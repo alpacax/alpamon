@@ -541,8 +541,9 @@ func (cr *CommandRunner) delGroup() (exitCode int, result string) {
 
 func (cr *CommandRunner) modUser() (exitCode int, result string) {
 	data := modUserData{
-		Username: cr.data.Username,
-		Comment:  cr.data.Comment,
+		Username:   cr.data.Username,
+		Groupnames: cr.data.Groupnames,
+		Comment:    cr.data.Comment,
 	}
 
 	err := cr.validateData(data)
@@ -555,7 +556,7 @@ func (cr *CommandRunner) modUser() (exitCode int, result string) {
 			[]string{
 				"/usr/sbin/usermod",
 				"--comment", data.Comment,
-				"-G", utils.JoinUint64s(cr.data.Groups),
+				"-G", strings.Join(data.Groupnames, ","),
 				data.Username,
 			},
 			"root", "", nil, 60,

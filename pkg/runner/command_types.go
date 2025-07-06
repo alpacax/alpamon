@@ -39,6 +39,7 @@ type CommandData struct {
 	Cols                    uint16   `json:"cols"`
 	Username                string   `json:"username"`
 	Groupname               string   `json:"groupname"`
+	Groupnames              []string `json:"groupnames"`
 	HomeDirectory           string   `json:"home_directory"`
 	HomeDirectoryPermission string   `json:"home_directory_permission"`
 	UID                     uint64   `json:"uid"`
@@ -93,8 +94,9 @@ type deleteGroupData struct {
 }
 
 type modUserData struct {
-	Username string `validate:"required"`
-	Comment  string `validate:"required"`
+	Username   string   `validate:"required"`
+	Groupnames []string `validate:"required"`
+	Comment    string   `validate:"required"`
 }
 
 type openPtyData struct {
