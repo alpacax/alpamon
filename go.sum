@@ -10,8 +10,8 @@ github.com/adrianbrad/queue v1.3.0 h1:8FH1N+93HXbqta5+URa1AL+diV7MP3VDXAEnP+DNp4
 github.com/adrianbrad/queue v1.3.0/go.mod h1:wYiPC/3MPbyT45QHLrPR4zcqJWPePubM1oEP/xTwhUs=
 github.com/agext/levenshtein v1.2.3 h1:YB2fHEn0UJagG8T1rrWknE3ZQzWM06O8AMAatNn7lmo=
 github.com/agext/levenshtein v1.2.3/go.mod h1:JEDfjyjHDjOF/1e4FlBE/PkbqA9OfWu2ki2W0IB5558=
-github.com/alpacanetworks/alpacon-cli v0.0.3-0.20250109074532-43ca315d9a7a h1:9XZMcjj8FfItURuZH/y6eeOvpMWyFkROy5l1JKXrHpY=
-github.com/alpacanetworks/alpacon-cli v0.0.3-0.20250109074532-43ca315d9a7a/go.mod h1:NGHAye9qmT70QD1H3Sd4evpHrTiphqJ6RXKIrp8unRQ=
+github.com/alpacax/alpacon-cli v0.0.3-0.20250109074532-43ca315d9a7a h1:9XZMcjj8FfItURuZH/y6eeOvpMWyFkROy5l1JKXrHpY=
+github.com/alpacax/alpacon-cli v0.0.3-0.20250109074532-43ca315d9a7a/go.mod h1:NGHAye9qmT70QD1H3Sd4evpHrTiphqJ6RXKIrp8unRQ=
 github.com/apparentlymart/go-textseg/v15 v15.0.0 h1:uYvfpb3DyLSCGWnctWKGj857c6ew1u1fNQOlOtuGxQY=
 github.com/apparentlymart/go-textseg/v15 v15.0.0/go.mod h1:K8XmNZdhEBkdlyDdvbmmsvpAG721bKi0joRfFdHIWJ4=
 github.com/cenkalti/backoff v2.2.1+incompatible h1:tNowT99t7UNflLxfYYSlKYsBpXdEet03Pg2g16Swow4=

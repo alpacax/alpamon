@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/alpacanetworks/alpamon/pkg/collector/check/base"
-	"github.com/alpacanetworks/alpamon/pkg/scheduler"
-	"github.com/alpacanetworks/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/utils"
 )
 
 type TransportStrategy interface {

@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/alpacanetworks/alpamon/pkg/config"
-	"github.com/alpacanetworks/alpamon/pkg/logger"
-	"github.com/alpacanetworks/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/pkg/config"
+	"github.com/alpacax/alpamon/pkg/logger"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/gorilla/websocket"
 )
 

@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/collector/check/base"
-	"github.com/alpacanetworks/alpamon/pkg/db/ent"
-	"github.com/alpacanetworks/alpamon/pkg/db/ent/hourlydiskio"
+	"github.com/alpacax/alpamon/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/pkg/db/ent"
+	"github.com/alpacax/alpamon/pkg/db/ent/hourlydiskio"
 )
 
 type Check struct {

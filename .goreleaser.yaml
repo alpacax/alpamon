@@ -12,7 +12,7 @@ builds:
   - main: ./cmd/alpamon
     binary: alpamon
     ldflags:
-      - -s -w -X github.com/alpacanetworks/alpamon/pkg/version.Version={{.Version}}
+      - -s -w -X github.com/alpacax/alpamon/pkg/version.Version={{.Version}}
     env:
       - CGO_ENABLED=0
     goos:
@@ -36,9 +36,9 @@ archives:
 
 nfpms:
   - package_name: alpamon
-    maintainer: Younghwan Kim <yh.kim@alpacax.com>
+    maintainer: AlpacaX <support@alpacax.com>
     description: Alpamon
-    homepage: https://github.com/alpacanetworks/alpamon
+    homepage: https://github.com/alpacax/alpamon
     license: MIT
     vendor: AlpacaX
     formats:

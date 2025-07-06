@@ -34,7 +34,7 @@ sudo yum install alpamon
 #### Clone the source code
 To get started on macOS, clone the source code from the repository:
 ```bash
-git clone https://github.com/alpacanetworks/alpamon.git
+git clone https://github.com/alpacax/alpamon.git
 ```
 
 #### Generate Ent Schema Code with Entgo

@@ -1,7 +1,7 @@
 package runner
 
 import (
-	"github.com/alpacanetworks/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/scheduler"
 	"gopkg.in/go-playground/validator.v9"
 )
 

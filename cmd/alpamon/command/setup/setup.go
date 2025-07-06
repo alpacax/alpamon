@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"text/template"
 
-	cli "github.com/alpacanetworks/alpacon-cli/utils"
-	"github.com/alpacanetworks/alpamon/pkg/utils"
+	cli "github.com/alpacax/alpacon-cli/utils"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
