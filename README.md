@@ -7,7 +7,8 @@ This guide outlines the step-by-step process for installing Alpamon within a dev
 
 ## Getting started
 To build Alpamon, ensure you have:
-- [Go](https://go.dev/doc/install) version 1.22 or higher installed.
+- [Go](https://go.dev/doc/install) version 1.24.4 or higher installed(required for building).
+  - The module is compatible with Go **1.23** and above for usage (importing and running pre-built binaries).
   - Make sure `$GOPATH` is set and `$GOPATH/bin` is added to your system’s `PATH`.
   
 ## Installation
