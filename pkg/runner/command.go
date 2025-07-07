@@ -461,7 +461,8 @@ func (cr *CommandRunner) addGroup() (exitCode int, result string) {
 
 func (cr *CommandRunner) delUser() (exitCode int, result string) {
 	data := deleteUserData{
-		Username: cr.data.Username,
+		Username:           cr.data.Username,
+		PurgeHomeDirectory: cr.data.PurgeHomeDirectory,
 	}
 
 	err := cr.validateData(data)
@@ -469,30 +470,58 @@ func (cr *CommandRunner) delUser() (exitCode int, result string) {
 		return 1, fmt.Sprintf("deluser: Not enough information. %s", err)
 	}
 
-	if utils.PlatformLike == "debian" {
-		exitCode, result = runCmdWithOutput(
-			[]string{
-				"/usr/sbin/deluser",
-				data.Username,
-			},
-			"root", "", nil, 60,
-		)
-		if exitCode != 0 {
-			return exitCode, result
+	cmd := "/usr/sbin/userdel"
+	args := []string{}
+
+	switch utils.PlatformLike {
+	case "debian":
+		cmd = "/usr/sbin/deluser"
+		if data.PurgeHomeDirectory {
+			args = append(args, "--remove-home")
 		}
-	} else if utils.PlatformLike == "rhel" {
-		exitCode, result = runCmdWithOutput(
-			[]string{
-				"/usr/sbin/userdel",
-				data.Username,
-			},
-			"root", "", nil, 60,
-		)
-		if exitCode != 0 {
-			return exitCode, result
+	case "rhel":
+		if data.PurgeHomeDirectory {
+			args = append(args, "--remove")
 		}
-	} else {
+	default:
 		return 1, "Not implemented 'deluser' command for this platform."
+	}
+
+	if !data.PurgeHomeDirectory {
+		homeDir := fmt.Sprintf("/home/%s", data.Username)
+		timestamp := time.Now().UTC().Format(time.RFC3339)
+		backupDir := fmt.Sprintf("/home/deleted_users/%s_%s", data.Username, timestamp)
+
+		err = os.MkdirAll("/home/deleted_users", 0700)
+		if err != nil {
+			return 1, fmt.Sprintf("Failed to create backup directory: %v", err)
+		}
+
+		_, err = os.Stat(homeDir)
+		if err != nil {
+			return 1, fmt.Sprintf("%s not exist: %v", homeDir, err)
+		}
+
+		err = os.Rename(homeDir, backupDir)
+		if err != nil {
+			return 1, fmt.Sprintf("Failed to move home directory: %v", err)
+		}
+
+		err = utils.ChownRecursive(backupDir, 0, 0)
+		if err != nil {
+			return 1, fmt.Sprintf("Failed to chown backup directory: %v", err)
+		}
+	}
+
+	args = append(args, data.Username)
+	cmdString := append([]string{cmd}, args...)
+
+	exitCode, result = runCmdWithOutput(
+		cmdString,
+		"root", "", nil, 60,
+	)
+	if exitCode != 0 {
+		return exitCode, result
 	}
 
 	cr.sync([]string{"groups", "users"})
