@@ -42,6 +42,7 @@ type CommandData struct {
 	Groupnames              []string `json:"groupnames"`
 	HomeDirectory           string   `json:"home_directory"`
 	HomeDirectoryPermission string   `json:"home_directory_permission"`
+	PurgeHomeDirectory      bool     `json:"purge_home"`
 	UID                     uint64   `json:"uid"`
 	GID                     uint64   `json:"gid"`
 	Comment                 string   `json:"comment"`
@@ -86,7 +87,8 @@ type addGroupData struct {
 }
 
 type deleteUserData struct {
-	Username string `validate:"required"`
+	Username           string `validate:"required"`
+	PurgeHomeDirectory bool   `validate:"omitempty"`
 }
 
 type deleteGroupData struct {
