@@ -8,7 +8,7 @@ require (
 	ariga.io/atlas-go-sdk v0.6.5
 	entgo.io/ent v0.14.2
 	github.com/adrianbrad/queue v1.3.0
-	github.com/alpacax/alpacon-cli v0.0.3-0.20250109074532-43ca315d9a7a
+	github.com/alpacax/alpacon-cli v0.3.2
 	github.com/cenkalti/backoff v2.2.1+incompatible
 	github.com/creack/pty v1.1.23
 	github.com/glebarez/go-sqlite v1.22.0
