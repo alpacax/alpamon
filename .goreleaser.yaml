@@ -25,17 +25,18 @@ builds:
         - ./scripts/install_atlas.sh {{ .Arch }}
 
 checksum:
-  name_template: "{{ .ProjectName }}-{{ .Version }}-checksums.sha256"
+  name_template: '{{ .ProjectName }}-{{ trimprefix .Version "v" }}-checksums.sha256'
 
 archives:
   - id: alpamon
-    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    name_template: '{{ .ProjectName }}-{{ trimprefix .Version "v" }}-{{ .Os }}-{{ .Arch }}'
     files:
       - src: bin/atlas-{{ .Arch }}
         dst: usr/local/bin/atlas
 
 nfpms:
-  - package_name: alpamon
+  - file_name_template: '{{ .PackageName }}_{{ trimprefix .Version "v" }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    package_name: alpamon
     maintainer: AlpacaX <support@alpacax.com>
     description: Alpamon
     homepage: https://github.com/alpacax/alpamon
