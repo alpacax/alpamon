@@ -3,7 +3,7 @@ package base
 import (
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/db/ent"
+	"github.com/alpacax/alpamon/pkg/db/ent"
 )
 
 const (

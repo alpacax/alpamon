@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"syscall"
 
-	"github.com/alpacanetworks/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/pkg/utils"
 )
 
 func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string, env map[string]string) {

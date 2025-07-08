@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/scheduler"
-	"github.com/alpacanetworks/alpamon/pkg/version"
+	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/version"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )

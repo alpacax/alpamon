@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/collector/check"
-	"github.com/alpacanetworks/alpamon/pkg/collector/check/base"
-	"github.com/alpacanetworks/alpamon/pkg/collector/scheduler"
-	"github.com/alpacanetworks/alpamon/pkg/collector/transporter"
-	"github.com/alpacanetworks/alpamon/pkg/db/ent"
-	session "github.com/alpacanetworks/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/collector/check"
+	"github.com/alpacax/alpamon/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/pkg/collector/scheduler"
+	"github.com/alpacax/alpamon/pkg/collector/transporter"
+	"github.com/alpacax/alpamon/pkg/db/ent"
+	session "github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )

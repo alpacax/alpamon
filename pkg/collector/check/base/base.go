@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/db/ent"
+	"github.com/alpacax/alpamon/pkg/db/ent"
 )
 
 type CheckStrategy interface {

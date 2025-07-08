@@ -16,9 +16,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/scheduler"
-	"github.com/alpacanetworks/alpamon/pkg/utils"
-	"github.com/alpacanetworks/alpamon/pkg/version"
+	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/pkg/version"
 	_ "github.com/glebarez/go-sqlite"
 	"github.com/google/go-cmp/cmp"
 	rpmdb "github.com/knqyf263/go-rpmdb/pkg"

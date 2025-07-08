@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/pkg/collector/check/base"
 	"github.com/rs/zerolog/log"
 )
 

@@ -63,32 +63,37 @@ jobs:
     needs: [goreleaser]
     runs-on: ubuntu-latest
     steps:
+      - name: Strip "v" prefix from tag
+        run: echo "TAG_NAME=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }} 
+
       - name: Download AMD64 DEB Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: alpamon_${{ github.ref_name }}_linux_amd64.deb
+          name: alpamon_${{ env.TAG_NAME }}_linux_amd64.deb
 
       - name: Download ARM64 DEB Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: alpamon_${{ github.ref_name }}_linux_arm64.deb
+          name: alpamon_${{ env.TAG_NAME }}_linux_arm64.deb
 
       - name: Download AMD64 RPM Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: alpamon_${{ github.ref_name }}_linux_amd64.rpm
+          name: alpamon_${{ env.TAG_NAME }}_linux_amd64.rpm
 
       - name: Download ARM64 RPM Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: alpamon_${{ github.ref_name }}_linux_arm64.rpm
+          name: alpamon_${{ env.TAG_NAME }}_linux_arm64.rpm
 
       - run: ls
 
       - name: Upload AMD64 DEB to PackageCloud
         uses: danielmundi/upload-packagecloud@v1
         with:
-          package-name: alpamon_${{ github.ref_name }}_linux_amd64.deb
+          package-name: alpamon_${{ env.TAG_NAME }}_linux_amd64.deb
           packagecloud-username: alpacax
           packagecloud-repo: alpamon
           packagecloud-distrib: any/any
@@ -97,7 +102,7 @@ jobs:
       - name: Upload ARM64 DEB to PackageCloud
         uses: danielmundi/upload-packagecloud@v1
         with:
-          package-name: alpamon_${{ github.ref_name }}_linux_arm64.deb
+          package-name: alpamon_${{ env.TAG_NAME }}_linux_arm64.deb
           packagecloud-username: alpacax
           packagecloud-repo: alpamon
           packagecloud-distrib: any/any
@@ -106,7 +111,7 @@ jobs:
       - name: Upload AMD64 RPM to PackageCloud
         uses: danielmundi/upload-packagecloud@v1
         with:
-          package-name: alpamon_${{ github.ref_name }}_linux_amd64.rpm
+          package-name: alpamon_${{ env.TAG_NAME }}_linux_amd64.rpm
           packagecloud-username: alpacax
           packagecloud-repo: alpamon
           packagecloud-distrib: rpm_any/rpm_any
@@ -115,7 +120,7 @@ jobs:
       - name: Upload ARM64 RPM to PackageCloud
         uses: danielmundi/upload-packagecloud@v1
         with:
-          package-name: alpamon_${{ github.ref_name }}_linux_arm64.rpm
+          package-name: alpamon_${{ env.TAG_NAME }}_linux_arm64.rpm
           packagecloud-username: alpacax
           packagecloud-repo: alpamon
           packagecloud-distrib: rpm_any/rpm_any

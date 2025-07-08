@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/alpacanetworks/alpamon/pkg/version"
+	"github.com/alpacax/alpamon/pkg/version"
 	"github.com/google/go-github/github"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/host"
@@ -148,7 +148,7 @@ func GetLatestVersion() string {
 	client := github.NewClient(nil)
 	ctx := context.Background()
 
-	release, _, err := client.Repositories.GetLatestRelease(ctx, "alpacanetworks", "alpamon")
+	release, _, err := client.Repositories.GetLatestRelease(ctx, "alpacax", "alpamon")
 	if err != nil {
 		return ""
 	}
