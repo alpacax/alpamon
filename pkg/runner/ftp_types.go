@@ -40,15 +40,16 @@ type FtpConfigData struct {
 }
 
 type FtpData struct {
-	Path       string `json:"path,omitempty"`
-	Depth      int    `json:"depth,omitempty"`
-	Recursive  bool   `json:"recursive,omitempty"`
-	ShowHidden bool   `json:"show_hidden,omitempty"`
-	Src        string `json:"src,omitempty"`
-	Dst        string `json:"dst,omitempty"`
-	Mode       string `json:"mode,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Groupname  string `json:"groupname,omitempty"`
+	Path           string `json:"path,omitempty"`
+	Depth          int    `json:"depth,omitempty"`
+	Recursive      bool   `json:"recursive,omitempty"`
+	ShowHidden     bool   `json:"show_hidden,omitempty"`
+	AllowOverwrite bool   `json:"allow_overwrite,omitempty"`
+	Src            string `json:"src,omitempty"`
+	Dst            string `json:"dst,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	Username       string `json:"username,omitempty"`
+	Groupname      string `json:"groupname,omitempty"`
 }
 
 type FtpContent struct {
