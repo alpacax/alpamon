@@ -11,7 +11,13 @@ import (
 	"syscall"
 )
 
-func CopyFile(src, dst string) error {
+func CopyFile(src, dst string, allowOverwrite bool) error {
+	if !allowOverwrite {
+		if _, err := os.Stat(dst); err == nil {
+			dst = GetCopyPath(src, dst)
+		}
+	}
+
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -42,9 +48,20 @@ func CopyFile(src, dst string) error {
 	return nil
 }
 
-func CopyDir(src, dst string) error {
-	if strings.HasPrefix(dst, src) {
+func CopyDir(src, dst string, allowOverwrite bool) error {
+	rel, err := filepath.Rel(src, dst)
+	if err != nil {
+		return err
+	}
+
+	if rel != "." && !strings.HasPrefix(rel, "..") {
 		return fmt.Errorf("%s is inside %s, causing infinite recursion", dst, src)
+	}
+
+	if !allowOverwrite {
+		if _, err := os.Stat(dst); err == nil {
+			dst = GetCopyPath(src, dst)
+		}
 	}
 
 	srcInfo, err := os.Stat(src)
@@ -67,12 +84,12 @@ func CopyDir(src, dst string) error {
 		dstPath := filepath.Join(dst, entry.Name())
 
 		if entry.IsDir() {
-			err = CopyDir(srcPath, dstPath)
+			err = CopyDir(srcPath, dstPath, allowOverwrite)
 			if err != nil {
 				return err
 			}
 		} else {
-			err = CopyFile(srcPath, dstPath)
+			err = CopyFile(srcPath, dstPath, allowOverwrite)
 			if err != nil {
 				return err
 			}
@@ -163,4 +180,19 @@ func ChownRecursive(path string, uid, gid int) error {
 
 		return os.Chown(p, uid, gid)
 	})
+}
+
+func GetCopyPath(src, dst string) string {
+	base := filepath.Base(src)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	parent := filepath.Dir(dst)
+
+	for i := 1; ; i++ {
+		candidate := filepath.Join(parent, fmt.Sprintf("%s(%d)%s", name, i, ext))
+		_, err := os.Stat(candidate)
+		if os.IsNotExist(err) {
+			return candidate
+		}
+	}
 }
