@@ -187,7 +187,7 @@ func GetFtpErrorCode(command FtpCommand, result CommandResult) (CommandResult, i
 		for message, code := range codes.Error {
 			if strings.Contains(result.Message, message) {
 				return CommandResult{
-					Message: message,
+					Message: result.Message,
 				}, code
 			}
 		}
