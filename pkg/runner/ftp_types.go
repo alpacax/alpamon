@@ -30,6 +30,7 @@ const (
 	ErrNoSuchFileOrDirectory = "no such file or directory"
 	ErrFileExists            = "file exists"
 	ErrDirectoryNotEmpty     = "directory not empty"
+	ErrInfiniteRecursion     = "causing infinite recursion"
 )
 
 type FtpConfigData struct {
@@ -158,6 +159,7 @@ var returnCodes = map[FtpCommand]returnCode{
 			ErrInvalidArgument:       452,
 			ErrNoSuchFileOrDirectory: 550,
 			ErrFileExists:            552,
+			ErrInfiniteRecursion:     553,
 		},
 	},
 	Chmod: {
