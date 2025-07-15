@@ -155,7 +155,7 @@ func (fc *FtpClient) handleFtpCommand(command FtpCommand, data FtpData) (Command
 	case Rmd:
 		return fc.rmd(data.Path, data.Recursive)
 	case Mv:
-		return fc.mv(data.Src, data.Dst)
+		return fc.mv(data.Src, data.Dst, data.AllowOverwrite)
 	case Cp:
 		return fc.cp(data.Src, data.Dst, data.AllowOverwrite)
 	case Chmod:
@@ -392,9 +392,22 @@ func (fc *FtpClient) rmd(path string, recursive bool) (CommandResult, error) {
 	}, nil
 }
 
-func (fc *FtpClient) mv(src, dst string) (CommandResult, error) {
+func (fc *FtpClient) mv(src, dst string, allowOverwrite bool) (CommandResult, error) {
 	src = fc.parsePath(src)
 	dst = fc.parsePath(dst)
+
+	if !allowOverwrite {
+		_, err := os.Stat(dst)
+		switch {
+		case err == nil:
+			dst = utils.GetCopyPath(src, dst)
+		case os.IsNotExist(err):
+		default:
+			return CommandResult{
+				Message: err.Error(),
+			}, err
+		}
+	}
 
 	err := os.Rename(src, dst)
 	if err != nil {
@@ -418,8 +431,15 @@ func (fc *FtpClient) cp(src, dst string, allowOverwrite bool) (CommandResult, er
 	}
 
 	if !allowOverwrite {
-		if _, err := os.Stat(dst); err == nil {
+		_, err := os.Stat(dst)
+		switch {
+		case err == nil:
 			dst = utils.GetCopyPath(src, dst)
+		case os.IsNotExist(err):
+		default:
+			return CommandResult{
+				Message: err.Error(),
+			}, err
 		}
 	}
 
