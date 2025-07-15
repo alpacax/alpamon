@@ -57,12 +57,26 @@ type CommandData struct {
 	Keys                    []string `json:"keys"`
 }
 
+type iptablesCommandData struct {
+	Method      string   `validate:"required"`
+	Chain       string   `validate:"required"`
+	Protocol    string   `validate:"required"`
+	PortStart   int      `validate:"omitempty"`
+	PortEnd     int      `validate:"omitempty"`
+	DPorts      []int    `validate:"omitempty"`
+	ICMPType    string   `validate:"omitempty"`
+	Source      string   `validate:"omitempty"`
+	Target      string   `validate:"required"`
+	Description string   `validate:"omitempty"`
+	Priority    int      `validate:"omitempty"`
+}
 type CommandRunner struct {
 	name       string
 	command    Command
 	wsClient   *WebsocketClient
 	apiSession *scheduler.Session
 	data       CommandData
+	iptablesData iptablesCommandData
 	validator  *validator.Validate
 }
 
