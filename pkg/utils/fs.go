@@ -12,12 +12,6 @@ import (
 )
 
 func CopyFile(src, dst string, allowOverwrite bool) error {
-	if !allowOverwrite {
-		if _, err := os.Stat(dst); err == nil {
-			dst = GetCopyPath(src, dst)
-		}
-	}
-
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -56,12 +50,6 @@ func CopyDir(src, dst string, allowOverwrite bool) error {
 
 	if rel != "." && !strings.HasPrefix(rel, "..") {
 		return fmt.Errorf("%s is inside %s, causing infinite recursion", dst, src)
-	}
-
-	if !allowOverwrite {
-		if _, err := os.Stat(dst); err == nil {
-			dst = GetCopyPath(src, dst)
-		}
 	}
 
 	srcInfo, err := os.Stat(src)

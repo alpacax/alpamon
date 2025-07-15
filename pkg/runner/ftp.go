@@ -417,6 +417,12 @@ func (fc *FtpClient) cp(src, dst string, allowOverwrite bool) (CommandResult, er
 		dst = utils.GetCopyPath(src, dst)
 	}
 
+	if !allowOverwrite {
+		if _, err := os.Stat(dst); err == nil {
+			dst = utils.GetCopyPath(src, dst)
+		}
+	}
+
 	info, err := os.Stat(src)
 	if err != nil {
 		return CommandResult{
