@@ -241,6 +241,8 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		cr.wsClient.RestartCollector()
 
 		return 0, "Collector will be restarted."
+	case "iptables":
+		return cr.iptables()
 	case "help":
 		helpMessage := `
 		Available commands:
@@ -715,6 +717,51 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 	}
 
 	return nil
+}
+
+func (cr *CommandRunner) iptables() (exitCode int, result string) {
+	data := iptablesCommandData{
+		Method: cr.iptablesData.Method,
+		Chain:  cr.iptablesData.Chain,
+		Protocol: cr.iptablesData.Protocol,
+		PortStart: cr.iptablesData.PortStart,
+		PortEnd: cr.iptablesData.PortEnd,
+		DPorts: cr.iptablesData.DPorts,
+		ICMPType: cr.iptablesData.ICMPType,
+		Source: cr.iptablesData.Source,
+		Target: cr.iptablesData.Target,
+		Description: cr.iptablesData.Description,
+		Priority: cr.iptablesData.Priority,
+	}
+
+	err := cr.validateData(data)
+	if err != nil {
+		return 1, fmt.Sprintf("iptables: Not enough information. %s", err)
+	}
+
+	args := []string{
+		"iptables",
+		data.Method, data.Chain,
+		"-p", data.Protocol,
+		"-s", data.Source,
+		"-j", data.Target,
+	}
+
+	if data.PortStart != 0 {
+		args = append(args, "--dport", strconv.Itoa(data.PortStart))
+	}
+	if data.PortEnd != 0 && data.PortStart != 0 {
+		args = append(args, "--dport", strconv.Itoa(data.PortEnd))
+	}
+	
+
+	exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
+
+	if exitCode != 0 {
+		return exitCode, result
+	}
+
+	return 0, "Successfully added new iptables rule."
 }
 
 func getFileData(data CommandData) ([]byte, error) {
