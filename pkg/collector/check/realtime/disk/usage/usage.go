@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/collector/check/base"
-	"github.com/alpacanetworks/alpamon/pkg/db/ent"
-	"github.com/alpacanetworks/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/pkg/db/ent"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/shirou/gopsutil/v4/disk"
 )
 

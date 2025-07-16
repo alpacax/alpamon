@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/logger"
+	"github.com/alpacax/alpamon/pkg/logger"
 )
 
 type FtpCommand string

@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/alpacanetworks/alpamon/pkg/config"
-	"github.com/alpacanetworks/alpamon/pkg/logger"
-	"github.com/alpacanetworks/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/pkg/config"
+	"github.com/alpacax/alpamon/pkg/logger"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/gorilla/websocket"
 )
 
@@ -520,7 +520,7 @@ func (fc *FtpClient) chown(path, username, groupname string, recursive bool) (Co
 	msg := ""
 	if recursive {
 		msg = " recursively"
-		err = fc.chownRecursive(path, uid, gid)
+		err = utils.ChownRecursive(path, uid, gid)
 	} else {
 		err = os.Chown(path, uid, gid)
 	}
@@ -534,23 +534,4 @@ func (fc *FtpClient) chown(path, username, groupname string, recursive bool) (Co
 	return CommandResult{
 		Message: fmt.Sprintf("Changed owner of %s to UID: %d, GID: %d%s", path, uid, gid, msg),
 	}, nil
-}
-
-func (fc *FtpClient) chownRecursive(path string, uid, gid int) error {
-	return filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil
-		}
-
-		return os.Chown(p, uid, gid)
-	})
 }

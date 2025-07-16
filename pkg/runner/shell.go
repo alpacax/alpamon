@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 

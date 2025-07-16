@@ -4,7 +4,7 @@ project_name: alpamon
 
 before:
   hooks:
-    - go run -mod=mod entgo.io/ent/cmd/ent@v0.14.0 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
+    - go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
     - go mod tidy
     - chmod +x ./scripts/install_atlas.sh
 
@@ -12,7 +12,7 @@ builds:
   - main: ./cmd/alpamon
     binary: alpamon
     ldflags:
-      - -s -w -X github.com/alpacanetworks/alpamon/pkg/version.Version={{.Version}}
+      - -s -w -X github.com/alpacax/alpamon/pkg/version.Version={{.Version}}
     env:
       - CGO_ENABLED=0
     goos:
@@ -25,20 +25,21 @@ builds:
         - ./scripts/install_atlas.sh {{ .Arch }}
 
 checksum:
-  name_template: "{{ .ProjectName }}-{{ .Version }}-checksums.sha256"
+  name_template: '{{ .ProjectName }}-{{ trimprefix .Version "v" }}-checksums.sha256'
 
 archives:
   - id: alpamon
-    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    name_template: '{{ .ProjectName }}-{{ trimprefix .Version "v" }}-{{ .Os }}-{{ .Arch }}'
     files:
       - src: bin/atlas-{{ .Arch }}
         dst: usr/local/bin/atlas
 
 nfpms:
-  - package_name: alpamon
-    maintainer: Younghwan Kim <yh.kim@alpacax.com>
+  - file_name_template: '{{ .PackageName }}_{{ trimprefix .Version "v" }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    package_name: alpamon
+    maintainer: AlpacaX <support@alpacax.com>
     description: Alpamon
-    homepage: https://github.com/alpacanetworks/alpamon
+    homepage: https://github.com/alpacax/alpamon
     license: MIT
     vendor: AlpacaX
     formats:

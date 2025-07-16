@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/alpacanetworks/alpamon/pkg/config"
+	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/rs/zerolog/log"
 )
 

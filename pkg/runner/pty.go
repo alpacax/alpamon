@@ -5,13 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"github.com/alpacanetworks/alpamon/pkg/config"
-	"github.com/alpacanetworks/alpamon/pkg/scheduler"
-	"github.com/alpacanetworks/alpamon/pkg/utils"
-	"github.com/cenkalti/backoff"
-	"github.com/creack/pty"
-	"github.com/gorilla/websocket"
-	"github.com/rs/zerolog/log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +12,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/alpacax/alpamon/pkg/config"
+	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/cenkalti/backoff"
+	"github.com/creack/pty"
+	"github.com/gorilla/websocket"
+	"github.com/rs/zerolog/log"
 )
 
 type PtyClient struct {
@@ -40,9 +41,9 @@ type PtyClient struct {
 }
 
 const (
-	maxRecoveryTimeout     = 1 * time.Minute
-	reissuePtyWebsocketURL = "/api/websh/pty-channels/"
-	bufferSize             = 8192
+	maxRecoveryTimeout       = 1 * time.Minute
+	reconnectPtyWebsocketURL = "/api/websh/pty-channels/"
+	bufferSize               = 8192
 
 	sessionCloseCode = 4000
 )
@@ -82,7 +83,7 @@ func (pc *PtyClient) initializePtySession() error {
 	}
 	pc.conn, _, err = dialer.Dial(pc.url, pc.requestHeader)
 	if err != nil {
-		return fmt.Errorf("failed to connect pty websocket: %w", err)
+		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
 
 	pc.cmd = exec.Command("/bin/bash", "-i")
@@ -103,7 +104,7 @@ func (pc *PtyClient) initializePtySession() error {
 }
 
 func (pc *PtyClient) RunPtyBackground() {
-	log.Debug().Msg("Opening websocket for pty session.")
+	log.Debug().Msg("Starting Websh session in background.")
 	defer pc.close()
 
 	err := pc.initializePtySession()
@@ -129,7 +130,7 @@ func (pc *PtyClient) RunPtyBackground() {
 		case <-ctx.Done():
 			return
 		case <-recoveryChan:
-			log.Debug().Msg("Attempting to reconnect pty websocket...")
+			log.Debug().Msg("Attempting to reconnect Websh channel...")
 			err = pc.recovery()
 			pc.isRecovering.Store(false)
 			if err != nil {
@@ -154,7 +155,7 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 					return
 				}
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, sessionCloseCode) {
-					log.Debug().Msg("Pty websocket connection closed by peer.")
+					log.Debug().Msg("Websh channel closed by peer.")
 					cancel()
 					return
 				}
@@ -212,13 +213,13 @@ func (pc *PtyClient) writeToWebsocket(ctx context.Context, cancel context.Cancel
 		case <-ctx.Done():
 			return
 		case msg := <-pc.ptyToWs:
-			err := pc.conn.WriteMessage(websocket.TextMessage, msg)
+			err := pc.conn.WriteMessage(websocket.BinaryMessage, msg)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, sessionCloseCode) {
-					log.Debug().Msg("Pty websocket connection closed by peer.")
+					log.Debug().Msg("Websh channel closed by peer.")
 					cancel()
 					return
 				}
@@ -275,17 +276,17 @@ func (pc *PtyClient) close() {
 			time.Now().Add(5*time.Second),
 		)
 		if err != nil {
-			log.Debug().Err(err).Msg("Failed to write close message to pty websocket.")
+			log.Debug().Err(err).Msg("Failed to write close message to Websh channel.")
 			return
 		}
 
 		err = pc.conn.Close()
 		if err != nil {
-			log.Debug().Err(err).Msg("Failed to close pty websocket connection.")
+			log.Debug().Err(err).Msg("Failed to close Websh channel.")
 		}
 	}
 
-	log.Debug().Msg("Websocket connection for pty has been closed.")
+	log.Debug().Msg("Websh channel for pty has been closed.")
 }
 
 // recovery reconnects the WebSocket while keeping the PTY session alive.
@@ -304,24 +305,24 @@ func (pc *PtyClient) recovery() error {
 	operation := func() error {
 		select {
 		case <-ctx.Done():
-			log.Error().Msg("PTY recovery aborted: timeout reached.")
+			log.Error().Msg("Websh recovery aborted: timeout reached.")
 			return backoff.Permanent(ctx.Err())
 		default:
 			data := map[string]interface{}{
 				"session": pc.sessionID,
 			}
-			body, statusCode, err := pc.apiSession.Post(reissuePtyWebsocketURL, data, 5)
+			body, statusCode, err := pc.apiSession.Post(reconnectPtyWebsocketURL, data, 5)
 			if err != nil || statusCode != http.StatusCreated {
 				nextInterval := retryBackoff.NextBackOff()
-				log.Warn().Err(err).Msgf("Failed to reissue pty websocket (status: %d), will try again in %ds.", statusCode, int(nextInterval.Seconds()))
-				return fmt.Errorf("reissue failed: %w", err)
+				log.Warn().Err(err).Msgf("Failed to reconnect Websh channel (status: %d), will try again in %ds.", statusCode, int(nextInterval.Seconds()))
+				return fmt.Errorf("reconnect failed: %w", err)
 			}
 
 			var resp struct {
 				WebsocketURL string `json:"websocket_url"`
 			}
 			if err = json.Unmarshal(body, &resp); err != nil {
-				log.Warn().Err(err).Msg("Failed to parse reissue response.")
+				log.Warn().Err(err).Msg("Failed to parse reconnect response.")
 				return fmt.Errorf("unmarshal error: %w", err)
 			}
 			pc.url = strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + resp.WebsocketURL
@@ -333,12 +334,12 @@ func (pc *PtyClient) recovery() error {
 			}
 			conn, _, err := dialer.Dial(pc.url, pc.requestHeader)
 			if err != nil {
-				log.Warn().Err(err).Msg("PTY websocket reconnection failed.")
+				log.Warn().Err(err).Msg("Websh reconnect failed.")
 				return err
 			}
 
 			pc.conn = conn
-			log.Debug().Msg("Pty websocket reconnected successfully.")
+			log.Debug().Msg("Websh reconnected successfully.")
 			return nil
 		}
 	}

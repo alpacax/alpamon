@@ -38,18 +38,12 @@ var (
 		"/dev":  true,
 	}
 	virtualMountPointPattern = "^/(sys|proc|run|dev/)"
-	virtaulDisk              = map[string]bool{
-		"loop": true,
-		"ram":  true,
-		"fd":   true,
-		"sr":   true,
-		"zram": true,
-	}
-	virtualInterfaceFlags = map[string]bool{
+	virtualInterfaceFlags    = map[string]bool{
 		"flagloopback":     true,
 		"flagpointtopoint": true,
 	}
 	loopFileSystemPrefix = "/dev/loop"
+	virtaulDiskPattern   = regexp.MustCompile(`^(loop|ram|fd|sr|zram)\d*$`)
 	nvmeDiskPattern      = regexp.MustCompile(`^(nvme\d+n\d+)(p\d+)?$`)
 	scsiDiskPattern      = regexp.MustCompile(`^([a-z]+)(\d+)?$`)
 	mmcDiskPattern       = regexp.MustCompile(`^(mmcblk\d+)(p\d+)?$`)
@@ -125,7 +119,7 @@ func IsVirtualFileSystem(device string, fstype string, mountPoint string) bool {
 }
 
 func IsVirtualDisk(name string) bool {
-	return virtaulDisk[name]
+	return virtaulDiskPattern.MatchString(name)
 }
 
 func ParseDiskName(device string) string {

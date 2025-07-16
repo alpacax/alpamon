@@ -145,3 +145,22 @@ func GetFileInfo(info os.FileInfo, path string) (permString, permOctal, owner, g
 
 	return permString, permOctal, ownerInfo.Username, groupInfo.Name, nil
 }
+
+func ChownRecursive(path string, uid, gid int) error {
+	return filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+
+		return os.Chown(p, uid, gid)
+	})
+}

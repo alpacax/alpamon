@@ -3,14 +3,15 @@ package scheduler
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/alpacanetworks/alpamon/pkg/config"
-	"github.com/alpacanetworks/alpamon/pkg/utils"
-	"github.com/alpacanetworks/alpamon/pkg/version"
-	"github.com/rs/zerolog/log"
 	"math"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/alpacax/alpamon/pkg/config"
+	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/pkg/version"
+	"github.com/rs/zerolog/log"
 )
 
 const (

@@ -1,12 +1,14 @@
-module github.com/alpacanetworks/alpamon
+module github.com/alpacax/alpamon
 
-go 1.22.5
+go 1.23
+
+toolchain go1.24.4
 
 require (
 	ariga.io/atlas-go-sdk v0.6.5
-	entgo.io/ent v0.14.0
+	entgo.io/ent v0.14.2
 	github.com/adrianbrad/queue v1.3.0
-	github.com/alpacanetworks/alpacon-cli v0.0.3-0.20250109074532-43ca315d9a7a
+	github.com/alpacax/alpacon-cli v0.3.2
 	github.com/cenkalti/backoff v2.2.1+incompatible
 	github.com/creack/pty v1.1.23
 	github.com/glebarez/go-sqlite v1.22.0
@@ -25,9 +27,10 @@ require (
 )
 
 require (
-	ariga.io/atlas v0.21.2-0.20240418081819-02b3f6239b04 // indirect
+	ariga.io/atlas v0.31.1-0.20250212144724-069be8033e83 // indirect
 	github.com/agext/levenshtein v1.2.3 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
+	github.com/bmatcuk/doublestar v1.3.4 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
@@ -56,11 +59,11 @@ require (
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/xo/terminfo v0.0.0-20210125001918-ca9a967f8778 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	github.com/zclconf/go-cty v1.14.1 // indirect
-	golang.org/x/mod v0.18.0 // indirect
-	golang.org/x/sys v0.24.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
-	golang.org/x/tools v0.22.0 // indirect
+	github.com/zclconf/go-cty v1.14.4 // indirect
+	github.com/zclconf/go-cty-yaml v1.1.0 // indirect
+	golang.org/x/mod v0.23.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
 	gopkg.in/go-playground/assert.v1 v1.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

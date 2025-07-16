@@ -1,7 +1,7 @@
 package runner
 
 import (
-	"github.com/alpacanetworks/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/scheduler"
 	"gopkg.in/go-playground/validator.v9"
 )
 
@@ -39,8 +39,10 @@ type CommandData struct {
 	Cols                    uint16   `json:"cols"`
 	Username                string   `json:"username"`
 	Groupname               string   `json:"groupname"`
+	Groupnames              []string `json:"groupnames"`
 	HomeDirectory           string   `json:"home_directory"`
 	HomeDirectoryPermission string   `json:"home_directory_permission"`
+	PurgeHomeDirectory      bool     `json:"purge_home"`
 	UID                     uint64   `json:"uid"`
 	GID                     uint64   `json:"gid"`
 	Comment                 string   `json:"comment"`
@@ -99,7 +101,8 @@ type addGroupData struct {
 }
 
 type deleteUserData struct {
-	Username string `validate:"required"`
+	Username           string `validate:"required"`
+	PurgeHomeDirectory bool   `validate:"omitempty"`
 }
 
 type deleteGroupData struct {
@@ -107,8 +110,9 @@ type deleteGroupData struct {
 }
 
 type modUserData struct {
-	Username string `validate:"required"`
-	Comment  string `validate:"required"`
+	Username   string   `validate:"required"`
+	Groupnames []string `validate:"required"`
+	Comment    string   `validate:"required"`
 }
 
 type openPtyData struct {
