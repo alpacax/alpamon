@@ -750,18 +750,18 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 }
 
 func (cr *CommandRunner) iptables() (exitCode int, result string) {
-	data := iptablesCommandData{
-		Method: cr.iptablesData.Method,
-		Chain:  cr.iptablesData.Chain,
-		Protocol: cr.iptablesData.Protocol,
-		PortStart: cr.iptablesData.PortStart,
-		PortEnd: cr.iptablesData.PortEnd,
-		DPorts: cr.iptablesData.DPorts,
-		ICMPType: cr.iptablesData.ICMPType,
-		Source: cr.iptablesData.Source,
-		Target: cr.iptablesData.Target,
-		Description: cr.iptablesData.Description,
-		Priority: cr.iptablesData.Priority,
+	data := iptablesData{
+		Method:      cr.data.Method,
+		Chain:       cr.data.Chain,
+		Protocol:    cr.data.Protocol,
+		PortStart:   cr.data.PortStart,
+		PortEnd:     cr.data.PortEnd,
+		DPorts:      cr.data.DPorts,
+		ICMPType:    cr.data.ICMPType,
+		Source:      cr.data.Source,
+		Target:      cr.data.Target,
+		Description: cr.data.Description,
+		Priority:    cr.data.Priority,
 	}
 
 	err := cr.validateData(data)
@@ -783,7 +783,6 @@ func (cr *CommandRunner) iptables() (exitCode int, result string) {
 	if data.PortEnd != 0 && data.PortStart != 0 {
 		args = append(args, "--dport", strconv.Itoa(data.PortEnd))
 	}
-	
 
 	exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
 

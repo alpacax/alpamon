@@ -57,20 +57,31 @@ type CommandData struct {
 	AllowUnzip              bool     `json:"allow_unzip,omitempty"`
 	UseBlob                 bool     `json:"use_blob,omitempty"`
 	Keys                    []string `json:"keys"`
+	Method                  string   `json:"method"`
+	Chain                   string   `json:"chain"`
+	Protocol                string   `json:"protocol"`
+	PortStart               int      `json:"port_start"`
+	PortEnd                 int      `json:"port_end"`
+	DPorts                  []int    `json:"dports"`
+	ICMPType                string   `json:"icmp_type"`
+	Source                  string   `json:"source"`
+	Target                  string   `json:"target"`
+	Description             string   `json:"description"`
+	Priority                int      `json:"priority"`
 }
 
-type iptablesCommandData struct {
-	Method      string   `validate:"required"`
-	Chain       string   `validate:"required"`
-	Protocol    string   `validate:"required"`
-	PortStart   int      `validate:"omitempty"`
-	PortEnd     int      `validate:"omitempty"`
-	DPorts      []int    `validate:"omitempty"`
-	ICMPType    string   `validate:"omitempty"`
-	Source      string   `validate:"omitempty"`
-	Target      string   `validate:"required"`
-	Description string   `validate:"omitempty"`
-	Priority    int      `validate:"omitempty"`
+type iptablesData struct {
+	Method      string `validate:"required"`
+	Chain       string `validate:"required"`
+	Protocol    string `validate:"required"`
+	PortStart   int    `validate:"omitempty"`
+	PortEnd     int    `validate:"omitempty"`
+	DPorts      []int  `validate:"omitempty"`
+	ICMPType    string `validate:"omitempty"`
+	Source      string `validate:"omitempty"`
+	Target      string `validate:"required"`
+	Description string `validate:"omitempty"`
+	Priority    int    `validate:"omitempty"`
 }
 type CommandRunner struct {
 	name       string
@@ -78,7 +89,6 @@ type CommandRunner struct {
 	wsClient   *WebsocketClient
 	apiSession *scheduler.Session
 	data       CommandData
-	iptablesData iptablesCommandData
 	validator  *validator.Validate
 }
 
