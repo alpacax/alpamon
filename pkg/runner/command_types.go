@@ -57,6 +57,7 @@ type CommandData struct {
 	AllowUnzip              bool     `json:"allow_unzip,omitempty"`
 	UseBlob                 bool     `json:"use_blob,omitempty"`
 	Keys                    []string `json:"keys"`
+	ChainName               string   `json:"chain_name"`
 	Method                  string   `json:"method"`
 	Chain                   string   `json:"chain"`
 	Protocol                string   `json:"protocol"`
@@ -70,7 +71,8 @@ type CommandData struct {
 	Priority                int      `json:"priority"`
 }
 
-type iptablesData struct {
+type firewallData struct {
+	ChainName   string `validate:"required"`
 	Method      string `validate:"required"`
 	Chain       string `validate:"required"`
 	Protocol    string `validate:"required"`

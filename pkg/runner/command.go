@@ -241,8 +241,8 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		cr.wsClient.RestartCollector()
 
 		return 0, "Collector will be restarted."
-	case "iptables":
-		return cr.iptables()
+	case "firewall":
+		return cr.firewall()
 	case "help":
 		helpMessage := `
 		Available commands:
@@ -749,8 +749,73 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 	return nil
 }
 
-func (cr *CommandRunner) iptables() (exitCode int, result string) {
-	data := iptablesData{
+func installFirewall() (nftablesInstalled bool, iptablesInstalled bool, err error) {
+	nftablesInstalled = false
+	iptablesInstalled = false
+
+	// Check if nftables is installed
+	_, nftablesResult := runCmdWithOutput([]string{"which", "nft"}, "root", "", nil, 0)
+	nftablesInstalled = strings.Contains(nftablesResult, "nft")
+
+	if !nftablesInstalled {
+		_, iptablesResult := runCmdWithOutput([]string{"which", "iptables"}, "root", "", nil, 0)
+		iptablesInstalled = strings.Contains(iptablesResult, "iptables")
+	}
+
+	if nftablesInstalled || iptablesInstalled {
+		return nftablesInstalled, iptablesInstalled, nil
+	}
+
+	// If neither is installed
+	if !nftablesInstalled && !iptablesInstalled {
+		log.Info().Msg("No firewall tools installed. Attempting to install nftables.")
+		var installCmd []string
+		if utils.PlatformLike == "debian" {
+			updateCmd := []string{"apt-get", "update"}
+			exitCode, result := runCmdWithOutput(updateCmd, "root", "", nil, 0)
+			if exitCode != 0 {
+				return false, false, fmt.Errorf("failed to update package list: %s", result)
+			}
+			installCmd = []string{"apt-get", "install", "-y", "nftables"}
+		} else if utils.PlatformLike == "rhel" {
+			installCmd = []string{"yum", "install", "-y", "nftables"}
+		} else {
+			return false, false, fmt.Errorf("unsupported operating system")
+		}
+		
+		exitCode, _ := runCmdWithOutput(installCmd, "root", "", nil, 0)
+		_, nftablesResult = runCmdWithOutput([]string{"which", "nft"}, "root", "", nil, 0)
+		nftablesInstalled = strings.Contains(nftablesResult, "nft")
+		if exitCode != 0 || !nftablesInstalled {
+			log.Warn().Msg("Failed to install nftables. Attempting to install iptables.")
+			
+			if utils.PlatformLike == "debian" {
+				installCmd = []string{"apt-get", "update", "&&", "apt-get", "install", "-y", "iptables"}
+			} else if utils.PlatformLike == "rhel" {
+				installCmd = []string{"yum", "install", "-y", "iptables"}
+			}
+			
+			exitCode, _ = runCmdWithOutput(installCmd, "root", "", nil, 0)
+			_, nftablesResult = runCmdWithOutput([]string{"which", "nft"}, "root", "", nil, 0)
+			nftablesInstalled = strings.Contains(nftablesResult, "nft")
+			if exitCode != 0 || !nftablesInstalled {
+				return false, false, fmt.Errorf("failed to install firewall tools")
+			}
+		}
+		
+	}
+
+	if !nftablesInstalled && !iptablesInstalled {
+		return false, false, fmt.Errorf("failed to install firewall management tool")
+	}
+
+	return nftablesInstalled, iptablesInstalled, nil
+}
+
+func (cr *CommandRunner) firewall() (exitCode int, result string) {
+	log.Info().Msgf("cr.data: %v", cr.data)
+	data := firewallData{
+		ChainName:   cr.data.ChainName,
 		Method:      cr.data.Method,
 		Chain:       cr.data.Chain,
 		Protocol:    cr.data.Protocol,
@@ -766,31 +831,103 @@ func (cr *CommandRunner) iptables() (exitCode int, result string) {
 
 	err := cr.validateData(data)
 	if err != nil {
-		return 1, fmt.Sprintf("iptables: Not enough information. %s", err)
+		return 1, fmt.Sprintf("firewall: Not enough information. %s", err)
 	}
 
-	args := []string{
-		"iptables",
-		data.Method, data.Chain,
-		"-p", data.Protocol,
-		"-s", data.Source,
-		"-j", data.Target,
+	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	if err != nil {
+		return 1, fmt.Sprintf("firewall: Failed to install firewall tools. %s", err)
 	}
 
-	if data.PortStart != 0 {
-		args = append(args, "--dport", strconv.Itoa(data.PortStart))
-	}
-	if data.PortEnd != 0 && data.PortStart != 0 {
-		args = append(args, "--dport", strconv.Itoa(data.PortEnd))
-	}
+	// Check available firewall tools and execute appropriate command
+	if nftablesInstalled {
+		log.Info().Msg("Using nftables for firewall management.")
+		
+		// Create table dynamically
+		tableCmdArgs := []string{"nft", "add", "table", "ip", data.ChainName}
+		_, _ = runCmdWithOutput(tableCmdArgs, "root", "", nil, 60)
+		
+		// Create chain in the new table
+		chainCmdArgs := []string{"nft", "add", "chain", "ip", data.ChainName, strings.ToLower(data.Chain)}
+		switch strings.ToUpper(data.Chain) {
+		case "INPUT":
+			chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "input", "priority", strconv.Itoa(data.Priority),";", "policy", "accept;", "}")
+		case "OUTPUT":
+			chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "output", "priority", strconv.Itoa(data.Priority),";", "policy", "accept;", "}")
+		case "FORWARD":
+				chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "forward", "priority", strconv.Itoa(data.Priority),";", "policy", "accept;", "}")
+		default:
+			chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "prerouting", "priority", strconv.Itoa(data.Priority),";", "policy", "accept;", "}")
+		}
+		_, _ = runCmdWithOutput(chainCmdArgs, "root", "", nil, 60)
+		
+		// Add rule to the dynamic table/chain
+		args := []string{"nft"}
+		switch data.Method {
+		case "-A":
+			args = append(args, "add")
+		case "-I":
+			args = append(args, "insert")
+		case "-R":
+			args = append(args, "replace")
+		case "-D":
+			args = append(args, "delete")
+		}
+		args = append(args, "rule", "ip", data.ChainName, strings.ToLower(data.Chain))
+		if data.Source != "" && data.Source != "0.0.0.0/0" {
+			args = append(args, "ip", "saddr", data.Source)
+		}
+		if data.Protocol != "all" {
+			if data.Protocol == "icmp" && data.ICMPType != "" {
+				args = append(args, "icmp", "type", data.ICMPType)
+			} else {
+				if data.PortStart != 0 {
+					portStr := strconv.Itoa(data.PortStart)
+					if data.PortEnd != 0 && data.PortEnd != data.PortStart {
+						portStr = fmt.Sprintf("%d-%d", data.PortStart, data.PortEnd)
+					}
+					args = append(args, data.Protocol, "dport", portStr)
+				}
+			}
+		}
+		targetAction := strings.ToLower(data.Target)
+		args = append(args, "counter", targetAction)
+		
+		exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
+		
+		if exitCode != 0 {
+			return exitCode, result
+		}
+		
+		return 0, fmt.Sprintf("Successfully added rule to security group table %s.", data.ChainName)
+	} else if iptablesInstalled {
+		log.Info().Msg("Using iptables for firewall management.")
+		
+		chainName := data.ChainName+"_"+strings.ToLower(data.Chain)
 
-	exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
-
-	if exitCode != 0 {
-		return exitCode, result
+		// Create chain dynamically in filter table
+		chainCreateCmdArgs := []string{"iptables", "-N", chainName}
+		_, _ = runCmdWithOutput(chainCreateCmdArgs, "root", "", nil, 60)
+		
+		// Add rule to the dynamic chain
+		args := []string{"iptables", data.Method, chainName, "-p", data.Protocol, "-s", data.Source, "-j", data.Target}
+		if data.PortStart != 0 {
+			args = append(args, "--dport", strconv.Itoa(data.PortStart))
+		}
+		if data.PortEnd != 0 && data.PortStart != 0 {
+			args = append(args, "--dport", strconv.Itoa(data.PortEnd))
+		}
+		
+		exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
+		
+		if exitCode != 0 {
+			return exitCode, result
+		}
+		
+		return 0, fmt.Sprintf("Successfully added rule to security group chain %s.", chainName)
+	} else {
+		return 1, "No firewall management tool installed."
 	}
-
-	return 0, "Successfully added new iptables rule."
 }
 
 func getFileData(data CommandData) ([]byte, error) {
