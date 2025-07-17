@@ -18,7 +18,7 @@ RUN go build -o alpamon ./cmd/alpamon/main.go
 
 FROM ubuntu:22.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl systemd ca-certificates iptables
+RUN apt-get update && apt-get install -y --no-install-recommends curl systemd ca-certificates 
 
 RUN curl -sSf https://atlasgo.sh | sh
 
