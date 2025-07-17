@@ -177,7 +177,7 @@ func GetCopyPath(src, dst string) string {
 	parent := filepath.Dir(dst)
 
 	for i := 1; ; i++ {
-		candidate := filepath.Join(parent, fmt.Sprintf("%s(%d)%s", name, i, ext))
+		candidate := filepath.Join(parent, fmt.Sprintf("%s (%d)%s", name, i, ext))
 		_, err := os.Stat(candidate)
 		if os.IsNotExist(err) {
 			return candidate
