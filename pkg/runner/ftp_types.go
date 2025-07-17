@@ -30,6 +30,7 @@ const (
 	ErrNoSuchFileOrDirectory = "no such file or directory"
 	ErrFileExists            = "file exists"
 	ErrDirectoryNotEmpty     = "directory not empty"
+	ErrInfiniteRecursion     = "causing infinite recursion"
 )
 
 type FtpConfigData struct {
@@ -40,15 +41,16 @@ type FtpConfigData struct {
 }
 
 type FtpData struct {
-	Path       string `json:"path,omitempty"`
-	Depth      int    `json:"depth,omitempty"`
-	Recursive  bool   `json:"recursive,omitempty"`
-	ShowHidden bool   `json:"show_hidden,omitempty"`
-	Src        string `json:"src,omitempty"`
-	Dst        string `json:"dst,omitempty"`
-	Mode       string `json:"mode,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Groupname  string `json:"groupname,omitempty"`
+	Path           string `json:"path,omitempty"`
+	Depth          int    `json:"depth,omitempty"`
+	Recursive      bool   `json:"recursive,omitempty"`
+	ShowHidden     bool   `json:"show_hidden,omitempty"`
+	AllowOverwrite bool   `json:"allow_overwrite,omitempty"`
+	Src            string `json:"src,omitempty"`
+	Dst            string `json:"dst,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	Username       string `json:"username,omitempty"`
+	Groupname      string `json:"groupname,omitempty"`
 }
 
 type FtpContent struct {
@@ -157,6 +159,7 @@ var returnCodes = map[FtpCommand]returnCode{
 			ErrInvalidArgument:       452,
 			ErrNoSuchFileOrDirectory: 550,
 			ErrFileExists:            552,
+			ErrInfiniteRecursion:     553,
 		},
 	},
 	Chmod: {
@@ -184,7 +187,7 @@ func GetFtpErrorCode(command FtpCommand, result CommandResult) (CommandResult, i
 		for message, code := range codes.Error {
 			if strings.Contains(result.Message, message) {
 				return CommandResult{
-					Message: message,
+					Message: result.Message,
 				}, code
 			}
 		}

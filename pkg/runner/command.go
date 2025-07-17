@@ -738,11 +738,14 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	if err = cmd.Start(); err != nil {
+	err = cmd.Start()
+	if err != nil {
 		log.Debug().Err(err).Msg("Failed to start ftp worker process")
 
 		return fmt.Errorf("openftp: Failed to start ftp worker process. %w", err)
 	}
+
+	go func() { _ = cmd.Wait() }()
 
 	return nil
 }
