@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpacax/alpamon/pkg/version"
 	"github.com/rs/zerolog"
 )
 
@@ -12,7 +13,8 @@ type FtpLogger struct {
 	log zerolog.Logger
 }
 
-// TODO : Send logs to alpamon's Logserver using a Unix domain socket
+// NewFtpLogger creates a new FtpLogger instance.
+// TODO: Send logs to alpamon's Logserver using a Unix domain socket
 func NewFtpLogger() FtpLogger {
 	consoleOutput := zerolog.ConsoleWriter{
 		Out:          os.Stderr,
@@ -31,8 +33,12 @@ func NewFtpLogger() FtpLogger {
 			return i.(string)
 		},
 	}
+	// Remove caller info in production
+	if version.Version != "dev" {
+		consoleOutput.FormatCaller = nil
+	}
 
-	logger := zerolog.New(consoleOutput).With().Timestamp().Caller().Logger()
+	logger := zerolog.New(consoleOutput).With().Timestamp().Logger()
 
 	return FtpLogger{
 		log: logger,

@@ -24,6 +24,7 @@ require (
 	golang.org/x/term v0.14.0
 	gopkg.in/go-playground/validator.v9 v9.31.0
 	gopkg.in/ini.v1 v1.67.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (
@@ -72,3 +73,5 @@ require (
 	modernc.org/memory v1.8.0 // indirect
 	modernc.org/sqlite v1.28.0 // indirect
 )
+
+replace github.com/natefinch/lumberjack/v2 => gopkg.in/natefinch/lumberjack.v2 v2.2.1
