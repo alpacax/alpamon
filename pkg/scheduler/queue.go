@@ -1,11 +1,12 @@
 package scheduler
 
 import (
-	"github.com/adrianbrad/queue"
-	"github.com/rs/zerolog/log"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/adrianbrad/queue"
+	"github.com/rs/zerolog/log"
 )
 
 var (
@@ -37,7 +38,7 @@ func lessFunc(elem, otherElem PriorityEntry) bool {
 }
 
 func (rq *RequestQueue) request(method, url string, data interface{}, priority int, due time.Time) {
-	// time.Time{} : 0001-01-01 00:00:00 +0000 UTC
+	// time.Time{}: 0001-01-01 00:00:00 +0000 UTC
 	if due.IsZero() {
 		due = time.Now()
 	}

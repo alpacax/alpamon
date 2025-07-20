@@ -13,7 +13,7 @@ import (
 // doesn't exist or doesn't contain a PID for a running process.
 //
 // Based on a function from the Datadog Agent.
-// Reference : https://github.com/DataDog/datadog-agent
+// Reference: https://github.com/DataDog/datadog-agent
 func WritePID(pidFilePath string) (string, error) {
 	// check whether the pidfile exists and contains the PID for a running proc...
 	if byteContent, err := os.ReadFile(pidFilePath); err == nil {

@@ -78,8 +78,8 @@ func JoinUint64s(values []uint64) string {
 // that chunk using two-lined separators.
 //
 // Based on a function from the Datadog Agent.
-// Original source : https://github.com/DataDog/datadog-agent
-// License : Apache-2.0 license
+// Original source: https://github.com/DataDog/datadog-agent
+// License: Apache-2.0 license
 func ScanBlock(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil

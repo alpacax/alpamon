@@ -126,7 +126,7 @@ You can run containers for these images in Docker Desktop or using command line 
 ```
 docker run alpamon:ubuntu-22.04
 ```
-- Note : This will run the container with the default workspace URL (http://localhost:8000), plugin ID, and key values. 
+- Note: This will run the container with the default workspace URL (http://localhost:8000), plugin ID, and key values. 
 For more details, refer to the `entrypoint.sh` file in the Dockerfiles directory corresponding to each operating system.
 
 To run the container with a custom workspace URL, plugin ID, and key, use the following command:
