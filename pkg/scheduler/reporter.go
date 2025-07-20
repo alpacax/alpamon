@@ -124,6 +124,3 @@ func (r *Reporter) Run() {
 		}
 	}
 }
-
-// TODO : GetReporterStats
-func GetReporterStats() {}
