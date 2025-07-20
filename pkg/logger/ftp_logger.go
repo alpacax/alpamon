@@ -13,7 +13,6 @@ type FtpLogger struct {
 	log zerolog.Logger
 }
 
-// NewFtpLogger creates a new FtpLogger instance.
 // TODO: Send logs to alpamon's Logserver using a Unix domain socket
 func NewFtpLogger() FtpLogger {
 	consoleOutput := zerolog.ConsoleWriter{
@@ -33,7 +32,7 @@ func NewFtpLogger() FtpLogger {
 			return i.(string)
 		},
 	}
-	// Remove caller info in production
+
 	if version.Version != "dev" {
 		consoleOutput.FormatCaller = nil
 	}

@@ -73,5 +73,3 @@ require (
 	modernc.org/memory v1.8.0 // indirect
 	modernc.org/sqlite v1.28.0 // indirect
 )
-
-replace github.com/natefinch/lumberjack/v2 => gopkg.in/natefinch/lumberjack.v2 v2.2.1

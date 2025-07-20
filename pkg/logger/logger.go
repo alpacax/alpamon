@@ -111,19 +111,18 @@ func PrettyWriter(out io.Writer, showCaller bool) zerolog.ConsoleWriter {
 				return ""
 			}
 			callerStr := fmt.Sprint(i)
-			// Try to make path relative to "/alpamon/"
 			if idx := strings.Index(callerStr, "/alpamon/"); idx != -1 {
-				callerStr = callerStr[idx+len("/alpamon/"):] // remove up to and including /alpamon/
+				callerStr = callerStr[idx+len("/alpamon/"):]
 			}
 			return fmt.Sprintf("(%s)", callerStr)
 		}
 	} else {
-		cw.FormatCaller = nil // Remove caller info in production
+		cw.FormatCaller = nil
 	}
 	return cw
 }
 
-// Note : Always return nil error to avoid zerolog internal error logs
+// Note: Always return nil error to avoid zerolog internal error logs
 func (w *logRecordWriter) Write(p []byte) (n int, err error) {
 	var entry ZerologEntry
 	err = json.Unmarshal(p, &entry)
