@@ -75,12 +75,12 @@ func InitLogger() *os.File {
 	if version.Version == "dev" {
 		// In development, log to console with caller info
 		output = zerolog.MultiLevelWriter(PrettyWriter(os.Stderr, true), recordWriter)
-		log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
 	} else {
-		// In production, log to file without caller info
+		// In production, log to file without caller info in PrettyWriter
 		output = zerolog.MultiLevelWriter(PrettyWriter(logRotate, false), recordWriter)
-		log.Logger = zerolog.New(output).With().Timestamp().Logger()
 	}
+	// Always include .Caller() so entry.Caller is set for logRecordWriter
+	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
 
 	return nil
 }
@@ -117,7 +117,7 @@ func PrettyWriter(out io.Writer, showCaller bool) zerolog.ConsoleWriter {
 			return fmt.Sprintf("(%s)", callerStr)
 		}
 	} else {
-		cw.FormatCaller = nil
+		cw.FormatCaller = func(i interface{}) string { return "" }
 	}
 	return cw
 }

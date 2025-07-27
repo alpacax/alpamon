@@ -33,11 +33,23 @@ func NewFtpLogger() FtpLogger {
 		},
 	}
 
-	if version.Version != "dev" {
-		consoleOutput.FormatCaller = nil
+	showCaller := version.Version == "dev"
+	if showCaller {
+		consoleOutput.FormatCaller = func(i interface{}) string {
+			if i == nil || i == "" {
+				return ""
+			}
+			callerStr := i.(string)
+			if idx := strings.Index(callerStr, "/alpamon/"); idx != -1 {
+				callerStr = callerStr[idx+len("/alpamon/"):]
+			}
+			return "(" + callerStr + ")"
+		}
+	} else {
+		consoleOutput.FormatCaller = func(i interface{}) string { return "" }
 	}
 
-	logger := zerolog.New(consoleOutput).With().Timestamp().Logger()
+	logger := zerolog.New(consoleOutput).With().Timestamp().Caller().Logger()
 
 	return FtpLogger{
 		log: logger,
