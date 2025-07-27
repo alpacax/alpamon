@@ -97,15 +97,24 @@ For testing with the `Alpacon-Server`, you can use the following values:
 
 ## Run
 
+### Local build
+
+To build Alpamon as a binary for local development, run the following command from the project root:
+```sh
+go build -o alpamon ./cmd/alpamon
+```
+This will create an `alpamon` executable in your project root. You can run it directly:
+
+```sh
+./alpamon
+```
+
 ### Local environment
 
-To run Alpamon in a local development environment, navigate to the cmd/alpamon directory and run the application using Go:
+To run Alpamon in a local development environment, you can also use Go directly:
 ```sh
-cd /path/to/alpamon/cmd/alpamon
-
-go run main.go
+go run ./cmd/alpamon
 ```
-Ensure that you are in the correct directory (`/cmd/alpamon`), as this is where the `main.go` file resides.
 
 ### Docker
 You can also use docker to test alpamon in various Linux distributions. We use Docker Desktop to test alpamon on following distributions.
