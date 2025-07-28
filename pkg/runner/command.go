@@ -243,6 +243,8 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		return 0, "Collector will be restarted."
 	case "firewall":
 		return cr.firewall()
+	case "firewall-rollback":
+		return cr.firewallRollback()
 	case "help":
 		helpMessage := `
 		Available commands:
@@ -829,9 +831,11 @@ func (cr *CommandRunner) firewall() (exitCode int, result string) {
 		Priority:    cr.data.Priority,
 	}
 
-	err := cr.validateData(data)
+	// Enhanced validation
+	err := cr.validateFirewallData(data)
 	if err != nil {
-		return 1, fmt.Sprintf("firewall: Not enough information. %s", err)
+		log.Error().Err(err).Msg("Firewall data validation failed")
+		return 1, fmt.Sprintf("firewall: Validation failed. %s", err)
 	}
 
 	nftablesInstalled, iptablesInstalled, err := installFirewall()
@@ -878,15 +882,26 @@ func (cr *CommandRunner) firewall() (exitCode int, result string) {
 			args = append(args, "ip", "saddr", data.Source)
 		}
 		if data.Protocol != "all" {
+			args = append(args, data.Protocol)
+			
 			if data.Protocol == "icmp" && data.ICMPType != "" {
-				args = append(args, "icmp", "type", data.ICMPType)
-			} else {
-				if data.PortStart != 0 {
-					portStr := strconv.Itoa(data.PortStart)
-					if data.PortEnd != 0 && data.PortEnd != data.PortStart {
-						portStr = fmt.Sprintf("%d-%d", data.PortStart, data.PortEnd)
+				args = append(args, "type", data.ICMPType)
+			} else if data.Protocol == "tcp" || data.Protocol == "udp" {
+				// Handle multiport
+				if len(data.DPorts) > 0 {
+					var portList []string
+					for _, port := range data.DPorts {
+						portList = append(portList, strconv.Itoa(port))
 					}
-					args = append(args, data.Protocol, "dport", portStr)
+					args = append(args, "dport", "{", strings.Join(portList, ","), "}")
+				} else if data.PortStart != 0 {
+					// Handle single port or port range
+					if data.PortEnd != 0 && data.PortEnd != data.PortStart {
+						portStr := fmt.Sprintf("%d-%d", data.PortStart, data.PortEnd)
+						args = append(args, "dport", portStr)
+					} else {
+						args = append(args, "dport", strconv.Itoa(data.PortStart))
+					}
 				}
 			}
 		}
@@ -896,9 +911,11 @@ func (cr *CommandRunner) firewall() (exitCode int, result string) {
 		exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
 		
 		if exitCode != 0 {
-			return exitCode, result
+			log.Error().Msgf("nftables command failed: %s", result)
+			return exitCode, fmt.Sprintf("nftables error: %s", result)
 		}
 		
+		log.Info().Msgf("Successfully added nftables rule to table %s", data.ChainName)
 		return 0, fmt.Sprintf("Successfully added rule to security group table %s.", data.ChainName)
 	} else if iptablesInstalled {
 		log.Info().Msg("Using iptables for firewall management.")
@@ -910,20 +927,53 @@ func (cr *CommandRunner) firewall() (exitCode int, result string) {
 		_, _ = runCmdWithOutput(chainCreateCmdArgs, "root", "", nil, 60)
 		
 		// Add rule to the dynamic chain
-		args := []string{"iptables", data.Method, chainName, "-p", data.Protocol, "-s", data.Source, "-j", data.Target}
-		if data.PortStart != 0 {
-			args = append(args, "--dport", strconv.Itoa(data.PortStart))
+		args := []string{"iptables", data.Method, chainName}
+		
+		// Add protocol
+		if data.Protocol != "all" {
+			args = append(args, "-p", data.Protocol)
 		}
-		if data.PortEnd != 0 && data.PortStart != 0 {
-			args = append(args, "--dport", strconv.Itoa(data.PortEnd))
+		
+		// Add source if specified
+		if data.Source != "" && data.Source != "0.0.0.0/0" {
+			args = append(args, "-s", data.Source)
 		}
+		
+		// Handle ports based on protocol
+		if data.Protocol == "icmp" {
+			if data.ICMPType != "" {
+				args = append(args, "--icmp-type", data.ICMPType)
+			}
+		} else if data.Protocol == "tcp" || data.Protocol == "udp" {
+			// Handle multiport
+			if len(data.DPorts) > 0 {
+				var portList []string
+				for _, port := range data.DPorts {
+					portList = append(portList, strconv.Itoa(port))
+				}
+				args = append(args, "-m", "multiport", "--dports", strings.Join(portList, ","))
+			} else if data.PortStart != 0 {
+				// Handle single port or port range
+				if data.PortEnd != 0 && data.PortEnd != data.PortStart {
+					portStr := fmt.Sprintf("%d:%d", data.PortStart, data.PortEnd)
+					args = append(args, "--dport", portStr)
+				} else {
+					args = append(args, "--dport", strconv.Itoa(data.PortStart))
+				}
+			}
+		}
+		
+		// Add target
+		args = append(args, "-j", data.Target)
 		
 		exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
 		
 		if exitCode != 0 {
-			return exitCode, result
+			log.Error().Msgf("iptables command failed: %s", result)
+			return exitCode, fmt.Sprintf("iptables error: %s", result)
 		}
 		
+		log.Info().Msgf("Successfully added iptables rule to chain %s", chainName)
 		return 0, fmt.Sprintf("Successfully added rule to security group chain %s.", chainName)
 	} else {
 		return 1, "No firewall management tool installed."
@@ -1159,4 +1209,266 @@ func statFileTransfer(code int, transferType transferType, message string, data 
 		Type:    transferType,
 	}
 	scheduler.Rqueue.Post(statURL, payload, 10, time.Time{})
+}
+
+// validateFirewallData performs enhanced validation for firewall data
+func (cr *CommandRunner) validateFirewallData(data firewallData) error {
+	// Basic validation using struct tags
+	if err := cr.validateData(data); err != nil {
+		return fmt.Errorf("basic validation failed: %w", err)
+	}
+	
+	// Enhanced validation logic
+	validMethods := []string{"-A", "-I", "-R", "-D"}
+	found := false
+	for _, method := range validMethods {
+		if data.Method == method {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("invalid method '%s', must be one of: %v", data.Method, validMethods)
+	}
+	
+	validProtocols := []string{"tcp", "udp", "icmp", "all"}
+	found = false
+	for _, protocol := range validProtocols {
+		if data.Protocol == protocol {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("invalid protocol '%s', must be one of: %v", data.Protocol, validProtocols)
+	}
+	
+	validTargets := []string{"ACCEPT", "DROP", "REJECT", "LOG", "RETURN"}
+	found = false
+	for _, target := range validTargets {
+		if data.Target == target {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("invalid target '%s', must be one of: %v", data.Target, validTargets)
+	}
+	
+	// Protocol-specific validation
+	if data.Protocol == "icmp" {
+		if data.PortStart != 0 || data.PortEnd != 0 || len(data.DPorts) > 0 {
+			return fmt.Errorf("ICMP protocol cannot have port specifications")
+		}
+	}
+	
+	// Port validation
+	if data.PortStart != 0 {
+		if data.PortStart < 1 || data.PortStart > 65535 {
+			return fmt.Errorf("PortStart must be between 1 and 65535, got %d", data.PortStart)
+		}
+	}
+	
+	if data.PortEnd != 0 {
+		if data.PortEnd < 1 || data.PortEnd > 65535 {
+			return fmt.Errorf("PortEnd must be between 1 and 65535, got %d", data.PortEnd)
+		}
+		if data.PortStart != 0 && data.PortEnd < data.PortStart {
+			return fmt.Errorf("PortEnd (%d) cannot be less than PortStart (%d)", data.PortEnd, data.PortStart)
+		}
+	}
+	
+	// DPorts validation
+	if len(data.DPorts) > 0 {
+		if len(data.DPorts) > 15 {
+			return fmt.Errorf("too many ports in multiport rule (max 15), got %d", len(data.DPorts))
+		}
+		
+		// Check for duplicates and validate range
+		seen := make(map[int]bool)
+		for _, port := range data.DPorts {
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("DPort must be between 1 and 65535, got %d", port)
+			}
+			if seen[port] {
+				return fmt.Errorf("duplicate port %d in DPorts", port)
+			}
+			seen[port] = true
+		}
+		
+		// Cannot have both DPorts and single port/range
+		if data.PortStart != 0 || data.PortEnd != 0 {
+			return fmt.Errorf("cannot specify both individual ports (PortStart/PortEnd) and multiport (DPorts)")
+		}
+	}
+	
+	// ICMP type validation
+	if data.Protocol == "icmp" && data.ICMPType != "" {
+		// Check if numeric
+		if icmpTypeNum, err := strconv.Atoi(data.ICMPType); err == nil {
+			if icmpTypeNum < 0 || icmpTypeNum > 255 {
+				return fmt.Errorf("ICMP type must be between 0 and 255, got %d", icmpTypeNum)
+			}
+		} else {
+			// Validate common ICMP type names
+			validICMPTypes := []string{
+				"echo-request", "echo-reply", "destination-unreachable",
+				"source-quench", "redirect", "time-exceeded",
+				"parameter-problem", "timestamp-request", "timestamp-reply",
+			}
+			found := false
+			for _, validType := range validICMPTypes {
+				if data.ICMPType == validType {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("invalid ICMP type '%s'", data.ICMPType)
+			}
+		}
+	} else if data.Protocol != "icmp" && data.ICMPType != "" {
+		return fmt.Errorf("ICMP type can only be specified for ICMP protocol")
+	}
+	
+	return nil
+}
+
+// firewallRollback handles firewall rollback operations
+func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
+	log.Info().Msgf("Firewall rollback command received - ChainName: %s, Method: %s", 
+		cr.data.RollbackChainName, cr.data.RollbackMethod)
+	
+	if cr.data.RollbackChainName == "" {
+		return 1, "firewall-rollback: ChainName is required"
+	}
+	
+	if cr.data.RollbackMethod == "" {
+		cr.data.RollbackMethod = "flush" // Default rollback method
+	}
+	
+	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to install firewall tools for rollback")
+		return 1, fmt.Sprintf("firewall-rollback: Failed to install firewall tools. %s", err)
+	}
+	
+	// Perform rollback based on available tools
+	if nftablesInstalled {
+		return cr.performNftablesRollback(cr.data.RollbackChainName, cr.data.RollbackMethod)
+	} else if iptablesInstalled {
+		return cr.performIptablesRollback(cr.data.RollbackChainName, cr.data.RollbackMethod)
+	} else {
+		return 1, "firewall-rollback: No firewall management tool installed"
+	}
+}
+
+// performNftablesRollback performs rollback operations for nftables
+func (cr *CommandRunner) performNftablesRollback(chainName, method string) (int, string) {
+	log.Info().Msgf("Performing nftables rollback for chain: %s, method: %s", chainName, method)
+	
+	var exitCode int
+	var result string
+	
+	switch method {
+	case "flush":
+		// Flush all rules in the table
+		args := []string{"nft", "flush", "table", "ip", chainName}
+		exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
+		
+		if exitCode != 0 {
+			log.Error().Msgf("Failed to flush nftables table %s: %s", chainName, result)
+			return exitCode, fmt.Sprintf("nftables flush error: %s", result)
+		}
+		
+		log.Info().Msgf("Successfully flushed nftables table: %s", chainName)
+		return 0, fmt.Sprintf("Successfully flushed table %s", chainName)
+		
+	case "delete":
+		// Delete the entire table
+		args := []string{"nft", "delete", "table", "ip", chainName}
+		exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
+		
+		if exitCode != 0 {
+			log.Error().Msgf("Failed to delete nftables table %s: %s", chainName, result)
+			// If table doesn't exist, consider it success
+			if strings.Contains(result, "No such file or directory") {
+				log.Info().Msgf("nftables table %s already deleted", chainName)
+				return 0, fmt.Sprintf("Table %s was already deleted", chainName)
+			}
+			return exitCode, fmt.Sprintf("nftables delete error: %s", result)
+		}
+		
+		log.Info().Msgf("Successfully deleted nftables table: %s", chainName)
+		return 0, fmt.Sprintf("Successfully deleted table %s", chainName)
+		
+	default:
+		return 1, fmt.Sprintf("nftables rollback: unsupported method '%s', use 'flush' or 'delete'", method)
+	}
+}
+
+// performIptablesRollback performs rollback operations for iptables
+func (cr *CommandRunner) performIptablesRollback(chainName, method string) (int, string) {
+	log.Info().Msgf("Performing iptables rollback for chain: %s, method: %s", chainName, method)
+	
+	var exitCode int
+	var result string
+	
+	// For iptables, we need to handle chains differently
+	chainTypes := []string{"input", "output", "forward"}
+	
+	switch method {
+	case "flush":
+		successCount := 0
+		for _, chainType := range chainTypes {
+			fullChainName := chainName + "_" + chainType
+			
+			// Flush the chain
+			args := []string{"iptables", "-F", fullChainName}
+			exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
+			
+			if exitCode == 0 {
+				successCount++
+				log.Info().Msgf("Successfully flushed iptables chain: %s", fullChainName)
+			} else {
+				log.Warn().Msgf("Failed to flush iptables chain %s: %s", fullChainName, result)
+			}
+		}
+		
+		if successCount > 0 {
+			return 0, fmt.Sprintf("Successfully flushed %d chains for security group %s", successCount, chainName)
+		} else {
+			return 1, fmt.Sprintf("Failed to flush any chains for security group %s", chainName)
+		}
+		
+	case "delete":
+		successCount := 0
+		for _, chainType := range chainTypes {
+			fullChainName := chainName + "_" + chainType
+			
+			// First flush the chain
+			flushArgs := []string{"iptables", "-F", fullChainName}
+			runCmdWithOutput(flushArgs, "root", "", nil, 60)
+			
+			// Then delete the chain
+			deleteArgs := []string{"iptables", "-X", fullChainName}
+			exitCode, result = runCmdWithOutput(deleteArgs, "root", "", nil, 60)
+			
+			if exitCode == 0 {
+				successCount++
+				log.Info().Msgf("Successfully deleted iptables chain: %s", fullChainName)
+			} else {
+				log.Warn().Msgf("Failed to delete iptables chain %s: %s", fullChainName, result)
+			}
+		}
+		
+		if successCount > 0 {
+			return 0, fmt.Sprintf("Successfully deleted %d chains for security group %s", successCount, chainName)
+		} else {
+			return 1, fmt.Sprintf("Failed to delete any chains for security group %s", chainName)
+		}
+		
+	default:
+		return 1, fmt.Sprintf("iptables rollback: unsupported method '%s', use 'flush' or 'delete'", method)
+	}
 }
