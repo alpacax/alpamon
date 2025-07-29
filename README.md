@@ -5,6 +5,14 @@ New Go-based Secure Server Agent for Alpacon
 
 This guide outlines the step-by-step process for installing Alpamon within a development environment. The installation requires an active Internet connection or the appropriate configuration of a proxy server.
 
+## System Requirements
+
+To run Alpamon, ensure your system meets the following requirements:
+- Operating system: Linux, macOS, or Windows (via WSL)
+- Go version: 1.24.4 or higher
+- Memory: At least 512MB RAM
+- Disk space: At least 100MB free space
+
 ## Getting started
 To build Alpamon, ensure you have:
 - [Go](https://go.dev/doc/install) version 1.24.4 or higher installed(required for building).

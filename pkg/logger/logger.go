@@ -54,7 +54,7 @@ var logRecordFileHandlers = map[string]int{
 	"server.go":  40, // logger/server.go
 }
 
-func InitLogger() *os.File {
+func InitLogger() *lumberjack.Logger {
 	fileName := fmt.Sprintf("%s/%s", logDir, logFileName)
 	if _, err := os.Stat(logDir); os.IsNotExist(err) {
 		fileName = logFileName
@@ -82,7 +82,7 @@ func InitLogger() *os.File {
 	// Always include .Caller() so entry.Caller is set for logRecordWriter
 	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
 
-	return nil
+	return logRotate
 }
 
 // PrettyWriter returns a zerolog.ConsoleWriter with or without caller info
