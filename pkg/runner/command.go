@@ -1336,15 +1336,23 @@ func (cr *CommandRunner) validateFirewallData(data firewallData) error {
 
 // firewallRollback handles firewall rollback operations
 func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
-	log.Info().Msgf("Firewall rollback command received - ChainName: %s, Method: %s", 
-		cr.data.RollbackChainName, cr.data.RollbackMethod)
+	log.Info().Msgf("Firewall rollback command received - Action: %s, ChainName: %s", 
+		cr.data.Action, cr.data.ChainName)
 	
-	if cr.data.RollbackChainName == "" {
-		return 1, "firewall-rollback: ChainName is required"
+	// Handle both old and new field names for backward compatibility
+	if cr.data.ChainName == "" && cr.data.Action == "" {
+		return 1, "firewall-rollback: ChainName or Action is required"
 	}
 	
-	if cr.data.RollbackMethod == "" {
-		cr.data.RollbackMethod = "flush" // Default rollback method
+	// Determine the action (flush or restore)
+	action := cr.data.Action
+	if action == "" {
+		// Fallback to Method field for backward compatibility
+		if cr.data.Method != "" {
+			action = cr.data.Method
+		} else {
+			action = "flush" // Default action
+		}
 	}
 	
 	nftablesInstalled, iptablesInstalled, err := installFirewall()
@@ -1353,14 +1361,107 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 		return 1, fmt.Sprintf("firewall-rollback: Failed to install firewall tools. %s", err)
 	}
 	
-	// Perform rollback based on available tools
-	if nftablesInstalled {
-		return cr.performNftablesRollback(cr.data.RollbackChainName, cr.data.RollbackMethod)
-	} else if iptablesInstalled {
-		return cr.performIptablesRollback(cr.data.RollbackChainName, cr.data.RollbackMethod)
-	} else {
-		return 1, "firewall-rollback: No firewall management tool installed"
+	// Handle different rollback actions
+	switch action {
+	case "flush":
+		// Simple flush operation - remove all rules
+		if nftablesInstalled {
+			return cr.performNftablesRollback(cr.data.ChainName, "flush")
+		} else if iptablesInstalled {
+			return cr.performIptablesRollback(cr.data.ChainName, "flush")
+		}
+		
+	case "restore":
+		// Restore from snapshot - flush then apply new rules
+		if cr.data.Rules == nil || len(cr.data.Rules) == 0 {
+			return 1, "firewall-rollback: No rules provided for restore action"
+		}
+		
+		// First flush the chain
+		var flushExitCode int
+		var flushResult string
+		if nftablesInstalled {
+			flushExitCode, flushResult = cr.performNftablesRollback(cr.data.ChainName, "flush")
+		} else if iptablesInstalled {
+			flushExitCode, flushResult = cr.performIptablesRollback(cr.data.ChainName, "flush")
+		}
+		
+		if flushExitCode != 0 {
+			return flushExitCode, fmt.Sprintf("firewall-rollback: Failed to flush before restore - %s", flushResult)
+		}
+		
+		// Then apply each rule from the snapshot
+		successCount := 0
+		failedRules := []string{}
+		
+		for i, ruleData := range cr.data.Rules {
+			// Convert rule data to CommandData fields
+			if chainName, ok := ruleData["chain_name"].(string); ok {
+				cr.data.ChainName = chainName
+			}
+			if method, ok := ruleData["method"].(string); ok {
+				cr.data.Method = method
+			}
+			if chain, ok := ruleData["chain"].(string); ok {
+				cr.data.Chain = chain
+			}
+			if protocol, ok := ruleData["protocol"].(string); ok {
+				cr.data.Protocol = protocol
+			}
+			if portStart, ok := ruleData["port_start"].(float64); ok {
+				cr.data.PortStart = int(portStart)
+			}
+			if portEnd, ok := ruleData["port_end"].(float64); ok {
+				cr.data.PortEnd = int(portEnd)
+			}
+			if source, ok := ruleData["source"].(string); ok {
+				cr.data.Source = source
+			}
+			if target, ok := ruleData["target"].(string); ok {
+				cr.data.Target = target
+			}
+			if description, ok := ruleData["description"].(string); ok {
+				cr.data.Description = description
+			}
+			if priority, ok := ruleData["priority"].(float64); ok {
+				cr.data.Priority = int(priority)
+			}
+			if icmpType, ok := ruleData["icmp_type"].(string); ok {
+				cr.data.ICMPType = icmpType
+			}
+			
+			// Handle dports array
+			if dportsInterface, ok := ruleData["dports"].([]interface{}); ok {
+				dports := []int{}
+				for _, p := range dportsInterface {
+					if port, ok := p.(float64); ok {
+						dports = append(dports, int(port))
+					}
+				}
+				cr.data.DPorts = dports
+			}
+			
+			// Apply the rule
+			ruleExitCode, ruleResult := cr.firewall()
+			if ruleExitCode == 0 {
+				successCount++
+			} else {
+				failedRules = append(failedRules, fmt.Sprintf("Rule %d: %s", i+1, ruleResult))
+			}
+		}
+		
+		if len(failedRules) > 0 {
+			return 1, fmt.Sprintf("firewall-rollback: Restored %d/%d rules. Failed rules: %s", 
+				successCount, len(cr.data.Rules), strings.Join(failedRules, "; "))
+		}
+		
+		return 0, fmt.Sprintf("firewall-rollback: Successfully restored %d rules", successCount)
+		
+	default:
+		return 1, fmt.Sprintf("firewall-rollback: Unknown action '%s', use 'flush' or 'restore'", action)
 	}
+	
+	return 1, "firewall-rollback: No firewall management tool installed"
 }
 
 // performNftablesRollback performs rollback operations for nftables

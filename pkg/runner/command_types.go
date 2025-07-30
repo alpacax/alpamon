@@ -70,8 +70,10 @@ type CommandData struct {
 	Description             string   `json:"description"`
 	Priority                int      `json:"priority"`
 	// Rollback specific fields
-	RollbackChainName       string   `json:"rollback_chain_name"`
-	RollbackMethod          string   `json:"rollback_method"`
+	Action                  string   `json:"action"`
+	Rules                   []map[string]interface{} `json:"rules"`
+	AssignmentID            string   `json:"assignment_id"`
+	ServerID                string   `json:"server_id"`
 }
 
 type firewallData struct {
