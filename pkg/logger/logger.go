@@ -14,6 +14,7 @@ import (
 	"github.com/alpacax/alpamon/pkg/version"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const (
@@ -53,35 +54,40 @@ var logRecordFileHandlers = map[string]int{
 	"server.go":  40, // logger/server.go
 }
 
-func InitLogger() *os.File {
+func InitLogger() *lumberjack.Logger {
 	fileName := fmt.Sprintf("%s/%s", logDir, logFileName)
 	if _, err := os.Stat(logDir); os.IsNotExist(err) {
 		fileName = logFileName
 	}
 
-	logFile, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Failed to open log file: %v\n", err)
-		os.Exit(1)
+	// Set up lumberjack logger for log rotation
+	logRotate := &lumberjack.Logger{
+		Filename:   fileName,
+		MaxSize:    50, // Max size in MB before rotation
+		MaxBackups: 5,  // Max number of backup files
+		MaxAge:     30, // Max age in days
+		Compress:   true,
 	}
 
 	recordWriter := &logRecordWriter{}
 
 	var output io.Writer
-	// In development, log to console; in production, log to file
 	if version.Version == "dev" {
-		output = zerolog.MultiLevelWriter(PrettyWriter(os.Stderr), recordWriter)
+		// In development, log to console with caller info
+		output = zerolog.MultiLevelWriter(PrettyWriter(os.Stderr, true), recordWriter)
 	} else {
-		output = zerolog.MultiLevelWriter(PrettyWriter(logFile), recordWriter)
+		// In production, log to file without caller info in PrettyWriter
+		output = zerolog.MultiLevelWriter(PrettyWriter(logRotate, false), recordWriter)
 	}
-
+	// Always include .Caller() so entry.Caller is set for logRecordWriter
 	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
 
-	return logFile
+	return logRotate
 }
 
-func PrettyWriter(out io.Writer) zerolog.ConsoleWriter {
-	return zerolog.ConsoleWriter{
+// PrettyWriter returns a zerolog.ConsoleWriter with or without caller info
+func PrettyWriter(out io.Writer, showCaller bool) zerolog.ConsoleWriter {
+	cw := zerolog.ConsoleWriter{
 		Out:          out,
 		NoColor:      true,
 		TimeFormat:   time.RFC3339,
@@ -90,7 +96,7 @@ func PrettyWriter(out io.Writer) zerolog.ConsoleWriter {
 			return "[" + strings.ToUpper(fmt.Sprint(i)) + "]"
 		},
 		FormatMessage: func(i interface{}) string {
-			return " " + fmt.Sprint(i)
+			return fmt.Sprint(i)
 		},
 		FormatFieldName: func(i interface{}) string {
 			return "(" + fmt.Sprint(i) + ")"
@@ -99,9 +105,24 @@ func PrettyWriter(out io.Writer) zerolog.ConsoleWriter {
 			return fmt.Sprint(i)
 		},
 	}
+	if showCaller {
+		cw.FormatCaller = func(i interface{}) string {
+			if i == nil || i == "" {
+				return ""
+			}
+			callerStr := fmt.Sprint(i)
+			if idx := strings.Index(callerStr, "/alpamon/"); idx != -1 {
+				callerStr = callerStr[idx+len("/alpamon/"):]
+			}
+			return fmt.Sprintf("(%s)", callerStr)
+		}
+	} else {
+		cw.FormatCaller = func(i interface{}) string { return "" }
+	}
+	return cw
 }
 
-// Note : Always return nil error to avoid zerolog internal error logs
+// Note: Always return nil error to avoid zerolog internal error logs
 func (w *logRecordWriter) Write(p []byte) (n int, err error) {
 	var entry ZerologEntry
 	err = json.Unmarshal(p, &entry)

@@ -129,8 +129,6 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		return cr.modUser()
 	case "ping":
 		return 0, time.Now().Format(time.RFC3339)
-	//case "debug":
-	//	TODO : getReporterStats()
 	case "download":
 		return cr.runFileDownload(args[1])
 	case "upload":
