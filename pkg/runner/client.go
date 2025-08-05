@@ -39,7 +39,6 @@ type WebsocketClient struct {
 func NewWebsocketClient(session *scheduler.Session) *WebsocketClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
-		"Origin":        {config.GlobalSettings.ServerURL},
 		"User-Agent":    {utils.GetUserAgent("alpamon")},
 	}
 

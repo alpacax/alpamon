@@ -57,7 +57,6 @@ func init() {
 func NewPtyClient(data CommandData, apiSession *scheduler.Session) *PtyClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
-		"Origin":        {config.GlobalSettings.ServerURL},
 	}
 	return &PtyClient{
 		apiSession:    apiSession,

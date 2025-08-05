@@ -28,7 +28,6 @@ type FtpClient struct {
 
 func NewFtpClient(data FtpConfigData) *FtpClient {
 	headers := http.Header{
-		"Origin":     {data.ServerURL},
 		"User-Agent": {utils.GetUserAgent("alpamon")},
 	}
 
