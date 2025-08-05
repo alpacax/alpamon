@@ -103,6 +103,9 @@ func runAgent() {
 	wsClient := runner.NewWebsocketClient(session)
 	go wsClient.RunForever(ctx)
 
+	authManager := runner.GetAuthManager(wsClient)
+	go authManager.Start(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():

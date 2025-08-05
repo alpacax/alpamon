@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -252,6 +253,10 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		shutdown: shutdown system
 		`
 		return 0, helpMessage
+
+	case "mfa_response":
+		return cr.handleMfaResponse()
+
 	default:
 		return 1, fmt.Sprintf("Invalid command %s", args[0])
 	}
@@ -977,4 +982,32 @@ func statFileTransfer(code int, transferType transferType, message string, data 
 		Type:    transferType,
 	}
 	scheduler.Rqueue.Post(statURL, payload, 10, time.Time{})
+}
+
+func (cr *CommandRunner) handleMfaResponse() (int, string) {
+	var mfaResponse MFAResponse
+	if cr.command.Data != "" {
+		err := json.Unmarshal([]byte(cr.command.Data), &mfaResponse)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to parse MFA response data")
+			return 1, "Invalid MFA response data format"
+		}
+	} else {
+		return 1, "No MFA response data provided"
+	}
+
+	log.Debug().Interface("mfaResponse", mfaResponse).Msg("Parsed MFA response")
+
+	if authManager == nil {
+		log.Error().Msg("AuthManager not available")
+		return 1, "AuthManager not available"
+	}
+
+	err := authManager.HandleMFAResponse(mfaResponse)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to handle MFA response")
+		return 1, fmt.Sprintf("Failed to handle MFA response: %v", err)
+	}
+
+	return 0, "MFA response processed successfully"
 }
