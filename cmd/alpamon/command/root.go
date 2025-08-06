@@ -153,8 +153,8 @@ func gracefulShutdown(collector *collector.Collector, wsClient *runner.Websocket
 		wsClient.Close()
 	}
 	if authManager != nil {
-        authManager.Stop()
-    }
+		authManager.Stop()
+	}
 	if logServer != nil {
 		logServer.Stop()
 	}
