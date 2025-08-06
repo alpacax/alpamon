@@ -30,8 +30,6 @@ type WebsocketClientInterface interface {
 // MockWebsocketClient for testing
 type MockWebsocketClient struct {
 	Conn                 *MockWebsocketConn
-	requestHeader        map[string][]string
-	apiSession           interface{}
 	RestartChan          chan struct{}
 	ShutDownChan         chan struct{}
 	CollectorRestartChan chan struct{}
@@ -210,7 +208,7 @@ func TestAuthManager_HandleMFAResponse(t *testing.T) {
 	// Start reading from server in a goroutine to prevent blocking
 	go func() {
 		buf := make([]byte, 1024)
-		server.Read(buf)
+		_, _ = server.Read(buf) // Ignore read result for test purposes
 	}()
 
 	err := authManager.HandleMFAResponse(mfaResponse)
@@ -457,7 +455,7 @@ func TestAuthManager_HandleSudoRequest_Success(t *testing.T) {
 
 	// Process request in goroutine
 	go authManager.handleSudoRequest(client)
-	server.Write(authReqJSON)
+	_, _ = server.Write(authReqJSON) // Ignore write result for test purposes
 
 	// Wait for processing
 	time.Sleep(100 * time.Millisecond)
@@ -625,7 +623,7 @@ func TestAuthManager_HandleMFAResponse_PermissionDenied(t *testing.T) {
 	// Start reading from server in a goroutine to prevent blocking
 	go func() {
 		buf := make([]byte, 1024)
-		server.Read(buf)
+		_, _ = server.Read(buf) // Ignore read result for test purposes
 	}()
 
 	err := authManager.HandleMFAResponse(mfaResponse)
@@ -679,7 +677,7 @@ func TestAuthManager_HandleMFAResponse_MFAFailed(t *testing.T) {
 	// Start reading from server in a goroutine to prevent blocking
 	go func() {
 		buf := make([]byte, 1024)
-		server.Read(buf)
+		_, _ = server.Read(buf) // Ignore read result for test purposes
 	}()
 
 	err := authManager.HandleMFAResponse(mfaResponse)
