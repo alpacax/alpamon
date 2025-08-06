@@ -236,8 +236,10 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 	case <-time.After(30 * time.Second):
 		log.Warn().Msg("MFA response timeout")
 		am.sendAuthResponse(unix_conn, false, "Response timeout", authReq.RequestID, authReq.Username, authReq.Groupname, authReq.Command, authReq.PID, authReq.PPID)
+		unix_conn.Close()
 	case <-am.ctx.Done():
 		am.sendAuthResponse(unix_conn, false, "System error", authReq.RequestID, authReq.Username, authReq.Groupname, authReq.Command, authReq.PID, authReq.PPID)
+		unix_conn.Close()
 	}
 
 	am.mu.Lock()
