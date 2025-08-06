@@ -118,7 +118,7 @@ func (am *AuthManager) Start(ctx context.Context) {
 func (am *AuthManager) startSocketListener(ctx context.Context) error {
 	const socketPath = "/var/run/alpamon.sock"
 
-	if err := os.MkdirAll("/var/run", 0777); err != nil {
+	if err := os.MkdirAll("/var/run", 0755); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
 	}
 
