@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	//"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
 
@@ -31,6 +30,18 @@ type AuthRequest struct {
 	Command   string `json:"command"`
 	RequestID string `json:"request_id"`
 	Timestamp string `json:"timestamp"`
+	PID       int    `json:"pid"`
+	PPID      int    `json:"ppid"`
+}
+
+type AuthResponse struct {
+	RequestID string `json:"request_id"`
+	Username  string `json:"username"`
+	Groupname string `json:"groupname"`
+	Command   string `json:"command"`
+	Timestamp string `json:"timestamp"`
+	Success   bool   `json:"success"`
+	Reason    string `json:"reason"`
 	PID       int    `json:"pid"`
 	PPID      int    `json:"ppid"`
 }
@@ -120,7 +131,7 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 		return fmt.Errorf("socket listen error: %w", err)
 	}
 
-	if err := os.Chmod(socketPath, 0777); err != nil {
+	if err := os.Chmod(socketPath, 0600); err != nil {
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 
@@ -140,6 +151,9 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 		default:
 			unix_conn, err := am.listener.Accept()
 			if err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
 				log.Warn().Err(err).Msg("Socket accept error")
 				continue
 			}
@@ -150,23 +164,25 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 }
 
 func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
-	defer unix_conn.Close()
+	defer func() {
+		unix_conn.Close()
+		log.Debug().Msg("Unix connection closed")
+	}()
 
 	buf := make([]byte, 1024)
 	n, err := unix_conn.Read(buf)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to read sudo request")
+		am.sendAuthResponse(unix_conn, false, "System error", "", "", "", "", 0, 0)
 		return
 	}
-	fmt.Println("buf: ", string(buf[:n]))
-	
+
 	var authReq AuthRequest
 	if err := json.Unmarshal(buf[:n], &authReq); err != nil {
 		log.Warn().Err(err).Msg("Invalid PAM JSON request")
-		unix_conn.Write([]byte("mfa_failed"))
+		am.sendAuthResponse(unix_conn, false, "System error", authReq.RequestID, authReq.Username, authReq.Groupname, authReq.Command, authReq.PID, authReq.PPID)
 		return
 	}
-	fmt.Println("authReq: ", authReq)
 
 	am.mu.RLock()
 	session, exists := am.pidToSessionMap[authReq.PPID]
@@ -174,7 +190,7 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 
 	if !exists {
 		log.Warn().Msgf("No session found for PID %d", authReq.PPID)
-		unix_conn.Write([]byte("mfa_failed"))
+		am.sendAuthResponse(unix_conn, false, "Session missing", authReq.RequestID, authReq.Username, authReq.Groupname, authReq.Command, authReq.PID, authReq.PPID)
 		return
 	}
 
@@ -194,13 +210,13 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 
 	if am.wsClient == nil || am.wsClient.Conn == nil {
 		log.Error().Msg("WebSocket client not available")
-		unix_conn.Write([]byte("mfa_failed"))
+		am.sendAuthResponse(unix_conn, false, "WebSocket unavailable", authReq.RequestID, authReq.Username, authReq.Groupname, authReq.Command, authReq.PID, authReq.PPID)
 		return
 	}
 
 	if err := am.wsClient.WriteJSON(req); err != nil {
 		log.Error().Err(err).Msg("Failed to send MFA request to WebSocket client")
-		unix_conn.Write([]byte("mfa_failed"))
+		am.sendAuthResponse(unix_conn, false, "System error", authReq.RequestID, authReq.Username, authReq.Groupname, authReq.Command, authReq.PID, authReq.PPID)
 		return
 	}
 
@@ -219,16 +235,42 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 	select {
 	case <-time.After(30 * time.Second):
 		log.Warn().Msg("MFA response timeout")
-		unix_conn.Write([]byte("mfa_timeout"))
+		am.sendAuthResponse(unix_conn, false, "Response timeout", authReq.RequestID, authReq.Username, authReq.Groupname, authReq.Command, authReq.PID, authReq.PPID)
 	case <-am.ctx.Done():
-		unix_conn.Write([]byte("mfa_failed"))
+		am.sendAuthResponse(unix_conn, false, "System error", authReq.RequestID, authReq.Username, authReq.Groupname, authReq.Command, authReq.PID, authReq.PPID)
 	}
 
 	am.mu.Lock()
-	if session, exists := am.pidToSessionMap[authReq.PID]; exists {
+	if session, exists := am.pidToSessionMap[authReq.PPID]; exists {
 		delete(session.PAMRequests, requestID)
 	}
 	am.mu.Unlock()
+}
+
+func (am *AuthManager) sendAuthResponse(conn net.Conn, success bool, reason, requestID, username, groupname, command string, pid, ppid int) {
+	authResponse := AuthResponse{
+		RequestID: requestID,
+		Username:  username,
+		Groupname: groupname,
+		Command:   command,
+		Timestamp: time.Now().Format(time.RFC3339),
+		Success:   success,
+		Reason:    reason,
+		PID:       pid,
+		PPID:      ppid,
+	}
+
+	responseJSON, err := json.Marshal(authResponse)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to marshal auth response")
+		return
+	}
+
+	_, err = conn.Write(responseJSON)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to send auth response")
+		return
+	}
 }
 
 func (am *AuthManager) HandleMFAResponse(mfaResponse MFAResponse) error {
@@ -258,17 +300,18 @@ func (am *AuthManager) HandleMFAResponse(mfaResponse MFAResponse) error {
 		return fmt.Errorf("no pending PAM request found for request_id: %s, session_id: %s", requestID, mfaResponse.SessionID)
 	}
 
-	responseJSON, err := json.Marshal(mfaResponse)
-	if err != nil {
-		log.Error().Err(err).Str("request_id", requestID).Msg("Failed to marshal MFA response to JSON")
-		return err
-	}
-
-	_, err = pamRequest.Connection.Write(responseJSON)
-	if err != nil {
-		log.Error().Err(err).Str("request_id", requestID).Str("session_id", mfaResponse.SessionID).Msg("Failed to send MFA response to PAM")
-		return err
-	}
+	// Send response using unified function
+	am.sendAuthResponse(
+		pamRequest.Connection,
+		mfaResponse.Success,
+		mfaResponse.Reason,
+		mfaResponse.RequestID,
+		mfaResponse.Username,
+		mfaResponse.Groupname,
+		mfaResponse.Command,
+		mfaResponse.PID,
+		mfaResponse.PPID,
+	)
 
 	am.mu.Lock()
 	if targetSession != nil {
@@ -278,7 +321,7 @@ func (am *AuthManager) HandleMFAResponse(mfaResponse MFAResponse) error {
 
 	pamRequest.Connection.Close()
 
-	log.Info().Str("request_id", requestID).Bool("success", mfaResponse.Success).Msg("MFA response processed successfully")
+	log.Info().Str("request_id", requestID).Bool("success", mfaResponse.Success).Msg("AuthResponse processed successfully")
 	return nil
 }
 
@@ -295,4 +338,14 @@ func (am *AuthManager) RemovePIDSessionMapping(pid int) {
 		log.Debug().Msgf("PID mapping removed: %d -> Session: %s", pid, session.SessionID)
 	}
 	am.mu.Unlock()
+}
+
+func (am *AuthManager) Stop() {
+	if am.cancel != nil {
+		am.cancel()
+	}
+	if am.listener != nil {
+		am.listener.Close()
+	}
+	// Log message is already printed in Start() method when context is cancelled
 }
