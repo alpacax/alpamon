@@ -116,11 +116,10 @@ func (am *AuthManager) Start(ctx context.Context) {
 }
 
 func (am *AuthManager) startSocketListener(ctx context.Context) error {
-	const socketPath = "/var/run/alpamon.sock"
+	const socketPath = "/var/run/alpamon/auth.sock"
 
-	if err := os.MkdirAll("/var/run", 0755); err != nil {
-		return fmt.Errorf("failed to create socket directory: %w", err)
-	}
+	// systemd tmpfile will manage the /var/run/alpamon directory
+	// No need to create directory manually
 
 	if _, err := os.Stat(socketPath); err == nil {
 		os.Remove(socketPath)
