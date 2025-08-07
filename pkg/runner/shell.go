@@ -60,13 +60,13 @@ func demote(username, groupname string) (*syscall.SysProcAttr, error) {
 		if err != nil {
 			return nil, err
 		}
-		if gidStr == group.Gid {
+		if gidUint == gid {
 			groupInList = true
 		}
 		groups = append(groups, uint32(gidUint))
 	}
 	if !groupInList {
-		return nil, fmt.Errorf("groupname %s (gid %s) is not in user %s's group list", groupname, group.Gid, username)
+		return nil, fmt.Errorf("groupname %s is not in user %s's group list", groupname, username)
 	}
 
 	log.Debug().Msgf("Demote permission to match user: %s, group: %s.", username, groupname)
