@@ -19,4 +19,9 @@ EOL
 echo -e "\nThe following configuration file is being used:\n"
 cat /etc/alpamon/alpamon.conf
 
+echo "[entrypoint] creating /var/run/alpamon..."
+mkdir -p /var/run/alpamon
+chown root:root /var/run/alpamon
+chmod 750 /var/run/alpamon
+
 exec /usr/local/alpamon/alpamon

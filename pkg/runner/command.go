@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -252,6 +253,10 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		shutdown: shutdown system
 		`
 		return 0, helpMessage
+
+	case "mfa_response":
+		return cr.handleMfaResponse()
+
 	default:
 		return 1, fmt.Sprintf("Invalid command %s", args[0])
 	}
@@ -393,6 +398,31 @@ func (cr *CommandRunner) addUser() (exitCode int, result string) {
 		}
 	} else {
 		return 1, "Not implemented 'adduser' command for this platform."
+	}
+
+	// Add user to sudo group for both debian and rhel platforms
+	if utils.PlatformLike == "debian" || utils.PlatformLike == "rhel" {
+		// Check if sudo group exists
+		_, err := user.LookupGroup("sudo")
+		if err == nil {
+			// Add user to sudo group
+			exitCode, result = runCmdWithOutput(
+				[]string{
+					"/usr/sbin/usermod",
+					"-aG", "sudo",
+					data.Username,
+				},
+				"root", "", nil, 60,
+			)
+			if exitCode != 0 {
+				log.Warn().Err(fmt.Errorf(result)).Msg(fmt.Sprintf("Failed to add user %s to sudo group", data.Username))
+				// Don't return error, just log warning
+			} else {
+				log.Info().Msg(fmt.Sprintf("Successfully added user %s to sudo group", data.Username))
+			}
+		} else {
+			log.Debug().Msg("Sudo group not found, skipping sudo group addition")
+		}
 	}
 
 	// Set default permission for home directory if not provided
@@ -977,4 +1007,30 @@ func statFileTransfer(code int, transferType transferType, message string, data 
 		Type:    transferType,
 	}
 	scheduler.Rqueue.Post(statURL, payload, 10, time.Time{})
+}
+
+func (cr *CommandRunner) handleMfaResponse() (int, string) {
+	var mfaResponse MFAResponse
+	if cr.command.Data != "" {
+		err := json.Unmarshal([]byte(cr.command.Data), &mfaResponse)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to parse MFA response data")
+			return 1, "Invalid MFA response data format"
+		}
+	} else {
+		return 1, "No MFA response data provided"
+	}
+
+	if authManager == nil {
+		log.Error().Msg("AuthManager not available")
+		return 1, "AuthManager not available"
+	}
+
+	err := authManager.HandleMFAResponse(mfaResponse)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to handle MFA response")
+		return 1, fmt.Sprintf("Failed to handle MFA response: %v", err)
+	}
+
+	return 0, "MFA response processed successfully"
 }

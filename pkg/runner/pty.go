@@ -100,6 +100,18 @@ func (pc *PtyClient) initializePtySession() error {
 	}
 
 	terminals[pc.sessionID] = pc
+
+	pid := pc.cmd.Process.Pid
+	sessionInfo := &SessionInfo{
+		SessionID:   pc.sessionID,
+		PID:         pid,
+		PtyClient:   pc,
+		PAMRequests: make(map[string]*PAMRequest),
+	}
+
+	authManager.AddPIDSessionMapping(pid, sessionInfo)
+	log.Debug().Msgf("PID mapping added: %d -> Session: %s", pid, pc.sessionID)
+
 	return nil
 }
 
