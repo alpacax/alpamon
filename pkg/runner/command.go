@@ -243,6 +243,10 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		return 0, "Collector will be restarted."
 	case "firewall":
 		return cr.firewall()
+	case "firewall-batch-apply":
+		return cr.firewallBatchApply()
+	case "firewall-rules":
+		return cr.firewallRules()
 	case "firewall-rollback":
 		return cr.firewallRollback()
 	case "help":
@@ -1572,4 +1576,249 @@ func (cr *CommandRunner) performIptablesRollback(chainName, method string) (int,
 	default:
 		return 1, fmt.Sprintf("iptables rollback: unsupported method '%s', use 'flush' or 'delete'", method)
 	}
+}
+
+// firewallBatchApply handles batch application of firewall rules
+func (cr *CommandRunner) firewallBatchApply() (exitCode int, result string) {
+	log.Info().Msgf("Firewall batch apply - Action: %s, SecurityGroup: %s, RuleCount: %d", 
+		cr.data.Action, cr.data.ChainName, len(cr.data.Rules))
+	
+	// Validate action
+	if cr.data.Action != "apply_security_group" {
+		return 1, fmt.Sprintf("firewall-batch-apply: Invalid action '%s', expected 'apply_security_group'", cr.data.Action)
+	}
+	
+	// Validate required fields
+	if cr.data.ChainName == "" {
+		return 1, "firewall-batch-apply: security_group_name is required"
+	}
+	
+	if cr.data.Rules == nil || len(cr.data.Rules) == 0 {
+		return 1, "firewall-batch-apply: No rules provided"
+	}
+	
+	// Use the common batch apply logic with rollback on failure
+	appliedRules, failedRules, rolledBack, rollbackReason := cr.applyRulesBatch(true)
+	
+	// Prepare response in batch-apply format
+	if rolledBack {
+		return 1, fmt.Sprintf(`{"success": false, "error": "Failed to apply rules", "applied_rules": %d, "failed_rules": %d, "rolled_back": true, "rollback_reason": "%s"}`,
+			appliedRules, len(failedRules), rollbackReason)
+	}
+	
+	return 0, fmt.Sprintf(`{"success": true, "applied_rules": %d, "failed_rules": [], "rolled_back": false, "rollback_reason": null}`, appliedRules)
+}
+
+// firewallRules handles individual firewall rule operations
+func (cr *CommandRunner) firewallRules() (exitCode int, result string) {
+	log.Info().Msgf("Firewall rules - Action: %s, ChainName: %s", cr.data.Action, cr.data.ChainName)
+	
+	// Validate action
+	validActions := []string{"add_rule", "update_rule", "delete_rule", "apply_rules"}
+	actionValid := false
+	for _, validAction := range validActions {
+		if cr.data.Action == validAction {
+			actionValid = true
+			break
+		}
+	}
+	
+	if !actionValid {
+		return 1, fmt.Sprintf("firewall-rules: Invalid action '%s', must be one of: %v", cr.data.Action, validActions)
+	}
+	
+	// Validate required fields
+	if cr.data.ChainName == "" {
+		return 1, "firewall-rules: chain_name is required"
+	}
+	
+	switch cr.data.Action {
+	case "add_rule":
+		// For add_rule, we need to apply a single rule
+		cr.data.Method = "-A" // Append
+		return cr.firewall()
+		
+	case "update_rule":
+		// For update, we need to replace the rule
+		cr.data.Method = "-R"
+		return cr.firewall()
+		
+	case "delete_rule":
+		// For delete, we need to delete the rule
+		cr.data.Method = "-D"
+		return cr.firewall()
+		
+	case "apply_rules":
+		// For apply_rules, we need to flush and reapply all rules
+		if cr.data.Rules == nil || len(cr.data.Rules) == 0 {
+			return 1, "firewall-rules: No rules provided for apply_rules action"
+		}
+		
+		// Use the common batch apply logic without rollback on failure
+		appliedRules, _, _, _ := cr.applyRulesBatch(false)
+		
+		if appliedRules == len(cr.data.Rules) {
+			return 0, fmt.Sprintf(`{"success": true, "message": "Successfully applied %d rules"}`, appliedRules)
+		} else {
+			return 1, fmt.Sprintf(`{"success": false, "message": "Applied %d/%d rules"}`, appliedRules, len(cr.data.Rules))
+		}
+		
+	default:
+		return 1, fmt.Sprintf("firewall-rules: Unhandled action '%s'", cr.data.Action)
+	}
+}
+
+// applyRulesBatch applies a batch of firewall rules with optional rollback on failure
+// Returns: appliedRules, failedRules, rolledBack, rollbackReason
+func (cr *CommandRunner) applyRulesBatch(rollbackOnFailure bool) (int, []map[string]interface{}, bool, string) {
+	// Install firewall tools if needed
+	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to install firewall tools")
+		return 0, nil, false, ""
+	}
+	
+	// First flush the chain if applying rules
+	var flushExitCode int
+	var flushResult string
+	if nftablesInstalled {
+		flushExitCode, flushResult = cr.performNftablesRollback(cr.data.ChainName, "flush")
+	} else if iptablesInstalled {
+		flushExitCode, flushResult = cr.performIptablesRollback(cr.data.ChainName, "flush")
+	}
+	
+	if flushExitCode != 0 {
+		log.Error().Msgf("Failed to flush before applying rules: %s", flushResult)
+		return 0, nil, false, ""
+	}
+	
+	// Apply rules
+	appliedRules := 0
+	var failedRules []map[string]interface{}
+	var rollbackReason string
+	rolledBack := false
+	
+	// Store original data to restore later
+	originalChainName := cr.data.ChainName
+	originalMethod := cr.data.Method
+	originalChain := cr.data.Chain
+	originalProtocol := cr.data.Protocol
+	originalPortStart := cr.data.PortStart
+	originalPortEnd := cr.data.PortEnd
+	originalSource := cr.data.Source
+	originalTarget := cr.data.Target
+	originalDescription := cr.data.Description
+	originalPriority := cr.data.Priority
+	originalICMPType := cr.data.ICMPType
+	originalDPorts := cr.data.DPorts
+	
+	defer func() {
+		// Restore original data
+		cr.data.ChainName = originalChainName
+		cr.data.Method = originalMethod
+		cr.data.Chain = originalChain
+		cr.data.Protocol = originalProtocol
+		cr.data.PortStart = originalPortStart
+		cr.data.PortEnd = originalPortEnd
+		cr.data.Source = originalSource
+		cr.data.Target = originalTarget
+		cr.data.Description = originalDescription
+		cr.data.Priority = originalPriority
+		cr.data.ICMPType = originalICMPType
+		cr.data.DPorts = originalDPorts
+	}()
+	
+	for i, ruleData := range cr.data.Rules {
+		// Convert rule data to CommandData fields
+		cr.data = cr.convertRuleDataToCommandData(ruleData, cr.data)
+		
+		// Apply the rule
+		ruleExitCode, ruleResult := cr.firewall()
+		if ruleExitCode == 0 {
+			appliedRules++
+			log.Info().Msgf("Successfully applied rule %d/%d", i+1, len(cr.data.Rules))
+		} else {
+			failedRule := map[string]interface{}{
+				"rule":  fmt.Sprintf("Rule %d: %s", i+1, cr.data.Description),
+				"error": ruleResult,
+			}
+			failedRules = append(failedRules, failedRule)
+			log.Error().Msgf("Failed to apply rule %d/%d: %s", i+1, len(cr.data.Rules), ruleResult)
+			
+			// Trigger rollback on first failure if enabled
+			if rollbackOnFailure && !rolledBack {
+				rollbackReason = fmt.Sprintf("Rule %d failed to apply", i+1)
+				rolledBack = true
+				
+				// Perform rollback
+				log.Info().Msg("Initiating rollback due to rule failure")
+				if nftablesInstalled {
+					cr.performNftablesRollback(originalChainName, "flush")
+				} else if iptablesInstalled {
+					cr.performIptablesRollback(originalChainName, "flush")
+				}
+				
+				// Stop processing remaining rules
+				break
+			}
+		}
+	}
+	
+	return appliedRules, failedRules, rolledBack, rollbackReason
+}
+
+// convertRuleDataToCommandData converts rule data map to CommandData fields
+func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interface{}, data CommandData) CommandData {
+	if chainName, ok := ruleData["chain_name"].(string); ok {
+		data.ChainName = chainName
+	}
+	if method, ok := ruleData["method"].(string); ok {
+		data.Method = method
+	} else {
+		data.Method = "-A" // Default to append
+	}
+	if chain, ok := ruleData["chain"].(string); ok {
+		data.Chain = chain
+	}
+	if protocol, ok := ruleData["protocol"].(string); ok {
+		data.Protocol = protocol
+	}
+	if portStart, ok := ruleData["port_start"].(float64); ok {
+		data.PortStart = int(portStart)
+	}
+	if portEnd, ok := ruleData["port_end"].(float64); ok {
+		data.PortEnd = int(portEnd)
+	}
+	if source, ok := ruleData["source"].(string); ok {
+		data.Source = source
+	}
+	if target, ok := ruleData["target"].(string); ok {
+		data.Target = target
+	}
+	if description, ok := ruleData["description"].(string); ok {
+		data.Description = description
+	}
+	if priority, ok := ruleData["priority"].(float64); ok {
+		data.Priority = int(priority)
+	}
+	if icmpType, ok := ruleData["icmp_type"].(string); ok {
+		data.ICMPType = icmpType
+	}
+	
+	// Handle dports array
+	if dportsInterface, ok := ruleData["dports"].([]interface{}); ok {
+		dports := []int{}
+		for _, p := range dportsInterface {
+			if portStr, ok := p.(string); ok {
+				if port, err := strconv.Atoi(portStr); err == nil {
+					dports = append(dports, port)
+				}
+			} else if port, ok := p.(float64); ok {
+				dports = append(dports, int(port))
+			}
+		}
+		data.DPorts = dports
+	}
+	
+	return data
 }
