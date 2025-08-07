@@ -67,11 +67,11 @@ func demote(username, groupname string) (*syscall.SysProcAttr, error) {
 
 	groups := make([]uint32, 0, len(groupIds))
 	for _, gidStr := range groupIds {
-		gidInt, err := strconv.Atoi(gidStr)
+		gidUint, err := strconv.ParseUint(gidStr, 10, 32)
 		if err != nil {
 			return nil, err
 		}
-		groups = append(groups, uint32(gidInt))
+		groups = append(groups, uint32(gidUint))
 	}
 
 	log.Debug().Msgf("Demote permission to match user: %s, group: %s.", username, groupname)
