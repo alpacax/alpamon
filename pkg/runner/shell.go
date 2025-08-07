@@ -48,12 +48,39 @@ func demote(username, groupname string) (*syscall.SysProcAttr, error) {
 		return nil, err
 	}
 
+	groupIds, err := usr.GroupIds()
+	if err != nil {
+		return nil, err
+	}
+
+	// Return error if groupname is not in user's group list
+	groupInList := false
+	for _, gidStr := range groupIds {
+		if gidStr == group.Gid {
+			groupInList = true
+			break
+		}
+	}
+	if !groupInList {
+		return nil, fmt.Errorf("groupname %s (gid %s) is not in user %s's group list", groupname, group.Gid, username)
+	}
+
+	groups := make([]uint32, 0, len(groupIds))
+	for _, gidStr := range groupIds {
+		gidInt, err := strconv.Atoi(gidStr)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, uint32(gidInt))
+	}
+
 	log.Debug().Msgf("Demote permission to match user: %s, group: %s.", username, groupname)
 
 	return &syscall.SysProcAttr{
 		Credential: &syscall.Credential{
-			Uid: uint32(uid),
-			Gid: uint32(gid),
+			Uid:    uint32(uid),
+			Gid:    uint32(gid),
+			Groups: groups,
 		},
 	}, nil
 }
