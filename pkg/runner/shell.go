@@ -38,12 +38,12 @@ func demote(username, groupname string) (*syscall.SysProcAttr, error) {
 		return nil, fmt.Errorf("there is no corresponding %s groupname in this server", groupname)
 	}
 
-	uid, err := strconv.Atoi(usr.Uid)
+	uid, err := strconv.ParseUint(usr.Uid, 10, 32)
 	if err != nil {
 		return nil, err
 	}
 
-	gid, err := strconv.Atoi(group.Gid)
+	gid, err := strconv.ParseUint(group.Gid, 10, 32)
 	if err != nil {
 		return nil, err
 	}
@@ -53,25 +53,20 @@ func demote(username, groupname string) (*syscall.SysProcAttr, error) {
 		return nil, err
 	}
 
-	// Return error if groupname is not in user's group list
-	groupInList := false
-	for _, gidStr := range groupIds {
-		if gidStr == group.Gid {
-			groupInList = true
-			break
-		}
-	}
-	if !groupInList {
-		return nil, fmt.Errorf("groupname %s (gid %s) is not in user %s's group list", groupname, group.Gid, username)
-	}
-
 	groups := make([]uint32, 0, len(groupIds))
+	groupInList := false
 	for _, gidStr := range groupIds {
 		gidUint, err := strconv.ParseUint(gidStr, 10, 32)
 		if err != nil {
 			return nil, err
 		}
+		if gidStr == group.Gid {
+			groupInList = true
+		}
 		groups = append(groups, uint32(gidUint))
+	}
+	if !groupInList {
+		return nil, fmt.Errorf("groupname %s (gid %s) is not in user %s's group list", groupname, group.Gid, username)
 	}
 
 	log.Debug().Msgf("Demote permission to match user: %s, group: %s.", username, groupname)
@@ -108,12 +103,12 @@ func demoteFtp(username, groupname string) (*syscall.SysProcAttr, error) {
 		return nil, fmt.Errorf("there is no corresponding %s groupname in this server", groupname)
 	}
 
-	uid, err := strconv.Atoi(usr.Uid)
+	uid, err := strconv.ParseUint(usr.Uid, 10, 32)
 	if err != nil {
 		return nil, err
 	}
 
-	gid, err := strconv.Atoi(group.Gid)
+	gid, err := strconv.ParseUint(group.Gid, 10, 32)
 	if err != nil {
 		return nil, err
 	}
