@@ -60,14 +60,14 @@ func NewPtyClient(data CommandData, apiSession *scheduler.Session) *PtyClient {
 		"Origin":        {config.GlobalSettings.ServerURL},
 	}
 
-	// For local development
-	wsURL := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
-	wsURL = strings.Replace(wsURL, ":8000", ":8080", 1)
-
 	var finalURL string
 	if strings.HasPrefix(data.URL, "ws:") || strings.HasPrefix(data.URL, "wss:") {
 		finalURL = data.URL
 	} else {
+		// For local development
+		wsURL := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
+		wsURL = strings.Replace(wsURL, ":8000", ":8080", 1)
+
 		finalURL = wsURL + data.URL
 	}
 
