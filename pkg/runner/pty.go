@@ -62,7 +62,7 @@ func NewPtyClient(data CommandData, apiSession *scheduler.Session) *PtyClient {
 	return &PtyClient{
 		apiSession:    apiSession,
 		requestHeader: headers,
-		url:           strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + data.URL,
+		url:           data.URL,
 		rows:          data.Rows,
 		cols:          data.Cols,
 		username:      data.Username,
