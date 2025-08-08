@@ -720,7 +720,7 @@ func getPartitions() ([]Partition, error) {
 			continue
 		}
 		disk := utils.ParseDiskName(partition.Device)
-		seen[disk] = Partition{
+		seen[partition.Device] = Partition{
 			Name:        partition.Device,
 			MountPoints: []string{partition.Mountpoint},
 			DiskName:    disk,

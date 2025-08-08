@@ -5,6 +5,14 @@ New Go-based Secure Server Agent for Alpacon
 
 This guide outlines the step-by-step process for installing Alpamon within a development environment. The installation requires an active Internet connection or the appropriate configuration of a proxy server.
 
+## System Requirements
+
+To run Alpamon, ensure your system meets the following requirements:
+- Operating system: Linux, macOS, or Windows (via WSL)
+- Go version: 1.24.4 or higher
+- Memory: At least 512MB RAM
+- Disk space: At least 100MB free space
+
 ## Getting started
 To build Alpamon, ensure you have:
 - [Go](https://go.dev/doc/install) version 1.24.4 or higher installed(required for building).
@@ -97,15 +105,24 @@ For testing with the `Alpacon-Server`, you can use the following values:
 
 ## Run
 
+### Local build
+
+To build Alpamon as a binary for local development, run the following command from the project root:
+```sh
+go build -o alpamon ./cmd/alpamon
+```
+This will create an `alpamon` executable in your project root. You can run it directly:
+
+```sh
+./alpamon
+```
+
 ### Local environment
 
-To run Alpamon in a local development environment, navigate to the cmd/alpamon directory and run the application using Go:
+To run Alpamon in a local development environment, you can also use Go directly:
 ```sh
-cd /path/to/alpamon/cmd/alpamon
-
-go run main.go
+go run ./cmd/alpamon
 ```
-Ensure that you are in the correct directory (`/cmd/alpamon`), as this is where the `main.go` file resides.
 
 ### Docker
 You can also use docker to test alpamon in various Linux distributions. We use Docker Desktop to test alpamon on following distributions.
@@ -126,7 +143,7 @@ You can run containers for these images in Docker Desktop or using command line 
 ```
 docker run alpamon:ubuntu-22.04
 ```
-- Note : This will run the container with the default workspace URL (http://localhost:8000), plugin ID, and key values. 
+- Note: This will run the container with the default workspace URL (http://localhost:8000), plugin ID, and key values. 
 For more details, refer to the `entrypoint.sh` file in the Dockerfiles directory corresponding to each operating system.
 
 To run the container with a custom workspace URL, plugin ID, and key, use the following command:

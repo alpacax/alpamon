@@ -2,4 +2,5 @@
 !/pkg/db/ent/generate.go
 alpamon.log
 alpamon.db
+alpamon
 .DS_Store

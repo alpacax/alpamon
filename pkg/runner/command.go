@@ -129,8 +129,6 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		return cr.modUser()
 	case "ping":
 		return 0, time.Now().Format(time.RFC3339)
-	//case "debug":
-	//	TODO : getReporterStats()
 	case "download":
 		return cr.runFileDownload(args[1])
 	case "upload":
@@ -746,11 +744,14 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	if err = cmd.Start(); err != nil {
+	err = cmd.Start()
+	if err != nil {
 		log.Debug().Err(err).Msg("Failed to start ftp worker process")
 
 		return fmt.Errorf("openftp: Failed to start ftp worker process. %w", err)
 	}
+
+	go func() { _ = cmd.Wait() }()
 
 	return nil
 }
