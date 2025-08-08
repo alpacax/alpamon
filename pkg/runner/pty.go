@@ -59,10 +59,22 @@ func NewPtyClient(data CommandData, apiSession *scheduler.Session) *PtyClient {
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
 	}
+
+	// For local development
+	wsURL := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
+	wsURL = strings.Replace(wsURL, ":8000", ":8080", 1)
+
+	var finalURL string
+	if strings.HasPrefix(data.URL, "ws:") || strings.HasPrefix(data.URL, "wss:") {
+		finalURL = data.URL
+	} else {
+		finalURL = wsURL + data.URL
+	}
+
 	return &PtyClient{
 		apiSession:    apiSession,
 		requestHeader: headers,
-		url:           data.URL,
+		url:           finalURL,
 		rows:          data.Rows,
 		cols:          data.Cols,
 		username:      data.Username,
