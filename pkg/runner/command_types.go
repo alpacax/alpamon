@@ -69,26 +69,28 @@ type CommandData struct {
 	Target                  string   `json:"target"`
 	Description             string   `json:"description"`
 	Priority                int      `json:"priority"`
-	// Rollback specific fields
-	Action                  string   `json:"action"`
 	Rules                   []map[string]interface{} `json:"rules"`
+	Operation               string   `json:"operation"` // batch, flush, delete, add, update
+	RuleID                  string   `json:"rule_id"`     // for rule-specific operations
 	AssignmentID            string   `json:"assignment_id"`
 	ServerID                string   `json:"server_id"`
 }
 
 type firewallData struct {
 	ChainName   string `validate:"required"`
-	Method      string `validate:"required"`
-	Chain       string `validate:"required"`
-	Protocol    string `validate:"required"`
+	Method      string `validate:"omitempty"`
+	Chain       string `validate:"omitempty"`
+	Protocol    string `validate:"omitempty"`
 	PortStart   int    `validate:"omitempty"`
 	PortEnd     int    `validate:"omitempty"`
 	DPorts      []int  `validate:"omitempty"`
 	ICMPType    string `validate:"omitempty"`
 	Source      string `validate:"omitempty"`
-	Target      string `validate:"required"`
+	Target      string `validate:"omitempty"`
 	Description string `validate:"omitempty"`
 	Priority    int    `validate:"omitempty"`
+	RuleID      string `validate:"omitempty"`
+	Operation   string `validate:"required"` // batch, flush, delete, add, update
 }
 type CommandRunner struct {
 	name       string

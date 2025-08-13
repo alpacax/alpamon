@@ -241,10 +241,6 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		return 0, "Collector will be restarted."
 	case "firewall":
 		return cr.firewall()
-	case "firewall-batch-apply":
-		return cr.firewallBatchApply()
-	case "firewall-rules":
-		return cr.firewallRules()
 	case "firewall-rollback":
 		return cr.firewallRollback()
 	case "help":
@@ -820,7 +816,121 @@ func installFirewall() (nftablesInstalled bool, iptablesInstalled bool, err erro
 }
 
 func (cr *CommandRunner) firewall() (exitCode int, result string) {
-	log.Info().Msgf("cr.data: %v", cr.data)
+	log.Info().Msgf("Firewall operation: %s, ChainName: %s", cr.data.Operation, cr.data.ChainName)
+
+	// Validate required fields based on operation
+	if cr.data.ChainName == "" {
+		return 1, "firewall: chain_name is required"
+	}
+	if cr.data.Operation == "" {
+		return 1, "firewall: operation is required"
+	}
+
+	// Route to appropriate operation handler
+	switch cr.data.Operation {
+	case "batch":
+		return cr.handleBatchOperation()
+	case "flush":
+		return cr.handleFlushOperation()
+	case "delete":
+		return cr.handleDeleteOperation()
+	case "add":
+		return cr.handleAddOperation()
+	case "update":
+		return cr.handleUpdateOperation()
+	default:
+		return 1, fmt.Sprintf("firewall: Unknown operation '%s'. Supported: batch, flush, delete, add, update", cr.data.Operation)
+	}
+}
+
+// handleBatchOperation handles batch application of firewall rules
+func (cr *CommandRunner) handleBatchOperation() (exitCode int, result string) {
+	log.Info().Msgf("Firewall batch operation - ChainName: %s, RuleCount: %d", 
+		cr.data.ChainName, len(cr.data.Rules))
+	
+	if len(cr.data.Rules) == 0 {
+		return 1, "firewall batch: No rules provided"
+	}
+	
+	// Use the common batch apply logic with rollback on failure
+	appliedRules, failedRules, rolledBack, rollbackReason := cr.applyRulesBatchWithFlush()
+	
+	// Prepare response in batch format
+	if rolledBack {
+		return 1, fmt.Sprintf(`{"success": false, "error": "Failed to apply rules", "applied_rules": %d, "failed_rules": %d, "rolled_back": true, "rollback_reason": "%s"}`,
+			appliedRules, len(failedRules), rollbackReason)
+	}
+	
+	return 0, fmt.Sprintf(`{"success": true, "applied_rules": %d, "failed_rules": [], "rolled_back": false, "rollback_reason": null}`, appliedRules)
+}
+
+// handleFlushOperation handles flushing a firewall chain
+func (cr *CommandRunner) handleFlushOperation() (exitCode int, result string) {
+	log.Info().Msgf("Firewall flush operation - ChainName: %s", cr.data.ChainName)
+	
+	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	if err != nil {
+		return 1, fmt.Sprintf("firewall flush: Failed to install firewall tools. %s", err)
+	}
+	
+	if nftablesInstalled {
+		return cr.performNftablesRollback(cr.data.ChainName, "flush")
+	} else if iptablesInstalled {
+		return cr.performIptablesRollback(cr.data.ChainName, "flush")
+	}
+	
+	return 1, "firewall flush: No firewall management tool installed"
+}
+
+// handleDeleteOperation handles deleting a specific firewall rule by rule_id
+func (cr *CommandRunner) handleDeleteOperation() (exitCode int, result string) {
+	log.Info().Msgf("Firewall delete operation - ChainName: %s, RuleID: %s", cr.data.ChainName, cr.data.RuleID)
+	
+	// Validate required fields
+	if cr.data.RuleID == "" {
+		return 1, "firewall delete: rule_id is required for delete operation"
+	}
+	
+	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	if err != nil {
+		return 1, fmt.Sprintf("firewall delete: Failed to install firewall tools. %s", err)
+	}
+	
+	if nftablesInstalled {
+		return cr.deleteNftablesRuleByID(cr.data.ChainName, cr.data.RuleID)
+	} else if iptablesInstalled {
+		return cr.deleteIptablesRuleByID(cr.data.ChainName, cr.data.RuleID)
+	}
+	
+	return 1, "firewall delete: No firewall management tool installed"
+}
+
+// handleAddOperation handles adding a single firewall rule
+func (cr *CommandRunner) handleAddOperation() (exitCode int, result string) {
+	log.Info().Msgf("Firewall add operation - ChainName: %s", cr.data.ChainName)
+	
+	// Validate required fields for rule addition
+	if err := cr.validateFirewallRuleData(); err != nil {
+		return 1, fmt.Sprintf("firewall add: Validation failed. %s", err)
+	}
+	
+	return cr.executeSingleFirewallRule()
+}
+
+// handleUpdateOperation handles updating a firewall rule
+func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
+	log.Info().Msgf("Firewall update operation - ChainName: %s", cr.data.ChainName)
+	
+	// Validate required fields for rule update
+	if err := cr.validateFirewallRuleData(); err != nil {
+		return 1, fmt.Sprintf("firewall update: Validation failed. %s", err)
+	}
+	
+	return cr.executeSingleFirewallRule()
+}
+
+// validateFirewallRuleData performs validation for single rule operations
+func (cr *CommandRunner) validateFirewallRuleData() error {
 	data := firewallData{
 		ChainName:   cr.data.ChainName,
 		Method:      cr.data.Method,
@@ -834,155 +944,298 @@ func (cr *CommandRunner) firewall() (exitCode int, result string) {
 		Target:      cr.data.Target,
 		Description: cr.data.Description,
 		Priority:    cr.data.Priority,
+		RuleID:      cr.data.RuleID,
+		Operation:   cr.data.Operation,
 	}
+	
+	return cr.validateFirewallData(data)
+}
 
-	// Enhanced validation
-	err := cr.validateFirewallData(data)
-	if err != nil {
-		log.Error().Err(err).Msg("Firewall data validation failed")
-		return 1, fmt.Sprintf("firewall: Validation failed. %s", err)
-	}
-
+// executeSingleFirewallRule executes a single firewall rule operation
+func (cr *CommandRunner) executeSingleFirewallRule() (exitCode int, result string) {
 	nftablesInstalled, iptablesInstalled, err := installFirewall()
 	if err != nil {
 		return 1, fmt.Sprintf("firewall: Failed to install firewall tools. %s", err)
 	}
-
-	// Check available firewall tools and execute appropriate command
+	
 	if nftablesInstalled {
-		log.Info().Msg("Using nftables for firewall management.")
-		
-		// Create table dynamically
-		tableCmdArgs := []string{"nft", "add", "table", "ip", data.ChainName}
-		_, _ = runCmdWithOutput(tableCmdArgs, "root", "", nil, 60)
-		
-		// Create chain in the new table
-		chainCmdArgs := []string{"nft", "add", "chain", "ip", data.ChainName, strings.ToLower(data.Chain)}
-		switch strings.ToUpper(data.Chain) {
-		case "INPUT":
-			chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "input", "priority", strconv.Itoa(data.Priority),";", "policy", "accept;", "}")
-		case "OUTPUT":
-			chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "output", "priority", strconv.Itoa(data.Priority),";", "policy", "accept;", "}")
-		case "FORWARD":
-				chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "forward", "priority", strconv.Itoa(data.Priority),";", "policy", "accept;", "}")
-		default:
-			chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "prerouting", "priority", strconv.Itoa(data.Priority),";", "policy", "accept;", "}")
-		}
-		_, _ = runCmdWithOutput(chainCmdArgs, "root", "", nil, 60)
-		
-		// Add rule to the dynamic table/chain
-			args := []string{"nft"}
-			switch data.Method {
-			case "-A":
-				args = append(args, "add")
-			case "-I":
-				args = append(args, "insert")
-			case "-R":
-				args = append(args, "replace")
-		case "-D":
-			args = append(args, "delete")
-			}
-			args = append(args, "rule", "ip", data.ChainName, strings.ToLower(data.Chain))
-			if data.Source != "" && data.Source != "0.0.0.0/0" {
-				args = append(args, "ip", "saddr", data.Source)
-			}
-			if data.Protocol != "all" {
-				args = append(args, data.Protocol)
-				
-				if data.Protocol == "icmp" && data.ICMPType != "" {
-					args = append(args, "type", data.ICMPType)
-				} else if data.Protocol == "tcp" || data.Protocol == "udp" {
-				// Handle multiport
-					if len(data.DPorts) > 0 {
-						var portList []string
-						for _, port := range data.DPorts {
-							portList = append(portList, strconv.Itoa(port))
-						}
-						args = append(args, "dport", "{", strings.Join(portList, ","), "}")
-					} else if data.PortStart != 0 {
-						// Handle single port or port range
-						if data.PortEnd != 0 && data.PortEnd != data.PortStart {
-							portStr := fmt.Sprintf("%d-%d", data.PortStart, data.PortEnd)
-							args = append(args, "dport", portStr)
-						} else {
-							args = append(args, "dport", strconv.Itoa(data.PortStart))
-						}
-					}
-				}
-			}
-			targetAction := strings.ToLower(data.Target)
-			args = append(args, "counter", targetAction)
-			
-			exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
-		
-		if exitCode != 0 {
-			log.Error().Msgf("nftables command failed: %s", result)
-			return exitCode, fmt.Sprintf("nftables error: %s", result)
-		}
-		
-		log.Info().Msgf("Successfully added nftables rule to table %s", data.ChainName)
-		return 0, fmt.Sprintf("Successfully added rule to security group table %s.", data.ChainName)
+		return cr.executeNftablesRule()
 	} else if iptablesInstalled {
-		log.Info().Msg("Using iptables for firewall management.")
-		
-		chainName := data.ChainName+"_"+strings.ToLower(data.Chain)
+		return cr.executeIptablesRule()
+	}
+	
+	return 1, "firewall: No firewall management tool installed"
+}
 
-		// Create chain dynamically in filter table
-		chainCreateCmdArgs := []string{"iptables", "-N", chainName}
-		_, _ = runCmdWithOutput(chainCreateCmdArgs, "root", "", nil, 60)
+// executeNftablesRule executes nftables rule
+func (cr *CommandRunner) executeNftablesRule() (exitCode int, result string) {
+	log.Info().Msg("Using nftables for firewall management.")
+	
+	// Create table dynamically
+	tableCmdArgs := []string{"nft", "add", "table", "ip", cr.data.ChainName}
+	_, _ = runCmdWithOutput(tableCmdArgs, "root", "", nil, 60)
+	
+	// Create chain in the new table
+	chainCmdArgs := []string{"nft", "add", "chain", "ip", cr.data.ChainName, strings.ToLower(cr.data.Chain)}
+	switch strings.ToUpper(cr.data.Chain) {
+	case "INPUT":
+		chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "input", "priority", strconv.Itoa(cr.data.Priority),";", "policy", "accept;", "}")
+	case "OUTPUT":
+		chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "output", "priority", strconv.Itoa(cr.data.Priority),";", "policy", "accept;", "}")
+	case "FORWARD":
+		chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "forward", "priority", strconv.Itoa(cr.data.Priority),";", "policy", "accept;", "}")
+	default:
+		chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "prerouting", "priority", strconv.Itoa(cr.data.Priority),";", "policy", "accept;", "}")
+	}
+	_, _ = runCmdWithOutput(chainCmdArgs, "root", "", nil, 60)
+	
+	// Add rule to the dynamic table/chain
+	args := []string{"nft"}
+	switch cr.data.Method {
+	case "-A":
+		args = append(args, "add")
+	case "-I":
+		args = append(args, "insert")
+	case "-R":
+		args = append(args, "replace")
+	case "-D":
+		args = append(args, "delete")
+	}
+	args = append(args, "rule", "ip", cr.data.ChainName, strings.ToLower(cr.data.Chain))
+	
+	if cr.data.Source != "" && cr.data.Source != "0.0.0.0/0" {
+		args = append(args, "ip", "saddr", cr.data.Source)
+	}
+	if cr.data.Protocol != "all" {
+		args = append(args, cr.data.Protocol)
 		
-		// Add rule to the dynamic chain
-		args := []string{"iptables", data.Method, chainName}
-		
-		// Add protocol
-		if data.Protocol != "all" {
-			args = append(args, "-p", data.Protocol)
-		}
-		
-		// Add source if specified
-		if data.Source != "" && data.Source != "0.0.0.0/0" {
-			args = append(args, "-s", data.Source)
-		}
-		
-		// Handle ports based on protocol
-		if data.Protocol == "icmp" {
-			if data.ICMPType != "" {
-				args = append(args, "--icmp-type", data.ICMPType)
-			}
-		} else if data.Protocol == "tcp" || data.Protocol == "udp" {
+		if cr.data.Protocol == "icmp" && cr.data.ICMPType != "" {
+			args = append(args, "type", cr.data.ICMPType)
+		} else if cr.data.Protocol == "tcp" || cr.data.Protocol == "udp" {
 			// Handle multiport
-			if len(data.DPorts) > 0 {
+			if len(cr.data.DPorts) > 0 {
 				var portList []string
-				for _, port := range data.DPorts {
+				for _, port := range cr.data.DPorts {
 					portList = append(portList, strconv.Itoa(port))
 				}
-				args = append(args, "-m", "multiport", "--dports", strings.Join(portList, ","))
-			} else if data.PortStart != 0 {
+				args = append(args, "dport", "{", strings.Join(portList, ","), "}")
+			} else if cr.data.PortStart != 0 {
 				// Handle single port or port range
-				if data.PortEnd != 0 && data.PortEnd != data.PortStart {
-					portStr := fmt.Sprintf("%d:%d", data.PortStart, data.PortEnd)
-					args = append(args, "--dport", portStr)
+				if cr.data.PortEnd != 0 && cr.data.PortEnd != cr.data.PortStart {
+					portStr := fmt.Sprintf("%d-%d", cr.data.PortStart, cr.data.PortEnd)
+					args = append(args, "dport", portStr)
 				} else {
-					args = append(args, "--dport", strconv.Itoa(data.PortStart))
+					args = append(args, "dport", strconv.Itoa(cr.data.PortStart))
 				}
 			}
 		}
-		
-		// Add target
-		args = append(args, "-j", data.Target)
-		
-		exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
-		
-		if exitCode != 0 {
-			log.Error().Msgf("iptables command failed: %s", result)
-			return exitCode, fmt.Sprintf("iptables error: %s", result)
-		}
-		
-		log.Info().Msgf("Successfully added iptables rule to chain %s", chainName)
-		return 0, fmt.Sprintf("Successfully added rule to security group chain %s.", chainName)
-	} else {
-		return 1, "No firewall management tool installed."
 	}
+	targetAction := strings.ToLower(cr.data.Target)
+	args = append(args, "counter", targetAction)
+	
+	// Add comment with rule_id if provided
+	if cr.data.RuleID != "" {
+		ruleComment := fmt.Sprintf("rule_id:%s", cr.data.RuleID)
+		args = append(args, "comment", fmt.Sprintf("\"%s\"", ruleComment))
+	}
+	
+	exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
+	
+	if exitCode != 0 {
+		log.Error().Msgf("nftables command failed: %s", result)
+		return exitCode, fmt.Sprintf("nftables error: %s", result)
+	}
+	
+	log.Info().Msgf("Successfully executed nftables rule for table %s", cr.data.ChainName)
+	return 0, fmt.Sprintf("Successfully executed rule for security group table %s.", cr.data.ChainName)
+}
+
+// executeIptablesRule executes iptables rule
+func (cr *CommandRunner) executeIptablesRule() (exitCode int, result string) {
+	log.Info().Msg("Using iptables for firewall management.")
+	
+	chainName := cr.data.ChainName+"_"+strings.ToLower(cr.data.Chain)
+
+	// Create chain dynamically in filter table
+	chainCreateCmdArgs := []string{"iptables", "-N", chainName}
+	_, _ = runCmdWithOutput(chainCreateCmdArgs, "root", "", nil, 60)
+	
+	// Add rule to the dynamic chain
+	args := []string{"iptables", cr.data.Method, chainName}
+	
+	// Add protocol
+	if cr.data.Protocol != "all" {
+		args = append(args, "-p", cr.data.Protocol)
+	}
+	
+	// Add source if specified
+	if cr.data.Source != "" && cr.data.Source != "0.0.0.0/0" {
+		args = append(args, "-s", cr.data.Source)
+	}
+	
+	// Handle ports based on protocol
+	if cr.data.Protocol == "icmp" {
+		if cr.data.ICMPType != "" {
+			args = append(args, "--icmp-type", cr.data.ICMPType)
+		}
+	} else if cr.data.Protocol == "tcp" || cr.data.Protocol == "udp" {
+		// Handle multiport
+		if len(cr.data.DPorts) > 0 {
+			var portList []string
+			for _, port := range cr.data.DPorts {
+				portList = append(portList, strconv.Itoa(port))
+			}
+			args = append(args, "-m", "multiport", "--dports", strings.Join(portList, ","))
+		} else if cr.data.PortStart != 0 {
+			// Handle single port or port range
+			if cr.data.PortEnd != 0 && cr.data.PortEnd != cr.data.PortStart {
+				portStr := fmt.Sprintf("%d:%d", cr.data.PortStart, cr.data.PortEnd)
+				args = append(args, "--dport", portStr)
+			} else {
+				args = append(args, "--dport", strconv.Itoa(cr.data.PortStart))
+			}
+		}
+	}
+	
+	// Add target
+	args = append(args, "-j", cr.data.Target)
+	
+	// Add comment with rule_id if provided
+	if cr.data.RuleID != "" {
+		args = append(args, "-m", "comment", "--comment", fmt.Sprintf("rule_id:%s", cr.data.RuleID))
+	}
+	
+	exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
+	
+	if exitCode != 0 {
+		log.Error().Msgf("iptables command failed: %s", result)
+		return exitCode, fmt.Sprintf("iptables error: %s", result)
+	}
+	
+	log.Info().Msgf("Successfully executed iptables rule for chain %s", chainName)
+	return 0, fmt.Sprintf("Successfully executed rule for security group chain %s.", chainName)
+}
+
+// deleteNftablesRuleByID deletes a specific nftables rule by finding its handle using rule_id in comment
+func (cr *CommandRunner) deleteNftablesRuleByID(chainName, ruleID string) (exitCode int, result string) {
+	log.Info().Msgf("Deleting nftables rule by ID: %s in chain %s", ruleID, chainName)
+	
+	// First, list rules with handles to find the target rule
+	listArgs := []string{"nft", "--handle", "list", "table", "ip", chainName}
+	listExitCode, listOutput := runCmdWithOutput(listArgs, "root", "", nil, 60)
+	
+	if listExitCode != 0 {
+		log.Error().Msgf("Failed to list nftables rules: %s", listOutput)
+		return listExitCode, fmt.Sprintf("Failed to list rules: %s", listOutput)
+	}
+	
+	// Parse the output to find rule handle with matching rule_id in comment
+	ruleHandle := cr.findNftablesRuleHandle(listOutput, ruleID)
+	if ruleHandle == "" {
+		log.Warn().Msgf("Rule with ID %s not found in chain %s", ruleID, chainName)
+		return 1, fmt.Sprintf("Rule with ID %s not found", ruleID)
+	}
+	
+	// Delete the rule using its handle
+	deleteArgs := []string{"nft", "delete", "rule", "ip", chainName, cr.data.Chain, "handle", ruleHandle}
+	deleteExitCode, deleteOutput := runCmdWithOutput(deleteArgs, "root", "", nil, 60)
+	
+	if deleteExitCode != 0 {
+		log.Error().Msgf("Failed to delete nftables rule: %s", deleteOutput)
+		return deleteExitCode, fmt.Sprintf("Failed to delete rule: %s", deleteOutput)
+	}
+	
+	log.Info().Msgf("Successfully deleted nftables rule with ID %s (handle %s)", ruleID, ruleHandle)
+	return 0, fmt.Sprintf("Successfully deleted rule with ID %s", ruleID)
+}
+
+// findNftablesRuleHandle parses nft list output to find rule handle by rule_id in comment
+func (cr *CommandRunner) findNftablesRuleHandle(listOutput, ruleID string) string {
+	lines := strings.Split(listOutput, "\n")
+	targetComment := fmt.Sprintf("rule_id:%s", ruleID)
+	
+	for _, line := range lines {
+		// Look for lines containing the target comment and handle
+		if strings.Contains(line, targetComment) && strings.Contains(line, "# handle") {
+			// Extract handle number from the line
+			// Example: "tcp dport { 80, 443 } counter accept # handle 5 comment \"rule_id:1d6de556-95ec-4d5e-b8e5-4f6fa874d335\""
+			if handleIndex := strings.Index(line, "# handle"); handleIndex != -1 {
+				handlePart := line[handleIndex+9:] // Skip "# handle "
+				if spaceIndex := strings.Index(handlePart, " "); spaceIndex != -1 {
+					return strings.TrimSpace(handlePart[:spaceIndex])
+				} else {
+					return strings.TrimSpace(handlePart)
+				}
+			}
+		}
+	}
+	
+	return ""
+}
+
+// deleteIptablesRuleByID deletes a specific iptables rule by matching rule specifications
+func (cr *CommandRunner) deleteIptablesRuleByID(chainName, ruleID string) (exitCode int, result string) {
+	log.Info().Msgf("Deleting iptables rule - ChainName: %s, RuleID: %s", chainName, ruleID)
+	
+	fullChainName := chainName + "_" + strings.ToLower(cr.data.Chain)
+	
+	// Build delete command with rule specifications
+	args := []string{"iptables", "-D", fullChainName}
+	
+	// Add protocol
+	if cr.data.Protocol != "" && cr.data.Protocol != "all" {
+		args = append(args, "-p", cr.data.Protocol)
+	}
+	
+	// Add source if specified
+	if cr.data.Source != "" && cr.data.Source != "0.0.0.0/0" {
+		args = append(args, "-s", cr.data.Source)
+	}
+	
+	// Handle ports based on protocol
+	if cr.data.Protocol == "icmp" {
+		if cr.data.ICMPType != "" {
+			args = append(args, "--icmp-type", cr.data.ICMPType)
+		}
+	} else if cr.data.Protocol == "tcp" || cr.data.Protocol == "udp" {
+		// Handle multiport
+		if len(cr.data.DPorts) > 0 {
+			var portList []string
+			for _, port := range cr.data.DPorts {
+				portList = append(portList, strconv.Itoa(port))
+			}
+			args = append(args, "-m", "multiport", "--dports", strings.Join(portList, ","))
+		} else if cr.data.PortStart != 0 {
+			// Handle single port or port range
+			if cr.data.PortEnd != 0 && cr.data.PortEnd != cr.data.PortStart {
+				portStr := fmt.Sprintf("%d:%d", cr.data.PortStart, cr.data.PortEnd)
+				args = append(args, "--dport", portStr)
+			} else {
+				args = append(args, "--dport", strconv.Itoa(cr.data.PortStart))
+			}
+		}
+	}
+	
+	// Add target
+	if cr.data.Target != "" {
+		args = append(args, "-j", cr.data.Target)
+	}
+	
+	// Add comment to match (if rule was created with comment)
+	if ruleID != "" {
+		args = append(args, "-m", "comment", "--comment", fmt.Sprintf("rule_id:%s", ruleID))
+	}
+	
+	// Execute delete command
+	deleteExitCode, deleteOutput := runCmdWithOutput(args, "root", "", nil, 60)
+	
+	if deleteExitCode != 0 {
+		log.Error().Msgf("Failed to delete iptables rule: %s", deleteOutput)
+		return deleteExitCode, fmt.Sprintf("Failed to delete rule: %s", deleteOutput)
+	}
+	
+	log.Info().Msgf("Successfully deleted iptables rule with ID %s", ruleID)
+	return 0, fmt.Sprintf("Successfully deleted rule with ID %s", ruleID)
 }
 
 func getFileData(data CommandData) ([]byte, error) {
@@ -1341,16 +1594,16 @@ func (cr *CommandRunner) validateFirewallData(data firewallData) error {
 
 // firewallRollback handles firewall rollback operations
 func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
-	log.Info().Msgf("Firewall rollback command received - Action: %s, ChainName: %s", 
-		cr.data.Action, cr.data.ChainName)
+	log.Info().Msgf("Firewall rollback command received - Operation: %s, ChainName: %s", 
+		cr.data.Operation, cr.data.ChainName)
 	
 	// Handle both old and new field names for backward compatibility
-	if cr.data.ChainName == "" && cr.data.Action == "" {
-		return 1, "firewall-rollback: ChainName or Action is required"
+	if cr.data.ChainName == "" && cr.data.Operation == "" {
+		return 1, "firewall-rollback: ChainName or Operation is required"
 	}
 	
 	// Determine the action (flush or restore)
-	action := cr.data.Action
+	action := cr.data.Operation
 	if action == "" {
 		// Fallback to Method field for backward compatibility
 		if cr.data.Method != "" {
@@ -1446,8 +1699,7 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 				cr.data.DPorts = dports
 			}
 			
-			// Apply the rule
-			ruleExitCode, ruleResult := cr.firewall()
+			ruleExitCode, ruleResult := cr.executeSingleFirewallRule()
 			if ruleExitCode == 0 {
 				successCount++
 			} else {
@@ -1579,108 +1831,18 @@ func (cr *CommandRunner) performIptablesRollback(chainName, method string) (int,
 	}
 }
 
-// firewallBatchApply handles batch application of firewall rules
-func (cr *CommandRunner) firewallBatchApply() (exitCode int, result string) {
-	log.Info().Msgf("Firewall batch apply - ChainName: %s, RuleCount: %d", 
-		cr.data.ChainName, len(cr.data.Rules))
-	
-	// Validate required fields
-	if cr.data.ChainName == "" {
-		return 1, "firewall-batch-apply: chain_name is required"
-	}
-	
-	if len(cr.data.Rules) == 0 {
-		return 1, "firewall-batch-apply: No rules provided"
-	}
-	
-	// Use the common batch apply logic with rollback on failure
-	// Pass false for flushBeforeApply to only add new rules (incremental)
-	appliedRules, failedRules, rolledBack, rollbackReason := cr.applyRulesBatchWithFlush(true, false)
-	
-	// Prepare response in batch-apply format
-	if rolledBack {
-		return 1, fmt.Sprintf(`{"success": false, "error": "Failed to apply rules", "applied_rules": %d, "failed_rules": %d, "rolled_back": true, "rollback_reason": "%s"}`,
-			appliedRules, len(failedRules), rollbackReason)
-	}
-	
-	return 0, fmt.Sprintf(`{"success": true, "applied_rules": %d, "failed_rules": [], "rolled_back": false, "rollback_reason": null}`, appliedRules)
-}
 
-// firewallRules handles individual firewall rule operations
-func (cr *CommandRunner) firewallRules() (exitCode int, result string) {
-	log.Info().Msgf("Firewall rules - Action: %s, ChainName: %s", cr.data.Action, cr.data.ChainName)
-	
-	// Validate required fields
-	if cr.data.ChainName == "" {
-		return 1, "firewall-rules: chain_name is required"
-	}
-	
-	switch cr.data.Action {
-	case "add_rule":
-		// For add_rule, we need to apply a single rule
-		cr.data.Method = "-A" // Append
-		return cr.firewall()
-		
-	case "update_rule":
-		// For update, we need to replace the rule
-		cr.data.Method = "-R"
-		return cr.firewall()
-		
-	case "delete_rule":
-		// For delete, we need to delete the rule
-		cr.data.Method = "-D"
-		return cr.firewall()
-		
-	case "apply_rules":
-		// For apply_rules, we need to flush and reapply all rules (full replacement)
-		if len(cr.data.Rules) == 0 {
-			return 1, "firewall-rules: No rules provided for apply_rules action"
-		}
-		
-		// Use the common batch apply logic without rollback on failure
-		// Pass true for flushBeforeApply to replace all rules
-		appliedRules, _, _, _ := cr.applyRulesBatchWithFlush(false, true)
-		
-		if appliedRules == len(cr.data.Rules) {
-			return 0, fmt.Sprintf(`{"success": true, "message": "Successfully applied %d rules"}`, appliedRules)
-		} else {
-			return 1, fmt.Sprintf(`{"success": false, "message": "Applied %d/%d rules"}`, appliedRules, len(cr.data.Rules))
-		}
-		
-	default:
-		return 1, fmt.Sprintf("firewall-rules: Unhandled action '%s'", cr.data.Action)
-	}
-}
 
 // applyRulesBatchWithFlush applies a batch of firewall rules with optional rollback on failure
 // Returns: appliedRules, failedRules, rolledBack, rollbackReason
 // flushBeforeApply: if true, flush all existing rules before applying new ones (full replacement)
 //                   if false, only add new rules (incremental)
-func (cr *CommandRunner) applyRulesBatchWithFlush(rollbackOnFailure bool, flushBeforeApply bool) (int, []map[string]interface{}, bool, string) {
+func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface{}, bool, string) {
 	// Install firewall tools if needed
 	nftablesInstalled, iptablesInstalled, err := installFirewall()
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to install firewall tools")
 		return 0, nil, false, ""
-	}
-	
-	// First flush the chain if requested (for full replacement)
-	if flushBeforeApply {
-		var flushExitCode int
-		var flushResult string
-		if nftablesInstalled {
-			flushExitCode, flushResult = cr.performNftablesRollback(cr.data.ChainName, "flush")
-		} else if iptablesInstalled {
-			flushExitCode, flushResult = cr.performIptablesRollback(cr.data.ChainName, "flush")
-		}
-		
-		if flushExitCode != 0 {
-			log.Error().Msgf("Failed to flush before applying rules: %s", flushResult)
-			return 0, nil, false, ""
-		}
-		log.Info().Msg("Flushed existing rules before applying new ones")
-	} else {
-		log.Info().Msg("Adding rules incrementally without flushing existing rules")
 	}
 	
 	// Apply rules
@@ -1723,8 +1885,7 @@ func (cr *CommandRunner) applyRulesBatchWithFlush(rollbackOnFailure bool, flushB
 		// Convert rule data to CommandData fields
 		cr.data = cr.convertRuleDataToCommandData(ruleData, cr.data)
 		
-		// Apply the rule
-		ruleExitCode, ruleResult := cr.firewall()
+		ruleExitCode, ruleResult := cr.executeSingleFirewallRule()
 		if ruleExitCode == 0 {
 			appliedRules++
 			log.Info().Msgf("Successfully applied rule %d/%d", i+1, len(cr.data.Rules))
@@ -1737,7 +1898,7 @@ func (cr *CommandRunner) applyRulesBatchWithFlush(rollbackOnFailure bool, flushB
 			log.Error().Msgf("Failed to apply rule %d/%d: %s", i+1, len(cr.data.Rules), ruleResult)
 			
 			// Trigger rollback on first failure if enabled
-			if rollbackOnFailure && !rolledBack {
+			if !rolledBack {
 				rollbackReason = fmt.Sprintf("Rule %d failed to apply", i+1)
 				rolledBack = true
 				
@@ -1814,30 +1975,6 @@ func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interf
 	return data
 }
 
-// firewallChainDelete handles deleting a specific firewall chain
-func (cr *CommandRunner) firewallChainDelete() (exitCode int, result string) {
-	log.Info().Msgf("Firewall chain delete command received - ChainName: %s", cr.data.ChainName)
-	
-	// Validate required fields
-	if cr.data.ChainName == "" {
-		return 1, "firewall-chain-delete: chain_name is required"
-	}
-	
-	nftablesInstalled, iptablesInstalled, err := installFirewall()
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to install firewall tools for chain delete")
-		return 1, fmt.Sprintf("firewall-chain-delete: Failed to install firewall tools. %s", err)
-	}
-	
-	// Handle delete operation based on available firewall tool
-	if nftablesInstalled {
-		return cr.performNftablesChainDelete(cr.data.ChainName)
-	} else if iptablesInstalled {
-		return cr.performIptablesChainDelete(cr.data.ChainName)
-	}
-	
-	return 1, "firewall-chain-delete: No firewall management tool installed"
-}
 
 // performNftablesChainDelete deletes a specific chain or table in nftables
 func (cr *CommandRunner) performNftablesChainDelete(chainName string) (int, string) {
