@@ -602,7 +602,7 @@ func (cr *CommandRunner) modUser() (exitCode int, result string) {
 func (cr *CommandRunner) runFileUpload(fileName string) (exitCode int, result string) {
 	log.Debug().Msgf("Uploading file to %s. (username: %s, groupname: %s)", fileName, cr.data.Username, cr.data.Groupname)
 
-	sysProcAttr, err := demote(cr.data.Username, cr.data.Groupname)
+	sysProcAttr, homeDirectory, err := demoteFtp(cr.data.Username, cr.data.Groupname)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to demote user.")
 		return 1, err.Error()
@@ -612,7 +612,7 @@ func (cr *CommandRunner) runFileUpload(fileName string) (exitCode int, result st
 		return 1, "No paths provided"
 	}
 
-	paths, bulk, recursive, err := parsePaths(cr.data.Paths)
+	paths, bulk, recursive, err := parsePaths(homeDirectory, cr.data.Paths)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to parse paths")
 		return 1, err.Error()
@@ -711,7 +711,7 @@ func (cr *CommandRunner) validateData(data interface{}) error {
 }
 
 func (cr *CommandRunner) openFtp(data openFtpData) error {
-	sysProcAttr, err := demoteFtp(data.Username, data.Groupname)
+	sysProcAttr, homeDirectory, err := demoteFtp(data.Username, data.Groupname)
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to get demote permission")
 
@@ -730,7 +730,7 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 		"ftp",
 		data.URL,
 		config.GlobalSettings.ServerURL,
-		data.HomeDirectory,
+		homeDirectory,
 	)
 	cmd.SysProcAttr = sysProcAttr
 	cmd.Stdout = os.Stdout
@@ -823,9 +823,17 @@ func getFileData(data CommandData) ([]byte, error) {
 	return content, nil
 }
 
-func parsePaths(pathList []string) (parsedPaths []string, isBulk bool, isRecursive bool, err error) {
+func parsePaths(homeDirectory string, pathList []string) (parsedPaths []string, isBulk bool, isRecursive bool, err error) {
 	paths := make([]string, len(pathList))
 	for i, path := range pathList {
+		if strings.HasPrefix(path, "~") {
+			path = strings.Replace(path, "~", homeDirectory, 1)
+		}
+
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(homeDirectory, path)
+		}
+
 		absPath, err := filepath.Abs(path)
 		if err != nil {
 			return nil, false, false, err
