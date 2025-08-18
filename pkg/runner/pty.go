@@ -59,10 +59,15 @@ func NewPtyClient(data CommandData, apiSession *scheduler.Session) *PtyClient {
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
 	}
+	wsURL := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
+	wsURL = strings.Replace(wsURL, ":8000", ":8080", 1)
+	tmp := strings.Replace(data.URL, "localhost", "host.docker.internal", 1)
+	log.Debug().Msgf("🚀 NewPtyClient url: %s", tmp)
 	return &PtyClient{
 		apiSession:    apiSession,
 		requestHeader: headers,
-		url:           strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + data.URL,
+		url:           tmp,
+		//url:           strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + data.URL,
 		rows:          data.Rows,
 		cols:          data.Cols,
 		username:      data.Username,
@@ -103,10 +108,10 @@ func (pc *PtyClient) initializePtySession() error {
 
 	pid := pc.cmd.Process.Pid
 	sessionInfo := &SessionInfo{
-		SessionID:   pc.sessionID,
-		PID:         pid,
-		PtyClient:   pc,
-		PAMRequests: make(map[string]*PAMRequest),
+		SessionID: pc.sessionID,
+		PID:       pid,
+		PtyClient: pc,
+		Requests:  make(map[string]*SudoRequest),
 	}
 
 	authManager.AddPIDSessionMapping(pid, sessionInfo)
@@ -116,7 +121,6 @@ func (pc *PtyClient) initializePtySession() error {
 }
 
 func (pc *PtyClient) RunPtyBackground() {
-	log.Debug().Msg("Starting Websh session in background.")
 	defer pc.close()
 
 	err := pc.initializePtySession()

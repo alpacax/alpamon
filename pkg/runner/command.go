@@ -254,8 +254,8 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		`
 		return 0, helpMessage
 
-	case "mfa_response":
-		return cr.handleMfaResponse()
+	case "sudo_approval_response":
+		return cr.handleSudoApprovalResponse()
 
 	default:
 		return 1, fmt.Sprintf("Invalid command %s", args[0])
@@ -1009,16 +1009,16 @@ func statFileTransfer(code int, transferType transferType, message string, data 
 	scheduler.Rqueue.Post(statURL, payload, 10, time.Time{})
 }
 
-func (cr *CommandRunner) handleMfaResponse() (int, string) {
-	var mfaResponse MFAResponse
+func (cr *CommandRunner) handleSudoApprovalResponse() (int, string) {
+	var sudoApprovalResponse SudoApprovalResponse
 	if cr.command.Data != "" {
-		err := json.Unmarshal([]byte(cr.command.Data), &mfaResponse)
+		err := json.Unmarshal([]byte(cr.command.Data), &sudoApprovalResponse)
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to parse MFA response data")
-			return 1, "Invalid MFA response data format"
+			log.Error().Err(err).Msg("Failed to parse sudo_approval_response data")
+			return 1, "Invalid sudo_approval_response data format"
 		}
 	} else {
-		return 1, "No MFA response data provided"
+		return 1, "No sudo_approval_response data provided"
 	}
 
 	if authManager == nil {
@@ -1026,11 +1026,12 @@ func (cr *CommandRunner) handleMfaResponse() (int, string) {
 		return 1, "AuthManager not available"
 	}
 
-	err := authManager.HandleMFAResponse(mfaResponse)
+	// SudoApprovalResponse
+	err := authManager.HandleSudoApprovalResponse(sudoApprovalResponse)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to handle MFA response")
-		return 1, fmt.Sprintf("Failed to handle MFA response: %v", err)
+		log.Error().Err(err).Msg("Failed to handle sudo_approval_response")
+		return 1, fmt.Sprintf("Failed to handle sudo_approval_response: %v", err)
 	}
 
-	return 0, "MFA response processed successfully"
+	return 0, "Sudo approval response processed successfully"
 }
