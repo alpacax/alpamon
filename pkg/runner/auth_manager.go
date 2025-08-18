@@ -50,7 +50,6 @@ type SudoApprovalResponse struct {
 	Reason       string `json:"reason"`
 }
 
-// MFAResponse 타입 추가
 type MFAResponse struct {
 	RequestID    string `json:"request_id"`
 	SessionID    string `json:"session_id"`
@@ -60,16 +59,6 @@ type MFAResponse struct {
 	PPID         int    `json:"ppid"`
 	IsAlpconUser bool   `json:"is_alpcon_user"`
 	Success      bool   `json:"success"`
-}
-
-// PAMRequest 타입 추가
-type PAMRequest struct {
-	RequestID  string
-	Connection net.Conn
-	Username   string
-	Groupname  string
-	PID        int
-	PPID       int
 }
 
 type IsAlpconRequest struct {

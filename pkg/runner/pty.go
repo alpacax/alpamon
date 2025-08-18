@@ -59,15 +59,10 @@ func NewPtyClient(data CommandData, apiSession *scheduler.Session) *PtyClient {
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
 	}
-	wsURL := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
-	wsURL = strings.Replace(wsURL, ":8000", ":8080", 1)
-	tmp := strings.Replace(data.URL, "localhost", "host.docker.internal", 1)
-	log.Debug().Msgf("🚀 NewPtyClient url: %s", tmp)
 	return &PtyClient{
 		apiSession:    apiSession,
 		requestHeader: headers,
-		url:           tmp,
-		//url:           strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + data.URL,
+		url:           strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + data.URL,
 		rows:          data.Rows,
 		cols:          data.Cols,
 		username:      data.Username,
