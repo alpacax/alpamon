@@ -24,7 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo \
     vim \
     build-essential \
-    libpam0g-dev
+    libpam0g-dev \
+    libjansson-dev
 
 RUN curl -sSf https://atlasgo.sh | sh
 
