@@ -278,7 +278,7 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 
 		log.Debug().Msgf("sudo_approval request sent to WebSocket client, waiting for response...")
 
-		// timeout: should make responseChannel to checkif sudo approval request is processed already
+		// timeout: should make responseChannel to check if sudo approval request is processed already
 		select {
 		case <-time.After(30 * time.Second):
 			log.Warn().Msg("sudo_approval response timeout")

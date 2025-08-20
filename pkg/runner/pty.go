@@ -116,6 +116,7 @@ func (pc *PtyClient) initializePtySession() error {
 }
 
 func (pc *PtyClient) RunPtyBackground() {
+	log.Debug().Msg("Starting Websh session in background.")
 	defer pc.close()
 
 	err := pc.initializePtySession()
