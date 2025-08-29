@@ -693,7 +693,7 @@ func getDisks() ([]Disk, error) {
 		seen[baseName] = true
 
 		disks = append(disks, Disk{
-			Name:         name,
+			Name:         baseName,
 			SerialNumber: ioCounter.SerialNumber,
 			Label:        ioCounter.Label,
 		})
