@@ -53,19 +53,19 @@ func (c *CollectCheck) parseDiskIO(ioCounters map[string]disk.IOCountersStat) []
 		}
 
 		baseName := utils.GetDiskBaseName(name)
-		if seen[baseName] {
+		if seen[baseName] && baseName != name {
 			continue
 		}
 		seen[baseName] = true
 
-		if lastCounter, exist := c.lastMetric[baseName]; exist {
+		if lastCounter, exist := c.lastMetric[name]; exist {
 			readBps, writeBps = utils.CalculateDiskIOBps(ioCounter, lastCounter, c.GetInterval())
 		} else {
 			readBps = 0
 			writeBps = 0
 		}
 
-		c.lastMetric[baseName] = ioCounter
+		c.lastMetric[name] = ioCounter
 		data = append(data, base.CheckResult{
 			Timestamp: time.Now(),
 			Device:    baseName,
