@@ -34,7 +34,7 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 
 	return &FtpClient{
 		requestHeader:    headers,
-		url:              strings.Replace(data.ServerURL, "http", "ws", 1) + data.URL,
+		url:              data.URL,
 		homeDirectory:    data.HomeDirectory,
 		workingDirectory: data.HomeDirectory,
 		log:              data.Logger,
