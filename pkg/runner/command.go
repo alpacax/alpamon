@@ -793,15 +793,20 @@ func installFirewall() (nftablesInstalled bool, iptablesInstalled bool, err erro
 			log.Warn().Msg("Failed to install nftables. Attempting to install iptables.")
 
 			if utils.PlatformLike == "debian" {
-				installCmd = []string{"apt-get", "update", "&&", "apt-get", "install", "-y", "iptables"}
+				updateCmd := []string{"apt-get", "update"}
+				exitCode, result := runCmdWithOutput(updateCmd, "root", "", nil, 0)
+				if exitCode != 0 {
+					return false, false, fmt.Errorf("failed to update package list for iptables: %s", result)
+				}
+				installCmd = []string{"apt-get", "install", "-y", "iptables"}
 			} else if utils.PlatformLike == "rhel" {
 				installCmd = []string{"yum", "install", "-y", "iptables"}
 			}
 
 			exitCode, _ = runCmdWithOutput(installCmd, "root", "", nil, 0)
-			_, nftablesResult = runCmdWithOutput([]string{"which", "nft"}, "root", "", nil, 0)
-			nftablesInstalled = strings.Contains(nftablesResult, "nft")
-			if exitCode != 0 || !nftablesInstalled {
+			_, iptablesResult := runCmdWithOutput([]string{"which", "iptables"}, "root", "", nil, 0)
+			iptablesInstalled = strings.Contains(iptablesResult, "iptables")
+			if exitCode != 0 || !iptablesInstalled {
 				return false, false, fmt.Errorf("failed to install firewall tools")
 			}
 		}
