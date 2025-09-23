@@ -76,10 +76,12 @@ nfpms:
         dependencies:
           - zip
           - sqlite3
+          - nftables | iptables
       rpm:
         dependencies:
           - zip
           - sqlite
+          - nftables | iptables
       
 changelog:
   sort: asc
