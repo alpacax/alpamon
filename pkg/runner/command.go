@@ -1208,30 +1208,6 @@ func (cr *CommandRunner) deleteNftablesRuleByID(chainName, ruleID string) (exitC
 	return 0, fmt.Sprintf("Successfully deleted rule with ID %s", ruleID)
 }
 
-// findNftablesRuleHandle parses nft list output to find rule handle by rule_id in comment
-func (cr *CommandRunner) findNftablesRuleHandle(listOutput, ruleID string) string {
-	lines := strings.Split(listOutput, "\n")
-	targetComment := fmt.Sprintf("rule_id:%s", ruleID)
-
-	for _, line := range lines {
-		// Look for lines containing the target comment and handle
-		// Comment format can be: "rule_id:xxx" or "rule_id:xxx,type:yyy"
-		if strings.Contains(line, targetComment) && strings.Contains(line, "# handle") {
-			// Extract handle number from the line
-			// Example: "tcp dport { 80, 443 } counter accept # handle 5 comment \"rule_id:1d6de556-95ec-4d5e-b8e5-4f6fa874d335,type:user\""
-			if handleIndex := strings.Index(line, "# handle"); handleIndex != -1 {
-				handlePart := line[handleIndex+9:] // Skip "# handle "
-				if spaceIndex := strings.Index(handlePart, " "); spaceIndex != -1 {
-					return strings.TrimSpace(handlePart[:spaceIndex])
-				} else {
-					return strings.TrimSpace(handlePart)
-				}
-			}
-		}
-	}
-
-	return ""
-}
 
 // findNftablesRuleHandleAndChain parses nft list output to find rule handle and chain by rule_id in comment
 func (cr *CommandRunner) findNftablesRuleHandleAndChain(listOutput, ruleID string) (string, string) {
