@@ -1007,19 +1007,22 @@ func (cr *CommandRunner) executeNftablesRule() (exitCode int, result string) {
 		args = append(args, "ip", "saddr", cr.data.Source)
 	}
 	if cr.data.Protocol != "all" {
-		args = append(args, cr.data.Protocol)
-		
-		if cr.data.Protocol == "icmp" && cr.data.ICMPType != "" {
-			args = append(args, "type", cr.data.ICMPType)
+		if cr.data.Protocol == "icmp" {
+			args = append(args, "ip", "protocol", cr.data.Protocol)
+			if cr.data.ICMPType != "" {
+				args = append(args, "icmp", "type", cr.data.ICMPType)
+			}
 		} else if cr.data.Protocol == "tcp" || cr.data.Protocol == "udp" {
-			// Handle multiport
+			// For TCP/UDP, use proper nftables protocol syntax
 			if len(cr.data.DPorts) > 0 {
+				args = append(args, cr.data.Protocol)
 				var portList []string
 				for _, port := range cr.data.DPorts {
 					portList = append(portList, strconv.Itoa(port))
 				}
 				args = append(args, "dport", "{", strings.Join(portList, ","), "}")
 			} else if cr.data.PortStart != 0 {
+				args = append(args, cr.data.Protocol)
 				// Handle single port or port range
 				if cr.data.PortEnd != 0 && cr.data.PortEnd != cr.data.PortStart {
 					portStr := fmt.Sprintf("%d-%d", cr.data.PortStart, cr.data.PortEnd)
@@ -1027,12 +1030,25 @@ func (cr *CommandRunner) executeNftablesRule() (exitCode int, result string) {
 				} else {
 					args = append(args, "dport", strconv.Itoa(cr.data.PortStart))
 				}
+			} else {
+				// No port specified, use ip protocol syntax
+				args = append(args, "ip", "protocol", cr.data.Protocol)
 			}
+		} else {
+			// For other protocols
+			args = append(args, "ip", "protocol", cr.data.Protocol)
 		}
 	}
+
+	// Add target action (accept/drop/reject)
 	targetAction := strings.ToLower(cr.data.Target)
-	args = append(args, "counter", targetAction)
-	
+	if targetAction == "accept" || targetAction == "drop" || targetAction == "reject" {
+		args = append(args, targetAction)
+	} else {
+		// Default action if target is not specified or invalid
+		args = append(args, "accept")
+	}
+
 	// Add comment with rule_id if provided
 	if cr.data.RuleID != "" {
 		ruleComment := fmt.Sprintf("rule_id:%s", cr.data.RuleID)
