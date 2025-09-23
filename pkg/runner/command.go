@@ -936,6 +936,11 @@ func (cr *CommandRunner) validateFirewallRuleData() error {
 		cr.data.RuleType = "user"
 	}
 
+	// Generate rule ID if not provided
+	if cr.data.RuleID == "" {
+		cr.data.RuleID = uuid.New().String()
+	}
+
 	data := firewallData{
 		ChainName:   cr.data.ChainName,
 		Method:      cr.data.Method,
@@ -1167,33 +1172,34 @@ func (cr *CommandRunner) executeIptablesRule() (exitCode int, result string) {
 // deleteNftablesRuleByID deletes a specific nftables rule by finding its handle using rule_id in comment
 func (cr *CommandRunner) deleteNftablesRuleByID(chainName, ruleID string) (exitCode int, result string) {
 	log.Info().Msgf("Deleting nftables rule by ID: %s in chain %s", ruleID, chainName)
-	
+
 	// First, list rules with handles to find the target rule
 	listArgs := []string{"nft", "--handle", "list", "table", "ip", chainName}
 	listExitCode, listOutput := runCmdWithOutput(listArgs, "root", "", nil, 60)
-	
+
 	if listExitCode != 0 {
 		log.Error().Msgf("Failed to list nftables rules: %s", listOutput)
 		return listExitCode, fmt.Sprintf("Failed to list rules: %s", listOutput)
 	}
-	
-	// Parse the output to find rule handle with matching rule_id in comment
-	ruleHandle := cr.findNftablesRuleHandle(listOutput, ruleID)
+
+	// Parse the output to find rule handle and chain type with matching rule_id in comment
+	ruleHandle, chainType := cr.findNftablesRuleHandleAndChain(listOutput, ruleID)
 	if ruleHandle == "" {
-		log.Warn().Msgf("Rule with ID %s not found in chain %s", ruleID, chainName)
+		log.Warn().Msgf("Rule with ID %s not found in table %s", ruleID, chainName)
 		return 1, fmt.Sprintf("Rule with ID %s not found", ruleID)
 	}
-	
+
 	// Delete the rule using its handle
-	deleteArgs := []string{"nft", "delete", "rule", "ip", chainName, cr.data.Chain, "handle", ruleHandle}
+	// nftables syntax: nft delete rule ip <table> <chain> handle <handle>
+	deleteArgs := []string{"nft", "delete", "rule", "ip", chainName, chainType, "handle", ruleHandle}
 	deleteExitCode, deleteOutput := runCmdWithOutput(deleteArgs, "root", "", nil, 60)
-	
+
 	if deleteExitCode != 0 {
 		log.Error().Msgf("Failed to delete nftables rule: %s", deleteOutput)
 		return deleteExitCode, fmt.Sprintf("Failed to delete rule: %s", deleteOutput)
 	}
-	
-	log.Info().Msgf("Successfully deleted nftables rule with ID %s (handle %s)", ruleID, ruleHandle)
+
+	log.Info().Msgf("Successfully deleted nftables rule with ID %s (handle %s) from chain %s", ruleID, ruleHandle, chainType)
 	return 0, fmt.Sprintf("Successfully deleted rule with ID %s", ruleID)
 }
 
@@ -1220,6 +1226,42 @@ func (cr *CommandRunner) findNftablesRuleHandle(listOutput, ruleID string) strin
 	}
 
 	return ""
+}
+
+// findNftablesRuleHandleAndChain parses nft list output to find rule handle and chain by rule_id in comment
+func (cr *CommandRunner) findNftablesRuleHandleAndChain(listOutput, ruleID string) (string, string) {
+	lines := strings.Split(listOutput, "\n")
+	targetComment := fmt.Sprintf("rule_id:%s", ruleID)
+	currentChain := ""
+
+	for _, line := range lines {
+		// Check for chain declarations (e.g., "chain input {", "chain output {")
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "chain ") && strings.Contains(trimmed, "{") {
+			// Extract chain name from "chain <name> {"
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 2 {
+				currentChain = parts[1]
+			}
+		}
+
+		// Look for lines containing the target comment and handle
+		if strings.Contains(line, targetComment) && strings.Contains(line, "# handle") {
+			// Extract handle number from the line
+			if handleIndex := strings.Index(line, "# handle"); handleIndex != -1 {
+				handlePart := line[handleIndex+9:] // Skip "# handle "
+				handle := ""
+				if spaceIndex := strings.Index(handlePart, " "); spaceIndex != -1 {
+					handle = strings.TrimSpace(handlePart[:spaceIndex])
+				} else {
+					handle = strings.TrimSpace(handlePart)
+				}
+				return handle, currentChain
+			}
+		}
+	}
+
+	return "", ""
 }
 
 // deleteIptablesRuleByID deletes a specific iptables rule by matching rule specifications
@@ -1716,59 +1758,8 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 		failedRules := []string{}
 		
 		for i, ruleData := range cr.data.Rules {
-			// Convert rule data to CommandData fields
-			if chainName, ok := ruleData["chain_name"].(string); ok {
-				cr.data.ChainName = chainName
-			}
-			if method, ok := ruleData["method"].(string); ok {
-				cr.data.Method = method
-			}
-			if chain, ok := ruleData["chain"].(string); ok {
-				cr.data.Chain = chain
-			}
-			if protocol, ok := ruleData["protocol"].(string); ok {
-				cr.data.Protocol = protocol
-			}
-			if portStart, ok := ruleData["port_start"].(float64); ok {
-				cr.data.PortStart = int(portStart)
-			}
-			if portEnd, ok := ruleData["port_end"].(float64); ok {
-				cr.data.PortEnd = int(portEnd)
-			}
-			if source, ok := ruleData["source"].(string); ok {
-				cr.data.Source = source
-			}
-			if destination, ok := ruleData["destination"].(string); ok {
-				cr.data.Destination = destination
-			}
-			if target, ok := ruleData["target"].(string); ok {
-				cr.data.Target = target
-			}
-			if description, ok := ruleData["description"].(string); ok {
-				cr.data.Description = description
-			}
-			if priority, ok := ruleData["priority"].(float64); ok {
-				cr.data.Priority = int(priority)
-			}
-			if icmpType, ok := ruleData["icmp_type"].(string); ok {
-				cr.data.ICMPType = icmpType
-			}
-			if ruleType, ok := ruleData["rule_type"].(string); ok {
-				cr.data.RuleType = ruleType
-			} else {
-				cr.data.RuleType = "user" // Default to user type
-			}
-			
-			// Handle dports array
-			if dportsInterface, ok := ruleData["dports"].([]interface{}); ok {
-				dports := []int{}
-				for _, p := range dportsInterface {
-					if port, ok := p.(float64); ok {
-						dports = append(dports, int(port))
-					}
-				}
-				cr.data.DPorts = dports
-			}
+			// Convert rule data to CommandData fields using existing function with rule ID generation
+			cr.data = cr.convertRuleDataToCommandData(ruleData, cr.data)
 			
 			ruleExitCode, ruleResult := cr.executeSingleFirewallRule()
 			if ruleExitCode == 0 {
@@ -2043,7 +2034,13 @@ func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interf
 	if icmpType, ok := ruleData["icmp_type"].(string); ok {
 		data.ICMPType = icmpType
 	}
-	
+	if ruleID, ok := ruleData["rule_id"].(string); ok {
+		data.RuleID = ruleID
+	} else {
+		// Generate rule ID if not provided
+		data.RuleID = uuid.New().String()
+	}
+
 	// Handle dports array
 	if dportsInterface, ok := ruleData["dports"].([]interface{}); ok {
 		dports := []int{}
