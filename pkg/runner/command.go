@@ -1006,6 +1006,11 @@ func (cr *CommandRunner) executeNftablesRule() (exitCode int, result string) {
 	if cr.data.Source != "" && cr.data.Source != "0.0.0.0/0" {
 		args = append(args, "ip", "saddr", cr.data.Source)
 	}
+
+	if cr.data.Destination != "" && cr.data.Destination != "0.0.0.0/0" {
+		args = append(args, "ip", "daddr", cr.data.Destination)
+	}
+
 	if cr.data.Protocol != "all" {
 		if cr.data.Protocol == "icmp" {
 			args = append(args, "ip", "protocol", cr.data.Protocol)
@@ -1088,7 +1093,12 @@ func (cr *CommandRunner) executeIptablesRule() (exitCode int, result string) {
 	if cr.data.Source != "" && cr.data.Source != "0.0.0.0/0" {
 		args = append(args, "-s", cr.data.Source)
 	}
-	
+
+	// Add destination if specified
+	if cr.data.Destination != "" && cr.data.Destination != "0.0.0.0/0" {
+		args = append(args, "-d", cr.data.Destination)
+	}
+
 	// Handle ports based on protocol
 	if cr.data.Protocol == "icmp" {
 		if cr.data.ICMPType != "" {
@@ -1207,7 +1217,12 @@ func (cr *CommandRunner) deleteIptablesRuleByID(chainName, ruleID string) (exitC
 	if cr.data.Source != "" && cr.data.Source != "0.0.0.0/0" {
 		args = append(args, "-s", cr.data.Source)
 	}
-	
+
+	// Add destination if specified
+	if cr.data.Destination != "" && cr.data.Destination != "0.0.0.0/0" {
+		args = append(args, "-d", cr.data.Destination)
+	}
+
 	// Handle ports based on protocol
 	if cr.data.Protocol == "icmp" {
 		if cr.data.ICMPType != "" {
@@ -1699,6 +1714,9 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 			if source, ok := ruleData["source"].(string); ok {
 				cr.data.Source = source
 			}
+			if destination, ok := ruleData["destination"].(string); ok {
+				cr.data.Destination = destination
+			}
 			if target, ok := ruleData["target"].(string); ok {
 				cr.data.Target = target
 			}
@@ -1967,6 +1985,9 @@ func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interf
 	}
 	if source, ok := ruleData["source"].(string); ok {
 		data.Source = source
+	}
+	if destination, ok := ruleData["destination"].(string); ok {
+		data.Destination = destination
 	}
 	if target, ok := ruleData["target"].(string); ok {
 		data.Target = target

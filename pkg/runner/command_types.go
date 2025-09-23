@@ -66,6 +66,7 @@ type CommandData struct {
 	DPorts                  []int    `json:"dports"`
 	ICMPType                string   `json:"icmp_type"`
 	Source                  string   `json:"source"`
+	Destination             string   `json:"destination"`
 	Target                  string   `json:"target"`
 	Description             string   `json:"description"`
 	Priority                int      `json:"priority"`
@@ -86,6 +87,7 @@ type firewallData struct {
 	DPorts      []int  `validate:"omitempty"`
 	ICMPType    string `validate:"omitempty"`
 	Source      string `validate:"omitempty"`
+	Destination string `validate:"omitempty"`
 	Target      string `validate:"omitempty"`
 	Description string `validate:"omitempty"`
 	Priority    int    `validate:"omitempty"`
