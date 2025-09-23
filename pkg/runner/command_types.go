@@ -33,49 +33,49 @@ type File struct {
 }
 
 type CommandData struct {
-	SessionID               string   `json:"session_id"`
-	URL                     string   `json:"url"`
-	Rows                    uint16   `json:"rows"`
-	Cols                    uint16   `json:"cols"`
-	Username                string   `json:"username"`
-	Groupname               string   `json:"groupname"`
-	Groupnames              []string `json:"groupnames"`
-	HomeDirectory           string   `json:"home_directory"`
-	HomeDirectoryPermission string   `json:"home_directory_permission"`
-	PurgeHomeDirectory      bool     `json:"purge_home"`
-	UID                     uint64   `json:"uid"`
-	GID                     uint64   `json:"gid"`
-	Comment                 string   `json:"comment"`
-	Shell                   string   `json:"shell"`
-	Groups                  []uint64 `json:"groups"`
-	Type                    string   `json:"type"`
-	Content                 string   `json:"content"`
-	Path                    string   `json:"path"`
-	Paths                   []string `json:"paths"`
-	Files                   []File   `json:"files,omitempty"`
-	AllowOverwrite          bool     `json:"allow_overwrite,omitempty"`
-	AllowUnzip              bool     `json:"allow_unzip,omitempty"`
-	UseBlob                 bool     `json:"use_blob,omitempty"`
-	Keys                    []string `json:"keys"`
-	ChainName               string   `json:"chain_name"`
-	Method                  string   `json:"method"`
-	Chain                   string   `json:"chain"`
-	Protocol                string   `json:"protocol"`
-	PortStart               int      `json:"port_start"`
-	PortEnd                 int      `json:"port_end"`
-	DPorts                  []int    `json:"dports"`
-	ICMPType                string   `json:"icmp_type"`
-	Source                  string   `json:"source"`
-	Destination             string   `json:"destination"`
-	Target                  string   `json:"target"`
-	Description             string   `json:"description"`
-	Priority                int      `json:"priority"`
-	RuleType                string   `json:"rule_type"`
+	SessionID               string                   `json:"session_id"`
+	URL                     string                   `json:"url"`
+	Rows                    uint16                   `json:"rows"`
+	Cols                    uint16                   `json:"cols"`
+	Username                string                   `json:"username"`
+	Groupname               string                   `json:"groupname"`
+	Groupnames              []string                 `json:"groupnames"`
+	HomeDirectory           string                   `json:"home_directory"`
+	HomeDirectoryPermission string                   `json:"home_directory_permission"`
+	PurgeHomeDirectory      bool                     `json:"purge_home"`
+	UID                     uint64                   `json:"uid"`
+	GID                     uint64                   `json:"gid"`
+	Comment                 string                   `json:"comment"`
+	Shell                   string                   `json:"shell"`
+	Groups                  []uint64                 `json:"groups"`
+	Type                    string                   `json:"type"`
+	Content                 string                   `json:"content"`
+	Path                    string                   `json:"path"`
+	Paths                   []string                 `json:"paths"`
+	Files                   []File                   `json:"files,omitempty"`
+	AllowOverwrite          bool                     `json:"allow_overwrite,omitempty"`
+	AllowUnzip              bool                     `json:"allow_unzip,omitempty"`
+	UseBlob                 bool                     `json:"use_blob,omitempty"`
+	Keys                    []string                 `json:"keys"`
+	ChainName               string                   `json:"chain_name"`
+	Method                  string                   `json:"method"`
+	Chain                   string                   `json:"chain"`
+	Protocol                string                   `json:"protocol"`
+	PortStart               int                      `json:"port_start"`
+	PortEnd                 int                      `json:"port_end"`
+	DPorts                  []int                    `json:"dports"`
+	ICMPType                string                   `json:"icmp_type"`
+	Source                  string                   `json:"source"`
+	Destination             string                   `json:"destination"`
+	Target                  string                   `json:"target"`
+	Description             string                   `json:"description"`
+	Priority                int                      `json:"priority"`
+	RuleType                string                   `json:"rule_type"`
 	Rules                   []map[string]interface{} `json:"rules"`
-	Operation               string   `json:"operation"` // batch, flush, delete, add, update
-	RuleID                  string   `json:"rule_id"`     // for rule-specific operations
-	AssignmentID            string   `json:"assignment_id"`
-	ServerID                string   `json:"server_id"`
+	Operation               string                   `json:"operation"` // batch, flush, delete, add, update
+	RuleID                  string                   `json:"rule_id"`   // for rule-specific operations
+	AssignmentID            string                   `json:"assignment_id"`
+	ServerID                string                   `json:"server_id"`
 }
 
 type firewallData struct {
