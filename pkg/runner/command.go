@@ -931,6 +931,11 @@ func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
 
 // validateFirewallRuleData performs validation for single rule operations
 func (cr *CommandRunner) validateFirewallRuleData() error {
+	// Set default rule type if not provided
+	if cr.data.RuleType == "" {
+		cr.data.RuleType = "user"
+	}
+
 	data := firewallData{
 		ChainName:   cr.data.ChainName,
 		Method:      cr.data.Method,
@@ -941,13 +946,15 @@ func (cr *CommandRunner) validateFirewallRuleData() error {
 		DPorts:      cr.data.DPorts,
 		ICMPType:    cr.data.ICMPType,
 		Source:      cr.data.Source,
+		Destination: cr.data.Destination,
 		Target:      cr.data.Target,
 		Description: cr.data.Description,
 		Priority:    cr.data.Priority,
+		RuleType:    cr.data.RuleType,
 		RuleID:      cr.data.RuleID,
 		Operation:   cr.data.Operation,
 	}
-	
+
 	return cr.validateFirewallData(data)
 }
 
@@ -1054,9 +1061,16 @@ func (cr *CommandRunner) executeNftablesRule() (exitCode int, result string) {
 		args = append(args, "accept")
 	}
 
-	// Add comment with rule_id if provided
-	if cr.data.RuleID != "" {
-		ruleComment := fmt.Sprintf("rule_id:%s", cr.data.RuleID)
+	// Add comment with rule_id and rule_type
+	if cr.data.RuleID != "" || cr.data.RuleType != "" {
+		var commentParts []string
+		if cr.data.RuleID != "" {
+			commentParts = append(commentParts, fmt.Sprintf("rule_id:%s", cr.data.RuleID))
+		}
+		if cr.data.RuleType != "" {
+			commentParts = append(commentParts, fmt.Sprintf("type:%s", cr.data.RuleType))
+		}
+		ruleComment := strings.Join(commentParts, ",")
 		args = append(args, "comment", fmt.Sprintf("\"%s\"", ruleComment))
 	}
 	
@@ -1126,9 +1140,17 @@ func (cr *CommandRunner) executeIptablesRule() (exitCode int, result string) {
 	// Add target
 	args = append(args, "-j", cr.data.Target)
 	
-	// Add comment with rule_id if provided
-	if cr.data.RuleID != "" {
-		args = append(args, "-m", "comment", "--comment", fmt.Sprintf("rule_id:%s", cr.data.RuleID))
+	// Add comment with rule_id and rule_type
+	if cr.data.RuleID != "" || cr.data.RuleType != "" {
+		var commentParts []string
+		if cr.data.RuleID != "" {
+			commentParts = append(commentParts, fmt.Sprintf("rule_id:%s", cr.data.RuleID))
+		}
+		if cr.data.RuleType != "" {
+			commentParts = append(commentParts, fmt.Sprintf("type:%s", cr.data.RuleType))
+		}
+		ruleComment := strings.Join(commentParts, ",")
+		args = append(args, "-m", "comment", "--comment", ruleComment)
 	}
 	
 	exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
@@ -1179,12 +1201,13 @@ func (cr *CommandRunner) deleteNftablesRuleByID(chainName, ruleID string) (exitC
 func (cr *CommandRunner) findNftablesRuleHandle(listOutput, ruleID string) string {
 	lines := strings.Split(listOutput, "\n")
 	targetComment := fmt.Sprintf("rule_id:%s", ruleID)
-	
+
 	for _, line := range lines {
 		// Look for lines containing the target comment and handle
+		// Comment format can be: "rule_id:xxx" or "rule_id:xxx,type:yyy"
 		if strings.Contains(line, targetComment) && strings.Contains(line, "# handle") {
 			// Extract handle number from the line
-			// Example: "tcp dport { 80, 443 } counter accept # handle 5 comment \"rule_id:1d6de556-95ec-4d5e-b8e5-4f6fa874d335\""
+			// Example: "tcp dport { 80, 443 } counter accept # handle 5 comment \"rule_id:1d6de556-95ec-4d5e-b8e5-4f6fa874d335,type:user\""
 			if handleIndex := strings.Index(line, "# handle"); handleIndex != -1 {
 				handlePart := line[handleIndex+9:] // Skip "# handle "
 				if spaceIndex := strings.Index(handlePart, " "); spaceIndex != -1 {
@@ -1195,15 +1218,18 @@ func (cr *CommandRunner) findNftablesRuleHandle(listOutput, ruleID string) strin
 			}
 		}
 	}
-	
+
 	return ""
 }
 
 // deleteIptablesRuleByID deletes a specific iptables rule by matching rule specifications
 func (cr *CommandRunner) deleteIptablesRuleByID(chainName, ruleID string) (exitCode int, result string) {
 	log.Info().Msgf("Deleting iptables rule - ChainName: %s, RuleID: %s", chainName, ruleID)
-	
+
 	fullChainName := chainName + "_" + strings.ToLower(cr.data.Chain)
+
+	// Note: For iptables rule deletion with comment, we rely on rule specification matching
+	// since comment format may include additional type information
 	
 	// Build delete command with rule specifications
 	args := []string{"iptables", "-D", fullChainName}
@@ -1252,10 +1278,8 @@ func (cr *CommandRunner) deleteIptablesRuleByID(chainName, ruleID string) (exitC
 		args = append(args, "-j", cr.data.Target)
 	}
 	
-	// Add comment to match (if rule was created with comment)
-	if ruleID != "" {
-		args = append(args, "-m", "comment", "--comment", fmt.Sprintf("rule_id:%s", ruleID))
-	}
+	// Skip comment matching for deletion since the comment format may have changed
+	// to include type information. Rule specification matching should be sufficient.
 	
 	// Execute delete command
 	deleteExitCode, deleteOutput := runCmdWithOutput(args, "root", "", nil, 60)
@@ -1729,6 +1753,11 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 			if icmpType, ok := ruleData["icmp_type"].(string); ok {
 				cr.data.ICMPType = icmpType
 			}
+			if ruleType, ok := ruleData["rule_type"].(string); ok {
+				cr.data.RuleType = ruleType
+			} else {
+				cr.data.RuleType = "user" // Default to user type
+			}
 			
 			// Handle dports array
 			if dportsInterface, ok := ruleData["dports"].([]interface{}); ok {
@@ -1997,6 +2026,11 @@ func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interf
 	}
 	if priority, ok := ruleData["priority"].(float64); ok {
 		data.Priority = int(priority)
+	}
+	if ruleType, ok := ruleData["rule_type"].(string); ok {
+		data.RuleType = ruleType
+	} else {
+		data.RuleType = "user" // Default to user type
 	}
 	if icmpType, ok := ruleData["icmp_type"].(string); ok {
 		data.ICMPType = icmpType

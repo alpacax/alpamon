@@ -70,6 +70,7 @@ type CommandData struct {
 	Target                  string   `json:"target"`
 	Description             string   `json:"description"`
 	Priority                int      `json:"priority"`
+	RuleType                string   `json:"rule_type"`
 	Rules                   []map[string]interface{} `json:"rules"`
 	Operation               string   `json:"operation"` // batch, flush, delete, add, update
 	RuleID                  string   `json:"rule_id"`     // for rule-specific operations
@@ -91,6 +92,7 @@ type firewallData struct {
 	Target      string `validate:"omitempty"`
 	Description string `validate:"omitempty"`
 	Priority    int    `validate:"omitempty"`
+	RuleType    string `validate:"omitempty,oneof=user server"`
 	RuleID      string `validate:"omitempty"`
 	Operation   string `validate:"required"` // batch, flush, delete, add, update
 }
