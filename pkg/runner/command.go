@@ -753,8 +753,6 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 }
 
 func installFirewall() (nftablesInstalled bool, iptablesInstalled bool, err error) {
-	nftablesInstalled = false
-	iptablesInstalled = false
 
 	// Check if nftables is installed
 	_, nftablesResult := runCmdWithOutput([]string{"which", "nft"}, "root", "", nil, 0)
