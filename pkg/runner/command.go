@@ -1694,7 +1694,7 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 		
 	case "restore":
 		// Restore from snapshot - flush then apply new rules
-		if cr.data.Rules == nil || len(cr.data.Rules) == 0 {
+		if len(cr.data.Rules) == 0 {
 			return 1, "firewall-rollback: No rules provided for restore action"
 		}
 		
@@ -1784,9 +1784,17 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 		}
 		
 		return 0, fmt.Sprintf("firewall-rollback: Successfully restored %d rules", successCount)
-		
+
+	case "delete":
+		// Delete entire table/chain structure
+		if nftablesInstalled {
+			return cr.performNftablesRollback(cr.data.ChainName, "delete")
+		} else if iptablesInstalled {
+			return cr.performIptablesRollback(cr.data.ChainName, "delete")
+		}
+
 	default:
-		return 1, fmt.Sprintf("firewall-rollback: Unknown action '%s', use 'flush' or 'restore'", action)
+		return 1, fmt.Sprintf("firewall-rollback: Unknown action '%s', use 'flush', 'restore', or 'delete'", action)
 	}
 	
 	return 1, "firewall-rollback: No firewall management tool installed"
