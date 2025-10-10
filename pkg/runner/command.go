@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,6 +33,15 @@ import (
 
 const (
 	fileUploadTimeout = 60 * 10
+)
+
+var (
+	// Firewall installation cache and mutex
+	firewallInstallMutex     sync.Mutex
+	firewallInstallAttempted bool
+	firewallNftablesInstalled bool
+	firewallIptablesInstalled bool
+	firewallInstallError      error
 )
 
 func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command Command, data CommandData) *CommandRunner {
@@ -753,6 +763,14 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 }
 
 func installFirewall() (nftablesInstalled bool, iptablesInstalled bool, err error) {
+	// Use mutex to prevent concurrent installation attempts
+	firewallInstallMutex.Lock()
+	defer firewallInstallMutex.Unlock()
+
+	// Return cached result if we've already attempted installation
+	if firewallInstallAttempted {
+		return firewallNftablesInstalled, firewallIptablesInstalled, firewallInstallError
+	}
 
 	// Check if nftables is installed
 	_, nftablesResult := runCmdWithOutput([]string{"which", "nft"}, "root", "", nil, 0)
@@ -764,10 +782,15 @@ func installFirewall() (nftablesInstalled bool, iptablesInstalled bool, err erro
 	}
 
 	if nftablesInstalled || iptablesInstalled {
+		// Cache successful detection
+		firewallInstallAttempted = true
+		firewallNftablesInstalled = nftablesInstalled
+		firewallIptablesInstalled = iptablesInstalled
+		firewallInstallError = nil
 		return nftablesInstalled, iptablesInstalled, nil
 	}
 
-	// If neither is installed
+	// If neither is installed, attempt installation (only once)
 	if !nftablesInstalled && !iptablesInstalled {
 		log.Info().Msg("No firewall tools installed. Attempting to install nftables.")
 		var installCmd []string
@@ -805,16 +828,31 @@ func installFirewall() (nftablesInstalled bool, iptablesInstalled bool, err erro
 			_, iptablesResult := runCmdWithOutput([]string{"which", "iptables"}, "root", "", nil, 0)
 			iptablesInstalled = strings.Contains(iptablesResult, "iptables")
 			if exitCode != 0 || !iptablesInstalled {
-				return false, false, fmt.Errorf("failed to install firewall tools")
+				// Cache the failure
+				firewallInstallAttempted = true
+				firewallNftablesInstalled = false
+				firewallIptablesInstalled = false
+				firewallInstallError = fmt.Errorf("failed to install firewall tools")
+				return false, false, firewallInstallError
 			}
 		}
 
 	}
 
 	if !nftablesInstalled && !iptablesInstalled {
-		return false, false, fmt.Errorf("failed to install firewall management tool")
+		// Cache the failure
+		firewallInstallAttempted = true
+		firewallNftablesInstalled = false
+		firewallIptablesInstalled = false
+		firewallInstallError = fmt.Errorf("failed to install firewall management tool")
+		return false, false, firewallInstallError
 	}
 
+	// Cache the successful installation
+	firewallInstallAttempted = true
+	firewallNftablesInstalled = nftablesInstalled
+	firewallIptablesInstalled = iptablesInstalled
+	firewallInstallError = nil
 	return nftablesInstalled, iptablesInstalled, nil
 }
 

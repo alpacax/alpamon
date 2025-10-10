@@ -31,8 +31,9 @@ import (
 )
 
 const (
-	commitURL = "/api/servers/servers/-/commit/"
-	eventURL  = "/api/events/events/"
+	commitURL        = "/api/servers/servers/-/commit/"
+	eventURL         = "/api/events/events/"
+	firewallSyncURL  = "/api/firewall/agent/sync/"
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
@@ -76,8 +77,16 @@ func commitSystemInfo() {
 	scheduler.Rqueue.Put(commitURL, data, 80, time.Time{})
 	scheduler.Rqueue.Post(eventURL, []byte(fmt.Sprintf(`{
 		"reporter": "alpamon",
-		"record": "committed", 
+		"record": "committed",
 		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
+
+	// Sync firewall rules after committing system info
+	firewallData, err := collectFirewallRules()
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to collect firewall rules during commit.")
+	} else if len(firewallData.Chains) > 0 {
+		scheduler.Rqueue.Post(firewallSyncURL, firewallData, 80, time.Time{})
+	}
 
 	log.Info().Msg("Completed committing system information.")
 }
@@ -165,6 +174,19 @@ func syncSystemInfo(session *scheduler.Session, keys []string) {
 				log.Debug().Err(err).Msg("Failed to retrieve partitions.")
 			}
 			remoteData = &[]Partition{}
+		case "firewall":
+			firewallData, err := collectFirewallRules()
+			if err != nil {
+				log.Debug().Err(err).Msg("Failed to collect firewall rules.")
+				continue
+			}
+			if len(firewallData.Chains) == 0 {
+				log.Debug().Msg("No firewall rules to sync")
+				continue
+			}
+			currentData = firewallData
+			scheduler.Rqueue.Post(utils.JoinPath(entry.URL, entry.URLSuffix), currentData, 80, time.Time{})
+			continue
 		default:
 			log.Warn().Msgf("Unknown key: %s", key)
 			continue
