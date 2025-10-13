@@ -14,10 +14,18 @@ import (
 
 // Default values matching alpacon-server FirewallRuleSyncSerializer
 const (
-	DefaultSourceCIDR = "0.0.0.0/0" // matches serializer default
-	DefaultPriority   = 100          // matches serializer default
-	DefaultProtocol   = "all"
-	DefaultTarget     = "ACCEPT"
+	DefaultCIDR     = "0.0.0.0/0" // matches serializer default for source/destination
+	DefaultPriority = 100          // matches serializer default
+	DefaultProtocol = "all"
+	DefaultTarget   = "ACCEPT"
+
+	// Firewall sync API endpoint
+	FirewallSyncURL = "/api/firewall/agent/sync/"
+
+	// Rule types for progressive removal
+	RuleTypeUnknown = ""       // Rules without type (remove first)
+	RuleTypeServer  = "server" // Server-synced rules (remove second)
+	RuleTypeUser    = "user"   // User-created rules (remove last)
 )
 
 // FirewallChainSync represents a firewall chain for sync payload
@@ -202,7 +210,7 @@ func collectIptablesRules() (*FirewallSyncPayload, error) {
 // Reverse of command.go buildNftablesRule
 func parseNftablesRuleToSync(ruleMap map[string]interface{}) (*FirewallRuleSync, error) {
 	rule := &FirewallRuleSync{
-		SourceCIDR: DefaultSourceCIDR,
+		SourceCIDR: DefaultCIDR,
 		Priority:   DefaultPriority,
 		Protocol:   DefaultProtocol,
 		Target:     DefaultTarget,
@@ -366,7 +374,7 @@ func parseIptablesSaveRuleLine(line string) *FirewallRuleSync {
 
 	rule := &FirewallRuleSync{
 		Chain:      chainName,
-		SourceCIDR: DefaultSourceCIDR,
+		SourceCIDR: DefaultCIDR,
 		Priority:   DefaultPriority,
 		Protocol:   DefaultProtocol,
 		Target:     DefaultTarget,
@@ -486,8 +494,7 @@ func syncFirewallRules() error {
 		return err
 	}
 
-	const firewallSyncURL = "/api/firewall/agent/sync/"
-	scheduler.Rqueue.Post(firewallSyncURL, jsonData, 80, time.Time{})
+	scheduler.Rqueue.Post(FirewallSyncURL, jsonData, 80, time.Time{})
 
 	log.Info().Msgf("Queued firewall sync with %d chains", len(firewallData.Chains))
 
@@ -599,17 +606,17 @@ func buildIptablesArgsFromRule(chainName string, rule FirewallRuleSync, comment 
 	args := []string{"iptables", "-A", chainName}
 
 	// Protocol
-	if rule.Protocol != "" && rule.Protocol != "all" {
+	if rule.Protocol != "" && rule.Protocol != DefaultProtocol {
 		args = append(args, "-p", rule.Protocol)
 	}
 
 	// Source CIDR
-	if rule.SourceCIDR != "" && rule.SourceCIDR != "0.0.0.0/0" {
+	if rule.SourceCIDR != "" && rule.SourceCIDR != DefaultCIDR {
 		args = append(args, "-s", rule.SourceCIDR)
 	}
 
 	// Destination CIDR
-	if rule.DestinationCIDR != "" && rule.DestinationCIDR != "0.0.0.0/0" {
+	if rule.DestinationCIDR != "" && rule.DestinationCIDR != DefaultCIDR {
 		args = append(args, "-d", rule.DestinationCIDR)
 	}
 
@@ -644,4 +651,161 @@ func buildIptablesArgsFromRule(chainName string, rule FirewallRuleSync, comment 
 	}
 
 	return args
+}
+
+// RemoveFirewallRulesByType removes all firewall rules of a specific type
+// ruleType can be: RuleTypeUnknown (""), RuleTypeServer ("server"), or RuleTypeUser ("user")
+// Returns the number of rules removed and any error encountered
+func RemoveFirewallRulesByType(ruleType string) (int, error) {
+	// Collect current firewall rules
+	payload, err := collectFirewallRules()
+	if err != nil {
+		return 0, fmt.Errorf("failed to collect firewall rules: %w", err)
+	}
+
+	if len(payload.Chains) == 0 {
+		log.Debug().Msgf("No firewall chains found for rule type: %s", ruleType)
+		return 0, nil
+	}
+
+	// Check which firewall tool is available
+	nftablesInstalled, iptablesInstalled, err := checkFirewallAvailability()
+	if err != nil {
+		return 0, fmt.Errorf("failed to check firewall availability: %w", err)
+	}
+
+	removedCount := 0
+
+	for _, chain := range payload.Chains {
+		for _, rule := range chain.Rules {
+			// Skip rules that don't match the target type
+			if rule.RuleType != ruleType {
+				continue
+			}
+
+			// Remove the rule based on firewall backend
+			var removeErr error
+			if nftablesInstalled {
+				removeErr = removeNftablesRule(chain.Name, rule)
+			} else if iptablesInstalled {
+				removeErr = removeIptablesRule(chain.Name, rule)
+			}
+
+			if removeErr != nil {
+				log.Warn().Err(removeErr).Msgf("Failed to remove rule %s from chain %s", rule.RuleID, chain.Name)
+			} else {
+				removedCount++
+				log.Debug().Msgf("Removed rule %s (type: %s) from chain %s", rule.RuleID, ruleType, chain.Name)
+			}
+		}
+	}
+
+	log.Info().Msgf("Removed %d firewall rules of type: %s", removedCount, ruleType)
+
+	// Invalidate cache after removal
+	firewallRulesCache.mu.Lock()
+	firewallRulesCache.rules = nil
+	firewallRulesCache.lastUpdate = time.Time{}
+	firewallRulesCache.mu.Unlock()
+
+	return removedCount, nil
+}
+
+// removeNftablesRule removes a specific rule from nftables
+func removeNftablesRule(tableName string, rule FirewallRuleSync) error {
+	// Build nft delete command
+	// Format: nft delete rule <table> <chain> handle <handle>
+	// Since we don't have handle, we'll use rule matching
+
+	// Get rule handle by listing rules with handles
+	exitCode, output := runFirewallCommand([]string{"nft", "-a", "list", "table", tableName}, 10)
+	if exitCode != 0 {
+		return fmt.Errorf("failed to list nftables table %s", tableName)
+	}
+
+	// Parse output to find matching rule handle
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		// Look for rules with our rule_id in comment
+		if rule.RuleID != "" && strings.Contains(line, rule.RuleID) {
+			// Extract handle number from line (format: "... # handle 123")
+			if idx := strings.Index(line, "# handle "); idx != -1 {
+				handleStr := strings.TrimSpace(line[idx+9:])
+				handleParts := strings.Fields(handleStr)
+				if len(handleParts) > 0 {
+					handle := handleParts[0]
+
+					// Delete rule by handle
+					chainType := normalizeChainType(rule.Chain)
+					deleteArgs := []string{"nft", "delete", "rule", tableName, chainType, "handle", handle}
+					exitCode, _ := runFirewallCommand(deleteArgs, 10)
+					if exitCode == 0 {
+						return nil
+					}
+					return fmt.Errorf("failed to delete nftables rule handle %s", handle)
+				}
+			}
+		}
+	}
+
+	return fmt.Errorf("rule not found in nftables table %s", tableName)
+}
+
+// removeIptablesRule removes a specific rule from iptables
+func removeIptablesRule(chainName string, rule FirewallRuleSync) error {
+	// Build iptables delete command by rule specification
+	args := []string{"iptables", "-D", chainName}
+
+	// Protocol
+	if rule.Protocol != "" && rule.Protocol != DefaultProtocol {
+		args = append(args, "-p", rule.Protocol)
+	}
+
+	// Source CIDR
+	if rule.SourceCIDR != "" && rule.SourceCIDR != DefaultCIDR {
+		args = append(args, "-s", rule.SourceCIDR)
+	}
+
+	// Destination CIDR
+	if rule.DestinationCIDR != "" && rule.DestinationCIDR != DefaultCIDR {
+		args = append(args, "-d", rule.DestinationCIDR)
+	}
+
+	// Handle ports
+	if rule.Protocol == "tcp" || rule.Protocol == "udp" {
+		if rule.Dports != "" {
+			args = append(args, "-m", "multiport", "--dports", rule.Dports)
+		} else if rule.PortStart != nil {
+			if rule.PortEnd != nil && *rule.PortEnd != *rule.PortStart {
+				args = append(args, "--dport", fmt.Sprintf("%d:%d", *rule.PortStart, *rule.PortEnd))
+			} else {
+				args = append(args, "--dport", fmt.Sprintf("%d", *rule.PortStart))
+			}
+		}
+	}
+
+	// ICMP type
+	if rule.Protocol == "icmp" && rule.ICMPType != nil {
+		args = append(args, "--icmp-type", fmt.Sprintf("%d", *rule.ICMPType))
+	}
+
+	// Target
+	if rule.Target != "" {
+		args = append(args, "-j", rule.Target)
+	}
+
+	// Comment (for matching)
+	if rule.RuleID != "" {
+		args = append(args, "-m", "comment", "--comment")
+		// Construct comment string
+		comment := buildFirewallComment("", rule.RuleID, rule.RuleType)
+		args = append(args, comment)
+	}
+
+	exitCode, output := runFirewallCommand(args, 10)
+	if exitCode != 0 {
+		return fmt.Errorf("failed to delete iptables rule from chain %s: %s", chainName, output)
+	}
+
+	return nil
 }
