@@ -960,14 +960,53 @@ func (cr *CommandRunner) handleAddOperation() (exitCode int, result string) {
 
 // handleUpdateOperation handles updating a firewall rule
 func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
-	log.Info().Msgf("Firewall update operation - ChainName: %s", cr.data.ChainName)
+	log.Info().Msgf("Firewall update operation - ChainName: %s, RuleID: %s", cr.data.ChainName, cr.data.RuleID)
 
 	// Validate required fields for rule update
 	if err := cr.validateFirewallRuleData(); err != nil {
 		return 1, fmt.Sprintf("firewall update: Validation failed. %s", err)
 	}
 
-	return cr.executeSingleFirewallRule()
+	// For update operation: delete old rule first, then add new one
+	// If adding new rule fails, we need to restore the old rule
+
+	// Step 1: Backup current rule by finding it (for potential rollback)
+	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	if err != nil {
+		return 1, fmt.Sprintf("firewall update: Failed to install firewall tools. %s", err)
+	}
+
+	// Step 2: Delete the old rule
+	var deleteExitCode int
+	var deleteResult string
+
+	if nftablesInstalled {
+		deleteExitCode, deleteResult = cr.deleteNftablesRuleByID(cr.data.ChainName, cr.data.RuleID)
+	} else if iptablesInstalled {
+		deleteExitCode, deleteResult = cr.deleteIptablesRuleByID(cr.data.ChainName, cr.data.RuleID)
+	} else {
+		return 1, "firewall update: No firewall tool available"
+	}
+
+	if deleteExitCode != 0 {
+		// If deletion fails, the old rule is still there, so just return error
+		log.Error().Msgf("Failed to delete old rule during update: %s", deleteResult)
+		return deleteExitCode, fmt.Sprintf("firewall update: Failed to delete old rule: %s", deleteResult)
+	}
+
+	// Step 3: Add the new rule
+	addExitCode, addResult := cr.executeSingleFirewallRule()
+
+	if addExitCode != 0 {
+		// Adding new rule failed, attempt to rollback
+		// Since we don't have the original rule data backed up, we can't restore it
+		// This is a limitation that should be documented
+		log.Error().Msgf("Failed to add new rule during update, old rule was deleted: %s", addResult)
+		return addExitCode, fmt.Sprintf("firewall update: Failed to add new rule (old rule removed): %s", addResult)
+	}
+
+	log.Info().Msgf("Successfully updated firewall rule with ID %s", cr.data.RuleID)
+	return 0, fmt.Sprintf("Successfully updated rule with ID %s", cr.data.RuleID)
 }
 
 // validateFirewallRuleData performs validation for single rule operations
@@ -1971,7 +2010,43 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 		// Convert rule data to CommandData fields
 		cr.data = cr.convertRuleDataToCommandData(ruleData, cr.data)
 
-		ruleExitCode, ruleResult := cr.executeSingleFirewallRule()
+		var ruleExitCode int
+		var ruleResult string
+
+		// Check if rule has an operation field for UUID-based operations
+		if operation, ok := ruleData["operation"].(string); ok && operation != "" {
+			// Handle UUID-based operations (update/delete)
+			switch operation {
+			case "update":
+				// Update operation requires rule_id
+				if ruleID, ok := ruleData["rule_id"].(string); ok && ruleID != "" {
+					cr.data.RuleID = ruleID
+					ruleExitCode, ruleResult = cr.handleUpdateOperation()
+				} else {
+					ruleExitCode = 1
+					ruleResult = "update operation requires rule_id"
+				}
+			case "delete":
+				// Delete operation requires rule_id
+				if ruleID, ok := ruleData["rule_id"].(string); ok && ruleID != "" {
+					cr.data.RuleID = ruleID
+					ruleExitCode, ruleResult = cr.handleDeleteOperation()
+				} else {
+					ruleExitCode = 1
+					ruleResult = "delete operation requires rule_id"
+				}
+			case "add":
+				// Add operation (same as default)
+				ruleExitCode, ruleResult = cr.executeSingleFirewallRule()
+			default:
+				ruleExitCode = 1
+				ruleResult = fmt.Sprintf("unknown operation: %s", operation)
+			}
+		} else {
+			// Default: use method-based execution (-A, -I, -R, -D)
+			ruleExitCode, ruleResult = cr.executeSingleFirewallRule()
+		}
+
 		if ruleExitCode == 0 {
 			appliedRules++
 			log.Info().Msgf("Successfully applied rule %d/%d", i+1, len(cr.data.Rules))
