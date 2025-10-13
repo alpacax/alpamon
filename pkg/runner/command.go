@@ -37,8 +37,8 @@ const (
 
 var (
 	// Firewall installation cache and mutex
-	firewallInstallMutex     sync.Mutex
-	firewallInstallAttempted bool
+	firewallInstallMutex      sync.Mutex
+	firewallInstallAttempted  bool
 	firewallNftablesInstalled bool
 	firewallIptablesInstalled bool
 	firewallInstallError      error
@@ -1283,7 +1283,6 @@ func (cr *CommandRunner) deleteNftablesRuleByID(chainName, ruleID string) (exitC
 	return 0, fmt.Sprintf("Successfully deleted rule with ID %s", ruleID)
 }
 
-
 // findNftablesRuleHandleAndChain parses nft list output to find rule handle and chain by rule_id in comment
 func (cr *CommandRunner) findNftablesRuleHandleAndChain(listOutput, ruleID string) (string, string) {
 	lines := strings.Split(listOutput, "\n")
@@ -2149,4 +2148,3 @@ func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interf
 
 	return data
 }
-

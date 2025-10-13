@@ -15,7 +15,7 @@ import (
 // Default values matching alpacon-server FirewallRuleSyncSerializer
 const (
 	DefaultCIDR     = "0.0.0.0/0" // matches serializer default for source/destination
-	DefaultPriority = 100          // matches serializer default
+	DefaultPriority = 100         // matches serializer default
 	DefaultProtocol = "all"
 	DefaultTarget   = "ACCEPT"
 
@@ -71,11 +71,11 @@ const cacheValidityDuration = 5 * time.Minute
 func collectFirewallRules() (*FirewallSyncPayload, error) {
 	// Check cache first
 	firewallRulesCache.mu.RLock()
-	if time.Since(firewallRulesCache.lastUpdate) < cacheValidityDuration && 
-	   len(firewallRulesCache.rules) > 0 {
+	if time.Since(firewallRulesCache.lastUpdate) < cacheValidityDuration &&
+		len(firewallRulesCache.rules) > 0 {
 		cachedRules := firewallRulesCache.rules
 		firewallRulesCache.mu.RUnlock()
-		
+
 		log.Debug().Msg("Using cached firewall rules")
 		return buildSyncPayload(cachedRules), nil
 	}

@@ -31,9 +31,9 @@ import (
 )
 
 const (
-	commitURL        = "/api/servers/servers/-/commit/"
-	eventURL         = "/api/events/events/"
-	firewallSyncURL  = "/api/firewall/agent/sync/"
+	commitURL       = "/api/servers/servers/-/commit/"
+	eventURL        = "/api/events/events/"
+	firewallSyncURL = "/api/firewall/agent/sync/"
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
