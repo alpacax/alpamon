@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/rs/zerolog/log"
 )
 
@@ -139,7 +138,6 @@ func collectNftablesRules() (*FirewallSyncPayload, error) {
 
 	chains := make(map[string][]FirewallRuleSync)
 	tableNames := make(map[string]bool)
-	currentTable := ""
 
 	// First pass: collect all table names
 	for _, item := range nftData.Nftables {
@@ -147,14 +145,13 @@ func collectNftablesRules() (*FirewallSyncPayload, error) {
 			if tableMap, ok := table.(map[string]interface{}); ok {
 				if name, ok := tableMap["name"].(string); ok {
 					tableNames[name] = true
-					currentTable = name
 				}
 			}
 		}
 	}
 
 	// Second pass: collect rules grouped by table (table = security group in nftables)
-	currentTable = ""
+	currentTable := ""
 	for _, item := range nftData.Nftables {
 		// Track current table
 		if table, ok := item["table"]; ok {
@@ -191,8 +188,6 @@ func collectNftablesRules() (*FirewallSyncPayload, error) {
 // collectIptablesRules extracts rules from iptables
 // Reverse of command.go iptables rule application
 func collectIptablesRules() (*FirewallSyncPayload, error) {
-	chains := make(map[string][]FirewallRuleSync)
-
 	// Get all rules using iptables-save (more efficient than multiple iptables -L calls)
 	exitCode, output := runFirewallCommand([]string{"iptables-save"}, 30)
 	if exitCode != 0 {
@@ -201,7 +196,7 @@ func collectIptablesRules() (*FirewallSyncPayload, error) {
 	}
 
 	// Parse iptables-save output directly
-	chains = parseIptablesSaveOutput(output)
+	chains := parseIptablesSaveOutput(output)
 
 	return buildSyncPayload(chains), nil
 }
@@ -473,185 +468,6 @@ func buildSyncPayload(chains map[string][]FirewallRuleSync) *FirewallSyncPayload
 	}
 }
 
-// syncFirewallRules sends firewall rules to alpacon-server
-// This is called after server commit to sync existing firewall configuration
-func syncFirewallRules() error {
-	firewallData, err := collectFirewallRules()
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to collect firewall rules")
-		return err
-	}
-
-	if len(firewallData.Chains) == 0 {
-		log.Debug().Msg("No firewall rules to sync")
-		return nil
-	}
-
-	// Send to alpacon-server
-	jsonData, err := json.Marshal(firewallData)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to marshal firewall data")
-		return err
-	}
-
-	scheduler.Rqueue.Post(FirewallSyncURL, jsonData, 80, time.Time{})
-
-	log.Info().Msgf("Queued firewall sync with %d chains", len(firewallData.Chains))
-
-	// Update firewall rules with generated UUIDs in comments
-	// This ensures subsequent syncs will find the same UUIDs
-	if err := updateFirewallRuleComments(firewallData); err != nil {
-		log.Warn().Err(err).Msg("Failed to update firewall rule comments, will retry on next sync")
-	}
-
-	return nil
-}
-
-// updateFirewallRuleComments updates existing firewall rules with UUID comments
-// This allows subsequent syncs to reuse the same UUIDs
-func updateFirewallRuleComments(payload *FirewallSyncPayload) error {
-	nftablesInstalled, iptablesInstalled, err := checkFirewallAvailability()
-	if err != nil {
-		return fmt.Errorf("failed to check firewall availability: %w", err)
-	}
-
-	if nftablesInstalled {
-		return updateNftablesRuleComments(payload)
-	} else if iptablesInstalled {
-		return updateIptablesRuleComments(payload)
-	}
-
-	return nil
-}
-
-// updateNftablesRuleComments updates nftables rules with UUID comments
-func updateNftablesRuleComments(payload *FirewallSyncPayload) error {
-	// nftables doesn't support in-place comment updates easily
-	// For now, we'll log and skip - comments will be added when rules are recreated
-	log.Debug().Msg("nftables comment updates not yet implemented, UUIDs will be added on rule recreation")
-	return nil
-}
-
-// updateIptablesRuleComments updates iptables rules with UUID comments
-func updateIptablesRuleComments(payload *FirewallSyncPayload) error {
-	for _, chain := range payload.Chains {
-		chainName := chain.Name
-
-		// Get current rules to find ones without UUIDs
-		exitCode, output := runFirewallCommand([]string{"iptables-save", "-t", "filter"}, 10)
-		if exitCode != 0 {
-			continue
-		}
-
-		lines := strings.Split(output, "\n")
-		ruleIndex := 0
-
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-
-			// Only process rules for this chain
-			if !strings.HasPrefix(line, "-A "+chainName) {
-				continue
-			}
-
-			// Check if rule already has rule_id in comment
-			if strings.Contains(line, "rule_id:") {
-				ruleIndex++
-				continue
-			}
-
-			// Find matching rule in payload
-			if ruleIndex >= len(chain.Rules) {
-				break
-			}
-
-			rule := chain.Rules[ruleIndex]
-			ruleIndex++
-
-			// Skip if no UUID was generated
-			if rule.RuleID == "" || rule.RuleType == "" {
-				continue
-			}
-
-			// Build comment to add
-			newComment := buildFirewallComment("", rule.RuleID, rule.RuleType)
-
-			// Recreate the rule with comment using iptables-restore
-			// This is safer than trying to modify in-place
-			deleteArgs := []string{"iptables", "-D", chainName, fmt.Sprintf("%d", ruleIndex)}
-			insertArgs := buildIptablesArgsFromRule(chainName, rule, newComment)
-
-			// Delete old rule
-			exitCode, _ := runFirewallCommand(deleteArgs, 10)
-			if exitCode != 0 {
-				log.Debug().Msgf("Failed to delete iptables rule %d in chain %s for comment update", ruleIndex, chainName)
-				continue
-			}
-
-			// Insert rule with comment at same position
-			exitCode, _ = runFirewallCommand(insertArgs, 10)
-			if exitCode != 0 {
-				log.Warn().Msgf("Failed to insert iptables rule %d with comment in chain %s", ruleIndex, chainName)
-			} else {
-				log.Debug().Msgf("Updated comment for iptables rule %d in chain %s with UUID %s", ruleIndex, chainName, rule.RuleID)
-			}
-		}
-	}
-
-	return nil
-}
-
-// buildIptablesArgsFromRule builds iptables command args from FirewallRuleSync
-func buildIptablesArgsFromRule(chainName string, rule FirewallRuleSync, comment string) []string {
-	args := []string{"iptables", "-A", chainName}
-
-	// Protocol
-	if rule.Protocol != "" && rule.Protocol != DefaultProtocol {
-		args = append(args, "-p", rule.Protocol)
-	}
-
-	// Source CIDR
-	if rule.SourceCIDR != "" && rule.SourceCIDR != DefaultCIDR {
-		args = append(args, "-s", rule.SourceCIDR)
-	}
-
-	// Destination CIDR
-	if rule.DestinationCIDR != "" && rule.DestinationCIDR != DefaultCIDR {
-		args = append(args, "-d", rule.DestinationCIDR)
-	}
-
-	// Handle ports
-	if rule.Protocol == "tcp" || rule.Protocol == "udp" {
-		if rule.Dports != "" {
-			// Multiport
-			args = append(args, "-m", "multiport", "--dports", rule.Dports)
-		} else if rule.PortStart != nil {
-			// Single port or port range
-			if rule.PortEnd != nil && *rule.PortEnd != *rule.PortStart {
-				args = append(args, "--dport", fmt.Sprintf("%d:%d", *rule.PortStart, *rule.PortEnd))
-			} else {
-				args = append(args, "--dport", fmt.Sprintf("%d", *rule.PortStart))
-			}
-		}
-	}
-
-	// ICMP type
-	if rule.Protocol == "icmp" && rule.ICMPType != nil {
-		args = append(args, "--icmp-type", fmt.Sprintf("%d", *rule.ICMPType))
-	}
-
-	// Target
-	if rule.Target != "" {
-		args = append(args, "-j", rule.Target)
-	}
-
-	// Comment
-	if comment != "" {
-		args = append(args, "-m", "comment", "--comment", comment)
-	}
-
-	return args
-}
 
 // RemoveFirewallRulesByType removes all firewall rules of a specific type
 // ruleType can be: RuleTypeUnknown (""), RuleTypeServer ("server"), or RuleTypeUser ("user")
