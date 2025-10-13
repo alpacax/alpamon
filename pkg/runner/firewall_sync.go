@@ -3,9 +3,9 @@ package runner
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/scheduler"
@@ -48,23 +48,69 @@ type FirewallSyncPayload struct {
 	Chains []FirewallChainSync `json:"chains"`
 }
 
+// Cached firewall rules information
+var firewallRulesCache struct {
+	rules      map[string][]FirewallRuleSync
+	lastUpdate time.Time
+	mu         sync.RWMutex
+}
+
+// Cache validity duration (5 minutes)
+const cacheValidityDuration = 5 * time.Minute
+
 // collectFirewallRules collects current firewall rules from the system
 // This is the reverse operation of command.go firewall application logic
 func collectFirewallRules() (*FirewallSyncPayload, error) {
+	// Check cache first
+	firewallRulesCache.mu.RLock()
+	if time.Since(firewallRulesCache.lastUpdate) < cacheValidityDuration && 
+	   len(firewallRulesCache.rules) > 0 {
+		cachedRules := firewallRulesCache.rules
+		firewallRulesCache.mu.RUnlock()
+		
+		log.Debug().Msg("Using cached firewall rules")
+		return buildSyncPayload(cachedRules), nil
+	}
+	firewallRulesCache.mu.RUnlock()
+
 	// Check which firewall tool is available (reuses command.go function)
 	nftablesInstalled, iptablesInstalled, err := checkFirewallAvailability()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check firewall installation: %w", err)
 	}
 
+	var chains map[string][]FirewallRuleSync
+
 	if nftablesInstalled {
-		return collectNftablesRules()
+		payload, err := collectNftablesRules()
+		if err != nil {
+			return nil, err
+		}
+		chains = make(map[string][]FirewallRuleSync)
+		for _, chain := range payload.Chains {
+			chains[chain.Name] = chain.Rules
+		}
 	} else if iptablesInstalled {
-		return collectIptablesRules()
+		payload, err := collectIptablesRules()
+		if err != nil {
+			return nil, err
+		}
+		chains = make(map[string][]FirewallRuleSync)
+		for _, chain := range payload.Chains {
+			chains[chain.Name] = chain.Rules
+		}
+	} else {
+		log.Debug().Msg("No firewall tools available, skipping firewall sync")
+		return &FirewallSyncPayload{Chains: []FirewallChainSync{}}, nil
 	}
 
-	log.Debug().Msg("No firewall tools available, skipping firewall sync")
-	return &FirewallSyncPayload{Chains: []FirewallChainSync{}}, nil
+	// Update cache
+	firewallRulesCache.mu.Lock()
+	firewallRulesCache.rules = chains
+	firewallRulesCache.lastUpdate = time.Now()
+	firewallRulesCache.mu.Unlock()
+
+	return buildSyncPayload(chains), nil
 }
 
 // collectNftablesRules extracts rules from nftables
@@ -249,25 +295,7 @@ func parseNftablesRuleToSync(ruleMap map[string]interface{}) (*FirewallRuleSync,
 	}
 
 	// Parse comment to extract rule_id and type, or generate new ones
-	if fullComment != "" {
-		ruleID, ruleType, _ := parseFirewallComment(fullComment)
-		if ruleID != "" {
-			rule.RuleID = ruleID
-		} else {
-			// No rule_id in comment, generate new one
-			rule.RuleID = generateServerRuleID()
-		}
-		if ruleType != "" {
-			rule.RuleType = ruleType
-		} else {
-			// No type in comment, mark as server-type
-			rule.RuleType = "server"
-		}
-	} else {
-		// No comment at all, generate rule_id and mark as server-type
-		rule.RuleID = generateServerRuleID()
-		rule.RuleType = "server"
-	}
+	rule.RuleID, rule.RuleType = parseCommentOrGenerate(fullComment)
 
 	return rule, nil
 }
@@ -414,193 +442,9 @@ func parseIptablesSaveRuleLine(line string) *FirewallRuleSync {
 	}
 
 	// Parse comment to extract rule_id and type, or generate new ones
-	if fullComment != "" {
-		ruleID, ruleType, _ := parseFirewallComment(fullComment)
-		if ruleID != "" {
-			rule.RuleID = ruleID
-		} else {
-			rule.RuleID = generateServerRuleID()
-		}
-		if ruleType != "" {
-			rule.RuleType = ruleType
-		} else {
-			rule.RuleType = "server"
-		}
-	} else {
-		rule.RuleID = generateServerRuleID()
-		rule.RuleType = "server"
-	}
+	rule.RuleID, rule.RuleType = parseCommentOrGenerate(fullComment)
 
 	return rule
-}
-
-// parseIptablesChainOutput parses iptables -L output for a specific chain (deprecated, use parseIptablesSaveOutput)
-// Reverse of command.go iptables rule construction
-func parseIptablesChainOutput(output, fullChainName string) []FirewallRuleSync {
-	var rules []FirewallRuleSync
-	lines := strings.Split(output, "\n")
-
-	// Skip header lines (first 2 lines)
-	for i, line := range lines {
-		if i < 2 {
-			continue
-		}
-
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		if rule := parseIptablesRuleLine(line, fullChainName); rule != nil {
-			rules = append(rules, *rule)
-		}
-	}
-
-	return rules
-}
-
-// parseIptablesRuleLine parses a single iptables rule line
-// Format: num pkts bytes target prot opt in out source destination [extra options]
-func parseIptablesRuleLine(line, fullChainName string) *FirewallRuleSync {
-	fields := strings.Fields(line)
-	if len(fields) < 6 {
-		return nil
-	}
-
-	// Extract chain type from full chain name
-	parts := strings.Split(fullChainName, "_")
-	chainType := "INPUT"
-	if len(parts) > 1 {
-		chainType = normalizeChainType(parts[len(parts)-1])
-	}
-
-	rule := &FirewallRuleSync{
-		Chain:      chainType,
-		SourceCIDR: DefaultSourceCIDR,
-		Priority:   DefaultPriority,
-		Protocol:   DefaultProtocol,
-		Target:     DefaultTarget,
-	}
-
-	// Parse fields: num pkts bytes target prot opt in out source destination
-	if len(fields) > 3 {
-		rule.Target = strings.ToUpper(fields[3])
-	}
-	if len(fields) > 4 {
-		prot := fields[4]
-		if prot != "" && prot != "all" {
-			rule.Protocol = prot
-		}
-	}
-	if len(fields) > 8 {
-		source := fields[8]
-		if source != "" && source != "anywhere" && source != "0.0.0.0/0" {
-			rule.SourceCIDR = source
-		}
-	}
-	if len(fields) > 9 {
-		dest := fields[9]
-		if dest != "" && dest != "anywhere" && dest != "0.0.0.0/0" {
-			rule.DestinationCIDR = dest
-		}
-	}
-
-	// Parse additional options (ports, comment, etc.)
-	var fullComment string
-	for i := 10; i < len(fields); i++ {
-		field := fields[i]
-
-		// Single destination port
-		if strings.HasPrefix(field, "dpt:") {
-			portStr := strings.TrimPrefix(field, "dpt:")
-			if port, err := strconv.Atoi(portStr); err == nil {
-				rule.PortStart = &port
-			}
-		} else if strings.HasPrefix(field, "dpts:") {
-			// Port range: dpts:80:443
-			portRange := strings.TrimPrefix(field, "dpts:")
-			ports := strings.Split(portRange, ":")
-			if len(ports) == 2 {
-				if start, err := strconv.Atoi(ports[0]); err == nil {
-					rule.PortStart = &start
-				}
-				if end, err := strconv.Atoi(ports[1]); err == nil {
-					rule.PortEnd = &end
-				}
-			}
-		} else if field == "multiport" {
-			// multiport dports 80,443,8080
-			if i+2 < len(fields) && fields[i+1] == "dports" {
-				rule.Dports = fields[i+2]
-				i += 2
-			}
-		} else if strings.HasPrefix(field, "icmp") && strings.Contains(field, "type") {
-			// ICMP type
-			if i+1 < len(fields) {
-				if icmpType, err := strconv.Atoi(fields[i+1]); err == nil {
-					rule.ICMPType = &icmpType
-				}
-			}
-		} else if field == "/*" {
-			// Comment format: /* comment text */
-			commentStart := i
-			for j := i; j < len(fields); j++ {
-				if strings.HasSuffix(fields[j], "*/") {
-					// Found end of comment
-					commentParts := fields[commentStart : j+1]
-					fullComment = strings.Join(commentParts, " ")
-					fullComment = strings.TrimPrefix(fullComment, "/*")
-					fullComment = strings.TrimSuffix(fullComment, "*/")
-					fullComment = strings.TrimSpace(fullComment)
-					i = j
-					break
-				}
-			}
-		}
-	}
-
-	// Parse comment to extract rule_id and type, or generate new ones
-	if fullComment != "" {
-		ruleID, ruleType, _ := parseFirewallComment(fullComment)
-		if ruleID != "" {
-			rule.RuleID = ruleID
-		} else {
-			// No rule_id in comment, generate new one
-			rule.RuleID = generateServerRuleID()
-		}
-		if ruleType != "" {
-			rule.RuleType = ruleType
-		} else {
-			// No type in comment, mark as server-type
-			rule.RuleType = "server"
-		}
-	} else {
-		// No comment at all, generate rule_id and mark as server-type
-		rule.RuleID = generateServerRuleID()
-		rule.RuleType = "server"
-	}
-
-	return rule
-}
-
-// extractCustomChainsFromSave extracts custom chain names from iptables-save output
-func extractCustomChainsFromSave(output string) []string {
-	var customChains []string
-	chainPattern := regexp.MustCompile(`^:([A-Za-z0-9_-]+)`)
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		matches := chainPattern.FindStringSubmatch(line)
-		if len(matches) > 1 {
-			chainName := matches[1]
-			// Skip built-in chains (reuses firewall_utils.go function)
-			if !isBuiltinChain(chainName) {
-				customChains = append(customChains, chainName)
-			}
-		}
-	}
-
-	return customChains
 }
 
 // buildSyncPayload creates sync payload from parsed rules
