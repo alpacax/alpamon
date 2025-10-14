@@ -18,12 +18,10 @@ func runFirewallCommand(args []string, timeout int) (exitCode int, output string
 	return runCmdWithOutput(args, "root", "", nil, timeout)
 }
 
-
 // normalizeChainType converts chain type to uppercase
 func normalizeChainType(chain string) string {
 	return strings.ToUpper(chain)
 }
-
 
 // parseFirewallComment parses firewall rule comment to extract rule_id and type
 // Format: "rule_id:{uuid},type:{user|server}" or "existing comment,rule_id:{uuid},type:{user|server}"
@@ -74,7 +72,6 @@ func buildFirewallComment(existingComment, ruleID, ruleType string) string {
 
 	return strings.Join(parts, ",")
 }
-
 
 // generateServerRuleID generates a new UUID for server-type firewall rules
 func generateServerRuleID() string {

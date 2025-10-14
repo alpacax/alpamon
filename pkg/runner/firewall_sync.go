@@ -468,7 +468,6 @@ func buildSyncPayload(chains map[string][]FirewallRuleSync) *FirewallSyncPayload
 	}
 }
 
-
 // RemoveFirewallRulesByType removes all firewall rules of a specific type
 // ruleType can be: RuleTypeUnknown (""), RuleTypeServer ("server"), or RuleTypeUser ("user")
 // Returns the number of rules removed and any error encountered

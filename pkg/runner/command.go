@@ -253,6 +253,8 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		return cr.firewall()
 	case "firewall-rollback":
 		return cr.firewallRollback()
+	case "firewall-reorder-chains":
+		return cr.firewallReorderChains()
 	case "help":
 		helpMessage := `
 		Available commands:
@@ -960,30 +962,36 @@ func (cr *CommandRunner) handleAddOperation() (exitCode int, result string) {
 
 // handleUpdateOperation handles updating a firewall rule
 func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
-	log.Info().Msgf("Firewall update operation - ChainName: %s, RuleID: %s", cr.data.ChainName, cr.data.RuleID)
+	log.Info().Msgf("Firewall update operation - ChainName: %s, OldRuleID: %s, NewRuleID: %s",
+		cr.data.ChainName, cr.data.OldRuleID, cr.data.RuleID)
 
 	// Validate required fields for rule update
 	if err := cr.validateFirewallRuleData(); err != nil {
 		return 1, fmt.Sprintf("firewall update: Validation failed. %s", err)
 	}
 
-	// For update operation: delete old rule first, then add new one
-	// If adding new rule fails, we need to restore the old rule
+	// For update operation: delete old rule first, then add new one with new ID
+	// old_rule_id: the rule to delete
+	// rule_id: the new rule to add
 
-	// Step 1: Backup current rule by finding it (for potential rollback)
+	if cr.data.OldRuleID == "" {
+		return 1, "firewall update: old_rule_id is required for update operation"
+	}
+
+	// Step 1: Install firewall tools
 	nftablesInstalled, iptablesInstalled, err := installFirewall()
 	if err != nil {
 		return 1, fmt.Sprintf("firewall update: Failed to install firewall tools. %s", err)
 	}
 
-	// Step 2: Delete the old rule
+	// Step 2: Delete the old rule using old_rule_id
 	var deleteExitCode int
 	var deleteResult string
 
 	if nftablesInstalled {
-		deleteExitCode, deleteResult = cr.deleteNftablesRuleByID(cr.data.ChainName, cr.data.RuleID)
+		deleteExitCode, deleteResult = cr.deleteNftablesRuleByID(cr.data.ChainName, cr.data.OldRuleID)
 	} else if iptablesInstalled {
-		deleteExitCode, deleteResult = cr.deleteIptablesRuleByID(cr.data.ChainName, cr.data.RuleID)
+		deleteExitCode, deleteResult = cr.deleteIptablesRuleByID(cr.data.ChainName, cr.data.OldRuleID)
 	} else {
 		return 1, "firewall update: No firewall tool available"
 	}
@@ -994,19 +1002,17 @@ func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
 		return deleteExitCode, fmt.Sprintf("firewall update: Failed to delete old rule: %s", deleteResult)
 	}
 
-	// Step 3: Add the new rule
+	// Step 3: Add the new rule with new rule_id (stored in cr.data.RuleID)
 	addExitCode, addResult := cr.executeSingleFirewallRule()
 
 	if addExitCode != 0 {
-		// Adding new rule failed, attempt to rollback
-		// Since we don't have the original rule data backed up, we can't restore it
-		// This is a limitation that should be documented
+		// Adding new rule failed, old rule was already deleted
 		log.Error().Msgf("Failed to add new rule during update, old rule was deleted: %s", addResult)
 		return addExitCode, fmt.Sprintf("firewall update: Failed to add new rule (old rule removed): %s", addResult)
 	}
 
-	log.Info().Msgf("Successfully updated firewall rule with ID %s", cr.data.RuleID)
-	return 0, fmt.Sprintf("Successfully updated rule with ID %s", cr.data.RuleID)
+	log.Info().Msgf("Successfully updated firewall rule: deleted %s, added %s", cr.data.OldRuleID, cr.data.RuleID)
+	return 0, fmt.Sprintf("Successfully updated rule: deleted %s, added %s", cr.data.OldRuleID, cr.data.RuleID)
 }
 
 // validateFirewallRuleData performs validation for single rule operations
@@ -1969,6 +1975,27 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 		return 0, nil, false, ""
 	}
 
+	// Backup current rules before applying changes
+	var backup string
+
+	if nftablesInstalled {
+		exitCode, output := runFirewallCommand([]string{"nft", "list", "ruleset"}, 30)
+		if exitCode != 0 {
+			log.Error().Msgf("Failed to create nftables backup: %s", output)
+			return 0, nil, false, "Failed to create backup before applying rules"
+		}
+		backup = output
+		log.Info().Msg("Created nftables backup before batch apply")
+	} else if iptablesInstalled {
+		exitCode, output := runFirewallCommand([]string{"iptables-save"}, 30)
+		if exitCode != 0 {
+			log.Error().Msgf("Failed to create iptables backup: %s", output)
+			return 0, nil, false, "Failed to create backup before applying rules"
+		}
+		backup = output
+		log.Info().Msg("Created iptables backup before batch apply")
+	}
+
 	// Apply rules
 	appliedRules := 0
 	var failedRules []map[string]interface{}
@@ -2017,13 +2044,17 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 			// Handle UUID-based operations (update/delete)
 			switch operation {
 			case "update":
-				// Update operation requires rule_id
-				if ruleID, ok := ruleData["rule_id"].(string); ok && ruleID != "" {
+				// Update operation requires rule_id (new) and old_rule_id (to delete)
+				ruleID, hasRuleID := ruleData["rule_id"].(string)
+				oldRuleID, hasOldRuleID := ruleData["old_rule_id"].(string)
+
+				if hasRuleID && ruleID != "" && hasOldRuleID && oldRuleID != "" {
 					cr.data.RuleID = ruleID
+					cr.data.OldRuleID = oldRuleID
 					ruleExitCode, ruleResult = cr.handleUpdateOperation()
 				} else {
 					ruleExitCode = 1
-					ruleResult = "update operation requires rule_id"
+					ruleResult = "update operation requires both rule_id (new) and old_rule_id (to delete)"
 				}
 			case "delete":
 				// Delete operation requires rule_id
@@ -2062,12 +2093,15 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 				rollbackReason = fmt.Sprintf("Rule %d failed to apply", i+1)
 				rolledBack = true
 
-				// Perform rollback
+				// Perform rollback to previous state
 				log.Info().Msg("Initiating rollback due to rule failure")
+				// Restore from backup (backup always exists due to early return on backup failure)
 				if nftablesInstalled {
-					cr.performNftablesRollback(originalChainName, "flush")
+					restoreNftablesBackup(backup)
+					log.Info().Msg("Restored nftables rules from backup")
 				} else if iptablesInstalled {
-					cr.performIptablesRollback(originalChainName, "flush")
+					restoreIptablesBackup(backup)
+					log.Info().Msg("Restored iptables rules from backup")
 				}
 
 				// Stop processing remaining rules
