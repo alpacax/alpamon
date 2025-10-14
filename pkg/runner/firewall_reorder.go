@@ -170,8 +170,8 @@ func reorderIptablesChains(chainNames []string) (map[string]interface{}, error) 
 			if parts[1] == chainName || (len(parts) > 2 && parts[2] == chainName) {
 				// Parse line number
 				lineNum := 0
-				fmt.Sscanf(parts[0], "%d", &lineNum)
-				if lineNum > 0 {
+				_, err := fmt.Sscanf(parts[0], "%d", &lineNum)
+				if err == nil && lineNum > 0 {
 					jumpLines = append(jumpLines, lineNum)
 					log.Debug().Msgf("Found jump rule at line: %d for chain: %s", lineNum, chainName)
 					break
@@ -305,10 +305,8 @@ func jsonResponse(success bool, message string, data map[string]interface{}) str
 		"message": message,
 	}
 
-	if data != nil {
-		for k, v := range data {
-			response[k] = v
-		}
+	for k, v := range data {
+		response[k] = v
 	}
 
 	jsonBytes, err := json.Marshal(response)
