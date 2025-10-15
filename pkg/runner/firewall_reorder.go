@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -19,7 +18,7 @@ func (cr *CommandRunner) firewallReorderChains() (exitCode int, result string) {
 	// Get chain_names from data
 	chainNames := cr.data.ChainNames
 	if len(chainNames) == 0 {
-		return 1, jsonResponse(false, "No chain_names provided", nil)
+		return 1, "firewall-reorder-chains: No chain_names provided"
 	}
 
 	log.Debug().Msgf("Reordering chains: %v", chainNames)
@@ -27,27 +26,36 @@ func (cr *CommandRunner) firewallReorderChains() (exitCode int, result string) {
 	// Detect firewall backend
 	nftablesInstalled, iptablesInstalled, err := checkFirewallAvailability()
 	if err != nil {
-		return 1, jsonResponse(false, fmt.Sprintf("Failed to check firewall installation: %v", err), nil)
+		return 1, fmt.Sprintf("firewall-reorder-chains: Failed to check firewall installation: %v", err)
 	}
 
-	var resultData map[string]interface{}
+	var deletedRules int
 
 	// Execute reordering based on backend
 	if nftablesInstalled {
-		resultData, err = reorderNftablesChains(chainNames)
+		resultData, err := reorderNftablesChains(chainNames)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to reorder firewall chains")
+			return 1, fmt.Sprintf("firewall-reorder-chains: %v", err)
+		}
+		if count, ok := resultData["deleted_rules"].(int); ok {
+			deletedRules = count
+		}
 	} else if iptablesInstalled {
-		resultData, err = reorderIptablesChains(chainNames)
+		resultData, err := reorderIptablesChains(chainNames)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to reorder firewall chains")
+			return 1, fmt.Sprintf("firewall-reorder-chains: %v", err)
+		}
+		if count, ok := resultData["deleted_rules"].(int); ok {
+			deletedRules = count
+		}
 	} else {
-		return 1, jsonResponse(false, "No firewall backend available", nil)
-	}
-
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to reorder firewall chains")
-		return 1, jsonResponse(false, err.Error(), nil)
+		return 1, "firewall-reorder-chains: No firewall backend available"
 	}
 
 	log.Info().Msgf("Successfully reordered %d chains", len(chainNames))
-	return 0, jsonResponse(true, "Chains reordered successfully", resultData)
+	return 0, fmt.Sprintf(`{"success": true, "message": "Chains reordered successfully", "reordered_chains": %d, "deleted_rules": %d}`, len(chainNames), deletedRules)
 }
 
 // reorderNftablesChains reorders nftables INPUT chain jump rules
@@ -296,23 +304,4 @@ func restoreIptablesBackup(backup string) {
 	} else {
 		log.Info().Msg("Successfully restored iptables backup")
 	}
-}
-
-// jsonResponse creates a JSON response string
-func jsonResponse(success bool, message string, data map[string]interface{}) string {
-	response := map[string]interface{}{
-		"success": success,
-		"message": message,
-	}
-
-	for k, v := range data {
-		response[k] = v
-	}
-
-	jsonBytes, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Sprintf(`{"success": false, "message": "Failed to marshal response: %v"}`, err)
-	}
-
-	return string(jsonBytes)
 }
