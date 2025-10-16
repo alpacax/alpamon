@@ -60,6 +60,7 @@ func NewPtyClient(data CommandData, apiSession *scheduler.Session) *PtyClient {
 		"Origin":        {config.GlobalSettings.ServerURL},
 	}
 
+	// TODO: Remove this after testing
 	data.URL = strings.Replace(data.URL, "example.localhost", "host.docker.internal", 1)
 
 	return &PtyClient{

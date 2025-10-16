@@ -203,6 +203,7 @@ func collectIptablesRules() (*FirewallSyncPayload, error) {
 
 // parseNftablesRuleToSync converts nftables rule map to FirewallRuleSync
 // Reverse of command.go buildNftablesRule
+// If rule_id or type is missing from comment, re-creates the rule with proper metadata
 func parseNftablesRuleToSync(ruleMap map[string]interface{}) (*FirewallRuleSync, error) {
 	rule := &FirewallRuleSync{
 		SourceCIDR: DefaultCIDR,
@@ -211,10 +212,8 @@ func parseNftablesRuleToSync(ruleMap map[string]interface{}) (*FirewallRuleSync,
 		Target:     DefaultTarget,
 	}
 
-	// Extract chain name
-	if chain, ok := ruleMap["chain"].(string); ok {
-		rule.Chain = normalizeChainType(chain)
-	}
+	rule.Chain = ruleMap["chain"].(string)
+	tableName, _ := ruleMap["table"].(string)
 
 	// Extract comment if present
 	var fullComment string
@@ -297,8 +296,38 @@ func parseNftablesRuleToSync(ruleMap map[string]interface{}) (*FirewallRuleSync,
 		}
 	}
 
+	// Check if original comment has rule_id and type
+	originalRuleID, originalRuleType, existingComment := parseFirewallComment(fullComment)
+
 	// Parse comment to extract rule_id and type, or generate new ones
 	rule.RuleID, rule.RuleType = parseCommentOrGenerate(fullComment)
+
+	// If rule_id or type was missing, re-create the rule with proper metadata
+	if originalRuleID == "" || originalRuleType == "" {
+		newComment := buildFirewallComment(existingComment, rule.RuleID, rule.RuleType)
+
+		// Get rule handle from the ruleMap (available in JSON output)
+		var ruleHandle string
+		if handle, ok := ruleMap["handle"].(float64); ok {
+			ruleHandle = fmt.Sprintf("%.0f", handle)
+		}
+
+		// Create the rule with updated comment first (for security continuity)
+		if !recreateNftablesRuleWithComment(tableName, rule, newComment) {
+			log.Warn().Msgf("Failed to re-create nftables rule %s with proper metadata", rule.RuleID)
+			return rule, nil // Skip deletion if creation fails
+		}
+
+		// Delete the old rule using saved handle (safe because we have the exact handle)
+		if ruleHandle != "" {
+			deleteArgs := []string{"nft", "delete", "rule", tableName, rule.Chain, "handle", ruleHandle}
+			if exitCode, _ := runFirewallCommand(deleteArgs, 10); exitCode != 0 {
+				log.Warn().Msgf("Failed to delete old nftables rule with handle %s after re-creation", ruleHandle)
+			} else {
+				log.Debug().Msgf("Re-created nftables rule %s with proper metadata (table: %s, chain: %s)", rule.RuleID, tableName, rule.Chain)
+			}
+		}
+	}
 
 	return rule, nil
 }
@@ -351,6 +380,7 @@ func parseIptablesSaveOutput(output string) map[string][]FirewallRuleSync {
 
 // parseIptablesSaveRuleLine parses a single iptables-save rule line
 // Format: -A/-I CHAIN_NAME -p protocol --dport port -s source -j TARGET -m comment --comment "..."
+// If rule_id or type is missing from comment, re-creates the rule with proper metadata
 func parseIptablesSaveRuleLine(line string) *FirewallRuleSync {
 	// Remove -A or -I prefix
 	if strings.HasPrefix(line, "-A ") {
@@ -444,8 +474,34 @@ func parseIptablesSaveRuleLine(line string) *FirewallRuleSync {
 		}
 	}
 
+	// Check if original comment has rule_id and type
+	originalRuleID, originalRuleType, existingComment := parseFirewallComment(fullComment)
+
 	// Parse comment to extract rule_id and type, or generate new ones
 	rule.RuleID, rule.RuleType = parseCommentOrGenerate(fullComment)
+
+	// If rule_id or type was missing, re-create the rule with proper metadata
+	if originalRuleID == "" || originalRuleType == "" {
+		newComment := buildFirewallComment(existingComment, rule.RuleID, rule.RuleType)
+
+		// Create the rule with updated comment first (for security continuity)
+		if !recreateIptablesRuleWithComment(chainName, rule, newComment) {
+			log.Warn().Msgf("Failed to re-create iptables rule %s with proper metadata", rule.RuleID)
+			return rule // Skip deletion if creation fails
+		}
+
+		// Delete the old rule using the old comment if it exists
+		// For iptables, we need to delete using the old comment
+		oldRule := *rule
+		oldRule.RuleID = originalRuleID // Use original ID for deletion
+		oldRule.RuleType = originalRuleType
+
+		if err := removeIptablesRule(chainName, oldRule); err != nil {
+			log.Warn().Err(err).Msgf("Failed to delete old iptables rule after re-creation")
+		} else {
+			log.Debug().Msgf("Re-created iptables rule %s with proper metadata (chain: %s)", rule.RuleID, chainName)
+		}
+	}
 
 	return rule
 }
@@ -551,8 +607,7 @@ func removeNftablesRule(tableName string, rule FirewallRuleSync) error {
 					handle := handleParts[0]
 
 					// Delete rule by handle
-					chainType := normalizeChainType(rule.Chain)
-					deleteArgs := []string{"nft", "delete", "rule", tableName, chainType, "handle", handle}
+					deleteArgs := []string{"nft", "delete", "rule", tableName, rule.Chain, "handle", handle}
 					exitCode, _ := runFirewallCommand(deleteArgs, 10)
 					if exitCode == 0 {
 						return nil

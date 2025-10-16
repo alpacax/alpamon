@@ -952,6 +952,13 @@ func (cr *CommandRunner) handleDeleteOperation() (exitCode int, result string) {
 func (cr *CommandRunner) handleAddOperation() (exitCode int, result string) {
 	log.Info().Msgf("Firewall add operation - ChainName: %s", cr.data.ChainName)
 
+	// Log all received data for debugging
+	log.Debug().Msgf("Received firewall add data: ChainName=%s, Method=%s, Chain=%s, Protocol=%s, PortStart=%d, PortEnd=%d, DPorts=%v, ICMPType=%s, Source=%s, Destination=%s, Target=%s, Priority=%d, RuleID=%s, RuleType=%s",
+		cr.data.ChainName, cr.data.Method, cr.data.Chain, cr.data.Protocol,
+		cr.data.PortStart, cr.data.PortEnd, cr.data.DPorts, cr.data.ICMPType,
+		cr.data.Source, cr.data.Destination, cr.data.Target, cr.data.Priority,
+		cr.data.RuleID, cr.data.RuleType)
+
 	// Validate required fields for rule addition
 	if err := cr.validateFirewallRuleData(); err != nil {
 		return 1, fmt.Sprintf("firewall add: Validation failed. %s", err)
@@ -1165,10 +1172,13 @@ func (cr *CommandRunner) executeNftablesRule() (exitCode int, result string) {
 		args = append(args, "comment", fmt.Sprintf("\"%s\"", ruleComment))
 	}
 
+	// Log the final nftables command
+	log.Info().Msgf("Executing nftables command: %s", strings.Join(args, " "))
+
 	exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
 
 	if exitCode != 0 {
-		log.Error().Msgf("nftables command failed: %s", result)
+		log.Error().Msgf("nftables command failed (exit code %d): %s", exitCode, result)
 		return exitCode, fmt.Sprintf("nftables error: %s", result)
 	}
 
@@ -1244,10 +1254,13 @@ func (cr *CommandRunner) executeIptablesRule() (exitCode int, result string) {
 		args = append(args, "-m", "comment", "--comment", ruleComment)
 	}
 
+	// Log the final iptables command
+	log.Info().Msgf("Executing iptables command: %s", strings.Join(args, " "))
+
 	exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
 
 	if exitCode != 0 {
-		log.Error().Msgf("iptables command failed: %s", result)
+		log.Error().Msgf("iptables command failed (exit code %d): %s", exitCode, result)
 		return exitCode, fmt.Sprintf("iptables error: %s", result)
 	}
 
@@ -1854,24 +1867,38 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 
 // performNftablesRollback performs rollback operations for nftables
 func (cr *CommandRunner) performNftablesRollback(chainName, method string) (int, string) {
-	log.Info().Msgf("Performing nftables rollback for chain: %s, method: %s", chainName, method)
+	log.Info().Msgf("Performing nftables rollback for table: %s, method: %s", chainName, method)
 
 	var exitCode int
 	var result string
 
 	switch method {
 	case "flush":
-		// Flush all rules in the table
-		args := []string{"nft", "flush", "table", "ip", chainName}
-		exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
+		// Flush all chains in the table
+		// For nftables, we flush all chains (INPUT, OUTPUT, FORWARD) in the security group table
+		chainTypes := []string{"input", "output", "forward"}
+		successCount := 0
 
-		if exitCode != 0 {
-			log.Error().Msgf("Failed to flush nftables table %s: %s", chainName, result)
-			return exitCode, fmt.Sprintf("nftables flush error: %s", result)
+		for _, chainType := range chainTypes {
+			args := []string{"nft", "flush", "chain", "ip", chainName, chainType}
+			exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
+
+			if exitCode == 0 {
+				successCount++
+				log.Info().Msgf("Successfully flushed nftables chain: %s %s", chainName, chainType)
+			} else {
+				// Chain might not exist, which is OK
+				log.Debug().Msgf("Failed to flush nftables chain %s %s: %s (chain may not exist)", chainName, chainType, result)
+			}
 		}
 
-		log.Info().Msgf("Successfully flushed nftables table: %s", chainName)
-		return 0, fmt.Sprintf("Successfully flushed table %s", chainName)
+		if successCount > 0 {
+			log.Info().Msgf("Successfully flushed %d chains in table %s", successCount, chainName)
+			return 0, fmt.Sprintf("Successfully flushed %d chains in table %s", successCount, chainName)
+		}
+
+		log.Warn().Msgf("No chains flushed in table %s (table may not exist)", chainName)
+		return 0, fmt.Sprintf("No chains to flush in table %s", chainName)
 
 	case "delete":
 		// Delete the entire table
@@ -2041,7 +2068,7 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 
 		// Check if rule has an operation field for UUID-based operations
 		if operation, ok := ruleData["operation"].(string); ok && operation != "" {
-			// Handle UUID-based operations (update/delete)
+			// Handle UUID-based operations (update/delete/add)
 			switch operation {
 			case "update":
 				// Update operation requires rule_id (new) and old_rule_id (to delete)
@@ -2066,15 +2093,18 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 					ruleResult = "delete operation requires rule_id"
 				}
 			case "add":
-				// Add operation (same as default)
-				ruleExitCode, ruleResult = cr.executeSingleFirewallRule()
+				// Add operation - use handleAddOperation for proper validation and logging
+				log.Debug().Msgf("Batch add operation for rule %d/%d", i+1, len(cr.data.Rules))
+				ruleExitCode, ruleResult = cr.handleAddOperation()
 			default:
 				ruleExitCode = 1
 				ruleResult = fmt.Sprintf("unknown operation: %s", operation)
 			}
 		} else {
 			// Default: use method-based execution (-A, -I, -R, -D)
-			ruleExitCode, ruleResult = cr.executeSingleFirewallRule()
+			// This applies validation and logging via handleAddOperation
+			log.Debug().Msgf("Batch method-based operation for rule %d/%d (method: %s)", i+1, len(cr.data.Rules), cr.data.Method)
+			ruleExitCode, ruleResult = cr.handleAddOperation()
 		}
 
 		if ruleExitCode == 0 {
@@ -2115,13 +2145,30 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 
 // convertRuleDataToCommandData converts rule data map to CommandData fields
 func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interface{}, data CommandData) CommandData {
+	// Reset all optional fields to prevent conflicts between rules in batch operations
+	// This ensures each rule starts with a clean slate
+	data.Method = "-A" // Default to append
+	data.Chain = ""
+	data.Protocol = ""
+	data.PortStart = 0
+	data.PortEnd = 0
+	data.DPorts = nil
+	data.ICMPType = ""
+	data.Source = ""
+	data.Destination = ""
+	data.Target = ""
+	data.Description = ""
+	data.Priority = 0
+	data.RuleType = "user" // Default to user type
+	data.RuleID = ""
+	data.OldRuleID = ""
+
+	// Now set values from ruleData
 	if chainName, ok := ruleData["chain_name"].(string); ok {
 		data.ChainName = chainName
 	}
 	if method, ok := ruleData["method"].(string); ok {
 		data.Method = method
-	} else {
-		data.Method = "-A" // Default to append
 	}
 	if chain, ok := ruleData["chain"].(string); ok {
 		data.Chain = chain
@@ -2152,8 +2199,6 @@ func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interf
 	}
 	if ruleType, ok := ruleData["rule_type"].(string); ok {
 		data.RuleType = ruleType
-	} else {
-		data.RuleType = "user" // Default to user type
 	}
 	if icmpType, ok := ruleData["icmp_type"].(string); ok {
 		data.ICMPType = icmpType
