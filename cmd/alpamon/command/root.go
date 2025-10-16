@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/alpacax/alpamon/cmd/alpamon/command/ftp"
 	"github.com/alpacax/alpamon/cmd/alpamon/command/setup"
@@ -104,9 +103,6 @@ func runAgent() {
 	wsClient := runner.NewWebsocketClient(session)
 	go wsClient.RunForever(ctx)
 
-	// TODO: TEMPORARY - Remove server-type firewall rules every 5 minutes for testing
-	go startPeriodicRuleCleanup(ctx)
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -143,30 +139,6 @@ func restartAgent() {
 	err = syscall.Exec(executable, os.Args, os.Environ())
 	if err != nil {
 		log.Error().Err(err).Msgf("Failed to restart the %s.", name)
-	}
-}
-
-func startPeriodicRuleCleanup(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	log.Info().Msg("Periodic rule cleanup started: will remove 'server' type rules every 5 minutes")
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Info().Msg("Periodic cleanup stopped")
-			return
-		case <-ticker.C:
-			log.Info().Msg("Running periodic cleanup: removing 'server' type rules")
-
-			removedCount, err := runner.RemoveFirewallRulesByType("server")
-			if err != nil {
-				log.Error().Err(err).Msg("Periodic cleanup failed")
-			} else {
-				log.Info().Msgf("Periodic cleanup completed: removed %d server-type rules", removedCount)
-			}
-		}
 	}
 }
 
