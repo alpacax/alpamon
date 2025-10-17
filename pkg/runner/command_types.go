@@ -94,7 +94,7 @@ type firewallData struct {
 	Target      string `validate:"omitempty"`
 	Description string `validate:"omitempty"`
 	Priority    int    `validate:"omitempty"`
-	RuleType    string `validate:"omitempty,oneof=user server"`
+	RuleType    string `validate:"omitempty,oneof=alpacon server"`
 	RuleID      string `validate:"omitempty"`
 	Operation   string `validate:"required"` // batch, flush, delete, add, update
 }

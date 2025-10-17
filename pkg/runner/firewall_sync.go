@@ -22,9 +22,9 @@ const (
 	FirewallSyncURL = "/api/firewall/agent/sync/"
 
 	// Rule types for progressive removal
-	RuleTypeUnknown = ""       // Rules without type (remove first)
-	RuleTypeServer  = "server" // Server-synced rules (remove second)
-	RuleTypeUser    = "user"   // User-created rules (remove last)
+	RuleTypeUnknown = ""         // Rules without type (remove first)
+	RuleTypeServer  = "server"   // Server-synced rules (remove second)
+	RuleTypeAlpacon = "alpacon"  // Alpacon-created rules (remove last)
 )
 
 // FirewallChainSync represents a firewall chain for sync payload
@@ -508,7 +508,8 @@ func parseIptablesSaveRuleLine(line string) *FirewallRuleSync {
 
 // buildSyncPayload creates sync payload from parsed rules
 func buildSyncPayload(chains map[string][]FirewallRuleSync) *FirewallSyncPayload {
-	var chainsList []FirewallChainSync
+	// Initialize with empty slice to avoid null in JSON serialization
+	chainsList := make([]FirewallChainSync, 0)
 
 	for name, rules := range chains {
 		if len(rules) > 0 {
@@ -525,7 +526,7 @@ func buildSyncPayload(chains map[string][]FirewallRuleSync) *FirewallSyncPayload
 }
 
 // RemoveFirewallRulesByType removes all firewall rules of a specific type
-// ruleType can be: RuleTypeUnknown (""), RuleTypeServer ("server"), or RuleTypeUser ("user")
+// ruleType can be: RuleTypeUnknown (""), RuleTypeServer ("server"), or RuleTypeAlpacon ("alpacon")
 // Returns the number of rules removed and any error encountered
 func RemoveFirewallRulesByType(ruleType string) (int, error) {
 	// Collect current firewall rules

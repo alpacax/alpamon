@@ -255,6 +255,8 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		return cr.firewallRollback()
 	case "firewall-reorder-chains":
 		return cr.firewallReorderChains()
+	case "firewall-reorder-rules":
+		return cr.firewallReorderRules()
 	case "help":
 		helpMessage := `
 		Available commands:
@@ -1026,7 +1028,7 @@ func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
 func (cr *CommandRunner) validateFirewallRuleData() error {
 	// Set default rule type if not provided
 	if cr.data.RuleType == "" {
-		cr.data.RuleType = "user"
+		cr.data.RuleType = "alpacon"
 	}
 
 	// Generate rule ID if not provided
@@ -2159,7 +2161,7 @@ func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interf
 	data.Target = ""
 	data.Description = ""
 	data.Priority = 0
-	data.RuleType = "user" // Default to user type
+	data.RuleType = "alpacon" // Default to alpacon type
 	data.RuleID = ""
 	data.OldRuleID = ""
 
@@ -2208,6 +2210,11 @@ func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interf
 	} else {
 		// Generate rule ID if not provided
 		data.RuleID = uuid.New().String()
+	}
+
+	// Handle operation field for batch operations (add, update, delete)
+	if operation, ok := ruleData["operation"].(string); ok {
+		data.Operation = operation
 	}
 
 	// Handle dports array
