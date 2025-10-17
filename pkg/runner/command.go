@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -35,14 +34,10 @@ const (
 	fileUploadTimeout = 60 * 10
 )
 
-var (
-	// Firewall installation cache and mutex
-	firewallInstallMutex      sync.Mutex
-	firewallInstallAttempted  bool
-	firewallNftablesInstalled bool
-	firewallIptablesInstalled bool
-	firewallInstallError      error
-)
+func init() {
+	// Inject runCmdWithOutput function into utils.firewall package
+	utils.SetFirewallCommandExecutor(runCmdWithOutput)
+}
 
 func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command Command, data CommandData) *CommandRunner {
 	var name string
@@ -766,99 +761,6 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 	return nil
 }
 
-func installFirewall() (nftablesInstalled bool, iptablesInstalled bool, err error) {
-	// Use mutex to prevent concurrent installation attempts
-	firewallInstallMutex.Lock()
-	defer firewallInstallMutex.Unlock()
-
-	// Return cached result if we've already attempted installation
-	if firewallInstallAttempted {
-		return firewallNftablesInstalled, firewallIptablesInstalled, firewallInstallError
-	}
-
-	// Check if nftables is installed
-	_, nftablesResult := runCmdWithOutput([]string{"which", "nft"}, "root", "", nil, 0)
-	nftablesInstalled = strings.Contains(nftablesResult, "nft")
-
-	if !nftablesInstalled {
-		_, iptablesResult := runCmdWithOutput([]string{"which", "iptables"}, "root", "", nil, 0)
-		iptablesInstalled = strings.Contains(iptablesResult, "iptables")
-	}
-
-	if nftablesInstalled || iptablesInstalled {
-		// Cache successful detection
-		firewallInstallAttempted = true
-		firewallNftablesInstalled = nftablesInstalled
-		firewallIptablesInstalled = iptablesInstalled
-		firewallInstallError = nil
-		return nftablesInstalled, iptablesInstalled, nil
-	}
-
-	// If neither is installed, attempt installation (only once)
-	if !nftablesInstalled && !iptablesInstalled {
-		log.Info().Msg("No firewall tools installed. Attempting to install nftables.")
-		var installCmd []string
-		if utils.PlatformLike == "debian" {
-			updateCmd := []string{"apt-get", "update"}
-			exitCode, result := runCmdWithOutput(updateCmd, "root", "", nil, 0)
-			if exitCode != 0 {
-				return false, false, fmt.Errorf("failed to update package list: %s", result)
-			}
-			installCmd = []string{"apt-get", "install", "-y", "nftables"}
-		} else if utils.PlatformLike == "rhel" {
-			installCmd = []string{"yum", "install", "-y", "nftables"}
-		} else {
-			return false, false, fmt.Errorf("unsupported operating system")
-		}
-
-		exitCode, _ := runCmdWithOutput(installCmd, "root", "", nil, 0)
-		_, nftablesResult = runCmdWithOutput([]string{"which", "nft"}, "root", "", nil, 0)
-		nftablesInstalled = strings.Contains(nftablesResult, "nft")
-		if exitCode != 0 || !nftablesInstalled {
-			log.Warn().Msg("Failed to install nftables. Attempting to install iptables.")
-
-			if utils.PlatformLike == "debian" {
-				updateCmd := []string{"apt-get", "update"}
-				exitCode, result := runCmdWithOutput(updateCmd, "root", "", nil, 0)
-				if exitCode != 0 {
-					return false, false, fmt.Errorf("failed to update package list for iptables: %s", result)
-				}
-				installCmd = []string{"apt-get", "install", "-y", "iptables"}
-			} else if utils.PlatformLike == "rhel" {
-				installCmd = []string{"yum", "install", "-y", "iptables"}
-			}
-
-			exitCode, _ = runCmdWithOutput(installCmd, "root", "", nil, 0)
-			_, iptablesResult := runCmdWithOutput([]string{"which", "iptables"}, "root", "", nil, 0)
-			iptablesInstalled = strings.Contains(iptablesResult, "iptables")
-			if exitCode != 0 || !iptablesInstalled {
-				// Cache the failure
-				firewallInstallAttempted = true
-				firewallNftablesInstalled = false
-				firewallIptablesInstalled = false
-				firewallInstallError = fmt.Errorf("failed to install firewall tools")
-				return false, false, firewallInstallError
-			}
-		}
-
-	}
-
-	if !nftablesInstalled && !iptablesInstalled {
-		// Cache the failure
-		firewallInstallAttempted = true
-		firewallNftablesInstalled = false
-		firewallIptablesInstalled = false
-		firewallInstallError = fmt.Errorf("failed to install firewall management tool")
-		return false, false, firewallInstallError
-	}
-
-	// Cache the successful installation
-	firewallInstallAttempted = true
-	firewallNftablesInstalled = nftablesInstalled
-	firewallIptablesInstalled = iptablesInstalled
-	firewallInstallError = nil
-	return nftablesInstalled, iptablesInstalled, nil
-}
 
 func (cr *CommandRunner) firewall() (exitCode int, result string) {
 	log.Info().Msgf("Firewall operation: %s, ChainName: %s", cr.data.Operation, cr.data.ChainName)
@@ -913,7 +815,7 @@ func (cr *CommandRunner) handleBatchOperation() (exitCode int, result string) {
 func (cr *CommandRunner) handleFlushOperation() (exitCode int, result string) {
 	log.Info().Msgf("Firewall flush operation - ChainName: %s", cr.data.ChainName)
 
-	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
 	if err != nil {
 		return 1, fmt.Sprintf("firewall flush: Failed to install firewall tools. %s", err)
 	}
@@ -936,7 +838,7 @@ func (cr *CommandRunner) handleDeleteOperation() (exitCode int, result string) {
 		return 1, "firewall delete: rule_id is required for delete operation"
 	}
 
-	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
 	if err != nil {
 		return 1, fmt.Sprintf("firewall delete: Failed to install firewall tools. %s", err)
 	}
@@ -988,7 +890,7 @@ func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
 	}
 
 	// Step 1: Install firewall tools
-	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
 	if err != nil {
 		return 1, fmt.Sprintf("firewall update: Failed to install firewall tools. %s", err)
 	}
@@ -1060,7 +962,7 @@ func (cr *CommandRunner) validateFirewallRuleData() error {
 
 // executeSingleFirewallRule executes a single firewall rule operation
 func (cr *CommandRunner) executeSingleFirewallRule() (exitCode int, result string) {
-	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
 	if err != nil {
 		return 1, fmt.Sprintf("firewall: Failed to install firewall tools. %s", err)
 	}
@@ -1794,7 +1696,7 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 		}
 	}
 
-	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to install firewall tools for rollback")
 		return 1, fmt.Sprintf("firewall-rollback: Failed to install firewall tools. %s", err)
@@ -1998,7 +1900,7 @@ func (cr *CommandRunner) performIptablesRollback(chainName, method string) (int,
 //	if false, only add new rules (incremental)
 func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface{}, bool, string) {
 	// Install firewall tools if needed
-	nftablesInstalled, iptablesInstalled, err := installFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to install firewall tools")
 		return 0, nil, false, ""
@@ -2008,7 +1910,7 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 	var backup string
 
 	if nftablesInstalled {
-		exitCode, output := runFirewallCommand([]string{"nft", "list", "ruleset"}, 30)
+		exitCode, output := runCmdWithOutput([]string{"nft", "list", "ruleset"}, "root", "", nil, 30)
 		if exitCode != 0 {
 			log.Error().Msgf("Failed to create nftables backup: %s", output)
 			return 0, nil, false, "Failed to create backup before applying rules"
@@ -2016,7 +1918,7 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 		backup = output
 		log.Info().Msg("Created nftables backup before batch apply")
 	} else if iptablesInstalled {
-		exitCode, output := runFirewallCommand([]string{"iptables-save"}, 30)
+		exitCode, output := runCmdWithOutput([]string{"iptables-save"}, "root", "", nil, 30)
 		if exitCode != 0 {
 			log.Error().Msgf("Failed to create iptables backup: %s", output)
 			return 0, nil, false, "Failed to create backup before applying rules"
@@ -2129,10 +2031,10 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 				log.Info().Msg("Initiating rollback due to rule failure")
 				// Restore from backup (backup always exists due to early return on backup failure)
 				if nftablesInstalled {
-					restoreNftablesBackup(backup)
+					utils.RestoreNftablesBackup(backup)
 					log.Info().Msg("Restored nftables rules from backup")
 				} else if iptablesInstalled {
-					restoreIptablesBackup(backup)
+					utils.RestoreIptablesBackup(backup)
 					log.Info().Msg("Restored iptables rules from backup")
 				}
 

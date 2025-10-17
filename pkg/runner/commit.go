@@ -82,7 +82,7 @@ func commitSystemInfo() {
 
 	// Sync firewall rules after committing system info
 	// Always sync with alpacon regardless of current ruleset state
-	firewallData, err := collectFirewallRules()
+	firewallData, err := utils.CollectFirewallRules()
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to collect firewall rules during commit.")
 	} else {
@@ -178,7 +178,7 @@ func syncSystemInfo(session *scheduler.Session, keys []string) {
 		case "firewall":
 			// Firewall sync only posts current rules without comparison
 			// Early return to avoid unnecessary processing
-			firewallData, err := collectFirewallRules()
+			firewallData, err := utils.CollectFirewallRules()
 			if err != nil {
 				log.Debug().Err(err).Msg("Failed to collect firewall rules.")
 				continue
