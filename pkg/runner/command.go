@@ -838,18 +838,39 @@ func (cr *CommandRunner) handleDeleteOperation() (exitCode int, result string) {
 		return 1, "firewall delete: rule_id is required for delete operation"
 	}
 
+	// Create backup before deleting
+	backup, err := utils.BackupFirewallRules()
+	if err != nil {
+		return 1, fmt.Sprintf("firewall delete: Failed to create backup: %v", err)
+	}
+
 	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
 	if err != nil {
 		return 1, fmt.Sprintf("firewall delete: Failed to install firewall tools. %s", err)
 	}
 
+	var deleteExitCode int
+	var deleteResult string
+
 	if nftablesInstalled {
-		return cr.deleteNftablesRuleByID(cr.data.ChainName, cr.data.RuleID)
+		deleteExitCode, deleteResult = cr.deleteNftablesRuleByID(cr.data.ChainName, cr.data.RuleID)
 	} else if iptablesInstalled {
-		return cr.deleteIptablesRuleByID(cr.data.ChainName, cr.data.RuleID)
+		deleteExitCode, deleteResult = cr.deleteIptablesRuleByID(cr.data.ChainName, cr.data.RuleID)
+	} else {
+		return 1, "firewall delete: No firewall management tool installed"
 	}
 
-	return 1, "firewall delete: No firewall management tool installed"
+	// If deletion failed, restore backup
+	if deleteExitCode != 0 {
+		log.Error().Msgf("Failed to delete rule, restoring backup: %s", deleteResult)
+		if restoreErr := utils.RestoreFirewallRules(backup); restoreErr != nil {
+			log.Error().Err(restoreErr).Msg("Failed to restore backup after delete failure")
+			return deleteExitCode, fmt.Sprintf("firewall delete: Failed and restore failed: %s", deleteResult)
+		}
+		return deleteExitCode, fmt.Sprintf("firewall delete: Failed, backup restored: %s", deleteResult)
+	}
+
+	return deleteExitCode, deleteResult
 }
 
 // handleAddOperation handles adding a single firewall rule
@@ -884,9 +905,16 @@ func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
 	// For update operation: delete old rule first, then add new one with new ID
 	// old_rule_id: the rule to delete
 	// rule_id: the new rule to add
+	// TODO: Consider changing order to add-then-delete for better safety
 
 	if cr.data.OldRuleID == "" {
 		return 1, "firewall update: old_rule_id is required for update operation"
+	}
+
+	// Create backup before updating
+	backup, err := utils.BackupFirewallRules()
+	if err != nil {
+		return 1, fmt.Sprintf("firewall update: Failed to create backup: %v", err)
 	}
 
 	// Step 1: Install firewall tools
@@ -908,18 +936,26 @@ func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
 	}
 
 	if deleteExitCode != 0 {
-		// If deletion fails, the old rule is still there, so just return error
-		log.Error().Msgf("Failed to delete old rule during update: %s", deleteResult)
-		return deleteExitCode, fmt.Sprintf("firewall update: Failed to delete old rule: %s", deleteResult)
+		// If deletion fails, restore backup
+		log.Error().Msgf("Failed to delete old rule during update, restoring backup: %s", deleteResult)
+		if restoreErr := utils.RestoreFirewallRules(backup); restoreErr != nil {
+			log.Error().Err(restoreErr).Msg("Failed to restore backup after delete failure")
+			return deleteExitCode, fmt.Sprintf("firewall update: Failed to delete old rule and restore failed: %s", deleteResult)
+		}
+		return deleteExitCode, fmt.Sprintf("firewall update: Failed to delete old rule, backup restored: %s", deleteResult)
 	}
 
 	// Step 3: Add the new rule with new rule_id (stored in cr.data.RuleID)
 	addExitCode, addResult := cr.executeSingleFirewallRule()
 
 	if addExitCode != 0 {
-		// Adding new rule failed, old rule was already deleted
-		log.Error().Msgf("Failed to add new rule during update, old rule was deleted: %s", addResult)
-		return addExitCode, fmt.Sprintf("firewall update: Failed to add new rule (old rule removed): %s", addResult)
+		// Adding new rule failed, restore backup (old rule was deleted)
+		log.Error().Msgf("Failed to add new rule during update, restoring backup: %s", addResult)
+		if restoreErr := utils.RestoreFirewallRules(backup); restoreErr != nil {
+			log.Error().Err(restoreErr).Msg("Failed to restore backup after add failure")
+			return addExitCode, fmt.Sprintf("firewall update: Failed to add new rule and restore failed: %s", addResult)
+		}
+		return addExitCode, fmt.Sprintf("firewall update: Failed to add new rule, backup restored: %s", addResult)
 	}
 
 	log.Info().Msgf("Successfully updated firewall rule: deleted %s, added %s", cr.data.OldRuleID, cr.data.RuleID)
@@ -1900,32 +1936,19 @@ func (cr *CommandRunner) performIptablesRollback(chainName, method string) (int,
 //	if false, only add new rules (incremental)
 func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface{}, bool, string) {
 	// Install firewall tools if needed
-	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
+	_, _, err := utils.InstallFirewall()
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to install firewall tools")
 		return 0, nil, false, ""
 	}
 
 	// Backup current rules before applying changes
-	var backup string
-
-	if nftablesInstalled {
-		exitCode, output := runCmdWithOutput([]string{"nft", "list", "ruleset"}, "root", "", nil, 30)
-		if exitCode != 0 {
-			log.Error().Msgf("Failed to create nftables backup: %s", output)
-			return 0, nil, false, "Failed to create backup before applying rules"
-		}
-		backup = output
-		log.Info().Msg("Created nftables backup before batch apply")
-	} else if iptablesInstalled {
-		exitCode, output := runCmdWithOutput([]string{"iptables-save"}, "root", "", nil, 30)
-		if exitCode != 0 {
-			log.Error().Msgf("Failed to create iptables backup: %s", output)
-			return 0, nil, false, "Failed to create backup before applying rules"
-		}
-		backup = output
-		log.Info().Msg("Created iptables backup before batch apply")
+	backup, err := utils.BackupFirewallRules()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to create firewall backup")
+		return 0, nil, false, fmt.Sprintf("Failed to create backup before applying rules: %v", err)
 	}
+	log.Info().Msg("Created firewall backup before batch apply")
 
 	// Apply rules
 	appliedRules := 0
@@ -2029,13 +2052,12 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 
 				// Perform rollback to previous state
 				log.Info().Msg("Initiating rollback due to rule failure")
-				// Restore from backup (backup always exists due to early return on backup failure)
-				if nftablesInstalled {
-					utils.RestoreNftablesBackup(backup)
-					log.Info().Msg("Restored nftables rules from backup")
-				} else if iptablesInstalled {
-					utils.RestoreIptablesBackup(backup)
-					log.Info().Msg("Restored iptables rules from backup")
+				// Restore from backup
+				if restoreErr := utils.RestoreFirewallRules(backup); restoreErr != nil {
+					log.Error().Err(restoreErr).Msg("Failed to restore firewall rules from backup")
+					rollbackReason = fmt.Sprintf("Rule %d failed and restore failed: %v", i+1, restoreErr)
+				} else {
+					log.Info().Msg("Successfully restored firewall rules from backup")
 				}
 
 				// Stop processing remaining rules

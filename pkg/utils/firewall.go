@@ -823,6 +823,12 @@ func buildSyncPayload(chains map[string][]FirewallRuleSync) *FirewallSyncPayload
 
 // RemoveFirewallRulesByType removes all firewall rules of a specific type
 func RemoveFirewallRulesByType(ruleType string) (int, error) {
+	// Create backup before removing rules
+	backup, err := BackupFirewallRules()
+	if err != nil {
+		return 0, fmt.Errorf("failed to backup firewall rules: %w", err)
+	}
+
 	payload, err := CollectFirewallRules()
 	if err != nil {
 		return 0, fmt.Errorf("failed to collect firewall rules: %w", err)
@@ -854,11 +860,16 @@ func RemoveFirewallRulesByType(ruleType string) (int, error) {
 			}
 
 			if removeErr != nil {
-				log.Warn().Err(removeErr).Msgf("Failed to remove rule %s from chain %s", rule.RuleID, chain.Name)
-			} else {
-				removedCount++
-				log.Debug().Msgf("Removed rule %s (type: %s) from chain %s", rule.RuleID, ruleType, chain.Name)
+				log.Error().Err(removeErr).Msgf("Failed to remove rule %s from chain %s, restoring backup", rule.RuleID, chain.Name)
+				if restoreErr := RestoreFirewallRules(backup); restoreErr != nil {
+					log.Error().Err(restoreErr).Msg("Failed to restore backup after removal failure")
+					return removedCount, fmt.Errorf("failed to remove rule and restore failed: %w", restoreErr)
+				}
+				return removedCount, fmt.Errorf("failed to remove rule %s, backup restored: %w", rule.RuleID, removeErr)
 			}
+
+			removedCount++
+			log.Debug().Msgf("Removed rule %s (type: %s) from chain %s", rule.RuleID, ruleType, chain.Name)
 		}
 	}
 
@@ -957,9 +968,9 @@ func ReorderNftablesChains(chainNames []string) (map[string]interface{}, error) 
 	log.Debug().Msg("Starting nftables chain reordering")
 
 	// Backup current ruleset
-	exitCode, backup := runFirewallCommand([]string{"nft", "list", "ruleset"}, 30)
-	if exitCode != 0 {
-		return nil, fmt.Errorf("failed to backup nftables ruleset")
+	backup, err := BackupFirewallRules()
+	if err != nil {
+		return nil, fmt.Errorf("failed to backup nftables ruleset: %w", err)
 	}
 
 	// Get current INPUT chain rules with handles
@@ -1009,7 +1020,9 @@ func ReorderNftablesChains(chainNames []string) (map[string]interface{}, error) 
 		)
 		if exitCode != 0 {
 			log.Error().Msgf("Failed to delete rule handle %s: %s", handle, errOutput)
-			RestoreNftablesBackup(backup)
+			if err := RestoreFirewallRules(backup); err != nil {
+				log.Error().Err(err).Msg("Failed to restore backup after delete failure")
+			}
 			return nil, fmt.Errorf("failed to delete rule handle %s", handle)
 		}
 		log.Debug().Msgf("Deleted rule handle: %s", handle)
@@ -1023,7 +1036,9 @@ func ReorderNftablesChains(chainNames []string) (map[string]interface{}, error) 
 		)
 		if exitCode != 0 {
 			log.Error().Msgf("Failed to add jump rule for chain %s: %s", chainName, errOutput)
-			RestoreNftablesBackup(backup)
+			if err := RestoreFirewallRules(backup); err != nil {
+				log.Error().Err(err).Msg("Failed to restore backup after add failure")
+			}
 			return nil, fmt.Errorf("failed to add jump rule for chain %s", chainName)
 		}
 		log.Debug().Msgf("Added jump rule for chain: %s", chainName)
@@ -1040,9 +1055,9 @@ func ReorderIptablesChains(chainNames []string) (map[string]interface{}, error) 
 	log.Debug().Msg("Starting iptables chain reordering")
 
 	// Backup current rules
-	exitCode, backup := runFirewallCommand([]string{"iptables-save"}, 30)
-	if exitCode != 0 {
-		return nil, fmt.Errorf("failed to backup iptables rules")
+	backup, err := BackupFirewallRules()
+	if err != nil {
+		return nil, fmt.Errorf("failed to backup iptables rules: %w", err)
 	}
 
 	// Get current INPUT chain rules
@@ -1099,7 +1114,9 @@ func ReorderIptablesChains(chainNames []string) (map[string]interface{}, error) 
 		)
 		if exitCode != 0 {
 			log.Error().Msgf("Failed to delete rule at line %d: %s", lineNum, errOutput)
-			RestoreIptablesBackup(backup)
+			if err := RestoreFirewallRules(backup); err != nil {
+				log.Error().Err(err).Msg("Failed to restore backup after delete failure")
+			}
 			return nil, fmt.Errorf("failed to delete rule at line %d", lineNum)
 		}
 		log.Debug().Msgf("Deleted rule at line: %d", lineNum)
@@ -1113,7 +1130,9 @@ func ReorderIptablesChains(chainNames []string) (map[string]interface{}, error) 
 		)
 		if exitCode != 0 {
 			log.Error().Msgf("Failed to add jump rule for chain %s: %s", chainName, errOutput)
-			RestoreIptablesBackup(backup)
+			if err := RestoreFirewallRules(backup); err != nil {
+				log.Error().Err(err).Msg("Failed to restore backup after add failure")
+			}
 			return nil, fmt.Errorf("failed to add jump rule for chain %s", chainName)
 		}
 		log.Debug().Msgf("Added jump rule for chain: %s", chainName)
@@ -1125,22 +1144,68 @@ func ReorderIptablesChains(chainNames []string) (map[string]interface{}, error) 
 	}, nil
 }
 
-// RestoreNftablesBackup restores nftables ruleset from backup
-func RestoreNftablesBackup(backup string) {
+// BackupFirewallRules creates a backup of current firewall rules
+// Returns the backup string and error
+func BackupFirewallRules() (string, error) {
+	nftablesInstalled, iptablesInstalled, err := InstallFirewall()
+	if err != nil {
+		return "", fmt.Errorf("failed to check firewall installation: %w", err)
+	}
+
+	if nftablesInstalled {
+		exitCode, output := runFirewallCommand([]string{"nft", "list", "ruleset"}, 30)
+		if exitCode != 0 {
+			return "", fmt.Errorf("failed to backup nftables ruleset: exit code %d", exitCode)
+		}
+		log.Debug().Msg("Created nftables backup")
+		return output, nil
+	} else if iptablesInstalled {
+		exitCode, output := runFirewallCommand([]string{"iptables-save"}, 30)
+		if exitCode != 0 {
+			return "", fmt.Errorf("failed to backup iptables rules: exit code %d", exitCode)
+		}
+		log.Debug().Msg("Created iptables backup")
+		return output, nil
+	}
+
+	return "", fmt.Errorf("no firewall tools available for backup")
+}
+
+// RestoreFirewallRules restores firewall rules from backup string
+// Automatically detects the firewall type and uses appropriate restore method
+func RestoreFirewallRules(backup string) error {
+	if backup == "" {
+		return fmt.Errorf("empty backup provided")
+	}
+
+	nftablesInstalled, iptablesInstalled, err := InstallFirewall()
+	if err != nil {
+		return fmt.Errorf("failed to check firewall installation: %w", err)
+	}
+
+	if nftablesInstalled {
+		return restoreNftablesBackup(backup)
+	} else if iptablesInstalled {
+		return restoreIptablesBackup(backup)
+	}
+
+	return fmt.Errorf("no firewall tools available for restore")
+}
+
+// restoreNftablesBackup restores nftables ruleset from backup string
+func restoreNftablesBackup(backup string) error {
 	log.Warn().Msg("Restoring nftables backup")
 
 	tmpFile := fmt.Sprintf("/tmp/nft-backup-%d-%d.nft", os.Getpid(), time.Now().UnixNano())
 	f, err := os.OpenFile(tmpFile, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to create nftables backup temp file")
-		return
+		return fmt.Errorf("failed to create nftables backup temp file: %w", err)
 	}
 	defer os.Remove(tmpFile)
 
 	if _, err := f.WriteString(backup); err != nil {
-		log.Error().Err(err).Msg("Failed to write nftables backup")
 		f.Close()
-		return
+		return fmt.Errorf("failed to write nftables backup: %w", err)
 	}
 	f.Close()
 
@@ -1148,36 +1213,52 @@ func RestoreNftablesBackup(backup string) {
 	exitCode, output := runFirewallCommand([]string{"nft", "-f", tmpFile}, 10)
 
 	if exitCode != 0 {
-		log.Error().Msgf("Failed to restore nftables backup: %s", output)
-	} else {
-		log.Info().Msg("Successfully restored nftables backup")
+		return fmt.Errorf("failed to restore nftables backup: %s", output)
 	}
+
+	log.Info().Msg("Successfully restored nftables backup")
+	return nil
 }
 
-// RestoreIptablesBackup restores iptables rules from backup
-func RestoreIptablesBackup(backup string) {
+// restoreIptablesBackup restores iptables rules from backup string
+func restoreIptablesBackup(backup string) error {
 	log.Warn().Msg("Restoring iptables backup")
 
 	tmpFile := fmt.Sprintf("/tmp/iptables-backup-%d-%d.rules", os.Getpid(), time.Now().UnixNano())
 	f, err := os.OpenFile(tmpFile, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to create iptables backup temp file")
-		return
+		return fmt.Errorf("failed to create iptables backup temp file: %w", err)
 	}
 	defer os.Remove(tmpFile)
 
 	if _, err := f.WriteString(backup); err != nil {
-		log.Error().Err(err).Msg("Failed to write iptables backup")
 		f.Close()
-		return
+		return fmt.Errorf("failed to write iptables backup: %w", err)
 	}
 	f.Close()
 
 	exitCode, output := runFirewallCommand([]string{"iptables-restore", tmpFile}, 10)
 
 	if exitCode != 0 {
-		log.Error().Msgf("Failed to restore iptables backup: %s", output)
-	} else {
-		log.Info().Msg("Successfully restored iptables backup")
+		return fmt.Errorf("failed to restore iptables backup: %s", output)
+	}
+
+	log.Info().Msg("Successfully restored iptables backup")
+	return nil
+}
+
+// RestoreNftablesBackup restores nftables ruleset from backup
+// Deprecated: Use RestoreFirewallRules instead
+func RestoreNftablesBackup(backup string) {
+	if err := restoreNftablesBackup(backup); err != nil {
+		log.Error().Err(err).Msg("Failed to restore nftables backup")
+	}
+}
+
+// RestoreIptablesBackup restores iptables rules from backup
+// Deprecated: Use RestoreFirewallRules instead
+func RestoreIptablesBackup(backup string) {
+	if err := restoreIptablesBackup(backup); err != nil {
+		log.Error().Err(err).Msg("Failed to restore iptables backup")
 	}
 }
