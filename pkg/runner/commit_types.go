@@ -62,6 +62,11 @@ var commitDefs = map[string]commitDef{
 		URL:       "/api/proc/partitions/",
 		URLSuffix: "sync/",
 	},
+	"firewall": {
+		MultiRow:  false,
+		URL:       "/api/firewall/agent/",
+		URLSuffix: "sync/",
+	},
 }
 
 type ServerData struct {
