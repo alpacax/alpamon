@@ -81,10 +81,11 @@ func commitSystemInfo() {
 		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
 
 	// Sync firewall rules after committing system info
+	// Always sync with alpacon regardless of current ruleset state
 	firewallData, err := collectFirewallRules()
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to collect firewall rules during commit.")
-	} else if len(firewallData.Chains) > 0 {
+	} else {
 		scheduler.Rqueue.Post(firewallSyncURL, firewallData, 80, time.Time{})
 	}
 
@@ -175,17 +176,14 @@ func syncSystemInfo(session *scheduler.Session, keys []string) {
 			}
 			remoteData = &[]Partition{}
 		case "firewall":
+			// Firewall sync only posts current rules without comparison
+			// Early return to avoid unnecessary processing
 			firewallData, err := collectFirewallRules()
 			if err != nil {
 				log.Debug().Err(err).Msg("Failed to collect firewall rules.")
 				continue
 			}
-			if len(firewallData.Chains) == 0 {
-				log.Debug().Msg("No firewall rules to sync")
-				continue
-			}
-			currentData = firewallData
-			scheduler.Rqueue.Post(utils.JoinPath(entry.URL, entry.URLSuffix), currentData, 80, time.Time{})
+			scheduler.Rqueue.Post(utils.JoinPath(entry.URL, entry.URLSuffix), firewallData, 80, time.Time{})
 			continue
 		default:
 			log.Warn().Msgf("Unknown key: %s", key)
