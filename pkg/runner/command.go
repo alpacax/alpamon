@@ -815,9 +815,9 @@ func (cr *CommandRunner) handleBatchOperation() (exitCode int, result string) {
 func (cr *CommandRunner) handleFlushOperation() (exitCode int, result string) {
 	log.Info().Msgf("Firewall flush operation - ChainName: %s", cr.data.ChainName)
 
-	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.CheckFirewallTool()
 	if err != nil {
-		return 1, fmt.Sprintf("firewall flush: Failed to install firewall tools. %s", err)
+		return 1, fmt.Sprintf("firewall flush: Failed to check firewall tools. %s", err)
 	}
 
 	if nftablesInstalled {
@@ -844,9 +844,9 @@ func (cr *CommandRunner) handleDeleteOperation() (exitCode int, result string) {
 		return 1, fmt.Sprintf("firewall delete: Failed to create backup: %v", err)
 	}
 
-	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.CheckFirewallTool()
 	if err != nil {
-		return 1, fmt.Sprintf("firewall delete: Failed to install firewall tools. %s", err)
+		return 1, fmt.Sprintf("firewall delete: Failed to check firewall tools. %s", err)
 	}
 
 	var deleteExitCode int
@@ -917,10 +917,10 @@ func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
 		return 1, fmt.Sprintf("firewall update: Failed to create backup: %v", err)
 	}
 
-	// Step 1: Install firewall tools
-	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
+	// Step 1: Check firewall tools
+	nftablesInstalled, iptablesInstalled, err := utils.CheckFirewallTool()
 	if err != nil {
-		return 1, fmt.Sprintf("firewall update: Failed to install firewall tools. %s", err)
+		return 1, fmt.Sprintf("firewall update: Failed to check firewall tools. %s", err)
 	}
 
 	// Step 2: Delete the old rule using old_rule_id
@@ -998,9 +998,9 @@ func (cr *CommandRunner) validateFirewallRuleData() error {
 
 // executeSingleFirewallRule executes a single firewall rule operation
 func (cr *CommandRunner) executeSingleFirewallRule() (exitCode int, result string) {
-	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.CheckFirewallTool()
 	if err != nil {
-		return 1, fmt.Sprintf("firewall: Failed to install firewall tools. %s", err)
+		return 1, fmt.Sprintf("firewall: Failed to check firewall tools. %s", err)
 	}
 
 	if nftablesInstalled {
@@ -1732,10 +1732,10 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 		}
 	}
 
-	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.CheckFirewallTool()
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to install firewall tools for rollback")
-		return 1, fmt.Sprintf("firewall-rollback: Failed to install firewall tools. %s", err)
+		log.Error().Err(err).Msg("Failed to check firewall tools for rollback")
+		return 1, fmt.Sprintf("firewall-rollback: Failed to check firewall tools. %s", err)
 	}
 
 	// Handle different rollback actions
@@ -1935,10 +1935,10 @@ func (cr *CommandRunner) performIptablesRollback(chainName, method string) (int,
 //
 //	if false, only add new rules (incremental)
 func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface{}, bool, string) {
-	// Install firewall tools if needed
-	_, _, err := utils.InstallFirewall()
+	// Check firewall tools if needed
+	_, _, err := utils.CheckFirewallTool()
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to install firewall tools")
+		log.Error().Err(err).Msg("Failed to check firewall tools")
 		return 0, nil, false, ""
 	}
 

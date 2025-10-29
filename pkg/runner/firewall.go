@@ -28,7 +28,7 @@ func (cr *CommandRunner) firewallReorderRules() (exitCode int, result string) {
 	log.Debug().Msgf("Reordering %d rules in chain %s", len(cr.data.Rules), cr.data.ChainName)
 
 	// Detect firewall backend
-	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.CheckFirewallTool()
 	if err != nil {
 		return 1, fmt.Sprintf("firewall-reorder-rules: Failed to check firewall installation: %v", err)
 	}
@@ -93,7 +93,7 @@ func (cr *CommandRunner) firewallReorderChains() (exitCode int, result string) {
 	log.Debug().Msgf("Reordering chains: %v", chainNames)
 
 	// Detect firewall backend
-	nftablesInstalled, iptablesInstalled, err := utils.InstallFirewall()
+	nftablesInstalled, iptablesInstalled, err := utils.CheckFirewallTool()
 	if err != nil {
 		return 1, fmt.Sprintf("firewall-reorder-chains: Failed to check firewall installation: %v", err)
 	}
