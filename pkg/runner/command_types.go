@@ -72,8 +72,8 @@ type CommandData struct {
 	Priority                int                      `json:"priority"`
 	RuleType                string                   `json:"rule_type"`
 	Rules                   []map[string]interface{} `json:"rules"`
-	Operation               string                   `json:"operation"` // batch, flush, delete, add, update
-	RuleID                  string                   `json:"rule_id"`   // for rule-specific operations (add/update: new rule ID)
+	Operation               string                   `json:"operation"`   // batch, flush, delete, add, update
+	RuleID                  string                   `json:"rule_id"`     // for rule-specific operations (add/update: new rule ID)
 	OldRuleID               string                   `json:"old_rule_id"` // for update operation: old rule ID to delete
 	AssignmentID            string                   `json:"assignment_id"`
 	ServerID                string                   `json:"server_id"`
