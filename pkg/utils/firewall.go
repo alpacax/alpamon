@@ -14,13 +14,13 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// Firewall installation state (caching)
+// Firewall tool check state (caching)
 var (
-	firewallInstallMutex       sync.Mutex
-	firewallInstallAttempted   bool
-	firewallNftablesInstalled  bool
-	firewallIptablesInstalled  bool
-	firewallInstallError       error
+	firewallCheckMutex       sync.Mutex
+	firewallCheckAttempted   bool
+	firewallNftablesInstalled bool
+	firewallIptablesInstalled bool
+	firewallCheckError       error
 )
 
 // Default values matching alpacon-server FirewallRuleSyncSerializer
@@ -94,99 +94,41 @@ func runFirewallCommand(args []string, timeout int) (exitCode int, output string
 	return commandExecutor(args, "root", "", nil, timeout)
 }
 
-// InstallFirewall checks and installs firewall tools (nftables or iptables)
+// CheckFirewallTool checks if firewall tools (nftables or iptables) are installed
 // Returns (nftablesInstalled, iptablesInstalled, error)
-func InstallFirewall() (nftablesInstalled bool, iptablesInstalled bool, err error) {
-	// Use mutex to prevent concurrent installation attempts
-	firewallInstallMutex.Lock()
-	defer firewallInstallMutex.Unlock()
+// If neither tool is installed, returns an error without attempting installation
+func CheckFirewallTool() (nftablesInstalled bool, iptablesInstalled bool, err error) {
+	// Use mutex to prevent concurrent checks
+	firewallCheckMutex.Lock()
+	defer firewallCheckMutex.Unlock()
 
-	// Return cached result if we've already attempted installation
-	if firewallInstallAttempted {
-		return firewallNftablesInstalled, firewallIptablesInstalled, firewallInstallError
+	// Return cached result if we've already checked
+	if firewallCheckAttempted {
+		return firewallNftablesInstalled, firewallIptablesInstalled, firewallCheckError
 	}
 
 	// Check if nftables is installed
 	_, nftablesResult := runFirewallCommand([]string{"which", "nft"}, 0)
 	nftablesInstalled = strings.Contains(nftablesResult, "nft")
 
+	// Check if iptables is installed (only if nftables is not)
 	if !nftablesInstalled {
 		_, iptablesResult := runFirewallCommand([]string{"which", "iptables"}, 0)
 		iptablesInstalled = strings.Contains(iptablesResult, "iptables")
 	}
 
-	if nftablesInstalled || iptablesInstalled {
-		// Cache successful detection
-		firewallInstallAttempted = true
-		firewallNftablesInstalled = nftablesInstalled
-		firewallIptablesInstalled = iptablesInstalled
-		firewallInstallError = nil
-		return nftablesInstalled, iptablesInstalled, nil
-	}
-
-	// If neither is installed, attempt installation (only once)
-	if !nftablesInstalled && !iptablesInstalled {
-		log.Info().Msg("No firewall tools installed. Attempting to install nftables.")
-		var installCmd []string
-		if PlatformLike == "debian" {
-			updateCmd := []string{"apt-get", "update"}
-			exitCode, result := runFirewallCommand(updateCmd, 0)
-			if exitCode != 0 {
-				return false, false, fmt.Errorf("failed to update package list: %s", result)
-			}
-			installCmd = []string{"apt-get", "install", "-y", "nftables"}
-		} else if PlatformLike == "rhel" {
-			installCmd = []string{"yum", "install", "-y", "nftables"}
-		} else {
-			return false, false, fmt.Errorf("unsupported operating system")
-		}
-
-		exitCode, _ := runFirewallCommand(installCmd, 0)
-		_, nftablesResult = runFirewallCommand([]string{"which", "nft"}, 0)
-		nftablesInstalled = strings.Contains(nftablesResult, "nft")
-		if exitCode != 0 || !nftablesInstalled {
-			log.Warn().Msg("Failed to install nftables. Attempting to install iptables.")
-
-			if PlatformLike == "debian" {
-				updateCmd := []string{"apt-get", "update"}
-				exitCode, result := runFirewallCommand(updateCmd, 0)
-				if exitCode != 0 {
-					return false, false, fmt.Errorf("failed to update package list for iptables: %s", result)
-				}
-				installCmd = []string{"apt-get", "install", "-y", "iptables"}
-			} else if PlatformLike == "rhel" {
-				installCmd = []string{"yum", "install", "-y", "iptables"}
-			}
-
-			exitCode, _ = runFirewallCommand(installCmd, 0)
-			_, iptablesResult := runFirewallCommand([]string{"which", "iptables"}, 0)
-			iptablesInstalled = strings.Contains(iptablesResult, "iptables")
-			if exitCode != 0 || !iptablesInstalled {
-				// Cache the failure
-				firewallInstallAttempted = true
-				firewallNftablesInstalled = false
-				firewallIptablesInstalled = false
-				firewallInstallError = fmt.Errorf("failed to install firewall tools")
-				return false, false, firewallInstallError
-			}
-		}
-
-	}
-
-	if !nftablesInstalled && !iptablesInstalled {
-		// Cache the failure
-		firewallInstallAttempted = true
-		firewallNftablesInstalled = false
-		firewallIptablesInstalled = false
-		firewallInstallError = fmt.Errorf("failed to install firewall management tool")
-		return false, false, firewallInstallError
-	}
-
-	// Cache the successful installation
-	firewallInstallAttempted = true
+	// Cache the result
+	firewallCheckAttempted = true
 	firewallNftablesInstalled = nftablesInstalled
 	firewallIptablesInstalled = iptablesInstalled
-	firewallInstallError = nil
+
+	// Return error if neither tool is installed
+	if !nftablesInstalled && !iptablesInstalled {
+		firewallCheckError = fmt.Errorf("firewall tool not installed: neither nftables nor iptables is available")
+		return false, false, firewallCheckError
+	}
+
+	firewallCheckError = nil
 	return nftablesInstalled, iptablesInstalled, nil
 }
 
@@ -395,7 +337,7 @@ func CollectFirewallRules() (*FirewallSyncPayload, error) {
 	firewallRulesCache.mu.RUnlock()
 
 	// Check which firewall tool is available
-	nftablesInstalled, iptablesInstalled, err := InstallFirewall()
+	nftablesInstalled, iptablesInstalled, err := CheckFirewallTool()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check firewall installation: %w", err)
 	}
@@ -421,8 +363,9 @@ func CollectFirewallRules() (*FirewallSyncPayload, error) {
 			chains[chain.Name] = chain.Rules
 		}
 	} else {
-		log.Debug().Msg("No firewall tools available, skipping firewall sync")
-		return &FirewallSyncPayload{Chains: []FirewallChainSync{}}, nil
+		// This should never happen as CheckFirewallTool() already returns error
+		// if neither tool is installed, but keep as safety fallback
+		return nil, fmt.Errorf("no firewall tools available")
 	}
 
 	// Update cache
@@ -839,7 +782,7 @@ func RemoveFirewallRulesByType(ruleType string) (int, error) {
 		return 0, nil
 	}
 
-	nftablesInstalled, iptablesInstalled, err := InstallFirewall()
+	nftablesInstalled, iptablesInstalled, err := CheckFirewallTool()
 	if err != nil {
 		return 0, fmt.Errorf("failed to check firewall availability: %w", err)
 	}
@@ -1147,7 +1090,7 @@ func ReorderIptablesChains(chainNames []string) (map[string]interface{}, error) 
 // BackupFirewallRules creates a backup of current firewall rules
 // Returns the backup string and error
 func BackupFirewallRules() (string, error) {
-	nftablesInstalled, iptablesInstalled, err := InstallFirewall()
+	nftablesInstalled, iptablesInstalled, err := CheckFirewallTool()
 	if err != nil {
 		return "", fmt.Errorf("failed to check firewall installation: %w", err)
 	}
@@ -1178,7 +1121,7 @@ func RestoreFirewallRules(backup string) error {
 		return fmt.Errorf("empty backup provided")
 	}
 
-	nftablesInstalled, iptablesInstalled, err := InstallFirewall()
+	nftablesInstalled, iptablesInstalled, err := CheckFirewallTool()
 	if err != nil {
 		return fmt.Errorf("failed to check firewall installation: %w", err)
 	}
