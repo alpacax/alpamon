@@ -33,9 +33,6 @@ const (
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
 
-	dpkgDbPath     = "/var/lib/dpkg/status"
-	dpkgBufferSize = 1024 * 1024
-
 	IFF_UP          = 1 << 0 // Interface is up
 	IFF_LOOPBACK    = 1 << 3 // Loopback interface
 	IFF_POINTOPOINT = 1 << 4 // Point-to-point link
