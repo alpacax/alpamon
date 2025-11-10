@@ -162,9 +162,15 @@ func detectFirewallBackend() string {
 
 	// 2. iptables-save failed, try fallback with iptables -S
 	exitCode, output = runFirewallCommand([]string{"iptables", "-S"}, 10)
-	if exitCode == 0 && (strings.Contains(output, "\n-A ") || strings.Contains(output, "\n-I ")) {
-		log.Debug().Msg("Found iptables rules via iptables -S")
-		return "iptables"
+	if exitCode == 0 {
+		// Check for rules (iptables -S output starts with -P, -A, -I, etc)
+		for _, line := range strings.Split(output, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "-A ") || strings.HasPrefix(line, "-I ") {
+				log.Debug().Msg("Found iptables rules via iptables -S")
+				return "iptables"
+			}
+		}
 	}
 
 	// 3. No iptables rules found, check if nft is available
