@@ -33,32 +33,71 @@ type File struct {
 }
 
 type CommandData struct {
-	SessionID               string   `json:"session_id"`
-	URL                     string   `json:"url"`
-	Rows                    uint16   `json:"rows"`
-	Cols                    uint16   `json:"cols"`
-	Username                string   `json:"username"`
-	Groupname               string   `json:"groupname"`
-	Groupnames              []string `json:"groupnames"`
-	HomeDirectory           string   `json:"home_directory"`
-	HomeDirectoryPermission string   `json:"home_directory_permission"`
-	PurgeHomeDirectory      bool     `json:"purge_home"`
-	UID                     uint64   `json:"uid"`
-	GID                     uint64   `json:"gid"`
-	Comment                 string   `json:"comment"`
-	Shell                   string   `json:"shell"`
-	Groups                  []uint64 `json:"groups"`
-	Type                    string   `json:"type"`
-	Content                 string   `json:"content"`
-	Path                    string   `json:"path"`
-	Paths                   []string `json:"paths"`
-	Files                   []File   `json:"files,omitempty"`
-	AllowOverwrite          bool     `json:"allow_overwrite,omitempty"`
-	AllowUnzip              bool     `json:"allow_unzip,omitempty"`
-	UseBlob                 bool     `json:"use_blob,omitempty"`
-	Keys                    []string `json:"keys"`
+	SessionID               string                   `json:"session_id"`
+	URL                     string                   `json:"url"`
+	Rows                    uint16                   `json:"rows"`
+	Cols                    uint16                   `json:"cols"`
+	Username                string                   `json:"username"`
+	Groupname               string                   `json:"groupname"`
+	Groupnames              []string                 `json:"groupnames"`
+	HomeDirectory           string                   `json:"home_directory"`
+	HomeDirectoryPermission string                   `json:"home_directory_permission"`
+	PurgeHomeDirectory      bool                     `json:"purge_home"`
+	UID                     uint64                   `json:"uid"`
+	GID                     uint64                   `json:"gid"`
+	Comment                 string                   `json:"comment"`
+	Shell                   string                   `json:"shell"`
+	Groups                  []uint64                 `json:"groups"`
+	Type                    string                   `json:"type"`
+	Content                 string                   `json:"content"`
+	Path                    string                   `json:"path"`
+	Paths                   []string                 `json:"paths"`
+	Files                   []File                   `json:"files,omitempty"`
+	AllowOverwrite          bool                     `json:"allow_overwrite,omitempty"`
+	AllowUnzip              bool                     `json:"allow_unzip,omitempty"`
+	UseBlob                 bool                     `json:"use_blob,omitempty"`
+	Keys                    []string                 `json:"keys"`
+	ChainName               string                   `json:"chain_name"`
+	Method                  string                   `json:"method"`
+	Chain                   string                   `json:"chain"`
+	Protocol                string                   `json:"protocol"`
+	PortStart               int                      `json:"port_start"`
+	PortEnd                 int                      `json:"port_end"`
+	DPorts                  []int                    `json:"dports"`
+	ICMPType                string                   `json:"icmp_type"`
+	Source                  string                   `json:"source"`
+	Destination             string                   `json:"destination"`
+	Target                  string                   `json:"target"`
+	Description             string                   `json:"description"`
+	Priority                int                      `json:"priority"`
+	RuleType                string                   `json:"rule_type"`
+	Rules                   []map[string]interface{} `json:"rules"`
+	Operation               string                   `json:"operation"`   // batch, flush, delete, add, update
+	RuleID                  string                   `json:"rule_id"`     // for rule-specific operations (add/update: new rule ID)
+	OldRuleID               string                   `json:"old_rule_id"` // for update operation: old rule ID to delete
+	AssignmentID            string                   `json:"assignment_id"`
+	ServerID                string                   `json:"server_id"`
+	ChainNames              []string                 `json:"chain_names"` // for firewall-reorder-chains
 }
 
+type firewallData struct {
+	ChainName   string `validate:"required"`
+	Method      string `validate:"omitempty"`
+	Chain       string `validate:"omitempty"`
+	Protocol    string `validate:"omitempty"`
+	PortStart   int    `validate:"omitempty"`
+	PortEnd     int    `validate:"omitempty"`
+	DPorts      []int  `validate:"omitempty"`
+	ICMPType    string `validate:"omitempty"`
+	Source      string `validate:"omitempty"`
+	Destination string `validate:"omitempty"`
+	Target      string `validate:"omitempty"`
+	Description string `validate:"omitempty"`
+	Priority    int    `validate:"omitempty"`
+	RuleType    string `validate:"omitempty,oneof=alpacon server"`
+	RuleID      string `validate:"omitempty"`
+	Operation   string `validate:"required"` // batch, flush, delete, add, update
+}
 type CommandRunner struct {
 	name       string
 	command    Command

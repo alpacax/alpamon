@@ -59,10 +59,11 @@ func NewPtyClient(data CommandData, apiSession *scheduler.Session) *PtyClient {
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
 	}
+
 	return &PtyClient{
 		apiSession:    apiSession,
 		requestHeader: headers,
-		url:           strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + data.URL,
+		url:           data.URL,
 		rows:          data.Rows,
 		cols:          data.Cols,
 		username:      data.Username,

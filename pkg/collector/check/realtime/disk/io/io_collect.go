@@ -53,7 +53,7 @@ func (c *CollectCheck) parseDiskIO(ioCounters map[string]disk.IOCountersStat) []
 		}
 
 		baseName := utils.GetDiskBaseName(name)
-		if seen[baseName] {
+		if seen[baseName] && baseName != name {
 			continue
 		}
 		seen[baseName] = true

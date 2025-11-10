@@ -1,8 +1,9 @@
 package runner
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestGetLoadAverage(t *testing.T) {
@@ -91,18 +92,5 @@ func TestGetNetworkAddresses(t *testing.T) {
 		assert.NotEmpty(t, addr.Broadcast, "Broadcast address should not be empty.")
 		assert.NotEmpty(t, addr.InterfaceName, "Interface name should not be empty.")
 		assert.NotEmpty(t, addr.Mask, "Mask should not be empty.")
-	}
-}
-
-func TestGetSystemPackages(t *testing.T) {
-	systemPackages, err := getSystemPackages()
-	assert.NoError(t, err, "Failed to get system packages")
-
-	if len(systemPackages) > 0 {
-		for _, pkg := range systemPackages {
-			assert.NotEmpty(t, pkg.Name, "Package name should not be empty.")
-			assert.NotEmpty(t, pkg.Version, "Package version should not be empty.")
-			assert.NotEmpty(t, pkg.Arch, "Package architecture should not be empty.")
-		}
 	}
 }

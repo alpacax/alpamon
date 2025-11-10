@@ -47,11 +47,6 @@ var commitDefs = map[string]commitDef{
 		URL:       "/api/proc/addresses/",
 		URLSuffix: "sync/",
 	},
-	"packages": {
-		MultiRow:  true,
-		URL:       "/api/proc/packages/",
-		URLSuffix: "sync/",
-	},
 	"disks": {
 		MultiRow:  true,
 		URL:       "/api/proc/disks/",
@@ -60,6 +55,11 @@ var commitDefs = map[string]commitDef{
 	"partitions": {
 		MultiRow:  true,
 		URL:       "/api/proc/partitions/",
+		URLSuffix: "sync/",
+	},
+	"firewall": {
+		MultiRow:  false,
+		URL:       "/api/firewall/agent/",
 		URLSuffix: "sync/",
 	},
 }
@@ -120,14 +120,6 @@ type GroupData struct {
 	GroupName string `json:"groupname"`
 }
 
-type SystemPackageData struct {
-	ID      string `json:"id,omitempty"`
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Source  string `json:"source"`
-	Arch    string `json:"arch"`
-}
-
 type Interface struct {
 	ID        string `json:"id,omitempty"`
 	Name      string `json:"name"`
@@ -163,18 +155,17 @@ type Partition struct {
 }
 
 type commitData struct {
-	Version    string              `json:"version"`
-	Load       float64             `json:"load"`
-	Info       SystemData          `json:"info"`
-	OS         OSData              `json:"os"`
-	Time       TimeData            `json:"time"`
-	Users      []UserData          `json:"users"`
-	Groups     []GroupData         `json:"groups"`
-	Interfaces []Interface         `json:"interfaces"`
-	Addresses  []Address           `json:"addresses"`
-	Packages   []SystemPackageData `json:"packages"`
-	Disks      []Disk              `json:"disks"`
-	Partitions []Partition         `json:"partitions"`
+	Version    string      `json:"version"`
+	Load       float64     `json:"load"`
+	Info       SystemData  `json:"info"`
+	OS         OSData      `json:"os"`
+	Time       TimeData    `json:"time"`
+	Users      []UserData  `json:"users"`
+	Groups     []GroupData `json:"groups"`
+	Interfaces []Interface `json:"interfaces"`
+	Addresses  []Address   `json:"addresses"`
+	Disks      []Disk      `json:"disks"`
+	Partitions []Partition `json:"partitions"`
 }
 
 // Defines the ComparableData interface for comparing different types.
@@ -312,23 +303,6 @@ func (a Address) GetData() ComparableData {
 		Broadcast:     a.Broadcast,
 		InterfaceName: a.InterfaceName,
 		Mask:          a.Mask,
-	}
-}
-
-func (sp SystemPackageData) GetID() string {
-	return sp.ID
-}
-
-func (sp SystemPackageData) GetKey() interface{} {
-	return sp.Name
-}
-
-func (sp SystemPackageData) GetData() ComparableData {
-	return SystemPackageData{
-		Name:    sp.Name,
-		Version: sp.Version,
-		Source:  sp.Source,
-		Arch:    sp.Arch,
 	}
 }
 

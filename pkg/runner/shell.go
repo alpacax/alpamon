@@ -38,55 +38,12 @@ func demote(username, groupname string) (*syscall.SysProcAttr, error) {
 		return nil, fmt.Errorf("there is no corresponding %s groupname in this server", groupname)
 	}
 
-	uid, err := strconv.Atoi(usr.Uid)
+	uid, err := strconv.ParseUint(usr.Uid, 10, 32)
 	if err != nil {
 		return nil, err
 	}
 
-	gid, err := strconv.Atoi(group.Gid)
-	if err != nil {
-		return nil, err
-	}
-
-	log.Debug().Msgf("Demote permission to match user: %s, group: %s.", username, groupname)
-
-	return &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid: uint32(uid),
-			Gid: uint32(gid),
-		},
-	}, nil
-}
-
-func demoteFtp(username, groupname string) (*syscall.SysProcAttr, error) {
-	currentUid := os.Getuid()
-
-	if username == "" || groupname == "" {
-		log.Debug().Msg("No username or groupname provided, running as the current user.")
-		return nil, nil
-	}
-
-	if currentUid != 0 {
-		log.Warn().Msg("Alpamon is not running as root. Falling back to the current user.")
-		return nil, nil
-	}
-
-	usr, err := user.Lookup(username)
-	if err != nil {
-		return nil, fmt.Errorf("there is no corresponding %s username in this server", username)
-	}
-
-	group, err := user.LookupGroup(groupname)
-	if err != nil {
-		return nil, fmt.Errorf("there is no corresponding %s groupname in this server", groupname)
-	}
-
-	uid, err := strconv.Atoi(usr.Uid)
-	if err != nil {
-		return nil, err
-	}
-
-	gid, err := strconv.Atoi(group.Gid)
+	gid, err := strconv.ParseUint(group.Gid, 10, 32)
 	if err != nil {
 		return nil, err
 	}
@@ -97,10 +54,75 @@ func demoteFtp(username, groupname string) (*syscall.SysProcAttr, error) {
 	}
 
 	groups := make([]uint32, 0, len(groupIds))
+	groupInList := false
+	for _, gidStr := range groupIds {
+		gidUint, err := strconv.ParseUint(gidStr, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+		if gidUint == gid {
+			groupInList = true
+		}
+		groups = append(groups, uint32(gidUint))
+	}
+	if !groupInList {
+		return nil, fmt.Errorf("groupname %s is not in user %s's group list", groupname, username)
+	}
+
+	log.Debug().Msgf("Demote permission to match user: %s, group: %s.", username, groupname)
+
+	return &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    uint32(uid),
+			Gid:    uint32(gid),
+			Groups: groups,
+		},
+	}, nil
+}
+
+func demoteFtp(username, groupname string) (*syscall.SysProcAttr, string, error) {
+	currentUid := os.Getuid()
+
+	if username == "" || groupname == "" {
+		log.Debug().Msg("No username or groupname provided, running as the current user.")
+		return nil, "", nil
+	}
+
+	if currentUid != 0 {
+		log.Warn().Msg("Alpamon is not running as root. Falling back to the current user.")
+		return nil, "", nil
+	}
+
+	usr, err := user.Lookup(username)
+	if err != nil {
+		return nil, "", fmt.Errorf("there is no corresponding %s username in this server", username)
+	}
+
+	group, err := user.LookupGroup(groupname)
+	if err != nil {
+		return nil, "", fmt.Errorf("there is no corresponding %s groupname in this server", groupname)
+	}
+
+	uid, err := strconv.ParseUint(usr.Uid, 10, 32)
+	if err != nil {
+		return nil, "", err
+	}
+
+	gid, err := strconv.ParseUint(group.Gid, 10, 32)
+	if err != nil {
+		return nil, "", err
+	}
+
+	groupIds, err := usr.GroupIds()
+	if err != nil {
+		return nil, "", err
+	}
+
+	groups := make([]uint32, 0, len(groupIds))
 	for _, gidStr := range groupIds {
 		gidInt, err := strconv.Atoi(gidStr)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		groups = append(groups, uint32(gidInt))
 	}
@@ -113,7 +135,7 @@ func demoteFtp(username, groupname string) (*syscall.SysProcAttr, error) {
 			Gid:    uint32(gid),
 			Groups: groups,
 		},
-	}, nil
+	}, usr.HomeDir, nil
 }
 
 func runCmdWithOutput(args []string, username, groupname string, env map[string]string, timeout int) (exitCode int, result string) {

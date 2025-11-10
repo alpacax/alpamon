@@ -2,14 +2,10 @@ package runner
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/textproto"
 	"os"
 	"strconv"
 	"strings"
@@ -21,7 +17,6 @@ import (
 	"github.com/alpacax/alpamon/pkg/version"
 	_ "github.com/glebarez/go-sqlite"
 	"github.com/google/go-cmp/cmp"
-	rpmdb "github.com/knqyf263/go-rpmdb/pkg"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
@@ -31,29 +26,18 @@ import (
 )
 
 const (
-	commitURL = "/api/servers/servers/-/commit/"
-	eventURL  = "/api/events/events/"
+	commitURL       = "/api/servers/servers/-/commit/"
+	eventURL        = "/api/events/events/"
+	firewallSyncURL = "/api/firewall/agent/sync/"
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
-
-	dpkgDbPath     = "/var/lib/dpkg/status"
-	dpkgBufferSize = 1024 * 1024
 
 	IFF_UP          = 1 << 0 // Interface is up
 	IFF_LOOPBACK    = 1 << 3 // Loopback interface
 	IFF_POINTOPOINT = 1 << 4 // Point-to-point link
 	IFF_RUNNING     = 1 << 6 // Interface is running
 )
-
-var rpmDpPath = []string{
-	"/var/lib/rpm/Packages",
-	"/var/lib/rpm/rpmdb.sqlite",
-	"/usr/lib/sysimage/rpm/rpmdb.sqlite",
-	"/usr/lib/sysimage/rpm/Packages.db",
-	"/var/lib/rpm/Packages.db",
-	"/usr/lib/sysimage/rpm/Packages",
-}
 
 var syncMutex sync.Mutex
 
@@ -76,8 +60,17 @@ func commitSystemInfo() {
 	scheduler.Rqueue.Put(commitURL, data, 80, time.Time{})
 	scheduler.Rqueue.Post(eventURL, []byte(fmt.Sprintf(`{
 		"reporter": "alpamon",
-		"record": "committed", 
+		"record": "committed",
 		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
+
+	// Sync firewall rules after committing system info
+	// Always sync with alpacon regardless of current ruleset state
+	firewallData, err := utils.CollectFirewallRules()
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to collect firewall rules during commit.")
+	} else {
+		scheduler.Rqueue.Post(firewallSyncURL, firewallData, 80, time.Time{})
+	}
 
 	log.Info().Msg("Completed committing system information.")
 }
@@ -150,11 +143,6 @@ func syncSystemInfo(session *scheduler.Session, keys []string) {
 				log.Debug().Err(err).Msg("Failed to retrieve network addresses.")
 			}
 			remoteData = &[]Address{}
-		case "packages":
-			if currentData, err = getSystemPackages(); err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve system packages.")
-			}
-			remoteData = &[]SystemPackageData{}
 		case "disks":
 			if currentData, err = getDisks(); err != nil {
 				log.Debug().Err(err).Msg("Failed to retrieve disks.")
@@ -165,6 +153,16 @@ func syncSystemInfo(session *scheduler.Session, keys []string) {
 				log.Debug().Err(err).Msg("Failed to retrieve partitions.")
 			}
 			remoteData = &[]Partition{}
+		case "firewall":
+			// Firewall sync only posts current rules without comparison
+			// Early return to avoid unnecessary processing
+			firewallData, err := utils.CollectFirewallRules()
+			if err != nil {
+				log.Debug().Err(err).Msg("Failed to collect firewall rules.")
+				continue
+			}
+			scheduler.Rqueue.Post(utils.JoinPath(entry.URL, entry.URLSuffix), firewallData, 80, time.Time{})
+			continue
 		default:
 			log.Warn().Msgf("Unknown key: %s", key)
 			continue
@@ -265,9 +263,6 @@ func collectData() *commitData {
 	}
 	if data.Addresses, err = getNetworkAddresses(); err != nil {
 		log.Debug().Err(err).Msg("Failed to retrieve network addresses.")
-	}
-	if data.Packages, err = getSystemPackages(); err != nil {
-		log.Debug().Err(err).Msg("Failed to retrieve system packages.")
 	}
 	if data.Disks, err = getDisks(); err != nil {
 		log.Debug().Err(err).Msg("Failed to retrieve disks.")
@@ -565,113 +560,6 @@ func calculateBroadcastAddress(ip net.IP, mask net.IPMask) string {
 	return broadcast.String()
 }
 
-func getSystemPackages() ([]SystemPackageData, error) {
-	if utils.PlatformLike == "debian" {
-		return getDpkgPackage()
-	} else if utils.PlatformLike == "rhel" {
-		for _, path := range rpmDpPath {
-			rpmPackage, err := getRpmPackage(path)
-			if err == nil && len(rpmPackage) > 0 {
-				return rpmPackage, nil
-			}
-		}
-	}
-
-	return []SystemPackageData{}, nil
-}
-
-func getDpkgPackage() ([]SystemPackageData, error) {
-	fd, err := os.Open(dpkgDbPath)
-	if err != nil {
-		log.Debug().Err(err).Msgf("Failed to open %s file.", dpkgDbPath)
-		return []SystemPackageData{}, err
-	}
-	defer func() { _ = fd.Close() }()
-
-	var packages []SystemPackageData
-	scanner := bufio.NewScanner(fd)
-	scanner.Split(utils.ScanBlock)
-
-	buf := make([]byte, 0, dpkgBufferSize)
-	scanner.Buffer(buf, dpkgBufferSize)
-
-	pkgNamePrefix := []byte("Package:")
-	for scanner.Scan() {
-		chunk := scanner.Bytes()
-		lines := bytes.Split(chunk, []byte("\n"))
-
-		var pkgName string
-		for _, line := range lines {
-			if bytes.HasPrefix(line, pkgNamePrefix) {
-				pkgName = string(bytes.TrimSpace(line[len(pkgNamePrefix):]))
-				break
-			}
-		}
-
-		if pkgName == "" {
-			continue
-		}
-
-		reader := textproto.NewReader(bufio.NewReader(bytes.NewReader(chunk)))
-		header, err := reader.ReadMIMEHeader()
-		if err != nil && !errors.Is(err, io.EOF) {
-			log.Error().Err(err).Msgf("Failed to parse package %s", pkgName)
-			continue
-		}
-
-		pkg := SystemPackageData{
-			Name:    header.Get("Package"),
-			Version: header.Get("Version"),
-			Source:  header.Get("Source"),
-			Arch:    header.Get("Architecture"),
-		}
-
-		if pkg.Name == "" || pkg.Version == "" {
-			log.Debug().Msgf("Skip malformed package entry: %s", chunk)
-			continue
-		}
-
-		packages = append(packages, pkg)
-	}
-
-	if err = scanner.Err(); err != nil {
-		log.Error().Err(err).Msg("Error occurred while scanning dpkg status file.")
-		return nil, err
-	}
-
-	return packages, nil
-}
-
-func getRpmPackage(path string) ([]SystemPackageData, error) {
-	db, err := rpmdb.Open(path)
-	if err != nil {
-		log.Debug().Err(err).Msgf("Failed to open %s file: %v.", path, err)
-		return []SystemPackageData{}, err
-	}
-
-	defer func() { _ = db.Close() }()
-
-	pkgList, err := db.ListPackages()
-	if err != nil {
-		log.Debug().Err(err).Msgf("Failed to list packages: %v.", err)
-		return []SystemPackageData{}, err
-	}
-
-	var packages []SystemPackageData
-	for _, pkg := range pkgList {
-		rpmPkg := SystemPackageData{
-			Name:    pkg.Name,
-			Version: pkg.Version,
-			Source:  pkg.SourceRpm,
-			Arch:    pkg.Arch,
-		}
-
-		packages = append(packages, rpmPkg)
-	}
-
-	return packages, nil
-}
-
 func getDisks() ([]Disk, error) {
 	ioCounters, err := disk.IOCounters()
 	seen := make(map[string]bool)
@@ -693,7 +581,7 @@ func getDisks() ([]Disk, error) {
 		seen[baseName] = true
 
 		disks = append(disks, Disk{
-			Name:         name,
+			Name:         baseName,
 			SerialNumber: ioCounter.SerialNumber,
 			Label:        ioCounter.Label,
 		})
@@ -747,8 +635,6 @@ func dispatchComparison(entry commitDef, currentData, remoteData any) {
 		compareListData(entry, currentData.([]Interface), *v)
 	case *[]Address:
 		compareListData(entry, currentData.([]Address), *v)
-	case *[]SystemPackageData:
-		compareListData(entry, currentData.([]SystemPackageData), *v)
 	case *[]Disk:
 		compareListData(entry, currentData.([]Disk), *v)
 	case *[]Partition:
