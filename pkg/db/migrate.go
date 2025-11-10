@@ -210,18 +210,18 @@ func applyMigration(ctx context.Context, db *sql.DB, mf MigrationFile) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		err = tx.Rollback()
+		if err != nil && err != sql.ErrTxDone {
+			log.Error().Err(err).Msg("Failed to rollback transaction")
+		}
+	}()
 
 	// Execute migration SQL
 	_, err = tx.ExecContext(ctx, mf.Content)
 	if err != nil {
 		// Log the SQL that failed for debugging
-		log.Error().
-			Err(err).
-			Str("version", mf.Version).
-			Str("description", mf.Description).
-			Str("sql", mf.Content).
-			Msg("migration SQL execution failed")
+		log.Error().Err(err).Msgf("migration SQL execution failed: %s", mf.Content)
 
 		// Record failure in tracking table (use separate connection since tx will rollback)
 		_ = recordMigrationFailure(ctx, db, mf, err, startTime)
@@ -292,15 +292,4 @@ func recordMigrationFailure(ctx context.Context, db *sql.DB, mf MigrationFile, m
 	}
 
 	return nil
-}
-
-// getMigrationDir returns the migration subdirectory from the embedded filesystem
-// Kept for backward compatibility if needed
-func getMigrationDir() (fs.FS, error) {
-	migrationFS, err := fs.Sub(migrations, "migration")
-	if err != nil {
-		return nil, err
-	}
-
-	return migrationFS, nil
 }

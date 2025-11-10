@@ -271,7 +271,9 @@ func TestRecordMigrationSuccess(t *testing.T) {
 	// Begin transaction
 	tx, err := db.BeginTx(ctx, nil)
 	require.NoError(t, err)
-	defer tx.Rollback()
+	defer func() {
+		_ = tx.Rollback() // Ignore error in test cleanup
+	}()
 
 	// Record success
 	mf := MigrationFile{
