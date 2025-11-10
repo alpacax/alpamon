@@ -16,11 +16,11 @@ import (
 
 // Firewall tool check state (caching)
 var (
-	firewallCheckMutex       sync.Mutex
-	firewallCheckAttempted   bool
+	firewallCheckMutex        sync.Mutex
+	firewallCheckAttempted    bool
 	firewallNftablesInstalled bool
 	firewallIptablesInstalled bool
-	firewallCheckError       error
+	firewallCheckError        error
 )
 
 // Default values matching alpacon-server FirewallRuleSyncSerializer
@@ -31,9 +31,9 @@ const (
 	DefaultTarget   = "ACCEPT"
 
 	// Rule types for progressive removal
-	RuleTypeUnknown = ""         // Rules without type (remove first)
-	RuleTypeServer  = "server"   // Server-synced rules (remove second)
-	RuleTypeAlpacon = "alpacon"  // Alpacon-created rules (remove last)
+	RuleTypeUnknown = ""        // Rules without type (remove first)
+	RuleTypeServer  = "server"  // Server-synced rules (remove second)
+	RuleTypeAlpacon = "alpacon" // Alpacon-created rules (remove last)
 )
 
 // FirewallChainSync represents a firewall chain for sync payload

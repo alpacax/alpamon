@@ -761,7 +761,6 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 	return nil
 }
 
-
 func (cr *CommandRunner) firewall() (exitCode int, result string) {
 	log.Info().Msgf("Firewall operation: %s, ChainName: %s", cr.data.Operation, cr.data.ChainName)
 

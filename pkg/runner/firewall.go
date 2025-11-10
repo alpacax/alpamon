@@ -10,10 +10,10 @@ import (
 // firewallReorderRules handles the firewall-reorder-rules command
 // Flushes a chain and reapplies all rules in the specified order
 // TODO: Implement zero-downtime reordering to prevent complete firewall shutdown:
-//   1. Create temporary table/chain with new rules in desired order
-//   2. Atomically swap with existing table/chain
-//   3. Clean up old table/chain
-//   This prevents firewall from being completely down during flush+reorder
+//  1. Create temporary table/chain with new rules in desired order
+//  2. Atomically swap with existing table/chain
+//  3. Clean up old table/chain
+//     This prevents firewall from being completely down during flush+reorder
 func (cr *CommandRunner) firewallReorderRules() (exitCode int, result string) {
 	log.Info().Msgf("Firewall reorder rules command received for chain: %s", cr.data.ChainName)
 
@@ -77,10 +77,10 @@ func (cr *CommandRunner) firewallReorderRules() (exitCode int, result string) {
 // firewallReorderChains handles the firewall-reorder-chains command
 // Reorders INPUT chain jump rules for security groups
 // TODO: Implement zero-downtime chain reordering to prevent firewall shutdown:
-//   1. Create temporary chain with jump rules in new order
-//   2. Atomically swap INPUT chain reference to temporary chain
-//   3. Clean up old chain
-//   This prevents firewall from being completely down during chain reordering
+//  1. Create temporary chain with jump rules in new order
+//  2. Atomically swap INPUT chain reference to temporary chain
+//  3. Clean up old chain
+//     This prevents firewall from being completely down during chain reordering
 func (cr *CommandRunner) firewallReorderChains() (exitCode int, result string) {
 	log.Info().Msg("Firewall reorder chains command received")
 
