@@ -40,7 +40,7 @@ func (cr *CommandRunner) firewallReorderRules() (exitCode int, result string) {
 	if nftablesInstalled {
 		// For nftables, chain_name is actually the table name (security group)
 		flushExitCode, flushOutput = runCmdWithOutput(
-			[]string{"nft", "flush", "table", "ip", cr.data.ChainName},
+			[]string{"nft", "flush", "table", "inet", cr.data.ChainName},
 			"root", "", nil, 10,
 		)
 	} else if iptablesInstalled {
