@@ -797,7 +797,7 @@ func (cr *CommandRunner) handleBatchOperation() (exitCode int, result string) {
 	if len(cr.data.Rules) == 0 {
 		// Empty batch is considered successful (no-op)
 		log.Warn().Msgf("Firewall batch operation with no rules - treating as no-op for chain: %s", cr.data.ChainName)
-		return 0, fmt.Sprintf(`{"success": true, "applied_rules": 0, "failed_rules": [], "rolled_back": false, "rollback_reason": null, "message": "No rules to apply"}`)
+		return 0, `{"success": true, "applied_rules": 0, "failed_rules": [], "rolled_back": false, "rollback_reason": null, "message": "No rules to apply"}`
 	}
 
 	// Use the common batch apply logic with rollback on failure
