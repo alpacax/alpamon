@@ -64,12 +64,18 @@ func commitSystemInfo() {
 		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
 
 	// Sync firewall rules after committing system info
-	// Always sync with alpacon regardless of current ruleset state
-	firewallData, err := utils.CollectFirewallRules()
-	if err != nil {
-		log.Debug().Err(err).Msg("Failed to collect firewall rules during commit.")
+	// Skip if firewall functionality is disabled or high-level firewall tools are detected
+	if utils.IsFirewallDisabled() {
+		log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
+	} else if detected, toolName := utils.DetectHighLevelFirewall(); detected {
+		log.Info().Msgf("Skipping firewall sync - %s is active", toolName)
 	} else {
-		scheduler.Rqueue.Post(firewallSyncURL, firewallData, 80, time.Time{})
+		firewallData, err := utils.CollectFirewallRules()
+		if err != nil {
+			log.Debug().Err(err).Msg("Failed to collect firewall rules during commit.")
+		} else {
+			scheduler.Rqueue.Post(firewallSyncURL, firewallData, 80, time.Time{})
+		}
 	}
 
 	log.Info().Msg("Completed committing system information.")
@@ -155,7 +161,15 @@ func syncSystemInfo(session *scheduler.Session, keys []string) {
 			remoteData = &[]Partition{}
 		case "firewall":
 			// Firewall sync only posts current rules without comparison
-			// Early return to avoid unnecessary processing
+			// Skip if firewall functionality is disabled or high-level firewall tools are detected
+			if utils.IsFirewallDisabled() {
+				log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
+				continue
+			}
+			if detected, toolName := utils.DetectHighLevelFirewall(); detected {
+				log.Info().Msgf("Skipping firewall sync - %s is active", toolName)
+				continue
+			}
 			firewallData, err := utils.CollectFirewallRules()
 			if err != nil {
 				log.Debug().Err(err).Msg("Failed to collect firewall rules.")

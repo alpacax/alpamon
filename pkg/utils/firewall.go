@@ -21,6 +21,20 @@ var (
 	firewallNftablesInstalled bool
 	firewallIptablesInstalled bool
 	firewallCheckError        error
+
+	// Feature flag to disable automatic rule recreation
+	// Set to true to prevent conflicts with ufw/firewalld
+	disableRuleRecreation = true
+
+	// Temporary flag to disable all firewall functionality
+	// Set to true to completely disable alpacon firewall management
+	firewallFunctionalityDisabled = true
+
+	// High-level firewall detection cache
+	highLevelFirewallCheckMutex     sync.Mutex
+	highLevelFirewallCheckAttempted bool
+	highLevelFirewallDetected       bool
+	highLevelFirewallToolName       string
 )
 
 // Default values matching alpacon-server FirewallRuleSyncSerializer
@@ -85,6 +99,71 @@ func runFirewallCommand(args []string, timeout int) (exitCode int, output string
 		return 1, "firewall command executor not initialized"
 	}
 	return commandExecutor(args, "root", "", nil, timeout)
+}
+
+// IsFirewallDisabled checks if firewall functionality is disabled
+func IsFirewallDisabled() bool {
+	return firewallFunctionalityDisabled
+}
+
+// DetectHighLevelFirewall detects if high-level firewall management tools are active
+// Returns (detected, toolName) where toolName is "ufw" or "firewalld"
+func DetectHighLevelFirewall() (detected bool, toolName string) {
+	// Use mutex to prevent concurrent checks
+	highLevelFirewallCheckMutex.Lock()
+	defer highLevelFirewallCheckMutex.Unlock()
+
+	// Return cached result if we've already checked
+	if highLevelFirewallCheckAttempted {
+		return highLevelFirewallDetected, highLevelFirewallToolName
+	}
+
+	// 1. Check ufw via systemctl (most reliable)
+	exitCode, output := runFirewallCommand([]string{"systemctl", "is-active", "ufw"}, 5)
+	if exitCode == 0 && strings.TrimSpace(output) == "active" {
+		highLevelFirewallCheckAttempted = true
+		highLevelFirewallDetected = true
+		highLevelFirewallToolName = "ufw"
+		log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
+		return true, "ufw"
+	}
+
+	// 2. Fallback: Check ufw via direct command
+	exitCode, output = runFirewallCommand([]string{"ufw", "status"}, 5)
+	if exitCode == 0 && strings.Contains(strings.ToLower(output), "status: active") {
+		highLevelFirewallCheckAttempted = true
+		highLevelFirewallDetected = true
+		highLevelFirewallToolName = "ufw"
+		log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
+		return true, "ufw"
+	}
+
+	// 3. Check firewalld via systemctl
+	exitCode, output = runFirewallCommand([]string{"systemctl", "is-active", "firewalld"}, 5)
+	if exitCode == 0 && strings.TrimSpace(output) == "active" {
+		highLevelFirewallCheckAttempted = true
+		highLevelFirewallDetected = true
+		highLevelFirewallToolName = "firewalld"
+		log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
+		return true, "firewalld"
+	}
+
+	// 4. Fallback: Check firewalld via firewall-cmd
+	exitCode, output = runFirewallCommand([]string{"firewall-cmd", "--state"}, 5)
+	if exitCode == 0 && strings.Contains(strings.ToLower(output), "running") {
+		highLevelFirewallCheckAttempted = true
+		highLevelFirewallDetected = true
+		highLevelFirewallToolName = "firewalld"
+		log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
+		return true, "firewalld"
+	}
+
+	// No high-level firewall detected
+	highLevelFirewallCheckAttempted = true
+	highLevelFirewallDetected = false
+	highLevelFirewallToolName = ""
+	log.Debug().Msg("No high-level firewall detected - alpacon firewall management enabled")
+	return false, ""
 }
 
 // CheckFirewallTool checks if firewall tools (nftables or iptables) are installed
@@ -586,7 +665,8 @@ func parseNftablesRuleToSync(ruleMap map[string]interface{}) (*FirewallRuleSync,
 	rule.RuleID, rule.RuleType = ParseCommentOrGenerate(fullComment)
 
 	// If rule_id or type was missing, re-create the rule with proper metadata
-	if originalRuleID == "" || originalRuleType == "" {
+	// DISABLED: This can conflict with ufw/firewalld
+	if !disableRuleRecreation && (originalRuleID == "" || originalRuleType == "") {
 		newComment := BuildFirewallComment(existingComment, rule.RuleID, rule.RuleType)
 
 		// Get rule handle from the ruleMap
@@ -757,7 +837,8 @@ func parseIptablesSaveRuleLine(line string) *FirewallRuleSync {
 	rule.RuleID, rule.RuleType = ParseCommentOrGenerate(fullComment)
 
 	// If rule_id or type was missing, re-create the rule with proper metadata
-	if originalRuleID == "" || originalRuleType == "" {
+	// DISABLED: This can conflict with ufw/firewalld
+	if !disableRuleRecreation && (originalRuleID == "" || originalRuleType == "") {
 		newComment := BuildFirewallComment(existingComment, rule.RuleID, rule.RuleType)
 
 		// Create the rule with updated comment first
