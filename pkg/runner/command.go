@@ -761,7 +761,6 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 	return nil
 }
 
-
 func (cr *CommandRunner) firewall() (exitCode int, result string) {
 	log.Info().Msgf("Firewall operation: %s, ChainName: %s", cr.data.Operation, cr.data.ChainName)
 
@@ -796,7 +795,9 @@ func (cr *CommandRunner) handleBatchOperation() (exitCode int, result string) {
 		cr.data.ChainName, len(cr.data.Rules))
 
 	if len(cr.data.Rules) == 0 {
-		return 1, "firewall batch: No rules provided"
+		// Empty batch is considered successful (no-op)
+		log.Warn().Msgf("Firewall batch operation with no rules - treating as no-op for chain: %s", cr.data.ChainName)
+		return 0, `{"success": true, "applied_rules": 0, "failed_rules": [], "rolled_back": false, "rollback_reason": null, "message": "No rules to apply"}`
 	}
 
 	// Use the common batch apply logic with rollback on failure
@@ -1017,11 +1018,11 @@ func (cr *CommandRunner) executeNftablesRule() (exitCode int, result string) {
 	log.Info().Msg("Using nftables for firewall management.")
 
 	// Create table dynamically
-	tableCmdArgs := []string{"nft", "add", "table", "ip", cr.data.ChainName}
+	tableCmdArgs := []string{"nft", "add", "table", "inet", cr.data.ChainName}
 	_, _ = runCmdWithOutput(tableCmdArgs, "root", "", nil, 60)
 
 	// Create chain in the new table
-	chainCmdArgs := []string{"nft", "add", "chain", "ip", cr.data.ChainName, strings.ToLower(cr.data.Chain)}
+	chainCmdArgs := []string{"nft", "add", "chain", "inet", cr.data.ChainName, strings.ToLower(cr.data.Chain)}
 	switch strings.ToUpper(cr.data.Chain) {
 	case "INPUT":
 		chainCmdArgs = append(chainCmdArgs, "{", "type", "filter", "hook", "input", "priority", strconv.Itoa(cr.data.Priority), ";", "policy", "accept;", "}")
@@ -1046,7 +1047,7 @@ func (cr *CommandRunner) executeNftablesRule() (exitCode int, result string) {
 	case "-D":
 		args = append(args, "delete")
 	}
-	args = append(args, "rule", "ip", cr.data.ChainName, strings.ToLower(cr.data.Chain))
+	args = append(args, "rule", "inet", cr.data.ChainName, strings.ToLower(cr.data.Chain))
 
 	if cr.data.Source != "" && cr.data.Source != "0.0.0.0/0" {
 		args = append(args, "ip", "saddr", cr.data.Source)
@@ -1213,7 +1214,7 @@ func (cr *CommandRunner) deleteNftablesRuleByID(chainName, ruleID string) (exitC
 	log.Info().Msgf("Deleting nftables rule by ID: %s in chain %s", ruleID, chainName)
 
 	// First, list rules with handles to find the target rule
-	listArgs := []string{"nft", "--handle", "list", "table", "ip", chainName}
+	listArgs := []string{"nft", "--handle", "list", "table", "inet", chainName}
 	listExitCode, listOutput := runCmdWithOutput(listArgs, "root", "", nil, 60)
 
 	if listExitCode != 0 {
@@ -1229,8 +1230,8 @@ func (cr *CommandRunner) deleteNftablesRuleByID(chainName, ruleID string) (exitC
 	}
 
 	// Delete the rule using its handle
-	// nftables syntax: nft delete rule ip <table> <chain> handle <handle>
-	deleteArgs := []string{"nft", "delete", "rule", "ip", chainName, chainType, "handle", ruleHandle}
+	// nftables syntax: nft delete rule inet <table> <chain> handle <handle>
+	deleteArgs := []string{"nft", "delete", "rule", "inet", chainName, chainType, "handle", ruleHandle}
 	deleteExitCode, deleteOutput := runCmdWithOutput(deleteArgs, "root", "", nil, 60)
 
 	if deleteExitCode != 0 {
@@ -1820,7 +1821,7 @@ func (cr *CommandRunner) performNftablesRollback(chainName, method string) (int,
 		successCount := 0
 
 		for _, chainType := range chainTypes {
-			args := []string{"nft", "flush", "chain", "ip", chainName, chainType}
+			args := []string{"nft", "flush", "chain", "inet", chainName, chainType}
 			exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
 
 			if exitCode == 0 {
@@ -1842,7 +1843,7 @@ func (cr *CommandRunner) performNftablesRollback(chainName, method string) (int,
 
 	case "delete":
 		// Delete the entire table
-		args := []string{"nft", "delete", "table", "ip", chainName}
+		args := []string{"nft", "delete", "table", "inet", chainName}
 		exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
 
 		if exitCode != 0 {
