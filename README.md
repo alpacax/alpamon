@@ -52,10 +52,20 @@ To generate Ent schema code with custom features, navigate to the root of the pr
 go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
 ```
 
-#### Install Atlas CLI
-To enable versioned migrations, install Atlas CLI using the following command:
+#### Install Atlas CLI (Development Only)
+Atlas CLI is **only required for development** when you need to generate new migration files after modifying database schemas in `pkg/db/schema/`. Production deployments do not require Atlas CLI as migrations are executed directly from embedded SQL files.
+
+To install Atlas CLI for development:
 ```bash
 curl -sSf https://atlasgo.sh | sh
+```
+
+After modifying Ent schemas, generate migration files:
+```bash
+atlas migrate diff <migration_name> \
+  --dir "file://pkg/db/migration" \
+  --to "ent://pkg/db/ent/schema" \
+  --dev-url "sqlite://alpamon.db?mode=memory"
 ```
 
 #### Install Go dependencies

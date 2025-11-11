@@ -18,8 +18,6 @@ RUN go build -o alpamon ./cmd/alpamon/main.go
 
 FROM centos:centos7
 
-RUN curl -sSf https://atlasgo.sh | sh
-
 WORKDIR /usr/local/alpamon
 
 COPY --from=builder /build/alpamon ./alpamon
