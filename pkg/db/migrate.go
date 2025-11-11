@@ -63,6 +63,7 @@ func RunMigration(path string, ctx context.Context) error {
 	}
 
 	// Execute each migration
+	appliedCount := 0
 	for _, mf := range migrationFiles {
 		if appliedVersions[mf.Version] {
 			log.Debug().Msgf("Migration already applied, skipping: %s", mf.Filename)
@@ -76,9 +77,14 @@ func RunMigration(path string, ctx context.Context) error {
 		}
 
 		log.Info().Msgf("Migration applied successfully: %s", mf.Filename)
+		appliedCount++
 	}
 
-	log.Info().Msgf("All migrations completed: total %d applied", len(migrationFiles))
+	if appliedCount > 0 {
+		log.Info().Msgf("All migrations completed: %d migration(s) applied", appliedCount)
+	} else {
+		log.Info().Msg("All migrations up to date: no new migrations to apply")
+	}
 	return nil
 }
 
@@ -211,9 +217,9 @@ func applyMigration(ctx context.Context, db *sql.DB, mf MigrationFile) error {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() {
-		err = tx.Rollback()
-		if err != nil && err != sql.ErrTxDone {
-			log.Error().Err(err).Msg("Failed to rollback transaction")
+		rbErr := tx.Rollback()
+		if rbErr != nil && rbErr != sql.ErrTxDone {
+			log.Error().Err(rbErr).Msg("failed to rollback transaction")
 		}
 	}()
 
