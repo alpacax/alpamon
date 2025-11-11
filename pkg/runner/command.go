@@ -245,12 +245,24 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 
 		return 0, "Collector will be restarted."
 	case "firewall":
+		if detected, toolName := utils.DetectHighLevelFirewall(); detected {
+			return 1, fmt.Sprintf("Alpacon firewall management is disabled because %s is active. Please use %s to manage firewall rules.", toolName, toolName)
+		}
 		return cr.firewall()
 	case "firewall-rollback":
+		if detected, toolName := utils.DetectHighLevelFirewall(); detected {
+			return 1, fmt.Sprintf("Alpacon firewall management is disabled because %s is active. Please use %s to manage firewall rules.", toolName, toolName)
+		}
 		return cr.firewallRollback()
 	case "firewall-reorder-chains":
+		if detected, toolName := utils.DetectHighLevelFirewall(); detected {
+			return 1, fmt.Sprintf("Alpacon firewall management is disabled because %s is active. Please use %s to manage firewall rules.", toolName, toolName)
+		}
 		return cr.firewallReorderChains()
 	case "firewall-reorder-rules":
+		if detected, toolName := utils.DetectHighLevelFirewall(); detected {
+			return 1, fmt.Sprintf("Alpacon firewall management is disabled because %s is active. Please use %s to manage firewall rules.", toolName, toolName)
+		}
 		return cr.firewallReorderRules()
 	case "help":
 		helpMessage := `
