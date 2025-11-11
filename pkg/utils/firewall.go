@@ -26,6 +26,10 @@ var (
 	// Set to true to prevent conflicts with ufw/firewalld
 	disableRuleRecreation = true
 
+	// Temporary flag to disable all firewall functionality
+	// Set to true to completely disable alpacon firewall management
+	firewallFunctionalityDisabled = true
+
 	// High-level firewall detection cache
 	highLevelFirewallCheckMutex     sync.Mutex
 	highLevelFirewallCheckAttempted bool
@@ -95,6 +99,11 @@ func runFirewallCommand(args []string, timeout int) (exitCode int, output string
 		return 1, "firewall command executor not initialized"
 	}
 	return commandExecutor(args, "root", "", nil, timeout)
+}
+
+// IsFirewallDisabled checks if firewall functionality is disabled
+func IsFirewallDisabled() bool {
+	return firewallFunctionalityDisabled
 }
 
 // DetectHighLevelFirewall detects if high-level firewall management tools are active
