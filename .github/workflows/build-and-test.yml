@@ -30,9 +30,6 @@ jobs:
       - name: Generate go code
         run: go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
         working-directory: ./
-      
-      - name: Install Atlas CLI
-        run: curl -sSf https://atlasgo.sh | sh
 
       - name: Build
         run: go build -v .

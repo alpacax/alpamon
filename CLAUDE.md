@@ -17,6 +17,21 @@ go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --t
 go generate ./pkg/db/ent
 ```
 
+### Database Schema Changes (Development Only)
+```bash
+# Install Atlas CLI (only needed for generating new migration files)
+curl -sSf https://atlasgo.sh | sh
+
+# After modifying schemas in pkg/db/schema/, generate migration file
+atlas migrate diff <migration_name> \
+  --dir "file://pkg/db/migration" \
+  --to "ent://pkg/db/ent/schema" \
+  --dev-url "sqlite://alpamon.db?mode=memory"
+
+# Note: Atlas CLI is NOT required for production - migrations are executed
+# directly from embedded SQL files in pkg/db/migration/
+```
+
 ### Building
 ```bash
 # Build the main binary
@@ -147,4 +162,4 @@ cpu := client.CPU.Create().SetUsage(usage).SetTimestamp(time.Now()).SaveX(ctx)
 
 **Firewall Operations**: Use `runCmdWithOutputAndInput` for piping rules via stdin to `nft -f -` and `iptables-restore` commands.
 
-**Database Migrations**: Use Atlas CLI for schema migrations. Migration files are in `pkg/db/migration/` with checksums in `atlas.sum`.
+**Database Migrations**: Migration system uses direct SQL execution via Go's `database/sql` package. Migration files in `pkg/db/migration/` are pure SQLite SQL. The `RunMigration()` function tracks applied migrations in the `atlas_schema_revisions` table and executes unapplied migrations in transactions. No external tools required.
