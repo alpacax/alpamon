@@ -116,7 +116,7 @@ jobs:
       - name: Upload AMD64 RPM to PackageCloud
         uses: danielmundi/upload-packagecloud@v1
         with:
-          package-name: alpamon_${{ env.TAG_NAME }}_linux_amd64.rpm
+          package-name: alpamon-${{ env.TAG_NAME }}-1.linux.amd64.rpm
           packagecloud-username: alpacax
           packagecloud-repo: alpamon
           packagecloud-distrib: rpm_any/rpm_any
@@ -125,7 +125,7 @@ jobs:
       - name: Upload ARM64 RPM to PackageCloud
         uses: danielmundi/upload-packagecloud@v1
         with:
-          package-name: alpamon_${{ env.TAG_NAME }}_linux_arm64.rpm
+          package-name: alpamon-${{ env.TAG_NAME }}-1.linux.arm64.rpm
           packagecloud-username: alpacax
           packagecloud-repo: alpamon
           packagecloud-distrib: rpm_any/rpm_any
