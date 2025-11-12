@@ -75,7 +75,8 @@ type FirewallRuleSync struct {
 
 // FirewallSyncPayload represents the complete firewall sync payload
 type FirewallSyncPayload struct {
-	Chains []FirewallChainSync `json:"chains"`
+	BackendInfo *BackendInfo        `json:"backend_info,omitempty"` // Backend information
+	Chains      []FirewallChainSync `json:"chains"`
 }
 
 // Note: Firewall rules caching removed to ensure real-time rule synchronization
@@ -164,6 +165,153 @@ func DetectHighLevelFirewall() (detected bool, toolName string) {
 	highLevelFirewallToolName = ""
 	log.Debug().Msg("No high-level firewall detected - alpacon firewall management enabled")
 	return false, ""
+}
+
+// BackendInfo contains firewall backend information
+type BackendInfo struct {
+	Type    string `json:"type"`    // iptables, nftables, firewalld, ufw
+	Version string `json:"version"` // version string
+}
+
+// DetectFirewallBackend detects the active firewall backend and version
+// Priority: firewalld > ufw > nftables > iptables
+// This provides comprehensive backend information for sync protocol
+func DetectFirewallBackend() *BackendInfo {
+	// 1. Check firewalld first (highest priority)
+	if isServiceActive("firewalld") {
+		version := getFirewalldVersion()
+		log.Info().Msgf("Detected firewalld backend (version: %s)", version)
+		return &BackendInfo{
+			Type:    "firewalld",
+			Version: version,
+		}
+	}
+
+	// 2. Check ufw
+	if isUFWActive() {
+		version := getUFWVersion()
+		log.Info().Msgf("Detected ufw backend (version: %s)", version)
+		return &BackendInfo{
+			Type:    "ufw",
+			Version: version,
+		}
+	}
+
+	// 3. Check nftables (has rules)
+	if hasNftablesRules() {
+		version := getNftablesVersion()
+		log.Info().Msgf("Detected nftables backend (version: %s)", version)
+		return &BackendInfo{
+			Type:    "nftables",
+			Version: version,
+		}
+	}
+
+	// 4. Fallback to iptables if available
+	if hasIptablesAvailable() {
+		version := getIptablesVersion()
+		log.Info().Msgf("Detected iptables backend (version: %s)", version)
+		return &BackendInfo{
+			Type:    "iptables",
+			Version: version,
+		}
+	}
+
+	log.Warn().Msg("No firewall backend detected")
+	return &BackendInfo{
+		Type:    "none",
+		Version: "",
+	}
+}
+
+// isServiceActive checks if a systemd service is active
+func isServiceActive(serviceName string) bool {
+	exitCode, output := runFirewallCommand([]string{"systemctl", "is-active", serviceName}, 5)
+	return exitCode == 0 && strings.TrimSpace(output) == "active"
+}
+
+// getFirewalldVersion retrieves firewalld version
+func getFirewalldVersion() string {
+	exitCode, output := runFirewallCommand([]string{"firewall-cmd", "--version"}, 5)
+	if exitCode == 0 {
+		return strings.TrimSpace(output)
+	}
+	return "unknown"
+}
+
+// isUFWActive checks if ufw is active
+func isUFWActive() bool {
+	exitCode, output := runFirewallCommand([]string{"ufw", "status"}, 5)
+	return exitCode == 0 && strings.Contains(strings.ToLower(output), "status: active")
+}
+
+// getUFWVersion retrieves ufw version
+func getUFWVersion() string {
+	exitCode, output := runFirewallCommand([]string{"ufw", "version"}, 5)
+	if exitCode == 0 {
+		// Extract version number from output like "ufw 0.36"
+		parts := strings.Fields(output)
+		if len(parts) >= 2 {
+			return parts[1]
+		}
+	}
+	return "unknown"
+}
+
+// hasNftablesRules checks if nftables has any rules
+func hasNftablesRules() bool {
+	exitCode, output := runFirewallCommand([]string{"nft", "list", "ruleset"}, 5)
+	if exitCode != 0 {
+		return false
+	}
+
+	// Check for actual rules (not just empty tables)
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		// Rules typically start with protocol, source, destination, etc.
+		if strings.HasPrefix(line, "ip ") || strings.HasPrefix(line, "tcp ") ||
+			strings.HasPrefix(line, "udp ") || strings.HasPrefix(line, "icmp ") ||
+			strings.HasPrefix(line, "meta ") || strings.HasPrefix(line, "counter ") {
+			return true
+		}
+	}
+	return false
+}
+
+// getNftablesVersion retrieves nftables version
+func getNftablesVersion() string {
+	exitCode, output := runFirewallCommand([]string{"nft", "--version"}, 5)
+	if exitCode == 0 {
+		// Extract version from output like "nftables v1.0.5 (Lester Gooch)"
+		parts := strings.Fields(output)
+		if len(parts) >= 2 {
+			// Remove 'v' prefix if present
+			version := parts[1]
+			return strings.TrimPrefix(version, "v")
+		}
+	}
+	return "unknown"
+}
+
+// hasIptablesAvailable checks if iptables is available
+func hasIptablesAvailable() bool {
+	exitCode, _ := runFirewallCommand([]string{"which", "iptables"}, 5)
+	return exitCode == 0
+}
+
+// getIptablesVersion retrieves iptables version
+func getIptablesVersion() string {
+	exitCode, output := runFirewallCommand([]string{"iptables", "--version"}, 5)
+	if exitCode == 0 {
+		// Extract version from output like "iptables v1.8.7 (nf_tables)"
+		parts := strings.Fields(output)
+		if len(parts) >= 2 {
+			// Remove 'v' prefix if present
+			version := parts[1]
+			return strings.TrimPrefix(version, "v")
+		}
+	}
+	return "unknown"
 }
 
 // CheckFirewallTool checks if firewall tools (nftables or iptables) are installed
@@ -455,8 +603,13 @@ func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, n
 
 // CollectFirewallRules collects current firewall rules from the system
 // This is the reverse operation of command.go firewall application logic
+// Includes backend detection information in the sync payload
 func CollectFirewallRules() (*FirewallSyncPayload, error) {
-	// Check which firewall tool is available
+	// Detect backend type and version
+	backendInfo := DetectFirewallBackend()
+	log.Debug().Msgf("Detected firewall backend: %s (version: %s)", backendInfo.Type, backendInfo.Version)
+
+	// Check which firewall tool is available for rule collection
 	nftablesInstalled, iptablesInstalled, err := CheckFirewallTool()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check firewall installation: %w", err)
@@ -488,7 +641,9 @@ func CollectFirewallRules() (*FirewallSyncPayload, error) {
 		return nil, fmt.Errorf("no firewall tools available")
 	}
 
-	return buildSyncPayload(chains), nil
+	payload := buildSyncPayload(chains)
+	payload.BackendInfo = backendInfo
+	return payload, nil
 }
 
 // collectNftablesRules extracts rules from nftables

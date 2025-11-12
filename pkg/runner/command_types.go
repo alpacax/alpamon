@@ -78,6 +78,18 @@ type CommandData struct {
 	AssignmentID            string                   `json:"assignment_id"`
 	ServerID                string                   `json:"server_id"`
 	ChainNames              []string                 `json:"chain_names"` // for firewall-reorder-chains
+
+	// Backend information
+	Backend string `json:"backend"` // Backend type: iptables, nftables, firewalld, ufw
+
+	// Firewalld specific fields
+	Zone             string `json:"zone"`               // Firewalld zone (default, public, etc.)
+	Service          string `json:"service"`            // Firewalld service name
+	FirewalldRuleType string `json:"firewalld_rule_type"` // Firewalld rule type: service, port, rich
+
+	// UFW specific fields
+	Direction string `json:"direction"` // UFW direction: in, out
+	Interface string `json:"interface"` // UFW interface name
 }
 
 type firewallData struct {
