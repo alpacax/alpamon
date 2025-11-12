@@ -790,30 +790,55 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 }
 
 func (cr *CommandRunner) firewall() (exitCode int, result string) {
-	log.Info().Msgf("Firewall operation: %s, ChainName: %s", cr.data.Operation, cr.data.ChainName)
+	log.Info().Msgf("Firewall operation: %s, ChainName: %s, Backend: %s", cr.data.Operation, cr.data.ChainName, cr.data.Backend)
 
 	// Validate required fields based on operation
-	if cr.data.ChainName == "" {
+	if cr.data.ChainName == "" && cr.data.Operation != "delete" {
 		return 1, "firewall: chain_name is required"
 	}
 	if cr.data.Operation == "" {
 		return 1, "firewall: operation is required"
 	}
 
-	// Route to appropriate operation handler
-	switch cr.data.Operation {
-	case "batch":
-		return cr.handleBatchOperation()
-	case "flush":
-		return cr.handleFlushOperation()
-	case "delete":
-		return cr.handleDeleteOperation()
-	case "add":
-		return cr.handleAddOperation()
-	case "update":
-		return cr.handleUpdateOperation()
+	// Detect backend if not explicitly provided
+	if cr.data.Backend == "" {
+		backendInfo := utils.DetectFirewallBackend()
+		cr.data.Backend = backendInfo.Type
+		log.Debug().Msgf("Auto-detected firewall backend: %s", cr.data.Backend)
+	}
+
+	// Check for high-level firewall conflicts
+	if cr.data.Backend == "firewalld" || cr.data.Backend == "ufw" {
+		// These backends are supported, proceed normally
+		log.Debug().Msgf("Using high-level firewall backend: %s", cr.data.Backend)
+	} else if detected, toolName := utils.DetectHighLevelFirewall(); detected {
+		log.Warn().Msgf("High-level firewall %s is active but backend is %s", toolName, cr.data.Backend)
+	}
+
+	// Route to appropriate operation handler based on backend
+	switch cr.data.Backend {
+	case "firewalld":
+		return cr.handleFirewalldOperation()
+	case "ufw":
+		return cr.handleUFWOperation()
+	case "nftables", "iptables", "":
+		// Use existing iptables/nftables handlers
+		switch cr.data.Operation {
+		case "batch":
+			return cr.handleBatchOperation()
+		case "flush":
+			return cr.handleFlushOperation()
+		case "delete":
+			return cr.handleDeleteOperation()
+		case "add":
+			return cr.handleAddOperation()
+		case "update":
+			return cr.handleUpdateOperation()
+		default:
+			return 1, fmt.Sprintf("firewall: Unknown operation '%s'. Supported: batch, flush, delete, add, update", cr.data.Operation)
+		}
 	default:
-		return 1, fmt.Sprintf("firewall: Unknown operation '%s'. Supported: batch, flush, delete, add, update", cr.data.Operation)
+		return 1, fmt.Sprintf("firewall: Unsupported backend '%s'. Supported: iptables, nftables, firewalld, ufw", cr.data.Backend)
 	}
 }
 
