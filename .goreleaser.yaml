@@ -28,8 +28,7 @@ archives:
     name_template: '{{ .ProjectName }}-{{ trimprefix .Version "v" }}-{{ .Os }}-{{ .Arch }}'
 
 nfpms:
-  - file_name_template: '{{ .PackageName }}_{{ trimprefix .Version "v" }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
-    package_name: alpamon
+  - package_name: alpamon
     maintainer: AlpacaX <support@alpacax.com>
     description: Alpamon
     homepage: https://github.com/alpacax/alpamon
@@ -67,11 +66,13 @@ nfpms:
           - zip
           - sqlite3
           - nftables | iptables
+        file_name_template: '{{ .PackageName }}_{{ trimprefix .Version "v" }}_{{ .Os }}_{{ .Arch }}'
       rpm:
         dependencies:
           - zip
           - sqlite
           - nftables | iptables
+        file_name_template: '{{ .PackageName }}-{{ trimprefix .Version "v" }}-1.{{ .Os }}.{{ .Arch }}'
       
 changelog:
   sort: asc
