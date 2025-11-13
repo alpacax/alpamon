@@ -834,8 +834,10 @@ func (cr *CommandRunner) firewall() (exitCode int, result string) {
 			return cr.handleAddOperation()
 		case "update":
 			return cr.handleUpdateOperation()
+		case "update-comment":
+			return cr.handleUpdateCommentOperation()
 		default:
-			return 1, fmt.Sprintf("firewall: Unknown operation '%s'. Supported: batch, flush, delete, add, update", cr.data.Operation)
+			return 1, fmt.Sprintf("firewall: Unknown operation '%s'. Supported: batch, flush, delete, add, update, update-comment", cr.data.Operation)
 		}
 	default:
 		return 1, fmt.Sprintf("firewall: Unsupported backend '%s'. Supported: iptables, nftables, firewalld, ufw", cr.data.Backend)
@@ -1008,6 +1010,151 @@ func (cr *CommandRunner) handleUpdateOperation() (exitCode int, result string) {
 
 	log.Info().Msgf("Successfully updated firewall rule: deleted %s, added %s", cr.data.OldRuleID, cr.data.RuleID)
 	return 0, fmt.Sprintf("Successfully updated rule: deleted %s, added %s", cr.data.OldRuleID, cr.data.RuleID)
+}
+
+// handleUpdateCommentOperation handles updating comments for multiple firewall rules
+func (cr *CommandRunner) handleUpdateCommentOperation() (exitCode int, result string) {
+	log.Info().Msgf("Firewall update-comment operation - RuleCount: %d", len(cr.data.Rules))
+
+	if len(cr.data.Rules) == 0 {
+		return 0, `{"success": true, "updated_rules": 0, "failed_rules": [], "message": "No rules to update"}`
+	}
+
+	// Check firewall backend
+	nftablesInstalled, iptablesInstalled, err := utils.CheckFirewallTool()
+	if err != nil {
+		return 1, fmt.Sprintf("firewall update-comment: Failed to check firewall tools: %v", err)
+	}
+
+	if !nftablesInstalled && !iptablesInstalled {
+		return 1, "firewall update-comment: No firewall backend available"
+	}
+
+	updatedCount := 0
+	var failedRules []map[string]string
+
+	// Process each rule
+	for _, ruleData := range cr.data.Rules {
+		ruleID, _ := ruleData["rule_id"].(string)
+		ruleType, _ := ruleData["rule_type"].(string)
+		description, _ := ruleData["description"].(string)
+		table, _ := ruleData["table"].(string)
+		family, _ := ruleData["family"].(string)
+		chain, _ := ruleData["chain"].(string)
+
+		// Check required fields only
+		if ruleID == "" || chain == "" || ruleType == "" {
+			log.Warn().Msgf("Skipping rule with missing required fields - rule_id: %s, chain: %s, rule_type: %s", ruleID, chain, ruleType)
+			failedRules = append(failedRules, map[string]string{
+				"rule_id": ruleID,
+				"error":   "missing rule_id, chain, or rule_type",
+			})
+			continue
+		}
+
+		// Build new comment with metadata
+		newComment := utils.BuildFirewallComment(description, ruleID, ruleType)
+
+		// Convert rule data to FirewallRuleSync
+		rule := cr.convertToFirewallRuleSync(ruleData)
+
+		// Update comment based on backend
+		var success bool
+		if nftablesInstalled {
+			// For nftables, construct table name from family and table
+			// Default to "inet filter" if not provided
+			if table == "" {
+				table = "filter"
+			}
+			if family == "" {
+				family = "inet"
+			}
+			tableName := family + " " + table
+			success = utils.RecreateNftablesRuleWithComment(tableName, rule, newComment)
+		} else if iptablesInstalled {
+			// For iptables, use the chain name directly
+			success = utils.RecreateIptablesRuleWithComment(chain, rule, newComment)
+		}
+
+		if success {
+			updatedCount++
+			log.Debug().Msgf("Updated comment for rule %s", ruleID)
+		} else {
+			log.Warn().Msgf("Failed to update comment for rule %s", ruleID)
+			failedRules = append(failedRules, map[string]string{
+				"rule_id": ruleID,
+				"error":   "failed to recreate rule with updated comment",
+			})
+		}
+	}
+
+	if len(failedRules) > 0 {
+		return 1, fmt.Sprintf(`{"success": false, "updated_rules": %d, "failed_rules": %d}`, updatedCount, len(failedRules))
+	}
+
+	return 0, fmt.Sprintf(`{"success": true, "updated_rules": %d, "failed_rules": []}`, updatedCount)
+}
+
+// convertToFirewallRuleSync converts rule data map to FirewallRuleSync struct
+func (cr *CommandRunner) convertToFirewallRuleSync(ruleData map[string]interface{}) *utils.FirewallRuleSync {
+	rule := &utils.FirewallRuleSync{}
+
+	if protocol, ok := ruleData["protocol"].(string); ok {
+		rule.Protocol = protocol
+	}
+
+	if source, ok := ruleData["source"].(string); ok {
+		rule.SourceCIDR = source
+	}
+
+	if destination, ok := ruleData["destination"].(string); ok {
+		rule.DestinationCIDR = destination
+	}
+
+	if target, ok := ruleData["target"].(string); ok {
+		rule.Target = target
+	}
+
+	if chain, ok := ruleData["chain"].(string); ok {
+		rule.Chain = chain
+	}
+
+	if ruleID, ok := ruleData["rule_id"].(string); ok {
+		rule.RuleID = ruleID
+	}
+
+	if ruleType, ok := ruleData["rule_type"].(string); ok {
+		rule.RuleType = ruleType
+	}
+
+	// Handle ports
+	if dports, ok := ruleData["dports"].([]interface{}); ok && len(dports) > 0 {
+		var ports []string
+		for _, p := range dports {
+			if port, ok := p.(float64); ok {
+				ports = append(ports, fmt.Sprintf("%.0f", port))
+			}
+		}
+		if len(ports) > 0 {
+			rule.Dports = strings.Join(ports, ",")
+		}
+	} else if portStart, ok := ruleData["port_start"].(float64); ok {
+		ps := int(portStart)
+		rule.PortStart = &ps
+
+		if portEnd, ok := ruleData["port_end"].(float64); ok {
+			pe := int(portEnd)
+			rule.PortEnd = &pe
+		}
+	}
+
+	// Handle ICMP type
+	if icmpType, ok := ruleData["icmp_type"].(float64); ok {
+		it := int(icmpType)
+		rule.ICMPType = &it
+	}
+
+	return rule
 }
 
 // validateFirewallRuleData performs validation for single rule operations

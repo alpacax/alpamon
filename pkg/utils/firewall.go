@@ -454,59 +454,235 @@ func ParseCommentOrGenerate(comment string) (ruleID, ruleType string) {
 // RecreateNftablesRuleWithComment re-creates an nftables rule with updated comment
 // Returns true if re-creation was successful
 func RecreateNftablesRuleWithComment(tableName string, rule *FirewallRuleSync, newComment string) bool {
-	// Build nft add rule command with new comment
-	args := []string{"nft", "add", "rule", tableName, rule.Chain}
-
-	// Add protocol match
-	if rule.Protocol != "" && rule.Protocol != DefaultProtocol {
-		args = append(args, "meta", "l4proto", rule.Protocol)
+	// Step 1: List rules in JSON format to find exact matching rule
+	listArgs := []string{"nft", "-j", "list", "chain", tableName, rule.Chain}
+	exitCode, output := runFirewallCommand(listArgs, 10)
+	if exitCode != 0 {
+		log.Debug().Msgf("Failed to list chain %s in table %s", rule.Chain, tableName)
+		return false
 	}
 
-	// Add source CIDR match
-	if rule.SourceCIDR != "" && rule.SourceCIDR != DefaultCIDR {
-		args = append(args, "ip", "saddr", rule.SourceCIDR)
+	// Parse JSON output
+	var nftOutput map[string]interface{}
+	if err := json.Unmarshal([]byte(output), &nftOutput); err != nil {
+		log.Debug().Msgf("Failed to parse nftables JSON output: %v", err)
+		return false
 	}
 
-	// Add destination CIDR match
-	if rule.DestinationCIDR != "" && rule.DestinationCIDR != DefaultCIDR {
-		args = append(args, "ip", "daddr", rule.DestinationCIDR)
-	}
+	// Find matching rule without comment and collect all handles for position tracking
+	var matchingHandle int64 = -1
+	var handles []int64
+	var rulePosition int = 0
 
-	// Add port matches
-	if rule.Protocol == "tcp" || rule.Protocol == "udp" {
-		if rule.Dports != "" {
-			// Multiple ports
-			ports := strings.Split(rule.Dports, ",")
-			args = append(args, rule.Protocol, "dport", "{")
-			args = append(args, ports...)
-			args = append(args, "}")
-		} else if rule.PortStart != nil {
-			if rule.PortEnd != nil && *rule.PortEnd != *rule.PortStart {
-				// Port range
-				args = append(args, rule.Protocol, "dport", fmt.Sprintf("%d-%d", *rule.PortStart, *rule.PortEnd))
-			} else {
-				// Single port
-				args = append(args, rule.Protocol, "dport", fmt.Sprintf("%d", *rule.PortStart))
+	if nftables, ok := nftOutput["nftables"].([]interface{}); ok {
+		for _, item := range nftables {
+			if ruleMap, ok := item.(map[string]interface{}); ok {
+				if ruleData, ok := ruleMap["rule"].(map[string]interface{}); ok {
+					// Collect all handles to track positions
+					if handle, ok := ruleData["handle"].(float64); ok {
+						handles = append(handles, int64(handle))
+
+						// Skip if rule has comment
+						if comment, hasComment := ruleData["comment"]; hasComment && comment != "" {
+							continue
+						}
+
+						// Check if this rule matches our criteria
+						if matchesNftablesJSONRule(ruleData, rule) {
+							matchingHandle = int64(handle)
+							rulePosition = len(handles) // Current position in the chain
+						}
+					}
+				}
 			}
 		}
 	}
 
-	// Add ICMP type match
+	// If no matching rule found, return false
+	if matchingHandle == -1 {
+		log.Debug().Msgf("No matching rule found without comment, skipping recreation")
+		return false
+	}
+
+	// Step 2: Insert new rule at the same position
+	// Find the handle to insert after (position - 1)
+	var insertArgs []string
+	if rulePosition > 1 && rulePosition <= len(handles) {
+		// Insert after the previous rule
+		insertAfterHandle := handles[rulePosition-2] // -2 because: -1 for previous, -1 for 0-based index
+		insertArgs = []string{"nft", "add", "rule", tableName, rule.Chain, "position", fmt.Sprintf("%d", insertAfterHandle)}
+	} else {
+		// Insert at the beginning
+		insertArgs = []string{"nft", "insert", "rule", tableName, rule.Chain}
+	}
+
+	// Add rule specifications
+	if rule.Protocol != "" && rule.Protocol != DefaultProtocol {
+		insertArgs = append(insertArgs, "meta", "l4proto", rule.Protocol)
+	}
+	if rule.SourceCIDR != "" && rule.SourceCIDR != DefaultCIDR {
+		insertArgs = append(insertArgs, "ip", "saddr", rule.SourceCIDR)
+	}
+	if rule.DestinationCIDR != "" && rule.DestinationCIDR != DefaultCIDR {
+		insertArgs = append(insertArgs, "ip", "daddr", rule.DestinationCIDR)
+	}
+	if rule.Protocol == "tcp" || rule.Protocol == "udp" {
+		if rule.Dports != "" {
+			ports := strings.Split(rule.Dports, ",")
+			insertArgs = append(insertArgs, rule.Protocol, "dport", "{")
+			insertArgs = append(insertArgs, ports...)
+			insertArgs = append(insertArgs, "}")
+		} else if rule.PortStart != nil {
+			if rule.PortEnd != nil && *rule.PortEnd != *rule.PortStart {
+				insertArgs = append(insertArgs, rule.Protocol, "dport", fmt.Sprintf("%d-%d", *rule.PortStart, *rule.PortEnd))
+			} else {
+				insertArgs = append(insertArgs, rule.Protocol, "dport", fmt.Sprintf("%d", *rule.PortStart))
+			}
+		}
+	}
 	if rule.Protocol == "icmp" && rule.ICMPType != nil {
-		args = append(args, "icmp", "type", fmt.Sprintf("%d", *rule.ICMPType))
+		insertArgs = append(insertArgs, "icmp", "type", fmt.Sprintf("%d", *rule.ICMPType))
 	}
-
-	// Add target/verdict (must come before comment)
-	args = append(args, strings.ToLower(rule.Target))
-
-	// Add comment with updated metadata (must come after verdict)
+	insertArgs = append(insertArgs, strings.ToLower(rule.Target))
 	if newComment != "" {
-		args = append(args, "comment", fmt.Sprintf("\"%s\"", newComment))
+		insertArgs = append(insertArgs, "comment", fmt.Sprintf("\"%s\"", newComment))
 	}
 
-	// Execute the command
-	exitCode, _ := runFirewallCommand(args, 10)
-	return exitCode == 0
+	// Execute the insert command
+	exitCode, _ = runFirewallCommand(insertArgs, 10)
+	if exitCode != 0 {
+		log.Warn().Msgf("Failed to insert new rule with comment for rule_id %s", rule.RuleID)
+		return false
+	}
+
+	// Step 3: Delete the old rule using its handle
+	deleteArgs := []string{"nft", "delete", "rule", tableName, rule.Chain, "handle", fmt.Sprintf("%d", matchingHandle)}
+	exitCode, _ = runFirewallCommand(deleteArgs, 10)
+	if exitCode != 0 {
+		log.Warn().Msgf("Failed to delete old rule (handle %d) for rule_id %s", matchingHandle, rule.RuleID)
+		// Rule was added, so operation partially succeeded
+		return true
+	}
+
+	log.Debug().Msgf("Successfully recreated rule with comment for rule_id %s", rule.RuleID)
+	return true
+}
+
+// matchesNftablesJSONRule checks if a JSON rule data matches our FirewallRuleSync
+func matchesNftablesJSONRule(ruleData map[string]interface{}, rule *FirewallRuleSync) bool {
+	expr, ok := ruleData["expr"].([]interface{})
+	if !ok {
+		return false
+	}
+
+	// Check what we need to match
+	needProtocol := rule.Protocol != "" && rule.Protocol != DefaultProtocol
+	needSource := rule.SourceCIDR != "" && rule.SourceCIDR != DefaultCIDR
+	needDest := rule.DestinationCIDR != "" && rule.DestinationCIDR != DefaultCIDR
+	needPort := rule.PortStart != nil || rule.Dports != ""
+
+	// Track what we found
+	hasProtocol := !needProtocol
+	hasSource := !needSource
+	hasDest := !needDest
+	hasPort := !needPort
+	hasTarget := false
+
+	for _, e := range expr {
+		exprMap, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Check for match expressions
+		if match, ok := exprMap["match"].(map[string]interface{}); ok {
+			if left, ok := match["left"].(map[string]interface{}); ok {
+				// Check meta matches (protocol)
+				if meta, ok := left["meta"].(map[string]interface{}); ok {
+					if key, ok := meta["key"].(string); ok && key == "l4proto" {
+						if right, ok := match["right"].(string); ok && right == rule.Protocol {
+							hasProtocol = true
+						}
+					}
+				}
+
+				// Check payload matches (IP addresses, ports)
+				if payload, ok := left["payload"].(map[string]interface{}); ok {
+					protocol, _ := payload["protocol"].(string)
+					field, _ := payload["field"].(string)
+
+					if protocol == "ip" {
+						if field == "saddr" && needSource {
+							if right, ok := match["right"].(map[string]interface{}); ok {
+								if prefix, ok := right["prefix"].(map[string]interface{}); ok {
+									addr, _ := prefix["addr"].(string)
+									length, _ := prefix["len"].(float64)
+									if fmt.Sprintf("%s/%d", addr, int(length)) == rule.SourceCIDR {
+										hasSource = true
+									}
+								}
+							} else if right, ok := match["right"].(string); ok && right == rule.SourceCIDR {
+								hasSource = true
+							}
+						}
+						if field == "daddr" && needDest {
+							if right, ok := match["right"].(map[string]interface{}); ok {
+								if prefix, ok := right["prefix"].(map[string]interface{}); ok {
+									addr, _ := prefix["addr"].(string)
+									length, _ := prefix["len"].(float64)
+									if fmt.Sprintf("%s/%d", addr, int(length)) == rule.DestinationCIDR {
+										hasDest = true
+									}
+								}
+							} else if right, ok := match["right"].(string); ok && right == rule.DestinationCIDR {
+								hasDest = true
+							}
+						}
+					}
+
+					if (protocol == "tcp" || protocol == "udp") && field == "dport" && needPort {
+						if right, ok := match["right"].(map[string]interface{}); ok {
+							// Check for port range
+							if rangeMap, ok := right["range"].([]interface{}); ok && len(rangeMap) == 2 {
+								start, _ := rangeMap[0].(float64)
+								end, _ := rangeMap[1].(float64)
+								if rule.PortStart != nil && rule.PortEnd != nil {
+									if int(start) == *rule.PortStart && int(end) == *rule.PortEnd {
+										hasPort = true
+									}
+								}
+							}
+							// Check for port set
+							if set, ok := right["set"].([]interface{}); ok {
+								if rule.Dports != "" {
+									ports := strings.Split(rule.Dports, ",")
+									if len(set) == len(ports) {
+										// Simple check - could be improved to check actual values
+										hasPort = true
+									}
+								}
+							}
+						} else if right, ok := match["right"].(float64); ok {
+							// Single port
+							if rule.PortStart != nil && rule.PortEnd == nil {
+								if int(right) == *rule.PortStart {
+									hasPort = true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Check for verdict (accept/drop/reject)
+		target := strings.ToLower(rule.Target)
+		if _, ok := exprMap[target]; ok {
+			hasTarget = true
+		}
+	}
+
+	return hasProtocol && hasSource && hasDest && hasPort && hasTarget
 }
 
 // getIptablesCommand returns the appropriate iptables command based on IP family
@@ -534,8 +710,97 @@ func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, n
 	// Determine which command to use based on family
 	cmd := getIptablesCommand(rule.Family)
 
-	// Build iptables insert command (insert at beginning to maintain priority)
-	args := []string{cmd, "-I", chainName}
+	// Step 1: Find the position of the existing rule without comment
+	// Build a pattern that will match the rule in iptables -L output
+	// We'll check for the key components that define the rule
+
+	listArgs := []string{cmd, "-L", chainName, "--line-numbers", "-n", "-v"}
+	exitCode, output := runFirewallCommand(listArgs, 10)
+
+	var rulePosition int
+	if exitCode == 0 {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			// Skip header lines
+			if strings.HasPrefix(line, "Chain") || strings.HasPrefix(line, "num") || strings.TrimSpace(line) == "" {
+				continue
+			}
+
+			// Skip rules that already have rule_id
+			if strings.Contains(line, "rule_id:") {
+				continue
+			}
+
+			// Check if this line contains our rule components
+			// Target should be case-insensitive match
+			targetMatch := rule.Target == "" || strings.Contains(strings.ToLower(line), strings.ToLower(rule.Target))
+
+			// Protocol match
+			protocolMatch := rule.Protocol == "" || rule.Protocol == "all" ||
+				strings.Contains(line, " "+rule.Protocol+" ") || strings.Contains(line, " "+rule.Protocol+"/")
+
+			// Source match (check for exact match in the line)
+			sourceMatch := rule.SourceCIDR == "" || rule.SourceCIDR == "0.0.0.0/0" ||
+				strings.Contains(line, " "+rule.SourceCIDR+" ") || strings.Contains(line, " "+rule.SourceCIDR+"\t")
+
+			// Destination match
+			destMatch := rule.DestinationCIDR == "" || rule.DestinationCIDR == "0.0.0.0/0" ||
+				strings.Contains(line, " "+rule.DestinationCIDR+" ") || strings.Contains(line, " "+rule.DestinationCIDR+"\t") ||
+				strings.HasSuffix(line, " "+rule.DestinationCIDR)
+
+			if targetMatch && protocolMatch && sourceMatch && destMatch {
+				// Extract line number
+				fields := strings.Fields(line)
+				if len(fields) > 0 {
+					fmt.Sscanf(fields[0], "%d", &rulePosition)
+					log.Debug().Msgf("Found matching rule at position %d", rulePosition)
+					break
+				}
+			}
+		}
+	}
+
+	// Step 2: Insert the new rule with comment at the found position (or position 1 if not found)
+	insertPosition := rulePosition
+	if insertPosition == 0 {
+		insertPosition = 1  // Default to top if not found
+		log.Debug().Msgf("Could not find existing rule position, inserting at position 1")
+	}
+
+	insertArgs := buildIptablesRuleArgs(cmd, "-I", chainName, rule, newComment)
+	// Insert at the specific position
+	insertArgs = append(insertArgs[:3], append([]string{fmt.Sprintf("%d", insertPosition)}, insertArgs[3:]...)...)
+
+	exitCode, _ = runFirewallCommand(insertArgs, 10)
+	if exitCode != 0 {
+		log.Warn().Msgf("Failed to insert new rule with comment for rule_id %s at position %d", rule.RuleID, insertPosition)
+		return false
+	}
+
+	// Step 3: Try to delete the old rule (now at position+1 if we found it)
+	if rulePosition > 0 {
+		// Delete by position (it's now at position+1 after our insert)
+		deleteArgs := []string{cmd, "-D", chainName, fmt.Sprintf("%d", rulePosition+1)}
+		deleteExitCode, _ := runFirewallCommand(deleteArgs, 10)
+
+		if deleteExitCode != 0 {
+			// Fallback: try to delete by spec
+			deleteArgs = buildIptablesRuleArgs(cmd, "-D", chainName, rule, "")
+			runFirewallCommand(deleteArgs, 10)
+		}
+	} else {
+		// Try to delete by spec if we didn't find the position
+		deleteArgs := buildIptablesRuleArgs(cmd, "-D", chainName, rule, "")
+		runFirewallCommand(deleteArgs, 10)
+	}
+
+	log.Debug().Msgf("Successfully updated comment for rule %s in chain %s", rule.RuleID, chainName)
+	return true
+}
+
+// buildIptablesRuleArgs builds iptables command arguments for a rule
+func buildIptablesRuleArgs(cmd, method, chainName string, rule *FirewallRuleSync, comment string) []string {
+	args := []string{cmd, method, chainName}
 
 	// Protocol
 	if rule.Protocol != "" && rule.Protocol != DefaultProtocol {
@@ -575,14 +840,12 @@ func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, n
 		args = append(args, "-j", rule.Target)
 	}
 
-	// Comment with updated metadata
-	if newComment != "" {
-		args = append(args, "-m", "comment", "--comment", newComment)
+	// Comment
+	if comment != "" {
+		args = append(args, "-m", "comment", "--comment", comment)
 	}
 
-	// Execute the command
-	exitCode, _ := runFirewallCommand(args, 10)
-	return exitCode == 0
+	return args
 }
 
 // CollectFirewallRules collects current firewall rules from the system
@@ -1010,7 +1273,7 @@ func parseIptablesSaveRuleLine(line string, table string, family string) *Firewa
 			}
 		case "-j", "--jump":
 			if i+1 < len(parts) {
-				rule.Target = strings.ToUpper(parts[i+1])
+				rule.Target = parts[i+1]  // Keep original case, don't convert to uppercase
 				i++
 			}
 		case "--dport":
@@ -1074,12 +1337,14 @@ func parseIptablesSaveRuleLine(line string, table string, family string) *Firewa
 			return rule
 		}
 
-		// Delete the old rule
+		// Delete the old rule with original comment
 		oldRule := *rule
 		oldRule.RuleID = originalRuleID
 		oldRule.RuleType = originalRuleType
+		// Preserve the full original comment for exact matching
+		oldComment := BuildFirewallComment(existingComment, originalRuleID, originalRuleType)
 
-		if err := RemoveIptablesRule(chainName, oldRule); err != nil {
+		if err := RemoveIptablesRuleWithComment(chainName, oldRule, oldComment); err != nil {
 			log.Warn().Err(err).Msgf("Failed to delete old iptables rule after re-creation")
 		} else {
 			log.Debug().Msgf("Re-created iptables rule %s with proper metadata (chain: %s)", rule.RuleID, chainName)
@@ -1283,6 +1548,59 @@ func RemoveIptablesRule(chainName string, rule FirewallRuleSync) error {
 		args = append(args, "-m", "comment", "--comment")
 		comment := BuildFirewallComment("", rule.RuleID, rule.RuleType)
 		args = append(args, comment)
+	}
+
+	exitCode, output := runFirewallCommand(args, 10)
+	if exitCode != 0 {
+		return fmt.Errorf("failed to delete iptables rule from chain %s: %s", chainName, output)
+	}
+
+	return nil
+}
+
+// RemoveIptablesRuleWithComment removes an iptables rule using exact comment match
+// This is used when we need to delete the old rule after recreating it with updated comment
+func RemoveIptablesRuleWithComment(chainName string, rule FirewallRuleSync, fullComment string) error {
+	// Determine which command to use based on family
+	cmd := getIptablesCommand(rule.Family)
+
+	args := []string{cmd, "-D", chainName}
+
+	if rule.Protocol != "" && rule.Protocol != DefaultProtocol {
+		args = append(args, "-p", rule.Protocol)
+	}
+
+	if rule.SourceCIDR != "" && rule.SourceCIDR != DefaultCIDR {
+		args = append(args, "-s", rule.SourceCIDR)
+	}
+
+	if rule.DestinationCIDR != "" && rule.DestinationCIDR != DefaultCIDR {
+		args = append(args, "-d", rule.DestinationCIDR)
+	}
+
+	if rule.Protocol == "tcp" || rule.Protocol == "udp" {
+		if rule.Dports != "" {
+			args = append(args, "-m", "multiport", "--dports", rule.Dports)
+		} else if rule.PortStart != nil {
+			if rule.PortEnd != nil && *rule.PortEnd != *rule.PortStart {
+				args = append(args, "--dport", fmt.Sprintf("%d:%d", *rule.PortStart, *rule.PortEnd))
+			} else {
+				args = append(args, "--dport", fmt.Sprintf("%d", *rule.PortStart))
+			}
+		}
+	}
+
+	if rule.Protocol == "icmp" && rule.ICMPType != nil {
+		args = append(args, "--icmp-type", fmt.Sprintf("%d", *rule.ICMPType))
+	}
+
+	if rule.Target != "" {
+		args = append(args, "-j", rule.Target)
+	}
+
+	// Use the exact comment provided (includes description + metadata)
+	if fullComment != "" {
+		args = append(args, "-m", "comment", "--comment", fullComment)
 	}
 
 	exitCode, output := runFirewallCommand(args, 10)
