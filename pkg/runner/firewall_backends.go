@@ -75,7 +75,8 @@ func (cr *CommandRunner) handleFirewalldDelete() (exitCode int, result string) {
 		return 1, "firewalld delete: rule_id is required"
 	}
 
-	return cr.deleteFirewalldRule(cr.data.ChainName, cr.data.RuleID)
+	// cr.data.Chain now contains the complete chain name
+	return cr.deleteFirewalldRule(cr.data.Chain, cr.data.RuleID)
 }
 
 // handleFirewalldBatch applies multiple firewalld rules
@@ -133,7 +134,8 @@ func (cr *CommandRunner) handleFirewalldFlush() (exitCode int, result string) {
 func (cr *CommandRunner) handleFirewalldUpdate() (exitCode int, result string) {
 	// Delete old rule
 	if cr.data.OldRuleID != "" {
-		_, _ = cr.deleteFirewalldRule(cr.data.ChainName, cr.data.OldRuleID)
+		// cr.data.Chain now contains the complete chain name
+		_, _ = cr.deleteFirewalldRule(cr.data.Chain, cr.data.OldRuleID)
 	}
 
 	// Add new rule
@@ -167,7 +169,7 @@ func (cr *CommandRunner) handleUFWDelete() (exitCode int, result string) {
 		return 1, "ufw delete: rule_id is required"
 	}
 
-	return cr.deleteUFWRule(cr.data.ChainName, cr.data.RuleID)
+	return cr.deleteUFWRule(cr.data.Chain, cr.data.RuleID)
 }
 
 // handleUFWBatch applies multiple ufw rules
@@ -220,7 +222,7 @@ func (cr *CommandRunner) handleUFWFlush() (exitCode int, result string) {
 func (cr *CommandRunner) handleUFWUpdate() (exitCode int, result string) {
 	// Delete old rule
 	if cr.data.OldRuleID != "" {
-		_, _ = cr.deleteUFWRule(cr.data.ChainName, cr.data.OldRuleID)
+		_, _ = cr.deleteUFWRule(cr.data.Chain, cr.data.OldRuleID)
 	}
 
 	// Add new rule

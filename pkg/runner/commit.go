@@ -64,13 +64,12 @@ func commitSystemInfo() {
 		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
 
 	// Sync firewall rules after committing system info
-	// Skip if firewall functionality is disabled or high-level firewall tools are detected
+	// Skip if firewall functionality is disabled
 	if utils.IsFirewallDisabled() {
 		log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
-	} else if detected, toolName := utils.DetectHighLevelFirewall(); detected {
-		log.Info().Msgf("Skipping firewall sync - %s is active", toolName)
 	} else {
-		firewallData, err := utils.CollectFirewallRules()
+		backendInfo := utils.DetectFirewallBackend(true)
+		firewallData, err := utils.CollectFirewallRules(backendInfo)
 		if err != nil {
 			log.Debug().Err(err).Msg("Failed to collect firewall rules during commit.")
 		} else {
@@ -166,11 +165,8 @@ func syncSystemInfo(session *scheduler.Session, keys []string) {
 				log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
 				continue
 			}
-			if detected, toolName := utils.DetectHighLevelFirewall(); detected {
-				log.Info().Msgf("Skipping firewall sync - %s is active", toolName)
-				continue
-			}
-			firewallData, err := utils.CollectFirewallRules()
+			backendInfo := utils.DetectFirewallBackend(true)
+			firewallData, err := utils.CollectFirewallRules(backendInfo)
 			if err != nil {
 				log.Debug().Err(err).Msg("Failed to collect firewall rules.")
 				continue

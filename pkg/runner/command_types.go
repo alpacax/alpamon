@@ -57,7 +57,6 @@ type CommandData struct {
 	AllowUnzip              bool                     `json:"allow_unzip,omitempty"`
 	UseBlob                 bool                     `json:"use_blob,omitempty"`
 	Keys                    []string                 `json:"keys"`
-	ChainName               string                   `json:"chain_name"`
 	Method                  string                   `json:"method"`
 	Chain                   string                   `json:"chain"`
 	Protocol                string                   `json:"protocol"`
@@ -81,6 +80,8 @@ type CommandData struct {
 
 	// Backend information
 	Backend string `json:"backend"` // Backend type: iptables, nftables, firewalld, ufw
+	Table   string `json:"table"`   // iptables/nftables table: filter, nat, mangle, raw, security
+	Family  string `json:"family"`  // IP family: ip (IPv4), ip6 (IPv6), inet, arp, bridge, netdev
 
 	// Firewalld specific fields
 	Zone             string `json:"zone"`               // Firewalld zone (default, public, etc.)
@@ -93,7 +94,6 @@ type CommandData struct {
 }
 
 type firewallData struct {
-	ChainName   string `validate:"required"`
 	Method      string `validate:"omitempty"`
 	Chain       string `validate:"omitempty"`
 	Protocol    string `validate:"omitempty"`

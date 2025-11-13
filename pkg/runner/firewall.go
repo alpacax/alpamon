@@ -15,50 +15,17 @@ import (
 //  3. Clean up old table/chain
 //     This prevents firewall from being completely down during flush+reorder
 func (cr *CommandRunner) firewallReorderRules() (exitCode int, result string) {
-	log.Info().Msgf("Firewall reorder rules command received for chain: %s", cr.data.ChainName)
+	log.Info().Msg("Firewall reorder rules command received")
 
 	// Validate required fields
-	if cr.data.ChainName == "" {
-		return 1, "firewall-reorder-rules: chain_name is required"
-	}
 	if len(cr.data.Rules) == 0 {
 		return 1, "firewall-reorder-rules: rules array is required"
 	}
 
-	log.Debug().Msgf("Reordering %d rules in chain %s", len(cr.data.Rules), cr.data.ChainName)
+	log.Debug().Msgf("Reordering %d rules", len(cr.data.Rules))
 
-	// Detect firewall backend
-	nftablesInstalled, iptablesInstalled, err := utils.CheckFirewallTool()
-	if err != nil {
-		return 1, fmt.Sprintf("firewall-reorder-rules: Failed to check firewall installation: %v", err)
-	}
-
-	// Flush the chain/table before applying new rules
-	var flushExitCode int
-	var flushOutput string
-
-	if nftablesInstalled {
-		// For nftables, chain_name is actually the table name (security group)
-		flushExitCode, flushOutput = runCmdWithOutput(
-			[]string{"nft", "flush", "table", "inet", cr.data.ChainName},
-			"root", "", nil, 10,
-		)
-	} else if iptablesInstalled {
-		// For iptables, chain_name is the actual chain name
-		flushExitCode, flushOutput = runCmdWithOutput(
-			[]string{"iptables", "-F", cr.data.ChainName},
-			"root", "", nil, 10,
-		)
-	} else {
-		return 1, "firewall-reorder-rules: No firewall backend available"
-	}
-
-	if flushExitCode != 0 {
-		log.Error().Msgf("Failed to flush %s: %s", cr.data.ChainName, flushOutput)
-		return 1, fmt.Sprintf("firewall-reorder-rules: Failed to flush %s: %s", cr.data.ChainName, flushOutput)
-	}
-
-	log.Info().Msgf("Successfully flushed %s", cr.data.ChainName)
+	// No explicit flush needed - batch operation handles chain management
+	// Rules already contain complete chain information
 
 	// Use the common batch apply logic with flush (same as batch operation)
 	appliedRules, failedRules, rolledBack, rollbackReason := cr.applyRulesBatchWithFlush()
@@ -69,9 +36,9 @@ func (cr *CommandRunner) firewallReorderRules() (exitCode int, result string) {
 			appliedRules, len(failedRules), rollbackReason)
 	}
 
-	log.Info().Msgf("Successfully reordered %d rules in chain %s", appliedRules, cr.data.ChainName)
-	return 0, fmt.Sprintf(`{"success": true, "message": "Rules reordered successfully", "chain": "%s", "applied_rules": %d, "failed_rules": [], "rolled_back": false}`,
-		cr.data.ChainName, appliedRules)
+	log.Info().Msgf("Successfully reordered %d rules", appliedRules)
+	return 0, fmt.Sprintf(`{"success": true, "message": "Rules reordered successfully", "applied_rules": %d, "failed_rules": [], "rolled_back": false}`,
+		appliedRules)
 }
 
 // firewallReorderChains handles the firewall-reorder-chains command

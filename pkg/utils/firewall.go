@@ -23,18 +23,17 @@ var (
 	firewallCheckError        error
 
 	// Feature flag to disable automatic rule recreation
-	// Set to true to prevent conflicts with ufw/firewalld
+	// Set to true to prevent conflicts with ufw/firewalld and rule_id changes
 	disableRuleRecreation = true
 
 	// Temporary flag to disable all firewall functionality
 	// Set to true to completely disable alpacon firewall management
-	firewallFunctionalityDisabled = true
+	firewallFunctionalityDisabled = false
 
-	// High-level firewall detection cache
-	highLevelFirewallCheckMutex     sync.Mutex
-	highLevelFirewallCheckAttempted bool
-	highLevelFirewallDetected       bool
-	highLevelFirewallToolName       string
+	// Firewall backend detection cache
+	firewallBackendMutex     sync.Mutex
+	firewallBackendAttempted bool
+	cachedFirewallBackend    *BackendInfo
 )
 
 // Default values matching alpacon-server FirewallRuleSyncSerializer
@@ -50,16 +49,26 @@ const (
 	RuleTypeAlpacon = "alpacon" // Alpacon-created rules (remove last)
 )
 
+// chainMetadata holds table and family information for a chain
+type chainMetadata struct {
+	table  string
+	family string
+}
+
 // FirewallChainSync represents a firewall chain for sync payload
 type FirewallChainSync struct {
-	Name  string             `json:"name"`
-	Rules []FirewallRuleSync `json:"rules"`
+	Name   string             `json:"name"`
+	Table  string             `json:"table"`  // filter, nat, mangle, raw, security
+	Family string             `json:"family"` // ip, ip6, inet, arp, bridge, netdev
+	Rules  []FirewallRuleSync `json:"rules"`
 }
 
 // FirewallRuleSync represents a single firewall rule for sync
 // This matches the alpacon-server FirewallRuleSyncSerializer format
 type FirewallRuleSync struct {
 	Chain           string `json:"chain"`
+	Table           string `json:"table"`  // filter, nat, mangle, raw, security
+	Family          string `json:"family"` // ip, ip6, inet, arp, bridge, netdev
 	Protocol        string `json:"protocol"`
 	PortStart       *int   `json:"port_start,omitempty"`
 	PortEnd         *int   `json:"port_end,omitempty"`
@@ -107,66 +116,6 @@ func IsFirewallDisabled() bool {
 	return firewallFunctionalityDisabled
 }
 
-// DetectHighLevelFirewall detects if high-level firewall management tools are active
-// Returns (detected, toolName) where toolName is "ufw" or "firewalld"
-func DetectHighLevelFirewall() (detected bool, toolName string) {
-	// Use mutex to prevent concurrent checks
-	highLevelFirewallCheckMutex.Lock()
-	defer highLevelFirewallCheckMutex.Unlock()
-
-	// Return cached result if we've already checked
-	if highLevelFirewallCheckAttempted {
-		return highLevelFirewallDetected, highLevelFirewallToolName
-	}
-
-	// 1. Check ufw via systemctl (most reliable)
-	exitCode, output := runFirewallCommand([]string{"systemctl", "is-active", "ufw"}, 5)
-	if exitCode == 0 && strings.TrimSpace(output) == "active" {
-		highLevelFirewallCheckAttempted = true
-		highLevelFirewallDetected = true
-		highLevelFirewallToolName = "ufw"
-		log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
-		return true, "ufw"
-	}
-
-	// 2. Fallback: Check ufw via direct command
-	exitCode, output = runFirewallCommand([]string{"ufw", "status"}, 5)
-	if exitCode == 0 && strings.Contains(strings.ToLower(output), "status: active") {
-		highLevelFirewallCheckAttempted = true
-		highLevelFirewallDetected = true
-		highLevelFirewallToolName = "ufw"
-		log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
-		return true, "ufw"
-	}
-
-	// 3. Check firewalld via systemctl
-	exitCode, output = runFirewallCommand([]string{"systemctl", "is-active", "firewalld"}, 5)
-	if exitCode == 0 && strings.TrimSpace(output) == "active" {
-		highLevelFirewallCheckAttempted = true
-		highLevelFirewallDetected = true
-		highLevelFirewallToolName = "firewalld"
-		log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
-		return true, "firewalld"
-	}
-
-	// 4. Fallback: Check firewalld via firewall-cmd
-	exitCode, output = runFirewallCommand([]string{"firewall-cmd", "--state"}, 5)
-	if exitCode == 0 && strings.Contains(strings.ToLower(output), "running") {
-		highLevelFirewallCheckAttempted = true
-		highLevelFirewallDetected = true
-		highLevelFirewallToolName = "firewalld"
-		log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
-		return true, "firewalld"
-	}
-
-	// No high-level firewall detected
-	highLevelFirewallCheckAttempted = true
-	highLevelFirewallDetected = false
-	highLevelFirewallToolName = ""
-	log.Debug().Msg("No high-level firewall detected - alpacon firewall management enabled")
-	return false, ""
-}
-
 // BackendInfo contains firewall backend information
 type BackendInfo struct {
 	Type    string `json:"type"`    // iptables, nftables, firewalld, ufw
@@ -176,52 +125,64 @@ type BackendInfo struct {
 // DetectFirewallBackend detects the active firewall backend and version
 // Priority: firewalld > ufw > nftables > iptables
 // This provides comprehensive backend information for sync protocol
-func DetectFirewallBackend() *BackendInfo {
+func DetectFirewallBackend(force bool) *BackendInfo {
+	// Use mutex to prevent concurrent checks
+	firewallBackendMutex.Lock()
+	defer firewallBackendMutex.Unlock()
+
+	// Return cached result if not forcing and already checked
+	if !force && firewallBackendAttempted && cachedFirewallBackend != nil {
+		return cachedFirewallBackend
+	}
+
+	var result *BackendInfo
+	log.Info().Msgf("Detecting firewall backend")
+
 	// 1. Check firewalld first (highest priority)
 	if isServiceActive("firewalld") {
 		version := getFirewalldVersion()
 		log.Info().Msgf("Detected firewalld backend (version: %s)", version)
-		return &BackendInfo{
+		result = &BackendInfo{
 			Type:    "firewalld",
 			Version: version,
 		}
-	}
-
-	// 2. Check ufw
-	if isUFWActive() {
+	} else if isUFWActive() {
+		// 2. Check ufw
 		version := getUFWVersion()
 		log.Info().Msgf("Detected ufw backend (version: %s)", version)
-		return &BackendInfo{
+		result = &BackendInfo{
 			Type:    "ufw",
 			Version: version,
 		}
-	}
-
-	// 3. Check nftables (has rules)
-	if hasNftablesRules() {
+	} else if hasNftablesRules() {
+		// 3. Check nftables (has rules)
 		version := getNftablesVersion()
 		log.Info().Msgf("Detected nftables backend (version: %s)", version)
-		return &BackendInfo{
+		result = &BackendInfo{
 			Type:    "nftables",
 			Version: version,
 		}
-	}
-
-	// 4. Fallback to iptables if available
-	if hasIptablesAvailable() {
+	} else if hasIptablesAvailable() {
+		// 4. Fallback to iptables if available
 		version := getIptablesVersion()
 		log.Info().Msgf("Detected iptables backend (version: %s)", version)
-		return &BackendInfo{
+		result = &BackendInfo{
 			Type:    "iptables",
 			Version: version,
 		}
+	} else {
+		log.Warn().Msg("No firewall backend detected")
+		result = &BackendInfo{
+			Type:    "none",
+			Version: "",
+		}
 	}
 
-	log.Warn().Msg("No firewall backend detected")
-	return &BackendInfo{
-		Type:    "none",
-		Version: "",
-	}
+	// Cache the result
+	firewallBackendAttempted = true
+	cachedFirewallBackend = result
+
+	return result
 }
 
 // isServiceActive checks if a systemd service is active
@@ -322,10 +283,11 @@ func CheckFirewallTool() (nftablesInstalled bool, iptablesInstalled bool, err er
 	firewallCheckMutex.Lock()
 	defer firewallCheckMutex.Unlock()
 
-	// Return cached result if we've already checked
-	if firewallCheckAttempted {
-		return firewallNftablesInstalled, firewallIptablesInstalled, firewallCheckError
-	}
+	// TEMPORARY FIX: Always re-detect, ignore cache
+	// TODO: Remove this after fixing cache invalidation issue
+	// if firewallCheckAttempted {
+	// 	return firewallNftablesInstalled, firewallIptablesInstalled, firewallCheckError
+	// }
 
 	// Detect backend based on existing rules
 	backend := detectFirewallBackend()
@@ -547,11 +509,33 @@ func RecreateNftablesRuleWithComment(tableName string, rule *FirewallRuleSync, n
 	return exitCode == 0
 }
 
+// getIptablesCommand returns the appropriate iptables command based on IP family
+func getIptablesCommand(family string) string {
+	switch family {
+	case "ip6":
+		return "ip6tables"
+	case "arp":
+		return "arptables"
+	case "bridge":
+		return "ebtables"
+	case "inet", "netdev":
+		// These are nftables-only families, fall back to iptables
+		log.Warn().Msgf("Family '%s' is nftables-only, falling back to iptables", family)
+		return "iptables"
+	default:
+		// Default to iptables for ip (IPv4) or unspecified family
+		return "iptables"
+	}
+}
+
 // RecreateIptablesRuleWithComment re-creates an iptables rule with updated comment
 // Returns true if re-creation was successful
 func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, newComment string) bool {
+	// Determine which command to use based on family
+	cmd := getIptablesCommand(rule.Family)
+
 	// Build iptables insert command (insert at beginning to maintain priority)
-	args := []string{"iptables", "-I", chainName}
+	args := []string{cmd, "-I", chainName}
 
 	// Protocol
 	if rule.Protocol != "" && rule.Protocol != DefaultProtocol {
@@ -604,9 +588,13 @@ func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, n
 // CollectFirewallRules collects current firewall rules from the system
 // This is the reverse operation of command.go firewall application logic
 // Includes backend detection information in the sync payload
-func CollectFirewallRules() (*FirewallSyncPayload, error) {
-	// Detect backend type and version
-	backendInfo := DetectFirewallBackend()
+// Accepts backendInfo to avoid re-detection; if nil, will detect automatically
+func CollectFirewallRules(backendInfo *BackendInfo) (*FirewallSyncPayload, error) {
+	// Use provided backendInfo or detect if not provided
+	if backendInfo == nil {
+		// TEMPORARY FIX: Always force re-detection
+		backendInfo = DetectFirewallBackend(true)
+	}
 	log.Debug().Msgf("Detected firewall backend: %s (version: %s)", backendInfo.Type, backendInfo.Version)
 
 	// Check which firewall tool is available for rule collection
@@ -661,28 +649,63 @@ func collectNftablesRules() (*FirewallSyncPayload, error) {
 		return nil, fmt.Errorf("failed to parse nftables output: %w", err)
 	}
 
-	chains := make(map[string][]FirewallRuleSync)
-	tableNames := make(map[string]bool)
+	// Map: chainKey (table:family:chain) -> chainMetadata (table, family)
+	chainMeta := make(map[string]chainMetadata)
 
-	// First pass: collect all table names
+	// Map: chainKey -> rules
+	chainRules := make(map[string][]FirewallRuleSync)
+
+	// First pass: collect table and chain information with family
+	currentTable := ""
+	currentFamily := ""
 	for _, item := range nftData.Nftables {
+		// Track current table and its family
 		if table, ok := item["table"]; ok {
 			if tableMap, ok := table.(map[string]interface{}); ok {
 				if name, ok := tableMap["name"].(string); ok {
-					tableNames[name] = true
+					currentTable = name
+				}
+				if family, ok := tableMap["family"].(string); ok {
+					currentFamily = family
+				}
+			}
+		}
+
+		// Track chains and their metadata
+		if chain, ok := item["chain"]; ok {
+			if chainMap, ok := chain.(map[string]interface{}); ok {
+				chainName, _ := chainMap["name"].(string)
+				table, _ := chainMap["table"].(string)
+				family, _ := chainMap["family"].(string)
+
+				// Use current table/family if not specified
+				if table == "" {
+					table = currentTable
+				}
+				if family == "" {
+					family = currentFamily
+				}
+
+				if chainName != "" && table != "" && family != "" {
+					chainKey := fmt.Sprintf("%s:%s:%s", table, family, chainName)
+					chainMeta[chainKey] = chainMetadata{table: table, family: family}
 				}
 			}
 		}
 	}
 
-	// Second pass: collect rules grouped by table
-	currentTable := ""
+	// Second pass: collect rules with table/family info
+	currentTable = ""
+	currentFamily = ""
 	for _, item := range nftData.Nftables {
 		// Track current table
 		if table, ok := item["table"]; ok {
 			if tableMap, ok := table.(map[string]interface{}); ok {
 				if name, ok := tableMap["name"].(string); ok {
 					currentTable = name
+				}
+				if family, ok := tableMap["family"].(string); ok {
+					currentFamily = family
 				}
 			}
 		}
@@ -691,47 +714,77 @@ func collectNftablesRules() (*FirewallSyncPayload, error) {
 		if rule, ok := item["rule"]; ok {
 			ruleMap := rule.(map[string]interface{})
 			tableName, _ := ruleMap["table"].(string)
+			family, _ := ruleMap["family"].(string)
+
+			// Use current table/family if not specified in rule
 			if tableName == "" {
 				tableName = currentTable
 			}
-
-			// Only process tables we've seen in first pass
-			if !tableNames[tableName] {
-				continue
+			if family == "" {
+				family = currentFamily
 			}
 
-			if parsedRule, err := parseNftablesRuleToSync(ruleMap); err == nil {
-				chains[tableName] = append(chains[tableName], *parsedRule)
+			if parsedRule, err := parseNftablesRuleToSync(ruleMap, tableName, family); err == nil {
+				chainKey := fmt.Sprintf("%s:%s:%s", parsedRule.Table, parsedRule.Family, parsedRule.Chain)
+				chainRules[chainKey] = append(chainRules[chainKey], *parsedRule)
 			}
 		}
 	}
 
-	return buildSyncPayload(chains), nil
+	return buildSyncPayloadWithMetadata(chainRules, chainMeta), nil
 }
 
-// collectIptablesRules extracts rules from iptables
+// collectIptablesRules extracts rules from both iptables (IPv4) and ip6tables (IPv6)
 func collectIptablesRules() (*FirewallSyncPayload, error) {
+	allChains := make(map[string][]FirewallRuleSync)
+
+	// Collect IPv4 rules (iptables)
 	exitCode, output := runFirewallCommand([]string{"iptables-save"}, 30)
-	if exitCode != 0 {
+	if exitCode == 0 {
+		ipv4Chains := parseIptablesSaveOutput(output, "ip")
+		// Merge IPv4 chains
+		for chainName, rules := range ipv4Chains {
+			allChains[chainName] = append(allChains[chainName], rules...)
+		}
+		log.Debug().Msgf("Collected %d IPv4 chains from iptables", len(ipv4Chains))
+	} else {
 		log.Debug().Msgf("Failed to run iptables-save: exit code %d", exitCode)
+	}
+
+	// Collect IPv6 rules (ip6tables)
+	exitCode6, output6 := runFirewallCommand([]string{"ip6tables-save"}, 30)
+	if exitCode6 == 0 {
+		ipv6Chains := parseIptablesSaveOutput(output6, "ip6")
+		// Merge IPv6 chains (keep separate by family)
+		for chainName, rules := range ipv6Chains {
+			allChains[chainName] = append(allChains[chainName], rules...)
+		}
+		log.Debug().Msgf("Collected %d IPv6 chains from ip6tables", len(ipv6Chains))
+	} else {
+		log.Debug().Msgf("Failed to run ip6tables-save: exit code %d", exitCode6)
+	}
+
+	// Return empty payload if both failed
+	if exitCode != 0 && exitCode6 != 0 {
 		return &FirewallSyncPayload{Chains: []FirewallChainSync{}}, nil
 	}
 
-	chains := parseIptablesSaveOutput(output)
-	return buildSyncPayload(chains), nil
+	return buildSyncPayload(allChains), nil
 }
 
 // parseNftablesRuleToSync converts nftables rule map to FirewallRuleSync
-func parseNftablesRuleToSync(ruleMap map[string]interface{}) (*FirewallRuleSync, error) {
+func parseNftablesRuleToSync(ruleMap map[string]interface{}, table, family string) (*FirewallRuleSync, error) {
 	rule := &FirewallRuleSync{
 		SourceCIDR: DefaultCIDR,
 		Priority:   DefaultPriority,
 		Protocol:   DefaultProtocol,
 		Target:     DefaultTarget,
+		Table:      table,
+		Family:     family,
 	}
 
 	rule.Chain = ruleMap["chain"].(string)
-	tableName, _ := ruleMap["table"].(string)
+	tableName := table
 
 	// Extract comment if present
 	var fullComment string
@@ -851,14 +904,24 @@ func parseNftablesRuleToSync(ruleMap map[string]interface{}) (*FirewallRuleSync,
 }
 
 // parseIptablesSaveOutput parses iptables-save output to extract all chain rules
-func parseIptablesSaveOutput(output string) map[string][]FirewallRuleSync {
+// family: "ip" for iptables, "ip6" for ip6tables
+func parseIptablesSaveOutput(output string, family string) map[string][]FirewallRuleSync {
 	chains := make(map[string][]FirewallRuleSync)
 	chainNames := make(map[string]bool)
 	lines := strings.Split(output, "\n")
 
+	// Track current table (default: filter)
+	currentTable := "filter"
+
 	// First pass: extract all chain names
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
+
+		// Track table markers (e.g., "*filter", "*nat", "*mangle")
+		if strings.HasPrefix(line, "*") {
+			currentTable = strings.TrimPrefix(line, "*")
+		}
+
 		if strings.HasPrefix(line, ":") {
 			parts := strings.Fields(line)
 			if len(parts) > 0 {
@@ -869,8 +932,14 @@ func parseIptablesSaveOutput(output string) map[string][]FirewallRuleSync {
 	}
 
 	// Second pass: extract rules for all chains
+	currentTable = "filter"
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
+
+		// Track table markers
+		if strings.HasPrefix(line, "*") {
+			currentTable = strings.TrimPrefix(line, "*")
+		}
 
 		// Skip empty lines, comments, chain definitions, table markers
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ":") || strings.HasPrefix(line, "*") || line == "COMMIT" {
@@ -882,8 +951,8 @@ func parseIptablesSaveOutput(output string) map[string][]FirewallRuleSync {
 			continue
 		}
 
-		// Parse rule line
-		rule := parseIptablesSaveRuleLine(line)
+		// Parse rule line with current table and family
+		rule := parseIptablesSaveRuleLine(line, currentTable, family)
 		if rule != nil && chainNames[rule.Chain] {
 			chains[rule.Chain] = append(chains[rule.Chain], *rule)
 		}
@@ -893,7 +962,8 @@ func parseIptablesSaveOutput(output string) map[string][]FirewallRuleSync {
 }
 
 // parseIptablesSaveRuleLine parses a single iptables-save rule line
-func parseIptablesSaveRuleLine(line string) *FirewallRuleSync {
+// family: "ip" for iptables, "ip6" for ip6tables
+func parseIptablesSaveRuleLine(line string, table string, family string) *FirewallRuleSync {
 	// Remove -A or -I prefix
 	if strings.HasPrefix(line, "-A ") {
 		line = strings.TrimPrefix(line, "-A ")
@@ -911,6 +981,8 @@ func parseIptablesSaveRuleLine(line string) *FirewallRuleSync {
 
 	rule := &FirewallRuleSync{
 		Chain:      chainName,
+		Table:      table,
+		Family:     family, // "ip" or "ip6"
 		SourceCIDR: DefaultCIDR,
 		Priority:   DefaultPriority,
 		Protocol:   DefaultProtocol,
@@ -1017,15 +1089,62 @@ func parseIptablesSaveRuleLine(line string) *FirewallRuleSync {
 	return rule
 }
 
-// buildSyncPayload creates sync payload from parsed rules
+// buildSyncPayloadWithMetadata creates sync payload with table/family metadata
+// chainRules: map[chainKey] -> rules (chainKey format: "table:family:chain")
+// chainMeta: map[chainKey] -> metadata (table, family)
+func buildSyncPayloadWithMetadata(chainRules map[string][]FirewallRuleSync, chainMeta map[string]chainMetadata) *FirewallSyncPayload {
+	chainsList := make([]FirewallChainSync, 0)
+
+	for chainKey, rules := range chainRules {
+		if len(rules) == 0 {
+			continue
+		}
+
+		// Parse chainKey: "table:family:chain"
+		parts := strings.Split(chainKey, ":")
+		if len(parts) != 3 {
+			continue
+		}
+
+		table, family, chainName := parts[0], parts[1], parts[2]
+
+		chainsList = append(chainsList, FirewallChainSync{
+			Name:   chainName,
+			Table:  table,
+			Family: family,
+			Rules:  rules,
+		})
+	}
+
+	return &FirewallSyncPayload{
+		Chains: chainsList,
+	}
+}
+
+// buildSyncPayload creates sync payload from parsed rules (legacy, for iptables)
+// For iptables, table is always "filter" and family is "ip"
 func buildSyncPayload(chains map[string][]FirewallRuleSync) *FirewallSyncPayload {
 	chainsList := make([]FirewallChainSync, 0)
 
 	for name, rules := range chains {
 		if len(rules) > 0 {
+			// For iptables, default to filter table and ip family
+			table := "filter"
+			family := "ip"
+
+			// Extract from first rule if available
+			if len(rules) > 0 && rules[0].Table != "" {
+				table = rules[0].Table
+			}
+			if len(rules) > 0 && rules[0].Family != "" {
+				family = rules[0].Family
+			}
+
 			chainsList = append(chainsList, FirewallChainSync{
-				Name:  name,
-				Rules: rules,
+				Name:   name,
+				Table:  table,
+				Family: family,
+				Rules:  rules,
 			})
 		}
 	}
@@ -1043,7 +1162,7 @@ func RemoveFirewallRulesByType(ruleType string) (int, error) {
 		return 0, fmt.Errorf("failed to backup firewall rules: %w", err)
 	}
 
-	payload, err := CollectFirewallRules()
+	payload, err := CollectFirewallRules(nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to collect firewall rules: %w", err)
 	}
@@ -1123,7 +1242,10 @@ func RemoveNftablesRule(tableName string, rule FirewallRuleSync) error {
 
 // RemoveIptablesRule removes a specific rule from iptables
 func RemoveIptablesRule(chainName string, rule FirewallRuleSync) error {
-	args := []string{"iptables", "-D", chainName}
+	// Determine which command to use based on family
+	cmd := getIptablesCommand(rule.Family)
+
+	args := []string{cmd, "-D", chainName}
 
 	if rule.Protocol != "" && rule.Protocol != DefaultProtocol {
 		args = append(args, "-p", rule.Protocol)
@@ -1259,8 +1381,12 @@ func ReorderNftablesChains(chainNames []string) (map[string]interface{}, error) 
 }
 
 // ReorderIptablesChains reorders iptables INPUT chain jump rules
+// Note: This function uses iptables (IPv4) by default. For IPv6 support, use ReorderIptablesChainsByFamily
 func ReorderIptablesChains(chainNames []string) (map[string]interface{}, error) {
 	log.Debug().Msg("Starting iptables chain reordering")
+
+	// Use default IPv4 (iptables)
+	cmd := getIptablesCommand("ip")
 
 	// Backup current rules
 	backup, err := BackupFirewallRules()
@@ -1269,7 +1395,7 @@ func ReorderIptablesChains(chainNames []string) (map[string]interface{}, error) 
 	}
 
 	// Get current INPUT chain rules
-	exitCode, output := runFirewallCommand([]string{"iptables", "-L", "INPUT", "--line-numbers", "-n"}, 30)
+	exitCode, output := runFirewallCommand([]string{cmd, "-L", "INPUT", "--line-numbers", "-n"}, 30)
 	if exitCode != 0 {
 		return nil, fmt.Errorf("failed to list INPUT chain rules")
 	}
@@ -1317,7 +1443,7 @@ func ReorderIptablesChains(chainNames []string) (map[string]interface{}, error) 
 	// Delete old jump rules
 	for _, lineNum := range jumpLines {
 		exitCode, errOutput := runFirewallCommand(
-			[]string{"iptables", "-D", "INPUT", fmt.Sprintf("%d", lineNum)},
+			[]string{cmd, "-D", "INPUT", fmt.Sprintf("%d", lineNum)},
 			10,
 		)
 		if exitCode != 0 {
@@ -1333,7 +1459,7 @@ func ReorderIptablesChains(chainNames []string) (map[string]interface{}, error) 
 	// Add jump rules in new order
 	for _, chainName := range chainNames {
 		exitCode, errOutput := runFirewallCommand(
-			[]string{"iptables", "-A", "INPUT", "-j", chainName},
+			[]string{cmd, "-A", "INPUT", "-j", chainName},
 			10,
 		)
 		if exitCode != 0 {
@@ -1368,12 +1494,36 @@ func BackupFirewallRules() (string, error) {
 		log.Debug().Msg("Created nftables backup")
 		return output, nil
 	} else if iptablesInstalled {
-		exitCode, output := runFirewallCommand([]string{"iptables-save"}, 30)
-		if exitCode != 0 {
-			return "", fmt.Errorf("failed to backup iptables rules: exit code %d", exitCode)
+		// Backup both IPv4 and IPv6 rules
+		var backupBuilder strings.Builder
+
+		// IPv4 backup
+		exitCode4, output4 := runFirewallCommand([]string{"iptables-save"}, 30)
+		if exitCode4 == 0 {
+			backupBuilder.WriteString("# IPv4 Rules\n")
+			backupBuilder.WriteString(output4)
+			backupBuilder.WriteString("\n")
+			log.Debug().Msg("Created IPv4 iptables backup")
+		} else {
+			log.Warn().Msgf("Failed to backup IPv4 iptables rules: exit code %d", exitCode4)
 		}
-		log.Debug().Msg("Created iptables backup")
-		return output, nil
+
+		// IPv6 backup
+		exitCode6, output6 := runFirewallCommand([]string{"ip6tables-save"}, 30)
+		if exitCode6 == 0 {
+			backupBuilder.WriteString("# IPv6 Rules\n")
+			backupBuilder.WriteString(output6)
+			log.Debug().Msg("Created IPv6 ip6tables backup")
+		} else {
+			log.Warn().Msgf("Failed to backup IPv6 ip6tables rules: exit code %d", exitCode6)
+		}
+
+		// Return error only if both failed
+		if exitCode4 != 0 && exitCode6 != 0 {
+			return "", fmt.Errorf("failed to backup both IPv4 and IPv6 iptables rules")
+		}
+
+		return backupBuilder.String(), nil
 	}
 
 	return "", fmt.Errorf("no firewall tools available for backup")
@@ -1429,26 +1579,84 @@ func restoreNftablesBackup(backup string) error {
 }
 
 // restoreIptablesBackup restores iptables rules from backup string
+// Handles both IPv4 and IPv6 rules
 func restoreIptablesBackup(backup string) error {
 	log.Warn().Msg("Restoring iptables backup")
 
-	tmpFile := fmt.Sprintf("/tmp/iptables-backup-%d-%d.rules", os.Getpid(), time.Now().UnixNano())
-	f, err := os.OpenFile(tmpFile, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return fmt.Errorf("failed to create iptables backup temp file: %w", err)
+	// Split backup into IPv4 and IPv6 sections
+	lines := strings.Split(backup, "\n")
+	var ipv4Lines, ipv6Lines []string
+	var currentSection string
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "# IPv4 Rules") {
+			currentSection = "ipv4"
+			continue
+		} else if strings.HasPrefix(line, "# IPv6 Rules") {
+			currentSection = "ipv6"
+			continue
+		}
+
+		if currentSection == "ipv4" && line != "" {
+			ipv4Lines = append(ipv4Lines, line)
+		} else if currentSection == "ipv6" && line != "" {
+			ipv6Lines = append(ipv6Lines, line)
+		}
 	}
-	defer os.Remove(tmpFile)
 
-	if _, err := f.WriteString(backup); err != nil {
-		f.Close()
-		return fmt.Errorf("failed to write iptables backup: %w", err)
+	var restoreErrors []string
+
+	// Restore IPv4 rules
+	if len(ipv4Lines) > 0 {
+		ipv4Backup := strings.Join(ipv4Lines, "\n")
+		tmpFile4 := fmt.Sprintf("/tmp/iptables-backup-%d-%d.rules", os.Getpid(), time.Now().UnixNano())
+		f4, err := os.OpenFile(tmpFile4, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			restoreErrors = append(restoreErrors, fmt.Sprintf("IPv4: failed to create temp file: %v", err))
+		} else {
+			defer os.Remove(tmpFile4)
+			if _, err := f4.WriteString(ipv4Backup); err != nil {
+				f4.Close()
+				restoreErrors = append(restoreErrors, fmt.Sprintf("IPv4: failed to write backup: %v", err))
+			} else {
+				f4.Close()
+				exitCode, output := runFirewallCommand([]string{"iptables-restore", tmpFile4}, 10)
+				if exitCode != 0 {
+					restoreErrors = append(restoreErrors, fmt.Sprintf("IPv4: failed to restore: %s", output))
+				} else {
+					log.Info().Msg("Successfully restored IPv4 iptables backup")
+				}
+			}
+		}
 	}
-	f.Close()
 
-	exitCode, output := runFirewallCommand([]string{"iptables-restore", tmpFile}, 10)
+	// Restore IPv6 rules
+	if len(ipv6Lines) > 0 {
+		ipv6Backup := strings.Join(ipv6Lines, "\n")
+		tmpFile6 := fmt.Sprintf("/tmp/ip6tables-backup-%d-%d.rules", os.Getpid(), time.Now().UnixNano())
+		f6, err := os.OpenFile(tmpFile6, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			restoreErrors = append(restoreErrors, fmt.Sprintf("IPv6: failed to create temp file: %v", err))
+		} else {
+			defer os.Remove(tmpFile6)
+			if _, err := f6.WriteString(ipv6Backup); err != nil {
+				f6.Close()
+				restoreErrors = append(restoreErrors, fmt.Sprintf("IPv6: failed to write backup: %v", err))
+			} else {
+				f6.Close()
+				exitCode, output := runFirewallCommand([]string{"ip6tables-restore", tmpFile6}, 10)
+				if exitCode != 0 {
+					restoreErrors = append(restoreErrors, fmt.Sprintf("IPv6: failed to restore: %s", output))
+				} else {
+					log.Info().Msg("Successfully restored IPv6 ip6tables backup")
+				}
+			}
+		}
+	}
 
-	if exitCode != 0 {
-		return fmt.Errorf("failed to restore iptables backup: %s", output)
+	// Return error if any restore failed
+	if len(restoreErrors) > 0 {
+		return fmt.Errorf("failed to restore iptables backup: %s", strings.Join(restoreErrors, "; "))
 	}
 
 	log.Info().Msg("Successfully restored iptables backup")
