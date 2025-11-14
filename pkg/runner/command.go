@@ -1061,19 +1061,22 @@ func (cr *CommandRunner) handleUpdateCommentOperation() (exitCode int, result st
 		// Update comment based on backend
 		var success bool
 		if nftablesInstalled {
-			// For nftables, construct table name from family and table
-			// Default to "inet filter" if not provided
+			// For nftables, use family and table separately
+			// Default to "inet" and "filter" if not provided
 			if table == "" {
 				table = "filter"
 			}
 			if family == "" {
 				family = "inet"
 			}
-			tableName := family + " " + table
-			success = utils.RecreateNftablesRuleWithComment(tableName, rule, newComment)
+			success = utils.RecreateNftablesRuleWithComment(family, table, rule, newComment)
 		} else if iptablesInstalled {
-			// For iptables, use the chain name directly
-			success = utils.RecreateIptablesRuleWithComment(chain, rule, newComment)
+			// For iptables, use table and chain separately
+			// Default to "filter" if not provided
+			if table == "" {
+				table = "filter"
+			}
+			success = utils.RecreateIptablesRuleWithComment(table, chain, rule, newComment)
 		}
 
 		if success {
@@ -1125,6 +1128,18 @@ func (cr *CommandRunner) convertToFirewallRuleSync(ruleData map[string]interface
 
 	if ruleType, ok := ruleData["rule_type"].(string); ok {
 		rule.RuleType = ruleType
+	}
+
+	if table, ok := ruleData["table"].(string); ok {
+		rule.Table = table
+	}
+
+	if family, ok := ruleData["family"].(string); ok {
+		rule.Family = family
+	}
+
+	if priority, ok := ruleData["priority"].(float64); ok {
+		rule.Priority = int(priority)
 	}
 
 	// Handle ports

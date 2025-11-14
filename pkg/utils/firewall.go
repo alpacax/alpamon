@@ -453,12 +453,12 @@ func ParseCommentOrGenerate(comment string) (ruleID, ruleType string) {
 
 // RecreateNftablesRuleWithComment re-creates an nftables rule with updated comment
 // Returns true if re-creation was successful
-func RecreateNftablesRuleWithComment(tableName string, rule *FirewallRuleSync, newComment string) bool {
+func RecreateNftablesRuleWithComment(family string, table string, rule *FirewallRuleSync, newComment string) bool {
 	// Step 1: List rules in JSON format to find exact matching rule
-	listArgs := []string{"nft", "-j", "list", "chain", tableName, rule.Chain}
+	listArgs := []string{"nft", "-j", "list", "chain", family, table, rule.Chain}
 	exitCode, output := runFirewallCommand(listArgs, 10)
 	if exitCode != 0 {
-		log.Debug().Msgf("Failed to list chain %s in table %s", rule.Chain, tableName)
+		log.Debug().Msgf("Failed to list chain %s in table %s %s", rule.Chain, family, table)
 		return false
 	}
 
@@ -510,10 +510,10 @@ func RecreateNftablesRuleWithComment(tableName string, rule *FirewallRuleSync, n
 	if rulePosition > 1 && rulePosition <= len(handles) {
 		// Insert after the previous rule
 		insertAfterHandle := handles[rulePosition-2] // -2 because: -1 for previous, -1 for 0-based index
-		insertArgs = []string{"nft", "add", "rule", tableName, rule.Chain, "position", fmt.Sprintf("%d", insertAfterHandle)}
+		insertArgs = []string{"nft", "add", "rule", family, table, rule.Chain, "position", fmt.Sprintf("%d", insertAfterHandle)}
 	} else {
 		// Insert at the beginning
-		insertArgs = []string{"nft", "insert", "rule", tableName, rule.Chain}
+		insertArgs = []string{"nft", "insert", "rule", family, table, rule.Chain}
 	}
 
 	// Add rule specifications
@@ -556,7 +556,7 @@ func RecreateNftablesRuleWithComment(tableName string, rule *FirewallRuleSync, n
 	}
 
 	// Step 3: Delete the old rule using its handle
-	deleteArgs := []string{"nft", "delete", "rule", tableName, rule.Chain, "handle", fmt.Sprintf("%d", matchingHandle)}
+	deleteArgs := []string{"nft", "delete", "rule", family, table, rule.Chain, "handle", fmt.Sprintf("%d", matchingHandle)}
 	exitCode, _ = runFirewallCommand(deleteArgs, 10)
 	if exitCode != 0 {
 		log.Warn().Msgf("Failed to delete old rule (handle %d) for rule_id %s", matchingHandle, rule.RuleID)
@@ -706,7 +706,7 @@ func getIptablesCommand(family string) string {
 
 // RecreateIptablesRuleWithComment re-creates an iptables rule with updated comment
 // Returns true if re-creation was successful
-func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, newComment string) bool {
+func RecreateIptablesRuleWithComment(tableName string, chainName string, rule *FirewallRuleSync, newComment string) bool {
 	// Determine which command to use based on family
 	cmd := getIptablesCommand(rule.Family)
 
@@ -714,7 +714,12 @@ func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, n
 	// Build a pattern that will match the rule in iptables -L output
 	// We'll check for the key components that define the rule
 
-	listArgs := []string{cmd, "-L", chainName, "--line-numbers", "-n", "-v"}
+	// Build list command with table parameter
+	listArgs := []string{cmd}
+	if tableName != "" && tableName != "filter" {
+		listArgs = append(listArgs, "-t", tableName)
+	}
+	listArgs = append(listArgs, "-L", chainName, "--line-numbers", "-n", "-v")
 	exitCode, output := runFirewallCommand(listArgs, 10)
 
 	var rulePosition int
@@ -767,9 +772,14 @@ func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, n
 		log.Debug().Msgf("Could not find existing rule position, inserting at position 1")
 	}
 
-	insertArgs := buildIptablesRuleArgs(cmd, "-I", chainName, rule, newComment)
+	insertArgs := buildIptablesRuleArgs(cmd, tableName, "-I", chainName, rule, newComment)
 	// Insert at the specific position
-	insertArgs = append(insertArgs[:3], append([]string{fmt.Sprintf("%d", insertPosition)}, insertArgs[3:]...)...)
+	// Calculate base index (cmd + optional -t table + method + chain = 2/4 args)
+	baseIdx := 2
+	if tableName != "" && tableName != "filter" {
+		baseIdx = 4
+	}
+	insertArgs = append(insertArgs[:baseIdx], append([]string{fmt.Sprintf("%d", insertPosition)}, insertArgs[baseIdx:]...)...)
 
 	exitCode, _ = runFirewallCommand(insertArgs, 10)
 	if exitCode != 0 {
@@ -780,17 +790,21 @@ func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, n
 	// Step 3: Try to delete the old rule (now at position+1 if we found it)
 	if rulePosition > 0 {
 		// Delete by position (it's now at position+1 after our insert)
-		deleteArgs := []string{cmd, "-D", chainName, fmt.Sprintf("%d", rulePosition+1)}
+		deleteArgs := []string{cmd}
+		if tableName != "" && tableName != "filter" {
+			deleteArgs = append(deleteArgs, "-t", tableName)
+		}
+		deleteArgs = append(deleteArgs, "-D", chainName, fmt.Sprintf("%d", rulePosition+1))
 		deleteExitCode, _ := runFirewallCommand(deleteArgs, 10)
 
 		if deleteExitCode != 0 {
 			// Fallback: try to delete by spec
-			deleteArgs = buildIptablesRuleArgs(cmd, "-D", chainName, rule, "")
+			deleteArgs = buildIptablesRuleArgs(cmd, tableName, "-D", chainName, rule, "")
 			runFirewallCommand(deleteArgs, 10)
 		}
 	} else {
 		// Try to delete by spec if we didn't find the position
-		deleteArgs := buildIptablesRuleArgs(cmd, "-D", chainName, rule, "")
+		deleteArgs := buildIptablesRuleArgs(cmd, tableName, "-D", chainName, rule, "")
 		runFirewallCommand(deleteArgs, 10)
 	}
 
@@ -799,8 +813,15 @@ func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, n
 }
 
 // buildIptablesRuleArgs builds iptables command arguments for a rule
-func buildIptablesRuleArgs(cmd, method, chainName string, rule *FirewallRuleSync, comment string) []string {
-	args := []string{cmd, method, chainName}
+func buildIptablesRuleArgs(cmd, tableName, method, chainName string, rule *FirewallRuleSync, comment string) []string {
+	args := []string{cmd}
+
+	// Add table parameter if specified and not the default filter table
+	if tableName != "" && tableName != "filter" {
+		args = append(args, "-t", tableName)
+	}
+
+	args = append(args, method, chainName)
 
 	// Protocol
 	if rule.Protocol != "" && rule.Protocol != DefaultProtocol {
@@ -997,19 +1018,25 @@ func collectNftablesRules() (*FirewallSyncPayload, error) {
 	return buildSyncPayloadWithMetadata(chainRules, chainMeta), nil
 }
 
-// collectIptablesRules extracts rules from both iptables (IPv4) and ip6tables (IPv6)
+// collectIptablesRules extracts rules from all iptables families (IPv4, IPv6, ARP, bridge)
 func collectIptablesRules() (*FirewallSyncPayload, error) {
-	allChains := make(map[string][]FirewallRuleSync)
+	// Use chainKey format: "table:family:chain" to keep families separate
+	allChainRules := make(map[string][]FirewallRuleSync)
+	chainMeta := make(map[string]chainMetadata)
+	anySuccess := false
 
 	// Collect IPv4 rules (iptables)
 	exitCode, output := runFirewallCommand([]string{"iptables-save"}, 30)
 	if exitCode == 0 {
-		ipv4Chains := parseIptablesSaveOutput(output, "ip")
-		// Merge IPv4 chains
-		for chainName, rules := range ipv4Chains {
-			allChains[chainName] = append(allChains[chainName], rules...)
+		ipv4ChainRules, ipv4ChainMeta := parseIptablesSaveOutputWithKeys(output, "ip")
+		for chainKey, rules := range ipv4ChainRules {
+			allChainRules[chainKey] = rules
 		}
-		log.Debug().Msgf("Collected %d IPv4 chains from iptables", len(ipv4Chains))
+		for chainKey, meta := range ipv4ChainMeta {
+			chainMeta[chainKey] = meta
+		}
+		log.Debug().Msgf("Collected %d IPv4 chains from iptables", len(ipv4ChainRules))
+		anySuccess = true
 	} else {
 		log.Debug().Msgf("Failed to run iptables-save: exit code %d", exitCode)
 	}
@@ -1017,22 +1044,57 @@ func collectIptablesRules() (*FirewallSyncPayload, error) {
 	// Collect IPv6 rules (ip6tables)
 	exitCode6, output6 := runFirewallCommand([]string{"ip6tables-save"}, 30)
 	if exitCode6 == 0 {
-		ipv6Chains := parseIptablesSaveOutput(output6, "ip6")
-		// Merge IPv6 chains (keep separate by family)
-		for chainName, rules := range ipv6Chains {
-			allChains[chainName] = append(allChains[chainName], rules...)
+		ipv6ChainRules, ipv6ChainMeta := parseIptablesSaveOutputWithKeys(output6, "ip6")
+		for chainKey, rules := range ipv6ChainRules {
+			allChainRules[chainKey] = rules
 		}
-		log.Debug().Msgf("Collected %d IPv6 chains from ip6tables", len(ipv6Chains))
+		for chainKey, meta := range ipv6ChainMeta {
+			chainMeta[chainKey] = meta
+		}
+		log.Debug().Msgf("Collected %d IPv6 chains from ip6tables", len(ipv6ChainRules))
+		anySuccess = true
 	} else {
 		log.Debug().Msgf("Failed to run ip6tables-save: exit code %d", exitCode6)
 	}
 
-	// Return empty payload if both failed
-	if exitCode != 0 && exitCode6 != 0 {
+	// Collect ARP rules (arptables) if available
+	exitCodeArp, outputArp := runFirewallCommand([]string{"arptables-save"}, 30)
+	if exitCodeArp == 0 {
+		arpChainRules, arpChainMeta := parseIptablesSaveOutputWithKeys(outputArp, "arp")
+		for chainKey, rules := range arpChainRules {
+			allChainRules[chainKey] = rules
+		}
+		for chainKey, meta := range arpChainMeta {
+			chainMeta[chainKey] = meta
+		}
+		log.Debug().Msgf("Collected %d ARP chains from arptables", len(arpChainRules))
+		anySuccess = true
+	} else {
+		log.Debug().Msgf("arptables-save not available or failed: exit code %d", exitCodeArp)
+	}
+
+	// Collect bridge rules (ebtables) if available
+	exitCodeEb, outputEb := runFirewallCommand([]string{"ebtables-save"}, 30)
+	if exitCodeEb == 0 {
+		ebChainRules, ebChainMeta := parseIptablesSaveOutputWithKeys(outputEb, "bridge")
+		for chainKey, rules := range ebChainRules {
+			allChainRules[chainKey] = rules
+		}
+		for chainKey, meta := range ebChainMeta {
+			chainMeta[chainKey] = meta
+		}
+		log.Debug().Msgf("Collected %d bridge chains from ebtables", len(ebChainRules))
+		anySuccess = true
+	} else {
+		log.Debug().Msgf("ebtables-save not available or failed: exit code %d", exitCodeEb)
+	}
+
+	// Return empty payload if all failed
+	if !anySuccess {
 		return &FirewallSyncPayload{Chains: []FirewallChainSync{}}, nil
 	}
 
-	return buildSyncPayload(allChains), nil
+	return buildSyncPayloadWithMetadata(allChainRules, chainMeta), nil
 }
 
 // parseNftablesRuleToSync converts nftables rule map to FirewallRuleSync
@@ -1047,7 +1109,6 @@ func parseNftablesRuleToSync(ruleMap map[string]interface{}, table, family strin
 	}
 
 	rule.Chain = ruleMap["chain"].(string)
-	tableName := table
 
 	// Extract comment if present
 	var fullComment string
@@ -1147,18 +1208,18 @@ func parseNftablesRuleToSync(ruleMap map[string]interface{}, table, family strin
 		}
 
 		// Create the rule with updated comment first
-		if !RecreateNftablesRuleWithComment(tableName, rule, newComment) {
+		if !RecreateNftablesRuleWithComment(family, table, rule, newComment) {
 			log.Warn().Msgf("Failed to re-create nftables rule %s with proper metadata", rule.RuleID)
 			return rule, nil
 		}
 
 		// Delete the old rule using saved handle
 		if ruleHandle != "" {
-			deleteArgs := []string{"nft", "delete", "rule", tableName, rule.Chain, "handle", ruleHandle}
+			deleteArgs := []string{"nft", "delete", "rule", family, table, rule.Chain, "handle", ruleHandle}
 			if exitCode, _ := runFirewallCommand(deleteArgs, 10); exitCode != 0 {
 				log.Warn().Msgf("Failed to delete old nftables rule with handle %s after re-creation", ruleHandle)
 			} else {
-				log.Debug().Msgf("Re-created nftables rule %s with proper metadata (table: %s, chain: %s)", rule.RuleID, tableName, rule.Chain)
+				log.Debug().Msgf("Re-created nftables rule %s with proper metadata (table: %s %s, chain: %s)", rule.RuleID, family, table, rule.Chain)
 			}
 		}
 	}
@@ -1166,8 +1227,75 @@ func parseNftablesRuleToSync(ruleMap map[string]interface{}, table, family strin
 	return rule, nil
 }
 
+// parseIptablesSaveOutputWithKeys parses iptables-save output with unique chain keys
+// Returns: map[chainKey]rules and map[chainKey]metadata
+// chainKey format: "table:family:chain" (e.g., "filter:ip:INPUT", "nat:ip6:PREROUTING")
+func parseIptablesSaveOutputWithKeys(output string, family string) (map[string][]FirewallRuleSync, map[string]chainMetadata) {
+	chainRules := make(map[string][]FirewallRuleSync)
+	chainMeta := make(map[string]chainMetadata)
+	chainNames := make(map[string]bool)
+	lines := strings.Split(output, "\n")
+
+	// Track current table (default: filter)
+	currentTable := "filter"
+
+	// First pass: extract all chain names with their tables
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Track table markers (e.g., "*filter", "*nat", "*mangle")
+		if strings.HasPrefix(line, "*") {
+			currentTable = strings.TrimPrefix(line, "*")
+		}
+
+		if strings.HasPrefix(line, ":") {
+			parts := strings.Fields(line)
+			if len(parts) > 0 {
+				chainName := strings.TrimPrefix(parts[0], ":")
+				chainKey := fmt.Sprintf("%s:%s:%s", currentTable, family, chainName)
+				chainNames[chainName] = true
+				chainMeta[chainKey] = chainMetadata{
+					table:  currentTable,
+					family: family,
+				}
+			}
+		}
+	}
+
+	// Second pass: extract rules for all chains
+	currentTable = "filter"
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Track table markers
+		if strings.HasPrefix(line, "*") {
+			currentTable = strings.TrimPrefix(line, "*")
+		}
+
+		// Skip empty lines, comments, chain definitions, table markers
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ":") || strings.HasPrefix(line, "*") || line == "COMMIT" {
+			continue
+		}
+
+		// Process both -A (append) and -I (insert) rules
+		if !strings.HasPrefix(line, "-A ") && !strings.HasPrefix(line, "-I ") {
+			continue
+		}
+
+		// Parse rule line with current table and family
+		rule := parseIptablesSaveRuleLine(line, currentTable, family)
+		if rule != nil && chainNames[rule.Chain] {
+			chainKey := fmt.Sprintf("%s:%s:%s", currentTable, family, rule.Chain)
+			chainRules[chainKey] = append(chainRules[chainKey], *rule)
+		}
+	}
+
+	return chainRules, chainMeta
+}
+
 // parseIptablesSaveOutput parses iptables-save output to extract all chain rules
 // family: "ip" for iptables, "ip6" for ip6tables
+// Deprecated: Use parseIptablesSaveOutputWithKeys for proper table/family separation
 func parseIptablesSaveOutput(output string, family string) map[string][]FirewallRuleSync {
 	chains := make(map[string][]FirewallRuleSync)
 	chainNames := make(map[string]bool)
@@ -1332,7 +1460,7 @@ func parseIptablesSaveRuleLine(line string, table string, family string) *Firewa
 		newComment := BuildFirewallComment(existingComment, rule.RuleID, rule.RuleType)
 
 		// Create the rule with updated comment first
-		if !RecreateIptablesRuleWithComment(chainName, rule, newComment) {
+		if !RecreateIptablesRuleWithComment(rule.Table, chainName, rule, newComment) {
 			log.Warn().Msgf("Failed to re-create iptables rule %s with proper metadata", rule.RuleID)
 			return rule
 		}

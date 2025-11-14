@@ -69,11 +69,34 @@ func commitSystemInfo() {
 		log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
 	} else {
 		backendInfo := utils.DetectFirewallBackend(true)
-		firewallData, err := utils.CollectFirewallRules(backendInfo)
-		if err != nil {
-			log.Debug().Err(err).Msg("Failed to collect firewall rules during commit.")
+		log.Info().Msgf("Detected firewall backend: type=%s, version=%s", backendInfo.Type, backendInfo.Version)
+
+		// Always sync firewall state, even if no backend is detected
+		// This ensures server-side rules are cleared when backend is removed
+		if backendInfo.Type == "none" {
+			log.Info().Msg("No firewall backend detected - sending empty ruleset to clear server-side rules")
+			// Create empty payload with backend info
+			emptyPayload := &utils.FirewallSyncPayload{
+				BackendInfo: backendInfo,
+				Chains:      []utils.FirewallChainSync{},
+			}
+			// Log the JSON that will be sent
+			jsonData, _ := json.Marshal(emptyPayload)
+			log.Info().Msgf("Firewall sync payload (no backend): %s", string(jsonData))
+			scheduler.Rqueue.Post(firewallSyncURL, emptyPayload, 80, time.Time{})
+			log.Info().Msg("Empty firewall sync request queued successfully")
 		} else {
-			scheduler.Rqueue.Post(firewallSyncURL, firewallData, 80, time.Time{})
+			// Collect and sync actual firewall rules
+			firewallData, err := utils.CollectFirewallRules(backendInfo)
+			if err != nil {
+				log.Debug().Err(err).Msg("Failed to collect firewall rules during commit.")
+			} else {
+				// Log the payload size
+				log.Info().Msgf("Firewall sync payload: backend=%s, chains=%d",
+					backendInfo.Type, len(firewallData.Chains))
+				scheduler.Rqueue.Post(firewallSyncURL, firewallData, 80, time.Time{})
+				log.Info().Msg("Firewall sync request queued successfully")
+			}
 		}
 	}
 
@@ -166,12 +189,33 @@ func syncSystemInfo(session *scheduler.Session, keys []string) {
 				continue
 			}
 			backendInfo := utils.DetectFirewallBackend(true)
-			firewallData, err := utils.CollectFirewallRules(backendInfo)
-			if err != nil {
-				log.Debug().Err(err).Msg("Failed to collect firewall rules.")
-				continue
+			log.Info().Msgf("Detected firewall backend for sync: type=%s, version=%s", backendInfo.Type, backendInfo.Version)
+
+			// Always send firewall state, even if no backend is detected
+			if backendInfo.Type == "none" {
+				log.Info().Msg("No firewall backend detected - sending empty ruleset to clear server-side rules")
+				// Create empty payload with backend info
+				emptyPayload := &utils.FirewallSyncPayload{
+					BackendInfo: backendInfo,
+					Chains:      []utils.FirewallChainSync{},
+				}
+				// Log the JSON that will be sent
+				jsonData, _ := json.Marshal(emptyPayload)
+				log.Info().Msgf("Firewall sync payload (no backend): %s", string(jsonData))
+				scheduler.Rqueue.Post(utils.JoinPath(entry.URL, entry.URLSuffix), emptyPayload, 80, time.Time{})
+				log.Info().Msg("Empty firewall sync request queued successfully")
+			} else {
+				// Collect and sync actual firewall rules
+				firewallData, err := utils.CollectFirewallRules(backendInfo)
+				if err != nil {
+					log.Debug().Err(err).Msg("Failed to collect firewall rules.")
+					continue
+				}
+				log.Info().Msgf("Firewall sync payload: backend=%s, chains=%d",
+					backendInfo.Type, len(firewallData.Chains))
+				scheduler.Rqueue.Post(utils.JoinPath(entry.URL, entry.URLSuffix), firewallData, 80, time.Time{})
+				log.Info().Msg("Firewall sync request queued successfully")
 			}
-			scheduler.Rqueue.Post(utils.JoinPath(entry.URL, entry.URLSuffix), firewallData, 80, time.Time{})
 			continue
 		default:
 			log.Warn().Msgf("Unknown key: %s", key)
