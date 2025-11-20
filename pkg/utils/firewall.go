@@ -1484,7 +1484,7 @@ func parseIptablesSaveRuleLine(line string, table string, family string) *Firewa
 
 // buildSyncPayloadWithMetadata creates sync payload with table/family metadata
 // chainRules: map[chainKey] -> rules (chainKey format: "table:family:chain")
-// chainMeta: map[chainKey] -> metadata (table, family)
+// chainMeta: map[chainKey] -> metadata (table, family) - can be used to override parsed values
 func buildSyncPayloadWithMetadata(chainRules map[string][]FirewallRuleSync, chainMeta map[string]chainMetadata) *FirewallSyncPayload {
 	chainsList := make([]FirewallChainSync, 0)
 
@@ -1500,6 +1500,16 @@ func buildSyncPayloadWithMetadata(chainRules map[string][]FirewallRuleSync, chai
 		}
 
 		table, family, chainName := parts[0], parts[1], parts[2]
+
+		// Use metadata if available to override parsed values
+		if meta, exists := chainMeta[chainKey]; exists {
+			if meta.table != "" {
+				table = meta.table
+			}
+			if meta.family != "" {
+				family = meta.family
+			}
+		}
 
 		chainsList = append(chainsList, FirewallChainSync{
 			Name:   chainName,
@@ -1580,7 +1590,16 @@ func RemoveFirewallRulesByType(ruleType string) (int, error) {
 
 			var removeErr error
 			if nftablesInstalled {
-				removeErr = RemoveNftablesRule(chain.Name, rule)
+				// Pass family and table from chain, or use defaults
+				family := chain.Family
+				if family == "" {
+					family = "inet"  // Default family
+				}
+				table := chain.Table
+				if table == "" {
+					table = "filter"  // Default table
+				}
+				removeErr = RemoveNftablesRule(family, table, rule)
 			} else if iptablesInstalled {
 				removeErr = RemoveIptablesRule(chain.Name, rule)
 			}
@@ -1605,10 +1624,23 @@ func RemoveFirewallRulesByType(ruleType string) (int, error) {
 }
 
 // RemoveNftablesRule removes a specific rule from nftables
-func RemoveNftablesRule(tableName string, rule FirewallRuleSync) error {
-	exitCode, output := runFirewallCommand([]string{"nft", "-a", "list", "table", tableName}, 10)
+// Now properly handles family, table, and chain structure
+func RemoveNftablesRule(family, tableName string, rule FirewallRuleSync) error {
+	// Use rule's family if available, otherwise use passed family
+	if rule.Family != "" {
+		family = rule.Family
+	}
+
+	// Use rule's table if available, otherwise use passed tableName
+	table := tableName
+	if rule.Table != "" {
+		table = rule.Table
+	}
+
+	// List the table with family
+	exitCode, output := runFirewallCommand([]string{"nft", "-a", "list", "table", family, table}, 10)
 	if exitCode != 0 {
-		return fmt.Errorf("failed to list nftables table %s", tableName)
+		return fmt.Errorf("failed to list nftables table %s %s", family, table)
 	}
 
 	lines := strings.Split(output, "\n")
@@ -1619,7 +1651,8 @@ func RemoveNftablesRule(tableName string, rule FirewallRuleSync) error {
 				handleParts := strings.Fields(handleStr)
 				if len(handleParts) > 0 {
 					handle := handleParts[0]
-					deleteArgs := []string{"nft", "delete", "rule", tableName, rule.Chain, "handle", handle}
+					// Delete with family, table, chain
+					deleteArgs := []string{"nft", "delete", "rule", family, table, rule.Chain, "handle", handle}
 					exitCode, _ := runFirewallCommand(deleteArgs, 10)
 					if exitCode == 0 {
 						return nil
@@ -1630,7 +1663,7 @@ func RemoveNftablesRule(tableName string, rule FirewallRuleSync) error {
 		}
 	}
 
-	return fmt.Errorf("rule not found in nftables table %s", tableName)
+	return fmt.Errorf("rule not found in nftables table %s %s", family, table)
 }
 
 // RemoveIptablesRule removes a specific rule from iptables

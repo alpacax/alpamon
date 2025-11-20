@@ -867,14 +867,58 @@ func (cr *CommandRunner) handleBatchOperation() (exitCode int, result string) {
 }
 
 // handleFlushOperation handles flushing firewall chains
-// Chains to flush should be determined from Rules data
+// Uses existing rollback functions to perform flush
+// Supports both old format (chain name only) and new format (family table chain)
 func (cr *CommandRunner) handleFlushOperation() (exitCode int, result string) {
-	log.Info().Msg("Firewall flush operation")
+	log.Info().Msgf("Firewall flush operation - Chain: %s", cr.data.Chain)
 
-	// TODO: This operation needs refactoring to work with new chain structure
-	// For now, return success as flush is typically handled via batch operations
-	log.Warn().Msg("Flush operation is deprecated - use batch operations instead")
-	return 0, `{"success": true, "message": "Flush operation deprecated, use batch operations"}`
+	// Validate chain is provided
+	if cr.data.Chain == "" {
+		return 1, `{"success": false, "error": "Chain name is required for flush operation"}`
+	}
+
+	// Check firewall backend
+	nftablesInstalled, iptablesInstalled, err := utils.CheckFirewallTool()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to check firewall tools")
+		return 1, fmt.Sprintf(`{"success": false, "error": "Failed to check firewall tools: %v"}`, err)
+	}
+
+	// Create backup before flushing
+	backup, err := utils.BackupFirewallRules()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to create backup before flush")
+		return 1, fmt.Sprintf(`{"success": false, "error": "Failed to create backup: %v"}`, err)
+	}
+
+	var flushExitCode int
+	var flushResult string
+
+	if nftablesInstalled {
+		// For nftables, chain can be:
+		// 1. Old format: just table name (e.g., "alpacon-sg-123")
+		// 2. New format: "family table chain" (e.g., "inet filter alpacon-sg-123_input")
+		// performNftablesRollback will handle both formats
+		flushExitCode, flushResult = cr.performNftablesRollback(cr.data.Chain, "flush")
+	} else if iptablesInstalled {
+		// For iptables, use the chain name directly
+		flushExitCode, flushResult = cr.performIptablesRollback(cr.data.Chain, "flush")
+	} else {
+		return 1, `{"success": false, "error": "No firewall backend available"}`
+	}
+
+	// If flush failed, restore backup
+	if flushExitCode != 0 {
+		log.Error().Msgf("Flush operation failed: %s", flushResult)
+		if restoreErr := utils.RestoreFirewallRules(backup); restoreErr != nil {
+			log.Error().Err(restoreErr).Msg("Failed to restore backup after flush failure")
+			return flushExitCode, fmt.Sprintf(`{"success": false, "error": "%s", "backup_restore_failed": true}`, flushResult)
+		}
+		return flushExitCode, fmt.Sprintf(`{"success": false, "error": "%s", "backup_restored": true}`, flushResult)
+	}
+
+	log.Info().Msg("Successfully completed flush operation")
+	return 0, fmt.Sprintf(`{"success": true, "message": "%s"}`, flushResult)
 }
 
 // handleDeleteOperation handles deleting a specific firewall rule by rule_id
@@ -1476,8 +1520,22 @@ func (cr *CommandRunner) executeIptablesRule() (exitCode int, result string) {
 func (cr *CommandRunner) deleteNftablesRuleByID(chainName, ruleID string) (exitCode int, result string) {
 	log.Info().Msgf("Deleting nftables rule by ID: %s in chain %s", ruleID, chainName)
 
+	// Get table and family from cr.data (provided by server)
+	family := cr.data.Family
+	table := cr.data.Table
+
+	// Default values if not provided
+	if family == "" {
+		family = "inet"  // Default family for nftables
+	}
+	if table == "" {
+		table = "filter"  // Default table
+	}
+
+	log.Debug().Msgf("Using nftables family: %s, table: %s, chain: %s", family, table, chainName)
+
 	// First, list rules with handles to find the target rule
-	listArgs := []string{"nft", "--handle", "list", "table", "inet", chainName}
+	listArgs := []string{"nft", "--handle", "list", "table", family, table}
 	listExitCode, listOutput := runCmdWithOutput(listArgs, "root", "", nil, 60)
 
 	if listExitCode != 0 {
@@ -1485,16 +1543,16 @@ func (cr *CommandRunner) deleteNftablesRuleByID(chainName, ruleID string) (exitC
 		return listExitCode, fmt.Sprintf("Failed to list rules: %s", listOutput)
 	}
 
-	// Parse the output to find rule handle and chain type with matching rule_id in comment
-	ruleHandle, chainType := cr.findNftablesRuleHandleAndChain(listOutput, ruleID)
+	// Parse the output to find rule handle in the specific chain with matching rule_id in comment
+	ruleHandle := cr.findNftablesRuleHandleInChain(listOutput, chainName, ruleID)
 	if ruleHandle == "" {
-		log.Warn().Msgf("Rule with ID %s not found in table %s", ruleID, chainName)
+		log.Warn().Msgf("Rule with ID %s not found in chain %s", ruleID, chainName)
 		return 1, fmt.Sprintf("Rule with ID %s not found", ruleID)
 	}
 
 	// Delete the rule using its handle
-	// nftables syntax: nft delete rule inet <table> <chain> handle <handle>
-	deleteArgs := []string{"nft", "delete", "rule", "inet", chainName, chainType, "handle", ruleHandle}
+	// nftables syntax: nft delete rule <family> <table> <chain> handle <handle>
+	deleteArgs := []string{"nft", "delete", "rule", family, table, chainName, "handle", ruleHandle}
 	deleteExitCode, deleteOutput := runCmdWithOutput(deleteArgs, "root", "", nil, 60)
 
 	if deleteExitCode != 0 {
@@ -1502,15 +1560,16 @@ func (cr *CommandRunner) deleteNftablesRuleByID(chainName, ruleID string) (exitC
 		return deleteExitCode, fmt.Sprintf("Failed to delete rule: %s", deleteOutput)
 	}
 
-	log.Info().Msgf("Successfully deleted nftables rule with ID %s (handle %s) from chain %s", ruleID, ruleHandle, chainType)
+	log.Info().Msgf("Successfully deleted nftables rule with ID %s (handle %s) from chain %s", ruleID, ruleHandle, chainName)
 	return 0, fmt.Sprintf("Successfully deleted rule with ID %s", ruleID)
 }
 
-// findNftablesRuleHandleAndChain parses nft list output to find rule handle and chain by rule_id in comment
-func (cr *CommandRunner) findNftablesRuleHandleAndChain(listOutput, ruleID string) (string, string) {
+// findNftablesRuleHandleInChain parses nft list output to find rule handle in a specific chain by rule_id in comment
+func (cr *CommandRunner) findNftablesRuleHandleInChain(listOutput, targetChain, ruleID string) string {
 	lines := strings.Split(listOutput, "\n")
 	targetComment := fmt.Sprintf("rule_id:%s", ruleID)
 	currentChain := ""
+	inTargetChain := false
 
 	for _, line := range lines {
 		// Check for chain declarations (e.g., "chain input {", "chain output {")
@@ -1520,26 +1579,30 @@ func (cr *CommandRunner) findNftablesRuleHandleAndChain(listOutput, ruleID strin
 			parts := strings.Fields(trimmed)
 			if len(parts) >= 2 {
 				currentChain = parts[1]
+				inTargetChain = (currentChain == targetChain)
 			}
 		}
 
-		// Look for lines containing the target comment and handle
-		if strings.Contains(line, targetComment) && strings.Contains(line, "# handle") {
-			// Extract handle number from the line
-			if handleIndex := strings.Index(line, "# handle"); handleIndex != -1 {
-				handlePart := line[handleIndex+9:] // Skip "# handle "
-				handle := ""
-				if spaceIndex := strings.Index(handlePart, " "); spaceIndex != -1 {
-					handle = strings.TrimSpace(handlePart[:spaceIndex])
-				} else {
-					handle = strings.TrimSpace(handlePart)
+		// Only look for rules in the target chain
+		if inTargetChain {
+			// Look for lines containing the target comment and handle
+			if strings.Contains(line, targetComment) && strings.Contains(line, "# handle") {
+				// Extract handle number from the line
+				if handleIndex := strings.Index(line, "# handle"); handleIndex != -1 {
+					handlePart := line[handleIndex+9:] // Skip "# handle "
+					handle := ""
+					if spaceIndex := strings.Index(handlePart, " "); spaceIndex != -1 {
+						handle = strings.TrimSpace(handlePart[:spaceIndex])
+					} else {
+						handle = strings.TrimSpace(handlePart)
+					}
+					return handle
 				}
-				return handle, currentChain
 			}
 		}
 	}
 
-	return "", ""
+	return ""
 }
 
 // deleteIptablesRuleByID deletes a specific iptables rule by matching rule specifications
@@ -1552,9 +1615,15 @@ func (cr *CommandRunner) deleteIptablesRuleByID(chainName, ruleID string) (exitC
 	// Note: For iptables rule deletion with comment, we rely on rule specification matching
 	// since comment format may include additional type information
 
+	// Get table parameter (default to filter if not specified)
+	table := cr.data.Table
+	if table == "" {
+		table = "filter"
+	}
+
 	// Build delete command with rule specifications
 	cmd := cr.getIptablesCommand()
-	args := []string{cmd, "-D", chainName}
+	args := []string{cmd, "-t", table, "-D", chainName}
 
 	// Add protocol
 	if cr.data.Protocol != "" && cr.data.Protocol != "all" {
@@ -2051,39 +2120,75 @@ func (cr *CommandRunner) firewallRollback() (exitCode int, result string) {
 }
 
 // performNftablesRollback performs rollback operations for nftables
+// Now supports both old format (table name only) and new format (family table chain)
 func (cr *CommandRunner) performNftablesRollback(chainName, method string) (int, string) {
-	log.Info().Msgf("Performing nftables rollback for table: %s, method: %s", chainName, method)
+	log.Info().Msgf("Performing nftables rollback for chain: %s, method: %s", chainName, method)
 
 	var exitCode int
 	var result string
 
+	// Parse chainName to extract family, table, and chain
+	// Format can be:
+	// 1. Old format: just table name (e.g., "alpacon-sg-123")
+	// 2. New format: "family table chain" (e.g., "inet filter alpacon-sg-123_input")
+	parts := strings.Fields(chainName)
+
+	var family, table, chain string
+
+	if len(parts) == 3 {
+		// New format: family table chain
+		family = parts[0]
+		table = parts[1]
+		chain = parts[2]
+	} else if len(parts) == 1 {
+		// Old format: treat as table name, use default family
+		family = "inet"
+		table = parts[0]
+		chain = ""  // Will flush all chains in table
+	} else {
+		return 1, fmt.Sprintf("Invalid chain format: %s", chainName)
+	}
+
 	switch method {
 	case "flush":
-		// Flush all chains in the table
-		// For nftables, we flush all chains (INPUT, OUTPUT, FORWARD) in the security group table
-		chainTypes := []string{"input", "output", "forward"}
-		successCount := 0
-
-		for _, chainType := range chainTypes {
-			args := []string{"nft", "flush", "chain", "inet", chainName, chainType}
+		if chain != "" {
+			// Flush specific chain
+			args := []string{"nft", "flush", "chain", family, table, chain}
 			exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
 
 			if exitCode == 0 {
-				successCount++
-				log.Info().Msgf("Successfully flushed nftables chain: %s %s", chainName, chainType)
+				log.Info().Msgf("Successfully flushed nftables chain: %s %s %s", family, table, chain)
+				return 0, fmt.Sprintf("Successfully flushed chain %s in table %s %s", chain, family, table)
 			} else {
-				// Chain might not exist, which is OK
-				log.Debug().Msgf("Failed to flush nftables chain %s %s: %s (chain may not exist)", chainName, chainType, result)
+				log.Error().Msgf("Failed to flush nftables chain %s %s %s: %s", family, table, chain, result)
+				return exitCode, fmt.Sprintf("Failed to flush chain: %s", result)
 			}
-		}
+		} else {
+			// Old behavior: flush all chains in the table
+			chainTypes := []string{"input", "output", "forward"}
+			successCount := 0
 
-		if successCount > 0 {
-			log.Info().Msgf("Successfully flushed %d chains in table %s", successCount, chainName)
-			return 0, fmt.Sprintf("Successfully flushed %d chains in table %s", successCount, chainName)
-		}
+			for _, chainType := range chainTypes {
+				args := []string{"nft", "flush", "chain", family, table, chainType}
+				exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
 
-		log.Warn().Msgf("No chains flushed in table %s (table may not exist)", chainName)
-		return 0, fmt.Sprintf("No chains to flush in table %s", chainName)
+				if exitCode == 0 {
+					successCount++
+					log.Info().Msgf("Successfully flushed nftables chain: %s %s %s", family, table, chainType)
+				} else {
+					// Chain might not exist, which is OK
+					log.Debug().Msgf("Failed to flush nftables chain %s %s %s: %s (chain may not exist)", family, table, chainType, result)
+				}
+			}
+
+			if successCount > 0 {
+				log.Info().Msgf("Successfully flushed %d chains in table %s %s", successCount, family, table)
+				return 0, fmt.Sprintf("Successfully flushed %d chains in table %s %s", successCount, family, table)
+			}
+
+			log.Warn().Msgf("No chains flushed in table %s %s (table may not exist)", family, table)
+			return 0, fmt.Sprintf("No chains to flush in table %s %s", family, table)
+		}
 
 	case "delete":
 		// Delete the entire table
@@ -2118,6 +2223,12 @@ func (cr *CommandRunner) performIptablesRollback(chainName, method string) (int,
 	// Get the appropriate iptables command based on IP family
 	cmd := cr.getIptablesCommand()
 
+	// Get table parameter (default to filter if not specified)
+	table := cr.data.Table
+	if table == "" {
+		table = "filter"
+	}
+
 	// For iptables, we need to handle chains differently
 	chainTypes := []string{"input", "output", "forward"}
 
@@ -2127,8 +2238,8 @@ func (cr *CommandRunner) performIptablesRollback(chainName, method string) (int,
 		for _, chainType := range chainTypes {
 			fullChainName := chainName + "_" + chainType
 
-			// Flush the chain
-			args := []string{cmd, "-F", fullChainName}
+			// Flush the chain in the specified table
+			args := []string{cmd, "-t", table, "-F", fullChainName}
 			exitCode, result = runCmdWithOutput(args, "root", "", nil, 60)
 
 			if exitCode == 0 {
@@ -2150,12 +2261,12 @@ func (cr *CommandRunner) performIptablesRollback(chainName, method string) (int,
 		for _, chainType := range chainTypes {
 			fullChainName := chainName + "_" + chainType
 
-			// First flush the chain
-			flushArgs := []string{cmd, "-F", fullChainName}
+			// First flush the chain in the specified table
+			flushArgs := []string{cmd, "-t", table, "-F", fullChainName}
 			runCmdWithOutput(flushArgs, "root", "", nil, 60)
 
-			// Then delete the chain
-			deleteArgs := []string{cmd, "-X", fullChainName}
+			// Then delete the chain from the specified table
+			deleteArgs := []string{cmd, "-t", table, "-X", fullChainName}
 			exitCode, result = runCmdWithOutput(deleteArgs, "root", "", nil, 60)
 
 			if exitCode == 0 {
@@ -2335,6 +2446,11 @@ func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interf
 	data.RuleID = ""
 	data.OldRuleID = ""
 
+	// Backend-specific fields
+	data.Backend = ""
+	data.Table = ""
+	data.Family = ""
+
 	// Now set values from ruleData
 	// Note: chain_name field is deprecated, use chain instead
 	if method, ok := ruleData["method"].(string); ok {
@@ -2342,6 +2458,17 @@ func (cr *CommandRunner) convertRuleDataToCommandData(ruleData map[string]interf
 	}
 	if chain, ok := ruleData["chain"].(string); ok {
 		data.Chain = chain
+	}
+
+	// Backend-specific fields
+	if backend, ok := ruleData["backend"].(string); ok {
+		data.Backend = backend
+	}
+	if table, ok := ruleData["table"].(string); ok {
+		data.Table = table
+	}
+	if family, ok := ruleData["family"].(string); ok {
+		data.Family = family
 	}
 	if protocol, ok := ruleData["protocol"].(string); ok {
 		data.Protocol = protocol
