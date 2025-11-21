@@ -18,9 +18,6 @@ RUN go build -o alpamon ./cmd/alpamon/main.go
 
 FROM redhat/ubi9
 
-RUN dnf install -y curl
-RUN curl -sSf https://atlasgo.sh | sh
-
 WORKDIR /usr/local/alpamon
 
 COPY --from=builder /build/alpamon ./alpamon

@@ -17,24 +17,11 @@ RUN go build -o alpamon ./cmd/alpamon/main.go
 
 FROM ubuntu:22.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    systemd \
-    ca-certificates \
-    sudo \
-    vim \
-    build-essential \
-    libpam0g-dev \
-    libjansson-dev
-
-RUN curl -sSf https://atlasgo.sh | sh
+RUN apt-get update && apt-get install -y --no-install-recommends systemd ca-certificates
 
 WORKDIR /usr/local/alpamon
 
 COPY --from=builder /build/alpamon ./alpamon
-
-RUN useradd -m -s /bin/bash user && echo "user:123" | chpasswd
-RUN usermod -aG sudo user
 
 COPY Dockerfiles/ubuntu/22.04/entrypoint.sh /usr/local/alpamon/entrypoint.sh
 

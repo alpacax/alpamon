@@ -16,11 +16,25 @@ import (
 
 // Firewall tool check state (caching)
 var (
-	firewallCheckMutex       sync.Mutex
-	firewallCheckAttempted   bool
+	firewallCheckMutex        sync.Mutex
+	firewallCheckAttempted    bool
 	firewallNftablesInstalled bool
 	firewallIptablesInstalled bool
-	firewallCheckError       error
+	firewallCheckError        error
+
+	// Feature flag to disable automatic rule recreation
+	// Set to true to prevent conflicts with ufw/firewalld
+	disableRuleRecreation = true
+
+	// Temporary flag to disable all firewall functionality
+	// Set to true to completely disable alpacon firewall management
+	firewallFunctionalityDisabled = true
+
+	// High-level firewall detection cache
+	highLevelFirewallCheckMutex     sync.Mutex
+	highLevelFirewallCheckAttempted bool
+	highLevelFirewallDetected       bool
+	highLevelFirewallToolName       string
 )
 
 // Default values matching alpacon-server FirewallRuleSyncSerializer
@@ -31,9 +45,9 @@ const (
 	DefaultTarget   = "ACCEPT"
 
 	// Rule types for progressive removal
-	RuleTypeUnknown = ""         // Rules without type (remove first)
-	RuleTypeServer  = "server"   // Server-synced rules (remove second)
-	RuleTypeAlpacon = "alpacon"  // Alpacon-created rules (remove last)
+	RuleTypeUnknown = ""        // Rules without type (remove first)
+	RuleTypeServer  = "server"  // Server-synced rules (remove second)
+	RuleTypeAlpacon = "alpacon" // Alpacon-created rules (remove last)
 )
 
 // FirewallChainSync represents a firewall chain for sync payload
@@ -64,15 +78,8 @@ type FirewallSyncPayload struct {
 	Chains []FirewallChainSync `json:"chains"`
 }
 
-// Cached firewall rules information
-var firewallRulesCache struct {
-	rules      map[string][]FirewallRuleSync
-	lastUpdate time.Time
-	mu         sync.RWMutex
-}
-
-// Cache validity duration (5 minutes)
-const cacheValidityDuration = 5 * time.Minute
+// Note: Firewall rules caching removed to ensure real-time rule synchronization
+// and prevent stale data issues during rapid rule updates
 
 // FirewallCommandExecutor is a function type for executing firewall commands
 // This allows the runner package to inject its runCmdWithOutput function
@@ -94,9 +101,74 @@ func runFirewallCommand(args []string, timeout int) (exitCode int, output string
 	return commandExecutor(args, "root", "", nil, timeout)
 }
 
+// IsFirewallDisabled checks if firewall functionality is disabled
+func IsFirewallDisabled() bool {
+	return firewallFunctionalityDisabled
+}
+
+// DetectHighLevelFirewall detects if high-level firewall management tools are active
+// Returns (detected, toolName) where toolName is "ufw" or "firewalld"
+func DetectHighLevelFirewall() (detected bool, toolName string) {
+	// Use mutex to prevent concurrent checks
+	highLevelFirewallCheckMutex.Lock()
+	defer highLevelFirewallCheckMutex.Unlock()
+
+	// Return cached result if we've already checked
+	if highLevelFirewallCheckAttempted {
+		return highLevelFirewallDetected, highLevelFirewallToolName
+	}
+
+	// 1. Check ufw via systemctl (most reliable)
+	exitCode, output := runFirewallCommand([]string{"systemctl", "is-active", "ufw"}, 5)
+	if exitCode == 0 && strings.TrimSpace(output) == "active" {
+		highLevelFirewallCheckAttempted = true
+		highLevelFirewallDetected = true
+		highLevelFirewallToolName = "ufw"
+		log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
+		return true, "ufw"
+	}
+
+	// 2. Fallback: Check ufw via direct command
+	exitCode, output = runFirewallCommand([]string{"ufw", "status"}, 5)
+	if exitCode == 0 && strings.Contains(strings.ToLower(output), "status: active") {
+		highLevelFirewallCheckAttempted = true
+		highLevelFirewallDetected = true
+		highLevelFirewallToolName = "ufw"
+		log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
+		return true, "ufw"
+	}
+
+	// 3. Check firewalld via systemctl
+	exitCode, output = runFirewallCommand([]string{"systemctl", "is-active", "firewalld"}, 5)
+	if exitCode == 0 && strings.TrimSpace(output) == "active" {
+		highLevelFirewallCheckAttempted = true
+		highLevelFirewallDetected = true
+		highLevelFirewallToolName = "firewalld"
+		log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
+		return true, "firewalld"
+	}
+
+	// 4. Fallback: Check firewalld via firewall-cmd
+	exitCode, output = runFirewallCommand([]string{"firewall-cmd", "--state"}, 5)
+	if exitCode == 0 && strings.Contains(strings.ToLower(output), "running") {
+		highLevelFirewallCheckAttempted = true
+		highLevelFirewallDetected = true
+		highLevelFirewallToolName = "firewalld"
+		log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
+		return true, "firewalld"
+	}
+
+	// No high-level firewall detected
+	highLevelFirewallCheckAttempted = true
+	highLevelFirewallDetected = false
+	highLevelFirewallToolName = ""
+	log.Debug().Msg("No high-level firewall detected - alpacon firewall management enabled")
+	return false, ""
+}
+
 // CheckFirewallTool checks if firewall tools (nftables or iptables) are installed
+// and detects which backend to use based on existing rules
 // Returns (nftablesInstalled, iptablesInstalled, error)
-// If neither tool is installed, returns an error without attempting installation
 func CheckFirewallTool() (nftablesInstalled bool, iptablesInstalled bool, err error) {
 	// Use mutex to prevent concurrent checks
 	firewallCheckMutex.Lock()
@@ -107,29 +179,89 @@ func CheckFirewallTool() (nftablesInstalled bool, iptablesInstalled bool, err er
 		return firewallNftablesInstalled, firewallIptablesInstalled, firewallCheckError
 	}
 
-	// Check if nftables is installed
-	_, nftablesResult := runFirewallCommand([]string{"which", "nft"}, 0)
-	nftablesInstalled = strings.Contains(nftablesResult, "nft")
+	// Detect backend based on existing rules
+	backend := detectFirewallBackend()
 
-	// Check if iptables is installed (only if nftables is not)
-	if !nftablesInstalled {
-		_, iptablesResult := runFirewallCommand([]string{"which", "iptables"}, 0)
-		iptablesInstalled = strings.Contains(iptablesResult, "iptables")
+	if backend == "iptables" {
+		nftablesInstalled = false
+		iptablesInstalled = true
+		log.Info().Msg("Using iptables backend (existing iptables rules detected)")
+	} else if backend == "nftables" {
+		nftablesInstalled = true
+		iptablesInstalled = false
+		log.Info().Msg("Using nftables backend (no iptables rules found)")
+	} else {
+		// Neither backend available
+		firewallCheckError = fmt.Errorf("firewall tool not installed: neither nftables nor iptables is available")
+		firewallCheckAttempted = true
+		return false, false, firewallCheckError
 	}
 
 	// Cache the result
 	firewallCheckAttempted = true
 	firewallNftablesInstalled = nftablesInstalled
 	firewallIptablesInstalled = iptablesInstalled
+	firewallCheckError = nil
 
-	// Return error if neither tool is installed
-	if !nftablesInstalled && !iptablesInstalled {
-		firewallCheckError = fmt.Errorf("firewall tool not installed: neither nftables nor iptables is available")
-		return false, false, firewallCheckError
+	return nftablesInstalled, iptablesInstalled, nil
+}
+
+// detectFirewallBackend detects which firewall backend to use based on existing rules
+// Returns "iptables", "nftables", or "none"
+func detectFirewallBackend() string {
+	// 1. Try iptables-save to check for existing iptables rules
+	exitCode, output := runFirewallCommand([]string{"iptables-save"}, 10)
+
+	if exitCode == 0 {
+		// Count actual rules (lines starting with -A or -I)
+		ruleCount := 0
+		for _, line := range strings.Split(output, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "-A ") || strings.HasPrefix(line, "-I ") {
+				ruleCount++
+			}
+		}
+
+		if ruleCount > 0 {
+			log.Debug().Msgf("Found %d iptables rules", ruleCount)
+			return "iptables"
+		}
+
+		// iptables-save succeeded but no rules - check if nft is available
+		exitCode, _ := runFirewallCommand([]string{"which", "nft"}, 5)
+		if exitCode == 0 {
+			log.Debug().Msg("No iptables rules, nft available")
+			return "nftables"
+		}
+
+		// Only iptables available, no nft
+		log.Debug().Msg("No iptables rules, nft not available, defaulting to iptables")
+		return "iptables"
 	}
 
-	firewallCheckError = nil
-	return nftablesInstalled, iptablesInstalled, nil
+	// 2. iptables-save failed, try fallback with iptables -S
+	exitCode, output = runFirewallCommand([]string{"iptables", "-S"}, 10)
+	if exitCode == 0 {
+		// Check for rules (iptables -S output starts with -P, -A, -I, etc)
+		for _, line := range strings.Split(output, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "-A ") || strings.HasPrefix(line, "-I ") {
+				log.Debug().Msg("Found iptables rules via iptables -S")
+				return "iptables"
+			}
+		}
+	}
+
+	// 3. No iptables rules found, check if nft is available
+	exitCode, _ = runFirewallCommand([]string{"which", "nft"}, 5)
+	if exitCode == 0 {
+		log.Debug().Msg("No iptables rules, using nftables")
+		return "nftables"
+	}
+
+	// 4. Neither iptables nor nft available
+	log.Warn().Msg("No firewall backend available")
+	return "none"
 }
 
 // ParseFirewallComment parses firewall rule comment to extract rule_id and type
@@ -324,18 +456,6 @@ func RecreateIptablesRuleWithComment(chainName string, rule *FirewallRuleSync, n
 // CollectFirewallRules collects current firewall rules from the system
 // This is the reverse operation of command.go firewall application logic
 func CollectFirewallRules() (*FirewallSyncPayload, error) {
-	// Check cache first
-	firewallRulesCache.mu.RLock()
-	if time.Since(firewallRulesCache.lastUpdate) < cacheValidityDuration &&
-		len(firewallRulesCache.rules) > 0 {
-		cachedRules := firewallRulesCache.rules
-		firewallRulesCache.mu.RUnlock()
-
-		log.Debug().Msg("Using cached firewall rules")
-		return buildSyncPayload(cachedRules), nil
-	}
-	firewallRulesCache.mu.RUnlock()
-
 	// Check which firewall tool is available
 	nftablesInstalled, iptablesInstalled, err := CheckFirewallTool()
 	if err != nil {
@@ -367,12 +487,6 @@ func CollectFirewallRules() (*FirewallSyncPayload, error) {
 		// if neither tool is installed, but keep as safety fallback
 		return nil, fmt.Errorf("no firewall tools available")
 	}
-
-	// Update cache
-	firewallRulesCache.mu.Lock()
-	firewallRulesCache.rules = chains
-	firewallRulesCache.lastUpdate = time.Now()
-	firewallRulesCache.mu.Unlock()
 
 	return buildSyncPayload(chains), nil
 }
@@ -551,7 +665,8 @@ func parseNftablesRuleToSync(ruleMap map[string]interface{}) (*FirewallRuleSync,
 	rule.RuleID, rule.RuleType = ParseCommentOrGenerate(fullComment)
 
 	// If rule_id or type was missing, re-create the rule with proper metadata
-	if originalRuleID == "" || originalRuleType == "" {
+	// DISABLED: This can conflict with ufw/firewalld
+	if !disableRuleRecreation && (originalRuleID == "" || originalRuleType == "") {
 		newComment := BuildFirewallComment(existingComment, rule.RuleID, rule.RuleType)
 
 		// Get rule handle from the ruleMap
@@ -722,7 +837,8 @@ func parseIptablesSaveRuleLine(line string) *FirewallRuleSync {
 	rule.RuleID, rule.RuleType = ParseCommentOrGenerate(fullComment)
 
 	// If rule_id or type was missing, re-create the rule with proper metadata
-	if originalRuleID == "" || originalRuleType == "" {
+	// DISABLED: This can conflict with ufw/firewalld
+	if !disableRuleRecreation && (originalRuleID == "" || originalRuleType == "") {
 		newComment := BuildFirewallComment(existingComment, rule.RuleID, rule.RuleType)
 
 		// Create the rule with updated comment first
@@ -817,12 +933,6 @@ func RemoveFirewallRulesByType(ruleType string) (int, error) {
 	}
 
 	log.Info().Msgf("Removed %d firewall rules of type: %s", removedCount, ruleType)
-
-	// Invalidate cache
-	firewallRulesCache.mu.Lock()
-	firewallRulesCache.rules = nil
-	firewallRulesCache.lastUpdate = time.Time{}
-	firewallRulesCache.mu.Unlock()
 
 	return removedCount, nil
 }

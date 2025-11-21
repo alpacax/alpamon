@@ -18,9 +18,7 @@ RUN go build -o alpamon ./cmd/alpamon/main.go
 
 FROM ubuntu:20.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl systemd ca-certificates
-
-RUN curl -sSf https://atlasgo.sh | sh
+RUN apt-get update && apt-get install -y --no-install-recommends systemd ca-certificates
 
 WORKDIR /usr/local/alpamon
 
