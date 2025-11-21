@@ -77,11 +77,15 @@ nfpms:
           - zip
           - sqlite3
           - nftables | iptables
+        recommends:
+          - alpamon-pam
       rpm:
         dependencies:
           - zip
           - sqlite
           - nftables | iptables
+        recommends:
+          - alpamon-pam
       
 changelog:
   sort: asc
