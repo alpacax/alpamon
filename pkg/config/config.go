@@ -162,14 +162,14 @@ func validateConfig(config Config, wsPath string) (bool, Settings) {
 	}
 
 	// Validate and set default timeout for pool tasks
-	// Note: When not configured in INI file, config.Pool.DefaultTimeout will be 0 (zero value)
-	// To distinguish "not configured" from "explicitly set to 0", we treat:
-	// - Positive value: use configured value
-	// - Zero: use default (DefaultPoolDefaultTimeout) unless explicitly set
-	// Since we can't distinguish, we only override if a positive value is provided
-	if config.Pool.DefaultTimeout > 0 {
-		settings.PoolDefaultTimeout = config.Pool.DefaultTimeout
-		log.Debug().Msgf("Using configured pool default timeout: %d seconds", settings.PoolDefaultTimeout)
+	// Use pointer type to distinguish "not configured" (nil) from "explicitly set to 0"
+	if config.Pool.DefaultTimeout != nil {
+		settings.PoolDefaultTimeout = *config.Pool.DefaultTimeout
+		if settings.PoolDefaultTimeout == 0 {
+			log.Debug().Msg("Using configured pool default timeout: 0 (no timeout)")
+		} else {
+			log.Debug().Msgf("Using configured pool default timeout: %d seconds", settings.PoolDefaultTimeout)
+		}
 	} else {
 		// Keep the default value that was set during Settings initialization
 		log.Debug().Msgf("Using default pool timeout: %d seconds", settings.PoolDefaultTimeout)

@@ -29,8 +29,8 @@ type Config struct {
 		Debug bool `ini:"debug"`
 	} `ini:"logging"`
 	Pool struct {
-		MaxWorkers     int `ini:"max_workers"`
-		QueueSize      int `ini:"queue_size"`
-		DefaultTimeout int `ini:"default_timeout"`
+		MaxWorkers     int  `ini:"max_workers"`
+		QueueSize      int  `ini:"queue_size"`
+		DefaultTimeout *int `ini:"default_timeout"`
 	} `ini:"pool"`
 }
