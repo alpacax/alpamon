@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -48,7 +49,10 @@ const (
 	sessionCloseCode = 4000
 )
 
-var terminals map[string]*PtyClient
+var (
+	terminals   map[string]*PtyClient
+	terminalsMu sync.RWMutex
+)
 
 func init() {
 	terminals = make(map[string]*PtyClient)
@@ -100,7 +104,9 @@ func (pc *PtyClient) initializePtySession() error {
 		return fmt.Errorf("failed to start pty: %w", err)
 	}
 
+	terminalsMu.Lock()
 	terminals[pc.sessionID] = pc
+	terminalsMu.Unlock()
 	return nil
 }
 
@@ -266,9 +272,11 @@ func (pc *PtyClient) close() {
 		_ = pc.cmd.Wait()
 	}
 
+	terminalsMu.Lock()
 	if terminals[pc.sessionID] != nil {
 		delete(terminals, pc.sessionID)
 	}
+	terminalsMu.Unlock()
 
 	if pc.conn != nil {
 		err := pc.conn.WriteControl(

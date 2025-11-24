@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/alpacax/alpamon/pkg/version"
@@ -41,11 +42,24 @@ const (
 
 var syncMutex sync.Mutex
 
-func CommitAsync(session *scheduler.Session, commissioned bool) {
+// CommitAsync commits system information asynchronously
+// Uses ContextManager for coordinated lifecycle management
+func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agent.ContextManager) {
 	if commissioned {
+		// Use a goroutine with delayed execution for commissioned systems
 		go func() {
-			time.Sleep(5 * time.Second)
-			syncSystemInfo(session, nil)
+			// Get application-level context for shutdown coordination
+			ctx := ctxManager.Root()
+
+			// Wait for either timeout or shutdown signal
+			select {
+			case <-time.After(5 * time.Second):
+				// Timeout occurred, proceed with sync
+				syncSystemInfo(session, nil)
+			case <-ctx.Done():
+				// Shutdown occurred before timeout, skip sync
+				log.Debug().Msg("Skipping syncSystemInfo due to shutdown")
+			}
 		}()
 	} else {
 		go commitSystemInfo()
