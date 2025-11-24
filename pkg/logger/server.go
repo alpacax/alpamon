@@ -57,12 +57,14 @@ func (ls *LogServer) StartLogServer() {
 				continue
 			}
 			// Submit connection handler to worker pool
-			ctx, _ := ls.ctxManager.NewContext(0) // No timeout for connection handlers
+			ctx, cancel := ls.ctxManager.NewContext(0) // No timeout for connection handlers
 			err = ls.workerPool.Submit(ctx, func() error {
+				defer cancel()
 				ls.handleConnection(conn)
 				return nil
 			})
 			if err != nil {
+				cancel()
 				log.Error().Err(err).Msg("Failed to submit connection handler to pool")
 				conn.Close()
 			}

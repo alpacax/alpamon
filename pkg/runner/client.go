@@ -249,6 +249,7 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 			return commandRunner.Run(ctx)
 		})
 		if err != nil {
+			cancel()
 			log.Error().Err(err).Msgf("Failed to submit command %s to pool", content.Command.ID)
 			// Send failure notification
 			payload := &commandFin{
