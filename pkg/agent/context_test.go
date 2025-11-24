@@ -26,37 +26,6 @@ func TestContextManagerCreation(t *testing.T) {
 	}
 }
 
-// TestContextManagerWithRoot verifies creation with custom root context
-func TestContextManagerWithRoot(t *testing.T) {
-	root, rootCancel := context.WithCancel(context.Background())
-	defer rootCancel()
-
-	cm := NewContextManagerWithRoot(root)
-	if cm == nil {
-		t.Fatal("NewContextManagerWithRoot returned nil")
-	}
-
-	// Create a child context
-	ctx, cancel := cm.NewContext(0)
-	defer cancel()
-
-	// Cancel the original root
-	rootCancel()
-
-	// Child context should also be cancelled
-	select {
-	case <-ctx.Done():
-		// Expected
-	case <-time.After(100 * time.Millisecond):
-		t.Error("child context not cancelled when root was cancelled")
-	}
-
-	// Context manager should report shutdown
-	if !cm.IsShutdown() {
-		t.Error("context manager should report shutdown after root cancellation")
-	}
-}
-
 // TestContextCancellation verifies that shutdown cancels all child contexts
 func TestContextCancellation(t *testing.T) {
 	cm := NewContextManager()

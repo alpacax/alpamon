@@ -24,16 +24,6 @@ func NewContextManager() *ContextManager {
 	}
 }
 
-// NewContextManagerWithRoot creates a new context manager with a provided root context.
-// This is useful when you want to integrate with an existing context hierarchy.
-func NewContextManagerWithRoot(root context.Context) *ContextManager {
-	ctx, cancel := context.WithCancel(root)
-	return &ContextManager{
-		root:   ctx,
-		cancel: cancel,
-	}
-}
-
 // NewContext creates a new child context with an optional timeout.
 // If timeout is 0 or negative, no timeout is applied.
 func (m *ContextManager) NewContext(timeout time.Duration) (context.Context, context.CancelFunc) {
