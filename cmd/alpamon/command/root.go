@@ -85,7 +85,7 @@ func runAgent() {
 	commissioned := session.CheckSession(ctx)
 
 	// Reporter - pass context manager for centralized context management
-	scheduler.StartReporters(session, ctxManager)
+	reporters := scheduler.StartReporters(session, ctxManager)
 
 	// Log server - pass worker pool and context manager for connection handling
 	logServer := logger.NewLogServer(workerPool, ctxManager)
@@ -115,17 +115,17 @@ func runAgent() {
 		select {
 		case <-ctx.Done():
 			log.Info().Msg("Received termination signal. Shutting down...")
-			gracefulShutdown(metricCollector, wsClient, workerPool, logRotate, logServer, pidFilePath)
+			gracefulShutdown(metricCollector, wsClient, workerPool, logRotate, logServer, reporters, pidFilePath)
 			return
 		case <-wsClient.ShutDownChan:
 			log.Info().Msg("Shutdown command received. Shutting down...")
 			ctxManager.Shutdown()
-			gracefulShutdown(metricCollector, wsClient, workerPool, logRotate, logServer, pidFilePath)
+			gracefulShutdown(metricCollector, wsClient, workerPool, logRotate, logServer, reporters, pidFilePath)
 			return
 		case <-wsClient.RestartChan:
 			log.Info().Msg("Restart command received. Restarting...")
 			ctxManager.Shutdown()
-			gracefulShutdown(metricCollector, wsClient, workerPool, logRotate, logServer, pidFilePath)
+			gracefulShutdown(metricCollector, wsClient, workerPool, logRotate, logServer, reporters, pidFilePath)
 			restartAgent()
 			return
 		case <-wsClient.CollectorRestartChan:
@@ -150,17 +150,23 @@ func restartAgent() {
 	}
 }
 
-func gracefulShutdown(collector *collector.Collector, wsClient *runner.WebsocketClient, workerPool *pool.Pool, logRotate *lumberjack.Logger, logServer *logger.LogServer, pidPath string) {
+func gracefulShutdown(collector *collector.Collector, wsClient *runner.WebsocketClient, workerPool *pool.Pool, logRotate *lumberjack.Logger, logServer *logger.LogServer, reporters *scheduler.ReporterManager, pidPath string) {
 	if collector != nil {
 		collector.Stop()
 	}
 	if wsClient != nil {
 		wsClient.Close()
 	}
+	// Shutdown reporters before worker pool
+	if reporters != nil {
+		if err := reporters.Shutdown(1 * time.Second); err != nil {
+			log.Error().Err(err).Msg("Failed to shutdown reporters gracefully")
+		}
+	}
 	// Shutdown the global worker pool
 	if workerPool != nil {
 		log.Info().Msg("Shutting down global worker pool...")
-		if err := workerPool.Shutdown(10 * time.Second); err != nil {
+		if err := workerPool.Shutdown(1 * time.Second); err != nil {
 			log.Error().Err(err).Msg("Failed to shutdown worker pool gracefully")
 		}
 	}

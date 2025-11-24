@@ -34,15 +34,18 @@ func NewReporter(index int, session *Session) *Reporter {
 	}
 }
 
-func StartReporters(session *Session, ctxManager *agent.ContextManager) {
+func StartReporters(session *Session, ctxManager *agent.ContextManager) *ReporterManager {
 	newRequestQueue() // init RequestQueue
 
-	wg := sync.WaitGroup{}
+	wg := &sync.WaitGroup{}
+	cancels := make([]func(), 0, config.GlobalSettings.HTTPThreads)
+
 	for i := 0; i < config.GlobalSettings.HTTPThreads; i++ {
 		wg.Add(1)
 		reporter := NewReporter(i, session)
 		// Create context for each reporter with no timeout
-		ctx, _ := ctxManager.NewContext(0)
+		ctx, cancel := ctxManager.NewContext(0)
+		cancels = append(cancels, cancel)
 		go func(ctx context.Context) {
 			defer wg.Done()
 			reporter.Run(ctx)
@@ -50,6 +53,39 @@ func StartReporters(session *Session, ctxManager *agent.ContextManager) {
 	}
 
 	reportStartupEvent()
+
+	return &ReporterManager{
+		wg:      wg,
+		cancels: cancels,
+	}
+}
+
+// Shutdown gracefully stops all reporters with a timeout
+func (rm *ReporterManager) Shutdown(timeout time.Duration) error {
+	log.Info().Msg("Shutting down reporters...")
+
+	// Cancel all reporter contexts
+	for _, cancel := range rm.cancels {
+		cancel()
+	}
+
+	// Wake up all waiting reporters
+	Rqueue.cond.Broadcast()
+
+	// Wait for all reporters to finish with timeout
+	done := make(chan struct{})
+	go func() {
+		rm.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Info().Msg("All reporters shut down gracefully")
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("reporter shutdown timeout after %v", timeout)
+	}
 }
 
 func reportStartupEvent() {
