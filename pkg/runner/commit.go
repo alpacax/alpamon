@@ -2,7 +2,6 @@ package runner
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -47,18 +46,19 @@ var syncMutex sync.Mutex
 // Uses ContextManager for coordinated lifecycle management
 func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agent.ContextManager) {
 	if commissioned {
-		// Use a goroutine with ContextManager for coordinated shutdown
+		// Use a goroutine with delayed execution for commissioned systems
 		go func() {
-			// Create a context with 5 second timeout from ContextManager
-			ctx, cancel := ctxManager.NewContext(5 * time.Second)
-			defer cancel()
+			// Get application-level context for shutdown coordination
+			ctx := ctxManager.Root()
 
-			// Wait for the timeout or cancellation
-			<-ctx.Done()
-
-			// If it was a timeout (not a cancellation), proceed with sync
-			if ctx.Err() == context.DeadlineExceeded {
+			// Wait for either timeout or shutdown signal
+			select {
+			case <-time.After(5 * time.Second):
+				// Timeout occurred, proceed with sync
 				syncSystemInfo(session, nil)
+			case <-ctx.Done():
+				// Shutdown occurred before timeout, skip sync
+				log.Debug().Msg("Skipping syncSystemInfo due to shutdown")
 			}
 		}()
 	} else {
