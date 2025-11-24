@@ -10,7 +10,11 @@ import (
 
 func TestPoolBasic(t *testing.T) {
 	pool := NewPool(3, 10)
-	defer pool.Shutdown(5 * time.Second)
+	defer func() {
+		if err := pool.Shutdown(5 * time.Second); err != nil {
+			t.Errorf("shutdown failed: %v", err)
+		}
+	}()
 
 	var counter int32
 	var wg sync.WaitGroup
@@ -42,7 +46,11 @@ func TestPoolQueueFull(t *testing.T) {
 	// Small queue size to test overflow
 	// Queue size = 1, Workers = 1
 	pool := NewPool(1, 1)
-	defer pool.Shutdown(5 * time.Second)
+	defer func() {
+		if err := pool.Shutdown(5 * time.Second); err != nil {
+			t.Errorf("shutdown failed: %v", err)
+		}
+	}()
 
 	// Use a channel to control task execution
 	blocker := make(chan struct{})
@@ -83,14 +91,18 @@ func TestPoolQueueFull(t *testing.T) {
 func TestPoolConcurrency(t *testing.T) {
 	maxWorkers := 3
 	pool := NewPool(maxWorkers, 100)
-	defer pool.Shutdown(5 * time.Second)
+	defer func() {
+		if err := pool.Shutdown(5 * time.Second); err != nil {
+			t.Errorf("shutdown failed: %v", err)
+		}
+	}()
 
 	var concurrent int32
 	var maxConcurrent int32
 
 	// Submit many jobs
 	for i := 0; i < 50; i++ {
-		pool.Submit(context.Background(), func() error {
+		if err := pool.Submit(context.Background(), func() error {
 			current := atomic.AddInt32(&concurrent, 1)
 			defer atomic.AddInt32(&concurrent, -1)
 
@@ -104,7 +116,9 @@ func TestPoolConcurrency(t *testing.T) {
 
 			time.Sleep(10 * time.Millisecond)
 			return nil
-		})
+		}); err != nil {
+			t.Errorf("failed to submit job: %v", err)
+		}
 	}
 
 	// Wait a bit for jobs to run
@@ -118,14 +132,20 @@ func TestPoolConcurrency(t *testing.T) {
 
 func TestPoolPanicRecovery(t *testing.T) {
 	pool := NewPool(2, 10)
-	defer pool.Shutdown(5 * time.Second)
+	defer func() {
+		if err := pool.Shutdown(5 * time.Second); err != nil {
+			t.Errorf("shutdown failed: %v", err)
+		}
+	}()
 
 	var completed int32
 
 	// Submit job that panics
-	pool.Submit(context.Background(), func() error {
+	if err := pool.Submit(context.Background(), func() error {
 		panic("test panic")
-	})
+	}); err != nil {
+		t.Errorf("failed to submit panic job: %v", err)
+	}
 
 	// Submit normal job after panic
 	err := pool.Submit(context.Background(), func() error {
@@ -152,11 +172,13 @@ func TestPoolShutdown(t *testing.T) {
 
 	// Submit several jobs
 	for i := 0; i < 5; i++ {
-		pool.Submit(context.Background(), func() error {
+		if err := pool.Submit(context.Background(), func() error {
 			time.Sleep(50 * time.Millisecond)
 			atomic.AddInt32(&completed, 1)
 			return nil
-		})
+		}); err != nil {
+			t.Errorf("failed to submit job: %v", err)
+		}
 	}
 
 	// Shutdown with timeout
@@ -184,10 +206,14 @@ func BenchmarkPoolSubmit(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pool.Submit(ctx, func() error {
+		if err := pool.Submit(ctx, func() error {
 			return nil
-		})
+		}); err != nil {
+			b.Errorf("failed to submit job: %v", err)
+		}
 	}
 
-	pool.Shutdown(10 * time.Second)
+	if err := pool.Shutdown(10 * time.Second); err != nil {
+		b.Errorf("shutdown failed: %v", err)
+	}
 }
