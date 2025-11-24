@@ -223,13 +223,15 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 			message = "Collector will be restarted."
 		default:
 			// Submit to worker pool for managed execution
-			ctx, _ := cr.wsClient.ctxManager.NewContext(2 * time.Second)
+			ctx, cancel := cr.wsClient.ctxManager.NewContext(2 * time.Second)
 			err := cr.wsClient.pool.Submit(ctx, func() error {
+				defer cancel()
 				time.Sleep(1 * time.Second)
 				cr.wsClient.Restart()
 				return nil
 			})
 			if err != nil {
+				cancel()
 				log.Error().Err(err).Msg("Failed to submit restart task to pool")
 			}
 		}
@@ -237,26 +239,30 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		return 0, message
 	case "quit":
 		// Submit to worker pool for managed execution
-		ctx, _ := cr.wsClient.ctxManager.NewContext(2 * time.Second)
+		ctx, cancel := cr.wsClient.ctxManager.NewContext(2 * time.Second)
 		err := cr.wsClient.pool.Submit(ctx, func() error {
+			defer cancel()
 			time.Sleep(1 * time.Second)
 			cr.wsClient.ShutDown()
 			return nil
 		})
 		if err != nil {
+			cancel()
 			log.Error().Err(err).Msg("Failed to submit quit task to pool")
 		}
 		return 0, "Alpamon will shutdown in 1 second."
 	case "reboot":
 		log.Info().Msg("Reboot request received.")
 		// Submit to worker pool for managed execution
-		ctx, _ := cr.wsClient.ctxManager.NewContext(2 * time.Second)
+		ctx, cancel := cr.wsClient.ctxManager.NewContext(2 * time.Second)
 		err := cr.wsClient.pool.Submit(ctx, func() error {
+			defer cancel()
 			time.Sleep(1 * time.Second)
 			cr.handleShellCmd("reboot", "root", "root", nil)
 			return nil
 		})
 		if err != nil {
+			cancel()
 			log.Error().Err(err).Msg("Failed to submit reboot task to pool")
 		}
 
@@ -264,13 +270,15 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 	case "shutdown":
 		log.Info().Msg("Shutdown request received.")
 		// Submit to worker pool for managed execution
-		ctx, _ := cr.wsClient.ctxManager.NewContext(2 * time.Second)
+		ctx, cancel := cr.wsClient.ctxManager.NewContext(2 * time.Second)
 		err := cr.wsClient.pool.Submit(ctx, func() error {
+			defer cancel()
 			time.Sleep(1 * time.Second)
 			cr.handleShellCmd("shutdown", "root", "root", nil)
 			return nil
 		})
 		if err != nil {
+			cancel()
 			log.Error().Err(err).Msg("Failed to submit shutdown task to pool")
 		}
 
