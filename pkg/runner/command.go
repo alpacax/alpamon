@@ -3,6 +3,7 @@ package runner
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -55,13 +56,34 @@ func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, 
 	}
 }
 
-func (cr *CommandRunner) Run() {
+func (cr *CommandRunner) Run(ctx context.Context) error {
 	var exitCode int
 	var result string
+	start := time.Now()
+
+	defer func() {
+		if cr.command.ID != "" {
+			finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
+			payload := &commandFin{
+				Success:     exitCode == 0,
+				Result:      result,
+				ElapsedTime: time.Since(start).Seconds(),
+			}
+			scheduler.Rqueue.Post(finURL, payload, 10, time.Time{})
+		}
+	}()
 
 	log.Debug().Msgf("Received command: %s > %s", cr.command.Shell, cr.command.Line)
 
-	start := time.Now()
+	// Check if context is already cancelled before starting
+	select {
+	case <-ctx.Done():
+		result = fmt.Sprintf("Command cancelled before execution: %v", ctx.Err())
+		exitCode = 1
+		return fmt.Errorf("command failed with exit code %d: %s", exitCode, result)
+	default:
+	}
+
 	switch cr.command.Shell {
 	case "internal":
 		exitCode, result = cr.handleInternalCmd()
@@ -72,16 +94,9 @@ func (cr *CommandRunner) Run() {
 		result = "Invalid command shell argument."
 	}
 
-	if cr.command.ID != "" {
-		finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
-
-		payload := &commandFin{
-			Success:     exitCode == 0,
-			Result:      result,
-			ElapsedTime: time.Since(start).Seconds(),
-		}
-		scheduler.Rqueue.Post(finURL, payload, 10, time.Time{})
-	}
+	// Always return nil - exit code and result are already sent via defer
+	// Returning error here would cause duplicate notifications in client.go
+	return nil
 }
 
 func (cr *CommandRunner) handleInternalCmd() (int, string) {
@@ -157,6 +172,8 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		}
 
 		ptyClient := NewPtyClient(cr.data, cr.apiSession)
+		// TODO: Consider pool management for PTY sessions
+		// Note: PTY sessions are long-running and may need special handling
 		go ptyClient.RunPtyBackground()
 
 		return 0, "Spawned a pty terminal."
@@ -180,8 +197,12 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 
 		return 0, "Spawned a ftp terminal."
 	case "resizepty":
-		if terminals[cr.data.SessionID] != nil {
-			err := terminals[cr.data.SessionID].resize(cr.data.Rows, cr.data.Cols)
+		terminalsMu.RLock()
+		ptyClient := terminals[cr.data.SessionID]
+		terminalsMu.RUnlock()
+
+		if ptyClient != nil {
+			err := ptyClient.resize(cr.data.Rows, cr.data.Cols)
 			if err != nil {
 				return 1, err.Error()
 			}
@@ -201,29 +222,57 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 			cr.wsClient.RestartCollector()
 			message = "Collector will be restarted."
 		default:
-			time.AfterFunc(1*time.Second, func() {
+			// Submit to worker pool for managed execution
+			ctx, _ := cr.wsClient.ctxManager.NewContext(2 * time.Second)
+			err := cr.wsClient.pool.Submit(ctx, func() error {
+				time.Sleep(1 * time.Second)
 				cr.wsClient.Restart()
+				return nil
 			})
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to submit restart task to pool")
+			}
 		}
 
 		return 0, message
 	case "quit":
-		time.AfterFunc(1*time.Second, func() {
+		// Submit to worker pool for managed execution
+		ctx, _ := cr.wsClient.ctxManager.NewContext(2 * time.Second)
+		err := cr.wsClient.pool.Submit(ctx, func() error {
+			time.Sleep(1 * time.Second)
 			cr.wsClient.ShutDown()
+			return nil
 		})
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to submit quit task to pool")
+		}
 		return 0, "Alpamon will shutdown in 1 second."
 	case "reboot":
 		log.Info().Msg("Reboot request received.")
-		time.AfterFunc(1*time.Second, func() {
+		// Submit to worker pool for managed execution
+		ctx, _ := cr.wsClient.ctxManager.NewContext(2 * time.Second)
+		err := cr.wsClient.pool.Submit(ctx, func() error {
+			time.Sleep(1 * time.Second)
 			cr.handleShellCmd("reboot", "root", "root", nil)
+			return nil
 		})
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to submit reboot task to pool")
+		}
 
 		return 0, "Server will reboot in 1 second"
 	case "shutdown":
 		log.Info().Msg("Shutdown request received.")
-		time.AfterFunc(1*time.Second, func() {
+		// Submit to worker pool for managed execution
+		ctx, _ := cr.wsClient.ctxManager.NewContext(2 * time.Second)
+		err := cr.wsClient.pool.Submit(ctx, func() error {
+			time.Sleep(1 * time.Second)
 			cr.handleShellCmd("shutdown", "root", "root", nil)
+			return nil
 		})
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to submit shutdown task to pool")
+		}
 
 		return 0, "Server will shutdown in 1 second"
 	case "update":
@@ -784,7 +833,15 @@ func (cr *CommandRunner) openFtp(data openFtpData) error {
 		return fmt.Errorf("openftp: Failed to start ftp worker process. %w", err)
 	}
 
-	go func() { _ = cmd.Wait() }()
+	// Track FTP process in a goroutine (will be limited by pool in the future)
+	// For now, just improve the logging
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			log.Warn().Err(err).Msg("FTP worker process exited with error")
+		} else {
+			log.Debug().Msg("FTP worker process exited normally")
+		}
+	}()
 
 	return nil
 }

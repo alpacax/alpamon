@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/alpacax/alpamon/pkg/version"
@@ -41,11 +43,23 @@ const (
 
 var syncMutex sync.Mutex
 
-func CommitAsync(session *scheduler.Session, commissioned bool) {
+// CommitAsync commits system information asynchronously
+// Uses ContextManager for coordinated lifecycle management
+func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agent.ContextManager) {
 	if commissioned {
+		// Use a goroutine with ContextManager for coordinated shutdown
 		go func() {
-			time.Sleep(5 * time.Second)
-			syncSystemInfo(session, nil)
+			// Create a context with 5 second timeout from ContextManager
+			ctx, cancel := ctxManager.NewContext(5 * time.Second)
+			defer cancel()
+
+			// Wait for the timeout or cancellation
+			<-ctx.Done()
+
+			// If it was a timeout (not a cancellation), proceed with sync
+			if ctx.Err() == context.DeadlineExceeded {
+				syncSystemInfo(session, nil)
+			}
 		}()
 	} else {
 		go commitSystemInfo()

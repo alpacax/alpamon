@@ -9,6 +9,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/alpacax/alpamon/internal/pool"
+	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
@@ -34,9 +36,11 @@ type WebsocketClient struct {
 	RestartChan          chan struct{}
 	ShutDownChan         chan struct{}
 	CollectorRestartChan chan struct{}
+	pool                 *pool.Pool
+	ctxManager           *agent.ContextManager
 }
 
-func NewWebsocketClient(session *scheduler.Session) *WebsocketClient {
+func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextManager, workerPool *pool.Pool) *WebsocketClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
@@ -49,6 +53,8 @@ func NewWebsocketClient(session *scheduler.Session) *WebsocketClient {
 		RestartChan:          make(chan struct{}),
 		ShutDownChan:         make(chan struct{}),
 		CollectorRestartChan: make(chan struct{}, 1),
+		pool:                 workerPool,
+		ctxManager:           ctxManager,
 	}
 }
 
@@ -228,7 +234,34 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 			time.Time{},
 		)
 		commandRunner := NewCommandRunner(wc, wc.apiSession, content.Command, data)
-		go commandRunner.Run()
+
+		// Submit command to pool with context using configured default timeout
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if config.GlobalSettings.PoolDefaultTimeout > 0 {
+			ctx, cancel = wc.ctxManager.NewContext(time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second)
+		} else {
+			// No timeout - task can run indefinitely
+			ctx, cancel = wc.ctxManager.NewContext(0)
+		}
+		err := wc.pool.Submit(ctx, func() error {
+			defer cancel()
+			return commandRunner.Run(ctx)
+		})
+		if err != nil {
+			log.Error().Err(err).Msgf("Failed to submit command %s to pool", content.Command.ID)
+			// Send failure notification
+			payload := &commandFin{
+				Success:     false,
+				Result:      fmt.Sprintf("Failed to submit command: %v", err),
+				ElapsedTime: 0,
+			}
+			scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, content.Command.ID),
+				payload,
+				10,
+				time.Time{},
+			)
+		}
 	case "quit":
 		log.Debug().Msgf("Quit requested for reason: %s.", content.Reason)
 		wc.ShutDown()
