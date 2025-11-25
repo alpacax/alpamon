@@ -2110,14 +2110,14 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 
 // executeUninstall performs complete uninstallation of Alpamon
 func (cr *CommandRunner) executeUninstall() {
-	var uninstallCmd string
+	var cmd string
 
 	if utils.PlatformLike == "debian" {
 		// Use purge to remove package and config files
-		uninstallCmd = "apt-get purge alpamon -y && apt-get autoremove -y"
+		cmd = "apt-get purge alpamon -y && apt-get autoremove -y"
 	} else if utils.PlatformLike == "rhel" {
 		// Remove package using yum
-		uninstallCmd = "yum remove alpamon -y"
+		cmd = "yum remove alpamon -y"
 	} else if utils.PlatformLike == "darwin" {
 		// For macOS development environment, just shutdown
 		log.Warn().Msgf("Platform '%s' does not support full uninstall. Shutting down instead.", utils.PlatformLike)
@@ -2129,13 +2129,19 @@ func (cr *CommandRunner) executeUninstall() {
 		return
 	}
 
+	// Note: The transient units (alpamon-uninstall.timer and alpamon-uninstall.service)
+	// will automatically be cleaned up after execution completes with --remain-after-exit=no
+	uninstallCmd := fmt.Sprintf("%s; systemctl reset-failed alpamon-uninstall.service 2>/dev/null || true", cmd)
+
 	// This ensures the uninstall continues even after the current process terminates
 	// The service will start 5 seconds after being scheduled
 	// Use runCmdWithOutput directly to avoid shell parsing issues with handleShellCmd
+	// --remain-after-exit=no ensures the transient service is removed after completion
 	scheduleCmdArgs := []string{
 		"systemd-run",
 		"--on-active=5",
 		"--unit=alpamon-uninstall",
+		"--remain-after-exit=no",
 		"/bin/sh",
 		"-c",
 		uninstallCmd,
