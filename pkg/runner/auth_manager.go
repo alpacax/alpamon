@@ -215,11 +215,6 @@ func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) error {
 }
 
 func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
-	defer func() {
-		unix_conn.Close()
-		log.Debug().Msg("Unix connection closed")
-	}()
-
 	buf := make([]byte, 1024)
 	n, err := unix_conn.Read(buf)
 	if err != nil {
@@ -248,6 +243,7 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 		if err := json.Unmarshal(buf[:n], &isAlpconReq); err != nil {
 			log.Warn().Err(err).Msg("Invalid is_alpcon_request")
 			am.sendIsAlpconResponse(unix_conn, "", "", 0, 0, false)
+			unix_conn.Close()
 			return
 		}
 
@@ -258,17 +254,20 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 		if !exists {
 			log.Warn().Msgf("No session found for PID %d, username: %s, groupname: %s", isAlpconReq.PPID, isAlpconReq.Username, isAlpconReq.Groupname)
 			am.sendIsAlpconResponse(unix_conn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, false)
+			unix_conn.Close()
 			return
 		}
 
 		log.Debug().Msgf("Session found for PID %d: %s", isAlpconReq.PPID, session.SessionID)
 		am.sendIsAlpconResponse(unix_conn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, true)
+		unix_conn.Close()
 
 	case "sudo_approval":
 		var sudo_approval_req SudoApprovalRequest
 		if err := json.Unmarshal(buf[:n], &sudo_approval_req); err != nil {
 			log.Warn().Err(err).Msg("Invalid sudo_approval_request")
 			am.sendSudoApprovalResponse(unix_conn, sudo_approval_req, false, "Invalid sudo_approval_request")
+			unix_conn.Close()
 			return
 		}
 
@@ -309,20 +308,27 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 			log.Error().Err(err).Msg("Failed to send sudo_approval request after retries")
 			am.sendSudoApprovalResponse(unix_conn, sudo_approval_req, false, "Communication error")
 			am.cleanupTimeoutRequest(sudo_approval_req.RequestID, false, "Communication error")
+			unix_conn.Close()
 			return
 		}
 
 		log.Debug().Msgf("sudo_approval request sent to WebSocket client, waiting for response...")
 
-		// timeout: should make responseChannel to check if sudo approval request is processed already
+		// Connection will be closed when response arrives or on timeout
+		// Do not close here as it's managed by HandleSudoApprovalResponse or cleanupTimeoutRequest
 		select {
 		case <-time.After(30 * time.Second):
 			log.Warn().Msg("sudo_approval response timeout")
 			am.cleanupTimeoutRequest(sudo_approval_req.RequestID, false, "Response timeout")
 		case <-am.ctx.Done():
-			log.Debug().Msg("Context cancelled, closing sudo_approval connection")
+			log.Debug().Msg("Context cancelled, cleaning up sudo_approval connection")
+			am.cleanupTimeoutRequest(sudo_approval_req.RequestID, false, "Service shutdown")
 			return
 		}
+
+	default:
+		log.Warn().Str("type", requestType).Msg("Unknown request type")
+		unix_conn.Close()
 	}
 }
 
@@ -391,7 +397,6 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 			delete(session.Requests, response.RequestID)
 			sudoRequest = req
 			log.Debug().Msgf("Found Alpacon user request for ID: %s", response.RequestID)
-			am.mu.Unlock()
 			break
 		}
 	}
@@ -405,8 +410,8 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 		} else {
 			log.Debug().Msgf("Request ID %s not found in localSudoRequests", response.RequestID)
 		}
-		am.mu.Unlock()
 	}
+	am.mu.Unlock()
 
 	if sudoRequest == nil {
 		am.mu.RLock()
