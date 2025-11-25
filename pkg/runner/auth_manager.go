@@ -34,7 +34,7 @@ type SudoApprovalRequest struct {
 	PID          int    `json:"pid"`
 	PPID         int    `json:"ppid"`
 	Command      string `json:"command"`
-	IsAlpconUser bool   `json:"is_alpcon_user"`
+	IsAlpconUser bool   `json:"is_alpacon_user"`
 	SessionID    string `json:"session_id"`
 }
 
@@ -46,7 +46,7 @@ type SudoApprovalResponse struct {
 	PID          int    `json:"pid"`
 	PPID         int    `json:"ppid"`
 	Command      string `json:"command"`
-	IsAlpconUser bool   `json:"is_alpcon_user"`
+	IsAlpconUser bool   `json:"is_alpacon_user"`
 	SessionID    string `json:"session_id"`
 	Approved     bool   `json:"approved"`
 	Reason       string `json:"reason"`
@@ -59,7 +59,7 @@ type MFAResponse struct {
 	Groupname    string `json:"groupname"`
 	PID          int    `json:"pid"`
 	PPID         int    `json:"ppid"`
-	IsAlpconUser bool   `json:"is_alpcon_user"`
+	IsAlpconUser bool   `json:"is_alpacon_user"`
 	Success      bool   `json:"success"`
 }
 
@@ -77,7 +77,7 @@ type IsAlpconResponse struct {
 	Groupname    string `json:"groupname"`
 	PID          int    `json:"pid"`
 	PPID         int    `json:"ppid"`
-	IsAlpconUser bool   `json:"is_alpcon_user"`
+	IsAlpconUser bool   `json:"is_alpacon_user"`
 }
 
 type AuthManager struct {
