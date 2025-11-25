@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff"
 	"github.com/rs/zerolog/log"
 )
 
@@ -87,6 +89,12 @@ type AuthManager struct {
 	listener          net.Listener
 	localSudoRequests map[string]*SudoRequest
 }
+
+const (
+	authRetryInitialInterval = 1 * time.Second
+	authRetryMaxInterval     = 10 * time.Second
+	authRetryTimeout         = 25 * time.Second // Less than PAM 30s timeout
+)
 
 var (
 	authManager     *AuthManager
@@ -171,6 +179,39 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 			go am.handleSudoRequest(unix_conn)
 		}
 	}
+}
+
+func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) error {
+	retryBackoff := backoff.NewExponentialBackOff()
+	retryBackoff.InitialInterval = authRetryInitialInterval
+	retryBackoff.MaxInterval = authRetryMaxInterval
+	retryBackoff.MaxElapsedTime = authRetryTimeout
+	retryBackoff.RandomizationFactor = 0
+
+	ctx, cancel := context.WithTimeout(am.ctx, authRetryTimeout)
+	defer cancel()
+
+	operation := func() error {
+		select {
+		case <-ctx.Done():
+			return backoff.Permanent(ctx.Err())
+		default:
+			if am.wsClient == nil || am.wsClient.Conn == nil {
+				return fmt.Errorf("WebSocket client not available")
+			}
+
+			if err := am.wsClient.WriteJSON(req); err != nil {
+				nextInterval := retryBackoff.NextBackOff()
+				log.Warn().Err(err).Msgf("Failed to send sudo request, will retry in %ds", int(nextInterval.Seconds()))
+				return err
+			}
+
+			log.Debug().Msg("Sudo request sent successfully")
+			return nil
+		}
+	}
+
+	return backoff.Retry(operation, backoff.WithContext(retryBackoff, ctx))
 }
 
 func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
@@ -263,16 +304,11 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 			log.Debug().Msgf("Alpacon user sudo request: %s for session %s", sudo_approval_req.RequestID, session.SessionID)
 		}
 
-		if am.wsClient == nil || am.wsClient.Conn == nil {
-			log.Error().Msg("WebSocket client not available")
-			am.sendSudoApprovalResponse(unix_conn, sudo_approval_req, false, "WebSocket unavailable")
-			return
-		}
-
-		// Send Sudo Approval request to the alpacon-server
-		if err := am.wsClient.WriteJSON(sudo_approval_req); err != nil {
-			log.Error().Err(err).Msg("Failed to send sudo_approval request to WebSocket client")
-			am.sendSudoApprovalResponse(unix_conn, sudo_approval_req, false, "System error")
+		// Send Sudo Approval request to the alpacon-server with retry
+		if err := am.sendSudoRequestWithRetry(sudo_approval_req); err != nil {
+			log.Error().Err(err).Msg("Failed to send sudo_approval request after retries")
+			am.sendSudoApprovalResponse(unix_conn, sudo_approval_req, false, "Communication error")
+			am.cleanupTimeoutRequest(sudo_approval_req.RequestID, false, "Communication error")
 			return
 		}
 
@@ -391,7 +427,12 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 
 	_, err = sudoRequest.Connection.Write(responseJSON)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to send sudo_approval_response")
+		if strings.Contains(err.Error(), "broken pipe") || strings.Contains(err.Error(), "EPIPE") {
+			log.Warn().Err(err).Str("request_id", response.RequestID).
+				Msg("Unix socket broken pipe - client disconnected (expected if timeout)")
+		} else {
+			log.Error().Err(err).Msg("Failed to send sudo_approval_response")
+		}
 		return err
 	}
 
