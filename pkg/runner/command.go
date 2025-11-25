@@ -2129,19 +2129,20 @@ func (cr *CommandRunner) executeUninstall() {
 		return
 	}
 
-	// Note: The transient units (alpamon-uninstall.timer and alpamon-uninstall.service)
-	// will automatically be cleaned up after execution completes with --remain-after-exit=no
-	uninstallCmd := fmt.Sprintf("%s; systemctl reset-failed alpamon-uninstall.service 2>/dev/null || true", cmd)
+	// Build the complete uninstall command that includes:
+	// 1. Package removal
+	// 2. Cleanup of transient systemd units created by this operation
+	uninstallCmd := fmt.Sprintf("%s; systemctl reset-failed alpamon-uninstall.service 2>/dev/null || true; systemctl reset-failed alpamon-uninstall.timer 2>/dev/null || true", cmd)
 
 	// This ensures the uninstall continues even after the current process terminates
 	// The service will start 5 seconds after being scheduled
 	// Use runCmdWithOutput directly to avoid shell parsing issues with handleShellCmd
-	// --remain-after-exit=no ensures the transient service is removed after completion
+	// --collect: Automatically clean up transient units after they complete (systemd 236+)
 	scheduleCmdArgs := []string{
 		"systemd-run",
 		"--on-active=5",
 		"--unit=alpamon-uninstall",
-		"--remain-after-exit=no",
+		"--collect",
 		"/bin/sh",
 		"-c",
 		uninstallCmd,
