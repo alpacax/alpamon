@@ -2131,8 +2131,10 @@ func (cr *CommandRunner) executeUninstall() {
 
 	// This ensures the uninstall continues even after the current process terminates
 	// The service will start 5 seconds after being scheduled
-	scheduleCmd := fmt.Sprintf("systemd-run --on-active=5 --unit=alpamon-uninstall /bin/sh -c '%s'", uninstallCmd)
+	// Use escaped double quotes to avoid shell quoting issues
+	scheduleCmd := fmt.Sprintf("systemd-run --on-active=5 --unit=alpamon-uninstall /bin/sh -c \"%s\"", uninstallCmd)
 
+	log.Debug().Msgf("Scheduling uninstall via systemd-run: %s", scheduleCmd)
 	exitCode, result := cr.handleShellCmd(scheduleCmd, "root", "root", nil)
 
 	if exitCode != 0 {
