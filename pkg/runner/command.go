@@ -212,6 +212,15 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 			cr.wsClient.ShutDown()
 		})
 		return 0, "Alpamon will shutdown in 1 second."
+	case "byebye":
+		log.Info().Msg("Uninstall request received.")
+
+		// Execute uninstall after 1 second to ensure response is sent
+		time.AfterFunc(1*time.Second, func() {
+			cr.executeUninstall()
+		})
+
+		return 0, "Alpamon will be completely uninstalled in 1 second. Goodbye!"
 	case "reboot":
 		log.Info().Msg("Reboot request received.")
 		time.AfterFunc(1*time.Second, func() {
@@ -288,6 +297,7 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		upgrade: upgrade alpamon
 		restart: restart alpamon
 		quit: stop alpamon
+		byebye: completely uninstall alpamon
 		update: update system
 		reboot: reboot system
 		shutdown: shutdown system
@@ -2096,6 +2106,38 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 	}
 
 	return appliedRules, failedRules, rolledBack, rollbackReason
+}
+
+// executeUninstall performs complete uninstallation of Alpamon
+func (cr *CommandRunner) executeUninstall() {
+	var cmd string
+
+	// Note: Package manager will automatically stop and disable services via preremove.sh
+	if utils.PlatformLike == "debian" {
+		// Use purge to remove package and config files
+		cmd = "apt-get purge alpamon -y && apt-get autoremove -y"
+	} else if utils.PlatformLike == "rhel" {
+		// Remove package using yum
+		cmd = "yum remove alpamon -y"
+	} else if utils.PlatformLike == "darwin" {
+		// For macOS development environment, just shutdown
+		log.Warn().Msgf("Platform '%s' does not support full uninstall. Shutting down instead.", utils.PlatformLike)
+		cr.wsClient.ShutDown()
+		return
+	} else {
+		log.Error().Msgf("Platform '%s' not supported for uninstall.", utils.PlatformLike)
+		cr.wsClient.ShutDown()
+		return
+	}
+
+	log.Debug().Msgf("Executing uninstall command: %s", cmd)
+	exitCode, result := cr.handleShellCmd(cmd, "root", "root", nil)
+
+	if exitCode != 0 {
+		log.Error().Msgf("Uninstall failed: %s", result)
+	} else {
+		log.Info().Msg("Alpamon package removed, cleanup scheduled")
+	}
 }
 
 // convertRuleDataToCommandData converts rule data map to CommandData fields
