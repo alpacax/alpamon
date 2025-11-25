@@ -2110,15 +2110,14 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 
 // executeUninstall performs complete uninstallation of Alpamon
 func (cr *CommandRunner) executeUninstall() {
-	var cmd string
+	var uninstallCmd string
 
-	// Note: Package manager will automatically stop and disable services via preremove.sh
 	if utils.PlatformLike == "debian" {
 		// Use purge to remove package and config files
-		cmd = "apt-get purge alpamon -y && apt-get autoremove -y"
+		uninstallCmd = "apt-get purge alpamon -y && apt-get autoremove -y"
 	} else if utils.PlatformLike == "rhel" {
 		// Remove package using yum
-		cmd = "yum remove alpamon -y"
+		uninstallCmd = "yum remove alpamon -y"
 	} else if utils.PlatformLike == "darwin" {
 		// For macOS development environment, just shutdown
 		log.Warn().Msgf("Platform '%s' does not support full uninstall. Shutting down instead.", utils.PlatformLike)
@@ -2130,14 +2129,20 @@ func (cr *CommandRunner) executeUninstall() {
 		return
 	}
 
-	log.Debug().Msgf("Executing uninstall command: %s", cmd)
-	exitCode, result := cr.handleShellCmd(cmd, "root", "root", nil)
+	// This ensures the uninstall continues even after the current process terminates
+	// The service will start 5 seconds after being scheduled
+	scheduleCmd := fmt.Sprintf("systemd-run --on-active=5 --unit=alpamon-uninstall /bin/sh -c '%s'", uninstallCmd)
+
+	exitCode, result := cr.handleShellCmd(scheduleCmd, "root", "root", nil)
 
 	if exitCode != 0 {
-		log.Error().Msgf("Uninstall failed: %s", result)
+		log.Error().Msgf("Failed to schedule uninstall: %s", result)
 	} else {
-		log.Info().Msg("Alpamon package removed, cleanup scheduled")
+		log.Info().Msg("Alpamon uninstall scheduled via systemd, will execute in 5 seconds")
 	}
+
+	// The scheduled systemd service will continue independently
+	cr.wsClient.ShutDown()
 }
 
 // convertRuleDataToCommandData converts rule data map to CommandData fields
