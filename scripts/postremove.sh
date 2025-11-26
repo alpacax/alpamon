@@ -18,5 +18,10 @@ if [ "$1" = 'purge' ]; then
         rm -f "$file" || true
     done
 
+    if command -v systemctl >/dev/null; then
+        systemctl daemon-reload || true
+        systemctl reset-failed || true
+    fi
+
     echo "All related configuration, service, and log files have been deleted."
 fi
