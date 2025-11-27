@@ -451,31 +451,6 @@ func (cr *CommandRunner) addUser() (exitCode int, result string) {
 		return 1, "Not implemented 'adduser' command for this platform."
 	}
 
-	// Add user to sudo group for both debian and rhel platforms
-	if utils.PlatformLike == "debian" || utils.PlatformLike == "rhel" {
-		// Check if sudo group exists
-		_, err := user.LookupGroup("sudo")
-		if err == nil {
-			// Add user to sudo group
-			exitCode, result = runCmdWithOutput(
-				[]string{
-					"/usr/sbin/usermod",
-					"-aG", "sudo",
-					data.Username,
-				},
-				"root", "", nil, 60,
-			)
-			if exitCode != 0 {
-				log.Warn().Str("error", result).Msgf("Failed to add user %s to sudo group", data.Username)
-				// Don't return error, just log warning
-			} else {
-				log.Info().Msgf("Successfully added user %s to sudo group", data.Username)
-			}
-		} else {
-			log.Debug().Msg("Sudo group not found, skipping sudo group addition")
-		}
-	}
-
 	// Set default permission for home directory if not provided
 	if data.HomeDirectoryPermission == "" {
 		data.HomeDirectoryPermission = "700"
