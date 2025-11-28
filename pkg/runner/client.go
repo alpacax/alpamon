@@ -72,14 +72,7 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 			}
 			// Sends "ping" query for Alpacon to verify WebSocket session status without error handling.
 			_ = wc.SendPingQuery()
-			
-			// First try to handle direct messages (sudo_approval_response etc.)
-			if wc.HandleDirectMessage(message) {
-				// If handled as direct message, skip CommandRequestHandler
-				continue
-			}
-			
-			// Execute existing CommandRequestHandler (for other commands)
+
 			wc.CommandRequestHandler(message)
 		}
 	}
@@ -246,37 +239,6 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 	default:
 		log.Warn().Msgf("Not implemented query: %s.", content.Query)
 	}
-}
-
-// HandleDirectMessage modified - returns whether the message was processed
-func (wc *WebsocketClient) HandleDirectMessage(message []byte) bool {
-	var response SudoApprovalResponse
-	
-	if len(message) == 0 {
-		return false
-	}
-
-	err := json.Unmarshal(message, &response)
-	if err != nil {
-		// Return false if not a sudo_approval_response
-		return false
-	}
-
-	// If it's a sudo_approval_response type, pass it to AuthManager
-	if response.Type == "sudo_approval_response" {
-		log.Debug().Msgf("Received sudo_approval_response: %+v", response)
-		if authManager != nil {
-			err := authManager.HandleSudoApprovalResponse(response)
-			if err != nil {
-				log.Error().Err(err).Msg("Failed to handle sudo approval response")
-			}
-		} else {
-			log.Error().Msg("AuthManager not available")
-		}
-		return true // processed
-	}
-
-	return false // not processed
 }
 
 func (wc *WebsocketClient) WriteJSON(data interface{}) error {

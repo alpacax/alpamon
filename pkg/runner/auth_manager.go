@@ -85,7 +85,7 @@ type AuthManager struct {
 	ctx               context.Context
 	cancel            context.CancelFunc
 	pidToSessionMap   map[int]*SessionInfo
-	wsClient          *WebsocketClient
+	controlClient     *ControlClient
 	listener          net.Listener
 	localSudoRequests map[string]*SudoRequest
 }
@@ -101,7 +101,7 @@ var (
 	authManagerOnce sync.Once
 )
 
-func GetAuthManager(wsClient *WebsocketClient) *AuthManager {
+func GetAuthManager(controlClient *ControlClient) *AuthManager {
 	authManagerOnce.Do(func() {
 		authManager = &AuthManager{
 			pidToSessionMap:   make(map[int]*SessionInfo),
@@ -109,8 +109,8 @@ func GetAuthManager(wsClient *WebsocketClient) *AuthManager {
 		}
 	})
 
-	if authManager.wsClient == nil {
-		authManager.wsClient = wsClient
+	if authManager.controlClient == nil {
+		authManager.controlClient = controlClient
 	}
 
 	if authManager.localSudoRequests == nil {
@@ -196,11 +196,11 @@ func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) error {
 		case <-ctx.Done():
 			return backoff.Permanent(ctx.Err())
 		default:
-			if am.wsClient == nil || am.wsClient.Conn == nil {
-				return fmt.Errorf("WebSocket client not available")
+			if am.controlClient == nil || !am.controlClient.IsConnected() {
+				return fmt.Errorf("control WebSocket client not available")
 			}
 
-			if err := am.wsClient.WriteJSON(req); err != nil {
+			if err := am.controlClient.WriteJSON(req); err != nil {
 				nextInterval := retryBackoff.NextBackOff()
 				log.Warn().Err(err).Msgf("Failed to send sudo request, will retry in %ds", int(nextInterval.Seconds()))
 				return err
