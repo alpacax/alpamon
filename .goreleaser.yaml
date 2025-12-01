@@ -67,7 +67,7 @@ nfpms:
           - sqlite3
           - nftables | iptables
         file_name_template: '{{ .PackageName }}_{{ trimprefix .Version "v" }}_{{ .Os }}_{{ .Arch }}'
-        recommends:
+        suggests:
           - alpamon-pam
       rpm:
         dependencies:
@@ -75,7 +75,7 @@ nfpms:
           - sqlite
           - nftables | iptables
         file_name_template: '{{ .PackageName }}-{{ trimprefix .Version "v" }}-1.{{ .Os }}.{{ .Arch }}'
-        recommends:
+        suggests:
           - alpamon-pam
       
 changelog:
