@@ -334,7 +334,7 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 
 func (am *AuthManager) sendIsAlpconResponse(conn net.Conn, username, groupname string, pid, ppid int, isAlpconUser bool) {
 	response := IsAlpconResponse{
-		Type:         "is_alpcon_response",
+		Type:         "is_alpacon_response",
 		Username:     username,
 		Groupname:    groupname,
 		PID:          pid,
@@ -344,13 +344,13 @@ func (am *AuthManager) sendIsAlpconResponse(conn net.Conn, username, groupname s
 
 	responseJSON, err := json.Marshal(response)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to marshal is_alpcon_response")
+		log.Error().Err(err).Msg("Failed to marshal is_alpacon_response")
 		return
 	}
 
 	_, err = conn.Write(responseJSON)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to send is_alpcon_response")
+		log.Error().Err(err).Msg("Failed to send is_alpacon_response")
 		return
 	}
 }
