@@ -72,6 +72,7 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 			}
 			// Sends "ping" query for Alpacon to verify WebSocket session status without error handling.
 			_ = wc.SendPingQuery()
+
 			wc.CommandRequestHandler(message)
 		}
 	}
