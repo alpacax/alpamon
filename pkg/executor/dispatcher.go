@@ -33,7 +33,12 @@ func (e *CommandDispatcher) RegisterHandler(h common.Handler) error {
 }
 
 // Execute runs a command with the appropriate handler
-func (e *CommandDispatcher) Execute(ctx context.Context, cmd string, args map[string]interface{}) (int, string, error) {
+func (e *CommandDispatcher) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+	// Handle nil args
+	if args == nil {
+		args = &common.CommandArgs{}
+	}
+
 	// Log command execution
 	log.Debug().
 		Str("command", cmd).
@@ -84,7 +89,7 @@ func (e *CommandDispatcher) Execute(ctx context.Context, cmd string, args map[st
 }
 
 // ExecuteWithPool executes a command through the worker pool
-func (e *CommandDispatcher) ExecuteWithPool(ctx context.Context, cmd string, args map[string]interface{}) error {
+func (e *CommandDispatcher) ExecuteWithPool(ctx context.Context, cmd string, args *common.CommandArgs) error {
 	return e.pool.Submit(ctx, func() error {
 		_, _, err := e.Execute(ctx, cmd, args)
 		return err
@@ -92,7 +97,7 @@ func (e *CommandDispatcher) ExecuteWithPool(ctx context.Context, cmd string, arg
 }
 
 // ExecuteAsync executes a command asynchronously
-func (e *CommandDispatcher) ExecuteAsync(cmd string, args map[string]interface{}, timeout time.Duration) {
+func (e *CommandDispatcher) ExecuteAsync(cmd string, args *common.CommandArgs, timeout time.Duration) {
 	go func() {
 		ctx, cancel := e.ctxManager.NewContext(timeout)
 		defer cancel()
@@ -149,10 +154,10 @@ func (e *CommandDispatcher) Shutdown(timeout time.Duration) error {
 
 // CommandContext wraps command execution context
 type CommandContext struct {
-	Command   string                 `json:"command"`
-	Args      map[string]interface{} `json:"args"`
-	Timestamp time.Time              `json:"timestamp"`
-	RequestID string                 `json:"request_id,omitempty"`
+	Command   string              `json:"command"`
+	Args      *common.CommandArgs `json:"args"`
+	Timestamp time.Time           `json:"timestamp"`
+	RequestID string              `json:"request_id,omitempty"`
 }
 
 // ExecuteWithContext executes a command with additional context
