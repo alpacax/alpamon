@@ -15,17 +15,7 @@ type BaseHandler struct {
 }
 
 // NewBaseHandler creates a new base handler
-func NewBaseHandler(name string, commands []string, executor CommandExecutor) *BaseHandler {
-	return &BaseHandler{
-		name:      name,
-		commands:  commands,
-		validator: validator.New(),
-		Executor:  executor,
-	}
-}
-
-// NewBaseHandlerWithTypes creates a new base handler with typed parameters
-func NewBaseHandlerWithTypes(name HandlerType, commands []CommandType, executor CommandExecutor) *BaseHandler {
+func NewBaseHandler(name HandlerType, commands []CommandType, executor CommandExecutor) *BaseHandler {
 	return &BaseHandler{
 		name:      name.String(),
 		commands:  CommandsToStrings(commands),
