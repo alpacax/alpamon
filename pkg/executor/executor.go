@@ -1,0 +1,319 @@
+package executor
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/user"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/rs/zerolog/log"
+)
+
+// Executor provides system command execution with privilege management
+type Executor struct{}
+
+// NewExecutor creates a new system command executor
+func NewExecutor() *Executor {
+	return &Executor{}
+}
+
+// Execute runs a command with full control over execution parameters
+func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, string, error) {
+	// Apply environment variable substitution
+	args := e.substituteEnvVars(opts.Args, opts.Env)
+
+	// Setup context with timeout if specified
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
+	}
+
+	// Create command
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+
+	// Set up privilege demotion if username specified
+	if opts.Username != "" && opts.Username != "root" {
+		sysProcAttr, err := e.demotePrivileges(opts.Username, opts.Groupname)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to demote privileges")
+			return -1, err.Error(), err
+		}
+		if sysProcAttr != nil {
+			cmd.SysProcAttr = sysProcAttr
+		}
+	}
+
+	// Set environment variables
+	for key, value := range opts.Env {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
+	}
+
+	// Set working directory
+	if opts.WorkingDir != "" {
+		cmd.Dir = opts.WorkingDir
+	} else if opts.Username != "" {
+		usr, err := utils.GetSystemUser(opts.Username)
+		if err == nil {
+			cmd.Dir = usr.HomeDir
+		}
+	}
+
+	// Set stdin if provided
+	if opts.Input != "" {
+		cmd.Stdin = bytes.NewReader([]byte(opts.Input))
+	}
+
+	log.Debug().
+		Str("command", strings.Join(args, " ")).
+		Str("user", opts.Username).
+		Str("group", opts.Groupname).
+		Str("dir", cmd.Dir).
+		Msg("Executing command")
+
+	// Execute command
+	output, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = exitError.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	return exitCode, string(output), err
+}
+
+// CommandOptions defines options for command execution
+type CommandOptions struct {
+	Args       []string          // Command and arguments
+	Username   string            // Username to run as (empty = current user)
+	Groupname  string            // Group to run as
+	Env        map[string]string // Environment variables
+	WorkingDir string            // Working directory
+	Timeout    time.Duration     // Command timeout
+	Input      string            // Input to provide via stdin
+}
+
+// substituteEnvVars replaces environment variables in arguments
+func (e *Executor) substituteEnvVars(args []string, env map[string]string) []string {
+	if env == nil {
+		return args
+	}
+
+	// Add default environment variables
+	defaultEnv := e.getDefaultEnv()
+	for key, value := range defaultEnv {
+		if _, exists := env[key]; !exists {
+			env[key] = value
+		}
+	}
+
+	// Substitute variables in arguments
+	result := make([]string, len(args))
+	for i, arg := range args {
+		result[i] = e.expandEnvVar(arg, env)
+	}
+	return result
+}
+
+// expandEnvVar expands environment variables in a string
+func (e *Executor) expandEnvVar(s string, env map[string]string) string {
+	// Handle ${VAR} format
+	if strings.HasPrefix(s, "${") && strings.HasSuffix(s, "}") {
+		varName := s[2 : len(s)-1]
+		if val, ok := env[varName]; ok {
+			return val
+		}
+	}
+	// Handle $VAR format
+	if strings.HasPrefix(s, "$") {
+		varName := s[1:]
+		if val, ok := env[varName]; ok {
+			return val
+		}
+	}
+	return s
+}
+
+// getDefaultEnv returns default environment variables
+func (e *Executor) getDefaultEnv() map[string]string {
+	return map[string]string{
+		"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME": os.Getenv("HOME"),
+		"USER": os.Getenv("USER"),
+	}
+}
+
+// demotePrivileges creates syscall attributes for privilege demotion
+func (e *Executor) demotePrivileges(username, groupname string) (*syscall.SysProcAttr, error) {
+	currentUid := os.Getuid()
+
+	if username == "" || groupname == "" {
+		log.Debug().Msg("No username or groupname provided, running as current user")
+		return nil, nil
+	}
+
+	if currentUid != 0 {
+		log.Warn().Msg("Not running as root, cannot demote privileges")
+		return nil, nil
+	}
+
+	// Lookup user
+	usr, err := user.Lookup(username)
+	if err != nil {
+		return nil, fmt.Errorf("user %s not found: %w", username, err)
+	}
+
+	// Lookup group
+	group, err := user.LookupGroup(groupname)
+	if err != nil {
+		return nil, fmt.Errorf("group %s not found: %w", groupname, err)
+	}
+
+	// Parse UIDs and GIDs
+	uid, err := strconv.ParseUint(usr.Uid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("invalid UID: %w", err)
+	}
+
+	gid, err := strconv.ParseUint(group.Gid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("invalid GID: %w", err)
+	}
+
+	// Get supplementary groups
+	groupIds, err := usr.GroupIds()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get groups: %w", err)
+	}
+
+	groups := make([]uint32, 0, len(groupIds))
+	groupInList := false
+	for _, gidStr := range groupIds {
+		gidUint, err := strconv.ParseUint(gidStr, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid group ID: %w", err)
+		}
+		if gidUint == gid {
+			groupInList = true
+		}
+		groups = append(groups, uint32(gidUint))
+	}
+
+	if !groupInList {
+		return nil, fmt.Errorf("group %s not in user %s's groups", groupname, username)
+	}
+
+	log.Debug().
+		Str("user", username).
+		Str("group", groupname).
+		Msg("Demoting privileges")
+
+	return &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    uint32(uid),
+			Gid:    uint32(gid),
+			Groups: groups,
+		},
+	}, nil
+}
+
+// Implement CommandExecutor interface methods
+
+// Run executes a command with the given arguments
+func (e *Executor) Run(ctx context.Context, name string, args ...string) (int, string, error) {
+	allArgs := append([]string{name}, args...)
+	return e.Execute(ctx, CommandOptions{Args: allArgs})
+}
+
+// RunAsUser executes a command as a specific user
+func (e *Executor) RunAsUser(ctx context.Context, username string, name string, args ...string) (int, string, error) {
+	allArgs := append([]string{name}, args...)
+	groupname := username
+	if username == "root" {
+		groupname = "root"
+	}
+	return e.Execute(ctx, CommandOptions{
+		Args:      allArgs,
+		Username:  username,
+		Groupname: groupname,
+	})
+}
+
+// RunWithInput executes a command with stdin input
+func (e *Executor) RunWithInput(ctx context.Context, input string, name string, args ...string) (int, string, error) {
+	allArgs := append([]string{name}, args...)
+	return e.Execute(ctx, CommandOptions{
+		Args:  allArgs,
+		Input: input,
+	})
+}
+
+// RunWithTimeout executes a command with a timeout
+func (e *Executor) RunWithTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) (int, string, error) {
+	allArgs := append([]string{name}, args...)
+	return e.Execute(ctx, CommandOptions{
+		Args:    allArgs,
+		Timeout: timeout,
+	})
+}
+
+// Convenience methods that match the existing function signatures
+
+// RunCommand executes a simple command
+func (e *Executor) RunCommand(ctx context.Context, args []string) (int, string, error) {
+	return e.Execute(ctx, CommandOptions{Args: args})
+}
+
+// RunCommandAsUser executes a command as a specific user
+func (e *Executor) RunCommandAsUser(ctx context.Context, args []string, username, groupname string) (int, string, error) {
+	return e.Execute(ctx, CommandOptions{
+		Args:      args,
+		Username:  username,
+		Groupname: groupname,
+	})
+}
+
+// RunCommandWithTimeout executes a command with a timeout
+func (e *Executor) RunCommandWithTimeout(ctx context.Context, args []string, timeout time.Duration) (int, string, error) {
+	return e.Execute(ctx, CommandOptions{
+		Args:    args,
+		Timeout: timeout,
+	})
+}
+
+// RunCommandWithInput executes a command with stdin input
+func (e *Executor) RunCommandWithInput(ctx context.Context, args []string, input string) (int, string, error) {
+	return e.Execute(ctx, CommandOptions{
+		Args:  args,
+		Input: input,
+	})
+}
+
+// RunCommandWithEnv executes a command with environment variables
+func (e *Executor) RunCommandWithEnv(ctx context.Context, args []string, env map[string]string) (int, string, error) {
+	return e.Execute(ctx, CommandOptions{
+		Args: args,
+		Env:  env,
+	})
+}
+
+// RunCommandFull executes a command with all options
+func (e *Executor) RunCommandFull(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
+	return e.Execute(ctx, CommandOptions{
+		Args:      args,
+		Username:  username,
+		Groupname: groupname,
+		Env:       env,
+		Timeout:   timeout,
+	})
+}
