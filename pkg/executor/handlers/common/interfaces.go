@@ -16,11 +16,11 @@ type Handler interface {
 
 	// Execute runs the specified command with the given arguments.
 	// Returns exit code, output string, and error if command fails.
-	Execute(ctx context.Context, cmd string, args map[string]interface{}) (exitCode int, output string, err error)
+	Execute(ctx context.Context, cmd string, args *CommandArgs) (exitCode int, output string, err error)
 
 	// Validate checks if the provided arguments are valid for the command.
 	// This allows pre-execution validation without running the command.
-	Validate(cmd string, args map[string]interface{}) error
+	Validate(cmd string, args *CommandArgs) error
 }
 
 // CommandExecutor defines the interface for executing system commands.
