@@ -1,8 +1,8 @@
 package runner
 
 import (
+	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/scheduler"
-	"gopkg.in/go-playground/validator.v9"
 )
 
 type Content struct {
@@ -78,84 +78,29 @@ type CommandData struct {
 	AssignmentID            string                   `json:"assignment_id"`
 	ServerID                string                   `json:"server_id"`
 	ChainNames              []string                 `json:"chain_names"` // for firewall-reorder-chains
+
+	// Backend information
+	Backend string `json:"backend"` // Backend type: iptables, nftables, firewalld, ufw
+	Table   string `json:"table"`   // iptables/nftables table: filter, nat, mangle, raw, security
+	Family  string `json:"family"`  // IP family: ip (IPv4), ip6 (IPv6), inet, arp, bridge, netdev
+
+	// Firewalld specific fields
+	Zone              string `json:"zone"`                // Firewalld zone (default, public, etc.)
+	Service           string `json:"service"`             // Firewalld service name
+	FirewalldRuleType string `json:"firewalld_rule_type"` // Firewalld rule type: service, port, rich
+
+	// UFW specific fields
+	Direction string `json:"direction"` // UFW direction: in, out
+	Interface string `json:"interface"` // UFW interface name
 }
 
-type firewallData struct {
-	ChainName   string `validate:"required"`
-	Method      string `validate:"omitempty"`
-	Chain       string `validate:"omitempty"`
-	Protocol    string `validate:"omitempty"`
-	PortStart   int    `validate:"omitempty"`
-	PortEnd     int    `validate:"omitempty"`
-	DPorts      []int  `validate:"omitempty"`
-	ICMPType    string `validate:"omitempty"`
-	Source      string `validate:"omitempty"`
-	Destination string `validate:"omitempty"`
-	Target      string `validate:"omitempty"`
-	Description string `validate:"omitempty"`
-	Priority    int    `validate:"omitempty"`
-	RuleType    string `validate:"omitempty,oneof=alpacon server"`
-	RuleID      string `validate:"omitempty"`
-	Operation   string `validate:"required"` // batch, flush, delete, add, update
-}
 type CommandRunner struct {
 	name       string
 	command    Command
 	wsClient   *WebsocketClient
 	apiSession *scheduler.Session
 	data       CommandData
-	validator  *validator.Validate
-}
-
-// Structs defining the required input data for command validation purposes. //
-
-type addUserData struct {
-	Username                string `validate:"required"`
-	UID                     uint64 `validate:"required"`
-	GID                     uint64 `validate:"required"`
-	Comment                 string `validate:"required"`
-	HomeDirectory           string `validate:"required"`
-	HomeDirectoryPermission string `validate:"omitempty"` // Use omitempty for backward compatibility
-	Shell                   string `validate:"required"`
-	Groupname               string `validate:"required"`
-}
-
-type addGroupData struct {
-	Groupname string `validate:"required"`
-	GID       uint64 `validate:"required"`
-}
-
-type deleteUserData struct {
-	Username           string `validate:"required"`
-	PurgeHomeDirectory bool   `validate:"omitempty"`
-}
-
-type deleteGroupData struct {
-	Groupname string `validate:"required"`
-}
-
-type modUserData struct {
-	Username   string   `validate:"required"`
-	Groupnames []string `validate:"required"`
-	Comment    string   `validate:"required"`
-}
-
-type openPtyData struct {
-	SessionID     string `validate:"required"`
-	URL           string `validate:"required"`
-	Username      string `validate:"required"`
-	Groupname     string `validate:"required"`
-	HomeDirectory string `validate:"required"`
-	Rows          uint16 `validate:"required"`
-	Cols          uint16 `validate:"required"`
-}
-
-type openFtpData struct {
-	SessionID     string `validate:"required"`
-	URL           string `validate:"required"`
-	Username      string `validate:"required"`
-	Groupname     string `validate:"required"`
-	HomeDirectory string `validate:"required"`
+	dispatcher CommandDispatcher // Interface for dispatcher to avoid circular dependency
 }
 
 type commandFin struct {
@@ -164,18 +109,156 @@ type commandFin struct {
 	ElapsedTime float64 `json:"elapsed_time"`
 }
 
-type commandStat struct {
-	Success bool         `json:"success"`
-	Message string       `json:"message"`
-	Type    transferType `json:"type"`
+// ToArgs converts CommandData to CommandArgs for type-safe executor compatibility
+func (c CommandData) ToArgs() *common.CommandArgs {
+	args := &common.CommandArgs{
+		// Common fields
+		SessionID: c.SessionID,
+		URL:       c.URL,
+
+		// User management
+		Username:                c.Username,
+		Groupname:               c.Groupname,
+		Groupnames:              c.Groupnames,
+		HomeDirectory:           c.HomeDirectory,
+		HomeDirectoryPermission: c.HomeDirectoryPermission,
+		PurgeHomeDirectory:      c.PurgeHomeDirectory,
+		UID:                     c.UID,
+		GID:                     c.GID,
+		Comment:                 c.Comment,
+		Shell:                   c.Shell,
+		Groups:                  c.Groups,
+
+		// File operations
+		Type:           c.Type,
+		Content:        c.Content,
+		Path:           c.Path,
+		Paths:          c.Paths,
+		AllowOverwrite: c.AllowOverwrite,
+		AllowUnzip:     c.AllowUnzip,
+		UseBlob:        c.UseBlob,
+
+		// Terminal operations
+		Rows: c.Rows,
+		Cols: c.Cols,
+
+		// Firewall operations
+		Keys:         c.Keys,
+		ChainName:    c.ChainName,
+		Method:       c.Method,
+		Chain:        c.Chain,
+		Protocol:     c.Protocol,
+		PortStart:    c.PortStart,
+		PortEnd:      c.PortEnd,
+		DPorts:       c.DPorts,
+		ICMPType:     c.ICMPType,
+		Source:       c.Source,
+		Destination:  c.Destination,
+		Target:       c.Target,
+		Description:  c.Description,
+		Priority:     c.Priority,
+		RuleType:     c.RuleType,
+		Operation:    c.Operation,
+		RuleID:       c.RuleID,
+		OldRuleID:    c.OldRuleID,
+		AssignmentID: c.AssignmentID,
+		ServerID:     c.ServerID,
+		ChainNames:   c.ChainNames,
+
+		// Backend information
+		Backend: c.Backend,
+		Table:   c.Table,
+		Family:  c.Family,
+
+		// Firewalld specific
+		Zone:              c.Zone,
+		Service:           c.Service,
+		FirewalldRuleType: c.FirewalldRuleType,
+
+		// UFW specific
+		Direction: c.Direction,
+		Interface: c.Interface,
+	}
+
+	// Convert Files if present
+	if len(c.Files) > 0 {
+		args.Files = make([]common.File, len(c.Files))
+		for i, f := range c.Files {
+			args.Files[i] = common.File{
+				Username:       f.Username,
+				Groupname:      f.Groupname,
+				Type:           f.Type,
+				Content:        f.Content,
+				Path:           f.Path,
+				AllowOverwrite: f.AllowOverwrite,
+				AllowUnzip:     f.AllowUnzip,
+				URL:            f.URL,
+			}
+		}
+	}
+
+	// Convert Rules if present
+	if len(c.Rules) > 0 {
+		args.Rules = make([]common.FirewallRule, len(c.Rules))
+		for i, ruleMap := range c.Rules {
+			rule := common.FirewallRule{}
+			if v, ok := ruleMap["chain_name"].(string); ok {
+				rule.ChainName = v
+			}
+			if v, ok := ruleMap["method"].(string); ok {
+				rule.Method = v
+			}
+			if v, ok := ruleMap["chain"].(string); ok {
+				rule.Chain = v
+			}
+			if v, ok := ruleMap["protocol"].(string); ok {
+				rule.Protocol = v
+			}
+			if v, ok := ruleMap["port_start"].(int); ok {
+				rule.PortStart = v
+			}
+			if v, ok := ruleMap["port_end"].(int); ok {
+				rule.PortEnd = v
+			}
+			if v, ok := ruleMap["dports"].([]int); ok {
+				rule.DPorts = v
+			}
+			if v, ok := ruleMap["icmp_type"].(string); ok {
+				rule.ICMPType = v
+			}
+			if v, ok := ruleMap["source"].(string); ok {
+				rule.Source = v
+			}
+			if v, ok := ruleMap["destination"].(string); ok {
+				rule.Destination = v
+			}
+			if v, ok := ruleMap["target"].(string); ok {
+				rule.Target = v
+			}
+			if v, ok := ruleMap["description"].(string); ok {
+				rule.Description = v
+			}
+			if v, ok := ruleMap["priority"].(int); ok {
+				rule.Priority = v
+			}
+			if v, ok := ruleMap["rule_type"].(string); ok {
+				rule.RuleType = v
+			}
+			if v, ok := ruleMap["rule_id"].(string); ok {
+				rule.RuleID = v
+			}
+			if v, ok := ruleMap["old_rule_id"].(string); ok {
+				rule.OldRuleID = v
+			}
+			if v, ok := ruleMap["operation"].(string); ok {
+				rule.Operation = v
+			}
+			args.Rules[i] = rule
+		}
+	}
+
+	return args
 }
-
-type transferType string
-
-const (
-	DOWNLOAD transferType = "download"
-	UPLOAD   transferType = "upload"
-)
 
 var nonZipExt = map[string]bool{
 	".jar":   true,
