@@ -9,20 +9,14 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// SystemInfoManager interface for system info operations
-type SystemInfoManager interface {
-	CommitSystemInfo()
-	SyncSystemInfo(keys []string)
-}
-
 // InfoHandler handles informational commands like ping, help, commit, sync
 type InfoHandler struct {
 	*common.BaseHandler
-	infoManager SystemInfoManager
+	infoManager common.SystemInfoManager
 }
 
 // NewInfoHandler creates a new info handler
-func NewInfoHandler(infoManager SystemInfoManager) *InfoHandler {
+func NewInfoHandler(infoManager common.SystemInfoManager) *InfoHandler {
 	h := &InfoHandler{
 		BaseHandler: common.NewBaseHandler(
 			common.Info,

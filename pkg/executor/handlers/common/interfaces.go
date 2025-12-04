@@ -49,3 +49,9 @@ type WSClient interface {
 	ShutDown()
 	RestartCollector()
 }
+
+// SystemInfoManager interface for system info operations
+type SystemInfoManager interface {
+	CommitSystemInfo()
+	SyncSystemInfo(keys []string)
+}

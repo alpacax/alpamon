@@ -18,10 +18,11 @@ import (
 type UserHandler struct {
 	*common.BaseHandler
 	groupService services.GroupService
+	syncManager  common.SystemInfoManager
 }
 
 // NewUserHandler creates a new user handler
-func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.GroupService) *UserHandler {
+func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.GroupService, syncManager common.SystemInfoManager) *UserHandler {
 	h := &UserHandler{
 		BaseHandler: common.NewBaseHandler(
 			common.User,
@@ -33,22 +34,34 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 			cmdExecutor,
 		),
 		groupService: groupService,
+		syncManager:  syncManager,
 	}
 	return h
 }
 
 // Execute runs the user management command
 func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+	var exitCode int
+	var output string
+	var err error
+
 	switch cmd {
 	case common.AddUser.String():
-		return h.handleAddUser(ctx, args)
+		exitCode, output, err = h.handleAddUser(ctx, args)
 	case common.DelUser.String():
-		return h.handleDelUser(ctx, args)
+		exitCode, output, err = h.handleDelUser(ctx, args)
 	case common.ModUser.String():
-		return h.handleModUser(ctx, args)
+		exitCode, output, err = h.handleModUser(ctx, args)
 	default:
 		return 1, "", fmt.Errorf("unknown user command: %s", cmd)
 	}
+
+	// Sync system info after successful command execution
+	if exitCode == 0 && h.syncManager != nil {
+		h.syncManager.SyncSystemInfo([]string{"groups", "users"})
+	}
+
+	return exitCode, output, err
 }
 
 // Validate checks if the arguments are valid for the command

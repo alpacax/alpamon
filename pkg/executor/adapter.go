@@ -1,14 +1,14 @@
-package info
+package executor
 
 import (
 	"github.com/alpacax/alpamon/pkg/scheduler"
 )
 
-// SystemInfoAdapter implements the SystemInfoManager interface for handlers
+// SystemInfoAdapter implements the common.SystemInfoManager interface for handlers
 type SystemInfoAdapter struct {
-	session            *scheduler.Session
-	commitFunc         func()
-	syncFunc           func(*scheduler.Session, []string)
+	session    *scheduler.Session
+	commitFunc func()
+	syncFunc   func(*scheduler.Session, []string)
 }
 
 // NewSystemInfoAdapter creates a new system info adapter with function callbacks
@@ -24,14 +24,14 @@ func NewSystemInfoAdapter(
 	}
 }
 
-// CommitSystemInfo implements SystemInfoManager
+// CommitSystemInfo implements common.SystemInfoManager
 func (a *SystemInfoAdapter) CommitSystemInfo() {
 	if a.commitFunc != nil {
 		a.commitFunc()
 	}
 }
 
-// SyncSystemInfo implements SystemInfoManager
+// SyncSystemInfo implements common.SystemInfoManager
 func (a *SystemInfoAdapter) SyncSystemInfo(keys []string) {
 	if a.syncFunc != nil {
 		a.syncFunc(a.session, keys)

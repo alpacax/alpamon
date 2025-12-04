@@ -13,10 +13,11 @@ import (
 // GroupHandler handles group management commands
 type GroupHandler struct {
 	*common.BaseHandler
+	syncManager common.SystemInfoManager
 }
 
 // NewGroupHandler creates a new group handler
-func NewGroupHandler(cmdExecutor common.CommandExecutor) *GroupHandler {
+func NewGroupHandler(cmdExecutor common.CommandExecutor, syncManager common.SystemInfoManager) *GroupHandler {
 	h := &GroupHandler{
 		BaseHandler: common.NewBaseHandler(
 			common.Group,
@@ -26,20 +27,32 @@ func NewGroupHandler(cmdExecutor common.CommandExecutor) *GroupHandler {
 			},
 			cmdExecutor,
 		),
+		syncManager: syncManager,
 	}
 	return h
 }
 
 // Execute runs the group management command
 func (h *GroupHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+	var exitCode int
+	var output string
+	var err error
+
 	switch cmd {
 	case common.AddGroup.String():
-		return h.handleAddGroup(ctx, args)
+		exitCode, output, err = h.handleAddGroup(ctx, args)
 	case common.DelGroup.String():
-		return h.handleDelGroup(ctx, args)
+		exitCode, output, err = h.handleDelGroup(ctx, args)
 	default:
 		return 1, "", fmt.Errorf("unknown group command: %s", cmd)
 	}
+
+	// Sync system info after successful command execution
+	if exitCode == 0 && h.syncManager != nil {
+		h.syncManager.SyncSystemInfo([]string{"groups", "users"})
+	}
+
+	return exitCode, output, err
 }
 
 // Validate checks if the arguments are valid for the command
