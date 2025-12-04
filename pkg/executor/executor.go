@@ -267,48 +267,8 @@ func (e *Executor) RunWithTimeout(ctx context.Context, timeout time.Duration, na
 	})
 }
 
-// Convenience methods that match the existing function signatures
-
-// RunCommand executes a simple command
-func (e *Executor) RunCommand(ctx context.Context, args []string) (int, string, error) {
-	return e.Execute(ctx, CommandOptions{Args: args})
-}
-
-// RunCommandAsUser executes a command as a specific user
-func (e *Executor) RunCommandAsUser(ctx context.Context, args []string, username, groupname string) (int, string, error) {
-	return e.Execute(ctx, CommandOptions{
-		Args:      args,
-		Username:  username,
-		Groupname: groupname,
-	})
-}
-
-// RunCommandWithTimeout executes a command with a timeout
-func (e *Executor) RunCommandWithTimeout(ctx context.Context, args []string, timeout time.Duration) (int, string, error) {
-	return e.Execute(ctx, CommandOptions{
-		Args:    args,
-		Timeout: timeout,
-	})
-}
-
-// RunCommandWithInput executes a command with stdin input
-func (e *Executor) RunCommandWithInput(ctx context.Context, args []string, input string) (int, string, error) {
-	return e.Execute(ctx, CommandOptions{
-		Args:  args,
-		Input: input,
-	})
-}
-
-// RunCommandWithEnv executes a command with environment variables
-func (e *Executor) RunCommandWithEnv(ctx context.Context, args []string, env map[string]string) (int, string, error) {
-	return e.Execute(ctx, CommandOptions{
-		Args: args,
-		Env:  env,
-	})
-}
-
-// RunCommandFull executes a command with all options
-func (e *Executor) RunCommandFull(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
+// Exec executes a command with all options
+func (e *Executor) Exec(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
 	return e.Execute(ctx, CommandOptions{
 		Args:      args,
 		Username:  username,

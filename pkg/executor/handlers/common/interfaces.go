@@ -39,8 +39,8 @@ type CommandExecutor interface {
 	// RunWithTimeout executes a command with a timeout
 	RunWithTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) (int, string, error)
 
-	// RunCommandFull executes a command with all options (user, group, env, timeout)
-	RunCommandFull(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error)
+	// Exec executes a command with all options (user, group, env, timeout)
+	Exec(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error)
 }
 
 // WSClient interface for WebSocket client operations
