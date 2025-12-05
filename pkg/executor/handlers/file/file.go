@@ -232,7 +232,6 @@ func (h *FileHandler) fileDownload(args *common.CommandArgs, sysProcAttr *syscal
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
 }
 
-
 // demote demotes privilege to the specified user/group
 func (h *FileHandler) demote(username, groupname string) (*syscall.SysProcAttr, error) {
 	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
@@ -436,6 +435,7 @@ func (h *FileHandler) fetchFromURL(contentURL string) ([]byte, error) {
 // statFileTransfer reports the file transfer status
 func (h *FileHandler) statFileTransfer(code int, transferType transferType, message string, args *common.CommandArgs) {
 	if scheduler.Rqueue == nil {
+		log.Warn().Msg("Request queue not initialized, skipping stat")
 		return
 	}
 
