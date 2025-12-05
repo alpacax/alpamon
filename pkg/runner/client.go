@@ -38,6 +38,7 @@ type WebsocketClient struct {
 	CollectorRestartChan chan struct{}
 	pool                 *pool.Pool
 	ctxManager           *agent.ContextManager
+	dispatcher           CommandDispatcher
 }
 
 func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextManager, workerPool *pool.Pool) *WebsocketClient {
@@ -56,6 +57,11 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		pool:                 workerPool,
 		ctxManager:           ctxManager,
 	}
+}
+
+// SetDispatcher sets the dispatcher for handling commands with dispatcher
+func (wc *WebsocketClient) SetDispatcher(dispatcher CommandDispatcher) {
+	wc.dispatcher = dispatcher
 }
 
 func (wc *WebsocketClient) RunForever(ctx context.Context) {
@@ -233,28 +239,16 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 			10,
 			time.Time{},
 		)
-		commandRunner := NewCommandRunner(wc, wc.apiSession, content.Command, data)
 
-		// Submit command to pool with context using configured default timeout
-		var ctx context.Context
-		var cancel context.CancelFunc
-		if config.GlobalSettings.PoolDefaultTimeout > 0 {
-			ctx, cancel = wc.ctxManager.NewContext(time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second)
+		// Use modular handler system
+		if wc.dispatcher != nil {
+			wc.handleCommand(content.Command, data)
 		} else {
-			// No timeout - task can run indefinitely
-			ctx, cancel = wc.ctxManager.NewContext(0)
-		}
-		err := wc.pool.Submit(ctx, func() error {
-			defer cancel()
-			return commandRunner.Run(ctx)
-		})
-		if err != nil {
-			cancel()
-			log.Error().Err(err).Msgf("Failed to submit command %s to pool", content.Command.ID)
+			log.Error().Msg("Dispatcher not initialized")
 			// Send failure notification
 			payload := &commandFin{
 				Success:     false,
-				Result:      fmt.Sprintf("Failed to submit command: %v", err),
+				Result:      "Internal error: dispatcher not initialized",
 				ElapsedTime: 0,
 			}
 			scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, content.Command.ID),
@@ -281,4 +275,41 @@ func (wc *WebsocketClient) WriteJSON(data interface{}) error {
 		return err
 	}
 	return nil
+}
+
+func (wc *WebsocketClient) handleCommand(command Command, data CommandData) {
+	// Create CommandRunner with dispatcher for direct execution
+	commandRunner := NewCommandRunner(wc, wc.apiSession, command, data, wc.dispatcher)
+
+	// Submit to pool with context
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if config.GlobalSettings.PoolDefaultTimeout > 0 {
+		ctx, cancel = wc.ctxManager.NewContext(time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second)
+	} else {
+		ctx, cancel = wc.ctxManager.NewContext(0)
+	}
+
+	err := wc.pool.Submit(ctx, func() error {
+		defer cancel()
+		// Run the command - it handles result notification internally via defer
+		return commandRunner.Run(ctx)
+	})
+
+	if err != nil {
+		cancel()
+		log.Error().Err(err).Msgf("Failed to submit command %s to pool", command.ID)
+		// Send failure notification
+		start := time.Now()
+		payload := &commandFin{
+			Success:     false,
+			Result:      fmt.Sprintf("Failed to submit command: %v", err),
+			ElapsedTime: time.Since(start).Seconds(),
+		}
+		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, command.ID),
+			payload,
+			10,
+			time.Time{},
+		)
+	}
 }

@@ -260,6 +260,18 @@ func (pc *PtyClient) resize(rows, cols uint16) error {
 	return nil
 }
 
+// Resize is the exported version of resize for external packages
+func (pc *PtyClient) Resize(rows, cols uint16) error {
+	return pc.resize(rows, cols)
+}
+
+// GetTerminal returns the PTY client for the given session ID
+func GetTerminal(sessionID string) *PtyClient {
+	terminalsMu.RLock()
+	defer terminalsMu.RUnlock()
+	return terminals[sessionID]
+}
+
 // close terminates the PTY session and cleans up resources.
 // It ensures that the PTY, command, and WebSocket connection are properly closed.
 func (pc *PtyClient) close() {

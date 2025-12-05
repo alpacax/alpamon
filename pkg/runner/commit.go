@@ -55,18 +55,18 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			select {
 			case <-time.After(5 * time.Second):
 				// Timeout occurred, proceed with sync
-				syncSystemInfo(session, nil)
+				SyncSystemInfo(session, nil)
 			case <-ctx.Done():
 				// Shutdown occurred before timeout, skip sync
 				log.Debug().Msg("Skipping syncSystemInfo due to shutdown")
 			}
 		}()
 	} else {
-		go commitSystemInfo()
+		go CommitSystemInfo()
 	}
 }
 
-func commitSystemInfo() {
+func CommitSystemInfo() {
 	log.Debug().Msg("Start committing system information.")
 
 	data := collectData()
@@ -95,7 +95,7 @@ func commitSystemInfo() {
 	log.Info().Msg("Completed committing system information.")
 }
 
-func syncSystemInfo(session *scheduler.Session, keys []string) {
+func SyncSystemInfo(session *scheduler.Session, keys []string) {
 	log.Debug().Msg("Start system information synchronization.")
 
 	syncMutex.Lock()

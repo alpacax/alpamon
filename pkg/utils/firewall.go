@@ -28,7 +28,7 @@ var (
 
 	// Temporary flag to disable all firewall functionality
 	// Set to true to completely disable alpacon firewall management
-	firewallFunctionalityDisabled = true
+	FirewallFunctionalityDisabled = true
 
 	// High-level firewall detection cache
 	highLevelFirewallCheckMutex     sync.Mutex
@@ -103,7 +103,7 @@ func runFirewallCommand(args []string, timeout int) (exitCode int, output string
 
 // IsFirewallDisabled checks if firewall functionality is disabled
 func IsFirewallDisabled() bool {
-	return firewallFunctionalityDisabled
+	return FirewallFunctionalityDisabled
 }
 
 // DetectHighLevelFirewall detects if high-level firewall management tools are active
