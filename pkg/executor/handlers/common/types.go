@@ -68,10 +68,7 @@ const (
 	// Terminal commands
 	OpenPty   CommandType = "openpty"
 	OpenFtp   CommandType = "openftp"
-	WritePty  CommandType = "writepty"
 	ResizePty CommandType = "resizepty"
-	ClosePty  CommandType = "closepty"
-	CloseFtp  CommandType = "closeftp"
 )
 
 // Shell operators for command parsing
