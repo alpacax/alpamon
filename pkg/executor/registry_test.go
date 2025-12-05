@@ -156,7 +156,7 @@ func TestRegistry_ListCommands(t *testing.T) {
 		commands: []string{"cmd1", "cmd2", "cmd3"},
 	}
 
-	registry.Register(handler)
+	_ = registry.Register(handler)
 
 	commands := registry.ListCommands()
 	if len(commands) != 3 {
@@ -183,7 +183,7 @@ func TestRegistry_IsCommandRegistered(t *testing.T) {
 		commands: []string{"cmd1", "cmd2"},
 	}
 
-	registry.Register(handler)
+	_ = registry.Register(handler)
 
 	if !registry.IsCommandRegistered("cmd1") {
 		t.Error("Expected cmd1 to be registered")
@@ -204,7 +204,7 @@ func TestRegistry_Unregister(t *testing.T) {
 		commands: []string{"cmd1", "cmd2"},
 	}
 
-	registry.Register(handler)
+	_ = registry.Register(handler)
 
 	// Verify handler is registered
 	if !registry.IsCommandRegistered("cmd1") {
@@ -242,8 +242,8 @@ func TestRegistry_Clear(t *testing.T) {
 		commands: []string{"cmd2"},
 	}
 
-	registry.Register(handler1)
-	registry.Register(handler2)
+	_ = registry.Register(handler1)
+	_ = registry.Register(handler2)
 
 	// Verify handlers are registered
 	if len(registry.List()) != 2 {
@@ -273,7 +273,7 @@ func TestRegistry_ThreadSafety(t *testing.T) {
 				name:     "handler" + string(rune('A'+n)),
 				commands: []string{"cmd" + string(rune('A'+n))},
 			}
-			registry.Register(handler)
+			_ = registry.Register(handler)
 			done <- true
 		}(i)
 	}
