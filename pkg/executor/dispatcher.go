@@ -40,28 +40,16 @@ func (e *CommandDispatcher) Execute(ctx context.Context, cmd string, args *commo
 		args = &common.CommandArgs{}
 	}
 
-	// Log command execution
-	log.Debug().
-		Str("command", cmd).
-		Interface("args", args).
-		Msg("Executing command")
-
 	// Find the appropriate handler
 	handler, err := e.registry.Get(cmd)
 	if err != nil {
-		log.Warn().
-			Str("command", cmd).
-			Err(err).
-			Msg("No handler found for command")
+		log.Warn().Err(err).Msgf("No handler found for command: %s", cmd)
 		return 1, "", fmt.Errorf("no handler found for command: %s", cmd)
 	}
 
 	// Validate arguments before execution
 	if err := handler.Validate(cmd, args); err != nil {
-		log.Error().
-			Str("command", cmd).
-			Err(err).
-			Msg("Command validation failed")
+		log.Error().Err(err).Msgf("Command %s validation failed", cmd)
 		return 1, "", fmt.Errorf("validation failed: %w", err)
 	}
 
@@ -89,51 +77,9 @@ func (e *CommandDispatcher) Execute(ctx context.Context, cmd string, args *commo
 	return exitCode, output, err
 }
 
-// ExecuteWithPool executes a command through the worker pool
-func (e *CommandDispatcher) ExecuteWithPool(ctx context.Context, cmd string, args *common.CommandArgs) error {
-	return e.pool.Submit(ctx, func() error {
-		_, _, err := e.Execute(ctx, cmd, args)
-		return err
-	})
-}
-
-// ExecuteAsync executes a command asynchronously
-func (e *CommandDispatcher) ExecuteAsync(cmd string, args *common.CommandArgs, timeout time.Duration) {
-	go func() {
-		ctx, cancel := e.ctxManager.NewContext(timeout)
-		defer cancel()
-
-		exitCode, output, err := e.Execute(ctx, cmd, args)
-		if err != nil {
-			log.Error().
-				Str("command", cmd).
-				Int("exitCode", exitCode).
-				Str("output", output).
-				Err(err).
-				Msg("Async command execution failed")
-		}
-	}()
-}
-
-// IsCommandSupported checks if a command is supported
-func (e *CommandDispatcher) IsCommandSupported(cmd string) bool {
-	return e.registry.IsCommandRegistered(cmd)
-}
-
 // HasHandler checks if a handler exists for the given command
-// This is an alias for IsCommandSupported to match the CommandExecutor interface
 func (e *CommandDispatcher) HasHandler(cmd string) bool {
 	return e.registry.IsCommandRegistered(cmd)
-}
-
-// GetSupportedCommands returns all supported commands
-func (e *CommandDispatcher) GetSupportedCommands() []string {
-	return e.registry.ListCommands()
-}
-
-// GetHandlers returns all registered handler names
-func (e *CommandDispatcher) GetHandlers() []string {
-	return e.registry.List()
 }
 
 // Shutdown gracefully shuts down the executor
@@ -151,29 +97,6 @@ func (e *CommandDispatcher) Shutdown(timeout time.Duration) error {
 
 	log.Info().Msg("Executor shutdown complete")
 	return nil
-}
-
-// CommandContext wraps command execution context
-type CommandContext struct {
-	Command   string              `json:"command"`
-	Args      *common.CommandArgs `json:"args"`
-	Timestamp time.Time           `json:"timestamp"`
-	RequestID string              `json:"request_id,omitempty"`
-}
-
-// ExecuteWithContext executes a command with additional context
-func (e *CommandDispatcher) ExecuteWithContext(ctx context.Context, cmdCtx CommandContext) (int, string, error) {
-	// Add request ID to logs if provided
-	if cmdCtx.RequestID != "" {
-		log := log.With().Str("requestId", cmdCtx.RequestID).Logger()
-		log.Debug().
-			Str("command", cmdCtx.Command).
-			Interface("args", cmdCtx.Args).
-			Time("timestamp", cmdCtx.Timestamp).
-			Msg("Executing command with context")
-	}
-
-	return e.Execute(ctx, cmdCtx.Command, cmdCtx.Args)
 }
 
 // InitDispatcher initializes and configures the command dispatching system with all handlers
