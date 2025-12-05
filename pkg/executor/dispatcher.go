@@ -8,6 +8,7 @@ import (
 	"github.com/alpacax/alpamon/internal/pool"
 	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/rs/zerolog/log"
 )
 
@@ -173,4 +174,30 @@ func (e *CommandDispatcher) ExecuteWithContext(ctx context.Context, cmdCtx Comma
 	}
 
 	return e.Execute(ctx, cmdCtx.Command, cmdCtx.Args)
+}
+
+// InitDispatcher initializes and configures the command dispatching system with all handlers
+func InitDispatcher(
+	pool *pool.Pool,
+	ctxManager *agent.ContextManager,
+	session *scheduler.Session,
+	wsClient common.WSClient,
+	callbacks SystemInfoCallbacks,
+) (*CommandDispatcher, error) {
+	// Create the main command dispatcher
+	dispatcher := NewCommandDispatcher(pool, ctxManager)
+
+	// Create command executor for system commands
+	cmdExecutor := NewExecutor()
+
+	// Create and register all handlers using the handler factory pattern
+	factory := NewHandlerFactory(dispatcher, cmdExecutor)
+	err := factory.RegisterAll(pool, ctxManager, session, wsClient, callbacks)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Info().Msg("Dispatcher initialized with handlers")
+
+	return dispatcher, nil
 }
