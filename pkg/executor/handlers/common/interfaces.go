@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"context"
 	"time"
 )
@@ -54,4 +55,9 @@ type WSClient interface {
 type SystemInfoManager interface {
 	CommitSystemInfo()
 	SyncSystemInfo(keys []string)
+}
+
+// APISession interface for API operations (file upload)
+type APISession interface {
+	MultipartRequest(url string, body bytes.Buffer, contentType string, timeout time.Duration) ([]byte, int, error)
 }
