@@ -52,6 +52,11 @@ func getPlatformLike() {
 	}
 }
 
+// SetPlatformLike allows setting PlatformLike for testing purposes.
+func SetPlatformLike(platform string) {
+	PlatformLike = platform
+}
+
 func JoinPath(base string, paths ...string) string {
 	fullURL, err := url.JoinPath(base, paths...)
 	if err != nil {
