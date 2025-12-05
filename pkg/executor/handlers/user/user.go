@@ -285,14 +285,6 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 			cmdArgs = append(cmdArgs, "--remove-home")
 		}
 		cmdArgs = append(cmdArgs, data.Username)
-
-		exitCode, output, err = h.Executor.Run(
-			ctx,
-			cmdArgs[0], cmdArgs[1:]...,
-		)
-		if exitCode != 0 {
-			return exitCode, output, err
-		}
 	} else if utils.PlatformLike == "rhel" {
 		cmdArgs = append(cmdArgs, "/usr/sbin/userdel")
 		if data.PurgeHomeDirectory {
