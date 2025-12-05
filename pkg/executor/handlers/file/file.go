@@ -435,6 +435,10 @@ func (h *FileHandler) fetchFromURL(contentURL string) ([]byte, error) {
 
 // statFileTransfer reports the file transfer status
 func (h *FileHandler) statFileTransfer(code int, transferType transferType, message string, args *common.CommandArgs) {
+	if scheduler.Rqueue == nil {
+		return
+	}
+
 	statURL := fmt.Sprint(args.URL + "stat/")
 	isSuccess := code == 0
 
