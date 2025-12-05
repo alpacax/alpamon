@@ -14,6 +14,7 @@ import (
 	"github.com/alpacax/alpamon/pkg/collector"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/db"
+	"github.com/alpacax/alpamon/pkg/executor"
 	"github.com/alpacax/alpamon/pkg/logger"
 	"github.com/alpacax/alpamon/pkg/pidfile"
 	"github.com/alpacax/alpamon/pkg/runner"
@@ -109,6 +110,25 @@ func runAgent() {
 
 	// Websocket Client - pass context manager and worker pool for centralized management
 	wsClient := runner.NewWebsocketClient(session, ctxManager, workerPool)
+
+	// Initialize dispatcher system with callbacks
+	dispatcher, err := executor.InitDispatcher(
+		workerPool,
+		ctxManager,
+		session,
+		wsClient,
+		executor.SystemInfoCallbacks{
+			CommitFunc: runner.CommitSystemInfo,
+			SyncFunc:   runner.SyncSystemInfo,
+		},
+	)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to initialize dispatcher system")
+	}
+
+	wsClient.SetDispatcher(dispatcher)
+	log.Info().Msg("Dispatcher system initialized successfully")
+
 	go wsClient.RunForever(ctx)
 
 	for {
