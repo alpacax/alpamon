@@ -112,6 +112,7 @@ func validateConfig(config Config, wsPath string) (bool, Settings) {
 		val = strings.TrimSuffix(val, "/")
 		settings.ServerURL = val
 		settings.WSPath = strings.Replace(val, "http", "ws", 1) + settings.WSPath
+		settings.WSPath = strings.Replace(settings.WSPath, "8000", "8081", 1) // just for local environment (not effected in prod)
 		settings.UseSSL = strings.HasPrefix(val, "https://")
 	} else {
 		log.Error().Msg("Server url is invalid.")
