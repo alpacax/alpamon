@@ -74,7 +74,7 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 		Str("user", opts.Username).
 		Str("group", opts.Groupname).
 		Str("dir", cmd.Dir).
-		Msg("Executing command")
+		Msg("Executor execute command")
 
 	// Execute command
 	output, err := cmd.CombinedOutput()

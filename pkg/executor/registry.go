@@ -38,7 +38,7 @@ func (r *Registry) Register(h common.Handler) error {
 
 	// Register the handler
 	r.handlers[name] = h
-	log.Debug().Str("handler", name).Msg("Registered handler")
+	log.Debug().Msgf("Registered handler: %s", name)
 
 	// Map each command to this handler
 	for _, cmd := range h.Commands() {
@@ -46,10 +46,7 @@ func (r *Registry) Register(h common.Handler) error {
 			return fmt.Errorf("command %s already registered to handler %s", cmd, existing.Name())
 		}
 		r.cmdToHandler[cmd] = h
-		log.Debug().
-			Str("command", cmd).
-			Str("handler", name).
-			Msg("Registered command")
+		log.Debug().Msgf("Registered command %s to handler %s", cmd, name)
 	}
 
 	return nil
@@ -127,15 +124,12 @@ func (r *Registry) Unregister(name string) error {
 	// Remove command mappings
 	for _, cmd := range handler.Commands() {
 		delete(r.cmdToHandler, cmd)
-		log.Debug().
-			Str("command", cmd).
-			Str("handler", name).
-			Msg("Unregistered command")
+		log.Debug().Msgf("Unregistered command %s from handler %s", cmd, name)
 	}
 
 	// Remove handler
 	delete(r.handlers, name)
-	log.Debug().Str("handler", name).Msg("Unregistered handler")
+	log.Debug().Msgf("Unregistered handler %s", name)
 
 	return nil
 }
