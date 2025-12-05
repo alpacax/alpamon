@@ -112,6 +112,13 @@ func (h *SystemHandler) handleRestart(args *common.CommandArgs) (int, string, er
 	default:
 		// Submit to worker pool for managed execution
 		poolCtx, cancel := h.ctxManager.NewContext(2 * time.Second)
+		submitted := false
+		defer func() {
+			if !submitted {
+				cancel()
+			}
+		}()
+
 		err := h.pool.Submit(poolCtx, func() error {
 			defer cancel()
 			time.Sleep(1 * time.Second)
@@ -119,8 +126,9 @@ func (h *SystemHandler) handleRestart(args *common.CommandArgs) (int, string, er
 			return nil
 		})
 		if err != nil {
-			cancel()
 			log.Error().Err(err).Msg("Failed to submit restart task to pool")
+		} else {
+			submitted = true
 		}
 	}
 
@@ -131,6 +139,13 @@ func (h *SystemHandler) handleRestart(args *common.CommandArgs) (int, string, er
 func (h *SystemHandler) handleQuit() (int, string, error) {
 	// Submit to worker pool for managed execution
 	poolCtx, cancel := h.ctxManager.NewContext(2 * time.Second)
+	submitted := false
+	defer func() {
+		if !submitted {
+			cancel()
+		}
+	}()
+
 	err := h.pool.Submit(poolCtx, func() error {
 		defer cancel()
 		time.Sleep(1 * time.Second)
@@ -138,8 +153,9 @@ func (h *SystemHandler) handleQuit() (int, string, error) {
 		return nil
 	})
 	if err != nil {
-		cancel()
 		log.Error().Err(err).Msg("Failed to submit quit task to pool")
+	} else {
+		submitted = true
 	}
 	return 0, "Alpamon will shutdown in 1 second.", nil
 }
@@ -216,6 +232,13 @@ func (h *SystemHandler) handleReboot() (int, string, error) {
 
 	// Submit to worker pool for managed execution
 	poolCtx, cancel := h.ctxManager.NewContext(time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second)
+	submitted := false
+	defer func() {
+		if !submitted {
+			cancel()
+		}
+	}()
+
 	err := h.pool.Submit(poolCtx, func() error {
 		defer cancel()
 		time.Sleep(1 * time.Second)
@@ -223,8 +246,9 @@ func (h *SystemHandler) handleReboot() (int, string, error) {
 		return nil
 	})
 	if err != nil {
-		cancel()
 		log.Error().Err(err).Msg("Failed to submit reboot task to pool")
+	} else {
+		submitted = true
 	}
 
 	return 0, "Server will reboot in 1 second", nil
@@ -236,6 +260,13 @@ func (h *SystemHandler) handleShutdown() (int, string, error) {
 
 	// Submit to worker pool for managed execution
 	poolCtx, cancel := h.ctxManager.NewContext(time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second)
+	submitted := false
+	defer func() {
+		if !submitted {
+			cancel()
+		}
+	}()
+
 	err := h.pool.Submit(poolCtx, func() error {
 		defer cancel()
 		time.Sleep(1 * time.Second)
@@ -243,8 +274,9 @@ func (h *SystemHandler) handleShutdown() (int, string, error) {
 		return nil
 	})
 	if err != nil {
-		cancel()
 		log.Error().Err(err).Msg("Failed to submit shutdown task to pool")
+	} else {
+		submitted = true
 	}
 
 	return 0, "Server will shutdown in 1 second", nil
