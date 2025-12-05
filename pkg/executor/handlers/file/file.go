@@ -12,9 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -98,7 +96,7 @@ func (h *FileHandler) handleUpload(args *common.CommandArgs) (int, string) {
 		Int("pathCount", len(args.Paths)).
 		Msg("Uploading files")
 
-	sysProcAttr, homeDirectory, err := h.demoteFtp(args.Username, args.Groupname)
+	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to demote user.")
 		return 1, err.Error()
@@ -234,84 +232,29 @@ func (h *FileHandler) fileDownload(args *common.CommandArgs, sysProcAttr *syscal
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
 }
 
-// demoteInternal handles the common logic for privilege demotion
-func (h *FileHandler) demoteInternal(username, groupname string, validateGroup bool) (*syscall.SysProcAttr, *user.User, error) {
-	if username == "" || groupname == "" {
-		log.Debug().Msg("No username or groupname provided, running as the current user.")
-		return nil, nil, nil
-	}
-
-	if os.Getuid() != 0 {
-		log.Warn().Msg("Alpamon is not running as root. Falling back to the current user.")
-		return nil, nil, nil
-	}
-
-	usr, err := user.Lookup(username)
-	if err != nil {
-		return nil, nil, fmt.Errorf("there is no corresponding %s username in this server", username)
-	}
-
-	grp, err := user.LookupGroup(groupname)
-	if err != nil {
-		return nil, nil, fmt.Errorf("there is no corresponding %s groupname in this server", groupname)
-	}
-
-	uid, err := strconv.ParseUint(usr.Uid, 10, 32)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	gid, err := strconv.ParseUint(grp.Gid, 10, 32)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	groupIds, err := usr.GroupIds()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	groups := make([]uint32, 0, len(groupIds))
-	groupInList := false
-	for _, gidStr := range groupIds {
-		gidUint, err := strconv.ParseUint(gidStr, 10, 32)
-		if err != nil {
-			return nil, nil, err
-		}
-		if gidUint == gid {
-			groupInList = true
-		}
-		groups = append(groups, uint32(gidUint))
-	}
-
-	if validateGroup && !groupInList {
-		return nil, nil, fmt.Errorf("groupname %s is not in user %s's group list", groupname, username)
-	}
-
-	log.Debug().Msgf("Demote permission to match user: %s, group: %s.", username, groupname)
-
-	return &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid:    uint32(uid),
-			Gid:    uint32(gid),
-			Groups: groups,
-		},
-	}, usr, nil
-}
 
 // demote demotes privilege to the specified user/group
 func (h *FileHandler) demote(username, groupname string) (*syscall.SysProcAttr, error) {
-	attr, _, err := h.demoteInternal(username, groupname, true)
-	return attr, err
+	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, nil
+	}
+	return result.SysProcAttr, nil
 }
 
-// demoteFtp demotes privilege and returns home directory for FTP operations
-func (h *FileHandler) demoteFtp(username, groupname string) (*syscall.SysProcAttr, string, error) {
-	attr, usr, err := h.demoteInternal(username, groupname, false)
-	if err != nil || usr == nil {
-		return attr, "", err
+// demoteWithHomeDir demotes privilege and returns home directory
+func (h *FileHandler) demoteWithHomeDir(username, groupname string) (*syscall.SysProcAttr, string, error) {
+	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: false})
+	if err != nil {
+		return nil, "", err
 	}
-	return attr, usr.HomeDir, nil
+	if result == nil {
+		return nil, "", nil
+	}
+	return result.SysProcAttr, result.User.HomeDir, nil
 }
 
 // parsePaths parses and validates the path list

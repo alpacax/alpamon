@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -159,76 +157,14 @@ func (e *Executor) getDefaultEnv() map[string]string {
 
 // demotePrivileges creates syscall attributes for privilege demotion
 func (e *Executor) demotePrivileges(username, groupname string) (*syscall.SysProcAttr, error) {
-	currentUid := os.Getuid()
-
-	if username == "" || groupname == "" {
-		log.Debug().Msg("No username or groupname provided, running as current user")
+	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
 		return nil, nil
 	}
-
-	if currentUid != 0 {
-		log.Warn().Msg("Not running as root, cannot demote privileges")
-		return nil, nil
-	}
-
-	// Lookup user
-	usr, err := user.Lookup(username)
-	if err != nil {
-		return nil, fmt.Errorf("user %s not found: %w", username, err)
-	}
-
-	// Lookup group
-	group, err := user.LookupGroup(groupname)
-	if err != nil {
-		return nil, fmt.Errorf("group %s not found: %w", groupname, err)
-	}
-
-	// Parse UIDs and GIDs
-	uid, err := strconv.ParseUint(usr.Uid, 10, 32)
-	if err != nil {
-		return nil, fmt.Errorf("invalid UID: %w", err)
-	}
-
-	gid, err := strconv.ParseUint(group.Gid, 10, 32)
-	if err != nil {
-		return nil, fmt.Errorf("invalid GID: %w", err)
-	}
-
-	// Get supplementary groups
-	groupIds, err := usr.GroupIds()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get groups: %w", err)
-	}
-
-	groups := make([]uint32, 0, len(groupIds))
-	groupInList := false
-	for _, gidStr := range groupIds {
-		gidUint, err := strconv.ParseUint(gidStr, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid group ID: %w", err)
-		}
-		if gidUint == gid {
-			groupInList = true
-		}
-		groups = append(groups, uint32(gidUint))
-	}
-
-	if !groupInList {
-		return nil, fmt.Errorf("group %s not in user %s's groups", groupname, username)
-	}
-
-	log.Debug().
-		Str("user", username).
-		Str("group", groupname).
-		Msg("Demoting privileges")
-
-	return &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid:    uint32(uid),
-			Gid:    uint32(gid),
-			Groups: groups,
-		},
-	}, nil
+	return result.SysProcAttr, nil
 }
 
 // Implement CommandExecutor interface methods
