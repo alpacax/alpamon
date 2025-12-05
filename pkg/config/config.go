@@ -27,8 +27,8 @@ const (
 	DefaultPoolDefaultTimeout = 30
 
 	// Pool configuration limits for warnings
-	MaxReasonableWorkers       = 1000
-	MaxReasonableQueueSize     = 10000
+	MaxReasonableWorkers        = 1000
+	MaxReasonableQueueSize      = 10000
 	MaxReasonableTimeoutSeconds = 3600
 )
 
