@@ -68,7 +68,7 @@ func TestRegistry_Get(t *testing.T) {
 		commands: []string{"cmd1", "cmd2"},
 	}
 
-	registry.Register(handler)
+	_ = registry.Register(handler)
 
 	// Test getting existing command
 	h, err := registry.Get("cmd1")
@@ -94,7 +94,7 @@ func TestRegistry_GetHandler(t *testing.T) {
 		commands: []string{"cmd1", "cmd2"},
 	}
 
-	registry.Register(handler)
+	_ = registry.Register(handler)
 
 	// Test getting existing handler
 	h, err := registry.GetHandler("test")
@@ -124,8 +124,8 @@ func TestRegistry_List(t *testing.T) {
 		commands: []string{"cmd2"},
 	}
 
-	registry.Register(handler1)
-	registry.Register(handler2)
+	_ = registry.Register(handler1)
+	_ = registry.Register(handler2)
 
 	handlers := registry.List()
 	if len(handlers) != 2 {

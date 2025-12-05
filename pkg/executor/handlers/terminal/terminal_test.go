@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"testing"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
@@ -97,7 +98,7 @@ func TestTerminalHandler_Validate(t *testing.T) {
 func TestTerminalHandler_Execute_UnknownCommand(t *testing.T) {
 	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil)
 
-	exitCode, _, err := handler.Execute(nil, "unknown", &common.CommandArgs{})
+	exitCode, _, err := handler.Execute(context.TODO(), "unknown", &common.CommandArgs{})
 
 	if err == nil {
 		t.Error("Execute() expected error for unknown command")
@@ -116,7 +117,7 @@ func TestTerminalHandler_ResizePTY_InvalidSession(t *testing.T) {
 		Cols:      120,
 	}
 
-	exitCode, output, err := handler.Execute(nil, "resizepty", args)
+	exitCode, output, err := handler.Execute(context.TODO(), "resizepty", args)
 
 	if err != nil {
 		t.Errorf("Execute() unexpected error: %v", err)

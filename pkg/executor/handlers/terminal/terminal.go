@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
@@ -138,10 +139,13 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 		return 1, fmt.Sprintf("openftp: Failed to get demoted permission. %v", err), nil
 	}
 
-	var sysProcAttr = result.SysProcAttr
+	var sysProcAttr *syscall.SysProcAttr
 	var homeDirectory string
-	if result != nil && result.User != nil {
-		homeDirectory = result.User.HomeDir
+	if result != nil {
+		sysProcAttr = result.SysProcAttr
+		if result.User != nil {
+			homeDirectory = result.User.HomeDir
+		}
 	}
 
 	executable, err := os.Executable()

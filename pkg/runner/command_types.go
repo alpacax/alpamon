@@ -259,20 +259,3 @@ func (c CommandData) ToArgs() *common.CommandArgs {
 
 	return args
 }
-
-var nonZipExt = map[string]bool{
-	".jar":   true,
-	".war":   true,
-	".ear":   true,
-	".apk":   true,
-	".xpi":   true,
-	".vsix":  true,
-	".crx":   true,
-	".egg":   true,
-	".whl":   true,
-	".appx":  true,
-	".msix":  true,
-	".ipk":   true,
-	".nupkg": true,
-	".kmz":   true,
-}

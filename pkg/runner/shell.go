@@ -23,17 +23,6 @@ func demote(username, groupname string) (*syscall.SysProcAttr, error) {
 	return result.SysProcAttr, nil
 }
 
-func demoteWithHomeDir(username, groupname string) (*syscall.SysProcAttr, string, error) {
-	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: false})
-	if err != nil {
-		return nil, "", err
-	}
-	if result == nil {
-		return nil, "", nil
-	}
-	return result.SysProcAttr, result.User.HomeDir, nil
-}
-
 func runCmdWithOutput(args []string, username, groupname string, env map[string]string, timeout int) (exitCode int, result string) {
 	if env != nil {
 		defaultEnv := getDefaultEnv()

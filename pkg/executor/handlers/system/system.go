@@ -203,7 +203,7 @@ func (h *SystemHandler) executeUninstall() {
 	if exitCode != 0 {
 		log.Error().Msgf("Failed to schedule uninstall: %s", output)
 		// Fallback to direct execution
-		h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
+		_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
 	}
 
 	// Shutdown the process after scheduling
@@ -219,7 +219,7 @@ func (h *SystemHandler) handleReboot() (int, string, error) {
 	err := h.pool.Submit(poolCtx, func() error {
 		defer cancel()
 		time.Sleep(1 * time.Second)
-		h.Executor.RunAsUser(poolCtx, "root", "reboot")
+		_, _, _ = h.Executor.RunAsUser(poolCtx, "root", "reboot")
 		return nil
 	})
 	if err != nil {
@@ -239,7 +239,7 @@ func (h *SystemHandler) handleShutdown() (int, string, error) {
 	err := h.pool.Submit(poolCtx, func() error {
 		defer cancel()
 		time.Sleep(1 * time.Second)
-		h.Executor.RunAsUser(poolCtx, "root", "shutdown", "now")
+		_, _, _ = h.Executor.RunAsUser(poolCtx, "root", "shutdown", "now")
 		return nil
 	})
 	if err != nil {

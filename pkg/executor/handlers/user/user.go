@@ -195,7 +195,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	if data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
 		mode, err := strconv.ParseUint(data.HomeDirectoryPermission, 8, 32)
 		if err == nil {
-			os.Chmod(data.HomeDirectory, os.FileMode(mode))
+			_ = os.Chmod(data.HomeDirectory, os.FileMode(mode))
 		}
 	}
 
