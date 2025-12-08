@@ -78,6 +78,11 @@ type CommandData struct {
 	AssignmentID            string                   `json:"assignment_id"`
 	ServerID                string                   `json:"server_id"`
 	ChainNames              []string                 `json:"chain_names"` // for firewall-reorder-chains
+	// Tunnel-specific fields
+	ChannelID  string `json:"channel_id"`
+	TargetPort int    `json:"target_port"`
+	WSURL      string `json:"ws_url"`
+	TunnelID   string `json:"tunnel_id"`
 }
 
 type firewallData struct {
@@ -156,6 +161,18 @@ type openFtpData struct {
 	Username      string `validate:"required"`
 	Groupname     string `validate:"required"`
 	HomeDirectory string `validate:"required"`
+}
+
+type openTunnelData struct {
+	SessionID  string `validate:"required"`
+	ChannelID  string `validate:"required"`
+	Protocol   string `validate:"required"`
+	TargetPort int    `validate:"required"`
+	WSURL      string `validate:"required"`
+}
+
+type closeTunnelData struct {
+	TunnelID string `validate:"required"`
 }
 
 type commandFin struct {

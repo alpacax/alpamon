@@ -179,6 +179,56 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		}
 
 		return 0, "Spawned a ftp terminal."
+	case "opentunnel":
+		log.Debug().
+			Str("sessionID", cr.data.SessionID).
+			Str("channelID", cr.data.ChannelID).
+			Str("protocol", cr.data.Protocol).
+			Int("targetPort", cr.data.TargetPort).
+			Str("wsURL", cr.data.WSURL).
+			Msg("Received opentunnel command")
+
+		data := openTunnelData{
+			SessionID:  cr.data.SessionID,
+			ChannelID:  cr.data.ChannelID,
+			Protocol:   cr.data.Protocol,
+			TargetPort: cr.data.TargetPort,
+			WSURL:      cr.data.WSURL,
+		}
+		err := cr.validateData(data)
+		if err != nil {
+			return 1, fmt.Sprintf("opentunnel: Not enough information. %s", err.Error())
+		}
+
+		// Check if tunnel already exists
+		if _, exists := GetActiveTunnel(cr.data.SessionID); exists {
+			return 1, fmt.Sprintf("opentunnel: Tunnel session %s already exists.", cr.data.SessionID)
+		}
+
+		tunnelClient := NewTunnelClientWithURL(
+			cr.data.SessionID,
+			cr.data.ChannelID,
+			cr.data.Protocol,
+			cr.data.TargetPort,
+			cr.data.WSURL,
+		)
+		go tunnelClient.RunTunnelBackground()
+
+		return 0, fmt.Sprintf("Spawned a tunnel for session %s, target port %d.", cr.data.SessionID, cr.data.TargetPort)
+	case "closetunnel":
+		data := closeTunnelData{
+			TunnelID: cr.data.TunnelID,
+		}
+		err := cr.validateData(data)
+		if err != nil {
+			return 1, fmt.Sprintf("closetunnel: Not enough information. %s", err.Error())
+		}
+
+		if err := CloseTunnel(cr.data.TunnelID); err != nil {
+			return 1, fmt.Sprintf("closetunnel: %s", err.Error())
+		}
+
+		return 0, fmt.Sprintf("Closed tunnel session %s.", cr.data.TunnelID)
 	case "resizepty":
 		if terminals[cr.data.SessionID] != nil {
 			err := terminals[cr.data.SessionID].resize(cr.data.Rows, cr.data.Cols)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/xtaci/smux"
 	"gopkg.in/ini.v1"
 )
 
@@ -21,6 +22,17 @@ const (
 	MinConnectInterval = 5 * time.Second
 	MaxConnectInterval = 300 * time.Second
 )
+
+// GetSmuxConfig returns optimized smux configuration for tunnel connections.
+func GetSmuxConfig() *smux.Config {
+	cfg := smux.DefaultConfig()
+	cfg.KeepAliveInterval = 10 * time.Second
+	cfg.KeepAliveTimeout = 30 * time.Second
+	cfg.MaxFrameSize = 32768   // 32KB
+	cfg.MaxReceiveBuffer = 4194304 // 4MB
+	cfg.MaxStreamBuffer = 65536    // 64KB per stream
+	return cfg
+}
 
 func InitSettings(settings Settings) {
 	GlobalSettings = settings
@@ -133,6 +145,7 @@ func validateConfig(config Config, wsPath string) (bool, Settings) {
 			}
 		}
 	}
+
 	return valid, settings
 }
 
