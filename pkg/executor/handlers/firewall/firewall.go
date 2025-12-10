@@ -4,20 +4,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
-	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
 // FirewallHandler handles firewall management commands
-// Note: This is a basic extraction from command.go. Full refactoring scheduled for Phase 3.
 type FirewallHandler struct {
 	*common.BaseHandler
+	detector  *FirewallDetector
+	backend   FirewallBackend
+	backup    *BackupManager
+	validator *Validator
+	mu        sync.RWMutex
 }
 
 // NewFirewallHandler creates a new firewall handler
 func NewFirewallHandler(cmdExecutor common.CommandExecutor) *FirewallHandler {
+	detector := NewFirewallDetector(cmdExecutor)
+	validator := NewValidator()
+
 	h := &FirewallHandler{
 		BaseHandler: common.NewBaseHandler(
 			common.Firewall,
@@ -29,33 +36,76 @@ func NewFirewallHandler(cmdExecutor common.CommandExecutor) *FirewallHandler {
 			},
 			cmdExecutor,
 		),
+		detector:  detector,
+		validator: validator,
 	}
 	return h
 }
 
-// Execute runs the firewall management command
-func (h *FirewallHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
-	// Check if firewall is disabled
-	if utils.IsFirewallDisabled() {
-		log.Warn().Msg("Firewall command ignored - firewall functionality is temporarily disabled")
-		return 0, "Firewall functionality is temporarily disabled", nil
+// initBackend initializes the firewall backend based on detection
+func (h *FirewallHandler) initBackend(ctx context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.backend != nil {
+		return nil
 	}
 
+	h.backend = h.detector.CreateBackend(ctx)
+	if h.backend == nil {
+		return fmt.Errorf("no firewall backend available")
+	}
+
+	h.backup = NewBackupManager(h.backend)
+	log.Info().Str("backend", h.backend.Name()).Msg("Firewall backend initialized")
+	return nil
+}
+
+// getBackend returns the current backend, initializing if needed
+func (h *FirewallHandler) getBackend(ctx context.Context) (FirewallBackend, error) {
+	h.mu.RLock()
+	if h.backend != nil {
+		defer h.mu.RUnlock()
+		return h.backend, nil
+	}
+	h.mu.RUnlock()
+
+	if err := h.initBackend(ctx); err != nil {
+		return nil, err
+	}
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.backend, nil
+}
+
+// Execute runs the firewall management command
+func (h *FirewallHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
 	// Check for high-level firewall tools
-	if detected, toolName := utils.DetectHighLevelFirewall(); detected {
+	result := h.detector.Detect(ctx)
+	if result.HighLevel != HighLevelNone {
 		return 1, fmt.Sprintf("Alpacon firewall management is disabled because %s is active. Please use %s to manage firewall rules.",
-			toolName, toolName), nil
+			result.HighLevel, result.HighLevel), nil
+	}
+
+	if result.Disabled {
+		return 1, "Firewall functionality is not available - no backend detected", nil
+	}
+
+	// Initialize backend if not already done
+	if _, err := h.getBackend(ctx); err != nil {
+		return 1, fmt.Sprintf("Failed to initialize firewall: %v", err), err
 	}
 
 	switch cmd {
 	case common.FirewallCmd.String():
-		return h.handleFirewall(args)
+		return h.handleFirewall(ctx, args)
 	case common.FirewallRollback.String():
-		return h.handleFirewallRollback()
+		return h.handleFirewallRollback(ctx)
 	case common.FirewallReorderChains.String():
-		return h.handleFirewallReorderChains(args)
+		return h.handleFirewallReorderChains(ctx, args)
 	case common.FirewallReorderRules.String():
-		return h.handleFirewallReorderRules(args)
+		return h.handleFirewallReorderRules(ctx, args)
 	default:
 		return 1, "", fmt.Errorf("unknown firewall command: %s", cmd)
 	}
@@ -69,33 +119,52 @@ func (h *FirewallHandler) Validate(cmd string, args *common.CommandArgs) error {
 		if operation == "" {
 			return fmt.Errorf("firewall: operation is required")
 		}
-		// Additional validation based on operation type
 		switch operation {
-		case common.FirewallOpBatch, common.FirewallOpFlush, common.FirewallOpDelete, common.FirewallOpAdd, common.FirewallOpUpdate:
-			// Each operation has specific validation requirements
-			// For now, basic validation only
+		case common.FirewallOpBatch:
+			return h.validator.ValidateBatchRules(args.Rules)
+		case common.FirewallOpFlush:
+			if args.ChainName == "" {
+				return fmt.Errorf("firewall flush: chain name is required")
+			}
+			return h.validator.ValidateChainName(args.ChainName)
+		case common.FirewallOpDelete:
+			if args.RuleID == "" {
+				return fmt.Errorf("firewall delete: rule ID is required")
+			}
+			return nil
+		case common.FirewallOpAdd:
+			if len(args.Rules) == 0 {
+				return fmt.Errorf("firewall add: at least one rule is required")
+			}
+			return h.validator.ValidateBatchRules(args.Rules)
+		case common.FirewallOpUpdate:
+			if args.RuleID == "" {
+				return fmt.Errorf("firewall update: rule ID is required")
+			}
 			return nil
 		default:
 			return fmt.Errorf("firewall: unknown operation '%s'", operation)
 		}
 
 	case common.FirewallRollback.String():
-		// No specific validation needed
 		return nil
 
 	case common.FirewallReorderChains.String():
-		chainNames := args.ChainNames
-		if len(chainNames) == 0 {
+		if len(args.ChainNames) == 0 {
 			return fmt.Errorf("firewall-reorder-chains: chain names are required")
+		}
+		for _, name := range args.ChainNames {
+			if err := h.validator.ValidateChainName(name); err != nil {
+				return err
+			}
 		}
 		return nil
 
 	case common.FirewallReorderRules.String():
-		chainName := args.ChainName
-		if chainName == "" {
+		if args.ChainName == "" {
 			return fmt.Errorf("firewall-reorder-rules: chain name is required")
 		}
-		return nil
+		return h.validator.ValidateChainName(args.ChainName)
 
 	default:
 		return fmt.Errorf("unknown firewall command: %s", cmd)
@@ -103,7 +172,7 @@ func (h *FirewallHandler) Validate(cmd string, args *common.CommandArgs) error {
 }
 
 // handleFirewall handles the main firewall command
-func (h *FirewallHandler) handleFirewall(args *common.CommandArgs) (int, string, error) {
+func (h *FirewallHandler) handleFirewall(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	operation := args.Operation
 
 	log.Info().
@@ -112,22 +181,22 @@ func (h *FirewallHandler) handleFirewall(args *common.CommandArgs) (int, string,
 
 	switch operation {
 	case common.FirewallOpBatch:
-		return h.handleBatchOperation(args)
+		return h.handleBatchOperation(ctx, args)
 	case common.FirewallOpFlush:
-		return h.handleFlushOperation(args)
+		return h.handleFlushOperation(ctx, args)
 	case common.FirewallOpDelete:
-		return h.handleDeleteOperation(args)
+		return h.handleDeleteOperation(ctx, args)
 	case common.FirewallOpAdd:
-		return h.handleAddOperation(args)
+		return h.handleAddOperation(ctx, args)
 	case common.FirewallOpUpdate:
-		return h.handleUpdateOperation(args)
+		return h.handleUpdateOperation(ctx, args)
 	default:
 		return 1, fmt.Sprintf("firewall: Unknown operation '%s'", operation), nil
 	}
 }
 
 // handleBatchOperation handles batch firewall operations
-func (h *FirewallHandler) handleBatchOperation(args *common.CommandArgs) (int, string, error) {
+func (h *FirewallHandler) handleBatchOperation(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	chainName := args.ChainName
 	rules := args.Rules
 
@@ -137,17 +206,44 @@ func (h *FirewallHandler) handleBatchOperation(args *common.CommandArgs) (int, s
 		Msg("Firewall batch operation")
 
 	if len(rules) == 0 {
-		return 0, `{"success": true, "applied_rules": 0, "failed_rules": [], "rolled_back": false, "message": "No rules to apply"}`, nil
+		result := BatchResult{
+			Success:      true,
+			AppliedRules: 0,
+			FailedRules:  []string{},
+			RolledBack:   false,
+			Message:      "No rules to apply",
+		}
+		resultJSON, _ := json.Marshal(result)
+		return 0, string(resultJSON), nil
 	}
 
-	// TODO: Implement actual batch operation logic
-	// This is a placeholder for Phase 3 implementation
-	result := map[string]interface{}{
-		"success":       true,
-		"applied_rules": len(rules),
-		"failed_rules":  []interface{}{},
-		"rolled_back":   false,
-		"message":       "Batch operation placeholder - full implementation in Phase 3",
+	backend, err := h.getBackend(ctx)
+	if err != nil {
+		return 1, fmt.Sprintf("Failed to get firewall backend: %v", err), err
+	}
+
+	// Create backup before batch operation
+	if err := h.backup.CreateBackup(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to create backup before batch operation")
+	}
+
+	// Apply rules
+	applied, failed, applyErr := backend.BatchApply(ctx, chainName, rules)
+
+	result := BatchResult{
+		Success:      applyErr == nil,
+		AppliedRules: applied,
+		FailedRules:  failed,
+		RolledBack:   false,
+	}
+
+	// If there were failures and we have a backup, offer rollback info
+	if applyErr != nil && h.backup.HasBackup() {
+		result.Message = fmt.Sprintf("Batch operation completed with errors: %v. Rollback available.", applyErr)
+	} else if applyErr != nil {
+		result.Message = fmt.Sprintf("Batch operation completed with errors: %v", applyErr)
+	} else {
+		result.Message = fmt.Sprintf("Successfully applied %d rules", applied)
 	}
 
 	resultJSON, _ := json.Marshal(result)
@@ -155,66 +251,165 @@ func (h *FirewallHandler) handleBatchOperation(args *common.CommandArgs) (int, s
 }
 
 // handleFlushOperation handles flush firewall operations
-func (h *FirewallHandler) handleFlushOperation(args *common.CommandArgs) (int, string, error) {
+func (h *FirewallHandler) handleFlushOperation(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	chainName := args.ChainName
 
 	log.Info().
 		Str("chain", chainName).
 		Msg("Firewall flush operation")
 
-	// TODO: Implement actual flush operation logic
-	// This is a placeholder for Phase 3 implementation
-	return 0, fmt.Sprintf("Chain '%s' flush operation placeholder - full implementation in Phase 3", chainName), nil
+	backend, err := h.getBackend(ctx)
+	if err != nil {
+		return 1, fmt.Sprintf("Failed to get firewall backend: %v", err), err
+	}
+
+	// Create backup before flush
+	if err := h.backup.CreateBackup(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to create backup before flush operation")
+	}
+
+	if err := backend.FlushChain(ctx, chainName); err != nil {
+		return 1, fmt.Sprintf("Failed to flush chain '%s': %v", chainName, err), err
+	}
+
+	return 0, fmt.Sprintf("Successfully flushed chain '%s'", chainName), nil
 }
 
 // handleDeleteOperation handles delete firewall operations
-func (h *FirewallHandler) handleDeleteOperation(args *common.CommandArgs) (int, string, error) {
+func (h *FirewallHandler) handleDeleteOperation(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	ruleID := args.RuleID
-
-	log.Info().
-		Str("ruleID", ruleID).
-		Msg("Firewall delete operation")
-
-	// TODO: Implement actual delete operation logic
-	// This is a placeholder for Phase 3 implementation
-	return 0, fmt.Sprintf("Rule '%s' delete operation placeholder - full implementation in Phase 3", ruleID), nil
-}
-
-// handleAddOperation handles add firewall operations
-func (h *FirewallHandler) handleAddOperation(args *common.CommandArgs) (int, string, error) {
 	chainName := args.ChainName
 
 	log.Info().
+		Str("ruleID", ruleID).
 		Str("chain", chainName).
+		Msg("Firewall delete operation")
+
+	backend, err := h.getBackend(ctx)
+	if err != nil {
+		return 1, fmt.Sprintf("Failed to get firewall backend: %v", err), err
+	}
+
+	// Create backup before delete
+	if err := h.backup.CreateBackup(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to create backup before delete operation")
+	}
+
+	if err := backend.DeleteRule(ctx, ruleID, chainName); err != nil {
+		return 1, fmt.Sprintf("Failed to delete rule '%s': %v", ruleID, err), err
+	}
+
+	return 0, fmt.Sprintf("Successfully deleted rule '%s'", ruleID), nil
+}
+
+// handleAddOperation handles add firewall operations
+func (h *FirewallHandler) handleAddOperation(ctx context.Context, args *common.CommandArgs) (int, string, error) {
+	chainName := args.ChainName
+	rules := args.Rules
+
+	log.Info().
+		Str("chain", chainName).
+		Int("ruleCount", len(rules)).
 		Msg("Firewall add operation")
 
-	// TODO: Implement actual add operation logic
-	// This is a placeholder for Phase 3 implementation
-	return 0, "Firewall add operation placeholder - full implementation in Phase 3", nil
+	if len(rules) == 0 {
+		return 0, "No rules to add", nil
+	}
+
+	backend, err := h.getBackend(ctx)
+	if err != nil {
+		return 1, fmt.Sprintf("Failed to get firewall backend: %v", err), err
+	}
+
+	// Create backup before add
+	if err := h.backup.CreateBackup(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to create backup before add operation")
+	}
+
+	// Add each rule
+	var addedCount int
+	var lastErr error
+	for i, rule := range rules {
+		ruleCopy := rule
+		if ruleCopy.Chain == "" {
+			ruleCopy.Chain = chainName
+		}
+		if err := backend.AddRule(ctx, &ruleCopy); err != nil {
+			log.Error().Err(err).Int("ruleIndex", i).Msg("Failed to add rule")
+			lastErr = err
+			continue
+		}
+		addedCount++
+	}
+
+	if lastErr != nil {
+		return 1, fmt.Sprintf("Added %d of %d rules, last error: %v", addedCount, len(rules), lastErr), lastErr
+	}
+
+	return 0, fmt.Sprintf("Successfully added %d rules", addedCount), nil
 }
 
 // handleUpdateOperation handles update firewall operations
-func (h *FirewallHandler) handleUpdateOperation(args *common.CommandArgs) (int, string, error) {
+func (h *FirewallHandler) handleUpdateOperation(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	ruleID := args.RuleID
 	oldRuleID := args.OldRuleID
+	chainName := args.ChainName
 
 	log.Info().
 		Str("ruleID", ruleID).
 		Str("oldRuleID", oldRuleID).
+		Str("chain", chainName).
 		Msg("Firewall update operation")
 
-	// TODO: Implement actual update operation logic
-	// This is a placeholder for Phase 3 implementation
-	return 0, "Firewall update operation placeholder - full implementation in Phase 3", nil
+	backend, err := h.getBackend(ctx)
+	if err != nil {
+		return 1, fmt.Sprintf("Failed to get firewall backend: %v", err), err
+	}
+
+	// Create backup before update
+	if err := h.backup.CreateBackup(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to create backup before update operation")
+	}
+
+	// Delete old rule if specified
+	deleteID := oldRuleID
+	if deleteID == "" {
+		deleteID = ruleID
+	}
+
+	if deleteID != "" {
+		if err := backend.DeleteRule(ctx, deleteID, chainName); err != nil {
+			log.Warn().Err(err).Str("ruleID", deleteID).Msg("Failed to delete old rule during update")
+		}
+	}
+
+	// Add new rule if provided
+	if len(args.Rules) > 0 {
+		rule := args.Rules[0]
+		if rule.Chain == "" {
+			rule.Chain = chainName
+		}
+		if err := backend.AddRule(ctx, &rule); err != nil {
+			return 1, fmt.Sprintf("Failed to add updated rule: %v", err), err
+		}
+	}
+
+	return 0, fmt.Sprintf("Successfully updated rule '%s'", ruleID), nil
 }
 
 // handleFirewallRollback handles firewall rollback command
-func (h *FirewallHandler) handleFirewallRollback() (int, string, error) {
+func (h *FirewallHandler) handleFirewallRollback(ctx context.Context) (int, string, error) {
 	log.Info().Msg("Executing firewall rollback")
 
-	// Use utils package to restore firewall rules
-	err := utils.RestoreFirewallRules("")
-	if err != nil {
+	h.mu.RLock()
+	backup := h.backup
+	h.mu.RUnlock()
+
+	if backup == nil || !backup.HasBackup() {
+		return 1, "No backup available for rollback", fmt.Errorf("no backup available")
+	}
+
+	if err := backup.Rollback(ctx); err != nil {
 		return 1, fmt.Sprintf("Failed to rollback firewall: %v", err), err
 	}
 
@@ -222,20 +417,50 @@ func (h *FirewallHandler) handleFirewallRollback() (int, string, error) {
 }
 
 // handleFirewallReorderChains handles firewall chain reordering
-func (h *FirewallHandler) handleFirewallReorderChains(args *common.CommandArgs) (int, string, error) {
+func (h *FirewallHandler) handleFirewallReorderChains(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	chainNames := args.ChainNames
 
 	log.Info().
 		Strs("chains", chainNames).
 		Msg("Reordering firewall chains")
 
-	// TODO: Implement actual chain reordering logic
-	// This is a placeholder for Phase 3 implementation
-	return 0, fmt.Sprintf("Chain reorder operation placeholder for chains: %v", chainNames), nil
+	backend, err := h.getBackend(ctx)
+	if err != nil {
+		return 1, fmt.Sprintf("Failed to get firewall backend: %v", err), err
+	}
+
+	// Create backup before reorder
+	if err := h.backup.CreateBackup(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to create backup before chain reorder")
+	}
+
+	result, err := backend.ReorderChains(ctx, chainNames)
+	if err != nil {
+		// Attempt rollback on failure
+		if h.backup.HasBackup() {
+			if rollbackErr := h.backup.Rollback(ctx); rollbackErr != nil {
+				log.Error().Err(rollbackErr).Msg("Failed to rollback after reorder failure")
+			}
+		}
+		return 1, fmt.Sprintf("Failed to reorder chains: %v", err), err
+	}
+
+	reorderResult := ReorderResult{
+		Success:        true,
+		ReorderedCount: len(chainNames),
+		Message:        fmt.Sprintf("Successfully reordered %d chains", len(chainNames)),
+	}
+
+	if deletedRules, ok := result["deleted_rules"].(int); ok {
+		reorderResult.DeletedRules = deletedRules
+	}
+
+	resultJSON, _ := json.Marshal(reorderResult)
+	return 0, string(resultJSON), nil
 }
 
 // handleFirewallReorderRules handles firewall rule reordering within a chain
-func (h *FirewallHandler) handleFirewallReorderRules(args *common.CommandArgs) (int, string, error) {
+func (h *FirewallHandler) handleFirewallReorderRules(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	chainName := args.ChainName
 	rules := args.Rules
 
@@ -244,7 +469,93 @@ func (h *FirewallHandler) handleFirewallReorderRules(args *common.CommandArgs) (
 		Int("ruleCount", len(rules)).
 		Msg("Reordering firewall rules")
 
-	// TODO: Implement actual rule reordering logic
-	// This is a placeholder for Phase 3 implementation
-	return 0, fmt.Sprintf("Rule reorder operation placeholder for chain '%s'", chainName), nil
+	backend, err := h.getBackend(ctx)
+	if err != nil {
+		return 1, fmt.Sprintf("Failed to get firewall backend: %v", err), err
+	}
+
+	// Create backup before reorder
+	if err := h.backup.CreateBackup(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to create backup before rule reorder")
+	}
+
+	if err := backend.ReorderRules(ctx, chainName, rules); err != nil {
+		// Attempt rollback on failure
+		if h.backup.HasBackup() {
+			if rollbackErr := h.backup.Rollback(ctx); rollbackErr != nil {
+				log.Error().Err(rollbackErr).Msg("Failed to rollback after reorder failure")
+			}
+		}
+		return 1, fmt.Sprintf("Failed to reorder rules in chain '%s': %v", chainName, err), err
+	}
+
+	reorderResult := ReorderResult{
+		Success:        true,
+		ReorderedCount: len(rules),
+		Message:        fmt.Sprintf("Successfully reordered %d rules in chain '%s'", len(rules), chainName),
+	}
+
+	resultJSON, _ := json.Marshal(reorderResult)
+	return 0, string(resultJSON), nil
+}
+
+// GetDetector returns the firewall detector for external use
+func (h *FirewallHandler) GetDetector() *FirewallDetector {
+	return h.detector
+}
+
+// GetBackend returns the current backend for external use
+func (h *FirewallHandler) GetBackend() FirewallBackend {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.backend
+}
+
+// GetBackupManager returns the backup manager for external use
+func (h *FirewallHandler) GetBackupManager() *BackupManager {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.backup
+}
+
+// CollectAllRules collects all firewall rules from the system
+// Returns rules in the format compatible with utils.FirewallSyncPayload
+func (h *FirewallHandler) CollectAllRules(ctx context.Context) (map[string][]common.FirewallRule, error) {
+	backend, err := h.getBackend(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get firewall backend: %w", err)
+	}
+
+	// Get all chains by listing rules without filter
+	rules, err := backend.ListRules(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list firewall rules: %w", err)
+	}
+
+	// Group rules by chain
+	chains := make(map[string][]common.FirewallRule)
+	for _, rule := range rules {
+		chainName := rule.Chain
+		if chainName == "" {
+			chainName = "INPUT"
+		}
+		chains[chainName] = append(chains[chainName], rule)
+	}
+
+	return chains, nil
+}
+
+// IsFirewallAvailable checks if firewall functionality is available
+func (h *FirewallHandler) IsFirewallAvailable(ctx context.Context) bool {
+	result := h.detector.Detect(ctx)
+	return !result.Disabled && result.HighLevel == HighLevelNone
+}
+
+// GetHighLevelFirewall returns the detected high-level firewall tool name if any
+func (h *FirewallHandler) GetHighLevelFirewall(ctx context.Context) (bool, string) {
+	result := h.detector.Detect(ctx)
+	if result.HighLevel != HighLevelNone {
+		return true, string(result.HighLevel)
+	}
+	return false, ""
 }
