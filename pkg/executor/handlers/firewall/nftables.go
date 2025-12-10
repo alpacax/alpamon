@@ -495,8 +495,8 @@ func (s *NftablesBackend) Restore(ctx context.Context, backup string) error {
 	}
 	f.Close()
 
-	// Flush current ruleset
-	s.executor.RunAsUser(ctx, "root", "nft", "flush", "ruleset")
+	// Flush current ruleset (ignore error as restore will overwrite anyway)
+	_, _, _ = s.executor.RunAsUser(ctx, "root", "nft", "flush", "ruleset")
 
 	// Restore from file
 	exitCode, output, err := s.executor.RunAsUser(ctx, "root", "nft", "-f", tmpFile)
