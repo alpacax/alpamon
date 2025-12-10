@@ -8,7 +8,6 @@ import (
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/scheduler"
-	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
@@ -16,11 +15,6 @@ import (
 type CommandDispatcher interface {
 	Execute(ctx context.Context, command string, args *common.CommandArgs) (int, string, error)
 	HasHandler(command string) bool
-}
-
-func init() {
-	// Inject runCmdWithOutput function into utils.firewall package
-	utils.SetFirewallCommandExecutor(runCmdWithOutput)
 }
 
 func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command Command, data CommandData, dispatcher CommandDispatcher) *CommandRunner {
