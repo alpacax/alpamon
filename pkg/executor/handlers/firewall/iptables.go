@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -503,6 +502,3 @@ func (s *IptablesBackend) Restore(ctx context.Context, backup string) error {
 
 // Compile-time check to ensure IptablesBackend implements FirewallBackend
 var _ FirewallBackend = (*IptablesBackend)(nil)
-
-// Suppress unused import warning for regexp
-var _ = regexp.Compile
