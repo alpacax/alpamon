@@ -10,13 +10,13 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// FirewallBackend represents the detected firewall backend type
-type FirewallBackend string
+// BackendType represents the detected firewall backend type
+type BackendType string
 
 const (
-	BackendNone     FirewallBackend = "none"
-	BackendIptables FirewallBackend = "iptables"
-	BackendNftables FirewallBackend = "nftables"
+	BackendNone     BackendType = "none"
+	BackendIptables BackendType = "iptables"
+	BackendNftables BackendType = "nftables"
 )
 
 // HighLevelFirewall represents high-level firewall management tools
@@ -30,7 +30,7 @@ const (
 
 // DetectionResult holds the cached detection results
 type DetectionResult struct {
-	Backend           FirewallBackend
+	Backend           BackendType
 	HighLevel         HighLevelFirewall
 	NftablesAvailable bool
 	IptablesAvailable bool
@@ -110,8 +110,8 @@ func (d *FirewallDetector) IsDisabled() bool {
 	return d.result.Disabled
 }
 
-// GetBackend returns the detected backend type
-func (d *FirewallDetector) GetBackend() FirewallBackend {
+// GetBackendType returns the detected backend type
+func (d *FirewallDetector) GetBackendType() BackendType {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.result == nil {
@@ -155,7 +155,7 @@ func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLeve
 }
 
 // detectBackend detects which firewall backend to use based on existing rules
-func (d *FirewallDetector) detectBackend(ctx context.Context) FirewallBackend {
+func (d *FirewallDetector) detectBackend(ctx context.Context) BackendType {
 	// Try iptables-save to check for existing iptables rules
 	exitCode, output, _ := d.executor.RunWithTimeout(ctx, 10*time.Second, "iptables-save")
 
@@ -212,7 +212,7 @@ func (d *FirewallDetector) detectBackend(ctx context.Context) FirewallBackend {
 }
 
 // CreateBackend creates the appropriate backend based on detection result
-func (d *FirewallDetector) CreateBackend(ctx context.Context) FirewallBackendInterface {
+func (d *FirewallDetector) CreateBackend(ctx context.Context) FirewallBackend {
 	result := d.Detect(ctx)
 
 	if result.Disabled {
