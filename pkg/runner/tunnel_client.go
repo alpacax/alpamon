@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"net"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -30,6 +30,8 @@ type TunnelClient struct {
 	sessionID     string
 	targetPort    int
 	serverURL     string
+	username      string
+	groupname     string
 	requestHeader http.Header
 	wsConn        *websocket.Conn
 	session       *smux.Session
@@ -38,7 +40,7 @@ type TunnelClient struct {
 }
 
 // NewTunnelClient creates a new tunnel client for the given WebSocket URL.
-func NewTunnelClient(sessionID string, targetPort int, url string) *TunnelClient {
+func NewTunnelClient(sessionID string, targetPort int, url, username, groupname string) *TunnelClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
@@ -50,6 +52,8 @@ func NewTunnelClient(sessionID string, targetPort int, url string) *TunnelClient
 		sessionID:     sessionID,
 		targetPort:    targetPort,
 		serverURL:     url,
+		username:      username,
+		groupname:     groupname,
 		requestHeader: headers,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -136,7 +140,8 @@ type streamMetadata struct {
 	RemotePort string `json:"remote_port"`
 }
 
-// handleStream processes a single smux stream by connecting to the local service.
+// handleStream processes a single smux stream by spawning a worker subprocess
+// with user credentials to connect to the local service.
 func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	defer stream.Close()
 
@@ -160,36 +165,38 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 		targetPort = fmt.Sprintf("%d", tc.targetPort)
 	}
 
-	// Connect to local service
 	targetAddr := fmt.Sprintf("127.0.0.1:%s", targetPort)
-	localConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+
+	// Spawn tunnel worker subprocess with user credentials
+	cmd, stdinPipe, stdoutPipe, err := spawnTunnelWorker(tc.username, tc.groupname, targetAddr)
 	if err != nil {
-		log.Debug().Err(err).Msgf("Failed to connect to local service at %s.", targetAddr)
+		log.Debug().Err(err).Msgf("Failed to spawn tunnel worker for %s.", targetAddr)
 		return
 	}
-	defer localConn.Close()
 
-	// Enable TCP optimizations if available
-	if tcpConn, ok := localConn.(*net.TCPConn); ok {
-		_ = tcpConn.SetNoDelay(true)
-		_ = tcpConn.SetKeepAlive(true)
-		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
-	}
+	defer func() {
+		stdinPipe.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
 
-	log.Debug().Msgf("Tunnel stream connected to local service at %s.", targetAddr)
+	log.Debug().Msgf("Tunnel worker spawned for %s as user %s.", targetAddr, tc.username)
 
-	// Bidirectional relay
+	// Bidirectional relay: stream <-> subprocess
 	errChan := make(chan error, 2)
 
-	// Stream -> Local (using reader to skip metadata)
+	// Stream -> Subprocess stdin (using reader to skip metadata)
 	go func() {
-		_, err := tunnel.CopyBuffered(localConn, reader)
+		_, err := io.Copy(stdinPipe, reader)
+		stdinPipe.Close()
 		errChan <- err
 	}()
 
-	// Local -> Stream
+	// Subprocess stdout -> Stream
 	go func() {
-		_, err := tunnel.CopyBuffered(stream, localConn)
+		_, err := tunnel.CopyBuffered(stream, stdoutPipe)
 		errChan <- err
 	}()
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/alpacax/alpamon/cmd/alpamon/command/ftp"
 	"github.com/alpacax/alpamon/cmd/alpamon/command/setup"
+	"github.com/alpacax/alpamon/cmd/alpamon/command/tunnel"
 	"github.com/alpacax/alpamon/pkg/collector"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/db"
@@ -38,7 +39,7 @@ var RootCmd = &cobra.Command{
 
 func init() {
 	setup.SetConfigPaths(name)
-	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd)
+	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelWorkerCmd)
 }
 
 func runAgent() {

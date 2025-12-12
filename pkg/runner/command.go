@@ -184,12 +184,16 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 			Str("sessionID", cr.data.SessionID).
 			Int("targetPort", cr.data.TargetPort).
 			Str("url", cr.data.URL).
+			Str("username", cr.data.Username).
+			Str("groupname", cr.data.Groupname).
 			Msg("Received opentunnel command")
 
 		data := openTunnelData{
 			SessionID:  cr.data.SessionID,
 			TargetPort: cr.data.TargetPort,
 			URL:        cr.data.URL,
+			Username:   cr.data.Username,
+			Groupname:  cr.data.Groupname,
 		}
 		err := cr.validateData(data)
 		if err != nil {
@@ -205,10 +209,12 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 			cr.data.SessionID,
 			cr.data.TargetPort,
 			cr.data.URL,
+			cr.data.Username,
+			cr.data.Groupname,
 		)
 		go tunnelClient.RunTunnelBackground()
 
-		return 0, fmt.Sprintf("Spawned a tunnel for session %s, target port %d.", cr.data.SessionID, cr.data.TargetPort)
+		return 0, fmt.Sprintf("Spawned a tunnel for session %s, target port %d as user %s.", cr.data.SessionID, cr.data.TargetPort, cr.data.Username)
 	case "closetunnel":
 		data := closeTunnelData{
 			TunnelID: cr.data.TunnelID,
