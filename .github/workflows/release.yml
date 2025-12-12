@@ -67,66 +67,46 @@ jobs:
   packagecloud-deploy:
     needs: [goreleaser]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pkg_type: deb
+            arch: amd64
+            distro: any/any
+          - pkg_type: deb
+            arch: arm64
+            distro: any/any
+          - pkg_type: rpm
+            arch: amd64
+            distro: rpm_any/rpm_any
+          - pkg_type: rpm
+            arch: arm64
+            distro: rpm_any/rpm_any
     steps:
       - name: Strip "v" prefix from tag
         run: echo "TAG_NAME=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
         env:
-          GITHUB_REF_NAME: ${{ github.ref_name }} 
+          GITHUB_REF_NAME: ${{ github.ref_name }}
 
-      - name: Download AMD64 DEB Artifacts
+      - name: Set package name
+        run: |
+          if [ "${{ matrix.pkg_type }}" = "deb" ]; then
+            echo "PKG_NAME=alpamon_${{ env.TAG_NAME }}_linux_${{ matrix.arch }}.deb" >> $GITHUB_ENV
+          else
+            echo "PKG_NAME=alpamon-${{ env.TAG_NAME }}-1.linux.${{ matrix.arch }}.rpm" >> $GITHUB_ENV
+          fi
+
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: alpamon_${{ env.TAG_NAME }}_linux_amd64.deb
+          name: ${{ env.PKG_NAME }}
 
-      - name: Download ARM64 DEB Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: alpamon_${{ env.TAG_NAME }}_linux_arm64.deb
-
-      - name: Download AMD64 RPM Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: alpamon-${{ env.TAG_NAME }}-1.linux.amd64.rpm
-
-      - name: Download ARM64 RPM Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: alpamon-${{ env.TAG_NAME }}-1.linux.arm64.rpm
-
-      - run: ls
-
-      - name: Upload AMD64 DEB to PackageCloud
+      - name: Upload to PackageCloud
         uses: danielmundi/upload-packagecloud@v1
         with:
-          package-name: alpamon_${{ env.TAG_NAME }}_linux_amd64.deb
+          package-name: ${{ env.PKG_NAME }}
           packagecloud-username: alpacax
           packagecloud-repo: alpamon
-          packagecloud-distrib: any/any
-          packagecloud-token: ${{ secrets.PACKAGECLOUD_TOKEN }}
-
-      - name: Upload ARM64 DEB to PackageCloud
-        uses: danielmundi/upload-packagecloud@v1
-        with:
-          package-name: alpamon_${{ env.TAG_NAME }}_linux_arm64.deb
-          packagecloud-username: alpacax
-          packagecloud-repo: alpamon
-          packagecloud-distrib: any/any
-          packagecloud-token: ${{ secrets.PACKAGECLOUD_TOKEN }}
-
-      - name: Upload AMD64 RPM to PackageCloud
-        uses: danielmundi/upload-packagecloud@v1
-        with:
-          package-name: alpamon-${{ env.TAG_NAME }}-1.linux.amd64.rpm
-          packagecloud-username: alpacax
-          packagecloud-repo: alpamon
-          packagecloud-distrib: rpm_any/rpm_any
-          packagecloud-token: ${{ secrets.PACKAGECLOUD_TOKEN }}
-
-      - name: Upload ARM64 RPM to PackageCloud
-        uses: danielmundi/upload-packagecloud@v1
-        with:
-          package-name: alpamon-${{ env.TAG_NAME }}-1.linux.arm64.rpm
-          packagecloud-username: alpacax
-          packagecloud-repo: alpamon
-          packagecloud-distrib: rpm_any/rpm_any
+          packagecloud-distrib: ${{ matrix.distro }}
           packagecloud-token: ${{ secrets.PACKAGECLOUD_TOKEN }}
