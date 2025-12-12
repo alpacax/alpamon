@@ -172,10 +172,15 @@ func runCmdWithOutput(args []string, username, groupname string, env map[string]
 	}
 	defer cancel()
 
-	// Expand glob patterns (*) in arguments using filepath.Glob
-	args = expandGlobArgs(args)
+	// Check if args is empty
+	if len(args) == 0 {
+		return 1, "no command provided"
+	}
 
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	// Expand glob patterns (*) in arguments using filepath.Glob
+	expandedArgs := expandGlobArgs(args[1:])
+	cmd := exec.CommandContext(ctx, args[0], expandedArgs...)
+
 	if username != "root" {
 		sysProcAttr, err := demote(username, groupname)
 		if err != nil {
