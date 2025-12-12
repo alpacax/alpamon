@@ -1578,8 +1578,14 @@ func fileDownload(data CommandData, sysProcAttr *syscall.SysProcAttr) (exitCode 
 	if isZip && data.AllowUnzip {
 		escapePath := utils.Quote(data.Path)
 		escapeDirPath := utils.Quote(filepath.Dir(data.Path))
-		command := fmt.Sprintf("tee %s > /dev/null && unzip -n %s -d %s; rm %s",
+		// Use -o (overwrite) if AllowOverwrite is true, otherwise -n (never overwrite)
+		unzipOpt := "-n"
+		if data.AllowOverwrite {
+			unzipOpt = "-o"
+		}
+		command := fmt.Sprintf("tee %s > /dev/null && unzip %s %s -d %s; rm %s",
 			escapePath,
+			unzipOpt,
 			escapePath,
 			escapeDirPath,
 			escapePath)
