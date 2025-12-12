@@ -182,18 +182,14 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 	case "opentunnel":
 		log.Debug().
 			Str("sessionID", cr.data.SessionID).
-			Str("channelID", cr.data.ChannelID).
-			Str("protocol", cr.data.Protocol).
 			Int("targetPort", cr.data.TargetPort).
-			Str("wsURL", cr.data.WSURL).
+			Str("url", cr.data.URL).
 			Msg("Received opentunnel command")
 
 		data := openTunnelData{
 			SessionID:  cr.data.SessionID,
-			ChannelID:  cr.data.ChannelID,
-			Protocol:   cr.data.Protocol,
 			TargetPort: cr.data.TargetPort,
-			WSURL:      cr.data.WSURL,
+			URL:        cr.data.URL,
 		}
 		err := cr.validateData(data)
 		if err != nil {
@@ -205,12 +201,10 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 			return 1, fmt.Sprintf("opentunnel: Tunnel session %s already exists.", cr.data.SessionID)
 		}
 
-		tunnelClient := NewTunnelClientWithURL(
+		tunnelClient := NewTunnelClient(
 			cr.data.SessionID,
-			cr.data.ChannelID,
-			cr.data.Protocol,
 			cr.data.TargetPort,
-			cr.data.WSURL,
+			cr.data.URL,
 		)
 		go tunnelClient.RunTunnelBackground()
 
