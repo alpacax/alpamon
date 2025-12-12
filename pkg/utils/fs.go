@@ -52,17 +52,13 @@ func CopyDir(src, dst string, allowOverwrite bool) error {
 		return fmt.Errorf("%s is inside %s, causing infinite recursion", dst, src)
 	}
 
-	// Check if dst already exists
+	// Check if dst already exists and allowOverwrite is true
 	var backupPath string
-	dstExists := false
-	if _, err := os.Stat(dst); err == nil {
-		dstExists = true
-		if allowOverwrite {
-			// Create backup by renaming existing dst
-			backupPath = generateBackupPath(dst)
-			if err := os.Rename(dst, backupPath); err != nil {
-				return fmt.Errorf("failed to backup existing directory: %w", err)
-			}
+	if _, err := os.Stat(dst); err == nil && allowOverwrite {
+		// Create backup by renaming existing dst
+		backupPath = generateBackupPath(dst)
+		if err := os.Rename(dst, backupPath); err != nil {
+			return fmt.Errorf("failed to backup existing directory: %w", err)
 		}
 	}
 
@@ -80,9 +76,6 @@ func CopyDir(src, dst string, allowOverwrite bool) error {
 	// Success: remove backup if exists
 	if backupPath != "" {
 		_ = os.RemoveAll(backupPath)
-	} else if dstExists && !allowOverwrite {
-		// dst existed but allowOverwrite was false - this shouldn't happen
-		// as the caller should have handled this case
 	}
 
 	return nil
