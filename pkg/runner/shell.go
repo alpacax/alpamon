@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -177,8 +176,14 @@ func runCmdWithOutput(args []string, username, groupname string, env map[string]
 		return 1, "no command provided"
 	}
 
-	// Expand glob patterns (*) in arguments using filepath.Glob
-	expandedArgs := expandGlobArgs(args[1:])
+	// Get user info first to determine working directory for glob expansion
+	usr, err := utils.GetSystemUser(username)
+	if err != nil {
+		return 1, err.Error()
+	}
+
+	// Expand glob patterns in arguments using the user's home directory as base
+	expandedArgs := utils.ExpandGlobArgs(args[1:], usr.HomeDir)
 	cmd := exec.CommandContext(ctx, args[0], expandedArgs...)
 
 	if username != "root" {
@@ -196,10 +201,6 @@ func runCmdWithOutput(args []string, username, groupname string, env map[string]
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 	}
 
-	usr, err := utils.GetSystemUser(username)
-	if err != nil {
-		return 1, err.Error()
-	}
 	cmd.Dir = usr.HomeDir
 
 	log.Debug().Msgf("Executing command as user '%s' (group: '%s') -> '%s'", username, groupname, strings.Join(args, " "))
@@ -212,32 +213,4 @@ func runCmdWithOutput(args []string, username, groupname string, env map[string]
 	}
 
 	return 0, string(output)
-}
-
-// expandGlobArgs expands glob patterns in arguments using filepath.Glob.
-func expandGlobArgs(args []string) []string {
-	var expandedArgs []string
-
-	for _, arg := range args {
-		if containsGlobPattern(arg) {
-			// Try to expand glob pattern
-			matches, err := filepath.Glob(arg)
-			if err == nil && len(matches) > 0 {
-				expandedArgs = append(expandedArgs, matches...)
-			} else {
-				// No matches or error, keep original argument
-				expandedArgs = append(expandedArgs, arg)
-			}
-		} else {
-			expandedArgs = append(expandedArgs, arg)
-		}
-	}
-
-	return expandedArgs
-}
-
-// containsGlobPattern checks if a string contains glob pattern characters.
-// Supported: * (any), ? (single char), [ (character class)
-func containsGlobPattern(s string) bool {
-	return strings.ContainsAny(s, "*?[")
 }
