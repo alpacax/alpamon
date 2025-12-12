@@ -171,7 +171,19 @@ func runCmdWithOutput(args []string, username, groupname string, env map[string]
 	}
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	// Check if command contains glob wildcard (*) that requires shell expansion
+	var cmd *exec.Cmd
+	if needsGlobExpansion(args) {
+		// Quote each argument to prevent command injection, preserving * for glob expansion
+		quotedArgs := make([]string, len(args))
+		for i, arg := range args {
+			quotedArgs[i] = quoteArgPreservingGlob(arg)
+		}
+		shellCmd := strings.Join(quotedArgs, " ")
+		cmd = exec.CommandContext(ctx, "sh", "-c", shellCmd)
+	} else {
+		cmd = exec.CommandContext(ctx, args[0], args[1:]...)
+	}
 	if username != "root" {
 		sysProcAttr, err := demote(username, groupname)
 		if err != nil {
@@ -203,4 +215,34 @@ func runCmdWithOutput(args []string, username, groupname string, env map[string]
 	}
 
 	return 0, string(output)
+}
+
+// needsGlobExpansion checks if any argument contains * wildcard for glob expansion
+func needsGlobExpansion(args []string) bool {
+	for _, arg := range args {
+		if strings.Contains(arg, "*") {
+			return true
+		}
+	}
+	return false
+}
+
+// quoteArgPreservingGlob quotes an argument for safe shell execution,
+// but preserves * wildcards for glob expansion.
+// This prevents command injection while allowing glob patterns to work.
+func quoteArgPreservingGlob(arg string) string {
+	if !strings.Contains(arg, "*") {
+		// No glob, use full quoting for safety
+		return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
+	}
+
+	// Has glob - we need to be careful
+	// Split by *, quote each part, rejoin with *
+	parts := strings.Split(arg, "*")
+	for i, part := range parts {
+		if part != "" {
+			parts[i] = "'" + strings.ReplaceAll(part, "'", "'\"'\"'") + "'"
+		}
+	}
+	return strings.Join(parts, "*")
 }
