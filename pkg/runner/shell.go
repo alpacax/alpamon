@@ -171,7 +171,21 @@ func runCmdWithOutput(args []string, username, groupname string, env map[string]
 	}
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	// Check if args is empty
+	if len(args) == 0 {
+		return 1, "no command provided"
+	}
+
+	// Get user info first to determine working directory for glob expansion
+	usr, err := utils.GetSystemUser(username)
+	if err != nil {
+		return 1, err.Error()
+	}
+
+	// Expand glob patterns in arguments using the user's home directory as base
+	expandedArgs := utils.ExpandGlobArgs(args[1:], usr.HomeDir)
+	cmd := exec.CommandContext(ctx, args[0], expandedArgs...)
+
 	if username != "root" {
 		sysProcAttr, err := demote(username, groupname)
 		if err != nil {
@@ -187,10 +201,6 @@ func runCmdWithOutput(args []string, username, groupname string, env map[string]
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 	}
 
-	usr, err := utils.GetSystemUser(username)
-	if err != nil {
-		return 1, err.Error()
-	}
 	cmd.Dir = usr.HomeDir
 
 	log.Debug().Msgf("Executing command as user '%s' (group: '%s') -> '%s'", username, groupname, strings.Join(args, " "))
