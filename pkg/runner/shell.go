@@ -214,13 +214,12 @@ func runCmdWithOutput(args []string, username, groupname string, env map[string]
 	return 0, string(output)
 }
 
-// expandGlobArgs expands glob patterns (*) in arguments using filepath.Glob.
-// This is safer than using shell execution as it doesn't allow command injection.
+// expandGlobArgs expands glob patterns in arguments using filepath.Glob.
 func expandGlobArgs(args []string) []string {
 	var expandedArgs []string
 
 	for _, arg := range args {
-		if strings.Contains(arg, "*") {
+		if containsGlobPattern(arg) {
 			// Try to expand glob pattern
 			matches, err := filepath.Glob(arg)
 			if err == nil && len(matches) > 0 {
@@ -235,4 +234,10 @@ func expandGlobArgs(args []string) []string {
 	}
 
 	return expandedArgs
+}
+
+// containsGlobPattern checks if a string contains glob pattern characters.
+// Supported: * (any), ? (single char), [ (character class)
+func containsGlobPattern(s string) bool {
+	return strings.ContainsAny(s, "*?[")
 }
