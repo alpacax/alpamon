@@ -186,6 +186,15 @@ func (session *Session) Patch(url string, rawBody interface{}, timeout time.Dura
 	return session.do(req, timeout)
 }
 
+func (session *Session) Delete(url string, rawBody interface{}, timeout time.Duration) ([]byte, int, error) {
+	req, err := session.newRequest(http.MethodDelete, url, rawBody)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return session.do(req, timeout)
+}
+
 func (session *Session) MultipartRequest(url string, body bytes.Buffer, contentType string, timeout time.Duration) ([]byte, int, error) {
 	req, err := http.NewRequest(http.MethodPost, url, &body)
 	if err != nil {
