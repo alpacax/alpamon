@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -140,16 +141,20 @@ type streamMetadata struct {
 	RemotePort string `json:"remote_port"`
 }
 
+// maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
+const maxMetadataSize = 1024
+
 // handleStream processes a single smux stream by spawning a worker subprocess
 // with user credentials to connect to the local service.
 func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	defer stream.Close()
 
-	// Read metadata (first line: JSON with remote_port)
-	reader := bufio.NewReader(stream)
-	metadataLine, err := reader.ReadString('\n')
+	// Read metadata with size limit to prevent memory exhaustion from malicious servers
+	limitedReader := &io.LimitedReader{R: stream, N: maxMetadataSize}
+	bufReader := bufio.NewReader(limitedReader)
+	metadataLine, err := bufReader.ReadString('\n')
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to read stream metadata.")
+		log.Debug().Err(err).Msg("Failed to read stream metadata (may exceed size limit).")
 		return
 	}
 
@@ -177,19 +182,27 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	defer func() {
 		stdinPipe.Close()
 		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+			if err := cmd.Process.Kill(); err != nil {
+				log.Debug().Err(err).Msg("Failed to kill tunnel worker process.")
+			}
 		}
 		_ = cmd.Wait()
 	}()
 
 	log.Debug().Msgf("Tunnel worker spawned for %s as user %s.", targetAddr, tc.username)
 
+	// Create combined reader: remaining buffered data + original stream
+	// This is needed because bufReader may have buffered data beyond metadata
+	remainingBuf := make([]byte, bufReader.Buffered())
+	_, _ = bufReader.Read(remainingBuf)
+	dataReader := io.MultiReader(bytes.NewReader(remainingBuf), stream)
+
 	// Bidirectional relay: stream <-> subprocess
 	errChan := make(chan error, 2)
 
-	// Stream -> Subprocess stdin (using reader to skip metadata)
+	// Stream -> Subprocess stdin
 	go func() {
-		_, err := io.Copy(stdinPipe, reader)
+		_, err := io.Copy(stdinPipe, dataReader)
 		stdinPipe.Close()
 		errChan <- err
 	}()

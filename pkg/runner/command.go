@@ -188,6 +188,11 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 			Str("groupname", cr.data.Groupname).
 			Msg("Received opentunnel command")
 
+		// Validate port range (1-65535, 0 is reserved)
+		if cr.data.TargetPort < 1 || cr.data.TargetPort > 65535 {
+			return 1, fmt.Sprintf("opentunnel: Invalid target port %d. Must be between 1 and 65535.", cr.data.TargetPort)
+		}
+
 		data := openTunnelData{
 			SessionID:  cr.data.SessionID,
 			TargetPort: cr.data.TargetPort,

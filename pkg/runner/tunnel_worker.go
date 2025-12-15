@@ -4,15 +4,28 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
 )
 
+// validateTargetAddr ensures the target address is localhost only for security.
+// This prevents the tunnel from being used to connect to arbitrary external hosts.
+func validateTargetAddr(targetAddr string) bool {
+	return strings.HasPrefix(targetAddr, "127.0.0.1:") || strings.HasPrefix(targetAddr, "localhost:")
+}
+
 // RunTunnelWorker runs the tunnel worker subprocess.
 // It connects to the target address and relays data between stdin/stdout and the TCP connection.
 // This function is called by the tunnel-worker subcommand and runs with demoted user credentials.
 func RunTunnelWorker(targetAddr string) {
+	// Security: Only allow connections to localhost
+	if !validateTargetAddr(targetAddr) {
+		log.Error().Str("targetAddr", targetAddr).Msg("Invalid target address: must be localhost (127.0.0.1 or localhost)")
+		os.Exit(1)
+	}
+
 	conn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
 	if err != nil {
 		log.Error().Err(err).Msgf("Tunnel worker failed to connect to %s.", targetAddr)
