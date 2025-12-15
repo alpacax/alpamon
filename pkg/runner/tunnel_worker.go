@@ -13,7 +13,6 @@ import (
 // It connects to the target address and relays data between stdin/stdout and the TCP connection.
 // This function is called by the tunnel-worker subcommand and runs with demoted user credentials.
 func RunTunnelWorker(targetAddr string) {
-	// Connect to local service (this runs with user credentials set by the parent process)
 	conn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
 	if err != nil {
 		log.Error().Err(err).Msgf("Tunnel worker failed to connect to %s.", targetAddr)
@@ -21,7 +20,6 @@ func RunTunnelWorker(targetAddr string) {
 	}
 	defer conn.Close()
 
-	// Enable TCP optimizations
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
 		_ = tcpConn.SetKeepAlive(true)

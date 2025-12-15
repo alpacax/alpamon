@@ -1,5 +1,3 @@
-//go:build darwin
-
 package runner
 
 import (
@@ -20,7 +18,6 @@ func spawnTunnelWorker(username, groupname, targetAddr string) (*exec.Cmd, io.Wr
 		Str("groupname", groupname).
 		Msg("Credential demotion not supported on macOS. Running tunnel worker as current user.")
 
-	// Get current executable path
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get executable path: %w", err)
@@ -30,7 +27,6 @@ func spawnTunnelWorker(username, groupname, targetAddr string) (*exec.Cmd, io.Wr
 	cmd := exec.Command(executable, "tunnel-worker", targetAddr)
 	cmd.Stderr = os.Stderr // Route subprocess errors to parent's stderr for debugging
 
-	// Get stdin and stdout pipes
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create stdin pipe: %w", err)
