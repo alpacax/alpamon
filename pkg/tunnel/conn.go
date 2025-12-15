@@ -1,20 +1,19 @@
 package tunnel
 
 import (
-	"net"
-	"time"
+	"io"
 
 	"github.com/gorilla/websocket"
 )
 
-// WebSocketConn wraps a WebSocket connection to implement net.Conn interface.
-// This adapter is required for smux which expects net.Conn.
+// WebSocketConn wraps a WebSocket connection to implement io.ReadWriteCloser.
+// This adapter is required for smux which expects io.ReadWriteCloser.
 type WebSocketConn struct {
 	conn       *websocket.Conn
 	readBuffer []byte
 }
 
-// NewWebSocketConn creates a new WebSocket to net.Conn adapter.
+// NewWebSocketConn creates a new WebSocket to io.ReadWriteCloser adapter.
 func NewWebSocketConn(conn *websocket.Conn) *WebSocketConn {
 	return &WebSocketConn{conn: conn}
 }
@@ -60,33 +59,4 @@ func (w *WebSocketConn) Close() error {
 	return w.conn.Close()
 }
 
-// LocalAddr returns the local network address.
-func (w *WebSocketConn) LocalAddr() net.Addr {
-	return w.conn.LocalAddr()
-}
-
-// RemoteAddr returns the remote network address.
-func (w *WebSocketConn) RemoteAddr() net.Addr {
-	return w.conn.RemoteAddr()
-}
-
-// SetDeadline sets read and write deadlines.
-func (w *WebSocketConn) SetDeadline(t time.Time) error {
-	if err := w.conn.SetReadDeadline(t); err != nil {
-		return err
-	}
-	return w.conn.SetWriteDeadline(t)
-}
-
-// SetReadDeadline sets the read deadline.
-func (w *WebSocketConn) SetReadDeadline(t time.Time) error {
-	return w.conn.SetReadDeadline(t)
-}
-
-// SetWriteDeadline sets the write deadline.
-func (w *WebSocketConn) SetWriteDeadline(t time.Time) error {
-	return w.conn.SetWriteDeadline(t)
-}
-
-// Ensure WebSocketConn implements net.Conn
-var _ net.Conn = (*WebSocketConn)(nil)
+var _ io.ReadWriteCloser = (*WebSocketConn)(nil)
