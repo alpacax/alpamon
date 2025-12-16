@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alpacax/alpamon/internal/protocol"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
@@ -58,7 +59,7 @@ func init() {
 	terminals = make(map[string]*PtyClient)
 }
 
-func NewPtyClient(data CommandData, apiSession *scheduler.Session) *PtyClient {
+func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session) *PtyClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},

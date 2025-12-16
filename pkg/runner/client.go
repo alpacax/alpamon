@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,6 +11,7 @@ import (
 	"github.com/alpacax/alpamon/internal/pool"
 	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/config"
+	"github.com/alpacax/alpamon/internal/protocol"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/cenkalti/backoff"
@@ -211,60 +211,56 @@ func (wc *WebsocketClient) RestartCollector() {
 }
 
 func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
-	var content Content
-	var data CommandData
-
 	if len(message) == 0 {
 		return
 	}
 
-	err := json.Unmarshal(message, &content)
+	msg, err := protocol.ParseMessage(message)
 	if err != nil {
 		log.Warn().Err(err).Msgf("Inappropriate message: %s.", string(message))
 		return
 	}
 
-	if content.Command.Data != "" {
-		err = json.Unmarshal([]byte(content.Command.Data), &data)
-		if err != nil {
-			log.Warn().Err(err).Msgf("Inappropriate message: %s.", string(message))
+	switch msg.Query {
+	case protocol.MessageTypeCommand:
+		if msg.Command == nil {
+			log.Warn().Msg("Command message without command data")
 			return
 		}
-	}
 
-	switch content.Query {
-	case "command":
-		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandAckURL, content.Command.ID),
+		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandAckURL, msg.Command.ID),
 			nil,
 			10,
 			time.Time{},
 		)
 
+		data, err := msg.Command.ParseCommandData()
+		if err != nil {
+			log.Warn().Err(err).Msgf("Failed to parse command data: %s.", string(message))
+			return
+		}
+
 		// Use modular handler system
 		if wc.dispatcher != nil {
-			wc.handleCommand(content.Command, data)
+			wc.handleCommand(*msg.Command, *data)
 		} else {
 			log.Error().Msg("Dispatcher not initialized")
 			// Send failure notification
-			payload := &commandFin{
-				Success:     false,
-				Result:      "Internal error: dispatcher not initialized",
-				ElapsedTime: 0,
-			}
-			scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, content.Command.ID),
+			payload := protocol.NewCommandResponse(false, "Internal error: dispatcher not initialized", 0)
+			scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, msg.Command.ID),
 				payload,
 				10,
 				time.Time{},
 			)
 		}
-	case "quit":
-		log.Debug().Msgf("Quit requested for reason: %s.", content.Reason)
+	case protocol.MessageTypeQuit:
+		log.Debug().Msgf("Quit requested for reason: %s.", msg.Reason)
 		wc.ShutDown()
-	case "reconnect":
-		log.Debug().Msgf("Reconnect requested for reason: %s.", content.Reason)
+	case protocol.MessageTypeReconnect:
+		log.Debug().Msgf("Reconnect requested for reason: %s.", msg.Reason)
 		wc.Close()
 	default:
-		log.Warn().Msgf("Not implemented query: %s.", content.Query)
+		log.Warn().Msgf("Not implemented query: %s.", msg.Query)
 	}
 }
 
@@ -277,7 +273,7 @@ func (wc *WebsocketClient) WriteJSON(data interface{}) error {
 	return nil
 }
 
-func (wc *WebsocketClient) handleCommand(command Command, data CommandData) {
+func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol.CommandData) {
 	// Create CommandRunner with dispatcher for direct execution
 	commandRunner := NewCommandRunner(wc, wc.apiSession, command, data, wc.dispatcher)
 
@@ -301,11 +297,7 @@ func (wc *WebsocketClient) handleCommand(command Command, data CommandData) {
 		log.Error().Err(err).Msgf("Failed to submit command %s to pool", command.ID)
 		// Send failure notification
 		start := time.Now()
-		payload := &commandFin{
-			Success:     false,
-			Result:      fmt.Sprintf("Failed to submit command: %v", err),
-			ElapsedTime: time.Since(start).Seconds(),
-		}
+		payload := protocol.NewCommandResponse(false, fmt.Sprintf("Failed to submit command: %v", err), time.Since(start).Seconds())
 		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, command.ID),
 			payload,
 			10,

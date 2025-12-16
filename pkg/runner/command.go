@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/internal/protocol"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/rs/zerolog/log"
 )
@@ -17,7 +18,17 @@ type CommandDispatcher interface {
 	HasHandler(command string) bool
 }
 
-func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command Command, data CommandData, dispatcher CommandDispatcher) *CommandRunner {
+// CommandRunner executes commands received from the server
+type CommandRunner struct {
+	name       string
+	command    protocol.Command
+	wsClient   *WebsocketClient
+	apiSession *scheduler.Session
+	data       protocol.CommandData
+	dispatcher CommandDispatcher
+}
+
+func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command protocol.Command, data protocol.CommandData, dispatcher CommandDispatcher) *CommandRunner {
 	var name string
 	if command.ID != "" {
 		name = fmt.Sprintf("CommandRunner-%s", strings.Split(command.ID, "-")[0])
@@ -41,11 +52,7 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 	defer func() {
 		if cr.command.ID != "" {
 			finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
-			payload := &commandFin{
-				Success:     exitCode == 0,
-				Result:      result,
-				ElapsedTime: time.Since(start).Seconds(),
-			}
+			payload := protocol.NewCommandResponse(exitCode == 0, result, time.Since(start).Seconds())
 			scheduler.Rqueue.Post(finURL, payload, 10, time.Time{})
 		}
 	}()
