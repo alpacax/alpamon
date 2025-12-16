@@ -1,16 +1,12 @@
-package runner
+package protocol
 
 import (
+	"encoding/json"
+
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
-	"github.com/alpacax/alpamon/pkg/scheduler"
 )
 
-type Content struct {
-	Query   string  `json:"query"`
-	Command Command `json:"command,omitempty"`
-	Reason  string  `json:"reason,omitempty"`
-}
-
+// Command represents a command request from the server
 type Command struct {
 	ID    string            `json:"id"`
 	Shell string            `json:"shell"`
@@ -21,6 +17,7 @@ type Command struct {
 	Data  string            `json:"data,omitempty"`
 }
 
+// File represents a file in command data
 type File struct {
 	Username       string `json:"username"`
 	Groupname      string `json:"groupname"`
@@ -32,6 +29,7 @@ type File struct {
 	URL            string `json:"url"`
 }
 
+// CommandData holds additional command parameters
 type CommandData struct {
 	SessionID               string                   `json:"session_id"`
 	URL                     string                   `json:"url"`
@@ -72,45 +70,42 @@ type CommandData struct {
 	Priority                int                      `json:"priority"`
 	RuleType                string                   `json:"rule_type"`
 	Rules                   []map[string]interface{} `json:"rules"`
-	Operation               string                   `json:"operation"`   // batch, flush, delete, add, update
-	RuleID                  string                   `json:"rule_id"`     // for rule-specific operations (add/update: new rule ID)
-	OldRuleID               string                   `json:"old_rule_id"` // for update operation: old rule ID to delete
+	Operation               string                   `json:"operation"`
+	RuleID                  string                   `json:"rule_id"`
+	OldRuleID               string                   `json:"old_rule_id"`
 	AssignmentID            string                   `json:"assignment_id"`
 	ServerID                string                   `json:"server_id"`
-	ChainNames              []string                 `json:"chain_names"` // for firewall-reorder-chains
+	ChainNames              []string                 `json:"chain_names"`
 
 	// Backend information
-	Backend string `json:"backend"` // Backend type: iptables, nftables, firewalld, ufw
-	Table   string `json:"table"`   // iptables/nftables table: filter, nat, mangle, raw, security
-	Family  string `json:"family"`  // IP family: ip (IPv4), ip6 (IPv6), inet, arp, bridge, netdev
+	Backend string `json:"backend"`
+	Table   string `json:"table"`
+	Family  string `json:"family"`
 
 	// Firewalld specific fields
-	Zone              string `json:"zone"`                // Firewalld zone (default, public, etc.)
-	Service           string `json:"service"`             // Firewalld service name
-	FirewalldRuleType string `json:"firewalld_rule_type"` // Firewalld rule type: service, port, rich
+	Zone              string `json:"zone"`
+	Service           string `json:"service"`
+	FirewalldRuleType string `json:"firewalld_rule_type"`
 
 	// UFW specific fields
-	Direction string `json:"direction"` // UFW direction: in, out
-	Interface string `json:"interface"` // UFW interface name
+	Direction string `json:"direction"`
+	Interface string `json:"interface"`
 }
 
-type CommandRunner struct {
-	name       string
-	command    Command
-	wsClient   *WebsocketClient
-	apiSession *scheduler.Session
-	data       CommandData
-	dispatcher CommandDispatcher // Interface for dispatcher to avoid circular dependency
+// ParseCommandData parses the Data field of a Command into CommandData
+func (c *Command) ParseCommandData() (*CommandData, error) {
+	if c.Data == "" {
+		return &CommandData{}, nil
+	}
+	var data CommandData
+	if err := json.Unmarshal([]byte(c.Data), &data); err != nil {
+		return nil, err
+	}
+	return &data, nil
 }
 
-type commandFin struct {
-	Success     bool    `json:"success"`
-	Result      string  `json:"result"`
-	ElapsedTime float64 `json:"elapsed_time"`
-}
-
-// ToArgs converts CommandData to CommandArgs for type-safe executor compatibility
-func (c CommandData) ToArgs() *common.CommandArgs {
+// ToArgs converts CommandData to CommandArgs for executor compatibility
+func (c *CommandData) ToArgs() *common.CommandArgs {
 	args := &common.CommandArgs{
 		// Common fields
 		SessionID: c.SessionID,
@@ -214,14 +209,11 @@ func (c CommandData) ToArgs() *common.CommandArgs {
 			if v, ok := ruleMap["protocol"].(string); ok {
 				rule.Protocol = v
 			}
-			if v, ok := ruleMap["port_start"].(int); ok {
-				rule.PortStart = v
+			if v, ok := ruleMap["port_start"].(float64); ok {
+				rule.PortStart = int(v)
 			}
-			if v, ok := ruleMap["port_end"].(int); ok {
-				rule.PortEnd = v
-			}
-			if v, ok := ruleMap["dports"].([]int); ok {
-				rule.DPorts = v
+			if v, ok := ruleMap["port_end"].(float64); ok {
+				rule.PortEnd = int(v)
 			}
 			if v, ok := ruleMap["icmp_type"].(string); ok {
 				rule.ICMPType = v
@@ -238,8 +230,8 @@ func (c CommandData) ToArgs() *common.CommandArgs {
 			if v, ok := ruleMap["description"].(string); ok {
 				rule.Description = v
 			}
-			if v, ok := ruleMap["priority"].(int); ok {
-				rule.Priority = v
+			if v, ok := ruleMap["priority"].(float64); ok {
+				rule.Priority = int(v)
 			}
 			if v, ok := ruleMap["rule_type"].(string); ok {
 				rule.RuleType = v
