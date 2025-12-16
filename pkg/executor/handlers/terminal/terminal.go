@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"syscall"
 
+	"github.com/alpacax/alpamon/internal/protocol"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/runner"
@@ -97,7 +98,7 @@ func (h *TerminalHandler) handleOpenPTY(args *common.CommandArgs) (int, string, 
 		return 1, fmt.Sprintf("openpty: Not enough information. %s", err.Error()), nil
 	}
 
-	data := runner.CommandData{
+	data := protocol.CommandData{
 		SessionID:     args.SessionID,
 		URL:           args.URL,
 		Username:      args.Username,
