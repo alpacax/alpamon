@@ -252,7 +252,7 @@ func TestPool_NoLeakRapidShutdown(t *testing.T) {
 func TestPool_MaxGoroutineEnforcement(t *testing.T) {
 	maxWorkers := 10
 	pool := NewPool(maxWorkers, 100)
-	defer pool.Shutdown(5 * time.Second)
+	defer func() { _ = pool.Shutdown(5 * time.Second) }()
 
 	var maxConcurrent int32
 	var concurrent int32

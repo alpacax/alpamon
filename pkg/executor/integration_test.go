@@ -221,7 +221,7 @@ func TestIntegration_ConcurrentExecution(t *testing.T) {
 // TestIntegration_PoolWithRegistry tests pool integration with registry
 func TestIntegration_PoolWithRegistry(t *testing.T) {
 	workerPool := pool.NewPool(5, 100)
-	defer workerPool.Shutdown(5 * time.Second)
+	defer func() { _ = workerPool.Shutdown(5 * time.Second) }()
 
 	ctxManager := agent.NewContextManager()
 	defer ctxManager.Shutdown()

@@ -43,7 +43,7 @@ func TestPerformance_MemoryUsageIdle(t *testing.T) {
 	t.Logf("Heap memory in use: %.2f MB (HeapAlloc: %d bytes)", memUsedMB, m.HeapAlloc)
 
 	// Cleanup
-	workerPool.Shutdown(5 * time.Second)
+	_ = workerPool.Shutdown(5 * time.Second)
 	ctxManager.Shutdown()
 	registry.Clear()
 
@@ -78,7 +78,7 @@ func TestPerformance_StartupTime(t *testing.T) {
 	t.Logf("Startup time: %v", startupTime)
 
 	// Cleanup
-	workerPool.Shutdown(5 * time.Second)
+	_ = workerPool.Shutdown(5 * time.Second)
 	ctxManager.Shutdown()
 	registry.Clear()
 
