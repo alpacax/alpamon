@@ -314,7 +314,7 @@ func TestSystemHandler_PoolShutdown(t *testing.T) {
 	ctx := context.Background()
 
 	// Shutdown pool first
-	workerPool.Shutdown(100 * time.Millisecond)
+	_ = workerPool.Shutdown(100 * time.Millisecond)
 	ctxManager.Shutdown()
 
 	args := &common.CommandArgs{

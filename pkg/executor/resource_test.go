@@ -130,7 +130,7 @@ func TestPerformance_CommandOverhead(t *testing.T) {
 // TestPerformance_ConcurrentCommandScaling tests performance under concurrent load
 func TestPerformance_ConcurrentCommandScaling(t *testing.T) {
 	workerPool := pool.NewPool(10, 200)
-	defer workerPool.Shutdown(5 * time.Second)
+	defer func() { _ = workerPool.Shutdown(5 * time.Second) }()
 
 	ctxManager := agent.NewContextManager()
 	defer ctxManager.Shutdown()
@@ -228,7 +228,7 @@ func TestPerformance_RegistryLookupSpeed(t *testing.T) {
 func TestPerformance_GoroutineLimit(t *testing.T) {
 	maxWorkers := 10
 	workerPool := pool.NewPool(maxWorkers, 100)
-	defer workerPool.Shutdown(5 * time.Second)
+	defer func() { _ = workerPool.Shutdown(5 * time.Second) }()
 
 	ctx := context.Background()
 
