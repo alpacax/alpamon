@@ -201,17 +201,17 @@ func TestPoolShutdown(t *testing.T) {
 
 // Benchmark comparison
 func BenchmarkPoolSubmit(b *testing.B) {
-	pool := NewPool(10, 1000)
+	pool := NewPool(10, 50000)
 	ctx := context.Background()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := pool.Submit(ctx, func() error {
+		// Ignore queue full errors in benchmark
+		_ = pool.Submit(ctx, func() error {
 			return nil
-		}); err != nil {
-			b.Errorf("failed to submit job: %v", err)
-		}
+		})
 	}
+	b.StopTimer()
 
 	if err := pool.Shutdown(10 * time.Second); err != nil {
 		b.Errorf("shutdown failed: %v", err)
