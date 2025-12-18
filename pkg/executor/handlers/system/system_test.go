@@ -35,7 +35,7 @@ func TestSystemHandler_Name(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -49,7 +49,7 @@ func TestSystemHandler_Commands(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -82,7 +82,7 @@ func TestSystemHandler_Restart_Collector(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -113,7 +113,7 @@ func TestSystemHandler_Restart_Default(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -143,7 +143,7 @@ func TestSystemHandler_Restart_Alpamon(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -171,7 +171,7 @@ func TestSystemHandler_Quit(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -197,7 +197,7 @@ func TestSystemHandler_Reboot(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -223,7 +223,7 @@ func TestSystemHandler_Shutdown(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -249,7 +249,7 @@ func TestSystemHandler_UnknownCommand(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -275,7 +275,7 @@ func TestSystemHandler_Validate(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -341,7 +341,7 @@ func TestSystemHandler_Upgrade_UpToDate(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -376,7 +376,7 @@ func TestSystemHandler_Update(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
@@ -406,7 +406,7 @@ func TestSystemHandler_Uninstall(t *testing.T) {
 	mockWS := &MockWSClient{}
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
-	defer workerPool.Shutdown(1 * time.Second)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)

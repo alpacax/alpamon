@@ -24,7 +24,7 @@ func BenchmarkPool_WorkerScaling(b *testing.B) {
 			}
 			b.StopTimer()
 
-			pool.Shutdown(5 * time.Second)
+			_ = pool.Shutdown(5 * time.Second)
 		})
 	}
 }
@@ -50,7 +50,7 @@ func BenchmarkPool_QueueThroughput(b *testing.B) {
 	wg.Wait()
 	b.StopTimer()
 
-	pool.Shutdown(5 * time.Second)
+	_ = pool.Shutdown(5 * time.Second)
 }
 
 // BenchmarkPool_ConcurrentSubmit measures concurrent submission performance
@@ -68,7 +68,7 @@ func BenchmarkPool_ConcurrentSubmit(b *testing.B) {
 	})
 	b.StopTimer()
 
-	pool.Shutdown(10 * time.Second)
+	_ = pool.Shutdown(10 * time.Second)
 }
 
 // BenchmarkPool_WithWork measures performance with actual work
@@ -98,5 +98,5 @@ func BenchmarkPool_WithWork(b *testing.B) {
 	wg.Wait()
 	b.StopTimer()
 
-	pool.Shutdown(5 * time.Second)
+	_ = pool.Shutdown(5 * time.Second)
 }
