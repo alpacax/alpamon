@@ -5,31 +5,60 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
+	"syscall"
 
 	"github.com/rs/zerolog/log"
 )
 
-// spawnTunnelWorker spawns a tunnel worker subprocess with demoted user credentials.
-// The subprocess connects to the target address and relays data via stdin/stdout.
-func spawnTunnelWorker(username, groupname, targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
-	// Get demoted credentials using existing demoteFtp function
-	sysProcAttr, _, err := demoteFtp(username, groupname)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to demote credentials: %w", err)
+func getTunnelWorkerCredential() (*syscall.SysProcAttr, error) {
+	currentUid := os.Getuid()
+	if currentUid != 0 {
+		log.Debug().Msg("Alpamon is not running as root. Tunnel worker will run as current user.")
+		return nil, nil
 	}
 
-	// Get current executable path
+	usr, err := user.Lookup("nobody")
+	if err != nil {
+		return nil, fmt.Errorf("failed to lookup nobody user: %w", err)
+	}
+
+	uid, err := strconv.ParseUint(usr.Uid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse nobody uid: %w", err)
+	}
+
+	gid, err := strconv.ParseUint(usr.Gid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse nobody gid: %w", err)
+	}
+
+	return &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid: uint32(uid),
+			Gid: uint32(gid),
+		},
+	}, nil
+}
+
+// spawnTunnelWorker spawns a tunnel worker subprocess with nobody credentials.
+// The subprocess connects to the target address and relays data via stdin/stdout.
+func spawnTunnelWorker(targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
+	sysProcAttr, err := getTunnelWorkerCredential()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to get tunnel worker credentials: %w", err)
+	}
+
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// Create command for tunnel worker subprocess
 	cmd := exec.Command(executable, "tunnel-worker", targetAddr)
 	cmd.SysProcAttr = sysProcAttr
-	cmd.Stderr = os.Stderr // Route subprocess errors to parent's stderr for debugging
+	cmd.Stderr = os.Stderr
 
-	// Get stdin and stdout pipes
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create stdin pipe: %w", err)
@@ -41,7 +70,6 @@ func spawnTunnelWorker(username, groupname, targetAddr string) (*exec.Cmd, io.Wr
 		return nil, nil, nil, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
-	// Start the subprocess
 	if err := cmd.Start(); err != nil {
 		stdinPipe.Close()
 		stdoutPipe.Close()
@@ -49,10 +77,8 @@ func spawnTunnelWorker(username, groupname, targetAddr string) (*exec.Cmd, io.Wr
 	}
 
 	log.Debug().
-		Str("username", username).
-		Str("groupname", groupname).
 		Str("targetAddr", targetAddr).
-		Msg("Spawned tunnel worker subprocess with demoted credentials.")
+		Msg("Spawned tunnel worker subprocess as nobody user.")
 
 	return cmd, stdinPipe, stdoutPipe, nil
 }

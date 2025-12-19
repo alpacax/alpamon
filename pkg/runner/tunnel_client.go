@@ -31,8 +31,6 @@ type TunnelClient struct {
 	sessionID     string
 	targetPort    int
 	serverURL     string
-	username      string
-	groupname     string
 	requestHeader http.Header
 	wsConn        *websocket.Conn
 	session       *smux.Session
@@ -41,7 +39,7 @@ type TunnelClient struct {
 }
 
 // NewTunnelClient creates a new tunnel client for the given WebSocket URL.
-func NewTunnelClient(sessionID string, targetPort int, url, username, groupname string) *TunnelClient {
+func NewTunnelClient(sessionID string, targetPort int, url string) *TunnelClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
@@ -53,8 +51,6 @@ func NewTunnelClient(sessionID string, targetPort int, url, username, groupname 
 		sessionID:     sessionID,
 		targetPort:    targetPort,
 		serverURL:     url,
-		username:      username,
-		groupname:     groupname,
 		requestHeader: headers,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -172,8 +168,8 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 
 	targetAddr := fmt.Sprintf("127.0.0.1:%s", targetPort)
 
-	// Spawn tunnel worker subprocess with user credentials
-	cmd, stdinPipe, stdoutPipe, err := spawnTunnelWorker(tc.username, tc.groupname, targetAddr)
+	// Spawn tunnel worker subprocess (runs as nobody user for security)
+	cmd, stdinPipe, stdoutPipe, err := spawnTunnelWorker(targetAddr)
 	if err != nil {
 		log.Debug().Err(err).Msgf("Failed to spawn tunnel worker for %s.", targetAddr)
 		return
@@ -189,7 +185,7 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 		_ = cmd.Wait()
 	}()
 
-	log.Debug().Msgf("Tunnel worker spawned for %s as user %s.", targetAddr, tc.username)
+	log.Debug().Msgf("Tunnel worker spawned for %s.", targetAddr)
 
 	// Create combined reader: remaining buffered data + original stream
 	// This is needed because bufReader may have buffered data beyond metadata

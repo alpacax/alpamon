@@ -11,21 +11,14 @@ import (
 
 // spawnTunnelWorker spawns a tunnel worker subprocess.
 // On macOS, credential demotion is not supported, so the subprocess runs as the current user.
-func spawnTunnelWorker(username, groupname, targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
-	// macOS does not support syscall.Credential in SysProcAttr
-	log.Warn().
-		Str("username", username).
-		Str("groupname", groupname).
-		Msg("Credential demotion not supported on macOS. Running tunnel worker as current user.")
-
+func spawnTunnelWorker(targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// Create command for tunnel worker subprocess (without credential demotion)
 	cmd := exec.Command(executable, "tunnel-worker", targetAddr)
-	cmd.Stderr = os.Stderr // Route subprocess errors to parent's stderr for debugging
+	cmd.Stderr = os.Stderr
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -38,7 +31,6 @@ func spawnTunnelWorker(username, groupname, targetAddr string) (*exec.Cmd, io.Wr
 		return nil, nil, nil, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
-	// Start the subprocess
 	if err := cmd.Start(); err != nil {
 		stdinPipe.Close()
 		stdoutPipe.Close()
@@ -47,7 +39,7 @@ func spawnTunnelWorker(username, groupname, targetAddr string) (*exec.Cmd, io.Wr
 
 	log.Debug().
 		Str("targetAddr", targetAddr).
-		Msg("Spawned tunnel worker subprocess (macOS - no credential demotion).")
+		Msg("Spawned tunnel worker subprocess (macOS - runs as current user).")
 
 	return cmd, stdinPipe, stdoutPipe, nil
 }

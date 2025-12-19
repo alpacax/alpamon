@@ -165,8 +165,6 @@ type openTunnelData struct {
 	SessionID  string `validate:"required"`
 	TargetPort int    `validate:"required"`
 	URL        string `validate:"required"`
-	Username   string `validate:"required"`
-	Groupname  string `validate:"required"`
 }
 
 type closeTunnelData struct {
