@@ -39,7 +39,7 @@ func RunTunnelWorker(targetAddr string) {
 		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
 
-	log.Debug().Msgf("Tunnel worker connected to %s.", targetAddr)
+	log.Debug().Msgf("Tunnel worker connected to %s", targetAddr)
 
 	// Bidirectional relay between stdin/stdout and TCP connection
 	errChan := make(chan error, 2)
@@ -58,5 +58,5 @@ func RunTunnelWorker(targetAddr string) {
 
 	// Wait for one direction to complete
 	<-errChan
-	log.Debug().Msgf("Tunnel worker finished for %s.", targetAddr)
+	log.Debug().Msgf("Tunnel worker finished for %s", targetAddr)
 }
