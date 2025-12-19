@@ -216,18 +216,18 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		return 0, fmt.Sprintf("Spawned a tunnel for session %s, target port %d.", cr.data.SessionID, cr.data.TargetPort)
 	case "closetunnel":
 		data := closeTunnelData{
-			TunnelID: cr.data.TunnelID,
+			SessionID: cr.data.SessionID,
 		}
 		err := cr.validateData(data)
 		if err != nil {
 			return 1, fmt.Sprintf("closetunnel: Not enough information. %s", err.Error())
 		}
 
-		if err := CloseTunnel(cr.data.TunnelID); err != nil {
+		if err := CloseTunnel(cr.data.SessionID); err != nil {
 			return 1, fmt.Sprintf("closetunnel: %s", err.Error())
 		}
 
-		return 0, fmt.Sprintf("Closed tunnel session %s.", cr.data.TunnelID)
+		return 0, fmt.Sprintf("Closed tunnel session %s.", cr.data.SessionID)
 	case "resizepty":
 		if terminals[cr.data.SessionID] != nil {
 			err := terminals[cr.data.SessionID].resize(cr.data.Rows, cr.data.Cols)
