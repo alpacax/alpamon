@@ -134,6 +134,7 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 	case "moduser":
 		return cr.modUser()
 	case "ping":
+		_ = cr.wsClient.SendPongResponse()
 		return 0, time.Now().Format(time.RFC3339)
 	case "download":
 		return cr.runFileDownload(args[1])
