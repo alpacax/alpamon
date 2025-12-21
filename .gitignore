@@ -3,5 +3,6 @@
 alpamon.log
 alpamon.db
 /alpamon
+/cmd/alpamon/alpamon
 .DS_Store
 .idea
