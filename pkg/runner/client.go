@@ -228,7 +228,9 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 
 	switch content.Query {
 	case "ping":
-		_ = wc.SendPongResponse()
+		if err := wc.SendPongResponse(); err != nil {
+			log.Debug().Err(err).Msg("Failed to send pong response.")
+		}
 	case "command":
 		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandAckURL, content.Command.ID),
 			nil,
