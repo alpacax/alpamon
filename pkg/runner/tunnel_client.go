@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -126,20 +127,20 @@ func (tc *TunnelClient) connect() error {
 
 // handleStreams accepts and processes incoming smux streams from the server.
 func (tc *TunnelClient) handleStreams() {
-    for {
-        stream, err := tc.session.AcceptStream()
+	for {
+		stream, err := tc.session.AcceptStream()
 
-        if err != nil {
-            select {
-            case <-tc.ctx.Done():
-                return
-            default:
-                log.Debug().Err(err).Msgf("Tunnel session %s closed.", tc.sessionID)
-                return
-            }
-        }
-        go tc.handleStream(stream)
-    }
+		if err != nil {
+			select {
+			case <-tc.ctx.Done():
+				return
+			default:
+				log.Debug().Err(err).Msgf("Tunnel session %s closed.", tc.sessionID)
+				return
+			}
+		}
+		go tc.handleStream(stream)
+	}
 }
 
 // handleStream processes a single smux stream by spawning a worker subprocess
@@ -163,8 +164,15 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	}
 
 	// Use target port from tunnel configuration if not specified in metadata
-	targetPort := metadata.RemotePort
-	if targetPort == "" {
+	var targetPort string
+	if metadata.RemotePort != "" {
+		port, err := strconv.Atoi(metadata.RemotePort)
+		if err != nil || port < 1 || port > 65535 {
+			log.Debug().Str("remotePort", metadata.RemotePort).Msg("Invalid remote port in metadata.")
+			return
+		}
+		targetPort = metadata.RemotePort
+	} else {
 		targetPort = fmt.Sprintf("%d", tc.targetPort)
 	}
 
@@ -230,7 +238,6 @@ func (tc *TunnelClient) Close() {
 	}
 	if tc.session != nil {
 		_ = tc.session.Close()
-		tc.session = nil
 	}
 	if tc.wsConn != nil {
 		_ = tc.wsConn.WriteControl(
@@ -239,7 +246,6 @@ func (tc *TunnelClient) Close() {
 			time.Now().Add(5*time.Second),
 		)
 		_ = tc.wsConn.Close()
-		tc.wsConn = nil
 	}
 }
 
