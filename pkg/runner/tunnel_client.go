@@ -6,9 +6,11 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -179,7 +181,9 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 		stdinPipe.Close()
 		if cmd.Process != nil {
 			if err := cmd.Process.Kill(); err != nil {
-				log.Debug().Err(err).Msg("Failed to kill tunnel worker process.")
+				if !errors.Is(err, os.ErrProcessDone) {
+					log.Debug().Err(err).Msg("Failed to kill tunnel worker process.")
+				}
 			}
 		}
 		_ = cmd.Wait()
