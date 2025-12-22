@@ -245,13 +245,15 @@ func (tc *TunnelClient) Close() {
 
 // CloseTunnel closes an active tunnel by session ID.
 func CloseTunnel(sessionID string) error {
-	activeTunnelsMu.RLock()
+	activeTunnelsMu.Lock()
 	tc, exists := activeTunnels[sessionID]
-	activeTunnelsMu.RUnlock()
-
 	if !exists {
+		activeTunnelsMu.Unlock()
 		return fmt.Errorf("tunnel session %s not found", sessionID)
 	}
+	// Remove from active tunnels under lock to prevent race condition with defer cleanup
+	delete(activeTunnels, sessionID)
+	activeTunnelsMu.Unlock()
 
 	tc.Close()
 	return nil
