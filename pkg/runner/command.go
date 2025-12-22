@@ -182,23 +182,37 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 	case "opentunnel":
 		log.Debug().
 			Str("sessionID", cr.data.SessionID).
+			Str("clientType", cr.data.ClientType).
 			Int("targetPort", cr.data.TargetPort).
+			Str("username", cr.data.Username).
 			Str("url", cr.data.URL).
 			Msg("Received opentunnel command")
 
-		// Validate port range (1-65535, 0 is reserved)
-		if cr.data.TargetPort < 1 || cr.data.TargetPort > 65535 {
-			return 1, fmt.Sprintf("opentunnel: Invalid target port %d. Must be between 1 and 65535.", cr.data.TargetPort)
-		}
-
 		data := openTunnelData{
 			SessionID:  cr.data.SessionID,
-			TargetPort: cr.data.TargetPort,
 			URL:        cr.data.URL,
+			ClientType: cr.data.ClientType,
+			TargetPort: cr.data.TargetPort,
+			Username:   cr.data.Username,
+			Groupname:  cr.data.Groupname,
 		}
 		err := cr.validateData(data)
 		if err != nil {
 			return 1, fmt.Sprintf("opentunnel: Not enough information. %s", err.Error())
+		}
+
+		// Additional validation based on client type
+		switch cr.data.ClientType {
+		case "cli", "web":
+			if cr.data.TargetPort < 1 || cr.data.TargetPort > 65535 {
+				return 1, fmt.Sprintf("opentunnel: Invalid target port %d. Must be between 1 and 65535.", cr.data.TargetPort)
+			}
+		case "editor":
+			if cr.data.Username == "" || cr.data.Groupname == "" {
+				return 1, "opentunnel: Username and groupname are required for editor type."
+			}
+		default:
+			return 1, fmt.Sprintf("opentunnel: Invalid client type %s. Must be cli, web, or editor.", cr.data.ClientType)
 		}
 
 		// Check if tunnel already exists
@@ -208,12 +222,15 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 
 		tunnelClient := NewTunnelClient(
 			cr.data.SessionID,
+			cr.data.ClientType,
 			cr.data.TargetPort,
+			cr.data.Username,
+			cr.data.Groupname,
 			cr.data.URL,
 		)
 		go tunnelClient.RunTunnelBackground()
 
-		return 0, fmt.Sprintf("Spawned a tunnel for session %s, target port %d.", cr.data.SessionID, cr.data.TargetPort)
+		return 0, fmt.Sprintf("Spawned a tunnel for session %s (type: %s).", cr.data.SessionID, cr.data.ClientType)
 	case "closetunnel":
 		data := closeTunnelData{
 			SessionID: cr.data.SessionID,

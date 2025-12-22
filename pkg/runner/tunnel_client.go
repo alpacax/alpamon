@@ -29,7 +29,10 @@ var (
 // It accepts streams from the server and relays them to local services.
 type TunnelClient struct {
 	sessionID     string
-	targetPort    int
+	clientType    string // cli, web, editor
+	targetPort    int    // for cli/web type
+	username      string // for editor type
+	groupname     string // for editor type
 	serverURL     string
 	requestHeader http.Header
 	wsConn        *websocket.Conn
@@ -39,7 +42,7 @@ type TunnelClient struct {
 }
 
 // NewTunnelClient creates a new tunnel client for the given WebSocket URL.
-func NewTunnelClient(sessionID string, targetPort int, url string) *TunnelClient {
+func NewTunnelClient(sessionID, clientType string, targetPort int, username, groupname, url string) *TunnelClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
@@ -49,7 +52,10 @@ func NewTunnelClient(sessionID string, targetPort int, url string) *TunnelClient
 
 	return &TunnelClient{
 		sessionID:     sessionID,
+		clientType:    clientType,
 		targetPort:    targetPort,
+		username:      username,
+		groupname:     groupname,
 		serverURL:     url,
 		requestHeader: headers,
 		ctx:           ctx,
