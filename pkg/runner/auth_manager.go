@@ -63,6 +63,10 @@ type MFAResponse struct {
 	Success      bool   `json:"success"`
 }
 
+type BaseRequest struct {
+	Type string `json:"type"`
+}
+
 type IsAlpconRequest struct {
 	Type      string `json:"type"`
 	Username  string `json:"username"`
@@ -81,13 +85,14 @@ type IsAlpconResponse struct {
 }
 
 type AuthManager struct {
-	mu                sync.RWMutex
-	ctx               context.Context
-	cancel            context.CancelFunc
-	pidToSessionMap   map[int]*SessionInfo
-	controlClient     *ControlClient
-	listener          net.Listener
-	localSudoRequests map[string]*SudoRequest
+	mu                 sync.RWMutex
+	ctx                context.Context
+	cancel             context.CancelFunc
+	pidToSessionMap    map[int]*SessionInfo
+	controlClient      *ControlClient
+	listener           net.Listener
+	localSudoRequests  map[string]*SudoRequest
+	completionChannels map[string]chan struct{}
 }
 
 const (
@@ -104,8 +109,9 @@ var (
 func GetAuthManager(controlClient *ControlClient) *AuthManager {
 	authManagerOnce.Do(func() {
 		authManager = &AuthManager{
-			pidToSessionMap:   make(map[int]*SessionInfo),
-			localSudoRequests: make(map[string]*SudoRequest),
+			pidToSessionMap:    make(map[int]*SessionInfo),
+			localSudoRequests:  make(map[string]*SudoRequest),
+			completionChannels: make(map[string]chan struct{}),
 		}
 	})
 
@@ -115,6 +121,10 @@ func GetAuthManager(controlClient *ControlClient) *AuthManager {
 
 	if authManager.localSudoRequests == nil {
 		authManager.localSudoRequests = make(map[string]*SudoRequest)
+	}
+
+	if authManager.completionChannels == nil {
+		authManager.completionChannels = make(map[string]chan struct{})
 	}
 
 	return authManager
@@ -167,7 +177,7 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		default:
-			unix_conn, err := am.listener.Accept()
+			unixConn, err := am.listener.Accept()
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
@@ -176,7 +186,7 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 				continue
 			}
 
-			go am.handleSudoRequest(unix_conn)
+			go am.handleSudoRequest(unixConn)
 		}
 	}
 }
@@ -191,7 +201,12 @@ func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) error {
 	ctx, cancel := context.WithTimeout(am.ctx, authRetryTimeout)
 	defer cancel()
 
-	operation := func() error {
+	operation := am.createSendOperation(ctx, req, retryBackoff)
+	return backoff.Retry(operation, backoff.WithContext(retryBackoff, ctx))
+}
+
+func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApprovalRequest, retryBackoff *backoff.ExponentialBackOff) func() error {
+	return func() error {
 		select {
 		case <-ctx.Done():
 			return backoff.Permanent(ctx.Err())
@@ -210,40 +225,37 @@ func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) error {
 			return nil
 		}
 	}
-
-	return backoff.Retry(operation, backoff.WithContext(retryBackoff, ctx))
 }
 
-func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
+func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 	buf := make([]byte, 1024)
-	n, err := unix_conn.Read(buf)
+	n, err := unixConn.Read(buf)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to read sudo request")
-		am.sendIsAlpconResponse(unix_conn, "", "", 0, 0, false)
+		am.sendIsAlpconResponse(unixConn, "", "", 0, 0, false)
 		return
 	}
 
-	var requestData map[string]interface{}
-	if err := json.Unmarshal(buf[:n], &requestData); err != nil {
+	var baseReq BaseRequest
+	if err := json.Unmarshal(buf[:n], &baseReq); err != nil {
 		log.Warn().Err(err).Msg("Invalid JSON request")
-		unix_conn.Close()
+		unixConn.Close()
 		return
 	}
 
-	requestType, ok := requestData["type"].(string)
-	if !ok {
+	if baseReq.Type == "" {
 		log.Warn().Msg("Missing or invalid type field")
-		unix_conn.Close()
+		unixConn.Close()
 		return
 	}
 
-	switch requestType {
+	switch baseReq.Type {
 	case "check_user":
 		var isAlpconReq IsAlpconRequest
 		if err := json.Unmarshal(buf[:n], &isAlpconReq); err != nil {
 			log.Warn().Err(err).Msg("Invalid is_alpcon_request")
-			am.sendIsAlpconResponse(unix_conn, "", "", 0, 0, false)
-			unix_conn.Close()
+			am.sendIsAlpconResponse(unixConn, "", "", 0, 0, false)
+			unixConn.Close()
 			return
 		}
 
@@ -253,83 +265,92 @@ func (am *AuthManager) handleSudoRequest(unix_conn net.Conn) {
 
 		if !exists {
 			log.Warn().Msgf("No session found for PID %d, username: %s, groupname: %s", isAlpconReq.PPID, isAlpconReq.Username, isAlpconReq.Groupname)
-			am.sendIsAlpconResponse(unix_conn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, false)
-			unix_conn.Close()
+			am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, false)
+			unixConn.Close()
 			return
 		}
 
 		log.Debug().Msgf("Session found for PID %d: %s", isAlpconReq.PPID, session.SessionID)
-		am.sendIsAlpconResponse(unix_conn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, true)
-		unix_conn.Close()
+		am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, true)
+		unixConn.Close()
 
 	case "sudo_approval":
-		var sudo_approval_req SudoApprovalRequest
-		if err := json.Unmarshal(buf[:n], &sudo_approval_req); err != nil {
-			log.Warn().Err(err).Msg("Invalid sudo_approval_request")
-			am.sendSudoApprovalResponse(unix_conn, sudo_approval_req, false, "Invalid sudo_approval_request")
-			unix_conn.Close()
-			return
-		}
-
-		am.mu.RLock()
-		session, exists := am.pidToSessionMap[sudo_approval_req.PPID]
-		am.mu.RUnlock()
-
-		if !exists {
-			// local user: save in localSudoRequests
-			sudo_approval_req.IsAlpconUser = false
-			sudo_approval_req.SessionID = ""
-
-			am.mu.Lock()
-			am.localSudoRequests[sudo_approval_req.RequestID] = &SudoRequest{
-				RequestID:  sudo_approval_req.RequestID,
-				Connection: unix_conn,
-			}
-			am.mu.Unlock()
-
-			log.Debug().Msgf("Local user sudo request: %s for user %s", sudo_approval_req.RequestID, sudo_approval_req.Username)
-		} else {
-			// Alpacon user: pidToSessionMap
-			sudo_approval_req.IsAlpconUser = true
-			sudo_approval_req.SessionID = session.SessionID
-
-			am.mu.Lock()
-			session.Requests[sudo_approval_req.RequestID] = &SudoRequest{
-				RequestID:  sudo_approval_req.RequestID,
-				Connection: unix_conn,
-			}
-			am.mu.Unlock()
-
-			log.Debug().Msgf("Alpacon user sudo request: %s for session %s", sudo_approval_req.RequestID, session.SessionID)
-		}
-
-		// Send Sudo Approval request to the alpacon-server with retry
-		if err := am.sendSudoRequestWithRetry(sudo_approval_req); err != nil {
-			log.Error().Err(err).Msg("Failed to send sudo_approval request after retries")
-			am.sendSudoApprovalResponse(unix_conn, sudo_approval_req, false, "Communication error")
-			am.cleanupTimeoutRequest(sudo_approval_req.RequestID, false, "Communication error")
-			unix_conn.Close()
-			return
-		}
-
-		log.Debug().Msgf("sudo_approval request sent to WebSocket client, waiting for response...")
-
-		// Connection will be closed when response arrives or on timeout
-		// Do not close here as it's managed by HandleSudoApprovalResponse or cleanupTimeoutRequest
-		select {
-		case <-time.After(30 * time.Second):
-			log.Warn().Msg("sudo_approval response timeout")
-			am.cleanupTimeoutRequest(sudo_approval_req.RequestID, false, "Response timeout")
-		case <-am.ctx.Done():
-			log.Debug().Msg("Context cancelled, cleaning up sudo_approval connection")
-			am.cleanupTimeoutRequest(sudo_approval_req.RequestID, false, "Service shutdown")
-			return
-		}
+		am.handleSudoApprovalRequest(buf[:n], unixConn)
 
 	default:
-		log.Warn().Str("type", requestType).Msg("Unknown request type")
-		unix_conn.Close()
+		log.Warn().Str("type", baseReq.Type).Msg("Unknown request type")
+		unixConn.Close()
 	}
+}
+
+func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn) {
+	var sudoApprovalReq SudoApprovalRequest
+	if err := json.Unmarshal(data, &sudoApprovalReq); err != nil {
+		log.Warn().Err(err).Msg("Invalid sudo_approval_request")
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Invalid sudo_approval_request")
+		unixConn.Close()
+		return
+	}
+
+	// Create completion channel to signal when response is received
+	completionChan := make(chan struct{})
+
+	am.mu.Lock()
+	session, exists := am.pidToSessionMap[sudoApprovalReq.PPID]
+	if !exists {
+		// local user: save in localSudoRequests
+		sudoApprovalReq.IsAlpconUser = false
+		sudoApprovalReq.SessionID = ""
+
+		am.localSudoRequests[sudoApprovalReq.RequestID] = &SudoRequest{
+			RequestID:  sudoApprovalReq.RequestID,
+			Connection: unixConn,
+		}
+		am.mu.Unlock()
+
+		log.Debug().Msgf("Local user sudo request: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
+	} else {
+		// Alpacon user: pidToSessionMap
+		sudoApprovalReq.IsAlpconUser = true
+		sudoApprovalReq.SessionID = session.SessionID
+
+		session.Requests[sudoApprovalReq.RequestID] = &SudoRequest{
+			RequestID:  sudoApprovalReq.RequestID,
+			Connection: unixConn,
+		}
+		am.mu.Unlock()
+
+		log.Debug().Msgf("Alpacon user sudo request: %s for session %s", sudoApprovalReq.RequestID, session.SessionID)
+	}
+
+	// Store completion channel for this request
+	am.storeCompletionChannel(sudoApprovalReq.RequestID, completionChan)
+
+	// Send Sudo Approval request to the alpacon-server with retry
+	if err := am.sendSudoRequestWithRetry(sudoApprovalReq); err != nil {
+		log.Error().Err(err).Msg("Failed to send sudo_approval request after retries")
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Communication error")
+		am.cleanupTimeoutRequest(sudoApprovalReq.RequestID, false, "Communication error")
+		am.removeCompletionChannel(sudoApprovalReq.RequestID)
+		unixConn.Close()
+		return
+	}
+
+	log.Debug().Msgf("sudo_approval request sent to WebSocket client, waiting for response...")
+
+	// Wait for response, timeout, or context cancellation
+	select {
+	case <-completionChan:
+		// Response received and processed by HandleSudoApprovalResponse
+		log.Debug().Msgf("sudo_approval response received for request %s", sudoApprovalReq.RequestID)
+	case <-time.After(30 * time.Second):
+		log.Warn().Msg("sudo_approval response timeout")
+		am.cleanupTimeoutRequest(sudoApprovalReq.RequestID, false, "Response timeout")
+	case <-am.ctx.Done():
+		log.Debug().Msg("Context cancelled, cleaning up sudo_approval connection")
+		am.cleanupTimeoutRequest(sudoApprovalReq.RequestID, false, "Service shutdown")
+	}
+	am.removeCompletionChannel(sudoApprovalReq.RequestID)
 }
 
 func (am *AuthManager) sendIsAlpconResponse(conn net.Conn, username, groupname string, pid, ppid int, isAlpconUser bool) {
@@ -443,6 +464,9 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 
 	sudoRequest.Connection.Close()
 
+	// Signal completion to unblock the waiting goroutine
+	am.signalCompletion(response.RequestID)
+
 	log.Info().Str("request_id", response.RequestID).Bool("approved", response.Approved).Msg("SudoApprovalResponse processed successfully")
 	return nil
 }
@@ -460,6 +484,32 @@ func (am *AuthManager) RemovePIDSessionMapping(pid int) {
 		log.Debug().Msgf("PID mapping removed: %d -> Session: %s", pid, session.SessionID)
 	}
 	am.mu.Unlock()
+}
+
+func (am *AuthManager) storeCompletionChannel(requestID string, ch chan struct{}) {
+	am.mu.Lock()
+	am.completionChannels[requestID] = ch
+	am.mu.Unlock()
+}
+
+func (am *AuthManager) removeCompletionChannel(requestID string) {
+	am.mu.Lock()
+	delete(am.completionChannels, requestID)
+	am.mu.Unlock()
+}
+
+func (am *AuthManager) signalCompletion(requestID string) {
+	am.mu.RLock()
+	ch, exists := am.completionChannels[requestID]
+	am.mu.RUnlock()
+
+	if exists {
+		select {
+		case ch <- struct{}{}:
+		default:
+			// Channel already signaled or closed
+		}
+	}
 }
 
 func (am *AuthManager) Stop() {
@@ -481,6 +531,7 @@ func (am *AuthManager) cleanupTimeoutRequest(requestID string, approved bool, re
 			am.mu.Unlock()
 			if req.Connection != nil {
 				am.sendSudoApprovalResponse(req.Connection, SudoApprovalRequest{RequestID: requestID}, approved, reason)
+				req.Connection.Close()
 			}
 			return
 		}
@@ -492,6 +543,7 @@ func (am *AuthManager) cleanupTimeoutRequest(requestID string, approved bool, re
 		am.mu.Unlock()
 		if req.Connection != nil {
 			am.sendSudoApprovalResponse(req.Connection, SudoApprovalRequest{RequestID: requestID}, approved, reason)
+			req.Connection.Close()
 		}
 		return
 	}

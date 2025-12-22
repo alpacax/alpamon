@@ -269,6 +269,11 @@ func (pc *PtyClient) resize(rows, cols uint16) error {
 // close terminates the PTY session and cleans up resources.
 // It ensures that the PTY, command, and WebSocket connection are properly closed.
 func (pc *PtyClient) close() {
+	// Remove PID-to-session mapping before cleaning up
+	if pc.cmd != nil && pc.cmd.Process != nil {
+		authManager.RemovePIDSessionMapping(pc.cmd.Process.Pid)
+	}
+
 	if pc.ptmx != nil {
 		_ = pc.ptmx.Close()
 	}
