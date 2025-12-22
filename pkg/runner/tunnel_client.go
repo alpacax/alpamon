@@ -124,20 +124,20 @@ func (tc *TunnelClient) connect() error {
 
 // handleStreams accepts and processes incoming smux streams from the server.
 func (tc *TunnelClient) handleStreams() {
-	for {
-		select {
-		case <-tc.ctx.Done():
-			return
-		default:
-			stream, err := tc.session.AcceptStream()
-			if err != nil {
-				log.Debug().Err(err).Msgf("Tunnel session %s closed.", tc.sessionID)
-				return
-			}
+    for {
+        stream, err := tc.session.AcceptStream()
 
-			go tc.handleStream(stream)
-		}
-	}
+        if err != nil {
+            select {
+            case <-tc.ctx.Done():
+                return
+            default:
+                log.Debug().Err(err).Msgf("Tunnel session %s closed.", tc.sessionID)
+                return
+            }
+        }
+        go tc.handleStream(stream)
+    }
 }
 
 // handleStream processes a single smux stream by spawning a worker subprocess
