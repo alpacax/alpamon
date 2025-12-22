@@ -25,6 +25,9 @@ var (
 	activeTunnelsMu sync.RWMutex
 )
 
+// maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
+const maxMetadataSize = 1024
+
 // streamMetadata contains the target port information sent by the server.
 type streamMetadata struct {
 	RemotePort string `json:"remote_port"`
@@ -136,9 +139,6 @@ func (tc *TunnelClient) handleStreams() {
 		}
 	}
 }
-
-// maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
-const maxMetadataSize = 1024
 
 // handleStream processes a single smux stream by spawning a worker subprocess
 // with user credentials to connect to the local service.
