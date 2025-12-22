@@ -31,7 +31,8 @@ import (
 )
 
 const (
-	fileUploadTimeout = 60 * 10
+	fileUploadTimeout   = 60 * 10
+	serverUnregisterURL = "/api/servers/servers/-/unregister/"
 )
 
 func init() {
@@ -133,6 +134,7 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 	case "moduser":
 		return cr.modUser()
 	case "ping":
+		_ = cr.wsClient.SendPongResponse()
 		return 0, time.Now().Format(time.RFC3339)
 	case "download":
 		return cr.runFileDownload(args[1])
@@ -2165,25 +2167,35 @@ func (cr *CommandRunner) applyRulesBatchWithFlush() (int, []map[string]interface
 
 // executeUninstall performs complete uninstallation of Alpamon
 func (cr *CommandRunner) executeUninstall() {
-	var cmd string
-
+	// Only debian and rhel support systemd-run based uninstall
 	if utils.PlatformLike == "debian" {
-		// Use purge to remove package and config files
-		cmd = "apt-get purge alpamon -y && apt-get autoremove -y"
+		cmd := "apt-get purge alpamon -y && apt-get autoremove -y"
+		cr.scheduleSystemdUninstall(cmd)
 	} else if utils.PlatformLike == "rhel" {
-		// Remove package using yum
-		cmd = "yum remove alpamon -y"
+		cmd := "yum remove alpamon -y"
+		cr.scheduleSystemdUninstall(cmd)
 	} else if utils.PlatformLike == "darwin" {
-		// For macOS development environment, just shutdown
 		log.Warn().Msgf("Platform '%s' does not support full uninstall. Shutting down instead.", utils.PlatformLike)
-		cr.wsClient.ShutDown()
-		return
 	} else {
 		log.Error().Msgf("Platform '%s' not supported for uninstall.", utils.PlatformLike)
-		cr.wsClient.ShutDown()
-		return
 	}
 
+	// Send deletion event to server synchronously before shutdown (ALL platforms)
+	_, statusCode, err := cr.apiSession.Delete(serverUnregisterURL, nil, 10)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to send unregister request to server")
+	} else if statusCode >= 200 && statusCode < 300 {
+		log.Info().Msgf("Successfully sent unregister request to server (status: %d)", statusCode)
+	} else {
+		log.Warn().Msgf("Unregister request returned status: %d", statusCode)
+	}
+
+	// ShutDown asynchronously to ensure cleanup completes (ALL platforms)
+	go cr.wsClient.ShutDown()
+}
+
+// scheduleSystemdUninstall schedules the uninstall command via systemd-run
+func (cr *CommandRunner) scheduleSystemdUninstall(cmd string) {
 	// Build the complete uninstall command that includes:
 	// 1. Package removal
 	// 2. Cleanup of transient systemd units created by this operation
@@ -2211,9 +2223,6 @@ func (cr *CommandRunner) executeUninstall() {
 	} else {
 		log.Info().Msg("Alpamon uninstall scheduled via systemd, will execute in 5 seconds")
 	}
-
-	// The scheduled systemd service will continue independently
-	cr.wsClient.ShutDown()
 }
 
 // convertRuleDataToCommandData converts rule data map to CommandData fields
