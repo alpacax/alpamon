@@ -187,11 +187,16 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 
 	log.Debug().Msgf("Tunnel worker spawned for %s.", targetAddr)
 
-	// Create combined reader: remaining buffered data + original stream
-	// This is needed because bufReader may have buffered data beyond metadata
-	remainingBuf := make([]byte, bufReader.Buffered())
-	_, _ = bufReader.Read(remainingBuf)
-	dataReader := io.MultiReader(bytes.NewReader(remainingBuf), stream)
+	bufferedSize := bufReader.Buffered()
+	remainingBuf := make([]byte, bufferedSize)
+
+	n, err := io.ReadFull(bufReader, remainingBuf)
+	if err != nil && err != io.EOF {
+		log.Error().Err(err).Msg("Failed to read remaining buffered data from bufReader")
+		return
+	}
+
+	dataReader := io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
 
 	// Bidirectional relay: stream <-> subprocess
 	errChan := make(chan error, 2)
