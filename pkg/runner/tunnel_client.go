@@ -21,9 +21,14 @@ import (
 
 // activeTunnels tracks all active tunnel connections by session ID.
 var (
-	activeTunnels     = make(map[string]*TunnelClient)
-	activeTunnelsMu   sync.RWMutex
+	activeTunnels   = make(map[string]*TunnelClient)
+	activeTunnelsMu sync.RWMutex
 )
+
+// streamMetadata contains the target port information sent by the server.
+type streamMetadata struct {
+	RemotePort string `json:"remote_port"`
+}
 
 // TunnelClient manages the smux-multiplexed tunnel connection to the proxy server.
 // It accepts streams from the server and relays them to local services.
@@ -130,11 +135,6 @@ func (tc *TunnelClient) handleStreams() {
 			go tc.handleStream(stream)
 		}
 	}
-}
-
-// streamMetadata contains the target port information sent by the server.
-type streamMetadata struct {
-	RemotePort string `json:"remote_port"`
 }
 
 // maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.

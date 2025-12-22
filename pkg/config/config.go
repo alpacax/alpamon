@@ -19,18 +19,25 @@ var (
 )
 
 const (
-	MinConnectInterval = 5 * time.Second
-	MaxConnectInterval = 300 * time.Second
+	MinConnectInterval    = 5 * time.Second
+	MaxConnectInterval    = 300 * time.Second
+	SmuxKeepAliveInterval = 10 * time.Second
+	SmuxKeepAliveTimeout  = 30 * time.Second
+	SmuxMaxFrameSize      = 32768   // 32KB
+	SmuxMaxReceiveBuffer  = 4194304 // 4MB
+	SmuxMaxStreamBuffer   = 65536   // 64KB per stream
 )
 
 // GetSmuxConfig returns optimized smux configuration for tunnel connections.
 func GetSmuxConfig() *smux.Config {
 	cfg := smux.DefaultConfig()
-	cfg.KeepAliveInterval = 10 * time.Second
-	cfg.KeepAliveTimeout = 30 * time.Second
-	cfg.MaxFrameSize = 32768   // 32KB
-	cfg.MaxReceiveBuffer = 4194304 // 4MB
-	cfg.MaxStreamBuffer = 65536    // 64KB per stream
+
+	cfg.KeepAliveInterval = SmuxKeepAliveInterval
+	cfg.KeepAliveTimeout = SmuxKeepAliveTimeout
+	cfg.MaxFrameSize = SmuxMaxFrameSize
+	cfg.MaxReceiveBuffer = SmuxMaxReceiveBuffer
+	cfg.MaxStreamBuffer = SmuxMaxStreamBuffer
+
 	return cfg
 }
 
