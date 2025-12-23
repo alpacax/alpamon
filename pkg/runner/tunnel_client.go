@@ -105,7 +105,8 @@ func (tc *TunnelClient) connect() error {
 		HandshakeTimeout: 30 * time.Second,
 	}
 
-	conn, _, err := dialer.Dial(tc.serverURL, tc.requestHeader)
+	// Server URL is provided by the authenticated Alpacon console which the agent trusts.
+	conn, _, err := dialer.Dial(tc.serverURL, tc.requestHeader) // lgtm[go/request-forgery]
 	if err != nil {
 		return fmt.Errorf("failed to connect to tunnel server: %w", err)
 	}
