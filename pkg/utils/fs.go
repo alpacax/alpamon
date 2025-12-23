@@ -52,6 +52,45 @@ func CopyDir(src, dst string, allowOverwrite bool) error {
 		return fmt.Errorf("%s is inside %s, causing infinite recursion", dst, src)
 	}
 
+	// Check if dst already exists and allowOverwrite is true
+	var backupPath string
+	if _, err := os.Stat(dst); err == nil && allowOverwrite {
+		// Create backup by renaming existing dst
+		backupPath = generateBackupPath(dst)
+		if err := os.Rename(dst, backupPath); err != nil {
+			return fmt.Errorf("failed to backup existing directory: %w", err)
+		}
+	}
+
+	// Perform the actual copy
+	err = copyDirRecursive(src, dst)
+	if err != nil {
+		// Rollback: restore backup if exists
+		if backupPath != "" {
+			_ = os.RemoveAll(dst)
+			_ = os.Rename(backupPath, dst)
+		}
+		return err
+	}
+
+	// Success: remove backup if exists
+	if backupPath != "" {
+		_ = os.RemoveAll(backupPath)
+	}
+
+	return nil
+}
+
+func generateBackupPath(path string) string {
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s_backup_%d", path, i)
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+}
+
+func copyDirRecursive(src, dst string) error {
 	srcInfo, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -72,12 +111,12 @@ func CopyDir(src, dst string, allowOverwrite bool) error {
 		dstPath := filepath.Join(dst, entry.Name())
 
 		if entry.IsDir() {
-			err = CopyDir(srcPath, dstPath, allowOverwrite)
+			err = copyDirRecursive(srcPath, dstPath)
 			if err != nil {
 				return err
 			}
 		} else {
-			err = CopyFile(srcPath, dstPath, allowOverwrite)
+			err = CopyFile(srcPath, dstPath, true)
 			if err != nil {
 				return err
 			}

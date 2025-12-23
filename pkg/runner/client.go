@@ -70,9 +70,6 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 				wc.CloseAndReconnect(ctx)
 				continue
 			}
-			// Sends "ping" query for Alpacon to verify WebSocket session status without error handling.
-			_ = wc.SendPingQuery()
-
 			wc.CommandRequestHandler(message)
 		}
 	}
@@ -86,6 +83,14 @@ func (wc *WebsocketClient) SendPingQuery() error {
 	}
 
 	return nil
+}
+
+func (wc *WebsocketClient) SendPongResponse() error {
+	pongResponse := map[string]string{
+		"query":     "pong",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	}
+	return wc.WriteJSON(pongResponse)
 }
 
 func (wc *WebsocketClient) ReadMessage() (messageType int, message []byte, err error) {
@@ -222,6 +227,10 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 	}
 
 	switch content.Query {
+	case "ping":
+		if err := wc.SendPongResponse(); err != nil {
+			log.Debug().Err(err).Msg("Failed to send pong response.")
+		}
 	case "command":
 		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandAckURL, content.Command.ID),
 			nil,
