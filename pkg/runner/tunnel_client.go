@@ -22,14 +22,14 @@ import (
 	"github.com/xtaci/smux"
 )
 
+// maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
+const maxMetadataSize = 1024
+
 // activeTunnels tracks all active tunnel connections by session ID.
 var (
 	activeTunnels   = make(map[string]*TunnelClient)
 	activeTunnelsMu sync.RWMutex
 )
-
-// maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
-const maxMetadataSize = 1024
 
 // streamMetadata contains the target port information sent by the server.
 type streamMetadata struct {
