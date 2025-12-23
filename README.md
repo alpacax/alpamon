@@ -225,3 +225,21 @@ alpamon.service - alpamon agent for Alpacon
      Loaded: loaded (/lib/systemd/system/alpamon.service; enabled; vendor preset: enabled)
      Active: active (running) since Thu 2023-09-28 23:48:55 KST; 4 days ago
 ```
+
+### Logs
+
+Alpamon logs are managed by systemd's journald. Use the following commands to view logs:
+
+```bash
+# View all logs
+journalctl -u alpamon
+
+# Follow logs in real-time
+journalctl -u alpamon -f
+
+# View logs since today
+journalctl -u alpamon --since today
+
+# View recent logs (last 100 lines)
+journalctl -u alpamon -n 100
+```
