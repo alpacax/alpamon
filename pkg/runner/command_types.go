@@ -84,8 +84,8 @@ type CommandData struct {
 	AssignmentID            string                   `json:"assignment_id"`
 	ServerID                string                   `json:"server_id"`
 	ChainNames              []string                 `json:"chain_names"` // for firewall-reorder-chains
-	TargetPort              int                      `json:"target_port"` // for tunneling (cli/web type)
-	ClientType              string                   `json:"client_type"` // for tunneling: cli, web, editor
+	TargetPort              int                      `json:"target_port"`  // for tunneling (cli/web type)
+	ClientType              string                   `json:"client_type"`  // for tunneling: cli, web, editor
 }
 
 type firewallData struct {
