@@ -213,8 +213,6 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 			if cr.data.Username == "" || cr.data.Groupname == "" {
 				return 1, "opentunnel: Username and groupname are required for editor type."
 			}
-		default:
-			return 1, fmt.Sprintf("opentunnel: Invalid client type %s. Must be cli, web, or editor.", cr.data.ClientType)
 		}
 
 		// Check if tunnel already exists

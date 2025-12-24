@@ -58,11 +58,7 @@ func NewCodeServerManager(username, groupname string) (*CodeServerManager, error
 		if err != nil {
 			return nil, fmt.Errorf("failed to get current user: %w", err)
 		}
-		username = usr.Username
-		groupname = usr.Gid
-		log.Debug().
-			Str("user", username).
-			Msg("macOS: using current user for code-server")
+		log.Debug().Msg("macOS: skipping credential demotion")
 	} else {
 		usr, err = user.Lookup(username)
 		if err != nil {
