@@ -123,11 +123,7 @@ func (tc *TunnelClient) startCodeServer() error {
 	tc.codeServerMgr = mgr
 	tc.targetPort = mgr.Port()
 
-	log.Info().
-		Int("port", tc.targetPort).
-		Str("user", tc.username).
-		Str("session", tc.sessionID).
-		Msg("code-server ready for tunneling.")
+	log.Info().Msgf("code-server ready for tunneling on port %d (user: %s, session: %s).", tc.targetPort, tc.username, tc.sessionID)
 
 	return nil
 }
@@ -207,7 +203,7 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	if metadata.RemotePort != "" {
 		port, err := strconv.Atoi(metadata.RemotePort)
 		if err != nil || port < 1 || port > 65535 {
-			log.Debug().Str("remotePort", metadata.RemotePort).Msg("Invalid remote port in metadata.")
+			log.Debug().Msgf("Invalid remote port in metadata: %s.", metadata.RemotePort)
 			return
 		}
 		targetPort = metadata.RemotePort

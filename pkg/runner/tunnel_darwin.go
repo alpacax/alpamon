@@ -37,9 +37,7 @@ func spawnTunnelWorker(targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadClo
 		return nil, nil, nil, fmt.Errorf("failed to start tunnel worker: %w", err)
 	}
 
-	log.Debug().
-		Str("targetAddr", targetAddr).
-		Msg("Spawned tunnel worker subprocess (macOS - runs as current user).")
+	log.Debug().Msgf("Spawned tunnel worker subprocess for %s (macOS - runs as current user).", targetAddr)
 
 	return cmd, stdinPipe, stdoutPipe, nil
 }
@@ -67,9 +65,7 @@ func startCodeServerProcess(port int, username, groupname, homeDir string) (*exe
 		return nil, fmt.Errorf("failed to start code-server: %w", err)
 	}
 
-	log.Info().
-		Int("port", port).
-		Msg("code-server process started (macOS - runs as current user).")
+	log.Info().Msgf("code-server process started on port %d (macOS - runs as current user).", port)
 
 	return cmd, nil
 }

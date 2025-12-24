@@ -125,10 +125,7 @@ func (m *CodeServerManager) Start() error {
 	}
 
 	m.started = true
-	log.Info().
-		Int("port", m.port).
-		Str("user", m.username).
-		Msg("code-server started successfully.")
+	log.Info().Msgf("code-server started successfully on port %d for user %s.", m.port, m.username)
 
 	return nil
 }
@@ -147,7 +144,7 @@ func (m *CodeServerManager) stopProcess() error {
 		return nil
 	}
 
-	log.Info().Int("port", m.port).Msg("Stopping code-server...")
+	log.Info().Msgf("Stopping code-server on port %d...", m.port)
 
 	if m.cancel != nil {
 		m.cancel()

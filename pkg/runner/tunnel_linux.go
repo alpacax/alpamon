@@ -77,9 +77,7 @@ func spawnTunnelWorker(targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadClo
 		return nil, nil, nil, fmt.Errorf("failed to start tunnel worker: %w", err)
 	}
 
-	log.Debug().
-		Str("targetAddr", targetAddr).
-		Msg("Spawned tunnel worker subprocess as nobody user.")
+	log.Debug().Msgf("Spawned tunnel worker subprocess as nobody user for %s.", targetAddr)
 
 	return cmd, stdinPipe, stdoutPipe, nil
 }
@@ -117,11 +115,7 @@ func startCodeServerProcess(port int, username, groupname, homeDir string) (*exe
 		return nil, fmt.Errorf("failed to start code-server: %w", err)
 	}
 
-	log.Info().
-		Str("user", username).
-		Str("group", groupname).
-		Int("port", port).
-		Msg("code-server process started.")
+	log.Info().Msgf("code-server process started on port %d (user: %s, group: %s).", port, username, groupname)
 
 	return cmd, nil
 }
@@ -168,10 +162,7 @@ func getCodeServerCredential(username, groupname string) (*syscall.SysProcAttr, 
 		groups = append(groups, uint32(gidUint))
 	}
 
-	log.Debug().
-		Str("user", username).
-		Str("group", groupname).
-		Msg("Demoting code-server to user.")
+	log.Debug().Msgf("Demoting code-server to user %s (group: %s).", username, groupname)
 
 	return &syscall.SysProcAttr{
 		Credential: &syscall.Credential{
