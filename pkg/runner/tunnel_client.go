@@ -6,9 +6,12 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -19,11 +22,19 @@ import (
 	"github.com/xtaci/smux"
 )
 
+// maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
+const maxMetadataSize = 1024
+
 // activeTunnels tracks all active tunnel connections by session ID.
 var (
 	activeTunnels   = make(map[string]*TunnelClient)
 	activeTunnelsMu sync.RWMutex
 )
+
+// streamMetadata contains the target port information sent by the server.
+type streamMetadata struct {
+	RemotePort string `json:"remote_port"`
+}
 
 // TunnelClient manages the smux-multiplexed tunnel connection to the proxy server.
 // It accepts streams from the server and relays them to local services.
@@ -132,7 +143,8 @@ func (tc *TunnelClient) connect() error {
 		HandshakeTimeout: 30 * time.Second,
 	}
 
-	conn, _, err := dialer.Dial(tc.serverURL, tc.requestHeader)
+	// Server URL is provided by the authenticated Alpacon console which the agent trusts.
+	conn, _, err := dialer.Dial(tc.serverURL, tc.requestHeader) // lgtm[go/request-forgery]
 	if err != nil {
 		return fmt.Errorf("failed to connect to tunnel server: %w", err)
 	}
@@ -155,28 +167,20 @@ func (tc *TunnelClient) connect() error {
 // handleStreams accepts and processes incoming smux streams from the server.
 func (tc *TunnelClient) handleStreams() {
 	for {
-		select {
-		case <-tc.ctx.Done():
-			return
-		default:
-			stream, err := tc.session.AcceptStream()
-			if err != nil {
+		stream, err := tc.session.AcceptStream()
+
+		if err != nil {
+			select {
+			case <-tc.ctx.Done():
+				return
+			default:
 				log.Debug().Err(err).Msgf("Tunnel session %s closed.", tc.sessionID)
 				return
 			}
-
-			go tc.handleStream(stream)
 		}
+		go tc.handleStream(stream)
 	}
 }
-
-// streamMetadata contains the target port information sent by the server.
-type streamMetadata struct {
-	RemotePort string `json:"remote_port"`
-}
-
-// maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
-const maxMetadataSize = 1024
 
 // handleStream processes a single smux stream by spawning a worker subprocess
 // with user credentials to connect to the local service.
@@ -199,8 +203,15 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	}
 
 	// Use target port from tunnel configuration if not specified in metadata
-	targetPort := metadata.RemotePort
-	if targetPort == "" {
+	var targetPort string
+	if metadata.RemotePort != "" {
+		port, err := strconv.Atoi(metadata.RemotePort)
+		if err != nil || port < 1 || port > 65535 {
+			log.Debug().Str("remotePort", metadata.RemotePort).Msg("Invalid remote port in metadata.")
+			return
+		}
+		targetPort = metadata.RemotePort
+	} else {
 		targetPort = fmt.Sprintf("%d", tc.targetPort)
 	}
 
@@ -217,7 +228,9 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 		stdinPipe.Close()
 		if cmd.Process != nil {
 			if err := cmd.Process.Kill(); err != nil {
-				log.Debug().Err(err).Msg("Failed to kill tunnel worker process.")
+				if !errors.Is(err, os.ErrProcessDone) {
+					log.Debug().Err(err).Msg("Failed to kill tunnel worker process.")
+				}
 			}
 		}
 		_ = cmd.Wait()
@@ -225,11 +238,16 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 
 	log.Debug().Msgf("Tunnel worker spawned for %s.", targetAddr)
 
-	// Create combined reader: remaining buffered data + original stream
-	// This is needed because bufReader may have buffered data beyond metadata
-	remainingBuf := make([]byte, bufReader.Buffered())
-	_, _ = bufReader.Read(remainingBuf)
-	dataReader := io.MultiReader(bytes.NewReader(remainingBuf), stream)
+	bufferedSize := bufReader.Buffered()
+	remainingBuf := make([]byte, bufferedSize)
+
+	n, err := io.ReadFull(bufReader, remainingBuf)
+	if err != nil && err != io.EOF {
+		log.Error().Err(err).Msg("Failed to read remaining buffered data from bufReader")
+		return
+	}
+
+	dataReader := io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
 
 	// Bidirectional relay: stream <-> subprocess
 	errChan := make(chan error, 2)
@@ -267,7 +285,6 @@ func (tc *TunnelClient) Close() {
 	}
 	if tc.session != nil {
 		_ = tc.session.Close()
-		tc.session = nil
 	}
 	if tc.wsConn != nil {
 		_ = tc.wsConn.WriteControl(
@@ -276,19 +293,20 @@ func (tc *TunnelClient) Close() {
 			time.Now().Add(5*time.Second),
 		)
 		_ = tc.wsConn.Close()
-		tc.wsConn = nil
 	}
 }
 
 // CloseTunnel closes an active tunnel by session ID.
 func CloseTunnel(sessionID string) error {
-	activeTunnelsMu.RLock()
+	activeTunnelsMu.Lock()
 	tc, exists := activeTunnels[sessionID]
-	activeTunnelsMu.RUnlock()
-
 	if !exists {
+		activeTunnelsMu.Unlock()
 		return fmt.Errorf("tunnel session %s not found", sessionID)
 	}
+	// Remove from active tunnels under lock to prevent race condition with defer cleanup
+	delete(activeTunnels, sessionID)
+	activeTunnelsMu.Unlock()
 
 	tc.Close()
 	return nil

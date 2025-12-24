@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"io"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
@@ -11,6 +12,7 @@ import (
 type WebSocketConn struct {
 	conn       *websocket.Conn
 	readBuffer []byte
+	writeMu    sync.Mutex
 }
 
 // NewWebSocketConn creates a new WebSocket to io.ReadWriteCloser adapter.
@@ -46,7 +48,10 @@ func (w *WebSocketConn) Read(b []byte) (int, error) {
 }
 
 // Write writes data to the WebSocket connection as a binary message.
+// The write is protected by a mutex to ensure thread safety for concurrent calls from multiple smux streams.
 func (w *WebSocketConn) Write(b []byte) (int, error) {
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
 	err := w.conn.WriteMessage(websocket.BinaryMessage, b)
 	if err != nil {
 		return 0, err
