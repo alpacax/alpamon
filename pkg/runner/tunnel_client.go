@@ -91,7 +91,7 @@ func (tc *TunnelClient) RunTunnelBackground() {
 	}()
 
 	// For editor type, start code-server first
-	if tc.clientType == "editor" {
+	if tc.clientType == ClientTypeEditor {
 		if err := tc.startCodeServer(); err != nil {
 			log.Error().Err(err).Msgf("Failed to start code-server for session %s.", tc.sessionID)
 			return

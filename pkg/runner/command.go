@@ -205,11 +205,11 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 
 		// Additional validation based on client type
 		switch cr.data.ClientType {
-		case "cli", "web":
+		case ClientTypeCLI, ClientTypeWeb:
 			if cr.data.TargetPort < 1 || cr.data.TargetPort > 65535 {
 				return 1, fmt.Sprintf("opentunnel: Invalid target port %d. Must be between 1 and 65535.", cr.data.TargetPort)
 			}
-		case "editor":
+		case ClientTypeEditor:
 			if cr.data.Username == "" || cr.data.Groupname == "" {
 				return 1, "opentunnel: Username and groupname are required for editor type."
 			}

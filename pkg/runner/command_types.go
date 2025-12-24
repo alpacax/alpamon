@@ -5,6 +5,12 @@ import (
 	"gopkg.in/go-playground/validator.v9"
 )
 
+const (
+	ClientTypeCLI    = "cli"
+	ClientTypeWeb    = "web"
+	ClientTypeEditor = "editor"
+)
+
 type Content struct {
 	Query   string  `json:"query"`
 	Command Command `json:"command,omitempty"`
