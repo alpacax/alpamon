@@ -21,8 +21,8 @@ import (
 
 // activeTunnels tracks all active tunnel connections by session ID.
 var (
-	activeTunnels     = make(map[string]*TunnelClient)
-	activeTunnelsMu   sync.RWMutex
+	activeTunnels   = make(map[string]*TunnelClient)
+	activeTunnelsMu sync.RWMutex
 )
 
 // TunnelClient manages the smux-multiplexed tunnel connection to the proxy server.
@@ -39,6 +39,7 @@ type TunnelClient struct {
 	session       *smux.Session
 	ctx           context.Context
 	cancel        context.CancelFunc
+	codeServerMgr *CodeServerManager // for editor type
 }
 
 // NewTunnelClient creates a new tunnel client for the given WebSocket URL.
@@ -78,6 +79,14 @@ func (tc *TunnelClient) RunTunnelBackground() {
 		tc.Close()
 	}()
 
+	// For editor type, start code-server first
+	if tc.clientType == "editor" {
+		if err := tc.startCodeServer(); err != nil {
+			log.Error().Err(err).Msgf("Failed to start code-server for session %s.", tc.sessionID)
+			return
+		}
+	}
+
 	// Connect and run
 	if err := tc.connect(); err != nil {
 		log.Error().Err(err).Msgf("Tunnel connection failed for session %s.", tc.sessionID)
@@ -87,6 +96,29 @@ func (tc *TunnelClient) RunTunnelBackground() {
 	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort)
 	tc.handleStreams()
 	log.Info().Msgf("Tunnel session %s ended.", tc.sessionID)
+}
+
+// startCodeServer initializes and starts code-server for editor tunneling.
+func (tc *TunnelClient) startCodeServer() error {
+	mgr, err := NewCodeServerManager(tc.username, tc.groupname)
+	if err != nil {
+		return fmt.Errorf("failed to create code-server manager: %w", err)
+	}
+
+	if err := mgr.Start(); err != nil {
+		return fmt.Errorf("failed to start code-server: %w", err)
+	}
+
+	tc.codeServerMgr = mgr
+	tc.targetPort = mgr.Port()
+
+	log.Info().
+		Int("port", tc.targetPort).
+		Str("user", tc.username).
+		Str("session", tc.sessionID).
+		Msg("code-server ready for tunneling.")
+
+	return nil
 }
 
 // connect establishes WebSocket connection and creates smux session.
@@ -222,6 +254,14 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 
 // Close cleanly shuts down the tunnel connection.
 func (tc *TunnelClient) Close() {
+	// Stop code-server first (for editor type)
+	if tc.codeServerMgr != nil {
+		if err := tc.codeServerMgr.Stop(); err != nil {
+			log.Debug().Err(err).Msg("Failed to stop code-server.")
+		}
+		tc.codeServerMgr = nil
+	}
+
 	if tc.cancel != nil {
 		tc.cancel()
 	}

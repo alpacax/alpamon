@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -81,4 +82,102 @@ func spawnTunnelWorker(targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadClo
 		Msg("Spawned tunnel worker subprocess as nobody user.")
 
 	return cmd, stdinPipe, stdoutPipe, nil
+}
+
+// startCodeServerProcess starts code-server with user credentials on Linux.
+// If running as root, the process is demoted to the specified user.
+func startCodeServerProcess(port int, username, groupname, homeDir string) (*exec.Cmd, error) {
+	codeServerPath, err := getCodeServerPath()
+	if err != nil {
+		return nil, err
+	}
+
+	args := getCodeServerArgs(port)
+	cmd := exec.Command(codeServerPath, args...)
+	cmd.Dir = homeDir
+
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("HOME=%s", homeDir),
+		fmt.Sprintf("XDG_DATA_HOME=%s", filepath.Join(homeDir, ".local", "share")),
+		fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(homeDir, ".config")),
+	)
+
+	sysProcAttr, err := getCodeServerCredential(username, groupname)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user credentials: %w", err)
+	}
+	if sysProcAttr != nil {
+		cmd.SysProcAttr = sysProcAttr
+	}
+
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start code-server: %w", err)
+	}
+
+	log.Info().
+		Str("user", username).
+		Str("group", groupname).
+		Int("port", port).
+		Msg("code-server process started.")
+
+	return cmd, nil
+}
+
+// getCodeServerCredential returns SysProcAttr for running code-server as the specified user.
+func getCodeServerCredential(username, groupname string) (*syscall.SysProcAttr, error) {
+	currentUid := os.Getuid()
+	if currentUid != 0 {
+		log.Debug().Msg("Alpamon is not running as root. code-server will run as current user.")
+		return nil, nil
+	}
+
+	usr, err := user.Lookup(username)
+	if err != nil {
+		return nil, fmt.Errorf("user %s not found: %w", username, err)
+	}
+
+	group, err := user.LookupGroup(groupname)
+	if err != nil {
+		return nil, fmt.Errorf("group %s not found: %w", groupname, err)
+	}
+
+	uid, err := strconv.ParseUint(usr.Uid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("invalid uid: %w", err)
+	}
+
+	gid, err := strconv.ParseUint(group.Gid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gid: %w", err)
+	}
+
+	groupIds, err := usr.GroupIds()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group ids: %w", err)
+	}
+
+	groups := make([]uint32, 0, len(groupIds))
+	for _, gidStr := range groupIds {
+		gidUint, err := strconv.ParseUint(gidStr, 10, 32)
+		if err != nil {
+			continue
+		}
+		groups = append(groups, uint32(gidUint))
+	}
+
+	log.Debug().
+		Str("user", username).
+		Str("group", groupname).
+		Msg("Demoting code-server to user.")
+
+	return &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    uint32(uid),
+			Gid:    uint32(gid),
+			Groups: groups,
+		},
+	}, nil
 }
