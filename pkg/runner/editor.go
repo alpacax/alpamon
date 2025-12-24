@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -48,14 +49,30 @@ type CodeServerManager struct {
 }
 
 func NewCodeServerManager(username, groupname string) (*CodeServerManager, error) {
-	usr, err := user.Lookup(username)
-	if err != nil {
-		return nil, fmt.Errorf("user %s not found: %w", username, err)
-	}
+	var usr *user.User
+	var err error
 
-	_, err = user.LookupGroup(groupname)
-	if err != nil {
-		return nil, fmt.Errorf("group %s not found: %w", groupname, err)
+	// On macOS, use current user since credential demotion is not supported
+	if runtime.GOOS == "darwin" {
+		usr, err = user.Current()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current user: %w", err)
+		}
+		username = usr.Username
+		groupname = usr.Gid
+		log.Debug().
+			Str("user", username).
+			Msg("macOS: using current user for code-server")
+	} else {
+		usr, err = user.Lookup(username)
+		if err != nil {
+			return nil, fmt.Errorf("user %s not found: %w", username, err)
+		}
+
+		_, err = user.LookupGroup(groupname)
+		if err != nil {
+			return nil, fmt.Errorf("group %s not found: %w", groupname, err)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
