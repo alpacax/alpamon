@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,16 +27,19 @@ func TestFindAvailablePortUnique(t *testing.T) {
 }
 
 func TestGetCodeServerArgs(t *testing.T) {
-	args := getCodeServerArgs(8080)
+	userDataDir := "/tmp/test-user-data"
+	args := getCodeServerArgs(8080, userDataDir)
 
-	assert.Contains(t, args, "--auth", "Args should contain --auth")
-	assert.Contains(t, args, "none", "Auth should be none")
+	assert.Contains(t, args, "--config", "Args should contain --config")
+	assert.Contains(t, args, "--user-data-dir", "Args should contain --user-data-dir")
+	assert.Contains(t, args, userDataDir, "Args should contain user data dir path")
 	assert.Contains(t, args, "--bind-addr", "Args should contain --bind-addr")
 	assert.Contains(t, args, "127.0.0.1:8080", "Bind address should be 127.0.0.1:8080")
-	assert.Contains(t, args, "--disable-telemetry", "Args should contain --disable-telemetry")
+	assert.Contains(t, args, "--idle-timeout-seconds", "Args should contain --idle-timeout-seconds")
 }
 
 func TestGetCodeServerArgsDifferentPorts(t *testing.T) {
+	userDataDir := "/tmp/test-user-data"
 	testCases := []struct {
 		port     int
 		expected string
@@ -45,7 +50,7 @@ func TestGetCodeServerArgsDifferentPorts(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		args := getCodeServerArgs(tc.port)
+		args := getCodeServerArgs(tc.port, userDataDir)
 		assert.Contains(t, args, tc.expected, "Bind address should match port")
 	}
 }
@@ -70,110 +75,74 @@ func TestGetCodeServerPath(t *testing.T) {
 	}
 }
 
-func TestFindProductJSONPath(t *testing.T) {
-	// This test verifies function behavior
-	// If code-server is installed, it should find the product.json path
-	if isCodeServerInstalled() {
-		path, err := findProductJSONPath()
-		assert.NoError(t, err, "Should find product.json when code-server is installed")
-		assert.NotEmpty(t, path, "Path should not be empty")
-		assert.Contains(t, path, "product.json", "Path should contain product.json")
+func TestSetupUserDataDir(t *testing.T) {
+	// Create a temporary directory for testing
+	tempDir := t.TempDir()
 
-		// Verify file exists
-		_, err = os.Stat(path)
-		assert.NoError(t, err, "product.json file should exist at returned path")
-	} else {
-		_, err := findProductJSONPath()
-		assert.Error(t, err, "Should error when code-server is not installed")
-	}
+	// Call setupUserDataDir
+	userDataDir, err := setupUserDataDir(tempDir)
+	assert.NoError(t, err, "setupUserDataDir should not error")
+	assert.NotEmpty(t, userDataDir, "userDataDir should not be empty")
+
+	// Verify user data directory was created
+	expectedUserDataDir := filepath.Join(tempDir, userDataDirName)
+	assert.Equal(t, expectedUserDataDir, userDataDir)
+	_, err = os.Stat(userDataDir)
+	assert.NoError(t, err, "User data directory should exist")
+
+	// Verify config.yaml was created
+	configPath := filepath.Join(userDataDir, "config.yaml")
+	configData, err := os.ReadFile(configPath)
+	assert.NoError(t, err, "config.yaml should exist and be readable")
+	assert.Contains(t, string(configData), "auth: none", "config.yaml should contain auth: none")
+	assert.Contains(t, string(configData), "disable-telemetry: true", "config.yaml should contain disable-telemetry")
+	assert.Contains(t, string(configData), "disable-update-check: true", "config.yaml should contain disable-update-check")
+
+	// Verify User subdirectory was created
+	userDir := filepath.Join(userDataDir, "User")
+	_, err = os.Stat(userDir)
+	assert.NoError(t, err, "User subdirectory should exist")
+
+	// Verify settings.json was created
+	settingsPath := filepath.Join(userDir, "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	assert.NoError(t, err, "settings.json should exist and be readable")
+
+	// Verify settings.json content
+	var settings map[string]interface{}
+	err = json.Unmarshal(data, &settings)
+	assert.NoError(t, err, "settings.json should be valid JSON")
+
+	assert.Equal(t, defaultColorTheme, settings["workbench.colorTheme"], "colorTheme should be dark")
+	assert.Equal(t, "none", settings["workbench.startupEditor"], "workbench.startupEditor should be 'none'")
+	assert.Equal(t, false, settings["workbench.welcomePage.walkthroughs.openOnInstall"], "walkthroughs should be disabled")
+	assert.Equal(t, "none", settings["window.restoreWindows"], "window.restoreWindows should be 'none'")
+	assert.Equal(t, "off", settings["telemetry.telemetryLevel"], "telemetry should be off")
+	assert.Equal(t, false, settings["security.workspace.trust.enabled"], "workspace trust should be disabled")
+	assert.Equal(t, "none", settings["update.mode"], "update.mode should be 'none'")
 }
 
-func TestBrandingConstants(t *testing.T) {
-	// Verify branding constants are set correctly
-	assert.Equal(t, "Alpacon Editor", brandNameShort)
-	assert.Equal(t, "Alpacon Web Editor", brandNameLong)
-	assert.Equal(t, "alpacon-editor", brandApplicationName)
-	assert.Equal(t, "https://open-vsx.org/vscode/gallery", brandGalleryURL)
-	assert.Equal(t, "https://open-vsx.org/vscode/item", brandGalleryItemURL)
-}
+func TestSetupUserDataDirIdempotent(t *testing.T) {
+	// Create a temporary directory for testing
+	tempDir := t.TempDir()
 
-func TestPatchProductJSON(t *testing.T) {
-	if !isCodeServerInstalled() {
-		t.Skip("code-server not installed, skipping patch test")
-	}
-
-	// Apply the patch
-	err := patchProductJSON()
-	assert.NoError(t, err, "patchProductJSON should not error")
-
-	// Verify the patch was applied
-	path, err := findProductJSONPath()
+	// Call setupUserDataDir twice
+	userDataDir1, err := setupUserDataDir(tempDir)
 	assert.NoError(t, err)
 
-	data, err := os.ReadFile(path)
+	userDataDir2, err := setupUserDataDir(tempDir)
 	assert.NoError(t, err)
 
-	assert.Contains(t, string(data), "Alpacon Editor", "product.json should contain Alpacon Editor")
-	assert.Contains(t, string(data), "open-vsx.org", "product.json should contain open-vsx.org")
+	// Both calls should return the same path
+	assert.Equal(t, userDataDir1, userDataDir2)
 
-	t.Logf("Patched product.json at: %s", path)
-}
-
-func TestFindWorkbenchJSPath(t *testing.T) {
-	if !isCodeServerInstalled() {
-		t.Skip("code-server not installed, skipping test")
-	}
-
-	path, err := findWorkbenchJSPath()
-	assert.NoError(t, err, "Should find workbench.js when code-server is installed")
-	assert.NotEmpty(t, path, "Path should not be empty")
-	assert.Contains(t, path, "workbench.js", "Path should contain workbench.js")
-
-	// Verify file exists
-	_, err = os.Stat(path)
-	assert.NoError(t, err, "workbench.js file should exist at returned path")
-
-	t.Logf("Found workbench.js at: %s", path)
-}
-
-func TestPatchAndRestoreWorkbenchJS(t *testing.T) {
-	if !isCodeServerInstalled() {
-		t.Skip("code-server not installed, skipping patch test")
-	}
-
-	path, err := findWorkbenchJSPath()
+	// settings.json should still be valid
+	settingsPath := filepath.Join(userDataDir1, "User", "settings.json")
+	data, err := os.ReadFile(settingsPath)
 	assert.NoError(t, err)
 
-	// Read original content
-	originalData, err := os.ReadFile(path)
+	var settings map[string]interface{}
+	err = json.Unmarshal(data, &settings)
 	assert.NoError(t, err)
-
-	// Apply the patch
-	err = patchWorkbenchJS()
-	assert.NoError(t, err, "patchWorkbenchJS should not error")
-
-	// Verify the patch was applied
-	patchedData, err := os.ReadFile(path)
-	assert.NoError(t, err)
-	assert.Contains(t, string(patchedData), "Alpacon Editor", "workbench.js should contain Alpacon Editor after patch")
-
-	// Verify backup was created
-	backupPath := path + ".alpamon.bak"
-	_, err = os.Stat(backupPath)
-	assert.NoError(t, err, "Backup file should exist")
-
-	// Restore original
-	err = restoreWorkbenchJS()
-	assert.NoError(t, err, "restoreWorkbenchJS should not error")
-
-	// Verify restore
-	restoredData, err := os.ReadFile(path)
-	assert.NoError(t, err)
-	assert.Equal(t, originalData, restoredData, "Restored content should match original")
-
-	// Verify backup was removed
-	_, err = os.Stat(backupPath)
-	assert.True(t, os.IsNotExist(err), "Backup file should be removed after restore")
-
-	t.Logf("Successfully tested patch and restore of workbench.js at: %s", path)
+	assert.Equal(t, "none", settings["workbench.startupEditor"])
 }

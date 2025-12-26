@@ -84,13 +84,13 @@ func spawnTunnelWorker(targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadClo
 
 // startCodeServerProcess starts code-server with user credentials on Linux.
 // If running as root, the process is demoted to the specified user.
-func startCodeServerProcess(port int, username, groupname, homeDir string) (*exec.Cmd, error) {
+func startCodeServerProcess(port int, userDataDir, username, groupname, homeDir string) (*exec.Cmd, error) {
 	codeServerPath, err := getCodeServerPath()
 	if err != nil {
 		return nil, err
 	}
 
-	args := getCodeServerArgs(port)
+	args := getCodeServerArgs(port, userDataDir)
 	cmd := exec.Command(codeServerPath, args...)
 	cmd.Dir = homeDir
 

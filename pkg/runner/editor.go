@@ -13,7 +13,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -27,15 +26,15 @@ const (
 	startupTimeout = 30 * time.Second
 	idleTimeout    = 5 * time.Hour
 
-	// External resources
 	installScriptURL = "https://code-server.dev/install.sh"
 
-	// Alpacon Editor branding
-	brandNameShort       = "Alpacon Editor"
-	brandNameLong        = "Alpacon Web Editor"
-	brandApplicationName = "alpacon-editor"
-	brandGalleryURL      = "https://open-vsx.org/vscode/gallery"
-	brandGalleryItemURL  = "https://open-vsx.org/vscode/item"
+	// Settings for code-server
+	userDataDirName = ".alpamon-editor"
+	defaultColorTheme = "Default Dark Modern"
+	codeServerConfig = `auth: none
+disable-telemetry: true
+disable-update-check: true
+`
 )
 
 // Common installation paths for code-server
@@ -101,11 +100,6 @@ func (m *CodeServerManager) Start() error {
 		return nil
 	}
 
-	// Restore any orphaned patches from previous crashed sessions
-	if err := restoreWorkbenchJS(); err != nil {
-		log.Debug().Err(err).Msg("No orphaned workbench.js backup to restore")
-	}
-
 	// Check if code-server is installed
 	if !isCodeServerInstalled() {
 		log.Info().Msg("code-server not found, installing...")
@@ -119,6 +113,12 @@ func (m *CodeServerManager) Start() error {
 		log.Info().Msg("code-server installed successfully.")
 	}
 
+	// Setup user data directory with settings
+	userDataDir, err := setupUserDataDir(m.homeDir)
+	if err != nil {
+		return fmt.Errorf("failed to setup user data dir: %w", err)
+	}
+
 	// Find available port
 	port, err := findAvailablePort()
 	if err != nil {
@@ -126,18 +126,8 @@ func (m *CodeServerManager) Start() error {
 	}
 	m.port = port
 
-	// Patch product.json for Alpacon Editor branding
-	if err := patchProductJSON(); err != nil {
-		log.Warn().Err(err).Msg("Failed to patch product.json, continuing with defaults.")
-	}
-
-	// Patch workbench.js for Alpacon Editor branding
-	if err := patchWorkbenchJS(); err != nil {
-		log.Warn().Err(err).Msg("Failed to patch workbench.js, continuing with defaults.")
-	}
-
 	// Start code-server process
-	cmd, err := startCodeServerProcess(port, m.username, m.groupname, m.homeDir)
+	cmd, err := startCodeServerProcess(port, userDataDir, m.username, m.groupname, m.homeDir)
 	if err != nil {
 		return err
 	}
@@ -165,13 +155,6 @@ func (m *CodeServerManager) Stop() error {
 
 // stopProcess stops the code-server process
 func (m *CodeServerManager) stopProcess() error {
-	// Always try to restore workbench.js, even if process isn't running
-	defer func() {
-		if err := restoreWorkbenchJS(); err != nil {
-			log.Warn().Err(err).Msg("Failed to restore workbench.js")
-		}
-	}()
-
 	if !m.started || m.cmd == nil || m.cmd.Process == nil {
 		return nil
 	}
@@ -317,240 +300,52 @@ func findAvailablePort() (int, error) {
 }
 
 // getCodeServerArgs returns the command line arguments for code-server.
-func getCodeServerArgs(port int) []string {
+func getCodeServerArgs(port int, userDataDir string) []string {
 	return []string{
-		"--auth", "none",
+		"--config", filepath.Join(userDataDir, "config.yaml"),
+		"--user-data-dir", userDataDir,
 		"--bind-addr", fmt.Sprintf("127.0.0.1:%d", port),
-		"--disable-telemetry",
-		"--disable-workspace-trust",
-		"--ignore-last-opened",
 		"--idle-timeout-seconds", fmt.Sprintf("%d", int(idleTimeout.Seconds())),
 	}
 }
 
-// findProductJSONPath finds the actual product.json path from code-server installation.
-func findProductJSONPath() (string, error) {
-	codeServerPath, err := getCodeServerPath()
+// setupUserDataDir creates the user-data-dir with config.yaml and settings.json for code-server.
+func setupUserDataDir(homeDir string) (string, error) {
+	userDataDir := filepath.Join(homeDir, userDataDirName)
+	userDir := filepath.Join(userDataDir, "User")
+
+	// Create directories
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create user data dir: %w", err)
+	}
+
+	// Create config.yaml for code-server daemon settings
+	configPath := filepath.Join(userDataDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(codeServerConfig), 0644); err != nil {
+		return "", fmt.Errorf("failed to write config.yaml: %w", err)
+	}
+
+	// Create settings.json for VS Code editor settings
+	settings := map[string]interface{}{
+		"workbench.colorTheme":                             defaultColorTheme,
+		"workbench.startupEditor":                          "none",
+		"workbench.welcomePage.walkthroughs.openOnInstall": false,
+		"window.restoreWindows":                            "none",
+		"telemetry.telemetryLevel":                         "off",
+		"security.workspace.trust.enabled":                 false,
+		"update.mode":                                      "none",
+	}
+
+	settingsPath := filepath.Join(userDir, "settings.json")
+	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	// Resolve symlink fully to find the installation directory
-	realPath, err := filepath.EvalSymlinks(codeServerPath)
-	if err != nil {
-		realPath = codeServerPath
+	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to write settings.json: %w", err)
 	}
 
-	// Build candidates based on different installation types
-	var candidates []string
-
-	// For Homebrew: look for libexec directory in parent paths
-	// realPath might be: .../libexec/out/node/entry.js
-	// product.json is at: .../libexec/lib/vscode/product.json
-	dir := realPath
-	for i := 0; i < 10; i++ { // Walk up to 10 levels
-		dir = filepath.Dir(dir)
-		if dir == "/" || dir == "." {
-			break
-		}
-
-		// Check if this directory contains libexec/lib/vscode/product.json
-		candidate := filepath.Join(dir, "libexec", "lib", "vscode", "product.json")
-		if _, err := os.Stat(candidate); err == nil {
-			candidates = append(candidates, candidate)
-		}
-
-		// Check if this directory contains lib/vscode/product.json
-		candidate = filepath.Join(dir, "lib", "vscode", "product.json")
-		if _, err := os.Stat(candidate); err == nil {
-			candidates = append(candidates, candidate)
-		}
-	}
-
-	// Add standard Linux paths
-	candidates = append(candidates,
-		"/usr/lib/code-server/lib/vscode/product.json",
-		"/usr/share/code-server/lib/vscode/product.json",
-	)
-
-	for _, candidate := range candidates {
-		absPath, err := filepath.Abs(candidate)
-		if err != nil {
-			continue
-		}
-		if _, err := os.Stat(absPath); err == nil {
-			return absPath, nil
-		}
-	}
-
-	return "", fmt.Errorf("product.json not found in any known location")
-}
-
-// patchProductJSON patches the installed product.json with Alpacon Editor branding.
-func patchProductJSON() error {
-	productJSONPath, err := findProductJSONPath()
-	if err != nil {
-		return fmt.Errorf("failed to find product.json: %w", err)
-	}
-
-	// Read existing product.json
-	data, err := os.ReadFile(productJSONPath)
-	if err != nil {
-		return fmt.Errorf("failed to read product.json: %w", err)
-	}
-
-	// Parse as generic map to preserve all existing fields
-	var product map[string]interface{}
-	if err := json.Unmarshal(data, &product); err != nil {
-		return fmt.Errorf("failed to parse product.json: %w", err)
-	}
-
-	// Patch branding fields
-	product["nameShort"] = brandNameShort
-	product["nameLong"] = brandNameLong
-	product["applicationName"] = brandApplicationName
-
-	// Patch extensionsGallery
-	gallery := map[string]interface{}{
-		"serviceUrl": brandGalleryURL,
-		"itemUrl":    brandGalleryItemURL,
-	}
-	product["extensionsGallery"] = gallery
-
-	// Add trusted domains
-	product["linkProtectionTrustedDomains"] = []string{"https://open-vsx.org"}
-
-	// Marshal back to JSON with indentation
-	patchedData, err := json.MarshalIndent(product, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal patched product.json: %w", err)
-	}
-
-	// Write back to file
-	if err := os.WriteFile(productJSONPath, patchedData, 0644); err != nil {
-		return fmt.Errorf("failed to write patched product.json: %w", err)
-	}
-
-	log.Info().Msgf("Patched product.json at %s with Alpacon Editor branding.", productJSONPath)
-	return nil
-}
-
-// findWorkbenchJSPath finds the workbench.js path from code-server installation.
-func findWorkbenchJSPath() (string, error) {
-	codeServerPath, err := getCodeServerPath()
-	if err != nil {
-		return "", err
-	}
-
-	realPath, err := filepath.EvalSymlinks(codeServerPath)
-	if err != nil {
-		realPath = codeServerPath
-	}
-
-	var candidates []string
-
-	dir := realPath
-	for i := 0; i < 10; i++ {
-		dir = filepath.Dir(dir)
-		if dir == "/" || dir == "." {
-			break
-		}
-
-		// Homebrew path
-		candidate := filepath.Join(dir, "libexec", "lib", "vscode", "out", "vs", "code", "browser", "workbench", "workbench.js")
-		if _, err := os.Stat(candidate); err == nil {
-			candidates = append(candidates, candidate)
-		}
-
-		// Standard path
-		candidate = filepath.Join(dir, "lib", "vscode", "out", "vs", "code", "browser", "workbench", "workbench.js")
-		if _, err := os.Stat(candidate); err == nil {
-			candidates = append(candidates, candidate)
-		}
-	}
-
-	// Standard Linux paths
-	candidates = append(candidates,
-		"/usr/lib/code-server/lib/vscode/out/vs/code/browser/workbench/workbench.js",
-		"/usr/share/code-server/lib/vscode/out/vs/code/browser/workbench/workbench.js",
-	)
-
-	for _, candidate := range candidates {
-		absPath, err := filepath.Abs(candidate)
-		if err != nil {
-			continue
-		}
-		if _, err := os.Stat(absPath); err == nil {
-			return absPath, nil
-		}
-	}
-
-	return "", fmt.Errorf("workbench.js not found in any known location")
-}
-
-// patchWorkbenchJS patches the workbench.js with Alpacon Editor branding.
-// It creates a backup file (.alpamon.bak) before patching.
-func patchWorkbenchJS() error {
-	workbenchPath, err := findWorkbenchJSPath()
-	if err != nil {
-		return fmt.Errorf("failed to find workbench.js: %w", err)
-	}
-
-	backupPath := workbenchPath + ".alpamon.bak"
-
-	// Check if already patched (backup exists)
-	if _, err := os.Stat(backupPath); err == nil {
-		log.Debug().Msgf("workbench.js already patched (backup exists at %s)", backupPath)
-		return nil
-	}
-
-	// Read original file
-	data, err := os.ReadFile(workbenchPath)
-	if err != nil {
-		return fmt.Errorf("failed to read workbench.js: %w", err)
-	}
-
-	// Create backup
-	if err := os.WriteFile(backupPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to create backup: %w", err)
-	}
-
-	// Patch the content
-	content := string(data)
-	content = strings.ReplaceAll(content, `nameShort:"code-server"`, fmt.Sprintf(`nameShort:"%s"`, brandNameShort))
-	content = strings.ReplaceAll(content, `nameLong:"code-server"`, fmt.Sprintf(`nameLong:"%s"`, brandNameLong))
-
-	// Write patched file
-	if err := os.WriteFile(workbenchPath, []byte(content), 0644); err != nil {
-		// Try to restore backup on failure
-		_ = os.Rename(backupPath, workbenchPath)
-		return fmt.Errorf("failed to write patched workbench.js: %w", err)
-	}
-
-	log.Info().Msgf("Patched workbench.js at %s with Alpacon Editor branding.", workbenchPath)
-	return nil
-}
-
-// restoreWorkbenchJS restores the original workbench.js from backup.
-func restoreWorkbenchJS() error {
-	workbenchPath, err := findWorkbenchJSPath()
-	if err != nil {
-		return fmt.Errorf("failed to find workbench.js: %w", err)
-	}
-
-	backupPath := workbenchPath + ".alpamon.bak"
-
-	// Check if backup exists
-	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-		log.Debug().Msg("No workbench.js backup found, nothing to restore.")
-		return nil
-	}
-
-	// Restore from backup
-	if err := os.Rename(backupPath, workbenchPath); err != nil {
-		return fmt.Errorf("failed to restore workbench.js from backup: %w", err)
-	}
-
-	log.Info().Msgf("Restored original workbench.js at %s", workbenchPath)
-	return nil
+	log.Debug().Msgf("Created user data directory at %s with config.", userDataDir)
+	return userDataDir, nil
 }
