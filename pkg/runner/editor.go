@@ -364,16 +364,6 @@ func setupUserDataDir(homeDir string) (string, error) {
 	userDataDir := filepath.Join(homeDir, userDataDirName)
 	userDir := filepath.Join(userDataDir, "User")
 
-	// Clean up stale files to prevent restoring previous workspace
-	cleanupPaths := []string{
-		filepath.Join(userDataDir, "code-server-ipc.sock"),
-		filepath.Join(userDir, "workspaceStorage"),
-		filepath.Join(userDir, "globalStorage"),
-	}
-	for _, p := range cleanupPaths {
-		_ = os.RemoveAll(p)
-	}
-
 	// Create directories
 	if err := os.MkdirAll(userDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create user data dir: %w", err)
