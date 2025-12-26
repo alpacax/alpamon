@@ -44,6 +44,17 @@ var codeServerPaths = []string{
 	"/opt/homebrew/bin/code-server", // macOS Homebrew
 }
 
+// CodeServerStatus represents the current state of code-server.
+type CodeServerStatus string
+
+const (
+	CodeServerStatusIdle       CodeServerStatus = "idle"
+	CodeServerStatusInstalling CodeServerStatus = "installing"
+	CodeServerStatusStarting   CodeServerStatus = "starting"
+	CodeServerStatusReady      CodeServerStatus = "ready"
+	CodeServerStatusError      CodeServerStatus = "error"
+)
+
 // CodeServerManager manages a code-server process for editor tunneling.
 type CodeServerManager struct {
 	cmd       *exec.Cmd
@@ -55,6 +66,8 @@ type CodeServerManager struct {
 	cancel    context.CancelFunc
 	mu        sync.Mutex
 	started   bool
+	status    CodeServerStatus
+	lastError string
 }
 
 func NewCodeServerManager(username, groupname string) (*CodeServerManager, error) {
@@ -88,7 +101,43 @@ func NewCodeServerManager(username, groupname string) (*CodeServerManager, error
 		homeDir:   usr.HomeDir,
 		ctx:       ctx,
 		cancel:    cancel,
+		status:    CodeServerStatusIdle,
 	}, nil
+}
+
+// Status returns the current status and last error message.
+func (m *CodeServerManager) Status() (CodeServerStatus, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.status, m.lastError
+}
+
+// StartAsync starts code-server installation/startup in background.
+// Returns immediately. Use Status() to check progress.
+func (m *CodeServerManager) StartAsync() {
+	m.mu.Lock()
+	if m.status != CodeServerStatusIdle {
+		m.mu.Unlock()
+		return
+	}
+
+	// Set initial status based on installation state
+	if isCodeServerInstalled() {
+		m.status = CodeServerStatusStarting
+	} else {
+		m.status = CodeServerStatusInstalling
+	}
+	m.mu.Unlock()
+
+	go func() {
+		if err := m.Start(); err != nil {
+			m.mu.Lock()
+			m.status = CodeServerStatusError
+			m.lastError = err.Error()
+			m.mu.Unlock()
+			log.Error().Err(err).Msg("code-server startup failed.")
+		}
+	}()
 }
 
 // Start installs (if needed) and starts code-server on an available port.
@@ -140,6 +189,7 @@ func (m *CodeServerManager) Start() error {
 	}
 
 	m.started = true
+	m.status = CodeServerStatusReady
 	log.Info().Msgf("code-server started successfully on port %d for user %s.", m.port, m.username)
 
 	return nil
@@ -313,6 +363,16 @@ func getCodeServerArgs(port int, userDataDir string) []string {
 func setupUserDataDir(homeDir string) (string, error) {
 	userDataDir := filepath.Join(homeDir, userDataDirName)
 	userDir := filepath.Join(userDataDir, "User")
+
+	// Clean up stale files to prevent restoring previous workspace
+	cleanupPaths := []string{
+		filepath.Join(userDataDir, "code-server-ipc.sock"),
+		filepath.Join(userDir, "workspaceStorage"),
+		filepath.Join(userDir, "globalStorage"),
+	}
+	for _, p := range cleanupPaths {
+		_ = os.RemoveAll(p)
+	}
 
 	// Create directories
 	if err := os.MkdirAll(userDir, 0755); err != nil {

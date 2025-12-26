@@ -33,7 +33,8 @@ var (
 
 // streamMetadata contains the target port information sent by the server.
 type streamMetadata struct {
-	RemotePort string `json:"remote_port"`
+	RemotePort  string `json:"remote_port"`
+	HealthCheck bool   `json:"health_check,omitempty"`
 }
 
 // TunnelClient manages the smux-multiplexed tunnel connection to the proxy server.
@@ -90,10 +91,10 @@ func (tc *TunnelClient) RunTunnelBackground() {
 		tc.Close()
 	}()
 
-	// For editor type, start code-server first
+	// For editor type, initialize code-server manager (startup triggered by health_check)
 	if tc.clientType == ClientTypeEditor {
-		if err := tc.startCodeServer(); err != nil {
-			log.Error().Err(err).Msgf("Failed to start code-server for session %s.", tc.sessionID)
+		if err := tc.initCodeServerManager(); err != nil {
+			log.Error().Err(err).Msgf("Failed to initialize code-server manager for session %s.", tc.sessionID)
 			return
 		}
 	}
@@ -109,23 +110,74 @@ func (tc *TunnelClient) RunTunnelBackground() {
 	log.Info().Msgf("Tunnel session %s ended.", tc.sessionID)
 }
 
-// startCodeServer initializes and starts code-server for editor tunneling.
-func (tc *TunnelClient) startCodeServer() error {
+// initCodeServerManager creates the code-server manager without starting it.
+// The actual startup is triggered by health_check requests.
+func (tc *TunnelClient) initCodeServerManager() error {
 	mgr, err := NewCodeServerManager(tc.username, tc.groupname)
 	if err != nil {
 		return fmt.Errorf("failed to create code-server manager: %w", err)
 	}
+	tc.codeServerMgr = mgr
+	log.Info().Msgf("code-server manager initialized for session %s (user: %s).", tc.sessionID, tc.username)
+	return nil
+}
 
-	if err := mgr.Start(); err != nil {
-		return fmt.Errorf("failed to start code-server: %w", err)
+// handleHealthCheck responds to health check requests with code-server status.
+func (tc *TunnelClient) handleHealthCheck(stream *smux.Stream) {
+	if tc.codeServerMgr == nil {
+		tc.sendHealthResponse(stream, "error", "code-server manager not initialized")
+		return
 	}
 
-	tc.codeServerMgr = mgr
-	tc.targetPort = mgr.Port()
+	status, lastError := tc.codeServerMgr.Status()
 
-	log.Info().Msgf("code-server ready for tunneling on port %d (user: %s, session: %s).", tc.targetPort, tc.username, tc.sessionID)
+	switch status {
+	case CodeServerStatusIdle:
+		// First health_check triggers startup
+		tc.codeServerMgr.StartAsync()
+		// Re-check status after StartAsync to get installing or starting
+		status, _ = tc.codeServerMgr.Status()
+		tc.sendHealthResponse(stream, string(status), "")
+	case CodeServerStatusInstalling:
+		tc.sendHealthResponse(stream, "installing", "")
+	case CodeServerStatusStarting:
+		tc.sendHealthResponse(stream, "starting", "")
+	case CodeServerStatusReady:
+		tc.targetPort = tc.codeServerMgr.Port()
+		tc.sendHealthResponse(stream, "ready", "")
+	case CodeServerStatusError:
+		tc.sendHealthResponse(stream, "error", lastError)
+	}
+}
 
-	return nil
+// sendHealthResponse sends an HTTP response with health status.
+func (tc *TunnelClient) sendHealthResponse(stream *smux.Stream, status, errMsg string) {
+	var httpStatus int
+	switch status {
+	case "ready":
+		httpStatus = http.StatusOK
+	case "installing", "starting":
+		httpStatus = http.StatusServiceUnavailable
+	case "error":
+		httpStatus = http.StatusInternalServerError
+	default:
+		httpStatus = http.StatusInternalServerError
+	}
+
+	body := fmt.Sprintf(`{"status":"%s"`, status)
+	if errMsg != "" {
+		body += fmt.Sprintf(`,"error":"%s"`, errMsg)
+	}
+	body += "}"
+
+	response := fmt.Sprintf("HTTP/1.1 %d %s\r\n"+
+		"Content-Type: application/json\r\n"+
+		"Content-Length: %d\r\n"+
+		"Connection: close\r\n"+
+		"\r\n%s",
+		httpStatus, http.StatusText(httpStatus), len(body), body)
+
+	stream.Write([]byte(response))
 }
 
 // connect establishes WebSocket connection and creates smux session.
@@ -195,6 +247,18 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	var metadata streamMetadata
 	if err := json.Unmarshal([]byte(metadataLine), &metadata); err != nil {
 		log.Debug().Err(err).Msg("Failed to parse stream metadata.")
+		return
+	}
+
+	log.Info().
+		Str("remote_port", metadata.RemotePort).
+		Bool("health_check", metadata.HealthCheck).
+		Str("raw", metadataLine).
+		Msg("Received stream metadata")
+
+	// Handle health check for editor type
+	if metadata.HealthCheck && tc.clientType == ClientTypeEditor {
+		tc.handleHealthCheck(stream)
 		return
 	}
 
