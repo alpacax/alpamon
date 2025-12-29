@@ -192,6 +192,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	}
 
 	// Set home directory permissions if specified
+	// codeql[go/path-injection]: Intentional - Admin-specified home directory permission
 	if data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
 		mode, err := strconv.ParseUint(data.HomeDirectoryPermission, 8, 32)
 		if err == nil {
@@ -227,11 +228,13 @@ func (h *UserHandler) backupHomeDirectory(username string) error {
 	}
 
 	// Check if home directory exists
+	// codeql[go/path-injection]: Intentional - User home directory for backup
 	if _, err := os.Stat(homeDir); err != nil {
 		return fmt.Errorf("%s not exist: %w", homeDir, err)
 	}
 
 	// Move home directory to backup location
+	// codeql[go/path-injection]: Intentional - Backup destination path
 	if err := os.Rename(homeDir, backupDir); err != nil {
 		return fmt.Errorf("failed to move home directory: %w", err)
 	}

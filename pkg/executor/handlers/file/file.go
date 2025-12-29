@@ -118,6 +118,7 @@ func (h *FileHandler) handleUpload(args *common.CommandArgs) (int, string) {
 		return 1, err.Error()
 	}
 
+	// codeql[go/path-injection]: Intentional - Admin-specified file path for download
 	if bulk || recursive {
 		defer func() { _ = os.Remove(name) }()
 	}
@@ -278,6 +279,7 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 	isBulk := len(pathList) > 1
 	isRecursive := false
 
+	// codeql[go/path-injection]: Intentional - Admin-specified file path for upload
 	if !isBulk {
 		fileInfo, err := os.Stat(paths[0])
 		if err != nil {
@@ -412,6 +414,7 @@ func (h *FileHandler) fetchFromURL(contentURL string) ([]byte, error) {
 			config.GlobalSettings.ID, config.GlobalSettings.Key))
 	}
 
+	// codeql[go/request-forgery]: Intentional - Admin-specified URL for file content
 	client := utils.NewHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
