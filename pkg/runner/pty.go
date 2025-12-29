@@ -108,6 +108,19 @@ func (pc *PtyClient) initializePtySession() error {
 	terminalsMu.Lock()
 	terminals[pc.sessionID] = pc
 	terminalsMu.Unlock()
+
+	// Add PID-to-session mapping for auth manager
+	pid := pc.cmd.Process.Pid
+	sessionInfo := &SessionInfo{
+		SessionID: pc.sessionID,
+		PID:       pid,
+		PtyClient: pc,
+		Requests:  make(map[string]*SudoRequest),
+	}
+
+	authManager.AddPIDSessionMapping(pid, sessionInfo)
+	log.Debug().Msgf("PID mapping added: %d -> Session: %s", pid, pc.sessionID)
+
 	return nil
 }
 
@@ -276,6 +289,11 @@ func GetTerminal(sessionID string) *PtyClient {
 // close terminates the PTY session and cleans up resources.
 // It ensures that the PTY, command, and WebSocket connection are properly closed.
 func (pc *PtyClient) close() {
+	// Remove PID-to-session mapping before cleaning up
+	if pc.cmd != nil && pc.cmd.Process != nil {
+		authManager.RemovePIDSessionMapping(pc.cmd.Process.Pid)
+	}
+
 	if pc.ptmx != nil {
 		_ = pc.ptmx.Close()
 	}

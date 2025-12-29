@@ -9,6 +9,7 @@ import (
 
 	"github.com/alpacax/alpamon/cmd/alpamon/command/ftp"
 	"github.com/alpacax/alpamon/cmd/alpamon/command/setup"
+	"github.com/alpacax/alpamon/cmd/alpamon/command/tunnel"
 	"github.com/alpacax/alpamon/internal/pool"
 	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/collector"
@@ -23,7 +24,6 @@ import (
 	"github.com/alpacax/alpamon/pkg/version"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const (
@@ -41,7 +41,7 @@ var RootCmd = &cobra.Command{
 
 func init() {
 	setup.SetConfigPaths(name)
-	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd)
+	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelWorkerCmd)
 }
 
 func runAgent() {
@@ -58,7 +58,7 @@ func runAgent() {
 	}()
 
 	// Logger
-	logRotate := logger.InitLogger()
+	logger.InitLogger()
 
 	// platform
 	utils.InitPlatform()
@@ -131,21 +131,29 @@ func runAgent() {
 
 	go wsClient.RunForever(ctx)
 
+	// Control Client (Control - sudo approval)
+	controlClient := runner.NewControlClient()
+	go controlClient.RunForever(ctx)
+
+	// Auth Manager for sudo approval workflow
+	authManager := runner.GetAuthManager(controlClient)
+	go authManager.Start(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
 			log.Info().Msg("Received termination signal. Shutting down...")
-			gracefulShutdown(metricCollector, wsClient, workerPool, logRotate, logServer, reporters, pidFilePath)
+			gracefulShutdown(metricCollector, wsClient, controlClient, authManager, workerPool, logServer, reporters, pidFilePath)
 			return
 		case <-wsClient.ShutDownChan:
 			log.Info().Msg("Shutdown command received. Shutting down...")
 			ctxManager.Shutdown()
-			gracefulShutdown(metricCollector, wsClient, workerPool, logRotate, logServer, reporters, pidFilePath)
+			gracefulShutdown(metricCollector, wsClient, controlClient, authManager, workerPool, logServer, reporters, pidFilePath)
 			return
 		case <-wsClient.RestartChan:
 			log.Info().Msg("Restart command received. Restarting...")
 			ctxManager.Shutdown()
-			gracefulShutdown(metricCollector, wsClient, workerPool, logRotate, logServer, reporters, pidFilePath)
+			gracefulShutdown(metricCollector, wsClient, controlClient, authManager, workerPool, logServer, reporters, pidFilePath)
 			restartAgent()
 			return
 		case <-wsClient.CollectorRestartChan:
@@ -170,12 +178,18 @@ func restartAgent() {
 	}
 }
 
-func gracefulShutdown(collector *collector.Collector, wsClient *runner.WebsocketClient, workerPool *pool.Pool, logRotate *lumberjack.Logger, logServer *logger.LogServer, reporters *scheduler.ReporterManager, pidPath string) {
+func gracefulShutdown(collector *collector.Collector, wsClient *runner.WebsocketClient, controlClient *runner.ControlClient, authManager *runner.AuthManager, workerPool *pool.Pool, logServer *logger.LogServer, reporters *scheduler.ReporterManager, pidPath string) {
 	if collector != nil {
 		collector.Stop()
 	}
 	if wsClient != nil {
 		wsClient.Close()
+	}
+	if controlClient != nil {
+		controlClient.Close()
+	}
+	if authManager != nil {
+		authManager.Stop()
 	}
 	// Shutdown reporters before worker pool
 	if reporters != nil {
@@ -196,8 +210,5 @@ func gracefulShutdown(collector *collector.Collector, wsClient *runner.Websocket
 
 	log.Debug().Msg("Bye.")
 
-	if logRotate != nil {
-		_ = logRotate.Close()
-	}
 	_ = os.Remove(pidPath)
 }

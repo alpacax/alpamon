@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/internal/pool"
+	"github.com/alpacax/alpamon/internal/protocol"
 	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/config"
-	"github.com/alpacax/alpamon/internal/protocol"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/cenkalti/backoff"
@@ -82,8 +82,6 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 				wc.CloseAndReconnect(ctx)
 				continue
 			}
-			// Sends "ping" query for Alpacon to verify WebSocket session status without error handling.
-			_ = wc.SendPingQuery()
 			wc.CommandRequestHandler(message)
 		}
 	}
@@ -97,6 +95,14 @@ func (wc *WebsocketClient) SendPingQuery() error {
 	}
 
 	return nil
+}
+
+func (wc *WebsocketClient) SendPongResponse() error {
+	pongResponse := map[string]string{
+		"query":     "pong",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	}
+	return wc.WriteJSON(pongResponse)
 }
 
 func (wc *WebsocketClient) ReadMessage() (messageType int, message []byte, err error) {
@@ -222,6 +228,11 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 	}
 
 	switch msg.Query {
+	case protocol.MessageTypePing:
+		// Respond to ping with pong
+		if err := wc.SendPongResponse(); err != nil {
+			log.Debug().Err(err).Msg("Failed to send pong response.")
+		}
 	case protocol.MessageTypeCommand:
 		if msg.Command == nil {
 			log.Warn().Msg("Command message without command data")

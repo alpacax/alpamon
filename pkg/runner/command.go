@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/internal/protocol"
+	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/rs/zerolog/log"
 )

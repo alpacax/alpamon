@@ -9,8 +9,9 @@ WorkingDirectory=/var/lib/alpamon
 SELinuxContext=-unconfined_u:unconfined_r:unconfined_t:s0
 AppArmorProfile=-unconfined
 Restart=on-failure
-StandardOutput=null
-StandardError=null
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpamon
 
 [Install]
 WantedBy=multi-user.target

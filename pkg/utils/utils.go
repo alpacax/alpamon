@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -189,4 +190,59 @@ func LookUpGID(groupname string) (int, error) {
 	}
 
 	return strconv.Atoi(group.Gid)
+}
+
+// expandGlobArgs expands glob patterns in arguments using filepath.Glob.
+// baseDir is used as the working directory for relative path glob expansion.
+func ExpandGlobArgs(args []string, baseDir string) []string {
+	var result []string
+	for _, arg := range args {
+		result = append(result, expandSingleGlobArg(arg, baseDir)...)
+	}
+	return result
+}
+
+// expandSingleGlobArg expands a single argument if it contains glob patterns.
+func expandSingleGlobArg(arg, baseDir string) []string {
+	if !containsGlobPattern(arg) {
+		return []string{arg}
+	}
+
+	pattern, isRelative := toAbsolutePattern(arg, baseDir)
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return []string{arg}
+	}
+
+	if !isRelative {
+		return matches
+	}
+
+	return toRelativePaths(matches, baseDir)
+}
+
+// toAbsolutePattern converts a glob pattern to absolute path if it's relative.
+func toAbsolutePattern(arg, baseDir string) (pattern string, isRelative bool) {
+	if filepath.IsAbs(arg) {
+		return arg, false
+	}
+	return filepath.Join(baseDir, arg), true
+}
+
+// toRelativePaths converts absolute paths back to relative paths based on baseDir.
+func toRelativePaths(paths []string, baseDir string) []string {
+	result := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if rel, err := filepath.Rel(baseDir, p); err == nil {
+			result = append(result, rel)
+		} else {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// containsGlobPattern checks if a string contains glob pattern characters.
+func containsGlobPattern(s string) bool {
+	return strings.ContainsAny(s, "*?[")
 }
