@@ -14,13 +14,10 @@ import (
 	"github.com/alpacax/alpamon/pkg/version"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const (
-	logDir      = "/var/log/alpamon"
-	logFileName = "alpamon.log"
-	recordURL   = "/api/history/logs/"
+	recordURL = "/api/history/logs/"
 )
 
 type LogRecord struct {
@@ -54,35 +51,19 @@ var logRecordFileHandlers = map[string]int{
 	"server.go":  40, // logger/server.go
 }
 
-func InitLogger() *lumberjack.Logger {
-	fileName := fmt.Sprintf("%s/%s", logDir, logFileName)
-	if _, err := os.Stat(logDir); os.IsNotExist(err) {
-		fileName = logFileName
-	}
-
-	// Set up lumberjack logger for log rotation
-	logRotate := &lumberjack.Logger{
-		Filename:   fileName,
-		MaxSize:    50, // Max size in MB before rotation
-		MaxBackups: 5,  // Max number of backup files
-		MaxAge:     30, // Max age in days
-		Compress:   true,
-	}
-
+func InitLogger() {
 	recordWriter := &logRecordWriter{}
 
 	var output io.Writer
 	if version.Version == "dev" {
-		// In development, log to console with caller info
+		// In development, log to stderr with caller info
 		output = zerolog.MultiLevelWriter(PrettyWriter(os.Stderr, true), recordWriter)
 	} else {
-		// In production, log to file without caller info in PrettyWriter
-		output = zerolog.MultiLevelWriter(PrettyWriter(logRotate, false), recordWriter)
+		// In production, log to stderr without caller info (systemd/journald will capture)
+		output = zerolog.MultiLevelWriter(PrettyWriter(os.Stderr, false), recordWriter)
 	}
 	// Always include .Caller() so entry.Caller is set for logRecordWriter
 	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
-
-	return logRotate
 }
 
 // PrettyWriter returns a zerolog.ConsoleWriter with or without caller info

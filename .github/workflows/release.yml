@@ -12,7 +12,35 @@ jobs:
   goreleaser:
     needs: [build-and-test]
     runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.channel.outputs.channel }}
+      repo: ${{ steps.channel.outputs.repo }}
+      tag: ${{ steps.channel.outputs.tag }}
     steps:
+      - name: Determine release channel
+        id: channel
+        run: |
+          TAG="${{ github.ref_name }}"
+          TAG_WITHOUT_V="${TAG#v}"
+
+          if [[ "$TAG_WITHOUT_V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            CHANNEL="stable"
+            REPO="alpamon"
+          elif [[ "$TAG_WITHOUT_V" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc ]]; then
+            CHANNEL="latest"
+            REPO="alpamon-latest"
+          elif [[ "$TAG_WITHOUT_V" =~ ^[0-9]+\.[0-9]+\.[0-9]+-(dev|beta|alpha) ]]; then
+            CHANNEL="dev"
+            REPO="alpamon-dev"
+          else
+            CHANNEL="dev"
+            REPO="alpamon-dev"
+          fi
+
+          echo "channel=${CHANNEL}" >> $GITHUB_OUTPUT
+          echo "repo=${REPO}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG_WITHOUT_V}" >> $GITHUB_OUTPUT
+
       - name: Check out code
         uses: actions/checkout@v4
         with:
@@ -35,10 +63,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Strip "v" prefix from tag
-        run: echo "TAG_NAME=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-        env:
-          GITHUB_REF_NAME: ${{ github.ref_name }} 
+      - name: Set TAG_NAME from channel output
+        run: echo "TAG_NAME=${{ steps.channel.outputs.tag }}" >> $GITHUB_ENV
 
       - name: Upload AMD64 DEB artifacts
         uses: actions/upload-artifact@v4
@@ -84,10 +110,12 @@ jobs:
             arch: arm64
             distro: rpm_any/rpm_any
     steps:
-      - name: Strip "v" prefix from tag
-        run: echo "TAG_NAME=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-        env:
-          GITHUB_REF_NAME: ${{ github.ref_name }}
+      - name: Set environment variables
+        run: |
+          TAG="${{ github.ref_name }}"
+          TAG_WITHOUT_V="${TAG#v}"
+          echo "TAG_NAME=${TAG_WITHOUT_V}" >> $GITHUB_ENV
+          echo "REPO_NAME=${{ needs.goreleaser.outputs.repo }}" >> $GITHUB_ENV
 
       - name: Set package name
         run: |
@@ -107,6 +135,6 @@ jobs:
         with:
           package-name: ${{ env.PKG_NAME }}
           packagecloud-username: alpacax
-          packagecloud-repo: alpamon
+          packagecloud-repo: ${{ env.REPO_NAME }}
           packagecloud-distrib: ${{ matrix.distro }}
           packagecloud-token: ${{ secrets.PACKAGECLOUD_TOKEN }}

@@ -2,6 +2,9 @@ version: 2
 
 project_name: alpamon
 
+release:
+  prerelease: auto
+
 before:
   hooks:
     - go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
@@ -67,12 +70,16 @@ nfpms:
           - sqlite3
           - nftables | iptables
         file_name_template: '{{ .PackageName }}_{{ trimprefix .Version "v" }}_{{ .Os }}_{{ .Arch }}'
+        suggests:
+          - alpamon-pam
       rpm:
         dependencies:
           - zip
           - sqlite
           - nftables | iptables
         file_name_template: '{{ .PackageName }}-{{ trimprefix .Version "v" }}-1.{{ .Os }}.{{ .Arch }}'
+        suggests:
+          - alpamon-pam
       
 changelog:
   sort: asc

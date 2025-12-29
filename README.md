@@ -28,15 +28,44 @@ Download the latest `alpamon` directly from our releases page or install it usin
 ```bash
 curl -s https://packagecloud.io/install/repositories/alpacax/alpamon/script.deb.sh?any=true | sudo bash
 
+# Install alpamon (includes PAM module by default)
 sudo apt-get install alpamon
+
+# Install without PAM module
+sudo apt-get install alpamon --no-install-recommends
 ```
 
 #### CentOS and RHEL
 ```bash
 curl -s https://packagecloud.io/install/repositories/alpacax/alpamon/script.rpm.sh?any=true | sudo bash
 
+# Install alpamon (includes PAM module by default)
 sudo yum install alpamon
+
+# Install without PAM module
+sudo yum install alpamon --setopt=install_weak_deps=False
 ```
+
+### PAM Module
+
+By default, `alpamon` installation includes the `alpamon-pam` package, which provides PAM (Pluggable Authentication Modules) integration for advanced authentication features:
+- **pam_alpamon.so**: Verifies Alpacon users during sudo authentication
+- **alpacon_approval.so**: Handles sudo command approval requests
+
+#### Configuration
+After installation, configure PAM and sudo to enable the authentication features:
+
+1. Add to `/etc/pam.d/sudo`:
+```
+auth [user_unknown=ignore auth_err=die success=done default=bad] pam_alpamon.so
+```
+
+2. Add to `/etc/sudo.conf`:
+```
+Plugin approval_plugin alpacon_approval.so
+```
+
+**Note**: The Alpamon service must be running with socket at `/var/run/alpamon/auth.sock` for PAM authentication to work.
 
 ### macOS
 
@@ -195,4 +224,22 @@ The result would look like the following. The status must be loaded and active (
 alpamon.service - alpamon agent for Alpacon
      Loaded: loaded (/lib/systemd/system/alpamon.service; enabled; vendor preset: enabled)
      Active: active (running) since Thu 2023-09-28 23:48:55 KST; 4 days ago
+```
+
+### Logs
+
+Alpamon logs are managed by systemd's journald. Use the following commands to view logs:
+
+```bash
+# View all logs
+journalctl -u alpamon
+
+# Follow logs in real-time
+journalctl -u alpamon -f
+
+# View logs since today
+journalctl -u alpamon --since today
+
+# View recent logs (last 100 lines)
+journalctl -u alpamon -n 100
 ```
