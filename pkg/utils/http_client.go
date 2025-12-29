@@ -36,7 +36,7 @@ func NewHTTPClient() *http.Client {
 
 // codeql[go/request-forgery]: Intentional - HTTP client for admin-specified URLs
 func Put(url string, body bytes.Buffer, timeout time.Duration) ([]byte, int, error) {
-	req, err := http.NewRequest(http.MethodPut, url, &body)
+	req, err := http.NewRequest(http.MethodPut, url, &body) // lgtm[go/request-forgery]
 	if err != nil {
 		return nil, 0, err
 	}

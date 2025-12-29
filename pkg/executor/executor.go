@@ -36,7 +36,7 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 
 	// Create command
 	// codeql[go/command-injection]: Intentional - Alpamon executes admin commands from Alpacon console
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...) // lgtm[go/command-injection]
 
 	// Set up privilege demotion if username specified
 	if opts.Username != "" && opts.Username != "root" {

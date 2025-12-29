@@ -120,7 +120,7 @@ func (h *FileHandler) handleUpload(args *common.CommandArgs) (int, string) {
 
 	// codeql[go/path-injection]: Intentional - Admin-specified file path for download
 	if bulk || recursive {
-		defer func() { _ = os.Remove(name) }()
+		defer func() { _ = os.Remove(name) }() // lgtm[go/path-injection]
 	}
 
 	cmd := exec.Command("cat", name)
@@ -281,7 +281,7 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 
 	// codeql[go/path-injection]: Intentional - Admin-specified file path for upload
 	if !isBulk {
-		fileInfo, err := os.Stat(paths[0])
+		fileInfo, err := os.Stat(paths[0]) // lgtm[go/path-injection]
 		if err != nil {
 			return nil, false, false, err
 		}
@@ -416,7 +416,7 @@ func (h *FileHandler) fetchFromURL(contentURL string) ([]byte, error) {
 
 	// codeql[go/request-forgery]: Intentional - Admin-specified URL for file content
 	client := utils.NewHTTPClient()
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
 		return nil, fmt.Errorf("failed to download content from URL: %w", err)
 	}

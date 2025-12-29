@@ -247,7 +247,7 @@ func GetCopyPath(src, dst string) string {
 // FileExists checks if the file exists at the given path
 // codeql[go/path-injection]: Intentional - Admin-specified file path check
 func FileExists(path string) bool {
-	_, err := os.Stat(path)
+	_, err := os.Stat(path) // lgtm[go/path-injection]
 	return !os.IsNotExist(err)
 }
 
