@@ -19,10 +19,10 @@ require (
 	github.com/shirou/gopsutil/v4 v4.24.8
 	github.com/spf13/cobra v1.8.1
 	github.com/stretchr/testify v1.9.0
+	github.com/xtaci/smux v1.5.44
 	golang.org/x/term v0.30.0
 	gopkg.in/go-playground/validator.v9 v9.31.0
 	gopkg.in/ini.v1 v1.67.0
-	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (

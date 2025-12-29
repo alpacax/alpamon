@@ -9,6 +9,7 @@ import (
 
 	"github.com/alpacax/alpamon/cmd/alpamon/command/ftp"
 	"github.com/alpacax/alpamon/cmd/alpamon/command/setup"
+	"github.com/alpacax/alpamon/cmd/alpamon/command/tunnel"
 	"github.com/alpacax/alpamon/pkg/collector"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/db"
@@ -20,7 +21,6 @@ import (
 	"github.com/alpacax/alpamon/pkg/version"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const (
@@ -38,7 +38,7 @@ var RootCmd = &cobra.Command{
 
 func init() {
 	setup.SetConfigPaths(name)
-	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd)
+	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelWorkerCmd)
 }
 
 func runAgent() {
@@ -54,7 +54,7 @@ func runAgent() {
 	}()
 
 	// Logger
-	logRotate := logger.InitLogger()
+	logger.InitLogger()
 
 	// platform
 	utils.InitPlatform()
@@ -99,25 +99,32 @@ func runAgent() {
 		metricCollector.Start()
 	}
 
-	// Websocket Client
+	// Websocket Client (Backhaul - commands, sessions)
 	wsClient := runner.NewWebsocketClient(session)
 	go wsClient.RunForever(ctx)
+
+	// Control Client (Control - sudo approval)
+	controlClient := runner.NewControlClient()
+	go controlClient.RunForever(ctx)
+
+	authManager := runner.GetAuthManager(controlClient)
+	go authManager.Start(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Info().Msg("Received termination signal. Shutting down...")
-			gracefulShutdown(metricCollector, wsClient, logRotate, logServer, pidFilePath)
+			gracefulShutdown(metricCollector, wsClient, controlClient, authManager, logServer, pidFilePath)
 			return
 		case <-wsClient.ShutDownChan:
 			log.Info().Msg("Shutdown command received. Shutting down...")
 			cancel()
-			gracefulShutdown(metricCollector, wsClient, logRotate, logServer, pidFilePath)
+			gracefulShutdown(metricCollector, wsClient, controlClient, authManager, logServer, pidFilePath)
 			return
 		case <-wsClient.RestartChan:
 			log.Info().Msg("Restart command received. Restarting...")
 			cancel()
-			gracefulShutdown(metricCollector, wsClient, logRotate, logServer, pidFilePath)
+			gracefulShutdown(metricCollector, wsClient, controlClient, authManager, logServer, pidFilePath)
 			restartAgent()
 			return
 		case <-wsClient.CollectorRestartChan:
@@ -142,12 +149,18 @@ func restartAgent() {
 	}
 }
 
-func gracefulShutdown(collector *collector.Collector, wsClient *runner.WebsocketClient, logRotate *lumberjack.Logger, logServer *logger.LogServer, pidPath string) {
+func gracefulShutdown(collector *collector.Collector, wsClient *runner.WebsocketClient, controlClient *runner.ControlClient, authManager *runner.AuthManager, logServer *logger.LogServer, pidPath string) {
 	if collector != nil {
 		collector.Stop()
 	}
 	if wsClient != nil {
 		wsClient.Close()
+	}
+	if controlClient != nil {
+		controlClient.Close()
+	}
+	if authManager != nil {
+		authManager.Stop()
 	}
 	if logServer != nil {
 		logServer.Stop()
@@ -155,8 +168,5 @@ func gracefulShutdown(collector *collector.Collector, wsClient *runner.Websocket
 
 	log.Debug().Msg("Bye.")
 
-	if logRotate != nil {
-		_ = logRotate.Close()
-	}
 	_ = os.Remove(pidPath)
 }

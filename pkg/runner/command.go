@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -181,6 +182,55 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		}
 
 		return 0, "Spawned a ftp terminal."
+	case "opentunnel":
+		log.Debug().
+			Str("sessionID", cr.data.SessionID).
+			Int("targetPort", cr.data.TargetPort).
+			Str("url", cr.data.URL).
+			Msg("Received opentunnel command")
+
+		// Validate port range (1-65535, 0 is reserved)
+		if cr.data.TargetPort < 1 || cr.data.TargetPort > 65535 {
+			return 1, fmt.Sprintf("opentunnel: Invalid target port %d. Must be between 1 and 65535.", cr.data.TargetPort)
+		}
+
+		data := openTunnelData{
+			SessionID:  cr.data.SessionID,
+			TargetPort: cr.data.TargetPort,
+			URL:        cr.data.URL,
+		}
+		err := cr.validateData(data)
+		if err != nil {
+			return 1, fmt.Sprintf("opentunnel: Not enough information. %s", err.Error())
+		}
+
+		// Check if tunnel already exists
+		if _, exists := GetActiveTunnel(cr.data.SessionID); exists {
+			return 1, fmt.Sprintf("opentunnel: Tunnel session %s already exists.", cr.data.SessionID)
+		}
+
+		tunnelClient := NewTunnelClient(
+			cr.data.SessionID,
+			cr.data.TargetPort,
+			cr.data.URL,
+		)
+		go tunnelClient.RunTunnelBackground()
+
+		return 0, fmt.Sprintf("Spawned a tunnel for session %s, target port %d.", cr.data.SessionID, cr.data.TargetPort)
+	case "closetunnel":
+		data := closeTunnelData{
+			SessionID: cr.data.SessionID,
+		}
+		err := cr.validateData(data)
+		if err != nil {
+			return 1, fmt.Sprintf("closetunnel: Not enough information. %s", err.Error())
+		}
+
+		if err := CloseTunnel(cr.data.SessionID); err != nil {
+			return 1, fmt.Sprintf("closetunnel: %s", err.Error())
+		}
+
+		return 0, fmt.Sprintf("Closed tunnel session %s.", cr.data.SessionID)
 	case "resizepty":
 		if terminals[cr.data.SessionID] != nil {
 			err := terminals[cr.data.SessionID].resize(cr.data.Rows, cr.data.Cols)
@@ -305,6 +355,10 @@ func (cr *CommandRunner) handleInternalCmd() (int, string) {
 		shutdown: shutdown system
 		`
 		return 0, helpMessage
+
+	case "sudo_approval_response":
+		return cr.handleSudoApprovalResponse()
+
 	default:
 		return 1, fmt.Sprintf("Invalid command %s", args[0])
 	}
@@ -1633,6 +1687,33 @@ func statFileTransfer(code int, transferType transferType, message string, data 
 		Type:    transferType,
 	}
 	scheduler.Rqueue.Post(statURL, payload, 10, time.Time{})
+}
+
+func (cr *CommandRunner) handleSudoApprovalResponse() (int, string) {
+	var sudoApprovalResponse SudoApprovalResponse
+	if cr.command.Data != "" {
+		err := json.Unmarshal([]byte(cr.command.Data), &sudoApprovalResponse)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to parse sudo_approval_response data")
+			return 1, "Invalid sudo_approval_response data format"
+		}
+	} else {
+		return 1, "No sudo_approval_response data provided"
+	}
+
+	if authManager == nil {
+		log.Error().Msg("AuthManager not available")
+		return 1, "AuthManager not available"
+	}
+
+	// SudoApprovalResponse
+	err := authManager.HandleSudoApprovalResponse(sudoApprovalResponse)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to handle sudo_approval_response")
+		return 1, fmt.Sprintf("Failed to handle sudo_approval_response: %v", err)
+	}
+
+	return 0, "Sudo approval response processed successfully"
 }
 
 // validateFirewallData performs enhanced validation for firewall data
