@@ -13,6 +13,7 @@ import (
 	"github.com/alpacax/alpamon/pkg/executor/handlers/shell"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/system"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/terminal"
+	"github.com/alpacax/alpamon/pkg/executor/handlers/tunnel"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/user"
 	"github.com/alpacax/alpamon/pkg/executor/services"
 	"github.com/alpacax/alpamon/pkg/scheduler"
@@ -62,6 +63,7 @@ func (f *HandlerFactory) RegisterAll(
 		firewall.NewFirewallHandler(f.cmdExec),
 		file.NewFileHandler(f.cmdExec, session),
 		terminal.NewTerminalHandler(f.cmdExec, session),
+		tunnel.NewTunnelHandler(f.cmdExec),
 	}
 
 	// Register all handlers

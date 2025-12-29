@@ -38,6 +38,9 @@ type CommandArgs struct {
 	Cols  uint16
 	Input string
 
+	// Tunnel operations
+	TargetPort int
+
 	// Environment
 	Env map[string]string
 

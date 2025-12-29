@@ -1,10 +1,11 @@
 FROM golang:1.23 AS builder
 
-# Set golang env
+# Automatically set GOARCH to the build-time architecture
+ARG TARGETARCH
 ENV GO111MODULE=on \
     CGO_ENABLED=0 \
     GOOS=linux \
-    GOARCH=amd64
+    GOARCH=${TARGETARCH:-amd64}
 
 WORKDIR /build
 
@@ -18,7 +19,15 @@ RUN go build -o alpamon ./cmd/alpamon/main.go
 
 FROM ubuntu:22.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends systemd ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    systemd \
+    ca-certificates \
+    sudo \
+    vim \
+    build-essential \
+    libpam0g-dev \
+    libjansson-dev
 
 WORKDIR /usr/local/alpamon
 

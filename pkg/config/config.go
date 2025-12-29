@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/xtaci/smux"
 	"gopkg.in/ini.v1"
 )
 
@@ -21,6 +22,13 @@ const (
 	MinConnectInterval = 5 * time.Second
 	MaxConnectInterval = 300 * time.Second
 
+	// Smux configuration for tunnel connections
+	SmuxKeepAliveInterval = 10 * time.Second
+	SmuxKeepAliveTimeout  = 30 * time.Second
+	SmuxMaxFrameSize      = 32768   // 32KB
+	SmuxMaxReceiveBuffer  = 4194304 // 4MB
+	SmuxMaxStreamBuffer   = 65536   // 64KB per stream
+
 	// Pool configuration defaults
 	DefaultPoolMaxWorkers     = 20
 	DefaultPoolQueueSize      = 200
@@ -31,6 +39,19 @@ const (
 	MaxReasonableQueueSize      = 10000
 	MaxReasonableTimeoutSeconds = 3600
 )
+
+// GetSmuxConfig returns optimized smux configuration for tunnel connections.
+func GetSmuxConfig() *smux.Config {
+	cfg := smux.DefaultConfig()
+
+	cfg.KeepAliveInterval = SmuxKeepAliveInterval
+	cfg.KeepAliveTimeout = SmuxKeepAliveTimeout
+	cfg.MaxFrameSize = SmuxMaxFrameSize
+	cfg.MaxReceiveBuffer = SmuxMaxReceiveBuffer
+	cfg.MaxStreamBuffer = SmuxMaxStreamBuffer
+
+	return cfg
+}
 
 func InitSettings(settings Settings) {
 	GlobalSettings = settings

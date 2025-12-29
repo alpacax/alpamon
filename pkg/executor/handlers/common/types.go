@@ -16,6 +16,7 @@ const (
 	Firewall     HandlerType = "firewall"
 	FileTransfer HandlerType = "file"
 	Terminal     HandlerType = "terminal"
+	Tunnel       HandlerType = "tunnel"
 )
 
 // Command type constants
@@ -69,6 +70,10 @@ const (
 	OpenPty   CommandType = "openpty"
 	OpenFtp   CommandType = "openftp"
 	ResizePty CommandType = "resizepty"
+
+	// Tunnel commands
+	OpenTunnel  CommandType = "opentunnel"
+	CloseTunnel CommandType = "closetunnel"
 )
 
 // Shell operators for command parsing
