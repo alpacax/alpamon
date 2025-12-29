@@ -90,6 +90,9 @@ type CommandData struct {
 	// UFW specific fields
 	Direction string `json:"direction"`
 	Interface string `json:"interface"`
+
+	// Tunnel specific fields
+	TargetPort int `json:"target_port"`
 }
 
 // ParseCommandData parses the Data field of a Command into CommandData
@@ -136,6 +139,9 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 		// Terminal operations
 		Rows: c.Rows,
 		Cols: c.Cols,
+
+		// Tunnel operations
+		TargetPort: c.TargetPort,
 
 		// Firewall operations
 		Keys:         c.Keys,
