@@ -50,7 +50,14 @@ func (h *TunnelHandler) Validate(cmd string, args *common.CommandArgs) error {
 			URL:        args.URL,
 			TargetPort: args.TargetPort,
 		}
-		return h.ValidateStruct(data)
+		if err := h.ValidateStruct(data); err != nil {
+			return err
+		}
+		// Check for duplicate tunnel to prevent process leak
+		if _, exists := runner.GetActiveTunnel(args.SessionID); exists {
+			return fmt.Errorf("tunnel with session ID %s already exists", args.SessionID)
+		}
+		return nil
 
 	case common.CloseTunnel.String():
 		data := CloseTunnelData{
