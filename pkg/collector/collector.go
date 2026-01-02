@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/collector/check"
 	"github.com/alpacax/alpamon/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/pkg/collector/scheduler"
@@ -32,6 +33,7 @@ type Collector struct {
 	wg          sync.WaitGroup
 	ctx         context.Context
 	cancel      context.CancelFunc
+	ctxManager  *agent.ContextManager
 }
 
 type collectConf struct {
@@ -47,7 +49,7 @@ type collectorArgs struct {
 	transportFactory transporter.TransporterFactory
 }
 
-func InitCollector(session *session.Session, client *ent.Client) *Collector {
+func InitCollector(session *session.Session, client *ent.Client, ctxManager *agent.ContextManager) *Collector {
 	conf, err := fetchConfig(session)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to fetch collector config.")
@@ -65,7 +67,7 @@ func InitCollector(session *session.Session, client *ent.Client) *Collector {
 		transportFactory: transporterFactory,
 	}
 
-	collector, err := NewCollector(args)
+	collector, err := NewCollector(args, ctxManager)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create collector.")
 		return nil
@@ -92,7 +94,7 @@ func fetchConfig(session *session.Session) ([]collectConf, error) {
 	return conf, nil
 }
 
-func NewCollector(args collectorArgs) (*Collector, error) {
+func NewCollector(args collectorArgs, ctxManager *agent.ContextManager) (*Collector, error) {
 	metricTransporter, err := args.transportFactory.CreateTransporter(args.session)
 	if err != nil {
 		return nil, err
@@ -104,6 +106,7 @@ func NewCollector(args collectorArgs) (*Collector, error) {
 		scheduler:   scheduler.NewScheduler(),
 		buffer:      checkBuffer,
 		errorChan:   make(chan error, 10),
+		ctxManager:  ctxManager,
 	}
 
 	err = metricCollector.initTasks(args)
@@ -136,7 +139,8 @@ func (c *Collector) initTasks(args collectorArgs) error {
 func (c *Collector) Start() {
 	log.Debug().Msg("Started collector")
 
-	c.ctx, c.cancel = context.WithCancel(context.Background())
+	// Use context from global ContextManager instead of creating local context
+	c.ctx, c.cancel = c.ctxManager.NewContext(0) // 0 means no timeout
 
 	go c.scheduler.Start(c.ctx, c.buffer.Capacity)
 

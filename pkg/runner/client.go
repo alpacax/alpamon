@@ -3,12 +3,14 @@ package runner
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"time"
 
+	"github.com/alpacax/alpamon/internal/pool"
+	"github.com/alpacax/alpamon/internal/protocol"
+	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
@@ -34,9 +36,12 @@ type WebsocketClient struct {
 	RestartChan          chan struct{}
 	ShutDownChan         chan struct{}
 	CollectorRestartChan chan struct{}
+	pool                 *pool.Pool
+	ctxManager           *agent.ContextManager
+	dispatcher           CommandDispatcher
 }
 
-func NewWebsocketClient(session *scheduler.Session) *WebsocketClient {
+func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextManager, workerPool *pool.Pool) *WebsocketClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
@@ -49,7 +54,14 @@ func NewWebsocketClient(session *scheduler.Session) *WebsocketClient {
 		RestartChan:          make(chan struct{}),
 		ShutDownChan:         make(chan struct{}),
 		CollectorRestartChan: make(chan struct{}, 1),
+		pool:                 workerPool,
+		ctxManager:           ctxManager,
 	}
+}
+
+// SetDispatcher sets the dispatcher for handling commands with dispatcher
+func (wc *WebsocketClient) SetDispatcher(dispatcher CommandDispatcher) {
+	wc.dispatcher = dispatcher
 }
 
 func (wc *WebsocketClient) RunForever(ctx context.Context) {
@@ -205,48 +217,61 @@ func (wc *WebsocketClient) RestartCollector() {
 }
 
 func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
-	var content Content
-	var data CommandData
-
 	if len(message) == 0 {
 		return
 	}
 
-	err := json.Unmarshal(message, &content)
+	msg, err := protocol.ParseMessage(message)
 	if err != nil {
 		log.Warn().Err(err).Msgf("Inappropriate message: %s.", string(message))
 		return
 	}
 
-	if content.Command.Data != "" {
-		err = json.Unmarshal([]byte(content.Command.Data), &data)
-		if err != nil {
-			log.Warn().Err(err).Msgf("Inappropriate message: %s.", string(message))
-			return
-		}
-	}
-
-	switch content.Query {
-	case "ping":
+	switch msg.Query {
+	case protocol.MessageTypePing:
+		// Respond to ping with pong
 		if err := wc.SendPongResponse(); err != nil {
 			log.Debug().Err(err).Msg("Failed to send pong response.")
 		}
-	case "command":
-		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandAckURL, content.Command.ID),
+	case protocol.MessageTypeCommand:
+		if msg.Command == nil {
+			log.Warn().Msg("Command message without command data")
+			return
+		}
+
+		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandAckURL, msg.Command.ID),
 			nil,
 			10,
 			time.Time{},
 		)
-		commandRunner := NewCommandRunner(wc, wc.apiSession, content.Command, data)
-		go commandRunner.Run()
-	case "quit":
-		log.Debug().Msgf("Quit requested for reason: %s.", content.Reason)
+
+		data, err := msg.Command.ParseCommandData()
+		if err != nil {
+			log.Warn().Err(err).Msgf("Failed to parse command data: %s.", string(message))
+			return
+		}
+
+		// Use modular handler system
+		if wc.dispatcher != nil {
+			wc.handleCommand(*msg.Command, *data)
+		} else {
+			log.Error().Msg("Dispatcher not initialized")
+			// Send failure notification
+			payload := protocol.NewCommandResponse(false, "Internal error: dispatcher not initialized", 0)
+			scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, msg.Command.ID),
+				payload,
+				10,
+				time.Time{},
+			)
+		}
+	case protocol.MessageTypeQuit:
+		log.Debug().Msgf("Quit requested for reason: %s.", msg.Reason)
 		wc.ShutDown()
-	case "reconnect":
-		log.Debug().Msgf("Reconnect requested for reason: %s.", content.Reason)
+	case protocol.MessageTypeReconnect:
+		log.Debug().Msgf("Reconnect requested for reason: %s.", msg.Reason)
 		wc.Close()
 	default:
-		log.Warn().Msgf("Not implemented query: %s.", content.Query)
+		log.Warn().Msgf("Not implemented query: %s.", msg.Query)
 	}
 }
 
@@ -257,4 +282,37 @@ func (wc *WebsocketClient) WriteJSON(data interface{}) error {
 		return err
 	}
 	return nil
+}
+
+func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol.CommandData) {
+	// Create CommandRunner with dispatcher for direct execution
+	commandRunner := NewCommandRunner(wc, wc.apiSession, command, data, wc.dispatcher)
+
+	// Submit to pool with context
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if config.GlobalSettings.PoolDefaultTimeout > 0 {
+		ctx, cancel = wc.ctxManager.NewContext(time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second)
+	} else {
+		ctx, cancel = wc.ctxManager.NewContext(0)
+	}
+
+	err := wc.pool.Submit(ctx, func() error {
+		defer cancel()
+		// Run the command - it handles result notification internally via defer
+		return commandRunner.Run(ctx)
+	})
+
+	if err != nil {
+		cancel()
+		log.Error().Err(err).Msgf("Failed to submit command %s to pool", command.ID)
+		// Send failure notification
+		start := time.Now()
+		payload := protocol.NewCommandResponse(false, fmt.Sprintf("Failed to submit command: %v", err), time.Since(start).Seconds())
+		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, command.ID),
+			payload,
+			10,
+			time.Time{},
+		)
+	}
 }

@@ -19,13 +19,25 @@ var (
 )
 
 const (
-	MinConnectInterval    = 5 * time.Second
-	MaxConnectInterval    = 300 * time.Second
+	MinConnectInterval = 5 * time.Second
+	MaxConnectInterval = 300 * time.Second
+
+	// Smux configuration for tunnel connections
 	SmuxKeepAliveInterval = 10 * time.Second
 	SmuxKeepAliveTimeout  = 30 * time.Second
 	SmuxMaxFrameSize      = 32768   // 32KB
 	SmuxMaxReceiveBuffer  = 4194304 // 4MB
 	SmuxMaxStreamBuffer   = 65536   // 64KB per stream
+
+	// Pool configuration defaults
+	DefaultPoolMaxWorkers     = 20
+	DefaultPoolQueueSize      = 200
+	DefaultPoolDefaultTimeout = 30
+
+	// Pool configuration limits for warnings
+	MaxReasonableWorkers        = 1000
+	MaxReasonableQueueSize      = 10000
+	MaxReasonableTimeoutSeconds = 3600
 )
 
 // GetSmuxConfig returns optimized smux configuration for tunnel connections.
@@ -105,11 +117,14 @@ func validateConfig(config Config, wsPath string) (bool, Settings) {
 	log.Debug().Msg("Validating configuration fields...")
 
 	settings := Settings{
-		WSPath:      wsPath,
-		UseSSL:      false,
-		SSLVerify:   true,
-		SSLOpt:      make(map[string]interface{}),
-		HTTPThreads: 4,
+		WSPath:             wsPath,
+		UseSSL:             false,
+		SSLVerify:          true,
+		SSLOpt:             make(map[string]interface{}),
+		HTTPThreads:        4,
+		PoolMaxWorkers:     DefaultPoolMaxWorkers,
+		PoolQueueSize:      DefaultPoolQueueSize,
+		PoolDefaultTimeout: DefaultPoolDefaultTimeout,
 	}
 
 	valid := true
@@ -151,6 +166,46 @@ func validateConfig(config Config, wsPath string) (bool, Settings) {
 				settings.SSLOpt["ca_certs"] = caCert
 			}
 		}
+	}
+
+	// Validate and set worker pool configuration
+	if config.Pool.MaxWorkers > 0 {
+		settings.PoolMaxWorkers = config.Pool.MaxWorkers
+		log.Debug().Msgf("Using configured pool max workers: %d", settings.PoolMaxWorkers)
+	} else {
+		log.Debug().Msgf("Using default pool max workers: %d", settings.PoolMaxWorkers)
+	}
+
+	if config.Pool.QueueSize > 0 {
+		settings.PoolQueueSize = config.Pool.QueueSize
+		log.Debug().Msgf("Using configured pool queue size: %d", settings.PoolQueueSize)
+	} else {
+		log.Debug().Msgf("Using default pool queue size: %d", settings.PoolQueueSize)
+	}
+
+	// Validate and set default timeout for pool tasks
+	// Use pointer type to distinguish "not configured" (nil) from "explicitly set to 0"
+	if config.Pool.DefaultTimeout != nil {
+		settings.PoolDefaultTimeout = *config.Pool.DefaultTimeout
+		if settings.PoolDefaultTimeout == 0 {
+			log.Debug().Msg("Using configured pool default timeout: 0 (no timeout)")
+		} else {
+			log.Debug().Msgf("Using configured pool default timeout: %d seconds", settings.PoolDefaultTimeout)
+		}
+	} else {
+		// Keep the default value that was set during Settings initialization
+		log.Debug().Msgf("Using default pool timeout: %d seconds", settings.PoolDefaultTimeout)
+	}
+
+	// Validate pool settings are reasonable
+	if settings.PoolMaxWorkers > MaxReasonableWorkers {
+		log.Warn().Msgf("Pool max workers (%d) seems very high, consider reducing it", settings.PoolMaxWorkers)
+	}
+	if settings.PoolQueueSize > MaxReasonableQueueSize {
+		log.Warn().Msgf("Pool queue size (%d) seems very high, consider reducing it", settings.PoolQueueSize)
+	}
+	if settings.PoolDefaultTimeout > MaxReasonableTimeoutSeconds {
+		log.Warn().Msgf("Pool default timeout (%d seconds) seems very high, consider reducing it", settings.PoolDefaultTimeout)
 	}
 
 	return valid, settings

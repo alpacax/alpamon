@@ -8,6 +8,8 @@ import (
 	"net"
 	"time"
 
+	"github.com/alpacax/alpamon/internal/pool"
+	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/rs/zerolog/log"
 )
@@ -19,9 +21,11 @@ const (
 type LogServer struct {
 	listener     net.Listener
 	shutDownChan chan struct{}
+	workerPool   *pool.Pool
+	ctxManager   *agent.ContextManager
 }
 
-func NewLogServer() *LogServer {
+func NewLogServer(workerPool *pool.Pool, ctxManager *agent.ContextManager) *LogServer {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		log.Error().Err(err).Msgf("Log server startup failed: cannot bind to %s.", address)
@@ -31,6 +35,8 @@ func NewLogServer() *LogServer {
 	return &LogServer{
 		listener:     listener,
 		shutDownChan: make(chan struct{}),
+		workerPool:   workerPool,
+		ctxManager:   ctxManager,
 	}
 }
 
@@ -50,7 +56,18 @@ func (ls *LogServer) StartLogServer() {
 				log.Error().Err(err).Msg("Failed to accept socket.")
 				continue
 			}
-			go ls.handleConnection(conn)
+			// Submit connection handler to worker pool
+			ctx, cancel := ls.ctxManager.NewContext(0) // No timeout for connection handlers
+			err = ls.workerPool.Submit(ctx, func() error {
+				defer cancel()
+				ls.handleConnection(conn)
+				return nil
+			})
+			if err != nil {
+				cancel()
+				log.Error().Err(err).Msg("Failed to submit connection handler to pool")
+				conn.Close()
+			}
 		}
 	}
 }
