@@ -45,14 +45,36 @@ func (h *TunnelHandler) Execute(_ context.Context, cmd string, args *common.Comm
 func (h *TunnelHandler) Validate(cmd string, args *common.CommandArgs) error {
 	switch cmd {
 	case common.OpenTunnel.String():
+		// Default to cli for backward compatibility
+		clientType := args.ClientType
+		if clientType == "" {
+			clientType = runner.ClientTypeCLI
+		}
+
 		data := OpenTunnelData{
 			SessionID:  args.SessionID,
 			URL:        args.URL,
+			ClientType: clientType,
 			TargetPort: args.TargetPort,
+			Username:   args.Username,
+			Groupname:  args.Groupname,
 		}
 		if err := h.ValidateStruct(data); err != nil {
 			return err
 		}
+
+		// Conditional validation based on client type
+		switch clientType {
+		case runner.ClientTypeCLI, runner.ClientTypeWeb:
+			if data.TargetPort < 1 || data.TargetPort > 65535 {
+				return fmt.Errorf("target_port is required for %s tunnel (must be 1-65535)", clientType)
+			}
+		case runner.ClientTypeEditor:
+			if data.Username == "" {
+				return fmt.Errorf("username is required for editor tunnel")
+			}
+		}
+
 		// Check for duplicate tunnel to prevent process leak
 		if _, exists := runner.GetActiveTunnel(args.SessionID); exists {
 			return fmt.Errorf("tunnel with session ID %s already exists", args.SessionID)
@@ -74,25 +96,36 @@ func (h *TunnelHandler) Validate(cmd string, args *common.CommandArgs) error {
 func (h *TunnelHandler) handleOpenTunnel(args *common.CommandArgs) (int, string, error) {
 	err := h.Validate(common.OpenTunnel.String(), args)
 	if err != nil {
-		return 1, fmt.Sprintf("opentunnel: Not enough information. %s", err.Error()), nil
+		return 1, fmt.Sprintf("opentunnel: %s", err.Error()), nil
+	}
+
+	// Default to cli for backward compatibility
+	clientType := args.ClientType
+	if clientType == "" {
+		clientType = runner.ClientTypeCLI
 	}
 
 	log.Info().
 		Str("sessionID", args.SessionID).
+		Str("clientType", clientType).
 		Int("targetPort", args.TargetPort).
+		Str("username", args.Username).
 		Str("url", args.URL).
 		Msg("Opening tunnel connection")
 
 	tunnelClient := runner.NewTunnelClient(
 		args.SessionID,
-		runner.ClientTypeCLI, // TODO: support ClientType from args after editor integration
+		clientType,
 		args.TargetPort,
-		"", // username (for editor type)
-		"", // groupname (for editor type)
+		args.Username,
+		args.Groupname,
 		args.URL,
 	)
 	go tunnelClient.RunTunnelBackground()
 
+	if clientType == runner.ClientTypeEditor {
+		return 0, fmt.Sprintf("Editor tunnel opened for session %s (user: %s).", args.SessionID, args.Username), nil
+	}
 	return 0, fmt.Sprintf("Tunnel opened for session %s to port %d.", args.SessionID, args.TargetPort), nil
 }
 
