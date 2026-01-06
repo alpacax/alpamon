@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/alpacax/alpamon/pkg/version"
@@ -41,18 +42,31 @@ const (
 
 var syncMutex sync.Mutex
 
-func CommitAsync(session *scheduler.Session, commissioned bool) {
+// CommitAsync commits system information asynchronously
+// Uses ContextManager for coordinated lifecycle management
+func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agent.ContextManager) {
 	if commissioned {
+		// Use a goroutine with delayed execution for commissioned systems
 		go func() {
-			time.Sleep(5 * time.Second)
-			syncSystemInfo(session, nil)
+			// Get application-level context for shutdown coordination
+			ctx := ctxManager.Root()
+
+			// Wait for either timeout or shutdown signal
+			select {
+			case <-time.After(5 * time.Second):
+				// Timeout occurred, proceed with sync
+				SyncSystemInfo(session, nil)
+			case <-ctx.Done():
+				// Shutdown occurred before timeout, skip sync
+				log.Debug().Msg("Skipping syncSystemInfo due to shutdown")
+			}
 		}()
 	} else {
-		go commitSystemInfo()
+		go CommitSystemInfo()
 	}
 }
 
-func commitSystemInfo() {
+func CommitSystemInfo() {
 	log.Debug().Msg("Start committing system information.")
 
 	data := collectData()
@@ -64,24 +78,18 @@ func commitSystemInfo() {
 		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
 
 	// Sync firewall rules after committing system info
-	// Skip if firewall functionality is disabled or high-level firewall tools are detected
+	// Skip if firewall functionality is disabled
+	// Note: Full firewall sync is handled by FirewallHandler in executor package
 	if utils.IsFirewallDisabled() {
 		log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
-	} else if detected, toolName := utils.DetectHighLevelFirewall(); detected {
-		log.Info().Msgf("Skipping firewall sync - %s is active", toolName)
 	} else {
-		firewallData, err := utils.CollectFirewallRules()
-		if err != nil {
-			log.Debug().Err(err).Msg("Failed to collect firewall rules during commit.")
-		} else {
-			scheduler.Rqueue.Post(firewallSyncURL, firewallData, 80, time.Time{})
-		}
+		log.Debug().Msg("Firewall sync delegated to executor FirewallHandler")
 	}
 
 	log.Info().Msg("Completed committing system information.")
 }
 
-func syncSystemInfo(session *scheduler.Session, keys []string) {
+func SyncSystemInfo(session *scheduler.Session, keys []string) {
 	log.Debug().Msg("Start system information synchronization.")
 
 	syncMutex.Lock()
@@ -161,21 +169,13 @@ func syncSystemInfo(session *scheduler.Session, keys []string) {
 			remoteData = &[]Partition{}
 		case "firewall":
 			// Firewall sync only posts current rules without comparison
-			// Skip if firewall functionality is disabled or high-level firewall tools are detected
+			// Skip if firewall functionality is disabled
+			// Note: Full firewall sync is handled by FirewallHandler in executor package
 			if utils.IsFirewallDisabled() {
 				log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
 				continue
 			}
-			if detected, toolName := utils.DetectHighLevelFirewall(); detected {
-				log.Info().Msgf("Skipping firewall sync - %s is active", toolName)
-				continue
-			}
-			firewallData, err := utils.CollectFirewallRules()
-			if err != nil {
-				log.Debug().Err(err).Msg("Failed to collect firewall rules.")
-				continue
-			}
-			scheduler.Rqueue.Post(utils.JoinPath(entry.URL, entry.URLSuffix), firewallData, 80, time.Time{})
+			log.Debug().Msg("Firewall sync delegated to executor FirewallHandler")
 			continue
 		default:
 			log.Warn().Msgf("Unknown key: %s", key)

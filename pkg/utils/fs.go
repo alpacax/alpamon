@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"archive/zip"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +12,24 @@ import (
 	"strings"
 	"syscall"
 )
+
+// nonZipExt contains file extensions that are zip-like but shouldn't be auto-unzipped
+var nonZipExt = map[string]bool{
+	".jar":   true,
+	".war":   true,
+	".ear":   true,
+	".apk":   true,
+	".xpi":   true,
+	".vsix":  true,
+	".crx":   true,
+	".egg":   true,
+	".whl":   true,
+	".appx":  true,
+	".msix":  true,
+	".ipk":   true,
+	".nupkg": true,
+	".kmz":   true,
+}
 
 func CopyFile(src, dst string, allowOverwrite bool) error {
 	srcFile, err := os.Open(src)
@@ -222,4 +242,21 @@ func GetCopyPath(src, dst string) string {
 			return candidate
 		}
 	}
+}
+
+// FileExists checks if the file exists at the given path
+// codeql[go/path-injection]: Intentional - Admin-specified file path check
+func FileExists(path string) bool {
+	_, err := os.Stat(path) // lgtm[go/path-injection]
+	return !os.IsNotExist(err)
+}
+
+// IsZipFile checks if the content is a valid zip file
+func IsZipFile(content []byte, ext string) bool {
+	if _, found := nonZipExt[ext]; found {
+		return false
+	}
+
+	_, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+	return err == nil
 }

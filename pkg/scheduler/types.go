@@ -43,3 +43,9 @@ type counters struct {
 	delay   float64
 	latency float64
 }
+
+// ReporterManager manages the lifecycle of multiple reporter goroutines
+type ReporterManager struct {
+	wg      *sync.WaitGroup
+	cancels []func()
+}

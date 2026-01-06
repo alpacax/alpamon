@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/alpacax/alpamon/internal/protocol"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
@@ -48,13 +50,16 @@ const (
 	sessionCloseCode = 4000
 )
 
-var terminals map[string]*PtyClient
+var (
+	terminals   map[string]*PtyClient
+	terminalsMu sync.RWMutex
+)
 
 func init() {
 	terminals = make(map[string]*PtyClient)
 }
 
-func NewPtyClient(data CommandData, apiSession *scheduler.Session) *PtyClient {
+func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session) *PtyClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
@@ -100,8 +105,11 @@ func (pc *PtyClient) initializePtySession() error {
 		return fmt.Errorf("failed to start pty: %w", err)
 	}
 
+	terminalsMu.Lock()
 	terminals[pc.sessionID] = pc
+	terminalsMu.Unlock()
 
+	// Add PID-to-session mapping for auth manager
 	pid := pc.cmd.Process.Pid
 	sessionInfo := &SessionInfo{
 		SessionID: pc.sessionID,
@@ -266,6 +274,18 @@ func (pc *PtyClient) resize(rows, cols uint16) error {
 	return nil
 }
 
+// Resize is the exported version of resize for external packages
+func (pc *PtyClient) Resize(rows, cols uint16) error {
+	return pc.resize(rows, cols)
+}
+
+// GetTerminal returns the PTY client for the given session ID
+func GetTerminal(sessionID string) *PtyClient {
+	terminalsMu.RLock()
+	defer terminalsMu.RUnlock()
+	return terminals[sessionID]
+}
+
 // close terminates the PTY session and cleans up resources.
 // It ensures that the PTY, command, and WebSocket connection are properly closed.
 func (pc *PtyClient) close() {
@@ -283,9 +303,11 @@ func (pc *PtyClient) close() {
 		_ = pc.cmd.Wait()
 	}
 
+	terminalsMu.Lock()
 	if terminals[pc.sessionID] != nil {
 		delete(terminals, pc.sessionID)
 	}
+	terminalsMu.Unlock()
 
 	if pc.conn != nil {
 		err := pc.conn.WriteControl(

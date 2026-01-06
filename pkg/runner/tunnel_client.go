@@ -25,6 +25,13 @@ import (
 // maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
 const maxMetadataSize = 1024
 
+// Client type constants for tunnel connections
+const (
+	ClientTypeCLI    = "cli"
+	ClientTypeWeb    = "web"
+	ClientTypeEditor = "editor"
+)
+
 // activeTunnels tracks all active tunnel connections by session ID.
 var (
 	activeTunnels   = make(map[string]*TunnelClient)
