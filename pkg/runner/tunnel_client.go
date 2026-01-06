@@ -120,7 +120,7 @@ func (tc *TunnelClient) RunTunnelBackground() {
 // initCodeServerManager creates the code-server manager without starting it.
 // The actual startup is triggered by health_check requests.
 func (tc *TunnelClient) initCodeServerManager() error {
-	mgr, err := NewCodeServerManager(tc.username, tc.groupname)
+	mgr, err := NewCodeServerManager(tc.ctx, tc.username, tc.groupname)
 	if err != nil {
 		return fmt.Errorf("failed to create code-server manager: %w", err)
 	}

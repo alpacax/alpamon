@@ -70,7 +70,7 @@ type CodeServerManager struct {
 	lastError string
 }
 
-func NewCodeServerManager(username, groupname string) (*CodeServerManager, error) {
+func NewCodeServerManager(parentCtx context.Context, username, groupname string) (*CodeServerManager, error) {
 	var usr *user.User
 	var err error
 
@@ -93,7 +93,7 @@ func NewCodeServerManager(username, groupname string) (*CodeServerManager, error
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 
 	return &CodeServerManager{
 		username:  username,
@@ -152,7 +152,7 @@ func (m *CodeServerManager) Start() error {
 	// Check if code-server is installed
 	if !isCodeServerInstalled() {
 		log.Info().Msg("code-server not found, installing...")
-		if err := installCodeServer(); err != nil {
+		if err := installCodeServer(m.ctx); err != nil {
 			return fmt.Errorf("code-server installation failed: %w", err)
 		}
 
@@ -176,7 +176,7 @@ func (m *CodeServerManager) Start() error {
 	m.port = port
 
 	// Start code-server process
-	cmd, err := startCodeServerProcess(port, userDataDir, m.username, m.groupname, m.homeDir)
+	cmd, err := startCodeServerProcess(m.ctx, port, userDataDir, m.username, m.groupname, m.homeDir)
 	if err != nil {
 		return err
 	}
@@ -306,8 +306,8 @@ func getCodeServerPath() (string, error) {
 }
 
 // installCodeServer installs code-server using the official install script.
-func installCodeServer() error {
-	ctx, cancel := context.WithTimeout(context.Background(), installTimeout)
+func installCodeServer(parentCtx context.Context) error {
+	ctx, cancel := context.WithTimeout(parentCtx, installTimeout)
 	defer cancel()
 
 	// Download install script
