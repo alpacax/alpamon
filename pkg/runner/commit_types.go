@@ -105,13 +105,16 @@ type TimeData struct {
 }
 
 type UserData struct {
-	ID          string `json:"id,omitempty"`
-	UID         int    `json:"uid"`
-	GID         int    `json:"gid"`
-	Username    string `json:"username"`
-	Description string `json:"description"`
-	Directory   string `json:"directory"`
-	Shell       string `json:"shell"`
+	ID               string   `json:"id,omitempty"`
+	UID              int      `json:"uid"`
+	GID              int      `json:"gid"`
+	Username         string   `json:"username"`
+	Description      string   `json:"description"`
+	Directory        string   `json:"directory"`
+	Shell            string   `json:"shell"`
+	PasswordLocked   *bool    `json:"password_locked,omitempty"`    // /etc/shadow: password locked (boolean for security - no hash exposure)
+	ShadowExpireDate *int64   `json:"shadow_expire_date,omitempty"` // /etc/shadow: raw expiration date (days since epoch)
+	ValidShells      []string `json:"valid_shells,omitempty"`       // /etc/shells: full list of valid login shells
 }
 
 type GroupData struct {
@@ -152,6 +155,13 @@ type Partition struct {
 	DiskName    string   `json:"disk_name"`
 	Fstype      string   `json:"fs_type"`
 	IsVirtual   bool     `json:"is_virtual"`
+}
+
+// shadowEntry represents a parsed /etc/shadow entry (internal use only)
+type shadowEntry struct {
+	username       string
+	passwordLocked bool
+	expireDate     *int64 // days since epoch, nil if not set
 }
 
 type commitData struct {
@@ -247,11 +257,14 @@ func (u UserData) GetKey() interface{} {
 
 func (u UserData) GetData() ComparableData {
 	return UserData{
-		Username:  u.Username,
-		UID:       u.UID,
-		GID:       u.GID,
-		Directory: u.Directory,
-		Shell:     u.Shell,
+		Username:         u.Username,
+		UID:              u.UID,
+		GID:              u.GID,
+		Directory:        u.Directory,
+		Shell:            u.Shell,
+		PasswordLocked:   u.PasswordLocked,
+		ShadowExpireDate: u.ShadowExpireDate,
+		ValidShells:      u.ValidShells,
 	}
 }
 

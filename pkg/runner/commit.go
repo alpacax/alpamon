@@ -33,6 +33,8 @@ const (
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
+	shellsFilePath = "/etc/shells"
+	shadowFilePath = "/etc/shadow"
 
 	IFF_UP          = 1 << 0 // Interface is up
 	IFF_LOOPBACK    = 1 << 3 // Loopback interface
@@ -385,8 +387,91 @@ func getTimeData() (TimeData, error) {
 	}, nil
 }
 
+// loadValidShells reads /etc/shells and returns the list of valid login shells
+func loadValidShells() []string {
+	var shells []string
+
+	file, err := os.Open(shellsFilePath)
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to open /etc/shells, skipping shell validation")
+		return nil
+	}
+	defer func() { _ = file.Close() }()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		shells = append(shells, line)
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Debug().Err(err).Msg("Error reading /etc/shells")
+		return nil
+	}
+
+	return shells
+}
+
+// loadShadowData reads /etc/shadow and returns password/expiration info by username
+func loadShadowData() map[string]shadowEntry {
+	entries := make(map[string]shadowEntry)
+
+	file, err := os.Open(shadowFilePath)
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to open /etc/shadow, skipping password/expiration checks")
+		return nil
+	}
+	defer func() { _ = file.Close() }()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Split(line, ":")
+		if len(fields) < 2 {
+			continue
+		}
+
+		username := fields[0]
+		passwordField := fields[1]
+
+		entry := shadowEntry{
+			username: username,
+		}
+
+		// Check for locked password (!, *, !! prefix)
+		if strings.HasPrefix(passwordField, "!") ||
+			strings.HasPrefix(passwordField, "*") ||
+			passwordField == "!!" {
+			entry.passwordLocked = true
+		}
+
+		// Get raw expire date (8th field, index 7)
+		if len(fields) >= 8 && fields[7] != "" {
+			if expireDate, err := strconv.ParseInt(fields[7], 10, 64); err == nil {
+				entry.expireDate = &expireDate
+			}
+		}
+
+		entries[username] = entry
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Debug().Err(err).Msg("Error reading /etc/shadow")
+		return nil
+	}
+
+	return entries
+}
+
 func getUserData() ([]UserData, error) {
 	users := []UserData{}
+
+	// Load validation data once for all users
+	validShells := loadValidShells() // []string - /etc/shells list
+	shadowData := loadShadowData()
 
 	file, err := os.Open(passwdFilePath)
 	if err != nil {
@@ -413,12 +498,29 @@ func getUserData() ([]UserData, error) {
 			continue
 		}
 
+		username := fields[0]
+
+		// Collect raw data for server-side login_enabled determination
+		var passwordLocked *bool
+		var shadowExpireDate *int64
+
+		// /etc/shadow data
+		if shadowData != nil {
+			if entry, exists := shadowData[username]; exists {
+				passwordLocked = &entry.passwordLocked
+				shadowExpireDate = entry.expireDate // raw days since epoch
+			}
+		}
+
 		users = append(users, UserData{
-			Username:  fields[0],
-			UID:       uid,
-			GID:       gid,
-			Directory: fields[5],
-			Shell:     fields[6],
+			Username:         username,
+			UID:              uid,
+			GID:              gid,
+			Directory:        fields[5],
+			Shell:            fields[6],
+			PasswordLocked:   passwordLocked,
+			ShadowExpireDate: shadowExpireDate,
+			ValidShells:      validShells, // same list for all users
 		})
 	}
 
