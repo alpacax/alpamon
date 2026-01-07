@@ -112,7 +112,6 @@ type UserData struct {
 	Description      string   `json:"description"`
 	Directory        string   `json:"directory"`
 	Shell            string   `json:"shell"`
-	PasswordLocked   *bool    `json:"password_locked,omitempty"`    // /etc/shadow: password locked (boolean for security - no hash exposure)
 	ShadowExpireDate *int64   `json:"shadow_expire_date,omitempty"` // /etc/shadow: raw expiration date (days since epoch)
 	ValidShells      []string `json:"valid_shells,omitempty"`       // /etc/shells: full list of valid login shells
 }
@@ -159,9 +158,8 @@ type Partition struct {
 
 // shadowEntry represents a parsed /etc/shadow entry (internal use only)
 type shadowEntry struct {
-	username       string
-	passwordLocked bool
-	expireDate     *int64 // days since epoch, nil if not set
+	username   string
+	expireDate *int64 // days since epoch, nil if not set
 }
 
 type commitData struct {
@@ -262,7 +260,6 @@ func (u UserData) GetData() ComparableData {
 		GID:              u.GID,
 		Directory:        u.Directory,
 		Shell:            u.Shell,
-		PasswordLocked:   u.PasswordLocked,
 		ShadowExpireDate: u.ShadowExpireDate,
 		ValidShells:      u.ValidShells,
 	}

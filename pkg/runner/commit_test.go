@@ -101,7 +101,7 @@ func TestLoadShadowData(t *testing.T) {
 		for username, entry := range shadowData {
 			assert.NotEmpty(t, username, "Username should not be empty")
 			assert.Equal(t, username, entry.username, "Entry username should match key")
-			// passwordLocked is boolean, expireDate is *int64 (may be nil)
+			// expireDate is *int64 (may be nil)
 		}
 	}
 }
@@ -114,7 +114,7 @@ func TestGetUserDataWithRawFields(t *testing.T) {
 	for _, user := range userData {
 		assert.NotEmpty(t, user.Username, "Username should not be empty.")
 		// ValidShells will be set if /etc/shells was readable (same for all users)
-		// PasswordLocked and ShadowExpireDate will be set if /etc/shadow was readable
+		// ShadowExpireDate will be set if /etc/shadow was readable
 		// These raw data fields enable server-side login_enabled determination
 	}
 }

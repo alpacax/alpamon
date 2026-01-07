@@ -415,13 +415,13 @@ func loadValidShells() []string {
 	return shells
 }
 
-// loadShadowData reads /etc/shadow and returns password/expiration info by username
+// loadShadowData reads /etc/shadow and returns expiration info by username
 func loadShadowData() map[string]shadowEntry {
 	entries := make(map[string]shadowEntry)
 
 	file, err := os.Open(shadowFilePath)
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to open /etc/shadow, skipping password/expiration checks")
+		log.Debug().Err(err).Msg("Failed to open /etc/shadow, skipping expiration checks")
 		return nil
 	}
 	defer func() { _ = file.Close() }()
@@ -435,17 +435,9 @@ func loadShadowData() map[string]shadowEntry {
 		}
 
 		username := fields[0]
-		passwordField := fields[1]
 
 		entry := shadowEntry{
 			username: username,
-		}
-
-		// Check for locked password (!, *, !! prefix)
-		if strings.HasPrefix(passwordField, "!") ||
-			strings.HasPrefix(passwordField, "*") ||
-			passwordField == "!!" {
-			entry.passwordLocked = true
 		}
 
 		// Get raw expire date (8th field, index 7)
@@ -501,13 +493,11 @@ func getUserData() ([]UserData, error) {
 		username := fields[0]
 
 		// Collect raw data for server-side login_enabled determination
-		var passwordLocked *bool
 		var shadowExpireDate *int64
 
 		// /etc/shadow data
 		if shadowData != nil {
 			if entry, exists := shadowData[username]; exists {
-				passwordLocked = &entry.passwordLocked
 				shadowExpireDate = entry.expireDate // raw days since epoch
 			}
 		}
@@ -518,7 +508,6 @@ func getUserData() ([]UserData, error) {
 			GID:              gid,
 			Directory:        fields[5],
 			Shell:            fields[6],
-			PasswordLocked:   passwordLocked,
 			ShadowExpireDate: shadowExpireDate,
 			ValidShells:      validShells, // same list for all users
 		})
