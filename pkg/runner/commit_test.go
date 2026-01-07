@@ -96,13 +96,11 @@ func TestLoadShadowData(t *testing.T) {
 	// shadowData may be nil if /etc/shadow is not readable (permission denied)
 	// This is expected behavior on non-root execution
 	// The function should not panic or error
-	if shadowData != nil {
-		// If we could read the shadow file, verify the structure
-		for username, entry := range shadowData {
-			assert.NotEmpty(t, username, "Username should not be empty")
-			assert.Equal(t, username, entry.username, "Entry username should match key")
-			// expireDate is *int64 (may be nil)
-		}
+	// Note: range over nil map is safe and does nothing
+	for username, entry := range shadowData {
+		assert.NotEmpty(t, username, "Username should not be empty")
+		assert.Equal(t, username, entry.username, "Entry username should match key")
+		// expireDate is *int64 (may be nil)
 	}
 }
 
