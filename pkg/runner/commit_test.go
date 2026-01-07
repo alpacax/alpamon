@@ -55,7 +55,67 @@ func TestGetUserData(t *testing.T) {
 		assert.NotNil(t, user.UID, "uid should not be empty.")
 		assert.NotNil(t, user.GID, "GID should not be empty.")
 		assert.NotEmpty(t, user.Directory, "Directory should not be empty.")
-		assert.NotEmpty(t, user.Shell, "Shell should not be empty.")
+		// Raw data fields may be nil if the corresponding system file is not readable
+		// Server will determine login_enabled from these raw data fields
+	}
+}
+
+func TestLoadValidShells(t *testing.T) {
+	// This test verifies that loadValidShells can read and parse the shells file
+	// On macOS/Linux, /etc/shells should exist with common shells
+	shells := loadValidShells()
+
+	// shells may be nil if /etc/shells is not readable, which is acceptable
+	if shells != nil {
+		// If shells file was read, it should contain at least one shell
+		assert.True(t, len(shells) > 0, "Valid shells slice should not be empty when /etc/shells is readable")
+
+		// Common shells that should be in the file on most systems
+		commonShells := []string{"/bin/sh", "/bin/bash", "/bin/zsh"}
+		foundAny := false
+		for _, commonShell := range commonShells {
+			for _, shell := range shells {
+				if shell == commonShell {
+					foundAny = true
+					break
+				}
+			}
+			if foundAny {
+				break
+			}
+		}
+		assert.True(t, foundAny, "At least one common shell should be in /etc/shells")
+	}
+}
+
+func TestLoadShadowData(t *testing.T) {
+	// This test verifies that loadShadowData can attempt to read the shadow file
+	// Note: /etc/shadow requires root privileges on most systems
+	shadowData := loadShadowData()
+
+	// shadowData may be nil if /etc/shadow is not readable (permission denied)
+	// This is expected behavior on non-root execution
+	// The function should not panic or error
+	if shadowData != nil {
+		// If we could read the shadow file, verify the structure
+		for username, entry := range shadowData {
+			assert.NotEmpty(t, username, "Username should not be empty")
+			assert.Equal(t, username, entry.username, "Entry username should match key")
+			// passwordLocked is boolean, expireDate is *int64 (may be nil)
+		}
+	}
+}
+
+func TestGetUserDataWithRawFields(t *testing.T) {
+	userData, err := getUserData()
+	assert.NoError(t, err, "Failed to get user data")
+
+	assert.NotEmpty(t, userData, "User data should not be empty.")
+	for _, user := range userData {
+		assert.NotEmpty(t, user.Username, "Username should not be empty.")
+		// ValidShells will be set if /etc/shells was readable (same for all users)
+		// PasswordLocked and ShadowExpireDate will be set if /etc/shadow was readable
+		// These raw data fields enable server-side login_enabled determination
 	}
 }
 
