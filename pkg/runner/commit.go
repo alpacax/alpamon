@@ -213,7 +213,8 @@ func compareData(entry commitDef, currentData, remoteData ComparableData) {
 	if remoteData == nil {
 		createData = currentData
 	} else {
-		if currentData != remoteData.GetData() {
+		// Compare using GetComparableData() to exclude fields not stored by server
+		if !cmp.Equal(currentData.GetComparableData(), remoteData.GetComparableData()) {
 			updateData = currentData
 		}
 	}
@@ -232,7 +233,9 @@ func compareListData[T ComparableData](entry commitDef, currentData, remoteData 
 
 	for _, remoteItem := range remoteData {
 		if currentItem, exists := currentMap[remoteItem.GetKey()]; exists {
-			if !cmp.Equal(currentItem, remoteItem.GetData()) {
+			// Compare using GetComparableData() to exclude fields not stored by server
+			if !cmp.Equal(currentItem.GetComparableData(), remoteItem.GetComparableData()) {
+				// Transmit using GetData() to include all raw data
 				scheduler.Rqueue.Patch(entry.URL+remoteItem.GetID()+"/", currentItem.GetData(), 80, time.Time{})
 			}
 			delete(currentMap, currentItem.GetKey())
