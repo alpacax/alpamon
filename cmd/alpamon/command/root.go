@@ -103,12 +103,19 @@ func runAgent() {
 	wsClient := runner.NewWebsocketClient(session)
 	go wsClient.RunForever(ctx)
 
-	// Control Client (Control - sudo approval)
-	controlClient := runner.NewControlClient()
-	go controlClient.RunForever(ctx)
+	// Control Client and Auth Manager (sudo approval workflow)
+	var controlClient *runner.ControlClient
+	var authManager *runner.AuthManager
 
-	authManager := runner.GetAuthManager(controlClient)
-	go authManager.Start(ctx)
+	if !utils.IsSudoPAMDisabled() {
+		controlClient = runner.NewControlClient()
+		go controlClient.RunForever(ctx)
+
+		authManager = runner.GetAuthManager(controlClient)
+		go authManager.Start(ctx)
+	} else {
+		log.Info().Msg("Sudo PAM functionality temporarily disabled - skipping control client and auth manager")
+	}
 
 	for {
 		select {
