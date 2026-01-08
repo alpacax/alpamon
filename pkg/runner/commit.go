@@ -32,6 +32,8 @@ const (
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
+	shellsFilePath = "/etc/shells"
+	shadowFilePath = "/etc/shadow"
 
 	IFF_UP          = 1 << 0 // Interface is up
 	IFF_LOOPBACK    = 1 << 3 // Loopback interface
@@ -385,8 +387,79 @@ func getTimeData() (TimeData, error) {
 	}, nil
 }
 
+// loadValidShells reads /etc/shells and returns a list of valid login shells.
+// Returns nil if the file cannot be read (e.g., on macOS or permission issues).
+func loadValidShells() []string {
+	file, err := os.Open(shellsFilePath)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = file.Close() }()
+
+	var shells []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		shells = append(shells, line)
+	}
+
+	if scanner.Err() != nil {
+		return nil
+	}
+
+	return shells
+}
+
+// loadShadowData reads /etc/shadow and returns a map of username to shadow entry.
+// Returns nil if the file cannot be read (e.g., on macOS or permission issues).
+func loadShadowData() map[string]shadowEntry {
+	file, err := os.Open(shadowFilePath)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = file.Close() }()
+
+	shadowData := make(map[string]shadowEntry)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Split(line, ":")
+		if len(fields) < 9 {
+			continue
+		}
+
+		username := fields[0]
+		entry := shadowEntry{
+			username: username,
+		}
+
+		// Parse expireDate field (8th field, 0-indexed: fields[7])
+		if fields[7] != "" {
+			if expireDate, err := strconv.ParseInt(fields[7], 10, 64); err == nil {
+				entry.expireDate = &expireDate
+			}
+		}
+
+		shadowData[username] = entry
+	}
+
+	if scanner.Err() != nil {
+		return nil
+	}
+
+	return shadowData
+}
+
 func getUserData() ([]UserData, error) {
 	users := []UserData{}
+
+	// Load raw data for login_enabled determination by server
+	validShells := loadValidShells()
+	shadowData := loadShadowData()
 
 	file, err := os.Open(passwdFilePath)
 	if err != nil {
@@ -413,13 +486,23 @@ func getUserData() ([]UserData, error) {
 			continue
 		}
 
-		users = append(users, UserData{
-			Username:  fields[0],
-			UID:       uid,
-			GID:       gid,
-			Directory: fields[5],
-			Shell:     fields[6],
-		})
+		username := fields[0]
+		user := UserData{
+			Username:    username,
+			UID:         uid,
+			GID:         gid,
+			Directory:   fields[5],
+			Shell:       fields[6],
+			ValidShells: validShells,
+		}
+
+		// Add shadow data if available
+		// Note: range over nil map is safe and does nothing
+		if entry, exists := shadowData[username]; exists {
+			user.ShadowExpireDate = entry.expireDate
+		}
+
+		users = append(users, user)
 	}
 
 	err = scanner.Err()
