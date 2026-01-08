@@ -152,3 +152,146 @@ func TestGetNetworkAddresses(t *testing.T) {
 		assert.NotEmpty(t, addr.Mask, "Mask should not be empty.")
 	}
 }
+
+func TestUserDataGetComparableData(t *testing.T) {
+	expireDate := int64(20000)
+	user := UserData{
+		ID:               "test-id",
+		Username:         "testuser",
+		UID:              1001,
+		GID:              1001,
+		Directory:        "/home/testuser",
+		Shell:            "/bin/bash",
+		ShadowExpireDate: &expireDate,
+		ValidShells:      []string{"/bin/bash", "/bin/sh"},
+	}
+
+	// GetData should include all fields (for transmission)
+	data := user.GetData().(UserData)
+	assert.Equal(t, "testuser", data.Username)
+	assert.Equal(t, 1001, data.UID)
+	assert.Equal(t, "/bin/bash", data.Shell)
+	assert.NotNil(t, data.ShadowExpireDate, "GetData should include ShadowExpireDate")
+	assert.NotNil(t, data.ValidShells, "GetData should include ValidShells")
+	assert.Equal(t, 2, len(data.ValidShells))
+
+	// GetComparableData should exclude ValidShells (for comparison)
+	comparable := user.GetComparableData().(UserData)
+	assert.Equal(t, "testuser", comparable.Username)
+	assert.Equal(t, 1001, comparable.UID)
+	assert.Equal(t, "/bin/bash", comparable.Shell)
+	assert.NotNil(t, comparable.ShadowExpireDate, "GetComparableData should include ShadowExpireDate (server stores it)")
+	assert.Nil(t, comparable.ValidShells, "GetComparableData should exclude ValidShells (server doesn't store it)")
+}
+
+func TestCompareUserDataNoUnnecessaryPatch(t *testing.T) {
+	expireDate := int64(20000)
+
+	// Remote data from server (has shadow_expire_date, no valid_shells)
+	remoteData := UserData{
+		ID:               "1",
+		Username:         "testuser",
+		UID:              1001,
+		GID:              1001,
+		Directory:        "/home/testuser",
+		Shell:            "/bin/bash",
+		ShadowExpireDate: &expireDate,
+		// ValidShells is nil - server doesn't store this field
+	}
+
+	// Current data from system (has all raw data)
+	currentData := UserData{
+		Username:         "testuser",
+		UID:              1001,
+		GID:              1001,
+		Directory:        "/home/testuser",
+		Shell:            "/bin/bash",
+		ShadowExpireDate: &expireDate,
+		ValidShells:      []string{"/bin/bash", "/bin/sh"},
+	}
+
+	// GetComparableData() should make them equal (excluding ValidShells)
+	currentComparable := currentData.GetComparableData().(UserData)
+	remoteComparable := remoteData.GetComparableData().(UserData)
+
+	// Both should have ShadowExpireDate
+	assert.NotNil(t, currentComparable.ShadowExpireDate)
+	assert.NotNil(t, remoteComparable.ShadowExpireDate)
+
+	// Both should have nil ValidShells
+	assert.Nil(t, currentComparable.ValidShells)
+	assert.Nil(t, remoteComparable.ValidShells)
+
+	// They should be equal when compared
+	assert.Equal(t, currentComparable, remoteComparable, "Comparable data should be equal")
+}
+
+func TestCompareUserDataDetectRealChanges(t *testing.T) {
+	expireDate := int64(20000)
+	newExpireDate := int64(30000)
+
+	// Remote data from server
+	remoteData := UserData{
+		ID:               "1",
+		Username:         "testuser",
+		UID:              1001,
+		GID:              1001,
+		Directory:        "/home/testuser",
+		Shell:            "/bin/bash",
+		ShadowExpireDate: &expireDate,
+	}
+
+	// Current data with changed shell
+	currentDataShellChanged := UserData{
+		Username:         "testuser",
+		UID:              1001,
+		GID:              1001,
+		Directory:        "/home/testuser",
+		Shell:            "/bin/zsh", // Changed
+		ShadowExpireDate: &expireDate,
+		ValidShells:      []string{"/bin/bash", "/bin/zsh"},
+	}
+
+	// Current data with changed expire date
+	currentDataExpireChanged := UserData{
+		Username:         "testuser",
+		UID:              1001,
+		GID:              1001,
+		Directory:        "/home/testuser",
+		Shell:            "/bin/bash",
+		ShadowExpireDate: &newExpireDate, // Changed
+		ValidShells:      []string{"/bin/bash"},
+	}
+
+	// Shell change should be detected
+	assert.NotEqual(t,
+		currentDataShellChanged.GetComparableData(),
+		remoteData.GetComparableData(),
+		"Shell change should be detected")
+
+	// Expire date change should be detected
+	assert.NotEqual(t,
+		currentDataExpireChanged.GetComparableData(),
+		remoteData.GetComparableData(),
+		"ShadowExpireDate change should be detected")
+}
+
+func TestOtherTypesGetComparableData(t *testing.T) {
+	// For other types, GetComparableData should return same as GetData
+
+	// SystemData
+	sysData := SystemData{UUID: "test-uuid", Hostname: "testhost"}
+	assert.Equal(t, sysData.GetData(), sysData.GetComparableData())
+
+	// OSData
+	osData := OSData{Name: "linux", Version: "5.0"}
+	assert.Equal(t, osData.GetData(), osData.GetComparableData())
+
+	// GroupData
+	groupData := GroupData{GID: 1000, GroupName: "testgroup"}
+	assert.Equal(t, groupData.GetData(), groupData.GetComparableData())
+
+	// Interface
+	ifaceData := Interface{Name: "eth0", Mac: "00:00:00:00:00:00"}
+	assert.Equal(t, ifaceData.GetData(), ifaceData.GetComparableData())
+}
