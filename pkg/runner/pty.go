@@ -110,8 +110,10 @@ func (pc *PtyClient) initializePtySession() error {
 		Requests:  make(map[string]*SudoRequest),
 	}
 
-	authManager.AddPIDSessionMapping(pid, sessionInfo)
-	log.Debug().Msgf("PID mapping added: %d -> Session: %s", pid, pc.sessionID)
+	if authManager != nil {
+		authManager.AddPIDSessionMapping(pid, sessionInfo)
+		log.Debug().Msgf("PID mapping added: %d -> Session: %s", pid, pc.sessionID)
+	}
 
 	return nil
 }
@@ -271,7 +273,9 @@ func (pc *PtyClient) resize(rows, cols uint16) error {
 func (pc *PtyClient) close() {
 	// Remove PID-to-session mapping before cleaning up
 	if pc.cmd != nil && pc.cmd.Process != nil {
-		authManager.RemovePIDSessionMapping(pc.cmd.Process.Pid)
+		if authManager != nil {
+			authManager.RemovePIDSessionMapping(pc.cmd.Process.Pid)
+		}
 	}
 
 	if pc.ptmx != nil {
