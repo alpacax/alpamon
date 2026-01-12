@@ -105,13 +105,15 @@ type TimeData struct {
 }
 
 type UserData struct {
-	ID          string `json:"id,omitempty"`
-	UID         int    `json:"uid"`
-	GID         int    `json:"gid"`
-	Username    string `json:"username"`
-	Description string `json:"description"`
-	Directory   string `json:"directory"`
-	Shell       string `json:"shell"`
+	ID               string   `json:"id,omitempty"`
+	UID              int      `json:"uid"`
+	GID              int      `json:"gid"`
+	Username         string   `json:"username"`
+	Description      string   `json:"description"`
+	Directory        string   `json:"directory"`
+	Shell            string   `json:"shell"`
+	ShadowExpireDate *int64   `json:"shadow_expire_date,omitempty"` // /etc/shadow: raw expiration date (days since epoch)
+	ValidShells      []string `json:"valid_shells,omitempty"`       // /etc/shells: full list of valid login shells
 }
 
 type GroupData struct {
@@ -154,6 +156,12 @@ type Partition struct {
 	IsVirtual   bool     `json:"is_virtual"`
 }
 
+// shadowEntry represents a parsed /etc/shadow entry (internal use only)
+type shadowEntry struct {
+	username   string
+	expireDate *int64 // days since epoch, nil if not set
+}
+
 type commitData struct {
 	Version    string      `json:"version"`
 	Load       float64     `json:"load"`
@@ -173,7 +181,8 @@ type commitData struct {
 type ComparableData interface {
 	GetID() string
 	GetKey() interface{}
-	GetData() ComparableData
+	GetData() ComparableData           // For transmission (includes all raw data)
+	GetComparableData() ComparableData // For comparison (excludes fields not stored by server)
 }
 
 func (s SystemData) GetID() string {
@@ -201,6 +210,10 @@ func (s SystemData) GetData() ComparableData {
 	}
 }
 
+func (s SystemData) GetComparableData() ComparableData {
+	return s.GetData()
+}
+
 func (o OSData) GetID() string {
 	return o.ID
 }
@@ -221,6 +234,10 @@ func (o OSData) GetData() ComparableData {
 	}
 }
 
+func (o OSData) GetComparableData() ComparableData {
+	return o.GetData()
+}
+
 func (t TimeData) GetID() string {
 	return t.ID
 }
@@ -237,6 +254,10 @@ func (t TimeData) GetData() ComparableData {
 	}
 }
 
+func (t TimeData) GetComparableData() ComparableData {
+	return t.GetData()
+}
+
 func (u UserData) GetID() string {
 	return u.ID
 }
@@ -247,11 +268,28 @@ func (u UserData) GetKey() interface{} {
 
 func (u UserData) GetData() ComparableData {
 	return UserData{
-		Username:  u.Username,
-		UID:       u.UID,
-		GID:       u.GID,
-		Directory: u.Directory,
-		Shell:     u.Shell,
+		Username:         u.Username,
+		UID:              u.UID,
+		GID:              u.GID,
+		Directory:        u.Directory,
+		Shell:            u.Shell,
+		ShadowExpireDate: u.ShadowExpireDate,
+		ValidShells:      u.ValidShells,
+	}
+}
+
+// GetComparableData returns data for comparison, excluding fields not stored by server.
+// ValidShells is excluded because the server doesn't store it (system-wide, rarely changes).
+// ShadowExpireDate is included because the server stores it for real-time expiration checks.
+func (u UserData) GetComparableData() ComparableData {
+	return UserData{
+		Username:         u.Username,
+		UID:              u.UID,
+		GID:              u.GID,
+		Directory:        u.Directory,
+		Shell:            u.Shell,
+		ShadowExpireDate: u.ShadowExpireDate,
+		// ValidShells excluded - server doesn't store this field
 	}
 }
 
@@ -268,6 +306,10 @@ func (g GroupData) GetData() ComparableData {
 		GID:       g.GID,
 		GroupName: g.GroupName,
 	}
+}
+
+func (g GroupData) GetComparableData() ComparableData {
+	return g.GetData()
 }
 
 func (i Interface) GetID() string {
@@ -289,6 +331,10 @@ func (i Interface) GetData() ComparableData {
 	}
 }
 
+func (i Interface) GetComparableData() ComparableData {
+	return i.GetData()
+}
+
 func (a Address) GetID() string {
 	return a.ID
 }
@@ -304,6 +350,10 @@ func (a Address) GetData() ComparableData {
 		InterfaceName: a.InterfaceName,
 		Mask:          a.Mask,
 	}
+}
+
+func (a Address) GetComparableData() ComparableData {
+	return a.GetData()
 }
 
 func (d Disk) GetID() string {
@@ -322,6 +372,10 @@ func (d Disk) GetData() ComparableData {
 	}
 }
 
+func (d Disk) GetComparableData() ComparableData {
+	return d.GetData()
+}
+
 func (p Partition) GetID() string {
 	return p.ID
 }
@@ -338,4 +392,8 @@ func (p Partition) GetData() ComparableData {
 		Fstype:      p.Fstype,
 		IsVirtual:   p.IsVirtual,
 	}
+}
+
+func (p Partition) GetComparableData() ComparableData {
+	return p.GetData()
 }
