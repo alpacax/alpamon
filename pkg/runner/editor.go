@@ -29,9 +29,9 @@ const (
 	installScriptURL = "https://code-server.dev/install.sh"
 
 	// Settings for code-server
-	userDataDirName = ".alpamon-editor"
+	userDataDirName   = ".alpamon-editor"
 	defaultColorTheme = "Default Dark Modern"
-	codeServerConfig = `auth: none
+	codeServerConfig  = `auth: none
 disable-telemetry: true
 disable-update-check: true
 `
@@ -71,26 +71,9 @@ type CodeServerManager struct {
 }
 
 func NewCodeServerManager(parentCtx context.Context, username, groupname string) (*CodeServerManager, error) {
-	var usr *user.User
-	var err error
-
-	// On macOS, use current user since credential demotion is not supported
-	if runtime.GOOS == "darwin" {
-		usr, err = user.Current()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get current user: %w", err)
-		}
-		log.Debug().Msg("macOS: skipping credential demotion")
-	} else {
-		usr, err = user.Lookup(username)
-		if err != nil {
-			return nil, fmt.Errorf("user %s not found: %w", username, err)
-		}
-
-		_, err = user.LookupGroup(groupname)
-		if err != nil {
-			return nil, fmt.Errorf("group %s not found: %w", groupname, err)
-		}
+	usr, err := lookupUserForCodeServer(username, groupname)
+	if err != nil {
+		return nil, err
 	}
 
 	ctx, cancel := context.WithCancel(parentCtx)
@@ -103,6 +86,24 @@ func NewCodeServerManager(parentCtx context.Context, username, groupname string)
 		cancel:    cancel,
 		status:    CodeServerStatusIdle,
 	}, nil
+}
+
+func lookupUserForCodeServer(username, groupname string) (*user.User, error) {
+	if runtime.GOOS == "darwin" {
+		log.Debug().Msg("macOS: skipping credential demotion")
+		return user.Current()
+	}
+
+	usr, err := user.Lookup(username)
+	if err != nil {
+		return nil, fmt.Errorf("user %s not found: %w", username, err)
+	}
+
+	if _, err := user.LookupGroup(groupname); err != nil {
+		return nil, fmt.Errorf("group %s not found: %w", groupname, err)
+	}
+
+	return usr, nil
 }
 
 // Status returns the current status and last error message.
@@ -176,7 +177,7 @@ func (m *CodeServerManager) Start() error {
 	m.port = port
 
 	// Start code-server process
-	cmd, err := startCodeServerProcess(m.ctx, port, userDataDir, m.username, m.groupname, m.homeDir)
+	cmd, err := startCodeServerProcess(m.ctx, m, userDataDir)
 	if err != nil {
 		return err
 	}
@@ -276,29 +277,18 @@ func (m *CodeServerManager) waitForReady() error {
 }
 
 func isCodeServerInstalled() bool {
-	_, err := exec.LookPath("code-server")
-	if err == nil {
-		return true
+	_, err := getCodeServerPath()
+	return err == nil
+}
+
+func getCodeServerPath() (string, error) {
+	if path, err := exec.LookPath("code-server"); err == nil {
+		return path, nil
 	}
 
 	for _, path := range codeServerPaths {
 		if _, err := os.Stat(path); err == nil {
-			return true
-		}
-	}
-
-	return false
-}
-
-func getCodeServerPath() (string, error) {
-	path, err := exec.LookPath("code-server")
-	if err == nil {
-		return path, nil
-	}
-
-	for _, p := range codeServerPaths {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
+			return path, nil
 		}
 	}
 
@@ -310,23 +300,11 @@ func installCodeServer(parentCtx context.Context) error {
 	ctx, cancel := context.WithTimeout(parentCtx, installTimeout)
 	defer cancel()
 
-	// Download install script
-	resp, err := http.Get(installScriptURL)
+	script, err := downloadInstallScript()
 	if err != nil {
-		return fmt.Errorf("failed to download install script: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download install script: HTTP %d", resp.StatusCode)
+		return err
 	}
 
-	script, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read install script: %w", err)
-	}
-
-	// Execute with sh
 	cmd := exec.CommandContext(ctx, "sh")
 	cmd.Stdin = bytes.NewReader(script)
 	cmd.Stdout = os.Stdout
@@ -337,6 +315,25 @@ func installCodeServer(parentCtx context.Context) error {
 	}
 
 	return nil
+}
+
+func downloadInstallScript() ([]byte, error) {
+	resp, err := http.Get(installScriptURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download install script: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to download install script: HTTP %d", resp.StatusCode)
+	}
+
+	script, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read install script: %w", err)
+	}
+
+	return script, nil
 }
 
 // findAvailablePort finds an available port by letting the OS assign one.
