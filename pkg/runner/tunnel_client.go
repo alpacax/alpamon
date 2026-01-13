@@ -138,44 +138,22 @@ func (tc *TunnelClient) handleHealthCheck(stream *smux.Stream) {
 
 	status, lastError := tc.codeServerMgr.Status()
 
-	switch status {
-	case CodeServerStatusIdle:
-		// First health_check triggers startup
+	if status == CodeServerStatusIdle {
 		tc.codeServerMgr.StartAsync()
-		// Re-check status after StartAsync to get installing or starting
 		status, _ = tc.codeServerMgr.Status()
-		tc.sendHealthResponse(stream, string(status), "")
-	case CodeServerStatusInstalling:
-		tc.sendHealthResponse(stream, "installing", "")
-	case CodeServerStatusStarting:
-		tc.sendHealthResponse(stream, "starting", "")
-	case CodeServerStatusReady:
-		tc.targetPort = tc.codeServerMgr.Port()
-		tc.sendHealthResponse(stream, "ready", "")
-	case CodeServerStatusError:
-		tc.sendHealthResponse(stream, "error", lastError)
 	}
+
+	if status == CodeServerStatusReady {
+		tc.targetPort = tc.codeServerMgr.Port()
+	}
+
+	tc.sendHealthResponse(stream, string(status), lastError)
 }
 
 // sendHealthResponse sends an HTTP response with health status.
 func (tc *TunnelClient) sendHealthResponse(stream *smux.Stream, status, errMsg string) {
-	var httpStatus int
-	switch status {
-	case "ready":
-		httpStatus = http.StatusOK
-	case "installing", "starting":
-		httpStatus = http.StatusServiceUnavailable
-	case "error":
-		httpStatus = http.StatusInternalServerError
-	default:
-		httpStatus = http.StatusInternalServerError
-	}
-
-	body := fmt.Sprintf(`{"status":"%s"`, status)
-	if errMsg != "" {
-		body += fmt.Sprintf(`,"error":"%s"`, errMsg)
-	}
-	body += "}"
+	httpStatus := getHTTPStatusForHealth(status)
+	body := buildHealthResponseBody(status, errMsg)
 
 	response := fmt.Sprintf("HTTP/1.1 %d %s\r\n"+
 		"Content-Type: application/json\r\n"+
@@ -185,6 +163,24 @@ func (tc *TunnelClient) sendHealthResponse(stream *smux.Stream, status, errMsg s
 		httpStatus, http.StatusText(httpStatus), len(body), body)
 
 	stream.Write([]byte(response))
+}
+
+func getHTTPStatusForHealth(status string) int {
+	switch status {
+	case "ready":
+		return http.StatusOK
+	case "installing", "starting":
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func buildHealthResponseBody(status, errMsg string) string {
+	if errMsg != "" {
+		return fmt.Sprintf(`{"status":"%s","error":"%s"}`, status, errMsg)
+	}
+	return fmt.Sprintf(`{"status":"%s"}`, status)
 }
 
 // connect establishes WebSocket connection and creates smux session.
@@ -242,47 +238,29 @@ func (tc *TunnelClient) handleStreams() {
 func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	defer stream.Close()
 
-	// Read metadata with size limit to prevent memory exhaustion from malicious servers
-	limitedReader := &io.LimitedReader{R: stream, N: maxMetadataSize}
-	bufReader := bufio.NewReader(limitedReader)
-	metadataLine, err := bufReader.ReadString('\n')
+	metadata, bufReader, err := tc.readStreamMetadata(stream)
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to read stream metadata (may exceed size limit).")
-		return
-	}
-
-	var metadata streamMetadata
-	if err := json.Unmarshal([]byte(metadataLine), &metadata); err != nil {
-		log.Debug().Err(err).Msg("Failed to parse stream metadata.")
+		log.Debug().Err(err).Msg("Failed to read stream metadata.")
 		return
 	}
 
 	log.Info().
 		Str("remote_port", metadata.RemotePort).
 		Bool("health_check", metadata.HealthCheck).
-		Str("raw", metadataLine).
 		Msg("Received stream metadata")
 
-	// Handle health check for editor type
 	if metadata.HealthCheck && tc.clientType == ClientTypeEditor {
 		tc.handleHealthCheck(stream)
 		return
 	}
 
-	// Use target port from tunnel configuration if not specified in metadata
-	var targetPort string
-	if metadata.RemotePort != "" {
-		port, err := strconv.Atoi(metadata.RemotePort)
-		if err != nil || port < 1 || port > 65535 {
-			log.Debug().Msgf("Invalid remote port in metadata: %s.", metadata.RemotePort)
-			return
-		}
-		targetPort = metadata.RemotePort
-	} else {
-		targetPort = fmt.Sprintf("%d", tc.targetPort)
+	targetPort, err := tc.resolveTargetPort(metadata.RemotePort)
+	if err != nil {
+		log.Debug().Err(err).Msg("Invalid target port.")
+		return
 	}
 
-	targetAddr := fmt.Sprintf("127.0.0.1:%s", targetPort)
+	targetAddr := fmt.Sprintf("127.0.0.1:%d", targetPort)
 
 	// Spawn tunnel worker subprocess (runs as nobody user for security)
 	cmd, stdinPipe, stdoutPipe, err := spawnTunnelWorker(targetAddr)
@@ -305,36 +283,72 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 
 	log.Debug().Msgf("Tunnel worker spawned for %s.", targetAddr)
 
-	bufferedSize := bufReader.Buffered()
-	remainingBuf := make([]byte, bufferedSize)
+	dataReader := tc.buildDataReader(bufReader, stream)
+	tc.relayBidirectional(stream, stdinPipe, stdoutPipe, dataReader)
 
-	n, err := io.ReadFull(bufReader, remainingBuf)
-	if err != nil && err != io.EOF {
-		log.Error().Err(err).Msg("Failed to read remaining buffered data from bufReader")
-		return
+	log.Debug().Msgf("Tunnel stream closed for port %d.", targetPort)
+}
+
+func (tc *TunnelClient) readStreamMetadata(stream *smux.Stream) (*streamMetadata, *bufio.Reader, error) {
+	limitedReader := &io.LimitedReader{R: stream, N: maxMetadataSize}
+	bufReader := bufio.NewReader(limitedReader)
+
+	metadataLine, err := bufReader.ReadString('\n')
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read metadata: %w", err)
 	}
 
-	dataReader := io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
+	var metadata streamMetadata
+	if err := json.Unmarshal([]byte(metadataLine), &metadata); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse metadata: %w", err)
+	}
 
-	// Bidirectional relay: stream <-> subprocess
+	return &metadata, bufReader, nil
+}
+
+func (tc *TunnelClient) resolveTargetPort(remotePort string) (int, error) {
+	if remotePort == "" {
+		return tc.targetPort, nil
+	}
+
+	port, err := strconv.Atoi(remotePort)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid port: %s", remotePort)
+	}
+	return port, nil
+}
+
+func (tc *TunnelClient) buildDataReader(bufReader *bufio.Reader, stream *smux.Stream) io.Reader {
+	bufferedSize := bufReader.Buffered()
+	if bufferedSize == 0 {
+		return stream
+	}
+
+	remainingBuf := make([]byte, bufferedSize)
+	n, err := io.ReadFull(bufReader, remainingBuf)
+	if err != nil && err != io.EOF {
+		log.Debug().Err(err).Msg("Failed to read remaining buffered data.")
+		return stream
+	}
+
+	return io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
+}
+
+func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, stdinPipe io.WriteCloser, stdoutPipe io.ReadCloser, dataReader io.Reader) {
 	errChan := make(chan error, 2)
 
-	// Stream -> Subprocess stdin
 	go func() {
 		_, err := io.Copy(stdinPipe, dataReader)
 		stdinPipe.Close()
 		errChan <- err
 	}()
 
-	// Subprocess stdout -> Stream
 	go func() {
 		_, err := tunnel.CopyBuffered(stream, stdoutPipe)
 		errChan <- err
 	}()
 
-	// Wait for one direction to complete
 	<-errChan
-	log.Debug().Msgf("Tunnel stream closed for port %s.", targetPort)
 }
 
 // Close cleanly shuts down the tunnel connection.
