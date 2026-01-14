@@ -378,6 +378,7 @@ func setupUserDataDir(homeDir string) (string, error) {
 		"workbench.startupEditor":                          "none",
 		"workbench.welcomePage.walkthroughs.openOnInstall": false,
 		"window.restoreWindows":                            "none",
+		"window.title":                                     "${dirty}${activeEditorShort}${separator}${rootName}${separator}Alpamon Editor",
 		"telemetry.telemetryLevel":                         "off",
 		"security.workspace.trust.enabled":                 false,
 		"update.mode":                                      "none",
