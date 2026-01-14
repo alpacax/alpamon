@@ -154,9 +154,9 @@ func TestTunnelHandler_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "closetunnel missing session ID",
-			cmd:  "closetunnel",
-			args: &common.CommandArgs{},
+			name:    "closetunnel missing session ID",
+			cmd:     "closetunnel",
+			args:    &common.CommandArgs{},
 			wantErr: true,
 		},
 		{
