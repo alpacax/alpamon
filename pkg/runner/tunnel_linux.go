@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -103,11 +102,7 @@ func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataD
 	cmd := exec.CommandContext(ctx, codeServerPath, args...)
 	cmd.Dir = m.homeDir
 
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("HOME=%s", m.homeDir),
-		fmt.Sprintf("XDG_DATA_HOME=%s", filepath.Join(m.homeDir, ".local", "share")),
-		fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(m.homeDir, ".config")),
-	)
+	cmd.Env = getCodeServerEnv(m.homeDir, true)
 
 	sysProcAttr, err := getCodeServerCredential(m.username, m.groupname)
 	if err != nil {

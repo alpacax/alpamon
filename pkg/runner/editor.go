@@ -35,6 +35,8 @@ const (
 disable-telemetry: true
 disable-update-check: true
 `
+	// OpenVSX gallery configuration (overrides any existing user config)
+	openVSXGalleryEnv = `{"serviceUrl": "https://open-vsx.org/vscode/gallery", "itemUrl": "https://open-vsx.org/vscode/item"}`
 )
 
 // Common installation paths for code-server
@@ -354,6 +356,24 @@ func getCodeServerArgs(port int, userDataDir string) []string {
 		"--bind-addr", fmt.Sprintf("127.0.0.1:%d", port),
 		"--idle-timeout-seconds", fmt.Sprintf("%d", int(idleTimeout.Seconds())),
 	}
+}
+
+// getCodeServerEnv returns environment variables for code-server process.
+// This includes HOME, XDG directories (Linux only), and EXTENSIONS_GALLERY for OpenVSX.
+func getCodeServerEnv(homeDir string, includeXDG bool) []string {
+	env := append(os.Environ(),
+		fmt.Sprintf("HOME=%s", homeDir),
+		fmt.Sprintf("EXTENSIONS_GALLERY=%s", openVSXGalleryEnv),
+	)
+
+	if includeXDG {
+		env = append(env,
+			fmt.Sprintf("XDG_DATA_HOME=%s", filepath.Join(homeDir, ".local", "share")),
+			fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(homeDir, ".config")),
+		)
+	}
+
+	return env
 }
 
 // setupUserDataDir creates the user-data-dir with config.yaml and settings.json for code-server.

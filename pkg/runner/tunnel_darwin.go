@@ -55,9 +55,7 @@ func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataD
 	cmd := exec.CommandContext(ctx, codeServerPath, args...)
 	cmd.Dir = m.homeDir
 
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("HOME=%s", m.homeDir),
-	)
+	cmd.Env = getCodeServerEnv(m.homeDir, false)
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
