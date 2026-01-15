@@ -52,12 +52,13 @@ Requires an API token with servers:register scope.
 Groups are automatically assigned from the token's allowed_groups configuration.
 
 Examples:
+  sudo alpamon register --url https://alpacon.example.com --token <TOKEN>
   sudo alpamon register --url https://alpacon.example.com --token <TOKEN> --name my-server
 
 Options:
   --url         Alpacon server URL (required)
   --token       API token (servers:register scope required)
-  --name        Server name (required, max 64 chars, slug format)
+  --name        Server name (optional, defaults to hostname)
   --platform    Platform (debian/rhel, auto-detect if omitted)
   --ssl-verify  SSL certificate verification (default: true)
   --ca-cert     CA certificate path`,
@@ -67,14 +68,13 @@ Options:
 func init() {
 	RegisterCmd.Flags().StringVar(&serverURL, "url", "", "Alpacon server URL (required)")
 	RegisterCmd.Flags().StringVar(&apiToken, "token", "", "API token (servers:register scope required)")
-	RegisterCmd.Flags().StringVar(&serverName, "name", "", "Server name (required)")
+	RegisterCmd.Flags().StringVar(&serverName, "name", "", "Server name (optional, defaults to hostname)")
 	RegisterCmd.Flags().StringVar(&platform, "platform", "", "Platform (debian/rhel, auto-detect)")
 	RegisterCmd.Flags().BoolVar(&sslVerify, "ssl-verify", true, "SSL certificate verification")
 	RegisterCmd.Flags().StringVar(&caCert, "ca-cert", "", "CA certificate path")
 
 	_ = RegisterCmd.MarkFlagRequired("url")
 	_ = RegisterCmd.MarkFlagRequired("token")
-	_ = RegisterCmd.MarkFlagRequired("name")
 }
 
 func runRegister(cmd *cobra.Command, args []string) error {
@@ -83,13 +83,23 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("config file already exists: %s\nServer is already registered. Delete the config file to re-register", configPath)
 	}
 
-	// 2. Auto-detect platform
+	// 2. Auto-detect server name from hostname if not provided
+	if serverName == "" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			return fmt.Errorf("failed to get hostname: %w", err)
+		}
+		serverName = hostname
+		fmt.Printf("Server name auto-detected: %s\n", serverName)
+	}
+
+	// 3. Auto-detect platform
 	if platform == "" {
 		platform = detectPlatform()
 		fmt.Printf("Platform auto-detected: %s\n", platform)
 	}
 
-	// 3. Create registration request body
+	// 4. Create registration request body
 	reqBody := RegisterRequest{
 		Name:     serverName,
 		Platform: platform,
@@ -97,18 +107,18 @@ func runRegister(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Registering server: %s\n", serverURL)
 
-	// 4. API call
+	// 5. API call
 	resp, err := sendRegisterRequest(reqBody)
 	if err != nil {
 		return err
 	}
 
-	// 5. Create config file
+	// 6. Create config file
 	if err := writeConfigFile(resp); err != nil {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
 
-	// 6. Start systemd service
+	// 7. Start systemd service
 	fmt.Println("\nStarting alpamon service...")
 	if err := startSystemdService(); err != nil {
 		fmt.Printf("Warning: Failed to start service: %v\n", err)
@@ -117,7 +127,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		fmt.Println("  sudo systemctl enable alpamon")
 	}
 
-	// 7. Success message
+	// 8. Success message
 	fmt.Printf("\n==========================================\n")
 	fmt.Printf("Server registered successfully!\n")
 	fmt.Printf("==========================================\n")
