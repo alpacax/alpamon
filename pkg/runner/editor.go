@@ -187,7 +187,7 @@ func (m *CodeServerManager) Start() error {
 
 	// Wait for code-server to be ready
 	if err := m.waitForReady(); err != nil {
-		m.stopProcess()
+		_ = m.stopProcess()
 		return fmt.Errorf("code-server failed to start: %w", err)
 	}
 

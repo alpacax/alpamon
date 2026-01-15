@@ -162,7 +162,7 @@ func (tc *TunnelClient) sendHealthResponse(stream *smux.Stream, status, errMsg s
 		"\r\n%s",
 		httpStatus, http.StatusText(httpStatus), len(body), body)
 
-	stream.Write([]byte(response))
+	_, _ = stream.Write([]byte(response))
 }
 
 func getHTTPStatusForHealth(status string) int {
