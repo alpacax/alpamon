@@ -203,8 +203,10 @@ func lookupUserForCodeServer(username, groupname string) (*user.User, error) {
 		return nil, fmt.Errorf("user %s not found: %w", username, err)
 	}
 
-	if _, err := user.LookupGroup(groupname); err != nil {
-		return nil, fmt.Errorf("group %s not found: %w", groupname, err)
+	if groupname != "" {
+		if _, err := user.LookupGroup(groupname); err != nil {
+			return nil, fmt.Errorf("group %s not found: %w", groupname, err)
+		}
 	}
 
 	return usr, nil
@@ -425,7 +427,10 @@ func installCodeServer(parentCtx context.Context) error {
 }
 
 func downloadInstallScript(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	resp, err := client.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download install script: %w", err)
 	}
