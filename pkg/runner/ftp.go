@@ -253,8 +253,18 @@ func (fc *FtpClient) getDiretoryStructure(entry os.DirEntry, path string, depth,
 		return &result
 	}
 
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil
+	isSymlink := info.Mode()&os.ModeSymlink != 0
+	var target string
+	var targetInfo os.FileInfo
+
+	if isSymlink {
+		target, err = os.Readlink(fullPath)
+		if err != nil {
+			result := fc.handleListErrorResult(fullPath, err)
+			return &result
+		}
+		// Get info of the target file (follow symlink)
+		targetInfo, _ = os.Stat(fullPath)
 	}
 
 	permString, permOctal, owner, group, err := utils.GetFileInfo(info, fullPath)
@@ -276,7 +286,13 @@ func (fc *FtpClient) getDiretoryStructure(entry os.DirEntry, path string, depth,
 		Group:            group,
 	}
 
-	if entry.IsDir() {
+	if isSymlink {
+		child.Type = "symlink"
+		child.Target = target
+		if targetInfo != nil {
+			child.Size = targetInfo.Size()
+		}
+	} else if entry.IsDir() {
 		child.Type = "folder"
 		if current < depth-1 {
 			childResult, err := fc.listRecursive(fullPath, depth, current+1, showHidden)
