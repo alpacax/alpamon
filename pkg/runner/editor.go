@@ -20,24 +20,126 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const (
-	// Timeout configuration for code-server lifecycle
-	installTimeout = 5 * time.Minute
-	startupTimeout = 30 * time.Second
-	idleTimeout    = 5 * time.Hour
+// CodeServerConfig holds all code-server configuration in one place.
+type CodeServerConfig struct {
+	// Timeouts
+	InstallTimeout time.Duration
+	StartupTimeout time.Duration
+	IdleTimeout    time.Duration
 
-	installScriptURL = "https://code-server.dev/install.sh"
+	// Paths
+	UserDataDirName  string
+	InstallScriptURL string
 
-	// Settings for code-server
-	userDataDirName   = ".alpamon-editor"
-	defaultColorTheme = "Default Dark Modern"
-	codeServerConfig  = `auth: none
-disable-telemetry: true
-disable-update-check: true
-`
-	// OpenVSX gallery configuration (overrides any existing user config)
-	openVSXGalleryEnv = `{"serviceUrl": "https://open-vsx.org/vscode/gallery", "itemUrl": "https://open-vsx.org/vscode/item"}`
-)
+	// Daemon settings (config.yaml)
+	Auth               string
+	DisableTelemetry   bool
+	DisableUpdateCheck bool
+
+	// Editor settings (settings.json)
+	ColorTheme              string
+	WindowTitle             string
+	TelemetryLevel          string
+	StartupEditor           string
+	RestoreWindows          string
+	UpdateMode              string
+	DisableWorkspaceTrust   bool
+	DisableWelcomeWalkthrough bool
+
+	// Extension gallery
+	ExtensionGalleryServiceURL string
+	ExtensionGalleryItemURL    string
+}
+
+// defaultConfig is the singleton configuration instance.
+var defaultConfig = &CodeServerConfig{
+	// Timeouts
+	InstallTimeout: 5 * time.Minute,
+	StartupTimeout: 30 * time.Second,
+	IdleTimeout:    5 * time.Hour,
+
+	// Paths
+	UserDataDirName:  ".alpamon-editor",
+	InstallScriptURL: "https://code-server.dev/install.sh",
+
+	// Daemon settings
+	Auth:               "none",
+	DisableTelemetry:   true,
+	DisableUpdateCheck: true,
+
+	// Editor settings
+	ColorTheme:                "Default Dark Modern",
+	WindowTitle:               "${dirty}${activeEditorShort}${separator}${rootName}${separator}Alpamon Editor",
+	TelemetryLevel:            "off",
+	StartupEditor:             "none",
+	RestoreWindows:            "none",
+	UpdateMode:                "none",
+	DisableWorkspaceTrust:     true,
+	DisableWelcomeWalkthrough: true,
+
+	// Extension gallery (OpenVSX)
+	ExtensionGalleryServiceURL: "https://open-vsx.org/vscode/gallery",
+	ExtensionGalleryItemURL:    "https://open-vsx.org/vscode/item",
+}
+
+// GetCodeServerConfig returns the default code-server configuration.
+func GetCodeServerConfig() *CodeServerConfig {
+	return defaultConfig
+}
+
+// ToConfigYAML generates config.yaml content for code-server daemon.
+func (c *CodeServerConfig) ToConfigYAML() string {
+	return fmt.Sprintf("auth: %s\ndisable-telemetry: %t\ndisable-update-check: %t\n",
+		c.Auth, c.DisableTelemetry, c.DisableUpdateCheck)
+}
+
+// ToSettingsJSON generates settings.json content for VS Code editor.
+func (c *CodeServerConfig) ToSettingsJSON() ([]byte, error) {
+	settings := map[string]interface{}{
+		"workbench.colorTheme":                             c.ColorTheme,
+		"workbench.startupEditor":                          c.StartupEditor,
+		"workbench.welcomePage.walkthroughs.openOnInstall": !c.DisableWelcomeWalkthrough,
+		"window.restoreWindows":                            c.RestoreWindows,
+		"window.title":                                     c.WindowTitle,
+		"telemetry.telemetryLevel":                         c.TelemetryLevel,
+		"security.workspace.trust.enabled":                 !c.DisableWorkspaceTrust,
+		"update.mode":                                      c.UpdateMode,
+	}
+	return json.MarshalIndent(settings, "", "  ")
+}
+
+// ToExtensionGalleryEnv generates the EXTENSIONS_GALLERY environment variable value.
+func (c *CodeServerConfig) ToExtensionGalleryEnv() string {
+	return fmt.Sprintf(`{"serviceUrl": "%s", "itemUrl": "%s"}`,
+		c.ExtensionGalleryServiceURL, c.ExtensionGalleryItemURL)
+}
+
+// ToArgs generates command line arguments for code-server.
+func (c *CodeServerConfig) ToArgs(port int, userDataDir string) []string {
+	return []string{
+		"--config", filepath.Join(userDataDir, "config.yaml"),
+		"--user-data-dir", userDataDir,
+		"--bind-addr", fmt.Sprintf("127.0.0.1:%d", port),
+		"--idle-timeout-seconds", fmt.Sprintf("%d", int(c.IdleTimeout.Seconds())),
+	}
+}
+
+// ToEnv generates environment variables for code-server process.
+func (c *CodeServerConfig) ToEnv(homeDir string, includeXDG bool) []string {
+	env := append(os.Environ(),
+		fmt.Sprintf("HOME=%s", homeDir),
+		fmt.Sprintf("EXTENSIONS_GALLERY=%s", c.ToExtensionGalleryEnv()),
+	)
+
+	if includeXDG {
+		env = append(env,
+			fmt.Sprintf("XDG_DATA_HOME=%s", filepath.Join(homeDir, ".local", "share")),
+			fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(homeDir, ".config")),
+		)
+	}
+
+	return env
+}
 
 // Common installation paths for code-server
 var codeServerPaths = []string{
@@ -258,8 +360,9 @@ func (m *CodeServerManager) IsRunning() bool {
 
 // waitForReady waits for code-server to start listening on its port.
 func (m *CodeServerManager) waitForReady() error {
+	cfg := GetCodeServerConfig()
 	addr := fmt.Sprintf("127.0.0.1:%d", m.port)
-	deadline := time.Now().Add(startupTimeout)
+	deadline := time.Now().Add(cfg.StartupTimeout)
 
 	for time.Now().Before(deadline) {
 		if m.cmd.ProcessState != nil && m.cmd.ProcessState.Exited() {
@@ -275,7 +378,7 @@ func (m *CodeServerManager) waitForReady() error {
 		time.Sleep(time.Second)
 	}
 
-	return fmt.Errorf("code-server not ready after %v", startupTimeout)
+	return fmt.Errorf("code-server not ready after %v", cfg.StartupTimeout)
 }
 
 func isCodeServerInstalled() bool {
@@ -299,10 +402,11 @@ func getCodeServerPath() (string, error) {
 
 // installCodeServer installs code-server using the official install script.
 func installCodeServer(parentCtx context.Context) error {
-	ctx, cancel := context.WithTimeout(parentCtx, installTimeout)
+	cfg := GetCodeServerConfig()
+	ctx, cancel := context.WithTimeout(parentCtx, cfg.InstallTimeout)
 	defer cancel()
 
-	script, err := downloadInstallScript()
+	script, err := downloadInstallScript(cfg.InstallScriptURL)
 	if err != nil {
 		return err
 	}
@@ -313,14 +417,15 @@ func installCodeServer(parentCtx context.Context) error {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		log.Error().Err(err).Msg("code-server install script failed.")
 		return fmt.Errorf("install script failed: %w", err)
 	}
 
 	return nil
 }
 
-func downloadInstallScript() ([]byte, error) {
-	resp, err := http.Get(installScriptURL)
+func downloadInstallScript(url string) ([]byte, error) {
+	resp, err := http.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download install script: %w", err)
 	}
@@ -350,35 +455,18 @@ func findAvailablePort() (int, error) {
 
 // getCodeServerArgs returns the command line arguments for code-server.
 func getCodeServerArgs(port int, userDataDir string) []string {
-	return []string{
-		"--config", filepath.Join(userDataDir, "config.yaml"),
-		"--user-data-dir", userDataDir,
-		"--bind-addr", fmt.Sprintf("127.0.0.1:%d", port),
-		"--idle-timeout-seconds", fmt.Sprintf("%d", int(idleTimeout.Seconds())),
-	}
+	return GetCodeServerConfig().ToArgs(port, userDataDir)
 }
 
 // getCodeServerEnv returns environment variables for code-server process.
-// This includes HOME, XDG directories (Linux only), and EXTENSIONS_GALLERY for OpenVSX.
 func getCodeServerEnv(homeDir string, includeXDG bool) []string {
-	env := append(os.Environ(),
-		fmt.Sprintf("HOME=%s", homeDir),
-		fmt.Sprintf("EXTENSIONS_GALLERY=%s", openVSXGalleryEnv),
-	)
-
-	if includeXDG {
-		env = append(env,
-			fmt.Sprintf("XDG_DATA_HOME=%s", filepath.Join(homeDir, ".local", "share")),
-			fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(homeDir, ".config")),
-		)
-	}
-
-	return env
+	return GetCodeServerConfig().ToEnv(homeDir, includeXDG)
 }
 
 // setupUserDataDir creates the user-data-dir with config.yaml and settings.json for code-server.
 func setupUserDataDir(homeDir string) (string, error) {
-	userDataDir := filepath.Join(homeDir, userDataDirName)
+	cfg := GetCodeServerConfig()
+	userDataDir := filepath.Join(homeDir, cfg.UserDataDirName)
 	userDir := filepath.Join(userDataDir, "User")
 
 	// Create directories
@@ -388,24 +476,13 @@ func setupUserDataDir(homeDir string) (string, error) {
 
 	// Create config.yaml for code-server daemon settings
 	configPath := filepath.Join(userDataDir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte(codeServerConfig), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(cfg.ToConfigYAML()), 0644); err != nil {
 		return "", fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
 	// Create settings.json for VS Code editor settings
-	settings := map[string]interface{}{
-		"workbench.colorTheme":                             defaultColorTheme,
-		"workbench.startupEditor":                          "none",
-		"workbench.welcomePage.walkthroughs.openOnInstall": false,
-		"window.restoreWindows":                            "none",
-		"window.title":                                     "${dirty}${activeEditorShort}${separator}${rootName}${separator}Alpamon Editor",
-		"telemetry.telemetryLevel":                         "off",
-		"security.workspace.trust.enabled":                 false,
-		"update.mode":                                      "none",
-	}
-
 	settingsPath := filepath.Join(userDir, "settings.json")
-	data, err := json.MarshalIndent(settings, "", "  ")
+	data, err := cfg.ToSettingsJSON()
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal settings: %w", err)
 	}

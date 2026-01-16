@@ -85,7 +85,8 @@ func TestSetupUserDataDir(t *testing.T) {
 	assert.NotEmpty(t, userDataDir, "userDataDir should not be empty")
 
 	// Verify user data directory was created
-	expectedUserDataDir := filepath.Join(tempDir, userDataDirName)
+	cfg := GetCodeServerConfig()
+	expectedUserDataDir := filepath.Join(tempDir, cfg.UserDataDirName)
 	assert.Equal(t, expectedUserDataDir, userDataDir)
 	_, err = os.Stat(userDataDir)
 	assert.NoError(t, err, "User data directory should exist")
@@ -113,7 +114,7 @@ func TestSetupUserDataDir(t *testing.T) {
 	err = json.Unmarshal(data, &settings)
 	assert.NoError(t, err, "settings.json should be valid JSON")
 
-	assert.Equal(t, defaultColorTheme, settings["workbench.colorTheme"], "colorTheme should be dark")
+	assert.Equal(t, cfg.ColorTheme, settings["workbench.colorTheme"], "colorTheme should match config")
 	assert.Equal(t, "none", settings["workbench.startupEditor"], "workbench.startupEditor should be 'none'")
 	assert.Equal(t, false, settings["workbench.welcomePage.walkthroughs.openOnInstall"], "walkthroughs should be disabled")
 	assert.Equal(t, "none", settings["window.restoreWindows"], "window.restoreWindows should be 'none'")
