@@ -54,10 +54,7 @@ func (h *TunnelHandler) Validate(cmd string, args *common.CommandArgs) error {
 }
 
 func (h *TunnelHandler) validateOpenTunnel(args *common.CommandArgs) error {
-	clientType := args.ClientType
-	if clientType == "" {
-		clientType = runner.ClientTypeCLI
-	}
+	clientType := getClientType(args.ClientType)
 
 	data := OpenTunnelData{
 		SessionID:  args.SessionID,
@@ -148,7 +145,7 @@ func formatOpenTunnelMessage(clientType string, args *common.CommandArgs) string
 // handleCloseTunnel closes an existing tunnel connection
 func (h *TunnelHandler) handleCloseTunnel(args *common.CommandArgs) (int, string, error) {
 	if err := h.Validate(common.CloseTunnel.String(), args); err != nil {
-		return 1, fmt.Sprintf("closetunnel: Not enough information. %s", err.Error()), nil
+		return 1, fmt.Sprintf("closetunnel: %s", err.Error()), nil
 	}
 
 	log.Info().Str("sessionID", args.SessionID).Msg("Closing tunnel connection")
