@@ -79,6 +79,7 @@ type CommandResult struct {
 	PermissionOctal  string          `json:"permission_octal,omitempty"`
 	Owner            string          `json:"owner,omitempty"`
 	Group            string          `json:"group,omitempty"`
+	Target           string          `json:"target,omitempty"` // Symlink target path
 }
 
 type returnCode struct {
