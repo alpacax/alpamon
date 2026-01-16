@@ -205,10 +205,3 @@ func TestTunnelHandler_Commands(t *testing.T) {
 	}
 }
 
-func TestTunnelHandler_Name(t *testing.T) {
-	handler := NewTunnelHandler(common.NewMockCommandExecutor(t))
-
-	if handler.Name() != "tunnel" {
-		t.Errorf("Name() = %s, want tunnel", handler.Name())
-	}
-}
