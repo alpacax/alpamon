@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -270,7 +271,7 @@ func (m *CodeServerManager) Start() error {
 	}
 
 	// Setup user data directory with settings
-	userDataDir, err := setupUserDataDir(m.homeDir)
+	userDataDir, err := setupUserDataDir(m.homeDir, m.username, m.groupname)
 	if err != nil {
 		return fmt.Errorf("failed to setup user data dir: %w", err)
 	}
@@ -469,7 +470,8 @@ func getCodeServerEnv(homeDir string, includeXDG bool) []string {
 }
 
 // setupUserDataDir creates the user-data-dir with config.yaml and settings.json for code-server.
-func setupUserDataDir(homeDir string) (string, error) {
+// If running as root on Linux, ownership of created files is changed to the specified user.
+func setupUserDataDir(homeDir, username, groupname string) (string, error) {
 	cfg := GetCodeServerConfig()
 	userDataDir := filepath.Join(homeDir, cfg.UserDataDirName)
 	userDir := filepath.Join(userDataDir, "User")
@@ -496,6 +498,49 @@ func setupUserDataDir(homeDir string) (string, error) {
 		return "", fmt.Errorf("failed to write settings.json: %w", err)
 	}
 
+	// Change ownership if running as root (so demoted user can modify their config)
+	if os.Getuid() == 0 && runtime.GOOS != "darwin" {
+		if err := chownUserDataDir(userDataDir, username, groupname); err != nil {
+			log.Warn().Err(err).Msg("Failed to change ownership of user data dir.")
+		}
+	}
+
 	log.Debug().Msgf("Created user data directory at %s with config.", userDataDir)
 	return userDataDir, nil
+}
+
+// chownUserDataDir changes ownership of the user data directory and its contents.
+func chownUserDataDir(userDataDir, username, groupname string) error {
+	usr, err := user.Lookup(username)
+	if err != nil {
+		return fmt.Errorf("user %s not found: %w", username, err)
+	}
+
+	uid, err := strconv.Atoi(usr.Uid)
+	if err != nil {
+		return fmt.Errorf("invalid uid: %w", err)
+	}
+
+	// Use user's primary group if groupname is empty
+	gidStr := usr.Gid
+	if groupname != "" {
+		group, err := user.LookupGroup(groupname)
+		if err != nil {
+			return fmt.Errorf("group %s not found: %w", groupname, err)
+		}
+		gidStr = group.Gid
+	}
+
+	gid, err := strconv.Atoi(gidStr)
+	if err != nil {
+		return fmt.Errorf("invalid gid: %w", err)
+	}
+
+	// Recursively change ownership
+	return filepath.Walk(userDataDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chown(path, uid, gid)
+	})
 }

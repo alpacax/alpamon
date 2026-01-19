@@ -79,8 +79,8 @@ func TestSetupUserDataDir(t *testing.T) {
 	// Create a temporary directory for testing
 	tempDir := t.TempDir()
 
-	// Call setupUserDataDir
-	userDataDir, err := setupUserDataDir(tempDir)
+	// Call setupUserDataDir (empty username/groupname since we're not running as root in tests)
+	userDataDir, err := setupUserDataDir(tempDir, "", "")
 	assert.NoError(t, err, "setupUserDataDir should not error")
 	assert.NotEmpty(t, userDataDir, "userDataDir should not be empty")
 
@@ -128,10 +128,10 @@ func TestSetupUserDataDirIdempotent(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Call setupUserDataDir twice
-	userDataDir1, err := setupUserDataDir(tempDir)
+	userDataDir1, err := setupUserDataDir(tempDir, "", "")
 	assert.NoError(t, err)
 
-	userDataDir2, err := setupUserDataDir(tempDir)
+	userDataDir2, err := setupUserDataDir(tempDir, "", "")
 	assert.NoError(t, err)
 
 	// Both calls should return the same path
