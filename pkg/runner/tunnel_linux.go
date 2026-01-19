@@ -136,12 +136,17 @@ func getCodeServerCredential(username, groupname string) (*syscall.SysProcAttr, 
 		return nil, fmt.Errorf("user %s not found: %w", username, err)
 	}
 
-	group, err := user.LookupGroup(groupname)
-	if err != nil {
-		return nil, fmt.Errorf("group %s not found: %w", groupname, err)
+	// Use user's primary group if groupname is empty
+	gidStr := usr.Gid
+	if groupname != "" {
+		group, err := user.LookupGroup(groupname)
+		if err != nil {
+			return nil, fmt.Errorf("group %s not found: %w", groupname, err)
+		}
+		gidStr = group.Gid
 	}
 
-	uid, gid, err := parseUserCredentials(usr.Uid, group.Gid)
+	uid, gid, err := parseUserCredentials(usr.Uid, gidStr)
 	if err != nil {
 		return nil, err
 	}
