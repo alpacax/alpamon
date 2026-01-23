@@ -162,7 +162,9 @@ func (tc *TunnelClient) sendHealthResponse(stream *smux.Stream, status, errMsg s
 		"\r\n%s",
 		httpStatus, http.StatusText(httpStatus), len(body), body)
 
-	_, _ = stream.Write([]byte(response))
+	if _, err := stream.Write([]byte(response)); err != nil {
+		log.Debug().Err(err).Msg("Failed to write health response")
+	}
 }
 
 func getHTTPStatusForHealth(status string) int {
@@ -278,7 +280,9 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 				}
 			}
 		}
-		_ = cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+		log.Debug().Err(err).Msg("Tunnel worker process exited with error.")
+	}
 	}()
 
 	log.Debug().Msgf("Tunnel worker spawned for %s.", targetAddr)
