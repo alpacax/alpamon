@@ -25,6 +25,13 @@ import (
 // maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
 const maxMetadataSize = 1024
 
+// Client type constants for tunnel connections
+const (
+	ClientTypeCLI    = "cli"
+	ClientTypeWeb    = "web"
+	ClientTypeEditor = "editor"
+)
+
 // activeTunnels tracks all active tunnel connections by session ID.
 var (
 	activeTunnels   = make(map[string]*TunnelClient)
@@ -33,24 +40,29 @@ var (
 
 // streamMetadata contains the target port information sent by the server.
 type streamMetadata struct {
-	RemotePort string `json:"remote_port"`
+	RemotePort  string `json:"remote_port"`
+	HealthCheck bool   `json:"health_check,omitempty"`
 }
 
 // TunnelClient manages the smux-multiplexed tunnel connection to the proxy server.
 // It accepts streams from the server and relays them to local services.
 type TunnelClient struct {
 	sessionID     string
-	targetPort    int
+	clientType    string // cli, web, editor
+	targetPort    int    // for cli/web type
+	username      string // for editor type
+	groupname     string // for editor type
 	serverURL     string
 	requestHeader http.Header
 	wsConn        *websocket.Conn
 	session       *smux.Session
 	ctx           context.Context
 	cancel        context.CancelFunc
+	codeServerMgr *CodeServerManager // for editor type
 }
 
 // NewTunnelClient creates a new tunnel client for the given WebSocket URL.
-func NewTunnelClient(sessionID string, targetPort int, url string) *TunnelClient {
+func NewTunnelClient(sessionID, clientType string, targetPort int, username, groupname, url string) *TunnelClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
@@ -60,7 +72,10 @@ func NewTunnelClient(sessionID string, targetPort int, url string) *TunnelClient
 
 	return &TunnelClient{
 		sessionID:     sessionID,
+		clientType:    clientType,
 		targetPort:    targetPort,
+		username:      username,
+		groupname:     groupname,
 		serverURL:     url,
 		requestHeader: headers,
 		ctx:           ctx,
@@ -83,6 +98,14 @@ func (tc *TunnelClient) RunTunnelBackground() {
 		tc.Close()
 	}()
 
+	// For editor type, initialize code-server manager (startup triggered by health_check)
+	if tc.clientType == ClientTypeEditor {
+		if err := tc.initCodeServerManager(); err != nil {
+			log.Error().Err(err).Msgf("Failed to initialize code-server manager for session %s.", tc.sessionID)
+			return
+		}
+	}
+
 	// Connect and run
 	if err := tc.connect(); err != nil {
 		log.Error().Err(err).Msgf("Tunnel connection failed for session %s.", tc.sessionID)
@@ -92,6 +115,74 @@ func (tc *TunnelClient) RunTunnelBackground() {
 	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort)
 	tc.handleStreams()
 	log.Info().Msgf("Tunnel session %s ended.", tc.sessionID)
+}
+
+// initCodeServerManager creates the code-server manager without starting it.
+// The actual startup is triggered by health_check requests.
+func (tc *TunnelClient) initCodeServerManager() error {
+	mgr, err := NewCodeServerManager(tc.ctx, tc.username, tc.groupname)
+	if err != nil {
+		return fmt.Errorf("failed to create code-server manager: %w", err)
+	}
+	tc.codeServerMgr = mgr
+	log.Info().Msgf("code-server manager initialized for session %s (user: %s).", tc.sessionID, tc.username)
+	return nil
+}
+
+// handleHealthCheck responds to health check requests with code-server status.
+func (tc *TunnelClient) handleHealthCheck(stream *smux.Stream) {
+	if tc.codeServerMgr == nil {
+		tc.sendHealthResponse(stream, "error", "code-server manager not initialized")
+		return
+	}
+
+	status, lastError := tc.codeServerMgr.Status()
+
+	if status == CodeServerStatusIdle {
+		tc.codeServerMgr.StartAsync()
+		status, _ = tc.codeServerMgr.Status()
+	}
+
+	if status == CodeServerStatusReady {
+		tc.targetPort = tc.codeServerMgr.Port()
+	}
+
+	tc.sendHealthResponse(stream, string(status), lastError)
+}
+
+// sendHealthResponse sends an HTTP response with health status.
+func (tc *TunnelClient) sendHealthResponse(stream *smux.Stream, status, errMsg string) {
+	httpStatus := getHTTPStatusForHealth(status)
+	body := buildHealthResponseBody(status, errMsg)
+
+	response := fmt.Sprintf("HTTP/1.1 %d %s\r\n"+
+		"Content-Type: application/json\r\n"+
+		"Content-Length: %d\r\n"+
+		"Connection: close\r\n"+
+		"\r\n%s",
+		httpStatus, http.StatusText(httpStatus), len(body), body)
+
+	if _, err := stream.Write([]byte(response)); err != nil {
+		log.Debug().Err(err).Msg("Failed to write health response")
+	}
+}
+
+func getHTTPStatusForHealth(status string) int {
+	switch status {
+	case "ready":
+		return http.StatusOK
+	case "installing", "starting":
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func buildHealthResponseBody(status, errMsg string) string {
+	if errMsg != "" {
+		return fmt.Sprintf(`{"status":"%s","error":"%s"}`, status, errMsg)
+	}
+	return fmt.Sprintf(`{"status":"%s"}`, status)
 }
 
 // connect establishes WebSocket connection and creates smux session.
@@ -149,35 +240,29 @@ func (tc *TunnelClient) handleStreams() {
 func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	defer stream.Close()
 
-	// Read metadata with size limit to prevent memory exhaustion from malicious servers
-	limitedReader := &io.LimitedReader{R: stream, N: maxMetadataSize}
-	bufReader := bufio.NewReader(limitedReader)
-	metadataLine, err := bufReader.ReadString('\n')
+	metadata, bufReader, err := tc.readStreamMetadata(stream)
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to read stream metadata (may exceed size limit).")
+		log.Debug().Err(err).Msg("Failed to read stream metadata.")
 		return
 	}
 
-	var metadata streamMetadata
-	if err := json.Unmarshal([]byte(metadataLine), &metadata); err != nil {
-		log.Debug().Err(err).Msg("Failed to parse stream metadata.")
+	log.Info().
+		Str("remote_port", metadata.RemotePort).
+		Bool("health_check", metadata.HealthCheck).
+		Msg("Received stream metadata")
+
+	if metadata.HealthCheck && tc.clientType == ClientTypeEditor {
+		tc.handleHealthCheck(stream)
 		return
 	}
 
-	// Use target port from tunnel configuration if not specified in metadata
-	var targetPort string
-	if metadata.RemotePort != "" {
-		port, err := strconv.Atoi(metadata.RemotePort)
-		if err != nil || port < 1 || port > 65535 {
-			log.Debug().Str("remotePort", metadata.RemotePort).Msg("Invalid remote port in metadata.")
-			return
-		}
-		targetPort = metadata.RemotePort
-	} else {
-		targetPort = fmt.Sprintf("%d", tc.targetPort)
+	targetPort, err := tc.resolveTargetPort(metadata.RemotePort)
+	if err != nil {
+		log.Debug().Err(err).Msg("Invalid target port.")
+		return
 	}
 
-	targetAddr := fmt.Sprintf("127.0.0.1:%s", targetPort)
+	targetAddr := fmt.Sprintf("127.0.0.1:%d", targetPort)
 
 	// Spawn tunnel worker subprocess (runs as nobody user for security)
 	cmd, stdinPipe, stdoutPipe, err := spawnTunnelWorker(targetAddr)
@@ -195,45 +280,91 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 				}
 			}
 		}
-		_ = cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+		log.Debug().Err(err).Msg("Tunnel worker process exited with error.")
+	}
 	}()
 
 	log.Debug().Msgf("Tunnel worker spawned for %s.", targetAddr)
 
-	bufferedSize := bufReader.Buffered()
-	remainingBuf := make([]byte, bufferedSize)
+	dataReader := tc.buildDataReader(bufReader, stream)
+	tc.relayBidirectional(stream, stdinPipe, stdoutPipe, dataReader)
 
-	n, err := io.ReadFull(bufReader, remainingBuf)
-	if err != nil && err != io.EOF {
-		log.Error().Err(err).Msg("Failed to read remaining buffered data from bufReader")
-		return
+	log.Debug().Msgf("Tunnel stream closed for port %d.", targetPort)
+}
+
+func (tc *TunnelClient) readStreamMetadata(stream *smux.Stream) (*streamMetadata, *bufio.Reader, error) {
+	limitedReader := &io.LimitedReader{R: stream, N: maxMetadataSize}
+	bufReader := bufio.NewReader(limitedReader)
+
+	metadataLine, err := bufReader.ReadString('\n')
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read metadata: %w", err)
 	}
 
-	dataReader := io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
+	var metadata streamMetadata
+	if err := json.Unmarshal([]byte(metadataLine), &metadata); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse metadata: %w", err)
+	}
 
-	// Bidirectional relay: stream <-> subprocess
+	return &metadata, bufReader, nil
+}
+
+func (tc *TunnelClient) resolveTargetPort(remotePort string) (int, error) {
+	if remotePort == "" {
+		return tc.targetPort, nil
+	}
+
+	port, err := strconv.Atoi(remotePort)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid port: %s", remotePort)
+	}
+	return port, nil
+}
+
+func (tc *TunnelClient) buildDataReader(bufReader *bufio.Reader, stream *smux.Stream) io.Reader {
+	bufferedSize := bufReader.Buffered()
+	if bufferedSize == 0 {
+		return stream
+	}
+
+	remainingBuf := make([]byte, bufferedSize)
+	n, err := io.ReadFull(bufReader, remainingBuf)
+	if err != nil && err != io.EOF {
+		log.Debug().Err(err).Msg("Failed to read remaining buffered data.")
+		return stream
+	}
+
+	return io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
+}
+
+func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, stdinPipe io.WriteCloser, stdoutPipe io.ReadCloser, dataReader io.Reader) {
 	errChan := make(chan error, 2)
 
-	// Stream -> Subprocess stdin
 	go func() {
 		_, err := io.Copy(stdinPipe, dataReader)
 		stdinPipe.Close()
 		errChan <- err
 	}()
 
-	// Subprocess stdout -> Stream
 	go func() {
 		_, err := tunnel.CopyBuffered(stream, stdoutPipe)
 		errChan <- err
 	}()
 
-	// Wait for one direction to complete
 	<-errChan
-	log.Debug().Msgf("Tunnel stream closed for port %s.", targetPort)
 }
 
 // Close cleanly shuts down the tunnel connection.
 func (tc *TunnelClient) Close() {
+	// Stop code-server first (for editor type)
+	if tc.codeServerMgr != nil {
+		if err := tc.codeServerMgr.Stop(); err != nil {
+			log.Debug().Err(err).Msg("Failed to stop code-server.")
+		}
+		tc.codeServerMgr = nil
+	}
+
 	if tc.cancel != nil {
 		tc.cancel()
 	}

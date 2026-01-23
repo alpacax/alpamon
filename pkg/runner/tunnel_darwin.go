@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -37,9 +38,33 @@ func spawnTunnelWorker(targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadClo
 		return nil, nil, nil, fmt.Errorf("failed to start tunnel worker: %w", err)
 	}
 
-	log.Debug().
-		Str("targetAddr", targetAddr).
-		Msg("Spawned tunnel worker subprocess (macOS - runs as current user).")
+	log.Debug().Msgf("Spawned tunnel worker subprocess for %s (macOS - runs as current user).", targetAddr)
 
 	return cmd, stdinPipe, stdoutPipe, nil
+}
+
+// startCodeServerProcess starts code-server on macOS.
+// On macOS, credential demotion is not supported, so the process runs as the current user.
+func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataDir string) (*exec.Cmd, error) {
+	codeServerPath, err := getCodeServerPath()
+	if err != nil {
+		return nil, err
+	}
+
+	args := getCodeServerArgs(m.port, userDataDir)
+	cmd := exec.CommandContext(ctx, codeServerPath, args...)
+	cmd.Dir = m.homeDir
+
+	cmd.Env = getCodeServerEnv(m.homeDir, false)
+
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start code-server: %w", err)
+	}
+
+	log.Info().Msgf("code-server process started on port %d (macOS - runs as current user).", m.port)
+
+	return cmd, nil
 }

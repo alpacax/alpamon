@@ -40,6 +40,7 @@ type CommandArgs struct {
 
 	// Tunnel operations
 	TargetPort int
+	ClientType string // cli, web, editor
 
 	// Environment
 	Env map[string]string

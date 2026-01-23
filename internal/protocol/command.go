@@ -92,7 +92,8 @@ type CommandData struct {
 	Interface string `json:"interface"`
 
 	// Tunnel specific fields
-	TargetPort int `json:"target_port"`
+	TargetPort int    `json:"target_port"`
+	ClientType string `json:"client_type"` // cli, web, editor
 }
 
 // ParseCommandData parses the Data field of a Command into CommandData
@@ -142,6 +143,7 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 
 		// Tunnel operations
 		TargetPort: c.TargetPort,
+		ClientType: c.ClientType,
 
 		// Firewall operations
 		Keys:         c.Keys,
