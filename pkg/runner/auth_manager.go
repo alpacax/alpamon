@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/pkg/config"
+	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/cenkalti/backoff"
 	"github.com/rs/zerolog/log"
 )
@@ -93,6 +95,7 @@ type AuthManager struct {
 	listener           net.Listener
 	localSudoRequests  map[string]*SudoRequest
 	completionChannels map[string]chan struct{}
+	session            *scheduler.Session
 }
 
 const (
@@ -112,6 +115,7 @@ func GetAuthManager(controlClient *ControlClient) *AuthManager {
 			pidToSessionMap:    make(map[int]*SessionInfo),
 			localSudoRequests:  make(map[string]*SudoRequest),
 			completionChannels: make(map[string]chan struct{}),
+			session:            scheduler.InitSession(),
 		}
 	})
 
@@ -125,6 +129,10 @@ func GetAuthManager(controlClient *ControlClient) *AuthManager {
 
 	if authManager.completionChannels == nil {
 		authManager.completionChannels = make(map[string]chan struct{})
+	}
+
+	if authManager.session == nil {
+		authManager.session = scheduler.InitSession()
 	}
 
 	return authManager
@@ -211,17 +219,25 @@ func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApproval
 		case <-ctx.Done():
 			return backoff.Permanent(ctx.Err())
 		default:
-			if am.controlClient == nil || !am.controlClient.IsConnected() {
-				return fmt.Errorf("control WebSocket client not available")
+			if am.session == nil {
+				return fmt.Errorf("HTTP session not available")
 			}
 
-			if err := am.controlClient.WriteJSON(req); err != nil {
+			url := fmt.Sprintf("/api/servers/servers/%s/sudo-approval/", config.GlobalSettings.ID)
+			_, statusCode, err := am.session.Post(url, req, 10)
+			if err != nil {
 				nextInterval := retryBackoff.NextBackOff()
-				log.Warn().Err(err).Msgf("Failed to send sudo request, will retry in %ds", int(nextInterval.Seconds()))
+				log.Warn().Err(err).Msgf("Failed to send sudo request via REST API, will retry in %ds", int(nextInterval.Seconds()))
 				return err
 			}
 
-			log.Debug().Msg("Sudo request sent successfully")
+			if statusCode < 200 || statusCode >= 300 {
+				nextInterval := retryBackoff.NextBackOff()
+				log.Warn().Int("status_code", statusCode).Msgf("Sudo request failed with status %d, will retry in %ds", statusCode, int(nextInterval.Seconds()))
+				return fmt.Errorf("sudo request failed with status code: %d", statusCode)
+			}
+
+			log.Debug().Msg("Sudo request sent successfully via REST API")
 			return nil
 		}
 	}
@@ -336,7 +352,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		return
 	}
 
-	log.Debug().Msgf("sudo_approval request sent to WebSocket client, waiting for response...")
+	log.Debug().Msgf("sudo_approval request sent via REST API, waiting for response...")
 
 	// Wait for response, timeout, or context cancellation
 	select {
