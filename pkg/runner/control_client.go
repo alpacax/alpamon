@@ -17,7 +17,6 @@ import (
 )
 
 const (
-	controlWSPath             = "/ws/servers/control/"
 	controlMinConnectInterval = 5 * time.Second
 	controlMaxConnectInterval = 60 * time.Second
 	controlReadTimeout        = 35 * time.Minute
@@ -46,18 +45,7 @@ func NewControlClient() *ControlClient {
 
 // GetWSPath returns the WebSocket URL for control endpoint
 func (cc *ControlClient) GetWSPath() string {
-	// Build control WebSocket path from server URL
-	serverURL := config.GlobalSettings.ServerURL
-	wsURL := serverURL
-	if len(wsURL) > 0 {
-		// Replace http with ws
-		if wsURL[0:5] == "https" {
-			wsURL = "wss" + wsURL[5:]
-		} else if wsURL[0:4] == "http" {
-			wsURL = "ws" + wsURL[4:]
-		}
-	}
-	return wsURL + controlWSPath
+	return config.GlobalSettings.ControlWSPath
 }
 
 // RunForever maintains the control WebSocket connection and handles messages

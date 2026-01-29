@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/cenkalti/backoff"
 	"github.com/rs/zerolog/log"
@@ -223,7 +222,7 @@ func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApproval
 				return fmt.Errorf("HTTP session not available")
 			}
 
-			url := fmt.Sprintf("/api/servers/servers/%s/sudo-approval/", config.GlobalSettings.ID)
+			url := fmt.Sprintf("/api/websh/sessions/%s/sudo-approval/", req.SessionID)
 			_, statusCode, err := am.session.Post(url, req, 10)
 			if err != nil {
 				nextInterval := retryBackoff.NextBackOff()

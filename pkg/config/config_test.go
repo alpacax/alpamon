@@ -8,7 +8,7 @@ import (
 func TestPoolConfigDefaults(t *testing.T) {
 	// Test that default pool values are set correctly when not configured
 	config := Config{}
-	_, settings := validateConfig(config, "/ws/test/")
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
 	if settings.PoolMaxWorkers != DefaultPoolMaxWorkers {
 		t.Errorf("Expected default PoolMaxWorkers to be %d, got %d", DefaultPoolMaxWorkers, settings.PoolMaxWorkers)
@@ -29,7 +29,7 @@ func TestPoolConfigCustomValues(t *testing.T) {
 	config.Pool.MaxWorkers = 50
 	config.Pool.QueueSize = 500
 
-	_, settings := validateConfig(config, "/ws/test/")
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
 	if settings.PoolMaxWorkers != 50 {
 		t.Errorf("Expected PoolMaxWorkers to be 50, got %d", settings.PoolMaxWorkers)
@@ -66,7 +66,7 @@ queue_size = 300
 	}
 
 	// Load the config
-	settings := LoadConfig([]string{tmpfile.Name()}, "/ws/test/")
+	settings := LoadConfig([]string{tmpfile.Name()}, "/ws/test/", "/ws/control/")
 
 	if settings.PoolMaxWorkers != 30 {
 		t.Errorf("Expected PoolMaxWorkers to be 30 from INI, got %d", settings.PoolMaxWorkers)
