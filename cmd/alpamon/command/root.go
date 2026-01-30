@@ -138,7 +138,7 @@ func runAgent() {
 	go controlClient.RunForever(ctx)
 
 	// Auth Manager for sudo approval workflow
-	authManager := runner.GetAuthManager(controlClient)
+	authManager := runner.GetAuthManager(controlClient, session)
 	go authManager.Start(ctx)
 
 	for {
