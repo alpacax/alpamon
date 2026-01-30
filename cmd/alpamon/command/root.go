@@ -109,11 +109,11 @@ func runAgent() {
 	var controlClient *runner.ControlClient
 	var authManager *runner.AuthManager
 
-	if !utils.IsSudoPAMDisabled() {
+if !utils.IsSudoPAMDisabled() {
 		controlClient = runner.NewControlClient()
 		go controlClient.RunForever(ctx)
 
-		authManager = runner.GetAuthManager(controlClient)
+		authManager = runner.GetAuthManager(controlClient, session)
 		go authManager.Start(ctx)
 	} else {
 		log.Info().Msg("Sudo PAM functionality temporarily disabled - skipping control client and auth manager")

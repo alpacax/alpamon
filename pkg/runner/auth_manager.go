@@ -108,13 +108,13 @@ var (
 	authManagerOnce sync.Once
 )
 
-func GetAuthManager(controlClient *ControlClient) *AuthManager {
+func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *AuthManager {
 	authManagerOnce.Do(func() {
 		authManager = &AuthManager{
 			pidToSessionMap:    make(map[int]*SessionInfo),
 			localSudoRequests:  make(map[string]*SudoRequest),
 			completionChannels: make(map[string]chan struct{}),
-			session:            scheduler.InitSession(),
+			session:            session,
 		}
 	})
 
@@ -131,7 +131,7 @@ func GetAuthManager(controlClient *ControlClient) *AuthManager {
 	}
 
 	if authManager.session == nil {
-		authManager.session = scheduler.InitSession()
+		authManager.session = session
 	}
 
 	return authManager
@@ -208,11 +208,11 @@ func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) error {
 	ctx, cancel := context.WithTimeout(am.ctx, authRetryTimeout)
 	defer cancel()
 
-	operation := am.createSendOperation(ctx, req, retryBackoff)
+	operation := am.createSendOperation(ctx, req)
 	return backoff.Retry(operation, backoff.WithContext(retryBackoff, ctx))
 }
 
-func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApprovalRequest, retryBackoff *backoff.ExponentialBackOff) func() error {
+func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApprovalRequest) func() error {
 	return func() error {
 		select {
 		case <-ctx.Done():
@@ -223,16 +223,14 @@ func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApproval
 			}
 
 			url := fmt.Sprintf("/api/websh/sessions/%s/sudo-approval/", req.SessionID)
-			_, statusCode, err := am.session.Post(url, req, 10)
+			_, statusCode, err := am.session.Post(url, req, 10*time.Second)
 			if err != nil {
-				nextInterval := retryBackoff.NextBackOff()
-				log.Warn().Err(err).Msgf("Failed to send sudo request via REST API, will retry in %ds", int(nextInterval.Seconds()))
+				log.Warn().Err(err).Msg("Failed to send sudo request via REST API, will retry")
 				return err
 			}
 
 			if statusCode < 200 || statusCode >= 300 {
-				nextInterval := retryBackoff.NextBackOff()
-				log.Warn().Int("status_code", statusCode).Msgf("Sudo request failed with status %d, will retry in %ds", statusCode, int(nextInterval.Seconds()))
+				log.Warn().Int("status_code", statusCode).Msgf("Sudo request failed with status %d, will retry", statusCode)
 				return fmt.Errorf("sudo request failed with status code: %d", statusCode)
 			}
 
@@ -313,30 +311,28 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	am.mu.Lock()
 	session, exists := am.pidToSessionMap[sudoApprovalReq.PPID]
 	if !exists {
-		// local user: save in localSudoRequests
+		// Local user: reject immediately without sending to server
+		// Server would reject anyway (servers/consumer.py:217-228)
+		am.mu.Unlock()
 		sudoApprovalReq.IsAlpconUser = false
-		sudoApprovalReq.SessionID = ""
 
-		am.localSudoRequests[sudoApprovalReq.RequestID] = &SudoRequest{
-			RequestID:  sudoApprovalReq.RequestID,
-			Connection: unixConn,
-		}
-		am.mu.Unlock()
-
-		log.Debug().Msgf("Local user sudo request: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
-	} else {
-		// Alpacon user: pidToSessionMap
-		sudoApprovalReq.IsAlpconUser = true
-		sudoApprovalReq.SessionID = session.SessionID
-
-		session.Requests[sudoApprovalReq.RequestID] = &SudoRequest{
-			RequestID:  sudoApprovalReq.RequestID,
-			Connection: unixConn,
-		}
-		am.mu.Unlock()
-
-		log.Debug().Msgf("Alpacon user sudo request: %s for session %s", sudoApprovalReq.RequestID, session.SessionID)
+		log.Debug().Msgf("Local user sudo request rejected: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority")
+		unixConn.Close()
+		return
 	}
+
+	// Alpacon user: pidToSessionMap
+	sudoApprovalReq.IsAlpconUser = true
+	sudoApprovalReq.SessionID = session.SessionID
+
+	session.Requests[sudoApprovalReq.RequestID] = &SudoRequest{
+		RequestID:  sudoApprovalReq.RequestID,
+		Connection: unixConn,
+	}
+	am.mu.Unlock()
+
+	log.Debug().Msgf("Alpacon user sudo request: %s for session %s", sudoApprovalReq.RequestID, session.SessionID)
 
 	// Store completion channel for this request
 	am.storeCompletionChannel(sudoApprovalReq.RequestID, completionChan)
