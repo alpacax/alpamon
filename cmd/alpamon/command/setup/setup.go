@@ -97,7 +97,9 @@ func writeConfig() error {
 	}
 
 	if configData.URL == "" || configData.ID == "" || configData.Key == "" {
-		return fmt.Errorf("environment variables ALPACON_URL, PLUGIN_ID, PLUGIN_KEY must be set")
+		fmt.Println("Notice: Environment variables not set. Skipping config generation.")
+		fmt.Println("Please run 'sudo alpamon register' to complete the registration.")
+		return nil
 	}
 
 	err = os.MkdirAll(filepath.Dir(configTarget), 0755)

@@ -11,8 +11,11 @@ main() {
   if is_upgrade "$@"; then
     restart_alpamon_by_timer
   else
-    setup_alpamon
-    start_systemd_service
+    # setup_alpamon returns 1 if ENV not set (generic installation)
+    # In that case, skip start_systemd_service - user will run 'alpamon register'
+    if setup_alpamon; then
+      start_systemd_service
+    fi
   fi
 
   cleanup_tmpl_files
@@ -40,6 +43,14 @@ check_alpamon_binary() {
 }
 
 setup_alpamon() {
+  # Skip setup and service start if ENV not set (generic installation)
+  # User will run 'alpamon register' which starts the service after registration
+  if [ -z "$PLUGIN_ID" ] || [ -z "$PLUGIN_KEY" ]; then
+    echo "Notice: Environment variables not set. Skipping automatic setup."
+    echo "Please run 'sudo alpamon register' to complete the registration."
+    return 1  # Return non-zero to skip start_systemd_service
+  fi
+
   "$ALPAMON_BIN" setup
   if [ $? -ne 0 ]; then
     echo "Error: Alpamon setup command failed."
