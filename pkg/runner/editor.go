@@ -420,7 +420,15 @@ func installCodeServer(parentCtx context.Context) error {
 	cmd.Stderr = os.Stderr
 
 	// HOME is required by install script but not set in systemd service
-	cmd.Env = append(os.Environ(), "HOME=/root")
+	// On macOS, use current user's home directory (Homebrew requires writable HOME)
+	// On Linux, use /root (systemd service runs as root)
+	homeDir := "/root"
+	if runtime.GOOS == "darwin" {
+		if usr, err := user.Current(); err == nil {
+			homeDir = usr.HomeDir
+		}
+	}
+	cmd.Env = append(os.Environ(), fmt.Sprintf("HOME=%s", homeDir))
 
 	if err := cmd.Run(); err != nil {
 		log.Error().Err(err).Msg("code-server install script failed.")
