@@ -419,6 +419,9 @@ func installCodeServer(parentCtx context.Context) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	// HOME is required by install script but not set in systemd service
+	cmd.Env = append(os.Environ(), "HOME=/root")
+
 	if err := cmd.Run(); err != nil {
 		log.Error().Err(err).Msg("code-server install script failed.")
 		return fmt.Errorf("install script failed: %w", err)
