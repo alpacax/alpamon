@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -420,15 +421,24 @@ func installCodeServer(parentCtx context.Context) error {
 	cmd.Stderr = os.Stderr
 
 	// HOME is required by install script but not set in systemd service
-	// On macOS, use current user's home directory (Homebrew requires writable HOME)
-	// On Linux, use /root (systemd service runs as root)
 	homeDir := "/root"
 	if runtime.GOOS == "darwin" {
-		if usr, err := user.Current(); err == nil {
-			homeDir = usr.HomeDir
+		usr, err := user.Current()
+		if err != nil {
+			log.Error().Err(err).Msg("failed to determine current user on macOS")
+			return fmt.Errorf("failed to determine current user on macOS: %w", err)
+		}
+		homeDir = usr.HomeDir
+	}
+
+	env := os.Environ()
+	cmd.Env = make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if !strings.HasPrefix(e, "HOME=") {
+			cmd.Env = append(cmd.Env, e)
 		}
 	}
-	cmd.Env = append(os.Environ(), fmt.Sprintf("HOME=%s", homeDir))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("HOME=%s", homeDir))
 
 	if err := cmd.Run(); err != nil {
 		log.Error().Err(err).Msg("code-server install script failed.")
