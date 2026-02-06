@@ -38,6 +38,9 @@ const (
 	MaxReasonableWorkers        = 1000
 	MaxReasonableQueueSize      = 10000
 	MaxReasonableTimeoutSeconds = 3600
+
+	// Editor configuration defaults
+	DefaultEditorIdleTimeout = 60 // minutes
 )
 
 // GetSmuxConfig returns optimized smux configuration for tunnel connections.
@@ -125,6 +128,7 @@ func validateConfig(config Config, wsPath string) (bool, Settings) {
 		PoolMaxWorkers:     DefaultPoolMaxWorkers,
 		PoolQueueSize:      DefaultPoolQueueSize,
 		PoolDefaultTimeout: DefaultPoolDefaultTimeout,
+		EditorIdleTimeout:  DefaultEditorIdleTimeout,
 	}
 
 	valid := true
@@ -195,6 +199,18 @@ func validateConfig(config Config, wsPath string) (bool, Settings) {
 	} else {
 		// Keep the default value that was set during Settings initialization
 		log.Debug().Msgf("Using default pool timeout: %d seconds", settings.PoolDefaultTimeout)
+	}
+
+	// Validate and set editor configuration
+	if config.Editor.IdleTimeout != nil {
+		settings.EditorIdleTimeout = *config.Editor.IdleTimeout
+		if settings.EditorIdleTimeout == 0 {
+			log.Debug().Msg("Using configured editor idle timeout: 0 (no timeout).")
+		} else {
+			log.Debug().Msgf("Using configured editor idle timeout: %d minutes.", settings.EditorIdleTimeout)
+		}
+	} else {
+		log.Debug().Msgf("Using default editor idle timeout: %d minutes.", settings.EditorIdleTimeout)
 	}
 
 	// Validate pool settings are reasonable

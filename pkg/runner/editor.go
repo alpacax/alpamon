@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/rs/zerolog/log"
 )
 
@@ -58,7 +59,7 @@ var defaultConfig = &CodeServerConfig{
 	// Timeouts
 	InstallTimeout: 5 * time.Minute,
 	StartupTimeout: 30 * time.Second,
-	IdleTimeout:    5 * time.Hour,
+	IdleTimeout:    1 * time.Hour,
 
 	// Paths
 	UserDataDirName:  ".alpamon-editor",
@@ -84,8 +85,14 @@ var defaultConfig = &CodeServerConfig{
 	ExtensionGalleryItemURL:    "https://open-vsx.org/vscode/item",
 }
 
-// GetCodeServerConfig returns the default code-server configuration.
+var configOnce sync.Once
+
+// GetCodeServerConfig returns the code-server configuration.
+// On the first call, it applies the editor idle timeout from alpamon.conf.
 func GetCodeServerConfig() *CodeServerConfig {
+	configOnce.Do(func() {
+		defaultConfig.IdleTimeout = time.Duration(config.GlobalSettings.EditorIdleTimeout) * time.Minute
+	})
 	return defaultConfig
 }
 
