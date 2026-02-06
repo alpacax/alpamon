@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 
 	"github.com/rs/zerolog/log"
 )
@@ -42,6 +43,8 @@ func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataD
 	cmd.Dir = m.homeDir
 
 	cmd.Env = getCodeServerEnv(m.homeDir, false)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

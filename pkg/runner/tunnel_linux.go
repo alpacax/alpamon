@@ -94,9 +94,11 @@ func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataD
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user credentials: %w", err)
 	}
-	if sysProcAttr != nil {
-		cmd.SysProcAttr = sysProcAttr
+	if sysProcAttr == nil {
+		sysProcAttr = &syscall.SysProcAttr{}
 	}
+	sysProcAttr.Setpgid = true
+	cmd.SysProcAttr = sysProcAttr
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

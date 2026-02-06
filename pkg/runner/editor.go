@@ -324,9 +324,9 @@ func (m *CodeServerManager) stopProcess() error {
 		m.cancel()
 	}
 
-	if err := m.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := syscall.Kill(-m.cmd.Process.Pid, syscall.SIGTERM); err != nil {
 		log.Debug().Err(err).Msg("SIGTERM failed, trying SIGKILL.")
-		if err := m.cmd.Process.Kill(); err != nil {
+		if err := syscall.Kill(-m.cmd.Process.Pid, syscall.SIGKILL); err != nil {
 			return fmt.Errorf("failed to kill code-server: %w", err)
 		}
 	}
@@ -340,7 +340,7 @@ func (m *CodeServerManager) stopProcess() error {
 	case <-done:
 		log.Info().Msg("code-server stopped.")
 	case <-time.After(10 * time.Second):
-		_ = m.cmd.Process.Kill()
+		_ = syscall.Kill(-m.cmd.Process.Pid, syscall.SIGKILL)
 		log.Warn().Msg("code-server killed after timeout.")
 	}
 
