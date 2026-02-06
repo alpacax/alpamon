@@ -3,6 +3,7 @@ package config
 type Settings struct {
 	ServerURL          string
 	WSPath             string
+	ControlWSPath      string
 	UseSSL             bool
 	CaCert             string // CA certificate file path
 	SSLVerify          bool
