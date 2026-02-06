@@ -42,7 +42,7 @@ var RootCmd = &cobra.Command{
 
 func init() {
 	setup.SetConfigPaths(name)
-	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelWorkerCmd, register.RegisterCmd)
+	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelDaemonCmd, register.RegisterCmd)
 }
 
 func runAgent() {

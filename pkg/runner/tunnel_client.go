@@ -6,13 +6,15 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/config"
@@ -59,6 +61,8 @@ type TunnelClient struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	codeServerMgr *CodeServerManager // for editor type
+	daemonCmd     *exec.Cmd          // tunnel daemon subprocess
+	daemonSocket  string             // UDS path for daemon communication
 }
 
 // NewTunnelClient creates a new tunnel client for the given WebSocket URL.
@@ -113,6 +117,13 @@ func (tc *TunnelClient) RunTunnelBackground() {
 	}
 
 	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort)
+
+	// Start tunnel daemon (single subprocess for all streams)
+	if err := tc.startTunnelDaemon(); err != nil {
+		log.Error().Err(err).Msgf("Failed to start tunnel daemon for session %s.", tc.sessionID)
+		return
+	}
+
 	tc.handleStreams()
 	log.Info().Msgf("Tunnel session %s ended.", tc.sessionID)
 }
@@ -235,8 +246,8 @@ func (tc *TunnelClient) handleStreams() {
 	}
 }
 
-// handleStream processes a single smux stream by spawning a worker subprocess
-// with user credentials to connect to the local service.
+// handleStream processes a single smux stream by connecting to the tunnel daemon
+// via Unix domain socket and relaying data to the local service.
 func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	defer stream.Close()
 
@@ -264,31 +275,18 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 
 	targetAddr := fmt.Sprintf("127.0.0.1:%d", targetPort)
 
-	// Spawn tunnel worker subprocess (runs as nobody user for security)
-	cmd, stdinPipe, stdoutPipe, err := spawnTunnelWorker(targetAddr)
+	// Connect to tunnel daemon via UDS (daemon runs as nobody user for security)
+	daemonConn, err := tc.connectToDaemon(targetAddr)
 	if err != nil {
-		log.Debug().Err(err).Msgf("Failed to spawn tunnel worker for %s.", targetAddr)
+		log.Debug().Err(err).Msgf("Failed to connect to tunnel daemon for %s.", targetAddr)
 		return
 	}
+	defer daemonConn.Close()
 
-	defer func() {
-		stdinPipe.Close()
-		if cmd.Process != nil {
-			if err := cmd.Process.Kill(); err != nil {
-				if !errors.Is(err, os.ErrProcessDone) {
-					log.Debug().Err(err).Msg("Failed to kill tunnel worker process.")
-				}
-			}
-		}
-		if err := cmd.Wait(); err != nil {
-		log.Debug().Err(err).Msg("Tunnel worker process exited with error.")
-	}
-	}()
-
-	log.Debug().Msgf("Tunnel worker spawned for %s.", targetAddr)
+	log.Debug().Msgf("Connected to tunnel daemon for %s.", targetAddr)
 
 	dataReader := tc.buildDataReader(bufReader, stream)
-	tc.relayBidirectional(stream, stdinPipe, stdoutPipe, dataReader)
+	tc.relayBidirectional(stream, daemonConn, dataReader)
 
 	log.Debug().Msgf("Tunnel stream closed for port %d.", targetPort)
 }
@@ -338,21 +336,110 @@ func (tc *TunnelClient) buildDataReader(bufReader *bufio.Reader, stream *smux.St
 	return io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
 }
 
-func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, stdinPipe io.WriteCloser, stdoutPipe io.ReadCloser, dataReader io.Reader) {
+func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, daemonConn net.Conn, dataReader io.Reader) {
 	errChan := make(chan error, 2)
 
+	// stream -> daemon (via UDS)
 	go func() {
-		_, err := io.Copy(stdinPipe, dataReader)
-		stdinPipe.Close()
+		_, err := io.Copy(daemonConn, dataReader)
+		// Half-close the write side to signal EOF to daemon
+		if uc, ok := daemonConn.(*net.UnixConn); ok {
+			_ = uc.CloseWrite()
+		}
 		errChan <- err
 	}()
 
+	// daemon -> stream (via UDS)
 	go func() {
-		_, err := tunnel.CopyBuffered(stream, stdoutPipe)
+		_, err := tunnel.CopyBuffered(stream, daemonConn)
 		errChan <- err
 	}()
 
 	<-errChan
+}
+
+// startTunnelDaemon starts a tunnel daemon subprocess for this session.
+// The daemon runs with demoted credentials and handles all stream relay via UDS.
+func (tc *TunnelClient) startTunnelDaemon() error {
+	tc.daemonSocket = fmt.Sprintf("/tmp/alpamon-tunnel-%s.sock", tc.sessionID)
+
+	cmd, err := spawnTunnelDaemon(tc.daemonSocket)
+	if err != nil {
+		return fmt.Errorf("failed to spawn tunnel daemon: %w", err)
+	}
+	tc.daemonCmd = cmd
+
+	if err := tc.waitForDaemonReady(); err != nil {
+		// Daemon failed to start, clean up
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		os.Remove(tc.daemonSocket)
+		return fmt.Errorf("tunnel daemon not ready: %w", err)
+	}
+
+	log.Info().Msgf("Tunnel daemon ready for session %s, socket: %s.", tc.sessionID, tc.daemonSocket)
+	return nil
+}
+
+// waitForDaemonReady polls the UDS socket until the daemon is accepting connections.
+func (tc *TunnelClient) waitForDaemonReady() error {
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		conn, err := net.Dial("unix", tc.daemonSocket)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return fmt.Errorf("timeout waiting for daemon socket %s", tc.daemonSocket)
+}
+
+// connectToDaemon connects to the tunnel daemon via UDS and sends the target address.
+func (tc *TunnelClient) connectToDaemon(targetAddr string) (net.Conn, error) {
+	conn, err := net.Dial("unix", tc.daemonSocket)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon socket: %w", err)
+	}
+
+	if _, err := fmt.Fprintf(conn, "%s\n", targetAddr); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to send target address to daemon: %w", err)
+	}
+
+	return conn, nil
+}
+
+// stopTunnelDaemon gracefully stops the tunnel daemon subprocess.
+func (tc *TunnelClient) stopTunnelDaemon() {
+	if tc.daemonCmd == nil || tc.daemonCmd.Process == nil {
+		return
+	}
+
+	log.Info().Msgf("Stopping tunnel daemon for session %s...", tc.sessionID)
+
+	if err := tc.daemonCmd.Process.Signal(syscall.SIGTERM); err != nil {
+		log.Debug().Err(err).Msg("SIGTERM failed for tunnel daemon, trying SIGKILL.")
+		_ = tc.daemonCmd.Process.Kill()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- tc.daemonCmd.Wait()
+	}()
+
+	select {
+	case <-done:
+		log.Info().Msg("Tunnel daemon stopped.")
+	case <-time.After(10 * time.Second):
+		_ = tc.daemonCmd.Process.Kill()
+		log.Warn().Msg("Tunnel daemon killed after timeout.")
+	}
+
+	os.Remove(tc.daemonSocket)
+	tc.daemonCmd = nil
 }
 
 // Close cleanly shuts down the tunnel connection.
@@ -363,6 +450,11 @@ func (tc *TunnelClient) Close() {
 			log.Debug().Err(err).Msg("Failed to stop code-server.")
 		}
 		tc.codeServerMgr = nil
+	}
+
+	// Stop tunnel daemon
+	if tc.daemonCmd != nil {
+		tc.stopTunnelDaemon()
 	}
 
 	if tc.cancel != nil {

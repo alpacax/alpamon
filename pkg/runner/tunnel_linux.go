@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -13,9 +12,9 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-func getTunnelWorkerCredential() (*syscall.SysProcAttr, error) {
+func getNobodyCredential() (*syscall.SysProcAttr, error) {
 	if os.Getuid() != 0 {
-		log.Debug().Msg("Alpamon is not running as root. Tunnel worker will run as current user.")
+		log.Debug().Msg("Alpamon is not running as root. Tunnel daemon will run as current user.")
 		return nil, nil
 	}
 
@@ -51,43 +50,30 @@ func parseUserCredentials(uidStr, gidStr string) (uint32, uint32, error) {
 	return uint32(uid), uint32(gid), nil
 }
 
-// spawnTunnelWorker spawns a tunnel worker subprocess with nobody credentials.
-// The subprocess connects to the target address and relays data via stdin/stdout.
-func spawnTunnelWorker(targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
-	sysProcAttr, err := getTunnelWorkerCredential()
+// spawnTunnelDaemon spawns a tunnel daemon subprocess with nobody credentials.
+// The daemon listens on a Unix domain socket and relays multiple connections as goroutines.
+func spawnTunnelDaemon(socketPath string) (*exec.Cmd, error) {
+	sysProcAttr, err := getNobodyCredential()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get tunnel worker credentials: %w", err)
+		return nil, fmt.Errorf("failed to get tunnel daemon credentials: %w", err)
 	}
 
 	executable, err := os.Executable()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get executable path: %w", err)
+		return nil, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	cmd := exec.Command(executable, "tunnel-worker", targetAddr)
+	cmd := exec.Command(executable, "tunnel-daemon", socketPath)
 	cmd.SysProcAttr = sysProcAttr
 	cmd.Stderr = os.Stderr
 
-	stdinPipe, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create stdin pipe: %w", err)
-	}
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		stdinPipe.Close()
-		return nil, nil, nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
 	if err := cmd.Start(); err != nil {
-		stdinPipe.Close()
-		stdoutPipe.Close()
-		return nil, nil, nil, fmt.Errorf("failed to start tunnel worker: %w", err)
+		return nil, fmt.Errorf("failed to start tunnel daemon: %w", err)
 	}
 
-	log.Debug().Msgf("Spawned tunnel worker subprocess as nobody user for %s.", targetAddr)
+	log.Debug().Msgf("Spawned tunnel daemon subprocess as nobody user, socket: %s.", socketPath)
 
-	return cmd, stdinPipe, stdoutPipe, nil
+	return cmd, nil
 }
 
 // startCodeServerProcess starts code-server with user credentials on Linux.
