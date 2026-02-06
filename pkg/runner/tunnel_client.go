@@ -27,6 +27,15 @@ import (
 // maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
 const maxMetadataSize = 1024
 
+// Stream concurrency limits.
+const (
+	// maxStreamsPerSession is the maximum number of concurrent streams per tunnel session.
+	maxStreamsPerSession = 64
+
+	// maxGlobalStreams is the maximum number of concurrent streams across all tunnel sessions.
+	maxGlobalStreams = 256
+)
+
 // Client type constants for tunnel connections
 const (
 	ClientTypeCLI    = "cli"
@@ -39,6 +48,9 @@ var (
 	activeTunnels   = make(map[string]*TunnelClient)
 	activeTunnelsMu sync.RWMutex
 )
+
+// globalStreamSem limits the total number of concurrent streams across all tunnel sessions.
+var globalStreamSem = make(chan struct{}, maxGlobalStreams)
 
 // streamMetadata contains the target port information sent by the server.
 type streamMetadata struct {
@@ -63,6 +75,7 @@ type TunnelClient struct {
 	codeServerMgr *CodeServerManager // for editor type
 	daemonCmd     *exec.Cmd          // tunnel daemon subprocess
 	daemonSocket  string             // UDS path for daemon communication
+	streamSem     chan struct{}       // per-session stream concurrency limiter
 }
 
 // NewTunnelClient creates a new tunnel client for the given WebSocket URL.
@@ -84,6 +97,7 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 		requestHeader: headers,
 		ctx:           ctx,
 		cancel:        cancel,
+		streamSem:     make(chan struct{}, maxStreamsPerSession),
 	}
 }
 
@@ -232,7 +246,6 @@ func (tc *TunnelClient) connect() error {
 func (tc *TunnelClient) handleStreams() {
 	for {
 		stream, err := tc.session.AcceptStream()
-
 		if err != nil {
 			select {
 			case <-tc.ctx.Done():
@@ -242,7 +255,54 @@ func (tc *TunnelClient) handleStreams() {
 				return
 			}
 		}
-		go tc.handleStream(stream)
+
+		tc.logStreamPressure()
+
+		// Acquire session-level semaphore (block until slot available or context cancelled).
+		select {
+		case tc.streamSem <- struct{}{}:
+		case <-tc.ctx.Done():
+			stream.Close()
+			return
+		}
+
+		// Acquire global-level semaphore (block until slot available or context cancelled).
+		select {
+		case globalStreamSem <- struct{}{}:
+		case <-tc.ctx.Done():
+			<-tc.streamSem
+			stream.Close()
+			return
+		}
+
+		go func() {
+			defer func() {
+				<-globalStreamSem
+				<-tc.streamSem
+			}()
+			tc.handleStream(stream)
+		}()
+	}
+}
+
+// logStreamPressure logs a warning when stream concurrency approaches limits.
+func (tc *TunnelClient) logStreamPressure() {
+	sessionCount := len(tc.streamSem)
+	globalCount := len(globalStreamSem)
+
+	if sessionCount >= maxStreamsPerSession*3/4 {
+		log.Warn().
+			Int("session_streams", sessionCount).
+			Int("max_session_streams", maxStreamsPerSession).
+			Str("session_id", tc.sessionID).
+			Msg("Session stream count approaching limit.")
+	}
+
+	if globalCount >= maxGlobalStreams*3/4 {
+		log.Warn().
+			Int("global_streams", globalCount).
+			Int("max_global_streams", maxGlobalStreams).
+			Msg("Global stream count approaching limit.")
 	}
 }
 
