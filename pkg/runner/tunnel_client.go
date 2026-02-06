@@ -45,22 +45,17 @@ const (
 	ClientTypeEditor = "editor"
 )
 
-// validSessionID restricts session IDs to safe characters.
-var validSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-
-// activeTunnels tracks all active tunnel connections by session ID.
 var (
+	// validSessionID restricts session IDs to safe characters.
+	validSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+	// activeTunnels tracks all active tunnel connections by session ID.
 	activeTunnels   = make(map[string]*TunnelClient)
 	activeTunnelsMu sync.RWMutex
+
+	// globalStreamSem limits the total number of concurrent streams across all tunnel sessions.
+	globalStreamSem = make(chan struct{}, maxGlobalStreams)
 )
-
-// IsValidSessionID reports whether sessionID is safe to use in paths and map keys.
-func IsValidSessionID(sessionID string) bool {
-	return validSessionID.MatchString(sessionID)
-}
-
-// globalStreamSem limits the total number of concurrent streams across all tunnel sessions.
-var globalStreamSem = make(chan struct{}, maxGlobalStreams)
 
 // streamMetadata contains the target port information sent by the server.
 type streamMetadata struct {
@@ -92,7 +87,12 @@ type TunnelClient struct {
 	daemonCmd     *exec.Cmd          // tunnel daemon subprocess
 	daemonSocket  string             // UDS path for daemon communication
 	streamSem     chan struct{}      // per-session stream concurrency limiter
-	closeOnce     sync.Once         // ensures Close is executed only once
+	closeOnce     sync.Once          // ensures Close is executed only once
+}
+
+// IsValidSessionID reports whether sessionID is safe to use in paths and map keys.
+func IsValidSessionID(sessionID string) bool {
+	return validSessionID.MatchString(sessionID)
 }
 
 // CheckSystemResources verifies that system resources are within acceptable limits
