@@ -17,7 +17,6 @@ import (
 )
 
 const (
-	controlWSPath             = "/ws/servers/control/"
 	controlMinConnectInterval = 5 * time.Second
 	controlMaxConnectInterval = 60 * time.Second
 	controlReadTimeout        = 35 * time.Minute
@@ -46,18 +45,7 @@ func NewControlClient() *ControlClient {
 
 // GetWSPath returns the WebSocket URL for control endpoint
 func (cc *ControlClient) GetWSPath() string {
-	// Build control WebSocket path from server URL
-	serverURL := config.GlobalSettings.ServerURL
-	wsURL := serverURL
-	if len(wsURL) > 0 {
-		// Replace http with ws
-		if wsURL[0:5] == "https" {
-			wsURL = "wss" + wsURL[5:]
-		} else if wsURL[0:4] == "http" {
-			wsURL = "ws" + wsURL[4:]
-		}
-	}
-	return wsURL + controlWSPath
+	return config.GlobalSettings.ControlWSPath
 }
 
 // RunForever maintains the control WebSocket connection and handles messages
@@ -185,16 +173,36 @@ func (cc *ControlClient) IsConnected() bool {
 	return cc.connected && cc.Conn != nil
 }
 
+// ControlMessage represents the wrapper message from alpacon-server via Redis
+type ControlMessage struct {
+	Query string          `json:"query"`
+	Data  json.RawMessage `json:"data"`
+}
+
 // HandleMessage processes incoming control messages
 func (cc *ControlClient) HandleMessage(message []byte) {
 	if len(message) == 0 {
 		return
 	}
 
-	var response SudoApprovalResponse
-	err := json.Unmarshal(message, &response)
+	// First, parse the outer control message wrapper
+	var ctrlMsg ControlMessage
+	err := json.Unmarshal(message, &ctrlMsg)
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to unmarshal control message")
+		log.Debug().Err(err).Msg("Failed to unmarshal control message wrapper")
+		return
+	}
+
+	if ctrlMsg.Query != "control" {
+		log.Debug().Str("query", ctrlMsg.Query).Msg("Unknown control message query type")
+		return
+	}
+
+	// Parse the inner data as SudoApprovalResponse
+	var response SudoApprovalResponse
+	err = json.Unmarshal(ctrlMsg.Data, &response)
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to unmarshal control message data")
 		return
 	}
 
