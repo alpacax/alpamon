@@ -76,7 +76,7 @@ type TunnelClient struct {
 	codeServerMgr *CodeServerManager // for editor type
 	daemonCmd     *exec.Cmd          // tunnel daemon subprocess
 	daemonSocket  string             // UDS path for daemon communication
-	streamSem     chan struct{}       // per-session stream concurrency limiter
+	streamSem     chan struct{}      // per-session stream concurrency limiter
 }
 
 // CheckSystemResources verifies that system resources are within acceptable limits

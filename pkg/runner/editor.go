@@ -41,13 +41,13 @@ type CodeServerConfig struct {
 	DisableUpdateCheck bool
 
 	// Editor settings (settings.json)
-	ColorTheme              string
-	WindowTitle             string
-	TelemetryLevel          string
-	StartupEditor           string
-	RestoreWindows          string
-	UpdateMode              string
-	DisableWorkspaceTrust   bool
+	ColorTheme                string
+	WindowTitle               string
+	TelemetryLevel            string
+	StartupEditor             string
+	RestoreWindows            string
+	UpdateMode                string
+	DisableWorkspaceTrust     bool
 	DisableWelcomeWalkthrough bool
 
 	// Extension gallery
