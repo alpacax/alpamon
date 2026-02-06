@@ -21,23 +21,24 @@ import (
 	"github.com/alpacax/alpamon/pkg/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/xtaci/smux"
 )
 
-// maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
-const maxMetadataSize = 1024
-
-// Stream concurrency limits.
 const (
-	// maxStreamsPerSession is the maximum number of concurrent streams per tunnel session.
+	// Stream metadata limit.
+	maxMetadataSize = 1024
+
+	// Stream concurrency limits.
 	maxStreamsPerSession = 64
+	maxGlobalStreams     = 256
 
-	// maxGlobalStreams is the maximum number of concurrent streams across all tunnel sessions.
-	maxGlobalStreams = 256
-)
+	// System resource limits for tunnel session creation.
+	maxCPUUsageForNewSession    = 90.0
+	maxMemoryUsageForNewSession = 90.0
 
-// Client type constants for tunnel connections
-const (
+	// Client type constants for tunnel connections.
 	ClientTypeCLI    = "cli"
 	ClientTypeWeb    = "web"
 	ClientTypeEditor = "editor"
@@ -76,6 +77,23 @@ type TunnelClient struct {
 	daemonCmd     *exec.Cmd          // tunnel daemon subprocess
 	daemonSocket  string             // UDS path for daemon communication
 	streamSem     chan struct{}       // per-session stream concurrency limiter
+}
+
+// CheckSystemResources verifies that system resources are within acceptable limits
+// for creating a new tunnel session. Returns an error if CPU or memory usage exceeds thresholds.
+// Uses fail-open policy: if resource metrics cannot be retrieved, the session is allowed.
+func CheckSystemResources() error {
+	cpuUsage, err := cpu.Percent(0, false)
+	if err == nil && len(cpuUsage) > 0 && cpuUsage[0] > maxCPUUsageForNewSession {
+		return fmt.Errorf("CPU usage %.1f%% exceeds limit %.0f%%", cpuUsage[0], maxCPUUsageForNewSession)
+	}
+
+	memInfo, err := mem.VirtualMemory()
+	if err == nil && memInfo.UsedPercent > maxMemoryUsageForNewSession {
+		return fmt.Errorf("memory usage %.1f%% exceeds limit %.0f%%", memInfo.UsedPercent, maxMemoryUsageForNewSession)
+	}
+
+	return nil
 }
 
 // NewTunnelClient creates a new tunnel client for the given WebSocket URL.

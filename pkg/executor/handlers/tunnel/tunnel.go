@@ -105,6 +105,11 @@ func (h *TunnelHandler) handleOpenTunnel(args *common.CommandArgs) (int, string,
 		return 1, fmt.Sprintf("opentunnel: %s", err.Error()), nil
 	}
 
+	if err := runner.CheckSystemResources(); err != nil {
+		log.Warn().Err(err).Str("sessionID", args.SessionID).Msg("Tunnel creation rejected due to high resource usage.")
+		return 1, fmt.Sprintf("opentunnel: %s", err.Error()), nil
+	}
+
 	clientType := getClientType(args.ClientType)
 
 	log.Info().
