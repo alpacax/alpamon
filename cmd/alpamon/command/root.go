@@ -181,6 +181,8 @@ func restartAgent() {
 }
 
 func gracefulShutdown(collector *collector.Collector, wsClient *runner.WebsocketClient, controlClient *runner.ControlClient, authManager *runner.AuthManager, workerPool *pool.Pool, logServer *logger.LogServer, reporters *scheduler.ReporterManager, pidPath string) {
+	runner.CloseAllActiveTunnels()
+
 	if collector != nil {
 		collector.Stop()
 	}

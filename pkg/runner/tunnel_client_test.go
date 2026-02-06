@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -145,4 +146,57 @@ func TestStartTunnelDaemonInvalidSessionID(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCloseAllActiveTunnels(t *testing.T) {
+	t.Run("closes all tunnels and clears map", func(t *testing.T) {
+		activeTunnelsMu.Lock()
+		activeTunnels = make(map[string]*TunnelClient)
+		activeTunnelsMu.Unlock()
+
+		ctx1, cancel1 := context.WithCancel(context.Background())
+		tc1 := &TunnelClient{sessionID: "s1", ctx: ctx1, cancel: cancel1}
+		ctx2, cancel2 := context.WithCancel(context.Background())
+		tc2 := &TunnelClient{sessionID: "s2", ctx: ctx2, cancel: cancel2}
+
+		RegisterTunnel("s1", tc1)
+		RegisterTunnel("s2", tc2)
+
+		CloseAllActiveTunnels()
+
+		activeTunnelsMu.RLock()
+		remaining := len(activeTunnels)
+		activeTunnelsMu.RUnlock()
+
+		if remaining != 0 {
+			t.Fatalf("expected 0 active tunnels after CloseAll, got %d", remaining)
+		}
+		if ctx1.Err() == nil {
+			t.Fatalf("expected tc1 context to be cancelled")
+		}
+		if ctx2.Err() == nil {
+			t.Fatalf("expected tc2 context to be cancelled")
+		}
+	})
+
+	t.Run("safe on empty map", func(t *testing.T) {
+		activeTunnelsMu.Lock()
+		activeTunnels = make(map[string]*TunnelClient)
+		activeTunnelsMu.Unlock()
+
+		CloseAllActiveTunnels() // should not panic
+	})
+
+	t.Run("double close is safe", func(t *testing.T) {
+		activeTunnelsMu.Lock()
+		activeTunnels = make(map[string]*TunnelClient)
+		activeTunnelsMu.Unlock()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		tc := &TunnelClient{sessionID: "s3", ctx: ctx, cancel: cancel}
+		RegisterTunnel("s3", tc)
+
+		CloseAllActiveTunnels()
+		tc.Close() // second close should not panic (sync.Once)
+	})
 }

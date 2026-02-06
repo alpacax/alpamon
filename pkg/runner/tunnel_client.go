@@ -92,6 +92,7 @@ type TunnelClient struct {
 	daemonCmd     *exec.Cmd          // tunnel daemon subprocess
 	daemonSocket  string             // UDS path for daemon communication
 	streamSem     chan struct{}      // per-session stream concurrency limiter
+	closeOnce     sync.Once         // ensures Close is executed only once
 }
 
 // CheckSystemResources verifies that system resources are within acceptable limits
@@ -549,34 +550,37 @@ func (tc *TunnelClient) stopTunnelDaemon() {
 }
 
 // Close cleanly shuts down the tunnel connection.
+// Safe to call multiple times; only the first call performs cleanup.
 func (tc *TunnelClient) Close() {
-	// Stop code-server first (for editor type)
-	if tc.codeServerMgr != nil {
-		if err := tc.codeServerMgr.Stop(); err != nil {
-			log.Debug().Err(err).Msg("Failed to stop code-server.")
+	tc.closeOnce.Do(func() {
+		// Stop code-server first (for editor type)
+		if tc.codeServerMgr != nil {
+			if err := tc.codeServerMgr.Stop(); err != nil {
+				log.Debug().Err(err).Msg("Failed to stop code-server.")
+			}
+			tc.codeServerMgr = nil
 		}
-		tc.codeServerMgr = nil
-	}
 
-	// Stop tunnel daemon
-	if tc.daemonCmd != nil {
-		tc.stopTunnelDaemon()
-	}
+		// Stop tunnel daemon
+		if tc.daemonCmd != nil {
+			tc.stopTunnelDaemon()
+		}
 
-	if tc.cancel != nil {
-		tc.cancel()
-	}
-	if tc.session != nil {
-		_ = tc.session.Close()
-	}
-	if tc.wsConn != nil {
-		_ = tc.wsConn.WriteControl(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-			time.Now().Add(5*time.Second),
-		)
-		_ = tc.wsConn.Close()
-	}
+		if tc.cancel != nil {
+			tc.cancel()
+		}
+		if tc.session != nil {
+			_ = tc.session.Close()
+		}
+		if tc.wsConn != nil {
+			_ = tc.wsConn.WriteControl(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+				time.Now().Add(5*time.Second),
+			)
+			_ = tc.wsConn.Close()
+		}
+	})
 }
 
 // CloseTunnel closes an active tunnel by session ID.
@@ -601,4 +605,21 @@ func GetActiveTunnel(sessionID string) (*TunnelClient, bool) {
 	defer activeTunnelsMu.RUnlock()
 	tc, exists := activeTunnels[sessionID]
 	return tc, exists
+}
+
+// CloseAllActiveTunnels closes all active tunnel connections.
+// Called during graceful shutdown to ensure code-server and daemon processes are cleaned up.
+func CloseAllActiveTunnels() {
+	activeTunnelsMu.Lock()
+	tunnels := make([]*TunnelClient, 0, len(activeTunnels))
+	for _, tc := range activeTunnels {
+		tunnels = append(tunnels, tc)
+	}
+	activeTunnels = make(map[string]*TunnelClient)
+	activeTunnelsMu.Unlock()
+
+	for _, tc := range tunnels {
+		log.Info().Str("sessionID", tc.sessionID).Msg("Closing tunnel during shutdown.")
+		tc.Close()
+	}
 }
