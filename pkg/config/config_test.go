@@ -5,6 +5,10 @@ import (
 	"testing"
 )
 
+func intPtr(v int) *int {
+	return &v
+}
+
 func TestPoolConfigDefaults(t *testing.T) {
 	// Test that default pool values are set correctly when not configured
 	config := Config{}
@@ -74,5 +78,34 @@ queue_size = 300
 
 	if settings.PoolQueueSize != 300 {
 		t.Errorf("Expected PoolQueueSize to be 300 from INI, got %d", settings.PoolQueueSize)
+	}
+}
+
+func TestEditorIdleTimeoutDefaults(t *testing.T) {
+	config := Config{}
+	_, settings := validateConfig(config, "/ws/test/")
+
+	if settings.EditorIdleTimeout != DefaultEditorIdleTimeout {
+		t.Errorf("Expected default EditorIdleTimeout to be %d, got %d", DefaultEditorIdleTimeout, settings.EditorIdleTimeout)
+	}
+}
+
+func TestEditorIdleTimeoutZero(t *testing.T) {
+	config := Config{}
+	config.Editor.IdleTimeout = intPtr(0)
+	_, settings := validateConfig(config, "/ws/test/")
+
+	if settings.EditorIdleTimeout != 0 {
+		t.Errorf("Expected EditorIdleTimeout to be 0, got %d", settings.EditorIdleTimeout)
+	}
+}
+
+func TestEditorIdleTimeoutCustom(t *testing.T) {
+	config := Config{}
+	config.Editor.IdleTimeout = intPtr(15)
+	_, settings := validateConfig(config, "/ws/test/")
+
+	if settings.EditorIdleTimeout != 15 {
+		t.Errorf("Expected EditorIdleTimeout to be 15, got %d", settings.EditorIdleTimeout)
 	}
 }
