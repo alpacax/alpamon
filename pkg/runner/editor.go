@@ -195,7 +195,7 @@ type CodeServerManager struct {
 	homeDir   string
 	ctx       context.Context
 	cancel    context.CancelFunc
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	started   bool
 	status    CodeServerStatus
 	lastError string
@@ -241,8 +241,8 @@ func lookupUserForCodeServer(username, groupname string) (*user.User, error) {
 
 // Status returns the current status and last error message.
 func (m *CodeServerManager) Status() (CodeServerStatus, string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.status, m.lastError
 }
 
@@ -275,19 +275,21 @@ func (m *CodeServerManager) StartAsync() {
 }
 
 // Start installs (if needed) and starts code-server on an available port.
+// Lock is held only for short field updates to avoid blocking Status()/Stop() during
+// long-running install/startup operations.
 func (m *CodeServerManager) Start() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	if m.started {
+		m.mu.RUnlock()
 		return nil
 	}
+	m.mu.RUnlock()
 
 	if err := checkEditorResources(); err != nil {
 		return err
 	}
 
-	// Check if code-server is installed
+	// Check if code-server is installed (long operation — no lock held)
 	if !isCodeServerInstalled() {
 		log.Info().Msg("code-server not found, installing...")
 		if err := installCodeServer(m.ctx); err != nil {
@@ -300,35 +302,51 @@ func (m *CodeServerManager) Start() error {
 		log.Info().Msg("code-server installed successfully.")
 	}
 
-	// Setup user data directory with settings
+	m.mu.Lock()
+	m.status = CodeServerStatusStarting
+	m.mu.Unlock()
+
+	// Setup user data directory with settings (no lock needed)
 	userDataDir, err := setupUserDataDir(m.homeDir, m.username, m.groupname)
 	if err != nil {
 		return fmt.Errorf("failed to setup user data dir: %w", err)
 	}
 
-	// Find available port
+	// Find available port (no lock needed)
 	port, err := findAvailablePort()
 	if err != nil {
 		return fmt.Errorf("failed to find available port: %w", err)
 	}
-	m.port = port
 
-	// Start code-server process
+	// Set port before starting process (startCodeServerProcess reads m.port)
+	m.mu.Lock()
+	m.port = port
+	m.mu.Unlock()
+
+	// Start code-server process (no lock needed)
 	cmd, err := startCodeServerProcess(m.ctx, m, userDataDir)
 	if err != nil {
 		return err
 	}
-	m.cmd = cmd
 
-	// Wait for code-server to be ready
+	m.mu.Lock()
+	m.cmd = cmd
+	m.mu.Unlock()
+
+	// Wait for code-server to be ready (no lock needed)
 	if err := m.waitForReady(); err != nil {
+		m.mu.Lock()
 		_ = m.stopProcess()
+		m.mu.Unlock()
 		return fmt.Errorf("code-server failed to start: %w", err)
 	}
 
+	m.mu.Lock()
 	m.started = true
 	m.status = CodeServerStatusReady
-	log.Info().Msgf("code-server started successfully on port %d for user %s.", m.port, m.username)
+	m.mu.Unlock()
+
+	log.Info().Msgf("code-server started successfully on port %d for user %s.", port, m.username)
 
 	return nil
 }
@@ -379,15 +397,15 @@ func (m *CodeServerManager) stopProcess() error {
 
 // Port returns the port code-server is running on.
 func (m *CodeServerManager) Port() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.port
 }
 
 // IsRunning checks if code-server is currently running.
 func (m *CodeServerManager) IsRunning() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.started
 }
 
