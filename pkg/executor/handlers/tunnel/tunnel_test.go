@@ -146,12 +146,42 @@ func TestTunnelHandler_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "opentunnel invalid session ID traversal",
+			cmd:  "opentunnel",
+			args: &common.CommandArgs{
+				SessionID:  "../session",
+				URL:        "wss://tunnel.example.com",
+				ClientType: runner.ClientTypeCLI,
+				TargetPort: 8080,
+			},
+			wantErr: true,
+		},
+		{
+			name: "opentunnel invalid session ID with slash",
+			cmd:  "opentunnel",
+			args: &common.CommandArgs{
+				SessionID:  "session/123",
+				URL:        "wss://tunnel.example.com",
+				ClientType: runner.ClientTypeCLI,
+				TargetPort: 8080,
+			},
+			wantErr: true,
+		},
+		{
 			name: "closetunnel valid",
 			cmd:  "closetunnel",
 			args: &common.CommandArgs{
 				SessionID: "session909",
 			},
 			wantErr: false,
+		},
+		{
+			name: "closetunnel invalid session ID",
+			cmd:  "closetunnel",
+			args: &common.CommandArgs{
+				SessionID: "session/909",
+			},
+			wantErr: true,
 		},
 		{
 			name:    "closetunnel missing session ID",

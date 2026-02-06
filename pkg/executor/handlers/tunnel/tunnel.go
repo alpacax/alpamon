@@ -3,15 +3,11 @@ package tunnel
 import (
 	"context"
 	"fmt"
-	"regexp"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/runner"
 	"github.com/rs/zerolog/log"
 )
-
-// validSessionID restricts session IDs to safe characters to prevent socket path injection.
-var validSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // TunnelHandler handles tunnel connection commands (opentunnel, closetunnel)
 type TunnelHandler struct {
@@ -72,7 +68,7 @@ func (h *TunnelHandler) validateOpenTunnel(args *common.CommandArgs) error {
 		return err
 	}
 
-	if !validSessionID.MatchString(args.SessionID) {
+	if !runner.IsValidSessionID(args.SessionID) {
 		return fmt.Errorf("invalid session_id format: must contain only alphanumeric characters, hyphens, and underscores")
 	}
 
@@ -105,7 +101,7 @@ func (h *TunnelHandler) validateCloseTunnel(args *common.CommandArgs) error {
 		return err
 	}
 
-	if !validSessionID.MatchString(args.SessionID) {
+	if !runner.IsValidSessionID(args.SessionID) {
 		return fmt.Errorf("invalid session_id format: must contain only alphanumeric characters, hyphens, and underscores")
 	}
 

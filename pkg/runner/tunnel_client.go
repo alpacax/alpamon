@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"sync"
 	"syscall"
@@ -44,11 +45,19 @@ const (
 	ClientTypeEditor = "editor"
 )
 
+// validSessionID restricts session IDs to safe characters.
+var validSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
 // activeTunnels tracks all active tunnel connections by session ID.
 var (
 	activeTunnels   = make(map[string]*TunnelClient)
 	activeTunnelsMu sync.RWMutex
 )
+
+// IsValidSessionID reports whether sessionID is safe to use in paths and map keys.
+func IsValidSessionID(sessionID string) bool {
+	return validSessionID.MatchString(sessionID)
+}
 
 // globalStreamSem limits the total number of concurrent streams across all tunnel sessions.
 var globalStreamSem = make(chan struct{}, maxGlobalStreams)
@@ -454,6 +463,10 @@ func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, daemonConn net.C
 // startTunnelDaemon starts a tunnel daemon subprocess for this session.
 // The daemon runs with demoted credentials and handles all stream relay via UDS.
 func (tc *TunnelClient) startTunnelDaemon() error {
+	if !IsValidSessionID(tc.sessionID) {
+		return fmt.Errorf("invalid session ID for tunnel daemon socket")
+	}
+
 	tc.daemonSocket = fmt.Sprintf("/tmp/alpamon-tunnel-%s.sock", tc.sessionID)
 
 	cmd, err := spawnTunnelDaemon(tc.daemonSocket)
@@ -466,7 +479,7 @@ func (tc *TunnelClient) startTunnelDaemon() error {
 		// Daemon failed to start, clean up
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		os.Remove(tc.daemonSocket)
+		_ = os.Remove(tc.daemonSocket)
 		return fmt.Errorf("tunnel daemon not ready: %w", err)
 	}
 
@@ -531,7 +544,7 @@ func (tc *TunnelClient) stopTunnelDaemon() {
 		log.Warn().Msg("Tunnel daemon killed after timeout.")
 	}
 
-	os.Remove(tc.daemonSocket)
+	_ = os.Remove(tc.daemonSocket)
 	tc.daemonCmd = nil
 }
 
