@@ -21,6 +21,7 @@ import (
 
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/rs/zerolog/log"
+	"github.com/shirou/gopsutil/v4/mem"
 )
 
 // CodeServerConfig holds all code-server configuration in one place.
@@ -53,6 +54,9 @@ type CodeServerConfig struct {
 	ExtensionGalleryServiceURL string
 	ExtensionGalleryItemURL    string
 }
+
+// Minimum free memory required to start code-server.
+const minFreeMemoryForEditor uint64 = 512 * 1024 * 1024 // 512MB
 
 // defaultConfig is the singleton configuration instance.
 var defaultConfig = &CodeServerConfig{
@@ -94,6 +98,20 @@ func GetCodeServerConfig() *CodeServerConfig {
 		defaultConfig.IdleTimeout = time.Duration(config.GlobalSettings.EditorIdleTimeout) * time.Minute
 	})
 	return defaultConfig
+}
+
+// checkEditorResources verifies sufficient memory is available for code-server.
+// Uses fail-open policy: if metrics cannot be retrieved, startup is allowed.
+func checkEditorResources() error {
+	memInfo, err := mem.VirtualMemory()
+	if err != nil {
+		return nil
+	}
+	if memInfo.Available < minFreeMemoryForEditor {
+		return fmt.Errorf("insufficient memory: %dMB available, %dMB required",
+			memInfo.Available/1024/1024, minFreeMemoryForEditor/1024/1024)
+	}
+	return nil
 }
 
 // ToConfigYAML generates config.yaml content for code-server daemon.
@@ -263,6 +281,10 @@ func (m *CodeServerManager) Start() error {
 
 	if m.started {
 		return nil
+	}
+
+	if err := checkEditorResources(); err != nil {
+		return err
 	}
 
 	// Check if code-server is installed
