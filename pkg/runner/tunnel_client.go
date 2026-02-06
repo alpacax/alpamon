@@ -59,6 +59,12 @@ type streamMetadata struct {
 	HealthCheck bool   `json:"health_check,omitempty"`
 }
 
+// healthResponse is the JSON body for health check responses.
+type healthResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
 // TunnelClient manages the smux-multiplexed tunnel connection to the proxy server.
 // It accepts streams from the server and relays them to local services.
 type TunnelClient struct {
@@ -119,13 +125,21 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 	}
 }
 
-// RunTunnelBackground starts the tunnel connection in a goroutine.
-func (tc *TunnelClient) RunTunnelBackground() {
-	// Register in active tunnels
+// RegisterTunnel atomically checks for an existing tunnel and registers a new one.
+// Returns false if a tunnel with the same session ID already exists.
+func RegisterTunnel(sessionID string, tc *TunnelClient) bool {
 	activeTunnelsMu.Lock()
-	activeTunnels[tc.sessionID] = tc
-	activeTunnelsMu.Unlock()
+	defer activeTunnelsMu.Unlock()
+	if _, exists := activeTunnels[sessionID]; exists {
+		return false
+	}
+	activeTunnels[sessionID] = tc
+	return true
+}
 
+// RunTunnelBackground starts the tunnel connection in a goroutine.
+// The caller must register the tunnel via RegisterTunnel before calling this method.
+func (tc *TunnelClient) RunTunnelBackground() {
 	defer func() {
 		// Cleanup on exit
 		activeTunnelsMu.Lock()
@@ -222,10 +236,11 @@ func getHTTPStatusForHealth(status string) int {
 }
 
 func buildHealthResponseBody(status, errMsg string) string {
-	if errMsg != "" {
-		return fmt.Sprintf(`{"status":"%s","error":"%s"}`, status, errMsg)
+	data, err := json.Marshal(healthResponse{Status: status, Error: errMsg})
+	if err != nil {
+		return `{"status":"error"}`
 	}
-	return fmt.Sprintf(`{"status":"%s"}`, status)
+	return string(data)
 }
 
 // connect establishes WebSocket connection and creates smux session.
