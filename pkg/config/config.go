@@ -57,7 +57,7 @@ func InitSettings(settings Settings) {
 	GlobalSettings = settings
 }
 
-func LoadConfig(configFiles []string, wsPath string) Settings {
+func LoadConfig(configFiles []string, wsPath string, controlWsPath string) Settings {
 	var iniData *ini.File
 	var err error
 	var validConfigFile string
@@ -104,7 +104,7 @@ func LoadConfig(configFiles []string, wsPath string) Settings {
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	}
 
-	isValid, settings := validateConfig(config, wsPath)
+	isValid, settings := validateConfig(config, wsPath, controlWsPath)
 
 	if !isValid {
 		log.Fatal().Msg("Aborting...")
@@ -113,11 +113,12 @@ func LoadConfig(configFiles []string, wsPath string) Settings {
 	return settings
 }
 
-func validateConfig(config Config, wsPath string) (bool, Settings) {
+func validateConfig(config Config, wsPath string, controlWsPath string) (bool, Settings) {
 	log.Debug().Msg("Validating configuration fields...")
 
 	settings := Settings{
 		WSPath:             wsPath,
+		ControlWSPath:      controlWsPath,
 		UseSSL:             false,
 		SSLVerify:          true,
 		SSLOpt:             make(map[string]interface{}),
@@ -132,8 +133,10 @@ func validateConfig(config Config, wsPath string) (bool, Settings) {
 	if strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") {
 		val = strings.TrimSuffix(val, "/")
 		settings.ServerURL = val
-		settings.WSPath = strings.Replace(val, "http", "ws", 1) + settings.WSPath
-		settings.WSPath = strings.Replace(settings.WSPath, "8000", "8081", 1) // just for local environment (not effected in prod)
+		wsBase := strings.Replace(val, "http", "ws", 1)
+		wsBase = strings.Replace(wsBase, "8000", "8081", 1) // just for local environment (not effected in prod)
+		settings.WSPath = wsBase + settings.WSPath
+		settings.ControlWSPath = wsBase + settings.ControlWSPath
 		settings.UseSSL = strings.HasPrefix(val, "https://")
 	} else {
 		log.Error().Msg("Server url is invalid.")

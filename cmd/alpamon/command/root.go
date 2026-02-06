@@ -28,8 +28,9 @@ import (
 )
 
 const (
-	name   = "alpamon"
-	wsPath = "/ws/servers/backhaul/"
+	name          = "alpamon"
+	wsPath        = "/ws/servers/backhaul/"
+	controlWsPath = "/ws/servers/control/"
 )
 
 var RootCmd = &cobra.Command{
@@ -74,7 +75,7 @@ func runAgent() {
 	log.Info().Msgf("Starting alpamon... (version: %s)", version.Version)
 
 	// Config & Settings
-	settings := config.LoadConfig(config.Files(name), wsPath)
+	settings := config.LoadConfig(config.Files(name), wsPath, controlWsPath)
 	config.InitSettings(settings)
 
 	// Create global worker pool for the entire application using config settings
@@ -137,7 +138,7 @@ func runAgent() {
 	go controlClient.RunForever(ctx)
 
 	// Auth Manager for sudo approval workflow
-	authManager := runner.GetAuthManager(controlClient)
+	authManager := runner.GetAuthManager(controlClient, session)
 	go authManager.Start(ctx)
 
 	for {
