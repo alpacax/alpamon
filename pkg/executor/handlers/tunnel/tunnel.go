@@ -68,13 +68,14 @@ func (h *TunnelHandler) validateOpenTunnel(args *common.CommandArgs) error {
 		return err
 	}
 
+	if !runner.IsValidSessionID(args.SessionID) {
+		return fmt.Errorf("invalid session_id format: must contain only alphanumeric characters, hyphens, and underscores")
+	}
+
 	if err := h.validateClientTypeRequirements(clientType, data); err != nil {
 		return err
 	}
 
-	if _, exists := runner.GetActiveTunnel(args.SessionID); exists {
-		return fmt.Errorf("tunnel with session ID %s already exists", args.SessionID)
-	}
 	return nil
 }
 
@@ -96,12 +97,25 @@ func (h *TunnelHandler) validateCloseTunnel(args *common.CommandArgs) error {
 	data := CloseTunnelData{
 		SessionID: args.SessionID,
 	}
-	return h.ValidateStruct(data)
+	if err := h.ValidateStruct(data); err != nil {
+		return err
+	}
+
+	if !runner.IsValidSessionID(args.SessionID) {
+		return fmt.Errorf("invalid session_id format: must contain only alphanumeric characters, hyphens, and underscores")
+	}
+
+	return nil
 }
 
 // handleOpenTunnel opens a new tunnel connection
 func (h *TunnelHandler) handleOpenTunnel(args *common.CommandArgs) (int, string, error) {
 	if err := h.Validate(common.OpenTunnel.String(), args); err != nil {
+		return 1, fmt.Sprintf("opentunnel: %s", err.Error()), nil
+	}
+
+	if err := runner.CheckSystemResources(); err != nil {
+		log.Warn().Err(err).Str("sessionID", args.SessionID).Msg("Tunnel creation rejected due to high resource usage.")
 		return 1, fmt.Sprintf("opentunnel: %s", err.Error()), nil
 	}
 
@@ -123,6 +137,12 @@ func (h *TunnelHandler) handleOpenTunnel(args *common.CommandArgs) (int, string,
 		args.Groupname,
 		args.URL,
 	)
+
+	// Atomically check and register to prevent duplicate session IDs.
+	if !runner.RegisterTunnel(args.SessionID, tunnelClient) {
+		return 1, fmt.Sprintf("opentunnel: tunnel with session ID %s already exists", args.SessionID), nil
+	}
+
 	go tunnelClient.RunTunnelBackground()
 
 	return 0, formatOpenTunnelMessage(clientType, args), nil

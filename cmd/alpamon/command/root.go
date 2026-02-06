@@ -43,7 +43,7 @@ var RootCmd = &cobra.Command{
 
 func init() {
 	setup.SetConfigPaths(name)
-	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelWorkerCmd, register.RegisterCmd)
+	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelDaemonCmd, register.RegisterCmd)
 }
 
 func runAgent() {
@@ -181,6 +181,8 @@ func restartAgent() {
 }
 
 func gracefulShutdown(collector *collector.Collector, wsClient *runner.WebsocketClient, controlClient *runner.ControlClient, authManager *runner.AuthManager, workerPool *pool.Pool, logServer *logger.LogServer, reporters *scheduler.ReporterManager, pidPath string) {
+	runner.CloseAllActiveTunnels()
+
 	if collector != nil {
 		collector.Stop()
 	}
