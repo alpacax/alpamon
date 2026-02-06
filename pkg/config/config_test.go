@@ -83,7 +83,7 @@ queue_size = 300
 
 func TestEditorIdleTimeoutDefaults(t *testing.T) {
 	config := Config{}
-	_, settings := validateConfig(config, "/ws/test/")
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
 	if settings.EditorIdleTimeout != DefaultEditorIdleTimeout {
 		t.Errorf("Expected default EditorIdleTimeout to be %d, got %d", DefaultEditorIdleTimeout, settings.EditorIdleTimeout)
@@ -93,7 +93,7 @@ func TestEditorIdleTimeoutDefaults(t *testing.T) {
 func TestEditorIdleTimeoutZero(t *testing.T) {
 	config := Config{}
 	config.Editor.IdleTimeout = intPtr(0)
-	_, settings := validateConfig(config, "/ws/test/")
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
 	if settings.EditorIdleTimeout != 0 {
 		t.Errorf("Expected EditorIdleTimeout to be 0, got %d", settings.EditorIdleTimeout)
@@ -103,7 +103,7 @@ func TestEditorIdleTimeoutZero(t *testing.T) {
 func TestEditorIdleTimeoutCustom(t *testing.T) {
 	config := Config{}
 	config.Editor.IdleTimeout = intPtr(15)
-	_, settings := validateConfig(config, "/ws/test/")
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
 	if settings.EditorIdleTimeout != 15 {
 		t.Errorf("Expected EditorIdleTimeout to be 15, got %d", settings.EditorIdleTimeout)
