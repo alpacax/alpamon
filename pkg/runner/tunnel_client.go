@@ -341,7 +341,7 @@ func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, daemonConn net.C
 
 	// stream -> daemon (via UDS)
 	go func() {
-		_, err := io.Copy(daemonConn, dataReader)
+		_, err := tunnel.CopyBuffered(daemonConn, dataReader)
 		// Half-close the write side to signal EOF to daemon
 		if uc, ok := daemonConn.(*net.UnixConn); ok {
 			_ = uc.CloseWrite()
