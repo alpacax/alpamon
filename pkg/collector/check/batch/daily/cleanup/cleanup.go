@@ -198,7 +198,7 @@ func deleteAllDiskIO(ctx context.Context, client *ent.Client, now time.Time) err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	_, err = tx.DiskIO.Delete().
+	_, err = client.DiskIO.Delete().
 		Where(diskio.TimestampLTE(now.Add(-1 * time.Hour))).Exec(ctx)
 	if err != nil {
 		return err
