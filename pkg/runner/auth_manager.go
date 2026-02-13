@@ -355,11 +355,19 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		// Response received and processed by HandleSudoApprovalResponse
 		log.Debug().Msgf("sudo_approval response received for request %s", sudoApprovalReq.RequestID)
 	case <-time.After(30 * time.Second):
-		log.Warn().Msg("sudo_approval response timeout")
-		am.cleanupTimeoutRequest(sudoApprovalReq.RequestID, false, "Response timeout")
+		// Prevent race condition: check if request still exists before cleanup
+		// (HandleSudoApprovalResponse may have already processed it)
+		if am.isRequestPending(sudoApprovalReq.RequestID) {
+			log.Warn().Msg("sudo_approval response timeout")
+			am.cleanupTimeoutRequest(sudoApprovalReq.RequestID, false, "Response timeout")
+		} else {
+			log.Debug().Msgf("sudo_approval timeout triggered but request already handled: %s", sudoApprovalReq.RequestID)
+		}
 	case <-am.ctx.Done():
 		log.Debug().Msg("Context cancelled, cleaning up sudo_approval connection")
-		am.cleanupTimeoutRequest(sudoApprovalReq.RequestID, false, "Service shutdown")
+		if am.isRequestPending(sudoApprovalReq.RequestID) {
+			am.cleanupTimeoutRequest(sudoApprovalReq.RequestID, false, "Service shutdown")
+		}
 	}
 	am.removeCompletionChannel(sudoApprovalReq.RequestID)
 }
@@ -521,6 +529,27 @@ func (am *AuthManager) signalCompletion(requestID string) {
 			// Channel already signaled or closed
 		}
 	}
+}
+
+// isRequestPending checks if a sudo request is still pending (not yet handled).
+// Used to prevent race condition between timeout and response handling.
+func (am *AuthManager) isRequestPending(requestID string) bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+
+	// Check alpacon user requests
+	for _, session := range am.pidToSessionMap {
+		if _, exists := session.Requests[requestID]; exists {
+			return true
+		}
+	}
+
+	// Check local user requests
+	if _, exists := am.localSudoRequests[requestID]; exists {
+		return true
+	}
+
+	return false
 }
 
 func (am *AuthManager) Stop() {
