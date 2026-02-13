@@ -223,7 +223,7 @@ func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApproval
 			}
 
 			url := fmt.Sprintf("/api/websh/sessions/%s/sudo-approval/", req.SessionID)
-			_, statusCode, err := am.session.Post(url, req, 10*time.Second)
+			_, statusCode, err := am.session.Post(url, req, 10)
 			if err != nil {
 				log.Warn().Err(err).Msg("Failed to send sudo request via REST API, will retry")
 				return err
