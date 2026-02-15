@@ -177,18 +177,19 @@ func (h *SystemHandler) handleUninstall() (int, string, error) {
 func (h *SystemHandler) executeUninstall() {
 	var cmd string
 
-	if utils.PlatformLike == "debian" {
+	switch utils.PlatformLike {
+	case "debian":
 		// Use purge to remove package and config files
 		cmd = "apt-get purge alpamon -y && apt-get autoremove -y"
-	} else if utils.PlatformLike == "rhel" {
+	case "rhel":
 		// Remove package using yum
 		cmd = "yum remove alpamon -y"
-	} else if utils.PlatformLike == "darwin" {
+	case "darwin":
 		// For macOS development environment, just shutdown
 		log.Warn().Msgf("Platform '%s' does not support full uninstall. Shutting down instead.", utils.PlatformLike)
 		h.wsClient.ShutDown()
 		return
-	} else {
+	default:
 		log.Error().Msgf("Platform '%s' not supported for uninstall.", utils.PlatformLike)
 		h.wsClient.ShutDown()
 		return
@@ -288,13 +289,14 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	log.Info().Msg("Upgrade system requested.")
 
 	var cmd string
-	if utils.PlatformLike == "debian" {
+	switch utils.PlatformLike {
+	case "debian":
 		cmd = "apt-get update && apt-get upgrade -y && apt-get autoremove -y"
-	} else if utils.PlatformLike == "rhel" {
+	case "rhel":
 		cmd = "yum update -y"
-	} else if utils.PlatformLike == "darwin" {
+	case "darwin":
 		cmd = "brew upgrade"
-	} else {
+	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
 	}
 

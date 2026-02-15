@@ -201,7 +201,7 @@ func TestRunMigrationIdempotent(t *testing.T) {
 	// Verify still only 2 migrations
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM atlas_schema_revisions").Scan(&count)
@@ -260,7 +260,7 @@ func TestRecordMigrationSuccess(t *testing.T) {
 
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -312,7 +312,7 @@ func TestApplyMigration(t *testing.T) {
 
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -350,7 +350,7 @@ func TestApplyMigrationTransactionRollback(t *testing.T) {
 
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
