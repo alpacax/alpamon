@@ -39,7 +39,7 @@ func RunMigration(path string, ctx context.Context) error {
 		log.Error().Err(err).Msg("failed to open database")
 		return fmt.Errorf("failed to open database: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Create migration tracking table if not exists
 	err = createMigrationTable(ctx, db)
@@ -189,7 +189,7 @@ func getAppliedMigrations(ctx context.Context, db *sql.DB) (map[string]bool, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to query applied migrations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	applied := make(map[string]bool)
 	for rows.Next() {

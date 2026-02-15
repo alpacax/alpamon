@@ -100,8 +100,8 @@ func (v *Validator) ValidateChainName(chainName string) error {
 
 	// Check for valid characters (alphanumeric, underscore, hyphen)
 	for _, c := range chainName {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-			(c >= '0' && c <= '9') || c == '_' || c == '-') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') &&
+			(c < '0' || c > '9') && c != '_' && c != '-' {
 			return fmt.Errorf("invalid character '%c' in chain name", c)
 		}
 	}

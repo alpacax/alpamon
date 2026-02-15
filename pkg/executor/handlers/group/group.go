@@ -96,7 +96,8 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 	var exitCode int
 	var output string
 	// Platform-specific group addition
-	if utils.PlatformLike == "debian" {
+	switch utils.PlatformLike {
+	case "debian":
 		exitCode, output, err = h.Executor.Run(
 			ctx,
 			"/usr/sbin/addgroup",
@@ -106,7 +107,7 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 		if exitCode != 0 {
 			return exitCode, output, err
 		}
-	} else if utils.PlatformLike == "rhel" {
+	case "rhel":
 		exitCode, output, err = h.Executor.Run(
 			ctx,
 			"/usr/sbin/groupadd",
@@ -116,7 +117,7 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 		if exitCode != 0 {
 			return exitCode, output, err
 		}
-	} else {
+	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported for group management", utils.PlatformLike), nil
 	}
 
@@ -148,7 +149,8 @@ func (h *GroupHandler) handleDelGroup(ctx context.Context, args *common.CommandA
 	var output string
 
 	// Platform-specific group deletion
-	if utils.PlatformLike == "debian" {
+	switch utils.PlatformLike {
+	case "debian":
 		exitCode, output, err = h.Executor.Run(
 			ctx,
 			"/usr/sbin/delgroup",
@@ -157,7 +159,7 @@ func (h *GroupHandler) handleDelGroup(ctx context.Context, args *common.CommandA
 		if exitCode != 0 {
 			return exitCode, output, err
 		}
-	} else if utils.PlatformLike == "rhel" {
+	case "rhel":
 		exitCode, output, err = h.Executor.Run(
 			ctx,
 			"/usr/sbin/groupdel",
@@ -166,7 +168,7 @@ func (h *GroupHandler) handleDelGroup(ctx context.Context, args *common.CommandA
 		if exitCode != 0 {
 			return exitCode, output, err
 		}
-	} else {
+	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported for group management", utils.PlatformLike), nil
 	}
 

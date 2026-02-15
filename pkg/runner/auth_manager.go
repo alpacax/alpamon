@@ -252,13 +252,13 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 	var baseReq BaseRequest
 	if err := json.Unmarshal(buf[:n], &baseReq); err != nil {
 		log.Warn().Err(err).Msg("Invalid JSON request")
-		unixConn.Close()
+		_ = unixConn.Close()
 		return
 	}
 
 	if baseReq.Type == "" {
 		log.Warn().Msg("Missing or invalid type field")
-		unixConn.Close()
+		_ = unixConn.Close()
 		return
 	}
 
@@ -268,7 +268,7 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		if err := json.Unmarshal(buf[:n], &isAlpconReq); err != nil {
 			log.Warn().Err(err).Msg("Invalid is_alpcon_request")
 			am.sendIsAlpconResponse(unixConn, "", "", 0, 0, false)
-			unixConn.Close()
+			_ = unixConn.Close()
 			return
 		}
 
@@ -481,7 +481,7 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 		return err
 	}
 
-	sudoRequest.Connection.Close()
+	_ = sudoRequest.Connection.Close()
 
 	// Signal completion to unblock the waiting goroutine
 	am.signalCompletion(response.RequestID)
@@ -557,7 +557,7 @@ func (am *AuthManager) Stop() {
 		am.cancel()
 	}
 	if am.listener != nil {
-		am.listener.Close()
+		_ = am.listener.Close()
 	}
 }
 
@@ -571,7 +571,7 @@ func (am *AuthManager) cleanupTimeoutRequest(requestID string, approved bool, re
 			am.mu.Unlock()
 			if req.Connection != nil {
 				am.sendSudoApprovalResponse(req.Connection, SudoApprovalRequest{RequestID: requestID}, approved, reason)
-				req.Connection.Close()
+				_ = req.Connection.Close()
 			}
 			return
 		}
@@ -583,7 +583,7 @@ func (am *AuthManager) cleanupTimeoutRequest(requestID string, approved bool, re
 		am.mu.Unlock()
 		if req.Connection != nil {
 			am.sendSudoApprovalResponse(req.Connection, SudoApprovalRequest{RequestID: requestID}, approved, reason)
-			req.Connection.Close()
+			_ = req.Connection.Close()
 		}
 		return
 	}
