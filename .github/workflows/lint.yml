@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: 1.24.4
+  GO_VERSION: 1.25.7
 
 jobs:
   linter:
@@ -22,7 +22,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        go-version: ['1.24.4']
+        go-version: ['1.25.7']
         os: [ubuntu-latest]
     env:
       CGO_ENABLED: 0
@@ -34,7 +34,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       
       - name: Generate go code
-        run: go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
+        run: go run -mod=mod entgo.io/ent/cmd/ent@v0.14.5 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
         working-directory: ./
 
       - name: GolangCI-Lint
