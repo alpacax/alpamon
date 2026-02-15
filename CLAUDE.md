@@ -11,7 +11,7 @@ Alpamon is a Go-based secure server agent for Alpacon that collects system metri
 ### Code Generation
 ```bash
 # Generate Ent schema code (required before building)
-go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
+go run -mod=mod entgo.io/ent/cmd/ent@v0.14.5 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
 
 # Alternative using go:generate
 go generate ./pkg/db/ent

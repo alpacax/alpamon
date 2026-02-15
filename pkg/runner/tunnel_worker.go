@@ -31,7 +31,7 @@ func RunTunnelWorker(targetAddr string) {
 		log.Error().Err(err).Msgf("Tunnel worker failed to connect to %s.", targetAddr)
 		os.Exit(1)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)

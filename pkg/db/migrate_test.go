@@ -61,7 +61,7 @@ func TestCreateMigrationTable(t *testing.T) {
 
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -94,7 +94,7 @@ func TestGetAppliedMigrations(t *testing.T) {
 
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -140,7 +140,7 @@ func TestRunMigration(t *testing.T) {
 	// Verify database was created
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Check if cp_us table exists (from init_schemas.sql)
 	var tableName string
@@ -162,7 +162,7 @@ func TestRunMigration(t *testing.T) {
 	// Verify migration versions
 	rows, err := db.Query("SELECT version, description FROM atlas_schema_revisions ORDER BY version")
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	expectedMigrations := []struct {
 		version     string
@@ -201,7 +201,7 @@ func TestRunMigrationIdempotent(t *testing.T) {
 	// Verify still only 2 migrations
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM atlas_schema_revisions").Scan(&count)
@@ -260,7 +260,7 @@ func TestRecordMigrationSuccess(t *testing.T) {
 
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -312,7 +312,7 @@ func TestApplyMigration(t *testing.T) {
 
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -350,7 +350,7 @@ func TestApplyMigrationTransactionRollback(t *testing.T) {
 
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 

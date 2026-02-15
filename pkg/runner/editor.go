@@ -375,7 +375,7 @@ func (m *CodeServerManager) waitForReady() error {
 
 		conn, err := net.DialTimeout("tcp", addr, time.Second)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil
 		}
 
@@ -456,7 +456,7 @@ func downloadInstallScript(url string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to download install script: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to download install script: HTTP %d", resp.StatusCode)
@@ -476,7 +476,7 @@ func findAvailablePort() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to find available port: %w", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 

@@ -158,7 +158,7 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 	// No need to create directory manually
 
 	if _, err := os.Stat(socketPath); err == nil {
-		os.Remove(socketPath)
+		_ = os.Remove(socketPath)
 	}
 
 	listener, err := net.Listen("unix", socketPath)
@@ -252,13 +252,13 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 	var baseReq BaseRequest
 	if err := json.Unmarshal(buf[:n], &baseReq); err != nil {
 		log.Warn().Err(err).Msg("Invalid JSON request")
-		unixConn.Close()
+		_ = unixConn.Close()
 		return
 	}
 
 	if baseReq.Type == "" {
 		log.Warn().Msg("Missing or invalid type field")
-		unixConn.Close()
+		_ = unixConn.Close()
 		return
 	}
 
@@ -268,7 +268,7 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		if err := json.Unmarshal(buf[:n], &isAlpconReq); err != nil {
 			log.Warn().Err(err).Msg("Invalid is_alpcon_request")
 			am.sendIsAlpconResponse(unixConn, "", "", 0, 0, false)
-			unixConn.Close()
+			_ = unixConn.Close()
 			return
 		}
 
@@ -279,20 +279,20 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		if !exists {
 			log.Warn().Msgf("No session found for PID %d, username: %s, groupname: %s", isAlpconReq.PPID, isAlpconReq.Username, isAlpconReq.Groupname)
 			am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, false)
-			unixConn.Close()
+			_ = unixConn.Close()
 			return
 		}
 
 		log.Debug().Msgf("Session found for PID %d: %s", isAlpconReq.PPID, session.SessionID)
 		am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, true)
-		unixConn.Close()
+		_ = unixConn.Close()
 
 	case "sudo_approval":
 		am.handleSudoApprovalRequest(buf[:n], unixConn)
 
 	default:
 		log.Warn().Str("type", baseReq.Type).Msg("Unknown request type")
-		unixConn.Close()
+		_ = unixConn.Close()
 	}
 }
 
@@ -301,7 +301,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	if err := json.Unmarshal(data, &sudoApprovalReq); err != nil {
 		log.Warn().Err(err).Msg("Invalid sudo_approval_request")
 		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Invalid sudo_approval_request")
-		unixConn.Close()
+		_ = unixConn.Close()
 		return
 	}
 
@@ -318,7 +318,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 
 		log.Debug().Msgf("Local user sudo request rejected: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
 		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority")
-		unixConn.Close()
+		_ = unixConn.Close()
 		return
 	}
 
@@ -343,7 +343,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Communication error")
 		am.cleanupTimeoutRequest(sudoApprovalReq.RequestID, false, "Communication error")
 		am.removeCompletionChannel(sudoApprovalReq.RequestID)
-		unixConn.Close()
+		_ = unixConn.Close()
 		return
 	}
 
@@ -481,7 +481,7 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 		return err
 	}
 
-	sudoRequest.Connection.Close()
+	_ = sudoRequest.Connection.Close()
 
 	// Signal completion to unblock the waiting goroutine
 	am.signalCompletion(response.RequestID)
@@ -557,7 +557,7 @@ func (am *AuthManager) Stop() {
 		am.cancel()
 	}
 	if am.listener != nil {
-		am.listener.Close()
+		_ = am.listener.Close()
 	}
 }
 
@@ -571,7 +571,7 @@ func (am *AuthManager) cleanupTimeoutRequest(requestID string, approved bool, re
 			am.mu.Unlock()
 			if req.Connection != nil {
 				am.sendSudoApprovalResponse(req.Connection, SudoApprovalRequest{RequestID: requestID}, approved, reason)
-				req.Connection.Close()
+				_ = req.Connection.Close()
 			}
 			return
 		}
@@ -583,7 +583,7 @@ func (am *AuthManager) cleanupTimeoutRequest(requestID string, approved bool, re
 		am.mu.Unlock()
 		if req.Connection != nil {
 			am.sendSudoApprovalResponse(req.Connection, SudoApprovalRequest{RequestID: requestID}, approved, reason)
-			req.Connection.Close()
+			_ = req.Connection.Close()
 		}
 		return
 	}

@@ -75,13 +75,13 @@ func spawnTunnelWorker(targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadClo
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		stdinPipe.Close()
+		_ = stdinPipe.Close()
 		return nil, nil, nil, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		stdinPipe.Close()
-		stdoutPipe.Close()
+		_ = stdinPipe.Close()
+		_ = stdoutPipe.Close()
 		return nil, nil, nil, fmt.Errorf("failed to start tunnel worker: %w", err)
 	}
 

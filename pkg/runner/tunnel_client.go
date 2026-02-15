@@ -208,7 +208,7 @@ func (tc *TunnelClient) connect() error {
 	wsNetConn := tunnel.NewWebSocketConn(tc.wsConn)
 	session, err := smux.Client(wsNetConn, config.GetSmuxConfig())
 	if err != nil {
-		tc.wsConn.Close()
+		_ = tc.wsConn.Close()
 		return fmt.Errorf("failed to create smux session: %w", err)
 	}
 
@@ -238,7 +238,7 @@ func (tc *TunnelClient) handleStreams() {
 // handleStream processes a single smux stream by spawning a worker subprocess
 // with user credentials to connect to the local service.
 func (tc *TunnelClient) handleStream(stream *smux.Stream) {
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	metadata, bufReader, err := tc.readStreamMetadata(stream)
 	if err != nil {
@@ -272,7 +272,7 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	}
 
 	defer func() {
-		stdinPipe.Close()
+		_ = stdinPipe.Close()
 		if cmd.Process != nil {
 			if err := cmd.Process.Kill(); err != nil {
 				if !errors.Is(err, os.ErrProcessDone) {
@@ -343,7 +343,7 @@ func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, stdinPipe io.Wri
 
 	go func() {
 		_, err := io.Copy(stdinPipe, dataReader)
-		stdinPipe.Close()
+		_ = stdinPipe.Close()
 		errChan <- err
 	}()
 
