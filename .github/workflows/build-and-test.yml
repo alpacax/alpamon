@@ -10,26 +10,59 @@ on:
 
   workflow_call:
 
+env:
+  GO_VERSION: '1.25.7'
+  ENT_VERSION: 'v0.14.5'
+
 jobs:
   build-and-test:
-    name: Build and Test
+    name: Build and Test (${{ matrix.distro }})
     runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
     strategy:
+      fail-fast: false
       matrix:
-        go-version: [ '1.25.7' ]
+        include:
+          - distro: ubuntu-22.04
+            container: ubuntu:22.04
+            pkg_manager: apt-get
+          - distro: ubuntu-24.04
+            container: ubuntu:24.04
+            pkg_manager: apt-get
+          - distro: debian-11
+            container: debian:11
+            pkg_manager: apt-get
+          - distro: debian-12
+            container: debian:12
+            pkg_manager: apt-get
+          - distro: rocky-8
+            container: rockylinux:8
+            pkg_manager: yum
+          - distro: rocky-9
+            container: rockylinux:9
+            pkg_manager: yum
 
     steps:
+      - name: Install dependencies (Debian/Ubuntu)
+        if: matrix.pkg_manager == 'apt-get'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git curl gcc libc6-dev ca-certificates
+
+      - name: Install dependencies (RHEL)
+        if: matrix.pkg_manager == 'yum'
+        run: yum install -y git curl gcc
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Check out code
         uses: actions/checkout@v4
-      
+
       - name: Generate go code
-        run: go run -mod=mod entgo.io/ent/cmd/ent@v0.14.5 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
-        working-directory: ./
+        run: go run -mod=mod entgo.io/ent/cmd/ent@${{ env.ENT_VERSION }} generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
 
       - name: Build
         run: go build -v .
