@@ -23,6 +23,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Debian/Ubuntu
+          - distro: ubuntu-20.04
+            container: ubuntu:20.04
+            pkg_manager: apt-get
           - distro: ubuntu-22.04
             container: ubuntu:22.04
             pkg_manager: apt-get
@@ -35,11 +39,36 @@ jobs:
           - distro: debian-12
             container: debian:12
             pkg_manager: apt-get
+          # RHEL/CentOS
+          - distro: centos-7
+            container: centos:7
+            pkg_manager: yum
           - distro: rocky-8
             container: rockylinux:8
             pkg_manager: yum
           - distro: rocky-9
             container: rockylinux:9
+            pkg_manager: yum
+          - distro: almalinux-9
+            container: almalinux:9
+            pkg_manager: yum
+          - distro: rhel-8
+            container: redhat/ubi8
+            pkg_manager: yum
+          - distro: rhel-9
+            container: redhat/ubi9
+            pkg_manager: yum
+          # Fedora
+          - distro: fedora-41
+            container: fedora:41
+            pkg_manager: dnf
+          # Oracle Linux
+          - distro: oracle-9
+            container: oraclelinux:9
+            pkg_manager: yum
+          # Amazon Linux
+          - distro: amazonlinux-2023
+            container: amazonlinux:2023
             pkg_manager: yum
 
     steps:
@@ -49,9 +78,13 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git curl gcc libc6-dev ca-certificates
 
-      - name: Install dependencies (RHEL)
+      - name: Install dependencies (RHEL/CentOS/Amazon)
         if: matrix.pkg_manager == 'yum'
         run: yum install -y git curl gcc
+
+      - name: Install dependencies (Fedora)
+        if: matrix.pkg_manager == 'dnf'
+        run: dnf install -y git curl gcc
 
       - name: Set up Go
         uses: actions/setup-go@v5
