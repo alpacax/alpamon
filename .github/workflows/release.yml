@@ -5,6 +5,9 @@ on:
     tags:
       - "*"
 
+env:
+  GO_VERSION: '1.25.7'
+
 jobs:
   build-and-test:
     uses: ./.github/workflows/build-and-test.yml
@@ -52,7 +55,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.7'
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
@@ -128,7 +131,7 @@ jobs:
         run: alpamon --help
 
   packagecloud-deploy:
-    needs: [goreleaser]
+    needs: [goreleaser, package-smoke-test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
