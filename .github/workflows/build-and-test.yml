@@ -39,25 +39,26 @@ jobs:
           - distro: debian-12
             container: debian:12
             pkg_manager: apt-get
-          # RHEL/CentOS
+          # RHEL/CentOS (yum-based)
           - distro: centos-7
             container: centos:7
             pkg_manager: yum
           - distro: rocky-8
             container: rockylinux:8
             pkg_manager: yum
-          - distro: rocky-9
-            container: rockylinux:9
-            pkg_manager: yum
-          - distro: almalinux-9
-            container: almalinux:9
-            pkg_manager: yum
           - distro: rhel-8
             container: redhat/ubi8
             pkg_manager: yum
+          # RHEL/CentOS (dnf-based)
+          - distro: rocky-9
+            container: rockylinux:9
+            pkg_manager: dnf
+          - distro: almalinux-9
+            container: almalinux:9
+            pkg_manager: dnf
           - distro: rhel-9
             container: redhat/ubi9
-            pkg_manager: yum
+            pkg_manager: dnf
           # Fedora
           - distro: fedora-41
             container: fedora:41
@@ -65,11 +66,11 @@ jobs:
           # Oracle Linux
           - distro: oracle-9
             container: oraclelinux:9
-            pkg_manager: yum
+            pkg_manager: dnf
           # Amazon Linux
           - distro: amazonlinux-2023
             container: amazonlinux:2023
-            pkg_manager: yum
+            pkg_manager: dnf
 
     steps:
       - name: Install dependencies (Debian/Ubuntu)
@@ -78,11 +79,17 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git curl gcc libc6-dev ca-certificates
 
-      - name: Install dependencies (RHEL/CentOS/Amazon)
+      - name: Fix CentOS 7 mirrors
+        if: matrix.distro == 'centos-7'
+        run: |
+          sed -i 's|mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/CentOS-*.repo
+          sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*.repo
+
+      - name: Install dependencies (yum)
         if: matrix.pkg_manager == 'yum'
         run: yum install -y git curl gcc
 
-      - name: Install dependencies (Fedora)
+      - name: Install dependencies (dnf)
         if: matrix.pkg_manager == 'dnf'
         run: dnf install -y git curl gcc
 
@@ -93,6 +100,9 @@ jobs:
 
       - name: Check out code
         uses: actions/checkout@v4
+
+      - name: Mark workspace as safe for Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Generate go code
         run: go run -mod=mod entgo.io/ent/cmd/ent@${{ env.ENT_VERSION }} generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
