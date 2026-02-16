@@ -118,12 +118,21 @@ jobs:
 
       - name: Install dependencies (dnf)
         if: matrix.pkg_manager == 'dnf'
-        run: dnf install -y git curl gcc glibc-devel
+        run: dnf install -y --allowerasing git curl gcc glibc-devel
 
       - name: Set up Go
+        if: matrix.distro != 'centos-7'
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+
+      - name: Set up Go (CentOS 7)
+        if: matrix.distro == 'centos-7'
+        run: |
+          curl -fsSL "https://go.dev/dl/go${{ env.GO_VERSION }}.linux-amd64.tar.gz" -o go.tar.gz
+          tar -C /usr/local -xzf go.tar.gz
+          rm go.tar.gz
+          echo "/usr/local/go/bin" >> $GITHUB_PATH
 
       - name: Check out code
         uses: actions/checkout@v4
