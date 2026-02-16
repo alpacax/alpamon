@@ -14,16 +14,13 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: 1.25.7
+  GO_VERSION: '1.25.7'
+  ENT_VERSION: 'v0.14.5'
 
 jobs:
   linter:
     name: golangci-lint
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        go-version: ['1.25.7']
-        os: [ubuntu-latest]
+    runs-on: ubuntu-latest
     env:
       CGO_ENABLED: 0
 
@@ -32,10 +29,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-      
+
       - name: Generate go code
-        run: go run -mod=mod entgo.io/ent/cmd/ent@v0.14.5 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
-        working-directory: ./
+        run: go run -mod=mod entgo.io/ent/cmd/ent@${{ env.ENT_VERSION }} generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
 
       - name: GolangCI-Lint
         uses: golangci/golangci-lint-action@v7

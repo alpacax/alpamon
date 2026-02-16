@@ -96,14 +96,14 @@ func (h *FileHandler) handleUpload(args *common.CommandArgs) (int, string) {
 		Int("pathCount", len(args.Paths)).
 		Msg("Uploading files")
 
+	if len(args.Paths) == 0 {
+		return 1, "No paths provided"
+	}
+
 	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to demote user.")
 		return 1, err.Error()
-	}
-
-	if len(args.Paths) == 0 {
-		return 1, "No paths provided"
 	}
 
 	paths, bulk, recursive, err := h.parsePaths(homeDirectory, args.Paths)
