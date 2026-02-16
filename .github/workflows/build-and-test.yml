@@ -45,10 +45,6 @@ jobs:
             pkg_manager: apt-get
             runner: ubuntu-latest
           # RHEL/CentOS yum-based (amd64)
-          - distro: centos-7
-            container: centos:7
-            pkg_manager: yum
-            runner: ubuntu-latest
           - distro: rocky-8
             container: rockylinux:8
             pkg_manager: yum
@@ -106,33 +102,18 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git curl gcc libc6-dev ca-certificates
 
-      - name: Fix CentOS 7 mirrors
-        if: matrix.distro == 'centos-7'
-        run: |
-          sed -i 's|mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/CentOS-*.repo
-          sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*.repo
-
       - name: Install dependencies (yum)
         if: matrix.pkg_manager == 'yum'
-        run: yum install -y git curl gcc glibc-devel
+        run: yum install -y git curl gcc glibc-devel tar
 
       - name: Install dependencies (dnf)
         if: matrix.pkg_manager == 'dnf'
-        run: dnf install -y --allowerasing git curl gcc glibc-devel
+        run: dnf install -y --allowerasing git curl gcc glibc-devel tar
 
       - name: Set up Go
-        if: matrix.distro != 'centos-7'
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-
-      - name: Set up Go (CentOS 7)
-        if: matrix.distro == 'centos-7'
-        run: |
-          curl -fsSL "https://go.dev/dl/go${{ env.GO_VERSION }}.linux-amd64.tar.gz" -o go.tar.gz
-          tar -C /usr/local -xzf go.tar.gz
-          rm go.tar.gz
-          echo "/usr/local/go/bin" >> $GITHUB_PATH
 
       - name: Check out code
         uses: actions/checkout@v4
