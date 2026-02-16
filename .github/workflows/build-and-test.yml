@@ -114,11 +114,11 @@ jobs:
 
       - name: Install dependencies (yum)
         if: matrix.pkg_manager == 'yum'
-        run: yum install -y git curl gcc
+        run: yum install -y git curl gcc glibc-devel
 
       - name: Install dependencies (dnf)
         if: matrix.pkg_manager == 'dnf'
-        run: dnf install -y git curl gcc
+        run: dnf install -y git curl gcc glibc-devel
 
       - name: Set up Go
         uses: actions/setup-go@v5
