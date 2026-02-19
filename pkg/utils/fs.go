@@ -260,3 +260,18 @@ func IsZipFile(content []byte, ext string) bool {
 	_, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
 	return err == nil
 }
+
+// IsZipPath checks if the file at path is a valid zip file
+func IsZipPath(path, ext string) bool {
+	if _, found := nonZipExt[ext]; found {
+		return false
+	}
+
+	reader, err := zip.OpenReader(path)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = reader.Close() }()
+
+	return true
+}
