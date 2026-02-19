@@ -5,6 +5,10 @@ import (
 	"testing"
 )
 
+func intPtr(v int) *int {
+	return &v
+}
+
 func TestPoolConfigDefaults(t *testing.T) {
 	// Test that default pool values are set correctly when not configured
 	config := Config{}
@@ -74,5 +78,44 @@ queue_size = 300
 
 	if settings.PoolQueueSize != 300 {
 		t.Errorf("Expected PoolQueueSize to be 300 from INI, got %d", settings.PoolQueueSize)
+	}
+}
+
+func TestUploadMultipartBufferThresholdDefaults(t *testing.T) {
+	config := Config{}
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
+
+	if settings.UploadBufferMB != DefaultUploadBufferMB {
+		t.Errorf(
+			"Expected default UploadBufferMB to be %d, got %d",
+			DefaultUploadBufferMB,
+			settings.UploadBufferMB,
+		)
+	}
+}
+
+func TestUploadMultipartBufferThresholdCustomValue(t *testing.T) {
+	config := Config{}
+	config.Upload.BufferMB = intPtr(24)
+
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
+
+	if settings.UploadBufferMB != 24 {
+		t.Errorf("Expected UploadBufferMB to be 24, got %d", settings.UploadBufferMB)
+	}
+}
+
+func TestUploadMultipartBufferThresholdInvalidValue(t *testing.T) {
+	config := Config{}
+	config.Upload.BufferMB = intPtr(0)
+
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
+
+	if settings.UploadBufferMB != DefaultUploadBufferMB {
+		t.Errorf(
+			"Expected fallback UploadBufferMB to be %d, got %d",
+			DefaultUploadBufferMB,
+			settings.UploadBufferMB,
+		)
 	}
 }

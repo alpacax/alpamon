@@ -14,10 +14,6 @@ import (
 	"gopkg.in/ini.v1"
 )
 
-var (
-	GlobalSettings Settings
-)
-
 const (
 	MinConnectInterval = 5 * time.Second
 	MaxConnectInterval = 300 * time.Second
@@ -33,12 +29,16 @@ const (
 	DefaultPoolMaxWorkers     = 20
 	DefaultPoolQueueSize      = 200
 	DefaultPoolDefaultTimeout = 30
+	DefaultUploadBufferMB     = 16
 
 	// Pool configuration limits for warnings
 	MaxReasonableWorkers        = 1000
 	MaxReasonableQueueSize      = 10000
 	MaxReasonableTimeoutSeconds = 3600
+	MaxReasonableUploadBufferMB = 512
 )
+
+var GlobalSettings Settings
 
 // GetSmuxConfig returns optimized smux configuration for tunnel connections.
 func GetSmuxConfig() *smux.Config {
@@ -65,12 +65,10 @@ func LoadConfig(configFiles []string, wsPath string, controlWsPath string) Setti
 	for _, configFile := range configFiles {
 		fileInfo, statErr := os.Stat(configFile)
 		if statErr != nil {
-			if os.IsNotExist(statErr) {
-				continue
-			} else {
+			if !os.IsNotExist(statErr) {
 				log.Error().Err(statErr).Msgf("Error accessing config file %s.", configFile)
-				continue
 			}
+			continue
 		}
 
 		if fileInfo.Size() == 0 {
@@ -126,6 +124,7 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 		PoolMaxWorkers:     DefaultPoolMaxWorkers,
 		PoolQueueSize:      DefaultPoolQueueSize,
 		PoolDefaultTimeout: DefaultPoolDefaultTimeout,
+		UploadBufferMB:     DefaultUploadBufferMB,
 	}
 
 	valid := true
@@ -209,6 +208,31 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 	}
 	if settings.PoolDefaultTimeout > MaxReasonableTimeoutSeconds {
 		log.Warn().Msgf("Pool default timeout (%d seconds) seems very high, consider reducing it", settings.PoolDefaultTimeout)
+	}
+
+	// Validate and set upload multipart buffer threshold
+	if config.Upload.BufferMB != nil {
+		if *config.Upload.BufferMB > 0 {
+			settings.UploadBufferMB = *config.Upload.BufferMB
+			log.Debug().Msgf("Using configured upload multipart buffer threshold: %d MB", settings.UploadBufferMB)
+		} else {
+			log.Warn().Msgf(
+				"Invalid upload multipart buffer threshold (%d MB), using default: %d MB",
+				*config.Upload.BufferMB,
+				settings.UploadBufferMB,
+			)
+		}
+	} else {
+		log.Debug().Msgf(
+			"Using default upload multipart buffer threshold: %d MB",
+			settings.UploadBufferMB,
+		)
+	}
+	if settings.UploadBufferMB > MaxReasonableUploadBufferMB {
+		log.Warn().Msgf(
+			"Upload multipart buffer threshold (%d MB) seems very high, consider reducing it",
+			settings.UploadBufferMB,
+		)
 	}
 
 	return valid, settings
