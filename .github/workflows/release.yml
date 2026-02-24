@@ -103,11 +103,11 @@ jobs:
           - pkg_type: deb
             container: ubuntu:24.04
             arch: amd64
-            install_cmd: dpkg -i
+            install_cmd: apt-get install -y
           - pkg_type: rpm
             container: rockylinux:9
             arch: amd64
-            install_cmd: rpm -i
+            install_cmd: dnf install -y
     container: ${{ matrix.container }}
     steps:
       - name: Set package name
@@ -124,8 +124,12 @@ jobs:
         with:
           name: ${{ env.PKG_NAME }}
 
+      - name: Update package index (DEB only)
+        if: matrix.pkg_type == 'deb'
+        run: apt-get update
+
       - name: Install package
-        run: ${{ matrix.install_cmd }} ${{ env.PKG_NAME }}
+        run: ${{ matrix.install_cmd }} ./${{ env.PKG_NAME }}
 
       - name: Smoke test
         run: alpamon --help
