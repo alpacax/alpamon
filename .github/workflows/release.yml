@@ -127,6 +127,8 @@ jobs:
       - name: Update package index (DEB only)
         if: matrix.pkg_type == 'deb'
         run: apt-get update
+        env:
+          DEBIAN_FRONTEND: noninteractive
 
       - name: Install package
         run: ${{ matrix.install_cmd }} ./${{ env.PKG_NAME }}
