@@ -66,7 +66,7 @@ func (ls *LogServer) StartLogServer() {
 			if err != nil {
 				cancel()
 				log.Error().Err(err).Msg("Failed to submit connection handler to pool")
-				conn.Close()
+				_ = conn.Close()
 			}
 		}
 	}

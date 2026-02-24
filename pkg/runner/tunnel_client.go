@@ -276,7 +276,7 @@ func (tc *TunnelClient) connect() error {
 	wsNetConn := tunnel.NewWebSocketConn(tc.wsConn)
 	session, err := smux.Client(wsNetConn, config.GetSmuxConfig())
 	if err != nil {
-		tc.wsConn.Close()
+		_ = tc.wsConn.Close()
 		return fmt.Errorf("failed to create smux session: %w", err)
 	}
 
@@ -352,7 +352,7 @@ func (tc *TunnelClient) logStreamPressure() {
 // handleStream processes a single smux stream by connecting to the tunnel daemon
 // via Unix domain socket and relaying data to the local service.
 func (tc *TunnelClient) handleStream(stream *smux.Stream) {
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	metadata, bufReader, err := tc.readStreamMetadata(stream)
 	if err != nil {

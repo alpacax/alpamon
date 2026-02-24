@@ -10,26 +10,119 @@ on:
 
   workflow_call:
 
+env:
+  GO_VERSION: '1.25.7'
+  ENT_VERSION: 'v0.14.5'
+
 jobs:
   build-and-test:
-    name: Build and Test
-    runs-on: ubuntu-latest
+    name: Build and Test (${{ matrix.distro }})
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
     strategy:
+      fail-fast: false
       matrix:
-        go-version: [ '1.24.4' ]
+        include:
+          # Debian/Ubuntu (amd64)
+          - distro: ubuntu-20.04
+            container: ubuntu:20.04
+            pkg_manager: apt-get
+            runner: ubuntu-latest
+          - distro: ubuntu-22.04
+            container: ubuntu:22.04
+            pkg_manager: apt-get
+            runner: ubuntu-latest
+          - distro: ubuntu-24.04
+            container: ubuntu:24.04
+            pkg_manager: apt-get
+            runner: ubuntu-latest
+          - distro: debian-11
+            container: debian:11
+            pkg_manager: apt-get
+            runner: ubuntu-latest
+          - distro: debian-12
+            container: debian:12
+            pkg_manager: apt-get
+            runner: ubuntu-latest
+          # RHEL/CentOS yum-based (amd64)
+          - distro: rocky-8
+            container: rockylinux:8
+            pkg_manager: yum
+            runner: ubuntu-latest
+          - distro: rhel-8
+            container: redhat/ubi8
+            pkg_manager: yum
+            runner: ubuntu-latest
+          # RHEL/CentOS dnf-based (amd64)
+          - distro: rocky-9
+            container: rockylinux:9
+            pkg_manager: dnf
+            runner: ubuntu-latest
+          - distro: almalinux-9
+            container: almalinux:9
+            pkg_manager: dnf
+            runner: ubuntu-latest
+          - distro: rhel-9
+            container: redhat/ubi9
+            pkg_manager: dnf
+            runner: ubuntu-latest
+          # Fedora (amd64)
+          - distro: fedora-41
+            container: fedora:41
+            pkg_manager: dnf
+            runner: ubuntu-latest
+          # Oracle Linux (amd64)
+          - distro: oracle-9
+            container: oraclelinux:9
+            pkg_manager: dnf
+            runner: ubuntu-latest
+          # Amazon Linux (amd64)
+          - distro: amazonlinux-2023
+            container: amazonlinux:2023
+            pkg_manager: dnf
+            runner: ubuntu-latest
+          # ARM64
+          - distro: ubuntu-24.04-arm64
+            container: ubuntu:24.04
+            pkg_manager: apt-get
+            runner: ubuntu-24.04-arm
+          - distro: rocky-9-arm64
+            container: rockylinux:9
+            pkg_manager: dnf
+            runner: ubuntu-24.04-arm
+          - distro: amazonlinux-2023-arm64
+            container: amazonlinux:2023
+            pkg_manager: dnf
+            runner: ubuntu-24.04-arm
 
     steps:
+      - name: Install dependencies (Debian/Ubuntu)
+        if: matrix.pkg_manager == 'apt-get'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git curl gcc libc6-dev ca-certificates
+
+      - name: Install dependencies (yum)
+        if: matrix.pkg_manager == 'yum'
+        run: yum install -y git curl gcc glibc-devel tar
+
+      - name: Install dependencies (dnf)
+        if: matrix.pkg_manager == 'dnf'
+        run: dnf install -y --allowerasing git curl gcc glibc-devel tar
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Check out code
         uses: actions/checkout@v4
-      
+
+      - name: Mark workspace as safe for Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Generate go code
-        run: go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
-        working-directory: ./
+        run: go run -mod=mod entgo.io/ent/cmd/ent@${{ env.ENT_VERSION }} generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
 
       - name: Build
         run: go build -v .

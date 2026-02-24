@@ -144,7 +144,8 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	var output string
 
 	// Platform-specific user addition
-	if utils.PlatformLike == "debian" {
+	switch utils.PlatformLike {
+	case "debian":
 		exitCode, output, err = h.Executor.Run(
 			ctx,
 			"/usr/sbin/adduser",
@@ -159,7 +160,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		if exitCode != 0 {
 			return exitCode, output, err
 		}
-	} else if utils.PlatformLike == "rhel" {
+	case "rhel":
 		// Create primary group first if needed
 		exitCode, output, err = h.Executor.Run(
 			ctx,
@@ -187,7 +188,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		if exitCode != 0 {
 			return exitCode, output, err
 		}
-	} else {
+	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported for user management", utils.PlatformLike), nil
 	}
 
@@ -282,19 +283,20 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 	cmdArgs := []string{}
 
 	// Platform-specific user deletion
-	if utils.PlatformLike == "debian" {
+	switch utils.PlatformLike {
+	case "debian":
 		cmdArgs = append(cmdArgs, "/usr/sbin/deluser")
 		if data.PurgeHomeDirectory {
 			cmdArgs = append(cmdArgs, "--remove-home")
 		}
 		cmdArgs = append(cmdArgs, data.Username)
-	} else if utils.PlatformLike == "rhel" {
+	case "rhel":
 		cmdArgs = append(cmdArgs, "/usr/sbin/userdel")
 		if data.PurgeHomeDirectory {
 			cmdArgs = append(cmdArgs, "-r")
 		}
 		cmdArgs = append(cmdArgs, data.Username)
-	} else {
+	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported for user management", utils.PlatformLike), nil
 	}
 

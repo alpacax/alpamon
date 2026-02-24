@@ -479,13 +479,13 @@ func (s *IptablesBackend) Restore(ctx context.Context, backup string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(tmpFile)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	if _, err := f.WriteString(backup); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("failed to write backup: %w", err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	// Restore using iptables-restore
 	exitCode, output, err := s.executor.RunAsUser(ctx, "root", "iptables-restore", tmpFile)

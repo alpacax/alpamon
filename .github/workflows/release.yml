@@ -5,6 +5,9 @@ on:
     tags:
       - "*"
 
+env:
+  GO_VERSION: '1.25.7'
+
 jobs:
   build-and-test:
     uses: ./.github/workflows/build-and-test.yml
@@ -50,9 +53,9 @@ jobs:
         run: git fetch --force --tags
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: 1.24.4
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
@@ -90,8 +93,45 @@ jobs:
           name: alpamon-${{ env.TAG_NAME }}-1.linux.arm64.rpm
           path: dist/alpamon-${{ env.TAG_NAME }}-1.linux.arm64.rpm
 
-  packagecloud-deploy:
+  package-smoke-test:
     needs: [goreleaser]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pkg_type: deb
+            container: ubuntu:24.04
+            arch: amd64
+            install_cmd: dpkg -i
+          - pkg_type: rpm
+            container: rockylinux:9
+            arch: amd64
+            install_cmd: rpm -i
+    container: ${{ matrix.container }}
+    steps:
+      - name: Set package name
+        run: |
+          TAG="${{ needs.goreleaser.outputs.tag }}"
+          if [ "${{ matrix.pkg_type }}" = "deb" ]; then
+            echo "PKG_NAME=alpamon_${TAG}_linux_${{ matrix.arch }}.deb" >> $GITHUB_ENV
+          else
+            echo "PKG_NAME=alpamon-${TAG}-1.linux.${{ matrix.arch }}.rpm" >> $GITHUB_ENV
+          fi
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.PKG_NAME }}
+
+      - name: Install package
+        run: ${{ matrix.install_cmd }} ${{ env.PKG_NAME }}
+
+      - name: Smoke test
+        run: alpamon --help
+
+  packagecloud-deploy:
+    needs: [goreleaser, package-smoke-test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

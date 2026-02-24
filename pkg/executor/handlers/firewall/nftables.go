@@ -300,9 +300,10 @@ func (s *NftablesBackend) parseNftablesRule(ruleMap map[string]interface{}) *com
 					if payload, ok := left["payload"].(map[string]interface{}); ok {
 						if field, ok := payload["field"].(string); ok {
 							if right, ok := match["right"].(string); ok {
-								if field == "saddr" {
+								switch field {
+								case "saddr":
 									rule.Source = right
-								} else if field == "daddr" {
+								case "daddr":
 									rule.Destination = right
 								}
 							}
@@ -487,13 +488,13 @@ func (s *NftablesBackend) Restore(ctx context.Context, backup string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(tmpFile)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	if _, err := f.WriteString(backup); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("failed to write backup: %w", err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	// Flush current ruleset (ignore error as restore will overwrite anyway)
 	_, _, _ = s.executor.RunAsUser(ctx, "root", "nft", "flush", "ruleset")
