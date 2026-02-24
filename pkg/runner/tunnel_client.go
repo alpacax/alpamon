@@ -6,36 +6,56 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/xtaci/smux"
 )
 
-// maxMetadataSize is the maximum size of stream metadata to prevent DoS attacks.
-const maxMetadataSize = 1024
-
-// Client type constants for tunnel connections
 const (
+	// Stream metadata limit.
+	maxMetadataSize = 1024
+
+	// Stream concurrency limits.
+	maxStreamsPerSession = 64
+	maxGlobalStreams     = 256
+
+	// System resource limits for tunnel session creation.
+	maxCPUUsageForNewSession    = 90.0
+	maxMemoryUsageForNewSession = 90.0
+
+	// Client type constants for tunnel connections.
 	ClientTypeCLI    = "cli"
 	ClientTypeWeb    = "web"
 	ClientTypeEditor = "editor"
 )
 
-// activeTunnels tracks all active tunnel connections by session ID.
 var (
+	// validSessionID restricts session IDs to safe characters.
+	validSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+	// activeTunnels tracks all active tunnel connections by session ID.
 	activeTunnels   = make(map[string]*TunnelClient)
 	activeTunnelsMu sync.RWMutex
+
+	// globalStreamSem limits the total number of concurrent streams across all tunnel sessions.
+	globalStreamSem = make(chan struct{}, maxGlobalStreams)
 )
 
 // streamMetadata contains the target port information sent by the server.
@@ -44,14 +64,20 @@ type streamMetadata struct {
 	HealthCheck bool   `json:"health_check,omitempty"`
 }
 
+// healthResponse is the JSON body for health check responses.
+type healthResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
 // TunnelClient manages the smux-multiplexed tunnel connection to the proxy server.
 // It accepts streams from the server and relays them to local services.
 type TunnelClient struct {
 	sessionID     string
-	clientType    string // cli, web, editor
-	targetPort    int    // for cli/web type
-	username      string // for editor type
-	groupname     string // for editor type
+	clientType    string       // cli, web, editor
+	targetPort    atomic.Int32 // for cli/web type
+	username      string       // for editor type
+	groupname     string       // for editor type
 	serverURL     string
 	requestHeader http.Header
 	wsConn        *websocket.Conn
@@ -59,6 +85,32 @@ type TunnelClient struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	codeServerMgr *CodeServerManager // for editor type
+	daemonCmd     *exec.Cmd          // tunnel daemon subprocess
+	daemonSocket  string             // UDS path for daemon communication
+	streamSem     chan struct{}      // per-session stream concurrency limiter
+	closeOnce     sync.Once          // ensures Close is executed only once
+}
+
+// IsValidSessionID reports whether sessionID is safe to use in paths and map keys.
+func IsValidSessionID(sessionID string) bool {
+	return validSessionID.MatchString(sessionID)
+}
+
+// CheckSystemResources verifies that system resources are within acceptable limits
+// for creating a new tunnel session. Returns an error if CPU or memory usage exceeds thresholds.
+// Uses fail-open policy: if resource metrics cannot be retrieved, the session is allowed.
+func CheckSystemResources() error {
+	cpuUsage, err := cpu.Percent(0, false)
+	if err == nil && len(cpuUsage) > 0 && cpuUsage[0] > maxCPUUsageForNewSession {
+		return fmt.Errorf("CPU usage %.1f%% exceeds limit %.0f%%", cpuUsage[0], maxCPUUsageForNewSession)
+	}
+
+	memInfo, err := mem.VirtualMemory()
+	if err == nil && memInfo.UsedPercent > maxMemoryUsageForNewSession {
+		return fmt.Errorf("memory usage %.1f%% exceeds limit %.0f%%", memInfo.UsedPercent, maxMemoryUsageForNewSession)
+	}
+
+	return nil
 }
 
 // NewTunnelClient creates a new tunnel client for the given WebSocket URL.
@@ -70,26 +122,36 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &TunnelClient{
+	tc := &TunnelClient{
 		sessionID:     sessionID,
 		clientType:    clientType,
-		targetPort:    targetPort,
 		username:      username,
 		groupname:     groupname,
 		serverURL:     url,
 		requestHeader: headers,
 		ctx:           ctx,
 		cancel:        cancel,
+		streamSem:     make(chan struct{}, maxStreamsPerSession),
 	}
+	tc.targetPort.Store(int32(targetPort))
+	return tc
+}
+
+// RegisterTunnel atomically checks for an existing tunnel and registers a new one.
+// Returns false if a tunnel with the same session ID already exists.
+func RegisterTunnel(sessionID string, tc *TunnelClient) bool {
+	activeTunnelsMu.Lock()
+	defer activeTunnelsMu.Unlock()
+	if _, exists := activeTunnels[sessionID]; exists {
+		return false
+	}
+	activeTunnels[sessionID] = tc
+	return true
 }
 
 // RunTunnelBackground starts the tunnel connection in a goroutine.
+// The caller must register the tunnel via RegisterTunnel before calling this method.
 func (tc *TunnelClient) RunTunnelBackground() {
-	// Register in active tunnels
-	activeTunnelsMu.Lock()
-	activeTunnels[tc.sessionID] = tc
-	activeTunnelsMu.Unlock()
-
 	defer func() {
 		// Cleanup on exit
 		activeTunnelsMu.Lock()
@@ -112,7 +174,14 @@ func (tc *TunnelClient) RunTunnelBackground() {
 		return
 	}
 
-	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort)
+	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort.Load())
+
+	// Start tunnel daemon (single subprocess for all streams)
+	if err := tc.startTunnelDaemon(); err != nil {
+		log.Error().Err(err).Msgf("Failed to start tunnel daemon for session %s.", tc.sessionID)
+		return
+	}
+
 	tc.handleStreams()
 	log.Info().Msgf("Tunnel session %s ended.", tc.sessionID)
 }
@@ -144,7 +213,7 @@ func (tc *TunnelClient) handleHealthCheck(stream *smux.Stream) {
 	}
 
 	if status == CodeServerStatusReady {
-		tc.targetPort = tc.codeServerMgr.Port()
+		tc.targetPort.Store(int32(tc.codeServerMgr.Port()))
 	}
 
 	tc.sendHealthResponse(stream, string(status), lastError)
@@ -179,10 +248,11 @@ func getHTTPStatusForHealth(status string) int {
 }
 
 func buildHealthResponseBody(status, errMsg string) string {
-	if errMsg != "" {
-		return fmt.Sprintf(`{"status":"%s","error":"%s"}`, status, errMsg)
+	data, err := json.Marshal(healthResponse{Status: status, Error: errMsg})
+	if err != nil {
+		return `{"status":"error"}`
 	}
-	return fmt.Sprintf(`{"status":"%s"}`, status)
+	return string(data)
 }
 
 // connect establishes WebSocket connection and creates smux session.
@@ -221,7 +291,6 @@ func (tc *TunnelClient) connect() error {
 func (tc *TunnelClient) handleStreams() {
 	for {
 		stream, err := tc.session.AcceptStream()
-
 		if err != nil {
 			select {
 			case <-tc.ctx.Done():
@@ -231,12 +300,59 @@ func (tc *TunnelClient) handleStreams() {
 				return
 			}
 		}
-		go tc.handleStream(stream)
+
+		tc.logStreamPressure()
+
+		// Acquire session-level semaphore (block until slot available or context cancelled).
+		select {
+		case tc.streamSem <- struct{}{}:
+		case <-tc.ctx.Done():
+			_ = stream.Close()
+			return
+		}
+
+		// Acquire global-level semaphore (block until slot available or context cancelled).
+		select {
+		case globalStreamSem <- struct{}{}:
+		case <-tc.ctx.Done():
+			<-tc.streamSem
+			_ = stream.Close()
+			return
+		}
+
+		go func() {
+			defer func() {
+				<-globalStreamSem
+				<-tc.streamSem
+			}()
+			tc.handleStream(stream)
+		}()
 	}
 }
 
-// handleStream processes a single smux stream by spawning a worker subprocess
-// with user credentials to connect to the local service.
+// logStreamPressure logs a warning when stream concurrency approaches limits.
+func (tc *TunnelClient) logStreamPressure() {
+	sessionCount := len(tc.streamSem)
+	globalCount := len(globalStreamSem)
+
+	if sessionCount >= maxStreamsPerSession*3/4 {
+		log.Warn().
+			Int("session_streams", sessionCount).
+			Int("max_session_streams", maxStreamsPerSession).
+			Str("session_id", tc.sessionID).
+			Msg("Session stream count approaching limit.")
+	}
+
+	if globalCount >= maxGlobalStreams*3/4 {
+		log.Warn().
+			Int("global_streams", globalCount).
+			Int("max_global_streams", maxGlobalStreams).
+			Msg("Global stream count approaching limit.")
+	}
+}
+
+// handleStream processes a single smux stream by connecting to the tunnel daemon
+// via Unix domain socket and relaying data to the local service.
 func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	defer func() { _ = stream.Close() }()
 
@@ -264,31 +380,18 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 
 	targetAddr := fmt.Sprintf("127.0.0.1:%d", targetPort)
 
-	// Spawn tunnel worker subprocess (runs as nobody user for security)
-	cmd, stdinPipe, stdoutPipe, err := spawnTunnelWorker(targetAddr)
+	// Connect to tunnel daemon via UDS (daemon runs as nobody user for security)
+	daemonConn, err := tc.connectToDaemon(targetAddr)
 	if err != nil {
-		log.Debug().Err(err).Msgf("Failed to spawn tunnel worker for %s.", targetAddr)
+		log.Debug().Err(err).Msgf("Failed to connect to tunnel daemon for %s.", targetAddr)
 		return
 	}
+	defer func() { _ = daemonConn.Close() }()
 
-	defer func() {
-		_ = stdinPipe.Close()
-		if cmd.Process != nil {
-			if err := cmd.Process.Kill(); err != nil {
-				if !errors.Is(err, os.ErrProcessDone) {
-					log.Debug().Err(err).Msg("Failed to kill tunnel worker process.")
-				}
-			}
-		}
-		if err := cmd.Wait(); err != nil {
-		log.Debug().Err(err).Msg("Tunnel worker process exited with error.")
-	}
-	}()
-
-	log.Debug().Msgf("Tunnel worker spawned for %s.", targetAddr)
+	log.Debug().Msgf("Connected to tunnel daemon for %s.", targetAddr)
 
 	dataReader := tc.buildDataReader(bufReader, stream)
-	tc.relayBidirectional(stream, stdinPipe, stdoutPipe, dataReader)
+	tc.relayBidirectional(stream, daemonConn, dataReader)
 
 	log.Debug().Msgf("Tunnel stream closed for port %d.", targetPort)
 }
@@ -312,7 +415,7 @@ func (tc *TunnelClient) readStreamMetadata(stream *smux.Stream) (*streamMetadata
 
 func (tc *TunnelClient) resolveTargetPort(remotePort string) (int, error) {
 	if remotePort == "" {
-		return tc.targetPort, nil
+		return int(tc.targetPort.Load()), nil
 	}
 
 	port, err := strconv.Atoi(remotePort)
@@ -338,47 +441,156 @@ func (tc *TunnelClient) buildDataReader(bufReader *bufio.Reader, stream *smux.St
 	return io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
 }
 
-func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, stdinPipe io.WriteCloser, stdoutPipe io.ReadCloser, dataReader io.Reader) {
+func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, daemonConn net.Conn, dataReader io.Reader) {
 	errChan := make(chan error, 2)
 
+	// stream -> daemon (via UDS)
 	go func() {
-		_, err := io.Copy(stdinPipe, dataReader)
-		_ = stdinPipe.Close()
+		_, err := tunnel.CopyBuffered(daemonConn, dataReader)
+		// Half-close the write side to signal EOF to daemon
+		if uc, ok := daemonConn.(*net.UnixConn); ok {
+			_ = uc.CloseWrite()
+		}
 		errChan <- err
 	}()
 
+	// daemon -> stream (via UDS)
 	go func() {
-		_, err := tunnel.CopyBuffered(stream, stdoutPipe)
+		_, err := tunnel.CopyBuffered(stream, daemonConn)
 		errChan <- err
 	}()
 
+	// Wait for one direction to complete, then close both connections to unblock the other goroutine
+	<-errChan
+	_ = stream.Close()
+	_ = daemonConn.Close()
 	<-errChan
 }
 
-// Close cleanly shuts down the tunnel connection.
-func (tc *TunnelClient) Close() {
-	// Stop code-server first (for editor type)
-	if tc.codeServerMgr != nil {
-		if err := tc.codeServerMgr.Stop(); err != nil {
-			log.Debug().Err(err).Msg("Failed to stop code-server.")
-		}
-		tc.codeServerMgr = nil
+// startTunnelDaemon starts a tunnel daemon subprocess for this session.
+// The daemon runs with demoted credentials and handles all stream relay via UDS.
+func (tc *TunnelClient) startTunnelDaemon() error {
+	if !IsValidSessionID(tc.sessionID) {
+		return fmt.Errorf("invalid session ID for tunnel daemon socket")
 	}
 
-	if tc.cancel != nil {
-		tc.cancel()
+	socketDir, err := ensureTunnelSocketDir()
+	if err != nil {
+		return fmt.Errorf("failed to ensure tunnel socket directory: %w", err)
 	}
-	if tc.session != nil {
-		_ = tc.session.Close()
+	tc.daemonSocket = filepath.Join(socketDir, tc.sessionID+".sock")
+
+	cmd, err := spawnTunnelDaemon(tc.daemonSocket)
+	if err != nil {
+		return fmt.Errorf("failed to spawn tunnel daemon: %w", err)
 	}
-	if tc.wsConn != nil {
-		_ = tc.wsConn.WriteControl(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-			time.Now().Add(5*time.Second),
-		)
-		_ = tc.wsConn.Close()
+	tc.daemonCmd = cmd
+
+	if err := tc.waitForDaemonReady(); err != nil {
+		// Daemon failed to start, clean up
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = safeRemoveSocket(tc.daemonSocket)
+		return fmt.Errorf("tunnel daemon not ready: %w", err)
 	}
+
+	log.Info().Msgf("Tunnel daemon ready for session %s, socket: %s.", tc.sessionID, tc.daemonSocket)
+	return nil
+}
+
+// waitForDaemonReady polls the UDS socket until the daemon is accepting connections.
+func (tc *TunnelClient) waitForDaemonReady() error {
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		conn, err := net.Dial("unix", tc.daemonSocket)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return fmt.Errorf("timeout waiting for daemon socket %s", tc.daemonSocket)
+}
+
+// connectToDaemon connects to the tunnel daemon via UDS and sends the target address.
+func (tc *TunnelClient) connectToDaemon(targetAddr string) (net.Conn, error) {
+	conn, err := net.Dial("unix", tc.daemonSocket)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon socket: %w", err)
+	}
+
+	if _, err := fmt.Fprintf(conn, "%s\n", targetAddr); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("failed to send target address to daemon: %w", err)
+	}
+
+	return conn, nil
+}
+
+// stopTunnelDaemon gracefully stops the tunnel daemon subprocess.
+func (tc *TunnelClient) stopTunnelDaemon() {
+	if tc.daemonCmd == nil || tc.daemonCmd.Process == nil {
+		return
+	}
+
+	log.Info().Msgf("Stopping tunnel daemon for session %s...", tc.sessionID)
+
+	if err := tc.daemonCmd.Process.Signal(syscall.SIGTERM); err != nil {
+		log.Debug().Err(err).Msg("SIGTERM failed for tunnel daemon, trying SIGKILL.")
+		_ = tc.daemonCmd.Process.Kill()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- tc.daemonCmd.Wait()
+	}()
+
+	select {
+	case <-done:
+		log.Info().Msg("Tunnel daemon stopped.")
+	case <-time.After(10 * time.Second):
+		_ = tc.daemonCmd.Process.Kill()
+		log.Warn().Msg("Tunnel daemon killed after timeout.")
+	}
+
+	_ = safeRemoveSocket(tc.daemonSocket)
+	tc.daemonCmd = nil
+}
+
+// Close cleanly shuts down the tunnel connection.
+// Safe to call multiple times; only the first call performs cleanup.
+func (tc *TunnelClient) Close() {
+	tc.closeOnce.Do(func() {
+		// Stop code-server first (for editor type)
+		if tc.codeServerMgr != nil {
+			if err := tc.codeServerMgr.Stop(); err != nil {
+				log.Debug().Err(err).Msg("Failed to stop code-server.")
+			}
+			tc.codeServerMgr = nil
+		}
+
+		// Stop tunnel daemon
+		if tc.daemonCmd != nil {
+			tc.stopTunnelDaemon()
+		}
+
+		if tc.cancel != nil {
+			tc.cancel()
+		}
+		if tc.session != nil {
+			_ = tc.session.Close()
+		}
+		if tc.wsConn != nil {
+			_ = tc.wsConn.WriteControl(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+				time.Now().Add(5*time.Second),
+			)
+			_ = tc.wsConn.Close()
+		}
+	})
 }
 
 // CloseTunnel closes an active tunnel by session ID.
@@ -403,4 +615,21 @@ func GetActiveTunnel(sessionID string) (*TunnelClient, bool) {
 	defer activeTunnelsMu.RUnlock()
 	tc, exists := activeTunnels[sessionID]
 	return tc, exists
+}
+
+// CloseAllActiveTunnels closes all active tunnel connections.
+// Called during graceful shutdown to ensure code-server and daemon processes are cleaned up.
+func CloseAllActiveTunnels() {
+	activeTunnelsMu.Lock()
+	tunnels := make([]*TunnelClient, 0, len(activeTunnels))
+	for _, tc := range activeTunnels {
+		tunnels = append(tunnels, tc)
+	}
+	activeTunnels = make(map[string]*TunnelClient)
+	activeTunnelsMu.Unlock()
+
+	for _, tc := range tunnels {
+		log.Info().Str("sessionID", tc.sessionID).Msg("Closing tunnel during shutdown.")
+		tc.Close()
+	}
 }

@@ -14,6 +14,7 @@ type Settings struct {
 	PoolMaxWorkers     int // Maximum number of workers in the global worker pool
 	PoolQueueSize      int // Size of the job queue for the global worker pool
 	PoolDefaultTimeout int // Default timeout in seconds for pool tasks (0 = no timeout)
+	EditorIdleTimeout  int // Editor idle timeout in minutes (0 = no timeout)
 }
 
 type Config struct {
@@ -34,4 +35,7 @@ type Config struct {
 		QueueSize      int  `ini:"queue_size"`
 		DefaultTimeout *int `ini:"default_timeout"`
 	} `ini:"pool"`
+	Editor struct {
+		IdleTimeout *int `ini:"idle_timeout"`
+	} `ini:"editor"`
 }

@@ -3,44 +3,42 @@ package runner
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
+	"syscall"
 
 	"github.com/rs/zerolog/log"
 )
 
-// spawnTunnelWorker spawns a tunnel worker subprocess.
+// ensureTunnelSocketDir creates and returns the tunnel socket directory.
+// Uses 0700 permissions to prevent other users from creating symlinks or files inside.
+func ensureTunnelSocketDir() (string, error) {
+	dir := "/tmp/alpamon-tunnels"
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create tunnel socket directory: %w", err)
+	}
+	return dir, nil
+}
+
+// spawnTunnelDaemon spawns a tunnel daemon subprocess.
 // On macOS, credential demotion is not supported, so the subprocess runs as the current user.
-func spawnTunnelWorker(targetAddr string) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
+func spawnTunnelDaemon(socketPath string) (*exec.Cmd, error) {
 	executable, err := os.Executable()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get executable path: %w", err)
+		return nil, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	cmd := exec.Command(executable, "tunnel-worker", targetAddr)
+	cmd := exec.Command(executable, "tunnel-daemon", socketPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = os.Stderr
 
-	stdinPipe, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create stdin pipe: %w", err)
-	}
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		stdinPipe.Close()
-		return nil, nil, nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
 	if err := cmd.Start(); err != nil {
-		stdinPipe.Close()
-		stdoutPipe.Close()
-		return nil, nil, nil, fmt.Errorf("failed to start tunnel worker: %w", err)
+		return nil, fmt.Errorf("failed to start tunnel daemon: %w", err)
 	}
 
-	log.Debug().Msgf("Spawned tunnel worker subprocess for %s (macOS - runs as current user).", targetAddr)
+	log.Debug().Msgf("Spawned tunnel daemon subprocess for socket %s (macOS - runs as current user).", socketPath)
 
-	return cmd, stdinPipe, stdoutPipe, nil
+	return cmd, nil
 }
 
 // startCodeServerProcess starts code-server on macOS.
@@ -56,6 +54,8 @@ func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataD
 	cmd.Dir = m.homeDir
 
 	cmd.Env = getCodeServerEnv(m.homeDir, false)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
