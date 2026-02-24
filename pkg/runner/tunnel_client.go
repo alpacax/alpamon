@@ -306,7 +306,7 @@ func (tc *TunnelClient) handleStreams() {
 		select {
 		case tc.streamSem <- struct{}{}:
 		case <-tc.ctx.Done():
-			stream.Close()
+			_ = stream.Close()
 			return
 		}
 
@@ -315,7 +315,7 @@ func (tc *TunnelClient) handleStreams() {
 		case globalStreamSem <- struct{}{}:
 		case <-tc.ctx.Done():
 			<-tc.streamSem
-			stream.Close()
+			_ = stream.Close()
 			return
 		}
 
@@ -385,7 +385,7 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 		log.Debug().Err(err).Msgf("Failed to connect to tunnel daemon for %s.", targetAddr)
 		return
 	}
-	defer daemonConn.Close()
+	defer func() { _ = daemonConn.Close() }()
 
 	log.Debug().Msgf("Connected to tunnel daemon for %s.", targetAddr)
 
@@ -500,7 +500,7 @@ func (tc *TunnelClient) waitForDaemonReady() error {
 	for time.Now().Before(deadline) {
 		conn, err := net.Dial("unix", tc.daemonSocket)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -517,7 +517,7 @@ func (tc *TunnelClient) connectToDaemon(targetAddr string) (net.Conn, error) {
 	}
 
 	if _, err := fmt.Fprintf(conn, "%s\n", targetAddr); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to send target address to daemon: %w", err)
 	}
 

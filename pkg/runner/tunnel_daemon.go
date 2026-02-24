@@ -59,7 +59,7 @@ func RunTunnelDaemon(socketPath string) {
 	}
 
 	if err := os.Chmod(socketPath, 0600); err != nil {
-		listener.Close()
+		_ = listener.Close()
 		log.Error().Err(err).Msgf("Failed to set socket permissions for %s.", socketPath)
 		os.Exit(1)
 	}
@@ -75,7 +75,7 @@ func RunTunnelDaemon(socketPath string) {
 	go func() {
 		<-sigChan
 		log.Info().Msg("Tunnel daemon received shutdown signal.")
-		listener.Close()
+		_ = listener.Close()
 	}()
 
 	for {
@@ -112,7 +112,7 @@ func RunTunnelDaemon(socketPath string) {
 // and relays data bidirectionally between the UDS connection and the TCP connection.
 func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 	defer wg.Done()
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Read target address from first line
 	reader := bufio.NewReader(conn)
@@ -138,7 +138,7 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 		log.Debug().Err(err).Msgf("Tunnel daemon failed to connect to %s.", targetAddr)
 		return
 	}
-	defer tcpConn.Close()
+	defer func() { _ = tcpConn.Close() }()
 
 	if tc, ok := tcpConn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
@@ -165,8 +165,8 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 
 	// Wait for one direction to complete, then close both connections to unblock the other goroutine
 	<-errChan
-	conn.Close()
-	tcpConn.Close()
+	_ = conn.Close()
+	_ = tcpConn.Close()
 	<-errChan
 	log.Debug().Msgf("Tunnel daemon relay finished for %s.", targetAddr)
 }
