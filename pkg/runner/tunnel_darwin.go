@@ -10,6 +10,16 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// ensureTunnelSocketDir creates and returns the tunnel socket directory.
+// Uses 0700 permissions to prevent other users from creating symlinks or files inside.
+func ensureTunnelSocketDir() (string, error) {
+	dir := "/tmp/alpamon-tunnels"
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create tunnel socket directory: %w", err)
+	}
+	return dir, nil
+}
+
 // spawnTunnelDaemon spawns a tunnel daemon subprocess.
 // On macOS, credential demotion is not supported, so the subprocess runs as the current user.
 func spawnTunnelDaemon(socketPath string) (*exec.Cmd, error) {

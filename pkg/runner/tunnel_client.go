@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"sync"
@@ -473,7 +474,11 @@ func (tc *TunnelClient) startTunnelDaemon() error {
 		return fmt.Errorf("invalid session ID for tunnel daemon socket")
 	}
 
-	tc.daemonSocket = fmt.Sprintf("/tmp/alpamon-tunnel-%s.sock", tc.sessionID)
+	socketDir, err := ensureTunnelSocketDir()
+	if err != nil {
+		return fmt.Errorf("failed to ensure tunnel socket directory: %w", err)
+	}
+	tc.daemonSocket = filepath.Join(socketDir, tc.sessionID+".sock")
 
 	cmd, err := spawnTunnelDaemon(tc.daemonSocket)
 	if err != nil {

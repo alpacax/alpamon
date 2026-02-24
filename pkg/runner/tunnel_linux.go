@@ -50,6 +50,32 @@ func parseUserCredentials(uidStr, gidStr string) (uint32, uint32, error) {
 	return uint32(uid), uint32(gid), nil
 }
 
+// ensureTunnelSocketDir creates and returns the tunnel socket directory with proper ownership.
+// Uses 0700 permissions to prevent other users from creating symlinks or files inside.
+// When running as root, the directory is chowned to nobody so the daemon can create sockets.
+func ensureTunnelSocketDir() (string, error) {
+	dir := "/tmp/alpamon-tunnels"
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create tunnel socket directory: %w", err)
+	}
+
+	if os.Getuid() == 0 {
+		usr, err := user.Lookup("nobody")
+		if err != nil {
+			return "", fmt.Errorf("failed to lookup nobody user for socket dir: %w", err)
+		}
+		uid, gid, err := parseUserCredentials(usr.Uid, usr.Gid)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse nobody credentials for socket dir: %w", err)
+		}
+		if err := os.Chown(dir, int(uid), int(gid)); err != nil {
+			return "", fmt.Errorf("failed to chown tunnel socket directory: %w", err)
+		}
+	}
+
+	return dir, nil
+}
+
 // spawnTunnelDaemon spawns a tunnel daemon subprocess with nobody credentials.
 // The daemon listens on a Unix domain socket and relays multiple connections as goroutines.
 func spawnTunnelDaemon(socketPath string) (*exec.Cmd, error) {
