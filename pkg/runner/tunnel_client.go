@@ -10,11 +10,11 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -73,10 +73,10 @@ type healthResponse struct {
 // It accepts streams from the server and relays them to local services.
 type TunnelClient struct {
 	sessionID     string
-	clientType    string // cli, web, editor
-	targetPort    int    // for cli/web type
-	username      string // for editor type
-	groupname     string // for editor type
+	clientType    string       // cli, web, editor
+	targetPort    atomic.Int32 // for cli/web type
+	username      string       // for editor type
+	groupname     string       // for editor type
 	serverURL     string
 	requestHeader http.Header
 	wsConn        *websocket.Conn
@@ -121,10 +121,9 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &TunnelClient{
+	tc := &TunnelClient{
 		sessionID:     sessionID,
 		clientType:    clientType,
-		targetPort:    targetPort,
 		username:      username,
 		groupname:     groupname,
 		serverURL:     url,
@@ -133,6 +132,8 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 		cancel:        cancel,
 		streamSem:     make(chan struct{}, maxStreamsPerSession),
 	}
+	tc.targetPort.Store(int32(targetPort))
+	return tc
 }
 
 // RegisterTunnel atomically checks for an existing tunnel and registers a new one.
@@ -172,7 +173,7 @@ func (tc *TunnelClient) RunTunnelBackground() {
 		return
 	}
 
-	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort)
+	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort.Load())
 
 	// Start tunnel daemon (single subprocess for all streams)
 	if err := tc.startTunnelDaemon(); err != nil {
@@ -211,7 +212,7 @@ func (tc *TunnelClient) handleHealthCheck(stream *smux.Stream) {
 	}
 
 	if status == CodeServerStatusReady {
-		tc.targetPort = tc.codeServerMgr.Port()
+		tc.targetPort.Store(int32(tc.codeServerMgr.Port()))
 	}
 
 	tc.sendHealthResponse(stream, string(status), lastError)
@@ -413,7 +414,7 @@ func (tc *TunnelClient) readStreamMetadata(stream *smux.Stream) (*streamMetadata
 
 func (tc *TunnelClient) resolveTargetPort(remotePort string) (int, error) {
 	if remotePort == "" {
-		return tc.targetPort, nil
+		return int(tc.targetPort.Load()), nil
 	}
 
 	port, err := strconv.Atoi(remotePort)
@@ -458,6 +459,10 @@ func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, daemonConn net.C
 		errChan <- err
 	}()
 
+	// Wait for one direction to complete, then close both connections to unblock the other goroutine
+	<-errChan
+	_ = stream.Close()
+	_ = daemonConn.Close()
 	<-errChan
 }
 
@@ -480,7 +485,7 @@ func (tc *TunnelClient) startTunnelDaemon() error {
 		// Daemon failed to start, clean up
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		_ = os.Remove(tc.daemonSocket)
+		_ = safeRemoveSocket(tc.daemonSocket)
 		return fmt.Errorf("tunnel daemon not ready: %w", err)
 	}
 
@@ -545,7 +550,7 @@ func (tc *TunnelClient) stopTunnelDaemon() {
 		log.Warn().Msg("Tunnel daemon killed after timeout.")
 	}
 
-	_ = os.Remove(tc.daemonSocket)
+	_ = safeRemoveSocket(tc.daemonSocket)
 	tc.daemonCmd = nil
 }
 

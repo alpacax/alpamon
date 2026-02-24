@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -21,13 +22,34 @@ func validateTargetAddr(targetAddr string) bool {
 	return strings.HasPrefix(targetAddr, "127.0.0.1:") || strings.HasPrefix(targetAddr, "localhost:")
 }
 
+// safeRemoveSocket removes a Unix domain socket file after verifying it is not a symlink.
+// This prevents symlink attacks where an attacker replaces the socket with a symlink to an arbitrary file.
+func safeRemoveSocket(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat socket %s: %w", path, err)
+	}
+
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to remove symlink at %s", path)
+	}
+	if fi.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("refusing to remove non-socket file at %s", path)
+	}
+
+	return os.Remove(path)
+}
+
 // RunTunnelDaemon runs the tunnel daemon subprocess.
 // It listens on a Unix domain socket and relays connections to local TCP services.
 // This function is called by the tunnel-daemon subcommand and runs with demoted user credentials.
 func RunTunnelDaemon(socketPath string) {
-	// Remove stale socket file if it exists
-	if _, err := os.Stat(socketPath); err == nil {
-		os.Remove(socketPath)
+	// Remove stale socket file if it exists (safe against symlink attacks)
+	if err := safeRemoveSocket(socketPath); err != nil {
+		log.Warn().Err(err).Msgf("Failed to remove stale socket %s.", socketPath)
 	}
 
 	listener, err := net.Listen("unix", socketPath)
@@ -81,7 +103,7 @@ func RunTunnelDaemon(socketPath string) {
 		log.Warn().Msg("Tunnel daemon shutdown timed out, forcing exit.")
 	}
 
-	os.Remove(socketPath)
+	_ = safeRemoveSocket(socketPath)
 	log.Info().Msg("Tunnel daemon stopped.")
 }
 
@@ -141,7 +163,10 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 		errChan <- err
 	}()
 
-	// Wait for one direction to complete
+	// Wait for one direction to complete, then close both connections to unblock the other goroutine
+	<-errChan
+	conn.Close()
+	tcpConn.Close()
 	<-errChan
 	log.Debug().Msgf("Tunnel daemon relay finished for %s.", targetAddr)
 }

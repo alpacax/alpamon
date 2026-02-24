@@ -89,7 +89,8 @@ func TestBuildHealthResponseBody(t *testing.T) {
 }
 
 func TestResolveTargetPort(t *testing.T) {
-	tc := &TunnelClient{targetPort: 3000}
+	tc := &TunnelClient{}
+	tc.targetPort.Store(3000)
 
 	tests := []struct {
 		name       string

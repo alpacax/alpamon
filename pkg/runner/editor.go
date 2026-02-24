@@ -199,6 +199,8 @@ type CodeServerManager struct {
 	started   bool
 	status    CodeServerStatus
 	lastError string
+	startOnce sync.Once
+	startErr  error
 }
 
 func NewCodeServerManager(parentCtx context.Context, username, groupname string) (*CodeServerManager, error) {
@@ -278,13 +280,14 @@ func (m *CodeServerManager) StartAsync() {
 // Lock is held only for short field updates to avoid blocking Status()/Stop() during
 // long-running install/startup operations.
 func (m *CodeServerManager) Start() error {
-	m.mu.RLock()
-	if m.started {
-		m.mu.RUnlock()
-		return nil
-	}
-	m.mu.RUnlock()
+	m.startOnce.Do(func() {
+		m.startErr = m.doStart()
+	})
+	return m.startErr
+}
 
+// doStart performs the actual code-server installation and startup.
+func (m *CodeServerManager) doStart() error {
 	if err := checkEditorResources(); err != nil {
 		return err
 	}

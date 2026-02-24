@@ -19,6 +19,7 @@ func spawnTunnelDaemon(socketPath string) (*exec.Cmd, error) {
 	}
 
 	cmd := exec.Command(executable, "tunnel-daemon", socketPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
