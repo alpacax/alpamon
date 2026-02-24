@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"os/user"
@@ -67,6 +68,9 @@ func ensureTunnelSocketDir() (string, error) {
 		uid, gid, err := parseUserCredentials(usr.Uid, usr.Gid)
 		if err != nil {
 			return "", fmt.Errorf("failed to parse nobody credentials for socket dir: %w", err)
+		}
+		if uid > math.MaxInt32 || gid > math.MaxInt32 {
+			return "", fmt.Errorf("nobody uid/gid exceeds int32 range: uid=%d, gid=%d", uid, gid)
 		}
 		if err := os.Chown(dir, int(uid), int(gid)); err != nil {
 			return "", fmt.Errorf("failed to chown tunnel socket directory: %w", err)
