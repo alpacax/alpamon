@@ -43,7 +43,7 @@ sudo yum install alpamon
 
 ### PAM Module
 
-The optional `alpamon-pam` package provides PAM (Pluggable Authentication Modules) integration for Alpacon-managed authentication:
+The optional `alpamon-pam` package provides PAM (Pluggable Authentication Modules) integration for Alpacon-managed sudo authentication:
 - **pam_alpamon.so**: Verifies Alpacon users during sudo authentication
 - **alpacon_approval.so**: Handles sudo command approval requests
 
