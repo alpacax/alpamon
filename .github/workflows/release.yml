@@ -124,9 +124,9 @@ jobs:
         with:
           name: ${{ env.PKG_NAME }}
 
-      - name: Update package index (DEB only)
+      - name: Install prerequisites (DEB only)
         if: matrix.pkg_type == 'deb'
-        run: apt-get update
+        run: apt-get update && apt-get install -y systemd
         env:
           DEBIAN_FRONTEND: noninteractive
 
