@@ -27,32 +27,40 @@ Download the latest `alpamon` directly from our releases page or install it usin
 #### Debian and Ubuntu
 ```bash
 curl -s https://packagecloud.io/install/repositories/alpacax/alpamon/script.deb.sh?any=true | sudo bash
-
-# Install alpamon (includes PAM module by default)
 sudo apt-get install alpamon
-
-# Install without PAM module
-sudo apt-get install alpamon --no-install-recommends
 ```
 
 #### CentOS and RHEL
 ```bash
 curl -s https://packagecloud.io/install/repositories/alpacax/alpamon/script.rpm.sh?any=true | sudo bash
-
-# Install alpamon (includes PAM module by default)
 sudo yum install alpamon
-
-# Install without PAM module
-sudo yum install alpamon --setopt=install_weak_deps=False
 ```
+
+> [!TIP]
+> To use Alpacon-managed sudo authentication, install the optional PAM module:
+> `sudo apt-get install alpamon-pam` (Debian/Ubuntu) or `sudo yum install alpamon-pam` (CentOS/RHEL).
+> See [PAM Module](#pam-module) for details.
 
 ### PAM Module
 
-By default, `alpamon` installation includes the `alpamon-pam` package, which provides PAM (Pluggable Authentication Modules) integration for advanced authentication features:
+The optional `alpamon-pam` package provides PAM (Pluggable Authentication Modules) integration for Alpacon-managed sudo authentication:
 - **pam_alpamon.so**: Verifies Alpacon users during sudo authentication
 - **alpacon_approval.so**: Handles sudo command approval requests
 
+#### Installing the PAM module
+
+The PAM module is packaged separately and must be installed explicitly:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install alpamon-pam
+
+# CentOS / RHEL
+sudo yum install alpamon-pam
+```
+
 #### Configuration
+
 After installation, configure PAM and sudo to enable the authentication features:
 
 1. Add to `/etc/pam.d/sudo`:
