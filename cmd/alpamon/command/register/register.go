@@ -76,7 +76,7 @@ func init() {
 	RegisterCmd.Flags().StringVar(&platform, "platform", "", "Platform (debian/rhel, auto-detect)")
 	RegisterCmd.Flags().BoolVar(&sslVerify, "ssl-verify", true, "SSL certificate verification")
 	RegisterCmd.Flags().StringVar(&caCert, "ca-cert", "", "CA certificate path")
-	RegisterCmd.Flags().StringToStringVar(&tags, "tag", nil, "Server tags in key=value format (can be specified multiple times)")
+	RegisterCmd.Flags().StringToStringVar(&tags, "tag", nil, "Server tags in key=value format (repeatable, or comma-separated: \"k1=v1,k2=v2\")")
 
 	_ = RegisterCmd.MarkFlagRequired("url")
 	_ = RegisterCmd.MarkFlagRequired("token")
