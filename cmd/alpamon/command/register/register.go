@@ -28,12 +28,14 @@ var (
 	platform   string
 	sslVerify  bool
 	caCert     string
+	tags       map[string]string
 )
 
 // RegisterRequest represents the request body for server registration
 type RegisterRequest struct {
-	Name     string `json:"name"`
-	Platform string `json:"platform"`
+	Name     string            `json:"name"`
+	Platform string            `json:"platform"`
+	Tags     map[string]string `json:"tags,omitempty"`
 }
 
 // RegisterResponse represents the response from server registration
@@ -54,6 +56,7 @@ Groups are automatically assigned from the token's allowed_groups configuration.
 Examples:
   sudo alpamon register --url https://alpacon.example.com --token <TOKEN>
   sudo alpamon register --url https://alpacon.example.com --token <TOKEN> --name my-server
+  sudo alpamon register --url https://alpacon.example.com --token <TOKEN> --tag env=prod --tag role=web
 
 Options:
   --url         Alpacon server URL (required)
@@ -61,7 +64,8 @@ Options:
   --name        Server name (optional, defaults to hostname)
   --platform    Platform (debian/rhel, auto-detect if omitted)
   --ssl-verify  SSL certificate verification (default: true)
-  --ca-cert     CA certificate path`,
+  --ca-cert     CA certificate path
+  --tag         Server tags in key=value format (repeatable)`,
 	RunE: runRegister,
 }
 
@@ -72,6 +76,7 @@ func init() {
 	RegisterCmd.Flags().StringVar(&platform, "platform", "", "Platform (debian/rhel, auto-detect)")
 	RegisterCmd.Flags().BoolVar(&sslVerify, "ssl-verify", true, "SSL certificate verification")
 	RegisterCmd.Flags().StringVar(&caCert, "ca-cert", "", "CA certificate path")
+	RegisterCmd.Flags().StringToStringVar(&tags, "tag", nil, "Server tags in key=value format (can be specified multiple times)")
 
 	_ = RegisterCmd.MarkFlagRequired("url")
 	_ = RegisterCmd.MarkFlagRequired("token")
@@ -103,6 +108,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	reqBody := RegisterRequest{
 		Name:     serverName,
 		Platform: platform,
+		Tags:     tags,
 	}
 
 	fmt.Printf("Registering server: %s\n", serverURL)
