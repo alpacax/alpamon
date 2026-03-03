@@ -114,6 +114,13 @@ func TestSendRegisterRequest_WithTags(t *testing.T) {
 			}))
 			defer server.Close()
 
+			oldServerURL, oldAPIToken, oldSSLVerify := serverURL, apiToken, sslVerify
+			t.Cleanup(func() {
+				serverURL = oldServerURL
+				apiToken = oldAPIToken
+				sslVerify = oldSSLVerify
+			})
+
 			serverURL = server.URL
 			apiToken = "test-token"
 			sslVerify = true
@@ -145,6 +152,13 @@ func TestSendRegisterRequest_ServerError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error": "invalid request"}`))
 	}))
 	defer server.Close()
+
+	oldServerURL, oldAPIToken, oldSSLVerify := serverURL, apiToken, sslVerify
+	t.Cleanup(func() {
+		serverURL = oldServerURL
+		apiToken = oldAPIToken
+		sslVerify = oldSSLVerify
+	})
 
 	serverURL = server.URL
 	apiToken = "test-token"
