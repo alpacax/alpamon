@@ -93,14 +93,16 @@ func TestSendRegisterRequest_WithTags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var receivedBody RegisterRequest
+			bodyCh := make(chan RegisterRequest, 1)
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 				assert.Contains(t, r.Header.Get("Authorization"), "token=")
 
-				err := json.NewDecoder(r.Body).Decode(&receivedBody)
+				var body RegisterRequest
+				err := json.NewDecoder(r.Body).Decode(&body)
 				require.NoError(t, err)
+				bodyCh <- body
 
 				w.WriteHeader(http.StatusCreated)
 				resp := RegisterResponse{
@@ -127,6 +129,7 @@ func TestSendRegisterRequest_WithTags(t *testing.T) {
 			assert.Equal(t, "test-id", resp.ID)
 			assert.Equal(t, "test-key", resp.Key)
 
+			receivedBody := <-bodyCh
 			if tt.expectTags {
 				assert.Equal(t, tt.tags, receivedBody.Tags)
 			} else {
