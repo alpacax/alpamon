@@ -65,7 +65,7 @@ Options:
   --platform    Platform (debian/rhel, auto-detect if omitted)
   --ssl-verify  SSL certificate verification (default: true)
   --ca-cert     CA certificate path
-  --tag         Server tags in key=value format (repeatable)`,
+  --tag         Server tags in key=value format (repeatable, or comma-separated: "k1=v1,k2=v2")`,
 	RunE: runRegister,
 }
 

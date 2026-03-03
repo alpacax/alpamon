@@ -101,7 +101,7 @@ func TestSendRegisterRequest_WithTags(t *testing.T) {
 
 				var body RegisterRequest
 				err := json.NewDecoder(r.Body).Decode(&body)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 				bodyCh <- body
 
 				w.WriteHeader(http.StatusCreated)
@@ -176,6 +176,11 @@ func TestTagFlagParsing(t *testing.T) {
 		{
 			name:         "multiple tags",
 			flagArgs:     []string{"--tag", "env=prod", "--tag", "role=web"},
+			expectedTags: map[string]string{"env": "prod", "role": "web"},
+		},
+		{
+			name:         "comma-separated tags",
+			flagArgs:     []string{"--tag", "env=prod,role=web"},
 			expectedTags: map[string]string{"env": "prod", "role": "web"},
 		},
 		{
