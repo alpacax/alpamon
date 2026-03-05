@@ -95,6 +95,7 @@ type AuthManager struct {
 	localSudoRequests  map[string]*SudoRequest
 	completionChannels map[string]chan struct{}
 	session            *scheduler.Session
+	blockLocalSudo     bool
 }
 
 const (
@@ -137,8 +138,36 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 	return authManager
 }
 
+func (am *AuthManager) fetchBlockLocalSudo() {
+	if am.session == nil {
+		log.Warn().Msg("Session not available, defaulting block_local_sudo to false")
+		return
+	}
+
+	resp, statusCode, err := am.session.Get("/api/servers/servers/-/", 10)
+	if err != nil || statusCode < 200 || statusCode >= 300 {
+		log.Warn().Err(err).Int("status_code", statusCode).Msg("Failed to fetch server settings, defaulting block_local_sudo to false")
+		return
+	}
+
+	var serverInfo map[string]interface{}
+	if err := json.Unmarshal(resp, &serverInfo); err != nil {
+		log.Warn().Err(err).Msg("Failed to parse server settings, defaulting block_local_sudo to false")
+		return
+	}
+
+	if blockLocalSudo, ok := serverInfo["block_local_sudo"].(bool); ok {
+		am.blockLocalSudo = blockLocalSudo
+		log.Info().Bool("block_local_sudo", blockLocalSudo).Msg("Loaded block_local_sudo setting from server")
+	} else {
+		log.Debug().Msg("block_local_sudo not found in server response, defaulting to false")
+	}
+}
+
 func (am *AuthManager) Start(ctx context.Context) {
 	am.ctx, am.cancel = context.WithCancel(ctx)
+
+	am.fetchBlockLocalSudo()
 
 	if err := am.startSocketListener(am.ctx); err != nil {
 		log.Error().Err(err).Msg("Failed to start socket listener")
@@ -311,13 +340,21 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	am.mu.Lock()
 	session, exists := am.pidToSessionMap[sudoApprovalReq.PPID]
 	if !exists {
-		// Local user: reject immediately without sending to server
-		// Server would reject anyway (servers/consumer.py:217-228)
+		// Non-WebSH session (local SSH, etc.)
 		am.mu.Unlock()
 		sudoApprovalReq.IsAlpconUser = false
 
-		log.Debug().Msgf("Local user sudo request rejected: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
-		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority")
+		if am.blockLocalSudo {
+			// block_local_sudo=true: reject all local sudo (original behavior)
+			log.Debug().Msgf("Local sudo blocked by policy: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
+			am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority")
+			_ = unixConn.Close()
+			return
+		}
+
+		// block_local_sudo=false: allow local sudo, respect existing sudoers permissions
+		log.Debug().Msgf("Local sudo approved: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, true, "Approved")
 		_ = unixConn.Close()
 		return
 	}
