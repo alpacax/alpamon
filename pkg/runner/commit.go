@@ -216,21 +216,23 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 
 func syncServerSettings(session *scheduler.Session) {
 	resp, statusCode, err := session.Get(serverSettingsURL, 10)
-	if err != nil || statusCode < 200 || statusCode >= 300 {
-		log.Warn().Err(err).Int("status_code", statusCode).Msg("Failed to fetch server settings")
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to fetch server settings")
+		return
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		log.Warn().Int("status_code", statusCode).Msg("Failed to fetch server settings")
 		return
 	}
 
-	var serverInfo map[string]interface{}
-	if err := json.Unmarshal(resp, &serverInfo); err != nil {
+	var serverSettings ServerSettings
+	if err := json.Unmarshal(resp, &serverSettings); err != nil {
 		log.Warn().Err(err).Msg("Failed to parse server settings")
 		return
 	}
 
 	if authManager != nil {
-		if blockLocalSudo, ok := serverInfo["block_local_sudo"].(bool); ok {
-			authManager.UpdateBlockLocalSudo(blockLocalSudo)
-		}
+		authManager.UpdateBlockLocalSudo(serverSettings.BlockLocalSudo)
 	}
 }
 
