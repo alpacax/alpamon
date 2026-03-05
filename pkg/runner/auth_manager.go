@@ -95,6 +95,7 @@ type AuthManager struct {
 	localSudoRequests  map[string]*SudoRequest
 	completionChannels map[string]chan struct{}
 	session            *scheduler.Session
+	blockLocalSudo     bool
 }
 
 const (
@@ -135,6 +136,13 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 	}
 
 	return authManager
+}
+
+func (am *AuthManager) UpdateBlockLocalSudo(value bool) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.blockLocalSudo = value
+	log.Info().Bool("block_local_sudo", value).Msg("Updated block_local_sudo setting")
 }
 
 func (am *AuthManager) Start(ctx context.Context) {
@@ -310,14 +318,23 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 
 	am.mu.Lock()
 	session, exists := am.pidToSessionMap[sudoApprovalReq.PPID]
+	blockLocalSudo := am.blockLocalSudo
 	if !exists {
-		// Local user: reject immediately without sending to server
-		// Server would reject anyway (servers/consumer.py:217-228)
+		// Non-WebSH session (local SSH, etc.)
 		am.mu.Unlock()
 		sudoApprovalReq.IsAlpconUser = false
 
-		log.Debug().Msgf("Local user sudo request rejected: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
-		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority")
+		if blockLocalSudo {
+			// block_local_sudo=true: reject all local sudo (original behavior)
+			log.Debug().Msgf("Local sudo blocked by policy: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
+			am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority")
+			_ = unixConn.Close()
+			return
+		}
+
+		// block_local_sudo=false: allow local sudo, respect existing sudoers permissions
+		log.Debug().Msgf("Local sudo approved: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, true, "Approved")
 		_ = unixConn.Close()
 		return
 	}

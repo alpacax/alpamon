@@ -27,9 +27,10 @@ import (
 )
 
 const (
-	commitURL       = "/api/servers/servers/-/commit/"
-	eventURL        = "/api/events/events/"
-	firewallSyncURL = "/api/firewall/agent/sync/"
+	commitURL         = "/api/servers/servers/-/commit/"
+	eventURL          = "/api/events/events/"
+	firewallSyncURL   = "/api/firewall/agent/sync/"
+	serverSettingsURL = "/api/servers/servers/-/"
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
@@ -97,7 +98,8 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 	syncMutex.Lock()
 	defer syncMutex.Unlock()
 
-	if len(keys) == 0 {
+	fullSync := len(keys) == 0
+	if fullSync {
 		for key := range commitDefs {
 			keys = append(keys, key)
 		}
@@ -204,7 +206,34 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 			compareData(entry, currentData.(ComparableData), remoteData.(ComparableData))
 		}
 	}
+	// Sync server settings (e.g., block_local_sudo) only during full sync
+	if fullSync {
+		syncServerSettings(session)
+	}
+
 	log.Info().Msg("Completed system information synchronization.")
+}
+
+func syncServerSettings(session *scheduler.Session) {
+	resp, statusCode, err := session.Get(serverSettingsURL, 10)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to fetch server settings")
+		return
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		log.Warn().Int("status_code", statusCode).Msg("Failed to fetch server settings")
+		return
+	}
+
+	var serverSettings ServerSettings
+	if err := json.Unmarshal(resp, &serverSettings); err != nil {
+		log.Warn().Err(err).Msg("Failed to parse server settings")
+		return
+	}
+
+	if authManager != nil {
+		authManager.UpdateBlockLocalSudo(serverSettings.BlockLocalSudo)
+	}
 }
 
 func compareData(entry commitDef, currentData, remoteData ComparableData) {

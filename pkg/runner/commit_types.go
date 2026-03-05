@@ -162,6 +162,10 @@ type shadowEntry struct {
 	expireDate *int64 // days since epoch, nil if not set
 }
 
+type ServerSettings struct {
+	BlockLocalSudo bool `json:"block_local_sudo"`
+}
+
 type commitData struct {
 	Version    string      `json:"version"`
 	Load       float64     `json:"load"`
