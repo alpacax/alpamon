@@ -318,12 +318,13 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 
 	am.mu.Lock()
 	session, exists := am.pidToSessionMap[sudoApprovalReq.PPID]
+	blockLocalSudo := am.blockLocalSudo
 	if !exists {
 		// Non-WebSH session (local SSH, etc.)
 		am.mu.Unlock()
 		sudoApprovalReq.IsAlpconUser = false
 
-		if am.blockLocalSudo {
+		if blockLocalSudo {
 			// block_local_sudo=true: reject all local sudo (original behavior)
 			log.Debug().Msgf("Local sudo blocked by policy: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
 			am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority")
