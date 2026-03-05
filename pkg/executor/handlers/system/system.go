@@ -84,9 +84,9 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 	var cmd string
 	switch utils.PlatformLike {
 	case "debian":
-		cmd = "apt-get update -y && apt-get install --only-upgrade alpamon -y"
+		cmd = "apt-get update -y && apt-get install --only-upgrade alpamon alpamon-pam -y"
 	case "rhel":
-		cmd = "yum update -y alpamon"
+		cmd = "yum update -y alpamon alpamon-pam"
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
 	}
