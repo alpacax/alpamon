@@ -204,7 +204,30 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 			compareData(entry, currentData.(ComparableData), remoteData.(ComparableData))
 		}
 	}
+	// Sync server settings (e.g., block_local_sudo)
+	syncServerSettings(session)
+
 	log.Info().Msg("Completed system information synchronization.")
+}
+
+func syncServerSettings(session *scheduler.Session) {
+	resp, statusCode, err := session.Get("/api/servers/servers/-/", 10)
+	if err != nil || statusCode < 200 || statusCode >= 300 {
+		log.Warn().Err(err).Int("status_code", statusCode).Msg("Failed to fetch server settings")
+		return
+	}
+
+	var serverInfo map[string]interface{}
+	if err := json.Unmarshal(resp, &serverInfo); err != nil {
+		log.Warn().Err(err).Msg("Failed to parse server settings")
+		return
+	}
+
+	if authManager != nil {
+		if blockLocalSudo, ok := serverInfo["block_local_sudo"].(bool); ok {
+			authManager.UpdateBlockLocalSudo(blockLocalSudo)
+		}
+	}
 }
 
 func compareData(entry commitDef, currentData, remoteData ComparableData) {

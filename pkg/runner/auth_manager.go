@@ -138,36 +138,15 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 	return authManager
 }
 
-func (am *AuthManager) fetchBlockLocalSudo() {
-	if am.session == nil {
-		log.Warn().Msg("Session not available, defaulting block_local_sudo to false")
-		return
-	}
-
-	resp, statusCode, err := am.session.Get("/api/servers/servers/-/", 10)
-	if err != nil || statusCode < 200 || statusCode >= 300 {
-		log.Warn().Err(err).Int("status_code", statusCode).Msg("Failed to fetch server settings, defaulting block_local_sudo to false")
-		return
-	}
-
-	var serverInfo map[string]interface{}
-	if err := json.Unmarshal(resp, &serverInfo); err != nil {
-		log.Warn().Err(err).Msg("Failed to parse server settings, defaulting block_local_sudo to false")
-		return
-	}
-
-	if blockLocalSudo, ok := serverInfo["block_local_sudo"].(bool); ok {
-		am.blockLocalSudo = blockLocalSudo
-		log.Info().Bool("block_local_sudo", blockLocalSudo).Msg("Loaded block_local_sudo setting from server")
-	} else {
-		log.Debug().Msg("block_local_sudo not found in server response, defaulting to false")
-	}
+func (am *AuthManager) UpdateBlockLocalSudo(value bool) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.blockLocalSudo = value
+	log.Info().Bool("block_local_sudo", value).Msg("Updated block_local_sudo setting")
 }
 
 func (am *AuthManager) Start(ctx context.Context) {
 	am.ctx, am.cancel = context.WithCancel(ctx)
-
-	am.fetchBlockLocalSudo()
 
 	if err := am.startSocketListener(am.ctx); err != nil {
 		log.Error().Err(err).Msg("Failed to start socket listener")
