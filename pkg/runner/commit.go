@@ -30,7 +30,7 @@ const (
 	commitURL         = "/api/servers/servers/-/commit/"
 	eventURL          = "/api/events/events/"
 	firewallSyncURL   = "/api/firewall/agent/sync/"
-	serverSettingsURL = "/api/servers/servers/-/"
+	accessPolicyURL   = "/api/servers/servers/-/access-policy/"
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
@@ -121,8 +121,9 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 				log.Debug().Err(err).Msg("Failed to retrieve load average.")
 			}
 			currentData = &ServerData{
-				Version: version.Version,
-				Load:    loadAvg,
+				Version:    version.Version,
+				PamVersion: utils.GetPamVersion(),
+				Load:       loadAvg,
 			}
 			scheduler.Rqueue.Patch(utils.JoinPath(entry.URL, entry.URLSuffix), currentData, 80, time.Time{})
 			continue
@@ -206,33 +207,37 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 			compareData(entry, currentData.(ComparableData), remoteData.(ComparableData))
 		}
 	}
-	// Sync server settings (e.g., block_local_sudo) only during full sync
+	// Sync access policy (e.g., block_local_sudo) only during full sync
 	if fullSync {
-		syncServerSettings(session)
+		syncAccessPolicy(session)
 	}
 
 	log.Info().Msg("Completed system information synchronization.")
 }
 
-func syncServerSettings(session *scheduler.Session) {
-	resp, statusCode, err := session.Get(serverSettingsURL, 10)
+func syncAccessPolicy(session *scheduler.Session) {
+	resp, statusCode, err := session.Get(accessPolicyURL, 10)
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to fetch server settings")
+		log.Warn().Err(err).Msg("Failed to fetch access policy")
+		return
+	}
+	if statusCode == http.StatusNotFound {
+		log.Debug().Msg("Access policy endpoint not available on this server")
 		return
 	}
 	if statusCode < 200 || statusCode >= 300 {
-		log.Warn().Int("status_code", statusCode).Msg("Failed to fetch server settings")
+		log.Warn().Int("status_code", statusCode).Msg("Failed to fetch access policy")
 		return
 	}
 
-	var serverSettings ServerSettings
-	if err := json.Unmarshal(resp, &serverSettings); err != nil {
-		log.Warn().Err(err).Msg("Failed to parse server settings")
+	var accessPolicy AccessPolicy
+	if err := json.Unmarshal(resp, &accessPolicy); err != nil {
+		log.Warn().Err(err).Msg("Failed to parse access policy")
 		return
 	}
 
 	if authManager != nil {
-		authManager.UpdateBlockLocalSudo(serverSettings.BlockLocalSudo)
+		authManager.UpdateBlockLocalSudo(accessPolicy.BlockLocalSudo)
 	}
 }
 
@@ -288,6 +293,7 @@ func collectData() *commitData {
 
 	var err error
 	data.Version = version.Version
+	data.PamVersion = utils.GetPamVersion()
 
 	if data.Load, err = getLoadAverage(); err != nil {
 		log.Debug().Err(err).Msg("Failed to retrieve load average.")

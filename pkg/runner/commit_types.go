@@ -65,8 +65,9 @@ var commitDefs = map[string]commitDef{
 }
 
 type ServerData struct {
-	Version string  `json:"version"`
-	Load    float64 `json:"load"`
+	Version    string  `json:"version"`
+	PamVersion string  `json:"pam_version,omitempty"`
+	Load       float64 `json:"load"`
 }
 
 type SystemData struct {
@@ -162,12 +163,13 @@ type shadowEntry struct {
 	expireDate *int64 // days since epoch, nil if not set
 }
 
-type ServerSettings struct {
+type AccessPolicy struct {
 	BlockLocalSudo bool `json:"block_local_sudo"`
 }
 
 type commitData struct {
 	Version    string      `json:"version"`
+	PamVersion string      `json:"pam_version,omitempty"`
 	Load       float64     `json:"load"`
 	Info       SystemData  `json:"info"`
 	OS         OSData      `json:"os"`
