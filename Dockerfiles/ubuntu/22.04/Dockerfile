@@ -1,4 +1,4 @@
-FROM golang:1.23 AS builder
+FROM golang:1.25 AS builder
 
 # Automatically set GOARCH to the build-time architecture
 ARG TARGETARCH

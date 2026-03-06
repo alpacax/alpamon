@@ -1,6 +1,6 @@
 #!/bin/bash
 
-ALPACON_URL=${ALPACON_URL:-"http://host.docker.internal:8000"}
+ALPACON_URL=${ALPACON_URL:-"http://host.docker.internal:8081}
 PLUGIN_ID=${PLUGIN_ID:-"d59bc536-2f33-43e0-8d78-bca3ecd91b8e"}
 PLUGIN_KEY=${PLUGIN_KEY:-"alpaca"}
 
