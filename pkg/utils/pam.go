@@ -4,14 +4,38 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
-const pamQueryTimeout = 3 * time.Second
+const (
+	pamQueryTimeout = 3 * time.Second
+	pamCacheTTL     = 3 * time.Hour
+)
+
+var (
+	pamCache      string
+	pamCacheTime  time.Time
+	pamCacheMutex sync.Mutex
+)
 
 // GetPamVersion returns the installed alpamon-pam package version.
 // Returns empty string if the package is not installed.
+// Results are cached with a TTL to avoid spawning external processes on every sync.
 func GetPamVersion() string {
+	pamCacheMutex.Lock()
+	defer pamCacheMutex.Unlock()
+
+	if !pamCacheTime.IsZero() && time.Since(pamCacheTime) < pamCacheTTL {
+		return pamCache
+	}
+
+	pamCache = queryPamVersion()
+	pamCacheTime = time.Now()
+	return pamCache
+}
+
+func queryPamVersion() string {
 	ctx, cancel := context.WithTimeout(context.Background(), pamQueryTimeout)
 	defer cancel()
 
