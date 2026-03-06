@@ -218,7 +218,11 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 func syncAccessPolicy(session *scheduler.Session) {
 	resp, statusCode, err := session.Get(accessPolicyURL, 10)
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to fetch access policy")
+		log.Debug().Err(err).Msg("Failed to fetch access policy")
+		return
+	}
+	if statusCode == http.StatusNotFound {
+		log.Debug().Msg("Access policy endpoint not available on this server")
 		return
 	}
 	if statusCode < 200 || statusCode >= 300 {
