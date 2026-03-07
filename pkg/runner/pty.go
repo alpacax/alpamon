@@ -89,6 +89,9 @@ func validateWebSocketURL(rawURL string) (string, error) {
 	if parsed.Scheme != "ws" && parsed.Scheme != "wss" {
 		return "", fmt.Errorf("invalid WebSocket scheme: %s", parsed.Scheme)
 	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("missing host in WebSocket URL")
+	}
 	return parsed.String(), nil
 }
 
