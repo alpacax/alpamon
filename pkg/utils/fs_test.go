@@ -7,14 +7,13 @@ import (
 )
 
 func TestFileExists(t *testing.T) {
-	// Create a temp file
 	tmpFile, err := os.CreateTemp("", "test_file_exists_*")
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
 	tmpPath := tmpFile.Name()
 	_ = tmpFile.Close()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	tests := []struct {
 		name string
@@ -54,13 +53,12 @@ func TestFileExists(t *testing.T) {
 }
 
 func TestCopyFile(t *testing.T) {
-	// Create source file with content
 	srcFile, err := os.CreateTemp("", "test_copy_src_*")
 	if err != nil {
 		t.Fatalf("failed to create source file: %v", err)
 	}
 	srcPath := srcFile.Name()
-	defer os.Remove(srcPath)
+	defer func() { _ = os.Remove(srcPath) }()
 
 	content := []byte("hello world")
 	if _, err := srcFile.Write(content); err != nil {
@@ -68,21 +66,19 @@ func TestCopyFile(t *testing.T) {
 	}
 	_ = srcFile.Close()
 
-	// Set specific permissions
 	if err := os.Chmod(srcPath, 0644); err != nil {
 		t.Fatalf("failed to chmod source: %v", err)
 	}
 
 	t.Run("basic copy", func(t *testing.T) {
 		dstPath := srcPath + "_copy"
-		defer os.Remove(dstPath)
+		defer func() { _ = os.Remove(dstPath) }()
 
 		err := CopyFile(srcPath, dstPath, true)
 		if err != nil {
 			t.Fatalf("CopyFile() error: %v", err)
 		}
 
-		// Verify content
 		got, err := os.ReadFile(dstPath)
 		if err != nil {
 			t.Fatalf("failed to read dst: %v", err)
@@ -91,7 +87,6 @@ func TestCopyFile(t *testing.T) {
 			t.Fatalf("CopyFile() content = %q, want %q", got, content)
 		}
 
-		// Verify permissions
 		srcInfo, _ := os.Stat(srcPath)
 		dstInfo, _ := os.Stat(dstPath)
 		if srcInfo.Mode() != dstInfo.Mode() {
@@ -108,14 +103,12 @@ func TestCopyFile(t *testing.T) {
 }
 
 func TestCopyDir(t *testing.T) {
-	// Create source directory structure
 	srcDir, err := os.MkdirTemp("", "test_copydir_src_*")
 	if err != nil {
 		t.Fatalf("failed to create source dir: %v", err)
 	}
-	defer os.RemoveAll(srcDir)
+	defer func() { _ = os.RemoveAll(srcDir) }()
 
-	// Create files in source
 	if err := os.WriteFile(filepath.Join(srcDir, "file1.txt"), []byte("one"), 0644); err != nil {
 		t.Fatalf("failed to create file1: %v", err)
 	}
@@ -132,15 +125,14 @@ func TestCopyDir(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to create dst dir: %v", err)
 		}
-		os.RemoveAll(dstDir) // CopyDir creates it
-		defer os.RemoveAll(dstDir)
+		_ = os.RemoveAll(dstDir)
+		defer func() { _ = os.RemoveAll(dstDir) }()
 
 		err = CopyDir(srcDir, dstDir, false)
 		if err != nil {
 			t.Fatalf("CopyDir() error: %v", err)
 		}
 
-		// Verify files exist
 		got1, err := os.ReadFile(filepath.Join(dstDir, "file1.txt"))
 		if err != nil {
 			t.Fatalf("file1.txt not copied: %v", err)
@@ -168,14 +160,12 @@ func TestCopyDir(t *testing.T) {
 }
 
 func TestGetCopyPath(t *testing.T) {
-	// Create a temp directory for test
 	tmpDir, err := os.MkdirTemp("", "test_getcopypath_*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	// Create existing file
 	srcPath := filepath.Join(tmpDir, "file.txt")
 	if err := os.WriteFile(srcPath, []byte("test"), 0644); err != nil {
 		t.Fatalf("failed to create file: %v", err)
@@ -190,7 +180,6 @@ func TestGetCopyPath(t *testing.T) {
 	})
 
 	t.Run("skips existing numbered copies", func(t *testing.T) {
-		// Create file (1).txt
 		copy1 := filepath.Join(tmpDir, "file (1).txt")
 		if err := os.WriteFile(copy1, []byte("copy"), 0644); err != nil {
 			t.Fatalf("failed to create copy: %v", err)
@@ -205,7 +194,6 @@ func TestGetCopyPath(t *testing.T) {
 }
 
 func TestChownRecursive(t *testing.T) {
-	// ChownRecursive requires root, so just verify it handles non-existent paths
 	t.Run("non-existent path returns error", func(t *testing.T) {
 		err := ChownRecursive("/nonexistent/path", 1000, 1000)
 		if err == nil {
