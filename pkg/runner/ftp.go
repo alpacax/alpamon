@@ -167,8 +167,10 @@ func (fc *FtpClient) handleFtpCommand(command FtpCommand, data FtpData) (Command
 	}
 }
 
-func (fc *FtpClient) parsePath(path string) string {
-	path = strings.ReplaceAll(path, "\x00", "")
+func (fc *FtpClient) parsePath(path string) (string, error) {
+	if strings.ContainsRune(path, '\x00') {
+		return "", fmt.Errorf("invalid path: contains null byte")
+	}
 
 	if strings.HasPrefix(path, "~") {
 		path = strings.Replace(path, "~", fc.workingDirectory, 1)
@@ -180,14 +182,17 @@ func (fc *FtpClient) parsePath(path string) string {
 
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return filepath.Clean(path)
+		return filepath.Clean(path), nil
 	}
 
-	return filepath.Clean(absPath)
+	return filepath.Clean(absPath), nil
 }
 
 func (fc *FtpClient) list(rootDir string, depth int, showHidden bool) (CommandResult, error) {
-	path := fc.parsePath(rootDir)
+	path, err := fc.parsePath(rootDir)
+	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
 	cmdResult, err := fc.listRecursive(path, depth, 0, showHidden)
 	return cmdResult, err
 }
@@ -324,9 +329,12 @@ func (fc *FtpClient) handleListErrorResult(path string, err error) CommandResult
 }
 
 func (fc *FtpClient) mkd(path string) (CommandResult, error) {
-	path = fc.parsePath(path)
+	path, err := fc.parsePath(path)
+	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
 
-	err := os.Mkdir(path, 0755)
+	err = os.Mkdir(path, 0755)
 	if err != nil {
 		return CommandResult{
 			Message: err.Error(),
@@ -339,7 +347,10 @@ func (fc *FtpClient) mkd(path string) (CommandResult, error) {
 }
 
 func (fc *FtpClient) cwd(path string) (CommandResult, error) {
-	path = fc.parsePath(path)
+	path, err := fc.parsePath(path)
+	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
 
 	info, err := os.Stat(path)
 	if err != nil {
@@ -369,9 +380,12 @@ func (fc *FtpClient) pwd() (CommandResult, error) {
 }
 
 func (fc *FtpClient) dele(path string) (CommandResult, error) {
-	path = fc.parsePath(path)
+	path, err := fc.parsePath(path)
+	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
 
-	err := os.Remove(path)
+	err = os.Remove(path)
 	if err != nil {
 		return CommandResult{
 			Message: err.Error(),
@@ -384,25 +398,28 @@ func (fc *FtpClient) dele(path string) (CommandResult, error) {
 }
 
 func (fc *FtpClient) rmd(path string, recursive bool) (CommandResult, error) {
-	path = fc.parsePath(path)
-
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return CommandResult{
-			Message: err.Error(),
-		}, err
-	}
-
-	var err error
-	if recursive {
-		err = os.RemoveAll(path)
-	} else {
-		err = os.Remove(path)
-	}
-
+	path, err := fc.parsePath(path)
 	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
+
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 		return CommandResult{
-			Message: err.Error(),
-		}, err
+			Message: statErr.Error(),
+		}, statErr
+	}
+
+	var rmErr error
+	if recursive {
+		rmErr = os.RemoveAll(path)
+	} else {
+		rmErr = os.Remove(path)
+	}
+
+	if rmErr != nil {
+		return CommandResult{
+			Message: rmErr.Error(),
+		}, rmErr
 	}
 
 	return CommandResult{
@@ -411,8 +428,15 @@ func (fc *FtpClient) rmd(path string, recursive bool) (CommandResult, error) {
 }
 
 func (fc *FtpClient) mv(src, dst string, allowOverwrite bool) (CommandResult, error) {
-	src = fc.parsePath(src)
-	dst = fc.parsePath(dst)
+	var err error
+	src, err = fc.parsePath(src)
+	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
+	dst, err = fc.parsePath(dst)
+	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
 
 	if !allowOverwrite {
 		_, err := os.Stat(dst)
@@ -427,7 +451,7 @@ func (fc *FtpClient) mv(src, dst string, allowOverwrite bool) (CommandResult, er
 		}
 	}
 
-	err := os.Rename(src, dst)
+	err = os.Rename(src, dst)
 	if err != nil {
 		return CommandResult{
 			Message: err.Error(),
@@ -441,8 +465,15 @@ func (fc *FtpClient) mv(src, dst string, allowOverwrite bool) (CommandResult, er
 }
 
 func (fc *FtpClient) cp(src, dst string, allowOverwrite bool) (CommandResult, error) {
-	src = fc.parsePath(src)
-	dst = fc.parsePath(dst)
+	var err error
+	src, err = fc.parsePath(src)
+	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
+	dst, err = fc.parsePath(dst)
+	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
 
 	if src == dst {
 		dst = utils.GetCopyPath(src, dst)
@@ -504,7 +535,10 @@ func (fc *FtpClient) cpFile(src, dst string, allowOverwrite bool) (CommandResult
 }
 
 func (fc *FtpClient) chmod(path, mode string, recursive bool) (CommandResult, error) {
-	path = fc.parsePath(path)
+	path, err := fc.parsePath(path)
+	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
 	fileMode, err := strconv.ParseUint(mode, 8, 32)
 	if err != nil {
 		return CommandResult{
@@ -553,7 +587,10 @@ func (fc *FtpClient) chmodRecursive(path string, fileMode os.FileMode) error {
 }
 
 func (fc *FtpClient) chown(path, username, groupname string, recursive bool) (CommandResult, error) {
-	path = fc.parsePath(path)
+	path, err := fc.parsePath(path)
+	if err != nil {
+		return CommandResult{Message: err.Error()}, err
+	}
 
 	uid, err := utils.LookUpUID(username)
 	if err != nil {
