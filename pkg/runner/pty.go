@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -81,36 +80,18 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session) *Pty
 	}
 }
 
-func validateWebSocketURL(rawURL string) (string, error) {
-	wsPrefix := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
-	if !strings.HasPrefix(rawURL, wsPrefix) {
-		return "", fmt.Errorf("WebSocket URL does not match server: %s", rawURL)
-	}
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid WebSocket URL: %w", err)
-	}
-	if parsed.Scheme != "ws" && parsed.Scheme != "wss" {
-		return "", fmt.Errorf("invalid WebSocket scheme: %s", parsed.Scheme)
-	}
-	if parsed.Host == "" {
-		return "", fmt.Errorf("missing host in WebSocket URL")
-	}
-	return parsed.String(), nil
-}
-
 func (pc *PtyClient) initializePtySession() error {
-	var err error
-	dialURL, err := validateWebSocketURL(pc.url)
-	if err != nil {
-		return fmt.Errorf("failed to validate WebSocket URL: %w", err)
+	wsPrefix := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
+	if !strings.HasPrefix(pc.url, wsPrefix) {
+		return fmt.Errorf("WebSocket URL does not match server: %s", pc.url)
 	}
+	var err error
 	dialer := websocket.Dialer{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
 	}
-	pc.conn, _, err = dialer.Dial(dialURL, pc.requestHeader)
+	pc.conn, _, err = dialer.Dial(pc.url, pc.requestHeader)
 	if err != nil {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
@@ -390,9 +371,9 @@ func (pc *PtyClient) recovery() error {
 			}
 			pc.url = strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + resp.WebsocketURL
 
-			dialURL, err := validateWebSocketURL(pc.url)
-			if err != nil {
-				return backoff.Permanent(fmt.Errorf("invalid recovery URL: %w", err))
+			wsPrefix := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
+			if !strings.HasPrefix(pc.url, wsPrefix) {
+				return backoff.Permanent(fmt.Errorf("recovery URL does not match server: %s", pc.url))
 			}
 
 			dialer := websocket.Dialer{
@@ -400,7 +381,7 @@ func (pc *PtyClient) recovery() error {
 					InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 				},
 			}
-			conn, _, err := dialer.Dial(dialURL, pc.requestHeader)
+			conn, _, err := dialer.Dial(pc.url, pc.requestHeader)
 			if err != nil {
 				log.Warn().Err(err).Msg("Websh reconnect failed.")
 				return err
