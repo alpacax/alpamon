@@ -193,6 +193,7 @@ func (fc *FtpClient) list(rootDir string, depth int, showHidden bool) (CommandRe
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	path = filepath.Clean(path)
 	cmdResult, err := fc.listRecursive(path, depth, 0, showHidden)
 	return cmdResult, err
 }
@@ -333,6 +334,7 @@ func (fc *FtpClient) mkd(path string) (CommandResult, error) {
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	path = filepath.Clean(path)
 
 	err = os.Mkdir(path, 0755)
 	if err != nil {
@@ -351,6 +353,7 @@ func (fc *FtpClient) cwd(path string) (CommandResult, error) {
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	path = filepath.Clean(path)
 
 	info, err := os.Stat(path)
 	if err != nil {
@@ -384,6 +387,7 @@ func (fc *FtpClient) dele(path string) (CommandResult, error) {
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	path = filepath.Clean(path)
 
 	err = os.Remove(path)
 	if err != nil {
@@ -402,6 +406,7 @@ func (fc *FtpClient) rmd(path string, recursive bool) (CommandResult, error) {
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	path = filepath.Clean(path)
 
 	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 		return CommandResult{
@@ -433,16 +438,18 @@ func (fc *FtpClient) mv(src, dst string, allowOverwrite bool) (CommandResult, er
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	src = filepath.Clean(src)
 	dst, err = fc.parsePath(dst)
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	dst = filepath.Clean(dst)
 
 	if !allowOverwrite {
 		_, err := os.Stat(dst)
 		switch {
 		case err == nil:
-			dst = utils.GetCopyPath(src, dst)
+			dst = filepath.Clean(utils.GetCopyPath(src, dst))
 		case os.IsNotExist(err):
 		default:
 			return CommandResult{
@@ -470,20 +477,22 @@ func (fc *FtpClient) cp(src, dst string, allowOverwrite bool) (CommandResult, er
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	src = filepath.Clean(src)
 	dst, err = fc.parsePath(dst)
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	dst = filepath.Clean(dst)
 
 	if src == dst {
-		dst = utils.GetCopyPath(src, dst)
+		dst = filepath.Clean(utils.GetCopyPath(src, dst))
 	}
 
 	if !allowOverwrite {
 		_, err := os.Stat(dst)
 		switch {
 		case err == nil:
-			dst = utils.GetCopyPath(src, dst)
+			dst = filepath.Clean(utils.GetCopyPath(src, dst))
 		case os.IsNotExist(err):
 		default:
 			return CommandResult{
@@ -539,6 +548,7 @@ func (fc *FtpClient) chmod(path, mode string, recursive bool) (CommandResult, er
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	path = filepath.Clean(path)
 	fileMode, err := strconv.ParseUint(mode, 8, 32)
 	if err != nil {
 		return CommandResult{
@@ -591,6 +601,7 @@ func (fc *FtpClient) chown(path, username, groupname string, recursive bool) (Co
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
 	}
+	path = filepath.Clean(path)
 
 	uid, err := utils.LookUpUID(username)
 	if err != nil {

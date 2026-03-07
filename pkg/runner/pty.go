@@ -92,7 +92,13 @@ func validateWebSocketURL(rawURL string) (string, error) {
 	if parsed.Host == "" {
 		return "", fmt.Errorf("missing host in WebSocket URL")
 	}
-	return parsed.String(), nil
+	validated := url.URL{
+		Scheme:   parsed.Scheme,
+		Host:     parsed.Host,
+		Path:     parsed.Path,
+		RawQuery: parsed.RawQuery,
+	}
+	return validated.String(), nil
 }
 
 func (pc *PtyClient) initializePtySession() error {
