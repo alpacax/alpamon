@@ -82,6 +82,10 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session) *Pty
 }
 
 func validateWebSocketURL(rawURL string) (string, error) {
+	wsPrefix := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
+	if !strings.HasPrefix(rawURL, wsPrefix) {
+		return "", fmt.Errorf("WebSocket URL does not match server: %s", rawURL)
+	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid WebSocket URL: %w", err)
@@ -92,13 +96,7 @@ func validateWebSocketURL(rawURL string) (string, error) {
 	if parsed.Host == "" {
 		return "", fmt.Errorf("missing host in WebSocket URL")
 	}
-	validated := url.URL{
-		Scheme:   parsed.Scheme,
-		Host:     parsed.Host,
-		Path:     parsed.Path,
-		RawQuery: parsed.RawQuery,
-	}
-	return validated.String(), nil
+	return parsed.String(), nil
 }
 
 func (pc *PtyClient) initializePtySession() error {

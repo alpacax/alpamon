@@ -254,9 +254,16 @@ func GetCopyPath(src, dst string) string {
 }
 
 func FileExists(path string) bool {
-	path = filepath.Clean(path)
-	_, err := os.Stat(path)
-	return !os.IsNotExist(err)
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel("/", absPath)
+	if err != nil {
+		return false
+	}
+	_, statErr := os.Stat(filepath.Join("/", rel))
+	return !os.IsNotExist(statErr)
 }
 
 // IsZipFile checks if the content is a valid zip file

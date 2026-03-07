@@ -182,10 +182,15 @@ func (fc *FtpClient) parsePath(path string) (string, error) {
 
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return filepath.Clean(path), nil
+		absPath = path
 	}
 
-	return filepath.Clean(absPath), nil
+	cleanPath := filepath.Clean(absPath)
+	rel, err := filepath.Rel("/", cleanPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	return filepath.Join("/", rel), nil
 }
 
 func (fc *FtpClient) list(rootDir string, depth int, showHidden bool) (CommandResult, error) {
