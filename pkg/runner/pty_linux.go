@@ -2,12 +2,19 @@ package runner
 
 import (
 	"fmt"
+	"math"
 	"syscall"
 
 	"github.com/alpacax/alpamon/pkg/utils"
 )
 
 func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string, env map[string]string) {
+	if uid < 0 || uid > math.MaxUint32 {
+		return
+	}
+	if gid < 0 || gid > math.MaxUint32 {
+		return
+	}
 	pc.cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{
 			Uid:    uint32(uid),

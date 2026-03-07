@@ -183,7 +183,7 @@ func (fc *FtpClient) parsePath(path string) string {
 		return filepath.Clean(path)
 	}
 
-	return absPath
+	return filepath.Clean(absPath)
 }
 
 func (fc *FtpClient) list(rootDir string, depth int, showHidden bool) (CommandResult, error) {

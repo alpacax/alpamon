@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -80,14 +81,29 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session) *Pty
 	}
 }
 
+func validateWebSocketURL(rawURL string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid WebSocket URL: %w", err)
+	}
+	if parsed.Scheme != "ws" && parsed.Scheme != "wss" {
+		return "", fmt.Errorf("invalid WebSocket scheme: %s", parsed.Scheme)
+	}
+	return parsed.String(), nil
+}
+
 func (pc *PtyClient) initializePtySession() error {
 	var err error
+	dialURL, err := validateWebSocketURL(pc.url)
+	if err != nil {
+		return fmt.Errorf("failed to validate WebSocket URL: %w", err)
+	}
 	dialer := websocket.Dialer{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
 	}
-	pc.conn, _, err = dialer.Dial(pc.url, pc.requestHeader)
+	pc.conn, _, err = dialer.Dial(dialURL, pc.requestHeader)
 	if err != nil {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
@@ -367,12 +383,17 @@ func (pc *PtyClient) recovery() error {
 			}
 			pc.url = strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + resp.WebsocketURL
 
+			dialURL, err := validateWebSocketURL(pc.url)
+			if err != nil {
+				return backoff.Permanent(fmt.Errorf("invalid recovery URL: %w", err))
+			}
+
 			dialer := websocket.Dialer{
 				TLSClientConfig: &tls.Config{
 					InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 				},
 			}
-			conn, _, err := dialer.Dial(pc.url, pc.requestHeader)
+			conn, _, err := dialer.Dial(dialURL, pc.requestHeader)
 			if err != nil {
 				log.Warn().Err(err).Msg("Websh reconnect failed.")
 				return err

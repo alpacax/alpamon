@@ -31,16 +31,16 @@ var nonZipExt = map[string]bool{
 	".kmz":   true,
 }
 
-// CopyFile copies a file from src to dst, preserving permissions.
-// Callers must sanitize paths before invocation (see FtpClient.parsePath).
-func CopyFile(src, dst string, allowOverwrite bool) error { // codeql[go/path-injection]
+func CopyFile(src, dst string, allowOverwrite bool) error {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = srcFile.Close() }()
 
-	dstFile, err := os.Create(dst) // lgtm[go/path-injection]
+	dstFile, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
@@ -51,12 +51,12 @@ func CopyFile(src, dst string, allowOverwrite bool) error { // codeql[go/path-in
 		return err
 	}
 
-	srcInfo, err := os.Stat(src) // lgtm[go/path-injection]
+	srcInfo, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
 
-	err = os.Chmod(dst, srcInfo.Mode()) // lgtm[go/path-injection]
+	err = os.Chmod(dst, srcInfo.Mode())
 	if err != nil {
 		return err
 	}
@@ -65,6 +65,8 @@ func CopyFile(src, dst string, allowOverwrite bool) error { // codeql[go/path-in
 }
 
 func CopyDir(src, dst string, allowOverwrite bool) error {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	rel, err := filepath.Rel(src, dst)
 	if err != nil {
 		return err
@@ -113,7 +115,9 @@ func generateBackupPath(path string) string {
 }
 
 func copyDirRecursive(src, dst string) error {
-	srcInfo, err := os.Stat(src) // lgtm[go/path-injection]
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
+	srcInfo, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
@@ -123,7 +127,7 @@ func copyDirRecursive(src, dst string) error {
 		return err
 	}
 
-	entries, err := os.ReadDir(src) // lgtm[go/path-injection]
+	entries, err := os.ReadDir(src)
 	if err != nil {
 		return err
 	}
@@ -213,6 +217,7 @@ func GetFileInfo(info os.FileInfo, path string) (permString, permOctal, owner, g
 }
 
 func ChownRecursive(path string, uid, gid int) error {
+	path = filepath.Clean(path)
 	return filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -232,6 +237,8 @@ func ChownRecursive(path string, uid, gid int) error {
 }
 
 func GetCopyPath(src, dst string) string {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	base := filepath.Base(src)
 	ext := filepath.Ext(base)
 	name := strings.TrimSuffix(base, ext)
@@ -239,17 +246,16 @@ func GetCopyPath(src, dst string) string {
 
 	for i := 1; ; i++ {
 		candidate := filepath.Join(parent, fmt.Sprintf("%s (%d)%s", name, i, ext))
-		_, err := os.Stat(candidate) // lgtm[go/path-injection]
+		_, err := os.Stat(candidate)
 		if os.IsNotExist(err) {
 			return candidate
 		}
 	}
 }
 
-// FileExists checks if the file exists at the given path
-// codeql[go/path-injection]: Intentional - Admin-specified file path check
 func FileExists(path string) bool {
-	_, err := os.Stat(path) // lgtm[go/path-injection]
+	path = filepath.Clean(path)
+	_, err := os.Stat(path)
 	return !os.IsNotExist(err)
 }
 

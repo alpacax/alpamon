@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"os/user"
@@ -112,6 +113,9 @@ func ConvertGroupIds(groupIds []string) []uint32 {
 	for _, gidStr := range groupIds {
 		gid, err := strconv.Atoi(gidStr)
 		if err != nil {
+			continue
+		}
+		if gid < 0 || gid > math.MaxUint32 {
 			continue
 		}
 		gids = append(gids, uint32(gid))
