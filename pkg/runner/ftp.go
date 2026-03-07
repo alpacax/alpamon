@@ -168,6 +168,8 @@ func (fc *FtpClient) handleFtpCommand(command FtpCommand, data FtpData) (Command
 }
 
 func (fc *FtpClient) parsePath(path string) string {
+	path = strings.ReplaceAll(path, "\x00", "")
+
 	if strings.HasPrefix(path, "~") {
 		path = strings.Replace(path, "~", fc.workingDirectory, 1)
 	}

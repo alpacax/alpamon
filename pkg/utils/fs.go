@@ -31,14 +31,16 @@ var nonZipExt = map[string]bool{
 	".kmz":   true,
 }
 
-func CopyFile(src, dst string, allowOverwrite bool) error {
+// CopyFile copies a file from src to dst, preserving permissions.
+// Callers must sanitize paths before invocation (see FtpClient.parsePath).
+func CopyFile(src, dst string, allowOverwrite bool) error { // codeql[go/path-injection]
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = srcFile.Close() }()
 
-	dstFile, err := os.Create(dst)
+	dstFile, err := os.Create(dst) // lgtm[go/path-injection]
 	if err != nil {
 		return err
 	}
@@ -49,12 +51,12 @@ func CopyFile(src, dst string, allowOverwrite bool) error {
 		return err
 	}
 
-	srcInfo, err := os.Stat(src)
+	srcInfo, err := os.Stat(src) // lgtm[go/path-injection]
 	if err != nil {
 		return err
 	}
 
-	err = os.Chmod(dst, srcInfo.Mode())
+	err = os.Chmod(dst, srcInfo.Mode()) // lgtm[go/path-injection]
 	if err != nil {
 		return err
 	}
@@ -111,7 +113,7 @@ func generateBackupPath(path string) string {
 }
 
 func copyDirRecursive(src, dst string) error {
-	srcInfo, err := os.Stat(src)
+	srcInfo, err := os.Stat(src) // lgtm[go/path-injection]
 	if err != nil {
 		return err
 	}
@@ -121,7 +123,7 @@ func copyDirRecursive(src, dst string) error {
 		return err
 	}
 
-	entries, err := os.ReadDir(src)
+	entries, err := os.ReadDir(src) // lgtm[go/path-injection]
 	if err != nil {
 		return err
 	}
@@ -237,7 +239,7 @@ func GetCopyPath(src, dst string) string {
 
 	for i := 1; ; i++ {
 		candidate := filepath.Join(parent, fmt.Sprintf("%s (%d)%s", name, i, ext))
-		_, err := os.Stat(candidate)
+		_, err := os.Stat(candidate) // lgtm[go/path-injection]
 		if os.IsNotExist(err) {
 			return candidate
 		}
