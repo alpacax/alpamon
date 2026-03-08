@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -81,9 +82,8 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session) *Pty
 }
 
 func (pc *PtyClient) initializePtySession() error {
-	wsPrefix := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
-	if !strings.HasPrefix(pc.url, wsPrefix) {
-		return fmt.Errorf("WebSocket URL does not match server: %s", pc.url)
+	if err := validateWebSocketURL(pc.url); err != nil {
+		return err
 	}
 	var err error
 	dialer := websocket.Dialer{
@@ -101,7 +101,9 @@ func (pc *PtyClient) initializePtySession() error {
 	if err != nil {
 		return fmt.Errorf("failed to get user/env: %w", err)
 	}
-	pc.setPtyCmdSysProcAttrAndEnv(uid, gid, groupIds, env)
+	if err = pc.setPtyCmdSysProcAttrAndEnv(uid, gid, groupIds, env); err != nil {
+		return fmt.Errorf("failed to set process credentials: %w", err)
+	}
 
 	initialSize := &pty.Winsize{Rows: pc.rows, Cols: pc.cols}
 	pc.ptmx, err = pty.StartWithSize(pc.cmd, initialSize)
@@ -371,9 +373,8 @@ func (pc *PtyClient) recovery() error {
 			}
 			pc.url = strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + resp.WebsocketURL
 
-			wsPrefix := strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1)
-			if !strings.HasPrefix(pc.url, wsPrefix) {
-				return backoff.Permanent(fmt.Errorf("recovery URL does not match server: %s", pc.url))
+			if err := validateWebSocketURL(pc.url); err != nil {
+				return backoff.Permanent(err)
 			}
 
 			dialer := websocket.Dialer{
@@ -396,6 +397,30 @@ func (pc *PtyClient) recovery() error {
 	err := backoff.Retry(operation, backoff.WithContext(retryBackoff, ctx))
 	if err != nil {
 		return err
+	}
+
+	return nil
+}
+
+// validateWebSocketURL checks that the given URL uses a valid ws/wss scheme
+// and that its host matches the configured server.
+func validateWebSocketURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid WebSocket URL: %w", err)
+	}
+
+	if parsed.Scheme != "ws" && parsed.Scheme != "wss" {
+		return fmt.Errorf("WebSocket URL has invalid scheme: %s", parsed.Scheme)
+	}
+
+	serverURL, err := url.Parse(config.GlobalSettings.ServerURL)
+	if err != nil {
+		return fmt.Errorf("invalid server URL: %w", err)
+	}
+
+	if !strings.EqualFold(parsed.Host, serverURL.Host) {
+		return fmt.Errorf("WebSocket URL host %q does not match server host %q", parsed.Host, serverURL.Host)
 	}
 
 	return nil

@@ -6,17 +6,14 @@ import (
 	"syscall"
 
 	"github.com/alpacax/alpamon/pkg/utils"
-	"github.com/rs/zerolog/log"
 )
 
-func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string, env map[string]string) {
+func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string, env map[string]string) error {
 	if uid < 0 || uid > math.MaxUint32 {
-		log.Error().Msgf("UID %d is out of valid range, skipping credential setup.", uid)
-		return
+		return fmt.Errorf("UID %d is out of valid range", uid)
 	}
 	if gid < 0 || gid > math.MaxUint32 {
-		log.Error().Msgf("GID %d is out of valid range, skipping credential setup.", gid)
-		return
+		return fmt.Errorf("GID %d is out of valid range", gid)
 	}
 	pc.cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{
@@ -30,4 +27,6 @@ func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string,
 	for key, value := range env {
 		pc.cmd.Env = append(pc.cmd.Env, fmt.Sprintf("%s=%s", key, value))
 	}
+
+	return nil
 }

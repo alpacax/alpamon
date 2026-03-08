@@ -169,7 +169,7 @@ func (fc *FtpClient) handleFtpCommand(command FtpCommand, data FtpData) (Command
 
 func (fc *FtpClient) parsePath(path string) (string, error) {
 	if strings.ContainsRune(path, '\x00') {
-		return "", fmt.Errorf("invalid path: contains null byte")
+		return "", fmt.Errorf("invalid argument: path contains null byte")
 	}
 
 	if strings.HasPrefix(path, "~") {
