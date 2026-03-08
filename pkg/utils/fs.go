@@ -254,15 +254,14 @@ func GetCopyPath(src, dst string) string {
 }
 
 func FileExists(path string) bool {
-	absPath, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		return false
+	cleanPath := filepath.Clean(path)
+	absPath, err := filepath.Abs(cleanPath)
+	var statErr error
+	if err == nil {
+		_, statErr = os.Stat(absPath)
+	} else {
+		_, statErr = os.Stat(cleanPath)
 	}
-	rel, err := filepath.Rel("/", absPath)
-	if err != nil {
-		return false
-	}
-	_, statErr := os.Stat(filepath.Join("/", rel))
 	return !os.IsNotExist(statErr)
 }
 

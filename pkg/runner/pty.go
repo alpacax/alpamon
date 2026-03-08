@@ -419,11 +419,32 @@ func validateWebSocketURL(rawURL string) error {
 		return fmt.Errorf("invalid server URL: %w", err)
 	}
 
-	if !strings.EqualFold(parsed.Host, serverURL.Host) {
-		return fmt.Errorf("WebSocket URL host %q does not match server host %q", parsed.Host, serverURL.Host)
+	if !strings.EqualFold(parsed.Hostname(), serverURL.Hostname()) {
+		return fmt.Errorf("WebSocket URL host %q does not match server host %q", parsed.Hostname(), serverURL.Hostname())
+	}
+
+	parsedPort := normalizePort(parsed.Scheme, parsed.Port())
+	serverPort := normalizePort(serverURL.Scheme, serverURL.Port())
+	if parsedPort != "" && serverPort != "" && parsedPort != serverPort {
+		return fmt.Errorf("WebSocket URL port %q does not match server port %q", parsedPort, serverPort)
 	}
 
 	return nil
+}
+
+// normalizePort returns the effective port for a given scheme and port string.
+func normalizePort(scheme, port string) string {
+	if port != "" {
+		return port
+	}
+	switch strings.ToLower(scheme) {
+	case "http", "ws":
+		return "80"
+	case "https", "wss":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 // getPtyUserAndEnv retrieves user information and sets environment variables.
