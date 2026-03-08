@@ -188,7 +188,7 @@ func (fc *FtpClient) parsePath(path string) (string, error) {
 	cleanPath := filepath.Clean(absPath)
 	rel, err := filepath.Rel("/", cleanPath)
 	if err != nil {
-		return "", fmt.Errorf("invalid path: %w", err)
+		return "", fmt.Errorf("%s: invalid path: %w", ErrInvalidArgument, err)
 	}
 	return filepath.Join("/", rel), nil
 }
