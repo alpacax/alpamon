@@ -100,6 +100,13 @@ func TestCopyFile(t *testing.T) {
 			t.Fatal("CopyFile() expected error for non-existent source")
 		}
 	})
+
+	t.Run("non-existent destination directory", func(t *testing.T) {
+		err := CopyFile(srcPath, "/nonexistent/dir/file", true)
+		if err == nil {
+			t.Fatal("CopyFile() expected error for non-existent destination directory")
+		}
+	})
 }
 
 func TestCopyDir(t *testing.T) {
@@ -155,6 +162,45 @@ func TestCopyDir(t *testing.T) {
 		err := CopyDir(srcDir, dst, false)
 		if err == nil {
 			t.Fatal("CopyDir() expected error for dst inside src")
+		}
+	})
+
+	t.Run("overwrite existing directory", func(t *testing.T) {
+		dstDir, err := os.MkdirTemp("", "test_copydir_overwrite_*")
+		if err != nil {
+			t.Fatalf("failed to create dst dir: %v", err)
+		}
+		defer func() { _ = os.RemoveAll(dstDir) }()
+
+		// Create existing content that should be replaced
+		if err := os.WriteFile(filepath.Join(dstDir, "old.txt"), []byte("old"), 0644); err != nil {
+			t.Fatalf("failed to create old file: %v", err)
+		}
+
+		err = CopyDir(srcDir, dstDir, true)
+		if err != nil {
+			t.Fatalf("CopyDir() with overwrite error: %v", err)
+		}
+
+		// New content should exist
+		got, err := os.ReadFile(filepath.Join(dstDir, "file1.txt"))
+		if err != nil {
+			t.Fatalf("file1.txt not copied: %v", err)
+		}
+		if string(got) != "one" {
+			t.Fatalf("file1.txt content = %q, want %q", got, "one")
+		}
+
+		// Old content should not exist
+		if _, err := os.Stat(filepath.Join(dstDir, "old.txt")); !os.IsNotExist(err) {
+			t.Fatal("old.txt should not exist after overwrite")
+		}
+	})
+
+	t.Run("non-existent source returns error", func(t *testing.T) {
+		err := CopyDir("/nonexistent/source", "/tmp/dst", false)
+		if err == nil {
+			t.Fatal("CopyDir() expected error for non-existent source")
 		}
 	})
 }
