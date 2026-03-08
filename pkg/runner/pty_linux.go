@@ -9,10 +9,10 @@ import (
 )
 
 func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string, env map[string]string) error {
-	if uid < 0 || uid > math.MaxUint32 {
+	if uid < 0 || uint64(uid) > uint64(math.MaxUint32) {
 		return fmt.Errorf("UID %d is out of valid range", uid)
 	}
-	if gid < 0 || gid > math.MaxUint32 {
+	if gid < 0 || uint64(gid) > uint64(math.MaxUint32) {
 		return fmt.Errorf("GID %d is out of valid range", gid)
 	}
 	pc.cmd.SysProcAttr = &syscall.SysProcAttr{

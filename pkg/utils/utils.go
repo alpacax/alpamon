@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"math"
 	"net/url"
 	"os"
 	"os/user"
@@ -111,11 +110,8 @@ func GetEnvOrDefault(envVar, defaultValue string) string {
 func ConvertGroupIds(groupIds []string) []uint32 {
 	var gids []uint32
 	for _, gidStr := range groupIds {
-		gid, err := strconv.Atoi(gidStr)
+		gid, err := strconv.ParseUint(gidStr, 10, 32)
 		if err != nil {
-			continue
-		}
-		if gid < 0 || gid > math.MaxUint32 {
 			continue
 		}
 		gids = append(gids, uint32(gid))
