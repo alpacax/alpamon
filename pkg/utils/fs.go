@@ -32,6 +32,8 @@ var nonZipExt = map[string]bool{
 }
 
 func CopyFile(src, dst string, allowOverwrite bool) error {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -63,6 +65,8 @@ func CopyFile(src, dst string, allowOverwrite bool) error {
 }
 
 func CopyDir(src, dst string, allowOverwrite bool) error {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	rel, err := filepath.Rel(src, dst)
 	if err != nil {
 		return err
@@ -111,6 +115,8 @@ func generateBackupPath(path string) string {
 }
 
 func copyDirRecursive(src, dst string) error {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	srcInfo, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -211,6 +217,7 @@ func GetFileInfo(info os.FileInfo, path string) (permString, permOctal, owner, g
 }
 
 func ChownRecursive(path string, uid, gid int) error {
+	path = filepath.Clean(path)
 	return filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -230,6 +237,8 @@ func ChownRecursive(path string, uid, gid int) error {
 }
 
 func GetCopyPath(src, dst string) string {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	base := filepath.Base(src)
 	ext := filepath.Ext(base)
 	name := strings.TrimSuffix(base, ext)
@@ -244,11 +253,16 @@ func GetCopyPath(src, dst string) string {
 	}
 }
 
-// FileExists checks if the file exists at the given path
-// codeql[go/path-injection]: Intentional - Admin-specified file path check
 func FileExists(path string) bool {
-	_, err := os.Stat(path) // lgtm[go/path-injection]
-	return !os.IsNotExist(err)
+	cleanPath := filepath.Clean(path)
+	absPath, err := filepath.Abs(cleanPath)
+	var statErr error
+	if err == nil {
+		_, statErr = os.Stat(absPath)
+	} else {
+		_, statErr = os.Stat(cleanPath)
+	}
+	return !os.IsNotExist(statErr)
 }
 
 // IsZipFile checks if the content is a valid zip file
