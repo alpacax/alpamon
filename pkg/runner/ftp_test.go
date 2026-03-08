@@ -153,6 +153,8 @@ func TestParsePath_CwdChangesResolution(t *testing.T) {
 }
 
 func TestValidateWebSocketURL(t *testing.T) {
+	prevServerURL := config.GlobalSettings.ServerURL
+	t.Cleanup(func() { config.GlobalSettings.ServerURL = prevServerURL })
 	config.GlobalSettings.ServerURL = "https://console.example.com"
 
 	tests := []struct {
@@ -165,7 +167,7 @@ func TestValidateWebSocketURL(t *testing.T) {
 			url:  "wss://console.example.com/ws/channel/123",
 		},
 		{
-			name:    "ws port mismatch with https server",
+			name:    "ws scheme rejected for https server",
 			url:     "ws://console.example.com/ws/channel/123",
 			wantErr: true,
 		},
@@ -223,6 +225,8 @@ func TestValidateWebSocketURL(t *testing.T) {
 }
 
 func TestValidateWebSocketURL_InvalidServerURL(t *testing.T) {
+	prevServerURL := config.GlobalSettings.ServerURL
+	t.Cleanup(func() { config.GlobalSettings.ServerURL = prevServerURL })
 	config.GlobalSettings.ServerURL = "://invalid"
 
 	err := validateWebSocketURL("wss://whatever.com/ws")
@@ -232,6 +236,8 @@ func TestValidateWebSocketURL_InvalidServerURL(t *testing.T) {
 }
 
 func TestValidateWebSocketURL_ServerWithExplicitPort(t *testing.T) {
+	prevServerURL := config.GlobalSettings.ServerURL
+	t.Cleanup(func() { config.GlobalSettings.ServerURL = prevServerURL })
 	config.GlobalSettings.ServerURL = "https://console.example.com:8443"
 
 	tests := []struct {

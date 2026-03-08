@@ -254,6 +254,9 @@ func GetCopyPath(src, dst string) string {
 }
 
 func FileExists(path string) bool {
+	if path == "" {
+		return false
+	}
 	cleanPath := filepath.Clean(path)
 	absPath, err := filepath.Abs(cleanPath)
 	var statErr error

@@ -40,6 +40,11 @@ func TestFileExists(t *testing.T) {
 			path: filepath.Join(os.TempDir(), "..", filepath.Base(os.TempDir())),
 			want: true,
 		},
+		{
+			name: "empty path returns false",
+			path: "",
+			want: false,
+		},
 	}
 
 	for _, tc := range tests {

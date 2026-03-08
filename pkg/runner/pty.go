@@ -402,21 +402,31 @@ func (pc *PtyClient) recovery() error {
 	return nil
 }
 
-// validateWebSocketURL checks that the given URL uses a valid ws/wss scheme
-// and that its host matches the configured server.
+// validateWebSocketURL checks that the given URL uses the correct ws/wss scheme
+// derived from the configured server URL and that its host matches the server.
 func validateWebSocketURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid WebSocket URL: %w", err)
 	}
 
-	if parsed.Scheme != "ws" && parsed.Scheme != "wss" {
-		return fmt.Errorf("WebSocket URL has invalid scheme: %s", parsed.Scheme)
-	}
-
 	serverURL, err := url.Parse(config.GlobalSettings.ServerURL)
 	if err != nil {
 		return fmt.Errorf("invalid server URL: %w", err)
+	}
+
+	var expectedScheme string
+	switch strings.ToLower(serverURL.Scheme) {
+	case "http":
+		expectedScheme = "ws"
+	case "https":
+		expectedScheme = "wss"
+	default:
+		return fmt.Errorf("unsupported server URL scheme: %s", serverURL.Scheme)
+	}
+
+	if parsed.Scheme != expectedScheme {
+		return fmt.Errorf("WebSocket URL scheme %q does not match expected scheme %q", parsed.Scheme, expectedScheme)
 	}
 
 	if !strings.EqualFold(parsed.Hostname(), serverURL.Hostname()) {
