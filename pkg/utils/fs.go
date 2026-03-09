@@ -272,15 +272,8 @@ func FileExists(path string) bool {
 	if path == "" {
 		return false
 	}
-	cleanPath := filepath.Clean(path)
-	absPath, err := filepath.Abs(cleanPath)
-	var statErr error
-	if err == nil {
-		_, statErr = os.Stat(absPath)
-	} else {
-		_, statErr = os.Stat(cleanPath)
-	}
-	return !os.IsNotExist(statErr)
+	_, err := os.Stat(filepath.Clean(path))
+	return !os.IsNotExist(err)
 }
 
 // IsZipFile checks if the content is a valid zip file
