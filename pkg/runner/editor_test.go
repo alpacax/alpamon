@@ -16,7 +16,7 @@ func TestFindAvailablePort(t *testing.T) {
 	assert.True(t, port <= 65535, "Port should be less than or equal to 65535")
 }
 
-func TestFindAvailablePortUnique(t *testing.T) {
+func TestFindAvailablePortRepeated(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		port, err := findAvailablePort()
 		assert.NoError(t, err, "Failed to find available port")
