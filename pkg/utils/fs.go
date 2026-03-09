@@ -32,6 +32,14 @@ var nonZipExt = map[string]bool{
 }
 
 func CopyFile(src, dst string, allowOverwrite bool) error {
+	if src == "" {
+		return fmt.Errorf("source path must not be empty")
+	}
+	if dst == "" {
+		return fmt.Errorf("destination path must not be empty")
+	}
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -63,6 +71,14 @@ func CopyFile(src, dst string, allowOverwrite bool) error {
 }
 
 func CopyDir(src, dst string, allowOverwrite bool) error {
+	if src == "" {
+		return fmt.Errorf("source path must not be empty")
+	}
+	if dst == "" {
+		return fmt.Errorf("destination path must not be empty")
+	}
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	rel, err := filepath.Rel(src, dst)
 	if err != nil {
 		return err
@@ -111,6 +127,8 @@ func generateBackupPath(path string) string {
 }
 
 func copyDirRecursive(src, dst string) error {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	srcInfo, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -211,6 +229,10 @@ func GetFileInfo(info os.FileInfo, path string) (permString, permOctal, owner, g
 }
 
 func ChownRecursive(path string, uid, gid int) error {
+	if path == "" {
+		return fmt.Errorf("path must not be empty")
+	}
+	path = filepath.Clean(path)
 	return filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -230,6 +252,8 @@ func ChownRecursive(path string, uid, gid int) error {
 }
 
 func GetCopyPath(src, dst string) string {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	base := filepath.Base(src)
 	ext := filepath.Ext(base)
 	name := strings.TrimSuffix(base, ext)
@@ -244,10 +268,11 @@ func GetCopyPath(src, dst string) string {
 	}
 }
 
-// FileExists checks if the file exists at the given path
-// codeql[go/path-injection]: Intentional - Admin-specified file path check
 func FileExists(path string) bool {
-	_, err := os.Stat(path) // lgtm[go/path-injection]
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Clean(path))
 	return !os.IsNotExist(err)
 }
 

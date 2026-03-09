@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -81,6 +82,9 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session) *Pty
 }
 
 func (pc *PtyClient) initializePtySession() error {
+	if err := validateWebSocketURL(pc.url); err != nil {
+		return err
+	}
 	var err error
 	dialer := websocket.Dialer{
 		TLSClientConfig: &tls.Config{
@@ -97,7 +101,9 @@ func (pc *PtyClient) initializePtySession() error {
 	if err != nil {
 		return fmt.Errorf("failed to get user/env: %w", err)
 	}
-	pc.setPtyCmdSysProcAttrAndEnv(uid, gid, groupIds, env)
+	if err = pc.setPtyCmdSysProcAttrAndEnv(uid, gid, groupIds, env); err != nil {
+		return fmt.Errorf("failed to set process credentials: %w", err)
+	}
 
 	initialSize := &pty.Winsize{Rows: pc.rows, Cols: pc.cols}
 	pc.ptmx, err = pty.StartWithSize(pc.cmd, initialSize)
@@ -367,6 +373,10 @@ func (pc *PtyClient) recovery() error {
 			}
 			pc.url = strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + resp.WebsocketURL
 
+			if err := validateWebSocketURL(pc.url); err != nil {
+				return backoff.Permanent(err)
+			}
+
 			dialer := websocket.Dialer{
 				TLSClientConfig: &tls.Config{
 					InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
@@ -390,6 +400,61 @@ func (pc *PtyClient) recovery() error {
 	}
 
 	return nil
+}
+
+// validateWebSocketURL checks that the given URL uses the correct ws/wss scheme
+// derived from the configured server URL and that its host matches the server.
+func validateWebSocketURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid WebSocket URL: %w", err)
+	}
+
+	serverURL, err := url.Parse(config.GlobalSettings.ServerURL)
+	if err != nil {
+		return fmt.Errorf("invalid server URL: %w", err)
+	}
+
+	var expectedScheme string
+	switch strings.ToLower(serverURL.Scheme) {
+	case "http":
+		expectedScheme = "ws"
+	case "https":
+		expectedScheme = "wss"
+	default:
+		return fmt.Errorf("unsupported server URL scheme: %s", serverURL.Scheme)
+	}
+
+	if parsed.Scheme != expectedScheme {
+		return fmt.Errorf("WebSocket URL scheme %q does not match expected scheme %q", parsed.Scheme, expectedScheme)
+	}
+
+	if !strings.EqualFold(parsed.Hostname(), serverURL.Hostname()) {
+		return fmt.Errorf("WebSocket URL host %q does not match server host %q", parsed.Hostname(), serverURL.Hostname())
+	}
+
+	parsedPort := normalizePort(parsed.Scheme, parsed.Port())
+	serverPort := normalizePort(serverURL.Scheme, serverURL.Port())
+	if parsedPort != "" && serverPort != "" && parsedPort != serverPort {
+		return fmt.Errorf("WebSocket URL port %q does not match server port %q", parsedPort, serverPort)
+	}
+
+	return nil
+}
+
+// normalizePort returns the effective port for a given scheme and port string.
+func normalizePort(scheme, port string) string {
+	if port != "" {
+		return port
+	}
+	switch strings.ToLower(scheme) {
+	case "http", "ws":
+		return "80"
+	case "https", "wss":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 // getPtyUserAndEnv retrieves user information and sets environment variables.
