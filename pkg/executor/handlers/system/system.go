@@ -84,7 +84,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 	var cmd string
 	switch utils.PlatformLike {
 	case "debian":
-		cmd = "apt-get update -y && apt-get install --only-upgrade alpamon alpamon-pam -y"
+		cmd = "apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade alpamon alpamon-pam -y -o Acquire::Retries=3"
 	case "rhel":
 		cmd = "yum update -y alpamon alpamon-pam"
 	default:
@@ -291,7 +291,7 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	var cmd string
 	switch utils.PlatformLike {
 	case "debian":
-		cmd = "apt-get update && apt-get upgrade -y && apt-get autoremove -y"
+		cmd = "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 && apt-get autoremove -y"
 	case "rhel":
 		cmd = "yum update -y"
 	case "darwin":
