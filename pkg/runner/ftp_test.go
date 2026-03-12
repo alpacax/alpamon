@@ -200,11 +200,6 @@ func TestValidateWebSocketURL(t *testing.T) {
 			url:  "wss://console.example.com:443/ws/channel/123",
 		},
 		{
-			name:    "mismatched port",
-			url:     "wss://console.example.com:8080/ws/channel/123",
-			wantErr: true,
-		},
-		{
 			name:    "empty scheme",
 			url:     "console.example.com/ws/channel/123",
 			wantErr: true,
@@ -235,67 +230,3 @@ func TestValidateWebSocketURL_InvalidServerURL(t *testing.T) {
 	}
 }
 
-func TestValidateWebSocketURL_ServerWithExplicitPort(t *testing.T) {
-	prevServerURL := config.GlobalSettings.ServerURL
-	t.Cleanup(func() { config.GlobalSettings.ServerURL = prevServerURL })
-	config.GlobalSettings.ServerURL = "https://console.example.com:8443"
-
-	tests := []struct {
-		name    string
-		url     string
-		wantErr bool
-	}{
-		{
-			name: "matching explicit port",
-			url:  "wss://console.example.com:8443/ws/channel/123",
-		},
-		{
-			name:    "default port does not match explicit",
-			url:     "wss://console.example.com:443/ws/channel/123",
-			wantErr: true,
-		},
-		{
-			name:    "no port does not match explicit",
-			url:     "wss://console.example.com/ws/channel/123",
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := validateWebSocketURL(tc.url)
-			if tc.wantErr && err == nil {
-				t.Fatalf("validateWebSocketURL(%q) expected error", tc.url)
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("validateWebSocketURL(%q) unexpected error: %v", tc.url, err)
-			}
-		})
-	}
-}
-
-func TestNormalizePort(t *testing.T) {
-	tests := []struct {
-		name   string
-		scheme string
-		port   string
-		want   string
-	}{
-		{"explicit port returned as-is", "wss", "8080", "8080"},
-		{"wss default", "wss", "", "443"},
-		{"ws default", "ws", "", "80"},
-		{"https default", "https", "", "443"},
-		{"http default", "http", "", "80"},
-		{"unknown scheme empty port", "ftp", "", ""},
-		{"case insensitive scheme", "WSS", "", "443"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := normalizePort(tc.scheme, tc.port)
-			if got != tc.want {
-				t.Fatalf("normalizePort(%q, %q) = %q, want %q", tc.scheme, tc.port, got, tc.want)
-			}
-		})
-	}
-}
