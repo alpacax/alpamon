@@ -27,10 +27,10 @@ import (
 )
 
 const (
-	commitURL         = "/api/servers/servers/-/commit/"
-	eventURL          = "/api/events/events/"
-	firewallSyncURL   = "/api/firewall/agent/sync/"
-	accessPolicyURL   = "/api/servers/servers/-/access-policy/"
+	commitURL       = "/api/servers/servers/-/commit/"
+	eventURL        = "/api/events/events/"
+	firewallSyncURL = "/api/firewall/agent/sync/"
+	accessPolicyURL = "/api/servers/servers/-/access-policy/"
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"

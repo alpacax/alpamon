@@ -44,13 +44,13 @@ func TestParsePath(t *testing.T) {
 			want: "/home/other/file.txt",
 		},
 		{
-			name: "null byte rejected",
-			path: "/tmp/file\x00.txt",
+			name:    "null byte rejected",
+			path:    "/tmp/file\x00.txt",
 			wantErr: true,
 		},
 		{
-			name: "only null byte",
-			path: "\x00",
+			name:    "only null byte",
+			path:    "\x00",
 			wantErr: true,
 		},
 		{
