@@ -102,8 +102,8 @@ jobs:
       - name: Install dependencies (Debian/Ubuntu)
         if: matrix.pkg_manager == 'apt-get'
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git curl gcc libc6-dev ca-certificates
+          apt-get update -o Acquire::Retries=3
+          apt-get install -y -o Acquire::Retries=3 --no-install-recommends git curl gcc libc6-dev ca-certificates
 
       - name: Install dependencies (yum)
         if: matrix.pkg_manager == 'yum'
