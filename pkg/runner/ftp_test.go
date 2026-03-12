@@ -230,3 +230,45 @@ func TestValidateWebSocketURL_InvalidServerURL(t *testing.T) {
 	}
 }
 
+func TestValidateWebSocketURL_ServerWithExplicitPort(t *testing.T) {
+	prevServerURL := config.GlobalSettings.ServerURL
+	t.Cleanup(func() { config.GlobalSettings.ServerURL = prevServerURL })
+	config.GlobalSettings.ServerURL = "https://console.example.com:8443"
+
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{
+			name: "same port allowed",
+			url:  "wss://console.example.com:8443/ws/channel/123",
+		},
+		{
+			name: "different port allowed",
+			url:  "wss://console.example.com:9090/ws/channel/123",
+		},
+		{
+			name: "no port allowed",
+			url:  "wss://console.example.com/ws/channel/123",
+		},
+		{
+			name:    "different host rejected",
+			url:     "wss://evil.com:8443/ws/channel/123",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateWebSocketURL(tc.url)
+			if tc.wantErr && err == nil {
+				t.Fatalf("validateWebSocketURL(%q) expected error", tc.url)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("validateWebSocketURL(%q) unexpected error: %v", tc.url, err)
+			}
+		})
+	}
+}
+
