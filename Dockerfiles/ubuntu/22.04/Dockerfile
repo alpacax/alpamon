@@ -19,7 +19,7 @@ RUN go build -o alpamon ./cmd/alpamon/main.go
 
 FROM ubuntu:22.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update -o Acquire::Retries=3 && apt-get install -y -o Acquire::Retries=3 --no-install-recommends \
     curl \
     systemd \
     ca-certificates \

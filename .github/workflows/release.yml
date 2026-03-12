@@ -106,7 +106,7 @@ jobs:
           - pkg_type: deb
             container: ubuntu:24.04
             arch: amd64
-            install_cmd: apt-get install -y
+            install_cmd: apt-get install -y -o Acquire::Retries=3
           - pkg_type: rpm
             container: rockylinux:9
             arch: amd64
@@ -129,7 +129,7 @@ jobs:
 
       - name: Install prerequisites (DEB only)
         if: matrix.pkg_type == 'deb'
-        run: apt-get update && apt-get install -y systemd
+        run: apt-get update -o Acquire::Retries=3 && apt-get install -y -o Acquire::Retries=3 systemd
         env:
           DEBIAN_FRONTEND: noninteractive
 
