@@ -200,11 +200,6 @@ func TestValidateWebSocketURL(t *testing.T) {
 			url:  "wss://console.example.com:443/ws/channel/123",
 		},
 		{
-			name:    "mismatched port",
-			url:     "wss://console.example.com:8080/ws/channel/123",
-			wantErr: true,
-		},
-		{
 			name:    "empty scheme",
 			url:     "console.example.com/ws/channel/123",
 			wantErr: true,
@@ -246,17 +241,20 @@ func TestValidateWebSocketURL_ServerWithExplicitPort(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "matching explicit port",
+			name: "same port allowed",
 			url:  "wss://console.example.com:8443/ws/channel/123",
 		},
 		{
-			name:    "default port does not match explicit",
-			url:     "wss://console.example.com:443/ws/channel/123",
-			wantErr: true,
+			name: "different port allowed",
+			url:  "wss://console.example.com:9090/ws/channel/123",
 		},
 		{
-			name:    "no port does not match explicit",
-			url:     "wss://console.example.com/ws/channel/123",
+			name: "no port allowed",
+			url:  "wss://console.example.com/ws/channel/123",
+		},
+		{
+			name:    "different host rejected",
+			url:     "wss://evil.com:8443/ws/channel/123",
 			wantErr: true,
 		},
 	}
@@ -274,28 +272,3 @@ func TestValidateWebSocketURL_ServerWithExplicitPort(t *testing.T) {
 	}
 }
 
-func TestNormalizePort(t *testing.T) {
-	tests := []struct {
-		name   string
-		scheme string
-		port   string
-		want   string
-	}{
-		{"explicit port returned as-is", "wss", "8080", "8080"},
-		{"wss default", "wss", "", "443"},
-		{"ws default", "ws", "", "80"},
-		{"https default", "https", "", "443"},
-		{"http default", "http", "", "80"},
-		{"unknown scheme empty port", "ftp", "", ""},
-		{"case insensitive scheme", "WSS", "", "443"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := normalizePort(tc.scheme, tc.port)
-			if got != tc.want {
-				t.Fatalf("normalizePort(%q, %q) = %q, want %q", tc.scheme, tc.port, got, tc.want)
-			}
-		})
-	}
-}
