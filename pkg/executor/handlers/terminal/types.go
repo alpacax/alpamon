@@ -26,3 +26,8 @@ type ResizePTYData struct {
 	Rows      int    `json:"rows" validate:"required"`
 	Cols      int    `json:"cols" validate:"required"`
 }
+
+// RefreshPTYData contains data for refreshing PTY (sending SIGWINCH)
+type RefreshPTYData struct {
+	SessionID string `json:"session_id" validate:"required"`
+}

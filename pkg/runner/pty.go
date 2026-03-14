@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/internal/protocol"
@@ -23,6 +24,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sys/unix"
 )
 
 type PtyClient struct {
@@ -283,6 +285,33 @@ func (pc *PtyClient) resize(rows, cols uint16) error {
 // Resize is the exported version of resize for external packages
 func (pc *PtyClient) Resize(rows, cols uint16) error {
 	return pc.resize(rows, cols)
+}
+
+// Refresh sends SIGWINCH to the PTY foreground process group to force a
+// terminal redraw without changing the terminal size. It uses TIOCGPGRP to
+// look up the foreground process group from the PTY fd, ensuring that
+// full-screen programs (vim, less, top, etc.) also receive the signal.
+func (pc *PtyClient) Refresh() error {
+	if pc.ptmx == nil {
+		return fmt.Errorf("no PTY for session %s", pc.sessionID)
+	}
+
+	pgid, err := unix.IoctlGetInt(int(pc.ptmx.Fd()), unix.TIOCGPGRP)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to get foreground process group, falling back to shell PID.")
+		if pc.cmd == nil || pc.cmd.Process == nil {
+			return fmt.Errorf("no running process for session %s", pc.sessionID)
+		}
+		pgid = pc.cmd.Process.Pid
+	}
+
+	err = syscall.Kill(-pgid, syscall.SIGWINCH)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to send SIGWINCH to terminal.")
+		return err
+	}
+	log.Debug().Msgf("Sent SIGWINCH to process group %d for %s.", pgid, pc.sessionID)
+	return nil
 }
 
 // GetTerminal returns the PTY client for the given session ID

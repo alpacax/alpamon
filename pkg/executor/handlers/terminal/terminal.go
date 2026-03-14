@@ -31,6 +31,7 @@ func NewTerminalHandler(cmdExecutor common.CommandExecutor, apiSession *schedule
 				common.OpenPty,
 				common.OpenFtp,
 				common.ResizePty,
+				common.RefreshPty,
 			},
 			cmdExecutor,
 		),
@@ -48,6 +49,8 @@ func (h *TerminalHandler) Execute(_ context.Context, cmd string, args *common.Co
 		return h.handleOpenFTP(args)
 	case common.ResizePty.String():
 		return h.handleResizePTY(args)
+	case common.RefreshPty.String():
+		return h.handleRefreshPTY(args)
 	default:
 		return 1, "", fmt.Errorf("unknown terminal command: %s", cmd)
 	}
@@ -83,6 +86,12 @@ func (h *TerminalHandler) Validate(cmd string, args *common.CommandArgs) error {
 			SessionID: args.SessionID,
 			Rows:      int(args.Rows),
 			Cols:      int(args.Cols),
+		}
+		return h.ValidateStruct(data)
+
+	case common.RefreshPty.String():
+		data := RefreshPTYData{
+			SessionID: args.SessionID,
 		}
 		return h.ValidateStruct(data)
 
@@ -196,4 +205,25 @@ func (h *TerminalHandler) handleResizePTY(args *common.CommandArgs) (int, string
 	}
 
 	return 0, fmt.Sprintf("Resized terminal for %s to %dx%d.", args.SessionID, args.Cols, args.Rows), nil
+}
+
+// handleRefreshPTY sends SIGWINCH to the PTY process to force a terminal redraw
+// without changing the terminal size. This is used after WebSocket reconnection
+// to make the shell refresh its display.
+func (h *TerminalHandler) handleRefreshPTY(args *common.CommandArgs) (int, string, error) {
+	log.Info().
+		Str("sessionID", args.SessionID).
+		Msg("Refreshing PTY")
+
+	terminal := runner.GetTerminal(args.SessionID)
+	if terminal == nil {
+		return 1, "Invalid session ID", nil
+	}
+
+	err := terminal.Refresh()
+	if err != nil {
+		return 1, err.Error(), nil
+	}
+
+	return 0, fmt.Sprintf("Refreshed terminal for %s.", args.SessionID), nil
 }

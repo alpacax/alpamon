@@ -67,9 +67,10 @@ const (
 	Download CommandType = "download"
 
 	// Terminal commands
-	OpenPty   CommandType = "openpty"
-	OpenFtp   CommandType = "openftp"
-	ResizePty CommandType = "resizepty"
+	OpenPty    CommandType = "openpty"
+	OpenFtp    CommandType = "openftp"
+	ResizePty  CommandType = "resizepty"
+	RefreshPty CommandType = "refreshpty"
 
 	// Tunnel commands
 	OpenTunnel  CommandType = "opentunnel"

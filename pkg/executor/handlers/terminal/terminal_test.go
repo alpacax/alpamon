@@ -78,6 +78,20 @@ func TestTerminalHandler_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "refreshpty valid",
+			cmd:  "refreshpty",
+			args: &common.CommandArgs{
+				SessionID: "session123",
+			},
+			wantErr: false,
+		},
+		{
+			name:    "refreshpty missing session ID",
+			cmd:     "refreshpty",
+			args:    &common.CommandArgs{},
+			wantErr: true,
+		},
+		{
 			name:    "unknown command",
 			cmd:     "unknown",
 			args:    &common.CommandArgs{},
@@ -105,6 +119,26 @@ func TestTerminalHandler_Execute_UnknownCommand(t *testing.T) {
 	}
 	if exitCode != 1 {
 		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
+	}
+}
+
+func TestTerminalHandler_RefreshPTY_InvalidSession(t *testing.T) {
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil)
+
+	args := &common.CommandArgs{
+		SessionID: "nonexistent",
+	}
+
+	exitCode, output, err := handler.Execute(context.TODO(), "refreshpty", args)
+
+	if err != nil {
+		t.Errorf("Execute() unexpected error: %v", err)
+	}
+	if exitCode != 1 {
+		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
+	}
+	if output != "Invalid session ID" {
+		t.Errorf("Execute() output = %v, want 'Invalid session ID'", output)
 	}
 }
 
