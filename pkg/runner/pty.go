@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/internal/protocol"
@@ -283,6 +284,21 @@ func (pc *PtyClient) resize(rows, cols uint16) error {
 // Resize is the exported version of resize for external packages
 func (pc *PtyClient) Resize(rows, cols uint16) error {
 	return pc.resize(rows, cols)
+}
+
+// Refresh sends SIGWINCH to the PTY process to force a terminal redraw
+// without changing the terminal size.
+func (pc *PtyClient) Refresh() error {
+	if pc.cmd == nil || pc.cmd.Process == nil {
+		return fmt.Errorf("no running process for session %s", pc.sessionID)
+	}
+	err := pc.cmd.Process.Signal(syscall.SIGWINCH)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to send SIGWINCH to terminal.")
+		return err
+	}
+	log.Debug().Msgf("Sent SIGWINCH to terminal for %s.", pc.sessionID)
+	return nil
 }
 
 // GetTerminal returns the PTY client for the given session ID
