@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/internal/protocol"
-	"golang.org/x/sys/unix"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
@@ -25,6 +24,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sys/unix"
 )
 
 type PtyClient struct {
