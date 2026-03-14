@@ -292,7 +292,7 @@ func (pc *PtyClient) Refresh() error {
 	if pc.cmd == nil || pc.cmd.Process == nil {
 		return fmt.Errorf("no running process for session %s", pc.sessionID)
 	}
-	err := pc.cmd.Process.Signal(syscall.SIGWINCH)
+	err := syscall.Kill(-pc.cmd.Process.Pid, syscall.SIGWINCH)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to send SIGWINCH to terminal.")
 		return err
