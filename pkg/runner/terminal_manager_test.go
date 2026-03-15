@@ -104,7 +104,7 @@ func TestTerminalManager_ConcurrentResizeAndRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tty.Close()
+	defer func() { _ = tty.Close() }()
 
 	pc := &PtyClient{sessionID: "test", ptmx: ptmx}
 	m.Register("test", pc)
@@ -124,7 +124,7 @@ func TestTerminalManager_ConcurrentResizeAndRemove(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		m.Remove("test")
-		ptmx.Close()
+		_ = ptmx.Close()
 	}()
 
 	wg.Wait()
