@@ -16,6 +16,7 @@ import (
 	"github.com/alpacax/alpamon/pkg/executor/handlers/tunnel"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/user"
 	"github.com/alpacax/alpamon/pkg/executor/services"
+	"github.com/alpacax/alpamon/pkg/runner"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 )
 
@@ -53,6 +54,9 @@ func (f *HandlerFactory) RegisterAll(
 	// Create system info adapter for info handler with function callbacks
 	infoAdapter := NewSystemInfoAdapter(session, callbacks.CommitFunc, callbacks.SyncFunc)
 
+	// Create terminal manager for PTY session lifecycle
+	terminalManager := runner.NewTerminalManager()
+
 	// Define all handlers in a slice for streamlined registration
 	handlers := []common.Handler{
 		system.NewSystemHandler(f.cmdExec, wsClient, ctxManager, pool),
@@ -62,7 +66,7 @@ func (f *HandlerFactory) RegisterAll(
 		user.NewUserHandler(f.cmdExec, groupService, infoAdapter),
 		firewall.NewFirewallHandler(f.cmdExec),
 		file.NewFileHandler(f.cmdExec, session),
-		terminal.NewTerminalHandler(f.cmdExec, session),
+		terminal.NewTerminalHandler(f.cmdExec, session, terminalManager),
 		tunnel.NewTunnelHandler(f.cmdExec),
 	}
 

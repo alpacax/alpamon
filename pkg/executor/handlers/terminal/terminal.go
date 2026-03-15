@@ -20,10 +20,11 @@ import (
 type TerminalHandler struct {
 	*common.BaseHandler
 	apiSession *scheduler.Session
+	manager    *runner.TerminalManager
 }
 
 // NewTerminalHandler creates a new terminal handler
-func NewTerminalHandler(cmdExecutor common.CommandExecutor, apiSession *scheduler.Session) *TerminalHandler {
+func NewTerminalHandler(cmdExecutor common.CommandExecutor, apiSession *scheduler.Session, manager *runner.TerminalManager) *TerminalHandler {
 	h := &TerminalHandler{
 		BaseHandler: common.NewBaseHandler(
 			common.Terminal,
@@ -36,6 +37,7 @@ func NewTerminalHandler(cmdExecutor common.CommandExecutor, apiSession *schedule
 			cmdExecutor,
 		),
 		apiSession: apiSession,
+		manager:    manager,
 	}
 	return h
 }
@@ -124,7 +126,7 @@ func (h *TerminalHandler) handleOpenPTY(args *common.CommandArgs) (int, string, 
 		Uint16("cols", data.Cols).
 		Msg("Opening PTY terminal")
 
-	ptyClient := runner.NewPtyClient(data, h.apiSession)
+	ptyClient := runner.NewPtyClient(data, h.apiSession, h.manager)
 	go ptyClient.RunPtyBackground()
 
 	return 0, "Spawned a pty terminal.", nil
@@ -194,12 +196,7 @@ func (h *TerminalHandler) handleResizePTY(args *common.CommandArgs) (int, string
 		Int("cols", int(args.Cols)).
 		Msg("Resizing PTY")
 
-	terminal := runner.GetTerminal(args.SessionID)
-	if terminal == nil {
-		return 1, "Invalid session ID", nil
-	}
-
-	err := terminal.Resize(uint16(args.Rows), uint16(args.Cols))
+	err := h.manager.Resize(args.SessionID, uint16(args.Rows), uint16(args.Cols))
 	if err != nil {
 		return 1, err.Error(), nil
 	}
@@ -215,12 +212,7 @@ func (h *TerminalHandler) handleRefreshPTY(args *common.CommandArgs) (int, strin
 		Str("sessionID", args.SessionID).
 		Msg("Refreshing PTY")
 
-	terminal := runner.GetTerminal(args.SessionID)
-	if terminal == nil {
-		return 1, "Invalid session ID", nil
-	}
-
-	err := terminal.Refresh()
+	err := h.manager.Refresh(args.SessionID)
 	if err != nil {
 		return 1, err.Error(), nil
 	}

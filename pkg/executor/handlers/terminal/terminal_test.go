@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/pkg/runner"
 )
 
 func TestTerminalHandler_Validate(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil)
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
 
 	tests := []struct {
 		name    string
@@ -110,7 +111,7 @@ func TestTerminalHandler_Validate(t *testing.T) {
 }
 
 func TestTerminalHandler_Execute_UnknownCommand(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil)
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
 
 	exitCode, _, err := handler.Execute(context.TODO(), "unknown", &common.CommandArgs{})
 
@@ -123,7 +124,7 @@ func TestTerminalHandler_Execute_UnknownCommand(t *testing.T) {
 }
 
 func TestTerminalHandler_RefreshPTY_InvalidSession(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil)
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
 
 	args := &common.CommandArgs{
 		SessionID: "nonexistent",
@@ -143,7 +144,7 @@ func TestTerminalHandler_RefreshPTY_InvalidSession(t *testing.T) {
 }
 
 func TestTerminalHandler_ResizePTY_InvalidSession(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil)
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
 
 	args := &common.CommandArgs{
 		SessionID: "nonexistent",
