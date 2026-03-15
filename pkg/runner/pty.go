@@ -306,7 +306,11 @@ func (pc *PtyClient) Refresh() error {
 
 // close terminates the PTY session and cleans up resources.
 // It ensures that the PTY, command, and WebSocket connection are properly closed.
+// Remove is called first so that the write lock waits for any in-flight
+// Resize/Refresh (which hold a read lock) to finish before we tear down the PTY.
 func (pc *PtyClient) close() {
+	pc.manager.Remove(pc.sessionID)
+
 	// Remove PID-to-session mapping before cleaning up
 	if pc.cmd != nil && pc.cmd.Process != nil {
 		authManager.RemovePIDSessionMapping(pc.cmd.Process.Pid)
@@ -320,8 +324,6 @@ func (pc *PtyClient) close() {
 		_ = pc.cmd.Process.Kill()
 		_ = pc.cmd.Wait()
 	}
-
-	pc.manager.Remove(pc.sessionID)
 
 	if pc.conn != nil {
 		err := pc.conn.WriteControl(

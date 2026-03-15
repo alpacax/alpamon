@@ -40,8 +40,12 @@ func (m *TerminalManager) Remove(sessionID string) {
 }
 
 // Resize resizes the terminal for the given session ID.
+// It holds a read lock for the duration of the resize syscall so that a
+// concurrent close/Remove cannot tear down the PTY mid-operation.
 func (m *TerminalManager) Resize(sessionID string, rows, cols uint16) error {
-	client := m.Get(sessionID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	client := m.terminals[sessionID]
 	if client == nil {
 		return errors.New("invalid session ID")
 	}
@@ -49,8 +53,12 @@ func (m *TerminalManager) Resize(sessionID string, rows, cols uint16) error {
 }
 
 // Refresh sends SIGWINCH to the terminal for the given session ID.
+// It holds a read lock for the duration of the signal syscall so that a
+// concurrent close/Remove cannot tear down the PTY mid-operation.
 func (m *TerminalManager) Refresh(sessionID string) error {
-	client := m.Get(sessionID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	client := m.terminals[sessionID]
 	if client == nil {
 		return errors.New("invalid session ID")
 	}
