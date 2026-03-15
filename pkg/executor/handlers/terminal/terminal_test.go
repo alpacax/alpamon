@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/pkg/runner"
 )
 
 func TestTerminalHandler_Validate(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil)
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
 
 	tests := []struct {
 		name    string
@@ -110,7 +111,7 @@ func TestTerminalHandler_Validate(t *testing.T) {
 }
 
 func TestTerminalHandler_Execute_UnknownCommand(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil)
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
 
 	exitCode, _, err := handler.Execute(context.TODO(), "unknown", &common.CommandArgs{})
 
@@ -123,7 +124,7 @@ func TestTerminalHandler_Execute_UnknownCommand(t *testing.T) {
 }
 
 func TestTerminalHandler_RefreshPTY_InvalidSession(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil)
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
 
 	args := &common.CommandArgs{
 		SessionID: "nonexistent",
@@ -137,13 +138,13 @@ func TestTerminalHandler_RefreshPTY_InvalidSession(t *testing.T) {
 	if exitCode != 1 {
 		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
 	}
-	if output != "Invalid session ID" {
+	if output != "invalid session ID" {
 		t.Errorf("Execute() output = %v, want 'Invalid session ID'", output)
 	}
 }
 
 func TestTerminalHandler_ResizePTY_InvalidSession(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil)
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
 
 	args := &common.CommandArgs{
 		SessionID: "nonexistent",
@@ -159,7 +160,7 @@ func TestTerminalHandler_ResizePTY_InvalidSession(t *testing.T) {
 	if exitCode != 1 {
 		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
 	}
-	if output != "Invalid session ID" {
+	if output != "invalid session ID" {
 		t.Errorf("Execute() output = %v, want 'Invalid session ID'", output)
 	}
 }

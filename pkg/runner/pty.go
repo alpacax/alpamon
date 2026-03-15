@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -43,6 +42,7 @@ type PtyClient struct {
 	wsToPty       chan []byte
 	ptyToWs       chan []byte
 	isRecovering  atomic.Bool // default : false
+	manager       *TerminalManager
 }
 
 const (
@@ -53,16 +53,7 @@ const (
 	sessionCloseCode = 4000
 )
 
-var (
-	terminals   map[string]*PtyClient
-	terminalsMu sync.RWMutex
-)
-
-func init() {
-	terminals = make(map[string]*PtyClient)
-}
-
-func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session) *PtyClient {
+func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, manager *TerminalManager) *PtyClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
@@ -80,6 +71,7 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session) *Pty
 		sessionID:     data.SessionID,
 		wsToPty:       make(chan []byte, bufferSize),
 		ptyToWs:       make(chan []byte, bufferSize),
+		manager:       manager,
 	}
 }
 
@@ -113,9 +105,7 @@ func (pc *PtyClient) initializePtySession() error {
 		return fmt.Errorf("failed to start pty: %w", err)
 	}
 
-	terminalsMu.Lock()
-	terminals[pc.sessionID] = pc
-	terminalsMu.Unlock()
+	pc.manager.Register(pc.sessionID, pc)
 
 	// Add PID-to-session mapping for auth manager
 	pid := pc.cmd.Process.Pid
@@ -314,16 +304,13 @@ func (pc *PtyClient) Refresh() error {
 	return nil
 }
 
-// GetTerminal returns the PTY client for the given session ID
-func GetTerminal(sessionID string) *PtyClient {
-	terminalsMu.RLock()
-	defer terminalsMu.RUnlock()
-	return terminals[sessionID]
-}
-
 // close terminates the PTY session and cleans up resources.
 // It ensures that the PTY, command, and WebSocket connection are properly closed.
+// Remove is called first so that the write lock waits for any in-flight
+// Resize/Refresh (which hold a read lock) to finish before we tear down the PTY.
 func (pc *PtyClient) close() {
+	pc.manager.Remove(pc.sessionID)
+
 	// Remove PID-to-session mapping before cleaning up
 	if pc.cmd != nil && pc.cmd.Process != nil {
 		authManager.RemovePIDSessionMapping(pc.cmd.Process.Pid)
@@ -337,12 +324,6 @@ func (pc *PtyClient) close() {
 		_ = pc.cmd.Process.Kill()
 		_ = pc.cmd.Wait()
 	}
-
-	terminalsMu.Lock()
-	if terminals[pc.sessionID] != nil {
-		delete(terminals, pc.sessionID)
-	}
-	terminalsMu.Unlock()
 
 	if pc.conn != nil {
 		err := pc.conn.WriteControl(
