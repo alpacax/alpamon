@@ -138,7 +138,7 @@ func TestTerminalHandler_RefreshPTY_InvalidSession(t *testing.T) {
 	if exitCode != 1 {
 		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
 	}
-	if output != "Invalid session ID" {
+	if output != "invalid session ID" {
 		t.Errorf("Execute() output = %v, want 'Invalid session ID'", output)
 	}
 }
@@ -160,7 +160,7 @@ func TestTerminalHandler_ResizePTY_InvalidSession(t *testing.T) {
 	if exitCode != 1 {
 		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
 	}
-	if output != "Invalid session ID" {
+	if output != "invalid session ID" {
 		t.Errorf("Execute() output = %v, want 'Invalid session ID'", output)
 	}
 }

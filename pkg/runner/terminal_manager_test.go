@@ -41,8 +41,8 @@ func TestTerminalManager_Resize_InvalidSession(t *testing.T) {
 	if err == nil {
 		t.Error("Resize() expected error for invalid session")
 	}
-	if err.Error() != "Invalid session ID" {
-		t.Errorf("Resize() error = %q, want %q", err.Error(), "Invalid session ID")
+	if err.Error() != "invalid session ID" {
+		t.Errorf("Resize() error = %q, want %q", err.Error(), "invalid session ID")
 	}
 }
 
@@ -53,7 +53,7 @@ func TestTerminalManager_Refresh_InvalidSession(t *testing.T) {
 	if err == nil {
 		t.Error("Refresh() expected error for invalid session")
 	}
-	if err.Error() != "Invalid session ID" {
-		t.Errorf("Refresh() error = %q, want %q", err.Error(), "Invalid session ID")
+	if err.Error() != "invalid session ID" {
+		t.Errorf("Refresh() error = %q, want %q", err.Error(), "invalid session ID")
 	}
 }

@@ -43,7 +43,7 @@ func (m *TerminalManager) Remove(sessionID string) {
 func (m *TerminalManager) Resize(sessionID string, rows, cols uint16) error {
 	client := m.Get(sessionID)
 	if client == nil {
-		return errors.New("Invalid session ID")
+		return errors.New("invalid session ID")
 	}
 	return client.Resize(rows, cols)
 }
@@ -52,7 +52,7 @@ func (m *TerminalManager) Resize(sessionID string, rows, cols uint16) error {
 func (m *TerminalManager) Refresh(sessionID string) error {
 	client := m.Get(sessionID)
 	if client == nil {
-		return errors.New("Invalid session ID")
+		return errors.New("invalid session ID")
 	}
 	return client.Refresh()
 }
