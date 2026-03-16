@@ -90,7 +90,7 @@ func (pc *PtyClient) initializePtySession() error {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
 
-	pc.cmd = exec.Command("/bin/bash", "-i")
+	pc.cmd = exec.Command("/bin/bash", "-il")
 	uid, gid, groupIds, env, err := pc.getPtyUserAndEnv()
 	if err != nil {
 		return fmt.Errorf("failed to get user/env: %w", err)
@@ -463,6 +463,9 @@ func (pc *PtyClient) getPtyUserAndEnv() (uid, gid int, groupIds []string, env ma
 		env["USER"] = pc.username
 		env["HOME"] = pc.homeDirectory
 	}
+
+	env["LOGNAME"] = env["USER"]
+	env["MAIL"] = "/var/mail/" + env["USER"]
 
 	uid, err = strconv.Atoi(usr.Uid)
 	if err != nil {
