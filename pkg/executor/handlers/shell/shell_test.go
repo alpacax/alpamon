@@ -43,7 +43,7 @@ func TestShellHandler_Commands(t *testing.T) {
 func TestShellHandler_Execute_Basic(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	// Key format is "name arg1 arg2..." - for single word command it's just "ls "
-	mockExec.SetResult("ls ", 0, "file1.txt\nfile2.txt", nil)
+	mockExec.SetResult("ls", 0, "file1.txt\nfile2.txt", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -90,8 +90,8 @@ func TestShellHandler_Execute_Exec(t *testing.T) {
 func TestShellHandler_Execute_AndOperator(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	// Shell handler uses strings.Fields which splits "cmd1 && cmd2" into ["cmd1", "&&", "cmd2"]
-	mockExec.SetResult("cmd1 ", 0, "output1", nil)
-	mockExec.SetResult("cmd2 ", 0, "output2", nil)
+	mockExec.SetResult("cmd1", 0, "output1", nil)
+	mockExec.SetResult("cmd2", 0, "output2", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -114,8 +114,8 @@ func TestShellHandler_Execute_AndOperator(t *testing.T) {
 
 func TestShellHandler_AndStopsOnFailure(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	mockExec.SetResult("cmd1 ", 1, "error output", nil) // First command fails
-	mockExec.SetResult("cmd2 ", 0, "output2", nil)
+	mockExec.SetResult("cmd1", 1, "error output", nil) // First command fails
+	mockExec.SetResult("cmd2", 0, "output2", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -135,8 +135,8 @@ func TestShellHandler_AndStopsOnFailure(t *testing.T) {
 
 func TestShellHandler_Execute_OrOperator(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	mockExec.SetResult("cmd1 ", 1, "error", nil) // First fails
-	mockExec.SetResult("cmd2 ", 0, "success", nil)
+	mockExec.SetResult("cmd1", 1, "error", nil) // First fails
+	mockExec.SetResult("cmd2", 0, "success", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -159,8 +159,8 @@ func TestShellHandler_Execute_OrOperator(t *testing.T) {
 
 func TestShellHandler_OrStopsOnSuccess(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	mockExec.SetResult("cmd1 ", 0, "success", nil) // First succeeds
-	mockExec.SetResult("cmd2 ", 0, "output2", nil)
+	mockExec.SetResult("cmd1", 0, "success", nil) // First succeeds
+	mockExec.SetResult("cmd2", 0, "output2", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -184,8 +184,8 @@ func TestShellHandler_OrStopsOnSuccess(t *testing.T) {
 
 func TestShellHandler_Execute_Semicolon(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	mockExec.SetResult("cmd1 ", 1, "error", nil) // First fails
-	mockExec.SetResult("cmd2 ", 0, "success", nil)
+	mockExec.SetResult("cmd1", 1, "error", nil) // First fails
+	mockExec.SetResult("cmd2", 0, "success", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -210,7 +210,7 @@ func TestShellHandler_Execute_Semicolon(t *testing.T) {
 
 func TestShellHandler_CustomUser(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	mockExec.SetResult("whoami ", 0, "testuser", nil)
+	mockExec.SetResult("whoami", 0, "testuser", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -245,7 +245,7 @@ func TestShellHandler_CustomUser(t *testing.T) {
 
 func TestShellHandler_DefaultUser(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	mockExec.SetResult("whoami ", 0, "root", nil)
+	mockExec.SetResult("whoami", 0, "root", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -296,7 +296,7 @@ func TestShellHandler_WithTimeout(t *testing.T) {
 
 func TestShellHandler_DefaultTimeout(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	mockExec.SetResult("ls ", 0, "output", nil)
+	mockExec.SetResult("ls", 0, "output", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -382,7 +382,7 @@ func TestShellHandler_UnknownCommand(t *testing.T) {
 func TestShellHandler_CommandExecutionError(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	// Set up a command that returns -1 exit code with error
-	mockExec.SetResult("failing_cmd ", -1, "", errors.New("command not found"))
+	mockExec.SetResult("failing_cmd", -1, "", errors.New("command not found"))
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -405,7 +405,7 @@ func TestShellHandler_CommandExecutionError(t *testing.T) {
 
 func TestShellHandler_WithEnv(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	mockExec.SetResult("printenv ", 0, "TEST_VAR=test_value", nil)
+	mockExec.SetResult("printenv", 0, "TEST_VAR=test_value", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -428,9 +428,9 @@ func TestShellHandler_WithEnv(t *testing.T) {
 
 func TestShellHandler_MixedOperators(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	mockExec.SetResult("cmd1 ", 0, "out1", nil)
-	mockExec.SetResult("cmd2 ", 1, "err2", nil)
-	mockExec.SetResult("cmd3 ", 0, "out3", nil)
+	mockExec.SetResult("cmd1", 0, "out1", nil)
+	mockExec.SetResult("cmd2", 1, "err2", nil)
+	mockExec.SetResult("cmd3", 0, "out3", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 

@@ -39,9 +39,16 @@ func NewMockCommandExecutor(t *testing.T) *MockCommandExecutor {
 }
 
 // lookupResult returns the mocked result for a given command key.
+// makeKey builds a consistent lookup key from a command name and arguments.
+func makeKey(name string, args ...string) string {
+	if len(args) == 0 {
+		return name
+	}
+	return name + " " + strings.Join(args, " ")
+}
+
 func (m *MockCommandExecutor) lookupResult(name string, args ...string) (int, string, error) {
-	key := name + " " + strings.Join(args, " ")
-	if result, ok := m.results[key]; ok {
+	if result, ok := m.results[makeKey(name, args...)]; ok {
 		return result.ExitCode, result.Output, result.Err
 	}
 	return 0, "Mock success", nil

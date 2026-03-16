@@ -247,7 +247,7 @@ func TestRegression_CommandExecutorInterface(t *testing.T) {
 	var _ common.CommandExecutor = mockExec
 
 	// Test all methods exist
-	mockExec.SetResult("test ", 0, "output", nil)
+	mockExec.SetResult("test", 0, "output", nil)
 	cmds := mockExec.GetExecutedCommands()
 	if cmds == nil {
 		t.Error("GetExecutedCommands should not return nil")
