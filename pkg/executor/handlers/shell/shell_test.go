@@ -302,7 +302,7 @@ func TestShellHandler_DefaultTimeout(t *testing.T) {
 
 	args := &common.CommandArgs{
 		Command: "ls",
-		// Timeout not set - should default to 120 seconds
+		// Timeout not set - should default to 30 minutes
 	}
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -443,6 +443,75 @@ func TestShellHandler_MixedOperators(t *testing.T) {
 	// cmd1's output should be present
 	if !strings.Contains(output, "out1") {
 		t.Errorf("expected output to contain 'out1', got %q", output)
+	}
+}
+
+func TestShellHandler_AllowSh(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	// When AllowSh is true, handler calls /bin/sh -c <command>
+	// Mock key: "/bin/sh" + " " + "-c" + " " + "grep err /log | head"
+	mockExec.SetResult("/bin/sh -c grep err /log | head", 0, "error line 1", nil)
+	handler := NewShellHandler(mockExec)
+	ctx := context.Background()
+
+	args := &common.CommandArgs{
+		Command: "grep err /log | head",
+		AllowSh: true,
+	}
+
+	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", exitCode)
+	}
+	if !strings.Contains(output, "error line 1") {
+		t.Errorf("expected output to contain 'error line 1', got %q", output)
+	}
+
+	// Verify it was called via /bin/sh -c, not split by Fields
+	cmds := mockExec.GetExecutedCommands()
+	if len(cmds) == 0 {
+		t.Fatal("expected at least one executed command")
+	}
+	if cmds[0].Name != "/bin/sh" {
+		t.Errorf("expected command name '/bin/sh', got %q", cmds[0].Name)
+	}
+	if len(cmds[0].Args) != 2 || cmds[0].Args[0] != "-c" || cmds[0].Args[1] != "grep err /log | head" {
+		t.Errorf("expected args ['-c', 'grep err /log | head'], got %v", cmds[0].Args)
+	}
+}
+
+func TestShellHandler_AllowSh_False_UsesDirectExec(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	// Without AllowSh, "echo hello" is split by Fields into ["echo", "hello"]
+	mockExec.SetResult("echo hello", 0, "hello", nil)
+	handler := NewShellHandler(mockExec)
+	ctx := context.Background()
+
+	args := &common.CommandArgs{
+		Command: "echo hello",
+		AllowSh: false,
+	}
+
+	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", exitCode)
+	}
+
+	// Verify it was NOT called via /bin/sh
+	cmds := mockExec.GetExecutedCommands()
+	if len(cmds) == 0 {
+		t.Fatal("expected at least one executed command")
+	}
+	if cmds[0].Name == "/bin/sh" {
+		t.Error("expected direct exec, not /bin/sh")
 	}
 }
 
