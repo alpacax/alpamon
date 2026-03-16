@@ -313,6 +313,15 @@ func TestShellHandler_DefaultTimeout(t *testing.T) {
 	if exitCode != 0 {
 		t.Errorf("expected exit code 0, got %d", exitCode)
 	}
+
+	// Verify the default 30m timeout was passed to the executor
+	cmds := mockExec.GetExecutedCommands()
+	if len(cmds) == 0 {
+		t.Fatal("expected at least one executed command")
+	}
+	if cmds[0].Timeout != 30*time.Minute {
+		t.Errorf("expected default timeout 30m, got %v", cmds[0].Timeout)
+	}
 }
 
 func TestShellHandler_Validate_Empty(t *testing.T) {

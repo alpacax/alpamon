@@ -17,9 +17,10 @@ type MockCommandExecutor struct {
 
 // ExecutedCommand represents a command that was executed by the mock.
 type ExecutedCommand struct {
-	Name string
-	Args []string
-	User string
+	Name    string
+	Args    []string
+	User    string
+	Timeout time.Duration
 }
 
 // CommandResult represents the result of a mocked command execution.
@@ -64,7 +65,7 @@ func (m *MockCommandExecutor) Exec(ctx context.Context, args []string, username,
 	if len(args) == 0 {
 		return 0, "", nil
 	}
-	m.commands = append(m.commands, ExecutedCommand{Name: args[0], Args: args[1:], User: username})
+	m.commands = append(m.commands, ExecutedCommand{Name: args[0], Args: args[1:], User: username, Timeout: timeout})
 	return m.Run(ctx, args[0], args[1:]...)
 }
 
