@@ -97,6 +97,32 @@ func TestCommand_ParseCommandData_Invalid(t *testing.T) {
 	assert.Nil(t, data)
 }
 
+func TestCommand_AllowSh(t *testing.T) {
+	t.Run("allow_sh present and true", func(t *testing.T) {
+		raw := `{"id":"cmd-1","shell":"system","line":"grep err /log | head","allow_sh":true}`
+		var cmd Command
+		err := json.Unmarshal([]byte(raw), &cmd)
+		require.NoError(t, err)
+		assert.True(t, cmd.AllowSh)
+	})
+
+	t.Run("allow_sh present and false", func(t *testing.T) {
+		raw := `{"id":"cmd-2","shell":"system","line":"ls -la","allow_sh":false}`
+		var cmd Command
+		err := json.Unmarshal([]byte(raw), &cmd)
+		require.NoError(t, err)
+		assert.False(t, cmd.AllowSh)
+	})
+
+	t.Run("allow_sh missing defaults to false", func(t *testing.T) {
+		raw := `{"id":"cmd-3","shell":"system","line":"ls -la"}`
+		var cmd Command
+		err := json.Unmarshal([]byte(raw), &cmd)
+		require.NoError(t, err)
+		assert.False(t, cmd.AllowSh)
+	})
+}
+
 func TestNewCommandResponse(t *testing.T) {
 	resp := NewCommandResponse(true, "success output", 1.5)
 

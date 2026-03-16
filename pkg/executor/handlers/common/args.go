@@ -9,6 +9,7 @@ type CommandArgs struct {
 	URL       string
 	Command   string
 	Timeout   time.Duration
+	AllowSh   bool
 
 	// User management
 	Username                string

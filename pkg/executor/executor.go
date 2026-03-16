@@ -81,6 +81,9 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	output, err := cmd.CombinedOutput()
 	exitCode := 0
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return 124, string(output) + fmt.Sprintf("\n\nCommand timed out after %s", opts.Timeout), err
+		}
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode = exitError.ExitCode()
 		} else {
