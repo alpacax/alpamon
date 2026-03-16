@@ -42,7 +42,7 @@ func TestShellHandler_Commands(t *testing.T) {
 
 func TestShellHandler_Execute_Basic(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	// Key format is "name arg1 arg2..." - for single word command it's just "ls "
+	// Key format is "name arg1 arg2..." - for single word command it's just "ls"
 	mockExec.SetResult("ls", 0, "file1.txt\nfile2.txt", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
