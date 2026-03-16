@@ -8,13 +8,14 @@ import (
 
 // Command represents a command request from the server
 type Command struct {
-	ID    string            `json:"id"`
-	Shell string            `json:"shell"`
-	Line  string            `json:"line"`
-	User  string            `json:"user"`
-	Group string            `json:"group"`
-	Env   map[string]string `json:"env"`
-	Data  string            `json:"data,omitempty"`
+	ID      string            `json:"id"`
+	Shell   string            `json:"shell"`
+	Line    string            `json:"line"`
+	User    string            `json:"user"`
+	Group   string            `json:"group"`
+	Env     map[string]string `json:"env"`
+	AllowSh bool              `json:"allow_sh,omitempty"`
+	Data    string            `json:"data,omitempty"`
 }
 
 // File represents a file in command data

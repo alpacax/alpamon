@@ -60,35 +60,37 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 		groupname = username
 	}
 
-	// Get environment variables
 	env := args.Env
 
-	// Get timeout
-	timeout := int(args.Timeout.Seconds())
+	timeout := args.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Minute
+	}
 
 	log.Debug().
 		Str("command", command).
 		Str("user", username).
 		Str("group", groupname).
-		Int("timeout", timeout).
+		Dur("timeout", timeout).
+		Bool("allow_sh", args.AllowSh).
 		Msg("Executing shell command")
 
-	// Parse and execute command with operators support
+	if args.AllowSh {
+		exitCode, result := h.executeCommand(ctx, []string{"/bin/sh", "-c", command}, username, groupname, env, timeout)
+		return exitCode, result, nil
+	}
+
+	// Fallback: direct execution with manual operator parsing
 	return h.executeWithOperators(ctx, command, username, groupname, env, timeout)
 }
 
 // executeWithOperators handles shell operators (&&, ||, ;)
-func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeoutSecs int) (int, string, error) {
+func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
 	spl := strings.Fields(command)
 	var currentCmd []string
 	var results strings.Builder
 	var exitCode int
 	var result string
-
-	timeout := time.Duration(timeoutSecs) * time.Second
-	if timeout == 0 {
-		timeout = 120 * time.Second // Default timeout
-	}
 
 	for _, arg := range spl {
 		switch arg {

@@ -95,6 +95,7 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 			Username:  cr.command.User,
 			Groupname: cr.command.Group,
 			Env:       cr.command.Env,
+			AllowSh:   cr.command.AllowSh,
 		}
 	default:
 		exitCode = 1
