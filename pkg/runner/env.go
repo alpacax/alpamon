@@ -43,7 +43,11 @@ func loadEtcEnvironment(env map[string]string) {
 		if !ok {
 			continue
 		}
-		value = strings.Trim(value, `"'`)
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
 		env[key] = value
 	}
 
