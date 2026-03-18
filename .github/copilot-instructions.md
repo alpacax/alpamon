@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Alpamon is a Go-based secure server agent for Alpacon. It collects system metrics and executes remote commands, communicating via WebSocket and storing metrics in SQLite (Ent ORM).
+Alpamon is a lightweight Go-based server agent for Alpacon — the infrastructure access platform that provides secure, unified server access for humans, AI agents, and CI/CD pipelines. It establishes an outbound-only WebSocket connection to the Alpacon console, enabling browser-based terminals (Websh), file transfers, system monitoring, and remote command execution. Metrics are stored locally in SQLite (Ent ORM).
 
 ## Writing conventions
 

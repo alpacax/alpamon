@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Alpamon is a Go-based secure server agent for Alpacon that collects system metrics and executes remote commands. It runs as a daemon that communicates with the Alpacon console via WebSocket connections and stores metrics in a local SQLite database using Ent ORM.
+Alpamon is a lightweight Go-based server agent for Alpacon — the infrastructure access platform that provides secure, unified server access for humans, AI agents, and CI/CD pipelines. Installed on each server, it establishes an outbound-only WebSocket connection to the Alpacon console, enabling browser-based terminals (Websh), file transfers, system monitoring, and remote command execution without VPNs or SSH keys. It stores metrics locally in SQLite using Ent ORM.
 
 ## Writing conventions
 

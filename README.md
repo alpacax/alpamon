@@ -1,9 +1,10 @@
 # Alpamon
-New Go-based secure server agent for Alpacon
 
-**Alpamon** is a server agent for **Alpacon**. Each server should have Alpamon installed to be controlled via Alpacon.
+**Alpamon** is a lightweight server agent for [Alpacon](https://www.alpacax.com) — the infrastructure access platform that provides secure, unified server access for humans, AI agents, and CI/CD pipelines.
 
-This guide outlines the step-by-step process for installing Alpamon within a development environment. The installation requires an active Internet connection or the appropriate configuration of a proxy server.
+Installed on each server, Alpamon establishes an outbound-only connection to the Alpacon console, enabling browser-based terminals (Websh), file transfers, system monitoring, and remote command execution — all without VPNs, SSH keys, or firewall changes.
+
+This guide outlines the step-by-step process for installing Alpamon within a development environment.
 
 ## System requirements
 
