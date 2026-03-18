@@ -10,7 +10,7 @@ Alpamon is a lightweight Go-based server agent for Alpacon—the infrastructure 
 
 - **Product names**: Use "Websh" (not "WebSH", "websh", or "WEBSH"). Proper nouns like Alpamon, Alpacon, and Websh should always be capitalized as shown.
 - **Sentence case**: Use sentence case for all headings, labels, and documentation (e.g., "Architecture overview" not "Architecture Overview"). Only capitalize the first word and proper nouns.
-- **Em-dashes**: No spaces around em-dashes (e.g., "word—word" not "word — word").
+- **Em-dashes**: No spaces around em-dashes (e.g., "word—word" not "word — word"). Use colons instead of em-dashes for itemized descriptions (e.g., "`shell/`: description").
 
 ## Development commands
 
@@ -84,16 +84,16 @@ Commands from the Alpacon console flow through:
 1. `pkg/runner/` receives WebSocket commands and dispatches them
 2. `pkg/executor/dispatcher.go` routes commands to registered handlers via the registry
 3. `pkg/executor/handlers/` contains modular handlers for each command domain:
-   - `shell/`—Shell command execution (supports `/bin/sh -c` via `allow_sh` flag)
-   - `system/`—System operations (upgrade, restart, reboot, shutdown)
-   - `file/`—File upload/download
-   - `firewall/`—Firewall rule management (iptables/nftables)
-   - `terminal/`—PTY session management
-   - `tunnel/`—Tunnel operations
-   - `user/`—User management
-   - `group/`—Group management
-   - `info/`—System info queries (ping, help, commit, sync)
-   - `common/`—Shared interfaces, types, base handler, and test utilities
+   - `shell/`: Shell command execution (supports `/bin/sh -c` via `allow_sh` flag)
+   - `system/`: System operations (upgrade, restart, reboot, shutdown)
+   - `file/`: File upload/download
+   - `firewall/`: Firewall rule management (iptables/nftables)
+   - `terminal/`: PTY session management
+   - `tunnel/`: Tunnel operations
+   - `user/`: User management
+   - `group/`: Group management
+   - `info/`: System info queries (ping, help, commit, sync)
+   - `common/`: Shared interfaces, types, base handler, and test utilities
 4. `pkg/executor/executor.go` runs system commands with privilege demotion, environment setup, and timeout handling (exit code 124 on timeout)
 
 ### Core packages
@@ -107,10 +107,10 @@ Commands from the Alpacon console flow through:
 - `auth_manager.go`: PAM authentication and sudo approval
 
 **Collector (`pkg/collector/`)**
-- `check/realtime/`—CPU, memory, disk I/O, network traffic (via gopsutil)
-- `check/batch/hourly/`, `check/batch/daily/`—Aggregated metrics
-- `scheduler/`—Collection scheduling
-- `transporter/`—Metric transmission to Alpacon console
+- `check/realtime/`: CPU, memory, disk I/O, network traffic (via gopsutil)
+- `check/batch/hourly/`, `check/batch/daily/`: Aggregated metrics
+- `scheduler/`: Collection scheduling
+- `transporter/`: Metric transmission to Alpacon console
 
 **Database (`pkg/db/`)**
 - Ent ORM with code-generated models (`pkg/db/ent/`)
@@ -122,8 +122,8 @@ Commands from the Alpacon console flow through:
 - `ContextManager`: Centralized lifecycle and graceful shutdown
 
 **Internal packages (`internal/`)**
-- `protocol/`—Command and message protocol definitions
-- `pool/`—Worker pool for concurrent task execution
+- `protocol/`: Command and message protocol definitions
+- `pool/`: Worker pool for concurrent task execution
 
 **Configuration (`pkg/config/`)**
 - INI-based configuration parsing

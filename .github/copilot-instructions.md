@@ -8,7 +8,7 @@ Alpamon is a lightweight Go-based server agent for Alpacon—the infrastructure 
 
 - **Product names**: Use "Websh" (not "WebSH", "websh", or "WEBSH"). Proper nouns like Alpamon, Alpacon, and Websh should always be capitalized as shown.
 - **Sentence case**: Use sentence case for all headings, labels, and documentation (e.g., "Architecture overview" not "Architecture Overview"). Only capitalize the first word and proper nouns.
-- **Em-dashes**: No spaces around em-dashes (e.g., "word—word" not "word — word").
+- **Em-dashes**: No spaces around em-dashes (e.g., "word—word" not "word — word"). Use colons instead of em-dashes for itemized descriptions (e.g., "`shell/`: description").
 
 ## Architecture
 
@@ -20,11 +20,11 @@ Commands flow through a handler-based executor pattern:
 4. `pkg/executor/executor.go` runs system commands with privilege demotion and timeout handling
 
 Key packages:
-- `pkg/collector/`—System metric collection (realtime and batch)
-- `pkg/db/`—Ent ORM with SQLite backend
-- `pkg/agent/`—Centralized lifecycle management
-- `internal/protocol/`—Command and message protocol definitions
-- `internal/pool/`—Worker pool for concurrent tasks
+- `pkg/collector/`: System metric collection (realtime and batch)
+- `pkg/db/`: Ent ORM with SQLite backend
+- `pkg/agent/`: Centralized lifecycle management
+- `internal/protocol/`: Command and message protocol definitions
+- `internal/pool/`: Worker pool for concurrent tasks
 
 ## Code conventions
 
