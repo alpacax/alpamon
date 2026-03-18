@@ -81,7 +81,7 @@ func (h *SystemHandler) Validate(cmd string, args *common.CommandArgs) error {
 func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) {
 	latestVersion := utils.GetLatestVersion()
 	if latestVersion == "" {
-		return 1, "Failed to retrieve the latest version from GitHub.", nil
+		return 1, "", fmt.Errorf("failed to retrieve the latest Alpamon version from GitHub")
 	}
 
 	needAlpamon := version.Version != latestVersion
@@ -90,7 +90,11 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 	needPam := currentPamVersion != "" && currentPamVersion != latestVersion
 
 	if !needAlpamon && !needPam {
-		return 0, fmt.Sprintf("Already up-to-date (alpamon: %s, pam: %s)", version.Version, currentPamVersion), nil
+		pamDisplay := currentPamVersion
+		if pamDisplay == "" {
+			pamDisplay = "not installed"
+		}
+		return 0, fmt.Sprintf("Already up-to-date (alpamon: %s, pam: %s)", version.Version, pamDisplay), nil
 	}
 
 	var packages []string
