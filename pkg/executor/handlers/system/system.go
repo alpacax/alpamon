@@ -80,10 +80,14 @@ func (h *SystemHandler) Validate(cmd string, args *common.CommandArgs) error {
 // alpamon is already at the latest version.
 func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) {
 	latestVersion := utils.GetLatestVersion()
-	needAlpamon := latestVersion != "" && version.Version != latestVersion
+	if latestVersion == "" {
+		return 1, "Failed to retrieve the latest version from GitHub.", nil
+	}
+
+	needAlpamon := version.Version != latestVersion
 
 	currentPamVersion := utils.GetPamVersion()
-	needPam := currentPamVersion != "" && latestVersion != "" && currentPamVersion != latestVersion
+	needPam := currentPamVersion != "" && currentPamVersion != latestVersion
 
 	if !needAlpamon && !needPam {
 		return 0, fmt.Sprintf("Already up-to-date (alpamon: %s, pam: %s)", version.Version, currentPamVersion), nil
@@ -110,7 +114,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 
 	log.Debug().Msgf("Upgrading %s...", pkgList)
 	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
-	if exitCode == 0 {
+	if exitCode == 0 && needPam {
 		utils.InvalidatePamCache()
 	}
 	return exitCode, output, err
