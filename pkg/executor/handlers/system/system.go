@@ -81,7 +81,8 @@ func (h *SystemHandler) Validate(cmd string, args *common.CommandArgs) error {
 func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) {
 	latestVersion := utils.GetLatestVersion()
 	if latestVersion == "" {
-		return 1, "", fmt.Errorf("failed to retrieve the latest Alpamon version from GitHub")
+		msg := "Failed to retrieve the latest Alpamon version from GitHub."
+		return 1, msg, fmt.Errorf("%s", msg)
 	}
 
 	needAlpamon := version.Version != latestVersion
