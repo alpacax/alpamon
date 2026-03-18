@@ -1,11 +1,11 @@
 # Alpamon
-New Go-based Secure Server Agent for Alpacon
+New Go-based secure server agent for Alpacon
 
 **Alpamon** is a server agent for **Alpacon**. Each server should have Alpamon installed to be controlled via Alpacon.
 
 This guide outlines the step-by-step process for installing Alpamon within a development environment. The installation requires an active Internet connection or the appropriate configuration of a proxy server.
 
-## System Requirements
+## System requirements
 
 To run Alpamon, ensure your system meets the following requirements:
 - Operating system: Linux, macOS, or Windows (via WSL)
@@ -39,9 +39,9 @@ sudo yum install alpamon
 > [!TIP]
 > To use Alpacon-managed sudo authentication, install the optional PAM module:
 > `sudo apt-get install alpamon-pam` (Debian/Ubuntu) or `sudo yum install alpamon-pam` (CentOS/RHEL).
-> See [PAM Module](#pam-module) for details.
+> See [PAM module](#pam-module) for details.
 
-### PAM Module
+### PAM module
 
 The optional `alpamon-pam` package provides PAM (Pluggable Authentication Modules) integration for Alpacon-managed sudo authentication:
 - **pam_alpamon.so**: Verifies Alpacon users during sudo authentication
@@ -83,13 +83,13 @@ To get started on macOS, clone the source code from the repository:
 git clone https://github.com/alpacax/alpamon.git
 ```
 
-#### Generate Ent Schema Code with Entgo
+#### Generate Ent schema code with Entgo
 To generate Ent schema code with custom features, navigate to the root of the project and use the following command:
 ```bash
 go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
 ```
 
-#### Install Atlas CLI (Development Only)
+#### Install Atlas CLI (development only)
 Atlas CLI is **only required for development** when you need to generate new migration files after modifying database schemas in `pkg/db/schema/`. Production deployments do not require Atlas CLI as migrations are executed directly from embedded SQL files.
 
 To install Atlas CLI for development:

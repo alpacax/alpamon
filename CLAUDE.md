@@ -2,13 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+## Project overview
 
 Alpamon is a Go-based secure server agent for Alpacon that collects system metrics and executes remote commands. It runs as a daemon that communicates with the Alpacon console via WebSocket connections and stores metrics in a local SQLite database using Ent ORM.
 
-## Development Commands
+## Writing conventions
 
-### Code Generation
+- **Product names**: Use "Websh" (not "WebSH", "websh", or "WEBSH"). Proper nouns like Alpamon, Alpacon, and Websh should always be capitalized as shown.
+- **Sentence case**: Use sentence case for all headings, labels, and documentation (e.g., "Architecture overview" not "Architecture Overview"). Only capitalize the first word and proper nouns.
+
+## Development commands
+
+### Code generation
 ```bash
 # Generate Ent schema code (required before building)
 go run -mod=mod entgo.io/ent/cmd/ent@v0.14.5 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
@@ -17,7 +22,7 @@ go run -mod=mod entgo.io/ent/cmd/ent@v0.14.5 generate --feature sql/modifier --t
 go generate ./pkg/db/ent
 ```
 
-### Database Schema Changes (Development Only)
+### Database schema changes (development only)
 ```bash
 # Install Atlas CLI (only needed for generating new migration files)
 curl -sSf https://atlasgo.sh | sh
@@ -35,8 +40,7 @@ atlas migrate diff <migration_name> \
 ### Building
 ```bash
 # Build the main binary
-cd cmd/alpamon
-go build -v .
+go build -v ./cmd/alpamon
 
 # Install dependencies
 go mod tidy
@@ -51,18 +55,17 @@ go test -v ./... -p 1
 go test -v ./pkg/collector/check/realtime/cpu
 ```
 
-### Running Locally
+### Running locally
 ```bash
-# Run from source (ensure you're in cmd/alpamon directory)
-cd cmd/alpamon
-go run main.go
+# Run from source
+go run ./cmd/alpamon
 
 # Configuration file locations (in order of precedence):
 # - ~/.alpamon.conf (development)
 # - /etc/alpamon/alpamon.conf (production)
 ```
 
-### Docker Testing
+### Docker testing
 ```bash
 # Build all distribution images
 ./Dockerfiles/build.sh
@@ -71,95 +74,120 @@ go run main.go
 docker run alpamon:ubuntu-22.04
 ```
 
-## Architecture Overview
+## Architecture overview
 
-### Core Components
+### Command execution (executor pattern)
 
-**Runner Package (`pkg/runner/`)**
-- `WebsocketClient`: Maintains WebSocket connection to Alpacon console
-- `command.go`: Command execution with privilege escalation/demotion
-- `shell.go`: Shell command execution with stdin/stdout handling
-- `firewall_backup.go`: Firewall state backup/restore using iptables/nftables
-- `ftp.go`: FTP server functionality for file transfers
+Commands from the Alpacon console flow through:
 
-**Collector Package (`pkg/collector/`)**
-- **Realtime collectors**: CPU, memory, disk I/O, network traffic metrics
-- **Batch collectors**: Hourly and daily aggregated metrics
-- **Scheduler**: Metric collection scheduling and coordination
-- **Transporter**: Metric transmission to Alpacon console
+1. `pkg/runner/` receives WebSocket commands and dispatches them
+2. `pkg/executor/dispatcher.go` routes commands to registered handlers via the registry
+3. `pkg/executor/handlers/` contains modular handlers for each command domain:
+   - `shell/` — Shell command execution (supports `/bin/sh -c` via `allow_sh` flag)
+   - `system/` — System operations (upgrade, restart, reboot, shutdown)
+   - `file/` — File upload/download
+   - `firewall/` — Firewall rule management (iptables/nftables)
+   - `terminal/` — PTY session management
+   - `tunnel/` — Tunnel operations
+   - `user/` — User management
+   - `group/` — Group management
+   - `info/` — System info queries (ping, help, commit, sync)
+   - `common/` — Shared interfaces, types, base handler, and test utilities
+4. `pkg/executor/executor.go` runs system commands with privilege demotion, environment setup, and timeout handling (exit code 124 on timeout)
 
-**Database Layer (`pkg/db/`)**
-- **Ent ORM**: Code-generated database models and queries
-- **Schema definitions**: Located in `pkg/db/schema/`
-- **Migrations**: Versioned schema changes in `pkg/db/migration/`
-- **SQLite backend**: Local storage with automatic migration
+### Core packages
+
+**Runner (`pkg/runner/`)**
+- `WebsocketClient`: WebSocket connection to Alpacon console
+- `command.go`: Command dispatch to executor handlers
+- `ftp.go`: FTP server for file transfers
+- `terminal_manager.go`: PTY session lifecycle
+- `tunnel_client.go`, `tunnel_daemon.go`: Tunnel operations
+- `auth_manager.go`: PAM authentication and sudo approval
+
+**Collector (`pkg/collector/`)**
+- `check/realtime/` — CPU, memory, disk I/O, network traffic (via gopsutil)
+- `check/batch/hourly/`, `check/batch/daily/` — Aggregated metrics
+- `scheduler/` — Collection scheduling
+- `transporter/` — Metric transmission to Alpacon console
+
+**Database (`pkg/db/`)**
+- Ent ORM with code-generated models (`pkg/db/ent/`)
+- Schema definitions in `pkg/db/schema/`
+- Versioned SQL migrations in `pkg/db/migration/`
+- SQLite backend with automatic migration
+
+**Agent (`pkg/agent/`)**
+- `ContextManager`: Centralized lifecycle and graceful shutdown
+
+**Internal packages (`internal/`)**
+- `protocol/` — Command and message protocol definitions
+- `pool/` — Worker pool for concurrent task execution
 
 **Configuration (`pkg/config/`)**
 - INI-based configuration parsing
 - Environment variable support
-- Multi-location config file loading
 
-### Data Flow
+### Data flow
 
 1. **Startup**: Agent initializes database, establishes WebSocket connection
-2. **Metric Collection**: Scheduled collectors gather system metrics → local database
-3. **Command Execution**: WebSocket receives commands → runner executes → results sent back
-4. **Firewall Management**: Backup/restore operations for iptables/nftables rules
-5. **FTP Operations**: File transfer capabilities with authentication
+2. **Metric collection**: Scheduled collectors gather system metrics → local database
+3. **Command execution**: WebSocket receives commands → dispatcher routes to handler → results sent back
+4. **Firewall management**: Backup/restore operations for iptables/nftables rules
+5. **File transfers**: FTP server with authentication
 
-### Security Architecture
+### Security architecture
 
-**Privilege Management**
 - Root execution for system-level operations
-- User demotion for safer command execution
+- User privilege demotion for safer command execution
+- Firewall state backup before rule changes with automatic rollback on failure
+- Command argument validation in executor handlers
+- WebSocket message validation via protocol package
 - PID file management and signal handling
 
-**Firewall Operations**
-- State backup before rule changes
-- Automatic rollback on failure
-- Support for both iptables and nftables
+## Key patterns
 
-**Input Validation**
-- Command argument sanitization in runner package
-- WebSocket message validation
-- Configuration parameter validation
-
-## Key Patterns
-
-### Command Execution
+### Handler-based command execution
 ```go
-// Standard command execution
-exitCode, output := runCmdWithOutput([]string{"command", "args"}, user, group, env, timeout)
+// Handlers implement the common.Handler interface
+type Handler interface {
+    Name() string
+    Commands() []string
+    Execute(ctx context.Context, cmd string, args *CommandArgs) (int, string, error)
+    Close() error
+}
 
-// Command with stdin input (for firewall rules, etc.)
-exitCode, output := runCmdWithOutputAndInput([]string{"command"}, inputData, user, group, env, timeout)
+// Handlers are registered in the factory and dispatched via registry
+dispatcher := executor.NewCommandDispatcher(wsClient, executor)
 ```
 
-### Database Operations
+### Database operations
 ```go
 // Ent client usage
 client := db.InitDB()
 cpu := client.CPU.Create().SetUsage(usage).SetTimestamp(time.Now()).SaveX(ctx)
 ```
 
-### Metric Collection
+### Metric collection
 - Collectors implement `Check` interface with `Collect()` method
-- Realtime: Direct system calls using `gopsutil`
+- Realtime: Direct system calls using gopsutil
 - Batch: Database aggregation queries for hourly/daily summaries
 
-### WebSocket Communication
+### WebSocket communication
 - JSON message protocol with command/response pattern
 - Automatic reconnection with exponential backoff
 - Context-based cancellation for graceful shutdown
 
-## Important Implementation Notes
+## Important implementation notes
 
-**Ent Code Generation**: Always run Ent code generation after schema changes. The generated code in `pkg/db/ent/` should not be manually edited.
+**Ent code generation**: Always run Ent code generation after schema changes. The generated code in `pkg/db/ent/` should not be manually edited.
 
-**Testing Constraints**: Tests run with `-p 1` (sequential execution) due to SQLite database file locking and system resource measurement conflicts.
+**Testing constraints**: Tests run with `-p 1` (sequential execution) due to SQLite database file locking and system resource measurement conflicts.
 
-**Platform Compatibility**: Codebase includes platform-specific implementations (darwin/linux) for PTY and PID file operations.
+**Platform compatibility**: Codebase includes platform-specific implementations (darwin/linux) for PTY and PID file operations.
 
-**Firewall Operations**: Use `runCmdWithOutputAndInput` for piping rules via stdin to `nft -f -` and `iptables-restore` commands.
+**Firewall operations**: Use executor's `RunWithInput` for piping rules via stdin to `nft -f -` and `iptables-restore` commands.
 
-**Database Migrations**: Migration system uses direct SQL execution via Go's `database/sql` package. Migration files in `pkg/db/migration/` are pure SQLite SQL. The `RunMigration()` function tracks applied migrations in the `atlas_schema_revisions` table and executes unapplied migrations in transactions. No external tools required.
+**Database migrations**: Migration system uses direct SQL execution via Go's `database/sql` package. Migration files in `pkg/db/migration/` are pure SQLite SQL. The `RunMigration()` function tracks applied migrations in the `atlas_schema_revisions` table and executes unapplied migrations in transactions. No external tools required.
+
+**Timeout handling**: Commands that exceed their timeout return exit code 124 with an elapsed time message, matching the GNU `timeout` convention. Default shell command timeout is 30 minutes.
