@@ -1,8 +1,8 @@
 # Alpamon
 
-**Alpamon** is a lightweight server agent for [Alpacon](https://www.alpacax.com) — the infrastructure access platform that provides secure, unified server access for humans, AI agents, and CI/CD pipelines.
+**Alpamon** is a lightweight server agent for [Alpacon](https://www.alpacax.com)—the infrastructure access platform that provides secure, unified server access for humans, AI agents, and CI/CD pipelines.
 
-Installed on each server, Alpamon establishes an outbound-only connection to the Alpacon console, enabling browser-based terminals (Websh), file transfers, system monitoring, and remote command execution — all without VPNs, SSH keys, or firewall changes.
+Installed on each server, Alpamon establishes an outbound-only connection to the Alpacon console, enabling browser-based terminals (Websh), file transfers, system monitoring, and remote command execution—all without VPNs, SSH keys, or firewall changes. Every action is supervised and audited for compliance.
 
 This guide outlines the step-by-step process for installing Alpamon within a development environment.
 
