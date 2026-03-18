@@ -10,14 +10,13 @@ This guide outlines the step-by-step process for installing Alpamon within a dev
 
 To run Alpamon, ensure your system meets the following requirements:
 - Operating system: Linux, macOS, or Windows (via WSL)
-- Go version: 1.24.4 or higher
+- Go version: 1.25.7 or higher
 - Memory: At least 512MB RAM
 - Disk space: At least 100MB free space
 
 ## Getting started
 To build Alpamon, ensure you have:
-- [Go](https://go.dev/doc/install) version 1.24.4 or higher installed(required for building).
-  - The module is compatible with Go **1.23** and above for usage (importing and running pre-built binaries).
+- [Go](https://go.dev/doc/install) version 1.25.7 or higher installed (required for building).
   - Make sure `$GOPATH` is set and `$GOPATH/bin` is added to your system’s `PATH`.
   
 ## Installation
@@ -87,7 +86,7 @@ git clone https://github.com/alpacax/alpamon.git
 #### Generate Ent schema code with Entgo
 To generate Ent schema code with custom features, navigate to the root of the project and use the following command:
 ```bash
-go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
+go run -mod=mod entgo.io/ent/cmd/ent@v0.14.5 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
 ```
 
 #### Install Atlas CLI (development only)

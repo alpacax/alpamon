@@ -142,7 +142,7 @@ Commands from the Alpacon console flow through:
 - User privilege demotion for safer command execution
 - Firewall state backup before rule changes with automatic rollback on failure
 - Command argument validation in executor handlers
-- WebSocket message validation via protocol package
+- JSON message parsing and envelope checks via protocol package
 - PID file management and signal handling
 
 ## Key patterns
@@ -154,11 +154,11 @@ type Handler interface {
     Name() string
     Commands() []string
     Execute(ctx context.Context, cmd string, args *CommandArgs) (int, string, error)
-    Close() error
+    Validate(cmd string, args *CommandArgs) error
 }
 
 // Handlers are registered in the factory and dispatched via registry
-dispatcher := executor.NewCommandDispatcher(wsClient, executor)
+dispatcher := executor.NewCommandDispatcher(pool, ctxManager)
 ```
 
 ### Database operations
