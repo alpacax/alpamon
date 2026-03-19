@@ -286,7 +286,7 @@ debug = false
 
 func startSystemdService() error {
 	// Create required directories via systemd-tmpfiles
-	if output, err := exec.Command("systemd-tmpfiles", "--create").CombinedOutput(); err != nil {
+	if output, err := exec.Command("systemd-tmpfiles", "--create", "alpamon.conf").CombinedOutput(); err != nil {
 		return fmt.Errorf("tmpfiles creation failed: %w\n%s", err, string(output))
 	}
 
