@@ -2,7 +2,9 @@ package system
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/alpacax/alpamon/internal/pool"
@@ -73,27 +75,54 @@ func (h *SystemHandler) Validate(cmd string, args *common.CommandArgs) error {
 	return nil
 }
 
-// handleUpgrade handles the upgrade command
+// handleUpgrade handles the upgrade command.
+// It checks alpamon and alpamon-pam versions independently and upgrades only
+// the packages that need it. This prevents skipping a pam-only upgrade when
+// alpamon is already at the latest version.
 func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) {
 	latestVersion := utils.GetLatestVersion()
-
-	if version.Version == latestVersion {
-		return 0, fmt.Sprintf("Alpamon is already up-to-date (version: %s)", version.Version), nil
+	if latestVersion == "" {
+		return 1, "Failed to retrieve the latest Alpamon version from GitHub.",
+			errors.New("failed to retrieve the latest Alpamon version from GitHub")
 	}
+
+	needAlpamon := version.Version != latestVersion
+
+	currentPamVersion := utils.GetPamVersion()
+	needPam := currentPamVersion != "" && currentPamVersion != latestVersion
+
+	if !needAlpamon && !needPam {
+		pamDisplay := currentPamVersion
+		if pamDisplay == "" {
+			pamDisplay = "not installed"
+		}
+		return 0, fmt.Sprintf("Already up-to-date (alpamon: %s, pam: %s)", version.Version, pamDisplay), nil
+	}
+
+	var packages []string
+	if needAlpamon {
+		packages = append(packages, "alpamon")
+	}
+	if needPam {
+		packages = append(packages, "alpamon-pam")
+	}
+	pkgList := strings.Join(packages, " ")
 
 	var cmd string
 	switch utils.PlatformLike {
 	case "debian":
-		cmd = "apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade alpamon alpamon-pam -y -o Acquire::Retries=3"
+		cmd = fmt.Sprintf("apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
 	case "rhel":
-		cmd = "yum update -y alpamon alpamon-pam"
+		cmd = fmt.Sprintf("yum update -y %s", pkgList)
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
 	}
 
-	log.Debug().Msgf("Upgrading alpamon from %s to %s using command: '%s'...", version.Version, latestVersion, cmd)
-
+	log.Debug().Msgf("Upgrading %s...", pkgList)
 	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
+	if exitCode == 0 && needPam {
+		utils.InvalidatePamCache()
+	}
 	return exitCode, output, err
 }
 

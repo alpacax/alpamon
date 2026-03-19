@@ -19,6 +19,16 @@ var (
 	pamCacheMutex sync.Mutex
 )
 
+// InvalidatePamCache clears the cached pam version so the next call to
+// GetPamVersion will re-query the system. Call this after upgrading alpamon-pam
+// to avoid reporting a stale version for up to pamCacheTTL.
+func InvalidatePamCache() {
+	pamCacheMutex.Lock()
+	defer pamCacheMutex.Unlock()
+	pamCache = ""
+	pamCacheTime = time.Time{}
+}
+
 // GetPamVersion returns the installed alpamon-pam package version.
 // Returns empty string if the package is not installed.
 // Results are cached with a TTL to avoid spawning external processes on every sync.
