@@ -285,19 +285,24 @@ debug = false
 }
 
 func startSystemdService() error {
+	// Create required directories via systemd-tmpfiles
+	if output, err := exec.Command("systemd-tmpfiles", "--create", "alpamon.conf").CombinedOutput(); err != nil {
+		return fmt.Errorf("tmpfiles creation failed: %w\n%s", err, string(output))
+	}
+
 	// Reload systemd daemon
-	if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
-		return fmt.Errorf("daemon-reload failed: %w", err)
+	if output, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+		return fmt.Errorf("daemon-reload failed: %w\n%s", err, string(output))
 	}
 
 	// Start the service
-	if err := exec.Command("systemctl", "start", "alpamon.service").Run(); err != nil {
-		return fmt.Errorf("start failed: %w", err)
+	if output, err := exec.Command("systemctl", "start", "alpamon.service").CombinedOutput(); err != nil {
+		return fmt.Errorf("start failed: %w\n%s", err, string(output))
 	}
 
 	// Enable the service
-	if err := exec.Command("systemctl", "enable", "alpamon.service").Run(); err != nil {
-		return fmt.Errorf("enable failed: %w", err)
+	if output, err := exec.Command("systemctl", "enable", "alpamon.service").CombinedOutput(); err != nil {
+		return fmt.Errorf("enable failed: %w\n%s", err, string(output))
 	}
 
 	fmt.Println("Alpamon service started and enabled.")
