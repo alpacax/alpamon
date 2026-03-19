@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -82,7 +83,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 	latestVersion := utils.GetLatestVersion()
 	if latestVersion == "" {
 		msg := "Failed to retrieve the latest Alpamon version from GitHub."
-		return 1, msg, fmt.Errorf("%s", msg)
+		return 1, msg, errors.New(msg)
 	}
 
 	needAlpamon := version.Version != latestVersion

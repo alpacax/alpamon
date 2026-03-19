@@ -25,6 +25,7 @@ var (
 func InvalidatePamCache() {
 	pamCacheMutex.Lock()
 	defer pamCacheMutex.Unlock()
+	pamCache = ""
 	pamCacheTime = time.Time{}
 }
 
