@@ -84,8 +84,12 @@ func init() {
 
 func runRegister(cmd *cobra.Command, args []string) error {
 	// 1. Check if config file already exists (prevent re-registration)
-	if _, err := os.Stat(configPath); err == nil {
-		return fmt.Errorf("config file already exists: %s\nServer is already registered. Delete the config file to re-register", configPath)
+	if info, err := os.Stat(configPath); err == nil {
+		if info.Size() > 0 {
+			return fmt.Errorf("config file already exists: %s\nServer is already registered. Delete the config file to re-register", configPath)
+		}
+		// Empty config file exists (likely created by systemd-tmpfiles) — will be cleaned up during registration
+		fmt.Printf("Note: Empty config file found at %s, will be overwritten\n", configPath)
 	}
 
 	// 2. Auto-detect server name from hostname if not provided
@@ -93,6 +97,10 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		hostname, err := os.Hostname()
 		if err != nil {
 			return fmt.Errorf("failed to get hostname: %w", err)
+		}
+		// Strip domain part for FQDN hostnames (e.g., "host.example.com" → "host")
+		if idx := strings.Index(hostname, "."); idx > 0 {
+			hostname = hostname[:idx]
 		}
 		serverName = hostname
 		fmt.Printf("Server name auto-detected: %s\n", serverName)
@@ -261,6 +269,13 @@ debug = false
 	// Create directory
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Remove empty config file left by systemd-tmpfiles if present
+	if info, err := os.Stat(configPath); err == nil && info.Size() == 0 {
+		if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove empty config file: %w", err)
+		}
 	}
 
 	// Create config file (fail if already exists)
