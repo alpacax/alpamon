@@ -29,6 +29,10 @@ func (c *Check) Execute(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	if len(metric.Data) == 0 {
+		return nil
+	}
+
 	buffer := c.GetBuffer()
 	buffer.SuccessQueue <- metric
 
@@ -41,6 +45,15 @@ func (c *Check) queryHourlyCPUUsage(ctx context.Context) (base.MetricData, error
 		return base.MetricData{}, err
 	}
 
+	err = c.deleteHourlyCPUUsage(ctx)
+	if err != nil {
+		return base.MetricData{}, err
+	}
+
+	if len(querySet) == 0 {
+		return base.MetricData{}, nil
+	}
+
 	data := base.CheckResult{
 		Timestamp: time.Now(),
 		Peak:      querySet[0].Max,
@@ -49,11 +62,6 @@ func (c *Check) queryHourlyCPUUsage(ctx context.Context) (base.MetricData, error
 	metric := base.MetricData{
 		Type: base.DailyCPUUsage,
 		Data: []base.CheckResult{data},
-	}
-
-	err = c.deleteHourlyCPUUsage(ctx)
-	if err != nil {
-		return base.MetricData{}, err
 	}
 
 	return metric, nil

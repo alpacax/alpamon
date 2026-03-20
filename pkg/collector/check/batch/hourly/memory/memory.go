@@ -29,6 +29,10 @@ func (c *Check) Execute(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	if len(metric.Data) == 0 {
+		return nil
+	}
+
 	buffer := c.GetBuffer()
 	buffer.SuccessQueue <- metric
 
@@ -39,6 +43,14 @@ func (c *Check) queryMemoryUsage(ctx context.Context) (base.MetricData, error) {
 	querySet, err := c.getMemory(ctx)
 	if err != nil {
 		return base.MetricData{}, err
+	}
+
+	if len(querySet) == 0 {
+		err = c.deleteMemory(ctx)
+		if err != nil {
+			return base.MetricData{}, err
+		}
+		return base.MetricData{}, nil
 	}
 
 	data := base.CheckResult{
