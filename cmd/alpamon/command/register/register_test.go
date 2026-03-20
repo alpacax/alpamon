@@ -176,6 +176,36 @@ func TestSendRegisterRequest_ServerError(t *testing.T) {
 	assert.Contains(t, err.Error(), "registration failed (status 400)")
 }
 
+func TestHostnameFQDNStripping(t *testing.T) {
+	tests := []struct {
+		name     string
+		hostname string
+		expected string
+	}{
+		{
+			name:     "FQDN is stripped to short hostname",
+			hostname: "host.example.com",
+			expected: "host",
+		},
+		{
+			name:     "short hostname unchanged",
+			hostname: "myserver",
+			expected: "myserver",
+		},
+		{
+			name:     "hostname with subdomain stripped",
+			hostname: "web01.dc1.example.com",
+			expected: "web01",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, normalizeHostname(tt.hostname))
+		})
+	}
+}
+
 func TestTagFlagParsing(t *testing.T) {
 	tests := []struct {
 		name         string
