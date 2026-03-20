@@ -34,7 +34,12 @@ func (c *CollectCheck) collectAndSaveDiskIO(ctx context.Context) error {
 		return err
 	}
 
-	err = c.saveDiskIO(c.parseDiskIO(ioCounters), ctx)
+	data := c.parseDiskIO(ioCounters)
+	if len(data) == 0 {
+		return nil
+	}
+
+	err = c.saveDiskIO(data, ctx)
 	if err != nil {
 		return err
 	}

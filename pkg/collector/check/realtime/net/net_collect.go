@@ -34,7 +34,12 @@ func (c *CollectCheck) collectAndSaveTraffic(ctx context.Context) error {
 		return err
 	}
 
-	err = c.saveTraffic(c.parseTraffic(ioCounters, interfaces), ctx)
+	data := c.parseTraffic(ioCounters, interfaces)
+	if len(data) == 0 {
+		return nil
+	}
+
+	err = c.saveTraffic(data, ctx)
 	if err != nil {
 		return err
 	}

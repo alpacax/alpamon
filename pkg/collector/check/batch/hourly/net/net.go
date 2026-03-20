@@ -29,6 +29,10 @@ func (c *Check) Execute(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	if len(metric.Data) == 0 {
+		return nil
+	}
+
 	buffer := c.GetBuffer()
 	buffer.SuccessQueue <- metric
 
@@ -56,17 +60,21 @@ func (c *Check) queryTraffic(ctx context.Context) (base.MetricData, error) {
 			AvgOutputBps:  row.AvgOutputBps,
 		})
 	}
+	err = c.deleteTraffic(ctx)
+	if err != nil {
+		return base.MetricData{}, err
+	}
+
+	if len(data) == 0 {
+		return base.MetricData{}, nil
+	}
+
 	metric := base.MetricData{
 		Type: base.HOURLY_NET,
 		Data: data,
 	}
 
 	err = c.saveHourlyTraffic(data, ctx)
-	if err != nil {
-		return base.MetricData{}, err
-	}
-
-	err = c.deleteTraffic(ctx)
 	if err != nil {
 		return base.MetricData{}, err
 	}
