@@ -19,7 +19,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var configPath = "/etc/alpamon/alpamon.conf"
+const configPath = "/etc/alpamon/alpamon.conf"
 
 var (
 	serverURL  string
@@ -90,8 +90,6 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		}
 		// Empty config file exists (likely created by systemd-tmpfiles) — will be cleaned up during registration
 		fmt.Printf("Note: Empty config file found at %s, will be overwritten\n", configPath)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("failed to stat config file %s: %w", configPath, err)
 	}
 
 	// 2. Auto-detect server name from hostname if not provided

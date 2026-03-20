@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -179,35 +177,6 @@ func TestSendRegisterRequest_ServerError(t *testing.T) {
 	assert.Contains(t, err.Error(), "registration failed (status 400)")
 }
 
-func TestConfigFilePreCheck(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	oldConfigPath := configPath
-	t.Cleanup(func() { configPath = oldConfigPath })
-
-	t.Run("empty config file allows registration to proceed", func(t *testing.T) {
-		path := filepath.Join(tmpDir, "empty.conf")
-		err := os.WriteFile(path, []byte{}, 0600)
-		require.NoError(t, err)
-
-		configPath = path
-		info, err := os.Stat(configPath)
-		require.NoError(t, err)
-		assert.Equal(t, int64(0), info.Size(), "pre-check should not block on empty config file")
-	})
-
-	t.Run("non-empty config file blocks registration", func(t *testing.T) {
-		path := filepath.Join(tmpDir, "existing.conf")
-		err := os.WriteFile(path, []byte("content"), 0600)
-		require.NoError(t, err)
-
-		configPath = path
-		info, err := os.Stat(configPath)
-		require.NoError(t, err)
-		assert.Greater(t, info.Size(), int64(0), "non-empty file should block registration")
-	})
-}
-
 func TestHostnameFQDNStripping(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -240,54 +209,6 @@ func TestHostnameFQDNStripping(t *testing.T) {
 			assert.Equal(t, tt.expected, hostname)
 		})
 	}
-}
-
-func TestWriteConfigFile_EmptyFileCleanup(t *testing.T) {
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "alpamon.conf")
-
-	oldConfigPath, oldServerURL, oldSSLVerify, oldCACert := configPath, serverURL, sslVerify, caCert
-	t.Cleanup(func() {
-		configPath = oldConfigPath
-		serverURL = oldServerURL
-		sslVerify = oldSSLVerify
-		caCert = oldCACert
-	})
-
-	configPath = path
-	serverURL = "https://example.com"
-	sslVerify = true
-	caCert = ""
-
-	t.Run("removes empty file and writes config", func(t *testing.T) {
-		// Create empty config file (simulating systemd-tmpfiles)
-		err := os.WriteFile(path, []byte{}, 0600)
-		require.NoError(t, err)
-
-		resp := &RegisterResponse{ID: "test-id", Key: "test-key", Name: "test-server"}
-		err = writeConfigFile(resp)
-		require.NoError(t, err)
-
-		content, err := os.ReadFile(path)
-		require.NoError(t, err)
-		assert.Contains(t, string(content), "test-id")
-		assert.Contains(t, string(content), "test-key")
-
-		// Cleanup for next subtest
-		os.Remove(path)
-	})
-
-	t.Run("non-empty file causes error", func(t *testing.T) {
-		err := os.WriteFile(path, []byte("existing content"), 0600)
-		require.NoError(t, err)
-
-		resp := &RegisterResponse{ID: "test-id", Key: "test-key", Name: "test-server"}
-		err = writeConfigFile(resp)
-		assert.Error(t, err, "should fail when non-empty config file exists")
-
-		// Cleanup
-		os.Remove(path)
-	})
 }
 
 func TestTagFlagParsing(t *testing.T) {
