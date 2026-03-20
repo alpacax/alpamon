@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/spf13/pflag"
@@ -202,11 +201,7 @@ func TestHostnameFQDNStripping(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hostname := tt.hostname
-			if idx := strings.Index(hostname, "."); idx > 0 {
-				hostname = hostname[:idx]
-			}
-			assert.Equal(t, tt.expected, hostname)
+			assert.Equal(t, tt.expected, normalizeHostname(tt.hostname))
 		})
 	}
 }

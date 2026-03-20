@@ -98,11 +98,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to get hostname: %w", err)
 		}
-		// Strip domain part for FQDN hostnames (e.g., "host.example.com" → "host")
-		if idx := strings.Index(hostname, "."); idx > 0 {
-			hostname = hostname[:idx]
-		}
-		serverName = hostname
+		serverName = normalizeHostname(hostname)
 		fmt.Printf("Server name auto-detected: %s\n", serverName)
 	}
 
@@ -151,6 +147,15 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	fmt.Printf("==========================================\n")
 
 	return nil
+}
+
+// normalizeHostname strips the domain part from FQDN hostnames
+// (e.g., "host.example.com" → "host").
+func normalizeHostname(hostname string) string {
+	if idx := strings.Index(hostname, "."); idx > 0 {
+		return hostname[:idx]
+	}
+	return hostname
 }
 
 func detectPlatform() string {
