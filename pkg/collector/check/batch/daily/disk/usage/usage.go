@@ -45,11 +45,6 @@ func (c *Check) queryHourlyDiskUsage(ctx context.Context) (base.MetricData, erro
 		return base.MetricData{}, err
 	}
 
-	err = c.deleteHourlyDiskUsage(ctx)
-	if err != nil {
-		return base.MetricData{}, err
-	}
-
 	var data []base.CheckResult
 	for _, row := range querySet {
 		data = append(data, base.CheckResult{
@@ -63,12 +58,17 @@ func (c *Check) queryHourlyDiskUsage(ctx context.Context) (base.MetricData, erro
 		})
 	}
 
+	err = c.deleteHourlyDiskUsage(ctx)
+	if err != nil {
+		return base.MetricData{}, err
+	}
+
 	if len(data) == 0 {
 		return base.MetricData{}, nil
 	}
 
 	metric := base.MetricData{
-		Type: base.DAILY_DISK_USAGE,
+		Type: base.DailyDiskUsage,
 		Data: data,
 	}
 

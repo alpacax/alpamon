@@ -60,21 +60,25 @@ func (c *Check) queryTraffic(ctx context.Context) (base.MetricData, error) {
 			AvgOutputBps:  row.AvgOutputBps,
 		})
 	}
-	err = c.deleteTraffic(ctx)
-	if err != nil {
-		return base.MetricData{}, err
-	}
-
 	if len(data) == 0 {
+		err = c.deleteTraffic(ctx)
+		if err != nil {
+			return base.MetricData{}, err
+		}
 		return base.MetricData{}, nil
 	}
 
 	metric := base.MetricData{
-		Type: base.HOURLY_NET,
+		Type: base.HourlyNet,
 		Data: data,
 	}
 
 	err = c.saveHourlyTraffic(data, ctx)
+	if err != nil {
+		return base.MetricData{}, err
+	}
+
+	err = c.deleteTraffic(ctx)
 	if err != nil {
 		return base.MetricData{}, err
 	}

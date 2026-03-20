@@ -45,11 +45,6 @@ func (c *Check) queryHourlyDiskIO(ctx context.Context) (base.MetricData, error) 
 		return base.MetricData{}, err
 	}
 
-	err = c.deleteHourlyDiskIO(ctx)
-	if err != nil {
-		return base.MetricData{}, err
-	}
-
 	var data []base.CheckResult
 	for _, row := range querySet {
 		data = append(data, base.CheckResult{
@@ -62,12 +57,17 @@ func (c *Check) queryHourlyDiskIO(ctx context.Context) (base.MetricData, error) 
 		})
 	}
 
+	err = c.deleteHourlyDiskIO(ctx)
+	if err != nil {
+		return base.MetricData{}, err
+	}
+
 	if len(data) == 0 {
 		return base.MetricData{}, nil
 	}
 
 	metric := base.MetricData{
-		Type: base.DAILY_DISK_IO,
+		Type: base.DailyDiskIO,
 		Data: data,
 	}
 

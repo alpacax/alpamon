@@ -56,21 +56,25 @@ func (c *Check) queryDiskIO(ctx context.Context) (base.MetricData, error) {
 			AvgReadBps:   row.AvgReadBps,
 		})
 	}
-	err = c.deleteDiskIO(ctx)
-	if err != nil {
-		return base.MetricData{}, err
-	}
-
 	if len(data) == 0 {
+		err = c.deleteDiskIO(ctx)
+		if err != nil {
+			return base.MetricData{}, err
+		}
 		return base.MetricData{}, nil
 	}
 
 	metric := base.MetricData{
-		Type: base.HOURLY_DISK_IO,
+		Type: base.HourlyDiskIO,
 		Data: data,
 	}
 
 	err = c.saveHourlyDiskIO(data, ctx)
+	if err != nil {
+		return base.MetricData{}, err
+	}
+
+	err = c.deleteDiskIO(ctx)
 	if err != nil {
 		return base.MetricData{}, err
 	}
