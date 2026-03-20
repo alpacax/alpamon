@@ -29,6 +29,10 @@ func (c *Check) Execute(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	if len(metric.Data) == 0 {
+		return nil
+	}
+
 	buffer := c.GetBuffer()
 	buffer.SuccessQueue <- metric
 
@@ -52,8 +56,16 @@ func (c *Check) queryDiskIO(ctx context.Context) (base.MetricData, error) {
 			AvgReadBps:   row.AvgReadBps,
 		})
 	}
+	if len(data) == 0 {
+		err = c.deleteDiskIO(ctx)
+		if err != nil {
+			return base.MetricData{}, err
+		}
+		return base.MetricData{}, nil
+	}
+
 	metric := base.MetricData{
-		Type: base.HOURLY_DISK_IO,
+		Type: base.HourlyDiskIO,
 		Data: data,
 	}
 

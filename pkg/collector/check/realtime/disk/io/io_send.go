@@ -23,6 +23,10 @@ func (c *SendCheck) Execute(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	if len(metric.Data) == 0 {
+		return nil
+	}
+
 	buffer := c.GetBuffer()
 	buffer.SuccessQueue <- metric
 
@@ -47,7 +51,7 @@ func (c *SendCheck) queryDiskIO(ctx context.Context) (base.MetricData, error) {
 		})
 	}
 	metric := base.MetricData{
-		Type: base.DISK_IO,
+		Type: base.DiskIO,
 		Data: data,
 	}
 

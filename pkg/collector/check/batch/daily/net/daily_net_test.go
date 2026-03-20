@@ -28,8 +28,8 @@ func (suite *DailyNetCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	args := &base.CheckArgs{
-		Type:     base.DAILY_NET,
-		Name:     string(base.DAILY_NET) + "_" + uuid.NewString(),
+		Type:     base.DailyNet,
+		Name:     string(base.DailyNet) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,

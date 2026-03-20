@@ -43,6 +43,10 @@ func NewTransporter(session *scheduler.Session, resolver *URLResolver) *Transpor
 }
 
 func (t *Transporter) Send(data base.MetricData) error {
+	if len(data.Data) == 0 {
+		return nil
+	}
+
 	url, err := t.resolver.ResolveURL(data.Type)
 	if err != nil {
 		return err

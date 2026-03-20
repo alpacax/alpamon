@@ -29,6 +29,10 @@ func (c *Check) Execute(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	if len(metric.Data) == 0 {
+		return nil
+	}
+
 	buffer := c.GetBuffer()
 	buffer.SuccessQueue <- metric
 
@@ -41,13 +45,21 @@ func (c *Check) queryMemoryUsage(ctx context.Context) (base.MetricData, error) {
 		return base.MetricData{}, err
 	}
 
+	if len(querySet) == 0 {
+		err = c.deleteMemory(ctx)
+		if err != nil {
+			return base.MetricData{}, err
+		}
+		return base.MetricData{}, nil
+	}
+
 	data := base.CheckResult{
 		Timestamp: time.Now(),
 		Peak:      querySet[0].Max,
 		Avg:       querySet[0].AVG,
 	}
 	metric := base.MetricData{
-		Type: base.HOURLY_MEM_USAGE,
+		Type: base.HourlyMemUsage,
 		Data: []base.CheckResult{data},
 	}
 

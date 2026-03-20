@@ -27,8 +27,8 @@ func (suite *DailyMemoryUsageCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	args := &base.CheckArgs{
-		Type:     base.DAILY_MEM_USAGE,
-		Name:     string(base.DAILY_MEM_USAGE) + "_" + uuid.NewString(),
+		Type:     base.DailyMemUsage,
+		Name:     string(base.DailyMemUsage) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,

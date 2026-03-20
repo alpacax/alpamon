@@ -28,8 +28,8 @@ func (suite *HourlyDiskUsageCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	args := &base.CheckArgs{
-		Type:     base.HOURLY_DISK_USAGE,
-		Name:     string(base.HOURLY_DISK_USAGE) + "_" + uuid.NewString(),
+		Type:     base.HourlyDiskUsage,
+		Name:     string(base.HourlyDiskUsage) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,

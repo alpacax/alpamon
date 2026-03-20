@@ -8,12 +8,12 @@ import (
 func NewCheck(args *base.CheckArgs) base.CheckStrategy {
 	var check base.CheckStrategy
 	switch args.Type {
-	case base.DISK_IO_COLLECTOR:
+	case base.DiskIOCollector:
 		check = &CollectCheck{
 			BaseCheck:  base.NewBaseCheck(args),
 			lastMetric: make(map[string]disk.IOCountersStat),
 		}
-	case base.DISK_IO:
+	case base.DiskIO:
 		check = &SendCheck{
 			BaseCheck: base.NewBaseCheck(args),
 		}

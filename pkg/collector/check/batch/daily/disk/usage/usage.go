@@ -29,6 +29,10 @@ func (c *Check) Execute(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	if len(metric.Data) == 0 {
+		return nil
+	}
+
 	buffer := c.GetBuffer()
 	buffer.SuccessQueue <- metric
 
@@ -53,14 +57,19 @@ func (c *Check) queryHourlyDiskUsage(ctx context.Context) (base.MetricData, erro
 			Used:      row.Used,
 		})
 	}
-	metric := base.MetricData{
-		Type: base.DAILY_DISK_USAGE,
-		Data: data,
-	}
 
 	err = c.deleteHourlyDiskUsage(ctx)
 	if err != nil {
 		return base.MetricData{}, err
+	}
+
+	if len(data) == 0 {
+		return base.MetricData{}, nil
+	}
+
+	metric := base.MetricData{
+		Type: base.DailyDiskUsage,
+		Data: data,
 	}
 
 	return metric, nil

@@ -28,8 +28,8 @@ func (suite *HourlyCPUUsageCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	args := &base.CheckArgs{
-		Type:     base.HOURLY_CPU_USAGE,
-		Name:     string(base.HOURLY_CPU_USAGE) + "_" + uuid.NewString(),
+		Type:     base.HourlyCPUUsage,
+		Name:     string(base.HourlyCPUUsage) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,
