@@ -86,7 +86,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	// 1. Check if config file already exists (prevent re-registration)
 	if info, err := os.Stat(configPath); err == nil {
 		if info.Size() > 0 {
-			return fmt.Errorf("config file already exists: %s\nServer is already registered. Delete the config file to re-register", configPath)
+			return fmt.Errorf("config file already exists: %s\nServer is already registered. To re-register, first unregister this server from the Alpacon console, then delete the config file and run register again", configPath)
 		}
 		// Empty config file exists (likely created by systemd-tmpfiles) — will be cleaned up during registration
 		fmt.Printf("Note: Empty config file found at %s, will be overwritten\n", configPath)
