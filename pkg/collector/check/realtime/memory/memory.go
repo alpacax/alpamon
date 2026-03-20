@@ -45,7 +45,7 @@ func (c *Check) collectAndSaveMemoryUsage(ctx context.Context) (base.MetricData,
 		Usage:     usage,
 	}
 	metric := base.MetricData{
-		Type: base.MEM,
+		Type: base.Mem,
 		Data: []base.CheckResult{data},
 	}
 

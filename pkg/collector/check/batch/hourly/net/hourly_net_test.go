@@ -28,8 +28,8 @@ func (suite *HourlyNetCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	args := &base.CheckArgs{
-		Type:     base.HOURLY_NET,
-		Name:     string(base.HOURLY_NET) + "_" + uuid.NewString(),
+		Type:     base.HourlyNet,
+		Name:     string(base.HourlyNet) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,

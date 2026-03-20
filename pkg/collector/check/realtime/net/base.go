@@ -8,12 +8,12 @@ import (
 func NewCheck(args *base.CheckArgs) base.CheckStrategy {
 	var check base.CheckStrategy
 	switch args.Type {
-	case base.NET_COLLECTOR:
+	case base.NetCollector:
 		check = &CollectCheck{
 			BaseCheck:  base.NewBaseCheck(args),
 			lastMetric: make(map[string]net.IOCountersStat),
 		}
-	case base.NET:
+	case base.Net:
 		check = &SendCheck{
 			BaseCheck: base.NewBaseCheck(args),
 		}

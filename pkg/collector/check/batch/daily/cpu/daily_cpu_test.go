@@ -27,8 +27,8 @@ func (suite *DailyCPUUsageCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	args := &base.CheckArgs{
-		Type:     base.DAILY_CPU_USAGE,
-		Name:     string(base.DAILY_CPU_USAGE) + "_" + uuid.NewString(),
+		Type:     base.DailyCPUUsage,
+		Name:     string(base.DailyCPUUsage) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,

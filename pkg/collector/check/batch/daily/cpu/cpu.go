@@ -47,7 +47,7 @@ func (c *Check) queryHourlyCPUUsage(ctx context.Context) (base.MetricData, error
 		Avg:       querySet[0].AVG,
 	}
 	metric := base.MetricData{
-		Type: base.DAILY_CPU_USAGE,
+		Type: base.DailyCPUUsage,
 		Data: []base.CheckResult{data},
 	}
 

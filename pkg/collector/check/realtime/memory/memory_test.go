@@ -27,8 +27,8 @@ func (suite *MemoryCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	args := &base.CheckArgs{
-		Type:     base.MEM,
-		Name:     string(base.MEM) + "_" + uuid.NewString(),
+		Type:     base.Mem,
+		Name:     string(base.Mem) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,

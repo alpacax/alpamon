@@ -55,7 +55,7 @@ func (c *SendCheck) queryTraffic(ctx context.Context) (base.MetricData, error) {
 		})
 	}
 	metric := base.MetricData{
-		Type: base.NET,
+		Type: base.Net,
 		Data: data,
 	}
 

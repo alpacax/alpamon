@@ -51,7 +51,7 @@ func (c *SendCheck) queryDiskIO(ctx context.Context) (base.MetricData, error) {
 		})
 	}
 	metric := base.MetricData{
-		Type: base.DISK_IO,
+		Type: base.DiskIO,
 		Data: data,
 	}
 

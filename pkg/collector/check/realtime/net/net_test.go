@@ -29,15 +29,15 @@ func (suite *NetCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	collect_args := &base.CheckArgs{
-		Type:     base.NET_COLLECTOR,
-		Name:     string(base.NET_COLLECTOR) + "_" + uuid.NewString(),
+		Type:     base.NetCollector,
+		Name:     string(base.NetCollector) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,
 	}
 	send_args := &base.CheckArgs{
-		Type:     base.NET,
-		Name:     string(base.NET) + "_" + uuid.NewString(),
+		Type:     base.Net,
+		Name:     string(base.Net) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,

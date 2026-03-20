@@ -47,7 +47,7 @@ func (c *Check) queryHourlyMemoryUsage(ctx context.Context) (base.MetricData, er
 		Avg:       querySet[0].AVG,
 	}
 	metric := base.MetricData{
-		Type: base.DAILY_MEM_USAGE,
+		Type: base.DailyMemUsage,
 		Data: []base.CheckResult{data},
 	}
 

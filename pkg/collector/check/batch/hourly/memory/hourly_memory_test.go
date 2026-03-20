@@ -28,8 +28,8 @@ func (suite *HourlyMemoryUsageCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	args := &base.CheckArgs{
-		Type:     base.HOURLY_MEM_USAGE,
-		Name:     string(base.HOURLY_MEM_USAGE) + "_" + uuid.NewString(),
+		Type:     base.HourlyMemUsage,
+		Name:     string(base.HourlyMemUsage) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,

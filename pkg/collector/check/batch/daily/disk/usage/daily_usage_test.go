@@ -27,8 +27,8 @@ func (suite *DailyDiskUsageCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	args := &base.CheckArgs{
-		Type:     base.DAILY_DISK_USAGE,
-		Name:     string(base.DAILY_DISK_USAGE) + "_" + uuid.NewString(),
+		Type:     base.DailyDiskUsage,
+		Name:     string(base.DailyDiskUsage) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,

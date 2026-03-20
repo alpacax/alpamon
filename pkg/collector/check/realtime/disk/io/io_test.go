@@ -29,15 +29,15 @@ func (suite *DiskIOCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
 	buffer := base.NewCheckBuffer(10)
 	collect_args := &base.CheckArgs{
-		Type:     base.DISK_IO_COLLECTOR,
-		Name:     string(base.DISK_IO_COLLECTOR) + "_" + uuid.NewString(),
+		Type:     base.DiskIOCollector,
+		Name:     string(base.DiskIOCollector) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,
 	}
 	send_args := &base.CheckArgs{
-		Type:     base.DISK_IO,
-		Name:     string(base.DISK_IO) + "_" + uuid.NewString(),
+		Type:     base.DiskIO,
+		Name:     string(base.DiskIO) + "_" + uuid.NewString(),
 		Interval: time.Duration(1 * time.Second),
 		Buffer:   buffer,
 		Client:   suite.client,

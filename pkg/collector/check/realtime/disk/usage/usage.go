@@ -53,7 +53,7 @@ func (c *Check) collectAndSaveDiskUsage(ctx context.Context) (base.MetricData, e
 	}
 
 	metric := base.MetricData{
-		Type: base.DISK_USAGE,
+		Type: base.DiskUsage,
 		Data: data,
 	}
 
