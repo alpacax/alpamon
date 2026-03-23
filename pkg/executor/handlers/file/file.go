@@ -48,17 +48,31 @@ func NewFileHandler(cmdExecutor common.CommandExecutor, apiSession common.APISes
 }
 
 // Execute runs the file transfer command
-func (h *FileHandler) Execute(_ context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+func (h *FileHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+	ctx, cancel := common.WithHandlerTimeout(ctx, common.FileTimeout)
+	defer cancel()
+
+	var code int
+	var message string
+
 	switch cmd {
 	case common.Upload.String():
-		code, message := h.handleUpload(args)
+		code, message = h.handleUpload(ctx, args)
 		h.statFileTransfer(code, download, message, args)
-		return code, message, nil
 	case common.Download.String():
-		return h.handleDownload(args)
+		var err error
+		code, message, err = h.handleDownload(ctx, args)
+		if err != nil {
+			return code, message, err
+		}
 	default:
 		return 1, "", fmt.Errorf("unknown file command: %s", cmd)
 	}
+
+	if common.IsTimeout(ctx) {
+		return common.TimeoutError(common.FileTimeout)
+	}
+	return code, message, nil
 }
 
 // Validate checks if the arguments are valid for the command
@@ -89,7 +103,7 @@ func (h *FileHandler) Validate(cmd string, args *common.CommandArgs) error {
 }
 
 // handleUpload handles the upload command
-func (h *FileHandler) handleUpload(args *common.CommandArgs) (int, string) {
+func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs) (int, string) {
 	log.Debug().
 		Str("username", args.Username).
 		Str("groupname", args.Groupname).
@@ -112,7 +126,7 @@ func (h *FileHandler) handleUpload(args *common.CommandArgs) (int, string) {
 		return 1, err.Error()
 	}
 
-	name, err := h.makeArchive(paths, bulk, recursive, sysProcAttr)
+	name, err := h.makeArchive(ctx, paths, bulk, recursive, sysProcAttr)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create archive")
 		return 1, err.Error()
@@ -123,10 +137,10 @@ func (h *FileHandler) handleUpload(args *common.CommandArgs) (int, string) {
 		defer func() { _ = os.Remove(name) }() // lgtm[go/path-injection]
 	}
 
-	cmd := exec.Command("cat", name)
-	cmd.SysProcAttr = sysProcAttr
+	catCmd := exec.CommandContext(ctx, "cat", name)
+	catCmd.SysProcAttr = sysProcAttr
 
-	output, err := cmd.Output()
+	output, err := catCmd.Output()
 	if err != nil {
 		log.Error().Err(err).Msgf("Failed to cat file: %s", output)
 		return 1, err.Error()
@@ -152,7 +166,7 @@ func (h *FileHandler) handleUpload(args *common.CommandArgs) (int, string) {
 }
 
 // handleDownload handles the download command
-func (h *FileHandler) handleDownload(args *common.CommandArgs) (int, string, error) {
+func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	log.Debug().
 		Str("username", args.Username).
 		Str("groupname", args.Groupname).
@@ -169,7 +183,7 @@ func (h *FileHandler) handleDownload(args *common.CommandArgs) (int, string, err
 	}
 
 	if len(args.Files) == 0 {
-		code, message = h.fileDownload(args, sysProcAttr)
+		code, message = h.fileDownload(ctx, args, sysProcAttr)
 		h.statFileTransfer(code, upload, message, args)
 	} else {
 		for _, file := range args.Files {
@@ -183,7 +197,7 @@ func (h *FileHandler) handleDownload(args *common.CommandArgs) (int, string, err
 				AllowUnzip:     file.AllowUnzip,
 				URL:            file.URL,
 			}
-			code, message = h.fileDownload(cmdArgs, sysProcAttr)
+			code, message = h.fileDownload(ctx, cmdArgs, sysProcAttr)
 			h.statFileTransfer(code, upload, message, cmdArgs)
 		}
 	}
@@ -196,7 +210,7 @@ func (h *FileHandler) handleDownload(args *common.CommandArgs) (int, string, err
 }
 
 // fileDownload handles single file download
-func (h *FileHandler) fileDownload(args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr) (int, string) {
+func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr) (int, string) {
 	var cmd *exec.Cmd
 	content, err := h.getFileData(args)
 	if err != nil {
@@ -216,9 +230,9 @@ func (h *FileHandler) fileDownload(args *common.CommandArgs, sysProcAttr *syscal
 			escapePath,
 			escapeDirPath,
 			escapePath)
-		cmd = exec.Command("sh", "-c", command)
+		cmd = exec.CommandContext(ctx, "sh", "-c", command)
 	} else {
-		cmd = exec.Command("sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(args.Path)))
+		cmd = exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(args.Path)))
 	}
 
 	cmd.SysProcAttr = sysProcAttr
@@ -292,7 +306,7 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 }
 
 // makeArchive creates a zip archive from the specified paths
-func (h *FileHandler) makeArchive(paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, error) {
+func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, error) {
 	var archiveName string
 	var cmd *exec.Cmd
 	path := paths[0]
@@ -305,14 +319,14 @@ func (h *FileHandler) makeArchive(paths []string, bulk, recursive bool, sysProcA
 			basePaths[i] = filepath.Base(p)
 		}
 
-		cmd = exec.Command("zip", "-r", archiveName)
+		cmd = exec.CommandContext(ctx, "zip", "-r", archiveName)
 		cmd.SysProcAttr = sysProcAttr
 		cmd.Args = append(cmd.Args, basePaths...)
 		cmd.Dir = dirPath
 	} else {
 		if recursive {
 			archiveName = path + ".zip"
-			cmd = exec.Command("zip", "-r", archiveName, filepath.Base(path))
+			cmd = exec.CommandContext(ctx, "zip", "-r", archiveName, filepath.Base(path))
 			cmd.SysProcAttr = sysProcAttr
 			cmd.Dir = filepath.Dir(path)
 		} else {

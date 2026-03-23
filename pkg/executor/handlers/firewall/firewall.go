@@ -81,6 +81,9 @@ func (h *FirewallHandler) getBackend(ctx context.Context) (FirewallBackend, erro
 
 // Execute runs the firewall management command
 func (h *FirewallHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+	ctx, cancel := common.WithHandlerTimeout(ctx, common.FirewallTimeout)
+	defer cancel()
+
 	// Check for high-level firewall tools
 	result := h.detector.Detect(ctx)
 	if result.HighLevel != HighLevelNone {
@@ -97,18 +100,24 @@ func (h *FirewallHandler) Execute(ctx context.Context, cmd string, args *common.
 		return 1, fmt.Sprintf("Failed to initialize firewall: %v", err), err
 	}
 
+	var exitCode int
+	var output string
+	var err error
+
 	switch cmd {
 	case common.FirewallCmd.String():
-		return h.handleFirewall(ctx, args)
+		exitCode, output, err = h.handleFirewall(ctx, args)
 	case common.FirewallRollback.String():
-		return h.handleFirewallRollback(ctx)
+		exitCode, output, err = h.handleFirewallRollback(ctx)
 	case common.FirewallReorderChains.String():
-		return h.handleFirewallReorderChains(ctx, args)
+		exitCode, output, err = h.handleFirewallReorderChains(ctx, args)
 	case common.FirewallReorderRules.String():
-		return h.handleFirewallReorderRules(ctx, args)
+		exitCode, output, err = h.handleFirewallReorderRules(ctx, args)
 	default:
 		return 1, "", fmt.Errorf("unknown firewall command: %s", cmd)
 	}
+
+	return exitCode, output, err
 }
 
 // Validate checks if the arguments are valid for the command
