@@ -32,7 +32,7 @@ const (
 	// Pool configuration defaults
 	DefaultPoolMaxWorkers     = 20
 	DefaultPoolQueueSize      = 200
-	DefaultPoolDefaultTimeout = 30
+	DefaultPoolDefaultTimeout = 3600 // 1 hour; safety net for handler-level timeouts
 
 	// Pool configuration limits for warnings
 	MaxReasonableWorkers        = 1000

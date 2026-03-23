@@ -9,7 +9,6 @@ import (
 
 	"github.com/alpacax/alpamon/internal/pool"
 	"github.com/alpacax/alpamon/pkg/agent"
-	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/alpacax/alpamon/pkg/version"
@@ -51,7 +50,7 @@ func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClie
 func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
 	switch cmd {
 	case common.Upgrade.String():
-		return h.handleUpgrade(ctx)
+		return h.withTimeout(ctx, common.UpgradeTimeout, h.handleUpgrade)
 	case common.Restart.String():
 		return h.handleRestart(args)
 	case common.Quit.String():
@@ -63,10 +62,17 @@ func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.Co
 	case common.Shutdown.String():
 		return h.handleShutdown()
 	case common.Update.String():
-		return h.handleSystemUpdate(ctx)
+		return h.withTimeout(ctx, common.UpgradeTimeout, h.handleSystemUpdate)
 	default:
 		return 1, "", fmt.Errorf("unknown system command: %s", cmd)
 	}
+}
+
+// withTimeout wraps a context-dependent handler method with a timeout.
+func (h *SystemHandler) withTimeout(ctx context.Context, timeout time.Duration, fn func(context.Context) (int, string, error)) (int, string, error) {
+	ctx, cancel := common.WithHandlerTimeout(ctx, timeout)
+	defer cancel()
+	return fn(ctx)
 }
 
 // Validate checks if the arguments are valid for the command
@@ -262,7 +268,7 @@ func (h *SystemHandler) handleReboot() (int, string, error) {
 	log.Info().Msg("Reboot request received.")
 
 	// Submit to worker pool for managed execution
-	poolCtx, cancel := h.ctxManager.NewContext(time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second)
+	poolCtx, cancel := h.ctxManager.NewContext(common.SystemCmdTimeout)
 	submitted := false
 	defer func() {
 		if !submitted {
@@ -290,7 +296,7 @@ func (h *SystemHandler) handleShutdown() (int, string, error) {
 	log.Info().Msg("Shutdown request received.")
 
 	// Submit to worker pool for managed execution
-	poolCtx, cancel := h.ctxManager.NewContext(time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second)
+	poolCtx, cancel := h.ctxManager.NewContext(common.SystemCmdTimeout)
 	submitted := false
 	defer func() {
 		if !submitted {

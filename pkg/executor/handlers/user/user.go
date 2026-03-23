@@ -41,6 +41,14 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 
 // Execute runs the user management command
 func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+	// deluser with home backup may take longer
+	timeout := common.UserTimeout
+	if cmd == common.DelUser.String() {
+		timeout = common.UserDeleteTimeout
+	}
+	ctx, cancel := common.WithHandlerTimeout(ctx, timeout)
+	defer cancel()
+
 	var exitCode int
 	var output string
 	var err error

@@ -34,6 +34,9 @@ func NewGroupHandler(cmdExecutor common.CommandExecutor, syncManager common.Syst
 
 // Execute runs the group management command
 func (h *GroupHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+	ctx, cancel := common.WithHandlerTimeout(ctx, common.GroupTimeout)
+	defer cancel()
+
 	var exitCode int
 	var output string
 	var err error

@@ -64,7 +64,7 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 
 	timeout := args.Timeout
 	if timeout == 0 {
-		timeout = 30 * time.Minute
+		timeout = common.ShellTimeout
 	}
 
 	log.Debug().
