@@ -63,6 +63,9 @@ func (h *FileHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 		var err error
 		code, message, err = h.handleDownload(ctx, args)
 		if err != nil {
+			if common.IsTimeout(ctx) {
+				return common.TimeoutError(common.FileTimeout)
+			}
 			return code, message, err
 		}
 	default:

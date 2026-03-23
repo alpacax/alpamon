@@ -25,8 +25,9 @@ const (
 const TimeoutExitCode = 124
 
 // WithHandlerTimeout wraps ctx with the given timeout and returns a
-// context, cancel func, and a helper that produces a standard timeout
-// error return (exit 124) when ctx.Err() == DeadlineExceeded.
+// context and cancel func. Use IsTimeout to check if the context
+// deadline was exceeded, and TimeoutError to produce a standard
+// timeout response (exit 124).
 func WithHandlerTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
 		return ctx, func() {}

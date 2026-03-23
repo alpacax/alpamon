@@ -34,10 +34,7 @@ func NewInfoHandler(infoManager common.SystemInfoManager) *InfoHandler {
 }
 
 // Execute runs the info command
-func (h *InfoHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
-	ctx, cancel := common.WithHandlerTimeout(ctx, common.InfoTimeout)
-	defer cancel()
-	_ = ctx // info commands are instant; timeout is a safety net
+func (h *InfoHandler) Execute(_ context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
 	switch cmd {
 	case common.Ping.String():
 		return h.handlePing()

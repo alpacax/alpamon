@@ -288,8 +288,12 @@ func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol
 	// Create CommandRunner with dispatcher for direct execution
 	commandRunner := NewCommandRunner(wc, wc.apiSession, command, data, wc.dispatcher)
 
-	// Each handler manages its own timeout; 1-hour safety net prevents leaked goroutines
-	ctx, cancel := wc.ctxManager.NewContext(1 * time.Hour)
+	// Each handler manages its own timeout; safety net prevents leaked goroutines
+	safetyTimeout := time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second
+	if safetyTimeout <= 0 {
+		safetyTimeout = 1 * time.Hour
+	}
+	ctx, cancel := wc.ctxManager.NewContext(safetyTimeout)
 
 	err := wc.pool.Submit(ctx, func() error {
 		defer cancel()
