@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -161,12 +162,12 @@ func (am *AuthManager) Start(ctx context.Context) {
 
 func (am *AuthManager) startSocketListener(ctx context.Context) error {
 	const socketPath = "/var/run/alpamon/auth.sock"
-	const socketDir = "/var/run/alpamon"
+	socketDir := filepath.Dir(socketPath)
 
 	// Ensure socket directory exists as a fallback when systemd-tmpfiles
 	// has not run yet (e.g., service restart after package upgrade without reboot).
 	if err := os.MkdirAll(socketDir, 0750); err != nil {
-		return fmt.Errorf("failed to create socket directory: %w", err)
+		return fmt.Errorf("failed to create socket directory %q: %w", socketDir, err)
 	}
 
 	if _, err := os.Stat(socketPath); err == nil {
