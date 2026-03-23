@@ -65,7 +65,7 @@ func (s *singleRowSyncer[T]) syncWith(session *scheduler.Session) {
 	case http.StatusOK:
 		var remote T
 		if err := json.Unmarshal(resp, &remote); err != nil {
-			log.Error().Err(err).Msg("Failed to unmarshal remote data.")
+			log.Error().Err(err).Msgf("Failed to unmarshal remote data for %s.", s.key)
 			return
 		}
 		compareData(entry, current, remote)
@@ -105,7 +105,7 @@ func (s *multiRowSyncer[T]) syncWith(session *scheduler.Session) {
 	case http.StatusOK:
 		var remote []T
 		if err := json.Unmarshal(resp, &remote); err != nil {
-			log.Error().Err(err).Msg("Failed to unmarshal remote data.")
+			log.Error().Err(err).Msgf("Failed to unmarshal remote data for %s.", s.key)
 			return
 		}
 		compareListData(entry, current, remote)
@@ -162,5 +162,7 @@ func assignToCommitData(data *commitData, key string, result any) {
 		data.Disks = result.([]Disk)
 	case "partitions":
 		data.Partitions = result.([]Partition)
+	default:
+		log.Error().Str("key", key).Msg("unknown sync key in assignToCommitData")
 	}
 }
