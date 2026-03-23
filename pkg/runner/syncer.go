@@ -57,16 +57,17 @@ func (s *singleRowSyncer[T]) syncWith(session *scheduler.Session) {
 
 	entry := s.Def()
 	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10)
-	if statusCode == http.StatusOK {
+	switch statusCode {
+	case http.StatusOK:
 		var remote T
 		if err := json.Unmarshal(resp, &remote); err != nil {
 			log.Error().Err(err).Msg("Failed to unmarshal remote data.")
 			return
 		}
 		compareData(entry, current, remote)
-	} else if statusCode == http.StatusNotFound {
+	case http.StatusNotFound:
 		compareData(entry, current, nil)
-	} else {
+	default:
 		log.Error().Err(err).Msgf("HTTP %d: Failed to get data for %s.", statusCode, s.key)
 	}
 }
@@ -92,16 +93,17 @@ func (s *multiRowSyncer[T]) syncWith(session *scheduler.Session) {
 
 	entry := s.Def()
 	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10)
-	if statusCode == http.StatusOK {
+	switch statusCode {
+	case http.StatusOK:
 		var remote []T
 		if err := json.Unmarshal(resp, &remote); err != nil {
 			log.Error().Err(err).Msg("Failed to unmarshal remote data.")
 			return
 		}
 		compareListData(entry, current, remote)
-	} else if statusCode == http.StatusNotFound {
+	case http.StatusNotFound:
 		compareListData(entry, current, nil)
-	} else {
+	default:
 		log.Error().Err(err).Msgf("HTTP %d: Failed to get data for %s.", statusCode, s.key)
 	}
 }
