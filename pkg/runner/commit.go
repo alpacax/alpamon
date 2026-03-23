@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -65,7 +66,16 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			}
 		}()
 	} else {
-		go CommitSystemInfo()
+		go func() {
+			ctx := ctxManager.Root()
+			jitter := time.Duration(rand.IntN(31)) * time.Second
+			select {
+			case <-time.After(jitter):
+				CommitSystemInfo()
+			case <-ctx.Done():
+				log.Debug().Msg("Skipping commitSystemInfo due to shutdown")
+			}
+		}()
 	}
 }
 
@@ -100,119 +110,51 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 
 	fullSync := len(keys) == 0
 	if fullSync {
-		for key := range commitDefs {
-			keys = append(keys, key)
-		}
+		keys = allSyncKeys()
 	}
 
 	for _, key := range keys {
-		var currentData, remoteData any
-		var err error
-
-		entry, exists := commitDefs[key]
-		if !exists {
-			continue
-		}
-
 		switch key {
 		case "server":
-			loadAvg, err := getLoadAverage()
-			if err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve load average.")
-			}
-			currentData = &ServerData{
-				Version:    version.Version,
-				PamVersion: utils.GetPamVersion(),
-				Load:       loadAvg,
-			}
-			scheduler.Rqueue.Patch(utils.JoinPath(entry.URL, entry.URLSuffix), currentData, 80, time.Time{})
-			continue
-		case "info":
-			if currentData, err = getSystemData(); err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve system info.")
-			}
-			remoteData = &SystemData{}
-		case "os":
-			if currentData, err = getOsData(); err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve os info.")
-			}
-			remoteData = &OSData{}
-		case "time":
-			if currentData, err = getTimeData(); err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve time info.")
-			}
-			remoteData = &TimeData{}
-		case "groups":
-			if currentData, err = getGroupData(); err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve group info.")
-			}
-			remoteData = &[]GroupData{}
-		case "users":
-			if currentData, err = getUserData(); err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve user info.")
-			}
-			remoteData = &[]UserData{}
-		case "interfaces":
-			if currentData, err = getNetworkInterfaces(); err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve network interfaces.")
-			}
-			remoteData = &[]Interface{}
-		case "addresses":
-			if currentData, err = getNetworkAddresses(); err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve network addresses.")
-			}
-			remoteData = &[]Address{}
-		case "disks":
-			if currentData, err = getDisks(); err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve disks.")
-			}
-			remoteData = &[]Disk{}
-		case "partitions":
-			if currentData, err = getPartitions(); err != nil {
-				log.Debug().Err(err).Msg("Failed to retrieve partitions.")
-			}
-			remoteData = &[]Partition{}
+			syncServerData(session)
 		case "firewall":
-			// Firewall sync only posts current rules without comparison
-			// Skip if firewall functionality is disabled
-			// Note: Full firewall sync is handled by FirewallHandler in executor package
-			if utils.IsFirewallDisabled() {
-				log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
-				continue
-			}
-			log.Debug().Msg("Firewall sync delegated to executor FirewallHandler")
-			continue
+			syncFirewallData()
 		default:
-			log.Warn().Msgf("Unknown key: %s", key)
-			continue
-		}
-
-		resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10)
-		if statusCode == http.StatusOK {
-			err = json.Unmarshal(resp, &remoteData)
-			if err != nil {
-				log.Error().Err(err).Msg("Failed to unmarshal remote data.")
-				continue
+			if s, ok := syncerMap[key]; ok {
+				s.syncWith(session)
+			} else {
+				log.Warn().Msgf("Unknown key: %s", key)
 			}
-		} else if statusCode == http.StatusNotFound {
-			remoteData = nil
-		} else {
-			log.Error().Err(err).Msgf("HTTP %d: Failed to get data for %s.", statusCode, key)
-			continue
-		}
-
-		if entry.MultiRow {
-			dispatchComparison(entry, currentData, remoteData)
-		} else {
-			compareData(entry, currentData.(ComparableData), remoteData.(ComparableData))
 		}
 	}
-	// Sync access policy (e.g., block_local_sudo) only during full sync
+
 	if fullSync {
 		syncAccessPolicy(session)
 	}
 
 	log.Info().Msg("Completed system information synchronization.")
+}
+
+func syncServerData(session *scheduler.Session) {
+	loadAvg, err := getLoadAverage()
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed to retrieve load average.")
+	}
+	entry := commitDefs["server"]
+	data := &ServerData{
+		Version:    version.Version,
+		PamVersion: utils.GetPamVersion(),
+		Load:       loadAvg,
+	}
+	scheduler.Rqueue.Patch(utils.JoinPath(entry.URL, entry.URLSuffix), data, 80, time.Time{})
+}
+
+func syncFirewallData() {
+	if utils.IsFirewallDisabled() {
+		log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
+		return
+	}
+	log.Debug().Msg("Firewall sync delegated to executor FirewallHandler")
 }
 
 func syncAccessPolicy(session *scheduler.Session) {
@@ -289,41 +231,24 @@ func compareListData[T ComparableData](entry commitDef, currentData, remoteData 
 }
 
 func collectData() *commitData {
-	data := &commitData{}
+	data := &commitData{
+		Version:    version.Version,
+		PamVersion: utils.GetPamVersion(),
+	}
 
-	var err error
-	data.Version = version.Version
-	data.PamVersion = utils.GetPamVersion()
-
-	if data.Load, err = getLoadAverage(); err != nil {
+	if load, err := getLoadAverage(); err == nil {
+		data.Load = load
+	} else {
 		log.Debug().Err(err).Msg("Failed to retrieve load average.")
 	}
-	if data.Info, err = getSystemData(); err != nil {
-		log.Debug().Err(err).Msg("Failed to retrieve system info.")
-	}
-	if data.OS, err = getOsData(); err != nil {
-		log.Debug().Err(err).Msg("Failed to retrieve os info.")
-	}
-	if data.Time, err = getTimeData(); err != nil {
-		log.Debug().Err(err).Msg("Failed to retrieve time data.")
-	}
-	if data.Users, err = getUserData(); err != nil {
-		log.Debug().Err(err).Msg("Failed to retrieve user data.")
-	}
-	if data.Groups, err = getGroupData(); err != nil {
-		log.Debug().Err(err).Msg("Failed to retrieve group data.")
-	}
-	if data.Interfaces, err = getNetworkInterfaces(); err != nil {
-		log.Debug().Err(err).Msg("Failed to retrieve network interfaces.")
-	}
-	if data.Addresses, err = getNetworkAddresses(); err != nil {
-		log.Debug().Err(err).Msg("Failed to retrieve network addresses.")
-	}
-	if data.Disks, err = getDisks(); err != nil {
-		log.Debug().Err(err).Msg("Failed to retrieve disks.")
-	}
-	if data.Partitions, err = getPartitions(); err != nil {
-		log.Debug().Err(err).Msg("Failed to retrieve disk partitions.")
+
+	for _, s := range syncers {
+		result, err := s.Collect()
+		if err != nil {
+			log.Debug().Err(err).Msgf("Failed to collect %s data.", s.Key())
+			continue
+		}
+		assignToCommitData(data, s.Key(), result)
 	}
 
 	return data
@@ -769,19 +694,3 @@ func getPartitions() ([]Partition, error) {
 	return partitionList, nil
 }
 
-func dispatchComparison(entry commitDef, currentData, remoteData any) {
-	switch v := remoteData.(type) {
-	case *[]GroupData:
-		compareListData(entry, currentData.([]GroupData), *v)
-	case *[]UserData:
-		compareListData(entry, currentData.([]UserData), *v)
-	case *[]Interface:
-		compareListData(entry, currentData.([]Interface), *v)
-	case *[]Address:
-		compareListData(entry, currentData.([]Address), *v)
-	case *[]Disk:
-		compareListData(entry, currentData.([]Disk), *v)
-	case *[]Partition:
-		compareListData(entry, currentData.([]Partition), *v)
-	}
-}
