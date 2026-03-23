@@ -71,6 +71,8 @@ func (s *singleRowSyncer[T]) syncWith(session *scheduler.Session) {
 		compareData(entry, current, remote)
 	case http.StatusNotFound:
 		compareData(entry, current, nil)
+	default:
+		log.Error().Msgf("Unexpected HTTP %d when syncing %s.", statusCode, s.key)
 	}
 }
 
@@ -109,6 +111,8 @@ func (s *multiRowSyncer[T]) syncWith(session *scheduler.Session) {
 		compareListData(entry, current, remote)
 	case http.StatusNotFound:
 		compareListData(entry, current, nil)
+	default:
+		log.Error().Msgf("Unexpected HTTP %d when syncing %s.", statusCode, s.key)
 	}
 }
 
@@ -116,7 +120,11 @@ func (s *multiRowSyncer[T]) syncWith(session *scheduler.Session) {
 var syncerMap = func() map[string]syncable {
 	m := make(map[string]syncable, len(syncers))
 	for _, s := range syncers {
-		m[s.Key()] = s
+		key := s.Key()
+		if _, exists := m[key]; exists {
+			log.Fatal().Str("key", key).Msg("duplicate syncer key registered")
+		}
+		m[key] = s
 	}
 	return m
 }()
