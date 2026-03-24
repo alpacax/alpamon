@@ -2,6 +2,7 @@
 
 ALPAMON_BIN="/usr/local/bin/alpamon"
 TEMPLATE_FILE="/etc/alpamon/alpamon.config.tmpl"
+SYSTEMD_AVAILABLE=true
 
 main() {
   check_root_permission
@@ -9,12 +10,21 @@ main() {
   check_alpamon_binary
 
   if is_upgrade "$@"; then
-    restart_alpamon_by_timer
+    if [ "$SYSTEMD_AVAILABLE" = "true" ]; then
+      restart_alpamon_by_timer
+    else
+      restart_alpamon_process
+    fi
   else
     # setup_alpamon returns 1 if ENV not set (generic installation)
     # In that case, skip start_systemd_service - user will run 'alpamon register'
     if setup_alpamon; then
-      start_systemd_service
+      if [ "$SYSTEMD_AVAILABLE" = "true" ]; then
+        start_systemd_service
+      else
+        create_directories
+        start_alpamon_process
+      fi
     fi
   fi
 
@@ -30,9 +40,25 @@ check_root_permission() {
 
 check_systemd_status() {
   if ! command -v systemctl &> /dev/null; then
-    echo "Error: systemctl is required but could not be found. Please ensure systemd is installed and systemctl is available."
-    exit 1
+    echo "Notice: systemd is not available. Skipping systemd service setup."
+    echo "Alpamon will need to be started manually or via a container entrypoint."
+    SYSTEMD_AVAILABLE=false
+    return
   fi
+  # Detect containers that install systemctl but don't run systemd as init
+  if [ -f /proc/1/comm ] && [ "$(cat /proc/1/comm)" != "systemd" ]; then
+    echo "Notice: systemd is installed but not running as init. Skipping service setup."
+    SYSTEMD_AVAILABLE=false
+    return
+  fi
+}
+
+# Create required directories matching configs/tmpfile.conf
+# and pkg/utils/systemd.go:alpamonDirs. Keep all three in sync.
+create_directories() {
+  mkdir -p /etc/alpamon /var/lib/alpamon /var/log/alpamon /run/alpamon
+  chmod 0700 /etc/alpamon
+  chmod 0750 /var/lib/alpamon /var/log/alpamon /run/alpamon
 }
 
 check_alpamon_binary() {
@@ -56,6 +82,22 @@ setup_alpamon() {
     echo "Error: Alpamon setup command failed."
     exit 1
   fi
+}
+
+start_alpamon_process() {
+  local log_file="/var/log/alpamon/alpamon.log"
+  echo "Starting Alpamon as a background process..."
+  nohup "$ALPAMON_BIN" >>"$log_file" 2>&1 &
+  echo "Alpamon started (PID: $!)."
+  echo "Logs: $log_file"
+}
+
+restart_alpamon_process() {
+  echo "Restarting Alpamon process for upgrade..."
+  pkill -x alpamon 2>/dev/null || true
+  sleep 1
+  create_directories
+  start_alpamon_process
 }
 
 start_systemd_service() {
@@ -87,7 +129,7 @@ cleanup_tmpl_files() {
   fi
 }
 
-# debain
+# debian
 # Initial installation: $1 == configure
 # Upgrade: $1 == configure, $2 == old version
 
