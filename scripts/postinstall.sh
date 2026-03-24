@@ -41,13 +41,17 @@ check_root_permission() {
 check_systemd_status() {
   if ! command -v systemctl &> /dev/null; then
     echo "Notice: systemd is not available. Skipping systemd service setup."
-    echo "Alpamon will need to be started manually or via a container entrypoint."
     SYSTEMD_AVAILABLE=false
     return
   fi
   # Require positive confirmation that PID 1 is systemd.
   # Treat missing/unreadable /proc/1/comm as "no systemd" to align with utils.HasSystemd().
-  if [ ! -f /proc/1/comm ] || [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
+  # Use -r (readable) to avoid set -e exit on unreadable files.
+  local pid1_comm=""
+  if [ -r /proc/1/comm ]; then
+    pid1_comm=$(cat /proc/1/comm 2>/dev/null) || true
+  fi
+  if [ "$pid1_comm" != "systemd" ]; then
     echo "Notice: systemd is not running as init. Skipping service setup."
     SYSTEMD_AVAILABLE=false
     return
