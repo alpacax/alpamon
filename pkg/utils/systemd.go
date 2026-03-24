@@ -56,7 +56,8 @@ var alpamonDirs = []struct {
 	{"/run/alpamon", 0750},
 }
 
-// EnsureDirectories creates required alpamon directories.
+// EnsureDirectories creates required alpamon directories with permissions
+// and root:root ownership matching configs/tmpfile.conf.
 // Replaces systemd-tmpfiles when systemd is unavailable.
 func EnsureDirectories() error {
 	return ensureDirectoriesWithRoot("")
@@ -70,6 +71,13 @@ func ensureDirectoriesWithRoot(root string) error {
 		}
 		if err := os.Chmod(path, d.Mode); err != nil {
 			return fmt.Errorf("failed to set permissions on %s: %w", path, err)
+		}
+		// Enforce root:root ownership to match tmpfile.conf.
+		// Skip in tests (non-empty root) where we may not be running as root.
+		if root == "" {
+			if err := os.Chown(path, 0, 0); err != nil {
+				return fmt.Errorf("failed to set ownership on %s: %w", path, err)
+			}
 		}
 	}
 	return nil

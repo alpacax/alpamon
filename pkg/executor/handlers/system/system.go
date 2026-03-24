@@ -260,10 +260,12 @@ func (h *SystemHandler) executeUninstall() {
 			_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
 		}
 	} else {
-		// Defer the uninstall so the process can shut down cleanly first
-		deferredCmd := fmt.Sprintf("sleep 5 && %s", cmd)
+		// Defer the uninstall so the process can shut down cleanly first.
+		// Use a shell that starts the actual uninstall in the background
+		// so that RunAsUser (which uses CombinedOutput) does not block on it.
+		deferredCmd := fmt.Sprintf("nohup sh -c 'sleep 5 && %s' >/dev/null 2>&1 &", cmd)
 		log.Info().Msg("Systemd not available, scheduling deferred uninstall.")
-		_, _, _ = h.Executor.RunAsUser(ctx, "root", "nohup", "sh", "-c", deferredCmd)
+		_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", deferredCmd)
 	}
 
 	// Shutdown the process after scheduling
