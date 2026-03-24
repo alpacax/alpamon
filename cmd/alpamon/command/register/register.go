@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/template"
@@ -345,6 +346,11 @@ func startService() error {
 		}
 
 		fmt.Println("Alpamon service started and enabled.")
+		return nil
+	}
+
+	// On non-Linux platforms (e.g., macOS development), skip auto-start
+	if runtime.GOOS != "linux" {
 		return nil
 	}
 
