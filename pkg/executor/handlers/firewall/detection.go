@@ -129,7 +129,7 @@ func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLeve
 		// Check ufw via systemctl (most reliable)
 		exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "ufw")
 		if exitCode == 0 && strings.TrimSpace(output) == "active" {
-			log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
+			log.Info().Msg("Detected active ufw firewall - Alpacon firewall management will be disabled")
 			return HighLevelUFW
 		}
 	}
@@ -137,7 +137,7 @@ func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLeve
 	// Check ufw via direct command
 	exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "ufw", "status")
 	if exitCode == 0 && strings.Contains(strings.ToLower(output), "status: active") {
-		log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
+		log.Info().Msg("Detected active ufw firewall - Alpacon firewall management will be disabled")
 		return HighLevelUFW
 	}
 
@@ -145,7 +145,7 @@ func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLeve
 		// Check firewalld via systemctl
 		exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "firewalld")
 		if exitCode == 0 && strings.TrimSpace(output) == "active" {
-			log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
+			log.Info().Msg("Detected active firewalld - Alpacon firewall management will be disabled")
 			return HighLevelFirewalld
 		}
 	}
@@ -153,11 +153,11 @@ func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLeve
 	// Check firewalld via firewall-cmd
 	exitCode, output, _ = d.executor.RunWithTimeout(ctx, 5*time.Second, "firewall-cmd", "--state")
 	if exitCode == 0 && strings.Contains(strings.ToLower(output), "running") {
-		log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
+		log.Info().Msg("Detected active firewalld - Alpacon firewall management will be disabled")
 		return HighLevelFirewalld
 	}
 
-	log.Debug().Msg("No high-level firewall detected - alpacon firewall management enabled")
+	log.Debug().Msg("No high-level firewall detected - Alpacon firewall management enabled")
 	return HighLevelNone
 }
 

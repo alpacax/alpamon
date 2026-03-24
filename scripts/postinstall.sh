@@ -60,7 +60,9 @@ create_directories() {
   mkdir -p $alpamon_dirs
   chmod 0700 /etc/alpamon
   chmod 0750 /var/lib/alpamon /var/log/alpamon /run/alpamon
-  chown root:root $alpamon_dirs 2>/dev/null || true
+  if ! chown root:root $alpamon_dirs; then
+    echo "Warning: Failed to set ownership to root:root for Alpamon directories: $alpamon_dirs" >&2
+  fi
 }
 
 check_alpamon_binary() {
