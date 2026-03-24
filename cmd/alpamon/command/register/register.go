@@ -12,14 +12,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/spf13/cobra"
 )
 
-const configPath = "/etc/alpamon/alpamon.conf"
+const (
+	alpamonBinPath = "/usr/local/bin/alpamon"
+	configPath     = "/etc/alpamon/alpamon.conf"
+	logPath        = "/var/log/alpamon/alpamon.log"
+)
 
 var (
 	serverURL  string
@@ -128,16 +134,26 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
 
-	// 7. Start systemd service
-	fmt.Println("\nStarting alpamon service...")
-	if err := startSystemdService(); err != nil {
-		fmt.Printf("Warning: Failed to start service: %v\n", err)
-		fmt.Println("Please start the service manually:")
-		fmt.Println("  sudo systemctl start alpamon")
-		fmt.Println("  sudo systemctl enable alpamon")
+	// 7. Create required directories
+	if err := ensureDirectories(); err != nil {
+		fmt.Printf("Warning: Failed to create directories: %v\n", err)
 	}
 
-	// 8. Success message
+	// 8. Start service
+	fmt.Println("\nStarting alpamon service...")
+	if err := startService(); err != nil {
+		fmt.Printf("Warning: Failed to start service: %v\n", err)
+		if utils.HasSystemd() {
+			fmt.Println("Please start the service manually:")
+			fmt.Println("  sudo systemctl start alpamon")
+			fmt.Println("  sudo systemctl enable alpamon")
+		} else {
+			fmt.Println("Please start alpamon manually:")
+			fmt.Println("  /usr/local/bin/alpamon")
+		}
+	}
+
+	// 9. Success message
 	fmt.Printf("\n==========================================\n")
 	fmt.Printf("Server registered successfully!\n")
 	fmt.Printf("==========================================\n")
@@ -304,27 +320,52 @@ debug = false
 	})
 }
 
-func startSystemdService() error {
-	// Create required directories via systemd-tmpfiles
-	if output, err := exec.Command("systemd-tmpfiles", "--create", "alpamon.conf").CombinedOutput(); err != nil {
-		return fmt.Errorf("tmpfiles creation failed: %w\n%s", err, string(output))
+func ensureDirectories() error {
+	if utils.HasSystemd() {
+		if output, err := exec.Command("systemd-tmpfiles", "--create", "alpamon.conf").CombinedOutput(); err != nil {
+			return fmt.Errorf("tmpfiles creation failed: %w\n%s", err, string(output))
+		}
+		return nil
+	}
+	return utils.EnsureDirectories()
+}
+
+func startService() error {
+	if utils.HasSystemd() {
+		if output, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+			return fmt.Errorf("daemon-reload failed: %w\n%s", err, string(output))
+		}
+
+		if output, err := exec.Command("systemctl", "start", "alpamon.service").CombinedOutput(); err != nil {
+			return fmt.Errorf("start failed: %w\n%s", err, string(output))
+		}
+
+		if output, err := exec.Command("systemctl", "enable", "alpamon.service").CombinedOutput(); err != nil {
+			return fmt.Errorf("enable failed: %w\n%s", err, string(output))
+		}
+
+		fmt.Println("Alpamon service started and enabled.")
+		return nil
 	}
 
-	// Reload systemd daemon
-	if output, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
-		return fmt.Errorf("daemon-reload failed: %w\n%s", err, string(output))
+	// Start alpamon as a background process (containers without systemd)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
+	if err != nil {
+		return fmt.Errorf("failed to open log file %s: %w", logPath, err)
 	}
 
-	// Start the service
-	if output, err := exec.Command("systemctl", "start", "alpamon.service").CombinedOutput(); err != nil {
-		return fmt.Errorf("start failed: %w\n%s", err, string(output))
+	cmd := exec.Command(alpamonBinPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return fmt.Errorf("failed to start alpamon process: %w", err)
 	}
+	// logFile is inherited by the child process; closing here does not affect the child
+	_ = logFile.Close()
 
-	// Enable the service
-	if output, err := exec.Command("systemctl", "enable", "alpamon.service").CombinedOutput(); err != nil {
-		return fmt.Errorf("enable failed: %w\n%s", err, string(output))
-	}
-
-	fmt.Println("Alpamon service started and enabled.")
+	fmt.Printf("Alpamon started (PID: %d).\n", cmd.Process.Pid)
+	fmt.Printf("Logs: %s\n", logPath)
 	return nil
 }
