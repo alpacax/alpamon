@@ -58,7 +58,7 @@ func (s *singleRowSyncer[T]) syncWith(session *scheduler.Session) {
 	entry := s.Def()
 	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10)
 	if err != nil {
-		log.Error().Err(err).Msgf("HTTP %d: Failed to get data for %s.", statusCode, s.key)
+		log.Error().Err(err).Msgf("Failed to get data for %s.", s.key)
 		return
 	}
 	switch statusCode {
@@ -98,7 +98,7 @@ func (s *multiRowSyncer[T]) syncWith(session *scheduler.Session) {
 	entry := s.Def()
 	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10)
 	if err != nil {
-		log.Error().Err(err).Msgf("HTTP %d: Failed to get data for %s.", statusCode, s.key)
+		log.Error().Err(err).Msgf("Failed to get data for %s.", s.key)
 		return
 	}
 	switch statusCode {

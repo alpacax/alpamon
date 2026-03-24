@@ -37,6 +37,11 @@ const (
 	shellsFilePath = "/etc/shells"
 	shadowFilePath = "/etc/shadow"
 
+	// maxCommitJitterSeconds is the upper bound (exclusive) for random commit
+	// delay when uncommissioned servers register, distributing N simultaneous
+	// IaC-provisioned commits over a 0-30 second window.
+	maxCommitJitterSeconds = 31
+
 	IFF_UP          = 1 << 0 // Interface is up
 	IFF_LOOPBACK    = 1 << 3 // Loopback interface
 	IFF_POINTOPOINT = 1 << 4 // Point-to-point link
@@ -67,7 +72,7 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 	} else {
 		go func() {
 			ctx := ctxManager.Root()
-			jitter := time.Duration(rand.IntN(31)) * time.Second
+			jitter := time.Duration(rand.IntN(maxCommitJitterSeconds)) * time.Second
 			select {
 			case <-time.After(jitter):
 				CommitSystemInfo()
