@@ -45,9 +45,10 @@ check_systemd_status() {
     SYSTEMD_AVAILABLE=false
     return
   fi
-  # Detect containers that install systemctl but don't run systemd as init
-  if [ -f /proc/1/comm ] && [ "$(cat /proc/1/comm)" != "systemd" ]; then
-    echo "Notice: systemd is installed but not running as init. Skipping service setup."
+  # Require positive confirmation that PID 1 is systemd.
+  # Treat missing/unreadable /proc/1/comm as "no systemd" to align with utils.HasSystemd().
+  if [ ! -f /proc/1/comm ] || [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
+    echo "Notice: systemd is not running as init. Skipping service setup."
     SYSTEMD_AVAILABLE=false
     return
   fi

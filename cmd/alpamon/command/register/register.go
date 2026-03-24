@@ -371,7 +371,11 @@ func startService() error {
 	// logFile is inherited by the child process; closing here does not affect the child
 	_ = logFile.Close()
 
-	fmt.Printf("Alpamon started (PID: %d).\n", cmd.Process.Pid)
+	pid := cmd.Process.Pid
+	// Release OS resources for the detached child process
+	_ = cmd.Process.Release()
+
+	fmt.Printf("Alpamon started (PID: %d).\n", pid)
 	fmt.Printf("Logs: %s\n", logPath)
 	return nil
 }
