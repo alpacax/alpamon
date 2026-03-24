@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
@@ -122,28 +123,32 @@ func (d *FirewallDetector) GetBackendType() BackendType {
 
 // detectHighLevelFirewall detects if high-level firewall management tools are active
 func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLevelFirewall {
-	// Check ufw via systemctl (most reliable)
-	exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "ufw")
-	if exitCode == 0 && strings.TrimSpace(output) == "active" {
-		log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
-		return HighLevelUFW
+	if utils.HasSystemd() {
+		// Check ufw via systemctl (most reliable)
+		exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "ufw")
+		if exitCode == 0 && strings.TrimSpace(output) == "active" {
+			log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
+			return HighLevelUFW
+		}
 	}
 
-	// Fallback: Check ufw via direct command
-	exitCode, output, _ = d.executor.RunWithTimeout(ctx, 5*time.Second, "ufw", "status")
+	// Check ufw via direct command
+	exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "ufw", "status")
 	if exitCode == 0 && strings.Contains(strings.ToLower(output), "status: active") {
 		log.Info().Msg("Detected active ufw firewall - alpacon firewall management will be disabled")
 		return HighLevelUFW
 	}
 
-	// Check firewalld via systemctl
-	exitCode, output, _ = d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "firewalld")
-	if exitCode == 0 && strings.TrimSpace(output) == "active" {
-		log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
-		return HighLevelFirewalld
+	if utils.HasSystemd() {
+		// Check firewalld via systemctl
+		exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "firewalld")
+		if exitCode == 0 && strings.TrimSpace(output) == "active" {
+			log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
+			return HighLevelFirewalld
+		}
 	}
 
-	// Fallback: Check firewalld via firewall-cmd
+	// Check firewalld via firewall-cmd
 	exitCode, output, _ = d.executor.RunWithTimeout(ctx, 5*time.Second, "firewall-cmd", "--state")
 	if exitCode == 0 && strings.Contains(strings.ToLower(output), "running") {
 		log.Info().Msg("Detected active firewalld - alpacon firewall management will be disabled")
