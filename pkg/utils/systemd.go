@@ -23,13 +23,6 @@ func HasSystemd() bool {
 	return systemdAvailable
 }
 
-// resetSystemdCacheForTesting resets the cached detection result.
-// This must only be called from tests.
-func resetSystemdCacheForTesting() {
-	systemdOnce = sync.Once{}
-	systemdAvailable = false
-}
-
 func detectSystemd() bool {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return false

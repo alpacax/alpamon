@@ -4,8 +4,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 )
+
+// resetSystemdCacheForTesting resets the cached detection result.
+func resetSystemdCacheForTesting() {
+	systemdOnce = sync.Once{}
+	systemdAvailable = false
+}
 
 func TestDetectSystemd_Darwin(t *testing.T) {
 	if runtime.GOOS != "darwin" {
