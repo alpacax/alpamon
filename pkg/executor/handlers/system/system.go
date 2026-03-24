@@ -230,33 +230,40 @@ func (h *SystemHandler) executeUninstall() {
 		return
 	}
 
-	// Build the complete uninstall command that includes:
-	// 1. Package removal
-	// 2. Cleanup of transient systemd units created by this operation
-	uninstallCmd := fmt.Sprintf("%s; systemctl reset-failed alpamon-uninstall.service 2>/dev/null || true; systemctl reset-failed alpamon-uninstall.timer 2>/dev/null || true", cmd)
-
-	// This ensures the uninstall continues even after the current process terminates
-	// The service will start 5 seconds after being scheduled
-	// --collect: Automatically clean up transient units after they complete (systemd 236+)
-	scheduleCmdArgs := []string{
-		"systemd-run",
-		"--collect",
-		"--uid=0",
-		"--gid=0",
-		"--unit=alpamon-uninstall",
-		"--timer-property=OnActiveSec=5",
-		"--timer-property=AccuracySec=1s",
-		"--description=Alpamon Uninstall Service",
-		"/bin/sh", "-c", uninstallCmd,
-	}
-
 	ctx := context.Background()
-	exitCode, output, _ := h.Executor.RunWithTimeout(ctx, 30*time.Second, scheduleCmdArgs[0], scheduleCmdArgs[1:]...)
 
-	if exitCode != 0 {
-		log.Error().Msgf("Failed to schedule uninstall: %s", output)
-		// Fallback to direct execution
-		_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
+	if utils.HasSystemd() {
+		// Build the complete uninstall command that includes:
+		// 1. Package removal
+		// 2. Cleanup of transient systemd units created by this operation
+		uninstallCmd := fmt.Sprintf("%s; systemctl reset-failed alpamon-uninstall.service 2>/dev/null || true; systemctl reset-failed alpamon-uninstall.timer 2>/dev/null || true", cmd)
+
+		// This ensures the uninstall continues even after the current process terminates
+		// The service will start 5 seconds after being scheduled
+		// --collect: Automatically clean up transient units after they complete (systemd 236+)
+		scheduleCmdArgs := []string{
+			"systemd-run",
+			"--collect",
+			"--uid=0",
+			"--gid=0",
+			"--unit=alpamon-uninstall",
+			"--timer-property=OnActiveSec=5",
+			"--timer-property=AccuracySec=1s",
+			"--description=Alpamon Uninstall Service",
+			"/bin/sh", "-c", uninstallCmd,
+		}
+
+		exitCode, output, _ := h.Executor.RunWithTimeout(ctx, 30*time.Second, scheduleCmdArgs[0], scheduleCmdArgs[1:]...)
+
+		if exitCode != 0 {
+			log.Error().Msgf("Failed to schedule uninstall: %s", output)
+			_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
+		}
+	} else {
+		// Defer the uninstall so the process can shut down cleanly first
+		deferredCmd := fmt.Sprintf("sleep 5 && %s", cmd)
+		log.Info().Msg("Systemd not available, scheduling deferred uninstall.")
+		_, _, _ = h.Executor.RunAsUser(ctx, "root", "nohup", "sh", "-c", deferredCmd)
 	}
 
 	// Shutdown the process after scheduling
