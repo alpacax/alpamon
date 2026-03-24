@@ -123,7 +123,9 @@ func (d *FirewallDetector) GetBackendType() BackendType {
 
 // detectHighLevelFirewall detects if high-level firewall management tools are active
 func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLevelFirewall {
-	if utils.HasSystemd() {
+	hasSystemd := utils.HasSystemd()
+
+	if hasSystemd {
 		// Check ufw via systemctl (most reliable)
 		exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "ufw")
 		if exitCode == 0 && strings.TrimSpace(output) == "active" {
@@ -139,7 +141,7 @@ func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLeve
 		return HighLevelUFW
 	}
 
-	if utils.HasSystemd() {
+	if hasSystemd {
 		// Check firewalld via systemctl
 		exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "firewalld")
 		if exitCode == 0 && strings.TrimSpace(output) == "active" {

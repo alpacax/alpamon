@@ -23,9 +23,9 @@ func HasSystemd() bool {
 	return systemdAvailable
 }
 
-// ResetSystemdCacheForTesting resets the cached detection result.
+// resetSystemdCacheForTesting resets the cached detection result.
 // This must only be called from tests.
-func ResetSystemdCacheForTesting() {
+func resetSystemdCacheForTesting() {
 	systemdOnce = sync.Once{}
 	systemdAvailable = false
 }

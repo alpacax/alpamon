@@ -56,9 +56,11 @@ check_systemd_status() {
 # Create required directories matching configs/tmpfile.conf
 # and pkg/utils/systemd.go:alpamonDirs. Keep all three in sync.
 create_directories() {
-  mkdir -p /etc/alpamon /var/lib/alpamon /var/log/alpamon /run/alpamon
+  alpamon_dirs="/etc/alpamon /var/lib/alpamon /var/log/alpamon /run/alpamon"
+  mkdir -p $alpamon_dirs
   chmod 0700 /etc/alpamon
   chmod 0750 /var/lib/alpamon /var/log/alpamon /run/alpamon
+  chown root:root $alpamon_dirs 2>/dev/null || true
 }
 
 check_alpamon_binary() {
