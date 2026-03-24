@@ -276,6 +276,55 @@ func TestCompareUserDataDetectRealChanges(t *testing.T) {
 		"ShadowExpireDate change should be detected")
 }
 
+func TestTimeDataGetComparableData(t *testing.T) {
+	timeData := TimeData{
+		ID:       "test-id",
+		Datetime: "2024-01-01T00:00:00Z",
+		BootTime: 1704067200,
+		Timezone: "Asia/Seoul",
+		Uptime:   86400,
+	}
+
+	// GetData should include Datetime, Timezone, and Uptime (for transmission)
+	data := timeData.GetData().(TimeData)
+	assert.Equal(t, "2024-01-01T00:00:00Z", data.Datetime)
+	assert.Equal(t, "Asia/Seoul", data.Timezone)
+	assert.Equal(t, uint64(86400), data.Uptime)
+
+	// GetComparableData should only include Timezone (for comparison)
+	comparable := timeData.GetComparableData().(TimeData)
+	assert.Equal(t, "Asia/Seoul", comparable.Timezone)
+	assert.Empty(t, comparable.Datetime, "GetComparableData should exclude Datetime")
+	assert.Equal(t, uint64(0), comparable.Uptime, "GetComparableData should exclude Uptime")
+}
+
+func TestTimeDataComparisonIgnoresDatetime(t *testing.T) {
+	// Two TimeData with same timezone but different datetime/uptime
+	time1 := TimeData{
+		Datetime: "2024-01-01T00:00:00Z",
+		Timezone: "Asia/Seoul",
+		Uptime:   86400,
+	}
+	time2 := TimeData{
+		Datetime: "2024-01-01T01:00:00Z",
+		Timezone: "Asia/Seoul",
+		Uptime:   90000,
+	}
+
+	// Comparable data should be equal (only Timezone matters)
+	assert.Equal(t, time1.GetComparableData(), time2.GetComparableData(),
+		"Same timezone with different datetime/uptime should be equal for comparison")
+
+	// Different timezone should be detected
+	time3 := TimeData{
+		Datetime: "2024-01-01T00:00:00Z",
+		Timezone: "US/Pacific",
+		Uptime:   86400,
+	}
+	assert.NotEqual(t, time1.GetComparableData(), time3.GetComparableData(),
+		"Different timezone should be detected")
+}
+
 func TestOtherTypesGetComparableData(t *testing.T) {
 	// For other types, GetComparableData should return same as GetData
 
@@ -295,3 +344,43 @@ func TestOtherTypesGetComparableData(t *testing.T) {
 	ifaceData := Interface{Name: "eth0", Mac: "00:00:00:00:00:00"}
 	assert.Equal(t, ifaceData.GetData(), ifaceData.GetComparableData())
 }
+
+func TestSyncers(t *testing.T) {
+	expectedKeys := []string{
+		"info", "os", "time", "users", "groups",
+		"interfaces", "addresses", "disks", "partitions",
+	}
+
+	assert.Len(t, syncers, len(expectedKeys), "Should have 9 syncers")
+
+	// Verify all keys are present and unique
+	seen := make(map[string]bool)
+	for _, s := range syncers {
+		key := s.Key()
+		assert.False(t, seen[key], "Duplicate syncer key: %s", key)
+		seen[key] = true
+		assert.Contains(t, expectedKeys, key, "Unexpected syncer key: %s", key)
+
+		// Verify Def() returns a valid commitDef
+		def := s.Def()
+		assert.NotEmpty(t, def.URL, "Syncer %s should have a URL", key)
+		assert.NotEmpty(t, def.URLSuffix, "Syncer %s should have a URLSuffix", key)
+	}
+
+	for _, expected := range expectedKeys {
+		assert.True(t, seen[expected], "Missing syncer for key: %s", expected)
+	}
+}
+
+func TestSyncerCollect(t *testing.T) {
+	for _, s := range syncers {
+		// Collect may fail in certain environments (e.g., limited procfs or permissions in CI).
+		// This test verifies that all syncers are wired correctly and Collect can be invoked.
+		result, err := s.Collect()
+		if err != nil {
+			t.Logf("Collect returned error for %s: %v (allowed in this test)", s.Key(), err)
+		}
+		_ = result
+	}
+}
+

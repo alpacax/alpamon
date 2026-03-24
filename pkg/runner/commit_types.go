@@ -1,64 +1,52 @@
 package runner
 
 type commitDef struct {
-	MultiRow  bool   `json:"multirow"`
 	URL       string `json:"url"`
 	URLSuffix string `json:"url_suffix"`
 }
 
 var commitDefs = map[string]commitDef{
 	"server": {
-		MultiRow:  false,
 		URL:       "/api/servers/servers/",
 		URLSuffix: "-/sync/",
 	},
 	"info": {
-		MultiRow:  false,
 		URL:       "/api/proc/info/",
 		URLSuffix: "-/sync/",
 	},
 	"os": {
-		MultiRow:  false,
 		URL:       "/api/proc/os/",
 		URLSuffix: "-/sync/",
 	},
 	"time": {
-		MultiRow:  false,
 		URL:       "/api/proc/time/",
 		URLSuffix: "-/sync/",
 	},
 	"groups": {
-		MultiRow:  true,
 		URL:       "/api/proc/groups/",
 		URLSuffix: "sync/",
 	},
 	"users": {
-		MultiRow:  true,
 		URL:       "/api/proc/users/",
 		URLSuffix: "sync/",
 	},
 	"interfaces": {
-		MultiRow:  true,
 		URL:       "/api/proc/interfaces/",
 		URLSuffix: "sync/",
 	},
 	"addresses": {
-		MultiRow:  true,
 		URL:       "/api/proc/addresses/",
 		URLSuffix: "sync/",
 	},
 	"disks": {
-		MultiRow:  true,
 		URL:       "/api/proc/disks/",
 		URLSuffix: "sync/",
 	},
 	"partitions": {
-		MultiRow:  true,
 		URL:       "/api/proc/partitions/",
 		URLSuffix: "sync/",
 	},
 	"firewall": {
-		MultiRow:  false,
 		URL:       "/api/firewall/agent/",
 		URLSuffix: "sync/",
 	},
@@ -261,7 +249,7 @@ func (t TimeData) GetData() ComparableData {
 }
 
 func (t TimeData) GetComparableData() ComparableData {
-	return t.GetData()
+	return TimeData{Timezone: t.Timezone}
 }
 
 func (u UserData) GetID() string {
