@@ -95,6 +95,11 @@ setup_alpamon() {
 
 start_alpamon_process() {
   local log_file="/var/log/alpamon/alpamon.log"
+  # Create log file with restrictive permissions (0640) to match register.go behavior
+  if [ ! -e "$log_file" ]; then
+    touch "$log_file"
+    chmod 0640 "$log_file" 2>/dev/null || true
+  fi
   echo "Starting Alpamon as a background process..."
   nohup "$ALPAMON_BIN" >>"$log_file" 2>&1 &
   echo "Alpamon started (PID: $!)."
