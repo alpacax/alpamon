@@ -137,7 +137,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 
 	// 7. Create required directories
 	if err := ensureDirectories(); err != nil {
-		fmt.Printf("Warning: Failed to create directories: %v\n", err)
+		return fmt.Errorf("failed to create directories: %w", err)
 	}
 
 	// 8. Start service
@@ -372,7 +372,10 @@ func startService() error {
 	_ = logFile.Close()
 
 	pid := cmd.Process.Pid
-	// Release OS resources for the detached child process
+	// Release OS resources for the detached child process.
+	// When the register process exits, the child is reparented to PID 1.
+	// In containers without a proper init (no zombie reaping), this could
+	// leave zombies. Most container runtimes use tini or --init by default.
 	_ = cmd.Process.Release()
 
 	fmt.Printf("Alpamon started (PID: %d).\n", pid)
