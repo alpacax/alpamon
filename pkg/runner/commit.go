@@ -745,6 +745,9 @@ func getDisks() ([]Disk, error) {
 		})
 	}
 
+	slices.SortFunc(disks, func(a, b Disk) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return disks, nil
 }
 
@@ -779,7 +782,9 @@ func getPartitions() ([]Partition, error) {
 	for _, partition := range seen {
 		partitionList = append(partitionList, partition)
 	}
-
+	slices.SortFunc(partitionList, func(a, b Partition) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return partitionList, nil
 }
 
