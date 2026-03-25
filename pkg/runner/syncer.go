@@ -63,7 +63,10 @@ func (s *singleRowSyncer[T]) Collect() (any, error) { return s.collect() }
 func (s *singleRowSyncer[T]) Def() commitDef { return commitDefs[s.key] }
 
 func (s *singleRowSyncer[T]) ComputeHash(data any) string {
-	typed := data.(T)
+	typed, ok := data.(T)
+	if !ok {
+		return ""
+	}
 	if s.hashTransform != nil {
 		return computeFingerprint(s.hashTransform(typed))
 	}
@@ -71,7 +74,11 @@ func (s *singleRowSyncer[T]) ComputeHash(data any) string {
 }
 
 func (s *singleRowSyncer[T]) syncData(session *scheduler.Session, data any) {
-	current := data.(T)
+	current, ok := data.(T)
+	if !ok {
+		log.Error().Msgf("Invalid data type for %s, skipping sync.", s.key)
+		return
+	}
 	entry := s.Def()
 	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10)
 	if err != nil {
@@ -110,7 +117,11 @@ func (s *multiRowSyncer[T]) ComputeHash(data any) string {
 }
 
 func (s *multiRowSyncer[T]) syncData(session *scheduler.Session, data any) {
-	current := data.([]T)
+	current, ok := data.([]T)
+	if !ok {
+		log.Error().Msgf("Invalid data type for %s, skipping sync.", s.key)
+		return
+	}
 	entry := s.Def()
 	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10)
 	if err != nil {

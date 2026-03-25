@@ -125,8 +125,13 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 	// Step 2 & 3: check hashes with server and sync changed categories.
 	if !snap.empty() {
 		for _, key := range syncRequiredKeys(session, snap) {
+			data, exists := snap.data[key]
+			if !exists {
+				log.Warn().Str("key", key).Msg("Server requested sync for uncollected category, skipping.")
+				continue
+			}
 			if s, ok := syncerMap[key]; ok {
-				s.syncData(session, snap.data[key])
+				s.syncData(session, data)
 			}
 		}
 	}
@@ -204,8 +209,21 @@ func syncRequiredKeys(session *scheduler.Session, snap syncSnapshot) []string {
 				required = append(required, s.Key())
 			}
 		}
+		return required
 	}
-	return required
+
+	// Normalize server-provided keys to the deterministic syncers registration order.
+	requiredSet := make(map[string]struct{}, len(required))
+	for _, key := range required {
+		requiredSet[key] = struct{}{}
+	}
+	normalized := make([]string, 0, len(required))
+	for _, s := range syncers {
+		if _, ok := requiredSet[s.Key()]; ok {
+			normalized = append(normalized, s.Key())
+		}
+	}
+	return normalized
 }
 
 // checkSyncHashes sends per-category data hashes to the server and returns the
@@ -219,7 +237,11 @@ func checkSyncHashes(session *scheduler.Session, hashes map[string]string) ([]st
 		return nil, fmt.Errorf("sync-check request failed: %w", err)
 	}
 	if statusCode != http.StatusOK {
-		return nil, fmt.Errorf("sync-check returned HTTP %d", statusCode)
+		body := string(resp)
+		if len(body) > 256 {
+			body = body[:256]
+		}
+		return nil, fmt.Errorf("sync-check returned HTTP %d: %s", statusCode, body)
 	}
 
 	var result struct {
