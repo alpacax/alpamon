@@ -130,9 +130,12 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 				log.Warn().Str("key", key).Msg("Server requested sync for uncollected category, skipping.")
 				continue
 			}
-			if s, ok := syncerMap[key]; ok {
-				s.syncData(session, data)
+			s, ok := syncerMap[key]
+			if !ok {
+				log.Warn().Str("key", key).Msg("Server returned unknown sync category, skipping.")
+				continue
 			}
+			s.syncData(session, data)
 		}
 	}
 
