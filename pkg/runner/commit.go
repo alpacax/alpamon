@@ -255,11 +255,11 @@ func checkSyncHashes(session *scheduler.Session, hashes map[string]string) ([]st
 		return nil, fmt.Errorf("sync-check request failed: %w", err)
 	}
 	if statusCode != http.StatusOK {
-		body := string(resp)
-		if len(body) > 256 {
-			body = body[:256]
+		snippet := resp
+		if len(snippet) > 256 {
+			snippet = snippet[:256]
 		}
-		return nil, fmt.Errorf("sync-check returned HTTP %d: %s", statusCode, body)
+		return nil, fmt.Errorf("sync-check returned HTTP %d: %s", statusCode, snippet)
 	}
 
 	var result struct {
