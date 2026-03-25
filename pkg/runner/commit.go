@@ -116,6 +116,17 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 
 	fullSync := len(keys) == 0
 
+	// Warn about unknown keys from caller (e.g., info sync command).
+	if !fullSync {
+		for _, key := range keys {
+			if key != "server" && key != "firewall" {
+				if _, ok := syncerMap[key]; !ok {
+					log.Warn().Str("key", key).Msg("Unknown sync key requested, ignoring.")
+				}
+			}
+		}
+	}
+
 	// server is always synced unconditionally (not hashed).
 	syncServerData(session)
 
@@ -224,7 +235,11 @@ func syncRequiredKeys(session *scheduler.Session, snap syncSnapshot) []string {
 	for _, s := range syncers {
 		if _, ok := requiredSet[s.Key()]; ok {
 			normalized = append(normalized, s.Key())
+			delete(requiredSet, s.Key())
 		}
+	}
+	for key := range requiredSet {
+		log.Warn().Str("key", key).Msg("Server returned unknown sync category, ignoring.")
 	}
 	return normalized
 }
