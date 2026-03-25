@@ -32,7 +32,7 @@ const (
 	commitURL       = "/api/servers/servers/-/commit/"
 	eventURL        = "/api/events/events/"
 	accessPolicyURL = "/api/servers/servers/-/access-policy/"
-	syncCheckURL = "/api/servers/servers/-/sync-check/"
+	syncCheckURL    = "/api/servers/servers/-/sync-check/"
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
@@ -780,6 +780,7 @@ func getPartitions() ([]Partition, error) {
 
 	var partitionList []Partition
 	for _, partition := range seen {
+		slices.Sort(partition.MountPoints)
 		partitionList = append(partitionList, partition)
 	}
 	slices.SortFunc(partitionList, func(a, b Partition) int {

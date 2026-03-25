@@ -65,6 +65,7 @@ func (s *singleRowSyncer[T]) Def() commitDef { return commitDefs[s.key] }
 func (s *singleRowSyncer[T]) ComputeHash(data any) string {
 	typed, ok := data.(T)
 	if !ok {
+		log.Debug().Str("key", s.key).Msg("Unexpected data type in ComputeHash, forcing sync.")
 		return ""
 	}
 	if s.hashTransform != nil {
