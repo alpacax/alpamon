@@ -101,7 +101,10 @@ start_alpamon_process() {
     chmod 0640 "$log_file" 2>/dev/null || true
   fi
   echo "Starting Alpamon as a background process..."
-  nohup "$ALPAMON_BIN" >>"$log_file" 2>&1 &
+  # Trap SIGHUP to prevent the child from being killed when the
+  # postinstall script (and its parent shell session) exits.
+  # Uses exec to replace the subshell with alpamon directly.
+  (trap '' HUP; exec "$ALPAMON_BIN" >>"$log_file" 2>&1) &
   echo "Alpamon started (PID: $!)."
   echo "Logs: $log_file"
 }
@@ -109,7 +112,17 @@ start_alpamon_process() {
 restart_alpamon_process() {
   echo "Restarting Alpamon process for upgrade..."
   pkill -x alpamon 2>/dev/null || true
-  sleep 1
+  # Wait for graceful shutdown, then force-kill if still running
+  local i=0
+  while [ $i -lt 5 ] && pgrep -x alpamon >/dev/null 2>&1; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if pgrep -x alpamon >/dev/null 2>&1; then
+    echo "Warning: Alpamon did not shut down within 5 seconds, force-killing." >&2
+    pkill -9 -x alpamon 2>/dev/null || true
+    sleep 1
+  fi
   create_directories
   start_alpamon_process
 }
