@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ const (
 	commitURL       = "/api/servers/servers/-/commit/"
 	eventURL        = "/api/events/events/"
 	accessPolicyURL = "/api/servers/servers/-/access-policy/"
+	syncCheckURL = "/api/servers/servers/-/sync-check/"
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
@@ -113,23 +115,25 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 	defer syncMutex.Unlock()
 
 	fullSync := len(keys) == 0
-	if fullSync {
-		keys = allSyncKeys()
-	}
 
-	for _, key := range keys {
-		switch key {
-		case "server":
-			syncServerData(session)
-		case "firewall":
-			syncFirewallData()
-		default:
+	// server is always synced unconditionally (not hashed).
+	syncServerData(session)
+
+	// Step 1: collect data and compute hashes for data categories.
+	snap := collectSnapshot(keys)
+
+	// Step 2 & 3: check hashes with server and sync changed categories.
+	if !snap.empty() {
+		for _, key := range syncRequiredKeys(session, snap) {
 			if s, ok := syncerMap[key]; ok {
-				s.syncWith(session)
-			} else {
-				log.Warn().Msgf("Unknown key: %s", key)
+				s.syncData(session, snap.data[key])
 			}
 		}
+	}
+
+	// firewall is always synced separately (not hashed).
+	if fullSync || slices.Contains(keys, "firewall") {
+		syncFirewallData()
 	}
 
 	if fullSync {
@@ -185,6 +189,47 @@ func syncAccessPolicy(session *scheduler.Session) {
 	if authManager != nil {
 		authManager.UpdateBlockLocalSudo(accessPolicy.BlockLocalSudo)
 	}
+}
+
+// syncRequiredKeys sends hashes to the server and returns the list of categories
+// that need syncing. On server error, falls back to all collected categories
+// in the original syncers registration order for predictable behavior.
+func syncRequiredKeys(session *scheduler.Session, snap syncSnapshot) []string {
+	required, err := checkSyncHashes(session, snap.hashes)
+	if err != nil {
+		log.Debug().Err(err).Msg("Sync-check failed, falling back to full sync.")
+		required = make([]string, 0, len(snap.data))
+		for _, s := range syncers {
+			if _, ok := snap.data[s.Key()]; ok {
+				required = append(required, s.Key())
+			}
+		}
+	}
+	return required
+}
+
+// checkSyncHashes sends per-category data hashes to the server and returns the
+// list of categories that need syncing. On error (old server returning 404,
+// network failure, etc.), the caller should fall back to syncing all categories.
+func checkSyncHashes(session *scheduler.Session, hashes map[string]string) ([]string, error) {
+	payload := map[string]any{"hashes": hashes}
+
+	resp, statusCode, err := session.Post(syncCheckURL, payload, 10)
+	if err != nil {
+		return nil, fmt.Errorf("sync-check request failed: %w", err)
+	}
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("sync-check returned HTTP %d", statusCode)
+	}
+
+	var result struct {
+		SyncRequired []string `json:"sync_required"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("sync-check response parse failed: %w", err)
+	}
+
+	return result.SyncRequired, nil
 }
 
 func compareData(entry commitDef, currentData, remoteData ComparableData) {

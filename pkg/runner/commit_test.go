@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -382,5 +383,77 @@ func TestSyncerCollect(t *testing.T) {
 		}
 		_ = result
 	}
+}
+
+func TestComputeFingerprint(t *testing.T) {
+	data := map[string]string{"key": "value"}
+	hash := computeFingerprint(data)
+
+	assert.True(t, strings.HasPrefix(hash, "sha256:"), "Hash should have sha256: prefix")
+	assert.Len(t, hash, 7+64, "sha256: prefix (7) + 64 hex chars")
+
+	// Determinism: same input produces same hash
+	hash2 := computeFingerprint(data)
+	assert.Equal(t, hash, hash2, "Same input should produce same hash")
+
+	// Different input produces different hash
+	hash3 := computeFingerprint(map[string]string{"key": "other"})
+	assert.NotEqual(t, hash, hash3, "Different input should produce different hash")
+}
+
+func TestComputeFingerprintEmptyOnError(t *testing.T) {
+	// Channels cannot be marshaled to JSON
+	hash := computeFingerprint(make(chan int))
+	assert.Equal(t, "", hash, "Should return empty string on marshal error")
+}
+
+func TestSyncerComputeHash(t *testing.T) {
+	for _, s := range syncers {
+		result, err := s.Collect()
+		if err != nil {
+			t.Logf("Collect returned error for %s: %v (skipping hash test)", s.Key(), err)
+			continue
+		}
+		hash := s.ComputeHash(result)
+		assert.True(t, strings.HasPrefix(hash, "sha256:"),
+			"Syncer %s should produce sha256-prefixed hash, got: %s", s.Key(), hash)
+		assert.Len(t, hash, 7+64,
+			"Syncer %s hash should be 71 chars (sha256: + 64 hex)", s.Key())
+	}
+}
+
+func TestTimeSyncerComputeHash(t *testing.T) {
+	timeSyncer := syncerMap["time"]
+	assert.NotNil(t, timeSyncer, "time syncer should exist")
+
+	// Same timezone, different datetime/uptime should produce same hash
+	time1 := TimeData{Datetime: "2024-01-01T00:00:00Z", Timezone: "Asia/Seoul", Uptime: 86400}
+	time2 := TimeData{Datetime: "2024-01-01T01:00:00Z", Timezone: "Asia/Seoul", Uptime: 90000}
+	assert.Equal(t, timeSyncer.ComputeHash(time1), timeSyncer.ComputeHash(time2),
+		"Same timezone with different datetime/uptime should produce same hash")
+
+	// Different timezone should produce different hash
+	time3 := TimeData{Datetime: "2024-01-01T00:00:00Z", Timezone: "US/Pacific", Uptime: 86400}
+	assert.NotEqual(t, timeSyncer.ComputeHash(time1), timeSyncer.ComputeHash(time3),
+		"Different timezone should produce different hash")
+}
+
+func TestComputeFingerprintStructDeterminism(t *testing.T) {
+	// Verify struct field ordering is deterministic across calls
+	data := SystemData{
+		UUID:             "test-uuid",
+		CPUType:          "x86_64",
+		CPUBrand:         "Intel",
+		CPUPhysicalCores: 4,
+		CPULogicalCores:  8,
+		PhysicalMemory:   16000000000,
+		Hostname:         "testhost",
+	}
+
+	hashes := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		hashes[computeFingerprint(data)] = true
+	}
+	assert.Len(t, hashes, 1, "Same struct should always produce the same hash")
 }
 
