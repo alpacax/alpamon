@@ -27,14 +27,17 @@ func detectSystemd() bool {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return false
 	}
-	if runtime.GOOS == "linux" {
-		data, err := os.ReadFile("/proc/1/comm")
-		if err != nil {
-			return false
-		}
-		return strings.TrimSpace(string(data)) == "systemd"
+	// Only Linux uses /proc/1/comm to verify PID 1 is systemd.
+	// Other platforms (macOS, etc.) always return false even if
+	// systemctl happens to be in PATH (e.g., via Homebrew).
+	if runtime.GOOS != "linux" {
+		return false
 	}
-	return false
+	data, err := os.ReadFile("/proc/1/comm")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == "systemd"
 }
 
 // alpamonDirs defines required directories matching configs/tmpfile.conf
