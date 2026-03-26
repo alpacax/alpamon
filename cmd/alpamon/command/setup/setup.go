@@ -61,12 +61,18 @@ var SetupCmd = &cobra.Command{
 
 		fmt.Println("Applying a new configuration automatically...")
 
-		output, err := exec.Command("systemd-tmpfiles", "--create").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("%w\n%s", err, string(output))
+		if utils.HasSystemd() {
+			output, err := exec.Command("systemd-tmpfiles", "--create").CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("%w\n%s", err, string(output))
+			}
+		} else {
+			if err := utils.EnsureDirectories(); err != nil {
+				return fmt.Errorf("failed to create directories: %w", err)
+			}
 		}
 
-		err = writeConfig()
+		err := writeConfig()
 		if err != nil {
 			return err
 		}

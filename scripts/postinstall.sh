@@ -2,6 +2,7 @@
 
 ALPAMON_BIN="/usr/local/bin/alpamon"
 TEMPLATE_FILE="/etc/alpamon/alpamon.config.tmpl"
+SYSTEMD_AVAILABLE=true
 
 main() {
   check_root_permission
@@ -9,12 +10,21 @@ main() {
   check_alpamon_binary
 
   if is_upgrade "$@"; then
-    restart_alpamon_by_timer
+    if [ "$SYSTEMD_AVAILABLE" = "true" ]; then
+      restart_alpamon_by_timer
+    else
+      restart_alpamon_process
+    fi
   else
     # setup_alpamon returns 1 if ENV not set (generic installation)
     # In that case, skip start_systemd_service - user will run 'alpamon register'
     if setup_alpamon; then
-      start_systemd_service
+      if [ "$SYSTEMD_AVAILABLE" = "true" ]; then
+        start_systemd_service
+      else
+        create_directories
+        start_alpamon_process
+      fi
     fi
   fi
 
@@ -30,8 +40,35 @@ check_root_permission() {
 
 check_systemd_status() {
   if ! command -v systemctl &> /dev/null; then
-    echo "Error: systemctl is required but could not be found. Please ensure systemd is installed and systemctl is available."
-    exit 1
+    echo "Notice: systemd is not available. Skipping systemd service setup."
+    SYSTEMD_AVAILABLE=false
+    return
+  fi
+  # Require positive confirmation that PID 1 is systemd.
+  # Treat missing/unreadable /proc/1/comm as "no systemd" to align with utils.HasSystemd().
+  # Use -r (readable) to avoid set -e exit on unreadable files.
+  local pid1_comm=""
+  if [ -r /proc/1/comm ]; then
+    pid1_comm=$(cat /proc/1/comm 2>/dev/null) || true
+  fi
+  if [ "$pid1_comm" != "systemd" ]; then
+    echo "Notice: systemd is not running as init. Skipping service setup."
+    SYSTEMD_AVAILABLE=false
+    return
+  fi
+}
+
+# Create required directories matching configs/tmpfile.conf
+# and pkg/utils/systemd.go:alpamonDirs. Keep all three in sync.
+create_directories() {
+  local alpamon_dirs="/etc/alpamon /var/lib/alpamon /var/log/alpamon /run/alpamon"
+  # shellcheck disable=SC2086
+  mkdir -p $alpamon_dirs
+  chmod 0700 /etc/alpamon
+  chmod 0750 /var/lib/alpamon /var/log/alpamon /run/alpamon
+  # shellcheck disable=SC2086
+  if ! chown root:root $alpamon_dirs; then
+    echo "Warning: Failed to set ownership to root:root for Alpamon directories: $alpamon_dirs" >&2
   fi
 }
 
@@ -56,6 +93,46 @@ setup_alpamon() {
     echo "Error: Alpamon setup command failed."
     exit 1
   fi
+}
+
+start_alpamon_process() {
+  local log_file="/var/log/alpamon/alpamon.log"
+  # Create log file with restrictive permissions (0640) to match register.go behavior
+  if [ ! -e "$log_file" ]; then
+    touch "$log_file"
+    chmod 0640 "$log_file" 2>/dev/null || true
+  fi
+  echo "Starting Alpamon as a background process..."
+  # Trap SIGHUP to prevent the child from being killed when the
+  # postinstall script (and its parent shell session) exits.
+  # Uses exec to replace the subshell with alpamon directly.
+  (trap '' HUP; exec "$ALPAMON_BIN" >>"$log_file" 2>&1) &
+  local pid=$!
+  sleep 0.5
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "Warning: Alpamon process (PID: $pid) exited immediately. Check $log_file for details." >&2
+    return
+  fi
+  echo "Alpamon started (PID: $pid)."
+  echo "Logs: $log_file"
+}
+
+restart_alpamon_process() {
+  echo "Restarting Alpamon process for upgrade..."
+  pkill -x alpamon 2>/dev/null || true
+  # Wait for graceful shutdown, then force-kill if still running
+  local i=0
+  while [ $i -lt 5 ] && pgrep -x alpamon >/dev/null 2>&1; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if pgrep -x alpamon >/dev/null 2>&1; then
+    echo "Warning: Alpamon did not shut down within 5 seconds, force-killing." >&2
+    pkill -9 -x alpamon 2>/dev/null || true
+    sleep 1
+  fi
+  create_directories
+  start_alpamon_process
 }
 
 start_systemd_service() {
@@ -87,7 +164,7 @@ cleanup_tmpl_files() {
   fi
 }
 
-# debain
+# debian
 # Initial installation: $1 == configure
 # Upgrade: $1 == configure, $2 == old version
 
