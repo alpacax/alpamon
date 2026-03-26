@@ -13,12 +13,16 @@ type Session struct {
 	Authorization string
 }
 
+// Headers is a named map type for HTTP headers attached to queue entries.
+type Headers map[string]string
+
 // queue //
 type PriorityEntry struct {
 	priority int
 	method   string
 	url      string
 	data     interface{}
+	headers  *Headers
 	due      time.Time
 	expiry   time.Time
 	retry    int

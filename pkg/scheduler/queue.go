@@ -37,10 +37,15 @@ func lessFunc(elem, otherElem PriorityEntry) bool {
 	return elem.priority < otherElem.priority
 }
 
-func (rq *RequestQueue) request(method, url string, data interface{}, priority int, due time.Time) {
+func (rq *RequestQueue) request(method, url string, data interface{}, priority int, due time.Time, headers Headers) {
 	// time.Time{}: 0001-01-01 00:00:00 +0000 UTC
 	if due.IsZero() {
 		due = time.Now()
+	}
+
+	var h *Headers
+	if len(headers) > 0 {
+		h = &headers
 	}
 
 	entry := PriorityEntry{
@@ -48,6 +53,7 @@ func (rq *RequestQueue) request(method, url string, data interface{}, priority i
 		method:   method,
 		url:      url,
 		data:     data,
+		headers:  h,
 		due:      due,
 		// expiry:
 		retry: RetryLimit,
@@ -64,17 +70,29 @@ func (rq *RequestQueue) request(method, url string, data interface{}, priority i
 }
 
 func (rq *RequestQueue) Post(url string, data interface{}, priority int, due time.Time) {
-	rq.request(http.MethodPost, url, data, priority, due)
+	rq.request(http.MethodPost, url, data, priority, due, nil)
+}
+
+func (rq *RequestQueue) PostWithHeaders(url string, data interface{}, priority int, due time.Time, headers Headers) {
+	rq.request(http.MethodPost, url, data, priority, due, headers)
 }
 
 func (rq *RequestQueue) Patch(url string, data interface{}, priority int, due time.Time) {
-	rq.request(http.MethodPatch, url, data, priority, due)
+	rq.request(http.MethodPatch, url, data, priority, due, nil)
+}
+
+func (rq *RequestQueue) PatchWithHeaders(url string, data interface{}, priority int, due time.Time, headers Headers) {
+	rq.request(http.MethodPatch, url, data, priority, due, headers)
 }
 
 func (rq *RequestQueue) Put(url string, data interface{}, priority int, due time.Time) {
-	rq.request(http.MethodPut, url, data, priority, due)
+	rq.request(http.MethodPut, url, data, priority, due, nil)
 }
 
 func (rq *RequestQueue) Delete(url string, data interface{}, priority int, due time.Time) {
-	rq.request(http.MethodDelete, url, data, priority, due)
+	rq.request(http.MethodDelete, url, data, priority, due, nil)
+}
+
+func (rq *RequestQueue) DeleteWithHeaders(url string, data interface{}, priority int, due time.Time, headers Headers) {
+	rq.request(http.MethodDelete, url, data, priority, due, headers)
 }
