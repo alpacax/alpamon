@@ -146,7 +146,7 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 				log.Warn().Str("key", key).Msg("Server returned unknown sync category, skipping.")
 				continue
 			}
-			s.syncData(session, data)
+			s.syncData(session, data, snap.hashes[key])
 		}
 	}
 
@@ -272,7 +272,7 @@ func checkSyncHashes(session *scheduler.Session, hashes map[string]string) ([]st
 	return result.SyncRequired, nil
 }
 
-func compareData(entry commitDef, currentData, remoteData ComparableData) {
+func compareData(entry commitDef, currentData, remoteData ComparableData, syncHash string) {
 	var createData, updateData interface{}
 
 	if remoteData == nil {
@@ -284,14 +284,17 @@ func compareData(entry commitDef, currentData, remoteData ComparableData) {
 			updateData = currentData.GetData()
 		}
 	}
+	h := syncHashHeader(syncHash)
 	if createData != nil {
-		scheduler.Rqueue.Post(entry.URL, createData, 80, time.Time{})
+		scheduler.Rqueue.PostWithHeaders(entry.URL, createData, 80, time.Time{}, h)
 	} else if updateData != nil {
-		scheduler.Rqueue.Patch(entry.URL+remoteData.GetID()+"/", updateData, 80, time.Time{})
+		scheduler.Rqueue.PatchWithHeaders(entry.URL+remoteData.GetID()+"/", updateData, 80, time.Time{}, h)
 	}
 }
 
-func compareListData[T ComparableData](entry commitDef, currentData, remoteData []T) {
+func compareListData[T ComparableData](entry commitDef, currentData, remoteData []T, syncHash string) {
+	h := syncHashHeader(syncHash)
+
 	currentMap := make(map[interface{}]ComparableData)
 	for _, currentItem := range currentData {
 		currentMap[currentItem.GetKey()] = currentItem
@@ -302,11 +305,11 @@ func compareListData[T ComparableData](entry commitDef, currentData, remoteData 
 			// Compare using GetComparableData() to exclude fields not stored by server
 			if !cmp.Equal(currentItem.GetComparableData(), remoteItem.GetComparableData()) {
 				// Transmit using GetData() to include all raw data for server-side processing
-				scheduler.Rqueue.Patch(entry.URL+remoteItem.GetID()+"/", currentItem.GetData(), 80, time.Time{})
+				scheduler.Rqueue.PatchWithHeaders(entry.URL+remoteItem.GetID()+"/", currentItem.GetData(), 80, time.Time{}, h)
 			}
 			delete(currentMap, currentItem.GetKey())
 		} else {
-			scheduler.Rqueue.Delete(entry.URL+remoteItem.GetID()+"/", nil, 80, time.Time{})
+			scheduler.Rqueue.DeleteWithHeaders(entry.URL+remoteItem.GetID()+"/", nil, 80, time.Time{}, h)
 		}
 	}
 
@@ -315,7 +318,7 @@ func compareListData[T ComparableData](entry commitDef, currentData, remoteData 
 		createData = append(createData, currentItem.GetData())
 	}
 	if len(createData) > 0 {
-		scheduler.Rqueue.Post(entry.URL, createData, 80, time.Time{})
+		scheduler.Rqueue.PostWithHeaders(entry.URL, createData, 80, time.Time{}, h)
 	}
 }
 
@@ -788,4 +791,3 @@ func getPartitions() ([]Partition, error) {
 	})
 	return partitionList, nil
 }
-

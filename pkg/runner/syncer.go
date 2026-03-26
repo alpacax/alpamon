@@ -26,7 +26,9 @@ type syncable interface {
 	// syncData syncs using pre-collected data from Collect().
 	// The hash protocol collects data once in Step 1 for hashing
 	// and reuses it here in Step 3 for syncing.
-	syncData(session *scheduler.Session, data any)
+	// The hash is sent as X-Sync-Hash header on write requests
+	// so the server can store it for future sync-check comparisons.
+	syncData(session *scheduler.Session, data any, hash string)
 }
 
 // syncers registers all 9 syncable data categories.
@@ -74,7 +76,7 @@ func (s *singleRowSyncer[T]) ComputeHash(data any) string {
 	return computeFingerprint(typed)
 }
 
-func (s *singleRowSyncer[T]) syncData(session *scheduler.Session, data any) {
+func (s *singleRowSyncer[T]) syncData(session *scheduler.Session, data any, hash string) {
 	current, ok := data.(T)
 	if !ok {
 		log.Error().Msgf("Invalid data type for %s, skipping sync.", s.key)
@@ -93,9 +95,9 @@ func (s *singleRowSyncer[T]) syncData(session *scheduler.Session, data any) {
 			log.Error().Err(err).Msgf("Failed to unmarshal remote data for %s.", s.key)
 			return
 		}
-		compareData(entry, current, remote)
+		compareData(entry, current, remote, hash)
 	case http.StatusNotFound:
-		compareData(entry, current, nil)
+		compareData(entry, current, nil, hash)
 	default:
 		log.Error().Msgf("Unexpected HTTP %d when syncing %s.", statusCode, s.key)
 	}
@@ -117,7 +119,7 @@ func (s *multiRowSyncer[T]) ComputeHash(data any) string {
 	return computeFingerprint(data)
 }
 
-func (s *multiRowSyncer[T]) syncData(session *scheduler.Session, data any) {
+func (s *multiRowSyncer[T]) syncData(session *scheduler.Session, data any, hash string) {
 	current, ok := data.([]T)
 	if !ok {
 		log.Error().Msgf("Invalid data type for %s, skipping sync.", s.key)
@@ -136,9 +138,9 @@ func (s *multiRowSyncer[T]) syncData(session *scheduler.Session, data any) {
 			log.Error().Err(err).Msgf("Failed to unmarshal remote data for %s.", s.key)
 			return
 		}
-		compareListData(entry, current, remote)
+		compareListData(entry, current, remote, hash)
 	case http.StatusNotFound:
-		compareListData(entry, current, nil)
+		compareListData(entry, current, nil, hash)
 	default:
 		log.Error().Msgf("Unexpected HTTP %d when syncing %s.", statusCode, s.key)
 	}
@@ -187,6 +189,14 @@ var syncerMap = func() map[string]syncable {
 	}
 	return m
 }()
+
+// syncHashHeader returns headers with X-Sync-Hash, or nil if hash is empty.
+func syncHashHeader(hash string) scheduler.Headers {
+	if hash == "" {
+		return nil
+	}
+	return scheduler.Headers{"X-Sync-Hash": hash}
+}
 
 // computeFingerprint returns a SHA-256 hash of the JSON-serialized data.
 // Returns an empty string on serialization error, causing the server to always flag the category for sync.
