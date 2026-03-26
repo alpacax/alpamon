@@ -61,10 +61,12 @@ check_systemd_status() {
 # Create required directories matching configs/tmpfile.conf
 # and pkg/utils/systemd.go:alpamonDirs. Keep all three in sync.
 create_directories() {
-  alpamon_dirs="/etc/alpamon /var/lib/alpamon /var/log/alpamon /run/alpamon"
+  local alpamon_dirs="/etc/alpamon /var/lib/alpamon /var/log/alpamon /run/alpamon"
+  # shellcheck disable=SC2086
   mkdir -p $alpamon_dirs
   chmod 0700 /etc/alpamon
   chmod 0750 /var/lib/alpamon /var/log/alpamon /run/alpamon
+  # shellcheck disable=SC2086
   if ! chown root:root $alpamon_dirs; then
     echo "Warning: Failed to set ownership to root:root for Alpamon directories: $alpamon_dirs" >&2
   fi
@@ -105,7 +107,13 @@ start_alpamon_process() {
   # postinstall script (and its parent shell session) exits.
   # Uses exec to replace the subshell with alpamon directly.
   (trap '' HUP; exec "$ALPAMON_BIN" >>"$log_file" 2>&1) &
-  echo "Alpamon started (PID: $!)."
+  local pid=$!
+  sleep 0.5
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "Warning: Alpamon process (PID: $pid) exited immediately. Check $log_file for details." >&2
+    return
+  fi
+  echo "Alpamon started (PID: $pid)."
   echo "Logs: $log_file"
 }
 

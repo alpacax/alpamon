@@ -351,6 +351,7 @@ func startService() error {
 
 	// On non-Linux platforms (e.g., macOS development), skip auto-start
 	if runtime.GOOS != "linux" {
+		fmt.Println("Skipping auto-start (non-Linux platform).")
 		return nil
 	}
 
