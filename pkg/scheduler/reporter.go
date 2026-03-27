@@ -100,7 +100,11 @@ func reportStartupEvent() {
 
 func (r *Reporter) query(entry PriorityEntry) {
 	t1 := time.Now()
-	resp, statusCode, err := r.session.Request(entry.method, entry.url, entry.data, 5)
+	var headers Headers
+	if entry.headers != nil {
+		headers = *entry.headers
+	}
+	resp, statusCode, err := r.session.RequestWithHeaders(entry.method, entry.url, entry.data, 5, headers)
 	t2 := time.Now()
 
 	r.counters.delay = r.counters.delay*0.9 + (t2.Sub(entry.due).Seconds())*0.1

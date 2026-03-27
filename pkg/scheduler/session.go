@@ -137,9 +137,16 @@ func (session *Session) do(req *http.Request, timeout time.Duration) ([]byte, in
 }
 
 func (session *Session) Request(method, url string, rawBody interface{}, timeout time.Duration) ([]byte, int, error) {
+	return session.RequestWithHeaders(method, url, rawBody, timeout, nil)
+}
+
+func (session *Session) RequestWithHeaders(method, url string, rawBody interface{}, timeout time.Duration, headers Headers) ([]byte, int, error) {
 	req, err := session.newRequest(method, url, rawBody)
 	if err != nil {
 		return nil, 0, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 
 	resp, statusCode, err := session.do(req, timeout)

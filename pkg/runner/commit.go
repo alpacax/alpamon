@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ const (
 	commitURL       = "/api/servers/servers/-/commit/"
 	eventURL        = "/api/events/events/"
 	accessPolicyURL = "/api/servers/servers/-/access-policy/"
+	syncCheckURL    = "/api/servers/servers/-/sync-check/"
 
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
@@ -113,23 +115,44 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 	defer syncMutex.Unlock()
 
 	fullSync := len(keys) == 0
-	if fullSync {
-		keys = allSyncKeys()
-	}
 
-	for _, key := range keys {
-		switch key {
-		case "server":
-			syncServerData(session)
-		case "firewall":
-			syncFirewallData()
-		default:
-			if s, ok := syncerMap[key]; ok {
-				s.syncWith(session)
-			} else {
-				log.Warn().Msgf("Unknown key: %s", key)
+	// Warn about unknown keys from caller (e.g., info sync command).
+	if !fullSync {
+		for _, key := range keys {
+			if key != "server" && key != "firewall" {
+				if _, ok := syncerMap[key]; !ok {
+					log.Warn().Str("key", key).Msg("Unknown sync key requested, ignoring.")
+				}
 			}
 		}
+	}
+
+	// server is always synced unconditionally (not hashed).
+	syncServerData(session)
+
+	// Step 1: collect data and compute hashes for data categories.
+	snap := collectSnapshot(keys)
+
+	// Step 2 & 3: check hashes with server and sync changed categories.
+	if !snap.empty() {
+		for _, key := range syncRequiredKeys(session, snap) {
+			data, exists := snap.data[key]
+			if !exists {
+				log.Warn().Str("key", key).Msg("Server requested sync for uncollected category, skipping.")
+				continue
+			}
+			s, ok := syncerMap[key]
+			if !ok {
+				log.Warn().Str("key", key).Msg("Server returned unknown sync category, skipping.")
+				continue
+			}
+			s.syncData(session, data, snap.hashes[key])
+		}
+	}
+
+	// firewall is always synced separately (not hashed).
+	if fullSync || slices.Contains(keys, "firewall") {
+		syncFirewallData()
 	}
 
 	if fullSync {
@@ -187,7 +210,69 @@ func syncAccessPolicy(session *scheduler.Session) {
 	}
 }
 
-func compareData(entry commitDef, currentData, remoteData ComparableData) {
+// syncRequiredKeys sends hashes to the server and returns the list of categories
+// that need syncing. On server error, falls back to all collected categories
+// in the original syncers registration order for predictable behavior.
+func syncRequiredKeys(session *scheduler.Session, snap syncSnapshot) []string {
+	required, err := checkSyncHashes(session, snap.hashes)
+	if err != nil {
+		log.Debug().Err(err).Msg("Sync-check failed, falling back to full sync.")
+		required = make([]string, 0, len(snap.data))
+		for _, s := range syncers {
+			if _, ok := snap.data[s.Key()]; ok {
+				required = append(required, s.Key())
+			}
+		}
+		return required
+	}
+
+	// Normalize server-provided keys to the deterministic syncers registration order.
+	requiredSet := make(map[string]struct{}, len(required))
+	for _, key := range required {
+		requiredSet[key] = struct{}{}
+	}
+	normalized := make([]string, 0, len(required))
+	for _, s := range syncers {
+		if _, ok := requiredSet[s.Key()]; ok {
+			normalized = append(normalized, s.Key())
+			delete(requiredSet, s.Key())
+		}
+	}
+	for key := range requiredSet {
+		log.Warn().Str("key", key).Msg("Server returned unknown sync category, ignoring.")
+	}
+	return normalized
+}
+
+// checkSyncHashes sends per-category data hashes to the server and returns the
+// list of categories that need syncing. On error (old server returning 404,
+// network failure, etc.), the caller should fall back to syncing all categories.
+func checkSyncHashes(session *scheduler.Session, hashes map[string]string) ([]string, error) {
+	payload := map[string]any{"hashes": hashes}
+
+	resp, statusCode, err := session.Post(syncCheckURL, payload, 10)
+	if err != nil {
+		return nil, fmt.Errorf("sync-check request failed: %w", err)
+	}
+	if statusCode != http.StatusOK {
+		snippet := resp
+		if len(snippet) > 256 {
+			snippet = snippet[:256]
+		}
+		return nil, fmt.Errorf("sync-check returned HTTP %d: %s", statusCode, snippet)
+	}
+
+	var result struct {
+		SyncRequired []string `json:"sync_required"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("sync-check response parse failed: %w", err)
+	}
+
+	return result.SyncRequired, nil
+}
+
+func compareData(entry commitDef, currentData, remoteData ComparableData, syncHash string) {
 	var createData, updateData interface{}
 
 	if remoteData == nil {
@@ -199,14 +284,17 @@ func compareData(entry commitDef, currentData, remoteData ComparableData) {
 			updateData = currentData.GetData()
 		}
 	}
+	h := syncHashHeader(syncHash)
 	if createData != nil {
-		scheduler.Rqueue.Post(entry.URL, createData, 80, time.Time{})
+		scheduler.Rqueue.PostWithHeaders(entry.URL, createData, 80, time.Time{}, h)
 	} else if updateData != nil {
-		scheduler.Rqueue.Patch(entry.URL+remoteData.GetID()+"/", updateData, 80, time.Time{})
+		scheduler.Rqueue.PatchWithHeaders(entry.URL+remoteData.GetID()+"/", updateData, 80, time.Time{}, h)
 	}
 }
 
-func compareListData[T ComparableData](entry commitDef, currentData, remoteData []T) {
+func compareListData[T ComparableData](entry commitDef, currentData, remoteData []T, syncHash string) {
+	h := syncHashHeader(syncHash)
+
 	currentMap := make(map[interface{}]ComparableData)
 	for _, currentItem := range currentData {
 		currentMap[currentItem.GetKey()] = currentItem
@@ -217,11 +305,11 @@ func compareListData[T ComparableData](entry commitDef, currentData, remoteData 
 			// Compare using GetComparableData() to exclude fields not stored by server
 			if !cmp.Equal(currentItem.GetComparableData(), remoteItem.GetComparableData()) {
 				// Transmit using GetData() to include all raw data for server-side processing
-				scheduler.Rqueue.Patch(entry.URL+remoteItem.GetID()+"/", currentItem.GetData(), 80, time.Time{})
+				scheduler.Rqueue.PatchWithHeaders(entry.URL+remoteItem.GetID()+"/", currentItem.GetData(), 80, time.Time{}, h)
 			}
 			delete(currentMap, currentItem.GetKey())
 		} else {
-			scheduler.Rqueue.Delete(entry.URL+remoteItem.GetID()+"/", nil, 80, time.Time{})
+			scheduler.Rqueue.DeleteWithHeaders(entry.URL+remoteItem.GetID()+"/", nil, 80, time.Time{}, h)
 		}
 	}
 
@@ -230,7 +318,7 @@ func compareListData[T ComparableData](entry commitDef, currentData, remoteData 
 		createData = append(createData, currentItem.GetData())
 	}
 	if len(createData) > 0 {
-		scheduler.Rqueue.Post(entry.URL, createData, 80, time.Time{})
+		scheduler.Rqueue.PostWithHeaders(entry.URL, createData, 80, time.Time{}, h)
 	}
 }
 
@@ -660,6 +748,9 @@ func getDisks() ([]Disk, error) {
 		})
 	}
 
+	slices.SortFunc(disks, func(a, b Disk) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return disks, nil
 }
 
@@ -692,9 +783,11 @@ func getPartitions() ([]Partition, error) {
 
 	var partitionList []Partition
 	for _, partition := range seen {
+		slices.Sort(partition.MountPoints)
 		partitionList = append(partitionList, partition)
 	}
-
+	slices.SortFunc(partitionList, func(a, b Partition) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return partitionList, nil
 }
-
