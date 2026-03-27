@@ -442,13 +442,19 @@ func TestTimeSyncerComputeHash(t *testing.T) {
 func TestCollectDataIncludesSyncHashes(t *testing.T) {
 	data := collectData()
 
-	// SyncHashes should be populated for all 9 syncer categories
-	assert.NotNil(t, data.SyncHashes, "SyncHashes should not be nil")
-	assert.NotEmpty(t, data.SyncHashes, "SyncHashes should contain entries")
+	// SyncHashes should contain one entry per syncer category
+	assert.Equal(t, len(syncers), len(data.SyncHashes),
+		"SyncHashes should contain one entry per syncer")
 
-	for key, hash := range data.SyncHashes {
+	for _, s := range syncers {
+		key := s.Key()
+		hash, ok := data.SyncHashes[key]
+		assert.True(t, ok, "SyncHashes should contain entry for %s", key)
+		assert.NotEmpty(t, hash, "Hash for %s should not be empty", key)
 		assert.True(t, strings.HasPrefix(hash, "sha256:"),
 			"Hash for %s should have sha256: prefix, got %s", key, hash)
+		assert.Len(t, hash, 7+64,
+			"Hash for %s should be 71 chars (sha256: + 64 hex), got %d", key, len(hash))
 	}
 
 	// Verify sync_hashes is present in marshaled JSON
