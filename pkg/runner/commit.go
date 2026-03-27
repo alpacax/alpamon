@@ -247,7 +247,7 @@ func syncRequiredKeys(session *scheduler.Session, snap syncSnapshot) []string {
 // checkSyncHashes sends per-category data hashes to the server and returns the
 // list of categories that need syncing. On error (old server returning 404,
 // network failure, etc.), the caller should fall back to syncing all categories.
-func checkSyncHashes(session *scheduler.Session, hashes map[string]string) ([]string, error) {
+func checkSyncHashes(session *scheduler.Session, hashes SyncHashes) ([]string, error) {
 	payload := map[string]any{"hashes": hashes}
 
 	resp, statusCode, err := session.Post(syncCheckURL, payload, 10)
@@ -341,6 +341,12 @@ func collectData() *commitData {
 			continue
 		}
 		assignToCommitData(data, s.Key(), result)
+		if h := s.ComputeHash(result); h != "" {
+			if data.SyncHashes == nil {
+				data.SyncHashes = make(SyncHashes, len(syncers))
+			}
+			data.SyncHashes[s.Key()] = h
+		}
 	}
 
 	return data
