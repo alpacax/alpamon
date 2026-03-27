@@ -61,3 +61,10 @@ type SystemInfoManager interface {
 type APISession interface {
 	MultipartRequest(url string, body bytes.Buffer, contentType string, timeout time.Duration) ([]byte, int, error)
 }
+
+// VersionResolver provides version information for upgrade decisions.
+type VersionResolver interface {
+	GetLatestVersion() string
+	GetPamVersion() string
+	InvalidatePamCache()
+}
