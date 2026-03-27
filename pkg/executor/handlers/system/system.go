@@ -61,7 +61,7 @@ func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.Co
 		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
 		exitCode, output, err := h.handleRestart(args)
-		if common.IsTimeout(ctx) {
+		if err != nil && common.IsTimeout(ctx) {
 			return common.TimeoutError(common.SystemCmdTimeout)
 		}
 		return exitCode, output, err
@@ -69,7 +69,7 @@ func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.Co
 		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
 		exitCode, output, err := h.handleQuit()
-		if common.IsTimeout(ctx) {
+		if err != nil && common.IsTimeout(ctx) {
 			return common.TimeoutError(common.SystemCmdTimeout)
 		}
 		return exitCode, output, err
@@ -77,7 +77,7 @@ func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.Co
 		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
 		exitCode, output, err := h.handleUninstall()
-		if common.IsTimeout(ctx) {
+		if err != nil && common.IsTimeout(ctx) {
 			return common.TimeoutError(common.SystemCmdTimeout)
 		}
 		return exitCode, output, err
@@ -85,7 +85,7 @@ func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.Co
 		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
 		exitCode, output, err := h.handleReboot()
-		if common.IsTimeout(ctx) {
+		if err != nil && common.IsTimeout(ctx) {
 			return common.TimeoutError(common.SystemCmdTimeout)
 		}
 		return exitCode, output, err
@@ -93,7 +93,7 @@ func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.Co
 		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
 		exitCode, output, err := h.handleShutdown()
-		if common.IsTimeout(ctx) {
+		if err != nil && common.IsTimeout(ctx) {
 			return common.TimeoutError(common.SystemCmdTimeout)
 		}
 		return exitCode, output, err
@@ -109,7 +109,7 @@ func (h *SystemHandler) withTimeout(ctx context.Context, timeout time.Duration, 
 	ctx, cancel := common.WithHandlerTimeout(ctx, timeout)
 	defer cancel()
 	exitCode, output, err := fn(ctx)
-	if common.IsTimeout(ctx) {
+	if err != nil && common.IsTimeout(ctx) {
 		return common.TimeoutError(timeout)
 	}
 	return exitCode, output, err

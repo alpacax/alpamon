@@ -64,7 +64,7 @@ func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 		return 1, "", fmt.Errorf("unknown user command: %s", cmd)
 	}
 
-	if common.IsTimeout(ctx) {
+	if err != nil && common.IsTimeout(ctx) {
 		return common.TimeoutError(timeout)
 	}
 

@@ -50,7 +50,7 @@ func (h *GroupHandler) Execute(ctx context.Context, cmd string, args *common.Com
 		return 1, "", fmt.Errorf("unknown group command: %s", cmd)
 	}
 
-	if common.IsTimeout(ctx) {
+	if err != nil && common.IsTimeout(ctx) {
 		return common.TimeoutError(common.GroupTimeout)
 	}
 
