@@ -341,11 +341,11 @@ func collectData() *commitData {
 			continue
 		}
 		assignToCommitData(data, s.Key(), result)
-		if h := s.ComputeHash(result); h != "" {
+		if hash := s.ComputeHash(result); hash != "" {
 			if data.SyncHashes == nil {
 				data.SyncHashes = make(SyncHashes, len(syncers))
 			}
-			data.SyncHashes[s.Key()] = h
+			data.SyncHashes[s.Key()] = hash
 		}
 	}
 
