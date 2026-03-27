@@ -148,7 +148,7 @@ func (s *multiRowSyncer[T]) syncData(session *scheduler.Session, data any, hash 
 
 // syncSnapshot holds the result of Step 1: per-category collected data and their hashes.
 type syncSnapshot struct {
-	hashes map[string]string
+	hashes SyncHashes
 	data   map[string]any
 }
 
@@ -157,7 +157,7 @@ type syncSnapshot struct {
 func collectSnapshot(keys []string) syncSnapshot {
 	fullSync := len(keys) == 0
 	snap := syncSnapshot{
-		hashes: make(map[string]string, len(syncers)),
+		hashes: make(SyncHashes, len(syncers)),
 		data:   make(map[string]any, len(syncers)),
 	}
 	for _, s := range syncers {

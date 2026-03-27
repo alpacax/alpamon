@@ -1,5 +1,8 @@
 package runner
 
+// SyncHashes maps sync category keys to their SHA-256 content hashes.
+type SyncHashes map[string]string
+
 type commitDef struct {
 	URL       string `json:"url"`
 	URLSuffix string `json:"url_suffix"`
@@ -168,6 +171,7 @@ type commitData struct {
 	Addresses  []Address   `json:"addresses"`
 	Disks      []Disk      `json:"disks"`
 	Partitions []Partition `json:"partitions"`
+	SyncHashes SyncHashes  `json:"sync_hashes,omitempty"` // included in commit so server stores hashes at commission
 }
 
 // Defines the ComparableData interface for comparing different types.

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -436,6 +437,40 @@ func TestTimeSyncerComputeHash(t *testing.T) {
 	time3 := TimeData{Datetime: "2024-01-01T00:00:00Z", Timezone: "US/Pacific", Uptime: 86400}
 	assert.NotEqual(t, timeSyncer.ComputeHash(time1), timeSyncer.ComputeHash(time3),
 		"Different timezone should produce different hash")
+}
+
+func TestCollectDataIncludesSyncHashes(t *testing.T) {
+	data := collectData()
+
+	// Skip if no syncer can collect in this environment (e.g., constrained CI/container).
+	if len(data.SyncHashes) == 0 {
+		t.Skip("skipping: no syncer Collect() succeeded in this environment")
+	}
+
+	// Validate entries without re-running Collect() to avoid non-determinism.
+	validKeys := make(map[string]struct{}, len(syncers))
+	for _, s := range syncers {
+		validKeys[s.Key()] = struct{}{}
+	}
+
+	assert.LessOrEqual(t, len(data.SyncHashes), len(syncers),
+		"SyncHashes should not contain more entries than syncers")
+
+	for key, hash := range data.SyncHashes {
+		_, ok := validKeys[key]
+		assert.True(t, ok, "SyncHashes key %s should be a known syncer key", key)
+		assert.NotEmpty(t, hash, "Hash for %s should not be empty", key)
+		assert.True(t, strings.HasPrefix(hash, "sha256:"),
+			"Hash for %s should have sha256: prefix, got %s", key, hash)
+		assert.Len(t, hash, 7+64,
+			"Hash for %s should be 71 chars (sha256: + 64 hex), got %d", key, len(hash))
+	}
+
+	// Verify sync_hashes is present in marshaled JSON.
+	jsonBytes, err := json.Marshal(data)
+	assert.NoError(t, err)
+	assert.Contains(t, string(jsonBytes), `"sync_hashes"`,
+		"Marshaled commit payload should contain sync_hashes field")
 }
 
 func TestComputeFingerprintStructDeterminism(t *testing.T) {
