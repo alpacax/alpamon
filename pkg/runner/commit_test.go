@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -436,6 +437,25 @@ func TestTimeSyncerComputeHash(t *testing.T) {
 	time3 := TimeData{Datetime: "2024-01-01T00:00:00Z", Timezone: "US/Pacific", Uptime: 86400}
 	assert.NotEqual(t, timeSyncer.ComputeHash(time1), timeSyncer.ComputeHash(time3),
 		"Different timezone should produce different hash")
+}
+
+func TestCollectDataIncludesSyncHashes(t *testing.T) {
+	data := collectData()
+
+	// SyncHashes should be populated for all 9 syncer categories
+	assert.NotNil(t, data.SyncHashes, "SyncHashes should not be nil")
+	assert.NotEmpty(t, data.SyncHashes, "SyncHashes should contain entries")
+
+	for key, hash := range data.SyncHashes {
+		assert.True(t, strings.HasPrefix(hash, "sha256:"),
+			"Hash for %s should have sha256: prefix, got %s", key, hash)
+	}
+
+	// Verify sync_hashes is present in marshaled JSON
+	jsonBytes, err := json.Marshal(data)
+	assert.NoError(t, err)
+	assert.Contains(t, string(jsonBytes), `"sync_hashes"`,
+		"Marshaled commit payload should contain sync_hashes field")
 }
 
 func TestComputeFingerprintStructDeterminism(t *testing.T) {

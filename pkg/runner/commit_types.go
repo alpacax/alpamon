@@ -159,19 +159,19 @@ type AccessPolicy struct {
 }
 
 type commitData struct {
-	Version    string            `json:"version"`
-	PamVersion string            `json:"pam_version,omitempty"`
-	Load       float64           `json:"load"`
-	Info       SystemData        `json:"info"`
-	OS         OSData            `json:"os"`
-	Time       TimeData          `json:"time"`
-	Users      []UserData        `json:"users"`
-	Groups     []GroupData       `json:"groups"`
-	Interfaces []Interface       `json:"interfaces"`
-	Addresses  []Address         `json:"addresses"`
-	Disks      []Disk            `json:"disks"`
-	Partitions []Partition       `json:"partitions"`
-	SyncHashes SyncHashes `json:"sync_hashes,omitempty"` // included in commit so server stores hashes at commission
+	Version    string      `json:"version"`
+	PamVersion string      `json:"pam_version,omitempty"`
+	Load       float64     `json:"load"`
+	Info       SystemData  `json:"info"`
+	OS         OSData      `json:"os"`
+	Time       TimeData    `json:"time"`
+	Users      []UserData  `json:"users"`
+	Groups     []GroupData `json:"groups"`
+	Interfaces []Interface `json:"interfaces"`
+	Addresses  []Address   `json:"addresses"`
+	Disks      []Disk      `json:"disks"`
+	Partitions []Partition `json:"partitions"`
+	SyncHashes SyncHashes  `json:"sync_hashes,omitempty"` // included in commit so server stores hashes at commission
 }
 
 // Defines the ComparableData interface for comparing different types.
