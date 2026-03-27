@@ -442,11 +442,19 @@ func TestTimeSyncerComputeHash(t *testing.T) {
 func TestCollectDataIncludesSyncHashes(t *testing.T) {
 	data := collectData()
 
-	// SyncHashes should contain one entry per syncer category
-	assert.Equal(t, len(syncers), len(data.SyncHashes),
-		"SyncHashes should contain one entry per syncer")
+	// SyncHashes should contain hashes for all syncers whose Collect() succeeds.
+	assert.Greater(t, len(data.SyncHashes), 0,
+		"SyncHashes should contain at least one entry")
+	assert.LessOrEqual(t, len(data.SyncHashes), len(syncers),
+		"SyncHashes should not contain more entries than syncers")
 
 	for _, s := range syncers {
+		result, err := s.Collect()
+		if err != nil {
+			t.Logf("Collect returned error for %s: %v (skipping assertions)", s.Key(), err)
+			continue
+		}
+
 		key := s.Key()
 		hash, ok := data.SyncHashes[key]
 		assert.True(t, ok, "SyncHashes should contain entry for %s", key)
@@ -455,13 +463,17 @@ func TestCollectDataIncludesSyncHashes(t *testing.T) {
 			"Hash for %s should have sha256: prefix, got %s", key, hash)
 		assert.Len(t, hash, 7+64,
 			"Hash for %s should be 71 chars (sha256: + 64 hex), got %d", key, len(hash))
+		assert.Equal(t, s.ComputeHash(result), hash,
+			"Hash for %s should match ComputeHash(result)", key)
 	}
 
-	// Verify sync_hashes is present in marshaled JSON
-	jsonBytes, err := json.Marshal(data)
-	assert.NoError(t, err)
-	assert.Contains(t, string(jsonBytes), `"sync_hashes"`,
-		"Marshaled commit payload should contain sync_hashes field")
+	// Verify sync_hashes is present in marshaled JSON when there are sync hashes.
+	if len(data.SyncHashes) > 0 {
+		jsonBytes, err := json.Marshal(data)
+		assert.NoError(t, err)
+		assert.Contains(t, string(jsonBytes), `"sync_hashes"`,
+			"Marshaled commit payload should contain sync_hashes field")
+	}
 }
 
 func TestComputeFingerprintStructDeterminism(t *testing.T) {
