@@ -18,7 +18,7 @@ RUN go build -o alpamon ./cmd/alpamon/main.go
 
 FROM debian:10
 
-RUN apt-get update -o Acquire::Retries=3 && apt-get install -y -o Acquire::Retries=3 --no-install-recommends systemd ca-certificates
+RUN apt-get update -o Acquire::Retries=3 && apt-get install -y -o Acquire::Retries=3 --no-install-recommends ca-certificates
 
 WORKDIR /usr/local/alpamon
 
