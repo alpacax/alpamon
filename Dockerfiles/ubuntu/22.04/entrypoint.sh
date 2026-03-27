@@ -9,8 +9,9 @@ if [ -z "$PLUGIN_ID" ]; then
     exit 1
 fi
 
-mkdir -p /etc/alpamon /var/run/alpamon /var/log/alpamon /var/lib/alpamon
-chmod 750 /var/run/alpamon
+mkdir -p /etc/alpamon /var/lib/alpamon /var/log/alpamon /run/alpamon
+chmod 700 /etc/alpamon
+chmod 750 /var/lib/alpamon /var/log/alpamon /run/alpamon
 
 cat > /etc/alpamon/alpamon.conf <<EOL
 [server]

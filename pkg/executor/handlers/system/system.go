@@ -24,8 +24,12 @@ type SystemHandler struct {
 	versionResolver common.VersionResolver
 }
 
-// NewSystemHandler creates a new system handler
+// NewSystemHandler creates a new system handler.
+// versionResolver must not be nil; pass utils.NewDefaultVersionResolver() for production.
 func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClient, ctxManager *agent.ContextManager, pool *pool.Pool, versionResolver common.VersionResolver) *SystemHandler {
+	if versionResolver == nil {
+		panic("system: versionResolver must not be nil")
+	}
 	h := &SystemHandler{
 		BaseHandler: common.NewBaseHandler(
 			common.System,
@@ -54,25 +58,45 @@ func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.Co
 	case common.Upgrade.String():
 		return h.withTimeout(ctx, common.UpgradeTimeout, h.handleUpgrade)
 	case common.Restart.String():
-		_, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
+		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
-		return h.handleRestart(args)
+		exitCode, output, err := h.handleRestart(args)
+		if common.IsTimeout(ctx) {
+			return common.TimeoutError(common.SystemCmdTimeout)
+		}
+		return exitCode, output, err
 	case common.Quit.String():
-		_, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
+		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
-		return h.handleQuit()
+		exitCode, output, err := h.handleQuit()
+		if common.IsTimeout(ctx) {
+			return common.TimeoutError(common.SystemCmdTimeout)
+		}
+		return exitCode, output, err
 	case common.ByeBye.String():
-		_, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
+		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
-		return h.handleUninstall()
+		exitCode, output, err := h.handleUninstall()
+		if common.IsTimeout(ctx) {
+			return common.TimeoutError(common.SystemCmdTimeout)
+		}
+		return exitCode, output, err
 	case common.Reboot.String():
-		_, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
+		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
-		return h.handleReboot()
+		exitCode, output, err := h.handleReboot()
+		if common.IsTimeout(ctx) {
+			return common.TimeoutError(common.SystemCmdTimeout)
+		}
+		return exitCode, output, err
 	case common.Shutdown.String():
-		_, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
+		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
-		return h.handleShutdown()
+		exitCode, output, err := h.handleShutdown()
+		if common.IsTimeout(ctx) {
+			return common.TimeoutError(common.SystemCmdTimeout)
+		}
+		return exitCode, output, err
 	case common.Update.String():
 		return h.withTimeout(ctx, common.UpgradeTimeout, h.handleSystemUpdate)
 	default:

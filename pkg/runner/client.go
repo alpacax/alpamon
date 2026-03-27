@@ -290,12 +290,15 @@ func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol
 	commandRunner := NewCommandRunner(wc, wc.apiSession, command, data, wc.dispatcher)
 
 	// Each handler manages its own timeout; safety net prevents leaked goroutines.
-	// Ensure the pool timeout always exceeds the longest handler timeout (ShellTimeout)
-	// so handler-level timeouts take effect before the safety net.
+	// When PoolDefaultTimeout > 0, ensure it always exceeds the longest handler
+	// timeout (ShellTimeout) so handler-level timeouts fire before the safety net.
+	// When PoolDefaultTimeout == 0, the safety net is explicitly disabled by config.
 	safetyTimeout := time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second
-	minSafetyTimeout := common.ShellTimeout + 5*time.Minute
-	if safetyTimeout < minSafetyTimeout {
-		safetyTimeout = minSafetyTimeout
+	if safetyTimeout > 0 {
+		minSafetyTimeout := common.ShellTimeout + 5*time.Minute
+		if safetyTimeout < minSafetyTimeout {
+			safetyTimeout = minSafetyTimeout
+		}
 	}
 	ctx, cancel := wc.ctxManager.NewContext(safetyTimeout)
 
