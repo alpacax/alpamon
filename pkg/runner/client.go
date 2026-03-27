@@ -12,6 +12,7 @@ import (
 	"github.com/alpacax/alpamon/internal/protocol"
 	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/config"
+	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/cenkalti/backoff"
@@ -288,10 +289,13 @@ func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol
 	// Create CommandRunner with dispatcher for direct execution
 	commandRunner := NewCommandRunner(wc, wc.apiSession, command, data, wc.dispatcher)
 
-	// Each handler manages its own timeout; safety net prevents leaked goroutines
+	// Each handler manages its own timeout; safety net prevents leaked goroutines.
+	// Ensure the pool timeout always exceeds the longest handler timeout (ShellTimeout)
+	// so handler-level timeouts take effect before the safety net.
 	safetyTimeout := time.Duration(config.GlobalSettings.PoolDefaultTimeout) * time.Second
-	if safetyTimeout <= 0 {
-		safetyTimeout = 1 * time.Hour
+	minSafetyTimeout := common.ShellTimeout + 5*time.Minute
+	if safetyTimeout < minSafetyTimeout {
+		safetyTimeout = minSafetyTimeout
 	}
 	ctx, cancel := wc.ctxManager.NewContext(safetyTimeout)
 
