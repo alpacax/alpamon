@@ -40,16 +40,20 @@ func detectSystemd() bool {
 	return strings.TrimSpace(string(data)) == "systemd"
 }
 
-// alpamonDirs defines required directories matching configs/tmpfile.conf
-// and scripts/postinstall.sh:create_directories(). Keep all three in sync.
-var alpamonDirs = []struct {
+type alpamonDir struct {
 	Path string
 	Mode os.FileMode
-}{
-	{"/etc/alpamon", 0700},
-	{"/var/lib/alpamon", 0750},
-	{"/var/log/alpamon", 0750},
-	{"/run/alpamon", 0750},
+}
+
+// getAlpamonDirs returns required directories matching configs/tmpfile.conf
+// and scripts/postinstall.sh:create_directories(). Keep all three in sync.
+func getAlpamonDirs() []alpamonDir {
+	return []alpamonDir{
+		{ConfigDir(), 0700},
+		{DataDir(), 0750},
+		{LogDir(), 0750},
+		{RunDir(), 0750},
+	}
 }
 
 // EnsureDirectories creates required alpamon directories with permissions
@@ -60,7 +64,7 @@ func EnsureDirectories() error {
 }
 
 func ensureDirectoriesWithRoot(root string) error {
-	for _, d := range alpamonDirs {
+	for _, d := range getAlpamonDirs() {
 		path := filepath.Join(root, d.Path)
 		if err := os.MkdirAll(path, d.Mode); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", path, err)

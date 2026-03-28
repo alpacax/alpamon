@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/cenkalti/backoff"
 	"github.com/rs/zerolog/log"
 )
@@ -161,7 +162,7 @@ func (am *AuthManager) Start(ctx context.Context) {
 }
 
 func (am *AuthManager) startSocketListener(ctx context.Context) error {
-	const socketPath = "/var/run/alpamon/auth.sock"
+	socketPath := filepath.Join(utils.RunDir(), "auth.sock")
 	socketDir := filepath.Dir(socketPath)
 
 	// Ensure socket directory exists as a fallback when systemd-tmpfiles

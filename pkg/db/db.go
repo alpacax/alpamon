@@ -9,18 +9,17 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/db/ent"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/glebarez/go-sqlite"
 	"github.com/rs/zerolog/log"
 )
 
-const (
-	dbDir      = "/var/lib/alpamon"
-	dbFileName = "alpamon.db"
-)
+const dbFileName = "alpamon.db"
 
 func InitDB() *ent.Client {
-	fileName := fmt.Sprintf("%s/%s", dbDir, dbFileName)
-	if _, err := os.Stat(dbDir); os.IsNotExist(err) {
+	dataDir := utils.DataDir()
+	fileName := fmt.Sprintf("%s/%s", dataDir, dbFileName)
+	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		fileName, _ = filepath.Abs(dbFileName)
 	}
 

@@ -311,7 +311,7 @@ func (h *SystemHandler) executeUninstall() {
 		// Defer the uninstall so the process can shut down cleanly first.
 		// Use a subshell background pattern instead of nohup, which may not
 		// be available in minimal container images.
-		deferredCmd := fmt.Sprintf("(sleep 5 && %s) >>/var/log/alpamon/alpamon.log 2>&1 &", cmd)
+		deferredCmd := fmt.Sprintf("(sleep 5 && %s) >>%s/alpamon.log 2>&1 &", cmd, utils.LogDir())
 		log.Info().Msg("Systemd not available, scheduling deferred uninstall.")
 		_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", deferredCmd)
 	}

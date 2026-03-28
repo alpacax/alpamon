@@ -90,7 +90,7 @@ func (pc *PtyClient) initializePtySession() error {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
 
-	pc.cmd = exec.Command("/bin/bash", "-il")
+	pc.cmd = exec.Command(utils.DefaultShell(), utils.DefaultShellArgs()...)
 	uid, gid, groupIds, env, err := pc.getPtyUserAndEnv()
 	if err != nil {
 		return fmt.Errorf("failed to get user/env: %w", err)

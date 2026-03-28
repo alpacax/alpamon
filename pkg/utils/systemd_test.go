@@ -24,7 +24,7 @@ func TestEnsureDirectoriesWithRoot(t *testing.T) {
 		t.Fatalf("ensureDirectoriesWithRoot() error: %v", err)
 	}
 
-	for _, d := range alpamonDirs {
+	for _, d := range getAlpamonDirs() {
 		path := filepath.Join(root, d.Path)
 		info, err := os.Stat(path)
 		if err != nil {
@@ -51,7 +51,7 @@ func TestEnsureDirectoriesWithRoot_Idempotent(t *testing.T) {
 		t.Fatalf("second call error: %v", err)
 	}
 
-	for _, d := range alpamonDirs {
+	for _, d := range getAlpamonDirs() {
 		path := filepath.Join(root, d.Path)
 		info, err := os.Stat(path)
 		if err != nil {

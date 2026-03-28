@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,10 @@ func GetPamVersion() string {
 }
 
 func queryPamVersion() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), pamQueryTimeout)
 	defer cancel()
 

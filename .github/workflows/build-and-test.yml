@@ -97,6 +97,11 @@ jobs:
             container: amazonlinux:2023
             pkg_manager: dnf
             runner: ubuntu-24.04-arm
+          # macOS
+          - distro: macos-arm64
+            container: ''
+            pkg_manager: none
+            runner: macos-14
 
     steps:
       - name: Install dependencies (Debian/Ubuntu)
@@ -122,6 +127,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Mark workspace as safe for Git
+        if: matrix.container != ''
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Generate go code

@@ -11,7 +11,8 @@ before:
     - go mod tidy
 
 builds:
-  - main: ./cmd/alpamon
+  - id: alpamon-linux
+    main: ./cmd/alpamon
     binary: alpamon
     ldflags:
       - -s -w -X github.com/alpacax/alpamon/pkg/version.Version={{.Version}}
@@ -19,6 +20,19 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
+    goarch:
+      - amd64
+      - arm64
+
+  - id: alpamon-darwin
+    main: ./cmd/alpamon
+    binary: alpamon
+    ldflags:
+      - -s -w -X github.com/alpacax/alpamon/pkg/version.Version={{.Version}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
     goarch:
       - amd64
       - arm64
@@ -31,7 +45,9 @@ archives:
     name_template: '{{ .ProjectName }}-{{ trimprefix .Version "v" }}-{{ .Os }}-{{ .Arch }}'
 
 nfpms:
-  - package_name: alpamon
+  - builds:
+      - alpamon-linux
+    package_name: alpamon
     maintainer: AlpacaX <support@alpacax.com>
     description: Alpamon
     homepage: https://github.com/alpacax/alpamon

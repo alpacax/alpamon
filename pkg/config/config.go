@@ -232,7 +232,7 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 
 func Files(name string) []string {
 	return []string{
-		fmt.Sprintf("/etc/alpamon/%s.conf", name),
+		filepath.Join(configDir(), fmt.Sprintf("%s.conf", name)),
 		filepath.Join(os.Getenv("HOME"), fmt.Sprintf(".%s.conf", name)),
 	}
 }

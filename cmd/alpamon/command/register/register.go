@@ -22,10 +22,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	alpamonBinPath = "/usr/local/bin/alpamon"
-	configPath     = "/etc/alpamon/alpamon.conf"
-	logPath        = "/var/log/alpamon/alpamon.log"
+const alpamonBinPath = "/usr/local/bin/alpamon"
+
+var (
+	configPath = filepath.Join(utils.ConfigDir(), "alpamon.conf")
+	logPath    = filepath.Join(utils.LogDir(), "alpamon.log")
 )
 
 var (
