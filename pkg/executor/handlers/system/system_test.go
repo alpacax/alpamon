@@ -9,6 +9,7 @@ import (
 	"github.com/alpacax/alpamon/internal/pool"
 	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/pkg/version"
 )
 
 // MockWSClient is a mock implementation of WSClient for testing
@@ -30,6 +31,29 @@ func (m *MockWSClient) RestartCollector() {
 	m.RestartCollectorCalled = true
 }
 
+// MockVersionResolver is a mock implementation of VersionResolver for testing
+type MockVersionResolver struct {
+	LatestVersion       string
+	PamVersion          string
+	InvalidatePamCalled bool
+}
+
+func (m *MockVersionResolver) GetLatestVersion() string {
+	return m.LatestVersion
+}
+
+func (m *MockVersionResolver) GetPamVersion() string {
+	return m.PamVersion
+}
+
+func (m *MockVersionResolver) InvalidatePamCache() {
+	m.InvalidatePamCalled = true
+}
+
+func newMockVersionResolver() *MockVersionResolver {
+	return &MockVersionResolver{LatestVersion: "v0.0.0-test", PamVersion: ""}
+}
+
 func TestSystemHandler_Name(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -38,7 +62,7 @@ func TestSystemHandler_Name(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	if handler.Name() != common.System.String() {
 		t.Errorf("expected name %q, got %q", common.System.String(), handler.Name())
 	}
@@ -52,7 +76,7 @@ func TestSystemHandler_Commands(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	commands := handler.Commands()
 
 	expected := []string{
@@ -85,7 +109,7 @@ func TestSystemHandler_Restart_Collector(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
@@ -116,7 +140,7 @@ func TestSystemHandler_Restart_Default(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
@@ -146,7 +170,7 @@ func TestSystemHandler_Restart_Alpamon(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
@@ -174,7 +198,7 @@ func TestSystemHandler_Quit(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -200,7 +224,7 @@ func TestSystemHandler_Reboot(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -226,7 +250,7 @@ func TestSystemHandler_Shutdown(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -252,7 +276,7 @@ func TestSystemHandler_UnknownCommand(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -278,7 +302,7 @@ func TestSystemHandler_Validate(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 
 	testCases := []struct {
 		name string
@@ -310,7 +334,7 @@ func TestSystemHandler_PoolShutdown(t *testing.T) {
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	ctx := context.Background()
 
 	// Shutdown pool first
@@ -344,30 +368,25 @@ func TestSystemHandler_Upgrade_UpToDate(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	mockVersions := &MockVersionResolver{
+		LatestVersion: version.Version, // same as current -> up-to-date
+		PamVersion:    "",
+	}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
 
-	// This test depends on the actual version comparison
-	// GetLatestVersion() makes an HTTP call, so this test will behave differently
-	// depending on network availability
 	exitCode, output, err := handler.Execute(ctx, common.Upgrade.String(), args)
 
-	// Should not return an error regardless of version comparison result
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// exitCode could be 0 (up-to-date or upgrade success) or 1 (platform not supported)
-	if exitCode != 0 && exitCode != 1 {
-		t.Errorf("expected exit code 0 or 1, got %d", exitCode)
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", exitCode)
 	}
-	// Output should mention either "up-to-date", "Upgrading", or "not supported"
-	if !strings.Contains(output, "up-to-date") &&
-		!strings.Contains(output, "Upgrading") &&
-		!strings.Contains(output, "not supported") &&
-		!strings.Contains(output, "Alpamon") {
-		t.Errorf("expected meaningful output, got %q", output)
+	if !strings.Contains(output, "up-to-date") {
+		t.Errorf("expected output to contain 'up-to-date', got %q", output)
 	}
 }
 
@@ -379,7 +398,7 @@ func TestSystemHandler_Update(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -409,7 +428,7 @@ func TestSystemHandler_Uninstall(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}

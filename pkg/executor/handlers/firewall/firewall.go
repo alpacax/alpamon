@@ -117,6 +117,9 @@ func (h *FirewallHandler) Execute(ctx context.Context, cmd string, args *common.
 		return 1, "", fmt.Errorf("unknown firewall command: %s", cmd)
 	}
 
+	if err != nil && common.IsTimeout(ctx) {
+		return common.TimeoutError(common.FirewallTimeout)
+	}
 	return exitCode, output, err
 }
 

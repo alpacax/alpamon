@@ -64,6 +64,10 @@ func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 		return 1, "", fmt.Errorf("unknown user command: %s", cmd)
 	}
 
+	if err != nil && common.IsTimeout(ctx) {
+		return common.TimeoutError(timeout)
+	}
+
 	// Sync system info after successful command execution
 	if exitCode == 0 && h.syncManager != nil {
 		h.syncManager.SyncSystemInfo([]string{"groups", "users"})

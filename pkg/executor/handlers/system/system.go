@@ -18,13 +18,18 @@ import (
 // SystemHandler handles system-level commands like restart, reboot, shutdown, upgrade
 type SystemHandler struct {
 	*common.BaseHandler
-	wsClient   common.WSClient
-	ctxManager *agent.ContextManager
-	pool       *pool.Pool
+	wsClient        common.WSClient
+	ctxManager      *agent.ContextManager
+	pool            *pool.Pool
+	versionResolver common.VersionResolver
 }
 
-// NewSystemHandler creates a new system handler
-func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClient, ctxManager *agent.ContextManager, pool *pool.Pool) *SystemHandler {
+// NewSystemHandler creates a new system handler.
+// versionResolver must not be nil; pass utils.NewDefaultVersionResolver() for production.
+func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClient, ctxManager *agent.ContextManager, pool *pool.Pool, versionResolver common.VersionResolver) *SystemHandler {
+	if versionResolver == nil {
+		panic("system: versionResolver must not be nil")
+	}
 	h := &SystemHandler{
 		BaseHandler: common.NewBaseHandler(
 			common.System,
@@ -39,9 +44,10 @@ func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClie
 			},
 			cmdExecutor,
 		),
-		wsClient:   wsClient,
-		ctxManager: ctxManager,
-		pool:       pool,
+		wsClient:        wsClient,
+		ctxManager:      ctxManager,
+		pool:            pool,
+		versionResolver: versionResolver,
 	}
 	return h
 }
@@ -52,15 +58,45 @@ func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.Co
 	case common.Upgrade.String():
 		return h.withTimeout(ctx, common.UpgradeTimeout, h.handleUpgrade)
 	case common.Restart.String():
-		return h.handleRestart(args)
+		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
+		defer cancel()
+		exitCode, output, err := h.handleRestart(args)
+		if err != nil && common.IsTimeout(ctx) {
+			return common.TimeoutError(common.SystemCmdTimeout)
+		}
+		return exitCode, output, err
 	case common.Quit.String():
-		return h.handleQuit()
+		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
+		defer cancel()
+		exitCode, output, err := h.handleQuit()
+		if err != nil && common.IsTimeout(ctx) {
+			return common.TimeoutError(common.SystemCmdTimeout)
+		}
+		return exitCode, output, err
 	case common.ByeBye.String():
-		return h.handleUninstall()
+		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
+		defer cancel()
+		exitCode, output, err := h.handleUninstall()
+		if err != nil && common.IsTimeout(ctx) {
+			return common.TimeoutError(common.SystemCmdTimeout)
+		}
+		return exitCode, output, err
 	case common.Reboot.String():
-		return h.handleReboot()
+		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
+		defer cancel()
+		exitCode, output, err := h.handleReboot()
+		if err != nil && common.IsTimeout(ctx) {
+			return common.TimeoutError(common.SystemCmdTimeout)
+		}
+		return exitCode, output, err
 	case common.Shutdown.String():
-		return h.handleShutdown()
+		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
+		defer cancel()
+		exitCode, output, err := h.handleShutdown()
+		if err != nil && common.IsTimeout(ctx) {
+			return common.TimeoutError(common.SystemCmdTimeout)
+		}
+		return exitCode, output, err
 	case common.Update.String():
 		return h.withTimeout(ctx, common.UpgradeTimeout, h.handleSystemUpdate)
 	default:
@@ -72,7 +108,11 @@ func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.Co
 func (h *SystemHandler) withTimeout(ctx context.Context, timeout time.Duration, fn func(context.Context) (int, string, error)) (int, string, error) {
 	ctx, cancel := common.WithHandlerTimeout(ctx, timeout)
 	defer cancel()
-	return fn(ctx)
+	exitCode, output, err := fn(ctx)
+	if err != nil && common.IsTimeout(ctx) {
+		return common.TimeoutError(timeout)
+	}
+	return exitCode, output, err
 }
 
 // Validate checks if the arguments are valid for the command
@@ -86,7 +126,7 @@ func (h *SystemHandler) Validate(cmd string, args *common.CommandArgs) error {
 // the packages that need it. This prevents skipping a pam-only upgrade when
 // alpamon is already at the latest version.
 func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) {
-	latestVersion := utils.GetLatestVersion()
+	latestVersion := h.versionResolver.GetLatestVersion()
 	if latestVersion == "" {
 		return 1, "Failed to retrieve the latest Alpamon version from GitHub.",
 			errors.New("failed to retrieve the latest Alpamon version from GitHub")
@@ -94,7 +134,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 
 	needAlpamon := version.Version != latestVersion
 
-	currentPamVersion := utils.GetPamVersion()
+	currentPamVersion := h.versionResolver.GetPamVersion()
 	needPam := currentPamVersion != "" && currentPamVersion != latestVersion
 
 	if !needAlpamon && !needPam {
@@ -127,12 +167,16 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 	log.Debug().Msgf("Upgrading %s...", pkgList)
 	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
 	if exitCode == 0 && needPam {
-		utils.InvalidatePamCache()
+		h.versionResolver.InvalidatePamCache()
 	}
 	return exitCode, output, err
 }
 
-// handleRestart handles the restart command
+// handleRestart handles the restart command.
+// This is a fire-and-forget command: the response is returned immediately and
+// the actual restart runs asynchronously via the pool with its own context
+// from ctxManager. The handler-level timeout in Execute() covers the synchronous
+// dispatch; the pool task manages its own lifecycle via ctxManager.NewContext().
 func (h *SystemHandler) handleRestart(args *common.CommandArgs) (int, string, error) {
 	target := args.Target
 	if target == "" {
@@ -171,7 +215,8 @@ func (h *SystemHandler) handleRestart(args *common.CommandArgs) (int, string, er
 	return 0, message, nil
 }
 
-// handleQuit handles the quit command
+// handleQuit handles the quit command.
+// See handleRestart for the fire-and-forget pattern.
 func (h *SystemHandler) handleQuit() (int, string, error) {
 	// Submit to worker pool for managed execution
 	poolCtx, cancel := h.ctxManager.NewContext(2 * time.Second)
@@ -196,7 +241,10 @@ func (h *SystemHandler) handleQuit() (int, string, error) {
 	return 0, "Alpamon will shutdown in 1 second.", nil
 }
 
-// handleUninstall handles the byebye (uninstall) command
+// handleUninstall handles the byebye (uninstall) command.
+// See handleRestart for the fire-and-forget pattern. executeUninstall uses
+// context.Background() intentionally because the uninstall must complete even
+// after the agent's own context tree is shut down.
 func (h *SystemHandler) handleUninstall() (int, string, error) {
 	log.Info().Msg("Uninstall request received.")
 
@@ -272,11 +320,14 @@ func (h *SystemHandler) executeUninstall() {
 	h.wsClient.ShutDown()
 }
 
-// handleReboot handles the reboot command
+// handleReboot handles the reboot command.
+// A separate context is created via ctxManager.NewContext instead of using the
+// handler's ctx because the response must be sent before the reboot executes.
+// The pool task runs asynchronously after the handler returns. The context is
+// still derived from ContextManager.root, so shutdown propagation works correctly.
 func (h *SystemHandler) handleReboot() (int, string, error) {
 	log.Info().Msg("Reboot request received.")
 
-	// Submit to worker pool for managed execution
 	poolCtx, cancel := h.ctxManager.NewContext(common.SystemCmdTimeout)
 	submitted := false
 	defer func() {
@@ -300,11 +351,11 @@ func (h *SystemHandler) handleReboot() (int, string, error) {
 	return 0, "Server will reboot in 1 second", nil
 }
 
-// handleShutdown handles the shutdown command
+// handleShutdown handles the shutdown command.
+// See handleReboot for why a separate context is created.
 func (h *SystemHandler) handleShutdown() (int, string, error) {
 	log.Info().Msg("Shutdown request received.")
 
-	// Submit to worker pool for managed execution
 	poolCtx, cancel := h.ctxManager.NewContext(common.SystemCmdTimeout)
 	submitted := false
 	defer func() {

@@ -34,19 +34,31 @@ func NewInfoHandler(infoManager common.SystemInfoManager) *InfoHandler {
 }
 
 // Execute runs the info command
-func (h *InfoHandler) Execute(_ context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+func (h *InfoHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+	ctx, cancel := common.WithHandlerTimeout(ctx, common.InfoTimeout)
+	defer cancel()
+
+	var exitCode int
+	var output string
+	var err error
+
 	switch cmd {
 	case common.Ping.String():
-		return h.handlePing()
+		exitCode, output, err = h.handlePing()
 	case common.Help.String():
-		return h.handleHelp()
+		exitCode, output, err = h.handleHelp()
 	case common.Commit.String():
-		return h.handleCommit()
+		exitCode, output, err = h.handleCommit()
 	case common.Sync.String():
-		return h.handleSync(args)
+		exitCode, output, err = h.handleSync(args)
 	default:
 		return 1, "", fmt.Errorf("unknown info command: %s", cmd)
 	}
+
+	if err != nil && common.IsTimeout(ctx) {
+		return common.TimeoutError(common.InfoTimeout)
+	}
+	return exitCode, output, err
 }
 
 // Validate checks if the arguments are valid for the command

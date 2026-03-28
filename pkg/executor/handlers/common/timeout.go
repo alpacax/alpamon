@@ -21,7 +21,7 @@ const (
 	InfoTimeout       = 30 * time.Second
 )
 
-// TimeoutResult is returned when a handler-level timeout is exceeded.
+// TimeoutExitCode is returned when a handler-level timeout is exceeded.
 const TimeoutExitCode = 124
 
 // WithHandlerTimeout wraps ctx with the given timeout and returns a

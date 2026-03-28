@@ -18,6 +18,7 @@ import (
 	"github.com/alpacax/alpamon/pkg/executor/services"
 	"github.com/alpacax/alpamon/pkg/runner"
 	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/utils"
 )
 
 // SystemInfoCallbacks contains function callbacks for system info operations
@@ -59,7 +60,7 @@ func (f *HandlerFactory) RegisterAll(
 
 	// Define all handlers in a slice for streamlined registration
 	handlers := []common.Handler{
-		system.NewSystemHandler(f.cmdExec, wsClient, ctxManager, pool),
+		system.NewSystemHandler(f.cmdExec, wsClient, ctxManager, pool, utils.NewDefaultVersionResolver()),
 		group.NewGroupHandler(f.cmdExec, infoAdapter),
 		info.NewInfoHandler(infoAdapter),
 		shell.NewShellHandler(f.cmdExec),

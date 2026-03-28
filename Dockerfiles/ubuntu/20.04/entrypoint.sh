@@ -1,10 +1,17 @@
 #!/bin/bash
 
-ALPACON_URL=${ALPACON_URL:-"http://host.docker.internal:8081"}
-PLUGIN_ID=${PLUGIN_ID:-"617cfd44-a25e-4fc7-90e1-bfafe429c649"}
+ALPACON_URL=${ALPACON_URL:-"http://host.docker.internal:8000"}
 PLUGIN_KEY=${PLUGIN_KEY:-"alpaca"}
 
-mkdir -p /etc/alpamon
+if [ -z "$PLUGIN_ID" ]; then
+    echo "Error: PLUGIN_ID environment variable is required."
+    echo "Usage: docker run -e PLUGIN_ID=<your-plugin-id> [-e ALPACON_URL=...] [-e PLUGIN_KEY=...] <image>"
+    exit 1
+fi
+
+mkdir -p /etc/alpamon /var/lib/alpamon /var/log/alpamon /run/alpamon
+chmod 700 /etc/alpamon
+chmod 750 /var/lib/alpamon /var/log/alpamon /run/alpamon
 
 cat > /etc/alpamon/alpamon.conf <<EOL
 [server]
