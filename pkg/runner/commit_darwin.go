@@ -64,8 +64,8 @@ func getUserData() ([]UserData, error) {
 		}
 		username := fields[0]
 		uid, err := strconv.Atoi(fields[1])
-		if err != nil || uid < 500 {
-			continue // skip system users
+		if err != nil {
+			continue
 		}
 
 		usr, err := user.Lookup(username)
