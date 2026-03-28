@@ -39,7 +39,7 @@ var (
 		"/proc": true,
 		"/dev":  true,
 	}
-	virtualMountPointPattern = "^/(sys|proc|run|dev/|System|Volumes/Recovery|private/var/vm)"
+	virtualMountPointPattern = regexp.MustCompile("^/(sys|proc|run|dev/|System|Volumes/Recovery|private/var/vm)")
 	virtualInterfaceFlags    = map[string]bool{
 		"flagloopback":     true,
 		"flagpointtopoint": true,
@@ -104,8 +104,7 @@ func IsVirtualFileSystem(device string, fstype string, mountPoint string) bool {
 		return true
 	}
 
-	matched, _ := regexp.MatchString(virtualMountPointPattern, mountPoint)
-	if matched {
+	if virtualMountPointPattern.MatchString(mountPoint) {
 		return true
 	}
 

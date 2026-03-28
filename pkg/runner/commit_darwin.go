@@ -72,7 +72,11 @@ func getUserData() ([]UserData, error) {
 		if err != nil {
 			continue
 		}
-		gid, _ := strconv.Atoi(usr.Gid)
+		gid, err := strconv.Atoi(usr.Gid)
+		if err != nil {
+			log.Debug().Err(err).Str("username", username).Str("gid", usr.Gid).Msg("Failed to parse user GID.")
+			continue
+		}
 
 		users = append(users, UserData{
 			Username:    username,

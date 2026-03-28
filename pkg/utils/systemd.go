@@ -45,8 +45,9 @@ type alpamonDir struct {
 	Mode os.FileMode
 }
 
-// getAlpamonDirs returns required directories matching configs/tmpfile.conf
-// and scripts/postinstall.sh:create_directories(). Keep all three in sync.
+// getAlpamonDirs returns required directories for alpamon.
+// On Linux, these match configs/tmpfile.conf and scripts/postinstall.sh:create_directories().
+// On macOS, RunDir() differs (/tmp/alpamon instead of /run/alpamon).
 func getAlpamonDirs() []alpamonDir {
 	return []alpamonDir{
 		{ConfigDir(), 0700},
@@ -65,7 +66,10 @@ func EnsureDirectories() error {
 
 func ensureDirectoriesWithRoot(root string) error {
 	for _, d := range getAlpamonDirs() {
-		path := filepath.Join(root, d.Path)
+		path := d.Path
+		if root != "" {
+			path = filepath.Join(root, strings.TrimPrefix(path, string(os.PathSeparator)))
+		}
 		if err := os.MkdirAll(path, d.Mode); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", path, err)
 		}
