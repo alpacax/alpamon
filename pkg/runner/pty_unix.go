@@ -9,11 +9,13 @@ import (
 	"syscall"
 
 	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/rs/zerolog/log"
 )
 
 func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string, env map[string]string) error {
 	// Only set credentials when running as root; non-root cannot demote.
-	if os.Getuid() == 0 {
+	currentUID := os.Getuid()
+	if currentUID == 0 {
 		u32uid, u32gid, err := safeUint32Credentials(uid, gid)
 		if err != nil {
 			return err
@@ -25,6 +27,9 @@ func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string,
 				Groups: utils.ConvertGroupIds(groupIds),
 			},
 		}
+	} else if uid != currentUID {
+		log.Warn().Int("requestedUID", uid).Int("processUID", currentUID).
+			Msg("PTY credential demotion skipped: alpamon is not running as root. Session will run as the alpamon process user.")
 	}
 
 	pc.cmd.Dir = env["HOME"]
