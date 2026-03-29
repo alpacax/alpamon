@@ -9,9 +9,8 @@ func DataDir() string { return "/var/lib/alpamon" }
 // LogDir returns the log directory for alpamon.
 func LogDir() string { return "/var/log/alpamon" }
 
-// RunDir returns the runtime directory for alpamon.
-// macOS does not have /run; use a dedicated subdirectory under /tmp.
-func RunDir() string { return "/tmp/alpamon" }
+// runDir returns the system runtime directory for alpamon (used when running as root).
+func runDir() string { return "/var/run/alpamon" }
 
 // DefaultShell returns the default shell for the platform.
 // macOS defaults to zsh since Catalina.

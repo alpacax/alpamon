@@ -9,8 +9,8 @@ func DataDir() string { return "/var/lib/alpamon" }
 // LogDir returns the log directory for alpamon.
 func LogDir() string { return "/var/log/alpamon" }
 
-// RunDir returns the runtime directory for alpamon.
-func RunDir() string { return "/run/alpamon" }
+// runDir returns the system runtime directory for alpamon (used when running as root).
+func runDir() string { return "/run/alpamon" }
 
 // DefaultShell returns the default shell for the platform.
 func DefaultShell() string { return "/bin/bash" }
