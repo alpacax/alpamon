@@ -160,6 +160,8 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 		cmd = fmt.Sprintf("apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
 	case "rhel":
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
+	case "darwin":
+		return 1, "Automatic upgrade is not supported on macOS. Please download the latest binary from the release channel and replace /usr/local/bin/alpamon manually.", nil
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
 	}
