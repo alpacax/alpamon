@@ -47,7 +47,8 @@ type alpamonDir struct {
 
 // getAlpamonDirs returns required directories for alpamon.
 // On Linux, these match configs/tmpfile.conf and scripts/postinstall.sh:create_directories().
-// On macOS, RunDir() differs (/tmp/alpamon instead of /run/alpamon).
+// RunDir() varies by platform and privilege: /run/alpamon (Linux root),
+// /var/run/alpamon (macOS root), or /tmp/alpamon (non-root on any platform).
 func getAlpamonDirs() []alpamonDir {
 	return []alpamonDir{
 		{ConfigDir(), 0700},

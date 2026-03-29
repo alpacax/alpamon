@@ -72,7 +72,7 @@ func TestGetAlpamonDirs_NoSystemDirectories(t *testing.T) {
 	systemDirs := map[string]bool{"/tmp": true, "/var": true, "/etc": true, "/run": true}
 	for _, d := range getAlpamonDirs() {
 		if systemDirs[d.Path] {
-			t.Errorf("getAlpamonDirs() contains bare system directory %q — EnsureDirectories would chmod it", d.Path)
+			t.Errorf("getAlpamonDirs() contains bare system directory %q: EnsureDirectories would chmod it", d.Path)
 		}
 	}
 }
