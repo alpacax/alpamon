@@ -93,7 +93,7 @@ func CommitSystemInfo() {
 	// Skip if firewall functionality is disabled
 	// Note: Full firewall sync is handled by FirewallHandler in executor package
 	if utils.IsFirewallDisabled() {
-		log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
+		log.Debug().Msg("Skipping firewall sync - firewall functionality is disabled")
 	} else {
 		log.Debug().Msg("Firewall sync delegated to executor FirewallHandler")
 	}
@@ -171,7 +171,7 @@ func syncServerData(session *scheduler.Session) {
 
 func syncFirewallData() {
 	if utils.IsFirewallDisabled() {
-		log.Info().Msg("Skipping firewall sync - firewall functionality is temporarily disabled")
+		log.Debug().Msg("Skipping firewall sync - firewall functionality is disabled")
 		return
 	}
 	log.Debug().Msg("Firewall sync delegated to executor FirewallHandler")
