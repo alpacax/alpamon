@@ -14,16 +14,14 @@ import (
 func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string, env map[string]string) error {
 	// Only set credentials when running as root; non-root cannot demote.
 	if os.Getuid() == 0 {
-		if uid < 0 || uint64(uid) > uint64(math.MaxUint32) {
-			return fmt.Errorf("UID %d is out of valid range", uid)
-		}
-		if gid < 0 || uint64(gid) > uint64(math.MaxUint32) {
-			return fmt.Errorf("GID %d is out of valid range", gid)
+		u32uid, u32gid, err := safeUint32Credentials(uid, gid)
+		if err != nil {
+			return err
 		}
 		pc.cmd.SysProcAttr = &syscall.SysProcAttr{
 			Credential: &syscall.Credential{
-				Uid:    uint32(uid),
-				Gid:    uint32(gid),
+				Uid:    u32uid,
+				Gid:    u32gid,
 				Groups: utils.ConvertGroupIds(groupIds),
 			},
 		}
@@ -36,4 +34,14 @@ func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string,
 	}
 
 	return nil
+}
+
+func safeUint32Credentials(uid, gid int) (uint32, uint32, error) {
+	if uid < 0 || uid > math.MaxUint32 {
+		return 0, 0, fmt.Errorf("UID %d is out of valid range", uid)
+	}
+	if gid < 0 || gid > math.MaxUint32 {
+		return 0, 0, fmt.Errorf("GID %d is out of valid range", gid)
+	}
+	return uint32(uid), uint32(gid), nil // #nosec G115
 }
