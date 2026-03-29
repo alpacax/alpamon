@@ -184,11 +184,13 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 
-	if err := os.Chown(socketPath, 0, 0); err != nil {
-		return fmt.Errorf("failed to set socket ownership: %w", err)
+	if os.Getuid() == 0 {
+		if err := os.Chown(socketPath, 0, 0); err != nil {
+			return fmt.Errorf("failed to set socket ownership: %w", err)
+		}
 	}
 
-	log.Info().Msgf("Socket created with permissions 600 (root only)")
+	log.Info().Msgf("Auth socket created at %s", socketPath)
 
 	am.listener = listener
 	log.Info().Msg("Auth socket listener started")
