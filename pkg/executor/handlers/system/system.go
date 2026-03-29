@@ -10,6 +10,7 @@ import (
 	"github.com/alpacax/alpamon/internal/pool"
 	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/pkg/updater"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/alpacax/alpamon/pkg/version"
 	"github.com/rs/zerolog/log"
@@ -161,7 +162,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 	case "rhel":
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
 	case "darwin":
-		return 1, "Automatic upgrade is not supported on macOS. Please download the latest binary from the release channel and replace /usr/local/bin/alpamon manually.", nil
+		return h.selfUpdate(latestVersion)
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
 	}
@@ -172,6 +173,36 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 		h.versionResolver.InvalidatePamCache()
 	}
 	return exitCode, output, err
+}
+
+// selfUpdate downloads and replaces the binary from GitHub Releases, then triggers restart.
+func (h *SystemHandler) selfUpdate(latestVersion string) (int, string, error) {
+	if err := updater.SelfUpdate(latestVersion, updater.Options{}); err != nil {
+		return 1, fmt.Sprintf("Self-update failed: %v", err), err
+	}
+
+	// Fire-and-forget restart after successful update
+	poolCtx, cancel := h.ctxManager.NewContext(2 * time.Second)
+	submitted := false
+	defer func() {
+		if !submitted {
+			cancel()
+		}
+	}()
+
+	err := h.pool.Submit(poolCtx, func() error {
+		defer cancel()
+		time.Sleep(1 * time.Second)
+		h.wsClient.Restart()
+		return nil
+	})
+	if err == nil {
+		submitted = true
+	} else {
+		log.Error().Err(err).Msg("Failed to submit restart task after self-update. Manual restart required.")
+	}
+
+	return 0, fmt.Sprintf("Updated to %s. Restarting...", latestVersion), nil
 }
 
 // handleRestart handles the restart command.
