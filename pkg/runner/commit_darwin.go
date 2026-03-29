@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"os"
 	"os/exec"
-	"os/user"
 	"strconv"
 	"strings"
 
@@ -47,6 +46,8 @@ func loadShadowData() map[string]shadowEntry {
 }
 
 // getUserData enumerates local users via dscl on macOS.
+// All user attributes are fetched via dscl to avoid os/user.Lookup(),
+// which requires CGO on macOS and fails with CGO_ENABLED=0 builds.
 func getUserData() ([]UserData, error) {
 	out, err := exec.Command("dscl", ".", "-list", "/Users", "UniqueID").Output()
 	if err != nil {
@@ -68,22 +69,19 @@ func getUserData() ([]UserData, error) {
 			continue
 		}
 
-		usr, err := user.Lookup(username)
-		if err != nil {
-			continue
-		}
-		gid, err := strconv.Atoi(usr.Gid)
-		if err != nil {
-			log.Debug().Err(err).Str("username", username).Str("gid", usr.Gid).Msg("Failed to parse user GID.")
-			continue
+		gid := lookupDsclInt(username, "PrimaryGroupID")
+		homeDir := lookupDsclAttr(username, "NFSHomeDirectory")
+		shell := lookupDsclAttr(username, "UserShell")
+		if shell == "" {
+			shell = utils.DefaultShell()
 		}
 
 		users = append(users, UserData{
 			Username:    username,
 			UID:         uid,
 			GID:         gid,
-			Directory:   usr.HomeDir,
-			Shell:       lookupUserShell(username),
+			Directory:   homeDir,
+			Shell:       shell,
 			ValidShells: validShells,
 		})
 	}
@@ -92,19 +90,6 @@ func getUserData() ([]UserData, error) {
 		users = []UserData{}
 	}
 	return users, nil
-}
-
-// lookupUserShell queries the user's login shell via dscl.
-func lookupUserShell(username string) string {
-	out, err := exec.Command("dscl", ".", "-read", "/Users/"+username, "UserShell").Output()
-	if err != nil {
-		return utils.DefaultShell()
-	}
-	parts := strings.SplitN(strings.TrimSpace(string(out)), " ", 2)
-	if len(parts) == 2 {
-		return strings.TrimSpace(parts[1])
-	}
-	return utils.DefaultShell()
 }
 
 // getGroupData enumerates local groups via dscl on macOS.
@@ -135,4 +120,33 @@ func getGroupData() ([]GroupData, error) {
 		groups = []GroupData{}
 	}
 	return groups, nil
+}
+
+// lookupDsclAttr reads a single attribute for a user via dscl.
+// Returns empty string on failure.
+func lookupDsclAttr(username, attr string) string {
+	out, err := exec.Command("dscl", ".", "-read", "/Users/"+username, attr).Output()
+	if err != nil {
+		return ""
+	}
+	// Output format: "AttrName: value"
+	parts := strings.SplitN(strings.TrimSpace(string(out)), " ", 2)
+	if len(parts) == 2 {
+		return strings.TrimSpace(parts[1])
+	}
+	return ""
+}
+
+// lookupDsclInt reads a single integer attribute for a user via dscl.
+// Returns 0 on failure.
+func lookupDsclInt(username, attr string) int {
+	s := lookupDsclAttr(username, attr)
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return v
 }

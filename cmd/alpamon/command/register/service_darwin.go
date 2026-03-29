@@ -53,14 +53,14 @@ func writeLaunchdPlist(path string) error {
 	<key>KeepAlive</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>%s/alpamon.err</string>
+	<string>/var/log/alpamon.err</string>
 	<key>StandardOutPath</key>
-	<string>%s/alpamon.out</string>
+	<string>/var/log/alpamon.out</string>
 	<key>WorkingDirectory</key>
 	<string>/</string>
 </dict>
 </plist>
-`, alpamonBinPath, utils.LogDir(), utils.LogDir())
+`, alpamonBinPath)
 
 	return os.WriteFile(path, []byte(plist), 0644)
 }

@@ -13,9 +13,9 @@
 	<key>KeepAlive</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/var/log/alpamon/alpamon.err</string>
+	<string>/var/log/alpamon.err</string>
 	<key>StandardOutPath</key>
-	<string>/var/log/alpamon/alpamon.out</string>
+	<string>/var/log/alpamon.out</string>
 	<key>WorkingDirectory</key>
 	<string>/</string>
 </dict>
