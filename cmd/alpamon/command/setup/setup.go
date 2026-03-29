@@ -31,8 +31,8 @@ type ConfigData struct {
 
 func SetConfigPaths(serviceName string) {
 	name = serviceName
-	configTarget = fmt.Sprintf("/etc/alpamon/%s.conf", name)
-	templateFilePath = fmt.Sprintf("/etc/alpamon/%s.config.tmpl", name)
+	configTarget = filepath.Join(utils.ConfigDir(), fmt.Sprintf("%s.conf", name))
+	templateFilePath = filepath.Join(utils.ConfigDir(), fmt.Sprintf("%s.config.tmpl", name))
 }
 
 var SetupCmd = &cobra.Command{

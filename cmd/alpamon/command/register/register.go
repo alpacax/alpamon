@@ -9,11 +9,8 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"syscall"
 	"text/template"
 	"time"
 
@@ -22,10 +19,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	alpamonBinPath = "/usr/local/bin/alpamon"
-	configPath     = "/etc/alpamon/alpamon.conf"
-	logPath        = "/var/log/alpamon/alpamon.log"
+var (
+	configPath = filepath.Join(utils.ConfigDir(), "alpamon.conf")
+	logPath    = filepath.Join(utils.LogDir(), "alpamon.log")
 )
 
 var (
@@ -144,14 +140,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	fmt.Println("\nStarting alpamon service...")
 	if err := startService(); err != nil {
 		fmt.Printf("Warning: Failed to start service: %v\n", err)
-		if utils.HasSystemd() {
-			fmt.Println("Please start the service manually:")
-			fmt.Println("  sudo systemctl start alpamon")
-			fmt.Println("  sudo systemctl enable alpamon")
-		} else {
-			fmt.Println("Please start alpamon manually:")
-			fmt.Println("  /usr/local/bin/alpamon")
-		}
+		printManualStartHint()
 	}
 
 	// 9. Success message
@@ -183,6 +172,8 @@ func detectPlatform() string {
 	}
 
 	switch hostInfo.Platform {
+	case "darwin":
+		return "darwin"
 	case "ubuntu", "debian", "raspbian":
 		return "debian"
 	case "centos", "rhel", "redhat", "amazon", "amzn", "fedora", "rocky", "oracle", "ol":
@@ -321,65 +312,3 @@ debug = false
 	})
 }
 
-func ensureDirectories() error {
-	if utils.HasSystemd() {
-		if output, err := exec.Command("systemd-tmpfiles", "--create", "alpamon.conf").CombinedOutput(); err != nil {
-			return fmt.Errorf("tmpfiles creation failed: %w\n%s", err, string(output))
-		}
-		return nil
-	}
-	return utils.EnsureDirectories()
-}
-
-func startService() error {
-	if utils.HasSystemd() {
-		if output, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
-			return fmt.Errorf("daemon-reload failed: %w\n%s", err, string(output))
-		}
-
-		if output, err := exec.Command("systemctl", "start", "alpamon.service").CombinedOutput(); err != nil {
-			return fmt.Errorf("start failed: %w\n%s", err, string(output))
-		}
-
-		if output, err := exec.Command("systemctl", "enable", "alpamon.service").CombinedOutput(); err != nil {
-			return fmt.Errorf("enable failed: %w\n%s", err, string(output))
-		}
-
-		fmt.Println("Alpamon service started and enabled.")
-		return nil
-	}
-
-	// On non-Linux platforms (e.g., macOS development), skip auto-start
-	if runtime.GOOS != "linux" {
-		fmt.Println("Skipping auto-start (non-Linux platform).")
-		return nil
-	}
-
-	// Start alpamon as a background process (containers without systemd)
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
-	if err != nil {
-		return fmt.Errorf("failed to open log file %s: %w", logPath, err)
-	}
-
-	cmd := exec.Command(alpamonBinPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		return fmt.Errorf("failed to start alpamon process: %w", err)
-	}
-	// logFile is inherited by the child process; closing here does not affect the child
-	_ = logFile.Close()
-
-	pid := cmd.Process.Pid
-	// Release OS resources for the detached child process.
-	// When the register process exits, the child is reparented to PID 1.
-	// In containers without a proper init (no zombie reaping), this could
-	// leave zombies. Most container runtimes use tini or --init by default.
-	_ = cmd.Process.Release()
-
-	fmt.Printf("Alpamon started (PID: %d).\n", pid)
-	fmt.Printf("Logs: %s\n", logPath)
-	return nil
-}

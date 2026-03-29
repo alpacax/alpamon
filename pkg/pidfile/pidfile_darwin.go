@@ -1,8 +1,11 @@
 package pidfile
 
-import "fmt"
+import (
+	"fmt"
 
-// Use /tmp for testing on macOS.
+	"github.com/alpacax/alpamon/pkg/utils"
+)
+
 func FilePath(name string) string {
-	return fmt.Sprintf("/tmp/%s.pid", name)
+	return fmt.Sprintf("%s/%s.pid", utils.RunDir(), name)
 }

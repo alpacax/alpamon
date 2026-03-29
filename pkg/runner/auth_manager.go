@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/cenkalti/backoff"
 	"github.com/rs/zerolog/log"
 )
@@ -142,6 +143,9 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 func (am *AuthManager) UpdateBlockLocalSudo(value bool) {
 	am.mu.Lock()
 	defer am.mu.Unlock()
+	if am.blockLocalSudo == value {
+		return
+	}
 	am.blockLocalSudo = value
 	log.Info().Bool("block_local_sudo", value).Msg("Updated block_local_sudo setting")
 }
@@ -161,7 +165,7 @@ func (am *AuthManager) Start(ctx context.Context) {
 }
 
 func (am *AuthManager) startSocketListener(ctx context.Context) error {
-	const socketPath = "/var/run/alpamon/auth.sock"
+	socketPath := filepath.Join(utils.RunDir(), "auth.sock")
 	socketDir := filepath.Dir(socketPath)
 
 	// Ensure socket directory exists as a fallback when systemd-tmpfiles
@@ -183,11 +187,13 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 
-	if err := os.Chown(socketPath, 0, 0); err != nil {
-		return fmt.Errorf("failed to set socket ownership: %w", err)
+	if os.Getuid() == 0 {
+		if err := os.Chown(socketPath, 0, 0); err != nil {
+			return fmt.Errorf("failed to set socket ownership: %w", err)
+		}
 	}
 
-	log.Info().Msgf("Socket created with permissions 600 (root only)")
+	log.Info().Msgf("Auth socket created at %s", socketPath)
 
 	am.listener = listener
 	log.Info().Msg("Auth socket listener started")

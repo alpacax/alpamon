@@ -160,6 +160,8 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 		cmd = fmt.Sprintf("apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
 	case "rhel":
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
+	case "darwin":
+		return 1, "Automatic upgrade is not supported on macOS. Please download the latest binary from the release channel and replace /usr/local/bin/alpamon manually.", nil
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
 	}
@@ -311,7 +313,7 @@ func (h *SystemHandler) executeUninstall() {
 		// Defer the uninstall so the process can shut down cleanly first.
 		// Use a subshell background pattern instead of nohup, which may not
 		// be available in minimal container images.
-		deferredCmd := fmt.Sprintf("(sleep 5 && %s) >>/var/log/alpamon/alpamon.log 2>&1 &", cmd)
+		deferredCmd := fmt.Sprintf("(sleep 5 && %s) >>%s/alpamon.log 2>&1 &", cmd, utils.LogDir())
 		log.Info().Msg("Systemd not available, scheduling deferred uninstall.")
 		_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", deferredCmd)
 	}
