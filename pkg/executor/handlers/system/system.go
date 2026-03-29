@@ -198,11 +198,11 @@ func (h *SystemHandler) selfUpdate(latestVersion string) (int, string, error) {
 	})
 	if err == nil {
 		submitted = true
-	} else {
-		log.Error().Err(err).Msg("Failed to submit restart task after self-update. Manual restart required.")
+		return 0, fmt.Sprintf("Updated to %s. Restarting...", latestVersion), nil
 	}
 
-	return 0, fmt.Sprintf("Updated to %s. Restarting...", latestVersion), nil
+	log.Error().Err(err).Msg("Failed to submit restart task after self-update. Manual restart required.")
+	return 1, fmt.Sprintf("Updated to %s, but automatic restart failed: %v. Please restart alpamon manually.", latestVersion, err), err
 }
 
 // handleRestart handles the restart command.

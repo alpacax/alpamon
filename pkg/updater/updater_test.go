@@ -94,7 +94,10 @@ func TestDownloadFile(t *testing.T) {
 	}
 
 	// Verify file permissions are restrictive
-	info, _ := os.Stat(destPath)
+	info, err := os.Stat(destPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if info.Mode().Perm()&0077 != 0 {
 		t.Errorf("downloaded file should not be group/world accessible, got %o", info.Mode().Perm())
 	}

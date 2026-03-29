@@ -142,6 +142,7 @@ func downloadFile(url, destPath string) error {
 	written, err := io.Copy(out, lr)
 	if err != nil {
 		_ = out.Close()
+		_ = os.Remove(destPath)
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 	if written > maxArchiveSize {
@@ -290,6 +291,8 @@ func validateBinaryFormat(binaryPath string) error {
 		if magic[0] != 0x7f || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F' {
 			return fmt.Errorf("not a valid ELF binary (magic: %x)", magic)
 		}
+	default:
+		return fmt.Errorf("binary format validation not supported on platform %q", runtime.GOOS)
 	}
 
 	return nil
