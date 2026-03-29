@@ -1,9 +1,27 @@
 package runner
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+	"syscall"
 
-// setPtyCmdSysProcAttrAndEnv does not set SysProcAttr on macOS because macOS does not support it.
+	"github.com/alpacax/alpamon/pkg/utils"
+)
+
 func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string, env map[string]string) error {
+	if uid < 0 || uint64(uid) > uint64(math.MaxUint32) {
+		return fmt.Errorf("UID %d is out of valid range", uid)
+	}
+	if gid < 0 || uint64(gid) > uint64(math.MaxUint32) {
+		return fmt.Errorf("GID %d is out of valid range", gid)
+	}
+	pc.cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    uint32(uid),
+			Gid:    uint32(gid),
+			Groups: utils.ConvertGroupIds(groupIds),
+		},
+	}
 	pc.cmd.Dir = env["HOME"]
 
 	for key, value := range env {

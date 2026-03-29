@@ -128,6 +128,7 @@ func (pc *PtyClient) RunPtyBackground() {
 
 	err := pc.initializePtySession()
 	if err != nil {
+		log.Error().Err(err).Str("sessionID", pc.sessionID).Str("username", pc.username).Msg("Failed to initialize PTY session.")
 		return
 	}
 
