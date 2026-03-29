@@ -128,14 +128,26 @@ func downloadFile(url, destPath string) error {
 		return fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
 	}
 
+	if resp.ContentLength > 0 && resp.ContentLength > maxArchiveSize {
+		return fmt.Errorf("download size %d exceeds maximum allowed %d bytes", resp.ContentLength, maxArchiveSize)
+	}
+
 	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 
-	if _, err := io.Copy(out, io.LimitReader(resp.Body, maxArchiveSize)); err != nil {
+	// Read maxArchiveSize+1 to detect oversize responses without Content-Length
+	lr := &io.LimitedReader{R: resp.Body, N: maxArchiveSize + 1}
+	written, err := io.Copy(out, lr)
+	if err != nil {
 		_ = out.Close()
 		return fmt.Errorf("failed to write file: %w", err)
+	}
+	if written > maxArchiveSize {
+		_ = out.Close()
+		_ = os.Remove(destPath)
+		return fmt.Errorf("downloaded file too large: limit is %d bytes", maxArchiveSize)
 	}
 	if err := out.Close(); err != nil {
 		return fmt.Errorf("failed to flush downloaded file: %w", err)
@@ -224,14 +236,23 @@ func extractBinary(archivePath, destPath string) error {
 
 		// Look for the alpamon binary (may be at root or in a subdirectory)
 		if filepath.Base(hdr.Name) == binaryName && hdr.Typeflag == tar.TypeReg {
+			if hdr.Size > maxExtractSize {
+				return fmt.Errorf("binary size %d exceeds maximum allowed %d bytes", hdr.Size, maxExtractSize)
+			}
+
 			out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 			if err != nil {
 				return fmt.Errorf("failed to create output file: %w", err)
 			}
 
-			if _, err := io.Copy(out, io.LimitReader(tr, maxExtractSize)); err != nil {
+			written, err := io.Copy(out, io.LimitReader(tr, maxExtractSize))
+			if err != nil {
 				_ = out.Close()
 				return fmt.Errorf("failed to extract binary: %w", err)
+			}
+			if written != hdr.Size {
+				_ = out.Close()
+				return fmt.Errorf("extracted size %d does not match declared size %d", written, hdr.Size)
 			}
 			if err := out.Close(); err != nil {
 				return fmt.Errorf("failed to flush extracted binary: %w", err)
@@ -282,8 +303,10 @@ func isMachO(magic []byte) bool {
 	return (magic[0] == 0xFE && magic[1] == 0xED && magic[2] == 0xFA && (magic[3] == 0xCE || magic[3] == 0xCF)) ||
 		// Little-endian magic bytes
 		((magic[0] == 0xCE || magic[0] == 0xCF) && magic[1] == 0xFA && magic[2] == 0xED && magic[3] == 0xFE) ||
-		// Universal binary (fat)
-		(magic[0] == 0xCA && magic[1] == 0xFE && magic[2] == 0xBA && magic[3] == 0xBE)
+		// Universal binary (fat, big-endian)
+		(magic[0] == 0xCA && magic[1] == 0xFE && magic[2] == 0xBA && magic[3] == 0xBE) ||
+		// Universal binary (fat, byte-swapped)
+		(magic[0] == 0xBE && magic[1] == 0xBA && magic[2] == 0xFE && magic[3] == 0xCA)
 }
 
 func replaceBinary(newPath, currentPath string) error {

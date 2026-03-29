@@ -290,4 +290,24 @@ func TestValidateBinaryFormat(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for invalid binary format")
 	}
+
+	// Test with valid binary for the current platform
+	var magic []byte
+	switch runtime.GOOS {
+	case "linux":
+		magic = []byte{0x7f, 'E', 'L', 'F'}
+	case "darwin":
+		magic = []byte{0xcf, 0xfa, 0xed, 0xfe} // 64-bit little-endian Mach-O
+	default:
+		t.Skipf("validateBinaryFormat not exercised for GOOS=%s", runtime.GOOS)
+	}
+
+	validPath := filepath.Join(tempDir, "valid")
+	content := append(magic, []byte("dummy")...)
+	if err := os.WriteFile(validPath, content, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBinaryFormat(validPath); err != nil {
+		t.Errorf("expected valid binary format, got error: %v", err)
+	}
 }
