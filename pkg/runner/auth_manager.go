@@ -143,6 +143,9 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 func (am *AuthManager) UpdateBlockLocalSudo(value bool) {
 	am.mu.Lock()
 	defer am.mu.Unlock()
+	if am.blockLocalSudo == value {
+		return
+	}
 	am.blockLocalSudo = value
 	log.Info().Bool("block_local_sudo", value).Msg("Updated block_local_sudo setting")
 }
