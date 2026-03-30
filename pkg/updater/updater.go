@@ -309,7 +309,11 @@ func isMachO(magic []byte) bool {
 		// Universal binary (fat, big-endian)
 		(magic[0] == 0xCA && magic[1] == 0xFE && magic[2] == 0xBA && magic[3] == 0xBE) ||
 		// Universal binary (fat, byte-swapped)
-		(magic[0] == 0xBE && magic[1] == 0xBA && magic[2] == 0xFE && magic[3] == 0xCA)
+		(magic[0] == 0xBE && magic[1] == 0xBA && magic[2] == 0xFE && magic[3] == 0xCA) ||
+		// Universal binary 64-bit (fat, big-endian)
+		(magic[0] == 0xCA && magic[1] == 0xFE && magic[2] == 0xBA && magic[3] == 0xBF) ||
+		// Universal binary 64-bit (fat, byte-swapped)
+		(magic[0] == 0xBF && magic[1] == 0xBA && magic[2] == 0xFE && magic[3] == 0xCA)
 }
 
 func replaceBinary(newPath, currentPath string) error {
@@ -328,7 +332,7 @@ func replaceBinary(newPath, currentPath string) error {
 	}
 	defer func() { _ = src.Close() }()
 
-	dst, err := os.OpenFile(stagePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	dst, err := os.OpenFile(stagePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create staged binary: %w", err)
 	}
@@ -339,6 +343,11 @@ func replaceBinary(newPath, currentPath string) error {
 	}
 	if err := dst.Close(); err != nil {
 		return fmt.Errorf("failed to close staged binary: %w", err)
+	}
+
+	// Explicitly set permissions to match current binary (immune to umask)
+	if err := os.Chmod(stagePath, info.Mode()); err != nil {
+		return fmt.Errorf("failed to set permissions on staged binary: %w", err)
 	}
 
 	// Atomic replace

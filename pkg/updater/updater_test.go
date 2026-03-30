@@ -188,7 +188,10 @@ func TestExtractBinary(t *testing.T) {
 		t.Errorf("extracted content = %q, want %q", got, binaryContent)
 	}
 
-	info, _ := os.Stat(destPath)
+	info, statErr := os.Stat(destPath)
+	if statErr != nil {
+		t.Fatalf("failed to stat extracted binary: %v", statErr)
+	}
 	if info.Mode()&0111 == 0 {
 		t.Error("extracted binary should be executable")
 	}
@@ -246,7 +249,10 @@ func TestReplaceBinary(t *testing.T) {
 		t.Errorf("binary content = %q, want %q", got, "new")
 	}
 
-	info, _ := os.Stat(currentPath)
+	info, err := os.Stat(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if info.Mode().Perm() != 0755 {
 		t.Errorf("permissions = %o, want 0755", info.Mode().Perm())
 	}
