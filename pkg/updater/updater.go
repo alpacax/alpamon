@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -25,6 +26,7 @@ const (
 	maxArchiveSize        = 100 * 1024 * 1024 // 100 MB
 	maxExtractSize        = 500 * 1024 * 1024 // 500 MB
 	maxTarEntries         = 100
+	maxChecksumFileSize   = 1 * 1024 * 1024 // 1 MB
 	binaryName            = "alpamon"
 )
 
@@ -44,7 +46,7 @@ func (o Options) baseURL() string {
 
 // SelfUpdate downloads the latest binary from GitHub Releases,
 // verifies its checksum, and replaces the current binary.
-func SelfUpdate(latestVersion string, opts Options) error {
+func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
 	if !versionRe.MatchString(latestVersion) {
 		return fmt.Errorf("invalid version format: %q", latestVersion)
 	}
@@ -74,13 +76,17 @@ func SelfUpdate(latestVersion string, opts Options) error {
 	archiveURL := fmt.Sprintf("%s/%s/%s", baseURL, latestVersion, archiveName)
 
 	log.Debug().Str("url", archiveURL).Msg("Downloading release archive.")
-	if err := downloadFile(archiveURL, archivePath); err != nil {
+	if err := downloadFile(ctx, archiveURL, archivePath); err != nil {
 		return fmt.Errorf("failed to download release: %w", err)
 	}
 
 	// 2. Verify checksum
+	// TODO(security): Add GPG or cosign signature verification. Currently only
+	// HTTPS + SHA256 checksum is verified, which does not protect against
+	// compromised GitHub releases. Since alpamon runs as root, a tampered binary
+	// grants full server access.
 	checksumFileURL := checksumURL(baseURL, latestVersion)
-	if err := verifyChecksum(archivePath, archiveName, checksumFileURL); err != nil {
+	if err := verifyChecksum(ctx, archivePath, archiveName, checksumFileURL); err != nil {
 		return fmt.Errorf("checksum verification failed: %w", err)
 	}
 	log.Debug().Msg("Checksum verified.")
@@ -116,9 +122,13 @@ func checksumURL(baseURL, version string) string {
 	return fmt.Sprintf("%s/%s/%s-%s-checksums.sha256", baseURL, version, binaryName, v)
 }
 
-func downloadFile(url, destPath string) error {
+func downloadFile(ctx context.Context, url, destPath string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
 	client := &http.Client{Timeout: downloadTimeout}
-	resp, err := client.Get(url)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
@@ -137,29 +147,36 @@ func downloadFile(url, destPath string) error {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 
+	var writeErr error
+	defer func() {
+		_ = out.Close()
+		if writeErr != nil {
+			_ = os.Remove(destPath)
+		}
+	}()
+
 	// Read maxArchiveSize+1 to detect oversize responses without Content-Length
 	lr := &io.LimitedReader{R: resp.Body, N: maxArchiveSize + 1}
 	written, err := io.Copy(out, lr)
 	if err != nil {
-		_ = out.Close()
-		_ = os.Remove(destPath)
-		return fmt.Errorf("failed to write file: %w", err)
+		writeErr = fmt.Errorf("failed to write file: %w", err)
+		return writeErr
 	}
 	if written > maxArchiveSize {
-		_ = out.Close()
-		_ = os.Remove(destPath)
-		return fmt.Errorf("downloaded file too large: limit is %d bytes", maxArchiveSize)
-	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("failed to flush downloaded file: %w", err)
+		writeErr = fmt.Errorf("downloaded file too large: limit is %d bytes", maxArchiveSize)
+		return writeErr
 	}
 
 	return nil
 }
 
-func verifyChecksum(archivePath, archiveName, checksumFileURL string) error {
+func verifyChecksum(ctx context.Context, archivePath, archiveName, checksumFileURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumFileURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create checksum request: %w", err)
+	}
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(checksumFileURL)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download checksums: %w", err)
 	}
@@ -171,7 +188,7 @@ func verifyChecksum(archivePath, archiveName, checksumFileURL string) error {
 
 	// Parse checksums: "{hash}  {filename}"
 	var expectedHash string
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(io.LimitReader(resp.Body, maxChecksumFileSize))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) == 2 && fields[1] == archiveName {
@@ -298,22 +315,29 @@ func validateBinaryFormat(binaryPath string) error {
 	return nil
 }
 
+// machoMagics contains all recognized Mach-O magic byte sequences.
+var machoMagics = [][4]byte{
+	{0xFE, 0xED, 0xFA, 0xCE}, // Mach-O 32-bit big-endian
+	{0xFE, 0xED, 0xFA, 0xCF}, // Mach-O 64-bit big-endian
+	{0xCE, 0xFA, 0xED, 0xFE}, // Mach-O 32-bit little-endian
+	{0xCF, 0xFA, 0xED, 0xFE}, // Mach-O 64-bit little-endian
+	{0xCA, 0xFE, 0xBA, 0xBE}, // Universal binary (fat)
+	{0xBE, 0xBA, 0xFE, 0xCA}, // Universal binary (fat, byte-swapped)
+	{0xCA, 0xFE, 0xBA, 0xBF}, // Universal binary 64-bit (fat)
+	{0xBF, 0xBA, 0xFE, 0xCA}, // Universal binary 64-bit (fat, byte-swapped)
+}
+
 func isMachO(magic []byte) bool {
 	if len(magic) < 4 {
 		return false
 	}
-	// Big-endian magic bytes
-	return (magic[0] == 0xFE && magic[1] == 0xED && magic[2] == 0xFA && (magic[3] == 0xCE || magic[3] == 0xCF)) ||
-		// Little-endian magic bytes
-		((magic[0] == 0xCE || magic[0] == 0xCF) && magic[1] == 0xFA && magic[2] == 0xED && magic[3] == 0xFE) ||
-		// Universal binary (fat, big-endian)
-		(magic[0] == 0xCA && magic[1] == 0xFE && magic[2] == 0xBA && magic[3] == 0xBE) ||
-		// Universal binary (fat, byte-swapped)
-		(magic[0] == 0xBE && magic[1] == 0xBA && magic[2] == 0xFE && magic[3] == 0xCA) ||
-		// Universal binary 64-bit (fat, big-endian)
-		(magic[0] == 0xCA && magic[1] == 0xFE && magic[2] == 0xBA && magic[3] == 0xBF) ||
-		// Universal binary 64-bit (fat, byte-swapped)
-		(magic[0] == 0xBF && magic[1] == 0xBA && magic[2] == 0xFE && magic[3] == 0xCA)
+	m := [4]byte{magic[0], magic[1], magic[2], magic[3]}
+	for _, v := range machoMagics {
+		if m == v {
+			return true
+		}
+	}
+	return false
 }
 
 func replaceBinary(newPath, currentPath string) error {
@@ -322,38 +346,46 @@ func replaceBinary(newPath, currentPath string) error {
 		return fmt.Errorf("failed to stat current binary: %w", err)
 	}
 
+	// Backup current binary for rollback on failure
+	backupPath := currentPath + ".bak"
+	if err := copyFile(currentPath, backupPath, info.Mode()); err != nil {
+		return fmt.Errorf("failed to backup current binary: %w", err)
+	}
+
 	// Stage new binary next to current (same filesystem for atomic rename)
 	stagePath := currentPath + ".new"
+	if err := copyFile(newPath, stagePath, info.Mode()); err != nil {
+		return fmt.Errorf("failed to stage new binary: %w", err)
+	}
 	defer func() { _ = os.Remove(stagePath) }()
-
-	src, err := os.Open(newPath)
-	if err != nil {
-		return fmt.Errorf("failed to open new binary: %w", err)
-	}
-	defer func() { _ = src.Close() }()
-
-	dst, err := os.OpenFile(stagePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("failed to create staged binary: %w", err)
-	}
-
-	if _, err := io.Copy(dst, src); err != nil {
-		_ = dst.Close()
-		return fmt.Errorf("failed to copy binary: %w", err)
-	}
-	if err := dst.Close(); err != nil {
-		return fmt.Errorf("failed to close staged binary: %w", err)
-	}
-
-	// Explicitly set permissions to match current binary (immune to umask)
-	if err := os.Chmod(stagePath, info.Mode()); err != nil {
-		return fmt.Errorf("failed to set permissions on staged binary: %w", err)
-	}
 
 	// Atomic replace
 	if err := os.Rename(stagePath, currentPath); err != nil {
 		return fmt.Errorf("failed to rename binary: %w", err)
 	}
 
+	// Replace succeeded — remove backup
+	_ = os.Remove(backupPath)
+	log.Debug().Msg("Binary replaced successfully, backup removed.")
 	return nil
+}
+
+// copyFile copies src to dst with the given permissions.
+func copyFile(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
