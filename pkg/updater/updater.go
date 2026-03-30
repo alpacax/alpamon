@@ -352,12 +352,17 @@ func replaceBinary(newPath, currentPath string) error {
 		return fmt.Errorf("failed to backup current binary: %w", err)
 	}
 
-	// Stage new binary next to current (same filesystem for atomic rename)
+	// Stage new binary next to current (same filesystem for atomic rename).
+	// Create with 0600 first, then chmod to match current binary (immune to umask).
 	stagePath := currentPath + ".new"
-	if err := copyFile(newPath, stagePath, info.Mode()); err != nil {
+	if err := copyFile(newPath, stagePath, 0600); err != nil {
 		return fmt.Errorf("failed to stage new binary: %w", err)
 	}
 	defer func() { _ = os.Remove(stagePath) }()
+
+	if err := os.Chmod(stagePath, info.Mode()); err != nil {
+		return fmt.Errorf("failed to set permissions on staged binary: %w", err)
+	}
 
 	// Atomic replace
 	if err := os.Rename(stagePath, currentPath); err != nil {
