@@ -3,6 +3,7 @@ package updater
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // createTestArchive creates a tar.gz archive containing a fake alpamon binary.
@@ -81,7 +83,7 @@ func TestDownloadFile(t *testing.T) {
 	defer server.Close()
 
 	destPath := filepath.Join(t.TempDir(), "downloaded")
-	if err := downloadFile(server.URL, destPath); err != nil {
+	if err := downloadFile(context.Background(), server.URL, destPath); err != nil {
 		t.Fatalf("downloadFile() error: %v", err)
 	}
 
@@ -108,7 +110,7 @@ func TestDownloadFile_NotFound(t *testing.T) {
 	defer server.Close()
 
 	destPath := filepath.Join(t.TempDir(), "downloaded")
-	err := downloadFile(server.URL, destPath)
+	err := downloadFile(context.Background(), server.URL, destPath)
 	if err == nil {
 		t.Fatal("expected error for 404 response")
 	}
@@ -135,7 +137,7 @@ func TestVerifyChecksum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := verifyChecksum(archivePath, archiveName, server.URL+"/checksums.sha256")
+	err := verifyChecksum(context.Background(), archivePath, archiveName, server.URL+"/checksums.sha256")
 	if err != nil {
 		t.Fatalf("verifyChecksum() error: %v", err)
 	}
@@ -156,7 +158,7 @@ func TestVerifyChecksum_Mismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := verifyChecksum(archivePath, archiveName, server.URL+"/checksums.sha256")
+	err := verifyChecksum(context.Background(), archivePath, archiveName, server.URL+"/checksums.sha256")
 	if err == nil {
 		t.Fatal("expected checksum mismatch error")
 	}
@@ -260,6 +262,11 @@ func TestReplaceBinary(t *testing.T) {
 	if _, err := os.Stat(currentPath + ".new"); !os.IsNotExist(err) {
 		t.Error("staged file should be cleaned up")
 	}
+
+	// Backup should be removed on success
+	if _, err := os.Stat(currentPath + ".bak"); !os.IsNotExist(err) {
+		t.Error("backup file should be cleaned up on success")
+	}
 }
 
 func TestSelfUpdate_InvalidVersion(t *testing.T) {
@@ -276,12 +283,86 @@ func TestSelfUpdate_InvalidVersion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := SelfUpdate(tt.version, Options{})
+			err := SelfUpdate(context.Background(), tt.version, Options{})
 			if err == nil {
 				t.Fatal("expected error for invalid version")
 			}
 			if !strings.Contains(err.Error(), "invalid version format") {
 				t.Errorf("error should mention invalid version format, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestDownloadFile_Oversize(t *testing.T) {
+	// Server streams more than maxArchiveSize without Content-Length
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Write maxArchiveSize+1 bytes in chunks to avoid setting Content-Length
+		chunk := make([]byte, 32*1024)
+		remaining := int64(maxArchiveSize) + 1
+		for remaining > 0 {
+			n := int64(len(chunk))
+			if n > remaining {
+				n = remaining
+			}
+			_, _ = w.Write(chunk[:n])
+			remaining -= n
+		}
+	}))
+	defer server.Close()
+
+	destPath := filepath.Join(t.TempDir(), "downloaded")
+	err := downloadFile(context.Background(), server.URL, destPath)
+	if err == nil {
+		t.Fatal("expected error for oversize response")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("error should mention too large, got: %v", err)
+	}
+}
+
+func TestDownloadFile_ContextCancelled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Slow server that never finishes
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	destPath := filepath.Join(t.TempDir(), "downloaded")
+	err := downloadFile(ctx, server.URL, destPath)
+	if err == nil {
+		t.Fatal("expected error for cancelled context")
+	}
+}
+
+func TestIsMachO(t *testing.T) {
+	tests := []struct {
+		name  string
+		magic []byte
+		want  bool
+	}{
+		{"big-endian 32-bit", []byte{0xFE, 0xED, 0xFA, 0xCE}, true},
+		{"big-endian 64-bit", []byte{0xFE, 0xED, 0xFA, 0xCF}, true},
+		{"little-endian 32-bit", []byte{0xCE, 0xFA, 0xED, 0xFE}, true},
+		{"little-endian 64-bit", []byte{0xCF, 0xFA, 0xED, 0xFE}, true},
+		{"universal fat", []byte{0xCA, 0xFE, 0xBA, 0xBE}, true},
+		{"universal fat swapped", []byte{0xBE, 0xBA, 0xFE, 0xCA}, true},
+		{"universal fat 64", []byte{0xCA, 0xFE, 0xBA, 0xBF}, true},
+		{"universal fat 64 swapped", []byte{0xBF, 0xBA, 0xFE, 0xCA}, true},
+		{"invalid", []byte{0x00, 0x00, 0x00, 0x00}, false},
+		{"too short", []byte{0xFE, 0xED}, false},
+		{"nil", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isMachO(tt.magic); got != tt.want {
+				t.Errorf("isMachO(%x) = %v, want %v", tt.magic, got, tt.want)
 			}
 		})
 	}
