@@ -162,7 +162,10 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 	case "rhel":
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
 	case "darwin":
-		return h.selfUpdate(latestVersion)
+		if !needAlpamon {
+			return 0, fmt.Sprintf("Already up-to-date (alpamon: %s). alpamon-pam upgrade is not supported on macOS.", version.Version), nil
+		}
+		return h.selfUpdate(ctx, latestVersion)
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
 	}
@@ -176,13 +179,26 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 }
 
 // selfUpdate downloads and replaces the binary from GitHub Releases, then triggers restart.
-func (h *SystemHandler) selfUpdate(latestVersion string) (int, string, error) {
-	if err := updater.SelfUpdate(latestVersion, updater.Options{}); err != nil {
+func (h *SystemHandler) selfUpdate(ctx context.Context, latestVersion string) (int, string, error) {
+	if err := updater.SelfUpdate(ctx, latestVersion, updater.Options{}); err != nil {
 		return 1, fmt.Sprintf("Self-update failed: %v", err), err
 	}
 
-	// Fire-and-forget restart after successful update
-	poolCtx, cancel := h.ctxManager.NewContext(2 * time.Second)
+	if err := h.scheduleDelayedAction(1*time.Second, func(_ context.Context) {
+		h.wsClient.Restart()
+	}); err != nil {
+		log.Error().Err(err).Msg("Failed to submit restart task after self-update. Manual restart required.")
+		return 1, fmt.Sprintf("Updated to %s, but automatic restart failed: %v. Please restart alpamon manually.", latestVersion, err), err
+	}
+	return 0, fmt.Sprintf("Updated to %s. Restarting...", latestVersion), nil
+}
+
+// scheduleDelayedAction submits a function to the worker pool that executes
+// after the given delay. Used for fire-and-forget operations like restart and
+// shutdown where the response must be sent before the action runs.
+// The action receives the pool context for operations that need it (e.g. RunAsUser).
+func (h *SystemHandler) scheduleDelayedAction(delay time.Duration, action func(ctx context.Context)) error {
+	poolCtx, cancel := h.ctxManager.NewContext(delay + 1*time.Second)
 	submitted := false
 	defer func() {
 		if !submitted {
@@ -192,17 +208,15 @@ func (h *SystemHandler) selfUpdate(latestVersion string) (int, string, error) {
 
 	err := h.pool.Submit(poolCtx, func() error {
 		defer cancel()
-		time.Sleep(1 * time.Second)
-		h.wsClient.Restart()
+		time.Sleep(delay)
+		action(poolCtx)
 		return nil
 	})
-	if err == nil {
-		submitted = true
-		return 0, fmt.Sprintf("Updated to %s. Restarting...", latestVersion), nil
+	if err != nil {
+		return err
 	}
-
-	log.Error().Err(err).Msg("Failed to submit restart task after self-update. Manual restart required.")
-	return 1, fmt.Sprintf("Updated to %s, but automatic restart failed: %v. Please restart alpamon manually.", latestVersion, err), err
+	submitted = true
+	return nil
 }
 
 // handleRestart handles the restart command.
@@ -211,65 +225,27 @@ func (h *SystemHandler) selfUpdate(latestVersion string) (int, string, error) {
 // from ctxManager. The handler-level timeout in Execute() covers the synchronous
 // dispatch; the pool task manages its own lifecycle via ctxManager.NewContext().
 func (h *SystemHandler) handleRestart(args *common.CommandArgs) (int, string, error) {
-	target := args.Target
-	if target == "" {
-		target = "alpamon"
-	}
-	message := "Alpamon will restart in 1 second."
-
-	switch target {
-	case "collector":
+	if args.Target == "collector" {
 		log.Info().Msg("Restart collector.")
 		h.wsClient.RestartCollector()
-		message = "Collector will be restarted."
-	default:
-		// Submit to worker pool for managed execution
-		poolCtx, cancel := h.ctxManager.NewContext(2 * time.Second)
-		submitted := false
-		defer func() {
-			if !submitted {
-				cancel()
-			}
-		}()
-
-		err := h.pool.Submit(poolCtx, func() error {
-			defer cancel()
-			time.Sleep(1 * time.Second)
-			h.wsClient.Restart()
-			return nil
-		})
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to submit restart task to pool")
-		} else {
-			submitted = true
-		}
+		return 0, "Collector will be restarted.", nil
 	}
 
-	return 0, message, nil
+	if err := h.scheduleDelayedAction(1*time.Second, func(_ context.Context) {
+		h.wsClient.Restart()
+	}); err != nil {
+		log.Error().Err(err).Msg("Failed to submit restart task to pool")
+	}
+	return 0, "Alpamon will restart in 1 second.", nil
 }
 
 // handleQuit handles the quit command.
-// See handleRestart for the fire-and-forget pattern.
+// See scheduleDelayedAction for the fire-and-forget pattern.
 func (h *SystemHandler) handleQuit() (int, string, error) {
-	// Submit to worker pool for managed execution
-	poolCtx, cancel := h.ctxManager.NewContext(2 * time.Second)
-	submitted := false
-	defer func() {
-		if !submitted {
-			cancel()
-		}
-	}()
-
-	err := h.pool.Submit(poolCtx, func() error {
-		defer cancel()
-		time.Sleep(1 * time.Second)
+	if err := h.scheduleDelayedAction(1*time.Second, func(_ context.Context) {
 		h.wsClient.ShutDown()
-		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		log.Error().Err(err).Msg("Failed to submit quit task to pool")
-	} else {
-		submitted = true
 	}
 	return 0, "Alpamon will shutdown in 1 second.", nil
 }
@@ -354,61 +330,29 @@ func (h *SystemHandler) executeUninstall() {
 }
 
 // handleReboot handles the reboot command.
-// A separate context is created via ctxManager.NewContext instead of using the
-// handler's ctx because the response must be sent before the reboot executes.
-// The pool task runs asynchronously after the handler returns. The context is
-// still derived from ContextManager.root, so shutdown propagation works correctly.
+// The pool task runs asynchronously after the handler returns so that the
+// response is sent before the reboot executes. See scheduleDelayedAction.
 func (h *SystemHandler) handleReboot() (int, string, error) {
 	log.Info().Msg("Reboot request received.")
 
-	poolCtx, cancel := h.ctxManager.NewContext(common.SystemCmdTimeout)
-	submitted := false
-	defer func() {
-		if !submitted {
-			cancel()
-		}
-	}()
-
-	err := h.pool.Submit(poolCtx, func() error {
-		defer cancel()
-		time.Sleep(1 * time.Second)
-		_, _, _ = h.Executor.RunAsUser(poolCtx, "root", "reboot")
-		return nil
-	})
-	if err != nil {
+	if err := h.scheduleDelayedAction(1*time.Second, func(ctx context.Context) {
+		_, _, _ = h.Executor.RunAsUser(ctx, "root", "reboot")
+	}); err != nil {
 		log.Error().Err(err).Msg("Failed to submit reboot task to pool")
-	} else {
-		submitted = true
 	}
-
 	return 0, "Server will reboot in 1 second", nil
 }
 
 // handleShutdown handles the shutdown command.
-// See handleReboot for why a separate context is created.
+// See handleReboot for the fire-and-forget pattern.
 func (h *SystemHandler) handleShutdown() (int, string, error) {
 	log.Info().Msg("Shutdown request received.")
 
-	poolCtx, cancel := h.ctxManager.NewContext(common.SystemCmdTimeout)
-	submitted := false
-	defer func() {
-		if !submitted {
-			cancel()
-		}
-	}()
-
-	err := h.pool.Submit(poolCtx, func() error {
-		defer cancel()
-		time.Sleep(1 * time.Second)
-		_, _, _ = h.Executor.RunAsUser(poolCtx, "root", "shutdown", "now")
-		return nil
-	})
-	if err != nil {
+	if err := h.scheduleDelayedAction(1*time.Second, func(ctx context.Context) {
+		_, _, _ = h.Executor.RunAsUser(ctx, "root", "shutdown", "now")
+	}); err != nil {
 		log.Error().Err(err).Msg("Failed to submit shutdown task to pool")
-	} else {
-		submitted = true
 	}
-
 	return 0, "Server will shutdown in 1 second", nil
 }
 
