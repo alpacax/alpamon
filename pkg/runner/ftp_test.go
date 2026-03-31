@@ -208,7 +208,7 @@ func TestValidateWebSocketURL(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateWebSocketURL(tc.url)
+			_, err := validateWebSocketURL(tc.url)
 			if tc.wantErr && err == nil {
 				t.Fatalf("validateWebSocketURL(%q) expected error", tc.url)
 			}
@@ -224,7 +224,7 @@ func TestValidateWebSocketURL_InvalidServerURL(t *testing.T) {
 	t.Cleanup(func() { config.GlobalSettings.ServerURL = prevServerURL })
 	config.GlobalSettings.ServerURL = "://invalid"
 
-	err := validateWebSocketURL("wss://whatever.com/ws")
+	_, err := validateWebSocketURL("wss://whatever.com/ws")
 	if err == nil {
 		t.Fatal("expected error for invalid server URL")
 	}
@@ -261,7 +261,7 @@ func TestValidateWebSocketURL_ServerWithExplicitPort(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateWebSocketURL(tc.url)
+			_, err := validateWebSocketURL(tc.url)
 			if tc.wantErr && err == nil {
 				t.Fatalf("validateWebSocketURL(%q) expected error", tc.url)
 			}

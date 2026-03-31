@@ -76,16 +76,16 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, mana
 }
 
 func (pc *PtyClient) initializePtySession() error {
-	if err := validateWebSocketURL(pc.url); err != nil {
+	sanitizedURL, err := validateWebSocketURL(pc.url)
+	if err != nil {
 		return err
 	}
-	var err error
 	dialer := websocket.Dialer{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
 	}
-	pc.conn, _, err = dialer.Dial(pc.url, pc.requestHeader)
+	pc.conn, _, err = dialer.Dial(sanitizedURL, pc.requestHeader)
 	if err != nil {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
@@ -384,7 +384,8 @@ func (pc *PtyClient) recovery() error {
 			}
 			pc.url = strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + resp.WebsocketURL
 
-			if err := validateWebSocketURL(pc.url); err != nil {
+			sanitizedURL, err := validateWebSocketURL(pc.url)
+			if err != nil {
 				return backoff.Permanent(err)
 			}
 
@@ -393,7 +394,7 @@ func (pc *PtyClient) recovery() error {
 					InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 				},
 			}
-			conn, _, err := dialer.Dial(pc.url, pc.requestHeader)
+			conn, _, err := dialer.Dial(sanitizedURL, pc.requestHeader)
 			if err != nil {
 				log.Warn().Err(err).Msg("Websh reconnect failed.")
 				return err
@@ -415,15 +416,16 @@ func (pc *PtyClient) recovery() error {
 
 // validateWebSocketURL checks that the given URL uses the correct ws/wss scheme
 // derived from the configured server URL and that its host matches the server.
-func validateWebSocketURL(rawURL string) error {
+// It returns a sanitized URL string reconstructed from the parsed components.
+func validateWebSocketURL(rawURL string) (string, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid WebSocket URL: %w", err)
+		return "", fmt.Errorf("invalid WebSocket URL: %w", err)
 	}
 
 	serverURL, err := url.Parse(config.GlobalSettings.ServerURL)
 	if err != nil {
-		return fmt.Errorf("invalid server URL: %w", err)
+		return "", fmt.Errorf("invalid server URL: %w", err)
 	}
 
 	var expectedScheme string
@@ -433,18 +435,18 @@ func validateWebSocketURL(rawURL string) error {
 	case "https":
 		expectedScheme = "wss"
 	default:
-		return fmt.Errorf("unsupported server URL scheme: %s", serverURL.Scheme)
+		return "", fmt.Errorf("unsupported server URL scheme: %s", serverURL.Scheme)
 	}
 
 	if parsed.Scheme != expectedScheme {
-		return fmt.Errorf("WebSocket URL scheme %q does not match expected scheme %q", parsed.Scheme, expectedScheme)
+		return "", fmt.Errorf("WebSocket URL scheme %q does not match expected scheme %q", parsed.Scheme, expectedScheme)
 	}
 
 	if !strings.EqualFold(parsed.Hostname(), serverURL.Hostname()) {
-		return fmt.Errorf("WebSocket URL host %q does not match server host %q", parsed.Hostname(), serverURL.Hostname())
+		return "", fmt.Errorf("WebSocket URL host %q does not match server host %q", parsed.Hostname(), serverURL.Hostname())
 	}
 
-	return nil
+	return parsed.String(), nil
 }
 
 // getPtyUserAndEnv retrieves user information and sets environment variables.
