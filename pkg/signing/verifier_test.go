@@ -1,0 +1,172 @@
+package signing
+
+import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"testing"
+
+	"github.com/alpacax/alpamon/internal/protocol"
+)
+
+func TestBuildCanonicalPayload(t *testing.T) {
+	cmd := &protocol.Command{
+		ID:         "test-uuid",
+		Shell:      "system",
+		Line:       "echo hello",
+		User:       "root",
+		Group:      "alpacon",
+		AnalyzedAt: "2026-01-01T00:00:00+00:00",
+	}
+
+	payload := BuildCanonicalPayload(cmd, "server-uuid")
+
+	// Must match Python's json.dumps(sort_keys=True, separators=(',', ':'))
+	expected := `{"command_id":"test-uuid","groupname":"alpacon","line":"echo hello","server_id":"server-uuid","shell":"system","timestamp":"2026-01-01T00:00:00+00:00","username":"root"}`
+
+	if string(payload) != expected {
+		t.Errorf("canonical payload mismatch\ngot:  %s\nwant: %s", string(payload), expected)
+	}
+}
+
+func TestBuildCanonicalPayload_EmptyAnalyzedAt(t *testing.T) {
+	cmd := &protocol.Command{
+		ID:    "cmd-1",
+		Shell: "system",
+		Line:  "ls",
+		User:  "deploy",
+		Group: "deploy",
+	}
+
+	payload := BuildCanonicalPayload(cmd, "srv-1")
+	expected := `{"command_id":"cmd-1","groupname":"deploy","line":"ls","server_id":"srv-1","shell":"system","timestamp":"","username":"deploy"}`
+
+	if string(payload) != expected {
+		t.Errorf("canonical payload mismatch\ngot:  %s\nwant: %s", string(payload), expected)
+	}
+}
+
+func TestVerifyCommand_Valid(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &protocol.Command{
+		ID:         "cmd-123",
+		Shell:      "system",
+		Line:       "whoami",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-03-01T12:00:00+00:00",
+	}
+	serverID := "server-456"
+
+	payload := BuildCanonicalPayload(cmd, serverID)
+	sig := ed25519.Sign(priv, payload)
+	cmd.Signature = base64.StdEncoding.EncodeToString(sig)
+
+	if err := VerifyCommand(cmd, serverID, pub); err != nil {
+		t.Errorf("expected valid signature, got error: %v", err)
+	}
+}
+
+func TestVerifyCommand_TamperedPayload(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+
+	cmd := &protocol.Command{
+		ID:         "cmd-123",
+		Shell:      "system",
+		Line:       "whoami",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-03-01T12:00:00+00:00",
+	}
+	serverID := "server-456"
+
+	payload := BuildCanonicalPayload(cmd, serverID)
+	sig := ed25519.Sign(priv, payload)
+	cmd.Signature = base64.StdEncoding.EncodeToString(sig)
+
+	// Tamper with the command
+	cmd.Line = "rm -rf /"
+
+	err := VerifyCommand(cmd, serverID, pub)
+	if err == nil {
+		t.Error("expected verification failure for tampered command")
+	}
+}
+
+func TestVerifyCommand_WrongServerID(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+
+	cmd := &protocol.Command{
+		ID:         "cmd-123",
+		Shell:      "system",
+		Line:       "whoami",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-03-01T12:00:00+00:00",
+	}
+
+	payload := BuildCanonicalPayload(cmd, "server-456")
+	sig := ed25519.Sign(priv, payload)
+	cmd.Signature = base64.StdEncoding.EncodeToString(sig)
+
+	err := VerifyCommand(cmd, "different-server", pub)
+	if err == nil {
+		t.Error("expected verification failure for wrong server ID")
+	}
+}
+
+func TestVerifyCommand_EmptySignature(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+
+	cmd := &protocol.Command{
+		ID:    "cmd-123",
+		Shell: "system",
+		Line:  "whoami",
+		User:  "root",
+		Group: "root",
+	}
+
+	err := VerifyCommand(cmd, "server-456", pub)
+	if err == nil {
+		t.Error("expected error for empty signature")
+	}
+}
+
+func TestVerifyCommand_InvalidBase64(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+
+	cmd := &protocol.Command{
+		ID:        "cmd-123",
+		Shell:     "system",
+		Line:      "whoami",
+		User:      "root",
+		Group:     "root",
+		Signature: "not-valid-base64!!!",
+	}
+
+	err := VerifyCommand(cmd, "server-456", pub)
+	if err == nil {
+		t.Error("expected error for invalid base64 signature")
+	}
+}
+
+func TestVerifyCommand_WrongSignatureSize(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+
+	cmd := &protocol.Command{
+		ID:        "cmd-123",
+		Shell:     "system",
+		Line:      "whoami",
+		User:      "root",
+		Group:     "root",
+		Signature: base64.StdEncoding.EncodeToString([]byte("tooshort")),
+	}
+
+	err := VerifyCommand(cmd, "server-456", pub)
+	if err == nil {
+		t.Error("expected error for wrong signature size")
+	}
+}
