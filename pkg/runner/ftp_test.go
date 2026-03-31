@@ -271,4 +271,3 @@ func TestValidateWebSocketURL_ServerWithExplicitPort(t *testing.T) {
 		})
 	}
 }
-
