@@ -438,7 +438,7 @@ func validateWebSocketURL(rawURL string) (string, error) {
 		return "", fmt.Errorf("unsupported server URL scheme: %s", serverURL.Scheme)
 	}
 
-	if parsed.Scheme != expectedScheme {
+	if !strings.EqualFold(parsed.Scheme, expectedScheme) {
 		return "", fmt.Errorf("WebSocket URL scheme %q does not match expected scheme %q", parsed.Scheme, expectedScheme)
 	}
 
@@ -446,7 +446,15 @@ func validateWebSocketURL(rawURL string) (string, error) {
 		return "", fmt.Errorf("WebSocket URL host %q does not match server host %q", parsed.Hostname(), serverURL.Hostname())
 	}
 
-	return parsed.String(), nil
+	// Reconstruct URL using trusted sources for scheme and host to prevent SSRF.
+	// scheme and host come from config (trusted), not user input.
+	sanitized := &url.URL{
+		Scheme:   expectedScheme,
+		Host:     serverURL.Host,
+		Path:     parsed.Path,
+		RawQuery: parsed.RawQuery,
+	}
+	return sanitized.String(), nil
 }
 
 // getPtyUserAndEnv retrieves user information and sets environment variables.
