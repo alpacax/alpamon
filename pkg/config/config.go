@@ -226,23 +226,36 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 	settings.KeyRefreshSecs = DefaultKeyRefreshSecs
 
 	if config.Signing.AIServerURL != "" {
-		settings.AIServerURL = strings.TrimSuffix(config.Signing.AIServerURL, "/")
-		log.Debug().Msgf("Command signature verification enabled with AI server: %s", settings.AIServerURL)
-	}
-
-	if config.Signing.Mode != "" {
-		mode := strings.ToLower(config.Signing.Mode)
-		if mode != "monitor" && mode != "enforce" {
-			log.Error().Msgf("Invalid signing mode '%s', must be 'monitor' or 'enforce'.", config.Signing.Mode)
+		aiURL := strings.TrimSuffix(config.Signing.AIServerURL, "/")
+		if !strings.HasPrefix(aiURL, "http://") && !strings.HasPrefix(aiURL, "https://") {
+			log.Error().Msgf("Invalid signing ai_server_url '%s', must start with http:// or https://.", aiURL)
 			valid = false
 		} else {
-			settings.SigningMode = mode
+			settings.AIServerURL = aiURL
+			log.Debug().Msgf("Command signature verification enabled with AI server: %s", aiURL)
 		}
-	}
 
-	if config.Signing.KeyRefresh != nil {
-		settings.KeyRefreshSecs = *config.Signing.KeyRefresh
-		log.Debug().Msgf("Using configured key refresh interval: %d seconds.", settings.KeyRefreshSecs)
+		if config.Signing.Mode != "" {
+			mode := strings.ToLower(config.Signing.Mode)
+			if mode != "monitor" && mode != "enforce" {
+				log.Error().Msgf("Invalid signing mode '%s', must be 'monitor' or 'enforce'.", config.Signing.Mode)
+				valid = false
+			} else {
+				settings.SigningMode = mode
+			}
+		}
+
+		if config.Signing.KeyRefresh != nil {
+			if *config.Signing.KeyRefresh <= 0 {
+				log.Error().Msgf("Invalid signing key_refresh '%d', must be a positive number of seconds.", *config.Signing.KeyRefresh)
+				valid = false
+			} else {
+				settings.KeyRefreshSecs = *config.Signing.KeyRefresh
+				log.Debug().Msgf("Using configured key refresh interval: %d seconds.", settings.KeyRefreshSecs)
+			}
+		}
+	} else if config.Signing.Mode != "" || config.Signing.KeyRefresh != nil {
+		log.Warn().Msg("Signing mode or key_refresh set without ai_server_url, signing configuration will be ignored.")
 	}
 
 	// Validate pool settings are reasonable
