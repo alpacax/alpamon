@@ -15,6 +15,11 @@ type Settings struct {
 	PoolQueueSize      int // Size of the job queue for the global worker pool
 	PoolDefaultTimeout int // Default timeout in seconds for pool tasks (0 = no timeout)
 	EditorIdleTimeout  int // Editor idle timeout in minutes (0 = no timeout)
+
+	// Command signature verification
+	AIServerURL    string // AI server URL for public key fetch (empty = verification disabled)
+	SigningMode    string // "monitor" (warn only) or "enforce" (reject unsigned)
+	KeyRefreshSecs int    // Public key cache TTL in seconds
 }
 
 type Config struct {
@@ -38,4 +43,9 @@ type Config struct {
 	Editor struct {
 		IdleTimeout *int `ini:"idle_timeout"`
 	} `ini:"editor"`
+	Signing struct {
+		AIServerURL string `ini:"ai_server_url"`
+		Mode        string `ini:"mode"`
+		KeyRefresh  *int   `ini:"key_refresh"`
+	} `ini:"signing"`
 }

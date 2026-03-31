@@ -34,6 +34,11 @@ const (
 	DefaultPoolQueueSize      = 200
 	DefaultPoolDefaultTimeout = 3600 // 1 hour; safety net for handler-level timeouts
 
+	// Signing configuration defaults
+	// mode: "monitor" (log warnings, always execute) or "enforce" (reject unsigned/invalid)
+	DefaultSigningMode    = "monitor"
+	DefaultKeyRefreshSecs = 3600 // 1 hour
+
 	// Pool configuration limits for warnings
 	MaxReasonableWorkers        = 1000
 	MaxReasonableQueueSize      = 10000
@@ -214,6 +219,30 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 		}
 	} else {
 		log.Debug().Msgf("Using default editor idle timeout: %d minutes.", settings.EditorIdleTimeout)
+	}
+
+	// Validate and set signing configuration
+	settings.SigningMode = DefaultSigningMode
+	settings.KeyRefreshSecs = DefaultKeyRefreshSecs
+
+	if config.Signing.AIServerURL != "" {
+		settings.AIServerURL = strings.TrimSuffix(config.Signing.AIServerURL, "/")
+		log.Debug().Msgf("Command signature verification enabled with AI server: %s", settings.AIServerURL)
+	}
+
+	if config.Signing.Mode != "" {
+		mode := strings.ToLower(config.Signing.Mode)
+		if mode != "monitor" && mode != "enforce" {
+			log.Error().Msgf("Invalid signing mode '%s', must be 'monitor' or 'enforce'.", config.Signing.Mode)
+			valid = false
+		} else {
+			settings.SigningMode = mode
+		}
+	}
+
+	if config.Signing.KeyRefresh != nil {
+		settings.KeyRefreshSecs = *config.Signing.KeyRefresh
+		log.Debug().Msgf("Using configured key refresh interval: %d seconds.", settings.KeyRefreshSecs)
 	}
 
 	// Validate pool settings are reasonable
