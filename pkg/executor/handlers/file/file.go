@@ -129,14 +129,14 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		return 1, err.Error()
 	}
 
-	name, err := h.makeArchive(ctx, paths, bulk, recursive, sysProcAttr)
+	name, displayName, err := h.makeArchive(ctx, paths, bulk, recursive, sysProcAttr)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create archive")
 		return 1, err.Error()
 	}
 
 	if bulk || recursive {
-		defer func() { _ = os.Remove(name) }() // codeql[go/path-injection]: Intentional: admin-specified temp archive cleanup
+		defer func() { _ = os.Remove(name) }()
 	}
 
 	catCmd := exec.CommandContext(ctx, "cat", name)
@@ -148,7 +148,7 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		return 1, err.Error()
 	}
 
-	requestBody, contentType, err := h.createMultipartBody(output, filepath.Base(name), args.UseBlob, recursive)
+	requestBody, contentType, err := h.createMultipartBody(output, displayName, args.UseBlob, recursive)
 	if err != nil {
 		log.Error().Err(err).Msgf("Failed to make request body")
 		return 1, err.Error()
@@ -307,14 +307,18 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 	return paths, isBulk, isRecursive, nil
 }
 
-// makeArchive creates a zip archive from the specified paths
-func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, error) {
+// makeArchive creates a zip archive from the specified paths.
+// It returns the archive file path, a display name for the upload, and any error.
+func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, string, error) {
 	var archiveName string
+	var displayName string
 	var cmd *exec.Cmd
 	path := paths[0]
 
 	if bulk {
-		archiveName = filepath.Dir(path) + "/" + uuid.New().String() + ".zip"
+		zipName := uuid.New().String() + ".zip"
+		archiveName = filepath.Join(os.TempDir(), zipName)
+		displayName = zipName
 		dirPath := filepath.Dir(path)
 		basePaths := make([]string, len(paths))
 		for i, p := range paths {
@@ -327,23 +331,25 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 		cmd.Dir = dirPath
 	} else {
 		if recursive {
-			archiveName = path + ".zip"
+			archiveName = filepath.Join(os.TempDir(), uuid.New().String()+".zip")
+			displayName = filepath.Base(path) + ".zip"
 			cmd = exec.CommandContext(ctx, "zip", "-r", archiveName, filepath.Base(path))
 			cmd.SysProcAttr = sysProcAttr
 			cmd.Dir = filepath.Dir(path)
 		} else {
 			archiveName = path
+			displayName = filepath.Base(path)
 		}
 	}
 
 	if bulk || recursive {
 		err := cmd.Run()
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 
-	return archiveName, nil
+	return archiveName, displayName, nil
 }
 
 // createMultipartBody creates a multipart form body for file upload
