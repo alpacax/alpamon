@@ -135,9 +135,8 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		return 1, err.Error()
 	}
 
-	// codeql[go/path-injection]: Intentional - Admin-specified file path for download
 	if bulk || recursive {
-		defer func() { _ = os.Remove(name) }() // lgtm[go/path-injection]
+		defer func() { _ = os.Remove(name) }() // codeql[go/path-injection]: Intentional: admin-specified temp archive cleanup
 	}
 
 	catCmd := exec.CommandContext(ctx, "cat", name)
