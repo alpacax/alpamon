@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,19 +36,22 @@ type KeyManager struct {
 
 // NewKeyManager creates a key manager that fetches from the AI server.
 func NewKeyManager(aiBaseURL string, refreshSecs int, client *http.Client) *KeyManager {
+	if client == nil {
+		client = http.DefaultClient
+	}
 	return &KeyManager{
-		aiBaseURL:    aiBaseURL,
+		aiBaseURL:    strings.TrimRight(aiBaseURL, "/"),
 		refreshSecs:  refreshSecs,
 		client:       client,
 		fetchTimeout: 10 * time.Second,
 	}
 }
 
-// GetPublicKey returns the cached public key, refreshing if stale.
+// GetPublicKey returns a copy of the cached public key, refreshing if stale.
 func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 	m.mu.RLock()
 	if m.publicKey != nil && time.Since(m.lastFetch) < time.Duration(m.refreshSecs)*time.Second {
-		key := m.publicKey
+		key := copyKey(m.publicKey)
 		m.mu.RUnlock()
 		return key, nil
 	}
@@ -57,14 +61,20 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
 		if m.publicKey != nil {
-			return m.publicKey, nil
+			return copyKey(m.publicKey), nil
 		}
 		return nil, err
 	}
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.publicKey, nil
+	return copyKey(m.publicKey), nil
+}
+
+func copyKey(key ed25519.PublicKey) ed25519.PublicKey {
+	cp := make(ed25519.PublicKey, len(key))
+	copy(cp, key)
+	return cp
 }
 
 // Refresh fetches the latest public key from the AI server.
@@ -77,8 +87,10 @@ func (m *KeyManager) Refresh() error {
 	}
 
 	client := &http.Client{
-		Transport: m.client.Transport,
-		Timeout:   m.fetchTimeout,
+		Transport:     m.client.Transport,
+		CheckRedirect: m.client.CheckRedirect,
+		Jar:           m.client.Jar,
+		Timeout:       m.fetchTimeout,
 	}
 
 	resp, err := client.Do(req)

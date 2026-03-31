@@ -72,9 +72,13 @@ func TestKeyManager_CacheHit(t *testing.T) {
 	km := NewKeyManager(server.URL, 3600, server.Client())
 
 	// First call fetches
-	km.GetPublicKey()
+	if _, err := km.GetPublicKey(); err != nil {
+		t.Fatalf("first GetPublicKey failed: %v", err)
+	}
 	// Second call should use cache
-	km.GetPublicKey()
+	if _, err := km.GetPublicKey(); err != nil {
+		t.Fatalf("second GetPublicKey failed: %v", err)
+	}
 
 	if fetchCount != 1 {
 		t.Errorf("expected 1 fetch, got %d", fetchCount)
@@ -100,9 +104,13 @@ func TestKeyManager_CacheExpiry(t *testing.T) {
 
 	km := NewKeyManager(server.URL, 1, server.Client()) // 1 second TTL
 
-	km.GetPublicKey()
+	if _, err := km.GetPublicKey(); err != nil {
+		t.Fatalf("first GetPublicKey failed: %v", err)
+	}
 	time.Sleep(1100 * time.Millisecond)
-	km.GetPublicKey()
+	if _, err := km.GetPublicKey(); err != nil {
+		t.Fatalf("second GetPublicKey failed: %v", err)
+	}
 
 	if fetchCount != 2 {
 		t.Errorf("expected 2 fetches after cache expiry, got %d", fetchCount)

@@ -1,6 +1,7 @@
 package signing
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -25,6 +26,8 @@ type signingPayload struct {
 
 // BuildCanonicalPayload constructs the signing payload that must match
 // what the AI server signed. The output is deterministic canonical JSON.
+// Uses json.Encoder with SetEscapeHTML(false) to match Python's json.dumps
+// behavior, which does not escape <, >, or & characters.
 func BuildCanonicalPayload(cmd *protocol.Command, serverID string) []byte {
 	p := signingPayload{
 		CommandID: cmd.ID,
@@ -35,12 +38,20 @@ func BuildCanonicalPayload(cmd *protocol.Command, serverID string) []byte {
 		Timestamp: cmd.AnalyzedAt,
 		Username:  cmd.User,
 	}
-	data, _ := json.Marshal(p)
-	return data
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(p)
+	// Encoder.Encode appends a newline; trim it for canonical form
+	return bytes.TrimRight(buf.Bytes(), "\n")
 }
 
 // VerifyCommand verifies the Ed25519 signature on a command.
 func VerifyCommand(cmd *protocol.Command, serverID string, publicKey ed25519.PublicKey) error {
+	if len(publicKey) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid public key size: got %d, want %d", len(publicKey), ed25519.PublicKeySize)
+	}
+
 	if cmd.Signature == "" {
 		return errors.New("empty signature")
 	}

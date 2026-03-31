@@ -170,3 +170,38 @@ func TestVerifyCommand_WrongSignatureSize(t *testing.T) {
 		t.Error("expected error for wrong signature size")
 	}
 }
+
+func TestVerifyCommand_NilPublicKey(t *testing.T) {
+	cmd := &protocol.Command{
+		ID:        "cmd-123",
+		Shell:     "system",
+		Line:      "whoami",
+		User:      "root",
+		Group:     "root",
+		Signature: base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize)),
+	}
+
+	err := VerifyCommand(cmd, "server-456", nil)
+	if err == nil {
+		t.Error("expected error for nil public key")
+	}
+}
+
+func TestBuildCanonicalPayload_HTMLChars(t *testing.T) {
+	// Verify that <, >, & are NOT escaped (matching Python's json.dumps behavior)
+	cmd := &protocol.Command{
+		ID:         "cmd-1",
+		Shell:      "system",
+		Line:       "echo '<h1>test</h1>' & cat /etc/passwd",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-01-01T00:00:00+00:00",
+	}
+
+	payload := BuildCanonicalPayload(cmd, "srv-1")
+	expected := `{"command_id":"cmd-1","groupname":"root","line":"echo '<h1>test</h1>' & cat /etc/passwd","server_id":"srv-1","shell":"system","timestamp":"2026-01-01T00:00:00+00:00","username":"root"}`
+
+	if string(payload) != expected {
+		t.Errorf("HTML chars should not be escaped\ngot:  %s\nwant: %s", string(payload), expected)
+	}
+}
