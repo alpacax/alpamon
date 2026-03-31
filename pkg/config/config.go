@@ -255,7 +255,8 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 			}
 		}
 	} else if config.Signing.Mode != "" || config.Signing.KeyRefresh != nil {
-		log.Warn().Msg("Signing mode or key_refresh set without ai_server_url, signing configuration will be ignored.")
+		log.Warn().Msgf("Signing mode=%q or key_refresh=%v set without ai_server_url, signing configuration will be ignored.",
+			config.Signing.Mode, config.Signing.KeyRefresh)
 	}
 
 	// Validate pool settings are reasonable

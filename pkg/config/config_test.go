@@ -192,17 +192,18 @@ func TestSigningConfigWithoutURL(t *testing.T) {
 	config := Config{}
 	config.Signing.Mode = "enforce"
 
-	valid, settings := validateConfig(config, "/ws/test/", "/ws/control/")
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
-	// Should not fail validation (just warn)
+	// Signing config should be ignored (defaults kept) when ai_server_url is empty
 	if settings.AIServerURL != "" {
 		t.Errorf("Expected empty AIServerURL, got %s", settings.AIServerURL)
 	}
-	// Mode should remain default since URL is empty
 	if settings.SigningMode != DefaultSigningMode {
 		t.Errorf("Expected default SigningMode when URL is empty, got %s", settings.SigningMode)
 	}
-	_ = valid
+	if settings.KeyRefreshSecs != DefaultKeyRefreshSecs {
+		t.Errorf("Expected default KeyRefreshSecs when URL is empty, got %d", settings.KeyRefreshSecs)
+	}
 }
 
 func TestSigningConfigFromINI(t *testing.T) {
