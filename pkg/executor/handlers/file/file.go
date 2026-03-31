@@ -339,13 +339,16 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 			cmd.Dir = filepath.Dir(path)
 		} else {
 			archiveName = path
-			// cleanupPath stays "" — single file, no temp archive to clean up
+			// cleanupPath stays ""—single file, no temp archive to clean up
 		}
 	}
 
 	if bulk || recursive {
 		err := cmd.Run()
 		if err != nil {
+			if cleanupPath != "" {
+				_ = os.Remove(cleanupPath)
+			}
 			return "", "", err
 		}
 	}
