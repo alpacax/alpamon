@@ -166,6 +166,166 @@ func TestKeyManager_InvalidKeySize(t *testing.T) {
 	}
 }
 
+func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+
+	fetchCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount++
+		resp := publicKeyResponse{
+			Algorithm: "Ed25519",
+			PublicKey: base64.StdEncoding.EncodeToString(pub),
+			KeyID:     "key-test-123",
+			ValidFrom: "2026-01-01T00:00:00Z",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	km := NewKeyManager(server.URL, 3600, server.Client())
+
+	// First call fetches
+	key1, err := km.GetPublicKeyForKID("key-test-123")
+	if err != nil {
+		t.Fatalf("first GetPublicKeyForKID failed: %v", err)
+	}
+	// Second call with same kid should use cache
+	key2, err := km.GetPublicKeyForKID("key-test-123")
+	if err != nil {
+		t.Fatalf("second GetPublicKeyForKID failed: %v", err)
+	}
+
+	if !key1.Equal(key2) {
+		t.Error("keys should match")
+	}
+	if fetchCount != 1 {
+		t.Errorf("expected 1 fetch for matching kid, got %d", fetchCount)
+	}
+}
+
+func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := publicKeyResponse{
+			Algorithm: "Ed25519",
+			PublicKey: base64.StdEncoding.EncodeToString(pub),
+			KeyID:     "key-v2",
+			ValidFrom: "2026-01-01T00:00:00Z",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	km := NewKeyManager(server.URL, 3600, server.Client())
+
+	// Request unknown kid, server returns key-v2
+	_, err := km.GetPublicKeyForKID("key-v2")
+	if err != nil {
+		t.Fatalf("expected success when server returns matching kid: %v", err)
+	}
+
+	// Request a kid that doesn't match what server returns
+	_, err = km.GetPublicKeyForKID("key-v999")
+	if err == nil {
+		t.Error("expected error when kid doesn't match after refresh")
+	}
+}
+
+func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
+	pub1, _, _ := ed25519.GenerateKey(nil)
+	pub2, _, _ := ed25519.GenerateKey(nil)
+
+	fetchCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount++
+		var pub ed25519.PublicKey
+		var kid string
+		if fetchCount == 1 {
+			pub = pub1
+			kid = "key-v1"
+		} else {
+			pub = pub2
+			kid = "key-v2"
+		}
+		resp := publicKeyResponse{
+			Algorithm: "Ed25519",
+			PublicKey: base64.StdEncoding.EncodeToString(pub),
+			KeyID:     kid,
+			ValidFrom: "2026-01-01T00:00:00Z",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	km := NewKeyManager(server.URL, 3600, server.Client())
+
+	// Fetch key-v1
+	key1, err := km.GetPublicKeyForKID("key-v1")
+	if err != nil {
+		t.Fatalf("first fetch failed: %v", err)
+	}
+	if !key1.Equal(pub1) {
+		t.Error("first key should be pub1")
+	}
+
+	// Request key-v2 triggers refresh
+	key2, err := km.GetPublicKeyForKID("key-v2")
+	if err != nil {
+		t.Fatalf("second fetch failed: %v", err)
+	}
+	if !key2.Equal(pub2) {
+		t.Error("second key should be pub2")
+	}
+	if fetchCount != 2 {
+		t.Errorf("expected 2 fetches for key rotation, got %d", fetchCount)
+	}
+}
+
+func TestKeyManager_ExpiresAt(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+
+	fetchCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount++
+		resp := publicKeyResponse{
+			Algorithm: "Ed25519",
+			PublicKey: base64.StdEncoding.EncodeToString(pub),
+			KeyID:     "key-test",
+			ValidFrom: "2026-01-01T00:00:00Z",
+			ExpiresAt: time.Now().Add(1 * time.Second).UTC().Format(time.RFC3339),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	km := NewKeyManager(server.URL, 3600, server.Client()) // Long TTL, but expires_at overrides
+
+	if _, err := km.GetPublicKey(); err != nil {
+		t.Fatalf("first GetPublicKey failed: %v", err)
+	}
+	// Should use cache (not expired yet)
+	if _, err := km.GetPublicKey(); err != nil {
+		t.Fatalf("second GetPublicKey failed: %v", err)
+	}
+	if fetchCount != 1 {
+		t.Errorf("expected 1 fetch before expiry, got %d", fetchCount)
+	}
+
+	// Wait for expires_at to pass
+	time.Sleep(1100 * time.Millisecond)
+	if _, err := km.GetPublicKey(); err != nil {
+		t.Fatalf("third GetPublicKey failed: %v", err)
+	}
+	if fetchCount != 2 {
+		t.Errorf("expected 2 fetches after expires_at, got %d", fetchCount)
+	}
+}
+
 func TestKeyManager_StaleKeyOnRefreshFailure(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 

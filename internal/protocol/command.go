@@ -20,6 +20,7 @@ type Command struct {
 	// Signature verification fields (populated by alpacon-server from AI server signing)
 	Signature  string `json:"signature,omitempty"`
 	AnalyzedAt string `json:"analyzed_at,omitempty"`
+	KeyID      string `json:"key_id,omitempty"`
 }
 
 // File represents a file in command data

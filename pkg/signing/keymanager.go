@@ -20,18 +20,20 @@ type publicKeyResponse struct {
 	PublicKey string `json:"public_key"`
 	KeyID     string `json:"key_id"`
 	ValidFrom string `json:"valid_from"`
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 // KeyManager fetches and caches the Ed25519 public key from the AI server.
 type KeyManager struct {
-	mu             sync.RWMutex
-	publicKey      ed25519.PublicKey
-	keyID          string
-	lastFetch      time.Time
-	refreshSecs    int
-	aiBaseURL      string
-	client         *http.Client
-	fetchTimeout   time.Duration
+	mu           sync.RWMutex
+	publicKey    ed25519.PublicKey
+	keyID        string
+	lastFetch    time.Time
+	expiresAt    time.Time
+	refreshSecs  int
+	aiBaseURL    string
+	client       *http.Client
+	fetchTimeout time.Duration
 }
 
 // NewKeyManager creates a key manager that fetches from the AI server.
@@ -50,7 +52,7 @@ func NewKeyManager(aiBaseURL string, refreshSecs int, client *http.Client) *KeyM
 // GetPublicKey returns a copy of the cached public key, refreshing if stale.
 func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 	m.mu.RLock()
-	if m.publicKey != nil && time.Since(m.lastFetch) < time.Duration(m.refreshSecs)*time.Second {
+	if m.publicKey != nil && !m.isExpired() {
 		key := copyKey(m.publicKey)
 		m.mu.RUnlock()
 		return key, nil
@@ -69,6 +71,47 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return copyKey(m.publicKey), nil
+}
+
+// GetPublicKeyForKID returns the cached key if the kid matches.
+// If the kid doesn't match the cached key, it refreshes from the AI server.
+// This avoids unnecessary fetches when the key hasn't rotated.
+func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
+	m.mu.RLock()
+	if m.publicKey != nil && m.keyID == kid {
+		key := copyKey(m.publicKey)
+		m.mu.RUnlock()
+		return key, nil
+	}
+	m.mu.RUnlock()
+
+	// Unknown kid: fetch new key from AI server
+	if err := m.Refresh(); err != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		if m.publicKey != nil {
+			return copyKey(m.publicKey), nil
+		}
+		return nil, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.keyID != kid {
+		return nil, fmt.Errorf("key_id mismatch after refresh: cached %q, requested %q", m.keyID, kid)
+	}
+	return copyKey(m.publicKey), nil
+}
+
+// isExpired reports whether the cached key should be refreshed.
+// Must be called with m.mu held (read or write).
+func (m *KeyManager) isExpired() bool {
+	// If AI server provided expires_at, use it
+	if !m.expiresAt.IsZero() {
+		return time.Now().After(m.expiresAt)
+	}
+	// Fall back to TTL-based refresh
+	return time.Since(m.lastFetch) >= time.Duration(m.refreshSecs)*time.Second
 }
 
 func copyKey(key ed25519.PublicKey) ed25519.PublicKey {
@@ -132,7 +175,18 @@ func (m *KeyManager) Refresh() error {
 	m.keyID = keyResp.KeyID
 	m.lastFetch = time.Now()
 
-	log.Debug().Str("key_id", keyResp.KeyID).Msg("Public signing key refreshed.")
+	if keyResp.ExpiresAt != "" {
+		if t, err := time.Parse(time.RFC3339, keyResp.ExpiresAt); err == nil {
+			m.expiresAt = t
+			log.Debug().Str("key_id", keyResp.KeyID).Time("expires_at", t).Msg("Public signing key refreshed.")
+		} else {
+			log.Warn().Str("expires_at", keyResp.ExpiresAt).Msg("Failed to parse expires_at, falling back to TTL-based refresh.")
+			m.expiresAt = time.Time{}
+		}
+	} else {
+		m.expiresAt = time.Time{}
+		log.Debug().Str("key_id", keyResp.KeyID).Msg("Public signing key refreshed.")
+	}
 
 	return nil
 }
