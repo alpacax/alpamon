@@ -333,7 +333,7 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 	}
 }
 
-func TestKeyManager_StaleKeyOnRefreshFailure(t *testing.T) {
+func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 
 	callCount := 0
@@ -357,23 +357,19 @@ func TestKeyManager_StaleKeyOnRefreshFailure(t *testing.T) {
 	km := NewKeyManager(server.URL, 3600, server.Client())
 
 	// First fetch succeeds
-	key1, err := km.GetPublicKey()
+	_, err := km.GetPublicKey()
 	if err != nil {
 		t.Fatalf("first fetch should succeed: %v", err)
 	}
 
-	// Simulate cache expiry by moving lastFetch into the past
+	// Simulate cache expiry
 	km.mu.Lock()
 	km.lastFetch = time.Now().Add(-2 * time.Hour)
 	km.mu.Unlock()
 
-	// Next fetch fails on refresh but should return stale key
-	key2, err := km.GetPublicKey()
-	if err != nil {
-		t.Fatalf("should return stale key on refresh failure: %v", err)
-	}
-
-	if !key1.Equal(key2) {
-		t.Error("stale key should match original key")
+	// Expired key + refresh failure should return error, not stale key
+	_, err = km.GetPublicKey()
+	if err == nil {
+		t.Error("expected error when key is expired and refresh fails")
 	}
 }

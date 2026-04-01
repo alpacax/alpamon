@@ -70,10 +70,10 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 	if err := m.Refresh(); err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
-		if m.publicKey != nil {
+		if m.publicKey != nil && !m.isExpired() {
 			return copyKey(m.publicKey), nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("public key expired and refresh failed: %w", err)
 	}
 
 	m.mu.RLock()
@@ -106,10 +106,10 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.keyID != kid {
-		return nil, fmt.Errorf("key_id mismatch after refresh: cached %q, requested %q", m.keyID, kid)
+	if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
+		return copyKey(m.publicKey), nil
 	}
-	return copyKey(m.publicKey), nil
+	return nil, fmt.Errorf("public key for kid %q not available after refresh", kid)
 }
 
 // isExpired reports whether the cached key should be refreshed.
