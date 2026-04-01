@@ -16,6 +16,10 @@ type Command struct {
 	Env     map[string]string `json:"env"`
 	AllowSh bool              `json:"allow_sh,omitempty"`
 	Data    string            `json:"data,omitempty"`
+
+	// Signature verification fields (populated by alpacon-server from AI server signing)
+	Signature  string `json:"signature,omitempty"`
+	AnalyzedAt string `json:"analyzed_at,omitempty"`
 }
 
 // File represents a file in command data
