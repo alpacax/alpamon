@@ -80,19 +80,19 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 	return copyKey(m.publicKey), nil
 }
 
-// GetPublicKeyForKID returns the cached key if the kid matches.
-// If the kid doesn't match the cached key, it refreshes from the AI server.
+// GetPublicKeyForKID returns the cached key if the kid matches and the key is not expired.
+// If the kid doesn't match the cached key or the key is expired, it refreshes from the AI server.
 // This avoids unnecessary fetches when the key hasn't rotated.
 func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	m.mu.RLock()
-	if m.publicKey != nil && m.keyID == kid {
+	if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
 		key := copyKey(m.publicKey)
 		m.mu.RUnlock()
 		return key, nil
 	}
 	m.mu.RUnlock()
 
-	// Unknown kid: force fetch new key from AI server
+	// Unknown kid or expired key: force fetch new key from AI server
 	if err := m.fetchKey(); err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
@@ -179,9 +179,12 @@ func (m *KeyManager) fetchKeyLocked() error {
 		return fmt.Errorf("public key endpoint returned status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
 		return fmt.Errorf("failed to read response body: %w", err)
+	}
+	if int64(len(body)) > maxResponseSize {
+		return fmt.Errorf("public key response too large (>%d bytes)", maxResponseSize)
 	}
 
 	var keyResp publicKeyResponse

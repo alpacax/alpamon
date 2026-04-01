@@ -1,6 +1,7 @@
 package signing
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"testing"
@@ -200,6 +201,31 @@ func TestBuildCanonicalPayload_NilCommand(t *testing.T) {
 	payload := BuildCanonicalPayload(nil, "srv-1")
 	if payload != nil {
 		t.Errorf("expected nil payload for nil command, got %s", string(payload))
+	}
+}
+
+func TestBuildCanonicalPayload_LineSeparators(t *testing.T) {
+	// U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) must NOT be
+	// escaped, matching Python's json.dumps(ensure_ascii=False) behavior.
+	// Go's encoding/json escapes these even with SetEscapeHTML(false).
+	cmd := &protocol.Command{
+		ID:         "cmd-1",
+		Shell:      "system",
+		Line:       "echo hello\u2028world\u2029end",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-01-01T00:00:00+00:00",
+	}
+
+	payload := BuildCanonicalPayload(cmd, "srv-1")
+
+	// Payload must contain raw UTF-8 bytes, not \u2028/\u2029 escapes
+	if bytes.Contains(payload, []byte(`\u2028`)) || bytes.Contains(payload, []byte(`\u2029`)) {
+		t.Errorf("U+2028/U+2029 should not be escaped in canonical payload\ngot: %s", string(payload))
+	}
+	// Verify the raw bytes are present
+	if !bytes.Contains(payload, []byte("\u2028")) || !bytes.Contains(payload, []byte("\u2029")) {
+		t.Error("payload should contain raw U+2028/U+2029 bytes")
 	}
 }
 

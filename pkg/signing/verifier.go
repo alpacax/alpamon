@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/alpacax/alpamon/internal/protocol"
 )
@@ -26,9 +27,10 @@ type signingPayload struct {
 
 // BuildCanonicalPayload constructs the signing payload that must match
 // what the AI server signed. The output is deterministic canonical JSON.
-// Uses json.Encoder with SetEscapeHTML(false) to match Python's json.dumps
-// behavior (called with ensure_ascii=False), which does not escape <, >, &
-// or non-ASCII characters. Both sides emit raw UTF-8.
+// Uses json.Encoder with SetEscapeHTML(false) and unescapes U+2028/U+2029
+// to match Python's json.dumps(ensure_ascii=False) behavior exactly.
+// Go's encoding/json escapes U+2028/U+2029 even with SetEscapeHTML(false),
+// but Python emits them as raw UTF-8.
 func BuildCanonicalPayload(cmd *protocol.Command, serverID string) []byte {
 	if cmd == nil {
 		return nil
@@ -47,7 +49,13 @@ func BuildCanonicalPayload(cmd *protocol.Command, serverID string) []byte {
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(p)
 	// Encoder.Encode appends a newline; trim it for canonical form
-	return bytes.TrimRight(buf.Bytes(), "\n")
+	result := bytes.TrimRight(buf.Bytes(), "\n")
+	// Unescape U+2028/U+2029 that Go escapes but Python does not
+	result = []byte(strings.NewReplacer(
+		`\u2028`, "\u2028",
+		`\u2029`, "\u2029",
+	).Replace(string(result)))
+	return result
 }
 
 // VerifyCommand verifies the Ed25519 signature on a command.
