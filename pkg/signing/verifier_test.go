@@ -187,6 +187,22 @@ func TestVerifyCommand_NilPublicKey(t *testing.T) {
 	}
 }
 
+func TestVerifyCommand_NilCommand(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+
+	err := VerifyCommand(nil, "server-456", pub)
+	if err == nil {
+		t.Error("expected error for nil command")
+	}
+}
+
+func TestBuildCanonicalPayload_NilCommand(t *testing.T) {
+	payload := BuildCanonicalPayload(nil, "srv-1")
+	if payload != nil {
+		t.Errorf("expected nil payload for nil command, got %s", string(payload))
+	}
+}
+
 func TestBuildCanonicalPayload_HTMLChars(t *testing.T) {
 	// Verify that <, >, & are NOT escaped (matching Python's json.dumps behavior)
 	cmd := &protocol.Command{

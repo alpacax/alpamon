@@ -27,8 +27,12 @@ type signingPayload struct {
 // BuildCanonicalPayload constructs the signing payload that must match
 // what the AI server signed. The output is deterministic canonical JSON.
 // Uses json.Encoder with SetEscapeHTML(false) to match Python's json.dumps
-// behavior, which does not escape <, >, or & characters.
+// behavior (called with ensure_ascii=False), which does not escape <, >, &
+// or non-ASCII characters. Both sides emit raw UTF-8.
 func BuildCanonicalPayload(cmd *protocol.Command, serverID string) []byte {
+	if cmd == nil {
+		return nil
+	}
 	p := signingPayload{
 		CommandID: cmd.ID,
 		GroupName: cmd.Group,
@@ -48,6 +52,10 @@ func BuildCanonicalPayload(cmd *protocol.Command, serverID string) []byte {
 
 // VerifyCommand verifies the Ed25519 signature on a command.
 func VerifyCommand(cmd *protocol.Command, serverID string, publicKey ed25519.PublicKey) error {
+	if cmd == nil {
+		return errors.New("nil command")
+	}
+
 	if len(publicKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("invalid public key size: got %d, want %d", len(publicKey), ed25519.PublicKeySize)
 	}

@@ -102,12 +102,16 @@ func TestKeyManager_CacheExpiry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 1, server.Client()) // 1 second TTL
+	km := NewKeyManager(server.URL, 3600, server.Client())
 
 	if _, err := km.GetPublicKey(); err != nil {
 		t.Fatalf("first GetPublicKey failed: %v", err)
 	}
-	time.Sleep(1100 * time.Millisecond)
+	// Simulate cache expiry by moving lastFetch into the past
+	km.mu.Lock()
+	km.lastFetch = time.Now().Add(-2 * time.Hour)
+	km.mu.Unlock()
+
 	if _, err := km.GetPublicKey(); err != nil {
 		t.Fatalf("second GetPublicKey failed: %v", err)
 	}
@@ -316,8 +320,11 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 		t.Errorf("expected 1 fetch before expiry, got %d", fetchCount)
 	}
 
-	// Wait for expires_at to pass
-	time.Sleep(1100 * time.Millisecond)
+	// Simulate expires_at having passed by moving it into the past
+	km.mu.Lock()
+	km.expiresAt = time.Now().Add(-1 * time.Second)
+	km.mu.Unlock()
+
 	if _, err := km.GetPublicKey(); err != nil {
 		t.Fatalf("third GetPublicKey failed: %v", err)
 	}
@@ -347,7 +354,7 @@ func TestKeyManager_StaleKeyOnRefreshFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 1, server.Client()) // 1 second TTL
+	km := NewKeyManager(server.URL, 3600, server.Client())
 
 	// First fetch succeeds
 	key1, err := km.GetPublicKey()
@@ -355,8 +362,12 @@ func TestKeyManager_StaleKeyOnRefreshFailure(t *testing.T) {
 		t.Fatalf("first fetch should succeed: %v", err)
 	}
 
-	// Wait for cache expiry, next fetch fails but returns stale key
-	time.Sleep(1100 * time.Millisecond)
+	// Simulate cache expiry by moving lastFetch into the past
+	km.mu.Lock()
+	km.lastFetch = time.Now().Add(-2 * time.Hour)
+	km.mu.Unlock()
+
+	// Next fetch fails on refresh but should return stale key
 	key2, err := km.GetPublicKey()
 	if err != nil {
 		t.Fatalf("should return stale key on refresh failure: %v", err)

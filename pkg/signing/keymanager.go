@@ -14,6 +14,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// maxResponseSize limits the public key response body to prevent
+// excessive memory usage from a misbehaving server.
+const maxResponseSize = 16 * 1024 // 16 KB
+
 // publicKeyResponse represents the response from GET /api/commands/public-key/
 type publicKeyResponse struct {
 	Algorithm string `json:"algorithm"`
@@ -34,6 +38,9 @@ type KeyManager struct {
 	aiBaseURL    string
 	client       *http.Client
 	fetchTimeout time.Duration
+
+	// refreshMu serializes refresh calls to prevent concurrent fetch bursts
+	refreshMu sync.Mutex
 }
 
 // NewKeyManager creates a key manager that fetches from the AI server.
@@ -85,8 +92,8 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	}
 	m.mu.RUnlock()
 
-	// Unknown kid: fetch new key from AI server
-	if err := m.Refresh(); err != nil {
+	// Unknown kid: force fetch new key from AI server
+	if err := m.fetchKey(); err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
 		if m.publicKey != nil {
@@ -121,7 +128,33 @@ func copyKey(key ed25519.PublicKey) ed25519.PublicKey {
 }
 
 // Refresh fetches the latest public key from the AI server.
+// Only one refresh runs at a time; concurrent callers wait for the in-flight result.
+// If the cache is still valid (another goroutine refreshed), this is a no-op.
 func (m *KeyManager) Refresh() error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	// Double-check: another goroutine may have refreshed while we waited
+	m.mu.RLock()
+	if m.publicKey != nil && !m.isExpired() {
+		m.mu.RUnlock()
+		return nil
+	}
+	m.mu.RUnlock()
+
+	return m.fetchKeyLocked()
+}
+
+// fetchKey acquires the refresh lock and fetches unconditionally.
+// Used by GetPublicKeyForKID when kid doesn't match (key may not be expired).
+func (m *KeyManager) fetchKey() error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	return m.fetchKeyLocked()
+}
+
+// fetchKeyLocked performs the actual HTTP fetch. Must be called with refreshMu held.
+func (m *KeyManager) fetchKeyLocked() error {
 	url := m.aiBaseURL + "/api/commands/public-key/"
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -146,7 +179,7 @@ func (m *KeyManager) Refresh() error {
 		return fmt.Errorf("public key endpoint returned status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return fmt.Errorf("failed to read response body: %w", err)
 	}
