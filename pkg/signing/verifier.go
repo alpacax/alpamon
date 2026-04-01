@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-
 	"github.com/alpacax/alpamon/internal/protocol"
 )
 
@@ -50,12 +48,37 @@ func BuildCanonicalPayload(cmd *protocol.Command, serverID string) []byte {
 	_ = enc.Encode(p)
 	// Encoder.Encode appends a newline; trim it for canonical form
 	result := bytes.TrimRight(buf.Bytes(), "\n")
-	// Unescape U+2028/U+2029 that Go escapes but Python does not
-	result = []byte(strings.NewReplacer(
-		`\u2028`, "\u2028",
-		`\u2029`, "\u2029",
-	).Replace(string(result)))
+	// Unescape U+2028/U+2029 that Go escapes but Python does not.
+	// Only replace \u2028/\u2029 when not preceded by a backslash
+	// (i.e., skip \\u2028 which represents a literal backslash in JSON).
+	result = unescapeLineSeparators(result)
 	return result
+}
+
+// unescapeLineSeparators replaces JSON-escaped \u2028 and \u2029 with raw
+// UTF-8 bytes, but only when the backslash is not itself escaped (\\u2028).
+func unescapeLineSeparators(data []byte) []byte {
+	var buf bytes.Buffer
+	buf.Grow(len(data))
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\\' && i+5 < len(data) && data[i+1] == 'u' &&
+			(string(data[i+2:i+6]) == "2028" || string(data[i+2:i+6]) == "2029") {
+			// Check if the backslash is escaped (preceded by another backslash)
+			if i > 0 && data[i-1] == '\\' {
+				buf.WriteByte(data[i])
+				continue
+			}
+			if string(data[i+2:i+6]) == "2028" {
+				buf.WriteString("\u2028")
+			} else {
+				buf.WriteString("\u2029")
+			}
+			i += 5 // skip past uXXXX
+		} else {
+			buf.WriteByte(data[i])
+		}
+	}
+	return buf.Bytes()
 }
 
 // VerifyCommand verifies the Ed25519 signature on a command.

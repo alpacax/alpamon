@@ -229,6 +229,30 @@ func TestBuildCanonicalPayload_LineSeparators(t *testing.T) {
 	}
 }
 
+func TestBuildCanonicalPayload_LiteralBackslashU2028(t *testing.T) {
+	// Verify that literal "\u2028"/"\u2029" text in user input is NOT
+	// corrupted by the U+2028/U+2029 unescaping post-processing.
+	cmd := &protocol.Command{
+		ID:         "cmd-2",
+		Shell:      "system",
+		Line:       `echo hello\u2028and\u2029end`,
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-01-01T00:00:00+00:00",
+	}
+
+	payload := BuildCanonicalPayload(cmd, "srv-1")
+
+	// Must NOT contain raw U+2028/U+2029 bytes (those would mean corruption)
+	if bytes.Contains(payload, []byte("\u2028")) || bytes.Contains(payload, []byte("\u2029")) {
+		t.Errorf("literal \\u2028/\\u2029 text should not become raw bytes\ngot: %s", string(payload))
+	}
+	// JSON should contain the escaped form \\u2028/\\u2029
+	if !bytes.Contains(payload, []byte(`\\u2028`)) || !bytes.Contains(payload, []byte(`\\u2029`)) {
+		t.Errorf("literal \\u2028/\\u2029 should remain as \\\\u2028/\\\\u2029 in JSON\ngot: %s", string(payload))
+	}
+}
+
 func TestBuildCanonicalPayload_HTMLChars(t *testing.T) {
 	// Verify that <, >, & are NOT escaped (matching Python's json.dumps behavior)
 	cmd := &protocol.Command{
