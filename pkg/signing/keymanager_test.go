@@ -23,7 +23,7 @@ func newTestServer(pub ed25519.PublicKey) *httptest.Server {
 			ValidFrom: "2026-01-01T00:00:00Z",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 }
 
@@ -65,7 +65,7 @@ func TestKeyManager_CacheHit(t *testing.T) {
 			ValidFrom: "2026-01-01T00:00:00Z",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -98,7 +98,7 @@ func TestKeyManager_CacheExpiry(t *testing.T) {
 			ValidFrom: "2026-01-01T00:00:00Z",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -134,7 +134,7 @@ func TestKeyManager_InvalidAlgorithm(t *testing.T) {
 			KeyID:     "key-test",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -154,7 +154,7 @@ func TestKeyManager_InvalidKeySize(t *testing.T) {
 			KeyID:     "key-test",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -179,7 +179,7 @@ func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
 			ValidFrom: "2026-01-01T00:00:00Z",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -215,7 +215,7 @@ func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
 			ValidFrom: "2026-01-01T00:00:00Z",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -257,7 +257,7 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 			ValidFrom: "2026-01-01T00:00:00Z",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -299,7 +299,7 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 			ExpiresAt: time.Now().Add(1 * time.Second).UTC().Format(time.RFC3339),
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -343,7 +343,7 @@ func TestKeyManager_StaleKeyOnRefreshFailure(t *testing.T) {
 			ValidFrom: "2026-01-01T00:00:00Z",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
