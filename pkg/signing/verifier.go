@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
 	"github.com/alpacax/alpamon/internal/protocol"
 )
 
@@ -56,15 +57,23 @@ func BuildCanonicalPayload(cmd *protocol.Command, serverID string) []byte {
 }
 
 // unescapeLineSeparators replaces JSON-escaped \u2028 and \u2029 with raw
-// UTF-8 bytes, but only when the backslash is not itself escaped (\\u2028).
+// UTF-8 bytes, but only when the leading backslash is not itself escaped.
+// Escaping is determined by counting consecutive preceding backslashes:
+// odd count means the backslash is escaped (part of \\), even means it
+// introduces a real JSON escape sequence.
 func unescapeLineSeparators(data []byte) []byte {
 	var buf bytes.Buffer
 	buf.Grow(len(data))
 	for i := 0; i < len(data); i++ {
 		if data[i] == '\\' && i+5 < len(data) && data[i+1] == 'u' &&
 			(string(data[i+2:i+6]) == "2028" || string(data[i+2:i+6]) == "2029") {
-			// Check if the backslash is escaped (preceded by another backslash)
-			if i > 0 && data[i-1] == '\\' {
+			// Count consecutive preceding backslashes
+			backslashCount := 0
+			for j := i - 1; j >= 0 && data[j] == '\\'; j-- {
+				backslashCount++
+			}
+			if backslashCount%2 == 1 {
+				// Odd preceding backslashes: this backslash is escaped, not a JSON escape
 				buf.WriteByte(data[i])
 				continue
 			}

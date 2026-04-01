@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,10 +97,11 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	if err := m.fetchKey(); err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
-		if m.publicKey != nil {
+		// Only fall back to cached key if it matches the requested kid
+		if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
 			return copyKey(m.publicKey), nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("failed to refresh key for kid %q: %w", kid, err)
 	}
 
 	m.mu.RLock()
@@ -194,6 +196,10 @@ func (m *KeyManager) fetchKeyLocked() error {
 
 	if keyResp.Algorithm != "Ed25519" {
 		return fmt.Errorf("unsupported algorithm: %s", keyResp.Algorithm)
+	}
+
+	if keyResp.KeyID == "" {
+		return errors.New("AI server returned empty key_id")
 	}
 
 	keyBytes, err := base64.StdEncoding.DecodeString(keyResp.PublicKey)
