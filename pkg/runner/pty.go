@@ -80,6 +80,7 @@ func (pc *PtyClient) initializePtySession() error {
 	if err != nil {
 		return err
 	}
+	pc.url = sanitizedURL
 	dialer := websocket.Dialer{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
