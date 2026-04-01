@@ -129,15 +129,14 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		return 1, err.Error()
 	}
 
-	name, err := h.makeArchive(ctx, paths, bulk, recursive, sysProcAttr)
+	name, cleanupPath, err := h.makeArchive(ctx, paths, bulk, recursive, sysProcAttr)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create archive")
 		return 1, err.Error()
 	}
 
-	// codeql[go/path-injection]: Intentional - Admin-specified file path for download
-	if bulk || recursive {
-		defer func() { _ = os.Remove(name) }() // lgtm[go/path-injection]
+	if cleanupPath != "" {
+		defer func() { _ = os.Remove(cleanupPath) }()
 	}
 
 	catCmd := exec.CommandContext(ctx, "cat", name)
@@ -308,14 +307,19 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 	return paths, isBulk, isRecursive, nil
 }
 
-// makeArchive creates a zip archive from the specified paths
-func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, error) {
+// makeArchive creates a zip archive from the specified paths.
+// It returns the archive file path, a cleanup path (non-empty only for temp archives), and any error.
+// cleanupPath is always derived from os.TempDir() and never from user input,
+// ensuring os.Remove(cleanupPath) is safe from path-injection.
+func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, string, error) {
 	var archiveName string
+	var cleanupPath string
 	var cmd *exec.Cmd
 	path := paths[0]
 
 	if bulk {
-		archiveName = filepath.Dir(path) + "/" + uuid.New().String() + ".zip"
+		archiveName = filepath.Join(os.TempDir(), uuid.New().String()+".zip")
+		cleanupPath = archiveName
 		dirPath := filepath.Dir(path)
 		basePaths := make([]string, len(paths))
 		for i, p := range paths {
@@ -328,23 +332,28 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 		cmd.Dir = dirPath
 	} else {
 		if recursive {
-			archiveName = path + ".zip"
+			archiveName = filepath.Join(os.TempDir(), uuid.New().String()+".zip")
+			cleanupPath = archiveName
 			cmd = exec.CommandContext(ctx, "zip", "-r", archiveName, filepath.Base(path))
 			cmd.SysProcAttr = sysProcAttr
 			cmd.Dir = filepath.Dir(path)
 		} else {
 			archiveName = path
+			// cleanupPath stays ""—single file, no temp archive to clean up
 		}
 	}
 
 	if bulk || recursive {
 		err := cmd.Run()
 		if err != nil {
-			return "", err
+			if cleanupPath != "" {
+				_ = os.Remove(cleanupPath)
+			}
+			return "", "", err
 		}
 	}
 
-	return archiveName, nil
+	return archiveName, cleanupPath, nil
 }
 
 // createMultipartBody creates a multipart form body for file upload
