@@ -300,7 +300,7 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 			PublicKey: base64.StdEncoding.EncodeToString(pub),
 			KeyID:     "key-test",
 			ValidFrom: "2026-01-01T00:00:00Z",
-			ExpiresAt: time.Now().Add(1 * time.Second).UTC().Format(time.RFC3339),
+			ExpiresAt: "2099-01-01T00:00:00Z",
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
