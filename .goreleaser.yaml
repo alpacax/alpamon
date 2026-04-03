@@ -99,8 +99,6 @@ nfpms:
       
 brews:
   - name: alpamon
-    ids:
-      - alpamon
     repository:
       owner: alpacax
       name: homebrew-alpacon
