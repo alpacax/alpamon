@@ -10,10 +10,23 @@ import (
 )
 
 const (
-	alpamonBinPath = "/usr/local/bin/alpamon"
-	plistName      = "com.alpacax.alpamon.plist"
-	launchdDir     = "/Library/LaunchDaemons"
+	alpamonBinPathFallback = "/usr/local/bin/alpamon"
+	plistName              = "com.alpacax.alpamon.plist"
+	launchdDir             = "/Library/LaunchDaemons"
 )
+
+// getAlpamonBinPath returns the path of the currently running alpamon binary.
+// This handles Homebrew installations where the binary may be at /opt/homebrew/bin/alpamon
+// (Apple Silicon) instead of the default /usr/local/bin/alpamon (Intel).
+// Note: symlinks are intentionally NOT resolved so that the plist uses the stable
+// symlink path (e.g. /opt/homebrew/bin/alpamon) rather than a version-pinned
+// Cellar path that would break after brew upgrade.
+func getAlpamonBinPath() string {
+	if exe, err := os.Executable(); err == nil {
+		return exe
+	}
+	return alpamonBinPathFallback
+}
 
 func ensureDirectories() error {
 	return utils.EnsureDirectories()
@@ -60,7 +73,7 @@ func writeLaunchdPlist(path string) error {
 	<string>/</string>
 </dict>
 </plist>
-`, alpamonBinPath)
+`, getAlpamonBinPath())
 
 	return os.WriteFile(path, []byte(plist), 0644)
 }
