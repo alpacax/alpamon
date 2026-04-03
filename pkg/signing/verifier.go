@@ -91,6 +91,8 @@ func unescapeLineSeparators(data []byte) []byte {
 }
 
 // VerifyCommand verifies the Ed25519 signature on a command.
+// The caller is responsible for resolving the public key, typically
+// by calling KeyManager.GetPublicKeyForKID(cmd.KeyID).
 func VerifyCommand(cmd *protocol.Command, serverID string, publicKey ed25519.PublicKey) error {
 	if cmd == nil {
 		return errors.New("nil command")

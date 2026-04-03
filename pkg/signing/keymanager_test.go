@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -55,9 +56,9 @@ func TestKeyManager_Refresh(t *testing.T) {
 func TestKeyManager_CacheHit(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 
-	fetchCount := 0
+	var fetchCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount++
+		fetchCount.Add(1)
 		resp := publicKeyResponse{
 			Algorithm: "Ed25519",
 			PublicKey: base64.StdEncoding.EncodeToString(pub),
@@ -80,17 +81,17 @@ func TestKeyManager_CacheHit(t *testing.T) {
 		t.Fatalf("second GetPublicKey failed: %v", err)
 	}
 
-	if fetchCount != 1 {
-		t.Errorf("expected 1 fetch, got %d", fetchCount)
+	if fetchCount.Load() != 1 {
+		t.Errorf("expected 1 fetch, got %d", fetchCount.Load())
 	}
 }
 
 func TestKeyManager_CacheExpiry(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 
-	fetchCount := 0
+	var fetchCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount++
+		fetchCount.Add(1)
 		resp := publicKeyResponse{
 			Algorithm: "Ed25519",
 			PublicKey: base64.StdEncoding.EncodeToString(pub),
@@ -116,8 +117,8 @@ func TestKeyManager_CacheExpiry(t *testing.T) {
 		t.Fatalf("second GetPublicKey failed: %v", err)
 	}
 
-	if fetchCount != 2 {
-		t.Errorf("expected 2 fetches after cache expiry, got %d", fetchCount)
+	if fetchCount.Load() != 2 {
+		t.Errorf("expected 2 fetches after cache expiry, got %d", fetchCount.Load())
 	}
 }
 
@@ -173,9 +174,9 @@ func TestKeyManager_InvalidKeySize(t *testing.T) {
 func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 
-	fetchCount := 0
+	var fetchCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount++
+		fetchCount.Add(1)
 		resp := publicKeyResponse{
 			Algorithm: "Ed25519",
 			PublicKey: base64.StdEncoding.EncodeToString(pub),
@@ -203,8 +204,8 @@ func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
 	if !key1.Equal(key2) {
 		t.Error("keys should match")
 	}
-	if fetchCount != 1 {
-		t.Errorf("expected 1 fetch for matching kid, got %d", fetchCount)
+	if fetchCount.Load() != 1 {
+		t.Errorf("expected 1 fetch for matching kid, got %d", fetchCount.Load())
 	}
 }
 
@@ -242,12 +243,12 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 	pub1, _, _ := ed25519.GenerateKey(nil)
 	pub2, _, _ := ed25519.GenerateKey(nil)
 
-	fetchCount := 0
+	var fetchCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount++
+		n := fetchCount.Add(1)
 		var pub ed25519.PublicKey
 		var kid string
-		if fetchCount == 1 {
+		if n == 1 {
 			pub = pub1
 			kid = "key-v1"
 		} else {
@@ -284,17 +285,17 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 	if !key2.Equal(pub2) {
 		t.Error("second key should be pub2")
 	}
-	if fetchCount != 2 {
-		t.Errorf("expected 2 fetches for key rotation, got %d", fetchCount)
+	if fetchCount.Load() != 2 {
+		t.Errorf("expected 2 fetches for key rotation, got %d", fetchCount.Load())
 	}
 }
 
 func TestKeyManager_ExpiresAt(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 
-	fetchCount := 0
+	var fetchCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount++
+		fetchCount.Add(1)
 		resp := publicKeyResponse{
 			Algorithm: "Ed25519",
 			PublicKey: base64.StdEncoding.EncodeToString(pub),
@@ -316,8 +317,8 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 	if _, err := km.GetPublicKey(); err != nil {
 		t.Fatalf("second GetPublicKey failed: %v", err)
 	}
-	if fetchCount != 1 {
-		t.Errorf("expected 1 fetch before expiry, got %d", fetchCount)
+	if fetchCount.Load() != 1 {
+		t.Errorf("expected 1 fetch before expiry, got %d", fetchCount.Load())
 	}
 
 	// Simulate expires_at having passed by moving it into the past
@@ -328,18 +329,17 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 	if _, err := km.GetPublicKey(); err != nil {
 		t.Fatalf("third GetPublicKey failed: %v", err)
 	}
-	if fetchCount != 2 {
-		t.Errorf("expected 2 fetches after expires_at, got %d", fetchCount)
+	if fetchCount.Load() != 2 {
+		t.Errorf("expected 2 fetches after expires_at, got %d", fetchCount.Load())
 	}
 }
 
 func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 
-	callCount := 0
+	var callCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		if callCount > 1 {
+		if callCount.Add(1) > 1 {
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
 		}

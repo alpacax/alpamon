@@ -1,6 +1,7 @@
 package signing
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -28,17 +29,19 @@ type publicKeyResponse struct {
 	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
+// fetchTimeout is the timeout for public key HTTP requests.
+const fetchTimeout = 10 * time.Second
+
 // KeyManager fetches and caches the Ed25519 public key from the AI server.
 type KeyManager struct {
-	mu           sync.RWMutex
-	publicKey    ed25519.PublicKey
-	keyID        string
-	lastFetch    time.Time
-	expiresAt    time.Time
-	refreshSecs  int
-	aiBaseURL    string
-	client       *http.Client
-	fetchTimeout time.Duration
+	mu          sync.RWMutex
+	publicKey   ed25519.PublicKey
+	keyID       string
+	lastFetch   time.Time
+	expiresAt   time.Time
+	refreshSecs int
+	aiBaseURL   string
+	client      *http.Client
 
 	// refreshMu serializes refresh calls to prevent concurrent fetch bursts
 	refreshMu sync.Mutex
@@ -50,10 +53,9 @@ func NewKeyManager(aiBaseURL string, refreshSecs int, client *http.Client) *KeyM
 		client = http.DefaultClient
 	}
 	return &KeyManager{
-		aiBaseURL:    strings.TrimRight(aiBaseURL, "/"),
-		refreshSecs:  refreshSecs,
-		client:       client,
-		fetchTimeout: 10 * time.Second,
+		aiBaseURL:   strings.TrimRight(aiBaseURL, "/"),
+		refreshSecs: refreshSecs,
+		client:      client,
 	}
 }
 
@@ -109,6 +111,8 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
 		return copyKey(m.publicKey), nil
 	}
+	log.Debug().Str("requested_kid", kid).Str("cached_kid", m.keyID).
+		Msg("AI server returned different kid than requested.")
 	return nil, fmt.Errorf("public key for kid %q not available after refresh", kid)
 }
 
@@ -159,19 +163,15 @@ func (m *KeyManager) fetchKey() error {
 func (m *KeyManager) fetchKeyLocked() error {
 	url := m.aiBaseURL + "/api/commands/public-key/"
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	client := &http.Client{
-		Transport:     m.client.Transport,
-		CheckRedirect: m.client.CheckRedirect,
-		Jar:           m.client.Jar,
-		Timeout:       m.fetchTimeout,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := m.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to fetch public key: %w", err)
 	}
