@@ -61,20 +61,26 @@ func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 		return nil
 	}
 
-	// Verification failed: try key refresh once (handles key rotation)
-	log.Debug().Err(err).Str("command_id", cmd.ID).
-		Msg("Signature verification failed, refreshing key.")
+	// Only retry with key refresh on actual signature mismatch (possible key
+	// rotation). Malformed input errors (bad base64, wrong size) cannot be
+	// fixed by fetching a new key, so skip the refresh to avoid unnecessary
+	// AI server load.
+	if errors.Is(err, signing.ErrSignatureMismatch) {
+		log.Debug().Str("command_id", cmd.ID).
+			Msg("Signature mismatch, refreshing key for possible rotation.")
 
-	retryErr := wc.retryVerificationAfterRefresh(cmd, err)
-	if retryErr == nil {
-		log.Debug().Str("command_id", cmd.ID).Msg("Command signature verified after key refresh.")
-		return nil
+		retryErr := wc.retryVerificationAfterRefresh(cmd, err)
+		if retryErr == nil {
+			log.Debug().Str("command_id", cmd.ID).Msg("Command signature verified after key refresh.")
+			return nil
+		}
+		err = retryErr
 	}
 
 	if wc.signingMode == "enforce" {
-		return retryErr
+		return err
 	}
-	log.Warn().Err(retryErr).Str("command_id", cmd.ID).
+	log.Warn().Err(err).Str("command_id", cmd.ID).
 		Msg("Signature verification failed, executing in monitor mode.")
 	return nil
 }
