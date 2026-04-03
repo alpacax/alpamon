@@ -44,6 +44,7 @@ type WebsocketClient struct {
 	dispatcher           CommandDispatcher
 	keyManager           *signing.KeyManager
 	signingMode          string
+	serverID             string
 }
 
 func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextManager, workerPool *pool.Pool) *WebsocketClient {
@@ -62,13 +63,14 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		pool:                 workerPool,
 		ctxManager:           ctxManager,
 		signingMode:          config.GlobalSettings.SigningMode,
+		serverID:             config.GlobalSettings.ID,
 	}
 
 	if config.GlobalSettings.AIServerURL != "" {
 		wc.keyManager = signing.NewKeyManager(
 			config.GlobalSettings.AIServerURL,
 			config.GlobalSettings.KeyRefreshSecs,
-			nil,
+			utils.NewHTTPClient(),
 		)
 		log.Info().Str("mode", wc.signingMode).Msg("Command signature verification enabled.")
 	}

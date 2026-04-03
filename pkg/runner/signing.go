@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/internal/protocol"
-	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/signing"
 	"github.com/rs/zerolog/log"
@@ -56,7 +55,7 @@ func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 	}
 
 	// Verify signature
-	err = signing.VerifyCommand(cmd, config.GlobalSettings.ID, pubKey)
+	err = signing.VerifyCommand(cmd, wc.serverID, pubKey)
 	if err == nil {
 		log.Debug().Str("command_id", cmd.ID).Msg("Command signature verified.")
 		return nil
@@ -80,11 +79,15 @@ func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 	return nil
 }
 
-// retryVerificationAfterRefresh refreshes the public key and retries signature verification.
+// retryVerificationAfterRefresh force-refreshes the public key and retries
+// signature verification. ForceRefresh fetches unconditionally (unlike Refresh
+// which is a no-op when the cached key hasn't expired), ensuring a rotated key
+// is actually fetched.
 func (wc *WebsocketClient) retryVerificationAfterRefresh(cmd *protocol.Command, originalErr error) error {
-	if refreshErr := wc.keyManager.Refresh(); refreshErr != nil {
+	if refreshErr := wc.keyManager.ForceRefresh(); refreshErr != nil {
 		log.Warn().Err(refreshErr).Msg("Key refresh failed.")
-		return fmt.Errorf("signature verification failed: %w", originalErr)
+		return fmt.Errorf("signature verification failed and key refresh failed: %w",
+			errors.Join(originalErr, refreshErr))
 	}
 
 	var pubKey []byte
@@ -98,7 +101,7 @@ func (wc *WebsocketClient) retryVerificationAfterRefresh(cmd *protocol.Command, 
 		return fmt.Errorf("public key unavailable after refresh: %w", err)
 	}
 
-	if retryErr := signing.VerifyCommand(cmd, config.GlobalSettings.ID, pubKey); retryErr != nil {
+	if retryErr := signing.VerifyCommand(cmd, wc.serverID, pubKey); retryErr != nil {
 		return fmt.Errorf("signature verification failed after key refresh: %w", retryErr)
 	}
 

@@ -10,11 +10,12 @@ import (
 	"testing"
 
 	"github.com/alpacax/alpamon/internal/protocol"
-	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/signing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const testServerID = "server-456"
 
 // newTestKeyServer creates a test HTTP server that serves a public key.
 func newTestKeyServer(t *testing.T, pub ed25519.PublicKey, keyID string) *httptest.Server {
@@ -112,13 +113,9 @@ func TestVerifyCommandSignature_ValidSignature(t *testing.T) {
 	server := newTestKeyServer(t, pub, keyID)
 	defer server.Close()
 
-	serverID := "server-456"
-	origID := config.GlobalSettings.ID
-	config.GlobalSettings.ID = serverID
-	defer func() { config.GlobalSettings.ID = origID }()
-
 	wc := &WebsocketClient{
 		signingMode: "enforce",
+		serverID:    testServerID,
 		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
 	}
 
@@ -131,7 +128,7 @@ func TestVerifyCommandSignature_ValidSignature(t *testing.T) {
 		AnalyzedAt: "2026-03-01T12:00:00+00:00",
 		KeyID:      keyID,
 	}
-	signCommand(t, cmd, serverID, priv)
+	signCommand(t, cmd, testServerID, priv)
 
 	err = wc.verifyCommandSignature(cmd)
 	assert.NoError(t, err, "valid signature should pass")
@@ -149,13 +146,9 @@ func TestVerifyCommandSignature_InvalidSignature(t *testing.T) {
 	server := newTestKeyServer(t, pub, keyID)
 	defer server.Close()
 
-	serverID := "server-456"
-	origID := config.GlobalSettings.ID
-	config.GlobalSettings.ID = serverID
-	defer func() { config.GlobalSettings.ID = origID }()
-
 	wc := &WebsocketClient{
 		signingMode: "enforce",
+		serverID:    testServerID,
 		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
 	}
 
@@ -168,7 +161,7 @@ func TestVerifyCommandSignature_InvalidSignature(t *testing.T) {
 		AnalyzedAt: "2026-03-01T12:00:00+00:00",
 		KeyID:      keyID,
 	}
-	signCommand(t, cmd, serverID, differentPriv)
+	signCommand(t, cmd, testServerID, differentPriv)
 
 	err = wc.verifyCommandSignature(cmd)
 	assert.Error(t, err, "invalid signature should fail")
@@ -197,13 +190,9 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	serverID := "server-456"
-	origID := config.GlobalSettings.ID
-	config.GlobalSettings.ID = serverID
-	defer func() { config.GlobalSettings.ID = origID }()
-
 	wc := &WebsocketClient{
 		signingMode: "enforce",
+		serverID:    testServerID,
 		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
 	}
 
@@ -217,7 +206,7 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 		AnalyzedAt: "2026-03-01T12:00:00+00:00",
 		KeyID:      keyID,
 	}
-	signCommand(t, cmdOld, serverID, oldPriv)
+	signCommand(t, cmdOld, testServerID, oldPriv)
 
 	// This will fail with old key, trigger refresh, fetch new key, but still fail
 	// because the command was signed with old key
@@ -234,7 +223,7 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 		AnalyzedAt: "2026-03-01T12:00:00+00:00",
 		KeyID:      keyID,
 	}
-	signCommand(t, cmdNew, serverID, newPriv)
+	signCommand(t, cmdNew, testServerID, newPriv)
 
 	err = wc.verifyCommandSignature(cmdNew)
 	assert.NoError(t, err, "command signed with new key should succeed after rotation")
@@ -298,13 +287,9 @@ func TestVerifyCommandSignature_InvalidSignatureMonitorMode(t *testing.T) {
 	server := newTestKeyServer(t, pub, keyID)
 	defer server.Close()
 
-	serverID := "server-456"
-	origID := config.GlobalSettings.ID
-	config.GlobalSettings.ID = serverID
-	defer func() { config.GlobalSettings.ID = origID }()
-
 	wc := &WebsocketClient{
 		signingMode: "monitor",
+		serverID:    testServerID,
 		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
 	}
 
@@ -317,7 +302,7 @@ func TestVerifyCommandSignature_InvalidSignatureMonitorMode(t *testing.T) {
 		AnalyzedAt: "2026-03-01T12:00:00+00:00",
 		KeyID:      keyID,
 	}
-	signCommand(t, cmd, serverID, differentPriv)
+	signCommand(t, cmd, testServerID, differentPriv)
 
 	err = wc.verifyCommandSignature(cmd)
 	assert.NoError(t, err, "monitor mode should allow execution even with invalid signature")
@@ -330,13 +315,9 @@ func TestVerifyCommandSignature_WithoutKeyID(t *testing.T) {
 	server := newTestKeyServer(t, pub, "default-key")
 	defer server.Close()
 
-	serverID := "server-456"
-	origID := config.GlobalSettings.ID
-	config.GlobalSettings.ID = serverID
-	defer func() { config.GlobalSettings.ID = origID }()
-
 	wc := &WebsocketClient{
 		signingMode: "enforce",
+		serverID:    testServerID,
 		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
 	}
 
@@ -349,7 +330,7 @@ func TestVerifyCommandSignature_WithoutKeyID(t *testing.T) {
 		AnalyzedAt: "2026-03-01T12:00:00+00:00",
 		// No KeyID: uses GetPublicKey() instead of GetPublicKeyForKID()
 	}
-	signCommand(t, cmd, serverID, priv)
+	signCommand(t, cmd, testServerID, priv)
 
 	err = wc.verifyCommandSignature(cmd)
 	assert.NoError(t, err, "should work without key_id using default key")
