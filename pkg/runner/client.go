@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -260,8 +261,18 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 
 		// Verify signature before ACK
 		if err := wc.verifyCommandSignature(msg.Command); err != nil {
-			log.Error().Err(err).Str("command_id", msg.Command.ID).
-				Msg("Command signature verification failed.")
+			// Log the full error chain locally; err.Error() returns only
+			// the fixed rejection reason, Unwrap() has the detailed cause.
+			var rejection *rejectionError
+			if errors.As(err, &rejection) {
+				log.Error().Err(rejection.Unwrap()).
+					Str("command_id", msg.Command.ID).
+					Str("reason", rejection.reason).
+					Msg("Command signature verification failed.")
+			} else {
+				log.Error().Err(err).Str("command_id", msg.Command.ID).
+					Msg("Command signature verification failed.")
+			}
 			wc.rejectCommand(msg.Command.ID, err.Error())
 			return
 		}

@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -103,7 +104,7 @@ func TestVerifyCommandSignature_UnsignedEnforceMode(t *testing.T) {
 
 	err := wc.verifyCommandSignature(cmd)
 	assert.Error(t, err, "enforce mode should reject unsigned commands")
-	assert.Contains(t, err.Error(), "missing signature")
+	assert.Equal(t, rejectReasonUnsigned, err.Error())
 }
 
 func TestVerifyCommandSignature_ValidSignature(t *testing.T) {
@@ -166,7 +167,7 @@ func TestVerifyCommandSignature_InvalidSignature(t *testing.T) {
 
 	err = wc.verifyCommandSignature(cmd)
 	assert.Error(t, err, "invalid signature should fail")
-	assert.Contains(t, err.Error(), "signature verification failed")
+	assert.Equal(t, rejectReasonSignatureMismatch, err.Error())
 }
 
 func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
@@ -283,7 +284,7 @@ func TestVerifyCommandSignature_KeyUnavailableEnforceMode(t *testing.T) {
 
 	err := wc.verifyCommandSignature(cmd)
 	assert.Error(t, err, "enforce mode should reject when key unavailable")
-	assert.Contains(t, err.Error(), "public key unavailable")
+	assert.Equal(t, rejectReasonKeyUnavailable, err.Error())
 }
 
 func TestVerifyCommandSignature_InvalidSignatureMonitorMode(t *testing.T) {
@@ -345,6 +346,18 @@ func TestVerifyCommandSignature_WithoutKeyID(t *testing.T) {
 
 	err = wc.verifyCommandSignature(cmd)
 	assert.NoError(t, err, "should work without key_id using default key")
+}
+
+func TestRejectionError_ReasonAndUnwrap(t *testing.T) {
+	inner := errors.New("detailed internal error")
+	re := newRejection(rejectReasonInvalidSignature, inner)
+
+	// Error() returns only the fixed reason string (sent to server)
+	assert.Equal(t, rejectReasonInvalidSignature, re.Error())
+
+	// Unwrap() returns the detailed error (for local logging)
+	assert.Equal(t, inner, errors.Unwrap(re))
+	assert.ErrorIs(t, re, inner)
 }
 
 func TestRejectCommandURL(t *testing.T) {
