@@ -23,6 +23,9 @@ const (
 // Cellar path that would break after brew upgrade.
 func getAlpamonBinPath() string {
 	if exe, err := os.Executable(); err == nil {
+		if abs, err := filepath.Abs(exe); err == nil {
+			return abs
+		}
 		return exe
 	}
 	return alpamonBinPathFallback
