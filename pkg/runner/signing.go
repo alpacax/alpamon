@@ -127,15 +127,12 @@ func (wc *WebsocketClient) retryVerificationAfterRefresh(cmd *protocol.Command, 
 			errors.Join(originalErr, refreshErr))
 	}
 
-	var pubKey []byte
-	var err error
-	if cmd.KeyID != "" {
-		pubKey, err = wc.keyManager.GetPublicKeyForKID(cmd.KeyID)
-	} else {
-		pubKey, err = wc.keyManager.GetPublicKey()
-	}
+	// Use GetPublicKey (not GetPublicKeyForKID) since ForceRefresh just
+	// populated the cache. Calling GetPublicKeyForKID here would trigger a
+	// second fetch if the AI server rotated to a different KID.
+	pubKey, err := wc.keyManager.GetPublicKey()
 	if err != nil {
-		return fmt.Errorf("signing key rotated, command was signed with a decommissioned key: %w", err)
+		return fmt.Errorf("public key unavailable after refresh: %w", err)
 	}
 
 	if retryErr := signing.VerifyCommand(cmd, wc.serverID, pubKey); retryErr != nil {
