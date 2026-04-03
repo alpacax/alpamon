@@ -97,6 +97,20 @@ nfpms:
         suggests:
           - alpamon-pam
       
+brews:
+  - name: alpamon
+    repository:
+      owner: alpacax
+      name: homebrew-alpacon
+    commit_author:
+      name: alpacaxbot
+      email: support@alpacax.com
+    directory: Formula
+    homepage: "https://github.com/alpacax/alpamon"
+    description: "Secure server agent for Alpacon"
+    license: MIT
+    skip_upload: auto
+
 changelog:
   sort: asc
   filters:

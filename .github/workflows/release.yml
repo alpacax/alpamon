@@ -67,7 +67,7 @@ jobs:
           version: latest
           args: release --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GORELEASER_GITHUB_TOKEN }}
 
       - name: Set TAG_NAME from channel output
         run: echo "TAG_NAME=${{ steps.channel.outputs.tag }}" >> $GITHUB_ENV
