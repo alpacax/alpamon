@@ -69,9 +69,9 @@ func writeLaunchdPlist(path string) error {
 	<key>KeepAlive</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/var/log/alpamon.err</string>
+	<string>/var/log/alpamon/alpamon.log</string>
 	<key>StandardOutPath</key>
-	<string>/var/log/alpamon.out</string>
+	<string>/var/log/alpamon/alpamon.log</string>
 	<key>WorkingDirectory</key>
 	<string>/</string>
 </dict>

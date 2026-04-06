@@ -56,7 +56,7 @@ nfpms:
     formats:
       - deb
       - rpm
-    bindir: /usr/local/bin/
+    bindir: /usr/bin/
 
     contents:
       - src: "configs/tmpfile.conf"

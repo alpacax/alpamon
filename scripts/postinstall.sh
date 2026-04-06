@@ -1,6 +1,6 @@
 #!/bin/bash
 
-ALPAMON_BIN="/usr/local/bin/alpamon"
+ALPAMON_BIN="/usr/bin/alpamon"
 TEMPLATE_FILE="/etc/alpamon/alpamon.config.tmpl"
 SYSTEMD_AVAILABLE=true
 
@@ -10,6 +10,7 @@ main() {
   check_alpamon_binary
 
   if is_upgrade "$@"; then
+    cleanup_old_binary
     if [ "$SYSTEMD_AVAILABLE" = "true" ]; then
       restart_alpamon_by_timer
     else
@@ -155,6 +156,13 @@ restart_alpamon_by_timer() {
   systemctl restart alpamon-restart.timer || true
 
   echo "Systemd timer to restart Alpamon has been set. It will restart the service in 5 minutes."
+}
+
+# TODO: remove after v2.1.x rollout completes
+cleanup_old_binary() {
+  if [ -f "/usr/local/bin/alpamon" ] && [ -f "/usr/bin/alpamon" ]; then
+    rm -f /usr/local/bin/alpamon
+  fi
 }
 
 cleanup_tmpl_files() {
