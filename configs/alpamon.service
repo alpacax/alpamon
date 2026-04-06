@@ -4,7 +4,7 @@ After=network.target syslog.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/alpamon
+ExecStart=/usr/bin/alpamon
 WorkingDirectory=/var/lib/alpamon
 SELinuxContext=-unconfined_u:unconfined_r:unconfined_t:s0
 AppArmorProfile=-unconfined

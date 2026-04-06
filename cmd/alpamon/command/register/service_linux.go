@@ -9,7 +9,7 @@ import (
 	"github.com/alpacax/alpamon/pkg/utils"
 )
 
-const alpamonBinPath = "/usr/local/bin/alpamon"
+const alpamonBinPath = "/usr/bin/alpamon"
 
 func ensureDirectories() error {
 	if utils.HasSystemd() {
