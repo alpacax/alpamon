@@ -161,7 +161,9 @@ restart_alpamon_by_timer() {
 # TODO: remove after v2.1.x rollout completes
 cleanup_old_binary() {
   if [ -f "/usr/local/bin/alpamon" ] && [ -f "/usr/bin/alpamon" ]; then
-    rm -f /usr/local/bin/alpamon
+    if ! rm -f /usr/local/bin/alpamon; then
+      echo "Warning: Failed to remove legacy Alpamon binary at /usr/local/bin/alpamon" >&2
+    fi
   fi
 }
 
