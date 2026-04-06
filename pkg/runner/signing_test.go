@@ -58,22 +58,6 @@ func TestVerifyCommandSignature_InternalBypass(t *testing.T) {
 	assert.NoError(t, err, "internal commands should bypass verification")
 }
 
-func TestVerifyCommandSignature_NoKeyManager(t *testing.T) {
-	wc := &WebsocketClient{
-		signingMode: "enforce",
-		keyManager:  nil,
-	}
-
-	cmd := &protocol.Command{
-		ID:    "cmd-1",
-		Shell: "system",
-		Line:  "whoami",
-	}
-
-	err := wc.verifyCommandSignature(cmd)
-	assert.NoError(t, err, "should skip when key manager is nil")
-}
-
 func TestVerifyCommandSignature_UnsignedMonitorMode(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "monitor",

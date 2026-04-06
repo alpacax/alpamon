@@ -34,10 +34,12 @@ const (
 	DefaultPoolQueueSize      = 200
 	DefaultPoolDefaultTimeout = 3600 // 1 hour; safety net for handler-level timeouts
 
-	// Signing configuration defaults
-	// mode: "monitor" (log warnings, always execute) or "enforce" (reject unsigned/invalid)
-	DefaultSigningMode    = "monitor"
-	DefaultKeyRefreshSecs = 3600 // 1 hour
+	// Command signature verification defaults.
+	// Hardcoded intentionally: mode transitions (monitor → enforce) should be
+	// deployed fleet-wide via code release, not per-server config changes.
+	DefaultAIServerURL    = "https://alpacon.ai"
+	DefaultSigningMode    = "monitor" // change to "enforce" when ready
+	DefaultKeyRefreshSecs = 3600     // 1 hour
 
 	// Pool configuration limits for warnings
 	MaxReasonableWorkers        = 1000
@@ -135,6 +137,9 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 		PoolQueueSize:      DefaultPoolQueueSize,
 		PoolDefaultTimeout: DefaultPoolDefaultTimeout,
 		EditorIdleTimeout:  DefaultEditorIdleTimeout,
+		AIServerURL:        DefaultAIServerURL,
+		SigningMode:        DefaultSigningMode,
+		KeyRefreshSecs:     DefaultKeyRefreshSecs,
 	}
 
 	valid := true
@@ -219,44 +224,6 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 		}
 	} else {
 		log.Debug().Msgf("Using default editor idle timeout: %d minutes.", settings.EditorIdleTimeout)
-	}
-
-	// Validate and set signing configuration
-	settings.SigningMode = DefaultSigningMode
-	settings.KeyRefreshSecs = DefaultKeyRefreshSecs
-
-	if config.Signing.AIServerURL != "" {
-		aiURL := strings.TrimSuffix(config.Signing.AIServerURL, "/")
-		if !strings.HasPrefix(aiURL, "http://") && !strings.HasPrefix(aiURL, "https://") {
-			log.Error().Msgf("Invalid signing ai_server_url '%s', must start with http:// or https://.", aiURL)
-			valid = false
-		} else {
-			settings.AIServerURL = aiURL
-			log.Debug().Msgf("Command signature verification enabled with AI server: %s", aiURL)
-		}
-
-		if config.Signing.Mode != "" {
-			mode := strings.ToLower(config.Signing.Mode)
-			if mode != "monitor" && mode != "enforce" {
-				log.Error().Msgf("Invalid signing mode '%s', must be 'monitor' or 'enforce'.", config.Signing.Mode)
-				valid = false
-			} else {
-				settings.SigningMode = mode
-			}
-		}
-
-		if config.Signing.KeyRefresh != nil {
-			if *config.Signing.KeyRefresh <= 0 {
-				log.Error().Msgf("Invalid signing key_refresh '%d', must be a positive number of seconds.", *config.Signing.KeyRefresh)
-				valid = false
-			} else {
-				settings.KeyRefreshSecs = *config.Signing.KeyRefresh
-				log.Debug().Msgf("Using configured key refresh interval: %d seconds.", settings.KeyRefreshSecs)
-			}
-		}
-	} else if config.Signing.Mode != "" || config.Signing.KeyRefresh != nil {
-		log.Warn().Msgf("Signing mode=%q or key_refresh=%v set without ai_server_url, signing configuration will be ignored.",
-			config.Signing.Mode, config.Signing.KeyRefresh)
 	}
 
 	// Validate pool settings are reasonable
