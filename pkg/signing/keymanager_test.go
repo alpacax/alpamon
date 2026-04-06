@@ -33,7 +33,7 @@ func TestKeyManager_Refresh(t *testing.T) {
 	server := newTestServer(pub)
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 3600, server.Client())
+	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
 	if err := km.Refresh(); err != nil {
 		t.Fatalf("Refresh failed: %v", err)
@@ -70,7 +70,7 @@ func TestKeyManager_CacheHit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 3600, server.Client())
+	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
 	// First call fetches
 	if _, err := km.GetPublicKey(); err != nil {
@@ -103,7 +103,7 @@ func TestKeyManager_CacheExpiry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 3600, server.Client())
+	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
 	if _, err := km.GetPublicKey(); err != nil {
 		t.Fatalf("first GetPublicKey failed: %v", err)
@@ -123,7 +123,7 @@ func TestKeyManager_CacheExpiry(t *testing.T) {
 }
 
 func TestKeyManager_ServerUnavailable(t *testing.T) {
-	km := NewKeyManager("http://localhost:1", 3600, &http.Client{Timeout: 1 * time.Second})
+	km := NewKeyManager("http://localhost:1", 3600, "", &http.Client{Timeout: 1 * time.Second})
 
 	_, err := km.GetPublicKey()
 	if err == nil {
@@ -143,7 +143,7 @@ func TestKeyManager_InvalidAlgorithm(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 3600, server.Client())
+	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
 	_, err := km.GetPublicKey()
 	if err == nil {
@@ -163,7 +163,7 @@ func TestKeyManager_InvalidKeySize(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 3600, server.Client())
+	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
 	_, err := km.GetPublicKey()
 	if err == nil {
@@ -188,7 +188,7 @@ func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 3600, server.Client())
+	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
 	// First call fetches
 	key1, err := km.GetPublicKeyForKID("key-test-123")
@@ -212,13 +212,10 @@ func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
 func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 
+	// Server always returns the active key for this env (key-v2).
+	// Alpamon should reject commands signed with a kid that doesn't match
+	// the active key, even after refreshing.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		kid := r.URL.Query().Get("key_id")
-		// Only serve key-v2; return 404 for unknown key_ids
-		if kid != "" && kid != "key-v2" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
 		resp := publicKeyResponse{
 			Algorithm: "Ed25519",
 			PublicKey: base64.StdEncoding.EncodeToString(pub),
@@ -230,18 +227,20 @@ func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 3600, server.Client())
+	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
-	// Request known kid
+	// Request matching kid: success
 	_, err := km.GetPublicKeyForKID("key-v2")
 	if err != nil {
-		t.Fatalf("expected success when server returns matching kid: %v", err)
+		t.Fatalf("expected success when kid matches active key: %v", err)
 	}
 
-	// Request unknown kid — server returns 404
+	// Request non-matching kid: refresh returns key-v2 again, kid still
+	// doesn't match → error. This prevents a compromised relay from
+	// directing alpamon to accept an arbitrary key.
 	_, err = km.GetPublicKeyForKID("key-v999")
 	if err == nil {
-		t.Error("expected error when key_id not found on server")
+		t.Error("expected error when kid doesn't match the active key for this environment")
 	}
 }
 
@@ -250,6 +249,8 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 	pub2, _, _ := ed25519.GenerateKey(nil)
 
 	var fetchCount atomic.Int32
+	// Server simulates key rotation: first fetch returns key-v1,
+	// subsequent fetches return key-v2 (the new active key).
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := fetchCount.Add(1)
 		var pub ed25519.PublicKey
@@ -272,9 +273,9 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 3600, server.Client())
+	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
-	// Fetch key-v1
+	// Fetch key-v1 (active before rotation)
 	key1, err := km.GetPublicKeyForKID("key-v1")
 	if err != nil {
 		t.Fatalf("first fetch failed: %v", err)
@@ -283,7 +284,8 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 		t.Error("first key should be pub1")
 	}
 
-	// Request key-v2 triggers refresh
+	// Request key-v2: kid mismatch triggers env-scoped refresh,
+	// which now returns key-v2 (rotated active key).
 	key2, err := km.GetPublicKeyForKID("key-v2")
 	if err != nil {
 		t.Fatalf("second fetch failed: %v", err)
@@ -314,7 +316,7 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 3600, server.Client()) // Long TTL, but expires_at overrides
+	km := NewKeyManager(server.URL, 3600, "", server.Client()) // Long TTL, but expires_at overrides
 
 	if _, err := km.GetPublicKey(); err != nil {
 		t.Fatalf("first GetPublicKey failed: %v", err)
@@ -360,7 +362,7 @@ func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	km := NewKeyManager(server.URL, 3600, server.Client())
+	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
 	// First fetch succeeds
 	_, err := km.GetPublicKey()
@@ -377,5 +379,84 @@ func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
 	_, err = km.GetPublicKey()
 	if err == nil {
 		t.Error("expected error when key is expired and refresh fails")
+	}
+}
+
+func TestResolveAuthEnv(t *testing.T) {
+	tests := []struct {
+		serverURL string
+		want      string
+	}{
+		{"https://dev.alpacon.io", "dev"},
+		{"https://dev.alpacon.io/", "dev"},
+		{"https://us.alpacon.io", ""},
+		{"https://kr.alpacon.io", ""},
+		{"http://localhost:8000", ""},
+		{"invalid-url", ""},
+	}
+	for _, tt := range tests {
+		got := ResolveAuthEnv(tt.serverURL)
+		if got != tt.want {
+			t.Errorf("ResolveAuthEnv(%q) = %q, want %q", tt.serverURL, got, tt.want)
+		}
+	}
+}
+
+func TestIsLocalEnv(t *testing.T) {
+	tests := []struct {
+		serverURL string
+		want      bool
+	}{
+		{"http://localhost:8000", true},
+		{"http://127.0.0.1:8000", true},
+		{"http://[::1]:8000", true},
+		{"https://dev.alpacon.io", false},
+		{"https://us.alpacon.io", false},
+		{"invalid-url", false},
+	}
+	for _, tt := range tests {
+		got := IsLocalEnv(tt.serverURL)
+		if got != tt.want {
+			t.Errorf("IsLocalEnv(%q) = %v, want %v", tt.serverURL, got, tt.want)
+		}
+	}
+}
+
+func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+
+	var receivedAuthEnv string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuthEnv = r.URL.Query().Get("auth_env")
+		resp := publicKeyResponse{
+			Algorithm: "Ed25519",
+			PublicKey: base64.StdEncoding.EncodeToString(pub),
+			KeyID:     "key-dev-1",
+			ValidFrom: "2026-01-01T00:00:00Z",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	// With authEnv="dev", requests should include ?auth_env=dev
+	km := NewKeyManager(server.URL, 3600, "dev", server.Client())
+	_, err := km.GetPublicKey()
+	if err != nil {
+		t.Fatalf("GetPublicKey failed: %v", err)
+	}
+	if receivedAuthEnv != "dev" {
+		t.Errorf("expected auth_env=dev in request, got %q", receivedAuthEnv)
+	}
+
+	// With empty authEnv, requests should not include auth_env
+	receivedAuthEnv = "should-not-change"
+	km2 := NewKeyManager(server.URL, 3600, "", server.Client())
+	_, err = km2.GetPublicKey()
+	if err != nil {
+		t.Fatalf("GetPublicKey failed: %v", err)
+	}
+	if receivedAuthEnv != "" {
+		t.Errorf("expected no auth_env in request, got %q", receivedAuthEnv)
 	}
 }

@@ -67,9 +67,17 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		serverID:    config.GlobalSettings.ID,
 	}
 
+	// Local environments (localhost) have no AI signing server, so enforce
+	// mode would reject all commands. Auto-downgrade to monitor mode.
+	if signing.IsLocalEnv(config.GlobalSettings.ServerURL) && wc.signingMode == "enforce" {
+		wc.signingMode = "monitor"
+		log.Warn().Msg("Local environment detected, downgrading signing mode to monitor.")
+	}
+
 	wc.keyManager = signing.NewKeyManager(
 		config.GlobalSettings.AIServerURL,
 		config.GlobalSettings.KeyRefreshSecs,
+		signing.ResolveAuthEnv(config.GlobalSettings.ServerURL),
 		utils.NewHTTPClient(),
 	)
 	log.Info().Str("mode", wc.signingMode).Msg("Command signature verification enabled.")

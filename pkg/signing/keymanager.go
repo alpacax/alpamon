@@ -9,12 +9,40 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 )
+
+// ResolveAuthEnv determines the auth environment from the alpacon server URL.
+// dev.alpacon.io → "dev", everything else → "" (prod default).
+// This lets alpamon derive its environment from trusted local config rather
+// than trusting the key_id provided by the relay (alpacon-server).
+func ResolveAuthEnv(serverURL string) string {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return ""
+	}
+	if strings.HasPrefix(u.Hostname(), "dev.") {
+		return "dev"
+	}
+	return ""
+}
+
+// IsLocalEnv reports whether the server URL points to a local development
+// environment (localhost, 127.0.0.1, etc.) where the AI signing server is
+// unavailable and command signing cannot work.
+func IsLocalEnv(serverURL string) bool {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
 
 // maxResponseSize limits the public key response body to prevent
 // excessive memory usage from a misbehaving server.
@@ -41,6 +69,7 @@ type KeyManager struct {
 	expiresAt   time.Time
 	refreshSecs int
 	aiBaseURL   string
+	authEnv     string // "dev" or "" (prod); derived from alpacon server URL
 	client      *http.Client
 
 	// refreshMu serializes refresh calls to prevent concurrent fetch bursts
@@ -48,13 +77,17 @@ type KeyManager struct {
 }
 
 // NewKeyManager creates a key manager that fetches from the AI server.
-func NewKeyManager(aiBaseURL string, refreshSecs int, client *http.Client) *KeyManager {
+// authEnv is the environment identifier (e.g. "dev") derived from the alpacon
+// server URL via ResolveAuthEnv. It is used to scope key fetches so that
+// alpamon only trusts keys for its own environment.
+func NewKeyManager(aiBaseURL string, refreshSecs int, authEnv string, client *http.Client) *KeyManager {
 	if client == nil {
 		client = http.DefaultClient
 	}
 	return &KeyManager{
 		aiBaseURL:   strings.TrimRight(aiBaseURL, "/"),
 		refreshSecs: refreshSecs,
+		authEnv:     authEnv,
 		client:      client,
 	}
 }
@@ -83,9 +116,11 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 	return copyKey(m.publicKey), nil
 }
 
-// GetPublicKeyForKID returns the cached key if the kid matches and the key is not expired.
-// If the kid doesn't match, it fetches that specific key by key_id from the AI server.
-// This handles both key rotation and cross-environment scenarios (dev/prod).
+// GetPublicKeyForKID returns the cached key if its kid matches.
+// If the kid doesn't match (possible key rotation), it refreshes the active
+// key for this environment from the AI server. The key_id from the command is
+// used only as a cache-staleness hint — never as a query parameter — so that
+// a compromised relay cannot direct alpamon to fetch an arbitrary key.
 func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	m.mu.RLock()
 	if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
@@ -95,17 +130,22 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	}
 	m.mu.RUnlock()
 
-	// Fetch the specific key by key_id (handles rotation + cross-env)
-	key, err := m.fetchKeyByKID(kid)
-	if err != nil {
+	// kid mismatch or expired: refresh the active key for this environment
+	if err := m.fetchKey(); err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
 		if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
 			return copyKey(m.publicKey), nil
 		}
-		return nil, fmt.Errorf("failed to fetch key for kid %q: %w", kid, err)
+		return nil, fmt.Errorf("failed to refresh key for kid %q: %w", kid, err)
 	}
-	return key, nil
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.publicKey != nil && m.keyID == kid {
+		return copyKey(m.publicKey), nil
+	}
+	return nil, fmt.Errorf("key %q is not the active key for this environment (active: %q)", kid, m.keyID)
 }
 
 // isExpired reports whether the cached key should be refreshed.
@@ -143,13 +183,6 @@ func (m *KeyManager) Refresh() error {
 	return m.fetchKeyLocked()
 }
 
-// ForceRefresh fetches the public key from the AI server unconditionally,
-// regardless of whether the cached key is still valid. Use this when
-// signature verification fails and a key rotation may have occurred.
-func (m *KeyManager) ForceRefresh() error {
-	return m.fetchKey()
-}
-
 // fetchKey acquires the refresh lock and fetches unconditionally.
 // Used by GetPublicKeyForKID when kid doesn't match (key may not be expired).
 func (m *KeyManager) fetchKey() error {
@@ -158,87 +191,19 @@ func (m *KeyManager) fetchKey() error {
 	return m.fetchKeyLocked()
 }
 
-// fetchKeyByKID fetches a specific public key by key_id from the AI server.
-// Unlike fetchKeyLocked (which gets the active key), this queries by key_id
-// to support key rotation and cross-environment (dev/prod) key lookup.
-// On success, the fetched key is cached for subsequent calls.
-func (m *KeyManager) fetchKeyByKID(kid string) (ed25519.PublicKey, error) {
-	url := m.aiBaseURL + "/api/commands/public-key/?key_id=" + kid
-
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch public key for kid %q: %w", kid, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("public key endpoint returned status %d for kid %q", resp.StatusCode, kid)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-	if int64(len(body)) > maxResponseSize {
-		return nil, fmt.Errorf("public key response too large (>%d bytes)", maxResponseSize)
-	}
-
-	var keyResp publicKeyResponse
-	if err := json.Unmarshal(body, &keyResp); err != nil {
-		return nil, fmt.Errorf("failed to parse public key response: %w", err)
-	}
-
-	if keyResp.Algorithm != "Ed25519" {
-		return nil, fmt.Errorf("unsupported algorithm: %s", keyResp.Algorithm)
-	}
-
-	keyBytes, err := base64.StdEncoding.DecodeString(keyResp.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode public key: %w", err)
-	}
-
-	if len(keyBytes) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("invalid public key size: got %d, want %d", len(keyBytes), ed25519.PublicKeySize)
-	}
-
-	pubKey := ed25519.PublicKey(keyBytes)
-
-	// Cache the fetched key so subsequent calls with the same kid are free.
-	m.mu.Lock()
-	m.publicKey = pubKey
-	m.keyID = keyResp.KeyID
-	m.lastFetch = time.Now()
-	if keyResp.ExpiresAt != "" {
-		if t, err := time.Parse(time.RFC3339, keyResp.ExpiresAt); err == nil {
-			m.expiresAt = t
-		} else {
-			m.expiresAt = time.Time{}
-		}
-	} else {
-		m.expiresAt = time.Time{}
-	}
-	m.mu.Unlock()
-
-	log.Debug().Str("key_id", keyResp.KeyID).Msg("Public signing key fetched by key_id.")
-	return copyKey(pubKey), nil
-}
-
 // fetchKeyLocked performs the actual HTTP fetch. Must be called with refreshMu held.
+// When authEnv is set, it scopes the request to that environment so alpamon
+// only receives keys valid for its own environment.
 func (m *KeyManager) fetchKeyLocked() error {
-	url := m.aiBaseURL + "/api/commands/public-key/"
+	fetchURL := m.aiBaseURL + "/api/commands/public-key/"
+	if m.authEnv != "" {
+		fetchURL += "?auth_env=" + url.QueryEscape(m.authEnv)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
