@@ -61,20 +61,18 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		RestartChan:          make(chan struct{}),
 		ShutDownChan:         make(chan struct{}),
 		CollectorRestartChan: make(chan struct{}, 1),
-		pool:                 workerPool,
-		ctxManager:           ctxManager,
-		signingMode:          config.GlobalSettings.SigningMode,
-		serverID:             config.GlobalSettings.ID,
+		pool:        workerPool,
+		ctxManager:  ctxManager,
+		signingMode: config.GlobalSettings.SigningMode,
+		serverID:    config.GlobalSettings.ID,
 	}
 
-	if config.GlobalSettings.AIServerURL != "" {
-		wc.keyManager = signing.NewKeyManager(
-			config.GlobalSettings.AIServerURL,
-			config.GlobalSettings.KeyRefreshSecs,
-			utils.NewHTTPClient(),
-		)
-		log.Info().Str("mode", wc.signingMode).Msg("Command signature verification enabled.")
-	}
+	wc.keyManager = signing.NewKeyManager(
+		config.GlobalSettings.AIServerURL,
+		config.GlobalSettings.KeyRefreshSecs,
+		utils.NewHTTPClient(),
+	)
+	log.Info().Str("mode", wc.signingMode).Msg("Command signature verification enabled.")
 
 	return wc
 }
