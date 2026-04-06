@@ -84,8 +84,8 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 }
 
 // GetPublicKeyForKID returns the cached key if the kid matches and the key is not expired.
-// If the kid doesn't match the cached key or the key is expired, it refreshes from the AI server.
-// This avoids unnecessary fetches when the key hasn't rotated.
+// If the kid doesn't match, it fetches that specific key by key_id from the AI server.
+// This handles both key rotation and cross-environment scenarios (dev/prod).
 func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	m.mu.RLock()
 	if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
@@ -95,25 +95,17 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	}
 	m.mu.RUnlock()
 
-	// Unknown kid or expired key: force fetch new key from AI server
-	if err := m.fetchKey(); err != nil {
+	// Fetch the specific key by key_id (handles rotation + cross-env)
+	key, err := m.fetchKeyByKID(kid)
+	if err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
-		// Only fall back to cached key if it matches the requested kid
 		if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
 			return copyKey(m.publicKey), nil
 		}
-		return nil, fmt.Errorf("failed to refresh key for kid %q: %w", kid, err)
+		return nil, fmt.Errorf("failed to fetch key for kid %q: %w", kid, err)
 	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
-		return copyKey(m.publicKey), nil
-	}
-	log.Debug().Str("requested_kid", kid).Str("cached_kid", m.keyID).
-		Msg("AI server returned different kid than requested.")
-	return nil, fmt.Errorf("public key for kid %q not available after refresh", kid)
+	return key, nil
 }
 
 // isExpired reports whether the cached key should be refreshed.
@@ -164,6 +156,60 @@ func (m *KeyManager) fetchKey() error {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	return m.fetchKeyLocked()
+}
+
+// fetchKeyByKID fetches a specific public key by key_id from the AI server.
+// Unlike fetchKeyLocked (which gets the active key), this queries by key_id
+// to support key rotation and cross-environment (dev/prod) key lookup.
+// The result is NOT cached — it is returned directly.
+func (m *KeyManager) fetchKeyByKID(kid string) (ed25519.PublicKey, error) {
+	url := m.aiBaseURL + "/api/commands/public-key/?key_id=" + kid
+
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch public key for kid %q: %w", kid, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("public key endpoint returned status %d for kid %q", resp.StatusCode, kid)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	if int64(len(body)) > maxResponseSize {
+		return nil, fmt.Errorf("public key response too large (>%d bytes)", maxResponseSize)
+	}
+
+	var keyResp publicKeyResponse
+	if err := json.Unmarshal(body, &keyResp); err != nil {
+		return nil, fmt.Errorf("failed to parse public key response: %w", err)
+	}
+
+	if keyResp.Algorithm != "Ed25519" {
+		return nil, fmt.Errorf("unsupported algorithm: %s", keyResp.Algorithm)
+	}
+
+	keyBytes, err := base64.StdEncoding.DecodeString(keyResp.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode public key: %w", err)
+	}
+
+	if len(keyBytes) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid public key size: got %d, want %d", len(keyBytes), ed25519.PublicKeySize)
+	}
+
+	return ed25519.PublicKey(keyBytes), nil
 }
 
 // fetchKeyLocked performs the actual HTTP fetch. Must be called with refreshMu held.

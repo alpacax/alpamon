@@ -161,22 +161,33 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 	newPub, newPriv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 
-	keyID := "rotated-key-1"
+	oldKeyID := "old-key-1"
+	newKeyID := "new-key-1"
 	var fetchCount atomic.Int32
 
-	// Serve old key on first request, new key on subsequent requests
+	// Serve keys based on query: ?key_id=xxx returns that specific key,
+	// otherwise returns whatever is "active" (new key after rotation).
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := fetchCount.Add(1)
+		fetchCount.Add(1)
+		kid := r.URL.Query().Get("key_id")
 		var pub ed25519.PublicKey
-		if n == 1 {
+		var respKID string
+		switch kid {
+		case oldKeyID:
 			pub = oldPub
-		} else {
+			respKID = oldKeyID
+		case newKeyID:
 			pub = newPub
+			respKID = newKeyID
+		default:
+			// Active key endpoint (no key_id param): return old key initially
+			pub = oldPub
+			respKID = oldKeyID
 		}
 		resp := map[string]string{
 			"algorithm":  "Ed25519",
 			"public_key": base64.StdEncoding.EncodeToString(pub),
-			"key_id":     keyID,
+			"key_id":     respKID,
 			"valid_from": "2026-01-01T00:00:00Z",
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -190,7 +201,7 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
 	}
 
-	// Pre-populate cache with old key by verifying a command signed with it
+	// Pre-populate cache with old key
 	cmdOld := &protocol.Command{
 		ID:         "cmd-old",
 		Shell:      "system",
@@ -198,16 +209,14 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 		User:       "root",
 		Group:      "root",
 		AnalyzedAt: "2026-03-01T12:00:00+00:00",
-		KeyID:      keyID,
+		KeyID:      oldKeyID,
 	}
 	signCommand(t, cmdOld, testServerID, oldPriv)
 	err = wc.verifyCommandSignature(cmdOld)
 	require.NoError(t, err, "command signed with old key should pass initially")
-	require.Equal(t, int32(1), fetchCount.Load(), "should have fetched key once")
 
-	// Now sign a command with the new key. First verification attempt uses
-	// the cached old key and fails, triggering ForceRefresh which fetches the
-	// new key, and the retry succeeds.
+	// Command signed with new key + new key_id. First attempt uses cached
+	// old key (kid mismatch), then fetches by key_id and succeeds.
 	cmdNew := &protocol.Command{
 		ID:         "cmd-new",
 		Shell:      "system",
@@ -215,14 +224,12 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 		User:       "root",
 		Group:      "root",
 		AnalyzedAt: "2026-03-01T12:00:00+00:00",
-		KeyID:      keyID,
+		KeyID:      newKeyID,
 	}
 	signCommand(t, cmdNew, testServerID, newPriv)
 
 	err = wc.verifyCommandSignature(cmdNew)
-	assert.NoError(t, err, "command signed with new key should succeed after key rotation")
-	assert.Equal(t, int32(2), fetchCount.Load(),
-		"should have fetched key twice: initial + ForceRefresh for rotation")
+	assert.NoError(t, err, "command signed with new key should succeed after key_id lookup")
 }
 
 func TestVerifyCommandSignature_KeyUnavailableMonitorMode(t *testing.T) {
