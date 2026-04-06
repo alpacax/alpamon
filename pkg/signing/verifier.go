@@ -11,6 +11,12 @@ import (
 	"github.com/alpacax/alpamon/internal/protocol"
 )
 
+// ErrSignatureMismatch is returned when the Ed25519 signature does not match
+// the payload. This is the only VerifyCommand error worth retrying after a
+// key refresh (key rotation scenario). Other errors (malformed input, wrong
+// sizes) cannot be fixed by fetching a new key.
+var ErrSignatureMismatch = errors.New("signature verification failed")
+
 // signingPayload defines the canonical payload that the AI server signs.
 // Struct fields are ordered alphabetically by JSON tag to match Python's
 // json.dumps(sort_keys=True, separators=(',', ':')).
@@ -118,7 +124,7 @@ func VerifyCommand(cmd *protocol.Command, serverID string, publicKey ed25519.Pub
 	payload := BuildCanonicalPayload(cmd, serverID)
 
 	if !ed25519.Verify(publicKey, payload, sig) {
-		return errors.New("signature verification failed")
+		return ErrSignatureMismatch
 	}
 
 	return nil

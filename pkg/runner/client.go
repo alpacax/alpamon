@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/signing"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/cenkalti/backoff"
 	"github.com/gorilla/websocket"
@@ -26,8 +28,9 @@ const (
 	ConnectionReadTimeout = 35 * time.Minute
 	maxRetryTimeout       = 3 * 24 * time.Hour
 
-	eventCommandAckURL = "/api/events/commands/%s/ack/"
-	eventCommandFinURL = "/api/events/commands/%s/fin/"
+	eventCommandAckURL    = "/api/events/commands/%s/ack/"
+	eventCommandFinURL    = "/api/events/commands/%s/fin/"
+	eventCommandRejectURL = "/api/events/commands/%s/reject/"
 )
 
 type WebsocketClient struct {
@@ -40,6 +43,9 @@ type WebsocketClient struct {
 	pool                 *pool.Pool
 	ctxManager           *agent.ContextManager
 	dispatcher           CommandDispatcher
+	keyManager           *signing.KeyManager
+	signingMode          string
+	serverID             string
 }
 
 func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextManager, workerPool *pool.Pool) *WebsocketClient {
@@ -49,7 +55,7 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		"User-Agent":    {utils.GetUserAgent("alpamon")},
 	}
 
-	return &WebsocketClient{
+	wc := &WebsocketClient{
 		requestHeader:        headers,
 		apiSession:           session,
 		RestartChan:          make(chan struct{}),
@@ -57,7 +63,20 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		CollectorRestartChan: make(chan struct{}, 1),
 		pool:                 workerPool,
 		ctxManager:           ctxManager,
+		signingMode:          config.GlobalSettings.SigningMode,
+		serverID:             config.GlobalSettings.ID,
 	}
+
+	if config.GlobalSettings.AIServerURL != "" {
+		wc.keyManager = signing.NewKeyManager(
+			config.GlobalSettings.AIServerURL,
+			config.GlobalSettings.KeyRefreshSecs,
+			utils.NewHTTPClient(),
+		)
+		log.Info().Str("mode", wc.signingMode).Msg("Command signature verification enabled.")
+	}
+
+	return wc
 }
 
 // SetDispatcher sets the dispatcher for handling commands with dispatcher
@@ -237,6 +256,24 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 	case protocol.MessageTypeCommand:
 		if msg.Command == nil {
 			log.Warn().Msg("Command message without command data")
+			return
+		}
+
+		// Verify signature before ACK
+		if err := wc.verifyCommandSignature(msg.Command); err != nil {
+			// Log the full error chain locally; err.Error() returns only
+			// the fixed rejection reason, Unwrap() has the detailed cause.
+			var rejection *rejectionError
+			if errors.As(err, &rejection) {
+				log.Error().Err(rejection.Unwrap()).
+					Str("command_id", msg.Command.ID).
+					Str("reason", rejection.reason).
+					Msg("Command signature verification failed.")
+			} else {
+				log.Error().Err(err).Str("command_id", msg.Command.ID).
+					Msg("Command signature verification failed.")
+			}
+			wc.rejectCommand(msg.Command.ID, err.Error())
 			return
 		}
 

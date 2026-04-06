@@ -151,6 +151,13 @@ func (m *KeyManager) Refresh() error {
 	return m.fetchKeyLocked()
 }
 
+// ForceRefresh fetches the public key from the AI server unconditionally,
+// regardless of whether the cached key is still valid. Use this when
+// signature verification fails and a key rotation may have occurred.
+func (m *KeyManager) ForceRefresh() error {
+	return m.fetchKey()
+}
+
 // fetchKey acquires the refresh lock and fetches unconditionally.
 // Used by GetPublicKeyForKID when kid doesn't match (key may not be expired).
 func (m *KeyManager) fetchKey() error {
