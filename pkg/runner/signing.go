@@ -46,11 +46,6 @@ func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 		return nil
 	}
 
-	// Signing not configured: skip verification
-	if wc.keyManager == nil {
-		return nil
-	}
-
 	// No signature: unsigned command
 	if cmd.Signature == "" {
 		if wc.signingMode == "enforce" {
