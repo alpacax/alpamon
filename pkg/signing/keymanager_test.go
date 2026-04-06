@@ -391,6 +391,7 @@ func TestResolveAuthEnv(t *testing.T) {
 		{"https://dev.alpacon.io/", "dev"},
 		{"https://us.alpacon.io", ""},
 		{"https://kr.alpacon.io", ""},
+		{"https://dev.example.com", ""},
 		{"http://localhost:8000", ""},
 		{"invalid-url", ""},
 	}
@@ -426,7 +427,9 @@ func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 
 	var receivedAuthEnv string
+	var authEnvPresent bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, authEnvPresent = r.URL.Query()["auth_env"]
 		receivedAuthEnv = r.URL.Query().Get("auth_env")
 		resp := publicKeyResponse{
 			Algorithm: "Ed25519",
@@ -445,18 +448,18 @@ func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPublicKey failed: %v", err)
 	}
-	if receivedAuthEnv != "dev" {
-		t.Errorf("expected auth_env=dev in request, got %q", receivedAuthEnv)
+	if !authEnvPresent || receivedAuthEnv != "dev" {
+		t.Errorf("expected auth_env=dev in request, got present=%v value=%q", authEnvPresent, receivedAuthEnv)
 	}
 
-	// With empty authEnv, requests should not include auth_env
-	receivedAuthEnv = "should-not-change"
+	// With empty authEnv, requests should not include auth_env param at all
+	authEnvPresent = true // reset
 	km2 := NewKeyManager(server.URL, 3600, "", server.Client())
 	_, err = km2.GetPublicKey()
 	if err != nil {
 		t.Fatalf("GetPublicKey failed: %v", err)
 	}
-	if receivedAuthEnv != "" {
-		t.Errorf("expected no auth_env in request, got %q", receivedAuthEnv)
+	if authEnvPresent {
+		t.Errorf("expected auth_env param to be absent, but it was present with value %q", receivedAuthEnv)
 	}
 }

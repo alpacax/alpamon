@@ -83,6 +83,20 @@ func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 		return nil
 	}
 
+	// Commands without key_id use TTL-based cache via GetPublicKey(). During
+	// key rotation the cached key may be stale but not yet expired, causing a
+	// mismatch. Retry once with an unconditional refresh (env-scoped, no
+	// relay-provided key_id) to pick up the rotated key immediately.
+	if cmd.KeyID == "" && errors.Is(err, signing.ErrSignatureMismatch) {
+		if refreshedKey, refreshErr := wc.keyManager.RefreshAndGet(); refreshErr == nil {
+			if signing.VerifyCommand(cmd, wc.serverID, refreshedKey) == nil {
+				log.Debug().Str("command_id", cmd.ID).
+					Msg("Command signature verified after key refresh.")
+				return nil
+			}
+		}
+	}
+
 	if wc.signingMode == "enforce" {
 		reason := rejectReasonInvalidSignature
 		if errors.Is(err, signing.ErrSignatureMismatch) {

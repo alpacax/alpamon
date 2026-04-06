@@ -26,7 +26,7 @@ func ResolveAuthEnv(serverURL string) string {
 	if err != nil {
 		return ""
 	}
-	if strings.HasPrefix(u.Hostname(), "dev.") {
+	if strings.EqualFold(u.Hostname(), "dev.alpacon.io") {
 		return "dev"
 	}
 	return ""
@@ -181,6 +181,19 @@ func (m *KeyManager) Refresh() error {
 	m.mu.RUnlock()
 
 	return m.fetchKeyLocked()
+}
+
+// RefreshAndGet fetches the active key unconditionally (ignoring cache TTL)
+// and returns it. Used for one-time retry on signature mismatch when the
+// command has no key_id. This is env-scoped and does not accept any
+// relay-provided key identifier.
+func (m *KeyManager) RefreshAndGet() (ed25519.PublicKey, error) {
+	if err := m.fetchKey(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return copyKey(m.publicKey), nil
 }
 
 // fetchKey acquires the refresh lock and fetches unconditionally.
