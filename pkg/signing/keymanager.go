@@ -161,7 +161,7 @@ func (m *KeyManager) fetchKey() error {
 // fetchKeyByKID fetches a specific public key by key_id from the AI server.
 // Unlike fetchKeyLocked (which gets the active key), this queries by key_id
 // to support key rotation and cross-environment (dev/prod) key lookup.
-// The result is NOT cached — it is returned directly.
+// On success, the fetched key is cached for subsequent calls.
 func (m *KeyManager) fetchKeyByKID(kid string) (ed25519.PublicKey, error) {
 	url := m.aiBaseURL + "/api/commands/public-key/?key_id=" + kid
 
@@ -209,7 +209,26 @@ func (m *KeyManager) fetchKeyByKID(kid string) (ed25519.PublicKey, error) {
 		return nil, fmt.Errorf("invalid public key size: got %d, want %d", len(keyBytes), ed25519.PublicKeySize)
 	}
 
-	return ed25519.PublicKey(keyBytes), nil
+	pubKey := ed25519.PublicKey(keyBytes)
+
+	// Cache the fetched key so subsequent calls with the same kid are free.
+	m.mu.Lock()
+	m.publicKey = pubKey
+	m.keyID = keyResp.KeyID
+	m.lastFetch = time.Now()
+	if keyResp.ExpiresAt != "" {
+		if t, err := time.Parse(time.RFC3339, keyResp.ExpiresAt); err == nil {
+			m.expiresAt = t
+		} else {
+			m.expiresAt = time.Time{}
+		}
+	} else {
+		m.expiresAt = time.Time{}
+	}
+	m.mu.Unlock()
+
+	log.Debug().Str("key_id", keyResp.KeyID).Msg("Public signing key fetched by key_id.")
+	return copyKey(pubKey), nil
 }
 
 // fetchKeyLocked performs the actual HTTP fetch. Must be called with refreshMu held.

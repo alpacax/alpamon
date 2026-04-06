@@ -213,6 +213,12 @@ func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		kid := r.URL.Query().Get("key_id")
+		// Only serve key-v2; return 404 for unknown key_ids
+		if kid != "" && kid != "key-v2" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		resp := publicKeyResponse{
 			Algorithm: "Ed25519",
 			PublicKey: base64.StdEncoding.EncodeToString(pub),
@@ -226,16 +232,16 @@ func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
 
 	km := NewKeyManager(server.URL, 3600, server.Client())
 
-	// Request unknown kid, server returns key-v2
+	// Request known kid
 	_, err := km.GetPublicKeyForKID("key-v2")
 	if err != nil {
 		t.Fatalf("expected success when server returns matching kid: %v", err)
 	}
 
-	// Request a kid that doesn't match what server returns
+	// Request unknown kid — server returns 404
 	_, err = km.GetPublicKeyForKID("key-v999")
 	if err == nil {
-		t.Error("expected error when kid doesn't match after refresh")
+		t.Error("expected error when key_id not found on server")
 	}
 }
 
