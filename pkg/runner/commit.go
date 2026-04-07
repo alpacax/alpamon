@@ -16,7 +16,6 @@ import (
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/alpacax/alpamon/pkg/version"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/google/go-cmp/cmp"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/cpu"

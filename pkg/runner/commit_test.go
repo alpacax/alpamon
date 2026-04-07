@@ -349,7 +349,7 @@ func TestOtherTypesGetComparableData(t *testing.T) {
 
 func TestSyncers(t *testing.T) {
 	expectedKeys := []string{
-		"info", "os", "time", "users", "groups",
+		"info", "os", "time", "groups", "users",
 		"interfaces", "addresses", "disks", "partitions",
 	}
 

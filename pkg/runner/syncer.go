@@ -33,6 +33,12 @@ type syncable interface {
 
 // syncers registers all 9 syncable data categories.
 // server and firewall are handled separately.
+//
+// Order matters: parent categories must precede their children to satisfy
+// server-side FK constraints during sync POST operations:
+//   - groups → users    (SystemUser.group FK)
+//   - interfaces → addresses (InterfaceAddress.interface FK, hard fail)
+//   - disks → partitions    (Partition.disk FK)
 var syncers = []syncable{
 	&singleRowSyncer[SystemData]{key: "info", collect: getSystemData},
 	&singleRowSyncer[OSData]{key: "os", collect: getOsData},
@@ -43,8 +49,8 @@ var syncers = []syncable{
 			return td.GetComparableData()
 		},
 	},
-	&multiRowSyncer[UserData]{key: "users", collect: getUserData},
 	&multiRowSyncer[GroupData]{key: "groups", collect: getGroupData},
+	&multiRowSyncer[UserData]{key: "users", collect: getUserData},
 	&multiRowSyncer[Interface]{key: "interfaces", collect: getNetworkInterfaces},
 	&multiRowSyncer[Address]{key: "addresses", collect: getNetworkAddresses},
 	&multiRowSyncer[Disk]{key: "disks", collect: getDisks},
