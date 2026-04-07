@@ -46,6 +46,12 @@ const (
 	// guarantee for the full ~15-45s scheduling range in every case.
 	minDeferredSyncJitterSeconds = 30
 
+	// maxPrioritySyncJitterSeconds is the upper bound (exclusive) for the
+	// jitter before priority sync (groups/users). This distributes IAM
+	// matching load when N servers are IaC-provisioned simultaneously,
+	// while keeping WebSH/WebFTP available within a few seconds.
+	maxPrioritySyncJitterSeconds = 6
+
 	IFF_UP          = 1 << 0 // Interface is up
 	IFF_LOOPBACK    = 1 << 3 // Loopback interface
 	IFF_POINTOPOINT = 1 << 4 // Point-to-point link
@@ -119,9 +125,17 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 				return
 			}
 
-			// Step 2: Immediately sync users/groups so Websh/WebFTP become
-			// available without waiting for the server's deferred sync command.
-			SyncSystemInfo(session, prioritySyncKeys)
+			// Step 2: Sync users/groups after short jitter (0-5s) so Websh/
+			// WebFTP become available quickly. The jitter distributes IAM
+			// matching load when many IaC-provisioned servers start at once.
+			priorityJitter := time.Duration(rand.IntN(maxPrioritySyncJitterSeconds)) * time.Second
+			select {
+			case <-time.After(priorityJitter):
+				SyncSystemInfo(session, prioritySyncKeys)
+			case <-ctx.Done():
+				log.Debug().Msg("Skipping priority sync due to shutdown")
+				return
+			}
 
 			// Step 3: Fallback deferred sync after 30-60s.
 			// The server schedules a sync command after processing the commit
