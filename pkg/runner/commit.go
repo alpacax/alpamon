@@ -96,6 +96,12 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			// Step 1: Immediate lightweight commit (no delay).
 			// Sends only essential data (os, info, server) so the server
 			// sets commissioned=True and the server appears as "connected".
+			select {
+			case <-ctx.Done():
+				log.Debug().Msg("Skipping lightweight commit due to shutdown")
+				return
+			default:
+			}
 			log.Info().Msg("Committing essential system information (lightweight).")
 			commitAndNotify(collectEssentialData())
 			log.Info().Msg("Essential system information committed.")
