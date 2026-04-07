@@ -40,8 +40,10 @@ const (
 	maxDeferredSyncJitterSeconds = 61
 
 	// minDeferredSyncJitterSeconds is the minimum delay before the fallback
-	// deferred sync. Must be long enough for: Rqueue processing + HTTP
-	// round trip + server commit handling + sync command scheduling (~15-45s).
+	// deferred sync. This 30s lower bound is a tradeoff: it often gives
+	// Rqueue processing, the HTTP round trip, server commit handling, and
+	// server-side sync scheduling time to complete first, but is not a
+	// guarantee for the full ~15-45s scheduling range in every case.
 	minDeferredSyncJitterSeconds = 30
 
 	IFF_UP          = 1 << 0 // Interface is up
