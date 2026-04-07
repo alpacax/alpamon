@@ -83,20 +83,18 @@ func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 		return nil
 	}
 
-	// Only retry with key refresh on actual signature mismatch (possible key
-	// rotation). Malformed input errors (bad base64, wrong size) cannot be
-	// fixed by fetching a new key, so skip the refresh to avoid unnecessary
-	// AI server load.
-	if errors.Is(err, signing.ErrSignatureMismatch) {
-		log.Debug().Str("command_id", cmd.ID).
-			Msg("Signature mismatch, refreshing key for possible rotation.")
-
-		retryErr := wc.retryVerificationAfterRefresh(cmd, err)
-		if retryErr == nil {
-			log.Debug().Str("command_id", cmd.ID).Msg("Command signature verified after key refresh.")
-			return nil
+	// Commands without key_id use TTL-based cache via GetPublicKey(). During
+	// key rotation the cached key may be stale but not yet expired, causing a
+	// mismatch. Retry once with an unconditional refresh (env-scoped, no
+	// relay-provided key_id) to pick up the rotated key immediately.
+	if cmd.KeyID == "" && errors.Is(err, signing.ErrSignatureMismatch) {
+		if refreshedKey, refreshErr := wc.keyManager.RefreshAndGet(); refreshErr == nil {
+			if signing.VerifyCommand(cmd, wc.serverID, refreshedKey) == nil {
+				log.Debug().Str("command_id", cmd.ID).
+					Msg("Command signature verified after key refresh.")
+				return nil
+			}
 		}
-		err = retryErr
 	}
 
 	if wc.signingMode == "enforce" {
@@ -108,32 +106,6 @@ func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 	}
 	log.Warn().Err(err).Str("command_id", cmd.ID).
 		Msg("Signature verification failed, executing in monitor mode.")
-	return nil
-}
-
-// retryVerificationAfterRefresh force-refreshes the public key and retries
-// signature verification. ForceRefresh fetches unconditionally (unlike Refresh
-// which is a no-op when the cached key hasn't expired), ensuring a rotated key
-// is actually fetched.
-func (wc *WebsocketClient) retryVerificationAfterRefresh(cmd *protocol.Command, originalErr error) error {
-	if refreshErr := wc.keyManager.ForceRefresh(); refreshErr != nil {
-		log.Warn().Err(refreshErr).Msg("Key refresh failed.")
-		return fmt.Errorf("signature verification failed and key refresh failed: %w",
-			errors.Join(originalErr, refreshErr))
-	}
-
-	// Use GetPublicKey (not GetPublicKeyForKID) since ForceRefresh just
-	// populated the cache. Calling GetPublicKeyForKID here would trigger a
-	// second fetch if the AI server rotated to a different KID.
-	pubKey, err := wc.keyManager.GetPublicKey()
-	if err != nil {
-		return fmt.Errorf("public key unavailable after refresh: %w", err)
-	}
-
-	if retryErr := signing.VerifyCommand(cmd, wc.serverID, pubKey); retryErr != nil {
-		return fmt.Errorf("signature verification failed after key refresh: %w", retryErr)
-	}
-
 	return nil
 }
 

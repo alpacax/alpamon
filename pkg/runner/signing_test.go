@@ -45,7 +45,7 @@ func signCommand(t *testing.T, cmd *protocol.Command, serverID string, priv ed25
 func TestVerifyCommandSignature_InternalBypass(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "enforce",
-		keyManager:  signing.NewKeyManager("http://localhost:9999", 3600, nil),
+		keyManager:  signing.NewKeyManager("http://localhost:9999", 3600, "", nil),
 	}
 
 	cmd := &protocol.Command{
@@ -61,7 +61,7 @@ func TestVerifyCommandSignature_InternalBypass(t *testing.T) {
 func TestVerifyCommandSignature_UnsignedMonitorMode(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "monitor",
-		keyManager:  signing.NewKeyManager("http://localhost:9999", 3600, nil),
+		keyManager:  signing.NewKeyManager("http://localhost:9999", 3600, "", nil),
 	}
 
 	cmd := &protocol.Command{
@@ -77,7 +77,7 @@ func TestVerifyCommandSignature_UnsignedMonitorMode(t *testing.T) {
 func TestVerifyCommandSignature_UnsignedEnforceMode(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "enforce",
-		keyManager:  signing.NewKeyManager("http://localhost:9999", 3600, nil),
+		keyManager:  signing.NewKeyManager("http://localhost:9999", 3600, "", nil),
 	}
 
 	cmd := &protocol.Command{
@@ -102,7 +102,7 @@ func TestVerifyCommandSignature_ValidSignature(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "enforce",
 		serverID:    testServerID,
-		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
+		keyManager:  signing.NewKeyManager(server.URL, 3600, "", nil),
 	}
 
 	cmd := &protocol.Command{
@@ -135,7 +135,7 @@ func TestVerifyCommandSignature_InvalidSignature(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "enforce",
 		serverID:    testServerID,
-		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
+		keyManager:  signing.NewKeyManager(server.URL, 3600, "", nil),
 	}
 
 	cmd := &protocol.Command{
@@ -161,22 +161,28 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 	newPub, newPriv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 
-	keyID := "rotated-key-1"
+	oldKeyID := "old-key-1"
+	newKeyID := "new-key-1"
 	var fetchCount atomic.Int32
 
-	// Serve old key on first request, new key on subsequent requests
+	// Server simulates key rotation: first request returns old key,
+	// subsequent requests return new key (the rotated active key).
+	// No ?key_id query — alpamon fetches by environment, not by relay-provided key_id.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := fetchCount.Add(1)
 		var pub ed25519.PublicKey
+		var respKID string
 		if n == 1 {
 			pub = oldPub
+			respKID = oldKeyID
 		} else {
 			pub = newPub
+			respKID = newKeyID
 		}
 		resp := map[string]string{
 			"algorithm":  "Ed25519",
 			"public_key": base64.StdEncoding.EncodeToString(pub),
-			"key_id":     keyID,
+			"key_id":     respKID,
 			"valid_from": "2026-01-01T00:00:00Z",
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -187,10 +193,10 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "enforce",
 		serverID:    testServerID,
-		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
+		keyManager:  signing.NewKeyManager(server.URL, 3600, "", nil),
 	}
 
-	// Pre-populate cache with old key by verifying a command signed with it
+	// Pre-populate cache with old key
 	cmdOld := &protocol.Command{
 		ID:         "cmd-old",
 		Shell:      "system",
@@ -198,16 +204,14 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 		User:       "root",
 		Group:      "root",
 		AnalyzedAt: "2026-03-01T12:00:00+00:00",
-		KeyID:      keyID,
+		KeyID:      oldKeyID,
 	}
 	signCommand(t, cmdOld, testServerID, oldPriv)
 	err = wc.verifyCommandSignature(cmdOld)
 	require.NoError(t, err, "command signed with old key should pass initially")
-	require.Equal(t, int32(1), fetchCount.Load(), "should have fetched key once")
 
-	// Now sign a command with the new key. First verification attempt uses
-	// the cached old key and fails, triggering ForceRefresh which fetches the
-	// new key, and the retry succeeds.
+	// Command signed with new key + new key_id. kid mismatch triggers
+	// env-scoped refresh, which returns the rotated active key.
 	cmdNew := &protocol.Command{
 		ID:         "cmd-new",
 		Shell:      "system",
@@ -215,14 +219,12 @@ func TestVerifyCommandSignature_KeyRotation(t *testing.T) {
 		User:       "root",
 		Group:      "root",
 		AnalyzedAt: "2026-03-01T12:00:00+00:00",
-		KeyID:      keyID,
+		KeyID:      newKeyID,
 	}
 	signCommand(t, cmdNew, testServerID, newPriv)
 
 	err = wc.verifyCommandSignature(cmdNew)
-	assert.NoError(t, err, "command signed with new key should succeed after key rotation")
-	assert.Equal(t, int32(2), fetchCount.Load(),
-		"should have fetched key twice: initial + ForceRefresh for rotation")
+	assert.NoError(t, err, "command signed with new key should succeed after env-scoped refresh")
 }
 
 func TestVerifyCommandSignature_KeyUnavailableMonitorMode(t *testing.T) {
@@ -234,7 +236,7 @@ func TestVerifyCommandSignature_KeyUnavailableMonitorMode(t *testing.T) {
 
 	wc := &WebsocketClient{
 		signingMode: "monitor",
-		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
+		keyManager:  signing.NewKeyManager(server.URL, 3600, "", nil),
 	}
 
 	cmd := &protocol.Command{
@@ -256,7 +258,7 @@ func TestVerifyCommandSignature_KeyUnavailableEnforceMode(t *testing.T) {
 
 	wc := &WebsocketClient{
 		signingMode: "enforce",
-		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
+		keyManager:  signing.NewKeyManager(server.URL, 3600, "", nil),
 	}
 
 	cmd := &protocol.Command{
@@ -286,7 +288,7 @@ func TestVerifyCommandSignature_InvalidSignatureMonitorMode(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "monitor",
 		serverID:    testServerID,
-		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
+		keyManager:  signing.NewKeyManager(server.URL, 3600, "", nil),
 	}
 
 	cmd := &protocol.Command{
@@ -314,7 +316,7 @@ func TestVerifyCommandSignature_WithoutKeyID(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "enforce",
 		serverID:    testServerID,
-		keyManager:  signing.NewKeyManager(server.URL, 3600, nil),
+		keyManager:  signing.NewKeyManager(server.URL, 3600, "", nil),
 	}
 
 	cmd := &protocol.Command{
