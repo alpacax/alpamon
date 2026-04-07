@@ -374,6 +374,69 @@ func TestSyncers(t *testing.T) {
 	}
 }
 
+func TestSyncerFKOrdering(t *testing.T) {
+	// Server-side FK constraints require parent categories to be synced
+	// before their children. syncRequiredKeys normalizes to syncers
+	// registration order, so this order is the authoritative processing order.
+	keyOrder := make([]string, len(syncers))
+	for i, s := range syncers {
+		keyOrder[i] = s.Key()
+	}
+
+	indexOf := func(key string) int {
+		for i, k := range keyOrder {
+			if k == key {
+				return i
+			}
+		}
+		return -1
+	}
+
+	// groups → users (SystemUser.group FK)
+	assert.Less(t, indexOf("groups"), indexOf("users"),
+		"groups must be synced before users (SystemUser.group FK)")
+	// interfaces → addresses (InterfaceAddress.interface FK, hard fail)
+	assert.Less(t, indexOf("interfaces"), indexOf("addresses"),
+		"interfaces must be synced before addresses (InterfaceAddress.interface FK)")
+	// disks → partitions (Partition.disk FK)
+	assert.Less(t, indexOf("disks"), indexOf("partitions"),
+		"disks must be synced before partitions (Partition.disk FK)")
+}
+
+func TestCollectEssentialDataOnlyIncludesEssentialCategories(t *testing.T) {
+	data := collectEssentialData()
+
+	// Essential fields must be populated.
+	assert.NotEmpty(t, data.Version, "Version should be set")
+	assert.NotEmpty(t, data.Info.UUID, "Info (essential) should be collected")
+	assert.NotEmpty(t, data.OS.Name, "OS (essential) should be collected")
+
+	// Deferred fields must be nil/empty (omitempty will exclude them).
+	assert.Nil(t, data.Time, "Time (deferred) should not be collected")
+	assert.Empty(t, data.Users, "Users (deferred) should not be collected")
+	assert.Empty(t, data.Groups, "Groups (deferred) should not be collected")
+	assert.Empty(t, data.Interfaces, "Interfaces (deferred) should not be collected")
+	assert.Empty(t, data.Addresses, "Addresses (deferred) should not be collected")
+	assert.Empty(t, data.Disks, "Disks (deferred) should not be collected")
+	assert.Empty(t, data.Partitions, "Partitions (deferred) should not be collected")
+
+	// SyncHashes should only contain essential keys.
+	for key := range data.SyncHashes {
+		assert.True(t, essentialSyncKeys[key],
+			"SyncHashes should only contain essential keys, got %s", key)
+	}
+
+	// Verify omitempty: marshaled JSON should not contain deferred fields.
+	jsonBytes, err := json.Marshal(data)
+	assert.NoError(t, err)
+	jsonStr := string(jsonBytes)
+	assert.NotContains(t, jsonStr, `"time"`, "Lightweight commit JSON should not contain time")
+	assert.NotContains(t, jsonStr, `"users"`, "Lightweight commit JSON should not contain users")
+	assert.NotContains(t, jsonStr, `"groups"`, "Lightweight commit JSON should not contain groups")
+	assert.Contains(t, jsonStr, `"info"`, "Lightweight commit JSON should contain info")
+	assert.Contains(t, jsonStr, `"os"`, "Lightweight commit JSON should contain os")
+}
+
 func TestSyncerCollect(t *testing.T) {
 	for _, s := range syncers {
 		// Collect may fail in certain environments (e.g., limited procfs or permissions in CI).
