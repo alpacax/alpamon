@@ -59,15 +59,20 @@ var syncMutex sync.Mutex
 // and enable Websh/WebFTP platform detection.
 var essentialSyncKeys = map[string]bool{"info": true, "os": true}
 
-// deferredSyncKeys are categories synced after the lightweight commit.
-// These involve heavy server-side processing (IAM matching, etc.)
-// and are distributed over a jitter window.
+// prioritySyncKeys are categories synced immediately after the lightweight
+// commit to enable Websh/WebFTP as quickly as possible. WebSH session
+// creation requires SystemUser records (login_enabled check), which only
+// exist after users/groups are synced. groups must precede users (FK).
+var prioritySyncKeys = []string{"groups", "users"}
+
+// deferredSyncKeys are the remaining categories synced via the server-
+// initiated sync command or fallback timer. These involve heavier server-
+// side processing and are not needed for immediate Websh/WebFTP access.
 //
 // Order reflects FK dependencies: parents before children
-// (groups→users, interfaces→addresses, disks→partitions).
+// (interfaces→addresses, disks→partitions).
 var deferredSyncKeys = []string{
 	"time",
-	"groups", "users",
 	"interfaces", "addresses",
 	"disks", "partitions",
 }
@@ -114,7 +119,11 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 				return
 			}
 
-			// Step 2: Fallback deferred sync after 30-60s.
+			// Step 2: Immediately sync users/groups so Websh/WebFTP become
+			// available without waiting for the server's deferred sync command.
+			SyncSystemInfo(session, prioritySyncKeys)
+
+			// Step 3: Fallback deferred sync after 30-60s.
 			// The server schedules a sync command after processing the commit
 			// (~15-45s). This fallback runs unconditionally but is harmless if
 			// the server command already triggered sync — the hash protocol
