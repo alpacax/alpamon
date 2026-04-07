@@ -223,7 +223,8 @@ func assignToCommitData(data *commitData, key string, result any) {
 	case "os":
 		data.OS = result.(OSData)
 	case "time":
-		data.Time = result.(TimeData)
+		t := result.(TimeData)
+		data.Time = &t
 	case "users":
 		data.Users = result.([]UserData)
 	case "groups":

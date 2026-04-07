@@ -31,10 +31,18 @@ const (
 	accessPolicyURL = "/api/servers/servers/-/access-policy/"
 	syncCheckURL    = "/api/servers/servers/-/sync-check/"
 
-	// maxCommitJitterSeconds is the upper bound (exclusive) for random commit
-	// delay when uncommissioned servers register, distributing N simultaneous
-	// IaC-provisioned commits over a 0-30 second window.
-	maxCommitJitterSeconds = 31
+	// maxDeferredSyncJitterSeconds is the upper bound (exclusive) for the
+	// fallback deferred sync delay. The primary path is the server-initiated
+	// sync command (arrives ~15-45s after commit). This fallback covers the
+	// case where the server command doesn't arrive. The 30-60s window gives
+	// the server command time to arrive first, while limiting the gap during
+	// which the collector may reference entities the server doesn't know yet.
+	maxDeferredSyncJitterSeconds = 61
+
+	// minDeferredSyncJitterSeconds is the minimum delay before the fallback
+	// deferred sync. Must be long enough for: Rqueue processing + HTTP
+	// round trip + server commit handling + sync command scheduling (~15-45s).
+	minDeferredSyncJitterSeconds = 30
 
 	IFF_UP          = 1 << 0 // Interface is up
 	IFF_LOOPBACK    = 1 << 3 // Loopback interface
@@ -43,6 +51,24 @@ const (
 )
 
 var syncMutex sync.Mutex
+
+// essentialSyncKeys are categories included in the lightweight commit.
+// These provide enough data for the server to set commissioned=True
+// and enable Websh/WebFTP platform detection.
+var essentialSyncKeys = map[string]bool{"info": true, "os": true}
+
+// deferredSyncKeys are categories synced after the lightweight commit.
+// These involve heavy server-side processing (IAM matching, etc.)
+// and are distributed over a jitter window.
+//
+// Order reflects FK dependencies: parents before children
+// (groups→users, interfaces→addresses, disks→partitions).
+var deferredSyncKeys = []string{
+	"time",
+	"groups", "users",
+	"interfaces", "addresses",
+	"disks", "partitions",
+}
 
 // CommitAsync commits system information asynchronously
 // Uses ContextManager for coordinated lifecycle management
@@ -66,12 +92,26 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 	} else {
 		go func() {
 			ctx := ctxManager.Root()
-			jitter := time.Duration(rand.IntN(maxCommitJitterSeconds)) * time.Second
+
+			// Step 1: Immediate lightweight commit (no delay).
+			// Sends only essential data (os, info, server) so the server
+			// sets commissioned=True and the server appears as "connected".
+			log.Info().Msg("Committing essential system information (lightweight).")
+			commitAndNotify(collectEssentialData())
+			log.Info().Msg("Essential system information committed.")
+
+			// Step 2: Fallback deferred sync after 30-60s.
+			// The server schedules a sync command after processing the commit
+			// (~15-45s). This fallback only fires if that command doesn't arrive.
+			jitter := time.Duration(rand.IntN(maxDeferredSyncJitterSeconds)) * time.Second
+			if jitter < minDeferredSyncJitterSeconds*time.Second {
+				jitter = minDeferredSyncJitterSeconds * time.Second
+			}
 			select {
 			case <-time.After(jitter):
-				CommitSystemInfo()
+				SyncSystemInfo(session, deferredSyncKeys)
 			case <-ctx.Done():
-				log.Debug().Msg("Skipping commitSystemInfo due to shutdown")
+				log.Debug().Msg("Skipping deferred sync due to shutdown")
 			}
 		}()
 	}
@@ -81,12 +121,7 @@ func CommitSystemInfo() {
 	log.Debug().Msg("Start committing system information.")
 
 	data := collectData()
-
-	scheduler.Rqueue.Put(commitURL, data, 80, time.Time{})
-	scheduler.Rqueue.Post(eventURL, []byte(fmt.Sprintf(`{
-		"reporter": "alpamon",
-		"record": "committed",
-		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
+	commitAndNotify(data)
 
 	// Sync firewall rules after committing system info
 	// Skip if firewall functionality is disabled
@@ -98,6 +133,51 @@ func CommitSystemInfo() {
 	}
 
 	log.Info().Msg("Completed committing system information.")
+}
+
+// commitAndNotify sends commit data to the server and posts a commit event.
+func commitAndNotify(data *commitData) {
+	scheduler.Rqueue.Put(commitURL, data, 80, time.Time{})
+	scheduler.Rqueue.Post(eventURL, []byte(fmt.Sprintf(`{
+		"reporter": "alpamon",
+		"record": "committed",
+		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
+}
+
+// collectEssentialData collects only the essential categories (info, os)
+// plus server-level fields (version, pam_version, load). The resulting
+// commitData omits deferred fields via omitempty tags.
+func collectEssentialData() *commitData {
+	data := &commitData{
+		Version:    version.Version,
+		PamVersion: utils.GetPamVersion(),
+	}
+
+	if load, err := getLoadAverage(); err == nil {
+		data.Load = load
+	} else {
+		log.Debug().Err(err).Msg("Failed to retrieve load average.")
+	}
+
+	for _, s := range syncers {
+		if !essentialSyncKeys[s.Key()] {
+			continue
+		}
+		result, err := s.Collect()
+		if err != nil {
+			log.Debug().Err(err).Msgf("Failed to collect %s data for lightweight commit.", s.Key())
+			continue
+		}
+		assignToCommitData(data, s.Key(), result)
+		if h := s.ComputeHash(result); h != "" {
+			if data.SyncHashes == nil {
+				data.SyncHashes = make(SyncHashes)
+			}
+			data.SyncHashes[s.Key()] = h
+		}
+	}
+
+	return data
 }
 
 func SyncSystemInfo(session *scheduler.Session, keys []string) {
