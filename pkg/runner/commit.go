@@ -102,13 +102,16 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 
 			// Step 2: Fallback deferred sync after 30-60s.
 			// The server schedules a sync command after processing the commit
-			// (~15-45s). This fallback only fires if that command doesn't arrive.
-			jitter := time.Duration(rand.IntN(maxDeferredSyncJitterSeconds)) * time.Second
-			if jitter < minDeferredSyncJitterSeconds*time.Second {
-				jitter = minDeferredSyncJitterSeconds * time.Second
-			}
+			// (~15-45s). This fallback runs unconditionally but is harmless if
+			// the server command already triggered sync — the hash protocol
+			// makes duplicate syncs a no-op.
+			jitter := time.Duration(
+				rand.IntN(maxDeferredSyncJitterSeconds-minDeferredSyncJitterSeconds)+minDeferredSyncJitterSeconds,
+			) * time.Second
+			timer := time.NewTimer(jitter)
+			defer timer.Stop()
 			select {
-			case <-time.After(jitter):
+			case <-timer.C:
 				SyncSystemInfo(session, deferredSyncKeys)
 			case <-ctx.Done():
 				log.Debug().Msg("Skipping deferred sync due to shutdown")
