@@ -105,8 +105,14 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			default:
 			}
 			log.Info().Msg("Committing essential system information (lightweight).")
-			commitAndNotify(collectEssentialData())
-			log.Info().Msg("Essential system information committed.")
+			if essentialData := collectEssentialData(); essentialData != nil {
+				commitAndNotify(essentialData)
+				log.Info().Msg("Essential system information committed.")
+			} else {
+				// Essential collection failed; fall back to full commit.
+				CommitSystemInfo()
+				return
+			}
 
 			// Step 2: Fallback deferred sync after 30-60s.
 			// The server schedules a sync command after processing the commit
@@ -158,6 +164,8 @@ func commitAndNotify(data *commitData) {
 // collectEssentialData collects only the essential categories (info, os)
 // plus server-level fields (version, pam_version, load). The resulting
 // commitData omits deferred fields via omitempty tags.
+// Returns nil if any essential category fails to collect, signaling the
+// caller to fall back to the full commit path.
 func collectEssentialData() *commitData {
 	data := &commitData{
 		Version:    version.Version,
@@ -176,8 +184,8 @@ func collectEssentialData() *commitData {
 		}
 		result, err := s.Collect()
 		if err != nil {
-			log.Debug().Err(err).Msgf("Failed to collect %s data for lightweight commit.", s.Key())
-			continue
+			log.Warn().Err(err).Msgf("Failed to collect essential %s data, falling back to full commit.", s.Key())
+			return nil
 		}
 		assignToCommitData(data, s.Key(), result)
 		if h := s.ComputeHash(result); h != "" {
