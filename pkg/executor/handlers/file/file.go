@@ -142,22 +142,40 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 	catCmd := exec.CommandContext(ctx, "cat", name)
 	catCmd.SysProcAttr = sysProcAttr
 
-	output, err := catCmd.Output()
+	fileStream, err := catCmd.StdoutPipe()
 	if err != nil {
-		log.Error().Err(err).Msgf("Failed to cat file: %s", output)
+		log.Error().Err(err).Msg("Failed to create archive stream")
 		return 1, err.Error()
 	}
 
-	requestBody, contentType, err := h.createMultipartBody(output, filepath.Base(name), args.UseBlob, recursive)
+	var catStderr bytes.Buffer
+	catCmd.Stderr = &catStderr
+
+	if err := catCmd.Start(); err != nil {
+		log.Error().Err(err).Msg("Failed to start archive stream")
+		return 1, err.Error()
+	}
+
+	requestBody, contentType, waitForBody, err := h.createMultipartBody(fileStream, filepath.Base(name), args.UseBlob, recursive)
 	if err != nil {
-		log.Error().Err(err).Msgf("Failed to make request body")
+		log.Error().Err(err).Msg("Failed to make request body")
 		return 1, err.Error()
 	}
 
 	_, statusCode, err := h.fileUpload(args.Content, args.UseBlob, requestBody, contentType)
+	bodyErr := waitForBody()
+	catErr := catCmd.Wait()
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to upload file")
 		return 1, err.Error()
+	}
+	if catErr != nil {
+		log.Error().Err(catErr).Str("stderr", catStderr.String()).Msg("Failed to stream file content")
+		return 1, catErr.Error()
+	}
+	if bodyErr != nil {
+		log.Error().Err(bodyErr).Msg("Failed to write multipart request body")
+		return 1, bodyErr.Error()
 	}
 
 	if statusCode == http.StatusOK {
@@ -213,37 +231,42 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 
 // fileDownload handles single file download
 func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr) (int, string) {
-	var cmd *exec.Cmd
-	content, err := h.getFileData(args)
-	if err != nil {
-		return 1, err.Error()
-	}
-
 	if !args.AllowOverwrite && utils.FileExists(args.Path) {
 		return 1, fmt.Sprintf("%s already exists.", args.Path)
 	}
 
-	isZip := utils.IsZipFile(content, filepath.Ext(args.Path))
-	if isZip && args.AllowUnzip {
-		escapePath := utils.Quote(args.Path)
-		escapeDirPath := utils.Quote(filepath.Dir(args.Path))
-		command := fmt.Sprintf("tee %s > /dev/null && unzip -n %s -d %s; rm %s",
-			escapePath,
-			escapePath,
-			escapeDirPath,
-			escapePath)
-		cmd = exec.CommandContext(ctx, "sh", "-c", command)
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(args.Path)))
+	contentReader, err := h.getFileReader(args)
+	if err != nil {
+		return 1, err.Error()
+	}
+	defer func() { _ = contentReader.Close() }()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(args.Path)))
+	cmd.SysProcAttr = sysProcAttr
+	cmd.Stdin = contentReader
+	cmd.Stdout = io.Discard
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		log.Error().Err(err).Str("stderr", stderr.String()).Msg("Failed to write file")
+		return 1, "You do not have permission to read on the directory. or directory does not exist"
 	}
 
-	cmd.SysProcAttr = sysProcAttr
-	cmd.Stdin = bytes.NewReader(content)
+	if args.AllowUnzip {
+		isZip, err := utils.IsZipFilePath(args.Path)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to inspect downloaded file")
+			return 1, err.Error()
+		}
 
-	output, err := cmd.Output()
-	if err != nil {
-		log.Error().Err(err).Msgf("Failed to write file: %s", output)
-		return 1, "You do not have permission to read on the directory. or directory does not exist"
+		if isZip {
+			if err := h.unzipDownloadedFile(ctx, args.Path, sysProcAttr); err != nil {
+				log.Error().Err(err).Msg("Failed to unzip downloaded file")
+				return 1, err.Error()
+			}
+		}
 	}
 
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
@@ -356,39 +379,48 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 	return archiveName, cleanupPath, nil
 }
 
-// createMultipartBody creates a multipart form body for file upload
-func (h *FileHandler) createMultipartBody(output []byte, filePath string, useBlob, isRecursive bool) (bytes.Buffer, string, error) {
+// createMultipartBody creates a multipart form body for file upload.
+func (h *FileHandler) createMultipartBody(fileStream io.Reader, filePath string, useBlob, isRecursive bool) (io.Reader, string, func() error, error) {
 	if useBlob {
-		return *bytes.NewBuffer(output), "", nil
+		return fileStream, "", func() error { return nil }, nil
 	}
 
-	var requestBody bytes.Buffer
-	writer := multipart.NewWriter(&requestBody)
+	pipeReader, pipeWriter := io.Pipe()
+	writer := multipart.NewWriter(pipeWriter)
+	done := make(chan error, 1)
 
-	fileWriter, err := writer.CreateFormFile("content", filePath)
-	if err != nil {
-		return bytes.Buffer{}, "", err
-	}
-
-	_, err = fileWriter.Write(output)
-	if err != nil {
-		return bytes.Buffer{}, "", err
-	}
-
-	if isRecursive {
-		err = writer.WriteField("name", filePath)
-		if err != nil {
-			return bytes.Buffer{}, "", err
+	go func() {
+		fileWriter, err := writer.CreateFormFile("content", filePath)
+		if err == nil {
+			_, err = io.Copy(fileWriter, fileStream)
 		}
-	}
+		if err == nil && isRecursive {
+			err = writer.WriteField("name", filePath)
+		}
+		if err != nil {
+			_ = pipeWriter.CloseWithError(err)
+			done <- err
+			return
+		}
+		if err := writer.Close(); err != nil {
+			_ = pipeWriter.CloseWithError(err)
+			done <- err
+			return
+		}
+		if err := pipeWriter.Close(); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
 
-	_ = writer.Close()
-
-	return requestBody, writer.FormDataContentType(), nil
+	return pipeReader, writer.FormDataContentType(), func() error {
+		return <-done
+	}, nil
 }
 
 // fileUpload uploads the file to the server
-func (h *FileHandler) fileUpload(uploadURL string, useBlob bool, body bytes.Buffer, contentType string) ([]byte, int, error) {
+func (h *FileHandler) fileUpload(uploadURL string, useBlob bool, body io.Reader, contentType string) ([]byte, int, error) {
 	if useBlob {
 		return utils.Put(uploadURL, body, 0)
 	}
@@ -400,26 +432,22 @@ func (h *FileHandler) fileUpload(uploadURL string, useBlob bool, body bytes.Buff
 	return h.apiSession.MultipartRequest(uploadURL, body, contentType, time.Duration(fileUploadTimeout)*time.Second)
 }
 
-// getFileData fetches file content from URL, text, or base64
-func (h *FileHandler) getFileData(args *common.CommandArgs) ([]byte, error) {
+// getFileReader fetches file content from URL, text, or base64 as a stream.
+func (h *FileHandler) getFileReader(args *common.CommandArgs) (io.ReadCloser, error) {
 	switch args.Type {
 	case "url":
 		return h.fetchFromURL(args.Content)
 	case "text":
-		return []byte(args.Content), nil
+		return io.NopCloser(strings.NewReader(args.Content)), nil
 	case "base64":
-		content, err := base64.StdEncoding.DecodeString(args.Content)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode base64 content: %w", err)
-		}
-		return content, nil
+		return io.NopCloser(base64.NewDecoder(base64.StdEncoding, strings.NewReader(args.Content))), nil
 	default:
 		return nil, fmt.Errorf("unknown file type: %s", args.Type)
 	}
 }
 
-// fetchFromURL downloads content from a URL
-func (h *FileHandler) fetchFromURL(contentURL string) ([]byte, error) {
+// fetchFromURL opens a streaming response body for a URL.
+func (h *FileHandler) fetchFromURL(contentURL string) (io.ReadCloser, error) {
 	parsedRequestURL, err := url.Parse(contentURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse URL '%s': %w", contentURL, err)
@@ -446,19 +474,32 @@ func (h *FileHandler) fetchFromURL(contentURL string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to download content from URL: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode/100 != 2 {
+		_ = resp.Body.Close()
 		log.Error().Msgf("Failed to download content from URL: %d %s", resp.StatusCode, parsedRequestURL)
 		return nil, errors.New("downloading content failed")
 	}
 
-	content, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+	return resp.Body, nil
+}
+
+func (h *FileHandler) unzipDownloadedFile(ctx context.Context, path string, sysProcAttr *syscall.SysProcAttr) error {
+	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("unzip -n %s -d %s && rm %s",
+		utils.Quote(path),
+		utils.Quote(filepath.Dir(path)),
+		utils.Quote(path)))
+	cmd.SysProcAttr = sysProcAttr
+	cmd.Stdout = io.Discard
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		log.Error().Err(err).Str("stderr", stderr.String()).Msg("Failed to unzip file")
+		return err
 	}
 
-	return content, nil
+	return nil
 }
 
 // statFileTransfer reports the file transfer status

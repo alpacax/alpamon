@@ -1,7 +1,17 @@
 package file
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
@@ -278,5 +288,137 @@ func TestNonZipExtensions(t *testing.T) {
 		if utils.IsZipFile(zipContent, ext) {
 			t.Errorf("Expected extension %s to be excluded from IsZipFile", ext)
 		}
+	}
+}
+
+func TestFileHandler_createMultipartBody_StreamsReader(t *testing.T) {
+	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+
+	body, contentType, waitForBody, err := handler.createMultipartBody(strings.NewReader("streamed-content"), "payload.txt", false, true)
+	if err != nil {
+		t.Fatalf("createMultipartBody() error = %v", err)
+	}
+
+	payload, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("io.ReadAll() error = %v", err)
+	}
+	if err := waitForBody(); err != nil {
+		t.Fatalf("waitForBody() error = %v", err)
+	}
+
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		t.Fatalf("ParseMediaType() error = %v", err)
+	}
+	if mediaType != "multipart/form-data" {
+		t.Fatalf("media type = %s, want multipart/form-data", mediaType)
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(payload), params["boundary"])
+	filePart, err := reader.NextPart()
+	if err != nil {
+		t.Fatalf("NextPart() file error = %v", err)
+	}
+	fileContent, err := io.ReadAll(filePart)
+	if err != nil {
+		t.Fatalf("ReadAll(filePart) error = %v", err)
+	}
+	if filePart.FormName() != "content" {
+		t.Fatalf("file field = %s, want content", filePart.FormName())
+	}
+	if filePart.FileName() != "payload.txt" {
+		t.Fatalf("file name = %s, want payload.txt", filePart.FileName())
+	}
+	if string(fileContent) != "streamed-content" {
+		t.Fatalf("file content = %q, want streamed-content", string(fileContent))
+	}
+
+	namePart, err := reader.NextPart()
+	if err != nil {
+		t.Fatalf("NextPart() field error = %v", err)
+	}
+	nameContent, err := io.ReadAll(namePart)
+	if err != nil {
+		t.Fatalf("ReadAll(namePart) error = %v", err)
+	}
+	if namePart.FormName() != "name" {
+		t.Fatalf("field name = %s, want name", namePart.FormName())
+	}
+	if string(nameContent) != "payload.txt" {
+		t.Fatalf("field content = %q, want payload.txt", string(nameContent))
+	}
+}
+
+func TestFileHandler_fileDownload_StreamsURLContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "streamed download payload")
+	}))
+	defer server.Close()
+
+	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+	destination := filepath.Join(t.TempDir(), "download.txt")
+
+	code, message := handler.fileDownload(context.Background(), &common.CommandArgs{
+		Type:           "url",
+		Content:        server.URL,
+		Path:           destination,
+		AllowOverwrite: true,
+	}, nil)
+	if code != 0 {
+		t.Fatalf("fileDownload() code = %d, message = %q", code, message)
+	}
+
+	content, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(content) != "streamed download payload" {
+		t.Fatalf("downloaded content = %q, want streamed download payload", string(content))
+	}
+}
+
+func TestIsZipFilePath(t *testing.T) {
+	tempDir := t.TempDir()
+	zipPath := filepath.Join(tempDir, "archive.zip")
+
+	file, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	writer := zip.NewWriter(file)
+	entry, err := writer.Create("file.txt")
+	if err != nil {
+		t.Fatalf("Create(zip entry) error = %v", err)
+	}
+	if _, err := entry.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write(zip entry) error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close(zip writer) error = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close(zip file) error = %v", err)
+	}
+
+	isZip, err := utils.IsZipFilePath(zipPath)
+	if err != nil {
+		t.Fatalf("IsZipFilePath() error = %v", err)
+	}
+	if !isZip {
+		t.Fatal("IsZipFilePath() = false, want true")
+	}
+
+	excludedPath := filepath.Join(tempDir, "archive.jar")
+	if err := os.WriteFile(excludedPath, []byte("not-a-jar"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	isZip, err = utils.IsZipFilePath(excludedPath)
+	if err != nil {
+		t.Fatalf("IsZipFilePath(excluded) error = %v", err)
+	}
+	if isZip {
+		t.Fatal("IsZipFilePath() = true for excluded extension, want false")
 	}
 }
