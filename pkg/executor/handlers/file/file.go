@@ -1,6 +1,7 @@
 package file
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -386,7 +387,8 @@ func (h *FileHandler) createMultipartBody(fileStream io.Reader, filePath string,
 	}
 
 	pipeReader, pipeWriter := io.Pipe()
-	writer := multipart.NewWriter(pipeWriter)
+	buffered := bufio.NewWriterSize(pipeWriter, 256*1024)
+	writer := multipart.NewWriter(buffered)
 	done := make(chan error, 1)
 
 	go func() {
@@ -403,6 +405,11 @@ func (h *FileHandler) createMultipartBody(fileStream io.Reader, filePath string,
 			return
 		}
 		if err := writer.Close(); err != nil {
+			_ = pipeWriter.CloseWithError(err)
+			done <- err
+			return
+		}
+		if err := buffered.Flush(); err != nil {
 			_ = pipeWriter.CloseWithError(err)
 			done <- err
 			return
