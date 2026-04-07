@@ -21,6 +21,9 @@ import (
 // dev.alpacon.io → "dev", everything else → "" (prod default).
 // This lets alpamon derive its environment from trusted local config rather
 // than trusting the key_id provided by the relay (alpacon-server).
+//
+// NOTE: When adding new environments (e.g. staging), add a corresponding
+// hostname check below and update TestResolveAuthEnv.
 func ResolveAuthEnv(serverURL string) string {
 	u, err := url.Parse(serverURL)
 	if err != nil {
