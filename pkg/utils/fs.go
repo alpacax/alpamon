@@ -3,6 +3,7 @@ package utils
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -284,4 +285,22 @@ func IsZipFile(content []byte, ext string) bool {
 
 	_, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
 	return err == nil
+}
+
+// IsZipFilePath checks whether a file on disk is a valid zip archive.
+func IsZipFilePath(path string) (bool, error) {
+	if _, found := nonZipExt[filepath.Ext(path)]; found {
+		return false, nil
+	}
+
+	reader, err := zip.OpenReader(path)
+	if err != nil {
+		if errors.Is(err, zip.ErrFormat) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer func() { _ = reader.Close() }()
+
+	return true, nil
 }
