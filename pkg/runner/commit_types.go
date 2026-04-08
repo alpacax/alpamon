@@ -164,14 +164,14 @@ type commitData struct {
 	Load       float64     `json:"load"`
 	Info       SystemData  `json:"info"`
 	OS         OSData      `json:"os"`
-	Time       TimeData    `json:"time"`
-	Users      []UserData  `json:"users"`
-	Groups     []GroupData `json:"groups"`
-	Interfaces []Interface `json:"interfaces"`
-	Addresses  []Address   `json:"addresses"`
-	Disks      []Disk      `json:"disks"`
-	Partitions []Partition `json:"partitions"`
-	SyncHashes SyncHashes  `json:"sync_hashes,omitempty"` // included in commit so server stores hashes at commission
+	Time       *TimeData   `json:"time,omitempty"`
+	Users      []UserData  `json:"users,omitempty"`
+	Groups     []GroupData `json:"groups,omitempty"`
+	Interfaces []Interface `json:"interfaces,omitempty"`
+	Addresses  []Address   `json:"addresses,omitempty"`
+	Disks      []Disk      `json:"disks,omitempty"`
+	Partitions []Partition `json:"partitions,omitempty"`
+	SyncHashes SyncHashes  `json:"sync_hashes,omitempty"`
 }
 
 // Defines the ComparableData interface for comparing different types.

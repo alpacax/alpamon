@@ -16,7 +16,6 @@ import (
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/alpacax/alpamon/pkg/version"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/google/go-cmp/cmp"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -32,10 +31,26 @@ const (
 	accessPolicyURL = "/api/servers/servers/-/access-policy/"
 	syncCheckURL    = "/api/servers/servers/-/sync-check/"
 
-	// maxCommitJitterSeconds is the upper bound (exclusive) for random commit
-	// delay when uncommissioned servers register, distributing N simultaneous
-	// IaC-provisioned commits over a 0-30 second window.
-	maxCommitJitterSeconds = 31
+	// maxDeferredSyncJitterSeconds is the upper bound (exclusive) for the
+	// fallback deferred sync delay. The primary path is the server-initiated
+	// sync command (arrives ~15-45s after commit). This fallback covers the
+	// case where the server command doesn't arrive. The 30-60s window gives
+	// the server command time to arrive first, while limiting the gap during
+	// which the collector may reference entities the server doesn't know yet.
+	maxDeferredSyncJitterSeconds = 61
+
+	// minDeferredSyncJitterSeconds is the minimum delay before the fallback
+	// deferred sync. This 30s lower bound is a tradeoff: it often gives
+	// Rqueue processing, the HTTP round trip, server commit handling, and
+	// server-side sync scheduling time to complete first, but is not a
+	// guarantee for the full ~15-45s scheduling range in every case.
+	minDeferredSyncJitterSeconds = 30
+
+	// maxPrioritySyncJitterSeconds is the upper bound (exclusive) for the
+	// jitter before priority sync (groups/users). This distributes IAM
+	// matching load when N servers are IaC-provisioned simultaneously,
+	// while keeping WebSH/WebFTP available within a few seconds.
+	maxPrioritySyncJitterSeconds = 6
 
 	IFF_UP          = 1 << 0 // Interface is up
 	IFF_LOOPBACK    = 1 << 3 // Loopback interface
@@ -44,6 +59,29 @@ const (
 )
 
 var syncMutex sync.Mutex
+
+// essentialSyncKeys are categories included in the lightweight commit.
+// These provide enough data for the server to set commissioned=True
+// and enable Websh/WebFTP platform detection.
+var essentialSyncKeys = map[string]bool{"info": true, "os": true}
+
+// prioritySyncKeys are categories synced immediately after the lightweight
+// commit to enable Websh/WebFTP as quickly as possible. WebSH session
+// creation requires SystemUser records (login_enabled check), which only
+// exist after users/groups are synced. groups must precede users (FK).
+var prioritySyncKeys = []string{"groups", "users"}
+
+// deferredSyncKeys are the remaining categories synced via the server-
+// initiated sync command or fallback timer. These involve heavier server-
+// side processing and are not needed for immediate Websh/WebFTP access.
+//
+// Order reflects FK dependencies: parents before children
+// (interfaces→addresses, disks→partitions).
+var deferredSyncKeys = []string{
+	"time",
+	"interfaces", "addresses",
+	"disks", "partitions",
+}
 
 // CommitAsync commits system information asynchronously
 // Uses ContextManager for coordinated lifecycle management
@@ -67,12 +105,53 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 	} else {
 		go func() {
 			ctx := ctxManager.Root()
-			jitter := time.Duration(rand.IntN(maxCommitJitterSeconds)) * time.Second
+
+			// Step 1: Immediate lightweight commit (no delay).
+			// Sends only essential data (os, info, server) so the server
+			// sets commissioned=True and the server appears as "connected".
 			select {
-			case <-time.After(jitter):
-				CommitSystemInfo()
 			case <-ctx.Done():
-				log.Debug().Msg("Skipping commitSystemInfo due to shutdown")
+				log.Debug().Msg("Skipping lightweight commit due to shutdown")
+				return
+			default:
+			}
+			log.Info().Msg("Committing essential system information (lightweight).")
+			if essentialData := collectEssentialData(); essentialData != nil {
+				commitAndNotify(essentialData)
+				log.Info().Msg("Essential system information committed.")
+			} else {
+				// Essential collection failed; fall back to full commit.
+				CommitSystemInfo()
+				return
+			}
+
+			// Step 2: Sync users/groups after short jitter (0-5s) so Websh/
+			// WebFTP become available quickly. The jitter distributes IAM
+			// matching load when many IaC-provisioned servers start at once.
+			priorityJitter := time.Duration(rand.IntN(maxPrioritySyncJitterSeconds)) * time.Second
+			select {
+			case <-time.After(priorityJitter):
+				SyncSystemInfo(session, prioritySyncKeys)
+			case <-ctx.Done():
+				log.Debug().Msg("Skipping priority sync due to shutdown")
+				return
+			}
+
+			// Step 3: Fallback deferred sync after 30-60s.
+			// The server schedules a sync command after processing the commit
+			// (~15-45s). This fallback runs unconditionally but is harmless if
+			// the server command already triggered sync — the hash protocol
+			// makes duplicate syncs a no-op.
+			jitter := time.Duration(
+				rand.IntN(maxDeferredSyncJitterSeconds-minDeferredSyncJitterSeconds)+minDeferredSyncJitterSeconds,
+			) * time.Second
+			timer := time.NewTimer(jitter)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				SyncSystemInfo(session, deferredSyncKeys)
+			case <-ctx.Done():
+				log.Debug().Msg("Skipping deferred sync due to shutdown")
 			}
 		}()
 	}
@@ -82,12 +161,7 @@ func CommitSystemInfo() {
 	log.Debug().Msg("Start committing system information.")
 
 	data := collectData()
-
-	scheduler.Rqueue.Put(commitURL, data, 80, time.Time{})
-	scheduler.Rqueue.Post(eventURL, []byte(fmt.Sprintf(`{
-		"reporter": "alpamon",
-		"record": "committed",
-		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
+	commitAndNotify(data)
 
 	// Sync firewall rules after committing system info
 	// Skip if firewall functionality is disabled
@@ -99,6 +173,53 @@ func CommitSystemInfo() {
 	}
 
 	log.Info().Msg("Completed committing system information.")
+}
+
+// commitAndNotify sends commit data to the server and posts a commit event.
+func commitAndNotify(data *commitData) {
+	scheduler.Rqueue.Put(commitURL, data, 80, time.Time{})
+	scheduler.Rqueue.Post(eventURL, []byte(fmt.Sprintf(`{
+		"reporter": "alpamon",
+		"record": "committed",
+		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
+}
+
+// collectEssentialData collects only the essential categories (info, os)
+// plus server-level fields (version, pam_version, load). The resulting
+// commitData omits deferred fields via omitempty tags.
+// Returns nil if any essential category fails to collect, signaling the
+// caller to fall back to the full commit path.
+func collectEssentialData() *commitData {
+	data := &commitData{
+		Version:    version.Version,
+		PamVersion: utils.GetPamVersion(),
+	}
+
+	if load, err := getLoadAverage(); err == nil {
+		data.Load = load
+	} else {
+		log.Debug().Err(err).Msg("Failed to retrieve load average.")
+	}
+
+	for _, s := range syncers {
+		if !essentialSyncKeys[s.Key()] {
+			continue
+		}
+		result, err := s.Collect()
+		if err != nil {
+			log.Warn().Err(err).Msgf("Failed to collect essential %s data, falling back to full commit.", s.Key())
+			return nil
+		}
+		assignToCommitData(data, s.Key(), result)
+		if h := s.ComputeHash(result); h != "" {
+			if data.SyncHashes == nil {
+				data.SyncHashes = make(SyncHashes)
+			}
+			data.SyncHashes[s.Key()] = h
+		}
+	}
+
+	return data
 }
 
 func SyncSystemInfo(session *scheduler.Session, keys []string) {
