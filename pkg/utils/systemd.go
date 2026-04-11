@@ -69,7 +69,15 @@ func ensureDirectoriesWithRoot(root string) error {
 	for _, d := range getAlpamonDirs() {
 		path := d.Path
 		if root != "" {
-			path = filepath.Join(root, strings.TrimPrefix(path, string(os.PathSeparator)))
+			// Convert absolute path to relative for test root overlay.
+			// On Unix: strip leading "/" (e.g., /etc/alpamon → etc/alpamon)
+			// On Windows: strip volume + separator (e.g., C:\ProgramData → ProgramData)
+			rel := path
+			if vol := filepath.VolumeName(rel); vol != "" {
+				rel = rel[len(vol):]
+			}
+			rel = strings.TrimPrefix(rel, string(os.PathSeparator))
+			path = filepath.Join(root, rel)
 		}
 		if err := os.MkdirAll(path, d.Mode); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", path, err)
