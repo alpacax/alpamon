@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
 	"text/template"
 
 	cli "github.com/alpacax/alpacon-cli/utils"
@@ -48,7 +47,7 @@ var SetupCmd = &cobra.Command{
 			fmt.Println("A configuration file already exists at:", configTarget)
 			fmt.Println("When setting up non-interactively, the existing configuration file will be used.")
 
-			if !term.IsTerminal(syscall.Stdin) {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				return nil
 			}
 
