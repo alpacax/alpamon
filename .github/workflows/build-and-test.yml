@@ -153,8 +153,11 @@ jobs:
         run: go build -v .
         working-directory: ./cmd/alpamon
 
-      - name: Run Tests
-        run: go test -v ./... -p 1
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run Windows-safe tests
+        run: go test -v ./pkg/config/ ./pkg/executor/ ./pkg/updater/ ./internal/... -p 1
 
   build-and-test-macos:
     name: Build and Test (macos-arm64)

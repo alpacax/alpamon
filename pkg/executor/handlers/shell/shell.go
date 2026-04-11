@@ -80,7 +80,9 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 	if args.AllowSh {
 		var cmdArgs []string
 		if runtime.GOOS == "windows" {
-			cmdArgs = []string{utils.DefaultShell(), "-Command", command}
+			shell := utils.DefaultShell()
+			cmdArgs = append([]string{shell}, utils.DefaultShellArgs()...)
+			cmdArgs = append(cmdArgs, "-Command", command)
 		} else {
 			cmdArgs = []string{"/bin/sh", "-c", command}
 		}

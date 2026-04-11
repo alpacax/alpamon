@@ -1,20 +1,28 @@
 package utils
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
-var programData = os.Getenv("ProgramData")
+func windowsProgramData() string {
+	if dir := os.Getenv("ProgramData"); dir != "" {
+		return dir
+	}
+	return `C:\ProgramData`
+}
 
 // ConfigDir returns the configuration directory for alpamon on Windows.
-func ConfigDir() string { return programData + `\alpamon` }
+func ConfigDir() string { return filepath.Join(windowsProgramData(), "alpamon") }
 
 // DataDir returns the data directory for alpamon on Windows.
-func DataDir() string { return programData + `\alpamon\data` }
+func DataDir() string { return filepath.Join(windowsProgramData(), "alpamon", "data") }
 
 // LogDir returns the log directory for alpamon on Windows.
-func LogDir() string { return programData + `\alpamon\log` }
+func LogDir() string { return filepath.Join(windowsProgramData(), "alpamon", "log") }
 
 // runDir returns the system runtime directory for alpamon on Windows.
-func runDir() string { return programData + `\alpamon\run` }
+func runDir() string { return filepath.Join(windowsProgramData(), "alpamon", "run") }
 
 // DefaultShell returns the default shell for Windows.
 func DefaultShell() string { return "powershell.exe" }

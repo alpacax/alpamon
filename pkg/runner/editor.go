@@ -382,7 +382,7 @@ func (m *CodeServerManager) stopProcess() error {
 	case <-done:
 		log.Info().Msg("code-server stopped.")
 	case <-time.After(10 * time.Second):
-		_ = m.cmd.Process.Kill()
+		_ = terminateProcess(m.cmd.Process)
 		log.Warn().Msg("code-server killed after timeout.")
 	}
 

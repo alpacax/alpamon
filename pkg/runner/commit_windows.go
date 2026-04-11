@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/alpacax/alpamon/pkg/utils"
@@ -20,8 +22,8 @@ func loadShadowData() map[string]shadowEntry {
 func getUserData() ([]UserData, error) {
 	out, err := exec.Command("wmic", "useraccount", "get", "Name,SID", "/format:csv").Output()
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to list users via wmic.")
-		return []UserData{}, nil
+		log.Warn().Err(err).Msg("Failed to list users via wmic.")
+		return nil, fmt.Errorf("wmic useraccount failed: %w", err)
 	}
 
 	validShells := loadValidShells()
@@ -37,13 +39,16 @@ func getUserData() ([]UserData, error) {
 			continue
 		}
 		username := strings.TrimSpace(fields[1])
-		if username == "" {
+		sid := strings.TrimSpace(fields[2])
+		if username == "" || sid == "" {
 			continue
 		}
 
+		uid := ridFromSID(sid)
+
 		users = append(users, UserData{
 			Username:    username,
-			UID:         0,
+			UID:         uid,
 			GID:         0,
 			Directory:   `C:\Users\` + username,
 			Shell:       utils.DefaultShell(),
@@ -61,34 +66,50 @@ func getUserData() ([]UserData, error) {
 func getGroupData() ([]GroupData, error) {
 	out, err := exec.Command("wmic", "group", "get", "Name,SID", "/format:csv").Output()
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to list groups via wmic.")
-		return []GroupData{}, nil
+		log.Warn().Err(err).Msg("Failed to list groups via wmic.")
+		return nil, fmt.Errorf("wmic group failed: %w", err)
 	}
 
 	var groups []GroupData
-	gid := 0
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
 		fields := strings.Split(line, ",")
-		if len(fields) < 2 {
+		if len(fields) < 3 {
 			continue
 		}
 		groupName := strings.TrimSpace(fields[1])
+		sid := strings.TrimSpace(fields[2])
 		if groupName == "" {
 			continue
 		}
+
+		gid := ridFromSID(sid)
+
 		groups = append(groups, GroupData{
 			GID:       gid,
 			GroupName: groupName,
 		})
-		gid++
 	}
 
 	if groups == nil {
 		groups = []GroupData{}
 	}
 	return groups, nil
+}
+
+// ridFromSID extracts the last component (RID) from a Windows SID string.
+// e.g., "S-1-5-21-...-500" → 500. Returns 0 if parsing fails.
+func ridFromSID(sid string) int {
+	parts := strings.Split(sid, "-")
+	if len(parts) < 2 {
+		return 0
+	}
+	rid, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil {
+		return 0
+	}
+	return rid
 }
