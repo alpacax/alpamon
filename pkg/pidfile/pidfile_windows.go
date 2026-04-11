@@ -1,14 +1,14 @@
 package pidfile
 
 import (
-	"fmt"
+	"path/filepath"
 	"syscall"
 
 	"github.com/alpacax/alpamon/pkg/utils"
 )
 
 func FilePath(name string) string {
-	return fmt.Sprintf(`%s\%s.pid`, utils.RunDir(), name)
+	return filepath.Join(utils.RunDir(), name+".pid")
 }
 
 // isProcess checks whether a process is running on Windows

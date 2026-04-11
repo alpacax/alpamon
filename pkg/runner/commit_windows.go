@@ -3,6 +3,7 @@ package runner
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -46,11 +47,12 @@ func getUserData() ([]UserData, error) {
 
 		uid := ridFromSID(sid)
 
+		homeDir := filepath.Join(`C:\Users`, username)
 		users = append(users, UserData{
 			Username:    username,
 			UID:         uid,
 			GID:         0,
-			Directory:   `C:\Users\` + username,
+			Directory:   homeDir,
 			Shell:       utils.DefaultShell(),
 			ValidShells: validShells,
 		})
