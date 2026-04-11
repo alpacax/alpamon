@@ -138,7 +138,7 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		defer func() { _ = os.Remove(cleanupPath) }()
 	}
 
-	output, err := os.ReadFile(name)
+	output, err := os.ReadFile(name) // codeql[go/path-injection]: Intentional — admin-specified file path for upload
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to read file for upload.")
 		return 1, err.Error()
@@ -219,23 +219,23 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	}
 
 	// Write file using Go stdlib (cross-platform, no shell dependency)
-	if err := os.MkdirAll(filepath.Dir(args.Path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(args.Path), 0755); err != nil { // codeql[go/path-injection]: Intentional — admin-specified download path
 		log.Error().Err(err).Msg("Failed to create directory for download.")
 		return 1, err.Error()
 	}
 
-	if err := os.WriteFile(args.Path, content, 0644); err != nil {
+	if err := os.WriteFile(args.Path, content, 0644); err != nil { // codeql[go/path-injection]: Intentional — admin-specified download path
 		log.Error().Err(err).Msg("Failed to write file.")
 		return 1, "You do not have permission to write to the directory, or directory does not exist"
 	}
 
 	isZip := utils.IsZipFile(content, filepath.Ext(args.Path))
 	if isZip && args.AllowUnzip {
-		if err := utils.Unzip(args.Path, filepath.Dir(args.Path)); err != nil {
+		if err := utils.Unzip(args.Path, filepath.Dir(args.Path)); err != nil { // codeql[go/path-injection]: Intentional — admin-specified download path
 			log.Error().Err(err).Msg("Failed to unzip file.")
 			return 1, err.Error()
 		}
-		_ = os.Remove(args.Path)
+		_ = os.Remove(args.Path) // codeql[go/path-injection]: Intentional — same path as download target
 	}
 
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)

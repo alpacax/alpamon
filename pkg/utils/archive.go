@@ -21,7 +21,7 @@ func CreateZip(destPath string, paths []string, recursive bool) error {
 	w := zip.NewWriter(f)
 	defer func() { _ = w.Close() }()
 
-	for _, path := range paths {
+	for _, path := range paths { // codeql[go/path-injection]: Paths are admin-specified via command protocol
 		info, err := os.Stat(path)
 		if err != nil {
 			return fmt.Errorf("failed to stat %s: %w", path, err)
@@ -56,7 +56,7 @@ func CreateZip(destPath string, paths []string, recursive bool) error {
 }
 
 func addFileToZip(w *zip.Writer, filePath, archiveName string) error {
-	f, err := os.Open(filePath)
+	f, err := os.Open(filePath) // codeql[go/path-injection]: Paths are admin-specified via command protocol
 	if err != nil {
 		return fmt.Errorf("failed to open %s: %w", filePath, err)
 	}
@@ -95,17 +95,17 @@ func Unzip(src, destDir string) error {
 		}
 
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(fpath, 0755); err != nil {
+			if err := os.MkdirAll(fpath, 0755); err != nil { // codeql[go/path-injection]: Protected by zip-slip check above
 				return err
 			}
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil { // codeql[go/path-injection]: Protected by zip-slip check above
 			return err
 		}
 
-		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode()) // codeql[go/path-injection]: Protected by zip-slip check above
 		if err != nil {
 			return err
 		}
