@@ -5,4 +5,5 @@ alpamon.db
 /alpamon
 /cmd/alpamon/alpamon
 .DS_Store
-.ideaalpamon.exe
+.idea
+alpamon.exe
