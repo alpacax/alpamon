@@ -138,7 +138,7 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		defer func() { _ = os.Remove(cleanupPath) }()
 	}
 
-	output, err := os.ReadFile(name) // codeql[go/path-injection]: Intentional — admin-specified file path for upload
+	output, err := readFileAs(ctx, name, sysProcAttr) // codeql[go/path-injection]: Intentional — admin-specified file path for upload
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to read file for upload.")
 		return 1, err.Error()
@@ -218,13 +218,8 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 		return 1, fmt.Sprintf("%s already exists.", args.Path)
 	}
 
-	// Write file using Go stdlib (cross-platform, no shell dependency)
-	if err := os.MkdirAll(filepath.Dir(args.Path), 0755); err != nil { // codeql[go/path-injection]: Intentional — admin-specified download path
-		log.Error().Err(err).Msg("Failed to create directory for download.")
-		return 1, err.Error()
-	}
-
-	if err := os.WriteFile(args.Path, content, 0644); err != nil { // codeql[go/path-injection]: Intentional — admin-specified download path
+	// Write file, preserving privilege demotion on Unix when available.
+	if err := writeFileAs(ctx, args.Path, content, sysProcAttr); err != nil { // codeql[go/path-injection]: Intentional — admin-specified download path
 		log.Error().Err(err).Msg("Failed to write file.")
 		return 1, "You do not have permission to write to the directory, or directory does not exist"
 	}
@@ -312,7 +307,7 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 
 	archiveName := filepath.Join(os.TempDir(), uuid.New().String()+".zip")
 
-	if err := utils.CreateZip(archiveName, paths, recursive); err != nil {
+	if err := utils.CreateZip(archiveName, paths, recursive || bulk); err != nil {
 		_ = os.Remove(archiveName)
 		return "", "", err
 	}

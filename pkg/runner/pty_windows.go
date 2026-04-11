@@ -152,7 +152,12 @@ func (pc *PtyClient) readFromPty(ctx context.Context, cancel context.CancelFunc)
 				cancel()
 				return
 			}
-			pc.ptyToWs <- append([]byte(nil), buf[:n]...)
+			data := append([]byte(nil), buf[:n]...)
+			select {
+			case pc.ptyToWs <- data:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }

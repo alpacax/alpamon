@@ -89,8 +89,9 @@ func Unzip(src, destDir string) error {
 	for _, f := range r.File {
 		fpath := filepath.Join(destDir, f.Name)
 
-		// Zip slip protection
-		if !strings.HasPrefix(filepath.Clean(fpath), filepath.Clean(destDir)+string(os.PathSeparator)) {
+		// Zip-slip protection using filepath.Rel (handles root dirs and all platforms)
+		rel, err := filepath.Rel(destDir, filepath.Clean(fpath))
+		if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 			return fmt.Errorf("illegal file path in zip: %s", f.Name)
 		}
 
