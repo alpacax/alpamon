@@ -95,13 +95,15 @@ func TestDownloadFile(t *testing.T) {
 		t.Errorf("downloaded content = %q, want %q", got, content)
 	}
 
-	// Verify file permissions are restrictive
-	info, err := os.Stat(destPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm()&0077 != 0 {
-		t.Errorf("downloaded file should not be group/world accessible, got %o", info.Mode().Perm())
+	// Verify file permissions are restrictive (Unix only — Windows doesn't enforce Unix perms)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(destPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0077 != 0 {
+			t.Errorf("downloaded file should not be group/world accessible, got %o", info.Mode().Perm())
+		}
 	}
 }
 
@@ -194,7 +196,7 @@ func TestExtractBinary(t *testing.T) {
 	if statErr != nil {
 		t.Fatalf("failed to stat extracted binary: %v", statErr)
 	}
-	if info.Mode()&0111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0111 == 0 {
 		t.Error("extracted binary should be executable")
 	}
 }
@@ -255,7 +257,7 @@ func TestReplaceBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0755 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0755 {
 		t.Errorf("permissions = %o, want 0755", info.Mode().Perm())
 	}
 
