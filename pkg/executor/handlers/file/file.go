@@ -138,7 +138,7 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		defer func() { _ = os.Remove(cleanupPath) }()
 	}
 
-	output, err := readFileAs(ctx, name, sysProcAttr) // codeql[go/path-injection]: Intentional — admin-specified file path for upload
+	output, err := readFileAs(ctx, name, sysProcAttr) // lgtm[go/path-injection]: Intentional — admin-specified file path for upload
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to read file for upload.")
 		return 1, err.Error()
@@ -219,18 +219,18 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	}
 
 	// Write file, preserving privilege demotion on Unix when available.
-	if err := writeFileAs(ctx, args.Path, content, sysProcAttr); err != nil { // codeql[go/path-injection]: Intentional — admin-specified download path
+	if err := writeFileAs(ctx, args.Path, content, sysProcAttr); err != nil { // lgtm[go/path-injection]: Intentional — admin-specified download path
 		log.Error().Err(err).Msg("Failed to write file.")
 		return 1, "You do not have permission to write to the directory, or directory does not exist"
 	}
 
 	isZip := utils.IsZipFile(content, filepath.Ext(args.Path))
 	if isZip && args.AllowUnzip {
-		if err := utils.Unzip(args.Path, filepath.Dir(args.Path)); err != nil { // codeql[go/path-injection]: Intentional — admin-specified download path
+		if err := utils.Unzip(args.Path, filepath.Dir(args.Path)); err != nil { // lgtm[go/path-injection]: Intentional — admin-specified download path
 			log.Error().Err(err).Msg("Failed to unzip file.")
 			return 1, err.Error()
 		}
-		_ = os.Remove(args.Path) // codeql[go/path-injection]: Intentional — same path as download target
+		_ = os.Remove(args.Path) // lgtm[go/path-injection]: Intentional — same path as download target
 	}
 
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
@@ -282,7 +282,7 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 	isBulk := len(pathList) > 1
 	isRecursive := false
 
-	// codeql[go/path-injection]: Intentional - Admin-specified file path for upload
+	// lgtm[go/path-injection]: Intentional - Admin-specified file path for upload
 	if !isBulk {
 		fileInfo, err := os.Stat(paths[0]) // lgtm[go/path-injection]
 		if err != nil {
@@ -399,7 +399,7 @@ func (h *FileHandler) fetchFromURL(contentURL string) ([]byte, error) {
 			config.GlobalSettings.ID, config.GlobalSettings.Key))
 	}
 
-	// codeql[go/request-forgery]: Intentional - Admin-specified URL for file content
+	// lgtm[go/request-forgery]: Intentional - Admin-specified URL for file content
 	client := utils.NewHTTPClient()
 	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
