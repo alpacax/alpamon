@@ -51,7 +51,7 @@ var (
 	mmcDiskPattern       = regexp.MustCompile(`^(mmcblk\d+)(p\d+)?$`)
 	lvmDiskPattern       = regexp.MustCompile(`^(dm-\d+)$`)
 	macDiskPattern       = regexp.MustCompile(`^(disk\d+)(s\d+)?$`)
-	VirtualIfacePattern  = regexp.MustCompile(`^(lo|docker|veth|br-|virbr|vmnet|tap|tun|wg|zt|tailscale|enp0s|cni|utun|awdl|llw|bridge|anpi|ap)`)
+	VirtualIfacePattern  = regexp.MustCompile(`^(lo|docker|veth|br-|virbr|vmnet|tap|tun|wg|zt|tailscale|enp0s|cni|utun|awdl|llw|bridge|anpi|ap|Loopback|isatap|Teredo|6to4)`)
 )
 
 func CalculateNetworkBps(current net.IOCountersStat, last net.IOCountersStat, interval time.Duration) (inputBps float64, outputBps float64) {

@@ -3,10 +3,12 @@ package shell
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
@@ -76,7 +78,13 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 		Msg("Executing shell command")
 
 	if args.AllowSh {
-		exitCode, result := h.executeCommand(ctx, []string{"/bin/sh", "-c", command}, username, groupname, env, timeout)
+		var cmdArgs []string
+		if runtime.GOOS == "windows" {
+			cmdArgs = []string{utils.DefaultShell(), "-Command", command}
+		} else {
+			cmdArgs = []string{"/bin/sh", "-c", command}
+		}
+		exitCode, result := h.executeCommand(ctx, cmdArgs, username, groupname, env, timeout)
 		return exitCode, result, nil
 	}
 

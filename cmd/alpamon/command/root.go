@@ -3,8 +3,6 @@ package command
 import (
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/cmd/alpamon/command/ftp"
@@ -51,13 +49,7 @@ func runAgent() {
 	ctxManager := agent.NewContextManager()
 	ctx := ctxManager.Root()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		ctxManager.Shutdown()
-	}()
+	setupSignalHandler(ctxManager)
 
 	// Logger
 	logger.InitLogger()
@@ -164,19 +156,6 @@ func runAgent() {
 			metricCollector = collector.InitCollector(session, client, ctxManager)
 			metricCollector.Start()
 		}
-	}
-}
-
-func restartAgent() {
-	executable, err := os.Executable()
-	if err != nil {
-		log.Error().Err(err).Msgf("Failed to restart the %s.", name)
-		return
-	}
-
-	err = syscall.Exec(executable, os.Args, os.Environ())
-	if err != nil {
-		log.Error().Err(err).Msgf("Failed to restart the %s.", name)
 	}
 }
 

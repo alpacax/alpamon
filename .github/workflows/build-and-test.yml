@@ -134,6 +134,28 @@ jobs:
       - name: Run Tests
         run: go test -v ./... -p 1
 
+  build-and-test-windows:
+    name: Build and Test (windows-amd64)
+    runs-on: windows-latest
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Generate go code
+        run: go run -mod=mod entgo.io/ent/cmd/ent@${{ env.ENT_VERSION }} generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
+
+      - name: Build
+        run: go build -v .
+        working-directory: ./cmd/alpamon
+
+      - name: Run Tests
+        run: go test -v ./... -p 1
+
   build-and-test-macos:
     name: Build and Test (macos-arm64)
     runs-on: macos-14

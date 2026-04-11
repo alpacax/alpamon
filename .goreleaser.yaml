@@ -37,6 +37,18 @@ builds:
       - amd64
       - arm64
 
+  - id: alpamon-windows
+    main: ./cmd/alpamon
+    binary: alpamon
+    ldflags:
+      - -s -w -X github.com/alpacax/alpamon/pkg/version.Version={{.Version}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+
 checksum:
   name_template: '{{ .ProjectName }}-{{ trimprefix .Version "v" }}-checksums.sha256'
 
