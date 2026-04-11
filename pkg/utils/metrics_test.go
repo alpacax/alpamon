@@ -31,6 +31,11 @@ func TestVirtualIfacePattern(t *testing.T) {
 		{"bridge", "bridge0", true},
 		{"anpi", "anpi0", true},
 		{"ap", "ap1", true},
+		// Windows virtual interfaces
+		{"loopback", "Loopback Pseudo-Interface 1", true},
+		{"isatap", "isatap.localdomain", true},
+		{"teredo", "Teredo Tunneling Pseudo-Interface", true},
+		{"6to4", "6to4 Adapter", true},
 		// Real interfaces (should NOT match)
 		{"ethernet", "eth0", false},
 		{"en0", "en0", false},
