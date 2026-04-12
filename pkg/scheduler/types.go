@@ -1,7 +1,6 @@
 package scheduler
 
 import (
-	"github.com/adrianbrad/queue"
 	"net/http"
 	"sync"
 	"time"
@@ -29,7 +28,7 @@ type PriorityEntry struct {
 }
 
 type RequestQueue struct {
-	queue *queue.Priority[PriorityEntry]
+	queue *priorityQueue
 	cond  *sync.Cond
 }
 

@@ -11,13 +11,13 @@ import (
 
 	"github.com/alpacax/alpamon/internal/pool"
 	"github.com/alpacax/alpamon/internal/protocol"
+	"github.com/alpacax/alpamon/internal/retry"
 	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/signing"
 	"github.com/alpacax/alpamon/pkg/utils"
-	"github.com/cenkalti/backoff"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
@@ -146,37 +146,27 @@ func (wc *WebsocketClient) Connect() {
 	ctx, cancel := context.WithTimeout(context.Background(), maxRetryTimeout)
 	defer cancel()
 
-	wsBackoff := backoff.NewExponentialBackOff()
-	wsBackoff.InitialInterval = minConnectInterval
-	wsBackoff.MaxInterval = maxConnectInterval
-	wsBackoff.MaxElapsedTime = 0 // No time limit for retries (infinite retry)
-	wsBackoff.RandomizationFactor = 0
-
-	operation := func() error {
-		select {
-		case <-ctx.Done():
-			log.Error().Msg("Maximum retry duration reached. Shutting down.")
-			return backoff.Permanent(ctx.Err())
-		default:
-			dialer := websocket.Dialer{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
-				},
-			}
-			conn, _, err := dialer.Dial(config.GlobalSettings.WSPath, wc.requestHeader)
-			if err != nil {
-				nextInterval := wsBackoff.NextBackOff()
-				log.Debug().Err(err).Msgf("Failed to connect to %s, will try again in %ds.", config.GlobalSettings.WSPath, int(nextInterval.Seconds()))
-				return err
-			}
-
-			wc.Conn = conn
-			log.Debug().Msg("Backhaul connection established.")
-			return nil
-		}
+	b := &retry.ExponentialBackoff{
+		InitialInterval: minConnectInterval,
+		MaxInterval:     maxConnectInterval,
 	}
 
-	err := backoff.Retry(operation, backoff.WithContext(wsBackoff, ctx))
+	err := retry.Retry(ctx, b, func() error {
+		dialer := websocket.Dialer{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
+			},
+		}
+		conn, _, err := dialer.Dial(config.GlobalSettings.WSPath, wc.requestHeader)
+		if err != nil {
+			log.Debug().Err(err).Msgf("Failed to connect to %s, retrying...", config.GlobalSettings.WSPath)
+			return err
+		}
+
+		wc.Conn = conn
+		log.Debug().Msg("Backhaul connection established.")
+		return nil
+	})
 	if err != nil {
 		os.Exit(1)
 		return

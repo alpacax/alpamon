@@ -2,8 +2,9 @@ package utils
 
 import (
 	"bytes"
-	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"os/user"
@@ -12,9 +13,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alpacax/alpamon/pkg/version"
-	"github.com/google/go-github/github"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/host"
 )
@@ -153,15 +154,24 @@ func GetSystemUser(username string) (*user.User, error) {
 }
 
 func GetLatestVersion() string {
-	client := github.NewClient(nil)
-	ctx := context.Background()
-
-	release, _, err := client.Repositories.GetLatestRelease(ctx, "alpacax", "alpamon")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://api.github.com/repos/alpacax/alpamon/releases/latest")
 	if err != nil {
 		return ""
 	}
+	defer func() { _ = resp.Body.Close() }()
 
-	return release.GetTagName()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return ""
+	}
+	return release.TagName
 }
 
 func GetUserAgent(name string) string {

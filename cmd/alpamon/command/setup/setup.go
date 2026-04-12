@@ -1,13 +1,14 @@
 package setup
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"text/template"
 
-	cli "github.com/alpacax/alpacon-cli/utils"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -51,7 +52,7 @@ var SetupCmd = &cobra.Command{
 				return nil
 			}
 
-			isOverwrite = cli.PromptForBool("Do you want to overwrite it with a new configuration?: ")
+			isOverwrite = promptForBool("Do you want to overwrite it with a new configuration? (y/n): ")
 			if !isOverwrite {
 				fmt.Println("Keeping the existing configuration file. Skipping configuration update.")
 				return nil
@@ -124,6 +125,14 @@ func writeConfig() error {
 	}
 
 	return nil
+}
+
+func promptForBool(prompt string) bool {
+	fmt.Print(prompt)
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(strings.ToLower(input))
+	return input == "y" || input == "yes"
 }
 
 func fileExists(path string) bool {

@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/internal/retry"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
-	"github.com/cenkalti/backoff"
 	"github.com/rs/zerolog/log"
 )
 
@@ -218,24 +218,23 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 }
 
 func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) error {
-	retryBackoff := backoff.NewExponentialBackOff()
-	retryBackoff.InitialInterval = authRetryInitialInterval
-	retryBackoff.MaxInterval = authRetryMaxInterval
-	retryBackoff.MaxElapsedTime = authRetryTimeout
-	retryBackoff.RandomizationFactor = 0
+	b := &retry.ExponentialBackoff{
+		InitialInterval: authRetryInitialInterval,
+		MaxInterval:     authRetryMaxInterval,
+		MaxElapsedTime:  authRetryTimeout,
+	}
 
 	ctx, cancel := context.WithTimeout(am.ctx, authRetryTimeout)
 	defer cancel()
 
-	operation := am.createSendOperation(ctx, req)
-	return backoff.Retry(operation, backoff.WithContext(retryBackoff, ctx))
+	return retry.Retry(ctx, b, am.createSendOperation(ctx, req))
 }
 
 func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApprovalRequest) func() error {
 	return func() error {
 		select {
 		case <-ctx.Done():
-			return backoff.Permanent(ctx.Err())
+			return retry.Permanent(ctx.Err())
 		default:
 			if am.session == nil {
 				return fmt.Errorf("HTTP session not available")
