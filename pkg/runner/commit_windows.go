@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -19,12 +18,13 @@ func loadShadowData() map[string]shadowEntry {
 	return nil
 }
 
-// getUserData enumerates local users via "wmic useraccount" on Windows.
+// getUserData enumerates local users via PowerShell on Windows.
 func getUserData() ([]UserData, error) {
-	out, err := exec.Command("wmic", "useraccount", "get", "Name,SID", "/format:csv").Output()
+	out, err := exec.Command("powershell", "-NoProfile", "-Command",
+		"Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation").Output()
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to list users via wmic.")
-		return nil, fmt.Errorf("wmic useraccount failed: %w", err)
+		log.Warn().Err(err).Msg("Failed to list users via PowerShell.")
+		return []UserData{}, nil
 	}
 
 	validShells := loadValidShells()
@@ -32,22 +32,23 @@ func getUserData() ([]UserData, error) {
 
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "Node") {
+		if line == "" || strings.HasPrefix(line, "\"Name\"") {
 			continue
 		}
-		fields := strings.Split(line, ",")
+		// CSV format: "Name","SID","Enabled"
+		fields := parseCSVLine(line)
 		if len(fields) < 3 {
 			continue
 		}
-		username := strings.TrimSpace(fields[1])
-		sid := strings.TrimSpace(fields[2])
+		username := fields[0]
+		sid := fields[1]
 		if username == "" || sid == "" {
 			continue
 		}
 
 		uid := ridFromSID(sid)
-
 		homeDir := filepath.Join(`C:\Users`, username)
+
 		users = append(users, UserData{
 			Username:    username,
 			UID:         uid,
@@ -64,26 +65,27 @@ func getUserData() ([]UserData, error) {
 	return users, nil
 }
 
-// getGroupData enumerates local groups via "wmic group" on Windows.
+// getGroupData enumerates local groups via PowerShell on Windows.
 func getGroupData() ([]GroupData, error) {
-	out, err := exec.Command("wmic", "group", "get", "Name,SID", "/format:csv").Output()
+	out, err := exec.Command("powershell", "-NoProfile", "-Command",
+		"Get-LocalGroup | Select-Object Name,SID | ConvertTo-Csv -NoTypeInformation").Output()
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to list groups via wmic.")
-		return nil, fmt.Errorf("wmic group failed: %w", err)
+		log.Warn().Err(err).Msg("Failed to list groups via PowerShell.")
+		return []GroupData{}, nil
 	}
 
 	var groups []GroupData
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "Node") {
+		if line == "" || strings.HasPrefix(line, "\"Name\"") {
 			continue
 		}
-		fields := strings.Split(line, ",")
-		if len(fields) < 3 {
+		fields := parseCSVLine(line)
+		if len(fields) < 2 {
 			continue
 		}
-		groupName := strings.TrimSpace(fields[1])
-		sid := strings.TrimSpace(fields[2])
+		groupName := fields[0]
+		sid := fields[1]
 		if groupName == "" {
 			continue
 		}
@@ -114,4 +116,16 @@ func ridFromSID(sid string) int {
 		return 0
 	}
 	return rid
+}
+
+// parseCSVLine parses a simple CSV line with quoted fields.
+// Handles: "value1","value2","value3"
+func parseCSVLine(line string) []string {
+	var fields []string
+	for _, f := range strings.Split(line, ",") {
+		f = strings.TrimSpace(f)
+		f = strings.Trim(f, "\"")
+		fields = append(fields, f)
+	}
+	return fields
 }
