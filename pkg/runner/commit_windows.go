@@ -11,7 +11,7 @@ import (
 )
 
 func loadValidShells() []string {
-	return []string{"powershell.exe", "cmd.exe"}
+	return []string{"powershell.exe", "cmd.exe", "pwsh.exe"}
 }
 
 func loadShadowData() map[string]shadowEntry {
@@ -19,6 +19,11 @@ func loadShadowData() map[string]shadowEntry {
 }
 
 // getUserData enumerates local users via PowerShell on Windows.
+// Only Administrator (RID 500) gets a login shell because alpamon cannot
+// demote privileges on Windows (no setuid equivalent). All sessions run
+// as SYSTEM, so allowing non-admin users would be a privilege escalation.
+// When credential-based demotion is implemented, other Enabled users can
+// be granted login shells.
 func getUserData() ([]UserData, error) {
 	out, err := exec.Command("powershell", "-NoProfile", "-Command",
 		"Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation").Output()
@@ -42,19 +47,26 @@ func getUserData() ([]UserData, error) {
 		}
 		username := fields[0]
 		sid := fields[1]
+		enabled := strings.EqualFold(fields[2], "True")
 		if username == "" || sid == "" {
 			continue
 		}
 
 		uid := ridFromSID(sid)
-		homeDir := filepath.Join(`C:\Users`, username)
+
+		// Only grant login shell to Administrator (RID 500) since all
+		// sessions run as SYSTEM without privilege demotion.
+		shell := ""
+		if enabled && uid == 500 {
+			shell = utils.DefaultShell()
+		}
 
 		users = append(users, UserData{
 			Username:    username,
 			UID:         uid,
 			GID:         0,
-			Directory:   homeDir,
-			Shell:       utils.DefaultShell(),
+			Directory:   filepath.Join(`C:\Users`, username),
+			Shell:       shell,
 			ValidShells: validShells,
 		})
 	}
