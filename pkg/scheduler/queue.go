@@ -45,9 +45,9 @@ func (h *priorityHeap) Pop() any {
 	return item
 }
 
-// priorityQueue is a thread-safe bounded priority queue backed by container/heap.
+// priorityQueue is a bounded priority queue backed by container/heap.
+// NOT thread-safe: callers must hold RequestQueue.cond.L for all operations.
 type priorityQueue struct {
-	mu       sync.Mutex
 	h        priorityHeap
 	capacity int
 }
@@ -62,8 +62,6 @@ func newPriorityQueue(capacity int) *priorityQueue {
 }
 
 func (pq *priorityQueue) Offer(entry PriorityEntry) error {
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
 	if pq.capacity > 0 && pq.h.Len() >= pq.capacity {
 		return errQueueFull
 	}
@@ -72,8 +70,6 @@ func (pq *priorityQueue) Offer(entry PriorityEntry) error {
 }
 
 func (pq *priorityQueue) Get() (PriorityEntry, error) {
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
 	if pq.h.Len() == 0 {
 		return PriorityEntry{}, errors.New("queue is empty")
 	}
@@ -81,8 +77,6 @@ func (pq *priorityQueue) Get() (PriorityEntry, error) {
 }
 
 func (pq *priorityQueue) Size() int {
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
 	return pq.h.Len()
 }
 
@@ -115,14 +109,28 @@ func (rq *RequestQueue) request(method, url string, data interface{}, priority i
 		retry: RetryLimit,
 	}
 
-	// Do not wake reporter goroutine if the queue is full or uninitialized.
+	// Lock cond.L for both Offer and Signal to prevent missed wakeups.
+	rq.cond.L.Lock()
 	err := rq.queue.Offer(entry)
+	rq.cond.L.Unlock()
+
 	if err != nil {
 		log.Error().Err(err).Msgf("Queue is full or uninitialized, dropping entry: %s", entry.url)
 		return
 	}
 
 	rq.cond.Signal()
+}
+
+// Requeue re-enqueues an entry under cond.L and signals waiting reporters.
+func (rq *RequestQueue) Requeue(entry PriorityEntry) error {
+	rq.cond.L.Lock()
+	err := rq.queue.Offer(entry)
+	rq.cond.L.Unlock()
+	if err == nil {
+		rq.cond.Signal()
+	}
+	return err
 }
 
 func (rq *RequestQueue) Post(url string, data interface{}, priority int, due time.Time) {

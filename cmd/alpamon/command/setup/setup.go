@@ -130,7 +130,10 @@ func writeConfig() error {
 func promptForBool(prompt string) bool {
 	fmt.Print(prompt)
 	reader := bufio.NewReader(os.Stdin)
-	input, _ := reader.ReadString('\n')
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		return false
+	}
 	input = strings.TrimSpace(strings.ToLower(input))
 	return input == "y" || input == "yes"
 }

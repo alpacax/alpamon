@@ -133,8 +133,7 @@ func (r *Reporter) query(entry PriorityEntry) {
 			backoff := time.Duration(math.Pow(2, float64(RetryLimit-entry.retry))) * time.Second
 			entry.due = entry.due.Add(backoff)
 			entry.retry--
-			err = Rqueue.queue.Offer(entry)
-			if err != nil {
+			if err = Rqueue.Requeue(entry); err != nil {
 				r.counters.ignored++
 			}
 		} else {
@@ -199,8 +198,7 @@ func (r *Reporter) processEntry(entry PriorityEntry) {
 
 	// Handle entries that are not yet due
 	if !entry.due.IsZero() && entry.due.After(time.Now()) {
-		err := Rqueue.queue.Offer(entry)
-		if err != nil {
+		if err := Rqueue.Requeue(entry); err != nil {
 			r.counters.ignored++
 		}
 		time.Sleep(1 * time.Second)
