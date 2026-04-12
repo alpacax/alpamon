@@ -109,27 +109,27 @@ func (rq *RequestQueue) request(method, url string, data interface{}, priority i
 		retry: RetryLimit,
 	}
 
-	// Lock cond.L for both Offer and Signal to prevent missed wakeups.
 	rq.cond.L.Lock()
 	err := rq.queue.Offer(entry)
+	if err == nil {
+		rq.cond.Signal()
+	}
 	rq.cond.L.Unlock()
 
 	if err != nil {
 		log.Error().Err(err).Msgf("Queue is full or uninitialized, dropping entry: %s", entry.url)
 		return
 	}
-
-	rq.cond.Signal()
 }
 
 // Requeue re-enqueues an entry under cond.L and signals waiting reporters.
 func (rq *RequestQueue) Requeue(entry PriorityEntry) error {
 	rq.cond.L.Lock()
 	err := rq.queue.Offer(entry)
-	rq.cond.L.Unlock()
 	if err == nil {
 		rq.cond.Signal()
 	}
+	rq.cond.L.Unlock()
 	return err
 }
 

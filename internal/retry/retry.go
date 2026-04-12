@@ -71,12 +71,18 @@ func Retry(ctx context.Context, b *ExponentialBackoff, operation func() error) e
 			return err
 		}
 
-		interval := b.NextBackOff()
+		timer := time.NewTimer(b.NextBackOff())
 
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return ctx.Err()
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 	}
 }
