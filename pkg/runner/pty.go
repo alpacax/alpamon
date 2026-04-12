@@ -17,10 +17,10 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/internal/protocol"
+	"github.com/alpacax/alpamon/internal/retry"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/scheduler"
 	"github.com/alpacax/alpamon/pkg/utils"
-	"github.com/cenkalti/backoff"
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
@@ -355,65 +355,54 @@ func (pc *PtyClient) recovery() error {
 	ctx, cancel := context.WithTimeout(context.Background(), maxRecoveryTimeout)
 	defer cancel()
 
-	retryBackoff := backoff.NewExponentialBackOff()
-	retryBackoff.InitialInterval = 1 * time.Second
-	retryBackoff.MaxInterval = 30 * time.Second
-	retryBackoff.MaxElapsedTime = 0 // until ctx timeout
-	retryBackoff.RandomizationFactor = 0
+	b := &retry.ExponentialBackoff{
+		InitialInterval: 1 * time.Second,
+		MaxInterval:     30 * time.Second,
+	}
 
-	operation := func() error {
-		select {
-		case <-ctx.Done():
-			log.Error().Msg("Websh recovery aborted: timeout reached.")
-			return backoff.Permanent(ctx.Err())
-		default:
-			data := map[string]interface{}{
-				"session": pc.sessionID,
-			}
-			body, statusCode, err := pc.apiSession.Post(reconnectPtyWebsocketURL, data, 5)
-			if err != nil || statusCode != http.StatusCreated {
-				nextInterval := retryBackoff.NextBackOff()
-				log.Warn().Err(err).Msgf("Failed to reconnect Websh channel (status: %d), will try again in %ds.", statusCode, int(nextInterval.Seconds()))
-				return fmt.Errorf("reconnect failed: %w", err)
-			}
-
-			var resp struct {
-				WebsocketURL string `json:"websocket_url"`
-			}
-			if err = json.Unmarshal(body, &resp); err != nil {
-				log.Warn().Err(err).Msg("Failed to parse reconnect response.")
-				return fmt.Errorf("unmarshal error: %w", err)
-			}
-			pc.url = strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + resp.WebsocketURL
-
-			sanitizedURL, err := validateWebSocketURL(pc.url)
-			if err != nil {
-				return backoff.Permanent(err)
-			}
-
-			dialer := websocket.Dialer{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
-				},
-			}
-			conn, _, err := dialer.Dial(sanitizedURL, pc.requestHeader)
-			if err != nil {
-				log.Warn().Err(err).Msg("Websh reconnect failed.")
-				return err
-			}
-
-			pc.conn = conn
-			log.Debug().Msg("Websh reconnected successfully.")
-			return nil
+	return retry.Retry(ctx, b, func() error {
+		data := map[string]interface{}{
+			"session": pc.sessionID,
 		}
-	}
+		body, statusCode, err := pc.apiSession.Post(reconnectPtyWebsocketURL, data, 5)
+		if err != nil {
+			log.Warn().Err(err).Msgf("Failed to reconnect Websh channel (status: %d), retrying...", statusCode)
+			return fmt.Errorf("reconnect failed: %w", err)
+		}
+		if statusCode != http.StatusCreated {
+			log.Warn().Msgf("Failed to reconnect Websh channel (status: %d), retrying...", statusCode)
+			return fmt.Errorf("reconnect failed: unexpected status code %d", statusCode)
+		}
 
-	err := backoff.Retry(operation, backoff.WithContext(retryBackoff, ctx))
-	if err != nil {
-		return err
-	}
+		var resp struct {
+			WebsocketURL string `json:"websocket_url"`
+		}
+		if err = json.Unmarshal(body, &resp); err != nil {
+			log.Warn().Err(err).Msg("Failed to parse reconnect response.")
+			return fmt.Errorf("unmarshal error: %w", err)
+		}
+		pc.url = strings.Replace(config.GlobalSettings.ServerURL, "http", "ws", 1) + resp.WebsocketURL
 
-	return nil
+		sanitizedURL, err := validateWebSocketURL(pc.url)
+		if err != nil {
+			return retry.Permanent(err)
+		}
+
+		dialer := websocket.Dialer{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
+			},
+		}
+		conn, _, err := dialer.Dial(sanitizedURL, pc.requestHeader)
+		if err != nil {
+			log.Warn().Err(err).Msg("Websh reconnect failed.")
+			return err
+		}
+
+		pc.conn = conn
+		log.Debug().Msg("Websh reconnected successfully.")
+		return nil
+	})
 }
 
 // validateWebSocketURL is defined in ws_url.go (cross-platform)

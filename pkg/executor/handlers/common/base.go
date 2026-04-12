@@ -3,7 +3,7 @@ package common
 import (
 	"strconv"
 
-	"gopkg.in/go-playground/validator.v9"
+	"github.com/go-playground/validator/v10"
 )
 
 // BaseHandler provides common functionality for all handlers

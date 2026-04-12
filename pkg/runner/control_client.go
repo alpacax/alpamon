@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/internal/retry"
 	"github.com/alpacax/alpamon/pkg/config"
 	"github.com/alpacax/alpamon/pkg/utils"
-	"github.com/cenkalti/backoff"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
@@ -85,13 +85,12 @@ func (cc *ControlClient) Connect() {
 	wsPath := cc.GetWSPath()
 	log.Info().Msgf("Connecting to control websocket at %s...", wsPath)
 
-	wsBackoff := backoff.NewExponentialBackOff()
-	wsBackoff.InitialInterval = controlMinConnectInterval
-	wsBackoff.MaxInterval = controlMaxConnectInterval
-	wsBackoff.MaxElapsedTime = 0 // Infinite retry
-	wsBackoff.RandomizationFactor = 0
+	b := &retry.ExponentialBackoff{
+		InitialInterval: controlMinConnectInterval,
+		MaxInterval:     controlMaxConnectInterval,
+	}
 
-	operation := func() error {
+	_ = retry.Retry(context.Background(), b, func() error {
 		dialer := websocket.Dialer{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
@@ -99,8 +98,7 @@ func (cc *ControlClient) Connect() {
 		}
 		conn, _, err := dialer.Dial(wsPath, cc.requestHeader)
 		if err != nil {
-			nextInterval := wsBackoff.NextBackOff()
-			log.Debug().Err(err).Msgf("Failed to connect to control endpoint %s, will try again in %ds.", wsPath, int(nextInterval.Seconds()))
+			log.Debug().Err(err).Msgf("Failed to connect to control endpoint %s, retrying...", wsPath)
 			return err
 		}
 
@@ -111,9 +109,7 @@ func (cc *ControlClient) Connect() {
 
 		log.Info().Msg("Control WebSocket connection established.")
 		return nil
-	}
-
-	_ = backoff.Retry(operation, wsBackoff)
+	})
 }
 
 // CloseAndReconnect closes current connection and reconnects

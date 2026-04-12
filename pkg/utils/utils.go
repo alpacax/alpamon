@@ -2,8 +2,10 @@ package utils
 
 import (
 	"bytes"
-	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/user"
@@ -12,9 +14,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alpacax/alpamon/pkg/version"
-	"github.com/google/go-github/github"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/host"
 )
@@ -153,15 +155,30 @@ func GetSystemUser(username string) (*user.User, error) {
 }
 
 func GetLatestVersion() string {
-	client := github.NewClient(nil)
-	ctx := context.Background()
-
-	release, _, err := client.Repositories.GetLatestRelease(ctx, "alpacax", "alpamon")
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/alpacax/alpamon/releases/latest", nil)
 	if err != nil {
 		return ""
 	}
+	req.Header.Set("User-Agent", GetUserAgent("alpamon"))
 
-	return release.GetTagName()
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&release); err != nil {
+		return ""
+	}
+	return release.TagName
 }
 
 func GetUserAgent(name string) string {
