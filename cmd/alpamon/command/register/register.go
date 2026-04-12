@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"text/template"
 	"time"
@@ -169,6 +170,10 @@ func detectPlatform() string {
 	if err != nil {
 		fmt.Println("Warning: Failed to detect platform, defaulting to debian")
 		return "debian"
+	}
+
+	if runtime.GOOS == "windows" {
+		return "windows"
 	}
 
 	switch hostInfo.Platform {

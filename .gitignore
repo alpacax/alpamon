@@ -6,3 +6,4 @@ alpamon.db
 /cmd/alpamon/alpamon
 .DS_Store
 .idea
+alpamon.exe

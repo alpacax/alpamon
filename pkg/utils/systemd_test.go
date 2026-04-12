@@ -26,7 +26,11 @@ func TestEnsureDirectoriesWithRoot(t *testing.T) {
 	}
 
 	for _, d := range getAlpamonDirs() {
-		rel := strings.TrimPrefix(d.Path, string(os.PathSeparator))
+		rel := d.Path
+		if vol := filepath.VolumeName(rel); vol != "" {
+			rel = rel[len(vol):]
+		}
+		rel = strings.TrimPrefix(rel, string(os.PathSeparator))
 		path := filepath.Join(root, rel)
 		info, err := os.Stat(path)
 		if err != nil {
@@ -54,7 +58,11 @@ func TestEnsureDirectoriesWithRoot_Idempotent(t *testing.T) {
 	}
 
 	for _, d := range getAlpamonDirs() {
-		rel := strings.TrimPrefix(d.Path, string(os.PathSeparator))
+		rel := d.Path
+		if vol := filepath.VolumeName(rel); vol != "" {
+			rel = rel[len(vol):]
+		}
+		rel = strings.TrimPrefix(rel, string(os.PathSeparator))
 		path := filepath.Join(root, rel)
 		info, err := os.Stat(path)
 		if err != nil {

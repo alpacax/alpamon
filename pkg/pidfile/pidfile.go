@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // WritePID writes the current PID to a file, ensuring that the file
@@ -39,7 +38,4 @@ func WritePID(pidFilePath string) (string, error) {
 	return pidFilePath, nil
 }
 
-// isProcess uses `kill -0` to check whether a process is running
-func isProcess(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
-}
+// isProcess is implemented in pidfile_unix.go and pidfile_windows.go

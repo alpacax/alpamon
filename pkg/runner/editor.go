@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/config"
@@ -370,11 +369,8 @@ func (m *CodeServerManager) stopProcess() error {
 
 	log.Info().Msgf("Stopping code-server on port %d...", m.port)
 
-	if err := syscall.Kill(-m.cmd.Process.Pid, syscall.SIGTERM); err != nil {
-		log.Debug().Err(err).Msg("SIGTERM failed, trying SIGKILL.")
-		if err := syscall.Kill(-m.cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			return fmt.Errorf("failed to kill code-server: %w", err)
-		}
+	if err := terminateProcess(m.cmd.Process); err != nil {
+		return fmt.Errorf("failed to stop code-server: %w", err)
 	}
 
 	done := make(chan error, 1)
@@ -386,7 +382,7 @@ func (m *CodeServerManager) stopProcess() error {
 	case <-done:
 		log.Info().Msg("code-server stopped.")
 	case <-time.After(10 * time.Second):
-		_ = syscall.Kill(-m.cmd.Process.Pid, syscall.SIGKILL)
+		_ = terminateProcess(m.cmd.Process)
 		log.Warn().Msg("code-server killed after timeout.")
 	}
 

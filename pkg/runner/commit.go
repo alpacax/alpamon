@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -535,13 +536,23 @@ func getOsData() (OSData, error) {
 		patch, _ = strconv.Atoi(versionParts[2])
 	}
 
+	platform := hostInfo.Platform
+	// Use short platform identifier for the Platform field.
+	// gopsutil returns full product name on Windows (e.g.,
+	// "Microsoft Windows Server 2025 Datacenter") which exceeds
+	// the server's field length. Name keeps the full product name.
+	shortPlatform := platform
+	if runtime.GOOS == "windows" {
+		shortPlatform = "windows"
+	}
+
 	return OSData{
-		Name:         hostInfo.Platform,
+		Name:         platform,
 		Version:      hostInfo.PlatformVersion,
 		Major:        major,
 		Minor:        minor,
 		Patch:        patch,
-		Platform:     hostInfo.Platform,
+		Platform:     shortPlatform,
 		PlatformLike: utils.PlatformLike,
 	}, nil
 }

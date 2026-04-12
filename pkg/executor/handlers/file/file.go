@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -139,12 +138,9 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		defer func() { _ = os.Remove(cleanupPath) }()
 	}
 
-	catCmd := exec.CommandContext(ctx, "cat", name)
-	catCmd.SysProcAttr = sysProcAttr
-
-	output, err := catCmd.Output()
+	output, err := readFileAs(ctx, name, sysProcAttr)
 	if err != nil {
-		log.Error().Err(err).Msgf("Failed to cat file: %s", output)
+		log.Error().Err(err).Msg("Failed to read file for upload.")
 		return 1, err.Error()
 	}
 
@@ -213,37 +209,34 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 
 // fileDownload handles single file download
 func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr) (int, string) {
-	var cmd *exec.Cmd
 	content, err := h.getFileData(args)
 	if err != nil {
 		return 1, err.Error()
 	}
 
+	downloadPath, err := utils.SanitizePath(args.Path)
+	if err != nil {
+		return 1, err.Error()
+	}
+	args.Path = downloadPath
+
 	if !args.AllowOverwrite && utils.FileExists(args.Path) {
 		return 1, fmt.Sprintf("%s already exists.", args.Path)
 	}
 
-	isZip := utils.IsZipFile(content, filepath.Ext(args.Path))
-	if isZip && args.AllowUnzip {
-		escapePath := utils.Quote(args.Path)
-		escapeDirPath := utils.Quote(filepath.Dir(args.Path))
-		command := fmt.Sprintf("tee %s > /dev/null && unzip -n %s -d %s; rm %s",
-			escapePath,
-			escapePath,
-			escapeDirPath,
-			escapePath)
-		cmd = exec.CommandContext(ctx, "sh", "-c", command)
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(args.Path)))
+	// Write file, preserving privilege demotion on Unix when available.
+	if err := writeFileAs(ctx, args.Path, content, sysProcAttr); err != nil {
+		log.Error().Err(err).Msg("Failed to write file.")
+		return 1, "You do not have permission to write to the directory, or directory does not exist"
 	}
 
-	cmd.SysProcAttr = sysProcAttr
-	cmd.Stdin = bytes.NewReader(content)
-
-	output, err := cmd.Output()
-	if err != nil {
-		log.Error().Err(err).Msgf("Failed to write file: %s", output)
-		return 1, "You do not have permission to read on the directory. or directory does not exist"
+	isZip := utils.IsZipFile(content, filepath.Ext(args.Path))
+	if isZip && args.AllowUnzip {
+		if err := utils.Unzip(args.Path, filepath.Dir(args.Path)); err != nil {
+			log.Error().Err(err).Msg("Failed to unzip file.")
+			return 1, err.Error()
+		}
+		_ = os.Remove(args.Path)
 	}
 
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
@@ -285,19 +278,18 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 			path = filepath.Join(homeDirectory, path)
 		}
 
-		absPath, err := filepath.Abs(path)
+		sanitized, err := utils.SanitizePath(path)
 		if err != nil {
 			return nil, false, false, err
 		}
-		paths[i] = absPath
+		paths[i] = sanitized
 	}
 
 	isBulk := len(pathList) > 1
 	isRecursive := false
 
-	// codeql[go/path-injection]: Intentional - Admin-specified file path for upload
 	if !isBulk {
-		fileInfo, err := os.Stat(paths[0]) // lgtm[go/path-injection]
+		fileInfo, err := os.Stat(paths[0])
 		if err != nil {
 			return nil, false, false, err
 		}
@@ -307,53 +299,25 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 	return paths, isBulk, isRecursive, nil
 }
 
-// makeArchive creates a zip archive from the specified paths.
+// makeArchive creates a zip archive from the specified paths using Go's archive/zip.
 // It returns the archive file path, a cleanup path (non-empty only for temp archives), and any error.
 // cleanupPath is always derived from os.TempDir() and never from user input,
 // ensuring os.Remove(cleanupPath) is safe from path-injection.
 func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, string, error) {
-	var archiveName string
-	var cleanupPath string
-	var cmd *exec.Cmd
 	path := paths[0]
 
-	if bulk {
-		archiveName = filepath.Join(os.TempDir(), uuid.New().String()+".zip")
-		cleanupPath = archiveName
-		dirPath := filepath.Dir(path)
-		basePaths := make([]string, len(paths))
-		for i, p := range paths {
-			basePaths[i] = filepath.Base(p)
-		}
-
-		cmd = exec.CommandContext(ctx, "zip", "-r", archiveName)
-		cmd.SysProcAttr = sysProcAttr
-		cmd.Args = append(cmd.Args, basePaths...)
-		cmd.Dir = dirPath
-	} else {
-		if recursive {
-			archiveName = filepath.Join(os.TempDir(), uuid.New().String()+".zip")
-			cleanupPath = archiveName
-			cmd = exec.CommandContext(ctx, "zip", "-r", archiveName, filepath.Base(path))
-			cmd.SysProcAttr = sysProcAttr
-			cmd.Dir = filepath.Dir(path)
-		} else {
-			archiveName = path
-			// cleanupPath stays ""—single file, no temp archive to clean up
-		}
+	if !bulk && !recursive {
+		return path, "", nil
 	}
 
-	if bulk || recursive {
-		err := cmd.Run()
-		if err != nil {
-			if cleanupPath != "" {
-				_ = os.Remove(cleanupPath)
-			}
-			return "", "", err
-		}
+	archiveName := filepath.Join(os.TempDir(), uuid.New().String()+".zip")
+
+	if err := utils.CreateZip(archiveName, paths, recursive || bulk); err != nil {
+		_ = os.Remove(archiveName)
+		return "", "", err
 	}
 
-	return archiveName, cleanupPath, nil
+	return archiveName, archiveName, nil
 }
 
 // createMultipartBody creates a multipart form body for file upload
@@ -440,7 +404,7 @@ func (h *FileHandler) fetchFromURL(contentURL string) ([]byte, error) {
 			config.GlobalSettings.ID, config.GlobalSettings.Key))
 	}
 
-	// codeql[go/request-forgery]: Intentional - Admin-specified URL for file content
+	// lgtm[go/request-forgery]: Intentional - Admin-specified URL for file content
 	client := utils.NewHTTPClient()
 	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
