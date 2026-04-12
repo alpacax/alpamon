@@ -53,6 +53,10 @@ func Retry(ctx context.Context, b *ExponentialBackoff, operation func() error) e
 	start := time.Now()
 
 	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
 		err := operation()
 		if err == nil {
 			return nil

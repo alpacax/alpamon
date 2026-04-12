@@ -365,9 +365,13 @@ func (pc *PtyClient) recovery() error {
 			"session": pc.sessionID,
 		}
 		body, statusCode, err := pc.apiSession.Post(reconnectPtyWebsocketURL, data, 5)
-		if err != nil || statusCode != http.StatusCreated {
+		if err != nil {
 			log.Warn().Err(err).Msgf("Failed to reconnect Websh channel (status: %d), retrying...", statusCode)
 			return fmt.Errorf("reconnect failed: %w", err)
+		}
+		if statusCode != http.StatusCreated {
+			log.Warn().Msgf("Failed to reconnect Websh channel (status: %d), retrying...", statusCode)
+			return fmt.Errorf("reconnect failed: unexpected status code %d", statusCode)
 		}
 
 		var resp struct {
