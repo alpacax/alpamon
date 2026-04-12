@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -154,8 +155,14 @@ func GetSystemUser(username string) (*user.User, error) {
 }
 
 func GetLatestVersion() string {
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/alpacax/alpamon/releases/latest", nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", GetUserAgent("alpamon"))
+
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get("https://api.github.com/repos/alpacax/alpamon/releases/latest")
+	resp, err := client.Do(req)
 	if err != nil {
 		return ""
 	}
@@ -168,7 +175,7 @@ func GetLatestVersion() string {
 	var release struct {
 		TagName string `json:"tag_name"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&release); err != nil {
 		return ""
 	}
 	return release.TagName

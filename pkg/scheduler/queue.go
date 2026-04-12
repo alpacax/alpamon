@@ -45,20 +45,25 @@ func (h *priorityHeap) Pop() any {
 	return item
 }
 
-// priorityQueue is a bounded priority queue backed by container/heap.
+// priorityQueue is a thread-safe bounded priority queue backed by container/heap.
 type priorityQueue struct {
+	mu       sync.Mutex
 	h        priorityHeap
 	capacity int
 }
 
 func newPriorityQueue(capacity int) *priorityQueue {
-	return &priorityQueue{
+	pq := &priorityQueue{
 		h:        make(priorityHeap, 0),
 		capacity: capacity,
 	}
+	heap.Init(&pq.h)
+	return pq
 }
 
 func (pq *priorityQueue) Offer(entry PriorityEntry) error {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
 	if pq.capacity > 0 && pq.h.Len() >= pq.capacity {
 		return errQueueFull
 	}
@@ -67,6 +72,8 @@ func (pq *priorityQueue) Offer(entry PriorityEntry) error {
 }
 
 func (pq *priorityQueue) Get() (PriorityEntry, error) {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
 	if pq.h.Len() == 0 {
 		return PriorityEntry{}, errors.New("queue is empty")
 	}
@@ -74,6 +81,8 @@ func (pq *priorityQueue) Get() (PriorityEntry, error) {
 }
 
 func (pq *priorityQueue) Size() int {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
 	return pq.h.Len()
 }
 
