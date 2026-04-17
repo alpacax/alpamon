@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -174,14 +176,14 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 	var code int
 	var message string
 
-	sysProcAttr, err := h.demote(args.Username, args.Groupname)
+	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to demote user.")
 		return 1, err.Error(), nil
 	}
 
 	if len(args.Files) == 0 {
-		code, message = h.fileDownload(ctx, args, sysProcAttr)
+		code, message = h.fileDownload(ctx, args, sysProcAttr, homeDirectory)
 		h.statFileTransfer(code, upload, message, args)
 	} else {
 		for _, file := range args.Files {
@@ -195,7 +197,7 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 				AllowUnzip:     file.AllowUnzip,
 				URL:            file.URL,
 			}
-			code, message = h.fileDownload(ctx, cmdArgs, sysProcAttr)
+			code, message = h.fileDownload(ctx, cmdArgs, sysProcAttr, homeDirectory)
 			h.statFileTransfer(code, upload, message, cmdArgs)
 		}
 	}
@@ -208,7 +210,7 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 }
 
 // fileDownload handles single file download
-func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr) (int, string) {
+func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr, homeDirectory string) (int, string) {
 	content, err := h.getFileData(args)
 	if err != nil {
 		return 1, err.Error()
@@ -218,6 +220,11 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	downloadPath, err := utils.SanitizePath(utils.FromWirePath(args.Path))
 	if err != nil {
 		return 1, err.Error()
+	}
+	if runtime.GOOS == "windows" {
+		if err := utils.EnsureUnderHome(homeDirectory, downloadPath); err != nil {
+			return 1, err.Error()
+		}
 	}
 	args.Path = downloadPath
 
@@ -243,28 +250,23 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
 }
 
-// demote demotes privilege to the specified user/group
-func (h *FileHandler) demote(username, groupname string) (*syscall.SysProcAttr, error) {
-	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
-	if err != nil {
-		return nil, err
-	}
-	if result == nil {
-		return nil, nil
-	}
-	return result.SysProcAttr, nil
-}
-
-// demoteWithHomeDir demotes privilege and returns home directory
+// demoteWithHomeDir demotes privilege and returns home directory.
+// On Windows utils.Demote is a no-op but the home directory is still
+// needed for path containment, so fall back to os/user.Lookup.
 func (h *FileHandler) demoteWithHomeDir(username, groupname string) (*syscall.SysProcAttr, string, error) {
 	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: false})
 	if err != nil {
 		return nil, "", err
 	}
-	if result == nil {
-		return nil, "", nil
+	if result != nil {
+		return result.SysProcAttr, result.User.HomeDir, nil
 	}
-	return result.SysProcAttr, result.User.HomeDir, nil
+	if runtime.GOOS == "windows" && username != "" {
+		if u, err := user.Lookup(username); err == nil {
+			return nil, u.HomeDir, nil
+		}
+	}
+	return nil, "", nil
 }
 
 // parsePaths parses and validates the path list
@@ -289,6 +291,11 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 		sanitized, err := utils.SanitizePath(path)
 		if err != nil {
 			return nil, false, false, err
+		}
+		if runtime.GOOS == "windows" {
+			if err := utils.EnsureUnderHome(homeDirectory, sanitized); err != nil {
+				return nil, false, false, err
+			}
 		}
 		paths[i] = sanitized
 	}

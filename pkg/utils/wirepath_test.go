@@ -53,3 +53,47 @@ func TestWirePathRoundtripWindows(t *testing.T) {
 		t.Errorf("FromWirePath(\"/C:\") = %q, want C:\\", got)
 	}
 }
+
+func TestEnsureUnderHome(t *testing.T) {
+	type row struct {
+		name    string
+		home    string
+		target  string
+		wantErr bool
+	}
+
+	var cases []row
+	if runtime.GOOS == "windows" {
+		cases = []row{
+			{"exact home", `C:\Users\alice`, `C:\Users\alice`, false},
+			{"child file", `C:\Users\alice`, `C:\Users\alice\docs\a.txt`, false},
+			{"parent dir escape", `C:\Users\alice`, `C:\Users`, true},
+			{"system file escape", `C:\Users\alice`, `C:\Windows\System32\config\SAM`, true},
+			{"different volume", `C:\Users\alice`, `D:\foo`, true},
+			{"case-insensitive child", `C:\Users\Alice`, `c:\users\alice\docs\a.txt`, false},
+			{"sibling user escape", `C:\Users\alice`, `C:\Users\bob\a.txt`, true},
+			{"empty home rejects", ``, `C:\anything`, true},
+		}
+	} else {
+		cases = []row{
+			{"exact home", "/home/alice", "/home/alice", false},
+			{"child file", "/home/alice", "/home/alice/docs/a.txt", false},
+			{"parent dir escape", "/home/alice", "/home", true},
+			{"system file escape", "/home/alice", "/etc/passwd", true},
+			{"sibling user escape", "/home/alice", "/home/bob/a.txt", true},
+			{"empty home rejects", "", "/anything", true},
+		}
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := EnsureUnderHome(tc.home, tc.target)
+			if tc.wantErr && err == nil {
+				t.Errorf("EnsureUnderHome(%q, %q) expected error", tc.home, tc.target)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("EnsureUnderHome(%q, %q) unexpected error: %v", tc.home, tc.target, err)
+			}
+		})
+	}
+}

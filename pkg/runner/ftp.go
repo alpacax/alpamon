@@ -195,10 +195,20 @@ func (fc *FtpClient) parsePath(path string) (string, error) {
 	cleanPath := filepath.Clean(absPath)
 
 	if runtime.GOOS == "windows" {
+		// Windows has no privilege demotion (utils.Demote is a no-op),
+		// so alpamon runs as the service account (typically SYSTEM)
+		// and OS-level ACLs do not scope the session to the named user.
+		// Enforce an explicit home-directory containment instead, so a
+		// malicious wire path cannot read system files like
+		// C:\Windows\System32\config\SAM.
+		if err := utils.EnsureUnderHome(fc.homeDirectory, cleanPath); err != nil {
+			return "", fmt.Errorf("%s: %w", ErrInvalidArgument, err)
+		}
 		return cleanPath, nil
 	}
 
-	// Unix: enforce that the resolved path stays under "/".
+	// Unix: enforce that the resolved path stays under "/". OS-level
+	// ACLs from privilege demotion provide the finer-grained scoping.
 	rel, err := filepath.Rel("/", cleanPath)
 	if err != nil {
 		return "", fmt.Errorf("%s: invalid path: %w", ErrInvalidArgument, err)

@@ -1,8 +1,10 @@
 package utils
 
 import (
+	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // Wire format for paths exchanged with the Alpacon web client is
@@ -48,3 +50,38 @@ func ToWirePath(p string) string {
 func isWireDriveLetter(c0, c1 byte) bool {
 	return ((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z')) && c1 == ':'
 }
+
+// EnsureUnderHome verifies cleanPath is contained within the home
+// directory. Returns an error suitable for returning to the FTP client
+// if the path escapes home. Comparison is case-insensitive on Windows
+// (Windows file system is case-insensitive by default).
+//
+// This is the containment check WebFTP relies on to scope user access
+// on Windows, where privilege demotion is a no-op and the alpamon
+// process runs as the service account (typically SYSTEM). On Unix the
+// demoted process's OS-level ACLs provide an equivalent protection.
+//
+// Callers should pass an absolute, cleaned home path and an absolute,
+// cleaned target path. An empty home is treated as "no containment
+// configured" and rejects everything to fail closed.
+func EnsureUnderHome(home, cleanPath string) error {
+	if home == "" {
+		return fmt.Errorf("%s: no home directory configured", errPathEscapesHome)
+	}
+	root := filepath.Clean(home)
+	target := cleanPath
+	if runtime.GOOS == "windows" {
+		root = strings.ToLower(root)
+		target = strings.ToLower(target)
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return fmt.Errorf("%s: %w", errPathEscapesHome, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%s", errPathEscapesHome)
+	}
+	return nil
+}
+
+const errPathEscapesHome = "path escapes home directory"
