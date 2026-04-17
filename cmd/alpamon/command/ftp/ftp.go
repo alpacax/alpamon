@@ -1,8 +1,11 @@
 package ftp
 
 import (
+	"os"
+
 	"github.com/alpacax/alpamon/pkg/logger"
 	"github.com/alpacax/alpamon/pkg/runner"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
 
@@ -25,7 +28,12 @@ var FtpCmd = &cobra.Command{
 func RunFtpWorker(data runner.FtpConfigData) {
 	ftpClient := runner.NewFtpClient(data)
 	if ftpClient == nil {
-		return
+		// NewFtpClient refuses to start on Windows when the home
+		// directory is empty, since containment requires a valid
+		// root. Surface it as an error so the parent/operator can
+		// spot the misconfiguration instead of a silent success.
+		log.Error().Msg("FTP worker aborting: client could not be initialized")
+		os.Exit(1)
 	}
 	ftpClient.RunFtpBackground()
 }

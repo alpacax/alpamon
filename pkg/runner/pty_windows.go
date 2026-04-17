@@ -113,8 +113,9 @@ func (pc *PtyClient) initializeSession() error {
 	// Inherit the parent process environment so PowerShell has the
 	// Windows-specific variables it needs (SystemRoot, PSModulePath,
 	// COMPUTERNAME, etc.). Missing these causes error 8009001d at
-	// PowerShell startup.
-	envSlice := os.Environ()
+	// PowerShell startup. Filter out existing USER/USERPROFILE so our
+	// overrides don't end up as duplicate keys in the conpty env.
+	envSlice := filterEnv(os.Environ(), "USER", "USERPROFILE")
 	envSlice = append(envSlice, "USER="+pc.username)
 	if pc.homeDirectory != "" {
 		envSlice = append(envSlice, "USERPROFILE="+pc.homeDirectory)
@@ -218,6 +219,28 @@ func (pc *PtyClient) writeToWebsocket(ctx context.Context, cancel context.Cancel
 			}
 		}
 	}
+}
+
+// filterEnv returns a copy of env with entries whose key is in
+// excludeKeys removed. Used to drop inherited parent-process values
+// before re-setting them, so the child sees one definitive entry per
+// key instead of two.
+func filterEnv(env []string, excludeKeys ...string) []string {
+	prefixes := make([]string, len(excludeKeys))
+	for i, k := range excludeKeys {
+		prefixes[i] = k + "="
+	}
+	filtered := make([]string, 0, len(env))
+outer:
+	for _, e := range env {
+		for _, pref := range prefixes {
+			if strings.HasPrefix(e, pref) {
+				continue outer
+			}
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
 }
 
 func (pc *PtyClient) close() {

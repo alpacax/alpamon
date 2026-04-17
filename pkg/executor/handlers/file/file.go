@@ -118,7 +118,9 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		return 1, "No paths provided"
 	}
 
-	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname)
+	// Upload accepts looser group matching; supplementary-group
+	// enforcement applies to downloads via ValidateGroup=true.
+	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, false)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to demote user.")
 		return 1, err.Error()
@@ -176,7 +178,9 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 	var code int
 	var message string
 
-	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname)
+	// Download enforces supplementary-group membership so a requested
+	// GID cannot widen filesystem access beyond what the user has.
+	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, true)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to demote user.")
 		return 1, err.Error(), nil
@@ -253,17 +257,22 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 }
 
 // demoteWithHomeDir demotes privilege and returns home directory.
-// On Windows utils.Demote is a no-op but the home directory is still
-// needed for path containment, so fall back to os/user.Lookup.
-func (h *FileHandler) demoteWithHomeDir(username, groupname string) (*syscall.SysProcAttr, string, error) {
-	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: false})
+// validateGroup enforces that the requested group is a supplementary
+// group of the user — required on Unix download paths to prevent
+// using an arbitrary GID for filesystem access, and off on upload
+// paths which accept looser group matching.
+// When utils.Demote is a no-op (e.g., Windows, or Unix running as a
+// non-root user), falls back to os/user.Lookup so the home directory
+// is still populated for path containment / relative-path resolution.
+func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGroup bool) (*syscall.SysProcAttr, string, error) {
+	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: validateGroup})
 	if err != nil {
 		return nil, "", err
 	}
 	if result != nil {
 		return result.SysProcAttr, result.User.HomeDir, nil
 	}
-	if runtime.GOOS == "windows" && username != "" {
+	if username != "" {
 		if u, err := user.Lookup(username); err == nil {
 			return nil, u.HomeDir, nil
 		}
