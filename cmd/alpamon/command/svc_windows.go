@@ -25,9 +25,9 @@ func runningAsWindowsService() bool {
 // It maps SCM events to the existing runAgent flow by:
 //   - launching runAgent in a goroutine (it manages its own lifecycle
 //     via ContextManager and returns when shutdown is signalled);
-//   - mirroring Stop / Shutdown / Preshutdown requests into
-//     agentCtrl.stop(), which we wire to ContextManager.Shutdown via
-//     a package-level hook;
+//   - mirroring Stop / Shutdown requests into triggerShutdown(),
+//     which we wire to ContextManager.Shutdown via a package-level
+//     hook;
 //   - reporting status transitions back to SCM.
 //
 // SCM blocks ChangeServiceConfig2W callers on StartPending / StopPending
@@ -77,7 +77,17 @@ func (s *alpamonService) Execute(args []string, r <-chan svc.ChangeRequest, chan
 			changes <- svc.Status{State: svc.Stopped}
 			return false, 0
 
-		case c := <-r:
+		case c, ok := <-r:
+			if !ok {
+				// SCM closed the request channel without sending
+				// Stop; treat as a stop so we don't spin. Wait for
+				// runAgent to drain before reporting Stopped.
+				log.Warn().Msg("Windows Service control channel closed unexpectedly; shutting down.")
+				triggerShutdown()
+				<-agentDone
+				changes <- svc.Status{State: svc.Stopped}
+				return false, 0
+			}
 			switch c.Cmd {
 			case svc.Interrogate:
 				changes <- c.CurrentStatus

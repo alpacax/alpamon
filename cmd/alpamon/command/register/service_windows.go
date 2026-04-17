@@ -40,8 +40,14 @@ func startService() error {
 
 	// If alpamon is already installed, reuse the existing service
 	// entry rather than failing: operators commonly re-run register.
+	// Only treat ERROR_SERVICE_DOES_NOT_EXIST as "go create it"; any
+	// other OpenService failure (access denied, RPC issues) should
+	// surface so the operator can address it.
 	s, err := m.OpenService(serviceName)
 	if err != nil {
+		if !isServiceNotExist(err) {
+			return fmt.Errorf("open service: %w%s", err, elevationHint(err))
+		}
 		s, err = m.CreateService(
 			serviceName,
 			binPath,
@@ -99,4 +105,12 @@ func elevationHint(err error) string {
 		return "\nHint: run this command from an elevated (Administrator) prompt."
 	}
 	return ""
+}
+
+// isServiceNotExist reports whether err indicates that the service is
+// not registered with the SCM (i.e. this is a fresh install). Used to
+// distinguish "go create the service" from real OpenService failures.
+func isServiceNotExist(err error) bool {
+	var errno windows.Errno
+	return errors.As(err, &errno) && errno == windows.ERROR_SERVICE_DOES_NOT_EXIST
 }
