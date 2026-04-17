@@ -3,7 +3,6 @@ package command
 import (
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/cmd/alpamon/command/ftp"
@@ -26,50 +25,6 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
-
-// shutdownHook lets non-signal callers (e.g. the Windows Service
-// handler on SCM Stop) trigger the same graceful-shutdown path that
-// setupSignalHandler uses. It is installed by runAgent once its
-// ContextManager is ready and reset to a no-op when runAgent returns.
-var (
-	shutdownMu   sync.Mutex
-	shutdownFunc func()
-)
-
-// pendingShutdown records that triggerShutdown was called before the
-// shutdown hook was installed. When setShutdownFunc later installs the
-// real hook, it checks this flag and fires immediately, closing the
-// SCM Stop-before-ready race.
-var pendingShutdown bool
-
-func setShutdownFunc(f func()) {
-	shutdownMu.Lock()
-	shutdownFunc = f
-	fire := pendingShutdown && f != nil
-	if fire {
-		pendingShutdown = false
-	}
-	shutdownMu.Unlock()
-	if fire {
-		f()
-	}
-}
-
-// triggerShutdown is called from platform integrations (Windows SCM)
-// to initiate the same shutdown flow as a SIGTERM on Unix. Safe to
-// call before runAgent is ready: the request is recorded and fired as
-// soon as the hook is installed. Also safe after shutdown has run.
-func triggerShutdown() {
-	shutdownMu.Lock()
-	f := shutdownFunc
-	if f == nil {
-		pendingShutdown = true
-	}
-	shutdownMu.Unlock()
-	if f != nil {
-		f()
-	}
-}
 
 const (
 	name          = "alpamon"

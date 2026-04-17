@@ -1,6 +1,8 @@
 package command
 
 import (
+	"sync"
+
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/windows/svc"
 )
@@ -8,6 +10,50 @@ import (
 // svcName is the Windows Service name registered by `alpamon register`.
 // Must match what register creates.
 const svcName = "alpamon"
+
+// Shutdown hook bridge: runAgent installs its ContextManager.Shutdown
+// via setShutdownFunc, and the SCM handler below invokes it on Stop /
+// Shutdown / control-channel-close. pendingShutdown covers the
+// Stop-before-ready race where SCM delivers Stop while runAgent is
+// still coming up.
+var (
+	shutdownMu      sync.Mutex
+	shutdownFunc    func()
+	pendingShutdown bool
+)
+
+// setShutdownFunc installs (or clears, when f == nil) the agent's
+// shutdown hook. If a Stop arrived before the hook was ready, it is
+// fired immediately now.
+func setShutdownFunc(f func()) {
+	shutdownMu.Lock()
+	shutdownFunc = f
+	fire := pendingShutdown && f != nil
+	if fire {
+		pendingShutdown = false
+	}
+	shutdownMu.Unlock()
+	if fire {
+		f()
+	}
+}
+
+// triggerShutdown is called from the SCM handler to initiate graceful
+// shutdown via ContextManager. Safe to call before runAgent has
+// installed the hook (the request is recorded and fired when
+// setShutdownFunc runs) and after shutdown has completed (becomes a
+// no-op).
+func triggerShutdown() {
+	shutdownMu.Lock()
+	f := shutdownFunc
+	if f == nil {
+		pendingShutdown = true
+	}
+	shutdownMu.Unlock()
+	if f != nil {
+		f()
+	}
+}
 
 // runningAsWindowsService reports whether the current process was
 // launched by the Windows Service Control Manager.
