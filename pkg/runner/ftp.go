@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -32,11 +33,20 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 		"User-Agent": {utils.GetUserAgent("alpamon")},
 	}
 
+	homeDir := utils.FromWirePath(data.HomeDirectory)
+	if runtime.GOOS == "windows" && homeDir == "" {
+		// On Windows home-directory containment is the only access
+		// scope (no privilege demotion). Refuse to start a session
+		// that has nothing to contain to, rather than fail closed on
+		// every subsequent command with a confusing error.
+		data.Logger.Debug().Msg("Refusing to open WebFTP session with empty home directory on Windows.")
+		return nil
+	}
 	return &FtpClient{
 		requestHeader:    headers,
 		url:              data.URL,
-		homeDirectory:    data.HomeDirectory,
-		workingDirectory: data.HomeDirectory,
+		homeDirectory:    homeDir,
+		workingDirectory: homeDir,
 		log:              data.Logger,
 	}
 }
@@ -167,10 +177,15 @@ func (fc *FtpClient) handleFtpCommand(command FtpCommand, data FtpData) (Command
 	}
 }
 
+// parsePath takes a wire-format path from the web client and returns a
+// native OS absolute path suitable for os.* calls. Use utils.ToWirePath() when
+// placing the resulting path back into a response.
 func (fc *FtpClient) parsePath(path string) (string, error) {
 	if strings.ContainsRune(path, '\x00') {
 		return "", fmt.Errorf("invalid argument: path contains null byte")
 	}
+
+	path = utils.FromWirePath(path)
 
 	if strings.HasPrefix(path, "~") {
 		path = strings.Replace(path, "~", fc.workingDirectory, 1)
@@ -186,6 +201,24 @@ func (fc *FtpClient) parsePath(path string) (string, error) {
 	}
 
 	cleanPath := filepath.Clean(absPath)
+
+	if runtime.GOOS == "windows" {
+		// Windows has no privilege demotion (utils.Demote is a no-op),
+		// so alpamon runs as the service account (typically SYSTEM)
+		// and OS-level ACLs do not scope the session to the named user.
+		// Enforce an explicit home-directory containment instead, with
+		// symlinks/junctions resolved on both sides, so a malicious
+		// wire path (or a junction planted inside home) cannot reach
+		// system files like C:\Windows\System32\config\SAM.
+		resolved, err := utils.ResolveAndEnsureUnderHome(fc.homeDirectory, cleanPath)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", ErrInvalidArgument, err)
+		}
+		return resolved, nil
+	}
+
+	// Unix: enforce that the resolved path stays under "/". OS-level
+	// ACLs from privilege demotion provide the finer-grained scoping.
 	rel, err := filepath.Rel("/", cleanPath)
 	if err != nil {
 		return "", fmt.Errorf("%s: invalid path: %w", ErrInvalidArgument, err)
@@ -212,7 +245,7 @@ func (fc *FtpClient) listRecursive(path string, depth, current int, showHidden b
 	result := CommandResult{
 		Name:     filepath.Base(path),
 		Type:     "folder",
-		Path:     path,
+		Path:     utils.ToWirePath(path),
 		ModTime:  nil,
 		Children: []CommandResult{},
 	}
@@ -289,7 +322,7 @@ func (fc *FtpClient) getDiretoryStructure(entry os.DirEntry, path string, depth,
 	modTime := info.ModTime()
 	child := &CommandResult{
 		Name:             entry.Name(),
-		Path:             fullPath,
+		Path:             utils.ToWirePath(fullPath),
 		Code:             returnCodes[List].Success,
 		ModTime:          &modTime,
 		PermissionString: permString,
@@ -300,7 +333,7 @@ func (fc *FtpClient) getDiretoryStructure(entry os.DirEntry, path string, depth,
 
 	if isSymlink {
 		child.Type = "symlink"
-		child.Target = target
+		child.Target = utils.ToWirePath(target)
 		if targetInfo != nil {
 			child.Size = targetInfo.Size()
 		}
@@ -325,7 +358,7 @@ func (fc *FtpClient) getDiretoryStructure(entry os.DirEntry, path string, depth,
 func (fc *FtpClient) handleListErrorResult(path string, err error) CommandResult {
 	result := CommandResult{
 		Name:    filepath.Base(path),
-		Path:    path,
+		Path:    utils.ToWirePath(path),
 		Message: err.Error(),
 	}
 	_, result.Code = GetFtpErrorCode(List, result)
@@ -378,9 +411,10 @@ func (fc *FtpClient) cwd(path string) (CommandResult, error) {
 }
 
 func (fc *FtpClient) pwd() (CommandResult, error) {
+	wire := utils.ToWirePath(fc.workingDirectory)
 	return CommandResult{
-		Message: fmt.Sprintf("Current working directory: %s.", fc.workingDirectory),
-		Path:    fc.workingDirectory,
+		Message: fmt.Sprintf("Current working directory: %s.", wire),
+		Path:    wire,
 	}, nil
 }
 
@@ -464,8 +498,8 @@ func (fc *FtpClient) mv(src, dst string, allowOverwrite bool) (CommandResult, er
 	}
 
 	return CommandResult{
-		Dst:     dst,
-		Message: fmt.Sprintf("Move %s to %s.", src, dst),
+		Dst:     utils.ToWirePath(dst),
+		Message: fmt.Sprintf("Move %s to %s.", utils.ToWirePath(src), utils.ToWirePath(dst)),
 	}, nil
 }
 
@@ -520,8 +554,8 @@ func (fc *FtpClient) cpDir(src, dst string, allowOverwrite bool) (CommandResult,
 	}
 
 	return CommandResult{
-		Dst:     dst,
-		Message: fmt.Sprintf("Copy %s to %s.", src, dst),
+		Dst:     utils.ToWirePath(dst),
+		Message: fmt.Sprintf("Copy %s to %s.", utils.ToWirePath(src), utils.ToWirePath(dst)),
 	}, nil
 }
 
@@ -534,12 +568,17 @@ func (fc *FtpClient) cpFile(src, dst string, allowOverwrite bool) (CommandResult
 	}
 
 	return CommandResult{
-		Dst:     dst,
-		Message: fmt.Sprintf("Copy %s to %s.", src, dst),
+		Dst:     utils.ToWirePath(dst),
+		Message: fmt.Sprintf("Copy %s to %s.", utils.ToWirePath(src), utils.ToWirePath(dst)),
 	}, nil
 }
 
 func (fc *FtpClient) chmod(path, mode string, recursive bool) (CommandResult, error) {
+	if runtime.GOOS == "windows" {
+		msg := fmt.Sprintf("chmod is %s. Windows uses ACLs instead of POSIX modes.", ErrNotSupported)
+		return CommandResult{Message: msg}, fmt.Errorf("%s", msg)
+	}
+
 	path, err := fc.parsePath(path)
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
@@ -592,6 +631,11 @@ func (fc *FtpClient) chmodRecursive(path string, fileMode os.FileMode) error {
 }
 
 func (fc *FtpClient) chown(path, username, groupname string, recursive bool) (CommandResult, error) {
+	if runtime.GOOS == "windows" {
+		msg := fmt.Sprintf("chown is %s. Windows uses SID-based ownership instead of UID/GID.", ErrNotSupported)
+		return CommandResult{Message: msg}, fmt.Errorf("%s", msg)
+	}
+
 	path, err := fc.parsePath(path)
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err

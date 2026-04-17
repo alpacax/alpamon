@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -116,7 +118,9 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		return 1, "No paths provided"
 	}
 
-	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname)
+	// Upload accepts looser group matching; supplementary-group
+	// enforcement applies to downloads via ValidateGroup=true.
+	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, false, args.HomeDirectory)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to demote user.")
 		return 1, err.Error()
@@ -174,16 +178,21 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 	var code int
 	var message string
 
-	sysProcAttr, err := h.demote(args.Username, args.Groupname)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to demote user.")
-		return 1, err.Error(), nil
-	}
-
 	if len(args.Files) == 0 {
-		code, message = h.fileDownload(ctx, args, sysProcAttr)
+		// Download enforces supplementary-group membership so a requested
+		// GID cannot widen filesystem access beyond what the user has.
+		sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, true, args.HomeDirectory)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to demote user.")
+			return 1, err.Error(), nil
+		}
+		code, message = h.fileDownload(ctx, args, sysProcAttr, homeDirectory)
 		h.statFileTransfer(code, upload, message, args)
 	} else {
+		// Each file entry may target a different user/group, so demote
+		// per file to get the correct sysProcAttr and home directory
+		// for that entry. Reusing the outer args.Username's demotion
+		// would mix up ownership and containment roots on Unix.
 		for _, file := range args.Files {
 			cmdArgs := &common.CommandArgs{
 				Username:       file.Username,
@@ -194,8 +203,17 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 				AllowOverwrite: file.AllowOverwrite,
 				AllowUnzip:     file.AllowUnzip,
 				URL:            file.URL,
+				HomeDirectory:  args.HomeDirectory,
 			}
-			code, message = h.fileDownload(ctx, cmdArgs, sysProcAttr)
+			sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(cmdArgs.Username, cmdArgs.Groupname, true, cmdArgs.HomeDirectory)
+			if err != nil {
+				log.Error().Err(err).Str("username", cmdArgs.Username).Msg("Failed to demote user.")
+				code = 1
+				message = err.Error()
+				h.statFileTransfer(code, upload, message, cmdArgs)
+				continue
+			}
+			code, message = h.fileDownload(ctx, cmdArgs, sysProcAttr, homeDirectory)
 			h.statFileTransfer(code, upload, message, cmdArgs)
 		}
 	}
@@ -208,15 +226,23 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 }
 
 // fileDownload handles single file download
-func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr) (int, string) {
+func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr, homeDirectory string) (int, string) {
 	content, err := h.getFileData(args)
 	if err != nil {
 		return 1, err.Error()
 	}
 
-	downloadPath, err := utils.SanitizePath(args.Path)
+	// Paths arrive in wire format from the web client.
+	downloadPath, err := utils.SanitizePath(utils.FromWirePath(args.Path))
 	if err != nil {
 		return 1, err.Error()
+	}
+	if runtime.GOOS == "windows" {
+		resolved, err := utils.ResolveAndEnsureUnderHome(homeDirectory, downloadPath)
+		if err != nil {
+			return 1, err.Error()
+		}
+		downloadPath = resolved
 	}
 	args.Path = downloadPath
 
@@ -242,34 +268,49 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
 }
 
-// demote demotes privilege to the specified user/group
-func (h *FileHandler) demote(username, groupname string) (*syscall.SysProcAttr, error) {
-	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
-	if err != nil {
-		return nil, err
-	}
-	if result == nil {
-		return nil, nil
-	}
-	return result.SysProcAttr, nil
-}
-
-// demoteWithHomeDir demotes privilege and returns home directory
-func (h *FileHandler) demoteWithHomeDir(username, groupname string) (*syscall.SysProcAttr, string, error) {
-	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: false})
+// demoteWithHomeDir demotes privilege and returns the home directory.
+// validateGroup enforces that the requested group is a supplementary
+// group of the user. Required on Unix download paths to prevent
+// using an arbitrary GID for filesystem access; off on upload paths
+// which accept looser group matching.
+//
+// Home directory is resolved in descending priority:
+//  1. utils.Demote result (Unix, running as root)
+//  2. os/user.Lookup on the given username
+//  3. fallbackHome (typically args.HomeDirectory carried in the
+//     protocol message from alpacon-server)
+//
+// The fallback exists so Windows and non-root Unix paths do not end
+// up with an empty home, which would cause relative paths to resolve
+// against the process CWD and Windows containment to fail with a
+// misleading configuration error.
+func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGroup bool, fallbackHome string) (*syscall.SysProcAttr, string, error) {
+	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: validateGroup})
 	if err != nil {
 		return nil, "", err
 	}
-	if result == nil {
-		return nil, "", nil
+	if result != nil {
+		return result.SysProcAttr, result.User.HomeDir, nil
 	}
-	return result.SysProcAttr, result.User.HomeDir, nil
+	if username != "" {
+		if u, err := user.Lookup(username); err == nil && u.HomeDir != "" {
+			return nil, u.HomeDir, nil
+		}
+	}
+	return nil, fallbackHome, nil
 }
 
 // parsePaths parses and validates the path list
 func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]string, bool, bool, error) {
 	paths := make([]string, len(pathList))
 	for i, path := range pathList {
+		// Paths from the web client arrive in wire format (POSIX-like
+		// with a leading "/"). Convert to a native OS path before any
+		// filepath.IsAbs / Join work, otherwise Windows drive-letter
+		// paths like "/C:/Users/foo" get joined to homeDirectory and
+		// produce "C:\C:\Users\foo".
+		path = utils.FromWirePath(path)
+
 		if strings.HasPrefix(path, "~") {
 			path = strings.Replace(path, "~", homeDirectory, 1)
 		}
@@ -281,6 +322,13 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 		sanitized, err := utils.SanitizePath(path)
 		if err != nil {
 			return nil, false, false, err
+		}
+		if runtime.GOOS == "windows" {
+			resolved, err := utils.ResolveAndEnsureUnderHome(homeDirectory, sanitized)
+			if err != nil {
+				return nil, false, false, err
+			}
+			sanitized = resolved
 		}
 		paths[i] = sanitized
 	}

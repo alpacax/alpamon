@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -109,15 +110,15 @@ func (pc *PtyClient) initializeSession() error {
 		commandLine = shell + " " + strings.Join(args, " ")
 	}
 
-	// Build environment
-	env := getDefaultEnv()
-	env["USER"] = pc.username
+	// Inherit the parent process environment so PowerShell has the
+	// Windows-specific variables it needs (SystemRoot, PSModulePath,
+	// COMPUTERNAME, etc.). Missing these causes error 8009001d at
+	// PowerShell startup. Filter out existing USER/USERPROFILE so our
+	// overrides don't end up as duplicate keys in the conpty env.
+	envSlice := filterEnv(os.Environ(), "USER", "USERPROFILE")
+	envSlice = append(envSlice, "USER="+pc.username)
 	if pc.homeDirectory != "" {
-		env["USERPROFILE"] = pc.homeDirectory
-	}
-	var envSlice []string
-	for k, v := range env {
-		envSlice = append(envSlice, fmt.Sprintf("%s=%s", k, v))
+		envSlice = append(envSlice, "USERPROFILE="+pc.homeDirectory)
 	}
 
 	opts := []conpty.ConPtyOption{
@@ -218,6 +219,31 @@ func (pc *PtyClient) writeToWebsocket(ctx context.Context, cancel context.Cancel
 			}
 		}
 	}
+}
+
+// filterEnv returns a copy of env with entries whose key is in
+// excludeKeys removed. Used to drop inherited parent-process values
+// before re-setting them, so the child sees one definitive entry per
+// key instead of two. Key comparison is case-insensitive so that
+// Windows-style inherited keys (e.g. "Userprofile=…") are caught
+// just like "USERPROFILE=…".
+func filterEnv(env []string, excludeKeys ...string) []string {
+	filtered := make([]string, 0, len(env))
+outer:
+	for _, e := range env {
+		key, _, found := strings.Cut(e, "=")
+		if !found {
+			filtered = append(filtered, e)
+			continue
+		}
+		for _, excludeKey := range excludeKeys {
+			if strings.EqualFold(key, excludeKey) {
+				continue outer
+			}
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
 }
 
 func (pc *PtyClient) close() {
