@@ -120,7 +120,7 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 
 	// Upload accepts looser group matching; supplementary-group
 	// enforcement applies to downloads via ValidateGroup=true.
-	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, false)
+	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, false, args.HomeDirectory)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to demote user.")
 		return 1, err.Error()
@@ -180,7 +180,7 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 
 	// Download enforces supplementary-group membership so a requested
 	// GID cannot widen filesystem access beyond what the user has.
-	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, true)
+	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, true, args.HomeDirectory)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to demote user.")
 		return 1, err.Error(), nil
@@ -256,15 +256,23 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
 }
 
-// demoteWithHomeDir demotes privilege and returns home directory.
+// demoteWithHomeDir demotes privilege and returns the home directory.
 // validateGroup enforces that the requested group is a supplementary
-// group of the user — required on Unix download paths to prevent
-// using an arbitrary GID for filesystem access, and off on upload
-// paths which accept looser group matching.
-// When utils.Demote is a no-op (e.g., Windows, or Unix running as a
-// non-root user), falls back to os/user.Lookup so the home directory
-// is still populated for path containment / relative-path resolution.
-func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGroup bool) (*syscall.SysProcAttr, string, error) {
+// group of the user. Required on Unix download paths to prevent
+// using an arbitrary GID for filesystem access; off on upload paths
+// which accept looser group matching.
+//
+// Home directory is resolved in descending priority:
+//  1. utils.Demote result (Unix, running as root)
+//  2. os/user.Lookup on the given username
+//  3. fallbackHome (typically args.HomeDirectory carried in the
+//     protocol message from alpacon-server)
+//
+// The fallback exists so Windows and non-root Unix paths do not end
+// up with an empty home, which would cause relative paths to resolve
+// against the process CWD and Windows containment to fail with a
+// misleading configuration error.
+func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGroup bool, fallbackHome string) (*syscall.SysProcAttr, string, error) {
 	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: validateGroup})
 	if err != nil {
 		return nil, "", err
@@ -273,11 +281,11 @@ func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGrou
 		return result.SysProcAttr, result.User.HomeDir, nil
 	}
 	if username != "" {
-		if u, err := user.Lookup(username); err == nil {
+		if u, err := user.Lookup(username); err == nil && u.HomeDir != "" {
 			return nil, u.HomeDir, nil
 		}
 	}
-	return nil, "", nil
+	return nil, fallbackHome, nil
 }
 
 // parsePaths parses and validates the path list

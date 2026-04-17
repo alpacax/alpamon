@@ -161,7 +161,7 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 	}
 	// utils.Demote is a no-op on Windows, so result is nil and the
 	// homeDirectory above never gets populated. Fall back to the home
-	// directory carried in the protocol message — alpacon-server sends
+	// directory carried in the protocol message: alpacon-server sends
 	// SystemUser.directory here, which is the user's real home.
 	if homeDirectory == "" {
 		homeDirectory = args.HomeDirectory

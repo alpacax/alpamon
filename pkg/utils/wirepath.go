@@ -99,7 +99,7 @@ const errPathEscapesHome = "path escapes home directory"
 // resolved and the remaining trailing components are appended
 // literally. This is needed so a symlink inside the home directory
 // cannot be used to redirect subsequent file operations outside the
-// home — see EnsureUnderHome.
+// home: see EnsureUnderHome.
 //
 // Errors other than "not exist" are returned as-is (permission denied,
 // too many links, etc.) so callers can distinguish a missing leaf
@@ -123,7 +123,7 @@ func ResolveSymlinksBestEffort(cleanPath string) (string, error) {
 	}
 	parent, tail := filepath.Split(cleanPath)
 	// Preserve a volume or filesystem root separator instead of
-	// trimming it away. On Windows `C:\\` must stay `C:\\` — trimming
+	// trimming it away. On Windows `C:\\` must stay `C:\\`; trimming
 	// to `C:` would turn an absolute path drive-relative and change
 	// path semantics for later os calls.
 	parent = trimTrailingSeparatorPreservingRoot(parent)
@@ -170,8 +170,8 @@ func trimTrailingSeparatorPreservingRoot(p string) string {
 // and target, then verifies the resolved target is contained within
 // the resolved home. Returns the resolved target path on success.
 // An empty home short-circuits with the EnsureUnderHome message so
-// callers get a clear, actionable error (the alternative — passing ""
-// to ResolveSymlinksBestEffort — emits a generic "empty path" error).
+// callers get a clear, actionable error; the alternative, passing ""
+// to ResolveSymlinksBestEffort, emits a generic "empty path" error.
 func ResolveAndEnsureUnderHome(home, target string) (string, error) {
 	if home == "" {
 		return "", fmt.Errorf("%s: no home directory configured", errPathEscapesHome)

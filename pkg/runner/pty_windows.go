@@ -224,17 +224,20 @@ func (pc *PtyClient) writeToWebsocket(ctx context.Context, cancel context.Cancel
 // filterEnv returns a copy of env with entries whose key is in
 // excludeKeys removed. Used to drop inherited parent-process values
 // before re-setting them, so the child sees one definitive entry per
-// key instead of two.
+// key instead of two. Key comparison is case-insensitive so that
+// Windows-style inherited keys (e.g. "Userprofile=…") are caught
+// just like "USERPROFILE=…".
 func filterEnv(env []string, excludeKeys ...string) []string {
-	prefixes := make([]string, len(excludeKeys))
-	for i, k := range excludeKeys {
-		prefixes[i] = k + "="
-	}
 	filtered := make([]string, 0, len(env))
 outer:
 	for _, e := range env {
-		for _, pref := range prefixes {
-			if strings.HasPrefix(e, pref) {
+		key, _, found := strings.Cut(e, "=")
+		if !found {
+			filtered = append(filtered, e)
+			continue
+		}
+		for _, excludeKey := range excludeKeys {
+			if strings.EqualFold(key, excludeKey) {
 				continue outer
 			}
 		}
