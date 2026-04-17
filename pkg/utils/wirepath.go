@@ -64,6 +64,11 @@ func isWireDriveLetter(c0, c1 byte) bool {
 // Callers should pass an absolute, cleaned home path and an absolute,
 // cleaned target path. An empty home is treated as "no containment
 // configured" and rejects everything to fail closed.
+//
+// This check is lexical only. To prevent symlink/junction escapes (a
+// user creating a link inside home that points outside), callers must
+// first resolve the target with ResolveSymlinksBestEffort and use the
+// resolved path for containment.
 func EnsureUnderHome(home, cleanPath string) error {
 	if home == "" {
 		return fmt.Errorf("%s: no home directory configured", errPathEscapesHome)
@@ -85,3 +90,36 @@ func EnsureUnderHome(home, cleanPath string) error {
 }
 
 const errPathEscapesHome = "path escapes home directory"
+
+// ResolveSymlinksBestEffort resolves all symlinks and junctions in
+// cleanPath. If cleanPath does not exist yet (for example, when a user
+// is about to create a new file), the nearest existing ancestor is
+// resolved and the remaining trailing components are appended
+// literally. This is needed so a symlink inside the home directory
+// cannot be used to redirect subsequent file operations outside the
+// home — see EnsureUnderHome.
+//
+// Note: this check is still subject to TOCTOU races. A user who can
+// create symlinks inside their home could swap a resolved component
+// between the check and the underlying os call. Closing that hole
+// requires atomic O_NOFOLLOW semantics which Go does not expose
+// portably on Windows.
+func ResolveSymlinksBestEffort(cleanPath string) (string, error) {
+	if cleanPath == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	resolved, err := filepath.EvalSymlinks(cleanPath)
+	if err == nil {
+		return resolved, nil
+	}
+	parent, tail := filepath.Split(cleanPath)
+	parent = strings.TrimRight(parent, string(filepath.Separator))
+	if parent == "" || parent == cleanPath {
+		return cleanPath, nil
+	}
+	resolvedParent, err := ResolveSymlinksBestEffort(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolvedParent, tail), nil
+}

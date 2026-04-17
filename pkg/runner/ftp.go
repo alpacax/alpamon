@@ -34,6 +34,14 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 	}
 
 	homeDir := utils.FromWirePath(data.HomeDirectory)
+	if runtime.GOOS == "windows" && homeDir == "" {
+		// On Windows home-directory containment is the only access
+		// scope (no privilege demotion). Refuse to start a session
+		// that has nothing to contain to, rather than fail closed on
+		// every subsequent command with a confusing error.
+		data.Logger.Debug().Msg("Refusing to open WebFTP session with empty home directory on Windows.")
+		return nil
+	}
 	return &FtpClient{
 		requestHeader:    headers,
 		url:              data.URL,
@@ -201,10 +209,22 @@ func (fc *FtpClient) parsePath(path string) (string, error) {
 		// Enforce an explicit home-directory containment instead, so a
 		// malicious wire path cannot read system files like
 		// C:\Windows\System32\config\SAM.
-		if err := utils.EnsureUnderHome(fc.homeDirectory, cleanPath); err != nil {
+		//
+		// Resolve symlinks/junctions on both the target and the home
+		// directory so a user who creates a junction inside home
+		// cannot redirect subsequent operations outside home.
+		resolvedHome, err := utils.ResolveSymlinksBestEffort(fc.homeDirectory)
+		if err != nil {
 			return "", fmt.Errorf("%s: %w", ErrInvalidArgument, err)
 		}
-		return cleanPath, nil
+		resolvedPath, err := utils.ResolveSymlinksBestEffort(cleanPath)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", ErrInvalidArgument, err)
+		}
+		if err := utils.EnsureUnderHome(resolvedHome, resolvedPath); err != nil {
+			return "", fmt.Errorf("%s: %w", ErrInvalidArgument, err)
+		}
+		return resolvedPath, nil
 	}
 
 	// Unix: enforce that the resolved path stays under "/". OS-level

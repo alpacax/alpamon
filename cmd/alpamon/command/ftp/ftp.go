@@ -7,7 +7,7 @@ import (
 )
 
 var FtpCmd = &cobra.Command{
-	Use:   "ftp <url> <homeDirectory>",
+	Use:   "ftp <url> <serverURL> <homeDirectory>",
 	Short: "Start worker for Web FTP",
 	Args:  cobra.ExactArgs(3),
 	Run: func(cmd *cobra.Command, args []string) {
@@ -24,5 +24,8 @@ var FtpCmd = &cobra.Command{
 
 func RunFtpWorker(data runner.FtpConfigData) {
 	ftpClient := runner.NewFtpClient(data)
+	if ftpClient == nil {
+		return
+	}
 	ftpClient.RunFtpBackground()
 }

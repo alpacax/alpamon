@@ -72,6 +72,7 @@ func TestEnsureUnderHome(t *testing.T) {
 			{"different volume", `C:\Users\alice`, `D:\foo`, true},
 			{"case-insensitive child", `C:\Users\Alice`, `c:\users\alice\docs\a.txt`, false},
 			{"sibling user escape", `C:\Users\alice`, `C:\Users\bob\a.txt`, true},
+			{"prefix substring does not pass", `C:\Users\alice`, `C:\Users\alicex\a.txt`, true},
 			{"empty home rejects", ``, `C:\anything`, true},
 		}
 	} else {
@@ -81,6 +82,7 @@ func TestEnsureUnderHome(t *testing.T) {
 			{"parent dir escape", "/home/alice", "/home", true},
 			{"system file escape", "/home/alice", "/etc/passwd", true},
 			{"sibling user escape", "/home/alice", "/home/bob/a.txt", true},
+			{"prefix substring does not pass", "/home/alice", "/home/alicex/a.txt", true},
 			{"empty home rejects", "", "/anything", true},
 		}
 	}
