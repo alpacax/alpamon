@@ -3,6 +3,7 @@ package command
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/cmd/alpamon/command/ftp"
@@ -19,11 +20,56 @@ import (
 	"github.com/alpacax/alpamon/pkg/pidfile"
 	"github.com/alpacax/alpamon/pkg/runner"
 	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/updater"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/alpacax/alpamon/pkg/version"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
+
+// shutdownHook lets non-signal callers (e.g. the Windows Service
+// handler on SCM Stop) trigger the same graceful-shutdown path that
+// setupSignalHandler uses. It is installed by runAgent once its
+// ContextManager is ready and reset to a no-op when runAgent returns.
+var (
+	shutdownMu   sync.Mutex
+	shutdownFunc func()
+)
+
+// pendingShutdown records that triggerShutdown was called before the
+// shutdown hook was installed. When setShutdownFunc later installs the
+// real hook, it checks this flag and fires immediately, closing the
+// SCM Stop-before-ready race.
+var pendingShutdown bool
+
+func setShutdownFunc(f func()) {
+	shutdownMu.Lock()
+	shutdownFunc = f
+	fire := pendingShutdown && f != nil
+	if fire {
+		pendingShutdown = false
+	}
+	shutdownMu.Unlock()
+	if fire {
+		f()
+	}
+}
+
+// triggerShutdown is called from platform integrations (Windows SCM)
+// to initiate the same shutdown flow as a SIGTERM on Unix. Safe to
+// call before runAgent is ready: the request is recorded and fired as
+// soon as the hook is installed. Also safe after shutdown has run.
+func triggerShutdown() {
+	shutdownMu.Lock()
+	f := shutdownFunc
+	if f == nil {
+		pendingShutdown = true
+	}
+	shutdownMu.Unlock()
+	if f != nil {
+		f()
+	}
+}
 
 const (
 	name          = "alpamon"
@@ -35,7 +81,14 @@ var RootCmd = &cobra.Command{
 	Use:   "alpamon",
 	Short: "Secure Server Agent for Alpacon",
 	Run: func(cmd *cobra.Command, args []string) {
-		runAgent()
+		// When launched by the Windows Service Control Manager, run
+		// under the svc dispatcher instead of as a plain console app.
+		// No-op / always false on Unix.
+		if runningAsWindowsService() {
+			runService()
+			return
+		}
+		runAgent(nil)
 	},
 }
 
@@ -44,15 +97,28 @@ func init() {
 	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelDaemonCmd, register.RegisterCmd)
 }
 
-func runAgent() {
+// runAgent is the core agent loop. When ready is non-nil, it is
+// closed as soon as the shutdown hook is installed — the Windows
+// Service handler uses this to delay reporting Running until a
+// Stop request can actually be honored.
+func runAgent(ready chan<- struct{}) {
 	// Create global context manager for the entire application
 	ctxManager := agent.NewContextManager()
 	ctx := ctxManager.Root()
 
 	setupSignalHandler(ctxManager)
+	setShutdownFunc(ctxManager.Shutdown)
+	defer setShutdownFunc(nil)
+	if ready != nil {
+		close(ready)
+	}
 
 	// Logger
 	logger.InitLogger()
+
+	// On Windows, clean up any ".old" binary left behind by a prior
+	// self-update before the new process takes over. No-op on Unix.
+	updater.CleanupStaleOld()
 
 	// platform
 	utils.InitPlatform()

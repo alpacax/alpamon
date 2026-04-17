@@ -55,6 +55,11 @@ checksum:
 archives:
   - id: alpamon
     name_template: '{{ .ProjectName }}-{{ trimprefix .Version "v" }}-{{ .Os }}-{{ .Arch }}'
+    # Force tar.gz on all platforms including Windows. The self-updater
+    # (pkg/updater/updater.go) hardcodes the .tar.gz suffix in archiveFilename,
+    # and defaulting to zip on Windows would break the update URL.
+    formats:
+      - tar.gz
 
 nfpms:
   - builds:

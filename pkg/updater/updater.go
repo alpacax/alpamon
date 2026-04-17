@@ -51,6 +51,11 @@ func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
 		return fmt.Errorf("invalid version format: %q", latestVersion)
 	}
 
+	// On Windows, clear any ".old" binary left behind by a prior update
+	// before we stage a new one, otherwise MoveFileEx will collide.
+	// No-op on Unix.
+	CleanupStaleOld()
+
 	log.Info().Str("version", latestVersion).Msg("Starting self-update.")
 
 	currentPath, err := os.Executable()
@@ -115,6 +120,14 @@ func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
 func archiveFilename(version string) string {
 	v := strings.TrimPrefix(version, "v")
 	return fmt.Sprintf("%s-%s-%s-%s.tar.gz", binaryName, v, runtime.GOOS, runtime.GOARCH)
+}
+
+// isAlpamonBinary reports whether the tar entry name refers to the
+// alpamon executable, allowing for the ".exe" suffix that goreleaser
+// appends on Windows.
+func isAlpamonBinary(name string) bool {
+	base := filepath.Base(name)
+	return base == binaryName || base == binaryName+".exe"
 }
 
 func checksumURL(baseURL, version string) string {
@@ -252,8 +265,9 @@ func extractBinary(archivePath, destPath string) error {
 			return fmt.Errorf("archive contains too many entries (max %d)", maxTarEntries)
 		}
 
-		// Look for the alpamon binary (may be at root or in a subdirectory)
-		if filepath.Base(hdr.Name) == binaryName && hdr.Typeflag == tar.TypeReg {
+		// Look for the alpamon binary (may be at root or in a subdirectory).
+		// goreleaser appends ".exe" on Windows.
+		if isAlpamonBinary(hdr.Name) && hdr.Typeflag == tar.TypeReg {
 			if hdr.Size > maxExtractSize {
 				return fmt.Errorf("binary size %d exceeds maximum allowed %d bytes", hdr.Size, maxExtractSize)
 			}
@@ -282,37 +296,10 @@ func extractBinary(archivePath, destPath string) error {
 	return fmt.Errorf("binary %q not found in archive", binaryName)
 }
 
-// validateBinaryFormat checks that the extracted file is a valid executable
-// for the current platform by inspecting magic bytes. This avoids executing
-// an unverified binary.
-func validateBinaryFormat(binaryPath string) error {
-	f, err := os.Open(binaryPath)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	magic := make([]byte, 4)
-	if _, err := io.ReadFull(f, magic); err != nil {
-		return fmt.Errorf("failed to read binary header: %w", err)
-	}
-
-	switch runtime.GOOS {
-	case "darwin":
-		// Mach-O: 0xFEEDFACE (32-bit), 0xFEEDFACF (64-bit), 0xCAFEBABE (universal)
-		if !isMachO(magic) {
-			return fmt.Errorf("not a valid Mach-O binary (magic: %x)", magic)
-		}
-	case "linux":
-		// ELF: 0x7F 'E' 'L' 'F'
-		if magic[0] != 0x7f || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F' {
-			return fmt.Errorf("not a valid ELF binary (magic: %x)", magic)
-		}
-	default:
-		return fmt.Errorf("binary format validation not supported on platform %q", runtime.GOOS)
-	}
-
-	return nil
+// readFull is a thin wrapper so platform-specific format validators
+// can read magic bytes without each re-implementing the loop.
+func readFull(r io.Reader, buf []byte) (int, error) {
+	return io.ReadFull(r, buf)
 }
 
 // machoMagics contains all recognized Mach-O magic byte sequences.
@@ -338,41 +325,6 @@ func isMachO(magic []byte) bool {
 		}
 	}
 	return false
-}
-
-func replaceBinary(newPath, currentPath string) error {
-	info, err := os.Stat(currentPath)
-	if err != nil {
-		return fmt.Errorf("failed to stat current binary: %w", err)
-	}
-
-	// Backup current binary for rollback on failure
-	backupPath := currentPath + ".bak"
-	if err := copyFile(currentPath, backupPath, info.Mode()); err != nil {
-		return fmt.Errorf("failed to backup current binary: %w", err)
-	}
-
-	// Stage new binary next to current (same filesystem for atomic rename).
-	// Create with 0600 first, then chmod to match current binary (immune to umask).
-	stagePath := currentPath + ".new"
-	if err := copyFile(newPath, stagePath, 0600); err != nil {
-		return fmt.Errorf("failed to stage new binary: %w", err)
-	}
-	defer func() { _ = os.Remove(stagePath) }()
-
-	if err := os.Chmod(stagePath, info.Mode()); err != nil {
-		return fmt.Errorf("failed to set permissions on staged binary: %w", err)
-	}
-
-	// Atomic replace
-	if err := os.Rename(stagePath, currentPath); err != nil {
-		return fmt.Errorf("failed to rename binary: %w", err)
-	}
-
-	// Replace succeeded — remove backup
-	_ = os.Remove(backupPath)
-	log.Debug().Msg("Binary replaced successfully, backup removed.")
-	return nil
 }
 
 // copyFile copies src to dst with the given permissions.
