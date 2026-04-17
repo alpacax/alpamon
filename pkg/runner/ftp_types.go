@@ -31,6 +31,7 @@ const (
 	ErrFileExists            = "file exists"
 	ErrDirectoryNotEmpty     = "directory not empty"
 	ErrInfiniteRecursion     = "causing infinite recursion"
+	ErrNotSupported          = "not supported on this platform"
 )
 
 type FtpConfigData struct {
@@ -170,6 +171,7 @@ var returnCodes = map[FtpCommand]returnCode{
 			ErrOperationNotPermitted: 450,
 			ErrInvalidArgument:       452,
 			ErrNoSuchFileOrDirectory: 550,
+			ErrNotSupported:          502,
 		},
 	},
 	Chown: {
@@ -179,6 +181,7 @@ var returnCodes = map[FtpCommand]returnCode{
 			ErrOperationNotPermitted: 450,
 			ErrInvalidArgument:       452,
 			ErrNoSuchFileOrDirectory: 550,
+			ErrNotSupported:          502,
 		},
 	},
 }

@@ -554,6 +554,11 @@ func (fc *FtpClient) cpFile(src, dst string, allowOverwrite bool) (CommandResult
 }
 
 func (fc *FtpClient) chmod(path, mode string, recursive bool) (CommandResult, error) {
+	if runtime.GOOS == "windows" {
+		msg := fmt.Sprintf("chmod is %s. Windows uses ACLs instead of POSIX modes.", ErrNotSupported)
+		return CommandResult{Message: msg}, fmt.Errorf("%s", msg)
+	}
+
 	path, err := fc.parsePath(path)
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
@@ -606,6 +611,11 @@ func (fc *FtpClient) chmodRecursive(path string, fileMode os.FileMode) error {
 }
 
 func (fc *FtpClient) chown(path, username, groupname string, recursive bool) (CommandResult, error) {
+	if runtime.GOOS == "windows" {
+		msg := fmt.Sprintf("chown is %s. Windows uses SID-based ownership instead of UID/GID.", ErrNotSupported)
+		return CommandResult{Message: msg}, fmt.Errorf("%s", msg)
+	}
+
 	path, err := fc.parsePath(path)
 	if err != nil {
 		return CommandResult{Message: err.Error()}, err
