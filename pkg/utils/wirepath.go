@@ -137,9 +137,9 @@ func ResolveSymlinksBestEffort(cleanPath string) (string, error) {
 	return filepath.Join(resolvedParent, tail), nil
 }
 
-// trimTrailingSeparatorPreservingRoot strips a single trailing path
-// separator unless doing so would leave only a volume or filesystem
-// root. Examples:
+// trimTrailingSeparatorPreservingRoot strips trailing path separators
+// unless doing so would leave only a volume or filesystem root.
+// Examples:
 //
 //	"/foo/"    -> "/foo"
 //	"/"        -> "/"          (preserved)
