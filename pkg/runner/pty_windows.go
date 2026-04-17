@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -109,15 +110,14 @@ func (pc *PtyClient) initializeSession() error {
 		commandLine = shell + " " + strings.Join(args, " ")
 	}
 
-	// Build environment
-	env := getDefaultEnv()
-	env["USER"] = pc.username
+	// Inherit the parent process environment so PowerShell has the
+	// Windows-specific variables it needs (SystemRoot, PSModulePath,
+	// COMPUTERNAME, etc.). Missing these causes error 8009001d at
+	// PowerShell startup.
+	envSlice := os.Environ()
+	envSlice = append(envSlice, "USER="+pc.username)
 	if pc.homeDirectory != "" {
-		env["USERPROFILE"] = pc.homeDirectory
-	}
-	var envSlice []string
-	for k, v := range env {
-		envSlice = append(envSlice, fmt.Sprintf("%s=%s", k, v))
+		envSlice = append(envSlice, "USERPROFILE="+pc.homeDirectory)
 	}
 
 	opts := []conpty.ConPtyOption{
