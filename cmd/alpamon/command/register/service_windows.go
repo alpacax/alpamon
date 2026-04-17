@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/utils"
@@ -12,7 +14,6 @@ import (
 )
 
 const (
-	alpamonBinPath       = `C:\Program Files\alpamon\alpamon.exe`
 	serviceName          = "alpamon"
 	serviceDisplayName   = "Alpamon Agent"
 	serviceDescription   = "Secure server agent for the Alpacon infrastructure access platform."
@@ -20,17 +21,31 @@ const (
 	recoveryRestartDelay = 5 * time.Second
 )
 
+// defaultInstallBinPath returns the canonical SCM BinaryPathName that
+// ensureInstalled() targets. Used as a fallback when os.Executable()
+// fails; derived from installDir() so both the installer and the
+// service entry stay in sync across systems where %ProgramFiles% is
+// non-default (different drive / localized install).
+func defaultInstallBinPath() string {
+	return filepath.Join(installDir(), installExeName)
+}
+
 func ensureDirectories() error {
 	return utils.EnsureDirectories()
 }
 
 func startService() error {
-	binPath := alpamonBinPath
+	binPath := defaultInstallBinPath()
 	if exe, err := os.Executable(); err == nil {
 		binPath = exe
 	} else {
 		fmt.Printf("Warning: os.Executable() failed (%v); falling back to %s\n", err, binPath)
 	}
+	// SCM stores BinaryPathName as a command line; a path that contains
+	// whitespace must be quoted. Leaving it unquoted triggers the
+	// classic "unquoted service path" behavior where Windows may
+	// search and execute sibling files (C:\Program.exe, etc.).
+	serviceBinPath := quoteServicePath(binPath)
 
 	m, err := mgr.Connect()
 	if err != nil {
@@ -50,7 +65,7 @@ func startService() error {
 		}
 		s, err = m.CreateService(
 			serviceName,
-			binPath,
+			serviceBinPath,
 			mgr.Config{
 				DisplayName:      serviceDisplayName,
 				Description:      serviceDescription,
@@ -69,7 +84,7 @@ func startService() error {
 		// pointing at an older location, services created by the old
 		// sc.exe instructions without DelayedAutoStart, etc.
 		if cfg, cfgErr := s.Config(); cfgErr == nil {
-			cfg.BinaryPathName = binPath
+			cfg.BinaryPathName = serviceBinPath
 			cfg.DisplayName = serviceDisplayName
 			cfg.Description = serviceDescription
 			cfg.StartType = mgr.StartAutomatic
@@ -132,4 +147,23 @@ func elevationHint(err error) string {
 func isServiceNotExist(err error) bool {
 	var errno windows.Errno
 	return errors.As(err, &errno) && errno == windows.ERROR_SERVICE_DOES_NOT_EXIST
+}
+
+// quoteServicePath wraps p in double quotes when it contains
+// whitespace and is not already quoted. SCM treats BinaryPathName as
+// a command line, so an unquoted "C:\Program Files\alpamon\..." can
+// be parsed as "C:\Program.exe Files\alpamon\..." and execute a
+// sibling file if one exists. Paths without whitespace are returned
+// unchanged to keep SCM output readable.
+func quoteServicePath(p string) string {
+	if p == "" {
+		return p
+	}
+	if strings.HasPrefix(p, `"`) {
+		return p
+	}
+	if !strings.ContainsAny(p, " \t") {
+		return p
+	}
+	return `"` + p + `"`
 }
