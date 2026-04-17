@@ -90,7 +90,7 @@ func (pc *PtyClient) RunPtyBackground() {
 // waitForChildExit cancels the session when the shell inside the
 // ConPTY exits (e.g. the user types `exit` in PowerShell). ConPTY's
 // output pipe stays open across the child exit, so Read() alone does
-// not notice — without this the websocket would linger until the
+// not notice—without this the websocket would linger until the
 // client disconnects or idle-timeouts elsewhere fire. conpty.Wait
 // polls WaitForSingleObject on the child process handle.
 func (pc *PtyClient) waitForChildExit(ctx context.Context, cancel context.CancelFunc) {
@@ -282,7 +282,7 @@ func (pc *PtyClient) close() {
 		// Emit CloseNormalClosure on our end so the web client
 		// treats a clean shell exit like a Unix bash exit rather
 		// than an abnormal disconnect. sessionCloseCode (4000) is
-		// still recognised in IsCloseError filters so a peer that
+		// still recognized in IsCloseError filters so a peer that
 		// happens to send it is accepted silently.
 		_ = pc.conn.WriteControl(
 			websocket.CloseMessage,
