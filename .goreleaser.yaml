@@ -55,6 +55,17 @@ checksum:
 archives:
   - id: alpamon
     name_template: '{{ .ProjectName }}-{{ trimprefix .Version "v" }}-{{ .Os }}-{{ .Arch }}'
+    # Default to tar.gz everywhere so the self-updater
+    # (pkg/updater/updater.go) which hardcodes the .tar.gz suffix keeps
+    # working. On Windows we additionally publish .zip so operators
+    # doing a manual download get the format native to Windows.
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - tar.gz
+          - zip
 
 nfpms:
   - builds:

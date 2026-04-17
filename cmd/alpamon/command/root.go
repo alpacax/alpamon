@@ -19,6 +19,7 @@ import (
 	"github.com/alpacax/alpamon/pkg/pidfile"
 	"github.com/alpacax/alpamon/pkg/runner"
 	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/updater"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/alpacax/alpamon/pkg/version"
 	"github.com/rs/zerolog/log"
@@ -35,7 +36,14 @@ var RootCmd = &cobra.Command{
 	Use:   "alpamon",
 	Short: "Secure Server Agent for Alpacon",
 	Run: func(cmd *cobra.Command, args []string) {
-		runAgent()
+		// When launched by the Windows Service Control Manager, run
+		// under the svc dispatcher instead of as a plain console app.
+		// No-op / always false on Unix.
+		if runningAsWindowsService() {
+			runService()
+			return
+		}
+		runAgent(nil)
 	},
 }
 
@@ -44,15 +52,28 @@ func init() {
 	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelDaemonCmd, register.RegisterCmd)
 }
 
-func runAgent() {
+// runAgent is the core agent loop. When ready is non-nil, it is
+// closed as soon as the shutdown hook is installed — the Windows
+// Service handler uses this to delay reporting Running until a
+// Stop request can actually be honored.
+func runAgent(ready chan<- struct{}) {
 	// Create global context manager for the entire application
 	ctxManager := agent.NewContextManager()
 	ctx := ctxManager.Root()
 
 	setupSignalHandler(ctxManager)
+	setShutdownFunc(ctxManager.Shutdown)
+	defer setShutdownFunc(nil)
+	if ready != nil {
+		close(ready)
+	}
 
 	// Logger
 	logger.InitLogger()
+
+	// On Windows, clean up any ".old" binary left behind by a prior
+	// self-update before the new process takes over. No-op on Unix.
+	updater.CleanupStaleOld()
 
 	// platform
 	utils.InitPlatform()

@@ -20,6 +20,14 @@ import (
 // createTestArchive creates a tar.gz archive containing a fake alpamon binary.
 func createTestArchive(t *testing.T, binaryContent []byte) []byte {
 	t.Helper()
+	return createTestArchiveNamed(t, binaryName, binaryContent)
+}
+
+// createTestArchiveNamed creates a tar.gz archive containing a single
+// file with the given name. Used to test both Unix-style "alpamon"
+// and Windows-style "alpamon.exe" archive entries.
+func createTestArchiveNamed(t *testing.T, entryName string, binaryContent []byte) []byte {
+	t.Helper()
 	tmpFile, err := os.CreateTemp("", "test-archive-*.tar.gz")
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +41,7 @@ func createTestArchive(t *testing.T, binaryContent []byte) []byte {
 	tw := tar.NewWriter(gw)
 
 	hdr := &tar.Header{
-		Name: binaryName,
+		Name: entryName,
 		Mode: 0755,
 		Size: int64(len(binaryContent)),
 	}
@@ -198,6 +206,33 @@ func TestExtractBinary(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" && info.Mode()&0111 == 0 {
 		t.Error("extracted binary should be executable")
+	}
+}
+
+func TestExtractBinary_WindowsExe(t *testing.T) {
+	// goreleaser appends ".exe" to the binary name on Windows; the
+	// extractor must recognise that entry too. Regression guard for
+	// isAlpamonBinary.
+	binaryContent := []byte("fake pe binary")
+	archive := createTestArchiveNamed(t, "alpamon.exe", binaryContent)
+
+	tempDir := t.TempDir()
+	archivePath := filepath.Join(tempDir, "test.tar.gz")
+	if err := os.WriteFile(archivePath, archive, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	destPath := filepath.Join(tempDir, "extracted")
+	if err := extractBinary(archivePath, destPath); err != nil {
+		t.Fatalf("extractBinary() error on alpamon.exe entry: %v", err)
+	}
+
+	got, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(binaryContent) {
+		t.Errorf("extracted content = %q, want %q", got, binaryContent)
 	}
 }
 

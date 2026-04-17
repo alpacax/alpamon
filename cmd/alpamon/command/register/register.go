@@ -87,6 +87,16 @@ func init() {
 }
 
 func runRegister(cmd *cobra.Command, args []string) error {
+	// 0. On Windows, place the binary in %ProgramFiles%\alpamon and
+	// re-exec from there so the Service Manager entry we're about to
+	// create points at a stable path. No-op on Linux/macOS, where
+	// apt/brew already handled placement.
+	if relaunched, err := ensureInstalled(); err != nil {
+		return err
+	} else if relaunched {
+		return nil
+	}
+
 	// 1. Check if config file already exists (prevent re-registration)
 	if info, err := os.Stat(configPath); err == nil {
 		if info.Size() > 0 {
@@ -316,4 +326,3 @@ debug = false
 		"CACert": caCert,
 	})
 }
-
