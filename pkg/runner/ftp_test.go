@@ -2,62 +2,10 @@ package runner
 
 import (
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/alpacax/alpamon/pkg/config"
 )
-
-func TestWirePathRoundtripUnix(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix-specific behavior")
-	}
-
-	cases := []string{"/home/foo", "/tmp/a/b", "/"}
-	for _, p := range cases {
-		got := toWirePath(p)
-		if got != p {
-			t.Errorf("toWirePath(%q) = %q, want %q (no-op on Unix)", p, got, p)
-		}
-		back := fromWirePath(p)
-		if back != p {
-			t.Errorf("fromWirePath(%q) = %q, want %q (no-op on Unix)", p, back, p)
-		}
-	}
-}
-
-func TestWirePathRoundtripWindows(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows-specific behavior")
-	}
-
-	cases := []struct {
-		native string
-		wire   string
-	}{
-		{`C:\Users\Administrator`, "/C:/Users/Administrator"},
-		{`c:\foo\bar`, "/c:/foo/bar"},
-		{`C:\`, "/C:/"},
-	}
-	for _, tc := range cases {
-		if got := toWirePath(tc.native); got != tc.wire {
-			t.Errorf("toWirePath(%q) = %q, want %q", tc.native, got, tc.wire)
-		}
-		if got := fromWirePath(tc.wire); got != tc.native {
-			t.Errorf("fromWirePath(%q) = %q, want %q", tc.wire, got, tc.native)
-		}
-	}
-
-	// fromWirePath should also accept already-native input
-	if got := fromWirePath(`C:\Users\foo`); got != `C:\Users\foo` {
-		t.Errorf("fromWirePath(native) should pass through, got %q", got)
-	}
-
-	// Bare "/C:" (breadcrumb click on drive letter) normalizes to drive root
-	if got := fromWirePath("/C:"); got != `C:\` {
-		t.Errorf("fromWirePath(\"/C:\") = %q, want C:\\", got)
-	}
-}
 
 func newTestFtpClient(home string) *FtpClient {
 	return &FtpClient{

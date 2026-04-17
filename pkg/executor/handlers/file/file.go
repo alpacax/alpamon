@@ -214,7 +214,8 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 		return 1, err.Error()
 	}
 
-	downloadPath, err := utils.SanitizePath(args.Path)
+	// Paths arrive in wire format from the web client.
+	downloadPath, err := utils.SanitizePath(utils.FromWirePath(args.Path))
 	if err != nil {
 		return 1, err.Error()
 	}
@@ -270,6 +271,13 @@ func (h *FileHandler) demoteWithHomeDir(username, groupname string) (*syscall.Sy
 func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]string, bool, bool, error) {
 	paths := make([]string, len(pathList))
 	for i, path := range pathList {
+		// Paths from the web client arrive in wire format (POSIX-like
+		// with a leading "/"). Convert to a native OS path before any
+		// filepath.IsAbs / Join work, otherwise Windows drive-letter
+		// paths like "/C:/Users/foo" get joined to homeDirectory and
+		// produce "C:\C:\Users\foo".
+		path = utils.FromWirePath(path)
+
 		if strings.HasPrefix(path, "~") {
 			path = strings.Replace(path, "~", homeDirectory, 1)
 		}

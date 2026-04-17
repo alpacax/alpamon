@@ -18,47 +18,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Wire format for FTP paths is POSIX-like with a leading "/".
-// - Unix native "/home/foo"            <=> wire "/home/foo"
-// - Windows native "C:\\Users\\foo"    <=> wire "/C:/Users/foo"
-// The web client splits paths on "/", so all responses must use wire
-// format. OS calls inside alpamon use the native format.
-
-// fromWirePath converts a wire-format FTP path to a native OS path.
-// It is a no-op on Unix. On Windows, "/C:/Users/foo" → "C:\\Users\\foo".
-// A bare "/C:" is normalized to the drive root "C:\\" since "C:" alone
-// means drive-relative on Windows, which is not what a breadcrumb click
-// to the drive letter means semantically.
-func fromWirePath(p string) string {
-	if p == "" {
-		return p
-	}
-	if runtime.GOOS == "windows" && len(p) >= 3 && p[0] == '/' && isDriveLetter(p[1], p[2]) {
-		p = p[1:]
-		if len(p) == 2 {
-			p += `\`
-		}
-	}
-	return filepath.FromSlash(p)
-}
-
-// toWirePath converts a native OS path to the wire format.
-// It is a no-op on Unix. On Windows, "C:\\Users\\foo" → "/C:/Users/foo".
-func toWirePath(p string) string {
-	if p == "" {
-		return p
-	}
-	slashed := filepath.ToSlash(p)
-	if runtime.GOOS == "windows" && len(slashed) >= 2 && isDriveLetter(slashed[0], slashed[1]) {
-		return "/" + slashed
-	}
-	return slashed
-}
-
-func isDriveLetter(c0, c1 byte) bool {
-	return ((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z')) && c1 == ':'
-}
-
 type FtpClient struct {
 	conn             *websocket.Conn
 	requestHeader    http.Header
@@ -74,7 +33,7 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 		"User-Agent": {utils.GetUserAgent("alpamon")},
 	}
 
-	homeDir := fromWirePath(data.HomeDirectory)
+	homeDir := utils.FromWirePath(data.HomeDirectory)
 	return &FtpClient{
 		requestHeader:    headers,
 		url:              data.URL,
@@ -211,14 +170,14 @@ func (fc *FtpClient) handleFtpCommand(command FtpCommand, data FtpData) (Command
 }
 
 // parsePath takes a wire-format path from the web client and returns a
-// native OS absolute path suitable for os.* calls. Use toWirePath() when
+// native OS absolute path suitable for os.* calls. Use utils.ToWirePath() when
 // placing the resulting path back into a response.
 func (fc *FtpClient) parsePath(path string) (string, error) {
 	if strings.ContainsRune(path, '\x00') {
 		return "", fmt.Errorf("invalid argument: path contains null byte")
 	}
 
-	path = fromWirePath(path)
+	path = utils.FromWirePath(path)
 
 	if strings.HasPrefix(path, "~") {
 		path = strings.Replace(path, "~", fc.workingDirectory, 1)
@@ -266,7 +225,7 @@ func (fc *FtpClient) listRecursive(path string, depth, current int, showHidden b
 	result := CommandResult{
 		Name:     filepath.Base(path),
 		Type:     "folder",
-		Path:     toWirePath(path),
+		Path:     utils.ToWirePath(path),
 		ModTime:  nil,
 		Children: []CommandResult{},
 	}
@@ -343,7 +302,7 @@ func (fc *FtpClient) getDiretoryStructure(entry os.DirEntry, path string, depth,
 	modTime := info.ModTime()
 	child := &CommandResult{
 		Name:             entry.Name(),
-		Path:             toWirePath(fullPath),
+		Path:             utils.ToWirePath(fullPath),
 		Code:             returnCodes[List].Success,
 		ModTime:          &modTime,
 		PermissionString: permString,
@@ -354,7 +313,7 @@ func (fc *FtpClient) getDiretoryStructure(entry os.DirEntry, path string, depth,
 
 	if isSymlink {
 		child.Type = "symlink"
-		child.Target = toWirePath(target)
+		child.Target = utils.ToWirePath(target)
 		if targetInfo != nil {
 			child.Size = targetInfo.Size()
 		}
@@ -379,7 +338,7 @@ func (fc *FtpClient) getDiretoryStructure(entry os.DirEntry, path string, depth,
 func (fc *FtpClient) handleListErrorResult(path string, err error) CommandResult {
 	result := CommandResult{
 		Name:    filepath.Base(path),
-		Path:    toWirePath(path),
+		Path:    utils.ToWirePath(path),
 		Message: err.Error(),
 	}
 	_, result.Code = GetFtpErrorCode(List, result)
@@ -432,7 +391,7 @@ func (fc *FtpClient) cwd(path string) (CommandResult, error) {
 }
 
 func (fc *FtpClient) pwd() (CommandResult, error) {
-	wire := toWirePath(fc.workingDirectory)
+	wire := utils.ToWirePath(fc.workingDirectory)
 	return CommandResult{
 		Message: fmt.Sprintf("Current working directory: %s.", wire),
 		Path:    wire,
@@ -519,8 +478,8 @@ func (fc *FtpClient) mv(src, dst string, allowOverwrite bool) (CommandResult, er
 	}
 
 	return CommandResult{
-		Dst:     toWirePath(dst),
-		Message: fmt.Sprintf("Move %s to %s.", toWirePath(src), toWirePath(dst)),
+		Dst:     utils.ToWirePath(dst),
+		Message: fmt.Sprintf("Move %s to %s.", utils.ToWirePath(src), utils.ToWirePath(dst)),
 	}, nil
 }
 
@@ -575,8 +534,8 @@ func (fc *FtpClient) cpDir(src, dst string, allowOverwrite bool) (CommandResult,
 	}
 
 	return CommandResult{
-		Dst:     toWirePath(dst),
-		Message: fmt.Sprintf("Copy %s to %s.", toWirePath(src), toWirePath(dst)),
+		Dst:     utils.ToWirePath(dst),
+		Message: fmt.Sprintf("Copy %s to %s.", utils.ToWirePath(src), utils.ToWirePath(dst)),
 	}, nil
 }
 
@@ -589,8 +548,8 @@ func (fc *FtpClient) cpFile(src, dst string, allowOverwrite bool) (CommandResult
 	}
 
 	return CommandResult{
-		Dst:     toWirePath(dst),
-		Message: fmt.Sprintf("Copy %s to %s.", toWirePath(src), toWirePath(dst)),
+		Dst:     utils.ToWirePath(dst),
+		Message: fmt.Sprintf("Copy %s to %s.", utils.ToWirePath(src), utils.ToWirePath(dst)),
 	}, nil
 }
 
