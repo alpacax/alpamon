@@ -63,6 +63,25 @@ func startService() error {
 		if err != nil {
 			return fmt.Errorf("create service: %w%s", err, elevationHint(err))
 		}
+	} else {
+		// Service already exists. Refresh its config so re-running
+		// register is idempotent and corrects any drift: a binPath
+		// pointing at an older location, services created by the old
+		// sc.exe instructions without DelayedAutoStart, etc.
+		if cfg, cfgErr := s.Config(); cfgErr == nil {
+			cfg.BinaryPathName = binPath
+			cfg.DisplayName = serviceDisplayName
+			cfg.Description = serviceDescription
+			cfg.StartType = mgr.StartAutomatic
+			cfg.DelayedAutoStart = true
+			cfg.ServiceType = windows.SERVICE_WIN32_OWN_PROCESS
+			cfg.ErrorControl = mgr.ErrorNormal
+			if err := s.UpdateConfig(cfg); err != nil {
+				fmt.Printf("Warning: failed to refresh service configuration: %v\n", err)
+			}
+		} else {
+			fmt.Printf("Warning: failed to read existing service configuration: %v\n", cfgErr)
+		}
 	}
 	defer func() { _ = s.Close() }()
 

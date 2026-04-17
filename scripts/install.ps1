@@ -3,11 +3,12 @@
     Install the Alpamon agent on Windows.
 
 .DESCRIPTION
-    Downloads the latest Alpamon release, extracts alpamon.exe to a
-    temporary directory, and runs `alpamon register`. The register
-    command copies the binary to %ProgramFiles%\alpamon\ and creates
-    a Windows Service. Intended for cloud-init, Packer, EC2 UserData,
-    and Azure Custom Script Extension.
+    Downloads the latest Alpamon release, verifies its SHA-256
+    checksum against the publisher-signed checksums manifest, extracts
+    alpamon.exe, and runs `alpamon register`. The register command
+    copies the binary to %ProgramFiles%\alpamon\ and creates a Windows
+    Service. Intended for cloud-init, Packer, EC2 UserData, and Azure
+    Custom Script Extension.
 
     Parameters can be provided on the command line or via environment
     variables (ALPAMON_URL, ALPAMON_TOKEN, ALPAMON_NAME,
@@ -23,15 +24,31 @@
     Server name. Defaults to the machine hostname.
 
 .PARAMETER Version
-    Specific release tag to install (e.g., "v1.2.3"). Defaults to the
-    latest release.
+    Specific release tag to install (e.g., "v1.2.3" or "1.2.3").
+    Defaults to the latest release. A leading "v" is added if missing.
 
 .EXAMPLE
     # Interactive install.
     .\install.ps1 -Url https://alpacon.example.com -Token <TOKEN>
 
 .EXAMPLE
-    # cloud-init / UserData style.
+    # cloud-init / UserData. Preferred form: download and run the
+    # script from a file rather than piping into Invoke-Expression.
+    # This keeps the installer auditable on the target machine and
+    # avoids running arbitrary remote content under Administrator
+    # if the delivery URL is ever tampered with.
+    $env:ALPAMON_URL   = "https://alpacon.example.com"
+    $env:ALPAMON_TOKEN = "<TOKEN>"
+    $installer = Join-Path $env:TEMP 'alpamon-install.ps1'
+    Invoke-WebRequest -UseBasicParsing `
+        -Uri 'https://raw.githubusercontent.com/alpacax/alpamon/main/scripts/install.ps1' `
+        -OutFile $installer
+    & powershell -ExecutionPolicy Bypass -File $installer
+
+.EXAMPLE
+    # Terse form, trades auditability for brevity. The script itself
+    # still verifies the downloaded release archive against the
+    # publisher-signed checksums file.
     $env:ALPAMON_URL   = "https://alpacon.example.com"
     $env:ALPAMON_TOKEN = "<TOKEN>"
     Invoke-WebRequest -UseBasicParsing `
@@ -64,19 +81,49 @@ if (-not $Version) {
         "https://api.github.com/repos/alpacax/alpamon/releases/latest"
     $Version = $latest.tag_name
 }
+# Accept both "v1.2.3" and "1.2.3"; GitHub release tags use the "v"
+# prefix so we need it on the download URL path.
+if (-not $Version.StartsWith("v")) {
+    $Version = "v$Version"
+}
 $versionBare = $Version.TrimStart("v")
 
 $arch = "amd64"
-$archiveName = "alpamon-$versionBare-windows-$arch.tar.gz"
-$archiveUrl  = "https://github.com/alpacax/alpamon/releases/download/$Version/$archiveName"
+$archiveName   = "alpamon-$versionBare-windows-$arch.tar.gz"
+$checksumsName = "alpamon-$versionBare-checksums.sha256"
+$archiveUrl    = "https://github.com/alpacax/alpamon/releases/download/$Version/$archiveName"
+$checksumsUrl  = "https://github.com/alpacax/alpamon/releases/download/$Version/$checksumsName"
 
 $tempDir = Join-Path $env:TEMP ("alpamon-install-" + [System.Guid]::NewGuid().ToString().Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
 try {
-    $archivePath = Join-Path $tempDir "alpamon.tar.gz"
+    $archivePath   = Join-Path $tempDir "alpamon.tar.gz"
+    $checksumsPath = Join-Path $tempDir $checksumsName
+
     Write-Host "Downloading $archiveUrl ..."
     Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath -UseBasicParsing
+
+    Write-Host "Downloading $checksumsUrl ..."
+    Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing
+
+    # Verify the archive against the publisher-signed checksums file
+    # before we extract and execute anything from it. This mirrors the
+    # agent's built-in self-updater and is what protects a pipe-to-iex
+    # install path from a tampered release asset.
+    $expectedLine = Get-Content $checksumsPath | Where-Object {
+        $parts = $_ -split '\s+', 2
+        $parts.Length -eq 2 -and $parts[1].Trim() -eq $archiveName
+    } | Select-Object -First 1
+    if (-not $expectedLine) {
+        throw "Checksum for $archiveName not found in $checksumsName."
+    }
+    $expectedHash = ($expectedLine -split '\s+', 2)[0].Trim()
+    $actualHash   = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash
+    if ($actualHash.ToLower() -ne $expectedHash.ToLower()) {
+        throw "SHA-256 mismatch for ${archiveName}: expected $expectedHash, got $actualHash."
+    }
+    Write-Host "Checksum verified."
 
     Write-Host "Extracting..."
     # tar.exe has shipped with Windows since 10 1803 / Server 2019.
