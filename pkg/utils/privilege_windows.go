@@ -28,7 +28,7 @@ func Demote(username, groupname string, opts DemoteOptions) (*DemoteResult, erro
 		log.Debug().Msg("No username or groupname provided, running as the current user.")
 		return nil, nil
 	}
-	log.Warn().Str("username", username).
+	log.Debug().Str("username", username).
 		Msg("Privilege demotion not supported on Windows. Session will run as the service account.")
 	return nil, nil
 }
