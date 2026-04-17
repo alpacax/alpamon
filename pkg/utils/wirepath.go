@@ -123,3 +123,21 @@ func ResolveSymlinksBestEffort(cleanPath string) (string, error) {
 	}
 	return filepath.Join(resolvedParent, tail), nil
 }
+
+// ResolveAndEnsureUnderHome resolves symlinks/junctions on both home
+// and target, then verifies the resolved target is contained within
+// the resolved home. Returns the resolved target path on success.
+func ResolveAndEnsureUnderHome(home, target string) (string, error) {
+	resolvedHome, err := ResolveSymlinksBestEffort(home)
+	if err != nil {
+		return "", err
+	}
+	resolvedTarget, err := ResolveSymlinksBestEffort(target)
+	if err != nil {
+		return "", err
+	}
+	if err := EnsureUnderHome(resolvedHome, resolvedTarget); err != nil {
+		return "", err
+	}
+	return resolvedTarget, nil
+}

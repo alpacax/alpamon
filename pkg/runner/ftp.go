@@ -206,25 +206,15 @@ func (fc *FtpClient) parsePath(path string) (string, error) {
 		// Windows has no privilege demotion (utils.Demote is a no-op),
 		// so alpamon runs as the service account (typically SYSTEM)
 		// and OS-level ACLs do not scope the session to the named user.
-		// Enforce an explicit home-directory containment instead, so a
-		// malicious wire path cannot read system files like
-		// C:\Windows\System32\config\SAM.
-		//
-		// Resolve symlinks/junctions on both the target and the home
-		// directory so a user who creates a junction inside home
-		// cannot redirect subsequent operations outside home.
-		resolvedHome, err := utils.ResolveSymlinksBestEffort(fc.homeDirectory)
+		// Enforce an explicit home-directory containment instead, with
+		// symlinks/junctions resolved on both sides, so a malicious
+		// wire path (or a junction planted inside home) cannot reach
+		// system files like C:\Windows\System32\config\SAM.
+		resolved, err := utils.ResolveAndEnsureUnderHome(fc.homeDirectory, cleanPath)
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", ErrInvalidArgument, err)
 		}
-		resolvedPath, err := utils.ResolveSymlinksBestEffort(cleanPath)
-		if err != nil {
-			return "", fmt.Errorf("%s: %w", ErrInvalidArgument, err)
-		}
-		if err := utils.EnsureUnderHome(resolvedHome, resolvedPath); err != nil {
-			return "", fmt.Errorf("%s: %w", ErrInvalidArgument, err)
-		}
-		return resolvedPath, nil
+		return resolved, nil
 	}
 
 	// Unix: enforce that the resolved path stays under "/". OS-level

@@ -222,7 +222,7 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 		return 1, err.Error()
 	}
 	if runtime.GOOS == "windows" {
-		resolved, err := resolveAndEnsureUnderHome(homeDirectory, downloadPath)
+		resolved, err := utils.ResolveAndEnsureUnderHome(homeDirectory, downloadPath)
 		if err != nil {
 			return 1, err.Error()
 		}
@@ -250,25 +250,6 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	}
 
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
-}
-
-// resolveAndEnsureUnderHome resolves symlinks/junctions on both the
-// home directory and the target path, then verifies the target stays
-// within home. Used on Windows where OS-level privilege demotion does
-// not scope file access to the user's home.
-func resolveAndEnsureUnderHome(home, target string) (string, error) {
-	resolvedHome, err := utils.ResolveSymlinksBestEffort(home)
-	if err != nil {
-		return "", err
-	}
-	resolvedTarget, err := utils.ResolveSymlinksBestEffort(target)
-	if err != nil {
-		return "", err
-	}
-	if err := utils.EnsureUnderHome(resolvedHome, resolvedTarget); err != nil {
-		return "", err
-	}
-	return resolvedTarget, nil
 }
 
 // demoteWithHomeDir demotes privilege and returns home directory.
@@ -314,7 +295,7 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 			return nil, false, false, err
 		}
 		if runtime.GOOS == "windows" {
-			resolved, err := resolveAndEnsureUnderHome(homeDirectory, sanitized)
+			resolved, err := utils.ResolveAndEnsureUnderHome(homeDirectory, sanitized)
 			if err != nil {
 				return nil, false, false, err
 			}
