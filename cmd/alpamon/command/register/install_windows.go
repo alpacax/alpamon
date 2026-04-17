@@ -86,11 +86,32 @@ func copySelf(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("create destination (%s): %w%s", dst, err, installErrorHint(err, dst))
 	}
+
+	// Roll back the destination on any failure past this point, so a
+	// retry doesn't find a truncated alpamon.exe that would then pass
+	// the os.Executable() check and skip reinstall.
+	success := false
+	defer func() {
+		if out != nil {
+			_ = out.Close()
+		}
+		if !success {
+			_ = os.Remove(dst)
+		}
+	}()
+
 	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
 		return fmt.Errorf("write destination: %w", err)
 	}
-	return out.Close()
+
+	closeErr := out.Close()
+	out = nil
+	if closeErr != nil {
+		return fmt.Errorf("close destination: %w", closeErr)
+	}
+
+	success = true
+	return nil
 }
 
 // installErrorHint annotates the two error classes users hit most

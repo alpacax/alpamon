@@ -50,16 +50,29 @@ sudo alpamon register --url https://<workspace> --token <TOKEN>
 
 Open an elevated PowerShell (Administrator), then run one of:
 
-**Automated — cloud-init, EC2 UserData, Packer, Azure Custom Script Extension**
+**Manual** — download `alpamon-X.Y.Z-windows-amd64.zip` from [Releases](https://github.com/alpacax/alpamon/releases), extract, and run:
+```powershell
+.\alpamon.exe register --url https://<workspace> --token <TOKEN>
+```
+
+**Automated download-then-run** — preferred for cloud-init, EC2 UserData, Packer, Azure Custom Script Extension. Keeps the installer on disk for audit and avoids executing arbitrary remote content under Administrator:
+```powershell
+$env:ALPAMON_URL   = "https://<workspace>"
+$env:ALPAMON_TOKEN = "<TOKEN>"
+$installer = Join-Path $env:TEMP 'alpamon-install.ps1'
+Invoke-WebRequest -UseBasicParsing `
+    -Uri 'https://raw.githubusercontent.com/alpacax/alpamon/main/scripts/install.ps1' `
+    -OutFile $installer
+& powershell -ExecutionPolicy Bypass -File $installer
+```
+
+The install script itself verifies the release archive's SHA-256 against the checksums file published with the release before extracting or executing anything.
+
+A terser pipe-to-`iex` form is also supported for quick one-liners but trades auditability for brevity:
 ```powershell
 $env:ALPAMON_URL   = "https://<workspace>"
 $env:ALPAMON_TOKEN = "<TOKEN>"
 iwr https://raw.githubusercontent.com/alpacax/alpamon/main/scripts/install.ps1 -UseB | iex
-```
-
-**Manual** — download `alpamon-X.Y.Z-windows-amd64.zip` from [Releases](https://github.com/alpacax/alpamon/releases), extract, and run:
-```powershell
-.\alpamon.exe register --url https://<workspace> --token <TOKEN>
 ```
 
 `register` copies the binary to `C:\Program Files\alpamon\`, creates the Windows Service (`StartType=Automatic (Delayed)`, Recovery Actions configured), and starts it. Re-running `register` is idempotent.

@@ -4,11 +4,12 @@
 
 .DESCRIPTION
     Downloads the latest Alpamon release, verifies its SHA-256
-    checksum against the publisher-signed checksums manifest, extracts
-    alpamon.exe, and runs `alpamon register`. The register command
-    copies the binary to %ProgramFiles%\alpamon\ and creates a Windows
-    Service. Intended for cloud-init, Packer, EC2 UserData, and Azure
-    Custom Script Extension.
+    checksum against the checksums file published alongside the
+    release (transport is HTTPS; signature verification is not yet
+    implemented), extracts alpamon.exe, and runs `alpamon register`.
+    The register command copies the binary to %ProgramFiles%\alpamon\
+    and creates a Windows Service. Intended for cloud-init, Packer,
+    EC2 UserData, and Azure Custom Script Extension.
 
     Parameters can be provided on the command line or via environment
     variables (ALPAMON_URL, ALPAMON_TOKEN, ALPAMON_NAME,
@@ -46,9 +47,9 @@
     & powershell -ExecutionPolicy Bypass -File $installer
 
 .EXAMPLE
-    # Terse form, trades auditability for brevity. The script itself
-    # still verifies the downloaded release archive against the
-    # publisher-signed checksums file.
+    # Terse form, trades auditability for brevity. The script still
+    # verifies the downloaded release archive against the checksums
+    # file published alongside the release.
     $env:ALPAMON_URL   = "https://alpacon.example.com"
     $env:ALPAMON_TOKEN = "<TOKEN>"
     Invoke-WebRequest -UseBasicParsing `
@@ -107,10 +108,11 @@ try {
     Write-Host "Downloading $checksumsUrl ..."
     Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing
 
-    # Verify the archive against the publisher-signed checksums file
-    # before we extract and execute anything from it. This mirrors the
-    # agent's built-in self-updater and is what protects a pipe-to-iex
-    # install path from a tampered release asset.
+    # Verify the archive against the checksums file published with
+    # the release, before we extract and execute anything from it.
+    # Transport is HTTPS; signature verification of the checksums
+    # file itself is not yet implemented (see updater.go TODO). This
+    # mirrors the agent's built-in self-updater.
     $expectedLine = Get-Content $checksumsPath | Where-Object {
         $parts = $_ -split '\s+', 2
         $parts.Length -eq 2 -and $parts[1].Trim() -eq $archiveName
