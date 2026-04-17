@@ -2,6 +2,7 @@ package file
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
@@ -219,6 +220,16 @@ func TestFileExists(t *testing.T) {
 }
 
 func TestFileHandler_parsePaths(t *testing.T) {
+	// This test uses Unix-style absolute paths ("/home/user", "/tmp/...").
+	// On Windows parsePaths runs EnsureUnderHome with these paths, which
+	// fails because "/tmp/file.txt" is not inside "/home/user" under
+	// Windows path semantics and "/home/user" itself is not an absolute
+	// Windows path. Skip on Windows; the behavior there is covered by
+	// the EnsureUnderHome and ResolveAndEnsureUnderHome tests in
+	// pkg/utils/wirepath_test.go.
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix path conventions; Windows containment is covered in pkg/utils")
+	}
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 
 	tests := []struct {

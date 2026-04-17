@@ -178,18 +178,21 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 	var code int
 	var message string
 
-	// Download enforces supplementary-group membership so a requested
-	// GID cannot widen filesystem access beyond what the user has.
-	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, true, args.HomeDirectory)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to demote user.")
-		return 1, err.Error(), nil
-	}
-
 	if len(args.Files) == 0 {
+		// Download enforces supplementary-group membership so a requested
+		// GID cannot widen filesystem access beyond what the user has.
+		sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, true, args.HomeDirectory)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to demote user.")
+			return 1, err.Error(), nil
+		}
 		code, message = h.fileDownload(ctx, args, sysProcAttr, homeDirectory)
 		h.statFileTransfer(code, upload, message, args)
 	} else {
+		// Each file entry may target a different user/group, so demote
+		// per file to get the correct sysProcAttr and home directory
+		// for that entry. Reusing the outer args.Username's demotion
+		// would mix up ownership and containment roots on Unix.
 		for _, file := range args.Files {
 			cmdArgs := &common.CommandArgs{
 				Username:       file.Username,
@@ -200,6 +203,15 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 				AllowOverwrite: file.AllowOverwrite,
 				AllowUnzip:     file.AllowUnzip,
 				URL:            file.URL,
+				HomeDirectory:  args.HomeDirectory,
+			}
+			sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(cmdArgs.Username, cmdArgs.Groupname, true, cmdArgs.HomeDirectory)
+			if err != nil {
+				log.Error().Err(err).Str("username", cmdArgs.Username).Msg("Failed to demote user.")
+				code = 1
+				message = err.Error()
+				h.statFileTransfer(code, upload, message, cmdArgs)
+				continue
 			}
 			code, message = h.fileDownload(ctx, cmdArgs, sysProcAttr, homeDirectory)
 			h.statFileTransfer(code, upload, message, cmdArgs)
