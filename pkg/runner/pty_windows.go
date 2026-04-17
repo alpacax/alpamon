@@ -106,7 +106,9 @@ func (pc *PtyClient) waitForChildExit(ctx context.Context, cancel context.Cancel
 	if err != nil {
 		log.Debug().Err(err).Str("sessionID", pc.sessionID).Msg("ConPTY wait returned an error.")
 	} else {
-		log.Info().Uint32("exitCode", exitCode).Str("sessionID", pc.sessionID).
+		// Debug level: Websh sessions end frequently and a clean
+		// shell exit is the expected termination path.
+		log.Debug().Uint32("exitCode", exitCode).Str("sessionID", pc.sessionID).
 			Msg("ConPTY child shell exited; closing Websh session.")
 	}
 	cancel()
@@ -277,9 +279,14 @@ func (pc *PtyClient) close() {
 		_ = pc.cpty.Close()
 	}
 	if pc.conn != nil {
+		// Emit CloseNormalClosure on our end so the web client
+		// treats a clean shell exit like a Unix bash exit rather
+		// than an abnormal disconnect. sessionCloseCode (4000) is
+		// still recognised in IsCloseError filters so a peer that
+		// happens to send it is accepted silently.
 		_ = pc.conn.WriteControl(
 			websocket.CloseMessage,
-			websocket.FormatCloseMessage(sessionCloseCode, ""),
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 			time.Now().Add(5*time.Second),
 		)
 		_ = pc.conn.Close()
