@@ -82,8 +82,36 @@ func (pc *PtyClient) RunPtyBackground() {
 	go pc.writeToWebsocket(ctx, cancel)
 	go pc.readFromWebsocket(ctx, cancel)
 	go pc.writeToPty(ctx, cancel)
+	go pc.waitForChildExit(ctx, cancel)
 
 	<-ctx.Done()
+}
+
+// waitForChildExit cancels the session when the shell inside the
+// ConPTY exits (e.g. the user types `exit` in PowerShell). ConPTY's
+// output pipe stays open across the child exit, so Read() alone does
+// not notice—without this the websocket would linger until the
+// client disconnects or idle-timeouts elsewhere fire. conpty.Wait
+// polls WaitForSingleObject on the child process handle.
+func (pc *PtyClient) waitForChildExit(ctx context.Context, cancel context.CancelFunc) {
+	if pc.cpty == nil {
+		return
+	}
+	exitCode, err := pc.cpty.Wait(ctx)
+	if ctx.Err() != nil {
+		// Context was already canceled by another goroutine (read
+		// error, websocket close, etc.). Nothing to do.
+		return
+	}
+	if err != nil {
+		log.Debug().Err(err).Str("sessionID", pc.sessionID).Msg("ConPTY wait returned an error.")
+	} else {
+		// Debug level: Websh sessions end frequently and a clean
+		// shell exit is the expected termination path.
+		log.Debug().Uint32("exitCode", exitCode).Str("sessionID", pc.sessionID).
+			Msg("ConPTY child shell exited; closing Websh session.")
+	}
+	cancel()
 }
 
 func (pc *PtyClient) initializeSession() error {
@@ -251,9 +279,14 @@ func (pc *PtyClient) close() {
 		_ = pc.cpty.Close()
 	}
 	if pc.conn != nil {
+		// Emit CloseNormalClosure on our end so the web client
+		// treats a clean shell exit like a Unix bash exit rather
+		// than an abnormal disconnect. sessionCloseCode (4000) is
+		// still recognized in IsCloseError filters so a peer that
+		// happens to send it is accepted silently.
 		_ = pc.conn.WriteControl(
 			websocket.CloseMessage,
-			websocket.FormatCloseMessage(sessionCloseCode, ""),
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 			time.Now().Add(5*time.Second),
 		)
 		_ = pc.conn.Close()
