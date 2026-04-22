@@ -80,24 +80,7 @@ func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 func (h *UserHandler) Validate(cmd string, args *common.CommandArgs) error {
 	switch cmd {
 	case common.AddUser.String():
-		data := UserData{
-			Username:                args.Username,
-			UID:                     args.UID,
-			GID:                     args.GID,
-			Comment:                 args.Comment,
-			HomeDirectory:           args.HomeDirectory,
-			HomeDirectoryPermission: args.HomeDirectoryPermission,
-			Shell:                   args.Shell,
-			Groupname:               args.Groupname,
-			Groups:                  args.Groups,
-		}
-		if data.HomeDirectoryPermission == "" {
-			data.HomeDirectoryPermission = "0755"
-		}
-		if data.Shell == "" {
-			data.Shell = "/bin/bash"
-		}
-		return h.ValidateStruct(data)
+		return h.ValidateStruct(userDataFromArgs(args))
 
 	case common.DelUser.String():
 		data := DeleteUserData{
@@ -121,24 +104,7 @@ func (h *UserHandler) Validate(cmd string, args *common.CommandArgs) error {
 
 // handleAddUser handles the adduser command
 func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArgs) (int, string, error) {
-	// Extract and validate arguments
-	data := UserData{
-		Username:                args.Username,
-		UID:                     args.UID,
-		GID:                     args.GID,
-		Comment:                 args.Comment,
-		HomeDirectory:           args.HomeDirectory,
-		HomeDirectoryPermission: args.HomeDirectoryPermission,
-		Shell:                   args.Shell,
-		Groupname:               args.Groupname,
-		Groups:                  args.Groups,
-	}
-	if data.HomeDirectoryPermission == "" {
-		data.HomeDirectoryPermission = "0755"
-	}
-	if data.Shell == "" {
-		data.Shell = "/bin/bash"
-	}
+	data := userDataFromArgs(args)
 
 	err := h.Validate(common.AddUser.String(), args)
 	if err != nil {
@@ -155,48 +121,65 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	var exitCode int
 	var output string
 
-	// Platform-specific user addition
+	// Platform-specific user addition.
+	// UID/GID/HomeDirectory flags are omitted only when IsServiceAccount=true
+	// AND the value is zero/empty, so the OS can auto-assign. For IAM User
+	// payloads (IsServiceAccount=false), these fields are validated as
+	// required upstream — if we ever reach this point with zero values, we
+	// still pass whatever was provided rather than silently rewriting the
+	// command, since defense-in-depth is cheap.
+	omitUID := data.IsServiceAccount && data.UID == 0
+	omitGID := data.IsServiceAccount && data.GID == 0
+	omitHome := data.IsServiceAccount && data.HomeDirectory == ""
+
 	switch utils.PlatformLike {
 	case "debian":
-		exitCode, output, err = h.Executor.Run(
-			ctx,
-			"/usr/sbin/adduser",
-			"--home", data.HomeDirectory,
-			"--shell", data.Shell,
-			"--uid", strconv.FormatUint(data.UID, 10),
-			"--gid", strconv.FormatUint(data.GID, 10),
-			"--gecos", data.Comment,
-			"--disabled-password",
-			data.Username,
-		)
+		cmdArgs := []string{}
+		if !omitHome {
+			cmdArgs = append(cmdArgs, "--home", data.HomeDirectory)
+		}
+		cmdArgs = append(cmdArgs, "--shell", data.Shell)
+		if !omitUID {
+			cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
+		}
+		if !omitGID {
+			cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
+		}
+		cmdArgs = append(cmdArgs, "--gecos", data.Comment, "--disabled-password", data.Username)
+		exitCode, output, err = h.Executor.Run(ctx, "/usr/sbin/adduser", cmdArgs...)
 		if exitCode != 0 {
 			return exitCode, output, err
 		}
 	case "rhel":
-		// Create primary group first if needed
-		exitCode, output, err = h.Executor.Run(
-			ctx,
-			"/usr/sbin/groupadd",
-			"--gid", strconv.FormatUint(data.GID, 10),
-			data.Groupname,
-		)
-		// Ignore if group already exists
-		if exitCode != 0 && !strings.Contains(output, "already exists") {
-			return exitCode, output, err
+		// Create primary group only when an explicit GID is requested.
+		// Without GID (service-account path), useradd auto-creates a group
+		// matching the username.
+		if !omitGID {
+			exitCode, output, err = h.Executor.Run(
+				ctx,
+				"/usr/sbin/groupadd",
+				"--gid", strconv.FormatUint(data.GID, 10),
+				data.Groupname,
+			)
+			// Ignore if group already exists
+			if exitCode != 0 && !strings.Contains(output, "already exists") {
+				return exitCode, output, err
+			}
 		}
 
-		// Create user
-		exitCode, output, err = h.Executor.Run(
-			ctx,
-			"/usr/sbin/useradd",
-			"--home-dir", data.HomeDirectory,
-			"--shell", data.Shell,
-			"--uid", strconv.FormatUint(data.UID, 10),
-			"--gid", strconv.FormatUint(data.GID, 10),
-			"--comment", data.Comment,
-			"--create-home",
-			data.Username,
-		)
+		cmdArgs := []string{}
+		if !omitHome {
+			cmdArgs = append(cmdArgs, "--home-dir", data.HomeDirectory)
+		}
+		cmdArgs = append(cmdArgs, "--shell", data.Shell)
+		if !omitUID {
+			cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
+		}
+		if !omitGID {
+			cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
+		}
+		cmdArgs = append(cmdArgs, "--comment", data.Comment, "--create-home", data.Username)
+		exitCode, output, err = h.Executor.Run(ctx, "/usr/sbin/useradd", cmdArgs...)
 		if exitCode != 0 {
 			return exitCode, output, err
 		}
@@ -204,9 +187,11 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		return 1, fmt.Sprintf("Platform '%s' not supported for user management", utils.PlatformLike), nil
 	}
 
-	// Set home directory permissions if specified
+	// Set home directory permissions if specified.
+	// Skip when HomeDirectory was omitted (OS default path), since the caller
+	// didn't specify a target and we would otherwise chmod an empty path.
 	// codeql[go/path-injection]: Intentional - Admin-specified home directory permission
-	if data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
+	if data.HomeDirectory != "" && data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
 		mode, err := strconv.ParseUint(data.HomeDirectoryPermission, 8, 32)
 		if err == nil {
 			_ = os.Chmod(data.HomeDirectory, os.FileMode(mode)) // lgtm[go/path-injection]
