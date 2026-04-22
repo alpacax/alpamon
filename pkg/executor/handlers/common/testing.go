@@ -3,9 +3,18 @@ package common
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// mockSyntheticPID produces monotonically increasing positive pids for
+// MockCommandExecutor.ExecWithHook so that every invocation hands the
+// hook a distinct, positive value. The base is well above typical real
+// pids to make accidental collisions obvious in test output.
+var mockSyntheticPID atomic.Int64
+
+const mockSyntheticPIDBase = 900000
 
 // MockCommandExecutor is a mock implementation of CommandExecutor for testing.
 // It is the single source of truth for mocking in this package.
@@ -83,11 +92,14 @@ func (m *MockCommandExecutor) Exec(ctx context.Context, args []string, username,
 }
 
 // ExecWithHook mirrors Exec for mock purposes and invokes pidHook (when
-// non-nil) with a synthetic pid of 0 so handlers that rely on the hook
-// contract can be exercised without spawning real processes.
+// non-nil) with a distinct, positive synthetic pid so handlers that rely
+// on the hook contract can be exercised without spawning real processes.
+// Using a positive pid ensures the registration code paths in the PID
+// tracker (which ignores pid<=0) are actually exercised.
 func (m *MockCommandExecutor) ExecWithHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int)) (int, string, error) {
 	if pidHook != nil {
-		pidHook(0)
+		pid := int(mockSyntheticPIDBase + mockSyntheticPID.Add(1))
+		pidHook(pid)
 	}
 	return m.Exec(ctx, args, username, groupname, env, timeout)
 }

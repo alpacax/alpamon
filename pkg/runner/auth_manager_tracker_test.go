@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,7 +104,9 @@ func TestRemovePIDCommandMapping_LeavesWebshEntryAlone(t *testing.T) {
 		Requests:  make(map[string]*SudoRequest),
 	})
 
-	am.RemovePIDCommandMapping(3333, "")
+	// Even a well-formed Command-style remove with a concrete commandID
+	// must not touch an entry that belongs to a different tracker kind.
+	am.RemovePIDCommandMapping(3333, "cmd-bystander")
 
 	entry, ok := am.LookupPID(3333)
 	if !ok {
@@ -251,16 +255,14 @@ func TestRegisterCommandPID_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSudoApprovalRequest_OmitsEmptyIdentifiers is a guardrail against
-// accidentally sending both session_id and command_id (or neither), by
-// confirming the JSON tags use omitempty. This protects the server-side
-// 2-branch resolver from ambiguous payloads.
+// TestSudoApprovalRequest_JSONTagsOmitEmpty is a guardrail against
+// accidentally sending both session_id and command_id (or neither) on
+// the wire. It marshals the struct and inspects the serialized keys so
+// that a regression dropping `omitempty` from either field would be
+// caught. This protects the server-side 2-branch resolver from
+// ambiguous payloads.
 func TestSudoApprovalRequest_JSONTagsOmitEmpty(t *testing.T) {
-	// Construct two requests that a deploy shell path and a websh path
-	// would send; spot-check that the wire representation reflects the
-	// invariants from the plan:
-	//   deploy shell: command_id set, session_id omitted
-	//   websh:        session_id set, command_id omitted
+	// Deploy shell path: command_id set, session_id must be omitted.
 	cmdReq := SudoApprovalRequest{
 		Type:      "sudo_approval_request",
 		CommandID: "cmd-uuid",
@@ -268,10 +270,18 @@ func TestSudoApprovalRequest_JSONTagsOmitEmpty(t *testing.T) {
 		PPID:      2,
 		Username:  "alice",
 	}
-	if cmdReq.SessionID != "" {
-		t.Errorf("deploy shell request should leave SessionID empty, got %q", cmdReq.SessionID)
+	cmdJSON, err := json.Marshal(cmdReq)
+	if err != nil {
+		t.Fatalf("marshal command request: %v", err)
+	}
+	if !strings.Contains(string(cmdJSON), `"command_id":"cmd-uuid"`) {
+		t.Errorf("expected command_id in payload, got %s", cmdJSON)
+	}
+	if strings.Contains(string(cmdJSON), `"session_id"`) {
+		t.Errorf("deploy shell payload must omit session_id, got %s", cmdJSON)
 	}
 
+	// Websh path: session_id set, command_id must be omitted.
 	webshReq := SudoApprovalRequest{
 		Type:      "sudo_approval_request",
 		SessionID: "session-uuid",
@@ -279,8 +289,32 @@ func TestSudoApprovalRequest_JSONTagsOmitEmpty(t *testing.T) {
 		PPID:      2,
 		Username:  "alice",
 	}
-	if webshReq.CommandID != "" {
-		t.Errorf("websh request should leave CommandID empty, got %q", webshReq.CommandID)
+	webshJSON, err := json.Marshal(webshReq)
+	if err != nil {
+		t.Fatalf("marshal websh request: %v", err)
+	}
+	if !strings.Contains(string(webshJSON), `"session_id":"session-uuid"`) {
+		t.Errorf("expected session_id in payload, got %s", webshJSON)
+	}
+	if strings.Contains(string(webshJSON), `"command_id"`) {
+		t.Errorf("websh payload must omit command_id, got %s", webshJSON)
+	}
+
+	// Neither-set path: both identifier keys must be absent, making the
+	// payload unambiguous for the server's 2-branch resolver.
+	emptyReq := SudoApprovalRequest{
+		Type:     "sudo_approval_request",
+		PID:      1,
+		PPID:     2,
+		Username: "alice",
+	}
+	emptyJSON, err := json.Marshal(emptyReq)
+	if err != nil {
+		t.Fatalf("marshal empty-id request: %v", err)
+	}
+	if strings.Contains(string(emptyJSON), `"session_id"`) ||
+		strings.Contains(string(emptyJSON), `"command_id"`) {
+		t.Errorf("payload with neither id must omit both keys, got %s", emptyJSON)
 	}
 }
 

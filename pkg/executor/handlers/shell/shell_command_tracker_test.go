@@ -8,6 +8,7 @@ import (
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/runner"
+	"github.com/alpacax/alpamon/pkg/runner/runnertest"
 )
 
 // hookRecordingExecutor wraps a MockCommandExecutor and records whether
@@ -46,7 +47,7 @@ func (r *hookRecordingExecutor) ExecWithHook(
 // duration of t and restores the previous singleton on cleanup.
 func withTrackerAuthManager(t *testing.T) *runner.AuthManager {
 	t.Helper()
-	return runner.SwapAuthManagerForTest(t, runner.NewAuthManagerForTest())
+	return runnertest.SwapAuthManager(t, runnertest.NewAuthManager())
 }
 
 // TestShellHandler_CommandID_RegistersAndUnregistersPID verifies that a

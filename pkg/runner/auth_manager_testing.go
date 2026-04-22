@@ -1,13 +1,12 @@
 package runner
 
-import "testing"
-
-// NewAuthManagerForTest returns an AuthManager populated just enough to
-// exercise the PID tracker. It does not start the socket listener.
-//
-// Exposed for tests in other packages (e.g. the shell handler) that need
-// a real AuthManager singleton installed via SwapAuthManagerForTest.
-func NewAuthManagerForTest() *AuthManager {
+// NewEmptyAuthManager returns an AuthManager populated just enough to
+// exercise the PID tracker without starting the socket listener. It has
+// no dependency on the testing package, so it is safe to keep in the
+// shipped package; the actual test-only glue that swaps the singleton
+// lives in the pkg/runner/runnertest subpackage, which is only imported
+// from *_test.go files.
+func NewEmptyAuthManager() *AuthManager {
 	return &AuthManager{
 		pidToSessionMap:    make(map[int]*SessionInfo),
 		localSudoRequests:  make(map[string]*SudoRequest),
@@ -15,13 +14,12 @@ func NewAuthManagerForTest() *AuthManager {
 	}
 }
 
-// SwapAuthManagerForTest installs am as the package-level singleton for
-// the duration of t and restores the previous singleton on cleanup.
-// It returns am so callers can keep working with the installed instance.
-func SwapAuthManagerForTest(t *testing.T, am *AuthManager) *AuthManager {
-	t.Helper()
+// SwapAuthManager installs am as the package-level singleton and returns
+// the previously installed one so callers can restore it. It is intended
+// to be used from pkg/runner/runnertest (which adds *testing.T cleanup);
+// direct use in production code is not supported.
+func SwapAuthManager(am *AuthManager) *AuthManager {
 	prev := authManager
 	authManager = am
-	t.Cleanup(func() { authManager = prev })
-	return am
+	return prev
 }

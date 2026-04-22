@@ -640,17 +640,17 @@ func (am *AuthManager) AddPIDCommandMapping(pid int, commandID, username string)
 
 // RemovePIDCommandMapping deletes the tracker entry for a deploy shell
 // Command's root pid. It only removes the entry when it still has the
-// matching command_id; if the pid has been reused (e.g. a legacy leftover
-// from a crash) by another kind of entry, the existing entry is
-// preserved.
+// matching command_id; callers must pass a non-empty commandID so that
+// a pid reused by an unrelated entry (e.g. a legacy leftover from a
+// crash) cannot be dropped accidentally.
 func (am *AuthManager) RemovePIDCommandMapping(pid int, commandID string) {
-	if pid <= 0 {
+	if pid <= 0 || commandID == "" {
 		return
 	}
 	am.mu.Lock()
 	if existing, ok := am.pidToSessionMap[pid]; ok {
 		if existing.effectiveKind() == TrackerKindCommand &&
-			(commandID == "" || existing.CommandID == commandID) {
+			existing.CommandID == commandID {
 			delete(am.pidToSessionMap, pid)
 			log.Debug().
 				Int("pid", pid).
@@ -694,11 +694,16 @@ func (am *AuthManager) LookupPID(pid int) (TrackerEntry, bool) {
 
 // RegisterCommandPID is a package-level helper that registers a deploy
 // shell Command root pid on the singleton AuthManager (if initialized).
-// Returning a boolean lets callers decide whether an Unregister is owed
-// even in setups where the AuthManager has not been wired up yet (tests,
-// early boot).
+// The returned boolean reports whether a mapping was actually added so
+// callers can decide whether an Unregister is owed. It returns false
+// when the AuthManager has not been wired up yet (tests, early boot) or
+// when the arguments would be rejected by AddPIDCommandMapping (non-
+// positive pid, empty commandID).
 func RegisterCommandPID(pid int, commandID, username string) bool {
 	if authManager == nil {
+		return false
+	}
+	if pid <= 0 || commandID == "" {
 		return false
 	}
 	authManager.AddPIDCommandMapping(pid, commandID, username)
