@@ -82,6 +82,16 @@ func (m *MockCommandExecutor) Exec(ctx context.Context, args []string, username,
 	return m.lookupResult(args[0], args[1:]...)
 }
 
+// ExecWithHook mirrors Exec for mock purposes and invokes pidHook (when
+// non-nil) with a synthetic pid of 0 so handlers that rely on the hook
+// contract can be exercised without spawning real processes.
+func (m *MockCommandExecutor) ExecWithHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int)) (int, string, error) {
+	if pidHook != nil {
+		pidHook(0)
+	}
+	return m.Exec(ctx, args, username, groupname, env, timeout)
+}
+
 func (m *MockCommandExecutor) SetResult(command string, exitCode int, output string, err error) {
 	m.results[command] = CommandResult{ExitCode: exitCode, Output: output, Err: err}
 }

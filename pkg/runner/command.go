@@ -88,9 +88,13 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		}
 		command = fields[0]
 		args = cr.data.ToArgs()
+		if args != nil {
+			args.CommandID = cr.command.ID
+		}
 	case "system":
 		command = common.ShellCmd.String()
 		args = &common.CommandArgs{
+			CommandID: cr.command.ID,
 			Command:   cr.command.Line,
 			Username:  cr.command.User,
 			Groupname: cr.command.Group,

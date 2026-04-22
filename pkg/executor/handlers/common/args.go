@@ -6,6 +6,10 @@ import "time"
 type CommandArgs struct {
 	// Common fields
 	SessionID string
+	// CommandID is the UUID of the deploy shell Command that originated
+	// this execution (propagated from protocol.Command.ID). Empty for
+	// non-Command-driven work such as internal collectors.
+	CommandID string
 	URL       string
 	Command   string
 	Timeout   time.Duration

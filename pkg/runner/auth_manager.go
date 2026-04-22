@@ -17,11 +17,42 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Kinds of tracked processes that may issue sudo through alpamon-pam.
+const (
+	// TrackerKindWebsh marks an interactive Websh PTY session.
+	TrackerKindWebsh = "websh"
+	// TrackerKindCommand marks a non-interactive deploy shell Command execution.
+	TrackerKindCommand = "command"
+)
+
+// SessionInfo tracks a process (Websh PTY or deploy shell Command) that
+// alpamon-pam may later encounter by walking the ppid chain. The same map
+// holds both kinds of entries so the PAM lookup logic stays single-path.
+//
+// Exactly one of SessionID or CommandID is populated, determined by Kind:
+//   - Kind == TrackerKindWebsh:   SessionID set, CommandID empty.
+//   - Kind == TrackerKindCommand: CommandID set, SessionID empty.
+//
+// Legacy entries created before the Kind field was introduced are treated
+// as websh entries for backward compatibility (see effectiveKind).
 type SessionInfo struct {
+	Kind      string
 	SessionID string
+	CommandID string
+	Username  string
 	PID       int
+	StartedAt time.Time
 	PtyClient *PtyClient
 	Requests  map[string]*SudoRequest
+}
+
+// effectiveKind returns the Kind of an entry, defaulting to websh when
+// the field is empty (older in-memory entries predating the Kind field).
+func (s *SessionInfo) effectiveKind() string {
+	if s == nil || s.Kind == "" {
+		return TrackerKindWebsh
+	}
+	return s.Kind
 }
 
 type SudoRequest struct {
@@ -38,7 +69,8 @@ type SudoApprovalRequest struct {
 	PPID         int    `json:"ppid"`
 	Command      string `json:"command"`
 	IsAlpconUser bool   `json:"is_alpacon_user"`
-	SessionID    string `json:"session_id"`
+	SessionID    string `json:"session_id,omitempty"`
+	CommandID    string `json:"command_id,omitempty"`
 }
 
 type SudoApprovalResponse struct {
@@ -50,7 +82,8 @@ type SudoApprovalResponse struct {
 	PPID         int    `json:"ppid"`
 	Command      string `json:"command"`
 	IsAlpconUser bool   `json:"is_alpacon_user"`
-	SessionID    string `json:"session_id"`
+	SessionID    string `json:"session_id,omitempty"`
+	CommandID    string `json:"command_id,omitempty"`
 	Approved     bool   `json:"approved"`
 	Reason       string `json:"reason"`
 }
@@ -240,7 +273,14 @@ func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApproval
 				return fmt.Errorf("HTTP session not available")
 			}
 
-			url := fmt.Sprintf("/api/websh/sessions/%s/sudo-approval/", req.SessionID)
+			// Deploy shell (Command) sudo requests go to the session-less
+			// endpoint so the server can resolve the IAM user via command_id.
+			var url string
+			if req.CommandID != "" && req.SessionID == "" {
+				url = "/api/sudo/approval/"
+			} else {
+				url = fmt.Sprintf("/api/websh/sessions/%s/sudo-approval/", req.SessionID)
+			}
 			_, statusCode, err := am.session.Post(url, req, 10)
 			if err != nil {
 				log.Warn().Err(err).Msg("Failed to send sudo request via REST API, will retry")
@@ -351,7 +391,15 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 
 	// Alpacon user: pidToSessionMap
 	sudoApprovalReq.IsAlpconUser = true
-	sudoApprovalReq.SessionID = session.SessionID
+	switch session.effectiveKind() {
+	case TrackerKindCommand:
+		sudoApprovalReq.SessionID = ""
+		sudoApprovalReq.CommandID = session.CommandID
+	default:
+		// websh (and legacy entries without Kind) keep the session-based path.
+		sudoApprovalReq.SessionID = session.SessionID
+		sudoApprovalReq.CommandID = ""
+	}
 
 	session.Requests[sudoApprovalReq.RequestID] = &SudoRequest{
 		RequestID:  sudoApprovalReq.RequestID,
@@ -359,7 +407,12 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	}
 	am.mu.Unlock()
 
-	log.Debug().Msgf("Alpacon user sudo request: %s for session %s", sudoApprovalReq.RequestID, session.SessionID)
+	log.Debug().
+		Str("request_id", sudoApprovalReq.RequestID).
+		Str("kind", session.effectiveKind()).
+		Str("session_id", sudoApprovalReq.SessionID).
+		Str("command_id", sudoApprovalReq.CommandID).
+		Msg("Alpacon user sudo request")
 
 	// Store completion channel for this request
 	am.storeCompletionChannel(sudoApprovalReq.RequestID, completionChan)
@@ -433,6 +486,7 @@ func (am *AuthManager) sendSudoApprovalResponse(conn net.Conn, sudo_approval_req
 		Command:      sudo_approval_req.Command,
 		IsAlpconUser: sudo_approval_req.IsAlpconUser,
 		SessionID:    sudo_approval_req.SessionID,
+		CommandID:    sudo_approval_req.CommandID,
 		RequestID:    sudo_approval_req.RequestID,
 		Approved:     approved,
 		Reason:       reason,
@@ -517,7 +571,24 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 	return nil
 }
 
+// AddPIDSessionMapping registers an entry for a Websh PTY session.
+// Kind and StartedAt are filled in when unset so callers don't have to
+// remember to populate them; CommandID is always cleared to keep the
+// websh/command fields mutually exclusive per entry.
 func (am *AuthManager) AddPIDSessionMapping(pid int, session *SessionInfo) {
+	if session == nil {
+		return
+	}
+	if session.Kind == "" {
+		session.Kind = TrackerKindWebsh
+	}
+	session.CommandID = ""
+	if session.StartedAt.IsZero() {
+		session.StartedAt = time.Now()
+	}
+	if session.PID == 0 {
+		session.PID = pid
+	}
 	am.mu.Lock()
 	am.pidToSessionMap[pid] = session
 	am.mu.Unlock()
@@ -527,9 +598,120 @@ func (am *AuthManager) RemovePIDSessionMapping(pid int) {
 	am.mu.Lock()
 	if session, exists := am.pidToSessionMap[pid]; exists {
 		delete(am.pidToSessionMap, pid)
-		log.Debug().Msgf("PID mapping removed: %d -> Session: %s", pid, session.SessionID)
+		log.Debug().
+			Int("pid", pid).
+			Str("kind", session.effectiveKind()).
+			Str("session_id", session.SessionID).
+			Str("command_id", session.CommandID).
+			Msg("PID mapping removed")
 	}
 	am.mu.Unlock()
+}
+
+// AddPIDCommandMapping registers the root pid of a deploy shell Command
+// execution so alpamon-pam can attribute a sudo call made inside the
+// Command (or any descendant) to the originating Command.ID. It must be
+// called before the child process can exec sudo to avoid a race where
+// sudo arrives at the PAM module before the tracker knows about the pid.
+//
+// Concurrency: multiple Commands run in parallel with distinct root pids,
+// so entries never collide. Safe to call from any goroutine.
+func (am *AuthManager) AddPIDCommandMapping(pid int, commandID, username string) {
+	if pid <= 0 || commandID == "" {
+		return
+	}
+	info := &SessionInfo{
+		Kind:      TrackerKindCommand,
+		CommandID: commandID,
+		Username:  username,
+		PID:       pid,
+		StartedAt: time.Now(),
+		Requests:  make(map[string]*SudoRequest),
+	}
+	am.mu.Lock()
+	am.pidToSessionMap[pid] = info
+	am.mu.Unlock()
+	log.Debug().
+		Int("pid", pid).
+		Str("command_id", commandID).
+		Str("username", username).
+		Msg("Command PID mapping added")
+}
+
+// RemovePIDCommandMapping deletes the tracker entry for a deploy shell
+// Command's root pid. It only removes the entry when it still has the
+// matching command_id; if the pid has been reused (e.g. a legacy leftover
+// from a crash) by another kind of entry, the existing entry is
+// preserved.
+func (am *AuthManager) RemovePIDCommandMapping(pid int, commandID string) {
+	if pid <= 0 {
+		return
+	}
+	am.mu.Lock()
+	if existing, ok := am.pidToSessionMap[pid]; ok {
+		if existing.effectiveKind() == TrackerKindCommand &&
+			(commandID == "" || existing.CommandID == commandID) {
+			delete(am.pidToSessionMap, pid)
+			log.Debug().
+				Int("pid", pid).
+				Str("command_id", existing.CommandID).
+				Msg("Command PID mapping removed")
+		}
+	}
+	am.mu.Unlock()
+}
+
+// TrackerEntry is a read-only snapshot of a tracker entry, returned by
+// LookupPID for callers (e.g. tests) that need to inspect state without
+// taking the AuthManager's lock themselves.
+type TrackerEntry struct {
+	Kind      string
+	SessionID string
+	CommandID string
+	Username  string
+	PID       int
+	StartedAt time.Time
+}
+
+// LookupPID returns a snapshot of the tracker entry for pid (if any).
+// The second return value reports whether an entry was found.
+func (am *AuthManager) LookupPID(pid int) (TrackerEntry, bool) {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	info, ok := am.pidToSessionMap[pid]
+	if !ok {
+		return TrackerEntry{}, false
+	}
+	return TrackerEntry{
+		Kind:      info.effectiveKind(),
+		SessionID: info.SessionID,
+		CommandID: info.CommandID,
+		Username:  info.Username,
+		PID:       info.PID,
+		StartedAt: info.StartedAt,
+	}, true
+}
+
+// RegisterCommandPID is a package-level helper that registers a deploy
+// shell Command root pid on the singleton AuthManager (if initialized).
+// Returning a boolean lets callers decide whether an Unregister is owed
+// even in setups where the AuthManager has not been wired up yet (tests,
+// early boot).
+func RegisterCommandPID(pid int, commandID, username string) bool {
+	if authManager == nil {
+		return false
+	}
+	authManager.AddPIDCommandMapping(pid, commandID, username)
+	return true
+}
+
+// UnregisterCommandPID removes a deploy shell Command entry previously
+// added by RegisterCommandPID. No-op if the AuthManager isn't available.
+func UnregisterCommandPID(pid int, commandID string) {
+	if authManager == nil {
+		return
+	}
+	authManager.RemovePIDCommandMapping(pid, commandID)
 }
 
 func (am *AuthManager) storeCompletionChannel(requestID string, ch chan struct{}) {

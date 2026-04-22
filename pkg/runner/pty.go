@@ -112,7 +112,9 @@ func (pc *PtyClient) initializePtySession() error {
 	// Add PID-to-session mapping for auth manager
 	pid := pc.cmd.Process.Pid
 	sessionInfo := &SessionInfo{
+		Kind:      TrackerKindWebsh,
 		SessionID: pc.sessionID,
+		Username:  pc.username,
 		PID:       pid,
 		PtyClient: pc,
 		Requests:  make(map[string]*SudoRequest),

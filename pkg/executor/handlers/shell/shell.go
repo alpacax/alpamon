@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/pkg/runner"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
@@ -86,16 +87,16 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 		} else {
 			cmdArgs = []string{"/bin/sh", "-c", command}
 		}
-		exitCode, result := h.executeCommand(ctx, cmdArgs, username, groupname, env, timeout)
+		exitCode, result := h.executeCommand(ctx, cmdArgs, username, groupname, env, timeout, args.CommandID)
 		return exitCode, result, nil
 	}
 
 	// Fallback: direct execution with manual operator parsing
-	return h.executeWithOperators(ctx, command, username, groupname, env, timeout)
+	return h.executeWithOperators(ctx, command, username, groupname, env, timeout, args.CommandID)
 }
 
 // executeWithOperators handles shell operators (&&, ||, ;)
-func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
+func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string) (int, string, error) {
 	spl := strings.Fields(command)
 	var currentCmd []string
 	var results strings.Builder
@@ -107,7 +108,7 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 		case "&&":
 			// Execute current command
 			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout)
+				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
 				results.WriteString(result)
 				// Stop if command fails
 				if exitCode != 0 {
@@ -118,7 +119,7 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 		case "||":
 			// Execute current command
 			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout)
+				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
 				results.WriteString(result)
 				// Continue only if command fails
 				if exitCode == 0 {
@@ -129,7 +130,7 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 		case ";":
 			// Execute current command
 			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout)
+				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
 				results.WriteString(result)
 				// Continue regardless of result
 				currentCmd = nil
@@ -141,21 +142,46 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 
 	// Execute any remaining command
 	if len(currentCmd) > 0 {
-		exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout)
+		exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
 		results.WriteString(result)
 	}
 
 	return exitCode, results.String(), nil
 }
 
-// executeCommand executes a single command
-func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string) {
+// executeCommand executes a single command.
+// When commandID is non-empty, the child's root pid is registered with
+// the PAM tracker for the duration of the execution so sudo calls made
+// from inside the command can be authorized by command_id.
+func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string) (int, string) {
 	if len(cmdArgs) == 0 {
 		return 0, ""
 	}
 
-	// Execute command through the executor with full parameters (user, group, env, timeout)
-	exitCode, output, err := h.Executor.Exec(ctx, cmdArgs, username, groupname, env, timeout)
+	var (
+		exitCode int
+		output   string
+		err      error
+	)
+
+	if commandID != "" {
+		// Track the pid in the PAM tracker before the child can exec
+		// sudo; unregister after the command completes. Holds the pid
+		// in a closure so we only unregister the exact pid we tracked,
+		// guarding against pid reuse.
+		var trackedPID int
+		registered := false
+		pidHook := func(pid int) {
+			trackedPID = pid
+			registered = runner.RegisterCommandPID(pid, commandID, username)
+		}
+		exitCode, output, err = h.Executor.ExecWithHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook)
+		if registered {
+			runner.UnregisterCommandPID(trackedPID, commandID)
+		}
+	} else {
+		exitCode, output, err = h.Executor.Exec(ctx, cmdArgs, username, groupname, env, timeout)
+	}
 
 	if err != nil && exitCode == -1 {
 		// Command execution error (not just non-zero exit)
