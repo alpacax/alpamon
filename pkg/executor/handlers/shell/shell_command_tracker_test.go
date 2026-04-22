@@ -40,7 +40,7 @@ func (r *hookRecordingExecutor) ExecWithHook(
 	if pidHook != nil {
 		pidHook(424242)
 	}
-	return r.MockCommandExecutor.Exec(ctx, args, username, groupname, env, timeout)
+	return r.Exec(ctx, args, username, groupname, env, timeout)
 }
 
 // withTrackerAuthManager installs a clean in-process AuthManager for the
