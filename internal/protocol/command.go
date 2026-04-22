@@ -52,6 +52,7 @@ type CommandData struct {
 	Comment                 string                   `json:"comment"`
 	Shell                   string                   `json:"shell"`
 	Groups                  []uint64                 `json:"groups"`
+	IsServiceAccount        bool                     `json:"is_service_account,omitempty"`
 	Type                    string                   `json:"type"`
 	Content                 string                   `json:"content"`
 	Path                    string                   `json:"path"`
@@ -133,6 +134,7 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 		Comment:                 c.Comment,
 		Shell:                   c.Shell,
 		Groups:                  c.Groups,
+		IsServiceAccount:        c.IsServiceAccount,
 
 		// File operations
 		Type:           c.Type,

@@ -23,6 +23,7 @@ type CommandArgs struct {
 	Comment                 string
 	Shell                   string
 	Groups                  []uint64
+	IsServiceAccount        bool
 
 	// File operations
 	Type           string
