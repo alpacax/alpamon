@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
@@ -154,6 +155,156 @@ func TestUserHandler_Execute(t *testing.T) {
 	}
 }
 
+// TestUserHandler_AddUser_UidLess verifies that Application service account
+// provisioning (no uid/gid/home_directory) results in adduser/useradd commands
+// without the corresponding flags, letting the OS auto-assign.
+func TestUserHandler_AddUser_UidLess(t *testing.T) {
+	baseArgs := &common.CommandArgs{
+		Username:         "gitlab-runner",
+		Comment:          "GitLab Runner,,,,(alpacon-app)abc",
+		Shell:            "/usr/sbin/nologin",
+		Groupname:        "alpacon",
+		IsServiceAccount: true,
+		// UID, GID, HomeDirectory intentionally omitted — OS auto-assigns
+	}
+
+	tests := []struct {
+		name         string
+		platform     string
+		wantProgram  string
+		wantFlags    []string // flags that must be present
+		forbidFlags  []string // flags that must NOT be present
+		wantGroupadd bool
+	}{
+		{
+			name:        "debian uid-less adduser",
+			platform:    "debian",
+			wantProgram: "/usr/sbin/adduser",
+			wantFlags:   []string{"--shell", "/usr/sbin/nologin", "--gecos", "--disabled-password", "gitlab-runner"},
+			forbidFlags: []string{"--uid", "--gid", "--home"},
+		},
+		{
+			name:         "rhel uid-less useradd, no groupadd",
+			platform:     "rhel",
+			wantProgram:  "/usr/sbin/useradd",
+			wantFlags:    []string{"--shell", "/usr/sbin/nologin", "--comment", "--create-home", "gitlab-runner"},
+			forbidFlags:  []string{"--uid", "--gid", "--home-dir"},
+			wantGroupadd: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			originalPlatformLike := utils.PlatformLike
+			utils.SetPlatformLike(tt.platform)
+			t.Cleanup(func() {
+				utils.SetPlatformLike(originalPlatformLike)
+			})
+
+			mock := common.NewMockCommandExecutor(t)
+			handler := NewUserHandler(mock, &MockGroupService{}, nil)
+
+			exitCode, _, err := handler.Execute(context.Background(), "adduser", baseArgs)
+			if err != nil {
+				t.Fatalf("Execute() unexpected error: %v", err)
+			}
+			if exitCode != 0 {
+				t.Fatalf("Execute() exitCode = %d, want 0", exitCode)
+			}
+
+			executed := mock.GetExecutedCommands()
+			var groupaddCalled bool
+			var target *common.ExecutedCommand
+			for i := range executed {
+				if executed[i].Name == "/usr/sbin/groupadd" {
+					groupaddCalled = true
+				}
+				if executed[i].Name == tt.wantProgram {
+					target = &executed[i]
+				}
+			}
+			if groupaddCalled != tt.wantGroupadd {
+				t.Errorf("groupadd called = %v, want %v", groupaddCalled, tt.wantGroupadd)
+			}
+			if target == nil {
+				t.Fatalf("expected %s to be invoked, got commands: %+v", tt.wantProgram, executed)
+			}
+			joined := strings.Join(target.Args, " ")
+			for _, want := range tt.wantFlags {
+				if !strings.Contains(joined, want) {
+					t.Errorf("expected flag %q in args, got: %s", want, joined)
+				}
+			}
+			for _, forbid := range tt.forbidFlags {
+				for _, a := range target.Args {
+					if a == forbid {
+						t.Errorf("flag %q must not appear in args, got: %s", forbid, joined)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestUserHandler_AddUser_RhelWithUID verifies the existing IAM User path
+// (uid/gid present) still runs groupadd and passes flags on RHEL.
+func TestUserHandler_AddUser_RhelWithUID(t *testing.T) {
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("rhel")
+	t.Cleanup(func() {
+		utils.SetPlatformLike(originalPlatformLike)
+	})
+
+	mock := common.NewMockCommandExecutor(t)
+	handler := NewUserHandler(mock, &MockGroupService{}, nil)
+
+	args := &common.CommandArgs{
+		Username:      "john",
+		UID:           5001,
+		GID:           5001,
+		Comment:       "John,,,,(alpacon)uuid",
+		HomeDirectory: "/home/john",
+		Shell:         "/bin/bash",
+		Groupname:     "alpacon",
+	}
+
+	exitCode, _, err := handler.Execute(context.Background(), "adduser", args)
+	if err != nil {
+		t.Fatalf("Execute() unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("Execute() exitCode = %d, want 0", exitCode)
+	}
+
+	executed := mock.GetExecutedCommands()
+	var sawGroupadd, sawUseradd bool
+	for _, c := range executed {
+		if c.Name == "/usr/sbin/groupadd" {
+			sawGroupadd = true
+			joined := strings.Join(c.Args, " ")
+			if !strings.Contains(joined, "--gid 5001") || !strings.Contains(joined, "alpacon") {
+				t.Errorf("groupadd missing expected args: %s", joined)
+			}
+		}
+		if c.Name == "/usr/sbin/useradd" {
+			sawUseradd = true
+			joined := strings.Join(c.Args, " ")
+			for _, want := range []string{"--uid", "5001", "--gid", "--home-dir", "/home/john", "--shell", "/bin/bash", "--create-home", "john"} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("useradd missing %q: %s", want, joined)
+				}
+			}
+		}
+	}
+	if !sawGroupadd {
+		t.Error("expected groupadd to be invoked")
+	}
+	if !sawUseradd {
+		t.Error("expected useradd to be invoked")
+	}
+}
+
 func TestUserHandler_Validate(t *testing.T) {
 	handler := NewUserHandler(common.NewMockCommandExecutor(t), &MockGroupService{}, nil)
 
@@ -182,7 +333,50 @@ func TestUserHandler_Validate(t *testing.T) {
 			cmd:  "adduser",
 			args: &common.CommandArgs{
 				Username: "testuser",
-				// Missing other required fields
+				// IsServiceAccount=false (default), so UID/GID/HomeDirectory
+				// are required_unless and also missing. Comment/Groupname are
+				// required unconditionally. Shell is defaulted by the helper.
+			},
+			wantErr: true,
+		},
+		{
+			name: "adduser uid-less service account valid",
+			cmd:  "adduser",
+			args: &common.CommandArgs{
+				Username:         "gitlab-runner",
+				Comment:          "GitLab Runner,,,,(alpacon-app)abc",
+				Shell:            "/usr/sbin/nologin",
+				Groupname:        "alpacon",
+				IsServiceAccount: true,
+				// UID/GID/HomeDirectory intentionally omitted (OS auto-assign)
+			},
+			wantErr: false,
+		},
+		{
+			name: "adduser IAM User path must still require uid/gid/home",
+			cmd:  "adduser",
+			args: &common.CommandArgs{
+				Username:  "john",
+				Comment:   "John,,,,(alpacon)uuid",
+				Shell:     "/bin/bash",
+				Groupname: "alpacon",
+				// IsServiceAccount=false (default)
+				// UID/GID/HomeDirectory missing — must fail
+			},
+			wantErr: true,
+		},
+		{
+			name: "adduser IAM User with uid=0 must fail (cannot silently auto-assign)",
+			cmd:  "adduser",
+			args: &common.CommandArgs{
+				Username:      "john",
+				UID:           0, // bug: alpacon-server sent zero
+				GID:           5001,
+				Comment:       "John,,,,(alpacon)uuid",
+				HomeDirectory: "/home/john",
+				Shell:         "/bin/bash",
+				Groupname:     "alpacon",
+				// IsServiceAccount=false — uid=0 must be rejected
 			},
 			wantErr: true,
 		},
