@@ -213,7 +213,17 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	// need this because useradd --gid already sets the primary group.
 	if data.IsServiceAccount && data.Groupname != "" {
 		// Ensure the group exists (groupadd -f is a no-op if it already does).
-		_, _, _ = h.Executor.Run(ctx, "/usr/sbin/groupadd", "-f", data.Groupname)
+		// Non-fatal: if this fails (missing binary, permissions, corrupt group
+		// db), usermod below will also fail and later Demote errors become
+		// hard to diagnose — so log the actual groupadd failure here.
+		if code, out, err := h.Executor.Run(ctx, "/usr/sbin/groupadd", "-f", data.Groupname); code != 0 {
+			log.Warn().
+				Str("group", data.Groupname).
+				Int("exitCode", code).
+				Str("output", out).
+				Err(err).
+				Msg("Failed to ensure supplementary group exists (groupadd -f); usermod will likely fail")
+		}
 		// Add the user to the group as a supplementary member. Non-fatal: log
 		// a warning so the root cause surfaces instead of silently breaking
 		// later Demote calls.
@@ -221,6 +231,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 			log.Warn().
 				Str("user", data.Username).
 				Str("group", data.Groupname).
+				Int("exitCode", code).
 				Str("output", out).
 				Err(err).
 				Msg("Failed to add service account to supplementary group")
