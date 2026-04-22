@@ -206,6 +206,27 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		}
 	}
 
+	// Service accounts skip the numeric-gid primary-group setup above, so they
+	// would not be a member of data.Groupname (e.g. "alpacon"). Add them as a
+	// supplementary member by name so privilege demotion (utils.Demote with
+	// ValidateGroup=true) succeeds for later commands. IAM User path doesn't
+	// need this because useradd --gid already sets the primary group.
+	if data.IsServiceAccount && data.Groupname != "" {
+		// Ensure the group exists (groupadd -f is a no-op if it already does).
+		_, _, _ = h.Executor.Run(ctx, "/usr/sbin/groupadd", "-f", data.Groupname)
+		// Add the user to the group as a supplementary member. Non-fatal: log
+		// a warning so the root cause surfaces instead of silently breaking
+		// later Demote calls.
+		if code, out, err := h.Executor.Run(ctx, "/usr/sbin/usermod", "-aG", data.Groupname, data.Username); code != 0 {
+			log.Warn().
+				Str("user", data.Username).
+				Str("group", data.Groupname).
+				Str("output", out).
+				Err(err).
+				Msg("Failed to add service account to supplementary group")
+		}
+	}
+
 	log.Info().
 		Str("username", data.Username).
 		Int("exitCode", exitCode).

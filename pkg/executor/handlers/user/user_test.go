@@ -169,12 +169,11 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		platform     string
-		wantProgram  string
-		wantFlags    []string // flags that must be present
-		forbidFlags  []string // flags that must NOT be present
-		wantGroupadd bool
+		name        string
+		platform    string
+		wantProgram string
+		wantFlags   []string // flags that must be present on wantProgram
+		forbidFlags []string // flags that must NOT be present on wantProgram
 	}{
 		{
 			name:        "debian uid-less adduser",
@@ -184,12 +183,11 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			forbidFlags: []string{"--uid", "--gid", "--home"},
 		},
 		{
-			name:         "rhel uid-less useradd, no groupadd",
-			platform:     "rhel",
-			wantProgram:  "/usr/sbin/useradd",
-			wantFlags:    []string{"--shell", "/usr/sbin/nologin", "--comment", "--create-home", "gitlab-runner"},
-			forbidFlags:  []string{"--uid", "--gid", "--home-dir"},
-			wantGroupadd: false,
+			name:        "rhel uid-less useradd",
+			platform:    "rhel",
+			wantProgram: "/usr/sbin/useradd",
+			wantFlags:   []string{"--shell", "/usr/sbin/nologin", "--comment", "--create-home", "gitlab-runner"},
+			forbidFlags: []string{"--uid", "--gid", "--home-dir"},
 		},
 	}
 
@@ -214,19 +212,28 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			}
 
 			executed := mock.GetExecutedCommands()
-			var groupaddCalled bool
 			var target *common.ExecutedCommand
+			var sawGidGroupadd, sawGroupaddDashF, sawUsermodAppendGroup bool
 			for i := range executed {
-				if executed[i].Name == "/usr/sbin/groupadd" {
-					groupaddCalled = true
-				}
-				if executed[i].Name == tt.wantProgram {
+				c := executed[i]
+				if c.Name == tt.wantProgram {
 					target = &executed[i]
 				}
+				if c.Name == "/usr/sbin/groupadd" {
+					joined := strings.Join(c.Args, " ")
+					if strings.Contains(joined, "--gid") {
+						sawGidGroupadd = true
+					}
+					if len(c.Args) >= 2 && c.Args[0] == "-f" && c.Args[1] == "alpacon" {
+						sawGroupaddDashF = true
+					}
+				}
+				if c.Name == "/usr/sbin/usermod" && len(c.Args) >= 3 &&
+					c.Args[0] == "-aG" && c.Args[1] == "alpacon" && c.Args[2] == "gitlab-runner" {
+					sawUsermodAppendGroup = true
+				}
 			}
-			if groupaddCalled != tt.wantGroupadd {
-				t.Errorf("groupadd called = %v, want %v", groupaddCalled, tt.wantGroupadd)
-			}
+
 			if target == nil {
 				t.Fatalf("expected %s to be invoked, got commands: %+v", tt.wantProgram, executed)
 			}
@@ -242,6 +249,20 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 						t.Errorf("flag %q must not appear in args, got: %s", forbid, joined)
 					}
 				}
+			}
+
+			// Service account must NOT use the gid-based groupadd path
+			// (that path is for IAM User only) but MUST add the user to the
+			// requested Groupname via `groupadd -f` + `usermod -aG` so later
+			// privilege demotion (ValidateGroup=true) succeeds.
+			if sawGidGroupadd {
+				t.Error("service account path must not call groupadd with --gid")
+			}
+			if !sawGroupaddDashF {
+				t.Error("expected `groupadd -f alpacon` to ensure the supplementary group exists")
+			}
+			if !sawUsermodAppendGroup {
+				t.Error("expected `usermod -aG alpacon gitlab-runner` to set supplementary membership")
 			}
 		})
 	}
