@@ -7,7 +7,7 @@ import "github.com/alpacax/alpamon/pkg/executor/handlers/common"
 // IsServiceAccount discriminates IAM User provisioning from Application
 // service-account provisioning:
 //   - IsServiceAccount=false (default, IAM User): UID/GID/HomeDirectory are
-//     required — alpacon-server centrally assigns these for cross-server
+//     required. alpacon-server centrally assigns these for cross-server
 //     consistency. Missing values indicate a server-side bug and must fail
 //     validation rather than silently fall back to OS auto-assignment.
 //   - IsServiceAccount=true (Application): UID/GID/HomeDirectory are optional.

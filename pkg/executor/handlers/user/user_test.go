@@ -165,7 +165,7 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 		Shell:            "/usr/sbin/nologin",
 		Groupname:        "alpacon",
 		IsServiceAccount: true,
-		// UID, GID, HomeDirectory intentionally omitted — OS auto-assigns
+		// UID, GID, HomeDirectory intentionally omitted: OS auto-assigns
 	}
 
 	tests := []struct {
@@ -382,7 +382,7 @@ func TestUserHandler_Validate(t *testing.T) {
 				Shell:     "/bin/bash",
 				Groupname: "alpacon",
 				// IsServiceAccount=false (default)
-				// UID/GID/HomeDirectory missing — must fail
+				// UID/GID/HomeDirectory missing: must fail
 			},
 			wantErr: true,
 		},
@@ -397,7 +397,7 @@ func TestUserHandler_Validate(t *testing.T) {
 				HomeDirectory: "/home/john",
 				Shell:         "/bin/bash",
 				Groupname:     "alpacon",
-				// IsServiceAccount=false — uid=0 must be rejected
+				// IsServiceAccount=false: uid=0 must be rejected
 			},
 			wantErr: true,
 		},

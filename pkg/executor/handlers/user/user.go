@@ -125,7 +125,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	// UID/GID/HomeDirectory flags are omitted only when IsServiceAccount=true
 	// AND the value is zero/empty, so the OS can auto-assign. For IAM User
 	// payloads (IsServiceAccount=false), these fields are validated as
-	// required upstream — if we ever reach this point with zero values, we
+	// required upstream: if we ever reach this point with zero values, we
 	// still pass whatever was provided rather than silently rewriting the
 	// command, since defense-in-depth is cheap.
 	omitUID := data.IsServiceAccount && data.UID == 0
@@ -198,24 +198,22 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		}
 	}
 
-	// Add user to additional groups if specified
-	if len(data.Groups) > 0 && h.groupService != nil {
-		if err := h.groupService.AddUserToGroups(ctx, data.Username, data.Groups); err != nil {
-			log.Warn().Err(err).Msg("Failed to add user to additional groups")
-			return 0, fmt.Sprintf("User '%s' created but failed to add to groups: %v", data.Username, err), nil
-		}
-	}
-
-	// Service accounts skip the numeric-gid primary-group setup above, so they
-	// would not be a member of data.Groupname (e.g. "alpacon"). Add them as a
-	// supplementary member by name so privilege demotion (utils.Demote with
-	// ValidateGroup=true) succeeds for later commands. IAM User path doesn't
-	// need this because useradd --gid already sets the primary group.
-	if data.IsServiceAccount && data.Groupname != "" {
+	// Service-account Groupname setup.
+	// Runs BEFORE AddUserToGroups so the critical `Groupname` membership is
+	// established even if the optional supplementary `Groups` list fails and
+	// triggers the early return below.
+	// Gated on `omitGID`: when GID is provided, the RHEL path already ran
+	// `groupadd --gid <GID> <Groupname>` and `useradd --gid <GID>`, making the
+	// user a member of Groupname as the primary group. Re-running groupadd/
+	// usermod there would be redundant. When GID is omitted (the typical
+	// service-account payload), useradd auto-creates a per-user primary group
+	// and the user is NOT in `Groupname`, which would break later
+	// `utils.Demote(..., ValidateGroup=true)` calls.
+	if data.IsServiceAccount && omitGID && data.Groupname != "" {
 		// Ensure the group exists (groupadd -f is a no-op if it already does).
 		// Non-fatal: if this fails (missing binary, permissions, corrupt group
 		// db), usermod below will also fail and later Demote errors become
-		// hard to diagnose — so log the actual groupadd failure here.
+		// hard to diagnose, so log the actual groupadd failure here.
 		if code, out, err := h.Executor.Run(ctx, "/usr/sbin/groupadd", "-f", data.Groupname); code != 0 {
 			log.Warn().
 				Str("group", data.Groupname).
@@ -235,6 +233,14 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 				Str("output", out).
 				Err(err).
 				Msg("Failed to add service account to supplementary group")
+		}
+	}
+
+	// Add user to additional groups if specified
+	if len(data.Groups) > 0 && h.groupService != nil {
+		if err := h.groupService.AddUserToGroups(ctx, data.Username, data.Groups); err != nil {
+			log.Warn().Err(err).Msg("Failed to add user to additional groups")
+			return 0, fmt.Sprintf("User '%s' created but failed to add to groups: %v", data.Username, err), nil
 		}
 	}
 
