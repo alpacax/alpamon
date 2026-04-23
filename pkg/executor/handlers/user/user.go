@@ -106,8 +106,7 @@ func (h *UserHandler) Validate(cmd string, args *common.CommandArgs) error {
 func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	data := userDataFromArgs(args)
 
-	err := h.Validate(common.AddUser.String(), args)
-	if err != nil {
+	if err := h.ValidateStruct(data); err != nil {
 		return 1, err.Error(), nil
 	}
 
@@ -120,6 +119,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 
 	var exitCode int
 	var output string
+	var err error
 
 	// Platform-specific user addition.
 	// UID/GID/HomeDirectory flags are omitted only when IsServiceAccount=true
@@ -209,7 +209,8 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	// service-account payload), useradd auto-creates a per-user primary group
 	// and the user is NOT in `Groupname`, which would break later
 	// `utils.Demote(..., ValidateGroup=true)` calls.
-	if data.IsServiceAccount && omitGID && data.Groupname != "" {
+	// omitGID already implies data.IsServiceAccount (see definition above).
+	if omitGID && data.Groupname != "" {
 		// Ensure the group exists (groupadd -f is a no-op if it already does).
 		// Non-fatal: if this fails (missing binary, permissions, corrupt group
 		// db), usermod below will also fail and later Demote errors become
