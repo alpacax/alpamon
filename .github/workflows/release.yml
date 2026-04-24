@@ -88,6 +88,34 @@ jobs:
           fi
           echo "Found $aliased ($(stat -c%s "$aliased") bytes)"
 
+      # Publish a version-independent alias of the checksums file so
+      # downstream consumers (alpacon-server's Windows install guide, any
+      # `releases/latest/download/…` flow) can verify SHA-256 without
+      # having to resolve the release tag first. The alias is a byte-for-
+      # byte copy of the versioned file; entries inside still reference
+      # the versioned artifact names, which is what consumers match on.
+      # goreleaser has already uploaded the versioned checksums file and
+      # created the release, so we attach the alias with `gh release
+      # upload`.
+      - name: Publish stable-alias checksums file
+        env:
+          GH_TOKEN: ${{ secrets.GORELEASER_GITHUB_TOKEN }}
+        run: |
+          set -e
+          versioned="dist/alpamon-${{ steps.channel.outputs.tag }}-checksums.sha256"
+          aliased="dist/alpamon-checksums.sha256"
+          if [ ! -f "$versioned" ]; then
+            echo "::error file=.goreleaser.yaml::expected $versioned in dist/ but it is missing; goreleaser did not produce the versioned checksums file"
+            echo "dist/ contents:"
+            ls -la dist/
+            exit 1
+          fi
+          cp "$versioned" "$aliased"
+          # --clobber lets the step be retried without failing on an
+          # already-attached asset.
+          gh release upload "${{ github.ref_name }}" "$aliased" --clobber
+          echo "Uploaded $aliased alongside $versioned"
+
       - name: Set TAG_NAME from channel output
         run: echo "TAG_NAME=${{ steps.channel.outputs.tag }}" >> $GITHUB_ENV
 
@@ -220,6 +248,27 @@ jobs:
             throw "SHA-256 mismatch for ${{ matrix.archive }}: expected $expected, got $actual"
           }
           Write-Host "Checksum verified for ${{ matrix.archive }}: $actual"
+
+      # Runs once per job-matrix execution; guard so we only exercise the
+      # byte-identical comparison under a single matrix entry (otherwise
+      # we'd do the same network fetch twice for no extra coverage).
+      # The check guards against a future regression where the "Publish
+      # stable-alias checksums file" step in the goreleaser job silently
+      # uploads the wrong bytes (or nothing at all).
+      - name: Verify stable-alias checksums file matches versioned file
+        if: matrix.flavor == 'versioned'
+        shell: pwsh
+        run: |
+          $aliasName = "alpamon-checksums.sha256"
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "$env:REPO_URL/$aliasName" `
+            -OutFile $aliasName
+          $versionedHash = (Get-FileHash -Algorithm SHA256 -Path $env:CHECKSUMS_NAME).Hash.ToLower()
+          $aliasHash     = (Get-FileHash -Algorithm SHA256 -Path $aliasName).Hash.ToLower()
+          if ($versionedHash -ne $aliasHash) {
+            throw "stable-alias checksums file diverges from versioned file: $aliasName=$aliasHash vs $env:CHECKSUMS_NAME=$versionedHash"
+          }
+          Write-Host "Alias checksums file matches versioned file: $aliasHash"
 
       - name: Extract archive
         shell: pwsh

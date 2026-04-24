@@ -67,6 +67,28 @@ The installer will:
    and starts the service.
 6. Delete the scratch directory on success *or* failure.
 
+#### Re-running `install.ps1`
+
+`install.ps1` is safe to re-run on a host that already has the
+`alpamon` service installed. If the service exists, the script stops
+it (and waits for the SCM to release the binary handle) before
+touching `%ProgramFiles%\alpamon\alpamon.exe`, so you will not see the
+`ERROR_SHARING_VIOLATION` that a naive re-run would otherwise hit.
+
+Re-running on an **already-registered** host still fails at the
+`alpamon register` step, because `register` refuses to run when
+`%ProgramData%\alpamon\alpamon.conf` already exists—this matches the
+Linux and macOS behavior and prevents a silent re-registration. To
+upgrade an already-registered host, use `alpamon upgrade` or the
+[Manual fallback](#manual-fallback) recipe below.
+
+If the install fails after the service was stopped, the script
+best-effort restarts the previously-running service before exiting
+non-zero, so a transient network or checksum failure does not leave
+the host with a downed agent. TLS 1.2 is forced before any network
+call, so stock Server 2019 images do not need a manual
+`[Net.ServicePointManager]::SecurityProtocol` shim.
+
 A terser pipe-to-`iex` form is also supported; it still performs the
 checksum verification inside the script, but trades local-audit
 friendliness for brevity:
@@ -93,9 +115,13 @@ Expand-Archive -Path "$env:TEMP\alpamon.zip" -DestinationPath "$env:TEMP\alpamon
     --url "https://<workspace>" --token "<TOKEN>"
 ```
 
-`register` is idempotent: re-running it with the same arguments on an
-already-installed machine refreshes the service configuration (binary
-path, recovery actions) but does not re-provision the agent.
+`register` refuses to run on an already-registered host: if
+`%ProgramData%\alpamon\alpamon.conf` exists it exits non-zero rather
+than silently re-provisioning. This matches the Linux and macOS
+behavior. To upgrade an already-registered host use `alpamon upgrade`
+(or the [Manual fallback](#manual-fallback) recipe below); to
+re-register from scratch, first [Uninstall](#uninstall) and then run
+Option A or Option B.
 
 > The zip can be extracted anywhere—`alpamon.exe register` copies
 > itself into `%ProgramFiles%\alpamon\alpamon.exe` and re-executes from
@@ -304,7 +330,8 @@ recovery log.
 |---|---|---|
 | `install.ps1 must be run from an elevated (Administrator) PowerShell` | Non-elevated session | Right-click PowerShell → Run as Administrator |
 | `failed to create install directory: access is denied` during `register` | Non-elevated session (same root cause) | As above |
-| `failed to create destination ... the process cannot access the file because it is being used by another process` | Existing `alpamon` service still holds the binary open | `Stop-Service alpamon` before rerunning |
+| `failed to create destination ... the process cannot access the file because it is being used by another process` | Existing `alpamon` service still holds the binary open (only seen when running `alpamon register` directly, not via `install.ps1`) | `Stop-Service alpamon` before rerunning, or use `install.ps1` which stops the service automatically |
+| `Install failed; attempting to restart previously-running alpamon service` (warning from `install.ps1`) | Download, checksum, extract, or `register` failed after the service was stopped | Read the preceding error for the root cause; the previously-running service is restarted on a best-effort basis, so the host is back in its prior state |
 | `connect to service manager: access is denied` | Non-elevated session, or Group Policy blocking SCM access | Elevate; if policy-blocked, contact your domain admin |
 | Service enters `StartPending` and never reaches `Running` | Bad config file, missing network, or dispatcher panic at startup | Inspect `%ProgramData%\alpamon\log\alpamon.log`; the crash reason is logged before SCM times the service out |
 | `alpamon.exe.old` lingering after upgrade | Normal: deletion is scheduled for next service start | `Restart-Service alpamon` to force the cleanup |
