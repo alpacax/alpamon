@@ -113,16 +113,9 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int)) ([]byte, err
 		return buf.Bytes(), err
 	}
 
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error().Interface("panic", r).Msg("PIDHook panicked; continuing")
-			}
-		}()
-		if cmd.Process != nil {
-			pidHook(cmd.Process.Pid)
-		}
-	}()
+	if cmd.Process != nil {
+		pidHook(cmd.Process.Pid)
+	}
 
 	err := cmd.Wait()
 	return buf.Bytes(), err

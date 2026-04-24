@@ -391,14 +391,23 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 
 	// Alpacon user: pidToSessionMap
 	sudoApprovalReq.IsAlpconUser = true
-	switch session.effectiveKind() {
+	kind := session.effectiveKind()
+	switch kind {
 	case TrackerKindCommand:
 		sudoApprovalReq.SessionID = ""
 		sudoApprovalReq.CommandID = session.CommandID
-	default:
-		// websh (and legacy entries without Kind) keep the session-based path.
+	case TrackerKindWebsh:
+		// websh (and legacy entries without Kind, normalized by effectiveKind).
 		sudoApprovalReq.SessionID = session.SessionID
 		sudoApprovalReq.CommandID = ""
+	default:
+		// Unknown kind: reject explicitly rather than silently misattribute
+		// as websh. A future new Kind must be added to the switch.
+		am.mu.Unlock()
+		log.Warn().Str("kind", kind).Msg("Unknown tracker kind; rejecting sudo")
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Unknown session kind")
+		_ = unixConn.Close()
+		return
 	}
 
 	session.Requests[sudoApprovalReq.RequestID] = &SudoRequest{
@@ -409,7 +418,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 
 	log.Debug().
 		Str("request_id", sudoApprovalReq.RequestID).
-		Str("kind", session.effectiveKind()).
+		Str("kind", kind).
 		Str("session_id", sudoApprovalReq.SessionID).
 		Str("command_id", sudoApprovalReq.CommandID).
 		Msg("Alpacon user sudo request")
@@ -693,30 +702,21 @@ func (am *AuthManager) LookupPID(pid int) (TrackerEntry, bool) {
 }
 
 // RegisterCommandPID is a package-level helper that registers a deploy
-// shell Command root pid on the singleton AuthManager (if initialized).
-// The returned boolean reports whether a mapping was actually added so
-// callers can decide whether an Unregister is owed. It returns false
-// when the AuthManager has not been wired up yet (tests, early boot) or
-// when the arguments would be rejected by AddPIDCommandMapping (non-
-// positive pid, empty commandID).
-func RegisterCommandPID(pid int, commandID, username string) bool {
-	if authManager == nil {
-		return false
+// shell Command root pid on the singleton AuthManager (if initialized)
+// and returns an unregister closure. The closure captures the exact
+// (pid, commandID) pair so callers cannot accidentally unregister the
+// wrong entry, making the Register/Unregister pair leak-proof by
+// construction. The returned closure is always safe to call — it is a
+// no-op when the AuthManager has not been wired up yet (tests, early
+// boot) or when the arguments would be rejected by
+// AddPIDCommandMapping (non-positive pid, empty commandID).
+func RegisterCommandPID(pid int, commandID, username string) func() {
+	if authManager == nil || pid <= 0 || commandID == "" {
+		return func() {}
 	}
-	if pid <= 0 || commandID == "" {
-		return false
-	}
-	authManager.AddPIDCommandMapping(pid, commandID, username)
-	return true
-}
-
-// UnregisterCommandPID removes a deploy shell Command entry previously
-// added by RegisterCommandPID. No-op if the AuthManager isn't available.
-func UnregisterCommandPID(pid int, commandID string) {
-	if authManager == nil {
-		return
-	}
-	authManager.RemovePIDCommandMapping(pid, commandID)
+	am := authManager
+	am.AddPIDCommandMapping(pid, commandID, username)
+	return func() { am.RemovePIDCommandMapping(pid, commandID) }
 }
 
 func (am *AuthManager) storeCompletionChannel(requestID string, ch chan struct{}) {

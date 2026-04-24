@@ -40,6 +40,9 @@ type CommandResult struct {
 }
 
 func NewMockCommandExecutor(t *testing.T) *MockCommandExecutor {
+	// Reset the synthetic pid counter on cleanup so pids don't leak across
+	// tests and future tests can rely on a predictable starting point.
+	t.Cleanup(func() { mockSyntheticPID.Store(0) })
 	return &MockCommandExecutor{
 		t:        t,
 		commands: []ExecutedCommand{},

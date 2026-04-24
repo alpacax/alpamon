@@ -166,18 +166,16 @@ func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, use
 
 	if commandID != "" {
 		// Track the pid in the PAM tracker before the child can exec
-		// sudo; unregister after the command completes. Holds the pid
-		// in a closure so we only unregister the exact pid we tracked,
-		// guarding against pid reuse.
-		var trackedPID int
-		registered := false
+		// sudo; unregister after the command completes. The register
+		// helper returns a closure that captures the exact (pid,
+		// commandID) pair, so the cleanup is leak-proof by construction.
+		var cleanup func()
 		pidHook := func(pid int) {
-			trackedPID = pid
-			registered = runner.RegisterCommandPID(pid, commandID, username)
+			cleanup = runner.RegisterCommandPID(pid, commandID, username)
 		}
 		exitCode, output, err = h.Executor.ExecWithHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook)
-		if registered {
-			runner.UnregisterCommandPID(trackedPID, commandID)
+		if cleanup != nil {
+			cleanup()
 		}
 	} else {
 		exitCode, output, err = h.Executor.Exec(ctx, cmdArgs, username, groupname, env, timeout)

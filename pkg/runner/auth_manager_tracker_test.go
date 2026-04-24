@@ -223,23 +223,24 @@ func TestRegisterCommandPID_NoopWithoutManager(t *testing.T) {
 	authManager = nil
 	t.Cleanup(func() { authManager = prev })
 
-	if RegisterCommandPID(123, "cmd", "user") {
-		t.Error("expected RegisterCommandPID to return false when authManager is nil")
+	cleanup := RegisterCommandPID(123, "cmd", "user")
+	if cleanup == nil {
+		t.Error("RegisterCommandPID should always return a non-nil cleanup closure")
 	}
-
-	// Must not panic.
-	UnregisterCommandPID(123, "cmd")
+	// Must not panic even when the AuthManager is absent.
+	cleanup()
 }
 
-// TestRegisterCommandPID_RoundTrip exercises the package-level helpers
-// against a real AuthManager singleton (Register -> Lookup -> Unregister).
+// TestRegisterCommandPID_RoundTrip exercises the package-level helper
+// against a real AuthManager singleton (Register -> Lookup -> cleanup).
 func TestRegisterCommandPID_RoundTrip(t *testing.T) {
 	prev := authManager
 	authManager = newTestAuthManager()
 	t.Cleanup(func() { authManager = prev })
 
-	if !RegisterCommandPID(9001, "cmd-round", "eve") {
-		t.Fatal("RegisterCommandPID should have returned true")
+	cleanup := RegisterCommandPID(9001, "cmd-round", "eve")
+	if cleanup == nil {
+		t.Fatal("RegisterCommandPID returned a nil cleanup closure")
 	}
 	entry, ok := authManager.LookupPID(9001)
 	if !ok {
@@ -249,9 +250,9 @@ func TestRegisterCommandPID_RoundTrip(t *testing.T) {
 		t.Errorf("CommandID: got %q, want cmd-round", entry.CommandID)
 	}
 
-	UnregisterCommandPID(9001, "cmd-round")
+	cleanup()
 	if _, ok := authManager.LookupPID(9001); ok {
-		t.Error("entry should be gone after UnregisterCommandPID")
+		t.Error("entry should be gone after cleanup()")
 	}
 }
 
