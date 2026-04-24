@@ -67,8 +67,14 @@ param(
 $ErrorActionPreference = "Stop"
 # Suppress Invoke-WebRequest progress bar; on PS 5.1 the default
 # rendering slows downloads by one to two orders of magnitude, which
-# is painful in cloud-init / UserData runs.
+# is painful in cloud-init / UserData runs. Save the caller's value
+# so a `iwr ... | iex` invocation doesn't inherit the suppression
+# after the installer exits (script-scope assignment would normally
+# shield the caller, but iex runs in the caller's scope).
+$previousProgressPreference = $ProgressPreference
 $ProgressPreference = "SilentlyContinue"
+
+try {
 
 if (-not $Url -or -not $Token) {
     throw "Url and Token are required (pass as parameters or set ALPAMON_URL / ALPAMON_TOKEN)."
@@ -99,13 +105,23 @@ $serviceWasRunning = $false
 $existingService = Get-Service -Name alpamon -ErrorAction SilentlyContinue
 if ($existingService) {
     if ($existingService.Status -eq 'Running') { $serviceWasRunning = $true }
-    Write-Host "Existing alpamon service detected (status: $($existingService.Status)). Stopping..."
-    Stop-Service -Name alpamon -Force -ErrorAction Stop
-    # Stop-Service returns before the SCM fully releases the binary
-    # handle; without the wait, the subsequent copy can still race.
-    # WaitForStatus refreshes the ServiceController's state internally,
-    # so reusing $existingService is safe.
-    $existingService.WaitForStatus('Stopped', '00:00:30')
+    if ($existingService.Status -eq 'Stopped') {
+        Write-Host "Existing alpamon service detected (status: Stopped); leaving as-is."
+    }
+    else {
+        Write-Host "Existing alpamon service detected (status: $($existingService.Status)). Stopping..."
+        # Skip Stop-Service if the SCM is already tearing the service
+        # down; the subsequent WaitForStatus will still block until the
+        # transition completes.
+        if ($existingService.Status -ne 'StopPending') {
+            Stop-Service -Name alpamon -Force -ErrorAction Stop
+        }
+        # Stop-Service returns before the SCM fully releases the binary
+        # handle; without the wait, the subsequent copy can still race.
+        # WaitForStatus refreshes the ServiceController's state internally,
+        # so reusing $existingService is safe.
+        $existingService.WaitForStatus('Stopped', '00:00:30')
+    }
 }
 
 if (-not $Version) {
@@ -199,4 +215,9 @@ catch {
 }
 finally {
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+}
+
+}  # end of outer try (ProgressPreference guard)
+finally {
+    $ProgressPreference = $previousProgressPreference
 }
