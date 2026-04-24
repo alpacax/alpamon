@@ -39,6 +39,13 @@ func (suite *HourlyNetCheckSuite) SetupSuite() {
 }
 
 func (suite *HourlyNetCheckSuite) TearDownSuite() {
+	// Close the ent client first. On Windows, os.Remove fails with
+	// a sharing violation if the underlying SQLite file handle is still
+	// open. On Unix, the unlink succeeds either way, so this is a no-op
+	// for Linux/macOS runners.
+	if suite.client != nil {
+		_ = suite.client.Close()
+	}
 	err := os.Remove(dbFileName)
 	suite.Require().NoError(err, "failed to delete test db file")
 }
