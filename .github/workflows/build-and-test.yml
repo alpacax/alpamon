@@ -160,7 +160,7 @@ jobs:
       # construction (user/group handlers not registered on Windows,
       # Unix shell path contracts, Unix file-mode assertions) are gated
       # with //go:build !windows or per-test runtime.GOOS skips; no
-      # silent blanket skip. See alpamon Issue #1 acceptance criteria.
+      # silent blanket skip. See alpamon issue #284 acceptance criteria.
       - name: Run Tests
         run: go test -v ./... -p 1
 

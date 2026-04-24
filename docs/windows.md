@@ -17,7 +17,7 @@ For Linux/macOS installation paths, see the [project README](../README.md).
 - **Administrator PowerShell.** Service registration, file placement
   under `%ProgramFiles%`, and the `alpamon.exe register` flow all
   require elevation. Non-admin sessions fail with a clear elevation
-  hint, but they fail — do not try to work around it by running from
+  hint, but they fail—do not try to work around it by running from
   a user-writable directory.
 - **Outbound HTTPS** to:
   - your Alpacon workspace URL
@@ -32,7 +32,7 @@ signing of the binary itself is tracked as a follow-up; see
 [unsupported features](#unsupported-on-windows)). There are
 two supported install paths.
 
-### Option A — `install.ps1` (recommended)
+### Option A: `install.ps1` (recommended)
 
 `scripts/install.ps1` is designed for cloud-init, EC2 UserData, Packer,
 and Azure Custom Script Extension. It verifies the SHA-256 of the
@@ -74,7 +74,7 @@ $env:ALPAMON_TOKEN = "<TOKEN>"
 iwr https://raw.githubusercontent.com/alpacax/alpamon/main/scripts/install.ps1 -UseB | iex
 ```
 
-### Option B — manual extract + `alpamon register`
+### Option B: manual extract + `alpamon register`
 
 ```powershell
 # Elevated PowerShell (Run as Administrator)
@@ -94,7 +94,7 @@ Expand-Archive -Path "$env:TEMP\alpamon.zip" -DestinationPath "$env:TEMP\alpamon
 already-installed machine refreshes the service configuration (binary
 path, recovery actions) but does not re-provision the agent.
 
-> The zip can be extracted anywhere — `alpamon.exe register` copies
+> The zip can be extracted anywhere—`alpamon.exe register` copies
 > itself into `%ProgramFiles%\alpamon\alpamon.exe` and re-executes from
 > there, so the Windows Service Manager entry always points at a
 > stable install path.
@@ -173,11 +173,11 @@ Alpacon execute with SYSTEM rights regardless of the requesting user.
 
 The agent ships with a self-updater that handles the normal case:
 
-- **From the Alpacon console** — issue an `upgrade` command. The
+- **From the Alpacon console**: issue an `upgrade` command. The
   agent downloads the latest release archive from GitHub, verifies the
   SHA-256 checksum, swaps the running binary, and restarts itself
   under the Service Control Manager.
-- **Local CLI** — running `alpamon upgrade` (or re-running
+- **Local CLI**: running `alpamon upgrade` (or re-running
   `install.ps1` with a newer `$env:ALPAMON_VERSION`) triggers the same
   flow.
 
@@ -185,7 +185,7 @@ Because Windows holds the running `.exe` locked, the updater renames
 the current binary to `alpamon.exe.old` via `MoveFileEx`, writes the
 new binary, and then schedules the `.old` file for deletion on the
 next service start. If you see an `alpamon.exe.old` after an upgrade,
-leave it — the next service start cleans it up automatically.
+leave it—the next service start cleans it up automatically.
 
 ### Manual fallback
 
@@ -205,7 +205,7 @@ Get-Content "$env:ProgramData\alpamon\log\alpamon.log" -Wait -Tail 50
 ```
 
 Do **not** use `alpamon register` to perform an upgrade on an
-already-registered machine — it refuses to run when a configuration
+already-registered machine—it refuses to run when a configuration
 file already exists, to avoid silently clobbering an existing
 registration.
 
@@ -244,7 +244,7 @@ implemented.
 | Capability | Implementation notes |
 |---|---|
 | Remote shell (`exec`, `shell`) | `powershell.exe -NoLogo -Command`; supports `&&`, `\|\|`, `;` operators |
-| Websh (browser terminal) | ConPTY / Microsoft Pseudoconsole — see `pkg/runner/pty_windows.go` |
+| Websh (browser terminal) | ConPTY / Microsoft Pseudoconsole—see `pkg/runner/pty_windows.go` |
 | File upload / download | Direct `ReadFile` / `WriteFile`, parent directories auto-created |
 | System info (commit / sync) | Via `gopsutil`; users enumerated via `Get-LocalUser`, groups via `Get-LocalGroup` |
 | System control | `restart`, `reboot`, `shutdown`, `upgrade`, `quit` |
@@ -256,12 +256,12 @@ implemented.
 
 | Capability | Status |
 |---|---|
-| User management (`adduser` / `deluser` / `moduser`) | Intentionally not registered in `factory_windows.go` — server enforces via `NO_ADDUSER_PLATFORMS` |
+| User management (`adduser` / `deluser` / `moduser`) | Intentionally not registered in `factory_windows.go`—server enforces via `NO_ADDUSER_PLATFORMS` |
 | Group management (`addgroup` / `delgroup`) | Same as above |
 | Windows Firewall integration | Not implemented; Linux `nftables` / `iptables` handler has no Windows equivalent today |
 | Tunnel (reverse-proxy) | `pkg/runner/tunnel_windows.go` returns an explicit error |
 | Code-Server integration | Returns an explicit error on Windows |
-| Privilege demotion (run-as user) | Stub — all commands execute as `LocalSystem`. No `setuid` equivalent; full fix requires `CreateProcessAsUser` |
+| Privilege demotion (run-as user) | Stub: all commands execute as `LocalSystem`. No `setuid` equivalent; full fix requires `CreateProcessAsUser` |
 | TTY resize via `SIGWINCH` | ConPTY has no Unix signal equivalent; the resize event is still forwarded over the wire, so terminals resize correctly |
 | Authenticode signing of `alpamon.exe` | Not yet signed; SmartScreen may warn on first run. Transport-layer integrity is provided by the checksums file |
 | ARM64 Windows builds | Not built today; tracking as a separate issue |
@@ -274,7 +274,7 @@ succeeding.
 
 ## Logs
 
-Alpamon writes to a single rolling file:
+Alpamon writes to a single log file:
 
 - **Path:** `%ProgramData%\alpamon\log\alpamon.log`
 - **Retention:** no automatic rotation today. On long-running
@@ -289,7 +289,7 @@ To tail the log live:
 Get-Content "$env:ProgramData\alpamon\log\alpamon.log" -Wait -Tail 50
 ```
 
-The Windows Event Log is **not** currently a sink — failures that
+The Windows Event Log is **not** currently a sink—failures that
 happen before the log file is open (for example, missing config file)
 are reported to stdout and, under SCM, mirrored to the service
 recovery log.
@@ -303,5 +303,5 @@ recovery log.
 | `failed to create destination ... the process cannot access the file because it is being used by another process` | Existing `alpamon` service still holds the binary open | `Stop-Service alpamon` before rerunning |
 | `connect to service manager: access is denied` | Non-elevated session, or Group Policy blocking SCM access | Elevate; if policy-blocked, contact your domain admin |
 | Service enters `StartPending` and never reaches `Running` | Bad config file, missing network, or dispatcher panic at startup | Inspect `%ProgramData%\alpamon\log\alpamon.log`; the crash reason is logged before SCM times the service out |
-| `alpamon.exe.old` lingering after upgrade | Normal — deletion is scheduled for next service start | `Restart-Service alpamon` to force the cleanup |
+| `alpamon.exe.old` lingering after upgrade | Normal: deletion is scheduled for next service start | `Restart-Service alpamon` to force the cleanup |
 | SmartScreen blocks the downloaded binary | No Authenticode signature on the archive yet | Unblock the specific file via `Unblock-File`, or use `install.ps1` which triggers the run outside of the zone-taint flow |
