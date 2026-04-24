@@ -115,9 +115,13 @@ Expand-Archive -Path "$env:TEMP\alpamon.zip" -DestinationPath "$env:TEMP\alpamon
     --url "https://<workspace>" --token "<TOKEN>"
 ```
 
-`register` is idempotent: re-running it with the same arguments on an
-already-installed machine refreshes the service configuration (binary
-path, recovery actions) but does not re-provision the agent.
+`register` refuses to run on an already-registered host: if
+`%ProgramData%\alpamon\alpamon.conf` exists it exits non-zero rather
+than silently re-provisioning. This matches the Linux and macOS
+behavior. To upgrade an already-registered host use `alpamon upgrade`
+(or the [Manual fallback](#manual-fallback) recipe below); to
+re-register from scratch, first [Uninstall](#uninstall) and then run
+Option A or Option B.
 
 > The zip can be extracted anywhere—`alpamon.exe register` copies
 > itself into `%ProgramFiles%\alpamon\alpamon.exe` and re-executes from

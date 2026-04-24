@@ -74,79 +74,81 @@ $ErrorActionPreference = "Stop"
 $previousProgressPreference = $ProgressPreference
 $ProgressPreference = "SilentlyContinue"
 
-try {
-
-if (-not $Url -or -not $Token) {
-    throw "Url and Token are required (pass as parameters or set ALPAMON_URL / ALPAMON_TOKEN)."
-}
-
-$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    throw "install.ps1 must be run from an elevated (Administrator) PowerShell."
-}
-
-# Force TLS 1.2+ before any Invoke-WebRequest / Invoke-RestMethod.
-# Older Server 2019 base images default to SSL3/TLS1.0, which fails
-# the GitHub API handshake. TLS 1.3 only exists on .NET Framework 4.8+,
-# so probe for the enum value rather than referencing the literal.
-$tls = [Net.SecurityProtocolType]::Tls12
-if ([Enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
-    $tls = $tls -bor [Net.SecurityProtocolType]'Tls13'
-}
-[Net.ServicePointManager]::SecurityProtocol = $tls
-
-# If an alpamon service already exists, stop it so `alpamon register`
-# can replace %ProgramFiles%\alpamon\alpamon.exe without hitting
-# ERROR_SHARING_VIOLATION. Track whether it was running so a failure
-# in the install block can put it back, matching Linux/macOS where a
-# failed register leaves the existing service untouched.
+# Pre-declared here so the outer catch/finally can reference them even
+# if a throw happens before the assignment points below.
 $serviceWasRunning = $false
-$existingService = Get-Service -Name alpamon -ErrorAction SilentlyContinue
-if ($existingService) {
-    if ($existingService.Status -eq 'Running') { $serviceWasRunning = $true }
-    if ($existingService.Status -eq 'Stopped') {
-        Write-Host "Existing alpamon service detected (status: Stopped); leaving as-is."
-    }
-    else {
-        Write-Host "Existing alpamon service detected (status: $($existingService.Status)). Stopping..."
-        # Skip Stop-Service if the SCM is already tearing the service
-        # down; the subsequent WaitForStatus will still block until the
-        # transition completes.
-        if ($existingService.Status -ne 'StopPending') {
-            Stop-Service -Name alpamon -Force -ErrorAction Stop
-        }
-        # Stop-Service returns before the SCM fully releases the binary
-        # handle; without the wait, the subsequent copy can still race.
-        # WaitForStatus refreshes the ServiceController's state internally,
-        # so reusing $existingService is safe.
-        $existingService.WaitForStatus('Stopped', '00:00:30')
-    }
-}
-
-if (-not $Version) {
-    Write-Host "Resolving latest Alpamon release..."
-    $latest  = Invoke-RestMethod -UseBasicParsing `
-        "https://api.github.com/repos/alpacax/alpamon/releases/latest"
-    $Version = $latest.tag_name
-}
-# Accept both "v1.2.3" and "1.2.3"; GitHub release tags use the "v"
-# prefix so we need it on the download URL path.
-if (-not $Version.StartsWith("v")) {
-    $Version = "v$Version"
-}
-$versionBare = $Version.TrimStart("v")
-
-$arch = "amd64"
-$archiveName   = "alpamon-$versionBare-windows-$arch.tar.gz"
-$checksumsName = "alpamon-$versionBare-checksums.sha256"
-$archiveUrl    = "https://github.com/alpacax/alpamon/releases/download/$Version/$archiveName"
-$checksumsUrl  = "https://github.com/alpacax/alpamon/releases/download/$Version/$checksumsName"
-
-$tempDir = Join-Path $env:TEMP ("alpamon-install-" + [System.Guid]::NewGuid().ToString().Substring(0, 8))
-New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+$tempDir = $null
 
 try {
+    if (-not $Url -or -not $Token) {
+        throw "Url and Token are required (pass as parameters or set ALPAMON_URL / ALPAMON_TOKEN)."
+    }
+
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        throw "install.ps1 must be run from an elevated (Administrator) PowerShell."
+    }
+
+    # Force TLS 1.2+ before any Invoke-WebRequest / Invoke-RestMethod.
+    # Older Server 2019 base images default to SSL3/TLS1.0, which fails
+    # the GitHub API handshake. TLS 1.3 only exists on .NET Framework 4.8+,
+    # so probe for the enum value rather than referencing the literal.
+    $tls = [Net.SecurityProtocolType]::Tls12
+    if ([Enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
+        $tls = $tls -bor [Net.SecurityProtocolType]'Tls13'
+    }
+    [Net.ServicePointManager]::SecurityProtocol = $tls
+
+    # If an alpamon service already exists, stop it so `alpamon register`
+    # can replace %ProgramFiles%\alpamon\alpamon.exe without hitting
+    # ERROR_SHARING_VIOLATION. Track whether it was running so a failure
+    # anywhere below can put it back, matching Linux/macOS where a failed
+    # register leaves the existing service untouched.
+    $existingService = Get-Service -Name alpamon -ErrorAction SilentlyContinue
+    if ($existingService) {
+        if ($existingService.Status -eq 'Running') { $serviceWasRunning = $true }
+        if ($existingService.Status -eq 'Stopped') {
+            Write-Host "Existing alpamon service detected (status: Stopped); leaving as-is."
+        }
+        else {
+            Write-Host "Existing alpamon service detected (status: $($existingService.Status)). Stopping..."
+            # Skip Stop-Service if the SCM is already tearing the service
+            # down; the subsequent WaitForStatus will still block until the
+            # transition completes.
+            if ($existingService.Status -ne 'StopPending') {
+                Stop-Service -Name alpamon -Force -ErrorAction Stop
+            }
+            # Stop-Service returns before the SCM fully releases the binary
+            # handle; without the wait, the subsequent copy can still race.
+            # WaitForStatus refreshes the ServiceController's state internally,
+            # so reusing $existingService is safe.
+            $existingService.WaitForStatus('Stopped', '00:00:30')
+        }
+    }
+
+    if (-not $Version) {
+        Write-Host "Resolving latest Alpamon release..."
+        $latest  = Invoke-RestMethod -UseBasicParsing `
+            "https://api.github.com/repos/alpacax/alpamon/releases/latest"
+        $Version = $latest.tag_name
+    }
+    # Accept both "v1.2.3" and "1.2.3"; GitHub release tags use the "v"
+    # prefix so we need it on the download URL path.
+    if (-not $Version.StartsWith("v")) {
+        $Version = "v$Version"
+    }
+    $versionBare = $Version.TrimStart("v")
+
+    $arch = "amd64"
+    $archiveName   = "alpamon-$versionBare-windows-$arch.tar.gz"
+    $checksumsName = "alpamon-$versionBare-checksums.sha256"
+    $archiveUrl    = "https://github.com/alpacax/alpamon/releases/download/$Version/$archiveName"
+    $checksumsUrl  = "https://github.com/alpacax/alpamon/releases/download/$Version/$checksumsName"
+
+    $tempDir = Join-Path $env:TEMP ("alpamon-install-" + [System.Guid]::NewGuid().ToString().Substring(0, 8))
+    New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+
     $archivePath   = Join-Path $tempDir "alpamon.tar.gz"
     $checksumsPath = Join-Path $tempDir $checksumsName
 
@@ -203,10 +205,12 @@ try {
     Write-Host "Alpamon installed and registered."
 }
 catch {
-    # If we stopped a running service but then failed before register
-    # could bring it back up, restore the prior state on a best-effort
-    # basis. This mirrors Linux/macOS, where a failed `alpamon register`
-    # does not touch the existing service.
+    # Any throw after the service was stopped leaves a previously-running
+    # alpamon down; best-effort restart to match Linux/macOS semantics
+    # where a failed `alpamon register` does not touch the existing
+    # service. Covers failures anywhere after service stop: WaitForStatus
+    # timeout, tag resolution, tempDir creation, download, extract,
+    # register.
     if ($serviceWasRunning) {
         Write-Warning "Install failed; attempting to restart previously-running alpamon service."
         Start-Service -Name alpamon -ErrorAction SilentlyContinue
@@ -214,10 +218,8 @@ catch {
     throw
 }
 finally {
-    Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-}
-
-}  # end of outer try (ProgressPreference guard)
-finally {
+    if ($tempDir -and (Test-Path $tempDir)) {
+        Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+    }
     $ProgressPreference = $previousProgressPreference
 }
