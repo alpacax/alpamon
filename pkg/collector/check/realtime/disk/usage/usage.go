@@ -2,6 +2,7 @@ package diskusage
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"time"
 
@@ -102,12 +103,30 @@ func (c *Check) collectDiskPartitions() ([]disk.PartitionStat, error) {
 			continue
 		}
 
-		if strings.HasPrefix(partition.Device, "/dev") {
+		if isPhysicalDevice(partition) {
 			filteredPartitions = append(filteredPartitions, partition)
 		}
 	}
 
 	return filteredPartitions, nil
+}
+
+// isPhysicalDevice filters gopsutil PartitionStat entries to what we
+// consider a real, operator-relevant disk. The kernel-reported device
+// name shape differs by OS, so the allowlist has to be platform-aware:
+//
+//   - Linux / macOS: physical devices live under /dev (e.g. /dev/sda,
+//     /dev/nvme0n1p1, /dev/disk1s1). The /dev prefix keeps loop, tmpfs,
+//     and overlay entries out in case IsVirtualFileSystem missed one.
+//   - Windows: gopsutil reports the drive root (C:\, D:\, ...) as the
+//     device. There is no /dev equivalent; virtual entries are already
+//     filtered by IsVirtualFileSystem, so every remaining partition is
+//     a real volume we want to measure.
+func isPhysicalDevice(p disk.PartitionStat) bool {
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return strings.HasPrefix(p.Device, "/dev")
 }
 
 func (c *Check) collectDiskUsage(path string) (*disk.UsageStat, error) {
