@@ -78,6 +78,11 @@ $ProgressPreference = "SilentlyContinue"
 # if a throw happens before the assignment points below.
 $serviceWasRunning = $false
 $tempDir = $null
+# SecurityProtocol is a process-wide setting, not script-scoped, so it
+# would persist in a caller that invoked the installer via `iwr | iex`.
+# Capture the prior value and restore it in the finally block for the
+# same reason $ProgressPreference is saved and restored above.
+$previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
 
 try {
     if (-not $Url -or -not $Token) {
@@ -221,5 +226,6 @@ finally {
     if ($tempDir -and (Test-Path $tempDir)) {
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
     }
+    [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
     $ProgressPreference = $previousProgressPreference
 }
