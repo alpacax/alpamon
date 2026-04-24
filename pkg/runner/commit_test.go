@@ -2,6 +2,7 @@ package runner
 
 import (
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -63,6 +64,12 @@ func TestGetUserData(t *testing.T) {
 }
 
 func TestLoadValidShells(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// loadValidShells on Windows returns a fixed list of
+		// {powershell.exe, cmd.exe, pwsh.exe} — see commit_windows.go.
+		// The /etc/shells parsing contract exercised here is Unix-only.
+		t.Skip("/etc/shells is Unix-only; Windows has a fixed shell list.")
+	}
 	// This test verifies that loadValidShells can read and parse the shells file
 	// On macOS/Linux, /etc/shells should exist with common shells
 	shells := loadValidShells()

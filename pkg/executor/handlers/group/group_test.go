@@ -1,3 +1,10 @@
+//go:build !windows
+
+// Group management is unsupported on Windows (see pkg/executor/factory_windows.go:
+// GroupHandler is not registered there). These assertions hardcode
+// /usr/sbin/addgroup invocations, so they are Unix-only. Tracked in alpamon
+// Issue #1 under "excluded test packages".
+
 package group
 
 import (
