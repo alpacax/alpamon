@@ -27,10 +27,13 @@ For Linux/macOS installation paths, see the [project README](../README.md).
 
 ## Install
 
-Alpamon ships as a signed-on-transport `.zip` archive (Authenticode
-signing of the binary itself is tracked as a follow-up; see
-[unsupported features](#unsupported-on-windows)). There are
-two supported install paths.
+Windows releases publish both a versioned `.tar.gz` archive and a
+`.zip` archive, both signed on transport (Authenticode signing of the
+binary itself is tracked as a follow-up; see [unsupported
+features](#unsupported-on-windows)). The `.tar.gz` artifact is what
+`install.ps1` and the in-agent self-updater consume; the `.zip`
+artifact supports manual extract workflows and the stable-alias
+download described below. There are two supported install paths.
 
 ### Option A: `install.ps1` (recommended)
 
@@ -136,7 +139,8 @@ Notes:
 | Logs | `%ProgramData%\alpamon\log\alpamon.log` | agent runtime |
 | Runtime state | `%ProgramData%\alpamon\run\` | agent runtime |
 | Local metrics DB | `%ProgramData%\alpamon\data\` | agent runtime |
-| Staged update binary | `%ProgramFiles%\alpamon\alpamon.exe.old` | self-updater (cleaned up on next start) |
+| Staged new binary (during upgrade) | `%ProgramFiles%\alpamon\alpamon.exe.new` | self-updater (renamed into place atomically) |
+| Previous binary (pending deletion) | `%ProgramFiles%\alpamon\alpamon.exe.old` | self-updater (cleaned up on next start, or scheduled for reboot-time removal) |
 
 `%ProgramFiles%` and `%ProgramData%` are read from the process
 environment at runtime, so the agent tolerates non-default locations
