@@ -65,6 +65,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Suppress Invoke-WebRequest progress bar; on PS 5.1 the default
+# rendering slows downloads by one to two orders of magnitude, which
+# is painful in cloud-init / UserData runs.
+$ProgressPreference = "SilentlyContinue"
 
 if (-not $Url -or -not $Token) {
     throw "Url and Token are required (pass as parameters or set ALPAMON_URL / ALPAMON_TOKEN)."
@@ -74,6 +78,34 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIde
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     throw "install.ps1 must be run from an elevated (Administrator) PowerShell."
+}
+
+# Force TLS 1.2+ before any Invoke-WebRequest / Invoke-RestMethod.
+# Older Server 2019 base images default to SSL3/TLS1.0, which fails
+# the GitHub API handshake. TLS 1.3 only exists on .NET Framework 4.8+,
+# so probe for the enum value rather than referencing the literal.
+$tls = [Net.SecurityProtocolType]::Tls12
+if ([Enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
+    $tls = $tls -bor [Net.SecurityProtocolType]'Tls13'
+}
+[Net.ServicePointManager]::SecurityProtocol = $tls
+
+# If an alpamon service already exists, stop it so `alpamon register`
+# can replace %ProgramFiles%\alpamon\alpamon.exe without hitting
+# ERROR_SHARING_VIOLATION. Track whether it was running so a failure
+# in the install block can put it back, matching Linux/macOS where a
+# failed register leaves the existing service untouched.
+$serviceWasRunning = $false
+$existingService = Get-Service -Name alpamon -ErrorAction SilentlyContinue
+if ($existingService) {
+    if ($existingService.Status -eq 'Running') { $serviceWasRunning = $true }
+    Write-Host "Existing alpamon service detected (status: $($existingService.Status)). Stopping..."
+    Stop-Service -Name alpamon -Force -ErrorAction Stop
+    # Stop-Service returns before the SCM fully releases the binary
+    # handle; without the wait, the subsequent copy can still race.
+    # WaitForStatus refreshes the ServiceController's state internally,
+    # so reusing $existingService is safe.
+    $existingService.WaitForStatus('Stopped', '00:00:30')
 }
 
 if (-not $Version) {
@@ -129,6 +161,9 @@ try {
 
     Write-Host "Extracting..."
     # tar.exe has shipped with Windows since 10 1803 / Server 2019.
+    if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
+        throw "tar.exe not found on PATH. Windows 10 1803 / Server 2019 or newer is required."
+    }
     & tar.exe -xzf $archivePath -C $tempDir
     if ($LASTEXITCODE -ne 0) {
         throw "tar extraction failed (exit code $LASTEXITCODE). Windows 10 1803 / Server 2019 or newer required."
@@ -150,6 +185,17 @@ try {
 
     Write-Host ""
     Write-Host "Alpamon installed and registered."
+}
+catch {
+    # If we stopped a running service but then failed before register
+    # could bring it back up, restore the prior state on a best-effort
+    # basis. This mirrors Linux/macOS, where a failed `alpamon register`
+    # does not touch the existing service.
+    if ($serviceWasRunning) {
+        Write-Warning "Install failed; attempting to restart previously-running alpamon service."
+        Start-Service -Name alpamon -ErrorAction SilentlyContinue
+    }
+    throw
 }
 finally {
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
