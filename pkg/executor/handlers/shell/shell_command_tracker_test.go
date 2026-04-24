@@ -8,7 +8,7 @@ import (
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/pkg/runner"
-	"github.com/alpacax/alpamon/pkg/runner/runnertest"
+	"github.com/alpacax/alpamon/internal/runnertest"
 )
 
 // hookRecordingExecutor wraps a MockCommandExecutor and records whether

@@ -3,6 +3,10 @@
 // "testing" (which would otherwise leak test-only API surface and the
 // testing dependency into shipped binaries).
 //
+// It lives under the repo-root internal/ tree so the Go compiler blocks
+// imports from outside this module, preventing accidental use of the
+// singleton-swap helper from external consumers.
+//
 // This package must only be imported from *_test.go files.
 package runnertest
 
