@@ -33,8 +33,9 @@ const (
 )
 
 var RootCmd = &cobra.Command{
-	Use:   "alpamon",
-	Short: "Secure Server Agent for Alpacon",
+	Use:     "alpamon",
+	Short:   "Secure Server Agent for Alpacon",
+	Version: version.Version,
 	Run: func(cmd *cobra.Command, args []string) {
 		// When launched by the Windows Service Control Manager, run
 		// under the svc dispatcher instead of as a plain console app.
@@ -50,6 +51,9 @@ var RootCmd = &cobra.Command{
 func init() {
 	setup.SetConfigPaths(name)
 	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelDaemonCmd, register.RegisterCmd)
+	// Emit just the version string (no "alpamon version ..." prefix) so
+	// shell one-liners like `alpamon --version` are easy to parse.
+	RootCmd.SetVersionTemplate("{{.Version}}\n")
 }
 
 // runAgent is the core agent loop. When ready is non-nil, it is

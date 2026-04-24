@@ -1,3 +1,11 @@
+//go:build !windows
+
+// User management is unsupported on Windows (see pkg/executor/factory_windows.go:
+// UserHandler is not registered there). The assertions in this file bake in
+// Unix shadow/passwd semantics and hardcoded /usr/sbin/{adduser,deluser,usermod}
+// paths, so they are Unix-only by construction. Tracked in alpamon issue #284
+// under "excluded test packages".
+
 package user
 
 import (

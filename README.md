@@ -48,6 +48,8 @@ sudo alpamon register --url https://<workspace> --token <TOKEN>
 
 ### Windows
 
+See [**docs/windows.md**](docs/windows.md) for the full install / upgrade / uninstall runbook, feature compatibility matrix, and troubleshooting.
+
 Open an elevated PowerShell (Administrator), then run one of:
 
 **Manual** — download `alpamon-X.Y.Z-windows-amd64.zip` from [Releases](https://github.com/alpacax/alpamon/releases), extract, and run:

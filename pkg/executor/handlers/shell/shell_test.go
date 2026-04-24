@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -456,6 +457,13 @@ func TestShellHandler_MixedOperators(t *testing.T) {
 }
 
 func TestShellHandler_AllowSh(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// On Windows, handleShellCommand routes AllowSh=true through
+		// powershell with different args. This unit test locks in the
+		// Unix /bin/sh -c contract; the Windows path is exercised by
+		// integration tests.
+		t.Skip("AllowSh=true uses powershell on Windows; /bin/sh contract is Unix-only.")
+	}
 	mockExec := common.NewMockCommandExecutor(t)
 	// When AllowSh is true, handler calls /bin/sh -c <command>
 	// Mock key: "/bin/sh" + " " + "-c" + " " + "grep err /log | head"

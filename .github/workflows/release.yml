@@ -69,6 +69,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GORELEASER_GITHUB_TOKEN }}
 
+      # Fail-fast guard: if `.goreleaser.yaml` silently drops the
+      # stable-alias archive (e.g. a future config edit moves it under
+      # a build id that doesn't match), goreleaser succeeds but
+      # downstream consumers of
+      # `releases/latest/download/alpamon-windows-amd64.zip` break with
+      # a 404 and we only find out from a user report. Check dist/
+      # before any downstream job spends runner time.
+      - name: Verify Windows stable-alias archive was produced
+        run: |
+          set -e
+          aliased="dist/alpamon-windows-amd64.zip"
+          if [ ! -f "$aliased" ]; then
+            echo "::error file=.goreleaser.yaml::expected $aliased in dist/ but it is missing; goreleaser did not produce the stable-name Windows alias"
+            echo "dist/ contents:"
+            ls -la dist/
+            exit 1
+          fi
+          echo "Found $aliased ($(stat -c%s "$aliased") bytes)"
+
       - name: Set TAG_NAME from channel output
         run: echo "TAG_NAME=${{ steps.channel.outputs.tag }}" >> $GITHUB_ENV
 
@@ -139,8 +158,97 @@ jobs:
       - name: Smoke test
         run: alpamon --help
 
+  windows-smoke-test:
+    # Windows archives are cross-compiled on the Ubuntu runner (see
+    # goreleaser job). This job is the only place in the pipeline that
+    # actually executes the produced alpamon.exe on Windows before we
+    # publish, so it must fail the release if the binary is broken or
+    # the checksum file disagrees with the archive. No continue-on-error.
+    #
+    # We smoke-test both the versioned archive (canonical, SHA-audited)
+    # and the unversioned stable alias that downstreams like
+    # alpacon-server consume via `releases/latest/download/<alias>`.
+    # Both must be attached to the release tag and both must hold an
+    # executable alpamon.exe that reports the expected version.
+    needs: [goreleaser]
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: versioned
+            archive: alpamon-${{ needs.goreleaser.outputs.tag }}-windows-amd64.zip
+          - flavor: stable-alias
+            archive: alpamon-windows-amd64.zip
+    steps:
+      - name: Resolve checksums file and release URL
+        shell: pwsh
+        run: |
+          $checksums = "alpamon-${{ needs.goreleaser.outputs.tag }}-checksums.sha256"
+          "CHECKSUMS_NAME=$checksums" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "REPO_URL=https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}" | `
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download archive and checksums from release
+        shell: pwsh
+        run: |
+          # goreleaser publishes Windows archives directly to the GitHub
+          # release; pull them straight from the release tag so we
+          # verify the exact bytes consumers will download (versioned
+          # archive via install.ps1, stable alias via
+          # `releases/latest/download/alpamon-windows-amd64.zip`).
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "$env:REPO_URL/${{ matrix.archive }}" `
+            -OutFile "${{ matrix.archive }}"
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "$env:REPO_URL/$env:CHECKSUMS_NAME" `
+            -OutFile $env:CHECKSUMS_NAME
+
+      - name: Verify SHA-256 against published checksums file
+        shell: pwsh
+        run: |
+          $line = Get-Content $env:CHECKSUMS_NAME | Where-Object {
+            $parts = $_ -split '\s+', 2
+            $parts.Length -eq 2 -and $parts[1].Trim() -eq "${{ matrix.archive }}"
+          } | Select-Object -First 1
+          if (-not $line) {
+            throw "checksum for ${{ matrix.archive }} not found in $env:CHECKSUMS_NAME"
+          }
+          $expected = ($line -split '\s+', 2)[0].Trim().ToLower()
+          $actual   = (Get-FileHash -Algorithm SHA256 -Path "${{ matrix.archive }}").Hash.ToLower()
+          if ($actual -ne $expected) {
+            throw "SHA-256 mismatch for ${{ matrix.archive }}: expected $expected, got $actual"
+          }
+          Write-Host "Checksum verified for ${{ matrix.archive }}: $actual"
+
+      - name: Extract archive
+        shell: pwsh
+        run: |
+          Expand-Archive -Path "${{ matrix.archive }}" -DestinationPath "extracted-${{ matrix.flavor }}" -Force
+          if (-not (Test-Path "extracted-${{ matrix.flavor }}\alpamon.exe")) {
+            throw "alpamon.exe not found in ${{ matrix.archive }} after extraction"
+          }
+
+      - name: Smoke test (--version)
+        shell: pwsh
+        run: |
+          $output = & ".\extracted-${{ matrix.flavor }}\alpamon.exe" --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "alpamon --version exited with code $LASTEXITCODE"
+          }
+          if ([string]::IsNullOrWhiteSpace($output)) {
+            throw "alpamon --version produced empty output"
+          }
+          # The release build injects the tag via ldflags; assert the
+          # smoke binary reports the tag we intended to ship.
+          $expected = "${{ needs.goreleaser.outputs.tag }}"
+          if ($output.Trim() -ne $expected -and $output.Trim() -ne "v$expected") {
+            throw "alpamon --version reports '$($output.Trim())', expected '$expected' or 'v$expected'"
+          }
+          Write-Host "${{ matrix.flavor }} -> alpamon --version: $output"
+
   packagecloud-deploy:
-    needs: [goreleaser, package-smoke-test]
+    needs: [goreleaser, package-smoke-test, windows-smoke-test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

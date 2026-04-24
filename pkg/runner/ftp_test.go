@@ -1,3 +1,16 @@
+//go:build !windows
+
+// parsePath has two distinct branches (see ftp.go): on Windows it
+// enforces strict home-directory containment via
+// utils.ResolveAndEnsureUnderHome, while on Unix it only scopes to "/"
+// because privilege demotion provides the finer scoping. The test
+// cases in this file encode the Unix contract — hardcoded wire paths
+// like "/tmp/file.txt" and "/home/testuser" are interpreted on
+// Windows with a drive-letter prefix and fail the home-containment
+// check, producing assertion mismatches that do not indicate a real
+// regression. The Windows branch is exercised by integration tests
+// (see pkg/runner/ftp.go:205 and utils.ResolveAndEnsureUnderHome).
+
 package runner
 
 import (

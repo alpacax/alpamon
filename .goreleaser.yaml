@@ -67,6 +67,20 @@ archives:
           - tar.gz
           - zip
 
+  # Stable-name alias for Windows. Produces an unversioned
+  # `alpamon-windows-amd64.zip` in addition to the versioned archive in
+  # the block above, so alpacon-server (and any external consumer) can
+  # point at `releases/latest/download/alpamon-windows-amd64.zip`
+  # without having to bump a version constant on every alpamon release.
+  # The versioned archive remains the canonical one for the self-updater
+  # (which resolves an exact tag) and for SHA-256 audit trails.
+  - id: alpamon-windows-stable
+    ids:
+      - alpamon-windows
+    name_template: '{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}'
+    formats:
+      - zip
+
 nfpms:
   - builds:
       - alpamon-linux

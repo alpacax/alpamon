@@ -156,8 +156,30 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Run Windows-safe tests
-        run: go test -v ./pkg/config/ ./pkg/executor/ ./pkg/updater/ ./internal/... -p 1
+      # Run the full suite on Windows. Packages that are Unix-only by
+      # construction (user/group handlers not registered on Windows,
+      # Unix shell path contracts, Unix file-mode assertions) are gated
+      # with //go:build !windows or per-test runtime.GOOS skips; no
+      # silent blanket skip. See alpamon issue #284 acceptance criteria.
+      - name: Run Tests
+        run: go test -v ./... -p 1
+
+      # `--version` should print the version and exit 0 regardless of
+      # whether Alpamon is registered. Guards against regressions that
+      # would stall startup (e.g., trying to read config, hitting SCM).
+      - name: Smoke test (--version)
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD 'cmd\alpamon\alpamon.exe'
+          if (-not (Test-Path $exe)) { throw "alpamon.exe not found at $exe" }
+          $output = & $exe --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "alpamon --version exited with code $LASTEXITCODE"
+          }
+          if ([string]::IsNullOrWhiteSpace($output)) {
+            throw "alpamon --version produced empty output"
+          }
+          Write-Host "alpamon --version: $output"
 
   build-and-test-macos:
     name: Build and Test (macos-arm64)

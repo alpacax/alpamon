@@ -19,6 +19,13 @@ func TestDetectSystemd_Darwin(t *testing.T) {
 }
 
 func TestEnsureDirectoriesWithRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows os.Stat reports a synthetic Mode().Perm() based on the
+		// read-only attribute, not the Unix mode bits we set. The chmod
+		// call itself still runs via ensureDirectoriesWithRoot, but the
+		// assertion below is Unix-only and would falsely fail here.
+		t.Skip("Unix file-mode assertions; Windows does not expose Unix perm bits.")
+	}
 	root := t.TempDir()
 
 	if err := ensureDirectoriesWithRoot(root); err != nil {
@@ -47,6 +54,9 @@ func TestEnsureDirectoriesWithRoot(t *testing.T) {
 }
 
 func TestEnsureDirectoriesWithRoot_Idempotent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file-mode assertions; Windows does not expose Unix perm bits.")
+	}
 	root := t.TempDir()
 
 	// Call twice to verify idempotency
