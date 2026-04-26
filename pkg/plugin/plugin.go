@@ -3,7 +3,7 @@
 // It encapsulates the boilerplate that every plugin previously duplicated:
 // signal handling, pidfile management, config loading, session setup, the
 // initial server-side version handshake, and the websocket lifecycle
-// (graceful shutdown + in-place restart).
+// (graceful shutdown plus in-place restart).
 //
 // A plugin defines a Plugin value and either calls Plugin.Run directly or
 // embeds it under a Cobra root command via NewRootCmd.
@@ -34,6 +34,10 @@ import (
 // shutdownTimeout bounds how long the SDK waits for the worker pool to drain.
 const shutdownTimeout = 30 * time.Second
 
+// exitRestart is the internal sentinel exit code used by run to signal that
+// Run should exec the binary in place after deferred cleanup completes.
+const exitRestart = -1
+
 // Plugin describes a plugin agent. Name, Version, WSPath, CheckServerURL and
 // Build are required; the rest are optional.
 type Plugin struct {
@@ -62,7 +66,7 @@ type Plugin struct {
 	InitLogger func()
 
 	// PreConfigInit, if set, runs after config files are resolved but before
-	// LoadConfig. Used by plugins that need to validate / fix-up paths
+	// LoadConfig. Used by plugins that need to validate or fix-up paths
 	// referenced in their INI files (e.g. storage paths).
 	PreConfigInit func(configFiles []string)
 
@@ -73,6 +77,10 @@ type Plugin struct {
 	//
 	// The websocket client's lifecycle (Close, ShutDownChan, RestartChan)
 	// is owned by the SDK; plugins should not call Close on it themselves.
+	//
+	// The provided ctx is the plugin's lifecycle context: it is cancelled on
+	// shutdown or restart. Long-running goroutines started by Build should
+	// honor it.
 	Build func(ctx context.Context, host Host) (*BuildResult, error)
 }
 
@@ -99,8 +107,12 @@ type BuildResult struct {
 
 // NewRootCmd returns a Cobra command that runs the plugin and exposes the
 // shared `setup` subcommand. The returned command is suitable for use as the
-// plugin binary's root command.
+// plugin binary's root command. NewRootCmd panics if p fails validation, so
+// misconfigured plugins fail at process start rather than at first run.
 func NewRootCmd(p *Plugin) *cobra.Command {
+	if err := p.validate(); err != nil {
+		panic(err)
+	}
 	cmd := &cobra.Command{
 		Use:   p.Name,
 		Short: fmt.Sprintf("%s agent", p.Name),
@@ -120,9 +132,26 @@ func NewRootCmd(p *Plugin) *cobra.Command {
 // Run blocks until the agent stops. On a Restart signal it execs the current
 // binary in place and does not return.
 func (p *Plugin) Run() {
+	switch code := p.run(); code {
+	case 0:
+		return
+	case exitRestart:
+		// All deferred cleanups in run have completed; exec the new image.
+		p.restartAgent()
+		os.Exit(1) // only reached if syscall.Exec fails
+	default:
+		os.Exit(code)
+	}
+}
+
+// run drives the plugin lifecycle and returns an exit code (or exitRestart
+// to indicate the caller should exec the binary). Using a return value
+// instead of os.Exit lets deferred cleanups—pidfile removal, pool shutdown,
+// context manager shutdown—run on every exit path.
+func (p *Plugin) run() int {
 	if err := p.validate(); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err.Error())
-		os.Exit(1)
+		return 1
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -142,15 +171,43 @@ func (p *Plugin) Run() {
 	if p.InitLogger != nil {
 		p.InitLogger()
 	}
-
 	utils.InitPlatform()
 
 	pidFilePath, err := pidfile.WritePID(pidfile.FilePath(p.Name))
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "Failed to create PID file.", err.Error())
-		os.Exit(1)
+		return 1
 	}
-	defer func() { _ = os.Remove(pidFilePath) }()
+
+	// Single shutdown closure so the order matches the original per-plugin
+	// behavior: ws.Close first (stops incoming reads), then plugin Cleanup,
+	// then pool drain, then context manager, then pidfile removal. The
+	// captured pointers are nil until the corresponding step succeeds, so
+	// the closure is safe to register early.
+	var (
+		wsClient   *runner.WebsocketClient
+		ctxManager *agent.ContextManager
+		workerPool *pool.Pool
+		buildRes   *BuildResult
+	)
+	defer func() {
+		if wsClient != nil {
+			wsClient.Close()
+		}
+		if buildRes != nil && buildRes.Cleanup != nil {
+			buildRes.Cleanup()
+		}
+		if workerPool != nil {
+			if err := workerPool.Shutdown(shutdownTimeout); err != nil {
+				log.Warn().Err(err).Msg("Worker pool shutdown timed out.")
+			}
+		}
+		if ctxManager != nil {
+			ctxManager.Shutdown()
+		}
+		log.Debug().Msg("Bye.")
+		_ = os.Remove(pidFilePath)
+	}()
 
 	log.Info().Msgf("Starting %s... (version: %s)", p.Name, p.Version)
 
@@ -162,51 +219,45 @@ func (p *Plugin) Run() {
 	config.InitSettings(settings)
 
 	session := scheduler.InitSession()
-	p.checkSession(ctx, session)
+	if !p.checkSession(ctx, session) {
+		return 1
+	}
 
-	ctxManager := agent.NewContextManager()
-	workerPool := pool.NewPool(
+	ctxManager = agent.NewContextManager()
+	workerPool = pool.NewPool(
 		config.GlobalSettings.PoolMaxWorkers,
 		config.GlobalSettings.PoolQueueSize,
 	)
-	wsClient := runner.NewWebsocketClient(session, ctxManager, workerPool)
+	wsClient = runner.NewWebsocketClient(session, ctxManager, workerPool)
 
-	host := Host{
-		Session:  session,
-		WSClient: wsClient,
-	}
+	host := Host{Session: session, WSClient: wsClient}
 
 	log.Info().Msgf("%s initialized and running.", p.Name)
 
-	result, err := p.Build(ctx, host)
+	buildRes, err = p.Build(ctx, host)
 	if err != nil {
 		log.Error().Err(err).Msg("Plugin build failed.")
-		os.Exit(1)
+		return 1
 	}
-	if result == nil || result.Run == nil {
+	if buildRes == nil || buildRes.Run == nil {
 		log.Error().Msg("Plugin returned an invalid BuildResult.")
-		os.Exit(1)
+		return 1
 	}
 
-	go result.Run(ctx)
+	go buildRes.Run(ctx)
 
-	restart := false
 	select {
 	case <-ctx.Done():
 		log.Info().Msg("Received termination signal. Shutting down...")
+		return 0
 	case <-wsClient.ShutDownChan:
 		log.Info().Msg("Shutdown command received. Shutting down...")
 		cancel()
+		return 0
 	case <-wsClient.RestartChan:
 		log.Info().Msg("Restart command received. Restarting...")
 		cancel()
-		restart = true
-	}
-
-	p.gracefulShutdown(host, result, workerPool, ctxManager, pidFilePath)
-
-	if restart {
-		p.restartAgent()
+		return exitRestart
 	}
 }
 
@@ -226,8 +277,9 @@ func (p *Plugin) validate() error {
 
 // checkSession performs the initial version handshake against the server.
 // It retries with exponential backoff bounded by the scheduler limits and
-// exits the process if it cannot reach the server within MaxRetryTimeout.
-func (p *Plugin) checkSession(ctx context.Context, session *scheduler.Session) {
+// returns false if it cannot reach the server within MaxRetryTimeout, so
+// the caller can return an error code through deferred cleanup.
+func (p *Plugin) checkSession(ctx context.Context, session *scheduler.Session) bool {
 	log.Debug().Msg("Checking current session...")
 	timeout := time.Duration(0)
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, scheduler.MaxRetryTimeout)
@@ -237,7 +289,7 @@ func (p *Plugin) checkSession(ctx context.Context, session *scheduler.Session) {
 		select {
 		case <-ctxWithTimeout.Done():
 			log.Error().Msg("Session check cancelled or timed out.")
-			os.Exit(1)
+			return false
 		case <-time.After(timeout):
 			jsonData, _ := json.Marshal(map[string]string{"version": p.Version})
 
@@ -256,28 +308,9 @@ func (p *Plugin) checkSession(ctx context.Context, session *scheduler.Session) {
 				}
 				continue
 			}
-			return
+			return true
 		}
 	}
-}
-
-func (p *Plugin) gracefulShutdown(host Host, result *BuildResult, workerPool *pool.Pool, ctxManager *agent.ContextManager, pidPath string) {
-	if host.WSClient != nil {
-		host.WSClient.Close()
-	}
-	if result != nil && result.Cleanup != nil {
-		result.Cleanup()
-	}
-	if workerPool != nil {
-		if err := workerPool.Shutdown(shutdownTimeout); err != nil {
-			log.Warn().Err(err).Msg("Worker pool shutdown timed out.")
-		}
-	}
-	if ctxManager != nil {
-		ctxManager.Shutdown()
-	}
-	log.Debug().Msg("Bye.")
-	_ = os.Remove(pidPath)
 }
 
 func (p *Plugin) restartAgent() {

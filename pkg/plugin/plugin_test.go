@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func validPlugin() Plugin {
+	return Plugin{
+		Name:           "alpamon-test-plugin",
+		Version:        "test",
+		WSPath:         "/ws/test/",
+		CheckServerURL: "/api/test/-/",
+		Build: func(context.Context, Host) (*BuildResult, error) {
+			return &BuildResult{Run: func(context.Context) {}}, nil
+		},
+	}
+}
+
 func TestValidate(t *testing.T) {
 	build := func(context.Context, Host) (*BuildResult, error) { return nil, nil }
 	tests := []struct {
@@ -33,4 +45,41 @@ func TestValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewRootCmdValid(t *testing.T) {
+	p := validPlugin()
+	cmd := NewRootCmd(&p)
+	if cmd == nil {
+		t.Fatal("NewRootCmd returned nil")
+	}
+	if cmd.Use != p.Name {
+		t.Fatalf("cmd.Use = %q, want %q", cmd.Use, p.Name)
+	}
+	// The shared `setup` subcommand must be wired up so plugins can run
+	// `<binary> setup` for first-time configuration.
+	var hasSetup bool
+	for _, sub := range cmd.Commands() {
+		if sub.Use == "setup" {
+			hasSetup = true
+			break
+		}
+	}
+	if !hasSetup {
+		t.Fatal("expected `setup` subcommand to be registered")
+	}
+}
+
+func TestNewRootCmdPanicsOnInvalidPlugin(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected NewRootCmd to panic on invalid Plugin")
+		}
+		err, ok := r.(error)
+		if !ok || !strings.Contains(err.Error(), "Name") {
+			t.Fatalf("expected error mentioning Name, got %v", r)
+		}
+	}()
+	NewRootCmd(&Plugin{}) // missing required fields
 }
