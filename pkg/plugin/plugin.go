@@ -11,7 +11,6 @@ package plugin
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -107,9 +106,13 @@ type BuildResult struct {
 
 // NewRootCmd returns a Cobra command that runs the plugin and exposes the
 // shared `setup` subcommand. The returned command is suitable for use as the
-// plugin binary's root command. NewRootCmd panics if p fails validation, so
-// misconfigured plugins fail at process start rather than at first run.
+// plugin binary's root command. NewRootCmd panics if p is nil or fails
+// validation, so misconfigured plugins fail at process start rather than at
+// first run.
 func NewRootCmd(p *Plugin) *cobra.Command {
+	if p == nil {
+		panic("plugin: nil Plugin")
+	}
 	if err := p.validate(); err != nil {
 		panic(err)
 	}
@@ -265,6 +268,8 @@ func (p *Plugin) validate() error {
 	switch {
 	case p.Name == "":
 		return fmt.Errorf("plugin: Name is required")
+	case p.Version == "":
+		return fmt.Errorf("plugin: Version is required")
 	case p.WSPath == "":
 		return fmt.Errorf("plugin: WSPath is required")
 	case p.CheckServerURL == "":
@@ -291,21 +296,26 @@ func (p *Plugin) checkSession(ctx context.Context, session *scheduler.Session) b
 			log.Error().Msg("Session check cancelled or timed out.")
 			return false
 		case <-time.After(timeout):
-			jsonData, _ := json.Marshal(map[string]string{"version": p.Version})
+			body := map[string]string{"version": p.Version}
 
-			_, statusCode, err := session.Patch(p.CheckServerURL, jsonData, 5)
+			_, statusCode, err := session.Patch(p.CheckServerURL, body, 5)
 			if err != nil || (statusCode != http.StatusOK && statusCode != http.StatusCreated) {
+				// Compute the next backoff before logging so the message
+				// reflects the actual delay (the previous version logged the
+				// stale value, which started at 0s on the first failure).
+				next := timeout
+				if next == 0 {
+					next = config.MinConnectInterval
+				}
+				next *= 2
+				if next > config.MaxConnectInterval {
+					next = config.MaxConnectInterval
+				}
 				log.Debug().Err(err).Msgf(
 					"Failed to connect to %s, will try again in %ds",
-					config.GlobalSettings.ServerURL, int(timeout.Seconds()),
+					config.GlobalSettings.ServerURL, int(next.Seconds()),
 				)
-				if timeout == 0 {
-					timeout = config.MinConnectInterval
-				}
-				timeout *= 2
-				if timeout > config.MaxConnectInterval {
-					timeout = config.MaxConnectInterval
-				}
+				timeout = next
 				continue
 			}
 			return true

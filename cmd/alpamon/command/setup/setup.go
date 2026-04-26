@@ -33,6 +33,10 @@ func SetConfigPaths(serviceName string) {
 	name = serviceName
 	configTarget = filepath.Join(utils.ConfigDir(), fmt.Sprintf("%s.conf", name))
 	templateFilePath = filepath.Join(utils.ConfigDir(), fmt.Sprintf("%s.config.tmpl", name))
+	// Refresh the help string with the resolved service name. SetupCmd.Short
+	// is computed at package-init time, when `name` is still empty—without
+	// this refresh, `<binary> --help` would show "Setup and configure the ."
+	SetupCmd.Short = fmt.Sprintf("Setup and configure the %s.", name)
 }
 
 var SetupCmd = &cobra.Command{

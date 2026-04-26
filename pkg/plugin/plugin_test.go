@@ -25,11 +25,12 @@ func TestValidate(t *testing.T) {
 		p    Plugin
 		want string
 	}{
-		{"missing name", Plugin{WSPath: "/x", CheckServerURL: "/y", Build: build}, "Name"},
-		{"missing wspath", Plugin{Name: "p", CheckServerURL: "/y", Build: build}, "WSPath"},
-		{"missing check url", Plugin{Name: "p", WSPath: "/x", Build: build}, "CheckServerURL"},
-		{"missing build", Plugin{Name: "p", WSPath: "/x", CheckServerURL: "/y"}, "Build"},
-		{"complete", Plugin{Name: "p", WSPath: "/x", CheckServerURL: "/y", Build: build}, ""},
+		{"missing name", Plugin{Version: "v1", WSPath: "/x", CheckServerURL: "/y", Build: build}, "Name"},
+		{"missing version", Plugin{Name: "p", WSPath: "/x", CheckServerURL: "/y", Build: build}, "Version"},
+		{"missing wspath", Plugin{Name: "p", Version: "v1", CheckServerURL: "/y", Build: build}, "WSPath"},
+		{"missing check url", Plugin{Name: "p", Version: "v1", WSPath: "/x", Build: build}, "CheckServerURL"},
+		{"missing build", Plugin{Name: "p", Version: "v1", WSPath: "/x", CheckServerURL: "/y"}, "Build"},
+		{"complete", Plugin{Name: "p", Version: "v1", WSPath: "/x", CheckServerURL: "/y", Build: build}, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,4 +83,18 @@ func TestNewRootCmdPanicsOnInvalidPlugin(t *testing.T) {
 		}
 	}()
 	NewRootCmd(&Plugin{}) // missing required fields
+}
+
+func TestNewRootCmdPanicsOnNilPlugin(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected NewRootCmd to panic on nil Plugin")
+		}
+		s, ok := r.(string)
+		if !ok || !strings.Contains(s, "nil Plugin") {
+			t.Fatalf("expected panic message mentioning nil Plugin, got %v", r)
+		}
+	}()
+	NewRootCmd(nil)
 }
