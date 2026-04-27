@@ -11,9 +11,11 @@ import "github.com/alpacax/alpamon/pkg/executor/handlers/common"
 //     consistency. Missing values indicate a server-side bug and must fail
 //     validation rather than silently fall back to OS auto-assignment.
 //   - IsServiceAccount=true (Application): UID/GID/HomeDirectory are optional.
-//     When omitted, the corresponding useradd/adduser flag is skipped so the
-//     OS auto-assigns values. Cross-server consistency is not required because
-//     alpacon-server matches service accounts by username.
+//     When omitted, the numeric --uid / --gid / --home flag is skipped:
+//     UID and HomeDirectory fall back to OS defaults; GID is replaced with
+//     `--ingroup <Groupname>` (Debian) or `--gid <Groupname>` (RHEL) so the
+//     primary group is set by name. Cross-server consistency is not required
+//     because alpacon-server matches service accounts by username.
 type UserData struct {
 	Username                string   `validate:"required"`
 	UID                     uint64   `validate:"required_unless=IsServiceAccount true"`
@@ -27,9 +29,10 @@ type UserData struct {
 	IsServiceAccount        bool
 }
 
-// userDataFromArgs builds a UserData from CommandArgs, applying defaults for
-// HomeDirectoryPermission and Shell. Shared by Validate and handleAddUser so
-// both paths see identical field population and defaulting.
+// userDataFromArgs builds a UserData from CommandArgs, defaulting empty
+// HomeDirectoryPermission to "0755". Shell is intentionally NOT defaulted
+// here (see comment below). Shared by Validate and handleAddUser so both
+// paths see identical field population.
 func userDataFromArgs(args *common.CommandArgs) UserData {
 	data := UserData{
 		Username:                args.Username,
@@ -47,8 +50,8 @@ func userDataFromArgs(args *common.CommandArgs) UserData {
 		data.HomeDirectoryPermission = "0755"
 	}
 	// Shell is intentionally NOT defaulted: defaulting it before
-	// ValidateStruct would mask an empty `shell` payload — the
-	// `validate:"required"` tag could never fire — and silently
+	// ValidateStruct would mask an empty `shell` payload (the
+	// `validate:"required"` tag could never fire) and silently
 	// give a service account an interactive `/bin/bash`. alpacon-server
 	// already always sends Shell explicitly (e.g. `/usr/sbin/nologin`
 	// for Application service accounts, `user.shell` for IAM Users),

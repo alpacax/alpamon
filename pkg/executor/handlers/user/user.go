@@ -149,7 +149,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	//
 	// Instead, ensure the named group exists up front, then pass it as
 	// the primary group to adduser/useradd via `--ingroup` (Debian) or
-	// `--gid <name>` (RHEL — useradd accepts a group name as well as a
+	// `--gid <name>` (RHEL: useradd accepts a group name as well as a
 	// numeric id). If `groupadd -f` fails here, fail loudly so the
 	// caller does not see a "succeeded" provisioning that breaks at
 	// runtime.

@@ -296,7 +296,7 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 // service-account payload sets the IsServiceAccount flag AND provides numeric
 // UID/GID/HomeDirectory, the omit-* logic correctly honors the explicit
 // values. Locks in the contract that `IsServiceAccount` alone does not strip
-// flags — the value must also be zero/empty.
+// flags; the value must also be zero/empty.
 func TestUserHandler_AddUser_ServiceAccountWithExplicitUID(t *testing.T) {
 	originalPlatformLike := utils.PlatformLike
 	utils.SetPlatformLike("rhel")
