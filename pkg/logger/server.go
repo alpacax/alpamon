@@ -44,6 +44,17 @@ func NewLogServer(workerPool *pool.Pool, ctxManager *agent.ContextManager) *LogS
 		return nil
 	}
 
+	// Restrict socket to root only, independent of process umask.
+	// Matches the pattern used in pkg/runner/auth_manager.go.
+	if err := os.Chmod(path, 0600); err != nil {
+		log.Warn().Err(err).Msg("Failed to set log socket permissions.")
+	}
+	if os.Getuid() == 0 {
+		if err := os.Chown(path, 0, 0); err != nil {
+			log.Warn().Err(err).Msg("Failed to set log socket ownership.")
+		}
+	}
+
 	return &LogServer{
 		path:         path,
 		listener:     listener,
@@ -85,6 +96,7 @@ func (ls *LogServer) StartLogServer() {
 }
 
 func (ls *LogServer) handleConnection(conn net.Conn) {
+	defer conn.Close()
 	var lengthBuf [4]byte
 	for {
 		_, err := io.ReadFull(conn, lengthBuf[:])
