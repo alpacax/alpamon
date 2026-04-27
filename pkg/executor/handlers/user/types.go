@@ -46,9 +46,13 @@ func userDataFromArgs(args *common.CommandArgs) UserData {
 	if data.HomeDirectoryPermission == "" {
 		data.HomeDirectoryPermission = "0755"
 	}
-	if data.Shell == "" {
-		data.Shell = "/bin/bash"
-	}
+	// Shell is intentionally NOT defaulted: defaulting it before
+	// ValidateStruct would mask an empty `shell` payload — the
+	// `validate:"required"` tag could never fire — and silently
+	// give a service account an interactive `/bin/bash`. alpacon-server
+	// already always sends Shell explicitly (e.g. `/usr/sbin/nologin`
+	// for Application service accounts, `user.shell` for IAM Users),
+	// so the validator catching missing `shell` is the desired contract.
 	return data
 }
 
