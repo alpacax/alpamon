@@ -6,16 +6,17 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"os/user"
+	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/alpacax/alpamon/internal/pool"
 	"github.com/alpacax/alpamon/pkg/agent"
 	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/rs/zerolog/log"
-)
-
-const (
-	address = "0.0.0.0:9020"
 )
 
 type LogServer struct {
@@ -25,12 +26,28 @@ type LogServer struct {
 	ctxManager   *agent.ContextManager
 }
 
+func socketPath() string {
+	return filepath.Join(utils.RunDir(), "logs.sock")
+}
+
 func NewLogServer(workerPool *pool.Pool, ctxManager *agent.ContextManager) *LogServer {
-	listener, err := net.Listen("tcp", address)
+	path := socketPath()
+	// Remove stale socket from a previous run.
+	_ = os.Remove(path)
+
+	listener, err := net.Listen("unix", path)
 	if err != nil {
-		log.Error().Err(err).Msgf("Log server startup failed: cannot bind to %s.", address)
+		log.Error().Err(err).Msgf("Log server startup failed: cannot bind to %s.", path)
 		return nil
 	}
+
+	// 0660: owner (root) rw, group rw, other none.
+	// Group ownership is set to "alpamon" so plugin processes in that group
+	// can connect without requiring root. Falls back silently if the group is absent.
+	if err := os.Chmod(path, 0660); err != nil {
+		log.Warn().Err(err).Msg("Failed to set log socket permissions.")
+	}
+	setAlpamonGroup(path)
 
 	return &LogServer{
 		listener:     listener,
@@ -40,8 +57,24 @@ func NewLogServer(workerPool *pool.Pool, ctxManager *agent.ContextManager) *LogS
 	}
 }
 
+// setAlpamonGroup chowns path to root:alpamon so group members can connect.
+// Silently skips if the alpamon group does not exist on this system.
+func setAlpamonGroup(path string) {
+	grp, err := user.LookupGroup("alpamon")
+	if err != nil {
+		return // alpamon group not provisioned yet; file ACL will be root-only
+	}
+	gid, err := strconv.Atoi(grp.Gid)
+	if err != nil {
+		return
+	}
+	if err := os.Lchown(path, 0, gid); err != nil {
+		log.Warn().Err(err).Msg("Failed to set log socket group ownership.")
+	}
+}
+
 func (ls *LogServer) StartLogServer() {
-	log.Debug().Msgf("Started log server on %s.", address)
+	log.Debug().Msgf("Started log server on %s.", socketPath())
 
 	for {
 		select {
@@ -56,8 +89,7 @@ func (ls *LogServer) StartLogServer() {
 				log.Error().Err(err).Msg("Failed to accept socket.")
 				continue
 			}
-			// Submit connection handler to worker pool
-			ctx, cancel := ls.ctxManager.NewContext(0) // No timeout for connection handlers
+			ctx, cancel := ls.ctxManager.NewContext(0)
 			err = ls.workerPool.Submit(ctx, func() error {
 				defer cancel()
 				ls.handleConnection(conn)
@@ -78,7 +110,7 @@ func (ls *LogServer) handleConnection(conn net.Conn) {
 		_, err := io.ReadFull(conn, lengthBuf)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return // connection closed by client, terminating read loop
+				return
 			}
 			log.Warn().Err(err).Msg("Couldn't read message length from connection.")
 			return
@@ -89,7 +121,7 @@ func (ls *LogServer) handleConnection(conn net.Conn) {
 		_, err = io.ReadFull(conn, body)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return // connection closed by client, terminating read loop
+				return
 			}
 			log.Warn().Err(err).Msg("Failed to read log body.")
 			return
@@ -116,4 +148,5 @@ func (ls *LogServer) handleRecord(record LogRecord) {
 func (ls *LogServer) Stop() {
 	close(ls.shutDownChan)
 	_ = ls.listener.Close()
+	_ = os.Remove(socketPath())
 }

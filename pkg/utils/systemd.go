@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -41,8 +43,9 @@ func detectSystemd() bool {
 }
 
 type alpamonDir struct {
-	Path string
-	Mode os.FileMode
+	Path  string
+	Mode  os.FileMode
+	Group string // desired group owner; empty means root
 }
 
 // getAlpamonDirs returns required directories for alpamon.
@@ -51,16 +54,17 @@ type alpamonDir struct {
 // /var/run/alpamon (macOS root), or /tmp/alpamon (non-root on any platform).
 func getAlpamonDirs() []alpamonDir {
 	return []alpamonDir{
-		{ConfigDir(), 0700},
-		{DataDir(), 0750},
-		{LogDir(), 0750},
-		{RunDir(), 0750},
+		{ConfigDir(), 0700, ""},
+		{DataDir(), 0750, ""},
+		{LogDir(), 0750, ""},
+		// RunDir is group-owned by "alpamon" so plugin processes in that group
+		// can traverse the directory and connect to the log socket.
+		{RunDir(), 0750, "alpamon"},
 	}
 }
 
 // EnsureDirectories creates required alpamon directories with permissions
-// and root:root ownership matching configs/tmpfile.conf.
-// Replaces systemd-tmpfiles when systemd is unavailable.
+// matching configs/tmpfile.conf. Replaces systemd-tmpfiles when systemd is unavailable.
 func EnsureDirectories() error {
 	return ensureDirectoriesWithRoot("")
 }
@@ -85,13 +89,30 @@ func ensureDirectoriesWithRoot(root string) error {
 		if err := os.Chmod(path, d.Mode); err != nil {
 			return fmt.Errorf("failed to set permissions on %s: %w", path, err)
 		}
-		// Enforce root:root ownership to match tmpfile.conf.
+		// Enforce ownership to match tmpfile.conf.
 		// Skip in tests (non-empty root) and on Windows (no Unix ownership).
 		if root == "" && runtime.GOOS != "windows" {
-			if err := os.Chown(path, 0, 0); err != nil {
+			gid := 0
+			if d.Group != "" {
+				gid = lookupGroupID(d.Group)
+			}
+			if err := os.Chown(path, 0, gid); err != nil {
 				return fmt.Errorf("failed to set ownership on %s: %w", path, err)
 			}
 		}
 	}
 	return nil
+}
+
+// lookupGroupID returns the GID for the named group, or 0 if not found.
+func lookupGroupID(name string) int {
+	grp, err := user.LookupGroup(name)
+	if err != nil {
+		return 0
+	}
+	gid, err := strconv.Atoi(grp.Gid)
+	if err != nil {
+		return 0
+	}
+	return gid
 }
