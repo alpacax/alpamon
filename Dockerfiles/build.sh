@@ -9,7 +9,8 @@
 #   docker run \
 #     --add-host="<your-domain>:host-gateway" \
 #     -e ALPACON_URL="http://host.docker.internal:8000" \
-#     -e PLUGIN_ID="<your-plugin-id>" \   # optional; image ships a placeholder for local smoke tests
+#     # PLUGIN_ID is optional; the image ships a placeholder for local smoke tests.
+#     -e PLUGIN_ID="<your-plugin-id>" \
 #     -e PLUGIN_KEY="<your-plugin-key>" \
 #     alpamon:<distro>
 #
