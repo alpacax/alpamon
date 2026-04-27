@@ -6,7 +6,6 @@ SYSTEMD_AVAILABLE=true
 
 main() {
   check_root_permission
-  ensure_alpamon_group
   check_systemd_status
   check_alpamon_binary
 
@@ -40,18 +39,6 @@ check_root_permission() {
   fi
 }
 
-# Create the alpamon system group if it does not already exist.
-# Plugin processes added to this group can connect to the log socket.
-ensure_alpamon_group() {
-  if ! getent group alpamon >/dev/null 2>&1; then
-    if command -v addgroup >/dev/null 2>&1; then
-      addgroup --system alpamon >/dev/null 2>&1 || true
-    elif command -v groupadd >/dev/null 2>&1; then
-      groupadd --system alpamon >/dev/null 2>&1 || true
-    fi
-  fi
-}
-
 check_systemd_status() {
   if ! command -v systemctl &> /dev/null; then
     echo "Notice: systemd is not available. Skipping systemd service setup."
@@ -80,14 +67,9 @@ create_directories() {
   mkdir -p $alpamon_dirs
   chmod 0700 /etc/alpamon
   chmod 0750 /var/lib/alpamon /var/log/alpamon /run/alpamon
-  if ! chown root:root /etc/alpamon /var/lib/alpamon /var/log/alpamon; then
-    echo "Warning: Failed to set ownership to root:root for Alpamon directories." >&2
-  fi
-  # /run/alpamon is group-owned by "alpamon" so plugin processes can traverse it.
-  if getent group alpamon >/dev/null 2>&1; then
-    chown root:alpamon /run/alpamon || true
-  else
-    chown root:root /run/alpamon || true
+  # shellcheck disable=SC2086
+  if ! chown root:root $alpamon_dirs; then
+    echo "Warning: Failed to set ownership to root:root for Alpamon directories: $alpamon_dirs" >&2
   fi
 }
 

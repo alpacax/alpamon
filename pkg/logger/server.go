@@ -7,9 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/alpacax/alpamon/internal/pool"
@@ -41,35 +39,11 @@ func NewLogServer(workerPool *pool.Pool, ctxManager *agent.ContextManager) *LogS
 		return nil
 	}
 
-	// 0660: owner (root) rw, group rw, other none.
-	// Group ownership is set to "alpamon" so plugin processes in that group
-	// can connect without requiring root. Falls back silently if the group is absent.
-	if err := os.Chmod(path, 0660); err != nil {
-		log.Warn().Err(err).Msg("Failed to set log socket permissions.")
-	}
-	setAlpamonGroup(path)
-
 	return &LogServer{
 		listener:     listener,
 		shutDownChan: make(chan struct{}),
 		workerPool:   workerPool,
 		ctxManager:   ctxManager,
-	}
-}
-
-// setAlpamonGroup chowns path to root:alpamon so group members can connect.
-// Silently skips if the alpamon group does not exist on this system.
-func setAlpamonGroup(path string) {
-	grp, err := user.LookupGroup("alpamon")
-	if err != nil {
-		return // alpamon group not provisioned yet; file ACL will be root-only
-	}
-	gid, err := strconv.Atoi(grp.Gid)
-	if err != nil {
-		return
-	}
-	if err := os.Lchown(path, 0, gid); err != nil {
-		log.Warn().Err(err).Msg("Failed to set log socket group ownership.")
 	}
 }
 
