@@ -17,6 +17,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// maxFrameSize caps the length-prefix value to prevent a malformed or
+// malicious client from triggering arbitrarily large heap allocations.
+const maxFrameSize = 1 << 20 // 1 MiB
+
 type LogServer struct {
 	listener     net.Listener
 	shutDownChan chan struct{}
@@ -91,6 +95,10 @@ func (ls *LogServer) handleConnection(conn net.Conn) {
 		}
 
 		length := binary.BigEndian.Uint32(lengthBuf)
+		if length > maxFrameSize {
+			log.Warn().Msgf("Log frame too large (%d bytes); closing connection.", length)
+			return
+		}
 		body := make([]byte, length)
 		_, err = io.ReadFull(conn, body)
 		if err != nil {

@@ -52,9 +52,13 @@ type Writer struct {
 // (using Python logging levels: 10=DEBUG, 20=INFO, 30=WARNING, 40=ERROR, 50=CRITICAL).
 // Connection failure at construction time is non-fatal; the writer will retry.
 func New(program string, handlers map[string]int) *Writer {
+	h := make(map[string]int, len(handlers))
+	for k, v := range handlers {
+		h[k] = v
+	}
 	w := &Writer{
 		program:  program,
-		handlers: handlers,
+		handlers: h,
 		path:     SocketPath(),
 	}
 	w.conn, _ = net.DialTimeout("unix", w.path, dialTimeout)
