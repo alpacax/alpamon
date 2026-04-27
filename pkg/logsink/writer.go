@@ -5,7 +5,6 @@
 package logsink
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"net"
@@ -39,6 +38,7 @@ func SocketPath() string {
 // silent and the writer reconnects automatically after a short cooldown.
 type Writer struct {
 	program  string
+	pid      int
 	handlers map[string]int // filename → minimum Python log level
 	path     string
 
@@ -58,6 +58,7 @@ func New(program string, handlers map[string]int) *Writer {
 	}
 	w := &Writer{
 		program:  program,
+		pid:      os.Getpid(),
 		handlers: h,
 		path:     SocketPath(),
 	}
@@ -81,17 +82,18 @@ func (w *Writer) Write(p []byte) (int, error) {
 	if !ok {
 		return len(p), nil
 	}
-	if logger.ConvertLevelToNumber(entry.Level) < threshold {
+	level := logger.ConvertLevelToNumber(entry.Level)
+	if level < threshold {
 		return len(p), nil
 	}
 
 	record := logger.LogRecord{
 		Date:    entry.Time,
-		Level:   logger.ConvertLevelToNumber(entry.Level),
+		Level:   level,
 		Program: w.program,
 		Path:    entry.Caller,
 		Lineno:  lineNo,
-		PID:     os.Getpid(),
+		PID:     w.pid,
 		Msg:     entry.Message,
 	}
 
@@ -100,11 +102,10 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 
-	var frame bytes.Buffer
-	if err := binary.Write(&frame, binary.BigEndian, uint32(len(data))); err != nil {
-		return len(p), nil
-	}
-	frame.Write(data)
+	// Build [uint32 BE length][JSON body] frame in a single allocation.
+	frame := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(frame, uint32(len(data)))
+	copy(frame[4:], data)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -115,7 +116,7 @@ func (w *Writer) Write(p []byte) (int, error) {
 	if w.conn == nil {
 		return len(p), nil // socket unavailable; drop silently
 	}
-	if _, err := w.conn.Write(frame.Bytes()); err != nil {
+	if _, err := w.conn.Write(frame); err != nil {
 		_ = w.conn.Close()
 		w.conn = nil
 		w.lastFail = time.Now()

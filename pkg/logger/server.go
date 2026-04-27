@@ -22,6 +22,7 @@ import (
 const maxFrameSize = 1 << 20 // 1 MiB
 
 type LogServer struct {
+	path         string
 	listener     net.Listener
 	shutDownChan chan struct{}
 	workerPool   *pool.Pool
@@ -44,6 +45,7 @@ func NewLogServer(workerPool *pool.Pool, ctxManager *agent.ContextManager) *LogS
 	}
 
 	return &LogServer{
+		path:         path,
 		listener:     listener,
 		shutDownChan: make(chan struct{}),
 		workerPool:   workerPool,
@@ -52,7 +54,7 @@ func NewLogServer(workerPool *pool.Pool, ctxManager *agent.ContextManager) *LogS
 }
 
 func (ls *LogServer) StartLogServer() {
-	log.Debug().Msgf("Started log server on %s.", socketPath())
+	log.Debug().Msgf("Started log server on %s.", ls.path)
 
 	for {
 		select {
@@ -83,9 +85,9 @@ func (ls *LogServer) StartLogServer() {
 }
 
 func (ls *LogServer) handleConnection(conn net.Conn) {
+	var lengthBuf [4]byte
 	for {
-		lengthBuf := make([]byte, 4)
-		_, err := io.ReadFull(conn, lengthBuf)
+		_, err := io.ReadFull(conn, lengthBuf[:])
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return
@@ -94,7 +96,7 @@ func (ls *LogServer) handleConnection(conn net.Conn) {
 			return
 		}
 
-		length := binary.BigEndian.Uint32(lengthBuf)
+		length := binary.BigEndian.Uint32(lengthBuf[:])
 		if length > maxFrameSize {
 			log.Warn().Msgf("Log frame too large (%d bytes); closing connection.", length)
 			return
@@ -110,13 +112,12 @@ func (ls *LogServer) handleConnection(conn net.Conn) {
 		}
 
 		var record LogRecord
-		err = json.Unmarshal(body, &record)
-		if err != nil {
+		if err = json.Unmarshal(body, &record); err != nil {
 			log.Debug().Err(err).Msg("Failed to unmarshal log record.")
 			continue
 		}
 
-		go ls.handleRecord(record)
+		ls.handleRecord(record)
 	}
 }
 
@@ -130,5 +131,5 @@ func (ls *LogServer) handleRecord(record LogRecord) {
 func (ls *LogServer) Stop() {
 	close(ls.shutDownChan)
 	_ = ls.listener.Close()
-	_ = os.Remove(socketPath())
+	_ = os.Remove(ls.path)
 }
