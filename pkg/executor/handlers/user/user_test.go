@@ -187,7 +187,11 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			platform:    "rhel",
 			wantProgram: "/usr/sbin/useradd",
 			wantFlags:   []string{"--shell", "/usr/sbin/nologin", "--comment", "--create-home", "gitlab-runner"},
-			forbidFlags: []string{"--uid", "--gid", "--home-dir"},
+			// `--gid` is allowed on RHEL because the service-account path
+			// now passes `--gid alpacon` (by name) to set the primary
+			// group. The "no numeric gid leak" invariant is enforced by
+			// the explicit `--gid alpacon` check below.
+			forbidFlags: []string{"--uid", "--home-dir"},
 		},
 	}
 
@@ -213,11 +217,13 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 
 			executed := mock.GetExecutedCommands()
 			var target *common.ExecutedCommand
-			var sawGidGroupadd, sawGroupaddDashF, sawUsermodAppendGroup bool
+			var sawGidGroupadd, sawGroupaddDashF, sawUsermod bool
+			var groupaddDashFIndex, useraddIndex = -1, -1
 			for i := range executed {
 				c := executed[i]
 				if c.Name == tt.wantProgram {
 					target = &executed[i]
+					useraddIndex = i
 				}
 				if c.Name == "/usr/sbin/groupadd" {
 					joined := strings.Join(c.Args, " ")
@@ -226,11 +232,11 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 					}
 					if len(c.Args) >= 2 && c.Args[0] == "-f" && c.Args[1] == "alpacon" {
 						sawGroupaddDashF = true
+						groupaddDashFIndex = i
 					}
 				}
-				if c.Name == "/usr/sbin/usermod" && len(c.Args) >= 3 &&
-					c.Args[0] == "-aG" && c.Args[1] == "alpacon" && c.Args[2] == "gitlab-runner" {
-					sawUsermodAppendGroup = true
+				if c.Name == "/usr/sbin/usermod" {
+					sawUsermod = true
 				}
 			}
 
@@ -252,19 +258,135 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			}
 
 			// Service account must NOT use the gid-based groupadd path
-			// (that path is for IAM User only) but MUST add the user to the
-			// requested Groupname via `groupadd -f` + `usermod -aG` so later
-			// privilege demotion (ValidateGroup=true) succeeds.
+			// (that path is for IAM User only). It MUST run `groupadd -f
+			// alpacon` BEFORE adduser/useradd so the named group exists,
+			// and adduser/useradd MUST set the primary group by name
+			// (--ingroup on Debian, --gid <name> on RHEL). Post-fact
+			// `usermod -aG` is no longer used.
 			if sawGidGroupadd {
 				t.Error("service account path must not call groupadd with --gid")
 			}
 			if !sawGroupaddDashF {
-				t.Error("expected `groupadd -f alpacon` to ensure the supplementary group exists")
+				t.Error("expected `groupadd -f alpacon` to ensure the named primary group exists")
 			}
-			if !sawUsermodAppendGroup {
-				t.Error("expected `usermod -aG alpacon gitlab-runner` to set supplementary membership")
+			if groupaddDashFIndex >= 0 && useraddIndex >= 0 && groupaddDashFIndex >= useraddIndex {
+				t.Errorf("`groupadd -f` must run BEFORE %s, got order groupadd=%d useradd=%d",
+					tt.wantProgram, groupaddDashFIndex, useraddIndex)
+			}
+			if sawUsermod {
+				t.Error("post-fact `usermod` should no longer run; primary group is set during adduser/useradd")
+			}
+
+			// Verify the primary-group-by-name flag is on the create command itself.
+			switch tt.platform {
+			case "debian":
+				if !strings.Contains(joined, "--ingroup alpacon") {
+					t.Errorf("expected `--ingroup alpacon` on adduser, got: %s", joined)
+				}
+			case "rhel":
+				if !strings.Contains(joined, "--gid alpacon") {
+					t.Errorf("expected `--gid alpacon` on useradd, got: %s", joined)
+				}
 			}
 		})
+	}
+}
+
+// TestUserHandler_AddUser_ServiceAccountWithExplicitUID verifies that when a
+// service-account payload sets the IsServiceAccount flag AND provides numeric
+// UID/GID/HomeDirectory, the omit-* logic correctly honors the explicit
+// values. Locks in the contract that `IsServiceAccount` alone does not strip
+// flags — the value must also be zero/empty.
+func TestUserHandler_AddUser_ServiceAccountWithExplicitUID(t *testing.T) {
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("rhel")
+	t.Cleanup(func() {
+		utils.SetPlatformLike(originalPlatformLike)
+	})
+
+	mock := common.NewMockCommandExecutor(t)
+	handler := NewUserHandler(mock, &MockGroupService{}, nil)
+
+	args := &common.CommandArgs{
+		Username:         "explicit-svc",
+		UID:              7000,
+		GID:              7000,
+		Comment:          "Explicit service account,,,,(alpacon-app)xyz",
+		HomeDirectory:    "/var/lib/explicit-svc",
+		Shell:            "/usr/sbin/nologin",
+		Groupname:        "alpacon",
+		IsServiceAccount: true,
+	}
+
+	exitCode, _, err := handler.Execute(context.Background(), "adduser", args)
+	if err != nil {
+		t.Fatalf("Execute() unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("Execute() exitCode = %d, want 0", exitCode)
+	}
+
+	executed := mock.GetExecutedCommands()
+	var useradd *common.ExecutedCommand
+	var sawNamedGidUseradd bool
+	for i, c := range executed {
+		if c.Name == "/usr/sbin/useradd" {
+			useradd = &executed[i]
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "--gid alpacon") {
+				sawNamedGidUseradd = true
+			}
+		}
+	}
+	if useradd == nil {
+		t.Fatalf("expected useradd to be invoked; got %+v", executed)
+	}
+	joined := strings.Join(useradd.Args, " ")
+	for _, want := range []string{"--uid", "7000", "--gid", "7000", "--home-dir", "/var/lib/explicit-svc"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected flag %q on useradd (explicit values must be honored), got: %s", want, joined)
+		}
+	}
+	if sawNamedGidUseradd {
+		t.Error("when GID is explicit (non-zero), useradd must NOT use the by-name `--gid alpacon` path")
+	}
+}
+
+// TestUserHandler_AddUser_ServiceAccountGroupaddFails verifies that a
+// failing `groupadd -f` on the service-account path is load-bearing:
+// handleAddUser must return a non-zero exit code so alpacon-server sees
+// the failure rather than a "succeeded" provisioning that breaks at
+// `utils.Demote(..., ValidateGroup=true)` runtime.
+func TestUserHandler_AddUser_ServiceAccountGroupaddFails(t *testing.T) {
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("rhel")
+	t.Cleanup(func() {
+		utils.SetPlatformLike(originalPlatformLike)
+	})
+
+	mock := common.NewMockCommandExecutor(t)
+	mock.SetResult("/usr/sbin/groupadd -f alpacon", 4, "groupadd: cannot lock /etc/group; try again later", errors.New("groupadd failed"))
+
+	handler := NewUserHandler(mock, &MockGroupService{}, nil)
+
+	args := &common.CommandArgs{
+		Username:         "gitlab-runner",
+		Comment:          "GitLab Runner,,,,(alpacon-app)abc",
+		Shell:            "/usr/sbin/nologin",
+		Groupname:        "alpacon",
+		IsServiceAccount: true,
+	}
+
+	exitCode, output, _ := handler.Execute(context.Background(), "adduser", args)
+	if exitCode == 0 {
+		t.Fatalf("expected non-zero exit code when groupadd fails on service-account path, got 0; output=%q", output)
+	}
+
+	// useradd must not be reached if the primary group cannot be ensured.
+	for _, c := range mock.GetExecutedCommands() {
+		if c.Name == "/usr/sbin/useradd" {
+			t.Errorf("useradd must not run when `groupadd -f` failed; got args=%v", c.Args)
+		}
 	}
 }
 
