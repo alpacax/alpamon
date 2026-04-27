@@ -96,7 +96,7 @@ func (ls *LogServer) StartLogServer() {
 }
 
 func (ls *LogServer) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	var lengthBuf [4]byte
 	for {
 		_, err := io.ReadFull(conn, lengthBuf[:])
