@@ -42,6 +42,14 @@ type CommandExecutor interface {
 
 	// Exec executes a command with all options (user, group, env, timeout)
 	Exec(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error)
+
+	// ExecWithHook is like Exec but invokes pidHook with the child's pid
+	// immediately after the process is started (before it is waited on).
+	// Callers use it to register the root pid with the PAM tracker so
+	// sudo calls issued by the child can be attributed to the originating
+	// deploy shell Command. pidHook may be nil, in which case this
+	// behaves identically to Exec.
+	ExecWithHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int)) (int, string, error)
 }
 
 // WSClient interface for WebSocket client operations

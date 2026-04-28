@@ -3,9 +3,18 @@ package common
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// mockSyntheticPID produces monotonically increasing positive pids for
+// MockCommandExecutor.ExecWithHook so that every invocation hands the
+// hook a distinct, positive value. The base is well above typical real
+// pids to make accidental collisions obvious in test output.
+var mockSyntheticPID atomic.Int64
+
+const mockSyntheticPIDBase = 900000
 
 // MockCommandExecutor is a mock implementation of CommandExecutor for testing.
 // It is the single source of truth for mocking in this package.
@@ -31,6 +40,9 @@ type CommandResult struct {
 }
 
 func NewMockCommandExecutor(t *testing.T) *MockCommandExecutor {
+	// Reset the synthetic pid counter on cleanup so pids don't leak across
+	// tests and future tests can rely on a predictable starting point.
+	t.Cleanup(func() { mockSyntheticPID.Store(0) })
 	return &MockCommandExecutor{
 		t:        t,
 		commands: []ExecutedCommand{},
@@ -80,6 +92,19 @@ func (m *MockCommandExecutor) Exec(ctx context.Context, args []string, username,
 	}
 	m.commands = append(m.commands, ExecutedCommand{Name: args[0], Args: args[1:], User: username, Timeout: timeout})
 	return m.lookupResult(args[0], args[1:]...)
+}
+
+// ExecWithHook mirrors Exec for mock purposes and invokes pidHook (when
+// non-nil) with a distinct, positive synthetic pid so handlers that rely
+// on the hook contract can be exercised without spawning real processes.
+// Using a positive pid ensures the registration code paths in the PID
+// tracker (which ignores pid<=0) are actually exercised.
+func (m *MockCommandExecutor) ExecWithHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int)) (int, string, error) {
+	if pidHook != nil {
+		pid := int(mockSyntheticPIDBase + mockSyntheticPID.Add(1))
+		pidHook(pid)
+	}
+	return m.Exec(ctx, args, username, groupname, env, timeout)
 }
 
 func (m *MockCommandExecutor) SetResult(command string, exitCode int, output string, err error) {

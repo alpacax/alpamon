@@ -79,7 +79,7 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 
 	// Execute command
 	start := time.Now()
-	output, err := cmd.CombinedOutput()
+	output, err := e.runCommand(cmd, opts.PIDHook)
 	exitCode := 0
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -96,6 +96,31 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	return exitCode, string(output), err
 }
 
+// runCommand executes cmd and returns its combined stdout/stderr output.
+// When pidHook is non-nil, the command is started with cmd.Start() so the
+// child's pid can be reported before Wait blocks. When pidHook is nil,
+// the simpler cmd.CombinedOutput() path is used unchanged.
+func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int)) ([]byte, error) {
+	if pidHook == nil {
+		return cmd.CombinedOutput()
+	}
+
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	if err := cmd.Start(); err != nil {
+		return buf.Bytes(), err
+	}
+
+	if cmd.Process != nil {
+		pidHook(cmd.Process.Pid)
+	}
+
+	err := cmd.Wait()
+	return buf.Bytes(), err
+}
+
 // CommandOptions defines options for command execution
 type CommandOptions struct {
 	Args       []string          // Command and arguments
@@ -105,6 +130,18 @@ type CommandOptions struct {
 	WorkingDir string            // Working directory
 	Timeout    time.Duration     // Command timeout
 	Input      string            // Input to provide via stdin
+
+	// PIDHook, if non-nil, is invoked with the child's pid immediately
+	// after cmd.Start() returns successfully and before the command is
+	// waited on. It is used to register the root pid of a deploy shell
+	// Command with the PAM tracker so that sudo invoked inside the
+	// command can be attributed to the originating Command.ID.
+	//
+	// When PIDHook is set, Execute uses cmd.Start()/cmd.Wait() instead
+	// of cmd.CombinedOutput() so the pid is visible to the hook before
+	// the child can exec sudo. Any panic from the hook is recovered and
+	// logged without affecting command execution.
+	PIDHook func(pid int)
 }
 
 // substituteEnvVars replaces environment variables in arguments
@@ -217,5 +254,20 @@ func (e *Executor) Exec(ctx context.Context, args []string, username, groupname 
 		Groupname: groupname,
 		Env:       env,
 		Timeout:   timeout,
+	})
+}
+
+// ExecWithHook is like Exec but registers a PIDHook that receives the
+// child's pid immediately after cmd.Start() succeeds. This is used by
+// the shell handler to track the root pid of a deploy shell Command so
+// sudo calls made inside the command can be authorized via command_id.
+func (e *Executor) ExecWithHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int)) (int, string, error) {
+	return e.Execute(ctx, CommandOptions{
+		Args:      args,
+		Username:  username,
+		Groupname: groupname,
+		Env:       env,
+		Timeout:   timeout,
+		PIDHook:   pidHook,
 	})
 }
