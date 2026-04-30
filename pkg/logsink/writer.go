@@ -125,13 +125,15 @@ func (w *Writer) Write(p []byte) (int, error) {
 }
 
 // Close closes the underlying connection.
-func (w *Writer) Close() {
+func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.conn != nil {
-		_ = w.conn.Close()
+		err := w.conn.Close()
 		w.conn = nil
+		return err
 	}
+	return nil
 }
 
 // tryReconnect attempts a single reconnect if the cooldown has elapsed.

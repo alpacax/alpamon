@@ -113,7 +113,8 @@ func (ls *LogServer) handleConnection(conn net.Conn) {
 			log.Warn().Msgf("Log frame too large (%d bytes); closing connection.", length)
 			return
 		}
-		body := make([]byte, length)
+		n := int(length)
+		body := make([]byte, n)
 		_, err = io.ReadFull(conn, body)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
