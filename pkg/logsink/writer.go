@@ -7,6 +7,7 @@ package logsink
 import (
 	"encoding/binary"
 	"encoding/json"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -103,6 +104,9 @@ func (w *Writer) Write(p []byte) (int, error) {
 	}
 
 	// Build [uint32 BE length][JSON body] frame in a single allocation.
+	if len(data) > math.MaxInt-4 {
+		return len(p), nil
+	}
 	frame := make([]byte, 4+len(data))
 	binary.BigEndian.PutUint32(frame, uint32(len(data)))
 	copy(frame[4:], data)
