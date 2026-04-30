@@ -68,6 +68,15 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GORELEASER_GITHUB_TOKEN }}
+          # Pin the tag goreleaser treats as "current" to the tag that
+          # actually triggered this workflow. Without this, goreleaser
+          # falls back to `git describe --tags`, which picks the
+          # earliest-created tag when multiple tags share a commit
+          # (e.g. an RC tag that was cut first and a GA tag attached
+          # to the same SHA after dev validation). The other steps in
+          # this workflow already key off `github.ref_name` for the
+          # same reason — this aligns goreleaser with that convention.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
 
       # Fail-fast guard: if `.goreleaser.yaml` silently drops the
       # stable-alias archive (e.g. a future config edit moves it under
