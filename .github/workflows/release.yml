@@ -75,7 +75,7 @@ jobs:
           # (e.g. an RC tag that was cut first and a GA tag attached
           # to the same SHA after dev validation). The other steps in
           # this workflow already key off `github.ref_name` for the
-          # same reason — this aligns goreleaser with that convention.
+          # same reason: this aligns goreleaser with that convention.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
 
       # Fail-fast guard: if `.goreleaser.yaml` silently drops the
