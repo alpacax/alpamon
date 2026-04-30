@@ -3,6 +3,7 @@
 package register
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -101,6 +102,15 @@ func TestStartService_BinaryPathNotDoubleEncoded(t *testing.T) {
 		},
 	)
 	if err != nil {
+		// mgr.Connect can succeed with read-only SCM access on some
+		// hosts (e.g. limited local accounts), so CreateService is the
+		// real privilege gate. Treat ACCESS_DENIED here as a skip to
+		// match the docstring's intent and avoid hard-failing
+		// non-Administrator local runs.
+		var errno windows.Errno
+		if errors.As(err, &errno) && errno == windows.ERROR_ACCESS_DENIED {
+			t.Skipf("requires Administrator + SCM create access (CreateService: %v)", err)
+		}
 		t.Fatalf("CreateService: %v", err)
 	}
 	t.Cleanup(func() {

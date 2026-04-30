@@ -89,9 +89,16 @@ func startService() error {
 		// does not call EscapeArg) so the stored ImagePath ends up as
 		// the canonical "<path>" command line.
 		if err := normalizeServiceBinaryPath(s, serviceBinPath); err != nil {
-			// Close explicitly: the deferred close below has not been
-			// registered yet at this point in the function flow.
+			// Best-effort rollback: delete the freshly-created service
+			// so a failed register does not leave a broken
+			// (double-encoded) ImagePath entry behind. Close
+			// explicitly afterward — the deferred close below has not
+			// been registered yet at this point in the function flow.
+			deleteErr := s.Delete()
 			_ = s.Close()
+			if deleteErr != nil {
+				return fmt.Errorf("normalize service binary path: %w (rollback delete service: %v)%s", err, deleteErr, elevationHint(err))
+			}
 			return fmt.Errorf("normalize service binary path: %w%s", err, elevationHint(err))
 		}
 	} else {
@@ -185,18 +192,19 @@ func quoteServicePath(p string) string {
 }
 
 // normalizeServiceBinaryPath rewrites the service's BinaryPathName to
-// binPath via UpdateConfig. Used immediately after mgr.CreateService to
-// undo the double-encoding caused by syscall.EscapeArg inside
+// binaryPathName via UpdateConfig. Used immediately after mgr.CreateService
+// to undo the double-encoding caused by syscall.EscapeArg inside
 // CreateService — see the call site in startService for the full
 // rationale. UpdateConfig writes BinaryPathName verbatim (no EscapeArg),
-// so the stored ImagePath ends up as the single-quoted command line we
-// constructed via quoteServicePath.
-func normalizeServiceBinaryPath(s *mgr.Service, binPath string) error {
+// so the stored ImagePath ends up as the command line we constructed via
+// quoteServicePath, wrapped once with a single pair of double quotes when
+// needed.
+func normalizeServiceBinaryPath(s *mgr.Service, binaryPathName string) error {
 	cfg, err := s.Config()
 	if err != nil {
 		return fmt.Errorf("read service config: %w", err)
 	}
-	cfg.BinaryPathName = binPath
+	cfg.BinaryPathName = binaryPathName
 	if err := s.UpdateConfig(cfg); err != nil {
 		return fmt.Errorf("update service config: %w", err)
 	}
