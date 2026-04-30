@@ -35,6 +35,10 @@ func socketPath() string {
 
 func NewLogServer(workerPool *pool.Pool, ctxManager *agent.ContextManager) *LogServer {
 	path := socketPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		log.Error().Err(err).Msgf("Log server startup failed: cannot create run directory %s.", filepath.Dir(path))
+		return nil
+	}
 	// Remove stale socket from a previous run.
 	_ = os.Remove(path)
 
