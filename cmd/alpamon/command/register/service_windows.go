@@ -192,13 +192,13 @@ func quoteServicePath(p string) string {
 }
 
 // normalizeServiceBinaryPath rewrites the service's BinaryPathName to
-// binaryPathName via UpdateConfig. Used immediately after mgr.CreateService
-// to undo the double-encoding caused by syscall.EscapeArg inside
-// CreateService — see the call site in startService for the full
-// rationale. UpdateConfig writes BinaryPathName verbatim (no EscapeArg),
-// so the stored ImagePath ends up as the command line we constructed via
-// quoteServicePath, wrapped once with a single pair of double quotes when
-// needed.
+// the provided binaryPathName via UpdateConfig. Used immediately after
+// mgr.CreateService to undo the double-encoding caused by
+// syscall.EscapeArg inside CreateService — see the call site in
+// startService for the full rationale. UpdateConfig writes
+// BinaryPathName verbatim (no EscapeArg), so the stored ImagePath ends
+// up as the command line we constructed via quoteServicePath, wrapped
+// once with a single pair of double quotes when needed.
 func normalizeServiceBinaryPath(s *mgr.Service, binaryPathName string) error {
 	cfg, err := s.Config()
 	if err != nil {

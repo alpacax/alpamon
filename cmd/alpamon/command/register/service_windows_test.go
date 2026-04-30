@@ -61,19 +61,27 @@ func TestQuoteServicePath(t *testing.T) {
 // TestStartService_BinaryPathNotDoubleEncoded exercises the production
 // composition of quoteServicePath + mgr.CreateService +
 // normalizeServiceBinaryPath against the real local SCM, and asserts
-// that the resulting ImagePath registry value is the single-quoted
-// canonical form. This is the regression gate for the double-encoding
-// bug fixed by normalizeServiceBinaryPath — the bug only reproduces
-// against the real SCM (mgr.CreateService applies syscall.EscapeArg
-// internally, which we cannot observe via a unit test of helpers).
+// that the resulting ImagePath registry value is the canonical form
+// wrapped once in double quotes. This is the regression gate for the
+// double-encoding bug fixed by normalizeServiceBinaryPath — the bug
+// only reproduces against the real SCM (mgr.CreateService applies
+// syscall.EscapeArg internally, which we cannot observe via a unit
+// test of helpers).
 //
 // Skipped if the test process can't open the SCM with create
 // privileges (i.e. not running as Administrator). GitHub-hosted
 // windows-latest runners are admin so CI does exercise this path.
+// Connect failures other than ACCESS_DENIED (e.g. SCM/RPC issues) are
+// surfaced via t.Fatalf rather than silently skipped, so CI does not
+// mask real regressions behind the elevation skip.
 func TestStartService_BinaryPathNotDoubleEncoded(t *testing.T) {
 	m, err := mgr.Connect()
 	if err != nil {
-		t.Skipf("requires Administrator + SCM access (mgr.Connect: %v)", err)
+		var errno windows.Errno
+		if errors.As(err, &errno) && errno == windows.ERROR_ACCESS_DENIED {
+			t.Skipf("requires Administrator + SCM access (mgr.Connect: %v)", err)
+		}
+		t.Fatalf("mgr.Connect failed: %v", err)
 	}
 	t.Cleanup(func() { _ = m.Disconnect() })
 
