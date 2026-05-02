@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,12 +20,17 @@ import (
 
 var sockCounter atomic.Uint64
 
-// shortSocketPath returns a UDS path under /tmp short enough to fit in the
+// shortSocketPath returns a UDS path short enough to fit in the
 // 104-byte sun_path limit on darwin. t.TempDir() can produce paths that
-// exceed this limit and cause "bind: invalid argument" on macOS.
+// exceed this limit and cause "bind: invalid argument" on macOS, so on
+// darwin we anchor under /tmp; elsewhere os.TempDir() is fine.
 func shortSocketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "lsk")
+	base := os.TempDir()
+	if runtime.GOOS == "darwin" {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, "lsk")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}
