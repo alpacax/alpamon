@@ -24,7 +24,13 @@ const (
 	socketName = "logs.sock"
 )
 
-// SocketPath returns the UDS path for the alpamon log socket.
+// SocketPath returns the UDS path for the Alpamon log socket.
+//
+// The path is derived from utils.RunDir(), which differs by uid:
+// /run/alpamon for root, /tmp/alpamon for non-root. This is safe today
+// because both Alpamon and its plugins run as root; once privilege
+// separation lands, this should switch to a fixed system path so
+// non-root plugins still reach the daemon's socket.
 func SocketPath() string {
 	return filepath.Join(utils.RunDir(), socketName)
 }
