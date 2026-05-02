@@ -150,7 +150,7 @@ func TestWriter_ForwardsRecordWhenHandlerMatches(t *testing.T) {
 	defer stop()
 
 	w := newTestWriter(path, "myplugin", map[string]int{"plugin.go": 30})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	n, err := w.Write(zerologLine(t, "error", "github.com/x/y/plugin.go:42", "boom"))
 	if err != nil {
@@ -187,7 +187,7 @@ func TestWriter_FiltersUnlistedFile(t *testing.T) {
 	defer stop()
 
 	w := newTestWriter(path, "myplugin", map[string]int{"plugin.go": 30})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	_, _ = w.Write(zerologLine(t, "error", "other.go:10", "ignored"))
 	expectNoFrame(t, frames)
@@ -198,7 +198,7 @@ func TestWriter_FiltersBelowThreshold(t *testing.T) {
 	defer stop()
 
 	w := newTestWriter(path, "myplugin", map[string]int{"plugin.go": 30})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	// info=20, threshold=30
 	_, _ = w.Write(zerologLine(t, "info", "plugin.go:1", "below"))
@@ -214,7 +214,7 @@ func TestWriter_DropsOversizedRecord(t *testing.T) {
 	defer stop()
 
 	w := newTestWriter(path, "p", map[string]int{"plugin.go": 10})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	huge := strings.Repeat("x", logger.MaxFrameSize)
 	_, _ = w.Write(zerologLine(t, "error", "plugin.go:1", huge))
@@ -226,7 +226,7 @@ func TestWriter_SilentOnInvalidJSON(t *testing.T) {
 	defer stop()
 
 	w := newTestWriter(path, "p", map[string]int{"plugin.go": 10})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	garbage := []byte("not json")
 	n, err := w.Write(garbage)
@@ -241,7 +241,7 @@ func TestWriter_HandlersMapIsCopied(t *testing.T) {
 
 	handlers := map[string]int{"plugin.go": 30}
 	w := New("p", handlers)
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 	w.path = path
 	// Mutate the caller's map after construction. If New() didn't copy,
 	// the writer's filter would change too.
@@ -257,7 +257,7 @@ func TestWriter_ReconnectsAfterServerRestart(t *testing.T) {
 	path, frames, stop := startTestServer(t)
 
 	w := newTestWriter(path, "p", map[string]int{"plugin.go": 10})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	_, _ = w.Write(zerologLine(t, "error", "plugin.go:1", "first"))
 	_ = recvFrame(t, frames)
@@ -300,10 +300,10 @@ func TestWriter_FrameFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	w := newTestWriter(path, "p", map[string]int{"plugin.go": 10})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	connCh := make(chan net.Conn, 1)
 	go func() {
@@ -317,7 +317,7 @@ func TestWriter_FrameFormat(t *testing.T) {
 	_, _ = w.Write(zerologLine(t, "error", "plugin.go:7", "hi"))
 
 	conn := <-connCh
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 
 	var hdr [4]byte

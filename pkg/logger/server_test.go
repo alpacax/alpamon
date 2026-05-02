@@ -30,7 +30,7 @@ func waitDone(t *testing.T, done <-chan struct{}, msg string) {
 
 func TestHandleConnection_OversizedFrameClosesConnection(t *testing.T) {
 	server, client := net.Pipe()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ls := &LogServer{}
 	done := runHandle(ls, server)
