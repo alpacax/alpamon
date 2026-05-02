@@ -268,26 +268,24 @@ func TestWriter_ReconnectsAfterServerRestart(t *testing.T) {
 	_, _ = w.Write(zerologLine(t, "error", "plugin.go:1", "first"))
 	_ = recvFrame(t, frames)
 
-	// Drop the server. Subsequent write should fail and arm cooldown.
+	// Drop the server. Force the writer to drop its conn too: a write
+	// to a server-closed peer doesn't reliably fail-fast on every
+	// platform (notably Windows), so we can't rely on Write() alone to
+	// trigger reconnect. We're testing tryReconnect's path here, not
+	// peer-disconnect detection.
 	stop()
-
-	_, _ = w.Write(zerologLine(t, "error", "plugin.go:1", "during-outage"))
-
-	// Skip cooldown so the next write reconnects immediately.
 	w.mu.Lock()
+	if w.conn != nil {
+		_ = w.conn.Close()
+		w.conn = nil
+	}
 	w.lastFail = time.Time{}
-	w.mu.Unlock()
-
-	// Bring the server back at the same path.
+	// Bring a fresh server up at a new path; tempdirs differ per call.
 	path2, frames2, stop2 := startTestServer(t)
 	defer stop2()
-	if path2 != path {
-		// startTestServer uses t.TempDir which gives a fresh dir per call,
-		// so paths differ. Repoint the writer to the new server.
-		w.mu.Lock()
-		w.path = path2
-		w.mu.Unlock()
-	}
+	w.path = path2
+	w.mu.Unlock()
+	_ = path
 
 	_, _ = w.Write(zerologLine(t, "error", "plugin.go:1", "after-restart"))
 	body := recvFrame(t, frames2)
