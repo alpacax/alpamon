@@ -7,7 +7,6 @@ package logsink
 import (
 	"encoding/binary"
 	"encoding/json"
-	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -104,7 +103,9 @@ func (w *Writer) Write(p []byte) (int, error) {
 	}
 
 	// Build [uint32 BE length][JSON body] frame in a single allocation.
-	if len(data) > math.MaxInt-4 {
+	// Drop records that exceed the server's MaxFrameSize — the server would
+	// close the connection on receipt, triggering reconnect cooldown.
+	if len(data) > logger.MaxFrameSize {
 		return len(p), nil
 	}
 	frame := make([]byte, 4+len(data))
