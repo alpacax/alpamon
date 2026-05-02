@@ -1,6 +1,6 @@
-// Package logsink provides a shared Unix-domain-socket writer for alpamon plugins.
+// Package logsink provides a shared Unix-domain-socket writer for Alpamon plugins.
 // Plugins use this package as an io.Writer target for zerolog so that their logs are
-// forwarded to alpamon and then on to the Alpacon server, without each plugin
+// forwarded to Alpamon and then on to the Alpacon server, without each plugin
 // duplicating the filtering, framing, and reconnect logic.
 package logsink
 
