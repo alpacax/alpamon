@@ -25,8 +25,8 @@ jobs:
       CGO_ENABLED: 0
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -34,7 +34,7 @@ jobs:
         run: go run -mod=mod entgo.io/ent/cmd/ent@${{ env.ENT_VERSION }} generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
 
       - name: GolangCI-Lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.9.0
           args: --timeout=5m
