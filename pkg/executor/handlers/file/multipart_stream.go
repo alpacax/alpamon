@@ -53,7 +53,64 @@ func (r multipartReader) WriteTo(dst io.Writer) (int64, error) {
 // buildMultipartStream returns a streaming multipart body containing `src`
 // under form field "content". The caller MUST Close the returned reader. The
 // goroutine owns src.Close so leaking the reader does not leak the source.
-func buildMultipartStream(src io.ReadCloser, fileName string, isRecursive bool) (io.ReadCloser, string, error) {
+//
+// hint is the source size in bytes. Pass -1 when unknown. Files smaller than
+// 1 MiB skip the pool buffers entirely to avoid over-provisioning 4 MiB
+// allocations for small payloads.
+func buildMultipartStream(src io.ReadCloser, fileName string, isRecursive bool, hint int64) (io.ReadCloser, string, error) {
+	if hint >= 0 && hint < (1<<20) {
+		return buildMultipartStreamSmall(src, fileName, isRecursive)
+	}
+	return buildMultipartStreamLarge(src, fileName, isRecursive)
+}
+
+// buildMultipartStreamSmall handles files < 1 MiB using Go's default 32 KiB
+// copy buffer and no pool allocation — avoids 4 MiB over-provisioning.
+func buildMultipartStreamSmall(src io.ReadCloser, fileName string, isRecursive bool) (io.ReadCloser, string, error) {
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	contentType := mw.FormDataContentType()
+
+	go func() {
+		defer src.Close()
+		defer func() {
+			if rec := recover(); rec != nil {
+				_ = pw.CloseWithError(fmt.Errorf("multipart panic: %v", rec))
+			}
+		}()
+
+		failPipe := func(err error) bool {
+			if err != nil {
+				_ = pw.CloseWithError(err)
+				return true
+			}
+			return false
+		}
+
+		fw, err := mw.CreateFormFile(multipartFieldContent, fileName)
+		if failPipe(err) {
+			return
+		}
+		if failPipe(func() error { _, err := io.Copy(fw, src); return err }()) {
+			return
+		}
+		if isRecursive {
+			if failPipe(mw.WriteField(multipartFieldName, fileName)) {
+				return
+			}
+		}
+		if failPipe(mw.Close()) {
+			return
+		}
+		_ = pw.Close()
+	}()
+
+	return pr, contentType, nil
+}
+
+// buildMultipartStreamLarge handles large files (≥ 1 MiB or unknown size)
+// using pool-reused 4 MiB buffers and multipartReader for efficient WriteTo.
+func buildMultipartStreamLarge(src io.ReadCloser, fileName string, isRecursive bool) (io.ReadCloser, string, error) {
 	pr, pw := io.Pipe()
 	bufW := bufio.NewWriterSize(pw, multipartPipeBufSize)
 	mw := multipart.NewWriter(bufW)

@@ -70,7 +70,7 @@ func BenchmarkCreateMultipartBodyLargePayload(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				src := io.NopCloser(bytes.NewReader(payload))
-				body, _, err := buildMultipartStream(src, "f.bin", false)
+				body, _, err := buildMultipartStream(src, "f.bin", false, int64(size))
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -106,7 +106,7 @@ func BenchmarkUpload_E2E_Local(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				body, ct, err := buildMultipartStream(src, filepath.Base(path), false)
+				body, ct, err := buildMultipartStream(src, filepath.Base(path), false, int64(size))
 				if err != nil {
 					_ = src.Close()
 					b.Fatal(err)

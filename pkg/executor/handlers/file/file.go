@@ -372,7 +372,7 @@ func (h *FileHandler) fileUpload(_ context.Context, args *common.CommandArgs, sr
 		return 0, errors.New("API session not available")
 	}
 
-	body, contentType, err := buildMultipartStream(src, fileName, recursive)
+	body, contentType, err := buildMultipartStream(src, fileName, recursive, size)
 	if err != nil {
 		return 0, err
 	}
