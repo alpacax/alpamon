@@ -14,12 +14,9 @@ import (
 	"testing"
 )
 
-// benchSizes covers the same payload range as issue #199.
 var benchSizes = []int{1 << 20, 10 << 20, 100 << 20}
 
-// makeTempFile writes `size` bytes of pseudo-random content into a temp file
-// and returns the path. b.Cleanup removes it. Random content prevents
-// compression-related throughput inflation in transports.
+// makeTempFile writes pseudo-random bytes to a temp file. Random content avoids transport-level compression.
 func makeTempFile(b *testing.B, size int) string {
 	b.Helper()
 	f, err := os.CreateTemp(b.TempDir(), "bench-*.bin")
@@ -33,9 +30,7 @@ func makeTempFile(b *testing.B, size int) string {
 	return f.Name()
 }
 
-// newSinkServer returns an httptest server that drains the request body and
-// returns 200. Useful for upload-path benchmarks: the payload travels over
-// loopback HTTP and is discarded server-side.
+// newSinkServer drains request bodies and returns 200 — used as the upload destination.
 func newSinkServer(b *testing.B) *httptest.Server {
 	b.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,17 +41,15 @@ func newSinkServer(b *testing.B) *httptest.Server {
 	return srv
 }
 
-// reportGC records GC count and total pause delta as bench-only metrics.
-// gc-count/op is meaningful only when b.N >= 3; large benchmarks may set b.N=1.
+// reportGC records GC count and pause delta as bench-only metrics.
 func reportGC(b *testing.B, before, after runtime.MemStats) {
 	b.Helper()
 	b.ReportMetric(float64(after.NumGC-before.NumGC)/float64(b.N), "gc-count/op")
 	b.ReportMetric(float64(after.PauseTotalNs-before.PauseTotalNs)/float64(b.N), "gc-pause-ns/op")
 }
 
-// BenchmarkCreateMultipartBodyLargePayload preserves the name from issue #199
-// so before/after benchstat tables compare 1:1.
-func BenchmarkCreateMultipartBodyLargePayload(b *testing.B) {
+// BenchmarkUpload_MultipartBody measures multipart body construction in isolation.
+func BenchmarkUpload_MultipartBody(b *testing.B) {
 	for _, size := range benchSizes {
 		b.Run(fmt.Sprintf("%dMB", size>>20), func(b *testing.B) {
 			payload := make([]byte, size)
@@ -87,11 +80,8 @@ func BenchmarkCreateMultipartBodyLargePayload(b *testing.B) {
 	}
 }
 
-// BenchmarkUpload_E2E_Local exercises the full upload composition that the
-// handler will use after the streaming refactor. It is defined now (against
-// current buffered code) so we capture a baseline; later commits replace
-// internals while the benchmark name stays identical.
-func BenchmarkUpload_E2E_Local(b *testing.B) {
+// BenchmarkUpload_E2E exercises the full upload pipeline against a loopback HTTP sink.
+func BenchmarkUpload_E2E(b *testing.B) {
 	for _, size := range benchSizes {
 		b.Run(fmt.Sprintf("%dMB", size>>20), func(b *testing.B) {
 			path := makeTempFile(b, size)
