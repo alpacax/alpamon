@@ -476,4 +476,3 @@ func (h *FileHandler) statFileTransfer(code int, transferType transferType, mess
 	}
 	scheduler.Rqueue.Post(statURL, payload, 10, time.Time{})
 }
-
