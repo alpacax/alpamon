@@ -14,9 +14,7 @@ const (
 	multipartCopyBufSize       = 64 << 10
 	multipartPipeBufSize       = 4 << 20 // bufio flush granularity; one Flush() → one 4 MiB pipe.Write
 	multipartReadBufSize       = 4 << 20 // matches pipe flush so each pr.Read returns a full 4 MiB chunk
-)
 
-const (
 	multipartFieldContent = "content"
 	multipartFieldName    = "name"
 )
@@ -49,13 +47,13 @@ type multipartReader struct {
 	*io.PipeReader
 }
 
+type countingWriter struct{ n int64 }
+
 func (r multipartReader) WriteTo(dst io.Writer) (int64, error) {
 	bufPtr := multipartReadPool.Get().(*[]byte)
 	defer multipartReadPool.Put(bufPtr)
 	return io.CopyBuffer(dst, r.PipeReader, *bufPtr)
 }
-
-type countingWriter struct{ n int64 }
 
 func (c *countingWriter) Write(p []byte) (int, error) {
 	c.n += int64(len(p))
@@ -186,7 +184,8 @@ func buildMultipartStreamSmall(src io.ReadCloser, fileName string, isRecursive b
 		if failPipe(err) {
 			return
 		}
-		if failPipe(func() error { _, err := io.Copy(fw, src); return err }()) {
+		_, err = io.Copy(fw, src)
+		if failPipe(err) {
 			return
 		}
 		if isRecursive {
