@@ -3,6 +3,7 @@ package utils
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -33,6 +34,11 @@ func NewHTTPClient() *http.Client {
 	}
 }
 
+// putMaxResponseSize caps response bodies for Put. Read putMaxResponseSize+1
+// bytes so an over-cap response can be detected explicitly instead of silently
+// truncating (which would hide server error details).
+const putMaxResponseSize = 1 << 20 // 1 MiB
+
 // Put issues a PUT request. If contentLength < 0, the Content-Length header
 // is omitted and the transport uses chunked transfer encoding.
 //
@@ -55,9 +61,12 @@ func Put(url string, body io.Reader, contentLength int64, timeout time.Duration)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, putMaxResponseSize+1))
 	if err != nil {
 		return nil, resp.StatusCode, err
+	}
+	if int64(len(respBody)) > putMaxResponseSize {
+		return nil, resp.StatusCode, fmt.Errorf("PUT response too large (>%d bytes)", putMaxResponseSize)
 	}
 
 	return respBody, resp.StatusCode, nil

@@ -369,8 +369,13 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 //   - Pre-handoff failures: closes src directly so it never leaks.
 func (h *FileHandler) fileUpload(args *common.CommandArgs, src io.ReadCloser, size int64, fileName string, recursive bool) (int, error) {
 	if args.UseBlob {
-		defer func() { _ = src.Close() }()
 		_, code, err := utils.Put(args.Content, src, size, 0)
+		// Surface src.Close() errors when the PUT itself succeeded so a
+		// non-zero `cat` exit (cmdReadCloser EACCES/ENOENT) is not silently
+		// reported as a successful upload.
+		if cerr := src.Close(); err == nil && cerr != nil {
+			return code, cerr
+		}
 		return code, err
 	}
 
