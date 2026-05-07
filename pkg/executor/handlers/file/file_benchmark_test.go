@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-var benchSizes = []int{1 << 20, 10 << 20, 100 << 20}
+var benchSizes = []int{1 << 20, 2 << 20, 3 << 20, 10 << 20, 100 << 20}
 
 // makeTempFile writes pseudo-random bytes to a temp file. Random content avoids transport-level compression.
 func makeTempFile(b *testing.B, size int) string {

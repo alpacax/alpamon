@@ -55,10 +55,10 @@ func (r multipartReader) WriteTo(dst io.Writer) (int64, error) {
 // goroutine owns src.Close so leaking the reader does not leak the source.
 //
 // hint is the source size in bytes. Pass -1 when unknown. Files smaller than
-// 1 MiB skip the pool buffers entirely to avoid over-provisioning 4 MiB
-// allocations for small payloads.
+// the 4 MiB pool buffer size skip the pool entirely to avoid allocating a
+// 4 MiB bufio buffer for payloads that fit in one flush anyway.
 func buildMultipartStream(src io.ReadCloser, fileName string, isRecursive bool, hint int64) (io.ReadCloser, string, error) {
-	if hint >= 0 && hint < (1<<20) {
+	if hint >= 0 && hint < multipartPipeBufSize {
 		return buildMultipartStreamSmall(src, fileName, isRecursive)
 	}
 	return buildMultipartStreamLarge(src, fileName, isRecursive)
