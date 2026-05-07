@@ -1,0 +1,36 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/alpacax/alpamon/pkg/executor/handlers/file
+cpu: Apple M2 Pro
+BenchmarkCreateMultipartBodyLargePayload/1MB-10         	   12445	    102761 ns/op	10204.06 MB/s	         0.2497 gc-count/op	     12595 gc-pause-ns/op	 1058631 B/op	      31 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/1MB-10         	   11883	     98313 ns/op	10665.72 MB/s	         0.2593 gc-count/op	     11965 gc-pause-ns/op	 1058645 B/op	      31 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/1MB-10         	   10000	    100264 ns/op	10458.11 MB/s	         0.2561 gc-count/op	     12368 gc-pause-ns/op	 1058641 B/op	      31 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/1MB-10         	   12399	    119906 ns/op	8744.99 MB/s	         0.2449 gc-count/op	     14402 gc-pause-ns/op	 1058620 B/op	      31 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/1MB-10         	   13482	    100494 ns/op	10434.22 MB/s	         0.1684 gc-count/op	     11459 gc-pause-ns/op	 1058501 B/op	      30 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/10MB-10        	    2560	    501500 ns/op	20908.81 MB/s	         0.3254 gc-count/op	     50649 gc-pause-ns/op	10496029 B/op	      32 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/10MB-10        	    2379	    495794 ns/op	21149.44 MB/s	         0.3317 gc-count/op	     50044 gc-pause-ns/op	10496038 B/op	      32 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/10MB-10        	    2461	    456641 ns/op	22962.80 MB/s	         0.3031 gc-count/op	     48936 gc-pause-ns/op	10495979 B/op	      32 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/10MB-10        	    2616	    500390 ns/op	20955.16 MB/s	         0.3104 gc-count/op	     51133 gc-pause-ns/op	10495993 B/op	      32 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/10MB-10        	    2029	    554058 ns/op	18925.40 MB/s	         0.3051 gc-count/op	     60291 gc-pause-ns/op	10495987 B/op	      32 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/100MB-10       	     268	   4856623 ns/op	21590.64 MB/s	         0.4291 gc-count/op	    278288 gc-pause-ns/op	104868030 B/op	      32 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/100MB-10       	     282	   4302658 ns/op	24370.43 MB/s	         0.4504 gc-count/op	    143645 gc-pause-ns/op	104868078 B/op	      33 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/100MB-10       	     283	   4139640 ns/op	25330.13 MB/s	         0.4558 gc-count/op	    122072 gc-pause-ns/op	104868074 B/op	      33 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/100MB-10       	     237	   4425453 ns/op	23694.20 MB/s	         0.4557 gc-count/op	    137057 gc-pause-ns/op	104868116 B/op	      33 allocs/op
+BenchmarkCreateMultipartBodyLargePayload/100MB-10       	     276	   4463022 ns/op	23494.76 MB/s	         0.4565 gc-count/op	    169864 gc-pause-ns/op	104868088 B/op	      33 allocs/op
+BenchmarkUpload_E2E_Local/1MB-10                        	    1269	    918853 ns/op	1141.18 MB/s	         0.9961 gc-count/op	     43440 gc-pause-ns/op	 2196799 B/op	     130 allocs/op
+BenchmarkUpload_E2E_Local/1MB-10                        	    1545	    885692 ns/op	1183.91 MB/s	         0.9968 gc-count/op	     48628 gc-pause-ns/op	 2196273 B/op	     130 allocs/op
+BenchmarkUpload_E2E_Local/1MB-10                        	    1371	    948872 ns/op	1105.08 MB/s	         0.9898 gc-count/op	     62278 gc-pause-ns/op	 2195291 B/op	     130 allocs/op
+BenchmarkUpload_E2E_Local/1MB-10                        	    1399	    921624 ns/op	1137.75 MB/s	         0.9929 gc-count/op	     52718 gc-pause-ns/op	 2196800 B/op	     130 allocs/op
+BenchmarkUpload_E2E_Local/1MB-10                        	    1479	    888123 ns/op	1180.67 MB/s	         0.9932 gc-count/op	     60141 gc-pause-ns/op	 2195867 B/op	     130 allocs/op
+BenchmarkUpload_E2E_Local/10MB-10                       	     192	   6110429 ns/op	1716.04 MB/s	         1.000 gc-count/op	     41692 gc-pause-ns/op	21073294 B/op	     130 allocs/op
+BenchmarkUpload_E2E_Local/10MB-10                       	     202	   6099176 ns/op	1719.21 MB/s	         1.000 gc-count/op	     65076 gc-pause-ns/op	21069983 B/op	     132 allocs/op
+BenchmarkUpload_E2E_Local/10MB-10                       	     194	   6136954 ns/op	1708.63 MB/s	         1.000 gc-count/op	     61157 gc-pause-ns/op	21069245 B/op	     134 allocs/op
+BenchmarkUpload_E2E_Local/10MB-10                       	     195	   6038413 ns/op	1736.51 MB/s	         1.005 gc-count/op	    102129 gc-pause-ns/op	21068273 B/op	     132 allocs/op
+BenchmarkUpload_E2E_Local/10MB-10                       	     194	   6355759 ns/op	1649.80 MB/s	         1.005 gc-count/op	     67670 gc-pause-ns/op	21069482 B/op	     133 allocs/op
+BenchmarkUpload_E2E_Local/100MB-10                      	      24	  46961899 ns/op	2232.82 MB/s	         1.042 gc-count/op	     71012 gc-pause-ns/op	209819979 B/op	     136 allocs/op
+BenchmarkUpload_E2E_Local/100MB-10                      	      25	  46470513 ns/op	2256.43 MB/s	         1.040 gc-count/op	    180850 gc-pause-ns/op	209820291 B/op	     137 allocs/op
+BenchmarkUpload_E2E_Local/100MB-10                      	      25	  47512267 ns/op	2206.96 MB/s	         1.080 gc-count/op	    196923 gc-pause-ns/op	209817253 B/op	     136 allocs/op
+BenchmarkUpload_E2E_Local/100MB-10                      	      24	  46707403 ns/op	2244.99 MB/s	         1.042 gc-count/op	    191625 gc-pause-ns/op	209818447 B/op	     133 allocs/op
+BenchmarkUpload_E2E_Local/100MB-10                      	      25	  45673690 ns/op	2295.80 MB/s	         1.040 gc-count/op	     59120 gc-pause-ns/op	209816267 B/op	     134 allocs/op
+PASS
+ok  	github.com/alpacax/alpamon/pkg/executor/handlers/file	54.921s
