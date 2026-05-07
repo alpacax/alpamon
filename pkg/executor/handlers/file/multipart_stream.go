@@ -60,6 +60,44 @@ func (r multipartReader) WriteTo(dst io.Writer) (int64, error) {
 	return io.CopyBuffer(dst, r.PipeReader, *bufPtr)
 }
 
+// countingWriter discards bytes and counts them. Used to measure the multipart
+// envelope size without holding any of it in memory.
+type countingWriter struct{ n int64 }
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	c.n += int64(len(p))
+	return len(p), nil
+}
+
+// multipartEnvelopeSize returns the byte count of the multipart envelope
+// (boundary frames + headers + closer) excluding the file body, by replaying
+// the same writer operations against a counting writer with an empty body.
+//
+// Why this works: total_wire = envelope + bodyN. mime/multipart writes part
+// headers (sorted deterministically since Go 1.17) and boundary frames
+// independently of the body content, so the envelope size for given
+// (boundary, fileName, isRecursive) is fixed. Adding bodyN bytes to the empty
+// measurement yields the exact Content-Length.
+func multipartEnvelopeSize(boundary, fileName string, isRecursive bool) (int64, error) {
+	var c countingWriter
+	mw := multipart.NewWriter(&c)
+	if err := mw.SetBoundary(boundary); err != nil {
+		return 0, err
+	}
+	if _, err := mw.CreateFormFile(multipartFieldContent, fileName); err != nil {
+		return 0, err
+	}
+	if isRecursive {
+		if err := mw.WriteField(multipartFieldName, fileName); err != nil {
+			return 0, err
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return 0, err
+	}
+	return c.n, nil
+}
+
 // buildMultipartStream returns a streaming multipart body containing `src`
 // under form field "content". The caller MUST Close the returned reader. The
 // producer goroutine owns src.Close() and propagates a non-nil close error
@@ -71,9 +109,18 @@ func (r multipartReader) WriteTo(dst io.Writer) (int64, error) {
 // than multipartPipeBufSize (4 MiB) skip the bufio + 4 MiB pool buffer and
 // use Go's default 32 KiB copy buffer, since payloads that fit in one flush
 // don't benefit from the larger pool buffer.
-func buildMultipartStream(src io.ReadCloser, fileName string, isRecursive bool, hint int64) (io.ReadCloser, string, error) {
+//
+// The third return value is the exact HTTP Content-Length to send (envelope
+// + body) for the small path when hint is known, allowing the transport to
+// use identity TE and skip the chunk-header overhead that dominates KB-MB
+// uploads. For the large path it is always -1 (chunked TE): net/http wraps
+// finite-length bodies in io.LimitReader, which loses the multipartReader
+// WriterTo bypass and forces 32 KiB reads from the pipe — at 4 MiB pipe
+// flushes that yields ~125x more reads per flush, costing far more than
+// the chunk-header bytes save.
+func buildMultipartStream(src io.ReadCloser, fileName string, isRecursive bool, hint int64) (io.ReadCloser, string, int64, error) {
 	if hint >= 0 && hint < multipartPipeBufSize {
-		return buildMultipartStreamSmall(src, fileName, isRecursive)
+		return buildMultipartStreamSmall(src, fileName, isRecursive, hint)
 	}
 	return buildMultipartStreamLarge(src, fileName, isRecursive)
 }
@@ -81,10 +128,21 @@ func buildMultipartStream(src io.ReadCloser, fileName string, isRecursive bool, 
 // buildMultipartStreamSmall handles sources smaller than multipartPipeBufSize
 // (4 MiB) using Go's default 32 KiB copy buffer and no pool allocation —
 // avoids 4 MiB over-provisioning for payloads that fit in one flush.
-func buildMultipartStreamSmall(src io.ReadCloser, fileName string, isRecursive bool) (io.ReadCloser, string, error) {
+func buildMultipartStreamSmall(src io.ReadCloser, fileName string, isRecursive bool, hint int64) (io.ReadCloser, string, int64, error) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 	contentType := mw.FormDataContentType()
+
+	contentLength := int64(-1)
+	if hint >= 0 {
+		env, err := multipartEnvelopeSize(mw.Boundary(), fileName, isRecursive)
+		if err != nil {
+			_ = src.Close()
+			_ = pw.Close()
+			return nil, "", 0, err
+		}
+		contentLength = env + hint
+	}
 
 	go func() {
 		var pipeErr error
@@ -133,7 +191,7 @@ func buildMultipartStreamSmall(src io.ReadCloser, fileName string, isRecursive b
 		}
 	}()
 
-	return pr, contentType, nil
+	return pr, contentType, contentLength, nil
 }
 
 // buildMultipartStreamLarge handles sources >= multipartPipeBufSize (4 MiB)
@@ -142,7 +200,13 @@ func buildMultipartStreamSmall(src io.ReadCloser, fileName string, isRecursive b
 //   - bufio.Writer (4 MiB pipe-flush buffer) via multipartPipeWriterPool
 //   - copy buffer (64 KiB) via multipartCopyPool
 //   - reader-side WriteTo buffer (4 MiB) via multipartReadPool
-func buildMultipartStreamLarge(src io.ReadCloser, fileName string, isRecursive bool) (io.ReadCloser, string, error) {
+//
+// Always returns contentLength=-1 (chunked TE). See buildMultipartStream for
+// the rationale: setting a finite ContentLength on the request makes net/http
+// wrap the body in io.LimitReader, which strips multipartReader's WriterTo
+// and forces 32 KiB reads — far slower than the 4 MiB chunk-header overhead
+// it would save.
+func buildMultipartStreamLarge(src io.ReadCloser, fileName string, isRecursive bool) (io.ReadCloser, string, int64, error) {
 	pr, pw := io.Pipe()
 	bufW := multipartPipeWriterPool.Get().(*bufio.Writer)
 	bufW.Reset(pw)
@@ -209,5 +273,5 @@ func buildMultipartStreamLarge(src io.ReadCloser, fileName string, isRecursive b
 		}
 	}()
 
-	return multipartReader{pr}, contentType, nil
+	return multipartReader{pr}, contentType, -1, nil
 }

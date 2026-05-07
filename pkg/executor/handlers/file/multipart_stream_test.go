@@ -39,7 +39,7 @@ func (e *errReader) Close() error { e.closeCnt++; return e.closeErr }
 func TestBuildMultipartStream_Roundtrip(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xAB}, 1<<20)
 	src := io.NopCloser(bytes.NewReader(payload))
-	body, ct, err := buildMultipartStream(src, "f.bin", false, -1)
+	body, ct, _, err := buildMultipartStream(src, "f.bin", false, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestBuildMultipartStream_Roundtrip(t *testing.T) {
 
 func TestBuildMultipartStream_Recursive(t *testing.T) {
 	src := io.NopCloser(strings.NewReader("zip-data"))
-	body, ct, err := buildMultipartStream(src, "tree.zip", true, -1)
+	body, ct, _, err := buildMultipartStream(src, "tree.zip", true, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestBuildMultipartStream_Recursive(t *testing.T) {
 
 func TestBuildMultipartStream_SrcErrorPropagates(t *testing.T) {
 	er := &errReader{r: bytes.NewReader(bytes.Repeat([]byte{1}, 1024)), failAt: 256}
-	body, _, err := buildMultipartStream(er, "f", false, -1)
+	body, _, _, err := buildMultipartStream(er, "f", false, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestBuildMultipartStream_SrcCloseErrorPropagates(t *testing.T) {
 				failAt:   1 << 30,
 				closeErr: errors.New("synthetic-close-fail"),
 			}
-			body, _, err := buildMultipartStream(er, "f.bin", false, tc.hint)
+			body, _, _, err := buildMultipartStream(er, "f.bin", false, tc.hint)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -151,7 +151,7 @@ func TestBuildMultipartStream_SrcCloseErrorPropagates(t *testing.T) {
 func TestBuildMultipartStream_EarlyCloseNoLeak(t *testing.T) {
 	g0 := runtime.NumGoroutine()
 	er := &errReader{r: bytes.NewReader(bytes.Repeat([]byte{1}, 4<<20)), failAt: 1 << 30}
-	body, _, _ := buildMultipartStream(er, "f", false, -1)
+	body, _, _, _ := buildMultipartStream(er, "f", false, -1)
 	buf := make([]byte, 64)
 	_, _ = body.Read(buf)
 	_ = body.Close()
@@ -170,7 +170,7 @@ func TestBuildMultipartStream_EarlyCloseNoLeak(t *testing.T) {
 func TestBuildMultipartStream_SmallPath_Roundtrip(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xCD}, 512<<10) // 512 KiB — well below multipartPipeBufSize (4 MiB)
 	src := io.NopCloser(bytes.NewReader(payload))
-	body, ct, err := buildMultipartStream(src, "small.bin", false, int64(len(payload)))
+	body, ct, _, err := buildMultipartStream(src, "small.bin", false, int64(len(payload)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,12 +201,73 @@ func TestBuildMultipartStream_SmallPath_Roundtrip(t *testing.T) {
 	}
 }
 
+// TestBuildMultipartStream_SmallPathContentLengthMatchesWire verifies the
+// precomputed contentLength equals the actual rendered byte count for the
+// small path (single + recursive). A mismatch would cause the server to
+// truncate the body or hang waiting for more bytes.
+func TestBuildMultipartStream_SmallPathContentLengthMatchesWire(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		size      int
+		recursive bool
+	}{
+		{"single", 64 << 10, false},
+		{"recursive", 64 << 10, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.Repeat([]byte{0xEE}, tc.size)
+			src := io.NopCloser(bytes.NewReader(payload))
+			body, _, contentLength, err := buildMultipartStream(src, "f.bin", tc.recursive, int64(tc.size))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = body.Close() }()
+			if contentLength <= 0 {
+				t.Fatalf("expected positive contentLength, got %d", contentLength)
+			}
+			n, err := io.Copy(io.Discard, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != contentLength {
+				t.Fatalf("wire size %d != precomputed contentLength %d", n, contentLength)
+			}
+		})
+	}
+}
+
+// TestBuildMultipartStream_LargePathReturnsMinusOne verifies the large path
+// always reports contentLength=-1 (chunked TE) even when size is known. See
+// buildMultipartStream doc for why finite ContentLength on the large path
+// triggers a regression via net/http's io.LimitReader wrap.
+func TestBuildMultipartStream_LargePathReturnsMinusOne(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hint int64
+	}{
+		{"unknown", -1},
+		{"known_large", 5 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := io.NopCloser(bytes.NewReader(bytes.Repeat([]byte{1}, 5<<20)))
+			body, _, contentLength, err := buildMultipartStream(src, "f.bin", false, tc.hint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = body.Close() }()
+			if contentLength != -1 {
+				t.Fatalf("expected contentLength=-1, got %d", contentLength)
+			}
+		})
+	}
+}
+
 // TestBuildMultipartStream_SmallPath_Recursive verifies the small-file path
 // emits the "name" field when isRecursive=true.
 func TestBuildMultipartStream_SmallPath_Recursive(t *testing.T) {
 	payload := []byte("small-zip-data")
 	src := io.NopCloser(bytes.NewReader(payload))
-	body, ct, err := buildMultipartStream(src, "arch.zip", true, int64(len(payload)))
+	body, ct, _, err := buildMultipartStream(src, "arch.zip", true, int64(len(payload)))
 	if err != nil {
 		t.Fatal(err)
 	}

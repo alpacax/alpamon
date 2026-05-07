@@ -384,7 +384,7 @@ func (h *FileHandler) fileUpload(args *common.CommandArgs, src io.ReadCloser, si
 		return 0, errors.New("API session not available")
 	}
 
-	body, contentType, err := buildMultipartStream(src, fileName, recursive, size)
+	body, contentType, contentLength, err := buildMultipartStream(src, fileName, recursive, size)
 	if err != nil {
 		_ = src.Close()
 		return 0, err
@@ -394,7 +394,7 @@ func (h *FileHandler) fileUpload(args *common.CommandArgs, src io.ReadCloser, si
 	// fileUploadTimeout is a seconds count; Session.MultipartRequest applies
 	// *time.Second internally, so pass the bare Duration (matches sibling
 	// callers like apiSession.Post(url, data, 5)).
-	_, code, err := h.apiSession.MultipartRequest(args.Content, body, contentType, time.Duration(fileUploadTimeout))
+	_, code, err := h.apiSession.MultipartRequest(args.Content, body, contentType, contentLength, time.Duration(fileUploadTimeout))
 	return code, err
 }
 

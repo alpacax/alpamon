@@ -67,7 +67,7 @@ type SystemInfoManager interface {
 
 // APISession interface for API operations (file upload)
 type APISession interface {
-	MultipartRequest(url string, body io.Reader, contentType string, timeout time.Duration) ([]byte, int, error)
+	MultipartRequest(url string, body io.Reader, contentType string, contentLength int64, timeout time.Duration) ([]byte, int, error)
 }
 
 // VersionResolver provides version information for upgrade decisions.

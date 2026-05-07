@@ -99,7 +99,7 @@ func BenchmarkUpload_MultipartBody(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				src := io.NopCloser(bytes.NewReader(payload))
-				body, _, err := buildMultipartStream(src, "f.bin", false, int64(size))
+				body, _, _, err := buildMultipartStream(src, "f.bin", false, int64(size))
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -133,12 +133,13 @@ func BenchmarkUpload_E2E(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				body, ct, err := buildMultipartStream(src, filepath.Base(path), false, int64(size))
+				body, ct, contentLength, err := buildMultipartStream(src, filepath.Base(path), false, int64(size))
 				if err != nil {
 					_ = src.Close()
 					b.Fatal(err)
 				}
 				req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+				req.ContentLength = contentLength
 				req.Header.Set("Content-Type", ct)
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {

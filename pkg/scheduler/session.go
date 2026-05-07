@@ -202,11 +202,17 @@ func (session *Session) Delete(url string, rawBody interface{}, timeout time.Dur
 	return session.do(req, timeout)
 }
 
-func (session *Session) MultipartRequest(url string, body io.Reader, contentType string, timeout time.Duration) ([]byte, int, error) {
+// MultipartRequest issues a POST with a multipart body. Pass contentLength=-1
+// to force chunked transfer; pass an exact byte count to use identity TE
+// (avoids per-write chunk header overhead). Overwrites req.ContentLength
+// unconditionally because http.NewRequest auto-fills it for bytes/strings
+// readers, which would defeat a caller's -1 chunked opt-in.
+func (session *Session) MultipartRequest(url string, body io.Reader, contentType string, contentLength int64, timeout time.Duration) ([]byte, int, error) {
 	req, err := http.NewRequest(http.MethodPost, url, body)
 	if err != nil {
 		return nil, 0, err
 	}
+	req.ContentLength = contentLength
 
 	ctx, cancel := context.WithTimeout(req.Context(), timeout*time.Second)
 	defer cancel()
