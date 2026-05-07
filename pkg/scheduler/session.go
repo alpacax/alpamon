@@ -202,8 +202,8 @@ func (session *Session) Delete(url string, rawBody interface{}, timeout time.Dur
 	return session.do(req, timeout)
 }
 
-func (session *Session) MultipartRequest(url string, body bytes.Buffer, contentType string, timeout time.Duration) ([]byte, int, error) {
-	req, err := http.NewRequest(http.MethodPost, url, &body)
+func (session *Session) MultipartRequest(url string, body io.Reader, contentType string, timeout time.Duration) ([]byte, int, error) {
+	req, err := http.NewRequest(http.MethodPost, url, body)
 	if err != nil {
 		return nil, 0, err
 	}

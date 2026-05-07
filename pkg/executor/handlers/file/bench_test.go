@@ -2,6 +2,7 @@ package file
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -61,7 +62,6 @@ func BenchmarkCreateMultipartBodyLargePayload(b *testing.B) {
 			if _, err := io.ReadFull(rand.Reader, payload); err != nil {
 				b.Fatal(err)
 			}
-			h := &FileHandler{}
 			b.SetBytes(int64(size))
 			b.ReportAllocs()
 			var ms0, ms1 runtime.MemStats
@@ -69,13 +69,15 @@ func BenchmarkCreateMultipartBodyLargePayload(b *testing.B) {
 			runtime.ReadMemStats(&ms0)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				body, _, err := h.createMultipartBody(payload, "f.bin", false, false)
+				src := io.NopCloser(bytes.NewReader(payload))
+				body, _, err := buildMultipartStream(src, "f.bin", false)
 				if err != nil {
 					b.Fatal(err)
 				}
-				if _, err := io.Copy(io.Discard, &body); err != nil {
+				if _, err := io.Copy(io.Discard, body); err != nil {
 					b.Fatal(err)
 				}
+				_ = body.Close()
 			}
 			b.StopTimer()
 			runtime.ReadMemStats(&ms1)
@@ -93,7 +95,6 @@ func BenchmarkUpload_E2E_Local(b *testing.B) {
 		b.Run(fmt.Sprintf("%dMB", size>>20), func(b *testing.B) {
 			path := makeTempFile(b, size)
 			srv := newSinkServer(b)
-			h := &FileHandler{}
 			b.SetBytes(int64(size))
 			b.ReportAllocs()
 			var ms0, ms1 runtime.MemStats
@@ -101,30 +102,29 @@ func BenchmarkUpload_E2E_Local(b *testing.B) {
 			runtime.ReadMemStats(&ms0)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				data, err := os.ReadFile(path)
+				src, _, err := readFileAs(context.Background(), path, nil)
 				if err != nil {
 					b.Fatal(err)
 				}
-				body, ct, err := h.createMultipartBody(data, filepath.Base(path), false, false)
+				body, ct, err := buildMultipartStream(src, filepath.Base(path), false)
 				if err != nil {
+					_ = src.Close()
 					b.Fatal(err)
 				}
-				req, err := http.NewRequest(http.MethodPost, srv.URL, &body)
-				if err != nil {
-					b.Fatal(err)
-				}
+				req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
 				req.Header.Set("Content-Type", ct)
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
+					_ = body.Close()
 					b.Fatal(err)
 				}
 				_, _ = io.Copy(io.Discard, resp.Body)
 				_ = resp.Body.Close()
+				_ = body.Close()
 			}
 			b.StopTimer()
 			runtime.ReadMemStats(&ms1)
 			reportGC(b, ms0, ms1)
 		})
 	}
-	_ = bytes.NewReader // keep import lest goimports drop it later
 }

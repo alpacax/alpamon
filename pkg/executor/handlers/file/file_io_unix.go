@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,17 +16,26 @@ import (
 )
 
 // readFileAs reads a file, using a demoted cat process when privilege demotion is active.
-func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAttr) ([]byte, error) {
+func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAttr) (io.ReadCloser, int64, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	size := st.Size()
 	if sysProcAttr == nil {
-		return os.ReadFile(path)
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, 0, err
+		}
+		return f, size, nil
 	}
 	cmd := exec.CommandContext(ctx, "cat", path)
 	cmd.SysProcAttr = sysProcAttr
-	output, err := cmd.Output()
+	rc, err := newCmdReadCloser(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file as demoted user: %w", err)
+		return nil, 0, fmt.Errorf("failed to start cat: %w", err)
 	}
-	return output, nil
+	return rc, size, nil
 }
 
 // writeFileAs writes a file, using a demoted tee process when privilege demotion is active.

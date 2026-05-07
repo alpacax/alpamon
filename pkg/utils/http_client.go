@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
@@ -35,10 +34,13 @@ func NewHTTPClient() *http.Client {
 }
 
 // codeql[go/request-forgery]: Intentional - HTTP client for admin-specified URLs
-func Put(url string, body bytes.Buffer, timeout time.Duration) ([]byte, int, error) {
-	req, err := http.NewRequest(http.MethodPut, url, &body) // lgtm[go/request-forgery]
+func Put(url string, body io.Reader, contentLength int64, timeout time.Duration) ([]byte, int, error) {
+	req, err := http.NewRequest(http.MethodPut, url, body) // lgtm[go/request-forgery]
 	if err != nil {
 		return nil, 0, err
+	}
+	if contentLength >= 0 {
+		req.ContentLength = contentLength
 	}
 
 	client := NewHTTPClient()

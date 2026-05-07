@@ -1,13 +1,11 @@
 package file
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -142,19 +141,15 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		defer func() { _ = os.Remove(cleanupPath) }()
 	}
 
-	output, err := readFileAs(ctx, name, sysProcAttr)
+	src, size, err := readFileAs(ctx, name, sysProcAttr)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to read file for upload.")
 		return 1, err.Error()
 	}
+	src = &closeOnceReader{ReadCloser: src}
+	defer func() { _ = src.Close() }()
 
-	requestBody, contentType, err := h.createMultipartBody(output, filepath.Base(name), args.UseBlob, recursive)
-	if err != nil {
-		log.Error().Err(err).Msgf("Failed to make request body")
-		return 1, err.Error()
-	}
-
-	_, statusCode, err := h.fileUpload(args.Content, args.UseBlob, requestBody, contentType)
+	statusCode, err := h.fileUpload(ctx, args, src, size, filepath.Base(name), recursive)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to upload file")
 		return 1, err.Error()
@@ -368,48 +363,25 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 	return archiveName, archiveName, nil
 }
 
-// createMultipartBody creates a multipart form body for file upload
-func (h *FileHandler) createMultipartBody(output []byte, filePath string, useBlob, isRecursive bool) (bytes.Buffer, string, error) {
-	if useBlob {
-		return *bytes.NewBuffer(output), "", nil
-	}
-
-	var requestBody bytes.Buffer
-	writer := multipart.NewWriter(&requestBody)
-
-	fileWriter, err := writer.CreateFormFile("content", filePath)
-	if err != nil {
-		return bytes.Buffer{}, "", err
-	}
-
-	_, err = fileWriter.Write(output)
-	if err != nil {
-		return bytes.Buffer{}, "", err
-	}
-
-	if isRecursive {
-		err = writer.WriteField("name", filePath)
-		if err != nil {
-			return bytes.Buffer{}, "", err
-		}
-	}
-
-	_ = writer.Close()
-
-	return requestBody, writer.FormDataContentType(), nil
-}
-
 // fileUpload uploads the file to the server
-func (h *FileHandler) fileUpload(uploadURL string, useBlob bool, body bytes.Buffer, contentType string) ([]byte, int, error) {
-	if useBlob {
-		return utils.Put(uploadURL, body, 0)
+func (h *FileHandler) fileUpload(_ context.Context, args *common.CommandArgs, src io.ReadCloser, size int64, fileName string, recursive bool) (int, error) {
+	if args.UseBlob {
+		_, code, err := utils.Put(args.Content, src, size, 0)
+		return code, err
 	}
 
 	if h.apiSession == nil {
-		return nil, 0, errors.New("API session not available")
+		return 0, errors.New("API session not available")
 	}
 
-	return h.apiSession.MultipartRequest(uploadURL, body, contentType, time.Duration(fileUploadTimeout)*time.Second)
+	body, contentType, err := buildMultipartStream(src, fileName, recursive)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = body.Close() }()
+
+	_, code, err := h.apiSession.MultipartRequest(args.Content, body, contentType, time.Duration(fileUploadTimeout)*time.Second)
+	return code, err
 }
 
 // getFileData fetches file content from URL, text, or base64
@@ -489,4 +461,19 @@ func (h *FileHandler) statFileTransfer(code int, transferType transferType, mess
 		Type:    transferType,
 	}
 	scheduler.Rqueue.Post(statURL, payload, 10, time.Time{})
+}
+
+// closeOnceReader wraps an io.ReadCloser so that Close is idempotent.
+// os.File.Close returns os.ErrClosed on the second call; wrapping it here
+// lets handleUpload defer src.Close() safely even when buildMultipartStream's
+// goroutine has already closed the source.
+type closeOnceReader struct {
+	io.ReadCloser
+	once sync.Once
+	err  error
+}
+
+func (c *closeOnceReader) Close() error {
+	c.once.Do(func() { c.err = c.ReadCloser.Close() })
+	return c.err
 }
