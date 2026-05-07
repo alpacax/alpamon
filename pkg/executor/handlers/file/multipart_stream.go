@@ -36,6 +36,16 @@ var multipartReadPool = sync.Pool{
 	},
 }
 
+// multipartPipeWriterPool reuses 4 MiB-buffered bufio.Writers for the
+// large-path producer goroutine. Without this, every concurrent upload would
+// allocate a fresh 4 MiB buffer (bufio.NewWriterSize), and concurrent
+// streaming uploads would still grow RSS by +4 MiB each.
+var multipartPipeWriterPool = sync.Pool{
+	New: func() any {
+		return bufio.NewWriterSize(io.Discard, multipartPipeBufSize)
+	},
+}
+
 // multipartReader wraps a *io.PipeReader and implements io.WriterTo.
 // When net/http detects WriterTo it calls WriteTo instead of looping small
 // Reads through a 32 KiB buffer, so chunkedWriter.Write is called far fewer
@@ -127,11 +137,15 @@ func buildMultipartStreamSmall(src io.ReadCloser, fileName string, isRecursive b
 }
 
 // buildMultipartStreamLarge handles sources >= multipartPipeBufSize (4 MiB)
-// or of unknown size, using pool-reused 4 MiB buffers and multipartReader
-// for efficient WriteTo.
+// or of unknown size. All three multi-MiB allocations are pool-reused so RSS
+// does not grow with concurrent uploads:
+//   - bufio.Writer (4 MiB pipe-flush buffer) via multipartPipeWriterPool
+//   - copy buffer (64 KiB) via multipartCopyPool
+//   - reader-side WriteTo buffer (4 MiB) via multipartReadPool
 func buildMultipartStreamLarge(src io.ReadCloser, fileName string, isRecursive bool) (io.ReadCloser, string, error) {
 	pr, pw := io.Pipe()
-	bufW := bufio.NewWriterSize(pw, multipartPipeBufSize)
+	bufW := multipartPipeWriterPool.Get().(*bufio.Writer)
+	bufW.Reset(pw)
 	mw := multipart.NewWriter(bufW)
 	contentType := mw.FormDataContentType()
 
@@ -140,14 +154,20 @@ func buildMultipartStreamLarge(src io.ReadCloser, fileName string, isRecursive b
 		var pipeErr error
 
 		// LIFO defer order: panic-recover → src.Close (latches close err) →
-		// pool.Put → pipe-close. Body panics surface via recover; src.Close
+		// pool puts → pipe-close. Body panics surface via recover; src.Close
 		// errors surface only if no earlier failure already set pipeErr.
+		// bufW is reset to io.Discard before being returned to the pool so it
+		// does not retain a reference to pw after we hand it back.
 		defer func() {
 			if pipeErr != nil {
 				_ = pw.CloseWithError(pipeErr)
 			} else {
 				_ = pw.Close()
 			}
+		}()
+		defer func() {
+			bufW.Reset(io.Discard)
+			multipartPipeWriterPool.Put(bufW)
 		}()
 		defer multipartCopyPool.Put(bufPtr)
 		defer func() {

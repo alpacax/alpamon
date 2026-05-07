@@ -26,6 +26,9 @@ func newCmdReadCloser(cmd *exec.Cmd) (*cmdReadCloser, error) {
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
+		// StdoutPipe-allocated descriptor is not auto-closed on Start failure
+		// (Wait never runs), so close it here to avoid an fd leak.
+		_ = out.Close()
 		return nil, err
 	}
 	return &cmdReadCloser{cmd: cmd, stdout: out, stderr: &errBuf}, nil
