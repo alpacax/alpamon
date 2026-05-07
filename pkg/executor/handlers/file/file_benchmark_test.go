@@ -23,7 +23,7 @@ func makeTempFile(b *testing.B, size int) string {
 	if err != nil {
 		b.Fatalf("CreateTemp: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := io.CopyN(f, rand.Reader, int64(size)); err != nil {
 		b.Fatalf("CopyN: %v", err)
 	}

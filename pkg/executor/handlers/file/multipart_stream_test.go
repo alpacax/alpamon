@@ -42,7 +42,7 @@ func TestBuildMultipartStream_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	mt, params, err := mime.ParseMediaType(ct)
 	if err != nil || mt != "multipart/form-data" {
 		t.Fatalf("ct=%q err=%v", ct, err)
@@ -74,7 +74,7 @@ func TestBuildMultipartStream_Recursive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	_, params, _ := mime.ParseMediaType(ct)
 	mr := multipart.NewReader(body, params["boundary"])
 	sawName := false
@@ -140,7 +140,7 @@ func TestBuildMultipartStream_SmallPath_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	mt, params, err := mime.ParseMediaType(ct)
 	if err != nil || mt != "multipart/form-data" {
@@ -176,7 +176,7 @@ func TestBuildMultipartStream_SmallPath_Recursive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	_, params, _ := mime.ParseMediaType(ct)
 	mr := multipart.NewReader(body, params["boundary"])

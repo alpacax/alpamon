@@ -72,7 +72,7 @@ func buildMultipartStreamSmall(src io.ReadCloser, fileName string, isRecursive b
 	contentType := mw.FormDataContentType()
 
 	go func() {
-		defer src.Close()
+		defer func() { _ = src.Close() }()
 		defer func() {
 			if rec := recover(); rec != nil {
 				_ = pw.CloseWithError(fmt.Errorf("multipart panic: %v", rec))
@@ -121,7 +121,7 @@ func buildMultipartStreamLarge(src io.ReadCloser, fileName string, isRecursive b
 		// LIFO defer order: recover → src.Close → pool.Put. New defers must
 		// preserve this so panics still propagate to pw via CloseWithError.
 		defer multipartCopyPool.Put(bufPtr)
-		defer src.Close()
+		defer func() { _ = src.Close() }()
 		defer func() {
 			if rec := recover(); rec != nil {
 				_ = pw.CloseWithError(fmt.Errorf("multipart panic: %v", rec))
