@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -146,7 +145,6 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		log.Error().Err(err).Msg("Failed to read file for upload.")
 		return 1, err.Error()
 	}
-	src = &closeOnceReader{ReadCloser: src}
 	defer func() { _ = src.Close() }()
 
 	statusCode, err := h.fileUpload(ctx, args, src, size, filepath.Base(name), recursive)
@@ -463,17 +461,3 @@ func (h *FileHandler) statFileTransfer(code int, transferType transferType, mess
 	scheduler.Rqueue.Post(statURL, payload, 10, time.Time{})
 }
 
-// closeOnceReader wraps an io.ReadCloser so that Close is idempotent.
-// os.File.Close returns os.ErrClosed on the second call; wrapping it here
-// lets handleUpload defer src.Close() safely even when buildMultipartStream's
-// goroutine has already closed the source.
-type closeOnceReader struct {
-	io.ReadCloser
-	once sync.Once
-	err  error
-}
-
-func (c *closeOnceReader) Close() error {
-	c.once.Do(func() { c.err = c.ReadCloser.Close() })
-	return c.err
-}

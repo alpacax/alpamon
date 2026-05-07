@@ -8,9 +8,14 @@ import (
 	"sync"
 )
 
-const multipartCopyBufSize = 64 << 10   // 64 KiB — goroutine-side copy buffer (pool-reused)
-const multipartPipeBufSize = 4 << 20    // 4 MiB — bufio flush granularity; each Flush() → one pipe.Write(4MiB)
-const multipartReadBufSize = 4 << 20    // 4 MiB — WriteTo read buffer; matches pipe flush so each Read returns 4MiB
+const multipartCopyBufSize = 64 << 10 // 64 KiB — goroutine-side copy buffer (pool-reused)
+const multipartPipeBufSize = 4 << 20  // 4 MiB — bufio flush granularity; each Flush() → one pipe.Write(4MiB)
+const multipartReadBufSize = 4 << 20  // 4 MiB — WriteTo read buffer; matches pipe flush so each Read returns 4MiB
+
+const (
+	multipartFieldContent = "content"
+	multipartFieldName    = "name"
+)
 
 // multipartCopyPool reuses 64 KiB buffers for the goroutine-side io.CopyBuffer.
 var multipartCopyPool = sync.Pool{
@@ -56,6 +61,8 @@ func buildMultipartStream(src io.ReadCloser, fileName string, isRecursive bool) 
 
 	go func() {
 		bufPtr := multipartCopyPool.Get().(*[]byte)
+		// LIFO defer order: recover → src.Close → pool.Put. New defers must
+		// preserve this so panics still propagate to pw via CloseWithError.
 		defer multipartCopyPool.Put(bufPtr)
 		defer src.Close()
 		defer func() {
@@ -63,27 +70,32 @@ func buildMultipartStream(src io.ReadCloser, fileName string, isRecursive bool) 
 				_ = pw.CloseWithError(fmt.Errorf("multipart panic: %v", rec))
 			}
 		}()
-		fw, err := mw.CreateFormFile("content", fileName)
-		if err != nil {
-			_ = pw.CloseWithError(err)
+
+		failPipe := func(err error) bool {
+			if err != nil {
+				_ = pw.CloseWithError(err)
+				return true
+			}
+			return false
+		}
+
+		fw, err := mw.CreateFormFile(multipartFieldContent, fileName)
+		if failPipe(err) {
 			return
 		}
-		if _, err := io.CopyBuffer(fw, src, *bufPtr); err != nil {
-			_ = pw.CloseWithError(err)
+		_, err = io.CopyBuffer(fw, src, *bufPtr)
+		if failPipe(err) {
 			return
 		}
 		if isRecursive {
-			if err := mw.WriteField("name", fileName); err != nil {
-				_ = pw.CloseWithError(err)
+			if failPipe(mw.WriteField(multipartFieldName, fileName)) {
 				return
 			}
 		}
-		if err := mw.Close(); err != nil {
-			_ = pw.CloseWithError(err)
+		if failPipe(mw.Close()) {
 			return
 		}
-		if err := bufW.Flush(); err != nil {
-			_ = pw.CloseWithError(err)
+		if failPipe(bufW.Flush()) {
 			return
 		}
 		_ = pw.Close()
