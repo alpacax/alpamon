@@ -14,7 +14,41 @@ import (
 	"testing"
 )
 
-var benchSizes = []int{1 << 20, 2 << 20, 3 << 20, 10 << 20, 100 << 20}
+// benchSizes spans the observed real-world distribution: KB-scale config files
+// (most uploads), 1–100 MB midrange, and GB-scale cloud images. Sizes >= 500 MB
+// are skipped under -short to keep CI fast.
+var benchSizes = []int{
+	1 << 10,   // 1 KB
+	64 << 10,  // 64 KB
+	1 << 20,   // 1 MB
+	10 << 20,  // 10 MB
+	100 << 20, // 100 MB
+	500 << 20, // 500 MB
+	1 << 30,   // 1 GB
+}
+
+// sizeLabel formats a byte count as a sub-benchmark name (e.g. 1KB, 64KB, 1MB, 1GB).
+func sizeLabel(n int) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%dGB", n>>30)
+	case n >= 1<<20:
+		return fmt.Sprintf("%dMB", n>>20)
+	case n >= 1<<10:
+		return fmt.Sprintf("%dKB", n>>10)
+	default:
+		return fmt.Sprintf("%dB", n)
+	}
+}
+
+// skipIfLargeShort skips bench sizes >= 500 MB when -short is set, so CI runs
+// stay fast while local runs can sweep the full range.
+func skipIfLargeShort(b *testing.B, size int) {
+	b.Helper()
+	if testing.Short() && size >= (500<<20) {
+		b.Skipf("skip %s in -short mode", sizeLabel(size))
+	}
+}
 
 // makeTempFile writes pseudo-random bytes to a temp file. Random content avoids transport-level compression.
 func makeTempFile(b *testing.B, size int) string {
@@ -51,7 +85,8 @@ func reportGC(b *testing.B, before, after runtime.MemStats) {
 // BenchmarkUpload_MultipartBody measures multipart body construction in isolation.
 func BenchmarkUpload_MultipartBody(b *testing.B) {
 	for _, size := range benchSizes {
-		b.Run(fmt.Sprintf("%dMB", size>>20), func(b *testing.B) {
+		b.Run(sizeLabel(size), func(b *testing.B) {
+			skipIfLargeShort(b, size)
 			payload := make([]byte, size)
 			if _, err := io.ReadFull(rand.Reader, payload); err != nil {
 				b.Fatal(err)
@@ -83,7 +118,8 @@ func BenchmarkUpload_MultipartBody(b *testing.B) {
 // BenchmarkUpload_E2E exercises the full upload pipeline against a loopback HTTP sink.
 func BenchmarkUpload_E2E(b *testing.B) {
 	for _, size := range benchSizes {
-		b.Run(fmt.Sprintf("%dMB", size>>20), func(b *testing.B) {
+		b.Run(sizeLabel(size), func(b *testing.B) {
+			skipIfLargeShort(b, size)
 			path := makeTempFile(b, size)
 			srv := newSinkServer(b)
 			b.SetBytes(int64(size))
