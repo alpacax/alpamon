@@ -39,8 +39,7 @@ func NewHTTPClient() *http.Client {
 // truncating (which would hide server error details).
 const putMaxResponseSize = 1 << 20 // 1 MiB
 
-// Put issues a PUT request. If contentLength < 0, the Content-Length header
-// is omitted and the transport uses chunked transfer encoding.
+// Put issues a PUT request. Pass contentLength=-1 to force chunked transfer.
 //
 // codeql[go/request-forgery]: Intentional - HTTP client for admin-specified URLs
 func Put(url string, body io.Reader, contentLength int64, timeout time.Duration) ([]byte, int, error) {
@@ -48,9 +47,9 @@ func Put(url string, body io.Reader, contentLength int64, timeout time.Duration)
 	if err != nil {
 		return nil, 0, err
 	}
-	if contentLength >= 0 {
-		req.ContentLength = contentLength
-	}
+	// Overwrite unconditionally: http.NewRequest auto-fills ContentLength for
+	// bytes/strings readers, which would defeat a caller's -1 chunked opt-in.
+	req.ContentLength = contentLength
 
 	client := NewHTTPClient()
 	client.Timeout = timeout
