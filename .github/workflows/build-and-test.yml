@@ -113,11 +113,11 @@ jobs:
         if: matrix.pkg_manager == 'dnf'
         run: dnf install -y --allowerasing git curl gcc glibc-devel tar
 
-      - name: Check out code
-        uses: actions/checkout@v6
-
       - name: Mark workspace as safe for Git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Check out code
+        uses: actions/checkout@v6
 
       - name: Set up Go
         uses: actions/setup-go@v6
