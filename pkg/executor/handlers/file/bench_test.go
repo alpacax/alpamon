@@ -47,6 +47,7 @@ func newSinkServer(b *testing.B) *httptest.Server {
 }
 
 // reportGC records GC count and total pause delta as bench-only metrics.
+// gc-count/op is meaningful only when b.N >= 3; large benchmarks may set b.N=1.
 func reportGC(b *testing.B, before, after runtime.MemStats) {
 	b.Helper()
 	b.ReportMetric(float64(after.NumGC-before.NumGC)/float64(b.N), "gc-count/op")
@@ -117,6 +118,7 @@ func BenchmarkUpload_E2E_Local(b *testing.B) {
 				if err != nil {
 					_ = body.Close()
 					b.Fatal(err)
+					return
 				}
 				_, _ = io.Copy(io.Discard, resp.Body)
 				_ = resp.Body.Close()

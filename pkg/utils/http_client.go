@@ -33,6 +33,9 @@ func NewHTTPClient() *http.Client {
 	}
 }
 
+// Put issues a PUT request. If contentLength < 0, the Content-Length header
+// is omitted and the transport uses chunked transfer encoding.
+//
 // codeql[go/request-forgery]: Intentional - HTTP client for admin-specified URLs
 func Put(url string, body io.Reader, contentLength int64, timeout time.Duration) ([]byte, int, error) {
 	req, err := http.NewRequest(http.MethodPut, url, body) // lgtm[go/request-forgery]
@@ -52,7 +55,7 @@ func Put(url string, body io.Reader, contentLength int64, timeout time.Duration)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}

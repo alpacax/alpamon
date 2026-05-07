@@ -224,7 +224,7 @@ func (session *Session) MultipartRequest(url string, body io.Reader, contentType
 
 	defer func() { _ = resp.Body.Close() }()
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
