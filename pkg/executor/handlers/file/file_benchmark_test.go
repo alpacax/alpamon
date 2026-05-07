@@ -145,7 +145,6 @@ func BenchmarkUpload_E2E(b *testing.B) {
 				if err != nil {
 					_ = body.Close()
 					b.Fatal(err)
-					return
 				}
 				_, _ = io.Copy(io.Discard, resp.Body)
 				_ = resp.Body.Close()
