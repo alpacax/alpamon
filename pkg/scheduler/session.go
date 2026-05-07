@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	checkSessionURL = "/api/servers/servers/-/"
-	MaxRetryTimeout = 3 * 24 * time.Hour
+	checkSessionURL        = "/api/servers/servers/-/"
+	MaxRetryTimeout        = 3 * 24 * time.Hour
+	multipartMaxRespSize   = 1 << 20 // 1 MiB; read +1 to detect over-limit explicitly
 )
 
 func InitSession() *Session {
@@ -230,9 +231,12 @@ func (session *Session) MultipartRequest(url string, body io.Reader, contentType
 
 	defer func() { _ = resp.Body.Close() }()
 
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, multipartMaxRespSize+1))
 	if err != nil {
 		return nil, resp.StatusCode, err
+	}
+	if int64(len(responseBody)) > multipartMaxRespSize {
+		return nil, resp.StatusCode, fmt.Errorf("multipart response too large (>%d bytes)", multipartMaxRespSize)
 	}
 
 	return responseBody, resp.StatusCode, nil
