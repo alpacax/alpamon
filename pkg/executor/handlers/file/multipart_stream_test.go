@@ -130,7 +130,7 @@ func TestBuildMultipartStream_SrcCloseErrorPropagates(t *testing.T) {
 		hint int64
 	}{
 		{"large_path", 7, -1},
-		{"small_path", 64 << 10, 64 << 10}, // hint > multipartBufferedThreshold to hit io.Pipe small path
+		{"small_path", 128 << 10, 128 << 10}, // hint > multipartBufferedThreshold (64 KiB) to hit io.Pipe small path
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload := bytes.Repeat([]byte{0x42}, tc.size)
