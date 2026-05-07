@@ -48,7 +48,7 @@ jobs:
           echo "tag=${TAG_WITHOUT_V}" >> $GITHUB_OUTPUT
 
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -56,12 +56,12 @@ jobs:
         run: git fetch --force --tags
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: latest
@@ -129,25 +129,25 @@ jobs:
         run: echo "TAG_NAME=${{ steps.channel.outputs.tag }}" >> $GITHUB_ENV
 
       - name: Upload AMD64 DEB artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: alpamon_${{ env.TAG_NAME }}_linux_amd64.deb
           path: dist/alpamon_${{ env.TAG_NAME }}_linux_amd64.deb
 
       - name: Upload ARM64 DEB artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: alpamon_${{ env.TAG_NAME }}_linux_arm64.deb
           path: dist/alpamon_${{ env.TAG_NAME }}_linux_arm64.deb
 
       - name: Upload AMD64 RPM artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: alpamon-${{ env.TAG_NAME }}-1.linux.amd64.rpm
           path: dist/alpamon-${{ env.TAG_NAME }}-1.linux.amd64.rpm
 
       - name: Upload ARM64 RPM artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: alpamon-${{ env.TAG_NAME }}-1.linux.arm64.rpm
           path: dist/alpamon-${{ env.TAG_NAME }}-1.linux.arm64.rpm
@@ -179,7 +179,7 @@ jobs:
           fi
 
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ env.PKG_NAME }}
 
@@ -341,7 +341,7 @@ jobs:
           fi
 
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ env.PKG_NAME }}
 
