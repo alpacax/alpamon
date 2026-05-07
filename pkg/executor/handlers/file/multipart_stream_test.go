@@ -117,21 +117,25 @@ func TestBuildMultipartStream_SrcErrorPropagates(t *testing.T) {
 }
 
 // TestBuildMultipartStream_SrcCloseErrorPropagates exercises the demoted-cat
-// failure mode: Read returns a clean EOF (cat is done) but Close returns a
-// non-nil exit error (e.g., EACCES collected by cmdReadCloser via cmd.Wait).
-// The producer goroutine must surface that close error to the reader; otherwise
-// the upload would silently complete with an empty/truncated payload.
+// failure mode for streaming paths: Read returns a clean EOF (cat is done) but
+// Close returns a non-nil exit error (e.g., EACCES collected by cmdReadCloser
+// via cmd.Wait). The producer goroutine must surface that close error to the
+// reader; otherwise the upload would silently complete with an empty/truncated
+// payload. Buffered path has its own test (close error returned synchronously
+// before body handoff).
 func TestBuildMultipartStream_SrcCloseErrorPropagates(t *testing.T) {
 	for _, tc := range []struct {
 		name string
+		size int
 		hint int64
 	}{
-		{"large_path", -1},
-		{"small_path", int64(len("payload"))},
+		{"large_path", 7, -1},
+		{"small_path", 64 << 10, 64 << 10}, // hint > multipartBufferedThreshold to hit io.Pipe small path
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.Repeat([]byte{0x42}, tc.size)
 			er := &errReader{
-				r:        bytes.NewReader([]byte("payload")),
+				r:        bytes.NewReader(payload),
 				failAt:   1 << 30,
 				closeErr: errors.New("synthetic-close-fail"),
 			}
@@ -198,6 +202,86 @@ func TestBuildMultipartStream_SmallPath_Roundtrip(t *testing.T) {
 	}
 	if _, err := mr.NextPart(); err != io.EOF {
 		t.Fatalf("expected EOF, got %v", err)
+	}
+}
+
+// TestBuildMultipartStream_BufferedPath_Roundtrip verifies the buffered path
+// (hint <= multipartBufferedThreshold) produces a well-formed multipart body
+// with correct payload, exact ContentLength, and synchronous src.Close.
+func TestBuildMultipartStream_BufferedPath_Roundtrip(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		size      int
+		recursive bool
+	}{
+		{"single_1KB", 1 << 10, false},
+		{"single_at_threshold", multipartBufferedThreshold, false},
+		{"recursive_1KB", 1 << 10, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.Repeat([]byte{0xCD}, tc.size)
+			er := &errReader{r: bytes.NewReader(payload), failAt: 1 << 30}
+			body, ct, contentLength, err := buildMultipartStream(er, "f.bin", tc.recursive, int64(tc.size))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = body.Close() }()
+			if contentLength <= 0 {
+				t.Fatalf("expected positive contentLength, got %d", contentLength)
+			}
+			if er.closeCnt == 0 {
+				t.Fatal("expected src.Close to be called synchronously")
+			}
+			mt, params, err := mime.ParseMediaType(ct)
+			if err != nil || mt != "multipart/form-data" {
+				t.Fatalf("ct=%q err=%v", ct, err)
+			}
+			// Drain into a buffer so we can both verify wire size and parse
+			// (boundary is per-call, so a second buildMultipartStream() would
+			// have a different boundary than the ct we captured here).
+			var captured bytes.Buffer
+			n, err := captured.ReadFrom(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != contentLength {
+				t.Fatalf("wire size %d != contentLength %d", n, contentLength)
+			}
+			mr := multipart.NewReader(&captured, params["boundary"])
+			part, err := mr.NextPart()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if part.FormName() != multipartFieldContent || part.FileName() != "f.bin" {
+				t.Fatalf("name=%q file=%q", part.FormName(), part.FileName())
+			}
+			got := sha256.New()
+			if _, err := io.Copy(got, part); err != nil {
+				t.Fatal(err)
+			}
+			want := sha256.Sum256(payload)
+			if !bytes.Equal(got.Sum(nil), want[:]) {
+				t.Fatal("payload digest mismatch")
+			}
+		})
+	}
+}
+
+// TestBuildMultipartStream_BufferedPath_SrcCloseErrorPropagates verifies the
+// buffered path surfaces src.Close() errors (e.g., demoted-cat non-zero exit
+// from cmdReadCloser) instead of silently returning a successful body.
+func TestBuildMultipartStream_BufferedPath_SrcCloseErrorPropagates(t *testing.T) {
+	er := &errReader{
+		r:        bytes.NewReader([]byte("payload")),
+		failAt:   1 << 30,
+		closeErr: errors.New("synthetic-close-fail"),
+	}
+	_, _, _, err := buildMultipartStream(er, "f.bin", false, int64(len("payload")))
+	if err == nil {
+		t.Fatal("expected close error to propagate, got nil")
+	}
+	if !strings.Contains(err.Error(), "synthetic-close-fail") {
+		t.Fatalf("expected synthetic-close-fail, got %v", err)
 	}
 }
 
