@@ -1,0 +1,76 @@
+go test -c -o /tmp/file_bench ./pkg/executor/handlers/file/
+==== upload 1MB ====
+goos: darwin
+goarch: arm64
+pkg: github.com/alpacax/alpamon/pkg/executor/handlers/file
+cpu: Apple M2 Pro
+BenchmarkUpload_E2E_Local/1MB-10         	       1	   2138083 ns/op	 490.43 MB/s	         0 gc-count/op	         0 gc-pause-ns/op	 2248736 B/op	     268 allocs/op
+PASS
+        0.18 real         0.00 user         0.00 sys
+            19136512  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1430  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  45  messages sent
+                 132  messages received
+                  20  signals received
+                  15  voluntary context switches
+                 481  involuntary context switches
+            81713198  instructions retired
+            35097873  cycles elapsed
+             9634536  peak memory footprint
+==== upload 10MB ====
+goos: darwin
+goarch: arm64
+pkg: github.com/alpacax/alpamon/pkg/executor/handlers/file
+cpu: Apple M2 Pro
+BenchmarkUpload_E2E_Local/10MB-10         	       1	   7777416 ns/op	1348.23 MB/s	         2.000 gc-count/op	    134875 gc-pause-ns/op	21137448 B/op	     290 allocs/op
+PASS
+        0.02 real         0.01 user         0.01 sys
+            38813696  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                2630  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                 340  messages sent
+                1285  messages received
+                  28  signals received
+                   5  voluntary context switches
+                 511  involuntary context switches
+           194830094  instructions retired
+            68918156  cycles elapsed
+            29000472  peak memory footprint
+==== upload 100MB ====
+goos: darwin
+goarch: arm64
+pkg: github.com/alpacax/alpamon/pkg/executor/handlers/file
+cpu: Apple M2 Pro
+BenchmarkUpload_E2E_Local/100MB-10         	       1	  58235875 ns/op	1800.57 MB/s	         2.000 gc-count/op	     71792 gc-pause-ns/op	209874552 B/op	     278 allocs/op
+PASS
+        0.12 real         0.05 user         0.08 sys
+           227360768  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               14137  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                3288  messages sent
+               12816  messages received
+                  67  signals received
+                  18  voluntary context switches
+                1835  involuntary context switches
+          1326434246  instructions retired
+           438554313  cycles elapsed
+           217793424  peak memory footprint
