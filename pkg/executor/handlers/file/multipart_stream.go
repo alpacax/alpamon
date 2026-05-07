@@ -52,11 +52,15 @@ func (r multipartReader) WriteTo(dst io.Writer) (int64, error) {
 
 // buildMultipartStream returns a streaming multipart body containing `src`
 // under form field "content". The caller MUST Close the returned reader. The
-// goroutine owns src.Close so leaking the reader does not leak the source.
+// producer goroutine owns src.Close() and propagates a non-nil close error
+// (e.g., a non-zero `cat` exit from cmdReadCloser) to the reader via
+// pw.CloseWithError, so demoted-read failures surface as upload errors
+// instead of silent empty/truncated payloads.
 //
-// hint is the source size in bytes. Pass -1 when unknown. Files smaller than
-// the 4 MiB pool buffer size skip the pool entirely to avoid allocating a
-// 4 MiB bufio buffer for payloads that fit in one flush anyway.
+// hint is the source size in bytes. Pass -1 when unknown. Sources smaller
+// than multipartPipeBufSize (4 MiB) skip the bufio + 4 MiB pool buffer and
+// use Go's default 32 KiB copy buffer, since payloads that fit in one flush
+// don't benefit from the larger pool buffer.
 func buildMultipartStream(src io.ReadCloser, fileName string, isRecursive bool, hint int64) (io.ReadCloser, string, error) {
 	if hint >= 0 && hint < multipartPipeBufSize {
 		return buildMultipartStreamSmall(src, fileName, isRecursive)
@@ -64,27 +68,42 @@ func buildMultipartStream(src io.ReadCloser, fileName string, isRecursive bool, 
 	return buildMultipartStreamLarge(src, fileName, isRecursive)
 }
 
-// buildMultipartStreamSmall handles files < 1 MiB using Go's default 32 KiB
-// copy buffer and no pool allocation — avoids 4 MiB over-provisioning.
+// buildMultipartStreamSmall handles sources smaller than multipartPipeBufSize
+// (4 MiB) using Go's default 32 KiB copy buffer and no pool allocation —
+// avoids 4 MiB over-provisioning for payloads that fit in one flush.
 func buildMultipartStreamSmall(src io.ReadCloser, fileName string, isRecursive bool) (io.ReadCloser, string, error) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 	contentType := mw.FormDataContentType()
 
 	go func() {
-		defer func() { _ = src.Close() }()
+		var pipeErr error
+
+		// LIFO defer order: panic-recover → src.Close (latches close err) →
+		// pipe-close (uses accumulated pipeErr).
+		defer func() {
+			if pipeErr != nil {
+				_ = pw.CloseWithError(pipeErr)
+			} else {
+				_ = pw.Close()
+			}
+		}()
+		defer func() {
+			if cerr := src.Close(); cerr != nil && pipeErr == nil {
+				pipeErr = cerr
+			}
+		}()
 		defer func() {
 			if rec := recover(); rec != nil {
-				_ = pw.CloseWithError(fmt.Errorf("multipart panic: %v", rec))
+				pipeErr = fmt.Errorf("multipart panic: %v", rec)
 			}
 		}()
 
 		failPipe := func(err error) bool {
-			if err != nil {
-				_ = pw.CloseWithError(err)
-				return true
+			if err != nil && pipeErr == nil {
+				pipeErr = err
 			}
-			return false
+			return err != nil
 		}
 
 		fw, err := mw.CreateFormFile(multipartFieldContent, fileName)
@@ -102,14 +121,14 @@ func buildMultipartStreamSmall(src io.ReadCloser, fileName string, isRecursive b
 		if failPipe(mw.Close()) {
 			return
 		}
-		_ = pw.Close()
 	}()
 
 	return pr, contentType, nil
 }
 
-// buildMultipartStreamLarge handles large files (≥ 1 MiB or unknown size)
-// using pool-reused 4 MiB buffers and multipartReader for efficient WriteTo.
+// buildMultipartStreamLarge handles sources >= multipartPipeBufSize (4 MiB)
+// or of unknown size, using pool-reused 4 MiB buffers and multipartReader
+// for efficient WriteTo.
 func buildMultipartStreamLarge(src io.ReadCloser, fileName string, isRecursive bool) (io.ReadCloser, string, error) {
 	pr, pw := io.Pipe()
 	bufW := bufio.NewWriterSize(pw, multipartPipeBufSize)
@@ -118,22 +137,35 @@ func buildMultipartStreamLarge(src io.ReadCloser, fileName string, isRecursive b
 
 	go func() {
 		bufPtr := multipartCopyPool.Get().(*[]byte)
-		// LIFO defer order: recover → src.Close → pool.Put. New defers must
-		// preserve this so panics still propagate to pw via CloseWithError.
+		var pipeErr error
+
+		// LIFO defer order: panic-recover → src.Close (latches close err) →
+		// pool.Put → pipe-close. Body panics surface via recover; src.Close
+		// errors surface only if no earlier failure already set pipeErr.
+		defer func() {
+			if pipeErr != nil {
+				_ = pw.CloseWithError(pipeErr)
+			} else {
+				_ = pw.Close()
+			}
+		}()
 		defer multipartCopyPool.Put(bufPtr)
-		defer func() { _ = src.Close() }()
+		defer func() {
+			if cerr := src.Close(); cerr != nil && pipeErr == nil {
+				pipeErr = cerr
+			}
+		}()
 		defer func() {
 			if rec := recover(); rec != nil {
-				_ = pw.CloseWithError(fmt.Errorf("multipart panic: %v", rec))
+				pipeErr = fmt.Errorf("multipart panic: %v", rec)
 			}
 		}()
 
 		failPipe := func(err error) bool {
-			if err != nil {
-				_ = pw.CloseWithError(err)
-				return true
+			if err != nil && pipeErr == nil {
+				pipeErr = err
 			}
-			return false
+			return err != nil
 		}
 
 		fw, err := mw.CreateFormFile(multipartFieldContent, fileName)
@@ -155,7 +187,6 @@ func buildMultipartStreamLarge(src io.ReadCloser, fileName string, isRecursive b
 		if failPipe(bufW.Flush()) {
 			return
 		}
-		_ = pw.Close()
 	}()
 
 	return multipartReader{pr}, contentType, nil

@@ -18,6 +18,7 @@ type errReader struct {
 	failAt   int
 	read     int
 	closeCnt int
+	closeErr error
 }
 
 func (e *errReader) Read(p []byte) (int, error) {
@@ -33,7 +34,7 @@ func (e *errReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (e *errReader) Close() error { e.closeCnt++; return nil }
+func (e *errReader) Close() error { e.closeCnt++; return e.closeErr }
 
 func TestBuildMultipartStream_Roundtrip(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xAB}, 1<<20)
@@ -115,6 +116,38 @@ func TestBuildMultipartStream_SrcErrorPropagates(t *testing.T) {
 	}
 }
 
+// TestBuildMultipartStream_SrcCloseErrorPropagates exercises the demoted-cat
+// failure mode: Read returns a clean EOF (cat is done) but Close returns a
+// non-nil exit error (e.g., EACCES collected by cmdReadCloser via cmd.Wait).
+// The producer goroutine must surface that close error to the reader; otherwise
+// the upload would silently complete with an empty/truncated payload.
+func TestBuildMultipartStream_SrcCloseErrorPropagates(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hint int64
+	}{
+		{"large_path", -1},
+		{"small_path", int64(len("payload"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			er := &errReader{
+				r:        bytes.NewReader([]byte("payload")),
+				failAt:   1 << 30,
+				closeErr: errors.New("synthetic-close-fail"),
+			}
+			body, _, err := buildMultipartStream(er, "f.bin", false, tc.hint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = io.Copy(io.Discard, body)
+			if err == nil || !strings.Contains(err.Error(), "synthetic-close-fail") {
+				t.Fatalf("expected src.Close error to propagate, got %v", err)
+			}
+			_ = body.Close()
+		})
+	}
+}
+
 func TestBuildMultipartStream_EarlyCloseNoLeak(t *testing.T) {
 	g0 := runtime.NumGoroutine()
 	er := &errReader{r: bytes.NewReader(bytes.Repeat([]byte{1}, 4<<20)), failAt: 1 << 30}
@@ -132,9 +165,10 @@ func TestBuildMultipartStream_EarlyCloseNoLeak(t *testing.T) {
 }
 
 // TestBuildMultipartStream_SmallPath_Roundtrip verifies that the small-file
-// path (hint < 1 MiB) produces a well-formed multipart body with correct payload.
+// path (hint < multipartPipeBufSize, currently 4 MiB) produces a well-formed
+// multipart body with correct payload.
 func TestBuildMultipartStream_SmallPath_Roundtrip(t *testing.T) {
-	payload := bytes.Repeat([]byte{0xCD}, 512<<10) // 512 KiB — below 1 MiB threshold
+	payload := bytes.Repeat([]byte{0xCD}, 512<<10) // 512 KiB — well below multipartPipeBufSize (4 MiB)
 	src := io.NopCloser(bytes.NewReader(payload))
 	body, ct, err := buildMultipartStream(src, "small.bin", false, int64(len(payload)))
 	if err != nil {

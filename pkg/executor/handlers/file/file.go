@@ -145,9 +145,10 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		log.Error().Err(err).Msg("Failed to read file for upload.")
 		return 1, err.Error()
 	}
-	defer func() { _ = src.Close() }()
 
-	statusCode, err := h.fileUpload(ctx, args, src, size, filepath.Base(name), recursive)
+	// fileUpload owns src.Close() so a non-zero exit from the demoted-cat
+	// reader (cmdReadCloser) can be propagated through the upload pipeline.
+	statusCode, err := h.fileUpload(args, src, size, filepath.Base(name), recursive)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to upload file")
 		return 1, err.Error()
@@ -361,24 +362,34 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 	return archiveName, archiveName, nil
 }
 
-// fileUpload uploads the file to the server
-func (h *FileHandler) fileUpload(_ context.Context, args *common.CommandArgs, src io.ReadCloser, size int64, fileName string, recursive bool) (int, error) {
+// fileUpload uploads the file to the server. Owns src.Close():
+//   - UseBlob path: closes src after the synchronous PUT.
+//   - Multipart path: hands ownership to buildMultipartStream's producer goroutine
+//     (it Close()s src and propagates non-nil errors via pw.CloseWithError).
+//   - Pre-handoff failures: closes src directly so it never leaks.
+func (h *FileHandler) fileUpload(args *common.CommandArgs, src io.ReadCloser, size int64, fileName string, recursive bool) (int, error) {
 	if args.UseBlob {
+		defer func() { _ = src.Close() }()
 		_, code, err := utils.Put(args.Content, src, size, 0)
 		return code, err
 	}
 
 	if h.apiSession == nil {
+		_ = src.Close()
 		return 0, errors.New("API session not available")
 	}
 
 	body, contentType, err := buildMultipartStream(src, fileName, recursive, size)
 	if err != nil {
+		_ = src.Close()
 		return 0, err
 	}
 	defer func() { _ = body.Close() }()
 
-	_, code, err := h.apiSession.MultipartRequest(args.Content, body, contentType, time.Duration(fileUploadTimeout)*time.Second)
+	// fileUploadTimeout is a seconds count; Session.MultipartRequest applies
+	// *time.Second internally, so pass the bare Duration (matches sibling
+	// callers like apiSession.Post(url, data, 5)).
+	_, code, err := h.apiSession.MultipartRequest(args.Content, body, contentType, time.Duration(fileUploadTimeout))
 	return code, err
 }
 
