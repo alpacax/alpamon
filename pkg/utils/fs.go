@@ -261,16 +261,15 @@ func IsZipFile(content []byte, ext string) bool {
 	return err == nil
 }
 
-// IsZipFileFromPath checks if the file at path is a valid zip file.
-func IsZipFileFromPath(path, ext string) bool {
+// OpenIfZip returns a zip handle if path is a valid zip with allow-listed ext, else nil.
+// Caller must Close. Reusing this handle for extraction closes the TOCTOU window.
+func OpenIfZip(path, ext string) *zip.ReadCloser {
 	if _, found := nonZipExt[ext]; found {
-		return false
+		return nil
 	}
-
 	rc, err := zip.OpenReader(path)
 	if err != nil {
-		return false
+		return nil
 	}
-	_ = rc.Close()
-	return true
+	return rc
 }

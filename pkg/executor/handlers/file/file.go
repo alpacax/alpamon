@@ -251,12 +251,16 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 		return 1, "You do not have permission to write to the directory, or directory does not exist"
 	}
 
-	if args.AllowUnzip && utils.IsZipFileFromPath(args.Path, filepath.Ext(args.Path)) {
-		if err := utils.Unzip(args.Path, filepath.Dir(args.Path)); err != nil {
-			log.Error().Err(err).Msg("Failed to unzip file.")
-			return 1, err.Error()
+	if args.AllowUnzip {
+		if rc := utils.OpenIfZip(args.Path, filepath.Ext(args.Path)); rc != nil {
+			err := utils.UnzipReader(rc, filepath.Dir(args.Path))
+			_ = rc.Close()
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to unzip file.")
+				return 1, err.Error()
+			}
+			_ = os.Remove(args.Path)
 		}
-		_ = os.Remove(args.Path)
 	}
 
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)

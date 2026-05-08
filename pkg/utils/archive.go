@@ -85,7 +85,12 @@ func Unzip(src, destDir string) error {
 		return fmt.Errorf("failed to open zip: %w", err)
 	}
 	defer func() { _ = r.Close() }()
+	return UnzipReader(r, destDir)
+}
 
+// UnzipReader extracts an already-opened zip into destDir. Caller owns r.
+// Used when the caller has pre-validated the same handle to close TOCTOU windows.
+func UnzipReader(r *zip.ReadCloser, destDir string) error {
 	for _, f := range r.File {
 		fpath := filepath.Join(destDir, f.Name)
 
