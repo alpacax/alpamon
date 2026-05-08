@@ -43,12 +43,13 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 }
 
 // writeFileAs streams src to a file, demoting via tee when sysProcAttr is set. Caller owns src.
+// path is sanitized by callers via utils.SanitizePath + (Windows) ResolveAndEnsureUnderHome.
 func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr) error {
 	if sysProcAttr == nil {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return err
 		}
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644) // lgtm[go/path-injection]
 		if err != nil {
 			return err
 		}
@@ -57,7 +58,7 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 			err = cerr
 		}
 		if err != nil {
-			_ = os.Remove(path) // drop partial write so retry isn't blocked by AllowOverwrite=false
+			_ = os.Remove(path) // lgtm[go/path-injection] drop partial write so retry isn't blocked by AllowOverwrite=false
 		}
 		return err
 	}
@@ -68,7 +69,7 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	errW := &stderrCap{cap: stderrCapSize}
 	cmd.Stderr = errW
 	if err := cmd.Run(); err != nil {
-		_ = os.Remove(path) // drop partial write
+		_ = os.Remove(path) // lgtm[go/path-injection] drop partial write
 		if msg := strings.TrimSpace(errW.buf.String()); msg != "" {
 			return fmt.Errorf("%w: %s", err, msg)
 		}
