@@ -15,6 +15,20 @@ import (
 	"github.com/alpacax/alpamon/pkg/utils"
 )
 
+// errCapReader records the last non-EOF read error so it survives broken-pipe overwrites.
+type errCapReader struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errCapReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err != nil && err != io.EOF {
+		e.err = err
+	}
+	return n, err
+}
+
 // readFileAs reads a file, using a demoted cat process when privilege demotion is active.
 func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAttr) (io.ReadCloser, int64, error) {
 	if sysProcAttr == nil {
@@ -64,16 +78,31 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	}
 	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(path)))
 	cmd.SysProcAttr = sysProcAttr
-	cmd.Stdin = src
+	// Wrap src to preserve its read error even if a subsequent broken-pipe write
+	// overwrites it before cmd.Wait collects the goroutine result.
+	erc := &errCapReader{r: src}
+	cmd.Stdin = erc
 	// capture tee stderr so failures surface a real message, not "exit status 1"
 	errW := &stderrCap{cap: stderrCapSize}
 	cmd.Stderr = errW
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+
+	if runErr != nil || erc.err != nil {
 		_ = os.Remove(path) // lgtm[go/path-injection] drop partial write
-		if msg := strings.TrimSpace(errW.buf.String()); msg != "" {
-			return fmt.Errorf("%w: %s", err, msg)
+		if runErr != nil {
+			var details []string
+			if msg := strings.TrimSpace(errW.buf.String()); msg != "" {
+				details = append(details, msg)
+			}
+			if erc.err != nil && erc.err != runErr {
+				details = append(details, erc.err.Error())
+			}
+			if len(details) > 0 {
+				return fmt.Errorf("%w: %s", runErr, strings.Join(details, "; "))
+			}
+			return runErr
 		}
-		return err
+		return fmt.Errorf("failed to read source: %w", erc.err)
 	}
 	return nil
 }
