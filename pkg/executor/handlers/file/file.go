@@ -270,7 +270,8 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 				log.Error().Err(err).Msg("Failed to unzip file.")
 				return 1, err.Error()
 			}
-			// lgtm[go/path-injection]: args.Path sanitized above via SanitizePath + ResolveAndEnsureUnderHome
+			// lgtm[go/path-injection]: args.Path sanitized via SanitizePath; Windows additionally
+			// enforces ResolveAndEnsureUnderHome. Wire input is admin-authenticated.
 			_ = os.Remove(args.Path) // lgtm[go/path-injection]
 		}
 	}
