@@ -30,6 +30,14 @@ type FileHandler struct {
 	apiSession common.APISession
 }
 
+// limitedReadCloser wraps an io.ReadCloser and returns an error when the byte
+// limit is exceeded, avoiding the nil-ResponseWriter panic of http.MaxBytesReader.
+type limitedReadCloser struct {
+	rc    io.ReadCloser
+	limit int64
+	read  int64
+}
+
 // NewFileHandler creates a new file handler
 func NewFileHandler(cmdExecutor common.CommandExecutor, apiSession common.APISession) *FileHandler {
 	h := &FileHandler{
@@ -458,8 +466,8 @@ func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.R
 			_ = resp.Body.Close()
 			return nil, fmt.Errorf("download too large: %d bytes (max %d)", resp.ContentLength, limit)
 		}
-		// MaxBytesReader catches servers that lie in Content-Length or use chunked encoding.
-		return http.MaxBytesReader(nil, resp.Body, limit), nil
+		// limitedReadCloser catches servers that lie in Content-Length or use chunked encoding.
+		return &limitedReadCloser{rc: resp.Body, limit: limit}, nil
 	}
 
 	return resp.Body, nil
@@ -481,4 +489,18 @@ func (h *FileHandler) statFileTransfer(code int, transferType transferType, mess
 		Type:    transferType,
 	}
 	scheduler.Rqueue.Post(statURL, payload, 10, time.Time{})
+}
+
+func (l *limitedReadCloser) Read(p []byte) (int, error) {
+	n, err := l.rc.Read(p)
+	l.read += int64(n)
+	if l.read > l.limit {
+		_ = l.rc.Close()
+		return n, fmt.Errorf("download too large: exceeds max %d bytes", l.limit)
+	}
+	return n, err
+}
+
+func (l *limitedReadCloser) Close() error {
+	return l.rc.Close()
 }
