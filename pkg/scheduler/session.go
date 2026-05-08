@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	checkSessionURL = "/api/servers/servers/-/"
-	MaxRetryTimeout = 3 * 24 * time.Hour
+	checkSessionURL        = "/api/servers/servers/-/"
+	MaxRetryTimeout        = 3 * 24 * time.Hour
+	multipartMaxRespSize   = 1 << 20 // 1 MiB; read +1 to detect over-limit explicitly
 )
 
 func InitSession() *Session {
@@ -202,11 +203,17 @@ func (session *Session) Delete(url string, rawBody interface{}, timeout time.Dur
 	return session.do(req, timeout)
 }
 
-func (session *Session) MultipartRequest(url string, body bytes.Buffer, contentType string, timeout time.Duration) ([]byte, int, error) {
-	req, err := http.NewRequest(http.MethodPost, url, &body)
+// MultipartRequest issues a POST with a multipart body. Pass contentLength=-1
+// to force chunked transfer; pass an exact byte count to use identity TE
+// (avoids per-write chunk header overhead). Overwrites req.ContentLength
+// unconditionally because http.NewRequest auto-fills it for bytes/strings
+// readers, which would defeat a caller's -1 chunked opt-in.
+func (session *Session) MultipartRequest(url string, body io.Reader, contentType string, contentLength int64, timeout time.Duration) ([]byte, int, error) {
+	req, err := http.NewRequest(http.MethodPost, url, body)
 	if err != nil {
 		return nil, 0, err
 	}
+	req.ContentLength = contentLength
 
 	ctx, cancel := context.WithTimeout(req.Context(), timeout*time.Second)
 	defer cancel()
@@ -224,9 +231,12 @@ func (session *Session) MultipartRequest(url string, body bytes.Buffer, contentT
 
 	defer func() { _ = resp.Body.Close() }()
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, multipartMaxRespSize+1))
 	if err != nil {
 		return nil, resp.StatusCode, err
+	}
+	if int64(len(responseBody)) > multipartMaxRespSize {
+		return nil, resp.StatusCode, fmt.Errorf("multipart response too large (>%d bytes)", multipartMaxRespSize)
 	}
 
 	return responseBody, resp.StatusCode, nil
