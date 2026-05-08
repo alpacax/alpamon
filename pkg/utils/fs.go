@@ -260,3 +260,18 @@ func IsZipFile(content []byte, ext string) bool {
 	_, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
 	return err == nil
 }
+
+// IsZipFileFromPath checks if the file at path is a valid zip file. Used by
+// streaming download paths that never hold full content in memory.
+func IsZipFileFromPath(path, ext string) bool {
+	if _, found := nonZipExt[ext]; found {
+		return false
+	}
+
+	rc, err := zip.OpenReader(path)
+	if err != nil {
+		return false
+	}
+	_ = rc.Close()
+	return true
+}

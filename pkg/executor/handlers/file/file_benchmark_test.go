@@ -155,12 +155,17 @@ func BenchmarkDownload_FetchFromURL(b *testing.B) {
 			runtime.ReadMemStats(&ms0)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				content, err := h.fetchFromURL(srv.URL)
+				body, err := h.fetchFromURL(context.Background(), srv.URL)
 				if err != nil {
 					b.Fatal(err)
 				}
-				if len(content) != size {
-					b.Fatalf("size mismatch: got %d, want %d", len(content), size)
+				n, err := io.Copy(io.Discard, body)
+				_ = body.Close()
+				if err != nil {
+					b.Fatal(err)
+				}
+				if n != int64(size) {
+					b.Fatalf("size mismatch: got %d, want %d", n, size)
 				}
 			}
 			b.StopTimer()
@@ -185,11 +190,13 @@ func BenchmarkDownload_E2E(b *testing.B) {
 			runtime.ReadMemStats(&ms0)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				content, err := h.fetchFromURL(srv.URL)
+				body, err := h.fetchFromURL(context.Background(), srv.URL)
 				if err != nil {
 					b.Fatal(err)
 				}
-				if err := writeFileAs(context.Background(), outPath, content, nil); err != nil {
+				err = writeFileAs(context.Background(), outPath, body, nil)
+				_ = body.Close()
+				if err != nil {
 					b.Fatal(err)
 				}
 			}

@@ -3,7 +3,6 @@
 package file
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -42,17 +41,27 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 	return rc, st.Size(), nil
 }
 
-// writeFileAs writes a file, using a demoted tee process when privilege demotion is active.
-func writeFileAs(ctx context.Context, path string, content []byte, sysProcAttr *syscall.SysProcAttr) error {
+// writeFileAs streams src into a file, using a demoted tee process when privilege
+// demotion is active. The caller retains ownership of src; writeFileAs does not
+// close it. cmd.Run() is synchronous, so by the time this returns, os/exec's
+// internal stdin-copy goroutine has already finished consuming src.
+func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr) error {
 	if sysProcAttr == nil {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return err
 		}
-		return os.WriteFile(path, content, 0644)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(f, src)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		return err
 	}
 	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(path)))
 	cmd.SysProcAttr = sysProcAttr
-	cmd.Stdin = bytes.NewReader(content)
-	_, err := cmd.Output()
-	return err
+	cmd.Stdin = src
+	return cmd.Run()
 }

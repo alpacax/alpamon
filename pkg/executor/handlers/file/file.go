@@ -221,10 +221,11 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 
 // fileDownload handles single file download
 func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr, homeDirectory string) (int, string) {
-	content, err := h.getFileData(args)
+	src, err := h.getFileData(ctx, args)
 	if err != nil {
 		return 1, err.Error()
 	}
+	defer func() { _ = src.Close() }()
 
 	// Paths arrive in wire format from the web client.
 	downloadPath, err := utils.SanitizePath(utils.FromWirePath(args.Path))
@@ -245,13 +246,12 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	}
 
 	// Write file, preserving privilege demotion on Unix when available.
-	if err := writeFileAs(ctx, args.Path, content, sysProcAttr); err != nil {
+	if err := writeFileAs(ctx, args.Path, src, sysProcAttr); err != nil {
 		log.Error().Err(err).Msg("Failed to write file.")
 		return 1, "You do not have permission to write to the directory, or directory does not exist"
 	}
 
-	isZip := utils.IsZipFile(content, filepath.Ext(args.Path))
-	if isZip && args.AllowUnzip {
+	if args.AllowUnzip && utils.IsZipFileFromPath(args.Path, filepath.Ext(args.Path)) {
 		if err := utils.Unzip(args.Path, filepath.Dir(args.Path)); err != nil {
 			log.Error().Err(err).Msg("Failed to unzip file.")
 			return 1, err.Error()
@@ -398,32 +398,31 @@ func (h *FileHandler) fileUpload(args *common.CommandArgs, src io.ReadCloser, si
 	return code, err
 }
 
-// getFileData fetches file content from URL, text, or base64
-func (h *FileHandler) getFileData(args *common.CommandArgs) ([]byte, error) {
+// getFileData returns a streaming reader for the file content. Caller owns Close.
+// text/base64 wrap in-memory data via NopCloser; url returns the live HTTP body
+// so payloads never accumulate in []byte.
+func (h *FileHandler) getFileData(ctx context.Context, args *common.CommandArgs) (io.ReadCloser, error) {
 	switch args.Type {
 	case "url":
-		return h.fetchFromURL(args.Content)
+		return h.fetchFromURL(ctx, args.Content)
 	case "text":
-		return []byte(args.Content), nil
+		return io.NopCloser(strings.NewReader(args.Content)), nil
 	case "base64":
-		content, err := base64.StdEncoding.DecodeString(args.Content)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode base64 content: %w", err)
-		}
-		return content, nil
+		return io.NopCloser(base64.NewDecoder(base64.StdEncoding, strings.NewReader(args.Content))), nil
 	default:
 		return nil, fmt.Errorf("unknown file type: %s", args.Type)
 	}
 }
 
-// fetchFromURL downloads content from a URL
-func (h *FileHandler) fetchFromURL(contentURL string) ([]byte, error) {
+// fetchFromURL streams the response body to the caller. The returned ReadCloser
+// is the live resp.Body — caller must Close to release the connection.
+func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.ReadCloser, error) {
 	parsedRequestURL, err := url.Parse(contentURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse URL '%s': %w", contentURL, err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, parsedRequestURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedRequestURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -444,19 +443,14 @@ func (h *FileHandler) fetchFromURL(contentURL string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to download content from URL: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode/100 != 2 {
+		_ = resp.Body.Close()
 		log.Error().Msgf("Failed to download content from URL: %d %s", resp.StatusCode, parsedRequestURL)
 		return nil, errors.New("downloading content failed")
 	}
 
-	content, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	return content, nil
+	return resp.Body, nil
 }
 
 // statFileTransfer reports the file transfer status
