@@ -451,6 +451,16 @@ func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.R
 		return nil, errors.New("downloading content failed")
 	}
 
+	// Apply size cap only when configured (0 = unlimited).
+	if limit := config.GlobalSettings.MaxDownloadBytes; limit > 0 {
+		if resp.ContentLength > limit {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("download too large: %d bytes (max %d)", resp.ContentLength, limit)
+		}
+		// MaxBytesReader catches servers that lie in Content-Length or use chunked encoding.
+		return http.MaxBytesReader(nil, resp.Body, limit), nil
+	}
+
 	return resp.Body, nil
 }
 
