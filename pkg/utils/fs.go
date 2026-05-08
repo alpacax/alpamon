@@ -2,7 +2,6 @@ package utils
 
 import (
 	"archive/zip"
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -251,12 +250,15 @@ func FileExists(path string) bool {
 	return !os.IsNotExist(err)
 }
 
-// IsZipFile checks if the content is a valid zip file
-func IsZipFile(content []byte, ext string) bool {
-	if _, found := nonZipExt[ext]; found {
-		return false
+// OpenIfZip returns a zip handle if path is a valid zip and ext is not in the denylist, else nil.
+// Caller must Close. Reusing this handle for extraction closes the TOCTOU window.
+func OpenIfZip(path, ext string) *zip.ReadCloser {
+	if _, found := nonZipExt[strings.ToLower(ext)]; found {
+		return nil
 	}
-
-	_, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
-	return err == nil
+	rc, err := zip.OpenReader(path)
+	if err != nil {
+		return nil
+	}
+	return rc
 }

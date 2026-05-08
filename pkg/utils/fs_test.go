@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"archive/zip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -249,6 +250,60 @@ func TestChownRecursive(t *testing.T) {
 		err := ChownRecursive("/nonexistent/path", 1000, 1000)
 		if err == nil {
 			t.Fatal("ChownRecursive() expected error for non-existent path")
+		}
+	})
+}
+
+func makeZipFile(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := zip.NewWriter(f)
+	_ = w.Close()
+	_ = f.Close()
+}
+
+func TestOpenIfZip(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Run("valid zip returns handle", func(t *testing.T) {
+		p := filepath.Join(tmpDir, "valid.zip")
+		makeZipFile(t, p)
+		rc := OpenIfZip(p, ".zip")
+		if rc == nil {
+			t.Fatal("expected non-nil ReadCloser for valid zip")
+		}
+		_ = rc.Close()
+	})
+
+	t.Run("non-zip file returns nil", func(t *testing.T) {
+		p := filepath.Join(tmpDir, "plain.txt")
+		if err := os.WriteFile(p, []byte("hello"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if rc := OpenIfZip(p, ".txt"); rc != nil {
+			_ = rc.Close()
+			t.Fatal("expected nil for non-zip content")
+		}
+	})
+
+	t.Run("denylisted extension returns nil", func(t *testing.T) {
+		p := filepath.Join(tmpDir, "lib.jar")
+		makeZipFile(t, p)
+		if rc := OpenIfZip(p, ".jar"); rc != nil {
+			_ = rc.Close()
+			t.Fatal("expected nil for denylisted .jar extension")
+		}
+	})
+
+	t.Run("uppercase denylisted extension returns nil", func(t *testing.T) {
+		p := filepath.Join(tmpDir, "lib.JAR")
+		makeZipFile(t, p)
+		if rc := OpenIfZip(p, ".JAR"); rc != nil {
+			_ = rc.Close()
+			t.Fatal("expected nil for denylisted .JAR extension")
 		}
 	})
 }

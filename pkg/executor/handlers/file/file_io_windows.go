@@ -22,10 +22,21 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 	return f, st.Size(), nil
 }
 
-// writeFileAs writes a file directly on Windows (no privilege demotion available).
-func writeFileAs(ctx context.Context, path string, content []byte, sysProcAttr *syscall.SysProcAttr) error {
+// writeFileAs streams src into a file directly on Windows (no privilege demotion available).
+func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, content, 0644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, src)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(path) // drop partial write so retry isn't blocked by AllowOverwrite=false
+	}
+	return err
 }

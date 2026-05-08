@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 )
 
@@ -75,6 +76,31 @@ func newSinkServer(b *testing.B) *httptest.Server {
 	return srv
 }
 
+// newSourceServer serves `size` bytes per request — used as the download source.
+// A 4 MiB random block is cycled to avoid /dev/urandom cost on GB sizes.
+func newSourceServer(b *testing.B, size int) *httptest.Server {
+	b.Helper()
+	const blockSize = 4 << 20
+	block := make([]byte, blockSize)
+	if _, err := io.ReadFull(rand.Reader, block); err != nil {
+		b.Fatalf("ReadFull: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(size))
+		w.WriteHeader(http.StatusOK)
+		remaining := size
+		for remaining > 0 {
+			n := min(remaining, len(block))
+			if _, err := w.Write(block[:n]); err != nil {
+				return
+			}
+			remaining -= n
+		}
+	}))
+	b.Cleanup(srv.Close)
+	return srv
+}
+
 // reportGC records GC count and pause delta as bench-only metrics.
 func reportGC(b *testing.B, before, after runtime.MemStats) {
 	b.Helper()
@@ -107,6 +133,72 @@ func BenchmarkUpload_MultipartBody(b *testing.B) {
 					b.Fatal(err)
 				}
 				_ = body.Close()
+			}
+			b.StopTimer()
+			runtime.ReadMemStats(&ms1)
+			reportGC(b, ms0, ms1)
+		})
+	}
+}
+
+// BenchmarkDownload_FetchFromURL measures the URL fetch in isolation.
+func BenchmarkDownload_FetchFromURL(b *testing.B) {
+	h := &FileHandler{}
+	for _, size := range benchSizes {
+		b.Run(sizeLabel(size), func(b *testing.B) {
+			skipIfLargeShort(b, size)
+			srv := newSourceServer(b, size)
+			b.SetBytes(int64(size))
+			b.ReportAllocs()
+			var ms0, ms1 runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&ms0)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				body, err := h.fetchFromURL(context.Background(), srv.URL)
+				if err != nil {
+					b.Fatal(err)
+				}
+				n, err := io.Copy(io.Discard, body)
+				_ = body.Close()
+				if err != nil {
+					b.Fatal(err)
+				}
+				if n != int64(size) {
+					b.Fatalf("size mismatch: got %d, want %d", n, size)
+				}
+			}
+			b.StopTimer()
+			runtime.ReadMemStats(&ms1)
+			reportGC(b, ms0, ms1)
+		})
+	}
+}
+
+// BenchmarkDownload_E2E exercises the full download pipeline against a loopback HTTP source.
+func BenchmarkDownload_E2E(b *testing.B) {
+	h := &FileHandler{}
+	for _, size := range benchSizes {
+		b.Run(sizeLabel(size), func(b *testing.B) {
+			skipIfLargeShort(b, size)
+			srv := newSourceServer(b, size)
+			outPath := filepath.Join(b.TempDir(), "out.bin")
+			b.SetBytes(int64(size))
+			b.ReportAllocs()
+			var ms0, ms1 runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&ms0)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				body, err := h.fetchFromURL(context.Background(), srv.URL)
+				if err != nil {
+					b.Fatal(err)
+				}
+				err = writeFileAs(context.Background(), outPath, body, nil)
+				_ = body.Close()
+				if err != nil {
+					b.Fatal(err)
+				}
 			}
 			b.StopTimer()
 			runtime.ReadMemStats(&ms1)

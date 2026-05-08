@@ -226,6 +226,14 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 		log.Debug().Msgf("Using default editor idle timeout: %d minutes.", settings.EditorIdleTimeout)
 	}
 
+	// File download size cap. 0 (or unset) means unlimited.
+	if config.File.MaxDownloadBytes > 0 {
+		settings.MaxDownloadBytes = config.File.MaxDownloadBytes
+		log.Debug().Msgf("Using configured max download bytes: %d", settings.MaxDownloadBytes)
+	} else {
+		log.Debug().Msg("No download size limit configured (unlimited).")
+	}
+
 	// Validate pool settings are reasonable
 	if settings.PoolMaxWorkers > MaxReasonableWorkers {
 		log.Warn().Msgf("Pool max workers (%d) seems very high, consider reducing it", settings.PoolMaxWorkers)

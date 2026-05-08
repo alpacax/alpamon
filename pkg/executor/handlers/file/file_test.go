@@ -164,49 +164,6 @@ func TestFileHandler_Execute_DownloadUnknownType(t *testing.T) {
 	}
 }
 
-func TestIsZipFile(t *testing.T) {
-	tests := []struct {
-		name    string
-		content []byte
-		ext     string
-		want    bool
-	}{
-		{
-			name:    "jar file extension",
-			content: []byte("PK\x03\x04"), // zip magic bytes
-			ext:     ".jar",
-			want:    false, // Should be excluded
-		},
-		{
-			name:    "war file extension",
-			content: []byte("PK\x03\x04"),
-			ext:     ".war",
-			want:    false, // Should be excluded
-		},
-		{
-			name:    "regular zip content",
-			content: []byte("PK\x03\x04"),
-			ext:     ".zip",
-			want:    false, // Invalid zip (too short)
-		},
-		{
-			name:    "non-zip content",
-			content: []byte("hello world"),
-			ext:     ".txt",
-			want:    false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := utils.IsZipFile(tt.content, tt.ext)
-			if got != tt.want {
-				t.Errorf("IsZipFile() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestFileExists(t *testing.T) {
 	// Test with non-existent file
 	if utils.FileExists("/nonexistent/path/file.txt") {
@@ -276,18 +233,3 @@ func TestFileHandler_parsePaths(t *testing.T) {
 	}
 }
 
-func TestNonZipExtensions(t *testing.T) {
-	// Test that zip-like extensions are excluded from IsZipFile
-	zipContent := []byte("PK\x03\x04") // zip magic bytes (but invalid/short)
-	excludedExtensions := []string{
-		".jar", ".war", ".ear", ".apk", ".xpi",
-		".vsix", ".crx", ".egg", ".whl", ".appx",
-		".msix", ".ipk", ".nupkg", ".kmz",
-	}
-
-	for _, ext := range excludedExtensions {
-		if utils.IsZipFile(zipContent, ext) {
-			t.Errorf("Expected extension %s to be excluded from IsZipFile", ext)
-		}
-	}
-}

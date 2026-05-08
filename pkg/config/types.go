@@ -11,10 +11,11 @@ type Settings struct {
 	HTTPThreads        int
 	ID                 string
 	Key                string
-	PoolMaxWorkers     int // Maximum number of workers in the global worker pool
-	PoolQueueSize      int // Size of the job queue for the global worker pool
-	PoolDefaultTimeout int // Default timeout in seconds for pool tasks (0 = no timeout)
-	EditorIdleTimeout  int // Editor idle timeout in minutes (0 = no timeout)
+	PoolMaxWorkers     int   // Maximum number of workers in the global worker pool
+	PoolQueueSize      int   // Size of the job queue for the global worker pool
+	PoolDefaultTimeout int   // Default timeout in seconds for pool tasks (0 = no timeout)
+	EditorIdleTimeout  int   // Editor idle timeout in minutes (0 = no timeout)
+	MaxDownloadBytes   int64 // Cap for URL download payloads in bytes (0 = unlimited)
 
 	// Command signature verification (hardcoded, not configurable via INI)
 	AIServerURL    string // AI server URL for public key fetch
@@ -43,4 +44,7 @@ type Config struct {
 	Editor struct {
 		IdleTimeout *int `ini:"idle_timeout"`
 	} `ini:"editor"`
+	File struct {
+		MaxDownloadBytes int64 `ini:"max_download_bytes"`
+	} `ini:"file"`
 }
