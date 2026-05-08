@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/alpacax/alpamon/pkg/utils"
@@ -63,5 +64,15 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(path)))
 	cmd.SysProcAttr = sysProcAttr
 	cmd.Stdin = src
-	return cmd.Run()
+	// Capture tee stderr so non-zero exits surface a diagnostic message
+	// (Permission denied, ENOSPC, ...) instead of a bare "exit status 1".
+	errW := &stderrCap{cap: stderrCapSize}
+	cmd.Stderr = errW
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(errW.buf.String()); msg != "" {
+			return fmt.Errorf("%w: %s", err, msg)
+		}
+		return err
+	}
+	return nil
 }
