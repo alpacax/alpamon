@@ -256,7 +256,10 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	// Write file, preserving privilege demotion on Unix when available.
 	if err := writeFileAs(ctx, args.Path, src, sysProcAttr); err != nil {
 		log.Error().Err(err).Msg("Failed to write file.")
-		return 1, "You do not have permission to write to the directory, or directory does not exist"
+		if os.IsPermission(err) || errors.Is(err, syscall.EACCES) {
+			return 1, "You do not have permission to write to the directory, or directory does not exist"
+		}
+		return 1, err.Error()
 	}
 
 	if args.AllowUnzip {

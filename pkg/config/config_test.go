@@ -110,3 +110,21 @@ func TestEditorIdleTimeoutCustom(t *testing.T) {
 	}
 }
 
+func TestMaxDownloadBytesDefault(t *testing.T) {
+	config := Config{}
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
+
+	if settings.MaxDownloadBytes != 0 {
+		t.Errorf("Expected default MaxDownloadBytes to be 0 (unlimited), got %d", settings.MaxDownloadBytes)
+	}
+}
+
+func TestMaxDownloadBytesConfigured(t *testing.T) {
+	config := Config{}
+	config.File.MaxDownloadBytes = 1024 * 1024 * 100 // 100 MiB
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
+
+	if settings.MaxDownloadBytes != 1024*1024*100 {
+		t.Errorf("Expected MaxDownloadBytes to be %d, got %d", 1024*1024*100, settings.MaxDownloadBytes)
+	}
+}

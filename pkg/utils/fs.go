@@ -250,10 +250,10 @@ func FileExists(path string) bool {
 	return !os.IsNotExist(err)
 }
 
-// OpenIfZip returns a zip handle if path is a valid zip with allow-listed ext, else nil.
+// OpenIfZip returns a zip handle if path is a valid zip and ext is not in the denylist, else nil.
 // Caller must Close. Reusing this handle for extraction closes the TOCTOU window.
 func OpenIfZip(path, ext string) *zip.ReadCloser {
-	if _, found := nonZipExt[ext]; found {
+	if _, found := nonZipExt[strings.ToLower(ext)]; found {
 		return nil
 	}
 	rc, err := zip.OpenReader(path)
