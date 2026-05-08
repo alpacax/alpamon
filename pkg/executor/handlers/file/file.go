@@ -399,8 +399,6 @@ func (h *FileHandler) fileUpload(args *common.CommandArgs, src io.ReadCloser, si
 }
 
 // getFileData returns a streaming reader for the file content. Caller owns Close.
-// text/base64 wrap in-memory data via NopCloser; url returns the live HTTP body
-// so payloads never accumulate in []byte.
 func (h *FileHandler) getFileData(ctx context.Context, args *common.CommandArgs) (io.ReadCloser, error) {
 	switch args.Type {
 	case "url":
@@ -414,8 +412,7 @@ func (h *FileHandler) getFileData(ctx context.Context, args *common.CommandArgs)
 	}
 }
 
-// fetchFromURL streams the response body to the caller. The returned ReadCloser
-// is the live resp.Body — caller must Close to release the connection.
+// fetchFromURL returns the response body. Caller must Close to release the connection.
 func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.ReadCloser, error) {
 	parsedRequestURL, err := url.Parse(contentURL)
 	if err != nil {

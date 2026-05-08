@@ -42,10 +42,7 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 	return rc, st.Size(), nil
 }
 
-// writeFileAs streams src into a file, using a demoted tee process when privilege
-// demotion is active. The caller retains ownership of src; writeFileAs does not
-// close it. cmd.Run() is synchronous, so by the time this returns, os/exec's
-// internal stdin-copy goroutine has already finished consuming src.
+// writeFileAs streams src to a file, demoting via tee when sysProcAttr is set. Caller owns src.
 func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr) error {
 	if sysProcAttr == nil {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -67,8 +64,7 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(path)))
 	cmd.SysProcAttr = sysProcAttr
 	cmd.Stdin = src
-	// Capture tee stderr so non-zero exits surface a diagnostic message
-	// (Permission denied, ENOSPC, ...) instead of a bare "exit status 1".
+	// capture tee stderr so failures surface a real message, not "exit status 1"
 	errW := &stderrCap{cap: stderrCapSize}
 	cmd.Stderr = errW
 	if err := cmd.Run(); err != nil {

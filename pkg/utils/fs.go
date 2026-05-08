@@ -261,8 +261,7 @@ func IsZipFile(content []byte, ext string) bool {
 	return err == nil
 }
 
-// IsZipFileFromPath checks if the file at path is a valid zip file. Used by
-// streaming download paths that never hold full content in memory.
+// IsZipFileFromPath checks if the file at path is a valid zip file.
 func IsZipFileFromPath(path, ext string) bool {
 	if _, found := nonZipExt[ext]; found {
 		return false
