@@ -30,6 +30,19 @@ type FileHandler struct {
 	apiSession common.APISession
 }
 
+// base64Reader wraps a base64 decoder and re-tags decode errors for clearer diagnostics.
+type base64Reader struct {
+	r io.Reader
+}
+
+func (b *base64Reader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF {
+		return n, fmt.Errorf("failed to decode base64 content: %w", err)
+	}
+	return n, err
+}
+
 // limitedReadCloser wraps an io.ReadCloser and returns an error when the byte
 // limit is exceeded, avoiding the nil-ResponseWriter panic of http.MaxBytesReader.
 // r is wrapped with io.LimitReader(rc, limit+1) so the overshoot is at most 1 byte.
@@ -425,7 +438,7 @@ func (h *FileHandler) getFileData(ctx context.Context, args *common.CommandArgs)
 	case "text":
 		return io.NopCloser(strings.NewReader(args.Content)), nil
 	case "base64":
-		return io.NopCloser(base64.NewDecoder(base64.StdEncoding, strings.NewReader(args.Content))), nil
+		return io.NopCloser(&base64Reader{r: base64.NewDecoder(base64.StdEncoding, strings.NewReader(args.Content))}), nil
 	default:
 		return nil, fmt.Errorf("unknown file type: %s", args.Type)
 	}
