@@ -4,9 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/alpacax/alpamon/pkg/config"
+	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
 )
 
 // failingReader emits payload on first Read, then returns err on the next call.
@@ -73,5 +80,99 @@ func TestWriteFileAs_DirectPath_CreatesParentDir(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected file at %s, got %v", path, err)
+	}
+}
+
+// closeSpy wraps a Reader and records whether Close was called.
+type closeSpy struct {
+	io.Reader
+	closed bool
+}
+
+func (c *closeSpy) Close() error {
+	c.closed = true
+	return nil
+}
+
+func newLimitedRC(data []byte, limit int64) (*limitedReadCloser, *closeSpy) {
+	spy := &closeSpy{Reader: bytes.NewReader(data)}
+	return &limitedReadCloser{r: io.LimitReader(spy, limit+1), rc: spy, limit: limit}, spy
+}
+
+// TestLimitedReadCloser_UnderLimit verifies all bytes are delivered and Close is not called.
+func TestLimitedReadCloser_UnderLimit(t *testing.T) {
+	data := []byte("hello")
+	lr, spy := newLimitedRC(data, 10)
+
+	buf := make([]byte, 32)
+	n, err := lr.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != len(data) {
+		t.Fatalf("got %d bytes, want %d", n, len(data))
+	}
+	if spy.closed {
+		t.Fatal("Close must not be called under limit")
+	}
+}
+
+// TestLimitedReadCloser_OverLimit verifies an error is returned and Close is called.
+func TestLimitedReadCloser_OverLimit(t *testing.T) {
+	limit := int64(5)
+	lr, spy := newLimitedRC(bytes.Repeat([]byte("x"), 20), limit)
+
+	_, err := lr.Read(make([]byte, 32))
+	if err == nil {
+		t.Fatal("expected error for over-limit read")
+	}
+	if !strings.Contains(err.Error(), "download too large") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+	if !spy.closed {
+		t.Fatal("Close must be called on over-limit")
+	}
+}
+
+// TestLimitedReadCloser_OvershootAtMostOneByte verifies that io.LimitReader(rc, limit+1)
+// caps the total bytes delivered to at most limit+1.
+func TestLimitedReadCloser_OvershootAtMostOneByte(t *testing.T) {
+	limit := int64(10)
+	lr, _ := newLimitedRC(bytes.Repeat([]byte("x"), 20), limit)
+
+	var total int
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := lr.Read(buf)
+		total += n
+		if err != nil {
+			break
+		}
+	}
+	if int64(total) > limit+1 {
+		t.Fatalf("overshoot: read %d bytes, limit=%d (max limit+1=%d)", total, limit, limit+1)
+	}
+}
+
+// TestFetchFromURL_ContentLengthExceedsLimit verifies the upfront Content-Length check.
+func TestFetchFromURL_ContentLengthExceedsLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	orig := config.GlobalSettings.MaxDownloadBytes
+	config.GlobalSettings.MaxDownloadBytes = 100
+	defer func() { config.GlobalSettings.MaxDownloadBytes = orig }()
+
+	h := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+	rc, err := h.fetchFromURL(context.Background(), srv.URL)
+	if err == nil {
+		_ = rc.Close()
+		t.Fatal("expected error when Content-Length exceeds limit")
+	}
+	if !strings.Contains(err.Error(), "download too large") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
