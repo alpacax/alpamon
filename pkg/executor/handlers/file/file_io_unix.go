@@ -88,7 +88,9 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	runErr := cmd.Run()
 
 	if runErr != nil || erc.err != nil {
-		_ = os.Remove(path) // lgtm[go/path-injection] drop partial write
+		// lgtm[go/path-injection]: path sanitized via SanitizePath; Windows additionally
+		// enforces ResolveAndEnsureUnderHome. Wire input is admin-authenticated.
+		_ = os.Remove(path) // lgtm[go/path-injection]
 		if runErr != nil {
 			var details []string
 			if msg := strings.TrimSpace(errW.buf.String()); msg != "" {
