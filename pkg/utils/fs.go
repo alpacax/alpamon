@@ -2,7 +2,6 @@ package utils
 
 import (
 	"archive/zip"
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -249,16 +248,6 @@ func FileExists(path string) bool {
 	}
 	_, err := os.Stat(filepath.Clean(path))
 	return !os.IsNotExist(err)
-}
-
-// IsZipFile checks if the content is a valid zip file
-func IsZipFile(content []byte, ext string) bool {
-	if _, found := nonZipExt[ext]; found {
-		return false
-	}
-
-	_, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
-	return err == nil
 }
 
 // OpenIfZip returns a zip handle if path is a valid zip with allow-listed ext, else nil.
