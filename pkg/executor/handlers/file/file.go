@@ -32,7 +32,9 @@ type FileHandler struct {
 
 // limitedReadCloser wraps an io.ReadCloser and returns an error when the byte
 // limit is exceeded, avoiding the nil-ResponseWriter panic of http.MaxBytesReader.
+// r is wrapped with io.LimitReader(rc, limit+1) so the overshoot is at most 1 byte.
 type limitedReadCloser struct {
+	r     io.Reader
 	rc    io.ReadCloser
 	limit int64
 	read  int64
@@ -471,7 +473,7 @@ func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.R
 			return nil, fmt.Errorf("download too large: %d bytes (max %d)", resp.ContentLength, limit)
 		}
 		// limitedReadCloser catches servers that lie in Content-Length or use chunked encoding.
-		return &limitedReadCloser{rc: resp.Body, limit: limit}, nil
+		return &limitedReadCloser{r: io.LimitReader(resp.Body, limit+1), rc: resp.Body, limit: limit}, nil
 	}
 
 	return resp.Body, nil
@@ -496,7 +498,7 @@ func (h *FileHandler) statFileTransfer(code int, transferType transferType, mess
 }
 
 func (l *limitedReadCloser) Read(p []byte) (int, error) {
-	n, err := l.rc.Read(p)
+	n, err := l.r.Read(p)
 	l.read += int64(n)
 	if l.read > l.limit {
 		_ = l.rc.Close()
