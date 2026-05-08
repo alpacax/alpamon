@@ -35,5 +35,8 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	if err != nil {
+		_ = os.Remove(path) // drop partial write so retry isn't blocked by AllowOverwrite=false
+	}
 	return err
 }

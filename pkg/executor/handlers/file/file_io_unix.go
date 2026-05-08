@@ -59,6 +59,9 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
+		if err != nil {
+			_ = os.Remove(path) // drop partial write so retry isn't blocked by AllowOverwrite=false
+		}
 		return err
 	}
 	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(path)))
@@ -69,6 +72,7 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	errW := &stderrCap{cap: stderrCapSize}
 	cmd.Stderr = errW
 	if err := cmd.Run(); err != nil {
+		_ = os.Remove(path) // drop partial write
 		if msg := strings.TrimSpace(errW.buf.String()); msg != "" {
 			return fmt.Errorf("%w: %s", err, msg)
 		}
