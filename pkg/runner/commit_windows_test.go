@@ -162,6 +162,20 @@ func TestParseGetLocalUserCSV(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "user literally named \"Name\" is not mistaken for the header row",
+			csv:  header + "\"Name\",\"S-1-5-21-1-2-3-1600\",\"True\"\n",
+			want: []UserData{
+				{
+					Username:    "Name",
+					UID:         1600,
+					GID:         0,
+					Directory:   `C:\Users\Name`,
+					Shell:       powershell,
+					ValidShells: validShells,
+				},
+			},
+		},
 	}
 
 	for _, tc := range cases {

@@ -56,11 +56,18 @@ func parseGetLocalUserCSV(csvData string) []UserData {
 
 	for _, line := range strings.Split(csvData, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "\"Name\"") {
+		if line == "" {
 			continue
 		}
 		fields := parseCSVLine(line)
 		if len(fields) < 3 {
+			continue
+		}
+		// Skip the header row produced by ConvertTo-Csv. Use exact
+		// column-name match rather than a prefix check on the raw line
+		// so a legitimate local user literally named "Name" is not
+		// silently dropped.
+		if fields[0] == "Name" && fields[1] == "SID" && fields[2] == "Enabled" {
 			continue
 		}
 		username := fields[0]
@@ -112,11 +119,16 @@ func getGroupData() ([]GroupData, error) {
 	var groups []GroupData
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "\"Name\"") {
+		if line == "" {
 			continue
 		}
 		fields := parseCSVLine(line)
 		if len(fields) < 2 {
+			continue
+		}
+		// Skip the header row by exact column-name match; see the same
+		// rationale on parseGetLocalUserCSV.
+		if fields[0] == "Name" && fields[1] == "SID" {
 			continue
 		}
 		groupName := fields[0]
