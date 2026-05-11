@@ -8,7 +8,7 @@ import (
 
 // TestParseGetLocalUserCSV exercises the cases from the Windows
 // Administrator-login bug (issue #302). The fix removed the Enabled-flag
-// gate on RID 500 because every websh session runs as SYSTEM and the gate
+// gate on RID 500 because every Websh session runs as SYSTEM and the gate
 // was a cosmetic check, not a security boundary. Cases A/B/C come straight
 // from the acceptance criteria; the remaining cases guard the parser
 // against header lines, malformed rows, and empty fields.

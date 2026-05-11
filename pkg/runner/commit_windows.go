@@ -18,12 +18,10 @@ func loadShadowData() map[string]shadowEntry {
 	return nil
 }
 
-// getUserData enumerates local users via PowerShell on Windows.
-// Only Administrator (RID 500) gets a login shell because alpamon cannot
-// demote privileges on Windows (no setuid equivalent). All sessions run
-// as SYSTEM, so allowing non-admin users would be a privilege escalation.
-// When credential-based demotion is implemented, other Enabled users can
-// be granted login shells.
+// getUserData enumerates local users via PowerShell on Windows and grants
+// a login shell only to Administrator (RID 500). Sessions run as SYSTEM
+// today, so allowing non-admin users would be a privilege escalation; see
+// parseGetLocalUserCSV for why the Enabled column is not consulted.
 func getUserData() ([]UserData, error) {
 	out, err := exec.Command("powershell", "-NoProfile", "-Command",
 		"Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation").Output()
@@ -41,8 +39,8 @@ func getUserData() ([]UserData, error) {
 // into UserData entries. The Enabled column is intentionally not consulted:
 // gating Administrator's login shell on it would be a cosmetic check, not a
 // security boundary, because pkg/utils/privilege_windows.go is currently a
-// no-op stub and every websh session executes as SYSTEM regardless of the
-// OS-level Administrator state. Consulting Enabled instead caused websh to
+// no-op stub and every Websh session executes as SYSTEM regardless of the
+// OS-level Administrator state. Consulting Enabled instead caused Websh to
 // fail on default Windows 10/11 laptops where the built-in Administrator
 // is disabled by Microsoft default.
 func parseGetLocalUserCSV(csv string) []UserData {
