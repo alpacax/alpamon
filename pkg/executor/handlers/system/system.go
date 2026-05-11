@@ -16,6 +16,19 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// unregisterURL is the alpacon-server endpoint that removes the server record
+// corresponding to this agent. The `-` placeholder is resolved server-side to
+// the authenticated agent's own server id.
+const unregisterURL = "/api/servers/servers/-/unregister/"
+
+// unregisterTimeoutSeconds bounds the DELETE call issued during byebye. Kept
+// short so a network problem cannot stall the rest of the uninstall sequence;
+// the package removal must still run even when the console is unreachable.
+// The unit is seconds because Session.Delete (and every other Session method)
+// applies *time.Second internally — naming it explicitly avoids the foot-gun
+// of "fixing" this to 10*time.Second, which would balloon the deadline by ~1e9.
+const unregisterTimeoutSeconds = 10
+
 // SystemHandler handles system-level commands like restart, reboot, shutdown, upgrade
 type SystemHandler struct {
 	*common.BaseHandler
@@ -23,11 +36,13 @@ type SystemHandler struct {
 	ctxManager      *agent.ContextManager
 	pool            *pool.Pool
 	versionResolver common.VersionResolver
+	apiSession      common.APISession
 }
 
 // NewSystemHandler creates a new system handler.
 // versionResolver must not be nil; pass utils.NewDefaultVersionResolver() for production.
-func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClient, ctxManager *agent.ContextManager, pool *pool.Pool, versionResolver common.VersionResolver) *SystemHandler {
+// apiSession may be nil in tests; byebye will skip the server-side unregister call when absent.
+func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClient, ctxManager *agent.ContextManager, pool *pool.Pool, versionResolver common.VersionResolver, apiSession common.APISession) *SystemHandler {
 	if versionResolver == nil {
 		panic("system: versionResolver must not be nil")
 	}
@@ -49,6 +64,7 @@ func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClie
 		ctxManager:      ctxManager,
 		pool:            pool,
 		versionResolver: versionResolver,
+		apiSession:      apiSession,
 	}
 	return h
 }
@@ -250,6 +266,28 @@ func (h *SystemHandler) handleQuit() (int, string, error) {
 	return 0, "Alpamon will shutdown in 1 second.", nil
 }
 
+// unregisterFromConsole issues DELETE /api/servers/servers/-/unregister/ so
+// alpacon-server removes the corresponding server record. Best-effort: a
+// network failure or non-2xx response is logged and ignored so the agent can
+// still purge itself locally.
+func (h *SystemHandler) unregisterFromConsole() {
+	if h.apiSession == nil {
+		log.Debug().Msg("Skipping server unregister: no API session configured.")
+		return
+	}
+
+	_, statusCode, err := h.apiSession.Delete(unregisterURL, nil, unregisterTimeoutSeconds)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to unregister server from console; continuing with local uninstall.")
+		return
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		log.Warn().Int("status_code", statusCode).Msg("Server unregister returned non-2xx status; continuing with local uninstall.")
+		return
+	}
+	log.Info().Msg("Server record removed from console.")
+}
+
 // handleUninstall handles the byebye (uninstall) command.
 // See handleRestart for the fire-and-forget pattern. executeUninstall uses
 // context.Background() intentionally because the uninstall must complete even
@@ -265,8 +303,15 @@ func (h *SystemHandler) handleUninstall() (int, string, error) {
 	return 0, "Starting uninstall process...", nil
 }
 
-// executeUninstall performs the actual uninstall
+// executeUninstall performs the actual uninstall.
+// Three-step sequence: (1) tell the console to drop our server record so the
+// agent stops appearing in the inventory, (2) schedule the package removal so
+// it survives our own shutdown, (3) shut the agent down. Step (1) is
+// best-effort: any failure is logged and the rest of the sequence still runs,
+// otherwise a network blip would leave the binary uninstallable.
 func (h *SystemHandler) executeUninstall() {
+	h.unregisterFromConsole()
+
 	var cmd string
 
 	switch utils.PlatformLike {
