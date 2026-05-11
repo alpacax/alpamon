@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/csv"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -18,12 +19,11 @@ func loadShadowData() map[string]shadowEntry {
 	return nil
 }
 
-// getUserData enumerates local users via PowerShell on Windows.
-// Only Administrator (RID 500) gets a login shell because alpamon cannot
-// demote privileges on Windows (no setuid equivalent). All sessions run
-// as SYSTEM, so allowing non-admin users would be a privilege escalation.
-// When credential-based demotion is implemented, other Enabled users can
-// be granted login shells.
+// getUserData enumerates local users via PowerShell on Windows and grants
+// a login shell to Administrator (RID 500) plus every other enabled local
+// user. All Websh sessions execute as LocalSystem because privilege
+// demotion is not implemented on Windows; see parseGetLocalUserCSV for the
+// trade-off and the Alpacon-RBAC dependency that justifies it.
 func getUserData() ([]UserData, error) {
 	out, err := exec.Command("powershell", "-NoProfile", "-Command",
 		"Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation").Output()
@@ -31,18 +31,43 @@ func getUserData() ([]UserData, error) {
 		log.Warn().Err(err).Msg("Failed to list users via PowerShell.")
 		return []UserData{}, nil
 	}
+	return parseGetLocalUserCSV(string(out)), nil
+}
 
+// parseGetLocalUserCSV parses the CSV output of
+//
+//	Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation
+//
+// into UserData entries. A login shell is granted to:
+//   - Administrator (RID 500) regardless of Enabled, because the built-in
+//     admin is disabled by default on Windows 10/11 laptops; and
+//   - every other locally-enabled user, on the same basis as Linux's
+//     /etc/passwd-driven shell assignment.
+//
+// All Websh sessions on Windows execute as LocalSystem because
+// pkg/utils/privilege_windows.go is currently a no-op stub. The session's
+// displayed user is an audit label, not an OS-level permission boundary:
+// Alpacon RBAC is the authorization surface, and operators must configure
+// roles to reflect that granting Websh access on Windows grants SYSTEM
+// execution.
+func parseGetLocalUserCSV(csvData string) []UserData {
 	validShells := loadValidShells()
 	var users []UserData
 
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(csvData, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "\"Name\"") {
+		if line == "" {
 			continue
 		}
-		// CSV format: "Name","SID","Enabled"
 		fields := parseCSVLine(line)
 		if len(fields) < 3 {
+			continue
+		}
+		// Skip the header row produced by ConvertTo-Csv. Use exact
+		// column-name match rather than a prefix check on the raw line
+		// so a legitimate local user literally named "Name" is not
+		// silently dropped.
+		if fields[0] == "Name" && fields[1] == "SID" && fields[2] == "Enabled" {
 			continue
 		}
 		username := fields[0]
@@ -53,11 +78,16 @@ func getUserData() ([]UserData, error) {
 		}
 
 		uid := ridFromSID(sid)
+		if uid == 0 {
+			// Local SAM RIDs start at 500; a parsed 0 means the SID did
+			// not match the expected S-...-<rid> shape. Drop the row so
+			// the widened enabled-user predicate cannot emit a malformed
+			// UID=0 record with a login shell.
+			continue
+		}
 
-		// Only grant login shell to Administrator (RID 500) since all
-		// sessions run as SYSTEM without privilege demotion.
 		shell := ""
-		if enabled && uid == 500 {
+		if enabled || uid == 500 {
 			shell = utils.DefaultShell()
 		}
 
@@ -74,7 +104,7 @@ func getUserData() ([]UserData, error) {
 	if users == nil {
 		users = []UserData{}
 	}
-	return users, nil
+	return users
 }
 
 // getGroupData enumerates local groups via PowerShell on Windows.
@@ -89,11 +119,16 @@ func getGroupData() ([]GroupData, error) {
 	var groups []GroupData
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "\"Name\"") {
+		if line == "" {
 			continue
 		}
 		fields := parseCSVLine(line)
 		if len(fields) < 2 {
+			continue
+		}
+		// Skip the header row by exact column-name match; see the same
+		// rationale on parseGetLocalUserCSV.
+		if fields[0] == "Name" && fields[1] == "SID" {
 			continue
 		}
 		groupName := fields[0]
@@ -103,6 +138,9 @@ func getGroupData() ([]GroupData, error) {
 		}
 
 		gid := ridFromSID(sid)
+		if gid == 0 {
+			continue
+		}
 
 		groups = append(groups, GroupData{
 			GID:       gid,
@@ -130,14 +168,14 @@ func ridFromSID(sid string) int {
 	return rid
 }
 
-// parseCSVLine parses a simple CSV line with quoted fields.
-// Handles: "value1","value2","value3"
+// parseCSVLine parses one RFC 4180 CSV record from a single line.
+// Returns nil if the line is not well-formed CSV. Used for the output of
+// PowerShell `ConvertTo-Csv -NoTypeInformation`, which emits RFC 4180.
 func parseCSVLine(line string) []string {
-	var fields []string
-	for _, f := range strings.Split(line, ",") {
-		f = strings.TrimSpace(f)
-		f = strings.Trim(f, "\"")
-		fields = append(fields, f)
+	r := csv.NewReader(strings.NewReader(line))
+	fields, err := r.Read()
+	if err != nil {
+		return nil
 	}
 	return fields
 }

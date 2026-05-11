@@ -194,10 +194,40 @@ Restart-Service alpamon
 Get-Content "$env:ProgramData\alpamon\log\alpamon.log" -Wait -Tail 50
 ```
 
-The service starts as `LocalSystem`. Alpamon cannot currently drop
-privileges on Windows (see [unsupported
-features](#unsupported-on-windows)), so *all* commands from
-Alpacon execute with SYSTEM rights regardless of the requesting user.
+The service starts as `LocalSystem`; see [Permissions and
+identity](#permissions-and-identity) for what that means for commands
+sent from Alpacon.
+
+### Permissions and identity
+
+Alpamon cannot yet demote privileges on Windows (see [unsupported
+features](#unsupported-on-windows)), so every command from the Alpacon
+console executes with SYSTEM rights regardless of the requesting user.
+In practice:
+
+- **Websh works for any enabled local user**, and for `Administrator`
+  even when the built-in account is OS-level disabled (the Windows
+  10 / 11 default). Granting Websh to `alice` does not run commands
+  as `alice`—they run as SYSTEM with `alice` as the audit label.
+- **Commands run with full SYSTEM privileges**, irrespective of the
+  session's displayed user. Treat any Websh-enabled local user as
+  effectively SYSTEM on this host, and configure Alpacon roles and
+  policies accordingly. The displayed user is not a permission
+  boundary; **Alpacon RBAC is**.
+- **The roster of Websh-eligible users is part of the security
+  posture.** A local administrator on the host can re-enable an
+  otherwise-disabled local account (such as `Guest` or
+  `WDAGUtilityAccount`) and turn it into a Websh persistence
+  channel. Alarm on unexpected new `login_enabled` users in the
+  Alpacon audit feed.
+- **`whoami` inside the session prints `nt authority\system`**, not
+  the requested user. This is the current expected behavior; it will
+  change when credential-based privilege demotion ships
+  (`CreateProcessAsUser` with a logon token). Until then, attributing
+  a SYSTEM-level action to a specific operator requires correlating
+  the Alpacon console audit log (Alpacon user → target local user)
+  with the host's Windows event log (SYSTEM-level execution trace);
+  neither alone is sufficient.
 
 ## Upgrade
 
