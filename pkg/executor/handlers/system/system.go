@@ -21,13 +21,13 @@ import (
 // the authenticated agent's own server id.
 const unregisterURL = "/api/servers/servers/-/unregister/"
 
-// unregisterTimeout bounds the DELETE call issued during byebye. Kept short so
-// a network problem cannot stall the rest of the uninstall sequence; the
-// package removal must still run even when the console is unreachable. The
-// value is a seconds count because Session.Delete applies *time.Second
-// internally (matches the convention used by sibling callers like
-// session.Get(url, 10)).
-const unregisterTimeout = time.Duration(10)
+// unregisterTimeoutSeconds bounds the DELETE call issued during byebye. Kept
+// short so a network problem cannot stall the rest of the uninstall sequence;
+// the package removal must still run even when the console is unreachable.
+// The unit is seconds because Session.Delete (and every other Session method)
+// applies *time.Second internally — naming it explicitly avoids the foot-gun
+// of "fixing" this to 10*time.Second, which would balloon the deadline by ~1e9.
+const unregisterTimeoutSeconds = 10
 
 // SystemHandler handles system-level commands like restart, reboot, shutdown, upgrade
 type SystemHandler struct {
@@ -276,7 +276,7 @@ func (h *SystemHandler) unregisterFromConsole() {
 		return
 	}
 
-	_, statusCode, err := h.apiSession.Delete(unregisterURL, nil, unregisterTimeout)
+	_, statusCode, err := h.apiSession.Delete(unregisterURL, nil, time.Duration(unregisterTimeoutSeconds))
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to unregister server from console; continuing with local uninstall.")
 		return
