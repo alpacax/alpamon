@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -65,8 +66,11 @@ type MockAPISession struct {
 	DeleteErr        error
 }
 
+// MultipartRequest exists only to satisfy the APISession interface; SystemHandler
+// never calls it. Tripwiring with panic makes any accidental future use loud
+// instead of silently returning a fake success.
 func (m *MockAPISession) MultipartRequest(url string, body io.Reader, contentType string, contentLength int64, timeout time.Duration) ([]byte, int, error) {
-	return nil, 200, nil
+	panic("MockAPISession.MultipartRequest: unexpected call (system handler should not invoke MultipartRequest)")
 }
 
 func (m *MockAPISession) Delete(url string, rawBody interface{}, timeout time.Duration) ([]byte, int, error) {
@@ -528,4 +532,49 @@ func TestSystemHandler_UnregisterFromConsole_NilSession(t *testing.T) {
 
 	// Must not panic.
 	handler.unregisterFromConsole()
+}
+
+// TestSystemHandler_UnregisterFromConsole_NonSuccessStatus pins the best-effort
+// behavior on a non-2xx response: the helper must log and return cleanly
+// without panicking or aborting the surrounding uninstall sequence. Without
+// this test a future refactor could silently turn the warn-and-continue branch
+// into an error path that bricks local uninstall on any console hiccup.
+func TestSystemHandler_UnregisterFromConsole_NonSuccessStatus(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockSession := &MockAPISession{DeleteStatusCode: 500}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), mockSession)
+
+	handler.unregisterFromConsole()
+
+	if mockSession.deleteCallCount() != 1 {
+		t.Fatalf("expected 1 Delete call, got %d", mockSession.deleteCallCount())
+	}
+}
+
+// TestSystemHandler_UnregisterFromConsole_DeleteError pins the best-effort
+// behavior on a transport-level failure (network down, DNS error, etc.): the
+// helper must log and return cleanly so the local package purge still runs.
+// Pairs with NonSuccessStatus above.
+func TestSystemHandler_UnregisterFromConsole_DeleteError(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockSession := &MockAPISession{DeleteErr: errors.New("network unreachable")}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), mockSession)
+
+	handler.unregisterFromConsole()
+
+	if mockSession.deleteCallCount() != 1 {
+		t.Fatalf("expected 1 Delete call, got %d", mockSession.deleteCallCount())
+	}
 }

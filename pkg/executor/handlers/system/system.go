@@ -276,7 +276,7 @@ func (h *SystemHandler) unregisterFromConsole() {
 		return
 	}
 
-	_, statusCode, err := h.apiSession.Delete(unregisterURL, nil, time.Duration(unregisterTimeoutSeconds))
+	_, statusCode, err := h.apiSession.Delete(unregisterURL, nil, unregisterTimeoutSeconds)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to unregister server from console; continuing with local uninstall.")
 		return
