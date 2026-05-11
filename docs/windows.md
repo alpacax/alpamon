@@ -214,10 +214,20 @@ In practice:
   effectively SYSTEM on this host, and configure Alpacon roles and
   policies accordingly. The displayed user is not a permission
   boundary; **Alpacon RBAC is**.
+- **The roster of Websh-eligible users is part of the security
+  posture.** A local administrator on the host can re-enable an
+  otherwise-disabled local account (such as `Guest` or
+  `WDAGUtilityAccount`) and turn it into a Websh persistence
+  channel. Alarm on unexpected new `login_enabled` users in the
+  Alpacon audit feed.
 - **`whoami` inside the session prints `nt authority\system`**, not
   the requested user. This is the current expected behavior; it will
   change when credential-based privilege demotion ships
-  (`CreateProcessAsUser` with a logon token).
+  (`CreateProcessAsUser` with a logon token). Until then, attributing
+  a SYSTEM-level action to a specific operator requires correlating
+  the Alpacon console audit log (Alpacon user → target local user)
+  with the host's Windows event log (SYSTEM-level execution trace);
+  neither alone is sufficient.
 
 ## Upgrade
 
