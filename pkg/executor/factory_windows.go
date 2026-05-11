@@ -8,6 +8,6 @@ import (
 
 func platformHandlers(deps platformHandlerDeps) []common.Handler {
 	return []common.Handler{
-		system.NewSystemHandler(deps.cmdExec, deps.wsClient, deps.ctxManager, deps.pool, utils.NewDefaultVersionResolver()),
+		system.NewSystemHandler(deps.cmdExec, deps.wsClient, deps.ctxManager, deps.pool, utils.NewDefaultVersionResolver(), deps.apiSession),
 	}
 }

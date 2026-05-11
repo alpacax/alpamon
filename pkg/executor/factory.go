@@ -43,6 +43,7 @@ type platformHandlerDeps struct {
 	pool         *pool.Pool
 	infoAdapter  *SystemInfoAdapter
 	groupService services.GroupService
+	apiSession   common.APISession
 }
 
 // RegisterAll registers all handlers with the provided callbacks
@@ -78,6 +79,7 @@ func (f *HandlerFactory) RegisterAll(
 		pool:         pool,
 		infoAdapter:  infoAdapter,
 		groupService: groupService,
+		apiSession:   session,
 	}
 	handlers = append(handlers, platformHandlers(deps)...)
 

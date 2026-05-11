@@ -2,7 +2,9 @@ package system
 
 import (
 	"context"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,6 +56,45 @@ func newMockVersionResolver() *MockVersionResolver {
 	return &MockVersionResolver{LatestVersion: "v0.0.0-test", PamVersion: ""}
 }
 
+// MockAPISession records Delete calls and returns a configurable response so
+// tests can verify the byebye unregister flow without hitting the network.
+type MockAPISession struct {
+	mu               sync.Mutex
+	DeleteCalls      []string
+	DeleteStatusCode int
+	DeleteErr        error
+}
+
+func (m *MockAPISession) MultipartRequest(url string, body io.Reader, contentType string, contentLength int64, timeout time.Duration) ([]byte, int, error) {
+	return nil, 200, nil
+}
+
+func (m *MockAPISession) Delete(url string, rawBody interface{}, timeout time.Duration) ([]byte, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.DeleteCalls = append(m.DeleteCalls, url)
+	statusCode := m.DeleteStatusCode
+	if statusCode == 0 {
+		statusCode = 204
+	}
+	return nil, statusCode, m.DeleteErr
+}
+
+func (m *MockAPISession) deleteCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.DeleteCalls)
+}
+
+func (m *MockAPISession) lastDeleteURL() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.DeleteCalls) == 0 {
+		return ""
+	}
+	return m.DeleteCalls[len(m.DeleteCalls)-1]
+}
+
 func TestSystemHandler_Name(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -62,7 +103,7 @@ func TestSystemHandler_Name(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	if handler.Name() != common.System.String() {
 		t.Errorf("expected name %q, got %q", common.System.String(), handler.Name())
 	}
@@ -76,7 +117,7 @@ func TestSystemHandler_Commands(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	commands := handler.Commands()
 
 	expected := []string{
@@ -109,7 +150,7 @@ func TestSystemHandler_Restart_Collector(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
@@ -140,7 +181,7 @@ func TestSystemHandler_Restart_Default(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
@@ -170,7 +211,7 @@ func TestSystemHandler_Restart_Alpamon(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
@@ -198,7 +239,7 @@ func TestSystemHandler_Quit(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -224,7 +265,7 @@ func TestSystemHandler_Reboot(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -250,7 +291,7 @@ func TestSystemHandler_Shutdown(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -276,7 +317,7 @@ func TestSystemHandler_UnknownCommand(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -302,7 +343,7 @@ func TestSystemHandler_Validate(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 
 	testCases := []struct {
 		name string
@@ -334,7 +375,7 @@ func TestSystemHandler_PoolShutdown(t *testing.T) {
 	ctxManager := agent.NewContextManager()
 	workerPool := pool.NewPool(2, 10)
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
 	// Shutdown pool first
@@ -372,7 +413,7 @@ func TestSystemHandler_Upgrade_UpToDate(t *testing.T) {
 		LatestVersion: version.Version, // same as current -> up-to-date
 		PamVersion:    "",
 	}
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions)
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -398,7 +439,7 @@ func TestSystemHandler_Update(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -428,7 +469,7 @@ func TestSystemHandler_Uninstall(t *testing.T) {
 	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
 	defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver())
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
 	args := &common.CommandArgs{}
@@ -444,4 +485,47 @@ func TestSystemHandler_Uninstall(t *testing.T) {
 	if !strings.Contains(output, "uninstall") {
 		t.Errorf("expected output to mention uninstall, got %q", output)
 	}
+}
+
+// TestSystemHandler_UnregisterFromConsole_CallsDelete verifies that byebye
+// hits DELETE /api/servers/servers/-/unregister/ so the console drops the
+// server record before the local package is purged. Exercising
+// unregisterFromConsole directly avoids touching the executeUninstall path,
+// which would invoke real package managers on the host.
+func TestSystemHandler_UnregisterFromConsole_CallsDelete(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockSession := &MockAPISession{}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), mockSession)
+
+	handler.unregisterFromConsole()
+
+	if mockSession.deleteCallCount() != 1 {
+		t.Fatalf("expected 1 Delete call, got %d", mockSession.deleteCallCount())
+	}
+	if got := mockSession.lastDeleteURL(); got != unregisterURL {
+		t.Errorf("expected DELETE to %q, got %q", unregisterURL, got)
+	}
+}
+
+// TestSystemHandler_UnregisterFromConsole_NilSession ensures the helper is a
+// no-op when the API session is absent, so tests and unusual startup paths
+// don't panic.
+func TestSystemHandler_UnregisterFromConsole_NilSession(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+
+	// Must not panic.
+	handler.unregisterFromConsole()
 }
