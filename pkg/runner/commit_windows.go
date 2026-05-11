@@ -31,33 +31,43 @@ func getUserData() ([]UserData, error) {
 		log.Warn().Err(err).Msg("Failed to list users via PowerShell.")
 		return []UserData{}, nil
 	}
+	return parseGetLocalUserCSV(string(out)), nil
+}
 
+// parseGetLocalUserCSV parses the CSV output of
+//
+//	Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation
+//
+// into UserData entries. The Enabled column is intentionally not consulted:
+// gating Administrator's login shell on it would be a cosmetic check, not a
+// security boundary, because pkg/utils/privilege_windows.go is currently a
+// no-op stub and every websh session executes as SYSTEM regardless of the
+// OS-level Administrator state. Consulting Enabled instead caused websh to
+// fail on default Windows 10/11 laptops where the built-in Administrator
+// is disabled by Microsoft default.
+func parseGetLocalUserCSV(csv string) []UserData {
 	validShells := loadValidShells()
 	var users []UserData
 
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(csv, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "\"Name\"") {
 			continue
 		}
-		// CSV format: "Name","SID","Enabled"
 		fields := parseCSVLine(line)
 		if len(fields) < 3 {
 			continue
 		}
 		username := fields[0]
 		sid := fields[1]
-		enabled := strings.EqualFold(fields[2], "True")
 		if username == "" || sid == "" {
 			continue
 		}
 
 		uid := ridFromSID(sid)
 
-		// Only grant login shell to Administrator (RID 500) since all
-		// sessions run as SYSTEM without privilege demotion.
 		shell := ""
-		if enabled && uid == 500 {
+		if uid == 500 {
 			shell = utils.DefaultShell()
 		}
 
@@ -74,7 +84,7 @@ func getUserData() ([]UserData, error) {
 	if users == nil {
 		users = []UserData{}
 	}
-	return users, nil
+	return users
 }
 
 // getGroupData enumerates local groups via PowerShell on Windows.

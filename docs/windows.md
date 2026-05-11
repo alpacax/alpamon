@@ -194,10 +194,27 @@ Restart-Service alpamon
 Get-Content "$env:ProgramData\alpamon\log\alpamon.log" -Wait -Tail 50
 ```
 
-The service starts as `LocalSystem`. Alpamon cannot currently drop
-privileges on Windows (see [unsupported
-features](#unsupported-on-windows)), so *all* commands from
-Alpacon execute with SYSTEM rights regardless of the requesting user.
+The service starts as `LocalSystem`; see [Permissions and
+identity](#permissions-and-identity) for what that means for commands
+sent from Alpacon.
+
+### Permissions and identity
+
+Alpamon cannot yet demote privileges on Windows (see [unsupported
+features](#unsupported-on-windows)), so every command from the Alpacon
+console executes with SYSTEM rights regardless of the requesting user.
+In practice:
+
+- **Websh as `Administrator` works on every Windows host**, including
+  laptops where the built-in `Administrator` account is disabled at the
+  OS level (the Windows 10 / 11 default). Operators do not need to run
+  `net user Administrator /active:yes` for Websh to function.
+- **Commands run with full SYSTEM privileges.** Granting a user
+  `Administrator` Websh access is effectively granting SYSTEM execution
+  on the host; configure Alpacon roles and policies accordingly.
+- **`whoami` inside the session prints `nt authority\system`**, not
+  `administrator`. This is the current expected behavior; it will
+  change when credential-based privilege demotion ships.
 
 ## Upgrade
 
