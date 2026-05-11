@@ -143,6 +143,25 @@ func TestParseGetLocalUserCSV(t *testing.T) {
 				"\"noid\",\"\",\"True\"\n",
 			want: []UserData{},
 		},
+		{
+			name: "row with a malformed SID (non-numeric RID) is skipped, not emitted as UID 0",
+			csv:  header + "\"alice\",\"S-1-5-21-1-2-3-NOTANUMBER\",\"True\"\n",
+			want: []UserData{},
+		},
+		{
+			name: "row with a CSV-quoted value containing a comma round-trips correctly",
+			csv:  header + "\"odd,name\",\"S-1-5-21-1-2-3-1500\",\"True\"\n",
+			want: []UserData{
+				{
+					Username:    "odd,name",
+					UID:         1500,
+					GID:         0,
+					Directory:   `C:\Users\odd,name`,
+					Shell:       powershell,
+					ValidShells: validShells,
+				},
+			},
+		},
 	}
 
 	for _, tc := range cases {

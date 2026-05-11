@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/csv"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -49,11 +50,11 @@ func getUserData() ([]UserData, error) {
 // Alpacon RBAC is the authorization surface, and operators must configure
 // roles to reflect that granting Websh access on Windows grants SYSTEM
 // execution.
-func parseGetLocalUserCSV(csv string) []UserData {
+func parseGetLocalUserCSV(csvData string) []UserData {
 	validShells := loadValidShells()
 	var users []UserData
 
-	for _, line := range strings.Split(csv, "\n") {
+	for _, line := range strings.Split(csvData, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "\"Name\"") {
 			continue
@@ -70,6 +71,13 @@ func parseGetLocalUserCSV(csv string) []UserData {
 		}
 
 		uid := ridFromSID(sid)
+		if uid == 0 {
+			// Local SAM RIDs start at 500; a parsed 0 means the SID did
+			// not match the expected S-...-<rid> shape. Drop the row so
+			// the widened enabled-user predicate cannot emit a malformed
+			// UID=0 record with a login shell.
+			continue
+		}
 
 		shell := ""
 		if enabled || uid == 500 {
@@ -118,6 +126,9 @@ func getGroupData() ([]GroupData, error) {
 		}
 
 		gid := ridFromSID(sid)
+		if gid == 0 {
+			continue
+		}
 
 		groups = append(groups, GroupData{
 			GID:       gid,
@@ -145,14 +156,14 @@ func ridFromSID(sid string) int {
 	return rid
 }
 
-// parseCSVLine parses a simple CSV line with quoted fields.
-// Handles: "value1","value2","value3"
+// parseCSVLine parses one RFC 4180 CSV record from a single line.
+// Returns nil if the line is not well-formed CSV. Used for the output of
+// PowerShell `ConvertTo-Csv -NoTypeInformation`, which emits RFC 4180.
 func parseCSVLine(line string) []string {
-	var fields []string
-	for _, f := range strings.Split(line, ",") {
-		f = strings.TrimSpace(f)
-		f = strings.Trim(f, "\"")
-		fields = append(fields, f)
+	r := csv.NewReader(strings.NewReader(line))
+	fields, err := r.Read()
+	if err != nil {
+		return nil
 	}
 	return fields
 }
