@@ -205,16 +205,19 @@ features](#unsupported-on-windows)), so every command from the Alpacon
 console executes with SYSTEM rights regardless of the requesting user.
 In practice:
 
-- **Websh as `Administrator` works on every Windows host**, including
-  laptops where the built-in `Administrator` account is disabled at the
-  OS level (the Windows 10 / 11 default). Operators do not need to run
-  `net user Administrator /active:yes` for Websh to function.
-- **Commands run with full SYSTEM privileges.** Granting a user
-  `Administrator` Websh access is effectively granting SYSTEM execution
-  on the host; configure Alpacon roles and policies accordingly.
+- **Websh works for any enabled local user**, and for `Administrator`
+  even when the built-in account is OS-level disabled (the Windows
+  10 / 11 default). Granting Websh to `alice` does not run commands
+  as `alice`—they run as SYSTEM with `alice` as the audit label.
+- **Commands run with full SYSTEM privileges**, irrespective of the
+  session's displayed user. Treat any Websh-enabled local user as
+  effectively SYSTEM on this host, and configure Alpacon roles and
+  policies accordingly. The displayed user is not a permission
+  boundary; **Alpacon RBAC is**.
 - **`whoami` inside the session prints `nt authority\system`**, not
-  `administrator`. This is the current expected behavior; it will
-  change when credential-based privilege demotion ships.
+  the requested user. This is the current expected behavior; it will
+  change when credential-based privilege demotion ships
+  (`CreateProcessAsUser` with a logon token).
 
 ## Upgrade
 

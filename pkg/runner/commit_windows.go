@@ -19,9 +19,10 @@ func loadShadowData() map[string]shadowEntry {
 }
 
 // getUserData enumerates local users via PowerShell on Windows and grants
-// a login shell only to Administrator (RID 500). Sessions run as SYSTEM
-// today, so allowing non-admin users would be a privilege escalation; see
-// parseGetLocalUserCSV for why the Enabled column is not consulted.
+// a login shell to Administrator (RID 500) plus every other enabled local
+// user. All Websh sessions execute as LocalSystem because privilege
+// demotion is not implemented on Windows; see parseGetLocalUserCSV for the
+// trade-off and the Alpacon-RBAC dependency that justifies it.
 func getUserData() ([]UserData, error) {
 	out, err := exec.Command("powershell", "-NoProfile", "-Command",
 		"Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation").Output()
@@ -36,13 +37,18 @@ func getUserData() ([]UserData, error) {
 //
 //	Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation
 //
-// into UserData entries. The Enabled column is intentionally not consulted:
-// gating Administrator's login shell on it would be a cosmetic check, not a
-// security boundary, because pkg/utils/privilege_windows.go is currently a
-// no-op stub and every Websh session executes as SYSTEM regardless of the
-// OS-level Administrator state. Consulting Enabled instead caused Websh to
-// fail on default Windows 10/11 laptops where the built-in Administrator
-// is disabled by Microsoft default.
+// into UserData entries. A login shell is granted to:
+//   - Administrator (RID 500) regardless of Enabled, because the built-in
+//     admin is disabled by default on Windows 10/11 laptops; and
+//   - every other locally-enabled user, on the same basis as Linux's
+//     /etc/passwd-driven shell assignment.
+//
+// All Websh sessions on Windows execute as LocalSystem because
+// pkg/utils/privilege_windows.go is currently a no-op stub. The session's
+// displayed user is an audit label, not an OS-level permission boundary:
+// Alpacon RBAC is the authorization surface, and operators must configure
+// roles to reflect that granting Websh access on Windows grants SYSTEM
+// execution.
 func parseGetLocalUserCSV(csv string) []UserData {
 	validShells := loadValidShells()
 	var users []UserData
@@ -58,6 +64,7 @@ func parseGetLocalUserCSV(csv string) []UserData {
 		}
 		username := fields[0]
 		sid := fields[1]
+		enabled := strings.EqualFold(fields[2], "True")
 		if username == "" || sid == "" {
 			continue
 		}
@@ -65,7 +72,7 @@ func parseGetLocalUserCSV(csv string) []UserData {
 		uid := ridFromSID(sid)
 
 		shell := ""
-		if uid == 500 {
+		if enabled || uid == 500 {
 			shell = utils.DefaultShell()
 		}
 

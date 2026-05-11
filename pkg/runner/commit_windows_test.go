@@ -6,12 +6,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestParseGetLocalUserCSV exercises the cases from the Windows
-// Administrator-login bug (issue #302). The fix removed the Enabled-flag
-// gate on RID 500 because every Websh session runs as SYSTEM and the gate
-// was a cosmetic check, not a security boundary. Cases A/B/C come straight
-// from the acceptance criteria; the remaining cases guard the parser
-// against header lines, malformed rows, and empty fields.
+// TestParseGetLocalUserCSV exercises the predicate that decides whether a
+// local user receives a login shell. Administrator (RID 500) is always
+// granted a shell (issue #302: built-in admin is disabled by default on
+// Windows 10/11 laptops). Every other enabled user is also granted a
+// shell, with all sessions running as LocalSystem until privilege demotion
+// ships. Disabled non-admin users get no shell. The remaining cases guard
+// the parser against header lines, malformed rows, and empty fields.
 func TestParseGetLocalUserCSV(t *testing.T) {
 	const header = "\"Name\",\"SID\",\"Enabled\"\n"
 	const powershell = "powershell.exe"
@@ -51,7 +52,7 @@ func TestParseGetLocalUserCSV(t *testing.T) {
 			},
 		},
 		{
-			name: "Case C: non-Administrator enabled user receives no login shell",
+			name: "Case C: non-Administrator enabled user receives a login shell",
 			csv:  header + "\"alice\",\"S-1-5-21-1-2-3-1001\",\"True\"\n",
 			want: []UserData{
 				{
@@ -59,13 +60,27 @@ func TestParseGetLocalUserCSV(t *testing.T) {
 					UID:         1001,
 					GID:         0,
 					Directory:   `C:\Users\alice`,
+					Shell:       powershell,
+					ValidShells: validShells,
+				},
+			},
+		},
+		{
+			name: "Case D: non-Administrator disabled user receives no login shell (regression guard)",
+			csv:  header + "\"bob\",\"S-1-5-21-1-2-3-1002\",\"False\"\n",
+			want: []UserData{
+				{
+					Username:    "bob",
+					UID:         1002,
+					GID:         0,
+					Directory:   `C:\Users\bob`,
 					Shell:       "",
 					ValidShells: validShells,
 				},
 			},
 		},
 		{
-			name: "mixed roster: disabled Administrator + DefaultAccount + Guest + enabled non-admin",
+			name: "mixed roster: disabled Administrator + disabled service accounts + enabled non-admin",
 			csv: header +
 				"\"Administrator\",\"S-1-5-21-1-2-3-500\",\"False\"\n" +
 				"\"DefaultAccount\",\"S-1-5-21-1-2-3-503\",\"False\"\n" +
@@ -101,7 +116,7 @@ func TestParseGetLocalUserCSV(t *testing.T) {
 					UID:         1001,
 					GID:         0,
 					Directory:   `C:\Users\alice`,
-					Shell:       "",
+					Shell:       powershell,
 					ValidShells: validShells,
 				},
 			},
