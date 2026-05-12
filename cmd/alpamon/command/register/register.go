@@ -2,9 +2,11 @@ package register
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/alpacax/alpamon/pkg/cloud"
 	"github.com/alpacax/alpamon/pkg/utils"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/spf13/cobra"
@@ -26,14 +29,27 @@ var (
 )
 
 var (
-	serverURL  string
-	apiToken   string
-	serverName string
-	platform   string
-	sslVerify  bool
-	caCert     string
-	tags       map[string]string
+	serverURL    string
+	apiToken     string
+	serverName   string
+	platform     string
+	sslVerify    bool
+	caCert       string
+	tags         map[string]string
+	noCloudProbe bool
+
+	// detectCloud is overridable in tests to inject a stub detector. Production
+	// uses cloud.Detect with the default provider list.
+	detectCloud = func(ctx context.Context) (*cloud.Metadata, error) {
+		_, meta, err := cloud.Detect(ctx, cloud.DefaultProviders())
+		return meta, err
+	}
 )
+
+// registerCloudDetectTimeout caps the synchronous cloud probe at register time
+// so a non-cloud host (where all probes time out) still finishes registration
+// within a reasonable budget.
+const registerCloudDetectTimeout = 5 * time.Second
 
 // RegisterRequest represents the request body for server registration
 type RegisterRequest struct {
@@ -57,19 +73,26 @@ var RegisterCmd = &cobra.Command{
 Requires an API token with servers:register scope.
 Groups are automatically assigned from the token's allowed_groups configuration.
 
+On cloud hosts (AWS / GCP / Azure), alpamon probes the link-local IMDS to
+auto-detect provider metadata (instance_id, region, instance_type, ...) and
+includes the results as cloud:* tags. Operator-supplied --tag flags override
+auto-detected values on key conflicts. Pass --no-cloud-probe to skip detection.
+
 Examples:
   sudo alpamon register --url https://alpacon.example.com --token <TOKEN>
   sudo alpamon register --url https://alpacon.example.com --token <TOKEN> --name my-server
   sudo alpamon register --url https://alpacon.example.com --token <TOKEN> --tag env=prod --tag role=web
+  sudo alpamon register --url https://alpacon.example.com --token <TOKEN> --no-cloud-probe
 
 Options:
-  --url         Alpacon server URL (required)
-  --token       API token (servers:register scope required)
-  --name        Server name (optional, defaults to hostname)
-  --platform    Platform (debian/rhel, auto-detect if omitted)
-  --ssl-verify  SSL certificate verification (default: true)
-  --ca-cert     CA certificate path
-  --tag         Server tags in key=value format (repeatable, or comma-separated: "k1=v1,k2=v2")`,
+  --url             Alpacon server URL (required)
+  --token           API token (servers:register scope required)
+  --name            Server name (optional, defaults to hostname)
+  --platform        Platform (debian/rhel, auto-detect if omitted)
+  --ssl-verify      SSL certificate verification (default: true)
+  --ca-cert         CA certificate path
+  --tag             Server tags in key=value format (repeatable, or comma-separated: "k1=v1,k2=v2")
+  --no-cloud-probe  Skip cloud metadata IMDS probe`,
 	RunE: runRegister,
 }
 
@@ -81,6 +104,7 @@ func init() {
 	RegisterCmd.Flags().BoolVar(&sslVerify, "ssl-verify", true, "SSL certificate verification")
 	RegisterCmd.Flags().StringVar(&caCert, "ca-cert", "", "CA certificate path")
 	RegisterCmd.Flags().StringToStringVar(&tags, "tag", nil, "Server tags in key=value format (repeatable, or comma-separated: \"k1=v1,k2=v2\")")
+	RegisterCmd.Flags().BoolVar(&noCloudProbe, "no-cloud-probe", false, "Skip cloud metadata IMDS probe at registration")
 
 	_ = RegisterCmd.MarkFlagRequired("url")
 	_ = RegisterCmd.MarkFlagRequired("token")
@@ -122,39 +146,45 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Platform auto-detected: %s\n", platform)
 	}
 
-	// 4. Create registration request body
+	// 4. Auto-detect cloud provider metadata (best-effort) and merge with
+	// operator-supplied --tag flags. User-supplied tags win over auto-detected
+	// values so an operator can override a misdetection (e.g. forcing
+	// `--tag cloud:provider=aws` on a host where IMDS is restricted).
+	finalTags := mergeCloudAndUserTags(detectCloudTags(cmd.Context()), tags)
+
+	// 5. Create registration request body
 	reqBody := RegisterRequest{
 		Name:     serverName,
 		Platform: platform,
-		Tags:     tags,
+		Tags:     finalTags,
 	}
 
 	fmt.Printf("Registering server: %s\n", serverURL)
 
-	// 5. API call
+	// 6. API call
 	resp, err := sendRegisterRequest(reqBody)
 	if err != nil {
 		return err
 	}
 
-	// 6. Create config file
+	// 7. Create config file
 	if err := writeConfigFile(resp); err != nil {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
 
-	// 7. Create required directories
+	// 8. Create required directories
 	if err := ensureDirectories(); err != nil {
 		return fmt.Errorf("failed to create directories: %w", err)
 	}
 
-	// 8. Start service
+	// 9. Start service
 	fmt.Println("\nStarting alpamon service...")
 	if err := startService(); err != nil {
 		fmt.Printf("Warning: Failed to start service: %v\n", err)
 		printManualStartHint()
 	}
 
-	// 9. Success message
+	// 10. Success message
 	fmt.Printf("\n==========================================\n")
 	fmt.Printf("Server registered successfully!\n")
 	fmt.Printf("==========================================\n")
@@ -164,6 +194,78 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	fmt.Printf("==========================================\n")
 
 	return nil
+}
+
+// detectCloudTags runs the IMDS probe and returns the cloud:* tag set, or nil
+// when no provider responds / when the operator passed --no-cloud-probe.
+//
+// The parent ctx comes from cmd.Context() so a future signal-aware
+// RootCmd.ExecuteContext (e.g. wrapping with signal.NotifyContext) will
+// propagate Ctrl-C / SIGTERM into the IMDS probe without further changes here.
+//
+// cloud.Detect can return four shapes:
+//   - (nil, nil, ErrNoCloudProvider): on-prem / dev path → no tags, log normal
+//   - (provider, fullMeta, nil): happy path → use tags, log instance
+//   - (provider, partialMeta, fetchErr): IMDS partially answered → use whatever
+//     tags we have, log degraded
+//   - (nil, nil, other err): unrecoverable detection error (incl. ctx
+//     cancel/deadline) → no tags, log error
+//
+// Surfacing the partial case (rather than throwing away meta on err != nil)
+// matters because the partial tags still help reconcile when at least the
+// provider name was captured.
+func detectCloudTags(parent context.Context) map[string]string {
+	if noCloudProbe {
+		fmt.Println("Cloud detection skipped (--no-cloud-probe).")
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(parent, registerCloudDetectTimeout)
+	defer cancel()
+
+	meta, err := detectCloud(ctx)
+	if errors.Is(err, cloud.ErrNoCloudProvider) {
+		fmt.Println("No cloud provider detected; registering as plain server.")
+		return nil
+	}
+	if err != nil && meta == nil {
+		fmt.Printf("Cloud detection error: %v (continuing without cloud tags)\n", err)
+		return nil
+	}
+	if meta == nil {
+		return nil
+	}
+	tags := meta.ToTags()
+	if len(tags) == 0 {
+		return nil
+	}
+
+	switch {
+	case err != nil:
+		fmt.Printf("Cloud detected (partial) for %s: %v\n", meta.Provider, err)
+	case meta.InstanceID != "":
+		fmt.Printf("Cloud detected: %s (instance=%s)\n", meta.Provider, meta.InstanceID)
+	default:
+		fmt.Printf("Cloud detected: %s\n", meta.Provider)
+	}
+	return tags
+}
+
+// mergeCloudAndUserTags returns a single map combining auto-detected tags with
+// operator-supplied --tag flags. User-supplied tags win on key conflicts so
+// the operator can override a misdetection.
+func mergeCloudAndUserTags(auto, user map[string]string) map[string]string {
+	if len(auto) == 0 && len(user) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(auto)+len(user))
+	for k, v := range auto {
+		out[k] = v
+	}
+	for k, v := range user {
+		out[k] = v
+	}
+	return out
 }
 
 // normalizeHostname strips the domain part from FQDN hostnames
