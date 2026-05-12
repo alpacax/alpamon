@@ -146,7 +146,7 @@ func (p *GCPProvider) get(ctx context.Context, path string) ([]byte, error) {
 	if got := resp.Header.Get(gcpFlavorHeader); got != gcpFlavorValue {
 		return nil, fmt.Errorf("gcp %s missing Metadata-Flavor response header (got %q)", path, got)
 	}
-	return readLimitedN(resp.Body, gcpResponseLimit)
+	return readLimited(resp.Body, gcpResponseLimit)
 }
 
 // basename returns the final path segment of a slash-separated string.

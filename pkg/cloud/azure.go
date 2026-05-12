@@ -130,5 +130,5 @@ func (p *AzureProvider) fetchInstance(ctx context.Context) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("instance http %d", resp.StatusCode)
 	}
-	return readLimitedN(resp.Body, azureResponseLimit)
+	return readLimited(resp.Body, azureResponseLimit)
 }

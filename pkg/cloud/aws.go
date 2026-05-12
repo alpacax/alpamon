@@ -153,7 +153,7 @@ func (p *AWSProvider) fetchToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("token http %d", resp.StatusCode)
 	}
 
-	body, err := readLimitedN(resp.Body, awsResponseLimit)
+	body, err := readLimited(resp.Body, awsResponseLimit)
 	if err != nil {
 		return "", err
 	}
@@ -208,5 +208,5 @@ func (p *AWSProvider) imdsGet(ctx context.Context, token, path string) ([]byte, 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("imds %s http %d", path, resp.StatusCode)
 	}
-	return readLimitedN(resp.Body, awsResponseLimit)
+	return readLimited(resp.Body, awsResponseLimit)
 }
