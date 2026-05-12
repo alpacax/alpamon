@@ -226,6 +226,23 @@ func TestGCP_Fetch_ProjectIDFailure_OtherFieldsStillReturned(t *testing.T) {
 	}
 }
 
+func TestGCP_Fetch_EmptyInstanceID_ReturnsError(t *testing.T) {
+	// IMDS returns 200 with empty body for instance-id. Fetch must surface
+	// that as an error since cloud:instance_id is the deterministic-match
+	// key for reconcile.
+	server := newGCPMockServer(t, gcpMockOpts{instanceIDBody: "   "})
+	defer server.Close()
+
+	p := NewGCPWithBase(server.URL)
+	meta, err := p.Fetch(context.Background())
+	if err == nil {
+		t.Error("expected error when instance_id is empty/whitespace")
+	}
+	if meta == nil || meta.Provider != ProviderGCP {
+		t.Errorf("expected partial Metadata with Provider=gcp, got %+v", meta)
+	}
+}
+
 func TestGCP_Fetch_InstanceIDFailureAbortsWithError(t *testing.T) {
 	server := newGCPMockServer(t, gcpMockOpts{instanceIDStatus: http.StatusInternalServerError})
 	defer server.Close()

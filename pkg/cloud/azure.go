@@ -93,15 +93,23 @@ func (p *AzureProvider) Fetch(ctx context.Context) (*Metadata, error) {
 		return &Metadata{Provider: ProviderAzure}, fmt.Errorf("azure imds parse: %w", err)
 	}
 
-	return &Metadata{
+	meta := &Metadata{
 		Provider:         ProviderAzure,
-		InstanceID:       resp.Compute.VMID,
+		InstanceID:       strings.TrimSpace(resp.Compute.VMID),
 		Region:           resp.Compute.Location,
 		AvailabilityZone: resp.Compute.Zone, // empty for zone-less deployments
 		InstanceType:     resp.Compute.VMSize,
 		AccountID:        resp.Compute.SubscriptionID,
 		// NetworkID intentionally empty — see function-level comment.
-	}, nil
+	}
+	// instance_id is the deterministic-match key. An otherwise-valid IMDS
+	// response with empty vmId would silently undermine reconcile — fail
+	// explicitly while still returning partial meta (cloud:provider=azure
+	// makes it into Server.tags).
+	if meta.InstanceID == "" {
+		return meta, fmt.Errorf("azure imds returned empty vmId")
+	}
+	return meta, nil
 }
 
 func (p *AzureProvider) fetchInstance(ctx context.Context) ([]byte, error) {

@@ -102,7 +102,7 @@ func (p *AWSProvider) Fetch(ctx context.Context) (*Metadata, error) {
 
 	doc, docErr := p.fetchDocument(fetchCtx, token)
 	if docErr == nil {
-		meta.InstanceID = doc.InstanceID
+		meta.InstanceID = strings.TrimSpace(doc.InstanceID)
 		meta.Region = doc.Region
 		meta.AvailabilityZone = doc.AvailabilityZone
 		meta.InstanceType = doc.InstanceType
@@ -122,10 +122,16 @@ func (p *AWSProvider) Fetch(ctx context.Context) (*Metadata, error) {
 		}
 	}
 
-	// Only surface document error if it left us with no useful data beyond the
-	// provider tag — gives callers a chance to log Warn but still report cloud:provider=aws.
-	if docErr != nil && meta.InstanceID == "" {
-		return meta, fmt.Errorf("aws identity document: %w", docErr)
+	// instance_id is the deterministic-match key for alpacon-server reconcile.
+	// An "ok" Fetch with empty InstanceID would silently produce a useless tag
+	// set and undermine the feature's whole purpose — surface it as an error
+	// so callers can mark detection as degraded. Partial meta is still
+	// returned so cloud:provider=aws makes it into Server.tags.
+	if meta.InstanceID == "" {
+		if docErr != nil {
+			return meta, fmt.Errorf("aws identity document: %w", docErr)
+		}
+		return meta, errors.New("aws imds returned empty instance id")
 	}
 	return meta, nil
 }

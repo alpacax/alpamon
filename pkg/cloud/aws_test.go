@@ -210,6 +210,31 @@ func TestAWS_Fetch_DocumentError_StillReturnsProvider(t *testing.T) {
 	}
 }
 
+func TestAWS_Fetch_EmptyInstanceID_ReturnsError(t *testing.T) {
+	// IMDS returns a syntactically-valid identity document with an empty
+	// instanceId. Fetch must surface that as an error since cloud:instance_id
+	// is the deterministic-match key for reconcile.
+	doc := awsIdentityDocument{
+		InstanceID:       "", // empty — the regression we're guarding against
+		Region:           "us-east-1",
+		AvailabilityZone: "us-east-1a",
+		InstanceType:     "t3.micro",
+		AccountID:        "123456789012",
+	}
+	buf, _ := json.Marshal(doc)
+	server := newAWSMockServer(t, awsMockOpts{documentBody: string(buf)})
+	defer server.Close()
+
+	p := NewAWSWithBase(server.URL)
+	meta, err := p.Fetch(context.Background())
+	if err == nil {
+		t.Error("expected error when instance_id is empty")
+	}
+	if meta == nil || meta.Provider != ProviderAWS {
+		t.Errorf("expected partial Metadata with Provider=aws, got %+v", meta)
+	}
+}
+
 func TestAWS_Fetch_DocumentParseError(t *testing.T) {
 	server := newAWSMockServer(t, awsMockOpts{documentBody: "{ not json"})
 	defer server.Close()

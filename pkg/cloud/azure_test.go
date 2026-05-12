@@ -145,6 +145,22 @@ func TestAzure_Fetch_ServerErrorReturnsPartial(t *testing.T) {
 	}
 }
 
+func TestAzure_Fetch_EmptyVMID_ReturnsError(t *testing.T) {
+	// IMDS returns a syntactically-valid response with empty compute.vmId.
+	// Fetch must surface that as an error since cloud:instance_id is the
+	// deterministic-match key for reconcile.
+	server := newAzureMockServer(t, azureMockOpts{vmID: " "})
+	defer server.Close()
+
+	meta, err := NewAzureWithBase(server.URL).Fetch(context.Background())
+	if err == nil {
+		t.Error("expected error when vmId is empty/whitespace")
+	}
+	if meta == nil || meta.Provider != ProviderAzure {
+		t.Errorf("expected partial Metadata with Provider=azure, got %+v", meta)
+	}
+}
+
 func TestAzure_Fetch_BadJSON(t *testing.T) {
 	server := newAzureMockServer(t, azureMockOpts{instanceBody: "{not valid"})
 	defer server.Close()
