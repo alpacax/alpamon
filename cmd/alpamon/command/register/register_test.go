@@ -340,7 +340,7 @@ func TestDetectCloudTags_PartialMetadataReturnsAvailableTags(t *testing.T) {
 		return &cloud.Metadata{
 			Provider: cloud.ProviderAWS,
 			Region:   "us-east-1",
-			// InstanceID intentionally absent — partial detection
+			// InstanceID intentionally absent: partial detection
 		}, errors.New("imds document 500")
 	}
 	noCloudProbe = false

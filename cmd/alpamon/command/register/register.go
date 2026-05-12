@@ -242,7 +242,7 @@ func detectCloudTags(parent context.Context) map[string]string {
 
 	switch {
 	case err != nil:
-		fmt.Printf("Cloud detected (partial): %s — %v\n", meta.Provider, err)
+		fmt.Printf("Cloud detected (partial) for %s: %v\n", meta.Provider, err)
 	case meta.InstanceID != "":
 		fmt.Printf("Cloud detected: %s (instance=%s)\n", meta.Provider, meta.InstanceID)
 	default:
