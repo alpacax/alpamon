@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: '1.25.7'
+  GO_VERSION: '1.25.10'
   ENT_VERSION: 'v0.14.5'
 
 jobs:
