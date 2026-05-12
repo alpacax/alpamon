@@ -64,10 +64,8 @@ func NewAWS() *AWSProvider {
 // Tests inject an httptest server URL here.
 func NewAWSWithBase(base string) *AWSProvider {
 	return &AWSProvider{
-		base: strings.TrimRight(base, "/"),
-		client: &http.Client{
-			Timeout: awsFetchTimeout + 500*time.Millisecond,
-		},
+		base:   strings.TrimRight(base, "/"),
+		client: newIMDSClient(awsFetchTimeout + 500*time.Millisecond),
 	}
 }
 

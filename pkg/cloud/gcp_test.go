@@ -9,17 +9,18 @@ import (
 )
 
 type gcpMockOpts struct {
-	requireFlavor    bool
-	instanceIDStatus int
-	instanceIDBody   string
-	zoneStatus       int
-	zoneBody         string
-	machineStatus    int
-	machineBody      string
-	networkStatus    int
-	networkBody      string
-	projectStatus    int
-	projectBody      string
+	requireFlavor      bool // server enforces request Metadata-Flavor header
+	omitFlavorResponse bool // server does NOT echo Metadata-Flavor in responses (simulates non-GCE 200)
+	instanceIDStatus   int
+	instanceIDBody     string
+	zoneStatus         int
+	zoneBody           string
+	machineStatus      int
+	machineBody        string
+	networkStatus      int
+	networkBody        string
+	projectStatus      int
+	projectBody        string
 }
 
 func newGCPMockServer(t *testing.T, opts gcpMockOpts) *httptest.Server {
@@ -61,6 +62,11 @@ func newGCPMockServer(t *testing.T, opts gcpMockOpts) *httptest.Server {
 		if opts.requireFlavor && r.Header.Get(gcpFlavorHeader) != gcpFlavorValue {
 			http.Error(w, "missing Metadata-Flavor", http.StatusForbidden)
 			return false
+		}
+		// Real GCE echoes Metadata-Flavor: Google in successful responses; mimic
+		// unless the test explicitly opts out to verify client-side rejection.
+		if !opts.omitFlavorResponse {
+			w.Header().Set(gcpFlavorHeader, gcpFlavorValue)
 		}
 		return true
 	}
@@ -160,6 +166,19 @@ func TestGCP_Probe_FlavorEnforcementBreaksOnAWS(t *testing.T) {
 	p := NewGCPWithBase(server.URL)
 	if p.Probe(context.Background()) {
 		t.Error("Probe should fail when server doesn't recognize GCP paths")
+	}
+}
+
+func TestGCP_Probe_RejectsResponseWithoutFlavorHeader(t *testing.T) {
+	// A captive portal / spoofed listener can return 200 + body without the
+	// Metadata-Flavor: Google response header. Probe must reject this so we
+	// don't false-positive non-GCE hosts.
+	server := newGCPMockServer(t, gcpMockOpts{omitFlavorResponse: true})
+	defer server.Close()
+
+	p := NewGCPWithBase(server.URL)
+	if p.Probe(context.Background()) {
+		t.Error("Probe should fail when response is missing Metadata-Flavor: Google header")
 	}
 }
 

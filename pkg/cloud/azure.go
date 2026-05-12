@@ -48,14 +48,12 @@ type AzureProvider struct {
 // NewAzure returns an Azure provider pointed at the link-local IMDS endpoint.
 func NewAzure() *AzureProvider { return NewAzureWithBase(azureDefaultBase) }
 
-// NewAzureWithBase builds an Azure provider with an explicit base URL — used
+// NewAzureWithBase builds an Azure provider with an explicit base URL. Used
 // by tests.
 func NewAzureWithBase(base string) *AzureProvider {
 	return &AzureProvider{
-		base: strings.TrimRight(base, "/"),
-		client: &http.Client{
-			Timeout: azureFetchTimeout + 500*time.Millisecond,
-		},
+		base:   strings.TrimRight(base, "/"),
+		client: newIMDSClient(azureFetchTimeout + 500*time.Millisecond),
 	}
 }
 

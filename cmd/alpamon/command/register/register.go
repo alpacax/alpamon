@@ -198,6 +198,17 @@ func runRegister(cmd *cobra.Command, args []string) error {
 
 // detectCloudTags runs the IMDS probe and returns the cloud:* tag set, or nil
 // when no provider responds / when the operator passed --no-cloud-probe.
+//
+// cloud.Detect can return four shapes:
+//   - (nil, nil, ErrNoCloudProvider): on-prem / dev path → no tags, log normal
+//   - (provider, fullMeta, nil): happy path → use tags, log instance
+//   - (provider, partialMeta, fetchErr): IMDS partially answered → use whatever
+//     tags we have, log degraded
+//   - (nil, nil, other err): unrecoverable detection error → no tags, log error
+//
+// Surfacing the partial case (rather than throwing away meta on err != nil)
+// matters because the partial tags still help reconcile when at least the
+// provider name was captured.
 func detectCloudTags() map[string]string {
 	if noCloudProbe {
 		fmt.Println("Cloud detection skipped (--no-cloud-probe).")
@@ -208,11 +219,11 @@ func detectCloudTags() map[string]string {
 	defer cancel()
 
 	meta, err := detectCloud(ctx)
-	if err != nil {
-		if errors.Is(err, cloud.ErrNoCloudProvider) {
-			fmt.Println("No cloud provider detected; registering as plain server.")
-			return nil
-		}
+	if errors.Is(err, cloud.ErrNoCloudProvider) {
+		fmt.Println("No cloud provider detected; registering as plain server.")
+		return nil
+	}
+	if err != nil && meta == nil {
 		fmt.Printf("Cloud detection error: %v (continuing without cloud tags)\n", err)
 		return nil
 	}
@@ -223,7 +234,15 @@ func detectCloudTags() map[string]string {
 	if len(tags) == 0 {
 		return nil
 	}
-	fmt.Printf("Cloud detected: %s (instance=%s)\n", meta.Provider, meta.InstanceID)
+
+	switch {
+	case err != nil:
+		fmt.Printf("Cloud detected (partial): %s — %v\n", meta.Provider, err)
+	case meta.InstanceID != "":
+		fmt.Printf("Cloud detected: %s (instance=%s)\n", meta.Provider, meta.InstanceID)
+	default:
+		fmt.Printf("Cloud detected: %s\n", meta.Provider)
+	}
 	return tags
 }
 

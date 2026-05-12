@@ -42,22 +42,22 @@ type GCPProvider struct {
 // NewGCP returns a GCP provider pointed at metadata.google.internal.
 func NewGCP() *GCPProvider { return NewGCPWithBase(gcpDefaultBase) }
 
-// NewGCPWithBase constructs a GCP provider against an arbitrary base URL — used
+// NewGCPWithBase constructs a GCP provider against an arbitrary base URL. Used
 // by tests.
 func NewGCPWithBase(base string) *GCPProvider {
 	return &GCPProvider{
-		base: strings.TrimRight(base, "/"),
-		client: &http.Client{
-			Timeout: gcpFetchTimeout + 500*time.Millisecond,
-		},
+		base:   strings.TrimRight(base, "/"),
+		client: newIMDSClient(gcpFetchTimeout + 500*time.Millisecond),
 	}
 }
 
 // Name implements Provider.
 func (p *GCPProvider) Name() string { return ProviderGCP }
 
-// Probe reads the instance-id endpoint. A successful 200 with the right
-// Metadata-Flavor header echoed back is the strongest signal that this is GCE.
+// Probe reads the instance-id endpoint. A successful 200 with the
+// Metadata-Flavor: Google response header (validated inside get) is the
+// strongest signal that this is GCE — bare 200s without the header are
+// rejected as not-GCP (e.g. a captive portal returning a generic 200).
 func (p *GCPProvider) Probe(ctx context.Context) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, gcpProbeTimeout)
 	defer cancel()
@@ -114,6 +114,13 @@ func (p *GCPProvider) get(ctx context.Context, path string) ([]byte, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("gcp %s http %d", path, resp.StatusCode)
+	}
+	// GCE metadata server always echoes Metadata-Flavor: Google in responses.
+	// Absence rules out a real GCE responder (a captive portal or spoofed
+	// 169.254.169.254 listener could return 200 to anything), so we treat the
+	// header as authoritative provider discrimination, not just a hint.
+	if got := resp.Header.Get(gcpFlavorHeader); got != gcpFlavorValue {
+		return nil, fmt.Errorf("gcp %s missing Metadata-Flavor response header (got %q)", path, got)
 	}
 	return readLimitedN(resp.Body, gcpResponseLimit)
 }

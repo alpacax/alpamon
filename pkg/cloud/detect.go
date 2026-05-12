@@ -24,13 +24,19 @@ var dmiPaths = []string{
 // don't burn 800 ms probing the wrong provider on the common case (single-cloud
 // hosts have a strong identifying string in sys_vendor / chassis_asset_tag).
 //
-// Returns ErrNoCloudProvider when no provider responds. Callers must treat that
-// as a normal on-prem / dev path, not an error.
+// Return contract:
+//   - all probes fail: returns (nil, nil, ErrNoCloudProvider). Callers must
+//     treat this as a normal on-prem / dev path, not a failure.
+//   - probe succeeds and Fetch succeeds: returns (provider, fullMeta, nil).
+//   - probe succeeds but Fetch errors mid-read: returns
+//     (provider, partialMeta, fetchErr). Caller gets to decide how to surface
+//     the partial result. We never fall through to another provider once a
+//     probe is positive — IMDS responses are provider-specific, so partial
+//     data is strictly better than wrong-provider data.
 //
-// If a provider's Probe succeeds but Fetch fails, we still return that provider
-// with whatever partial Metadata it produced. We never try a different provider
-// after a successful Probe — IMDS responses are provider-specific, so partial
-// data is better than wrong-provider data.
+// Returning the Fetch error (rather than swallowing it) lets register surface
+// partial-detection diagnostics to the operator instead of silently shipping
+// an incomplete tag set.
 func Detect(ctx context.Context, providers []Provider) (Provider, *Metadata, error) {
 	if len(providers) == 0 {
 		return nil, nil, ErrNoCloudProvider
@@ -53,7 +59,7 @@ func Detect(ctx context.Context, providers []Provider) (Provider, *Metadata, err
 		if meta == nil {
 			meta = &Metadata{Provider: p.Name()}
 		}
-		return p, meta, nil
+		return p, meta, err
 	}
 	return nil, nil, ErrNoCloudProvider
 }

@@ -329,6 +329,29 @@ func TestDetectCloudTags_NonGracefulErrorDoesNotFail(t *testing.T) {
 	}
 }
 
+func TestDetectCloudTags_PartialMetadataReturnsAvailableTags(t *testing.T) {
+	// cloud.Detect now returns (partialMeta, fetchErr) when Probe succeeds but
+	// Fetch errors mid-read. detectCloudTags must use whatever tags we have
+	// rather than dropping them on the floor.
+	old := detectCloud
+	t.Cleanup(func() { detectCloud = old; noCloudProbe = false })
+
+	detectCloud = func(_ context.Context) (*cloud.Metadata, error) {
+		return &cloud.Metadata{
+			Provider: cloud.ProviderAWS,
+			Region:   "us-east-1",
+			// InstanceID intentionally absent — partial detection
+		}, errors.New("imds document 500")
+	}
+	noCloudProbe = false
+
+	got := detectCloudTags()
+	assert.Equal(t, cloud.ProviderAWS, got[cloud.TagProvider])
+	assert.Equal(t, "us-east-1", got[cloud.TagRegion])
+	_, hasInstanceID := got[cloud.TagInstanceID]
+	assert.False(t, hasInstanceID, "partial detection should not include empty cloud:instance_id")
+}
+
 func TestTagFlagParsing(t *testing.T) {
 	tests := []struct {
 		name         string

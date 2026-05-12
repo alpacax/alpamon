@@ -12,6 +12,7 @@ import (
 type fakeProvider struct {
 	name       string
 	probeOK    bool
+	probeDelay time.Duration // sleep inside Probe to exercise ctx cancellation paths
 	fetchMeta  *Metadata
 	fetchErr   error
 	probeCalls int
@@ -19,8 +20,15 @@ type fakeProvider struct {
 }
 
 func (f *fakeProvider) Name() string { return f.name }
-func (f *fakeProvider) Probe(_ context.Context) bool {
+func (f *fakeProvider) Probe(ctx context.Context) bool {
 	f.probeCalls++
+	if f.probeDelay > 0 {
+		select {
+		case <-time.After(f.probeDelay):
+		case <-ctx.Done():
+			return false
+		}
+	}
 	return f.probeOK
 }
 func (f *fakeProvider) Fetch(_ context.Context) (*Metadata, error) {
@@ -60,15 +68,17 @@ func TestDetect_AllProbesFail_ReturnsErr(t *testing.T) {
 }
 
 func TestDetect_FetchError_StillReturnsProvider(t *testing.T) {
-	// Probe succeeds, Fetch returns partial Metadata + error. Detect must NOT
+	// Probe succeeds, Fetch returns partial Metadata + error. Detect surfaces
+	// the error to the caller alongside the partial Metadata, and must NOT
 	// fall through to another provider — host IS on AWS.
 	partial := &Metadata{Provider: ProviderAWS}
-	aws := &fakeProvider{name: ProviderAWS, probeOK: true, fetchMeta: partial, fetchErr: errors.New("partial fetch")}
+	fetchErr := errors.New("partial fetch")
+	aws := &fakeProvider{name: ProviderAWS, probeOK: true, fetchMeta: partial, fetchErr: fetchErr}
 	gcp := &fakeProvider{name: ProviderGCP, probeOK: true, fetchMeta: &Metadata{Provider: ProviderGCP}}
 
 	p, meta, err := Detect(context.Background(), []Provider{aws, gcp})
-	if err != nil {
-		t.Fatalf("Detect: %v", err)
+	if !errors.Is(err, fetchErr) {
+		t.Errorf("expected Detect to surface fetch error, got %v", err)
 	}
 	if p.Name() != ProviderAWS {
 		t.Errorf("Detect fell through to %q; should stick with AWS", p.Name())
@@ -83,12 +93,14 @@ func TestDetect_FetchError_StillReturnsProvider(t *testing.T) {
 
 func TestDetect_NilMetaFromFetch_ReturnsProviderOnlyMeta(t *testing.T) {
 	// If a provider returns nil metadata + error, Detect must still surface
-	// a non-nil Metadata so callers can call .ToTags() safely.
-	aws := &fakeProvider{name: ProviderAWS, probeOK: true, fetchMeta: nil, fetchErr: errors.New("nil")}
+	// a non-nil Metadata so callers can call .ToTags() safely, and surface
+	// the error so callers know detection was partial.
+	fetchErr := errors.New("nil")
+	aws := &fakeProvider{name: ProviderAWS, probeOK: true, fetchMeta: nil, fetchErr: fetchErr}
 
 	_, meta, err := Detect(context.Background(), []Provider{aws})
-	if err != nil {
-		t.Fatalf("Detect: %v", err)
+	if !errors.Is(err, fetchErr) {
+		t.Errorf("expected Detect to surface fetch error, got %v", err)
 	}
 	if meta == nil || meta.Provider != ProviderAWS {
 		t.Errorf("expected non-nil meta with Provider=aws, got %+v", meta)
@@ -114,18 +126,30 @@ func TestDetect_ContextCancelled(t *testing.T) {
 }
 
 func TestDetect_ContextDeadlineRespectedBetweenProbes(t *testing.T) {
-	slow := &fakeProvider{name: ProviderAWS, probeOK: false}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	// Each fake probe sleeps 30ms; ctx deadline is 50ms so 1st probe completes
+	// (fails) then ctx.Err short-circuit fires before the 2nd probe sleeps.
+	// Without the in-loop ctx.Err check, this test would still hang for 90ms+
+	// because each probe respects ctx but Detect would keep iterating; with the
+	// short-circuit Detect returns the ctx error promptly after 1-2 probes.
+	slow := func() *fakeProvider {
+		return &fakeProvider{name: ProviderAWS, probeOK: false, probeDelay: 30 * time.Millisecond}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	// Add a synthetic delay between probes by sleeping in Probe. We can't easily
-	// embed a sleep in the fake, but the failing-probe case still validates the
-	// ctx.Err short-circuit inside the loop.
-	_, _, err := Detect(ctx, []Provider{slow, slow, slow})
-	// Either the ctx error or ErrNoCloudProvider is acceptable here; we just
-	// don't want it to hang.
-	if err == nil {
-		t.Error("expected an error")
+	start := time.Now()
+	_, _, err := Detect(ctx, []Provider{slow(), slow(), slow()})
+	elapsed := time.Since(start)
+
+	// ctx error (deadline) is the expected signal here, not ErrNoCloudProvider.
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrNoCloudProvider) {
+		t.Errorf("expected DeadlineExceeded or ErrNoCloudProvider, got %v", err)
+	}
+	// Loose upper bound: with the short-circuit Detect should return well
+	// before all 3 probes complete (3 * 30ms = 90ms). Allow generous slack for
+	// CI scheduling jitter.
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("Detect ran for %v; ctx short-circuit appears broken", elapsed)
 	}
 }
 
