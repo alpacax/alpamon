@@ -120,19 +120,13 @@ func TestAzure_Fetch_ZoneEmpty(t *testing.T) {
 	}
 }
 
-func TestAzure_Probe_RejectsWithoutHeader(t *testing.T) {
-	server := newAzureMockServer(t, azureMockOpts{requireHeader: true})
-	defer server.Close()
-
-	p := NewAzureWithBase(server.URL)
-	if !p.Probe(context.Background()) {
-		t.Error("Probe should succeed when client sends Metadata: true")
-	}
-}
-
 func TestAzure_HeaderEnforcedByServer(t *testing.T) {
 	// If our client failed to send Metadata: true, this server would 400.
 	// We sanity-check that Probe still works.
+	//
+	// (The previously-adjacent TestAzure_Probe_RejectsWithoutHeader had the
+	// same setup and assertion but a misleading negative-sounding name —
+	// removed in favor of this clearly-named duplicate.)
 	server := newAzureMockServer(t, azureMockOpts{requireHeader: true})
 	defer server.Close()
 

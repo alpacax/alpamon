@@ -145,14 +145,17 @@ func TestGCP_Fetch_HappyPath(t *testing.T) {
 	}
 }
 
-func TestGCP_Probe_RejectsWithoutFlavorHeader(t *testing.T) {
-	// Server requires Metadata-Flavor header — if we sent the right one, Probe succeeds.
+func TestGCP_Probe_SucceedsAgainstFlavorEnforcingServer(t *testing.T) {
+	// Integration sanity: a server that requires Metadata-Flavor: Google
+	// (mimicking real GCE) accepts our request, so Probe succeeds. Renamed
+	// from RejectsWithoutFlavorHeader — that name suggested a negative test
+	// but the assertion is positive (our client sends the header).
 	server := newGCPMockServer(t, gcpMockOpts{requireFlavor: true})
 	defer server.Close()
 
 	p := NewGCPWithBase(server.URL)
 	if !p.Probe(context.Background()) {
-		t.Error("Probe should pass when Metadata-Flavor is sent")
+		t.Error("Probe should pass against a flavor-enforcing server when our client sends the header")
 	}
 }
 
