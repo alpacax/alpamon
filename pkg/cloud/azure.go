@@ -60,9 +60,12 @@ func NewAzureWithBase(base string) *AzureProvider {
 // Name implements Provider.
 func (p *AzureProvider) Name() string { return ProviderAzure }
 
-// Probe issues the standard /metadata/instance request. Success confirms
-// Azure IMDS — AWS responds 401 here (no token) and GCP DNS won't resolve, so
-// the discriminator is reliable.
+// Probe issues the standard /metadata/instance request with the required
+// Metadata: true header and api-version query parameter. The combination of
+// path, header, and query param is the discriminator: AWS responds 401 on
+// /metadata/instance without a session token, and GCP responds non-200 on
+// any path that isn't under /computeMetadata/v1 with Metadata-Flavor: Google.
+// A 200 here is therefore a strong positive signal that this is Azure IMDS.
 func (p *AzureProvider) Probe(ctx context.Context) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, azureProbeTimeout)
 	defer cancel()

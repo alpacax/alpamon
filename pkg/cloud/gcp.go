@@ -21,7 +21,7 @@ import (
 //   - Provider discrimination: cross-fire on the shared 169.254.169.254 with
 //     AWS and Azure is prevented by the Metadata-Flavor: Google REQUEST header
 //     (which AWS/Azure won't echo) and the response-header validation in
-//     get() (added in iteration 1).
+//     get() that requires Metadata-Flavor: Google in the response.
 //
 // GCE listens on both 169.254.169.254 (IPv4) and fd00:ec2::254 (IPv6). We use
 // IPv4 to match AWS/Azure; IPv6-only GCE hosts are rare and can be supported
