@@ -272,8 +272,8 @@ func TestDetectCloudTags_NoProviderReturnsNil(t *testing.T) {
 	}
 	noCloudProbe = false
 
-	if got := detectCloudTags(); got != nil {
-		t.Errorf("detectCloudTags() = %v, want nil", got)
+	if got := detectCloudTags(context.Background()); got != nil {
+		t.Errorf("detectCloudTags(context.Background()) = %v, want nil", got)
 	}
 }
 
@@ -290,7 +290,7 @@ func TestDetectCloudTags_HappyPathReturnsTags(t *testing.T) {
 	}
 	noCloudProbe = false
 
-	got := detectCloudTags()
+	got := detectCloudTags(context.Background())
 	assert.Equal(t, cloud.ProviderAWS, got[cloud.TagProvider])
 	assert.Equal(t, "i-x", got[cloud.TagInstanceID])
 	assert.Equal(t, "us-east-1", got[cloud.TagRegion])
@@ -307,8 +307,8 @@ func TestDetectCloudTags_NoCloudProbeFlagSkipsDetection(t *testing.T) {
 	}
 	noCloudProbe = true
 
-	if got := detectCloudTags(); got != nil {
-		t.Errorf("detectCloudTags() with --no-cloud-probe should return nil, got %v", got)
+	if got := detectCloudTags(context.Background()); got != nil {
+		t.Errorf("detectCloudTags(context.Background()) with --no-cloud-probe should return nil, got %v", got)
 	}
 	if called {
 		t.Error("detectCloud must not run when --no-cloud-probe is set")
@@ -324,8 +324,8 @@ func TestDetectCloudTags_NonGracefulErrorDoesNotFail(t *testing.T) {
 	}
 	noCloudProbe = false
 
-	if got := detectCloudTags(); got != nil {
-		t.Errorf("detectCloudTags() should return nil on unexpected errors, got %v", got)
+	if got := detectCloudTags(context.Background()); got != nil {
+		t.Errorf("detectCloudTags(context.Background()) should return nil on unexpected errors, got %v", got)
 	}
 }
 
@@ -345,7 +345,7 @@ func TestDetectCloudTags_PartialMetadataReturnsAvailableTags(t *testing.T) {
 	}
 	noCloudProbe = false
 
-	got := detectCloudTags()
+	got := detectCloudTags(context.Background())
 	assert.Equal(t, cloud.ProviderAWS, got[cloud.TagProvider])
 	assert.Equal(t, "us-east-1", got[cloud.TagRegion])
 	_, hasInstanceID := got[cloud.TagInstanceID]

@@ -5,8 +5,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-
-	"github.com/rs/zerolog/log"
 )
 
 // dmiPaths lists the sysfs DMI files queried for a cloud-provider hint on
@@ -25,8 +23,13 @@ var dmiPaths = []string{
 // hosts have a strong identifying string in sys_vendor / chassis_asset_tag).
 //
 // Return contract:
-//   - all probes fail: returns (nil, nil, ErrNoCloudProvider). Callers must
-//     treat this as a normal on-prem / dev path, not a failure.
+//   - all probes fail and ctx is healthy: returns
+//     (nil, nil, ErrNoCloudProvider). Callers must treat this as a normal
+//     on-prem / dev path, not a failure.
+//   - ctx is canceled or times out at any point: returns (nil, nil, ctx.Err()).
+//     This is distinct from ErrNoCloudProvider so callers can tell "no provider"
+//     apart from "detection aborted by timeout/cancel" — including the edge
+//     case where ctx expires during the last provider's Probe.
 //   - probe succeeds and Fetch succeeds: returns (provider, fullMeta, nil).
 //   - probe succeeds but Fetch errors mid-read: returns
 //     (provider, partialMeta, fetchErr). Caller gets to decide how to surface
@@ -34,9 +37,9 @@ var dmiPaths = []string{
 //     probe is positive — IMDS responses are provider-specific, so partial
 //     data is strictly better than wrong-provider data.
 //
-// Returning the Fetch error (rather than swallowing it) lets register surface
-// partial-detection diagnostics to the operator instead of silently shipping
-// an incomplete tag set.
+// Detect is a pure library function: it does not log. Callers that need to
+// surface failures (e.g. the register CLI) should inspect the returned error
+// and format it in their own output style.
 func Detect(ctx context.Context, providers []Provider) (Provider, *Metadata, error) {
 	if len(providers) == 0 {
 		return nil, nil, ErrNoCloudProvider
@@ -45,21 +48,24 @@ func Detect(ctx context.Context, providers []Provider) (Provider, *Metadata, err
 	ordered := reorderByDMI(providers, readDMIHint())
 
 	for _, p := range ordered {
-		if ctx.Err() != nil {
-			return nil, nil, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
 		}
 		if !p.Probe(ctx) {
 			continue
 		}
 
 		meta, err := p.Fetch(ctx)
-		if err != nil {
-			log.Warn().Err(err).Str("provider", p.Name()).Msg("cloud metadata fetch returned partial data")
-		}
 		if meta == nil {
 			meta = &Metadata{Provider: p.Name()}
 		}
 		return p, meta, err
+	}
+	// ctx may have expired during the last Probe; surface that rather than
+	// the generic ErrNoCloudProvider so callers can distinguish timeout from
+	// "host is not on any of the known clouds".
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
 	}
 	return nil, nil, ErrNoCloudProvider
 }

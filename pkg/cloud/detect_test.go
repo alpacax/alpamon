@@ -156,6 +156,29 @@ func TestDetect_ContextDeadlineRespectedBetweenProbes(t *testing.T) {
 	}
 }
 
+func TestDetect_ContextExpiresDuringLastProbe_ReturnsCtxErr(t *testing.T) {
+	// Regression: if ctx expires DURING the final provider's Probe (not before
+	// the next iteration's top-of-loop check), Detect previously fell out and
+	// returned ErrNoCloudProvider — losing the real ctx error. The fix is a
+	// final ctx.Err() check before returning ErrNoCloudProvider.
+	//
+	// Setup: ctx deadline 30ms; single slow probe that sleeps 60ms. The probe
+	// returns false (via its own ctx.Done case) AFTER ctx expires. Without the
+	// post-loop ctx.Err() check, Detect would return ErrNoCloudProvider; with
+	// the check it returns context.DeadlineExceeded.
+	slow := &fakeProvider{name: ProviderAWS, probeOK: false, probeDelay: 60 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	_, _, err := Detect(ctx, []Provider{slow})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+	if errors.Is(err, ErrNoCloudProvider) {
+		t.Error("must not collapse ctx deadline into ErrNoCloudProvider")
+	}
+}
+
 func TestReorderByDMI_NoHint(t *testing.T) {
 	aws := &fakeProvider{name: ProviderAWS}
 	gcp := &fakeProvider{name: ProviderGCP}
