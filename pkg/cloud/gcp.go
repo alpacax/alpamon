@@ -1,0 +1,140 @@
+package cloud
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// GCE metadata server endpoints. The hostname metadata.google.internal resolves
+// to 169.254.169.254 (and to fd00:ec2::254 on IPv6 GCE), but we use the
+// hostname so the request fails fast on non-GCP hosts where DNS won't resolve.
+const (
+	gcpDefaultBase = "http://metadata.google.internal"
+
+	gcpInstanceIDPath  = "/computeMetadata/v1/instance/id"
+	gcpZonePath        = "/computeMetadata/v1/instance/zone"
+	gcpMachineTypePath = "/computeMetadata/v1/instance/machine-type"
+	gcpNetworkPath     = "/computeMetadata/v1/instance/network-interfaces/0/network"
+	gcpProjectIDPath   = "/computeMetadata/v1/project/project-id"
+
+	// gcpFlavorHeader prevents accidental cross-origin reads — GCE rejects
+	// requests without this exact header.
+	gcpFlavorHeader = "Metadata-Flavor"
+	gcpFlavorValue  = "Google"
+
+	gcpResponseLimit = 4 * 1024
+)
+
+const (
+	gcpProbeTimeout = 800 * time.Millisecond
+	gcpFetchTimeout = 2 * time.Second
+)
+
+// GCPProvider implements Provider against the GCE metadata server.
+type GCPProvider struct {
+	base   string
+	client *http.Client
+}
+
+// NewGCP returns a GCP provider pointed at metadata.google.internal.
+func NewGCP() *GCPProvider { return NewGCPWithBase(gcpDefaultBase) }
+
+// NewGCPWithBase constructs a GCP provider against an arbitrary base URL — used
+// by tests.
+func NewGCPWithBase(base string) *GCPProvider {
+	return &GCPProvider{
+		base: strings.TrimRight(base, "/"),
+		client: &http.Client{
+			Timeout: gcpFetchTimeout + 500*time.Millisecond,
+		},
+	}
+}
+
+// Name implements Provider.
+func (p *GCPProvider) Name() string { return ProviderGCP }
+
+// Probe reads the instance-id endpoint. A successful 200 with the right
+// Metadata-Flavor header echoed back is the strongest signal that this is GCE.
+func (p *GCPProvider) Probe(ctx context.Context) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, gcpProbeTimeout)
+	defer cancel()
+
+	_, err := p.get(probeCtx, gcpInstanceIDPath)
+	return err == nil
+}
+
+// Fetch retrieves the full metadata snapshot. Each sub-fetch is best-effort —
+// failures leave the corresponding Metadata field empty rather than aborting
+// the whole call, since GCE returns 404 (not 500) for genuinely-missing fields.
+func (p *GCPProvider) Fetch(ctx context.Context) (*Metadata, error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, gcpFetchTimeout)
+	defer cancel()
+
+	meta := &Metadata{Provider: ProviderGCP}
+
+	id, err := p.get(fetchCtx, gcpInstanceIDPath)
+	if err != nil {
+		return meta, fmt.Errorf("gcp instance-id: %w", err)
+	}
+	meta.InstanceID = strings.TrimSpace(string(id))
+
+	if zone, err := p.get(fetchCtx, gcpZonePath); err == nil {
+		az := basename(string(zone))
+		meta.AvailabilityZone = az
+		meta.Region = zoneToRegion(az)
+	}
+	if mt, err := p.get(fetchCtx, gcpMachineTypePath); err == nil {
+		meta.InstanceType = basename(string(mt))
+	}
+	if net, err := p.get(fetchCtx, gcpNetworkPath); err == nil {
+		meta.NetworkID = basename(string(net))
+	}
+	if proj, err := p.get(fetchCtx, gcpProjectIDPath); err == nil {
+		meta.AccountID = strings.TrimSpace(string(proj))
+	}
+
+	return meta, nil
+}
+
+func (p *GCPProvider) get(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(gcpFlavorHeader, gcpFlavorValue)
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gcp %s http %d", path, resp.StatusCode)
+	}
+	return readLimitedN(resp.Body, gcpResponseLimit)
+}
+
+// basename returns the final path segment of a slash-separated string.
+// GCE metadata returns full resource paths like "projects/123/zones/us-central1-a";
+// we only care about the leaf.
+func basename(s string) string {
+	s = strings.TrimSpace(s)
+	if idx := strings.LastIndex(s, "/"); idx >= 0 {
+		return s[idx+1:]
+	}
+	return s
+}
+
+// zoneToRegion strips the trailing zone suffix from a GCE zone name.
+// "us-central1-a" → "us-central1". A zone without a trailing "-X" is returned
+// unchanged (defensive — should not happen in practice).
+func zoneToRegion(zone string) string {
+	if idx := strings.LastIndex(zone, "-"); idx > 0 {
+		return zone[:idx]
+	}
+	return zone
+}
