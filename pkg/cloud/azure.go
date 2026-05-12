@@ -3,6 +3,7 @@ package cloud
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -103,11 +104,11 @@ func (p *AzureProvider) Fetch(ctx context.Context) (*Metadata, error) {
 		// NetworkID intentionally empty — see function-level comment.
 	}
 	// instance_id is the deterministic-match key. An otherwise-valid IMDS
-	// response with empty vmId would silently undermine reconcile — fail
+	// response with empty vmId would silently undermine reconcile, so fail
 	// explicitly while still returning partial meta (cloud:provider=azure
 	// makes it into Server.tags).
 	if meta.InstanceID == "" {
-		return meta, fmt.Errorf("azure imds returned empty vmId")
+		return meta, errors.New("azure imds returned empty vmId")
 	}
 	return meta, nil
 }

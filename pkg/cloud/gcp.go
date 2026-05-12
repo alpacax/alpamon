@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -99,9 +100,9 @@ func (p *GCPProvider) Fetch(ctx context.Context) (*Metadata, error) {
 	meta.InstanceID = strings.TrimSpace(string(id))
 	// instance_id is the deterministic-match key. A misbehaving IMDS that
 	// returns 200 with an empty body would otherwise produce a useless tag
-	// set with no cloud:instance_id — fail explicitly instead.
+	// set with no cloud:instance_id, so fail explicitly instead.
 	if meta.InstanceID == "" {
-		return meta, fmt.Errorf("gcp imds returned empty instance id")
+		return meta, errors.New("gcp imds returned empty instance id")
 	}
 
 	if zone, err := p.get(fetchCtx, gcpZonePath); err == nil {
