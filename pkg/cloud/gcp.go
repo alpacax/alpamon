@@ -54,7 +54,9 @@ type GCPProvider struct {
 	client *http.Client
 }
 
-// NewGCP returns a GCP provider pointed at metadata.google.internal.
+// NewGCP returns a GCP provider pointed at the link-local IP 169.254.169.254
+// (see gcpDefaultBase for why we use the IP directly rather than the canonical
+// metadata.google.internal hostname).
 func NewGCP() *GCPProvider { return NewGCPWithBase(gcpDefaultBase) }
 
 // NewGCPWithBase constructs a GCP provider against an arbitrary base URL. Used

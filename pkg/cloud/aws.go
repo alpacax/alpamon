@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/rs/zerolog/log"
 )
 
 // AWS IMDSv2 endpoints. Production IMDS lives on the link-local address
@@ -113,19 +111,13 @@ func (p *AWSProvider) Fetch(ctx context.Context) (*Metadata, error) {
 
 	// VPC ID is best-effort: requires two extra hops (mac → vpc-id). If either
 	// fails we leave NetworkID empty. The Server↔CloudInstance match uses
-	// cloud:instance_id, so missing cloud:network_id does not break reconcile —
-	// but we log at debug so field investigators can correlate "why is vpc empty"
-	// with the real IMDS error.
-	mac, macErr := p.fetchMAC(fetchCtx, token)
-	switch {
-	case macErr != nil:
-		log.Debug().Err(macErr).Msg("aws imds mac fetch failed; cloud:network_id will be empty")
-	case mac == "":
-		log.Debug().Msg("aws imds returned empty mac; cloud:network_id will be empty")
-	default:
-		if vpc, vpcErr := p.fetchVPCID(fetchCtx, token, mac); vpcErr != nil {
-			log.Debug().Err(vpcErr).Msg("aws imds vpc-id fetch failed; cloud:network_id will be empty")
-		} else {
+	// cloud:instance_id, so missing cloud:network_id does not break reconcile.
+	// We do not log MAC/VPC failures here: callers (e.g. register CLI) operate
+	// in plain-text mode and library-side zerolog calls would leak JSON into
+	// their output. Operators investigating missing cloud:network_id can curl
+	// IMDS directly; we trade silent partial data for a clean library boundary.
+	if mac, macErr := p.fetchMAC(fetchCtx, token); macErr == nil && mac != "" {
+		if vpc, vpcErr := p.fetchVPCID(fetchCtx, token, mac); vpcErr == nil {
 			meta.NetworkID = vpc
 		}
 	}
