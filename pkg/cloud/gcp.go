@@ -137,11 +137,20 @@ func basename(s string) string {
 }
 
 // zoneToRegion strips the trailing zone suffix from a GCE zone name.
-// "us-central1-a" → "us-central1". A zone without a trailing "-X" is returned
-// unchanged (defensive — should not happen in practice).
+// "us-central1-a" → "us-central1". GCE zones are always region-letter where
+// letter is exactly one character (a/b/c/...). If the final segment after the
+// last "-" is anything other than one character, the input is treated as
+// already a region (or otherwise malformed) and returned unchanged. This
+// guards against inputs like "us-central1" being incorrectly chopped to "us".
 func zoneToRegion(zone string) string {
-	if idx := strings.LastIndex(zone, "-"); idx > 0 {
-		return zone[:idx]
+	idx := strings.LastIndex(zone, "-")
+	if idx <= 0 {
+		return zone
 	}
-	return zone
+	if len(zone)-idx-1 != 1 {
+		// suffix is not a single zone letter — input is already a region or
+		// is otherwise non-zone-shaped (defensive).
+		return zone
+	}
+	return zone[:idx]
 }

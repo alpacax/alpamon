@@ -169,6 +169,32 @@ func TestGCP_Probe_FlavorEnforcementBreaksOnAWS(t *testing.T) {
 	}
 }
 
+func TestZoneToRegion(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// real GCE zones — strip trailing single-letter suffix
+		{"us-central1-a", "us-central1"},
+		{"asia-northeast1-b", "asia-northeast1"},
+		{"us-east4-c", "us-east4"},
+		// region-only inputs must NOT be stripped (the previous implementation
+		// chopped "us-central1" to "us")
+		{"us-central1", "us-central1"},
+		{"asia-northeast1", "asia-northeast1"},
+		// edge cases
+		{"region", "region"}, // no dash
+		{"", ""},             // empty
+		// multi-character trailing segment is treated as not-a-zone
+		{"us-central1-ab", "us-central1-ab"},
+	}
+	for _, c := range cases {
+		if got := zoneToRegion(c.in); got != c.want {
+			t.Errorf("zoneToRegion(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestGCP_Probe_RejectsResponseWithoutFlavorHeader(t *testing.T) {
 	// A captive portal / spoofed listener can return 200 + body without the
 	// Metadata-Flavor: Google response header. Probe must reject this so we

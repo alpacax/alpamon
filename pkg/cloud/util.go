@@ -34,7 +34,17 @@ func readLimitedN(r io.Reader, max int64) ([]byte, error) {
 //     CheckRedirect returns http.ErrUseLastResponse so callers see the 30x
 //     status as a non-200 and fail closed.
 func newIMDSClient(timeout time.Duration) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Safe assertion: tests or instrumentation packages (e.g. OpenTelemetry,
+	// runtime fault injection) may swap http.DefaultTransport for a different
+	// RoundTripper. An unchecked type assertion would panic in those cases and
+	// crash the agent at register time. Fall back to a fresh *http.Transport
+	// so IMDS probing degrades gracefully instead.
+	var transport *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
 	transport.Proxy = nil
 	return &http.Client{
 		Timeout:   timeout,
