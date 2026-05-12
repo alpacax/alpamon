@@ -126,11 +126,15 @@ func TestDetect_ContextCancelled(t *testing.T) {
 }
 
 func TestDetect_ContextDeadlineRespectedBetweenProbes(t *testing.T) {
-	// Each fake probe sleeps 30ms; ctx deadline is 50ms so 1st probe completes
-	// (fails) then ctx.Err short-circuit fires before the 2nd probe sleeps.
-	// Without the in-loop ctx.Err check, this test would still hang for 90ms+
-	// because each probe respects ctx but Detect would keep iterating; with the
-	// short-circuit Detect returns the ctx error promptly after 1-2 probes.
+	// Each fake probe sleeps 30ms; ctx deadline is 50ms. With the in-loop
+	// ctx.Err short-circuit working correctly, Detect returns
+	// context.DeadlineExceeded after 1-2 probes — not ErrNoCloudProvider.
+	//
+	// If the short-circuit regresses (e.g. the ctx.Err check is removed),
+	// each probe still returns quickly via its own ctx.Done case, the loop
+	// drains all providers, and Detect falls out with ErrNoCloudProvider.
+	// Tolerating ErrNoCloudProvider here would silently accept that
+	// regression, so the assertion requires DeadlineExceeded strictly.
 	slow := func() *fakeProvider {
 		return &fakeProvider{name: ProviderAWS, probeOK: false, probeDelay: 30 * time.Millisecond}
 	}
@@ -141,13 +145,12 @@ func TestDetect_ContextDeadlineRespectedBetweenProbes(t *testing.T) {
 	_, _, err := Detect(ctx, []Provider{slow(), slow(), slow()})
 	elapsed := time.Since(start)
 
-	// ctx error (deadline) is the expected signal here, not ErrNoCloudProvider.
-	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrNoCloudProvider) {
-		t.Errorf("expected DeadlineExceeded or ErrNoCloudProvider, got %v", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
 	}
-	// Loose upper bound: with the short-circuit Detect should return well
-	// before all 3 probes complete (3 * 30ms = 90ms). Allow generous slack for
-	// CI scheduling jitter.
+	// Upper bound guards against the regression where Detect ignores the
+	// deadline and serializes all probes (3 * 30ms = 90ms). Generous slack
+	// for CI scheduling jitter.
 	if elapsed > 200*time.Millisecond {
 		t.Errorf("Detect ran for %v; ctx short-circuit appears broken", elapsed)
 	}
