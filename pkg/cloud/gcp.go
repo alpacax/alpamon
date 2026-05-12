@@ -8,11 +8,26 @@ import (
 	"time"
 )
 
-// GCE metadata server endpoints. The hostname metadata.google.internal resolves
-// to 169.254.169.254 (and to fd00:ec2::254 on IPv6 GCE), but we use the
-// hostname so the request fails fast on non-GCP hosts where DNS won't resolve.
+// GCE metadata server endpoints. We target the link-local IP directly rather
+// than the canonical hostname metadata.google.internal. Reasoning:
+//
+//   - DNS dependency: a hostname lookup can resolve to a non-link-local
+//     address on hosts with split-horizon DNS, custom search domains, or a
+//     compromised resolver, allowing off-host HTTP requests that may spoof
+//     GCE responses and produce wrong cloud:* tags. The IP cannot be
+//     redirected by DNS.
+//   - Defense in depth: AWS and Azure already use link-local IPs. Using the
+//     same approach for GCP gives us a uniform untrustworthy-network policy.
+//   - Provider discrimination: cross-fire on the shared 169.254.169.254 with
+//     AWS and Azure is prevented by the Metadata-Flavor: Google REQUEST header
+//     (which AWS/Azure won't echo) and the response-header validation in
+//     get() (added in iteration 1).
+//
+// GCE listens on both 169.254.169.254 (IPv4) and fd00:ec2::254 (IPv6). We use
+// IPv4 to match AWS/Azure; IPv6-only GCE hosts are rare and can be supported
+// by future override via NewGCPWithBase.
 const (
-	gcpDefaultBase = "http://metadata.google.internal"
+	gcpDefaultBase = "http://169.254.169.254"
 
 	gcpInstanceIDPath  = "/computeMetadata/v1/instance/id"
 	gcpZonePath        = "/computeMetadata/v1/instance/zone"

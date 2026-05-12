@@ -87,16 +87,20 @@ func (p *AWSProvider) Probe(ctx context.Context) bool {
 // If Probe-positive but Fetch encounters an error mid-read, we return whatever
 // partial Metadata we managed to populate and let the caller log — we do NOT
 // fall back to a different provider, because the host IS on AWS.
+//
+// On any failure path Fetch returns a non-nil *Metadata with at least
+// Provider=aws set, matching the GCPProvider/AzureProvider contract so callers
+// can call .ToTags() safely without nil-guarding the result.
 func (p *AWSProvider) Fetch(ctx context.Context) (*Metadata, error) {
 	fetchCtx, cancel := context.WithTimeout(ctx, awsFetchTimeout)
 	defer cancel()
 
+	meta := &Metadata{Provider: ProviderAWS}
+
 	token, err := p.fetchToken(fetchCtx)
 	if err != nil {
-		return nil, fmt.Errorf("aws imds token: %w", err)
+		return meta, fmt.Errorf("aws imds token: %w", err)
 	}
-
-	meta := &Metadata{Provider: ProviderAWS}
 
 	doc, docErr := p.fetchDocument(fetchCtx, token)
 	if docErr == nil {

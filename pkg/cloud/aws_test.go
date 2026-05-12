@@ -181,9 +181,18 @@ func TestAWS_Fetch_TokenFailure(t *testing.T) {
 	defer server.Close()
 
 	p := NewAWSWithBase(server.URL)
-	_, err := p.Fetch(context.Background())
+	meta, err := p.Fetch(context.Background())
 	if err == nil {
 		t.Error("expected error when token fetch fails")
+	}
+	// Contract: Fetch returns a non-nil *Metadata with Provider=aws on every
+	// failure path, matching GCPProvider/AzureProvider so callers can call
+	// .ToTags() without nil-guarding.
+	if meta == nil {
+		t.Fatal("expected non-nil meta even on token failure")
+	}
+	if meta.Provider != ProviderAWS {
+		t.Errorf("meta.Provider = %q, want %q", meta.Provider, ProviderAWS)
 	}
 }
 
