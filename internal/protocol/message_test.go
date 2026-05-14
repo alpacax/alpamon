@@ -124,11 +124,12 @@ func TestCommand_AllowSh(t *testing.T) {
 }
 
 func TestNewCommandResponse(t *testing.T) {
-	resp := NewCommandResponse(true, "success output", 1.5)
+	resp := NewCommandResponse(true, "success output", 1.5, 0)
 
 	assert.True(t, resp.Success)
 	assert.Equal(t, "success output", resp.Result)
 	assert.Equal(t, 1.5, resp.ElapsedTime)
+	assert.Equal(t, 0, resp.ExitCode)
 }
 
 func TestNewPingResponse(t *testing.T) {
@@ -139,10 +140,12 @@ func TestNewPingResponse(t *testing.T) {
 }
 
 func TestCommandResponse_JSON(t *testing.T) {
-	resp := NewCommandResponse(true, "done", 2.5)
+	resp := NewCommandResponse(false, "command failed", 2.5, 7)
 
 	data, err := json.Marshal(resp)
 	require.NoError(t, err)
+
+	assert.Contains(t, string(data), `"exit_code":7`)
 
 	var decoded CommandResponse
 	err = json.Unmarshal(data, &decoded)
@@ -151,4 +154,5 @@ func TestCommandResponse_JSON(t *testing.T) {
 	assert.Equal(t, resp.Success, decoded.Success)
 	assert.Equal(t, resp.Result, decoded.Result)
 	assert.Equal(t, resp.ElapsedTime, decoded.ElapsedTime)
+	assert.Equal(t, resp.ExitCode, decoded.ExitCode)
 }

@@ -291,7 +291,7 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 		} else {
 			log.Error().Msg("Dispatcher not initialized")
 			// Send failure notification
-			payload := protocol.NewCommandResponse(false, "Internal error: dispatcher not initialized", 0)
+			payload := protocol.NewCommandResponse(false, "Internal error: dispatcher not initialized", 0, 1)
 			scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, msg.Command.ID),
 				payload,
 				10,
@@ -346,7 +346,7 @@ func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol
 		log.Error().Err(err).Msgf("Failed to submit command %s to pool", command.ID)
 		// Send failure notification
 		start := time.Now()
-		payload := protocol.NewCommandResponse(false, fmt.Sprintf("Failed to submit command: %v", err), time.Since(start).Seconds())
+		payload := protocol.NewCommandResponse(false, fmt.Sprintf("Failed to submit command: %v", err), time.Since(start).Seconds(), 1)
 		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, command.ID),
 			payload,
 			10,
