@@ -122,10 +122,12 @@ try {
     # ServicePointManager.SecurityProtocol still exists for source
     # compatibility but has no effect on TLS negotiation there.
     # Skip the assignment on those editions and rely on the
-    # HttpClient defaults (TLS 1.2 / 1.3 on .NET 7+). If OS-level
-    # TLS is degraded below 1.2 on such a host, fix it at the OS
-    # level; the installer is not the right place to paper over
-    # that.
+    # HttpClient/OS defaults (TLS 1.2, plus TLS 1.3 when the
+    # runtime and OS support it — on Windows that requires
+    # Server 2022 / Windows 11 SChannel or newer; older Windows
+    # gets TLS 1.2 only). If OS-level TLS is degraded below 1.2
+    # on such a host, fix it at the OS level; the installer is
+    # not the right place to paper over that.
     if ($PSVersionTable.PSEdition -eq 'Desktop') {
         $tls = [Net.SecurityProtocolType]::Tls12
         if ([Enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
