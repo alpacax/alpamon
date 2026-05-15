@@ -111,7 +111,7 @@ build shipped via the Microsoft Store and `winget`).
 
 | Shell | Invocation | TLS path |
 |---|---|---|
-| Windows PowerShell 5.1 | `powershell -ExecutionPolicy Bypass -File install.ps1` | `Invoke-WebRequest` routes through `[Net.ServicePointManager]`; the script forces TLS 1.2/1.3 there before any network call |
+| Windows PowerShell 5.1 | `powershell -ExecutionPolicy Bypass -File install.ps1` | `Invoke-WebRequest` routes through `[Net.ServicePointManager]`; the script forces TLS 1.2 (and TLS 1.3 when the `Tls13` enum is present, which requires .NET Framework 4.8+) before any network call |
 | PowerShell 7.x | `pwsh -File install.ps1` | `Invoke-WebRequest` is reimplemented on `HttpClient`, which ignores `ServicePointManager.SecurityProtocol`; the script relies on the HttpClient/OS defaults (TLS 1.2, plus TLS 1.3 when the runtime and SChannel/OpenSSL support it—on Windows that means Server 2022 / Windows 11 or newer) |
 
 The version check uses `$PSVersionTable.PSEdition -eq 'Desktop'` so
