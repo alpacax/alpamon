@@ -278,7 +278,8 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 				return 1, err.Error()
 			}
 			// lgtm[go/path-injection]: args.Path sanitized via SanitizePath, which
-			// rejects any literal ".." after cleaning. Wire input is admin-authenticated.
+			// rejects null bytes, UNC/device prefixes, and literal ".." after
+			// cleaning. Wire input is admin-authenticated.
 			_ = os.Remove(args.Path) // lgtm[go/path-injection]
 		}
 	}
@@ -321,8 +322,9 @@ func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGrou
 // parsePaths converts wire-format paths to native OS paths and
 // sanitizes them. homeDirectory is used as the anchor for tilde
 // expansion (`~/foo`) and as the base for joining relative paths;
-// it is NOT a containment root. SanitizePath rejects any literal
-// ".." that survives filepath.Clean; that is the only path-shape
+// it is NOT a containment root. SanitizePath rejects null bytes,
+// Windows UNC/device/extended-length prefixes (`\\...`), and any
+// literal ".." that survives filepath.Clean — that is the path-shape
 // validation performed here. Caller-side privilege demotion (Unix)
 // and Alpacon RBAC (both platforms) handle access control. Returns
 // the sanitized native paths plus bulk/recursive flags inferred from

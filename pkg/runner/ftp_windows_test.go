@@ -90,6 +90,42 @@ func TestParsePath_Windows(t *testing.T) {
 			path:    "\x00",
 			wantErr: true,
 		},
+		{
+			// Security regression: a wire path "//evil/share/..."
+			// translates to "\\evil\share\..." (UNC) via FromSlash.
+			// alpamon (SYSTEM) opening this would attempt to
+			// authenticate to an attacker-controlled SMB server —
+			// NTLM hash leak vector. Reject at parsePath.
+			name:    "UNC path (wire form) rejected",
+			path:    "//evil.attacker.com/share/payload.exe",
+			wantErr: true,
+		},
+		{
+			name:    "UNC path (native form) rejected",
+			path:    `\\evil.attacker.com\share\payload.exe`,
+			wantErr: true,
+		},
+		{
+			// Security regression: local device namespace gives raw
+			// disk read/write to SYSTEM. Reject.
+			name:    "local device namespace rejected",
+			path:    "//./PHYSICALDRIVE0",
+			wantErr: true,
+		},
+		{
+			// Security regression: extended-length namespace bypasses
+			// path canonicalization. Reject.
+			name:    "extended-length namespace rejected",
+			path:    `\\?\C:\Windows\System32\config\SAM`,
+			wantErr: true,
+		},
+		{
+			// Security regression: extended-length UNC is the UNC
+			// variant of the above.
+			name:    "extended-length UNC rejected",
+			path:    `\\?\UNC\evil\share\x`,
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {

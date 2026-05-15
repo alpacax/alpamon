@@ -117,6 +117,41 @@ func TestFileHandler_parsePaths_Windows_SystemRoot(t *testing.T) {
 	}
 }
 
+// TestFileHandler_parsePaths_Windows_RejectsUnsafeShapes is the security
+// hardening regression guard. After #311 removed home containment,
+// SanitizePath is the only path-shape gate; these inputs would otherwise
+// reach the OS open call running as SYSTEM. parsePaths must reject:
+//   - UNC paths (would authenticate to attacker SMB server, NTLM relay)
+//   - Local device namespace (raw disk read via \\.\PHYSICALDRIVE0)
+//   - Extended-length namespace (\\?\..., canonicalization bypass)
+//   - Embedded null bytes (logging vs OS truncation mismatch)
+func TestFileHandler_parsePaths_Windows_RejectsUnsafeShapes(t *testing.T) {
+	homeDir := t.TempDir()
+	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+
+	rejected := []struct {
+		name string
+		path string
+	}{
+		{"UNC path (wire form)", "//evil.attacker.com/share/payload.exe"},
+		{"UNC path (native form)", `\\evil.attacker.com\share\payload.exe`},
+		{"local device namespace (wire form)", "//./PHYSICALDRIVE0"},
+		{"local device namespace (native form)", `\\.\PHYSICALDRIVE0`},
+		{"extended-length namespace", `\\?\C:\Windows\System32\config\SAM`},
+		{"extended-length UNC", `\\?\UNC\evil\share\x`},
+		{"embedded null byte", "/C:/Users/test/file\x00.txt"},
+	}
+
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := handler.parsePaths(homeDir, []string{tc.path})
+			if err == nil {
+				t.Fatalf("parsePaths(%q) expected error, got nil", tc.path)
+			}
+		})
+	}
+}
+
 // TestFileHandler_fileDownload_Windows_OutsideHome exercises the
 // browser-to-host write path. Before the fix, fileDownload rejected any
 // destination outside the operator's home with "path escapes home directory".
@@ -155,5 +190,39 @@ func TestFileHandler_fileDownload_Windows_OutsideHome(t *testing.T) {
 	}
 	if string(written) != "hello" {
 		t.Errorf("contents = %q, want %q", string(written), "hello")
+	}
+}
+
+// TestFileHandler_fileDownload_Windows_RejectsUnsafeShapes guards the
+// write-to-disk path against the same UNC/device/null-byte vectors as
+// parsePaths. A wire-format destination must not be able to make alpamon
+// open a remote SMB share or a raw device for writing.
+func TestFileHandler_fileDownload_Windows_RejectsUnsafeShapes(t *testing.T) {
+	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+
+	rejected := []struct {
+		name string
+		path string
+	}{
+		{"UNC destination", "//evil.attacker.com/share/payload.exe"},
+		{"device destination", "//./PHYSICALDRIVE0"},
+		{"extended-length destination", `\\?\C:\Windows\System32\bad.exe`},
+		{"null byte in destination", "/C:/Users/test/file\x00.txt"},
+	}
+
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			args := &common.CommandArgs{
+				Type:           "text",
+				Content:        "x",
+				Path:           tc.path,
+				Username:       "test",
+				AllowOverwrite: true,
+			}
+			code, msg := handler.fileDownload(context.Background(), args, nil)
+			if code == 0 {
+				t.Fatalf("fileDownload(%q) expected non-zero code, got code=0 msg=%q", tc.path, msg)
+			}
+		})
 	}
 }

@@ -205,6 +205,16 @@ func (fc *FtpClient) parsePath(path string) (string, error) {
 
 	cleanPath := filepath.Clean(absPath)
 
+	// Reject Windows UNC, device, and extended-length namespace paths
+	// (`\\server\share`, `\\.\PHYSICALDRIVE0`, `\\?\...`). They have no
+	// legitimate WebFTP use; without this check a wire path could make
+	// alpamon (SYSTEM on Windows) authenticate to a hostile SMB server
+	// or open raw devices. Universal — the prefix has no legitimate
+	// meaning on Unix either, so no platform branch is needed.
+	if strings.HasPrefix(cleanPath, `\\`) {
+		return "", fmt.Errorf("%s: UNC and device paths are not allowed", ErrInvalidArgument)
+	}
+
 	if runtime.GOOS == "windows" {
 		// WebFTP on Windows runs as the service account (typically
 		// SYSTEM) because privilege demotion is not yet implemented;
