@@ -60,6 +60,24 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      # GoReleaser needs write access to two repositories with a single
+      # token: this repo (to attach release assets) and homebrew-alpacon
+      # (to push the updated Formula commit into the tap). The built-in
+      # `secrets.GITHUB_TOKEN` is scoped to this repo only, so we mint a
+      # cross-repo installation token from the alpacax-release-publisher
+      # GitHub App instead. The same token is reused by the later
+      # "Publish stable-alias checksums file" step.
+      - name: Generate App token
+        id: release-publisher-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PUBLISHER_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            alpamon
+            homebrew-alpacon
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -67,7 +85,7 @@ jobs:
           version: latest
           args: release --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GORELEASER_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.release-publisher-token.outputs.token }}
           # Pin the tag goreleaser treats as "current" to the tag that
           # actually triggered this workflow. Without this, goreleaser
           # falls back to `git describe --tags`, which picks the
@@ -108,7 +126,7 @@ jobs:
       # upload`.
       - name: Publish stable-alias checksums file
         env:
-          GH_TOKEN: ${{ secrets.GORELEASER_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.release-publisher-token.outputs.token }}
         run: |
           set -e
           versioned="dist/alpamon-${{ steps.channel.outputs.tag }}-checksums.sha256"
