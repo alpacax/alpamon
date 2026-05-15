@@ -157,9 +157,10 @@ jobs:
       # PowerShell 7.x to catch future syntax-compatibility drift.
       # This is a parse-only regression guard, not a behavior test:
       # the install.ps1 PS-7.x fix gates ServicePointManager assignments
-      # on $PSVersionTable.PSVersion.Major, which both shells parse
-      # cleanly. Actual fix behavior is verified manually on hosts with
-      # degraded OS TLS (see docs/windows.md > PowerShell compatibility).
+      # on $PSVersionTable.PSEdition (only the Desktop edition takes the
+      # legacy shim), which both shells parse cleanly. Actual fix
+      # behavior is verified manually on hosts with degraded OS TLS
+      # (see docs/windows.md > PowerShell compatibility).
       - name: Parse install.ps1 under Windows PowerShell 5.1
         shell: powershell
         run: |
