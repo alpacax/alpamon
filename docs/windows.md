@@ -85,9 +85,12 @@ upgrade an already-registered host, use `alpamon upgrade` or the
 If the install fails after the service was stopped, the script
 best-effort restarts the previously-running service before exiting
 non-zero, so a transient network or checksum failure does not leave
-the host with a downed agent. TLS 1.2 is forced before any network
-call, so stock Server 2019 images do not need a manual
-`[Net.ServicePointManager]::SecurityProtocol` shim.
+the host with a downed agent. On Windows PowerShell 5.1 the script
+forces TLS 1.2+ at the .NET `ServicePointManager` level, so stock
+Server 2019 images do not need a manual TLS shim. On PowerShell 7.x
+the installer relies on the .NET HttpClient defaults instead—see
+[PowerShell compatibility](#powershell-compatibility) for the full
+matrix.
 
 A terser pipe-to-`iex` form is also supported; it still performs the
 checksum verification inside the script, but trades local-audit
@@ -97,6 +100,43 @@ friendliness for brevity:
 $env:ALPAMON_URL   = "https://<workspace>"
 $env:ALPAMON_TOKEN = "<TOKEN>"
 iwr https://raw.githubusercontent.com/alpacax/alpamon/main/scripts/install.ps1 -UseB | iex
+```
+
+### PowerShell compatibility
+
+`install.ps1` is verified against both Windows PowerShell 5.1
+(`powershell.exe`, the in-box shell on Windows Server 2019/2022 and
+Windows 10/11) and PowerShell 7.x (`pwsh.exe`, the cross-platform
+build shipped via the Microsoft Store and `winget`).
+
+| Shell | Invocation | TLS path |
+|---|---|---|
+| Windows PowerShell 5.1 | `powershell -ExecutionPolicy Bypass -File install.ps1` | `Invoke-WebRequest` routes through `[Net.ServicePointManager]`; the script forces TLS 1.2 (and TLS 1.3 when the `Tls13` enum is present, which requires .NET Framework 4.8+) before any network call |
+| PowerShell 7.x | `pwsh -File install.ps1` | `Invoke-WebRequest` is reimplemented on `HttpClient`, which ignores `ServicePointManager.SecurityProtocol`; the script relies on the HttpClient/OS defaults (TLS 1.2, plus TLS 1.3 when the runtime and SChannel/OpenSSL support it—on Windows that means Server 2022 / Windows 11 or newer) |
+
+The version check uses `$PSVersionTable.PSEdition -eq 'Desktop'` so
+only Windows PowerShell (the `Desktop` edition built on .NET
+Framework) takes the legacy `ServicePointManager` TLS path.
+PowerShell 6.x and 7.x both report `Core` edition and use the
+HttpClient-based web cmdlets, so they fall through to the HttpClient
+defaults; treating either as 5.1 would emit a misleading verbose
+message and a TLS assignment the HTTP stack ignores. PowerShell 4.x
+and earlier are rejected by a `#requires -Version 5.1` directive at
+the top of the script, which fails fast with a clear error instead
+of producing a confusing mid-run cmdlet failure.
+
+If a host running PowerShell 7.x has OS-level TLS configured below 1.2
+(very old Windows 10 baselines with disabled TLS 1.2, custom Group
+Policy lockdowns), `install.ps1` cannot work around it—the HttpClient
+is bound by `SChannel`. Re-enable TLS 1.2 at the OS level before
+running the installer; the same fix applies to every other HTTPS
+client on that host.
+
+Pass `-Verbose` to either shell to see which TLS path the installer
+selected:
+
+```powershell
+& pwsh -File .\install.ps1 -Verbose
 ```
 
 ### Option B: manual extract + `alpamon register`

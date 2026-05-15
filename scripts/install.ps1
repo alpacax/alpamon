@@ -1,3 +1,4 @@
+#requires -Version 5.1
 <#
 .SYNOPSIS
     Install the Alpamon agent on Windows.
@@ -82,7 +83,23 @@ $tempDir = $null
 # would persist in a caller that invoked the installer via `iwr | iex`.
 # Capture the prior value and restore it in the finally block for the
 # same reason $ProgressPreference is saved and restored above.
-$previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+#
+# Only meaningful on Windows PowerShell (the `Desktop` edition,
+# built on .NET Framework), which routes Invoke-WebRequest /
+# Invoke-RestMethod through ServicePointManager. PowerShell Core
+# editions (6.x and 7.x) reimplement those cmdlets on HttpClient
+# and ignore ServicePointManager.SecurityProtocol entirely, so
+# there is nothing to save or restore there. Pre-initialize to
+# $null so the finally block always has a defined read target
+# even under Set-StrictMode -Version Latest.
+$previousSecurityProtocol = $null
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+    Write-Verbose "PowerShell $($PSVersionTable.PSVersion); saving previous SecurityProtocol for restore."
+    $previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+}
+else {
+    Write-Verbose "PowerShell $($PSVersionTable.PSVersion); skipping SecurityProtocol save (HttpClient ignores it)."
+}
 
 try {
     if (-not $Url -or -not $Token) {
@@ -99,11 +116,29 @@ try {
     # Older Server 2019 base images default to SSL3/TLS1.0, which fails
     # the GitHub API handshake. TLS 1.3 only exists on .NET Framework 4.8+,
     # so probe for the enum value rather than referencing the literal.
-    $tls = [Net.SecurityProtocolType]::Tls12
-    if ([Enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
-        $tls = $tls -bor [Net.SecurityProtocolType]'Tls13'
+    #
+    # PowerShell Core editions (6.x and 7.x) reimplement
+    # Invoke-WebRequest / Invoke-RestMethod on top of HttpClient;
+    # ServicePointManager.SecurityProtocol still exists for source
+    # compatibility but has no effect on TLS negotiation there.
+    # Skip the assignment on those editions and rely on the
+    # HttpClient/OS defaults (TLS 1.2, plus TLS 1.3 when the
+    # runtime and OS support it — on Windows that requires
+    # Server 2022 / Windows 11 SChannel or newer; older Windows
+    # gets TLS 1.2 only). If OS-level TLS is degraded below 1.2
+    # on such a host, fix it at the OS level; the installer is
+    # not the right place to paper over that.
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        $tls = [Net.SecurityProtocolType]::Tls12
+        if ([Enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
+            $tls = $tls -bor [Net.SecurityProtocolType]'Tls13'
+        }
+        [Net.ServicePointManager]::SecurityProtocol = $tls
+        Write-Verbose "Forced ServicePointManager.SecurityProtocol = $tls (Windows PowerShell 5.x path)."
     }
-    [Net.ServicePointManager]::SecurityProtocol = $tls
+    else {
+        Write-Verbose "Skipping ServicePointManager.SecurityProtocol assignment on PowerShell $($PSVersionTable.PSVersion); HttpClient ignores it."
+    }
 
     # If an alpamon service already exists, stop it so `alpamon register`
     # can replace %ProgramFiles%\alpamon\alpamon.exe without hitting
@@ -226,6 +261,14 @@ finally {
     if ($tempDir -and (Test-Path $tempDir)) {
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
     }
-    [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
+    # Symmetric with the save/set guards above: only restore on the
+    # PowerShell edition that actually changed the value. On Core
+    # editions the value was never saved ($previousSecurityProtocol
+    # is $null) and writing $null into a [Net.SecurityProtocolType]
+    # property is confusing at best.
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
+        Write-Verbose "Restored ServicePointManager.SecurityProtocol = $previousSecurityProtocol."
+    }
     $ProgressPreference = $previousProgressPreference
 }

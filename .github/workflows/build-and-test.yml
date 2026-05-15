@@ -153,6 +153,50 @@ jobs:
         run: go build -v .
         working-directory: ./cmd/alpamon
 
+      # Parse install.ps1 under both Windows PowerShell 5.1 and
+      # PowerShell 7.x to catch future syntax-compatibility drift.
+      # This is a parse-only regression guard, not a behavior test:
+      # the install.ps1 PS-7.x fix gates ServicePointManager assignments
+      # on $PSVersionTable.PSEdition (only the Desktop edition takes the
+      # legacy shim), which both shells parse cleanly. Actual fix
+      # behavior is verified manually on hosts with degraded OS TLS
+      # (see docs/windows.md > PowerShell compatibility).
+      - name: Parse install.ps1 under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $PWD 'scripts\install.ps1'
+          if (-not (Test-Path $script)) { throw "install.ps1 not found at $script" }
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+              $script, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -gt 0) {
+              foreach ($e in $parseErrors) {
+                  Write-Host "::error file=scripts/install.ps1,line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              }
+              throw "install.ps1 has $($parseErrors.Count) parse error(s) under Windows PowerShell 5.1."
+          }
+          Write-Host "install.ps1 parsed cleanly under Windows PowerShell $($PSVersionTable.PSVersion)."
+
+      - name: Parse install.ps1 under PowerShell 7.x
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $PWD 'scripts/install.ps1'
+          if (-not (Test-Path $script)) { throw "install.ps1 not found at $script" }
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+              $script, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -gt 0) {
+              foreach ($e in $parseErrors) {
+                  Write-Host "::error file=scripts/install.ps1,line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              }
+              throw "install.ps1 has $($parseErrors.Count) parse error(s) under PowerShell 7.x."
+          }
+          Write-Host "install.ps1 parsed cleanly under PowerShell $($PSVersionTable.PSVersion)."
+
       - name: Vet
         run: go vet ./...
 
