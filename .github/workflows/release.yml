@@ -77,6 +77,11 @@ jobs:
           repositories: |
             alpamon
             homebrew-alpacon
+          # Pin the minted installation token to the single permission
+          # GoReleaser actually needs. If the App's installation
+          # permissions are expanded in the future for another use case,
+          # this step continues to issue a contents-only token.
+          permission-contents: write
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
