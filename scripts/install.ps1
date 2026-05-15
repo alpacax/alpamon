@@ -84,15 +84,16 @@ $tempDir = $null
 # Capture the prior value and restore it in the finally block for the
 # same reason $ProgressPreference is saved and restored above.
 #
-# Only meaningful on Windows PowerShell 5.1, which routes
-# Invoke-WebRequest / Invoke-RestMethod through ServicePointManager.
-# PowerShell 7.x reimplements those cmdlets on HttpClient and ignores
-# ServicePointManager.SecurityProtocol entirely, so there is nothing
-# to save or restore there. Pre-initialize to $null so the finally
-# block always has a defined read target even under
-# Set-StrictMode -Version Latest.
+# Only meaningful on Windows PowerShell (the `Desktop` edition,
+# built on .NET Framework), which routes Invoke-WebRequest /
+# Invoke-RestMethod through ServicePointManager. PowerShell Core
+# editions (6.x and 7.x) reimplement those cmdlets on HttpClient
+# and ignore ServicePointManager.SecurityProtocol entirely, so
+# there is nothing to save or restore there. Pre-initialize to
+# $null so the finally block always has a defined read target
+# even under Set-StrictMode -Version Latest.
 $previousSecurityProtocol = $null
-if ($PSVersionTable.PSVersion.Major -lt 7) {
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
     Write-Verbose "PowerShell $($PSVersionTable.PSVersion); saving previous SecurityProtocol for restore."
     $previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
 }
@@ -116,14 +117,16 @@ try {
     # the GitHub API handshake. TLS 1.3 only exists on .NET Framework 4.8+,
     # so probe for the enum value rather than referencing the literal.
     #
-    # PowerShell 7.x reimplements Invoke-WebRequest / Invoke-RestMethod
-    # on top of HttpClient; ServicePointManager.SecurityProtocol still
-    # exists for source compatibility but has no effect on TLS
-    # negotiation there. Skip the assignment on 7.x and rely on the
-    # .NET 7+ HttpClient defaults (TLS 1.2 / 1.3). If OS-level TLS is
-    # degraded below 1.2 on a PS 7.x host, fix it at the OS level; the
-    # installer is not the right place to paper over that.
-    if ($PSVersionTable.PSVersion.Major -lt 7) {
+    # PowerShell Core editions (6.x and 7.x) reimplement
+    # Invoke-WebRequest / Invoke-RestMethod on top of HttpClient;
+    # ServicePointManager.SecurityProtocol still exists for source
+    # compatibility but has no effect on TLS negotiation there.
+    # Skip the assignment on those editions and rely on the
+    # HttpClient defaults (TLS 1.2 / 1.3 on .NET 7+). If OS-level
+    # TLS is degraded below 1.2 on such a host, fix it at the OS
+    # level; the installer is not the right place to paper over
+    # that.
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
         $tls = [Net.SecurityProtocolType]::Tls12
         if ([Enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
             $tls = $tls -bor [Net.SecurityProtocolType]'Tls13'
@@ -257,11 +260,11 @@ finally {
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
     }
     # Symmetric with the save/set guards above: only restore on the
-    # PowerShell version that actually changed the value. On 7.x the
-    # value was never saved ($previousSecurityProtocol is $null) and
-    # writing $null into a [Net.SecurityProtocolType] property is
-    # confusing at best.
-    if ($PSVersionTable.PSVersion.Major -lt 7) {
+    # PowerShell edition that actually changed the value. On Core
+    # editions the value was never saved ($previousSecurityProtocol
+    # is $null) and writing $null into a [Net.SecurityProtocolType]
+    # property is confusing at best.
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
         [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
         Write-Verbose "Restored ServicePointManager.SecurityProtocol = $previousSecurityProtocol."
     }

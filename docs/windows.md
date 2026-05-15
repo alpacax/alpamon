@@ -114,12 +114,16 @@ build shipped via the Microsoft Store and `winget`).
 | Windows PowerShell 5.1 | `powershell -ExecutionPolicy Bypass -File install.ps1` | `Invoke-WebRequest` routes through `[Net.ServicePointManager]`; the script forces TLS 1.2/1.3 there before any network call |
 | PowerShell 7.x | `pwsh -File install.ps1` | `Invoke-WebRequest` is reimplemented on `HttpClient`, which ignores `ServicePointManager.SecurityProtocol`; the script relies on the .NET 7+ defaults (TLS 1.2/1.3) |
 
-The version check uses `$PSVersionTable.PSVersion.Major -lt 7`, so the
-5.1 code path also runs under the (end-of-life) PowerShell 6.x line if
-it is somehow still in use. PowerShell 4.x and earlier are rejected by
-a `#requires -Version 5.1` directive at the top of the script, which
-fails fast with a clear error instead of producing a confusing mid-run
-cmdlet failure.
+The version check uses `$PSVersionTable.PSEdition -eq 'Desktop'` so
+only Windows PowerShell (the `Desktop` edition built on .NET
+Framework) takes the legacy `ServicePointManager` TLS path.
+PowerShell 6.x and 7.x both report `Core` edition and use the
+HttpClient-based web cmdlets, so they fall through to the HttpClient
+defaults; treating either as 5.1 would emit a misleading verbose
+message and a TLS assignment the HTTP stack ignores. PowerShell 4.x
+and earlier are rejected by a `#requires -Version 5.1` directive at
+the top of the script, which fails fast with a clear error instead
+of producing a confusing mid-run cmdlet failure.
 
 If a host running PowerShell 7.x has OS-level TLS configured below 1.2
 (very old Windows 10 baselines with disabled TLS 1.2, custom Group
