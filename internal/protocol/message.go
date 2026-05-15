@@ -33,6 +33,7 @@ type CommandResponse struct {
 	Success     bool    `json:"success"`
 	Result      string  `json:"result"`
 	ElapsedTime float64 `json:"elapsed_time"`
+	ExitCode    int     `json:"exit_code"`
 }
 
 // PingResponse represents a ping response
@@ -50,11 +51,12 @@ func NewPingResponse() *PingResponse {
 }
 
 // NewCommandResponse creates a new command response
-func NewCommandResponse(success bool, result string, elapsed float64) *CommandResponse {
+func NewCommandResponse(success bool, result string, elapsed float64, exitCode int) *CommandResponse {
 	return &CommandResponse{
 		Success:     success,
 		Result:      result,
 		ElapsedTime: elapsed,
+		ExitCode:    exitCode,
 	}
 }
 

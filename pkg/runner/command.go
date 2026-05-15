@@ -52,7 +52,7 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 	defer func() {
 		if cr.command.ID != "" {
 			finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
-			payload := protocol.NewCommandResponse(exitCode == 0, result, time.Since(start).Seconds())
+			payload := protocol.NewCommandResponse(exitCode == 0, result, time.Since(start).Seconds(), exitCode)
 			scheduler.Rqueue.Post(finURL, payload, 10, time.Time{})
 		}
 	}()
