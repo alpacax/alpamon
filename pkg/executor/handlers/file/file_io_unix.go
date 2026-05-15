@@ -57,7 +57,8 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 }
 
 // writeFileAs streams src to a file, demoting via tee when sysProcAttr is set. Caller owns src.
-// path is sanitized by callers via utils.SanitizePath + (Windows) ResolveAndEnsureUnderHome.
+// path is sanitized by callers via utils.SanitizePath, which rejects null bytes,
+// UNC/device prefixes, and literal ".." after cleaning.
 func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr) error {
 	if sysProcAttr == nil {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -88,8 +89,9 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	runErr := cmd.Run()
 
 	if runErr != nil || erc.err != nil {
-		// lgtm[go/path-injection]: path sanitized via SanitizePath; Windows additionally
-		// enforces ResolveAndEnsureUnderHome. Wire input is admin-authenticated.
+		// lgtm[go/path-injection]: path sanitized via SanitizePath, which
+		// rejects null bytes, UNC/device prefixes, and literal ".." after
+		// cleaning. Wire input is admin-authenticated.
 		_ = os.Remove(path) // lgtm[go/path-injection]
 		if runErr != nil {
 			var details []string

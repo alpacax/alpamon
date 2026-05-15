@@ -178,14 +178,12 @@ func TestFileExists(t *testing.T) {
 
 func TestFileHandler_parsePaths(t *testing.T) {
 	// This test uses Unix-style absolute paths ("/home/user", "/tmp/...").
-	// On Windows parsePaths runs EnsureUnderHome with these paths, which
-	// fails because "/tmp/file.txt" is not inside "/home/user" under
-	// Windows path semantics and "/home/user" itself is not an absolute
-	// Windows path. Skip on Windows; the behavior there is covered by
-	// the EnsureUnderHome and ResolveAndEnsureUnderHome tests in
-	// pkg/utils/wirepath_test.go.
+	// On Windows those paths join with the supplied home into shapes
+	// that filepath.IsAbs/Stat behave oddly on, so the cases here only
+	// document the Unix contract. Windows-specific coverage lives in
+	// file_windows_test.go (regression tests for #311).
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix path conventions; Windows containment is covered in pkg/utils")
+		t.Skip("Unix path conventions; Windows-specific coverage lives in file_windows_test.go")
 	}
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 

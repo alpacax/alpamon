@@ -229,6 +229,18 @@ In practice:
   with the host's Windows event log (SYSTEM-level execution trace);
   neither alone is sufficient.
 
+**WebFTP file access scope.** Because every command runs as SYSTEM
+(above), WebFTP can read and write any path the SYSTEM account has
+access to—including system directories like `C:\Windows\System32`, the
+alpamon log directory under `%ProgramData%\alpamon\`, and any user
+profile on the host. There is no agent-side containment to the
+requesting operator's home directory; until credential-based privilege
+demotion ships, access scoping is the responsibility of **Alpacon
+RBAC** and the **roster of Websh-eligible users**, not the agent.
+Operators should treat WebFTP on Windows as "SYSTEM-level filesystem
+access labeled with the operator's identity for audit", in the same way
+Websh is treated today.
+
 ## Upgrade
 
 The agent ships with a self-updater that handles the normal case:
@@ -305,7 +317,7 @@ implemented.
 |---|---|
 | Remote shell (`exec`, `shell`) | `powershell.exe -NoLogo -Command`; supports `&&`, `\|\|`, `;` operators |
 | Websh (browser terminal) | ConPTY / Microsoft Pseudoconsole—see `pkg/runner/pty_windows.go` |
-| File upload / download | Direct `ReadFile` / `WriteFile`, parent directories auto-created |
+| File upload / download | Direct `ReadFile` / `WriteFile`, parent directories auto-created. Runs as SYSTEM; see [Permissions and identity](#permissions-and-identity) |
 | System info (commit / sync) | Via `gopsutil`; users enumerated via `Get-LocalUser`, groups via `Get-LocalGroup` |
 | System control | `restart`, `reboot`, `shutdown`, `upgrade`, `quit` |
 | Realtime metrics | CPU, memory, disk, network (gopsutil) |

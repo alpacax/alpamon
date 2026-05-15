@@ -35,10 +35,13 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 
 	homeDir := utils.FromWirePath(data.HomeDirectory)
 	if runtime.GOOS == "windows" && homeDir == "" {
-		// On Windows home-directory containment is the only access
-		// scope (no privilege demotion). Refuse to start a session
-		// that has nothing to contain to, rather than fail closed on
-		// every subsequent command with a confusing error.
+		// On Windows alpamon runs as SYSTEM with no privilege demotion,
+		// so an empty home directory would let relative paths resolve
+		// against the service process CWD with full SYSTEM rights,
+		// which is both confusing and unsafe. On Unix the demoted
+		// process's filesystem ACLs make the same scenario benign, so
+		// the check is Windows-only. Refuse to open the session here
+		// rather than surface the surprise on every subsequent command.
 		data.Logger.Debug().Msg("Refusing to open WebFTP session with empty home directory on Windows.")
 		return nil
 	}
@@ -202,19 +205,24 @@ func (fc *FtpClient) parsePath(path string) (string, error) {
 
 	cleanPath := filepath.Clean(absPath)
 
+	// Reject Windows UNC, device, and extended-length namespace paths
+	// (`\\server\share`, `\\.\PHYSICALDRIVE0`, `\\?\...`). They have no
+	// legitimate WebFTP use; without this check a wire path could make
+	// alpamon (SYSTEM on Windows) authenticate to a hostile SMB server
+	// or open raw devices. Universal — the prefix has no legitimate
+	// meaning on Unix either, so no platform branch is needed.
+	if strings.HasPrefix(cleanPath, `\\`) {
+		return "", fmt.Errorf("%s: UNC and device paths are not allowed", ErrInvalidArgument)
+	}
+
 	if runtime.GOOS == "windows" {
-		// Windows has no privilege demotion (utils.Demote is a no-op),
-		// so alpamon runs as the service account (typically SYSTEM)
-		// and OS-level ACLs do not scope the session to the named user.
-		// Enforce an explicit home-directory containment instead, with
-		// symlinks/junctions resolved on both sides, so a malicious
-		// wire path (or a junction planted inside home) cannot reach
-		// system files like C:\Windows\System32\config\SAM.
-		resolved, err := utils.ResolveAndEnsureUnderHome(fc.homeDirectory, cleanPath)
-		if err != nil {
-			return "", fmt.Errorf("%s: %w", ErrInvalidArgument, err)
-		}
-		return resolved, nil
+		// WebFTP on Windows runs as the service account (typically
+		// SYSTEM) because privilege demotion is not yet implemented;
+		// on Unix the demoted-process OS-level ACLs provide per-user
+		// scoping. Either way, parsePath does not enforce a
+		// containment boundary here. Access control is delegated to
+		// OS privileges and to Alpacon RBAC.
+		return cleanPath, nil
 	}
 
 	// Unix: enforce that the resolved path stays under "/". OS-level

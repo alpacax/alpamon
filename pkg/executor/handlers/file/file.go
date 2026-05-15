@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -198,12 +197,12 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 	if len(args.Files) == 0 {
 		// Download enforces supplementary-group membership so a requested
 		// GID cannot widen filesystem access beyond what the user has.
-		sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, true, args.HomeDirectory)
+		sysProcAttr, _, err := h.demoteWithHomeDir(args.Username, args.Groupname, true, args.HomeDirectory)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to demote user.")
 			return 1, err.Error(), nil
 		}
-		code, message = h.fileDownload(ctx, args, sysProcAttr, homeDirectory)
+		code, message = h.fileDownload(ctx, args, sysProcAttr)
 		h.statFileTransfer(code, upload, message, args)
 	} else {
 		// Each file entry may target a different user/group, so demote
@@ -222,7 +221,7 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 				URL:            file.URL,
 				HomeDirectory:  args.HomeDirectory,
 			}
-			sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(cmdArgs.Username, cmdArgs.Groupname, true, cmdArgs.HomeDirectory)
+			sysProcAttr, _, err := h.demoteWithHomeDir(cmdArgs.Username, cmdArgs.Groupname, true, cmdArgs.HomeDirectory)
 			if err != nil {
 				log.Error().Err(err).Str("username", cmdArgs.Username).Msg("Failed to demote user.")
 				code = 1
@@ -230,7 +229,7 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 				h.statFileTransfer(code, upload, message, cmdArgs)
 				continue
 			}
-			code, message = h.fileDownload(ctx, cmdArgs, sysProcAttr, homeDirectory)
+			code, message = h.fileDownload(ctx, cmdArgs, sysProcAttr)
 			h.statFileTransfer(code, upload, message, cmdArgs)
 		}
 	}
@@ -243,7 +242,7 @@ func (h *FileHandler) handleDownload(ctx context.Context, args *common.CommandAr
 }
 
 // fileDownload handles single file download
-func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr, homeDirectory string) (int, string) {
+func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs, sysProcAttr *syscall.SysProcAttr) (int, string) {
 	src, err := h.getFileData(ctx, args)
 	if err != nil {
 		return 1, err.Error()
@@ -254,13 +253,6 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	downloadPath, err := utils.SanitizePath(utils.FromWirePath(args.Path))
 	if err != nil {
 		return 1, err.Error()
-	}
-	if runtime.GOOS == "windows" {
-		resolved, err := utils.ResolveAndEnsureUnderHome(homeDirectory, downloadPath)
-		if err != nil {
-			return 1, err.Error()
-		}
-		downloadPath = resolved
 	}
 	args.Path = downloadPath
 
@@ -285,8 +277,9 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 				log.Error().Err(err).Msg("Failed to unzip file.")
 				return 1, err.Error()
 			}
-			// lgtm[go/path-injection]: args.Path sanitized via SanitizePath; Windows additionally
-			// enforces ResolveAndEnsureUnderHome. Wire input is admin-authenticated.
+			// lgtm[go/path-injection]: args.Path sanitized via SanitizePath, which
+			// rejects null bytes, UNC/device prefixes, and literal ".." after
+			// cleaning. Wire input is admin-authenticated.
 			_ = os.Remove(args.Path) // lgtm[go/path-injection]
 		}
 	}
@@ -307,9 +300,9 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 //     protocol message from alpacon-server)
 //
 // The fallback exists so Windows and non-root Unix paths do not end
-// up with an empty home, which would cause relative paths to resolve
-// against the process CWD and Windows containment to fail with a
-// misleading configuration error.
+// up with an empty home, which would otherwise cause relative paths
+// and tilde expansion to resolve against the process CWD and yield
+// unpredictable results.
 func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGroup bool, fallbackHome string) (*syscall.SysProcAttr, string, error) {
 	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: validateGroup})
 	if err != nil {
@@ -326,7 +319,16 @@ func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGrou
 	return nil, fallbackHome, nil
 }
 
-// parsePaths parses and validates the path list
+// parsePaths converts wire-format paths to native OS paths and
+// sanitizes them. homeDirectory is used as the anchor for tilde
+// expansion (`~/foo`) and as the base for joining relative paths;
+// it is NOT a containment root. SanitizePath rejects null bytes,
+// Windows UNC/device/extended-length prefixes (`\\...`), and any
+// literal ".." that survives filepath.Clean — that is the path-shape
+// validation performed here. Caller-side privilege demotion (Unix)
+// and Alpacon RBAC (both platforms) handle access control. Returns
+// the sanitized native paths plus bulk/recursive flags inferred from
+// the input.
 func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]string, bool, bool, error) {
 	paths := make([]string, len(pathList))
 	for i, path := range pathList {
@@ -348,13 +350,6 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 		sanitized, err := utils.SanitizePath(path)
 		if err != nil {
 			return nil, false, false, err
-		}
-		if runtime.GOOS == "windows" {
-			resolved, err := utils.ResolveAndEnsureUnderHome(homeDirectory, sanitized)
-			if err != nil {
-				return nil, false, false, err
-			}
-			sanitized = resolved
 		}
 		paths[i] = sanitized
 	}
