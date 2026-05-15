@@ -37,11 +37,11 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 	if runtime.GOOS == "windows" && homeDir == "" {
 		// On Windows alpamon runs as SYSTEM with no privilege demotion,
 		// so an empty home directory would let relative paths resolve
-		// against the service process CWD with full SYSTEM rights —
-		// both confusing and unsafe. On Unix the demoted process's
-		// filesystem ACLs make the same scenario benign, so the check
-		// is Windows-only. Refuse to open the session here rather than
-		// surface the surprise on every subsequent command.
+		// against the service process CWD with full SYSTEM rights,
+		// which is both confusing and unsafe. On Unix the demoted
+		// process's filesystem ACLs make the same scenario benign, so
+		// the check is Windows-only. Refuse to open the session here
+		// rather than surface the surprise on every subsequent command.
 		data.Logger.Debug().Msg("Refusing to open WebFTP session with empty home directory on Windows.")
 		return nil
 	}
@@ -210,7 +210,7 @@ func (fc *FtpClient) parsePath(path string) (string, error) {
 		// SYSTEM) because privilege demotion is not yet implemented;
 		// on Unix the demoted-process OS-level ACLs provide per-user
 		// scoping. Either way, parsePath does not enforce a
-		// containment boundary here — access control is delegated to
+		// containment boundary here. Access control is delegated to
 		// OS privileges and to Alpacon RBAC.
 		return cleanPath, nil
 	}

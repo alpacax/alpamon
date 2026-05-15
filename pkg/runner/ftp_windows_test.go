@@ -127,8 +127,8 @@ func TestParsePath_Windows_NullByteErrorMessage(t *testing.T) {
 // predictability guard in NewFtpClient still rejects sessions with no
 // home directory on Windows. Although containment is no longer the
 // rationale, an empty home would make relative paths resolve against
-// the service CWD, producing confusing results — so the session is
-// refused.
+// the service CWD, producing confusing results, so the session is
+// refused at construction time.
 func TestNewFtpClient_Windows_EmptyHomeReturnsNil(t *testing.T) {
 	cfg := FtpConfigData{
 		URL:           "ws://example.com/test",
