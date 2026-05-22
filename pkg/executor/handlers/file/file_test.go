@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -262,12 +263,19 @@ func TestFileUpload_UseBlob_PutErrorTakesPrecedence(t *testing.T) {
 	}
 
 	h := NewFileHandler(common.NewMockCommandExecutor(t), nil)
-	// 127.0.0.1:1 is the reserved tcpmux port; on all common platforms a
-	// connection here is refused immediately, producing a transport-level
-	// error from utils.Put without depending on DNS or external network.
-	args := &common.CommandArgs{UseBlob: true, Content: "http://127.0.0.1:1/blob"}
+	// Bind to 127.0.0.1:0 to claim a free port, then close the listener so
+	// any subsequent connection to that address is deterministically refused.
+	// This avoids depending on a specific port (e.g. tcpmux/1) being closed
+	// in CI/container environments.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closedAddr := ln.Addr().String()
+	_ = ln.Close()
+	args := &common.CommandArgs{UseBlob: true, Content: "http://" + closedAddr + "/blob"}
 
-	_, err := h.fileUpload(args, er, 5, "blob.bin", false)
+	_, err = h.fileUpload(args, er, 5, "blob.bin", false)
 	if err == nil {
 		t.Fatal("fileUpload returned nil err, want PUT transport error")
 	}
