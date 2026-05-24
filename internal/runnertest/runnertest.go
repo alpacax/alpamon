@@ -13,7 +13,7 @@ package runnertest
 import (
 	"testing"
 
-	"github.com/alpacax/alpamon/pkg/runner"
+	"github.com/alpacax/alpamon/v2/pkg/runner"
 )
 
 // NewAuthManager returns an AuthManager populated just enough to

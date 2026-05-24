@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/alpacax/alpamon/internal/protocol"
-	"github.com/alpacax/alpamon/pkg/scheduler"
-	"github.com/alpacax/alpamon/pkg/signing"
+	"github.com/alpacax/alpamon/v2/internal/protocol"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/signing"
 	"github.com/rs/zerolog/log"
 )
 

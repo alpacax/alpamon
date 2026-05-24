@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 

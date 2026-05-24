@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/collector/check/base"
-	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 )
 
 const (

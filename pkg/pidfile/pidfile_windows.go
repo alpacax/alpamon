@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
 func FilePath(name string) string {

@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/logger"
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/logger"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
 const (

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
-	"github.com/alpacax/alpamon/pkg/runner"
-	"github.com/alpacax/alpamon/internal/runnertest"
+	"github.com/alpacax/alpamon/v2/internal/runnertest"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/runner"
 )
 
 // hookRecordingExecutor wraps a MockCommandExecutor and records whether

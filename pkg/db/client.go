@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/alpacax/alpamon/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent"
 	_ "github.com/glebarez/go-sqlite"
 )
 

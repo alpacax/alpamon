@@ -9,15 +9,15 @@ import (
 	"os"
 	"time"
 
-	"github.com/alpacax/alpamon/internal/pool"
-	"github.com/alpacax/alpamon/internal/protocol"
-	"github.com/alpacax/alpamon/internal/retry"
-	"github.com/alpacax/alpamon/pkg/agent"
-	"github.com/alpacax/alpamon/pkg/config"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
-	"github.com/alpacax/alpamon/pkg/scheduler"
-	"github.com/alpacax/alpamon/pkg/signing"
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/internal/pool"
+	"github.com/alpacax/alpamon/v2/internal/protocol"
+	"github.com/alpacax/alpamon/v2/internal/retry"
+	"github.com/alpacax/alpamon/v2/pkg/agent"
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/signing"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
@@ -61,10 +61,10 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		RestartChan:          make(chan struct{}),
 		ShutDownChan:         make(chan struct{}),
 		CollectorRestartChan: make(chan struct{}, 1),
-		pool:        workerPool,
-		ctxManager:  ctxManager,
-		signingMode: config.GlobalSettings.SigningMode,
-		serverID:    config.GlobalSettings.ID,
+		pool:                 workerPool,
+		ctxManager:           ctxManager,
+		signingMode:          config.GlobalSettings.SigningMode,
+		serverID:             config.GlobalSettings.ID,
 	}
 
 	// Local environments (localhost) have no AI signing server, so enforce

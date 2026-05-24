@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/alpacax/alpamon/internal/protocol"
+	"github.com/alpacax/alpamon/v2/internal/protocol"
 )
 
 // ErrSignatureMismatch is returned when the Ed25519 signature does not match

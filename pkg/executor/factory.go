@@ -3,16 +3,16 @@ package executor
 import (
 	"fmt"
 
-	"github.com/alpacax/alpamon/internal/pool"
-	"github.com/alpacax/alpamon/pkg/agent"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/file"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/info"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/shell"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/terminal"
-	"github.com/alpacax/alpamon/pkg/executor/services"
-	"github.com/alpacax/alpamon/pkg/runner"
-	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/internal/pool"
+	"github.com/alpacax/alpamon/v2/pkg/agent"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/file"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/info"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/shell"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/terminal"
+	"github.com/alpacax/alpamon/v2/pkg/executor/services"
+	"github.com/alpacax/alpamon/v2/pkg/runner"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 )
 
 // SystemInfoCallbacks contains function callbacks for system info operations

@@ -1,6 +1,6 @@
 package user
 
-import "github.com/alpacax/alpamon/pkg/executor/handlers/common"
+import "github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 
 // UserData contains data for user operations.
 //

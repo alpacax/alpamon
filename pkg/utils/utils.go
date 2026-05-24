@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/version"
+	"github.com/alpacax/alpamon/v2/pkg/version"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/host"
 )

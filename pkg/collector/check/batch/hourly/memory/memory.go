@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/collector/check/base"
-	"github.com/alpacax/alpamon/pkg/db/ent"
-	"github.com/alpacax/alpamon/pkg/db/ent/memory"
+	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/memory"
 )
 
 type Check struct {

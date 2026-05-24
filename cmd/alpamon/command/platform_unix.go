@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/alpacax/alpamon/pkg/agent"
+	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/rs/zerolog/log"
 )
 
