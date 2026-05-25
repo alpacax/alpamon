@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/rs/zerolog/log"
@@ -148,7 +149,12 @@ func (r *Receiver) fetch(id string) (*configResponse, error) {
 		return nil, err
 	}
 	if statusCode < 200 || statusCode >= 300 {
-		return nil, fmt.Errorf("unexpected status %d from %s: %s", statusCode, url, string(body))
+		// Cap the response body included in the error. Without a
+		// cap a 50 MB upstream error page would land in alpacon-
+		// server's DB and the local log; the truncated preview is
+		// enough to diagnose the typical 4xx/5xx text response.
+		return nil, fmt.Errorf("unexpected status %d from %s: %s",
+			statusCode, url, truncateUTF8(string(body), maxBodyPreviewBytes))
 	}
 	var resp configResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -164,23 +170,41 @@ func (r *Receiver) reportApplied(id, hash string) {
 	})
 }
 
-// maxReportedErrorLen caps the error string posted to the server.
+// maxReportedErrorBytes caps the error string posted to the server.
 // Applier and fetch errors can include full upstream response bodies
 // or large stack traces; truncating prevents DB bloat and accidental
 // secret leakage via log/error fields.
 //
-// Measured in runes, not bytes, so the truncation never lands in
-// the middle of a multi-byte UTF-8 sequence (would otherwise
-// produce an invalid string in the JSON body the server stores).
-const maxReportedErrorLen = 512
+// Byte-based cap rather than rune-based: “[]rune(s)“ allocates a
+// whole rune slice for the entire input, which is wasteful on a 10
+// MiB error string. “truncateUTF8“ walks the byte budget and only
+// pulls back to the nearest rune boundary, so the truncation never
+// produces an invalid UTF-8 sequence either.
+const maxReportedErrorBytes = 2048
+
+// maxBodyPreviewBytes caps the upstream response body folded into a
+// fetch error. 512 bytes is enough to identify a 4xx/5xx response
+// shape without flooding the receiver's log + server DB.
+const maxBodyPreviewBytes = 512
+
+// truncateUTF8 caps s at maxBytes bytes, then pulls the boundary
+// back to the previous rune start so the result is valid UTF-8.
+// Returns the original string when len(s) <= maxBytes.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "...(truncated)"
+}
 
 func (r *Receiver) reportError(id, errMsg string) {
-	if runes := []rune(errMsg); len(runes) > maxReportedErrorLen {
-		errMsg = string(runes[:maxReportedErrorLen]) + "...(truncated)"
-	}
 	r.post(id, map[string]any{
 		"success": false,
-		"error":   errMsg,
+		"error":   truncateUTF8(errMsg, maxReportedErrorBytes),
 	})
 }
 

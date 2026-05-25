@@ -113,3 +113,30 @@ func TestNew_ReceiverAlwaysConstructed(t *testing.T) {
 	assert.Equal(t, "alpamon-test-plugin", c.PluginName)
 	assert.Nil(t, c.OnReconfigure)
 }
+
+// TestEnqueueConfigUpdate_LastWriteWins exercises the bounded
+// dispatch path. The worker is started lazily on the first call;
+// once that worker exits (we pass an already-cancelled context),
+// the channel saturates and subsequent enqueues replace each other
+// in-place — only the most recent pending ID should survive.
+func TestEnqueueConfigUpdate_LastWriteWins(t *testing.T) {
+	c := New(nil, nil, nil, "test", nil)
+
+	// First call starts the worker with an already-cancelled ctx, so
+	// the worker exits before draining anything. Subsequent enqueues
+	// hit the buffered-of-1 channel directly.
+	deadCtx, deadCancel := context.WithCancel(context.Background())
+	deadCancel()
+	c.enqueueConfigUpdate(deadCtx, "id1")
+
+	live := context.Background()
+	c.enqueueConfigUpdate(live, "id2")
+	c.enqueueConfigUpdate(live, "id3")
+
+	select {
+	case got := <-c.configUpdateCh:
+		assert.Equal(t, "id3", got, "expected last-write-wins to retain id3")
+	default:
+		t.Fatal("configUpdateCh empty; expected last enqueued ID to remain")
+	}
+}

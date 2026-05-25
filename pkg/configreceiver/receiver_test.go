@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 )
@@ -256,5 +257,60 @@ func TestSha256HexMatchesStdlib(t *testing.T) {
 	sum := sha256.Sum256([]byte(dhcpdConf))
 	if expected := hex.EncodeToString(sum[:]); sha256hex(dhcpdConf) != expected {
 		t.Fatalf("sha256hex drift")
+	}
+}
+
+func TestTruncateUTF8(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		maxBytes int
+		want     string
+	}{
+		{"under cap", "hello", 100, "hello"},
+		{"exact cap", "hello", 5, "hello"},
+		{"plain ASCII over cap", "abcdefghij", 5, "abcde...(truncated)"},
+		// "한글" = 6 bytes (3+3). Cap=4 lands mid-codepoint; should
+		// pull back to byte 3 (end of first rune).
+		{"korean rune-aligned", "한글ABC", 4, "한...(truncated)"},
+		// Cap exactly on the second rune boundary keeps both glyphs.
+		{"korean exact rune boundary", "한글ABC", 6, "한글...(truncated)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := truncateUTF8(c.input, c.maxBytes)
+			if got != c.want {
+				t.Fatalf("truncateUTF8(%q, %d) = %q; want %q", c.input, c.maxBytes, got, c.want)
+			}
+		})
+	}
+}
+
+// TestReportErrorTruncates verifies the on-wire error body is
+// truncated at maxReportedErrorBytes and stays valid UTF-8 even when
+// the truncation boundary would otherwise split a multi-byte rune.
+func TestReportErrorTruncates(t *testing.T) {
+	fs := newFakeServer(t, dhcpdConf, 0, "")
+	r := newReceiver(fs, &recordingApplier{})
+
+	// Build an error string longer than the cap. Include some 3-byte
+	// Korean runes near the boundary to exercise the UTF-8 alignment.
+	huge := strings.Repeat("X", maxReportedErrorBytes-2) + "한글" + strings.Repeat("Y", 100)
+	r.reportError(pluginConfigID, huge)
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if len(fs.applied) != 1 {
+		t.Fatalf("expected 1 applied report, got %d", len(fs.applied))
+	}
+	gotErr, _ := fs.applied[0]["error"].(string)
+	if !strings.HasSuffix(gotErr, "...(truncated)") {
+		t.Fatalf("error not marked truncated: %q", gotErr)
+	}
+	if len(gotErr) > maxReportedErrorBytes+len("...(truncated)") {
+		t.Fatalf("error too long: %d bytes", len(gotErr))
+	}
+	if !utf8.ValidString(gotErr) {
+		t.Fatalf("truncated error is not valid UTF-8: %q", gotErr)
 	}
 }
