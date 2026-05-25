@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/alpacax/alpamon/internal/protocol"
-	"github.com/alpacax/alpamon/pkg/signing"
+	"github.com/alpacax/alpamon/v2/internal/protocol"
+	"github.com/alpacax/alpamon/v2/pkg/signing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

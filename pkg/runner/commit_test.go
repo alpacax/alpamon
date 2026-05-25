@@ -564,4 +564,3 @@ func TestComputeFingerprintStructDeterminism(t *testing.T) {
 	}
 	assert.Len(t, hashes, 1, "Same struct should always produce the same hash")
 }
-

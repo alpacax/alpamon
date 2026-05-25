@@ -3,7 +3,7 @@ package firewall
 import (
 	"context"
 
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 )
 
 // FirewallBackend defines the interface for firewall backend implementations

@@ -13,15 +13,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/config"
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
 const (
-	checkSessionURL        = "/api/servers/servers/-/"
-	MaxRetryTimeout        = 3 * 24 * time.Hour
-	multipartMaxRespSize   = 1 << 20 // 1 MiB; read +1 to detect over-limit explicitly
+	checkSessionURL      = "/api/servers/servers/-/"
+	MaxRetryTimeout      = 3 * 24 * time.Hour
+	multipartMaxRespSize = 1 << 20 // 1 MiB; read +1 to detect over-limit explicitly
 )
 
 func InitSession() *Session {

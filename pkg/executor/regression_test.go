@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 )
 
 // TestRegression_AllHandlerTypes verifies all expected handler types are available

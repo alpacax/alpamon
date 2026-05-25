@@ -4,18 +4,18 @@ import (
 	"context"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/collector/check/base"
-	"github.com/alpacax/alpamon/pkg/db/ent"
-	"github.com/alpacax/alpamon/pkg/db/ent/cpu"
-	"github.com/alpacax/alpamon/pkg/db/ent/diskio"
-	"github.com/alpacax/alpamon/pkg/db/ent/diskusage"
-	"github.com/alpacax/alpamon/pkg/db/ent/hourlycpuusage"
-	"github.com/alpacax/alpamon/pkg/db/ent/hourlydiskio"
-	"github.com/alpacax/alpamon/pkg/db/ent/hourlydiskusage"
-	"github.com/alpacax/alpamon/pkg/db/ent/hourlymemoryusage"
-	"github.com/alpacax/alpamon/pkg/db/ent/hourlytraffic"
-	"github.com/alpacax/alpamon/pkg/db/ent/memory"
-	"github.com/alpacax/alpamon/pkg/db/ent/traffic"
+	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/cpu"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/diskio"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/diskusage"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlycpuusage"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlydiskio"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlydiskusage"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlymemoryusage"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlytraffic"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/memory"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/traffic"
 )
 
 var (
@@ -32,16 +32,16 @@ var (
 		base.HourlyNet,
 	}
 	deleteQueryMap = map[base.CheckType]deleteQuery{
-		base.CPU:               deleteAllCPU,
+		base.CPU:             deleteAllCPU,
 		base.HourlyCPUUsage:  deleteAllHourlyCPUUsage,
-		base.Mem:               deleteAllMemory,
+		base.Mem:             deleteAllMemory,
 		base.HourlyMemUsage:  deleteAllHourlyMemoryUsage,
-		base.DiskUsage:        deleteAllDiskUsage,
+		base.DiskUsage:       deleteAllDiskUsage,
 		base.HourlyDiskUsage: deleteAllHourlyDiskUsage,
-		base.DiskIO:           deleteAllDiskIO,
+		base.DiskIO:          deleteAllDiskIO,
 		base.HourlyDiskIO:    deleteAllHourlyDiskIO,
-		base.Net:               deleteAllTraffic,
-		base.HourlyNet:        deleteAllHourlyTraffic,
+		base.Net:             deleteAllTraffic,
+		base.HourlyNet:       deleteAllHourlyTraffic,
 	}
 )
 

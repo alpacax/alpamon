@@ -1,4 +1,4 @@
-module github.com/alpacax/alpamon
+module github.com/alpacax/alpamon/v2
 
 go 1.25.10
 

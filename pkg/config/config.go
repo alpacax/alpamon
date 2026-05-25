@@ -39,7 +39,7 @@ const (
 	// deployed fleet-wide via code release, not per-server config changes.
 	DefaultAIServerURL    = "https://alpacon.ai"
 	DefaultSigningMode    = "monitor" // change to "enforce" when ready
-	DefaultKeyRefreshSecs = 3600     // 1 hour
+	DefaultKeyRefreshSecs = 3600      // 1 hour
 
 	// Pool configuration limits for warnings
 	MaxReasonableWorkers        = 1000

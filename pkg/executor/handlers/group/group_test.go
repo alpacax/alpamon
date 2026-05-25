@@ -10,7 +10,7 @@ package group
 import (
 	"testing"
 
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 )
 
 func TestGroupHandler_AddGroup(t *testing.T) {

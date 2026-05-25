@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/agent"
-	"github.com/alpacax/alpamon/pkg/config"
-	"github.com/alpacax/alpamon/pkg/utils"
-	"github.com/alpacax/alpamon/pkg/version"
+	"github.com/alpacax/alpamon/v2/pkg/agent"
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/version"
 	"github.com/rs/zerolog/log"
 )
 

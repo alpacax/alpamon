@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/collector/check/base"
-	"github.com/alpacax/alpamon/pkg/db"
-	"github.com/alpacax/alpamon/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/v2/pkg/db"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"

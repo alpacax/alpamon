@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alpacax/alpamon/pkg/logger"
+	"github.com/alpacax/alpamon/v2/pkg/logger"
 )
 
 func newTestFtpClient(home string) *FtpClient {

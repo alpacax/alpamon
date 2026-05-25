@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"testing"
 
-	"github.com/alpacax/alpamon/internal/protocol"
+	"github.com/alpacax/alpamon/v2/internal/protocol"
 )
 
 func TestBuildCanonicalPayload(t *testing.T) {

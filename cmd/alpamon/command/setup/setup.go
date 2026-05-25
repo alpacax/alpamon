@@ -9,7 +9,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
