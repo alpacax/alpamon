@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestReadURLFromConf_FindsURL(t *testing.T) {
+func TestReadCurrentServer_FindsAllFields(t *testing.T) {
 	dir := t.TempDir()
 	conf := filepath.Join(dir, "alpamon.conf")
 	body := `[server]
@@ -25,43 +25,104 @@ verify = true
 		t.Fatalf("write: %v", err)
 	}
 
-	got, err := readURLFromConf(conf)
+	got, err := readCurrentServer(conf)
 	if err != nil {
-		t.Fatalf("readURLFromConf: %v", err)
+		t.Fatalf("readCurrentServer: %v", err)
 	}
-	if got != "https://workspace-a.example.com" {
+	if got.URL != "https://workspace-a.example.com" || got.ID != "abc" || got.Key != "secret" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestReadCurrentServer_MissingURL(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "alpamon.conf")
+	if err := os.WriteFile(conf, []byte("[server]\nid=abc\nkey=k\n"), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := readCurrentServer(conf); err == nil {
+		t.Fatalf("expected error on missing url, got nil")
+	}
+}
+
+func TestReadCurrentServer_MissingIDKey(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "alpamon.conf")
+	if err := os.WriteFile(conf, []byte("[server]\nurl=https://a\n"), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := readCurrentServer(conf); err == nil {
+		t.Fatalf("expected error on missing id/key, got nil")
+	}
+}
+
+func TestStripGeneratedSuffix(t *testing.T) {
+	cases := map[string]string{
+		"mybox-a3f9c1":                 "mybox",
+		"prod-web-1-deadbe":            "prod-web-1",
+		"production-web-server-abcdef": "production-web-server",
+		"mybox":                        "mybox",                    // no suffix
+		"mybox-AB":                     "mybox-AB",                 // wrong length
+		"mybox-zzzzzz":                 "mybox-zzzzzz",             // non-hex
+		"mybox-a3f9c1-deadbe":          "mybox-a3f9c1",             // strips only the trailing hex suffix
+		"mybox-deadbe-xyz789":          "mybox-deadbe-xyz789",      // trailing non-hex blocks strip
+	}
+	for in, want := range cases {
+		if got := stripGeneratedSuffix(in); got != want {
+			t.Errorf("stripGeneratedSuffix(%q) = %q; want %q", in, got, want)
+		}
+	}
+}
+
+func TestFetchCurrentName_HappyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		if !strings.HasSuffix(r.URL.Path, "/api/servers/servers/srv-xyz/") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); !strings.Contains(got, `id="srv-xyz"`) {
+			t.Errorf("auth header missing id: %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "production-web-deadbe",
+		})
+	}))
+	defer srv.Close()
+
+	sslVerify = false
+	caCert = ""
+
+	got, err := fetchCurrentName(t.Context(), &currentServer{
+		URL: srv.URL, ID: "srv-xyz", Key: "key-xyz",
+	})
+	if err != nil {
+		t.Fatalf("fetchCurrentName: %v", err)
+	}
+	if got != "production-web-deadbe" {
 		t.Fatalf("got %q", got)
 	}
 }
 
-func TestReadURLFromConf_IgnoresLookalikeKeys(t *testing.T) {
-	dir := t.TempDir()
-	conf := filepath.Join(dir, "alpamon.conf")
-	// url_other should not match the literal url= key.
-	body := `[server]
-url_other = should-not-match
-url = https://real.example.com
-`
-	if err := os.WriteFile(conf, []byte(body), 0600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	got, err := readURLFromConf(conf)
-	if err != nil {
-		t.Fatalf("readURLFromConf: %v", err)
-	}
-	if got != "https://real.example.com" {
-		t.Fatalf("got %q (must skip lookalike url_other)", got)
-	}
-}
+func TestFetchCurrentName_404SurfacesAsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"detail":"not found"}`))
+	}))
+	defer srv.Close()
 
-func TestReadURLFromConf_MissingURL(t *testing.T) {
-	dir := t.TempDir()
-	conf := filepath.Join(dir, "alpamon.conf")
-	if err := os.WriteFile(conf, []byte("[server]\nid=abc\n"), 0600); err != nil {
-		t.Fatalf("write: %v", err)
+	sslVerify = false
+	caCert = ""
+
+	_, err := fetchCurrentName(t.Context(), &currentServer{
+		URL: srv.URL, ID: "srv-xyz", Key: "key-xyz",
+	})
+	if err == nil {
+		t.Fatalf("expected error on 404, got nil")
 	}
-	if _, err := readURLFromConf(conf); err == nil {
-		t.Fatalf("expected error on missing url, got nil")
+	if !strings.Contains(err.Error(), "status 404") {
+		t.Fatalf("error should mention status, got: %v", err)
 	}
 }
 

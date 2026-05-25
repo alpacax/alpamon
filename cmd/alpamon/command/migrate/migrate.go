@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"text/template"
@@ -40,6 +41,7 @@ import (
 
 	"github.com/alpacax/alpamon/pkg/migrate"
 	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/spf13/cobra"
 	"gopkg.in/ini.v1"
@@ -137,23 +139,45 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("active config not found at %s: %w", configPath, err)
 	}
 
+	if platform == "" {
+		platform = detectPlatform()
+	}
+
+	current, err := readCurrentServer(configPath)
+	if err != nil {
+		return fmt.Errorf("read current server from conf: %w", err)
+	}
+	if normalizeURL(current.URL) == normalizeURL(newURL) {
+		return fmt.Errorf("already pointed at %s; nothing to migrate", current.URL)
+	}
+	oldURL := current.URL
+
+	// Pick the server name in this priority order:
+	//   1. --name <X>             (operator override; honored as-is)
+	//   2. A's display name minus suffix
+	//      (preserves any rename the operator did via the console;
+	//       hostname can be stale or generic like `ip-172-31-...`)
+	//   3. local hostname         (last resort if A's API is unreachable)
+	if serverName == "" {
+		fetchCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+		got, ferr := fetchCurrentName(fetchCtx, current)
+		cancel()
+		switch {
+		case ferr != nil:
+			log.Warn().Err(ferr).Msg("Could not fetch current server name from source workspace; falling back to hostname.")
+		case strings.TrimSpace(got) == "":
+			log.Warn().Msg("Source workspace returned an empty name; falling back to hostname.")
+		default:
+			serverName = stripGeneratedSuffix(got)
+			fmt.Printf("Using current workspace name as prefix: %s\n", serverName)
+		}
+	}
 	if serverName == "" {
 		hn, err := os.Hostname()
 		if err != nil {
 			return fmt.Errorf("read hostname: %w", err)
 		}
 		serverName = normalizeHostname(hn)
-	}
-	if platform == "" {
-		platform = detectPlatform()
-	}
-
-	oldURL, err := readURLFromConf(configPath)
-	if err != nil {
-		return fmt.Errorf("read current URL from conf: %w", err)
-	}
-	if normalizeURL(oldURL) == normalizeURL(newURL) {
-		return fmt.Errorf("already pointed at %s; nothing to migrate", oldURL)
 	}
 
 	fmt.Printf("Registering on %s ...\n", newURL)
@@ -229,23 +253,95 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// readURLFromConf parses the conf as INI and returns the [server] url
-// value. config.LoadConfig is unsuitable here because it log.Fatal()s on
-// any validation problem; we want a graceful error path.
-func readURLFromConf(path string) (string, error) {
+// currentServer is what we need from the active alpamon.conf to (a) know
+// what workspace we're migrating away from and (b) authenticate to that
+// workspace's API to look up our display name.
+type currentServer struct {
+	URL string
+	ID  string
+	Key string
+}
+
+// readCurrentServer parses the conf as INI and returns the [server]
+// section's url/id/key. config.LoadConfig is unsuitable here because it
+// log.Fatal()s on any validation problem; we want a graceful error path.
+func readCurrentServer(path string) (*currentServer, error) {
 	f, err := ini.Load(path)
 	if err != nil {
-		return "", fmt.Errorf("parse conf: %w", err)
+		return nil, fmt.Errorf("parse conf: %w", err)
 	}
 	section, err := f.GetSection("server")
 	if err != nil {
-		return "", errors.New("[server] section missing")
+		return nil, errors.New("[server] section missing")
 	}
-	key, err := section.GetKey("url")
+	get := func(name string) string {
+		k, err := section.GetKey(name)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(k.String())
+	}
+	sc := &currentServer{URL: get("url"), ID: get("id"), Key: get("key")}
+	if sc.URL == "" {
+		return nil, errors.New("url not found in [server] section")
+	}
+	if sc.ID == "" || sc.Key == "" {
+		return nil, errors.New("id/key not found in [server] section")
+	}
+	return sc, nil
+}
+
+// generatedSuffixRE matches the 6-hex-char suffix that
+// servers/api/serializers.py:ServerRegisterSerializer.create appends to
+// every registered server name. We strip it before reusing the operator-
+// facing prefix on the target workspace so the new server doesn't end up
+// with two stacked suffixes (`mybox-abc123-xyz789`).
+var generatedSuffixRE = regexp.MustCompile(`-[0-9a-f]{6}$`)
+
+func stripGeneratedSuffix(name string) string {
+	return generatedSuffixRE.ReplaceAllString(name, "")
+}
+
+// fetchCurrentName queries the source workspace for this server's
+// human-assigned name (which the operator may have edited via the
+// Alpacon console — that edit isn't reflected in `hostname`). The agent
+// authenticates as itself via the standard `id="...", key="..."` scheme
+// already used by alpamon's session layer.
+//
+// On any failure (network, auth, 404), returns "" with a non-nil error
+// so the caller can fall back to hostname.
+func fetchCurrentName(ctx context.Context, sc *currentServer) (string, error) {
+	url := fmt.Sprintf("%s/api/servers/servers/%s/",
+		strings.TrimSuffix(sc.URL, "/"), sc.ID)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return "", errors.New("url not found in [server] section")
+		return "", err
 	}
-	return strings.TrimSpace(key.String()), nil
+	req.Header.Set("Authorization", fmt.Sprintf(`id="%s", key="%s"`, sc.ID, sc.Key))
+
+	client, err := buildHTTPClient(sslVerify, caCert)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var data struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+	return data.Name, nil
 }
 
 func normalizeURL(u string) string {
