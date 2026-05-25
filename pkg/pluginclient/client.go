@@ -117,14 +117,20 @@ func (c *Client) HandleMessage(ctx context.Context, message []byte) {
 
 	var cmd command
 	if err := json.Unmarshal(message, &cmd); err != nil {
-		preview := string(message)
-		if len(preview) > 200 {
-			preview = preview[:200] + "..."
+		// Slice the byte buffer FIRST, then convert — converting
+		// the whole ``message`` to string on a 10 MiB frame would
+		// allocate 10 MiB just to render a log preview.
+		const previewBytes = 200
+		previewLen := len(message)
+		ellipsis := ""
+		if previewLen > previewBytes {
+			previewLen = previewBytes
+			ellipsis = "..."
 		}
 		log.Error().
 			Err(err).
 			Int("messageSize", len(message)).
-			Str("messagePreview", preview).
+			Str("messagePreview", string(message[:previewLen])+ellipsis).
 			Msg("Failed to unmarshal command")
 		return
 	}
@@ -197,7 +203,7 @@ func (c *Client) setReadLimit() {
 // inbound frame through HandleMessage until ctx is cancelled or the
 // remote sends “quit“.
 //
-// Cancellation caveat: ``ctx`` interrupts the read loop and post-connect
+// Cancellation caveat: “ctx“ interrupts the read loop and post-connect
 // reconnect (CloseAndReconnect honours ctx), but the *initial*
 // WsClient.Connect call below uses its own internal retry timeout and
 // does not honour ctx. A caller cancelling during the very first

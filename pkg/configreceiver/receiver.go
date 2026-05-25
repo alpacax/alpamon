@@ -6,16 +6,16 @@
 //
 // Flow:
 //
-//   1. alpacon-server emits a ``config_updated`` WS event with the
-//      ``plugin_config_id`` of the freshly-rendered config row.
-//   2. The plugin receives that event and hands it to Receiver.Handle.
-//   3. Receiver fetches the body via ``GET /api/plugins/configs/{id}/``,
-//      verifies the sha256 hash matches what the event reported, then
-//      decodes the standard ``{files, metadata}`` envelope and calls
-//      the plugin-supplied Applier.
-//   4. Receiver reports success or failure via
-//      ``POST /api/plugins/configs/{id}/applied/`` so the server can
-//      tell which version is live (drift detection / audit).
+//  1. alpacon-server emits a “config_updated“ WS event with the
+//     “plugin_config_id“ of the freshly-rendered config row.
+//  2. The plugin receives that event and hands it to Receiver.Handle.
+//  3. Receiver fetches the body via “GET /api/plugins/configs/{id}/“,
+//     verifies the sha256 hash matches what the event reported, then
+//     decodes the standard “{files, metadata}“ envelope and calls
+//     the plugin-supplied Applier.
+//  4. Receiver reports success or failure via
+//     “POST /api/plugins/configs/{id}/applied/“ so the server can
+//     tell which version is live (drift detection / audit).
 //
 // Lives under github.com/alpacax/alpamon because every plugin already
 // depends on alpamon; adding a separate "alpacon-plugin-sdk" repo
@@ -38,18 +38,19 @@ import (
 const (
 	fetchURLFmt   = "/api/plugins/configs/%s/"
 	appliedURLFmt = "/api/plugins/configs/%s/applied/"
-	// requestTimeout caps each REST call in seconds.
-	//
-	// alpamon's scheduler.Session multiplies the caller's timeout by
-	// time.Second internally (see session.do), so this value is a
-	// plain int count of seconds and is intentionally NOT a
-	// time.Duration — passing a Duration here would overflow int64
-	// and trip the context deadline immediately.
+	// requestTimeout caps each REST call. scheduler.Session.do
+	// multiplies whatever Duration value is passed in by
+	// ``time.Second`` (pkg/scheduler/session.go:113), so the bare
+	// literal ``30`` here resolves to 30 seconds end-to-end — passing
+	// ``30 * time.Second`` would compound the multiplier and overflow
+	// int64. The type stays ``time.Duration`` only because that's the
+	// signature scheduler.Session exposes; the value semantics are
+	// "count of seconds".
 	requestTimeout time.Duration = 30
 )
 
 // Envelope is the standardised config-text shape the server emits.
-// ``files`` carries one or more files keyed by on-disk name; metadata
+// “files“ carries one or more files keyed by on-disk name; metadata
 // is plugin-specific structured data (raw JSON so plugins decode
 // only the keys they understand).
 type Envelope struct {
@@ -77,7 +78,7 @@ type Applier interface {
 // Receiver wires REST fetch + hash check + Applier dispatch into the
 // plugin's WS command loop.
 //
-// applyMu serialises Handle calls so two ``config_updated`` events
+// applyMu serialises Handle calls so two “config_updated“ events
 // arriving in quick succession cannot have their applies interleave
 // (older config finishing after newer would leave the plugin in a
 // stale state). Apply itself can be long-running (file writes +
@@ -89,7 +90,7 @@ type Receiver struct {
 }
 
 // Handle is the entry point called from the WS command switch when a
-// ``config_updated`` event arrives. Safe to call from a fresh goroutine:
+// “config_updated“ event arrives. Safe to call from a fresh goroutine:
 // concurrent invocations are serialised by applyMu so applies run in
 // the order their config_updated events landed.
 func (r *Receiver) Handle(ctx context.Context, pluginConfigID string) {
@@ -167,11 +168,15 @@ func (r *Receiver) reportApplied(id, hash string) {
 // Applier and fetch errors can include full upstream response bodies
 // or large stack traces; truncating prevents DB bloat and accidental
 // secret leakage via log/error fields.
+//
+// Measured in runes, not bytes, so the truncation never lands in
+// the middle of a multi-byte UTF-8 sequence (would otherwise
+// produce an invalid string in the JSON body the server stores).
 const maxReportedErrorLen = 512
 
 func (r *Receiver) reportError(id, errMsg string) {
-	if len(errMsg) > maxReportedErrorLen {
-		errMsg = errMsg[:maxReportedErrorLen] + "...(truncated)"
+	if runes := []rune(errMsg); len(runes) > maxReportedErrorLen {
+		errMsg = string(runes[:maxReportedErrorLen]) + "...(truncated)"
 	}
 	r.post(id, map[string]any{
 		"success": false,
