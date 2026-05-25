@@ -1,7 +1,7 @@
 package executor
 
 import (
-	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 )
 
 // SystemInfoAdapter implements the common.SystemInfoManager interface for handlers

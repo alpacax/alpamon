@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/tunnel"
+	"github.com/alpacax/alpamon/v2/pkg/tunnel"
 	"github.com/rs/zerolog/log"
 )
 

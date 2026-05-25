@@ -17,8 +17,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/cloud"
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/cloud"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/spf13/cobra"
 )

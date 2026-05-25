@@ -7,17 +7,18 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
-	"github.com/alpacax/alpamon/internal/pool"
-	"github.com/alpacax/alpamon/internal/protocol"
-	"github.com/alpacax/alpamon/internal/retry"
-	"github.com/alpacax/alpamon/pkg/agent"
-	"github.com/alpacax/alpamon/pkg/config"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
-	"github.com/alpacax/alpamon/pkg/scheduler"
-	"github.com/alpacax/alpamon/pkg/signing"
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/internal/pool"
+	"github.com/alpacax/alpamon/v2/internal/protocol"
+	"github.com/alpacax/alpamon/v2/internal/retry"
+	"github.com/alpacax/alpamon/v2/pkg/agent"
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/signing"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
@@ -46,6 +47,17 @@ type WebsocketClient struct {
 	keyManager           *signing.KeyManager
 	signingMode          string
 	serverID             string
+
+	// onAuthenticated holds a callback invoked from RunForever after the
+	// first successful ReadMessage on each new connection. Used by the
+	// workspace-migration watchdog to detect that the new workspace's
+	// WebSocket is not merely dial-able but actually streaming traffic
+	// (i.e. auth and any in-front-of proxies accepted the agent). The
+	// hook must be idempotent because it fires on every reconnect.
+	//
+	// Stored as an atomic.Pointer so concurrent SetOnAuthenticated calls
+	// from outside the RunForever goroutine race-safely with Connect.
+	onAuthenticated atomic.Pointer[func()]
 }
 
 func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextManager, workerPool *pool.Pool) *WebsocketClient {
@@ -61,10 +73,10 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		RestartChan:          make(chan struct{}),
 		ShutDownChan:         make(chan struct{}),
 		CollectorRestartChan: make(chan struct{}, 1),
-		pool:        workerPool,
-		ctxManager:  ctxManager,
-		signingMode: config.GlobalSettings.SigningMode,
-		serverID:    config.GlobalSettings.ID,
+		pool:                 workerPool,
+		ctxManager:           ctxManager,
+		signingMode:          config.GlobalSettings.SigningMode,
+		serverID:             config.GlobalSettings.ID,
 	}
 
 	// Local environments (localhost) have no AI signing server, so enforce
@@ -90,8 +102,29 @@ func (wc *WebsocketClient) SetDispatcher(dispatcher CommandDispatcher) {
 	wc.dispatcher = dispatcher
 }
 
+// SetOnAuthenticated registers a callback invoked from RunForever after
+// the first successful ReadMessage of each connection. Firing here rather
+// than at dial-time gives the migration watchdog a strong "the new
+// workspace really did accept us" signal: an upgrade-then-immediate-close
+// scenario (auth rejected by a downstream proxy, rate-limit, etc.) never
+// produces a ReadMessage and so never confirms.
+//
+// The callback must be idempotent — it fires on every reconnect, not only
+// the first one. Passing nil clears it. Safe to call from any goroutine.
+func (wc *WebsocketClient) SetOnAuthenticated(fn func()) {
+	if fn == nil {
+		wc.onAuthenticated.Store(nil)
+		return
+	}
+	wc.onAuthenticated.Store(&fn)
+}
+
 func (wc *WebsocketClient) RunForever(ctx context.Context) {
 	wc.Connect()
+	// authenticatedThisConn flips true after the first successful read on
+	// the current connection. Cleared by CloseAndReconnect so the next
+	// connection has to re-prove itself before onAuthenticated fires.
+	authenticatedThisConn := false
 
 	for {
 		select {
@@ -101,12 +134,20 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 			err := wc.Conn.SetReadDeadline(time.Now().Add(ConnectionReadTimeout))
 			if err != nil {
 				wc.CloseAndReconnect(ctx)
+				authenticatedThisConn = false
 				continue
 			}
 			_, message, err := wc.ReadMessage()
 			if err != nil {
 				wc.CloseAndReconnect(ctx)
+				authenticatedThisConn = false
 				continue
+			}
+			if !authenticatedThisConn {
+				authenticatedThisConn = true
+				if cb := wc.onAuthenticated.Load(); cb != nil {
+					(*cb)()
+				}
 			}
 			wc.CommandRequestHandler(message)
 		}

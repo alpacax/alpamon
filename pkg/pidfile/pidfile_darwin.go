@@ -3,7 +3,7 @@ package pidfile
 import (
 	"fmt"
 
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
 func FilePath(name string) string {

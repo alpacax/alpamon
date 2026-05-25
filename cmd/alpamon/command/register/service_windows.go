@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 )

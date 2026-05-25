@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect/sql"
-	"github.com/alpacax/alpamon/pkg/collector/check/base"
-	"github.com/alpacax/alpamon/pkg/db/ent"
-	"github.com/alpacax/alpamon/pkg/db/ent/diskusage"
+	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/diskusage"
 )
 
 type Check struct {

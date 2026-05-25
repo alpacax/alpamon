@@ -15,10 +15,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/config"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
-	"github.com/alpacax/alpamon/pkg/scheduler"
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
@@ -396,10 +396,12 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 //   - Pre-handoff failures: closes src directly so it never leaks.
 func (h *FileHandler) fileUpload(args *common.CommandArgs, src io.ReadCloser, size int64, fileName string, recursive bool) (int, error) {
 	if args.UseBlob {
-		_, code, err := utils.Put(args.Content, src, size, 0)
-		// Surface src.Close() errors when the PUT itself succeeded so a
-		// non-zero `cat` exit (cmdReadCloser EACCES/ENOENT) is not silently
-		// reported as a successful upload.
+		// Strip Closer so http.Client.Do can't close src before us—we own
+		// the close so the demoted-cat reader's non-zero exit (EACCES/ENOENT)
+		// surfaces via Close(), and *os.File on Windows is not double-closed
+		// (returns os.ErrClosed on the second Close, which would otherwise be
+		// reported as a failed upload even though the PUT succeeded).
+		_, code, err := utils.Put(args.Content, io.NopCloser(src), size, 0)
 		if cerr := src.Close(); err == nil && cerr != nil {
 			return code, cerr
 		}

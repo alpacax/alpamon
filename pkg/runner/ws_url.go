@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/alpacax/alpamon/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/config"
 )
 
 // validateWebSocketURL checks that the given URL uses the correct ws/wss scheme

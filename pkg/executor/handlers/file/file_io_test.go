@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alpacax/alpamon/pkg/config"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 )
 
 // failingReader emits payload on first Read, then returns err on the next call.

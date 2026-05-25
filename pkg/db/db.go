@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/db/ent"
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/glebarez/go-sqlite"
 	"github.com/rs/zerolog/log"
 )

@@ -3,8 +3,8 @@ package ftp
 import (
 	"os"
 
-	"github.com/alpacax/alpamon/pkg/logger"
-	"github.com/alpacax/alpamon/pkg/runner"
+	"github.com/alpacax/alpamon/v2/pkg/logger"
+	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )

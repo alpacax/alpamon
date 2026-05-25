@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/UserExistsError/conpty"
-	"github.com/alpacax/alpamon/internal/protocol"
-	"github.com/alpacax/alpamon/pkg/config"
-	"github.com/alpacax/alpamon/pkg/scheduler"
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/internal/protocol"
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )

@@ -1,10 +1,10 @@
 package executor
 
 import (
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/system"
-	"github.com/alpacax/alpamon/pkg/executor/handlers/tunnel"
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/system"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/tunnel"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
 func platformHandlers(deps platformHandlerDeps) []common.Handler {

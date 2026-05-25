@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 )
 
 func TestShellHandler_Name(t *testing.T) {

@@ -10,10 +10,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/alpacax/alpamon/internal/pool"
-	"github.com/alpacax/alpamon/pkg/agent"
-	"github.com/alpacax/alpamon/pkg/scheduler"
-	"github.com/alpacax/alpamon/pkg/utils"
+	"github.com/alpacax/alpamon/v2/internal/pool"
+	"github.com/alpacax/alpamon/v2/pkg/agent"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 

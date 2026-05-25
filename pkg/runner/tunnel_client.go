@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/config"
-	"github.com/alpacax/alpamon/pkg/tunnel"
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/cpu"

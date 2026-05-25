@@ -3,7 +3,7 @@ package transporter
 import (
 	"fmt"
 
-	"github.com/alpacax/alpamon/pkg/collector/check/base"
+	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 )
 
 const (
@@ -32,11 +32,11 @@ func NewURLResolver() *URLResolver {
 	return &URLResolver{
 		checkTypeToURL: map[base.CheckType]string{
 			base.CPU:             cpuURL,
-			base.HourlyCPUUsage: hourlyCPUUsageURL,
-			base.DailyCPUUsage:  dailyCPUUsageURL,
+			base.HourlyCPUUsage:  hourlyCPUUsageURL,
+			base.DailyCPUUsage:   dailyCPUUsageURL,
 			base.Mem:             memURL,
-			base.HourlyMemUsage: hourlyMemUsageURL,
-			base.DailyMemUsage:  dailyMemUsageURL,
+			base.HourlyMemUsage:  hourlyMemUsageURL,
+			base.DailyMemUsage:   dailyMemUsageURL,
 			base.DiskUsage:       diskUsageURL,
 			base.HourlyDiskUsage: hourlyDiskUsageURL,
 			base.DailyDiskUsage:  dailyDiskUsageURL,

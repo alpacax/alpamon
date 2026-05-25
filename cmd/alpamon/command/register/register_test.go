@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/alpacax/alpamon/pkg/cloud"
+	"github.com/alpacax/alpamon/v2/pkg/cloud"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

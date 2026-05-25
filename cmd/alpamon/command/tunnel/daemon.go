@@ -1,7 +1,7 @@
 package tunnel
 
 import (
-	"github.com/alpacax/alpamon/pkg/runner"
+	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/spf13/cobra"
 )
 
