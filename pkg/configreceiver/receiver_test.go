@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 )
 
 const (

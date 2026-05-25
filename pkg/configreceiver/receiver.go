@@ -31,7 +31,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/rs/zerolog/log"
 )
 

@@ -24,9 +24,9 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/alpacax/alpamon/pkg/configreceiver"
-	"github.com/alpacax/alpamon/pkg/runner"
-	"github.com/alpacax/alpamon/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/configreceiver"
+	"github.com/alpacax/alpamon/v2/pkg/runner"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/rs/zerolog/log"
 )
 
