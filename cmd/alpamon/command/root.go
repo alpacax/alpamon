@@ -1,11 +1,16 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/cmd/alpamon/command/ftp"
+	migratecmd "github.com/alpacax/alpamon/v2/cmd/alpamon/command/migrate"
 	"github.com/alpacax/alpamon/v2/cmd/alpamon/command/register"
 	"github.com/alpacax/alpamon/v2/cmd/alpamon/command/setup"
 	"github.com/alpacax/alpamon/v2/cmd/alpamon/command/tunnel"
@@ -16,6 +21,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/executor"
 	"github.com/alpacax/alpamon/v2/pkg/logger"
+	"github.com/alpacax/alpamon/v2/pkg/migrate"
 	"github.com/alpacax/alpamon/v2/pkg/pidfile"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
@@ -50,7 +56,7 @@ var RootCmd = &cobra.Command{
 
 func init() {
 	setup.SetConfigPaths(name)
-	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelDaemonCmd, register.RegisterCmd)
+	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelDaemonCmd, register.RegisterCmd, migratecmd.Cmd)
 	// Emit just the version string (no "alpamon version ..." prefix) so
 	// shell one-liners like `alpamon --version` are easy to parse.
 	RootCmd.SetVersionTemplate("{{.Version}}\n")
@@ -129,6 +135,12 @@ func runAgent(ready chan<- struct{}) {
 
 	// Websocket Client - pass context manager and worker pool for centralized management
 	wsClient := runner.NewWebsocketClient(session, ctxManager, workerPool)
+
+	// Workspace migration: if a previous `alpamon migrate` left a pending
+	// marker, arm the watchdog and register the connect-success hook so
+	// the marker is cleared once we authenticate against the new
+	// workspace. See pkg/migrate for the full state machine.
+	wirePendingMigration(ctx, wsClient, settings)
 
 	// Initialize dispatcher system with callbacks
 	dispatcher, err := executor.InitDispatcher(
@@ -219,4 +231,77 @@ func gracefulShutdown(collector *collector.Collector, wsClient *runner.Websocket
 	log.Debug().Msg("Bye.")
 
 	_ = os.Remove(pidPath)
+}
+
+// wirePendingMigration inspects the migration marker on startup. When a
+// migration is in flight, it registers a Confirm hook via
+// SetOnAuthenticated (which fires only after the first successful
+// ReadMessage on a fresh connection, i.e. genuine traffic from the target
+// workspace) and arms a watchdog that rolls back to the previous
+// workspace if the new one never accepts the agent.
+//
+// Confirm is guarded by sync.Once because SetOnAuthenticated fires on
+// every reconnect, not just the first; we want to clear the marker
+// exactly once.
+func wirePendingMigration(ctx context.Context, wsClient *runner.WebsocketClient, settings config.Settings) {
+	// Migration relies on systemd-run for self-restart. On platforms
+	// without systemd (Windows, container, dev macOS) the watchdog has no
+	// way to recover the agent from a failed migration; refuse to arm it
+	// rather than leave the operator with a half-wired safety net.
+	if !utils.HasSystemd() {
+		return
+	}
+
+	state, err := migrate.LoadPending()
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to load migration marker; continuing without migration watchdog.")
+		return
+	}
+	if state == nil {
+		return
+	}
+
+	log.Info().
+		Str("from", state.OldURL).
+		Str("to", state.NewURL).
+		Time("started_at", state.StartedAt).
+		Time("expires_at", state.ExpiresAt).
+		Msg("Detected pending workspace migration.")
+
+	confPath := filepath.Join(utils.ConfigDir(), "alpamon.conf")
+
+	// confirmed gates the rollback callback against a successful connect
+	// that races past the watchdog timer. Without this, an unlucky timing
+	// could cause Rollback to call the B-side unregister endpoint after
+	// the agent has already established a live session with B.
+	var confirmed atomic.Bool
+	var confirmOnce sync.Once
+
+	cancelWatchdog := migrate.StartWatchdog(ctx, state, func(cur *migrate.PendingState) {
+		if confirmed.Load() {
+			log.Info().Msg("Watchdog fired but Confirm already happened; standing down.")
+			return
+		}
+		if err := migrate.Rollback(cur, confPath, settings.SSLVerify, settings.CaCert); err != nil {
+			log.Error().Err(err).
+				Str("marker", migrate.MarkerPath()).
+				Str("backup", cur.BackupConfPath).
+				Str("conf", confPath).
+				Msg("Migration rollback failed; inspect/remove the marker, restore the backup manually, then restart alpamon.")
+			return
+		}
+		// Signal the main loop to run gracefulShutdown. systemd-run's
+		// 2-second-delayed `systemctl restart` brings us back up with
+		// the restored config and a clean shutdown trail.
+		log.Info().Msg("Migration rolled back; requesting graceful shutdown to await systemd restart.")
+		wsClient.ShutDown()
+	})
+
+	wsClient.SetOnAuthenticated(func() {
+		confirmOnce.Do(func() {
+			confirmed.Store(true)
+			cancelWatchdog()
+			migrate.Confirm(state)
+		})
+	})
 }
