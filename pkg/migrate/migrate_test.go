@@ -164,7 +164,7 @@ func TestRestoreBackup_RestoresContent(t *testing.T) {
 	}
 }
 
-func TestRollback_RestoresConfAndCleansUpEverything(t *testing.T) {
+func TestRollback_RestoresConf(t *testing.T) {
 	setupTempDataDir(t)
 	confDir := t.TempDir()
 
@@ -186,39 +186,29 @@ func TestRollback_RestoresConfAndCleansUpEverything(t *testing.T) {
 		t.Fatalf("WritePending: %v", err)
 	}
 
-	err := Rollback(st, confPath, false, "")
-	// systemd-run is almost certainly unavailable in CI; we expect the
-	// ScheduleSelfRestart step to fail. Everything BEFORE that step should
-	// still have executed so cleanup is verifiable.
-	if err == nil {
-		t.Log("Rollback returned nil — ScheduleSelfRestart succeeded (presumably systemd is available).")
-	}
+	// We deliberately do not assert on Rollback's return value: without
+	// systemd, ScheduleSelfRestart fails and Rollback returns that error,
+	// but the prior steps (restore + best-effort unregister) still ran.
+	_ = Rollback(st, confPath, false, "")
 
 	// Conf must be restored to backup content.
 	got, _ := os.ReadFile(confPath)
 	if string(got) != "[server]\nurl=https://a.example.com\n" {
 		t.Fatalf("conf not restored, got %q", string(got))
 	}
-	// Backup file must be removed.
-	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
-		t.Fatalf("backup not cleaned up: stat err=%v", err)
+	// When ScheduleSelfRestart fails, the marker and backup must remain
+	// so the next agent startup's watchdog can retry. This is the
+	// post-review ordering: clean up durable state only after the restart
+	// is queued.
+	if _, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("backup unexpectedly removed before restart was scheduled: %v", err)
 	}
-	// Marker must be removed.
-	if _, err := os.Stat(MarkerPath()); !os.IsNotExist(err) {
-		t.Fatalf("marker not cleaned up: stat err=%v", err)
-	}
-	// No leftover .new / .tmp anywhere in confDir.
-	entries, _ := os.ReadDir(confDir)
-	for _, e := range entries {
-		name := e.Name()
-		if name == filepath.Base(confPath) {
-			continue
-		}
-		t.Fatalf("unexpected leftover in confDir: %s", name)
+	if _, err := os.Stat(MarkerPath()); err != nil {
+		t.Fatalf("marker unexpectedly removed before restart was scheduled: %v", err)
 	}
 }
 
-func TestRollback_IdempotentWhenBackupMissing(t *testing.T) {
+func TestRollback_TolerantOfMissingBackup(t *testing.T) {
 	setupTempDataDir(t)
 	confDir := t.TempDir()
 	confPath := filepath.Join(confDir, "alpamon.conf")
@@ -235,16 +225,13 @@ func TestRollback_IdempotentWhenBackupMissing(t *testing.T) {
 		t.Fatalf("WritePending: %v", err)
 	}
 
-	// Should not error on the restore step despite missing backup. The
-	// final ScheduleSelfRestart step may still fail on CI without systemd;
-	// that is acceptable for this test, which is about cleanup idempotency.
+	// With backup gone, the restore step is skipped (warn logged) and
+	// the rest of Rollback runs. ScheduleSelfRestart still fails on CI,
+	// so we only assert on the no-overwrite invariant.
 	_ = Rollback(st, confPath, false, "")
 
 	if got, _ := os.ReadFile(confPath); string(got) != "restored already" {
 		t.Fatalf("Rollback overwrote conf when backup was missing: %q", string(got))
-	}
-	if _, err := os.Stat(MarkerPath()); !os.IsNotExist(err) {
-		t.Fatalf("marker not cleaned up despite missing backup")
 	}
 }
 
@@ -257,10 +244,14 @@ func TestRollback_NilState_ReturnsError(t *testing.T) {
 func TestStartWatchdog_FiresOnTimeout(t *testing.T) {
 	setupTempDataDir(t)
 
+	// Timer margin sized for slow CI runners (containers with throttled
+	// disks where WritePending alone can take 100ms+). Keep watchdog
+	// timeouts in tests >= ~1s so a slow WritePending doesn't push
+	// ExpiresAt into the past before StartWatchdog reads it.
 	st := &PendingState{
 		BackupConfPath: "/tmp/whatever",
 		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(50 * time.Millisecond),
+		ExpiresAt:      time.Now().Add(1 * time.Second),
 	}
 	if err := WritePending(st); err != nil {
 		t.Fatalf("WritePending: %v", err)
@@ -281,7 +272,7 @@ func TestStartWatchdog_FiresOnTimeout(t *testing.T) {
 		if fired.Load() != 1 {
 			t.Fatalf("expected single fire, got %d", fired.Load())
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatalf("watchdog did not fire within deadline")
 	}
 }
@@ -289,10 +280,12 @@ func TestStartWatchdog_FiresOnTimeout(t *testing.T) {
 func TestStartWatchdog_DoesNotFireAfterConfirm(t *testing.T) {
 	setupTempDataDir(t)
 
+	// 3s window leaves plenty of room to call Confirm even if
+	// WritePending takes several hundred ms on a slow CI runner.
 	st := &PendingState{
 		BackupConfPath: "/tmp/whatever",
 		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(80 * time.Millisecond),
+		ExpiresAt:      time.Now().Add(3 * time.Second),
 	}
 	if err := WritePending(st); err != nil {
 		t.Fatalf("WritePending: %v", err)
@@ -306,12 +299,12 @@ func TestStartWatchdog_DoesNotFireAfterConfirm(t *testing.T) {
 		fired.Add(1)
 	})
 
-	// Race-free Confirm before the timer would fire.
-	time.Sleep(10 * time.Millisecond)
+	// Confirm well before the timer would fire.
+	time.Sleep(200 * time.Millisecond)
 	Confirm(st)
 
 	// Wait past the original deadline plus jitter.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(4 * time.Second)
 
 	if fired.Load() != 0 {
 		t.Fatalf("watchdog fired despite Confirm: count=%d", fired.Load())
@@ -351,7 +344,7 @@ func TestStartWatchdog_CancelDisarmsBeforeTimer(t *testing.T) {
 	st := &PendingState{
 		BackupConfPath: "/tmp/whatever",
 		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(200 * time.Millisecond),
+		ExpiresAt:      time.Now().Add(3 * time.Second),
 	}
 	if err := WritePending(st); err != nil {
 		t.Fatalf("WritePending: %v", err)
@@ -367,10 +360,10 @@ func TestStartWatchdog_CancelDisarmsBeforeTimer(t *testing.T) {
 
 	// Disarm before the timer would fire — mirrors the on-connect-success
 	// path that races against the watchdog.
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	cancelWatchdog()
 
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(4 * time.Second)
 	if fired.Load() != 0 {
 		t.Fatalf("watchdog fired despite cancel: count=%d", fired.Load())
 	}
@@ -382,7 +375,7 @@ func TestStartWatchdog_StopsOnContextCancel(t *testing.T) {
 	st := &PendingState{
 		BackupConfPath: "/tmp/whatever",
 		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(2 * time.Second),
+		ExpiresAt:      time.Now().Add(3 * time.Second),
 	}
 	if err := WritePending(st); err != nil {
 		t.Fatalf("WritePending: %v", err)
@@ -396,7 +389,7 @@ func TestStartWatchdog_StopsOnContextCancel(t *testing.T) {
 	})
 
 	cancel()
-	time.Sleep(2500 * time.Millisecond)
+	time.Sleep(4 * time.Second)
 
 	if fired.Load() != 0 {
 		t.Fatalf("watchdog fired after ctx cancel: count=%d", fired.Load())

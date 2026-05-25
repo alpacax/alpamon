@@ -124,9 +124,9 @@ func LoadPending() (*PendingState, error) {
 	return &st, nil
 }
 
-// WritePending persists the marker via temp + rename so a crash mid-write
-// never leaves a half-parsed file. The parent directory is fsync'd after
-// rename so the new directory entry is durable across a kernel crash.
+// WritePending persists the marker via temp + fsync + rename + dir-fsync
+// so a power loss after rename never resurfaces a marker with partial
+// contents.
 func WritePending(st *PendingState) error {
 	if err := os.MkdirAll(dataDirFn(), 0750); err != nil {
 		return fmt.Errorf("ensure data dir: %w", err)
@@ -135,18 +135,7 @@ func WritePending(st *PendingState) error {
 	if err != nil {
 		return fmt.Errorf("marshal marker: %w", err)
 	}
-	tmp := MarkerPath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("write marker tmp: %w", err)
-	}
-	if err := os.Rename(tmp, MarkerPath()); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename marker: %w", err)
-	}
-	if err := fsyncDir(filepath.Dir(MarkerPath())); err != nil {
-		log.Warn().Err(err).Msg("fsync of marker dir failed; rename is still durable on most filesystems.")
-	}
-	return nil
+	return writeFileAtomic(MarkerPath(), data, 0600)
 }
 
 // ClearPending removes the marker file. Idempotent.
@@ -178,7 +167,9 @@ func Confirm(st *PendingState) {
 
 // BackupConf copies srcPath to a timestamped sibling and returns the
 // backup path. The backup keeps the source's mode bits so a restore
-// produces an identical file.
+// produces an identical file. Both the file contents and the parent
+// directory entry are fsync'd so a power loss right after this call
+// does not lose the backup.
 func BackupConf(srcPath string) (string, error) {
 	in, err := os.Open(srcPath)
 	if err != nil {
@@ -206,27 +197,56 @@ func BackupConf(srcPath string) (string, error) {
 		_ = os.Remove(backup)
 		return "", fmt.Errorf("sync backup: %w", err)
 	}
+	if err := fsyncDir(filepath.Dir(backup)); err != nil {
+		log.Warn().Err(err).Msg("fsync of backup dir failed; backup file content is still synced.")
+	}
 	return backup, nil
 }
 
-// WriteConfAtomic writes content to confPath via temp + rename. rename(2)
-// is atomic on POSIX so readers never see a half-written file. The parent
-// directory is fsync'd after rename so the new directory entry survives a
-// kernel crash.
+// WriteConfAtomic writes content to confPath via writeFileAtomic. The
+// parent directory is created with 0700 to mirror configs/tmpfile.conf,
+// keeping the alpamon config dir confidential (it holds secrets).
 func WriteConfAtomic(confPath string, content []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(confPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(confPath), 0700); err != nil {
 		return fmt.Errorf("ensure conf dir: %w", err)
 	}
-	tmp := confPath + ".new"
-	if err := os.WriteFile(tmp, content, mode); err != nil {
-		return fmt.Errorf("write conf tmp: %w", err)
+	return writeFileAtomic(confPath, content, mode)
+}
+
+// writeFileAtomic creates path with content via:
+//
+//	open(tmp) → write → fsync(tmp) → close → rename(tmp, path) → fsync(parent)
+//
+// Each step protects against a different failure mode: fsync(tmp) guards
+// against partial-content rename, fsync(parent) guards against a vanished
+// directory entry. Callers may rely on the file being durable as soon as
+// this returns nil.
+func writeFileAtomic(path string, content []byte, mode os.FileMode) error {
+	tmp := path + ".new"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("create tmp %s: %w", tmp, err)
 	}
-	if err := os.Rename(tmp, confPath); err != nil {
+	if _, err := f.Write(content); err != nil {
+		_ = f.Close()
 		_ = os.Remove(tmp)
-		return fmt.Errorf("rename conf: %w", err)
+		return fmt.Errorf("write tmp: %w", err)
 	}
-	if err := fsyncDir(filepath.Dir(confPath)); err != nil {
-		log.Warn().Err(err).Msg("fsync of conf dir failed; rename is still durable on most filesystems.")
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("fsync tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename tmp -> %s: %w", path, err)
+	}
+	if err := fsyncDir(filepath.Dir(path)); err != nil {
+		log.Warn().Err(err).Msg("fsync of parent dir failed; rename is still durable on most filesystems.")
 	}
 	return nil
 }
@@ -244,13 +264,20 @@ func fsyncDir(dir string) error {
 }
 
 // RestoreBackup copies backupPath over destPath via WriteConfAtomic so the
-// destination is updated atomically.
+// destination is updated atomically. The backup file's mode bits are
+// preserved (rather than forced to 0600) so a rollback yields an identical
+// file when the operator had previously set tighter or different
+// permissions on the original conf.
 func RestoreBackup(backupPath, destPath string) error {
+	info, err := os.Stat(backupPath)
+	if err != nil {
+		return fmt.Errorf("stat backup: %w", err)
+	}
 	data, err := os.ReadFile(backupPath)
 	if err != nil {
 		return fmt.Errorf("read backup: %w", err)
 	}
-	return WriteConfAtomic(destPath, data, 0600)
+	return WriteConfAtomic(destPath, data, info.Mode().Perm())
 }
 
 // ScheduleSelfRestart asks systemd to run `systemctl restart alpamon`
@@ -284,15 +311,19 @@ func ScheduleSelfRestart(delay time.Duration) error {
 }
 
 // Rollback executes the recovery sequence: restore the backup config,
-// best-effort unregister the orphan record on the target workspace, remove
-// the marker and backup files, then schedule a self-restart. Returns an
-// error if restoring the backup fails; in that case the marker is
-// intentionally left in place so an operator can inspect the breakage and
-// (after manual repair) the next agent startup retries via the watchdog.
+// best-effort unregister the orphan record on the target workspace,
+// schedule a self-restart, and only then drop the marker + backup files.
+// Returns an error if restoring the backup OR scheduling the restart
+// fails; in either case the marker is intentionally left in place so the
+// next agent startup retries via the watchdog.
 //
-// The function is idempotent: a missing backup file is treated as "already
-// restored on a previous attempt," which lets a partially-completed
-// Rollback finish cleanly on the next startup.
+// Ordering matters: the marker must outlive a failed ScheduleSelfRestart
+// (otherwise the agent would be left running on the new conf with no
+// retry handle). The backup is removed last so a partially-completed
+// Rollback can re-run safely from the next startup.
+//
+// The function is idempotent: a missing backup file is treated as
+// "already restored on a previous attempt".
 func Rollback(state *PendingState, confPath string, sslVerify bool, caCertPath string) error {
 	if state == nil {
 		return errors.New("nil state")
@@ -304,9 +335,6 @@ func Rollback(state *PendingState, confPath string, sslVerify bool, caCertPath s
 		Str("new_url", state.NewURL).
 		Msg("Migration watchdog: restoring previous configuration.")
 
-	// Restore the previous config from the backup. If the backup is
-	// missing, assume a prior Rollback already restored confPath and we
-	// crashed before clearing the marker — proceed to the cleanup steps.
 	if _, statErr := os.Stat(state.BackupConfPath); statErr == nil {
 		if err := RestoreBackup(state.BackupConfPath, confPath); err != nil {
 			return fmt.Errorf("restore backup: %w", err)
@@ -318,27 +346,29 @@ func Rollback(state *PendingState, confPath string, sslVerify bool, caCertPath s
 		return fmt.Errorf("stat backup: %w", statErr)
 	}
 
-	// Best-effort: tidy up the never-online server record on the target
-	// workspace. Failures (network, auth, etc.) are logged but do not
-	// affect the rollback outcome.
 	BestEffortUnregister(state.NewURL, state.NewServerID, state.NewServerKey, sslVerify, caCertPath)
 
-	// Clean up the backup file now that we no longer need it for restore.
-	// Done after RestoreBackup so a partial Rollback can re-run safely.
+	if err := ScheduleSelfRestart(2 * time.Second); err != nil {
+		// Marker is intentionally still on disk so the next startup's
+		// watchdog tries again. Don't touch backup either — we may need
+		// it for the retry.
+		return fmt.Errorf("schedule self-restart: %w", err)
+	}
+
+	// Now that the restart is queued, clear durable state. From here on,
+	// even if the restart itself never fires, the agent is at worst
+	// running on the (already restored) old conf without a marker — no
+	// data loss.
 	if state.BackupConfPath != "" {
 		if err := os.Remove(state.BackupConfPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Warn().Err(err).Str("path", state.BackupConfPath).
 				Msg("Failed to remove backup conf after rollback.")
 		}
 	}
-
 	if err := ClearPending(); err != nil {
 		log.Warn().Err(err).Msg("Failed to clear migration marker after rollback.")
 	}
 
-	if err := ScheduleSelfRestart(2 * time.Second); err != nil {
-		return fmt.Errorf("schedule self-restart: %w", err)
-	}
 	log.Info().Msg("Migration rolled back; self-restart scheduled.")
 	return nil
 }
@@ -370,8 +400,10 @@ func StartWatchdog(ctx context.Context, state *PendingState, onTimeout func(*Pen
 		Msg("Workspace migration pending; rollback watchdog armed.")
 
 	fire := func(reason string) {
-		// If the watchdog was disarmed mid-fire (cancel raced past timer.C),
-		// stand down before running any side-effects.
+		// Cancel-vs-fire is racy at multiple points: between timer.C
+		// firing and entering fire(), between LoadPending() and
+		// onTimeout(). We check childCtx.Err() at both edges so a
+		// Cancel that lands ANYWHERE before onTimeout takes effect.
 		if childCtx.Err() != nil {
 			return
 		}
@@ -382,6 +414,10 @@ func StartWatchdog(ctx context.Context, state *PendingState, onTimeout func(*Pen
 		}
 		if cur == nil {
 			log.Info().Msg("Watchdog: migration confirmed before fire; nothing to do.")
+			return
+		}
+		if childCtx.Err() != nil {
+			log.Info().Msg("Watchdog: canceled during marker re-read; standing down.")
 			return
 		}
 		log.Warn().Str("reason", reason).Msg("Watchdog: firing rollback.")

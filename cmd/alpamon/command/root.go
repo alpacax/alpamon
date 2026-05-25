@@ -234,13 +234,15 @@ func gracefulShutdown(collector *collector.Collector, wsClient *runner.Websocket
 }
 
 // wirePendingMigration inspects the migration marker on startup. When a
-// migration is in flight, it registers a Confirm hook against the next
-// WebSocket connection success and arms a watchdog that rolls back to the
-// previous workspace if the new one never accepts the agent.
+// migration is in flight, it registers a Confirm hook via
+// SetOnAuthenticated (which fires only after the first successful
+// ReadMessage on a fresh connection, i.e. genuine traffic from the target
+// workspace) and arms a watchdog that rolls back to the previous
+// workspace if the new one never accepts the agent.
 //
-// Confirm is guarded by sync.Once because SetOnConnectSuccess fires on
-// every reconnect, not just the first; we want to clear the marker exactly
-// once.
+// Confirm is guarded by sync.Once because SetOnAuthenticated fires on
+// every reconnect, not just the first; we want to clear the marker
+// exactly once.
 func wirePendingMigration(ctx context.Context, wsClient *runner.WebsocketClient, settings config.Settings) {
 	// Migration relies on systemd-run for self-restart. On platforms
 	// without systemd (Windows, container, dev macOS) the watchdog has no
