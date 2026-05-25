@@ -2,7 +2,14 @@ package file
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/pkg/executor/handlers/common"
@@ -176,6 +183,101 @@ func TestFileExists(t *testing.T) {
 	}
 }
 
+// TestFileUpload_UseBlob_OsFile_NoDoubleClose locks in the v2.1.6 regression
+// where http.Client.Do auto-closes req.Body and fileUpload then calls
+// src.Close() a second time. On *os.File the second Close returns
+// os.ErrClosed, which fileUpload propagated as a failed upload. After the
+// io.NopCloser wrap, http.Client.Do can no longer close src and our
+// explicit Close is the single real close.
+func TestFileUpload_UseBlob_OsFile_NoDoubleClose(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	tmpPath := filepath.Join(t.TempDir(), "blob.bin")
+	if err := os.WriteFile(tmpPath, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write temp: %v", err)
+	}
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		t.Fatalf("open temp: %v", err)
+	}
+
+	h := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+	args := &common.CommandArgs{UseBlob: true, Content: srv.URL}
+
+	code, err := h.fileUpload(args, f, 5, "blob.bin", false)
+	if err != nil {
+		t.Fatalf("fileUpload returned err=%v, want nil (regression of v2.1.6 double-close)", err)
+	}
+	if code != http.StatusOK {
+		t.Errorf("fileUpload code=%d, want %d", code, http.StatusOK)
+	}
+}
+
+// TestFileUpload_UseBlob_CloseErrorPropagates verifies the original intent
+// of commit b9ba9712: when the underlying reader's Close() returns an
+// error (e.g. demoted cat EACCES/ENOENT via cmdReadCloser), fileUpload
+// must propagate it instead of reporting the upload as successful.
+// closeCnt==1 also guards against a future regression that brings the
+// double-close back.
+func TestFileUpload_UseBlob_CloseErrorPropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	closeSentinel := errors.New("synthetic close failure")
+	er := &errReader{
+		r:        strings.NewReader("hello"),
+		failAt:   1 << 30,
+		closeErr: closeSentinel,
+	}
+
+	h := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+	args := &common.CommandArgs{UseBlob: true, Content: srv.URL}
+
+	_, err := h.fileUpload(args, er, 5, "blob.bin", false)
+	if !errors.Is(err, closeSentinel) {
+		t.Fatalf("fileUpload err=%v, want chain containing %v", err, closeSentinel)
+	}
+	if er.closeCnt != 1 {
+		t.Errorf("errReader.Close was called %d time(s), want exactly 1 (double-close regression)", er.closeCnt)
+	}
+}
+
+// TestFileUpload_UseBlob_PutErrorTakesPrecedence verifies the `err == nil &&`
+// guard: when utils.Put itself fails (transport-level error), that error is
+// returned instead of the src.Close() error. Without this guard a Close()
+// failure would mask the real PUT failure.
+func TestFileUpload_UseBlob_PutErrorTakesPrecedence(t *testing.T) {
+	closeSentinel := errors.New("synthetic close failure")
+	er := &errReader{
+		r:        strings.NewReader("hello"),
+		failAt:   1 << 30,
+		closeErr: closeSentinel,
+	}
+
+	h := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+	// Port 0 is reserved and cannot be dialed; net.Dial fails immediately
+	// with "can't assign requested address" / "invalid argument", giving a
+	// deterministic transport-level error without depending on any port
+	// being closed or claiming an ephemeral port that could be re-bound
+	// in the window between listener close and the PUT attempt.
+	args := &common.CommandArgs{UseBlob: true, Content: "http://127.0.0.1:0/blob"}
+
+	_, err := h.fileUpload(args, er, 5, "blob.bin", false)
+	if err == nil {
+		t.Fatal("fileUpload returned nil err, want PUT transport error")
+	}
+	if errors.Is(err, closeSentinel) {
+		t.Errorf("fileUpload returned close error %v; PUT transport error should take precedence", err)
+	}
+}
+
 func TestFileHandler_parsePaths(t *testing.T) {
 	// This test uses Unix-style absolute paths ("/home/user", "/tmp/...").
 	// On Windows those paths join with the supplied home into shapes
@@ -230,4 +332,3 @@ func TestFileHandler_parsePaths(t *testing.T) {
 		})
 	}
 }
-
