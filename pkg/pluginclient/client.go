@@ -22,6 +22,7 @@ package pluginclient
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/configreceiver"
@@ -82,6 +83,16 @@ type Client struct {
 	// the legacy path is disabled — the message is logged and
 	// discarded.
 	OnReconfigure func(rawMessage []byte)
+
+	// configUpdateCh is a buffered-of-1 queue of pending
+	// ``plugin_config_id`` values awaiting Receiver.Handle. A single
+	// configWorker goroutine drains it serially. New events use
+	// last-write-wins (drop the pending value and replace) — config
+	// versions are absolute and monotonic, so applying only the
+	// latest is correct and avoids backing up live goroutines while
+	// an Apply blocks on (e.g.) a slow systemctl reload.
+	configUpdateCh      chan string
+	configWorkerStarted sync.Once
 }
 
 // New wires a Client with the standard configreceiver.Receiver around
@@ -155,7 +166,7 @@ func (c *Client) HandleMessage(ctx context.Context, message []byte) {
 			log.Warn().Msg("Cannot process config_updated: Receiver is nil")
 			return
 		}
-		go c.Receiver.Handle(ctx, payload.PluginConfigID)
+		c.enqueueConfigUpdate(ctx, payload.PluginConfigID)
 		return
 
 	case "reconfigure":
@@ -189,6 +200,55 @@ func (c *Client) HandleMessage(ctx context.Context, message []byte) {
 		time.AfterFunc(1*time.Second, func() {
 			c.WsClient.Restart()
 		})
+	}
+}
+
+// enqueueConfigUpdate hands a fresh “plugin_config_id“ to the
+// single configWorker goroutine. The buffered-of-1 channel acts as
+// a last-write-wins queue: if a previous event is still pending,
+// it is dropped before the new one is enqueued. This bounds memory
+// regardless of event arrival rate (junho review on #319) and is
+// correct because config versions are absolute — applying the newest
+// supersedes any pending intermediates.
+func (c *Client) enqueueConfigUpdate(ctx context.Context, pluginConfigID string) {
+	c.configWorkerStarted.Do(func() {
+		c.configUpdateCh = make(chan string, 1)
+		go c.configWorker(ctx)
+	})
+	// Try fast path first.
+	select {
+	case c.configUpdateCh <- pluginConfigID:
+		return
+	default:
+	}
+	// Channel full: drop pending and enqueue newest.
+	select {
+	case <-c.configUpdateCh:
+	default:
+	}
+	select {
+	case c.configUpdateCh <- pluginConfigID:
+	default:
+		// Worker raced us and consumed the slot in between; not
+		// fatal — the worker will process whatever it grabbed, and
+		// any later event re-enters via Handle.
+		log.Debug().
+			Str("plugin_config_id", pluginConfigID).
+			Msg("configUpdateCh saturated under contention; dropped event")
+	}
+}
+
+// configWorker drains configUpdateCh serially, invoking
+// Receiver.Handle for each ID. Exits when ctx is cancelled (RunForever
+// lifetime). One goroutine per Client; bounded memory.
+func (c *Client) configWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case id := <-c.configUpdateCh:
+			c.Receiver.Handle(ctx, id)
+		}
 	}
 }
 
