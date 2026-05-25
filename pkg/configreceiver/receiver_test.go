@@ -87,7 +87,7 @@ func newFakeServer(t *testing.T, body string, statusOverride int, hashOverride s
 		w.WriteHeader(http.StatusNoContent)
 	})
 	fs.Server = httptest.NewServer(mux)
-	t.Cleanup(fs.Server.Close)
+	t.Cleanup(fs.Close)
 	return fs
 }
 
