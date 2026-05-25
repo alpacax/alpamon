@@ -28,6 +28,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/pkg/scheduler"
@@ -75,14 +76,33 @@ type Applier interface {
 
 // Receiver wires REST fetch + hash check + Applier dispatch into the
 // plugin's WS command loop.
+//
+// applyMu serialises Handle calls so two ``config_updated`` events
+// arriving in quick succession cannot have their applies interleave
+// (older config finishing after newer would leave the plugin in a
+// stale state). Apply itself can be long-running (file writes +
+// service reload) and is per-Receiver, so a plain mutex is enough.
 type Receiver struct {
 	Session *scheduler.Session
 	Applier Applier
+	applyMu sync.Mutex
 }
 
 // Handle is the entry point called from the WS command switch when a
-// ``config_updated`` event arrives.
+// ``config_updated`` event arrives. Safe to call from a fresh goroutine:
+// concurrent invocations are serialised by applyMu so applies run in
+// the order their config_updated events landed.
 func (r *Receiver) Handle(ctx context.Context, pluginConfigID string) {
+	if r == nil || r.Session == nil || r.Applier == nil {
+		log.Error().
+			Str("id", pluginConfigID).
+			Msg("configreceiver.Receiver not fully wired (nil Session or Applier); dropping config_updated")
+		return
+	}
+
+	r.applyMu.Lock()
+	defer r.applyMu.Unlock()
+
 	cfg, err := r.fetch(pluginConfigID)
 	if err != nil {
 		log.Error().Err(err).Str("id", pluginConfigID).Msg("Failed to fetch plugin config")
@@ -143,7 +163,16 @@ func (r *Receiver) reportApplied(id, hash string) {
 	})
 }
 
+// maxReportedErrorLen caps the error string posted to the server.
+// Applier and fetch errors can include full upstream response bodies
+// or large stack traces; truncating prevents DB bloat and accidental
+// secret leakage via log/error fields.
+const maxReportedErrorLen = 512
+
 func (r *Receiver) reportError(id, errMsg string) {
+	if len(errMsg) > maxReportedErrorLen {
+		errMsg = errMsg[:maxReportedErrorLen] + "...(truncated)"
+	}
 	r.post(id, map[string]any{
 		"success": false,
 		"error":   errMsg,
