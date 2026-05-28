@@ -53,7 +53,13 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		if cr.command.ID != "" {
 			finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
 			payload := protocol.NewCommandResponse(exitCode == 0, result, time.Since(start).Seconds(), exitCode)
-			scheduler.Rqueue.Post(finURL, payload, 10, time.Time{})
+			// fin uses a lower priority (higher number) than chunk so that any
+			// pending chunk POSTs for this command_id are pulled from the
+			// Rqueue first, reducing the chance that fin reaches the server
+			// before the trailing chunks. The server also accepts chunks that
+			// arrive after fin, but enforcing pop order keeps the common path
+			// monotonic.
+			scheduler.Rqueue.Post(finURL, payload, 11, time.Time{})
 		}
 	}()
 
