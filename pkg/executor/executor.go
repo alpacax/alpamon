@@ -19,15 +19,18 @@ const chunkSizeThreshold = 4 * 1024 // 4 KB
 
 // chunkWriter is an io.Writer that emits chunks to a callback on newline
 // boundaries or when the buffered content exceeds chunkSizeThreshold.
+// The callback receives chunk content only; sequencing is the caller's
+// responsibility so that multiple chunkWriter instances created for the
+// same logical command (e.g. across shell operators) share one monotonic
+// seq series.
 type chunkWriter struct {
 	mu       sync.Mutex
 	buf      bytes.Buffer
 	full     bytes.Buffer
-	seq      int
-	callback func(seq int, content string)
+	callback func(content string)
 }
 
-func newChunkWriter(callback func(seq int, content string)) *chunkWriter {
+func newChunkWriter(callback func(content string)) *chunkWriter {
 	return &chunkWriter{callback: callback}
 }
 
@@ -41,15 +44,13 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	for {
 		line, err := w.buf.ReadString('\n')
 		if err == nil {
-			w.callback(w.seq, line)
-			w.seq++
+			w.callback(line)
 			continue
 		}
 		// io.EOF: no newline, `line` holds the partial remainder
 		if len(line) > 0 {
 			if len(line) >= chunkSizeThreshold {
-				w.callback(w.seq, line)
-				w.seq++
+				w.callback(line)
 			} else {
 				// Put incomplete line back for the next Write
 				w.buf.WriteString(line)
@@ -69,8 +70,7 @@ func (w *chunkWriter) Flush() {
 	if w.buf.Len() > 0 {
 		content := w.buf.String()
 		w.buf.Reset()
-		w.callback(w.seq, content)
-		w.seq++
+		w.callback(content)
 	}
 }
 
@@ -171,7 +171,7 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 // chunkWriter (hybrid newline + 4 KB threshold). When only pidHook is set,
 // cmd.Start()/Wait() is used so the child pid is visible before Wait blocks.
 // When both are nil, the simpler cmd.CombinedOutput() path is used.
-func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), chunkCallback func(seq int, content string)) ([]byte, error) {
+func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), chunkCallback func(content string)) ([]byte, error) {
 	if chunkCallback != nil {
 		cw := newChunkWriter(chunkCallback)
 		cmd.Stdout = cw
@@ -231,10 +231,12 @@ type CommandOptions struct {
 	PIDHook func(pid int)
 
 	// ChunkCallback, if non-nil, enables streaming output. It is called
-	// with (seq, content) for each chunk of combined stdout/stderr produced
-	// during execution. Chunks are emitted on newline boundaries or when the
-	// internal buffer exceeds chunkSizeThreshold, whichever comes first.
-	ChunkCallback func(seq int, content string)
+	// with each chunk of combined stdout/stderr produced during execution.
+	// Chunks are emitted on newline boundaries or when the internal buffer
+	// exceeds chunkSizeThreshold, whichever comes first. Sequence numbering
+	// is the caller's responsibility — the executor invokes the callback
+	// once per chunk in the order produced.
+	ChunkCallback func(content string)
 }
 
 // substituteEnvVars replaces environment variables in arguments
@@ -368,7 +370,7 @@ func (e *Executor) ExecWithHook(ctx context.Context, args []string, username, gr
 // ExecWithStreamingHook combines PIDHook and ChunkCallback: the child pid is
 // reported via pidHook before Wait, and stdout/stderr are streamed to
 // chunkCallback in real time. Either hook may be nil.
-func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(seq int, content string)) (int, string, error) {
+func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error) {
 	return e.Execute(ctx, CommandOptions{
 		Args:          args,
 		Username:      username,

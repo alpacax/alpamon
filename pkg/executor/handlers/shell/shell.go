@@ -96,7 +96,7 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 }
 
 // executeWithOperators handles shell operators (&&, ||, ;)
-func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(seq int, content string)) (int, string, error) {
+func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string, error) {
 	spl := strings.Fields(command)
 	var currentCmd []string
 	var results strings.Builder
@@ -154,7 +154,7 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 // the PAM tracker for the duration of the execution so sudo calls made
 // from inside the command can be authorized by command_id.
 // When chunkCallback is non-nil, stdout/stderr are streamed to it in real time.
-func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(seq int, content string)) (int, string) {
+func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string) {
 	if len(cmdArgs) == 0 {
 		return 0, ""
 	}

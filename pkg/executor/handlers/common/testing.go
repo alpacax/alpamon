@@ -109,15 +109,15 @@ func (m *MockCommandExecutor) ExecWithHook(ctx context.Context, args []string, u
 
 // ExecWithStreamingHook mirrors ExecWithHook for mock purposes.
 // It invokes pidHook with a synthetic pid and, if chunkCallback is non-nil,
-// calls it once with the full mock output as a single chunk (seq=0).
-func (m *MockCommandExecutor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(seq int, content string)) (int, string, error) {
+// calls it once with the full mock output as a single chunk.
+func (m *MockCommandExecutor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error) {
 	if pidHook != nil {
 		pid := int(mockSyntheticPIDBase + mockSyntheticPID.Add(1))
 		pidHook(pid)
 	}
 	exitCode, output, err := m.Exec(ctx, args, username, groupname, env, timeout)
 	if chunkCallback != nil && output != "" {
-		chunkCallback(0, output)
+		chunkCallback(output)
 	}
 	return exitCode, output, err
 }

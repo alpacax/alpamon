@@ -93,14 +93,22 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		}
 	case "system":
 		commandID := cr.command.ID
-		var chunkCallback func(seq int, content string)
+		var chunkCallback func(content string)
 		if commandID != "" {
 			chunkURL := fmt.Sprintf(eventCommandChunkURL, commandID)
-			chunkCallback = func(seq int, content string) {
+			// seq is owned by the runner so that multiple chunkWriter
+			// instances spawned across shell operators in
+			// executeWithOperators share one monotonic series per
+			// command_id. The executor invokes the callback serially
+			// per command and operator branches run sequentially, so a
+			// plain counter is sufficient.
+			var seq int
+			chunkCallback = func(content string) {
 				payload := map[string]interface{}{
 					"seq":     seq,
 					"content": content,
 				}
+				seq++
 				scheduler.Rqueue.Post(chunkURL, payload, 10, time.Time{})
 			}
 		}

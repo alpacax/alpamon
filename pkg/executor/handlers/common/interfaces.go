@@ -52,11 +52,12 @@ type CommandExecutor interface {
 	ExecWithHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int)) (int, string, error)
 
 	// ExecWithStreamingHook is like ExecWithHook but also accepts a
-	// chunkCallback that is invoked with (seq, content) for each chunk
-	// of combined stdout/stderr produced during execution. Chunks are
-	// emitted on newline boundaries or when the internal buffer exceeds
-	// the threshold, whichever comes first.
-	ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(seq int, content string)) (int, string, error)
+	// chunkCallback that is invoked with each chunk of combined
+	// stdout/stderr produced during execution. Chunks are emitted on
+	// newline boundaries or when the internal buffer exceeds the
+	// threshold, whichever comes first. Sequence numbering is the
+	// caller's responsibility.
+	ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error)
 }
 
 // WSClient interface for WebSocket client operations

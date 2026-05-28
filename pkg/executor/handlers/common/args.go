@@ -51,10 +51,12 @@ type CommandArgs struct {
 	// Environment
 	Env map[string]string
 
-	// ChunkCallback, if non-nil, is called with (seq, content) for each
-	// chunk of stdout/stderr produced during execution. Used by system-shell
-	// commands to stream output to alpacon-server in real time.
-	ChunkCallback func(seq int, content string)
+	// ChunkCallback, if non-nil, is called with each chunk of stdout/stderr
+	// produced during execution. Used by system-shell commands to stream
+	// output to alpacon-server in real time. Sequence numbering is the
+	// caller's responsibility — the callback is invoked once per chunk in
+	// the order produced.
+	ChunkCallback func(content string)
 
 	// Firewall operations
 	Keys         []string
