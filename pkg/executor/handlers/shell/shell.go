@@ -87,16 +87,16 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 		} else {
 			cmdArgs = []string{"/bin/sh", "-c", command}
 		}
-		exitCode, result := h.executeCommand(ctx, cmdArgs, username, groupname, env, timeout, args.CommandID)
+		exitCode, result := h.executeCommand(ctx, cmdArgs, username, groupname, env, timeout, args.CommandID, args.ChunkCallback)
 		return exitCode, result, nil
 	}
 
 	// Fallback: direct execution with manual operator parsing
-	return h.executeWithOperators(ctx, command, username, groupname, env, timeout, args.CommandID)
+	return h.executeWithOperators(ctx, command, username, groupname, env, timeout, args.CommandID, args.ChunkCallback)
 }
 
 // executeWithOperators handles shell operators (&&, ||, ;)
-func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string) (int, string, error) {
+func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(seq int, content string)) (int, string, error) {
 	spl := strings.Fields(command)
 	var currentCmd []string
 	var results strings.Builder
@@ -108,7 +108,7 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 		case "&&":
 			// Execute current command
 			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
+				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
 				results.WriteString(result)
 				// Stop if command fails
 				if exitCode != 0 {
@@ -119,7 +119,7 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 		case "||":
 			// Execute current command
 			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
+				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
 				results.WriteString(result)
 				// Continue only if command fails
 				if exitCode == 0 {
@@ -130,7 +130,7 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 		case ";":
 			// Execute current command
 			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
+				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
 				results.WriteString(result)
 				// Continue regardless of result
 				currentCmd = nil
@@ -142,7 +142,7 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 
 	// Execute any remaining command
 	if len(currentCmd) > 0 {
-		exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
+		exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
 		results.WriteString(result)
 	}
 
@@ -153,7 +153,8 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 // When commandID is non-empty, the child's root pid is registered with
 // the PAM tracker for the duration of the execution so sudo calls made
 // from inside the command can be authorized by command_id.
-func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string) (int, string) {
+// When chunkCallback is non-nil, stdout/stderr are streamed to it in real time.
+func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(seq int, content string)) (int, string) {
 	if len(cmdArgs) == 0 {
 		return 0, ""
 	}
@@ -173,12 +174,20 @@ func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, use
 		pidHook := func(pid int) {
 			cleanup = runner.RegisterCommandPID(pid, commandID, username)
 		}
-		exitCode, output, err = h.Executor.ExecWithHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook)
+		if chunkCallback != nil {
+			exitCode, output, err = h.Executor.ExecWithStreamingHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook, chunkCallback)
+		} else {
+			exitCode, output, err = h.Executor.ExecWithHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook)
+		}
 		if cleanup != nil {
 			cleanup()
 		}
 	} else {
-		exitCode, output, err = h.Executor.Exec(ctx, cmdArgs, username, groupname, env, timeout)
+		if chunkCallback != nil {
+			exitCode, output, err = h.Executor.ExecWithStreamingHook(ctx, cmdArgs, username, groupname, env, timeout, nil, chunkCallback)
+		} else {
+			exitCode, output, err = h.Executor.Exec(ctx, cmdArgs, username, groupname, env, timeout)
+		}
 	}
 
 	if err != nil && exitCode == -1 {

@@ -51,6 +51,11 @@ type CommandArgs struct {
 	// Environment
 	Env map[string]string
 
+	// ChunkCallback, if non-nil, is called with (seq, content) for each
+	// chunk of stdout/stderr produced during execution. Used by system-shell
+	// commands to stream output to alpacon-server in real time.
+	ChunkCallback func(seq int, content string)
+
 	// Firewall operations
 	Keys         []string
 	ChainName    string

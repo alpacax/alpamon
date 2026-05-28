@@ -92,14 +92,27 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 			args.CommandID = cr.command.ID
 		}
 	case "system":
+		commandID := cr.command.ID
+		var chunkCallback func(seq int, content string)
+		if commandID != "" {
+			chunkURL := fmt.Sprintf(eventCommandChunkURL, commandID)
+			chunkCallback = func(seq int, content string) {
+				payload := map[string]interface{}{
+					"seq":     seq,
+					"content": content,
+				}
+				scheduler.Rqueue.Post(chunkURL, payload, 10, time.Time{})
+			}
+		}
 		command = common.ShellCmd.String()
 		args = &common.CommandArgs{
-			CommandID: cr.command.ID,
-			Command:   cr.command.Line,
-			Username:  cr.command.User,
-			Groupname: cr.command.Group,
-			Env:       cr.command.Env,
-			AllowSh:   cr.command.AllowSh,
+			CommandID:     commandID,
+			Command:       cr.command.Line,
+			Username:      cr.command.User,
+			Groupname:     cr.command.Group,
+			Env:           cr.command.Env,
+			AllowSh:       cr.command.AllowSh,
+			ChunkCallback: chunkCallback,
 		}
 	default:
 		exitCode = 1
