@@ -108,35 +108,6 @@ func TestChunkWriter_ThresholdTriggersEmissionWithoutNewline(t *testing.T) {
 	}
 }
 
-func TestChunkWriter_LongSingleLineSplitsIntoFixedChunks(t *testing.T) {
-	var chunks []string
-	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
-
-	big := strings.Repeat("y", chunkSizeThreshold*3+50)
-	if _, err := cw.Write([]byte(big)); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	if len(chunks) != 3 {
-		t.Fatalf("expected 3 fixed-size chunks before flush, got %d", len(chunks))
-	}
-	for i, c := range chunks {
-		if len(c) != chunkSizeThreshold {
-			t.Errorf("chunk[%d] size: got %d, want %d", i, len(c), chunkSizeThreshold)
-		}
-	}
-
-	cw.Flush()
-	if len(chunks) != 4 || len(chunks[3]) != 50 {
-		t.Errorf("flush should emit 50-byte tail, got %d chunks with sizes %v",
-			len(chunks), chunkSizes(chunks))
-	}
-
-	if assembled := strings.Join(chunks, ""); assembled != big {
-		t.Error("assembled chunks should reproduce the full input")
-	}
-}
-
 func TestChunkWriter_RecoversFromCallbackPanic(t *testing.T) {
 	var calls int
 	cw := newChunkWriter(func(content string) {

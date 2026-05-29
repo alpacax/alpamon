@@ -114,15 +114,20 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	// codeql[go/command-injection]: Intentional - Alpamon executes admin commands from Alpacon console
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) // lgtm[go/command-injection]
 
+	var cw *chunkWriter
+	if opts.ChunkCallback != nil {
+		cw = newChunkWriter(opts.ChunkCallback)
+	}
+
 	// Set up privilege demotion if username specified
 	if opts.Username != "" && opts.Username != "root" {
 		sysProcAttr, err := e.demotePrivileges(opts.Username, opts.Groupname)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to demote privileges")
 			msg := err.Error()
-			if opts.ChunkCallback != nil {
+			if cw != nil {
 				// In-band so streaming UIs don't see an empty terminal then fin.
-				safeInvokeChunkCallback(opts.ChunkCallback, "alpamon: "+msg+"\n")
+				cw.emit("alpamon: " + msg + "\n")
 				return 1, "", err
 			}
 			return 1, msg, err
@@ -161,14 +166,14 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 
 	// Execute command
 	start := time.Now()
-	output, err := e.runCommand(cmd, opts.PIDHook, opts.ChunkCallback)
+	output, err := e.runCommand(cmd, opts.PIDHook, cw)
 	exitCode := 0
 	result := string(output)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			elapsed := time.Since(start).Truncate(time.Second)
 			msg := fmt.Sprintf("Command timed out after %s", elapsed)
-			if opts.ChunkCallback != nil {
+			if cw != nil {
 				return 124, msg, err
 			}
 			return 124, result + "\n\n" + msg, err
@@ -190,56 +195,35 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 
 // runCommand uses Start/Wait when streaming or pid reporting is needed;
 // otherwise CombinedOutput. The streaming path returns no bytes.
-func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), chunkCallback func(content string)) ([]byte, error) {
-	if chunkCallback != nil {
-		cw := newChunkWriter(chunkCallback)
-		cmd.Stdout = cw
-		cmd.Stderr = cw
-
-		if err := cmd.Start(); err != nil {
-			return nil, err
-		}
-		if cmd.Process != nil {
-			invokePIDHook(pidHook, cmd.Process.Pid)
-		}
-		err := cmd.Wait()
-		cw.Flush()
-		return nil, err
-	}
-
-	if pidHook == nil {
+func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
+	if cw == nil && pidHook == nil {
 		return cmd.CombinedOutput()
 	}
 
 	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-
-	if err := cmd.Start(); err != nil {
-		return buf.Bytes(), err
+	if cw != nil {
+		cmd.Stdout = cw
+		cmd.Stderr = cw
+	} else {
+		cmd.Stdout = &buf
+		cmd.Stderr = &buf
 	}
 
+	if err := cmd.Start(); err != nil {
+		if cw != nil {
+			return nil, err
+		}
+		return buf.Bytes(), err
+	}
 	if cmd.Process != nil {
 		invokePIDHook(pidHook, cmd.Process.Pid)
 	}
-
 	err := cmd.Wait()
-	return buf.Bytes(), err
-}
-
-// safeInvokeChunkCallback is for pre-launch error paths that bypass the
-// writer. Safe ONLY before cmd.Start — after Start, use chunkWriter.emit
-// so w.mu serializes against concurrent stdout/stderr writes.
-func safeInvokeChunkCallback(cb func(content string), content string) {
-	if cb == nil {
-		return
+	if cw != nil {
+		cw.Flush()
+		return nil, err
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			log.Error().Interface("panic", r).Msg("ChunkCallback panicked")
-		}
-	}()
-	cb(content)
+	return buf.Bytes(), err
 }
 
 func invokePIDHook(pidHook func(pid int), pid int) {

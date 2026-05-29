@@ -95,44 +95,53 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 	return h.executeWithOperators(ctx, command, username, groupname, env, timeout, args.CommandID, args.ChunkCallback)
 }
 
-// executeWithOperators handles shell operators (&&, ||, ;)
+// executeWithOperators handles shell operators (&&, ||, ;). Under streaming,
+// per-segment output is empty (chunks carry the body) so the accumulator is
+// skipped entirely.
 func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string, error) {
 	spl := strings.Fields(command)
 	var currentCmd []string
 	var results strings.Builder
 	var exitCode int
 	var result string
+	streaming := chunkCallback != nil
+
+	appendResult := func(r string) {
+		if !streaming {
+			results.WriteString(r)
+		}
+	}
+	finalResult := func() string {
+		if streaming {
+			return ""
+		}
+		return results.String()
+	}
 
 	for _, arg := range spl {
 		switch arg {
 		case "&&":
-			// Execute current command
 			if len(currentCmd) > 0 {
 				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
-				results.WriteString(result)
-				// Stop if command fails
+				appendResult(result)
 				if exitCode != 0 {
-					return exitCode, results.String(), nil
+					return exitCode, finalResult(), nil
 				}
 				currentCmd = nil
 			}
 		case "||":
-			// Execute current command
 			if len(currentCmd) > 0 {
 				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
-				results.WriteString(result)
-				// Continue only if command fails
+				appendResult(result)
 				if exitCode == 0 {
-					return exitCode, results.String(), nil
+					return exitCode, finalResult(), nil
 				}
 				currentCmd = nil
 			}
 		case ";":
-			// Execute current command
 			if len(currentCmd) > 0 {
 				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
-				results.WriteString(result)
-				// Continue regardless of result
+				appendResult(result)
 				currentCmd = nil
 			}
 		default:
@@ -140,49 +149,33 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 		}
 	}
 
-	// Execute any remaining command
 	if len(currentCmd) > 0 {
 		exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
-		results.WriteString(result)
+		appendResult(result)
 	}
 
-	return exitCode, results.String(), nil
+	return exitCode, finalResult(), nil
 }
 
 // executeCommand registers the child pid with the PAM tracker when commandID
-// is set so sudo inside the command is authorized by command_id.
+// is set so sudo inside the command is authorized by command_id. Execute
+// folds startup errors into output, so the err return is intentionally
+// dropped here.
 func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string) {
 	if len(cmdArgs) == 0 {
 		return 0, ""
 	}
 
-	var (
-		exitCode int
-		output   string
-		err      error
-	)
-
+	var pidHook func(pid int)
+	var cleanup func()
 	if commandID != "" {
-		var cleanup func()
-		pidHook := func(pid int) {
+		pidHook = func(pid int) {
 			cleanup = runner.RegisterCommandPID(pid, commandID, username)
 		}
-		if chunkCallback != nil {
-			exitCode, output, err = h.Executor.ExecWithStreamingHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook, chunkCallback)
-		} else {
-			exitCode, output, err = h.Executor.ExecWithHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook)
-		}
-		if cleanup != nil {
-			cleanup()
-		}
-	} else {
-		if chunkCallback != nil {
-			exitCode, output, err = h.Executor.ExecWithStreamingHook(ctx, cmdArgs, username, groupname, env, timeout, nil, chunkCallback)
-		} else {
-			exitCode, output, err = h.Executor.Exec(ctx, cmdArgs, username, groupname, env, timeout)
-		}
 	}
-
-	_ = err // Execute folds startup errors into output.
+	exitCode, output, _ := h.Executor.ExecWithStreamingHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook, chunkCallback)
+	if cleanup != nil {
+		cleanup()
+	}
 	return exitCode, output
 }
