@@ -158,6 +158,8 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	return exitCode, string(output), err
 }
 
+// runCommand splits into Start/Wait when chunkCallback or pidHook is set so
+// streaming and pid reporting are possible; otherwise CombinedOutput.
 func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), chunkCallback func(content string)) ([]byte, error) {
 	if chunkCallback != nil {
 		cw := newChunkWriter(chunkCallback)
@@ -167,8 +169,8 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), chunkCallbac
 		if err := cmd.Start(); err != nil {
 			return cw.Bytes(), err
 		}
-		if pidHook != nil && cmd.Process != nil {
-			pidHook(cmd.Process.Pid)
+		if cmd.Process != nil {
+			invokePIDHook(pidHook, cmd.Process.Pid)
 		}
 		err := cmd.Wait()
 		cw.Flush()
@@ -188,11 +190,23 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), chunkCallbac
 	}
 
 	if cmd.Process != nil {
-		pidHook(cmd.Process.Pid)
+		invokePIDHook(pidHook, cmd.Process.Pid)
 	}
 
 	err := cmd.Wait()
 	return buf.Bytes(), err
+}
+
+func invokePIDHook(pidHook func(pid int), pid int) {
+	if pidHook == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Int("pid", pid).Msg("PIDHook panicked")
+		}
+	}()
+	pidHook(pid)
 }
 
 // CommandOptions defines options for command execution
@@ -205,16 +219,9 @@ type CommandOptions struct {
 	Timeout    time.Duration     // Command timeout
 	Input      string            // Input to provide via stdin
 
-	// PIDHook, if non-nil, is invoked with the child's pid immediately
-	// after cmd.Start() returns successfully and before the command is
-	// waited on. It is used to register the root pid of a deploy shell
-	// Command with the PAM tracker so that sudo invoked inside the
-	// command can be attributed to the originating Command.ID.
-	//
-	// When PIDHook is set, Execute uses cmd.Start()/cmd.Wait() instead
-	// of cmd.CombinedOutput() so the pid is visible to the hook before
-	// the child can exec sudo. Any panic from the hook is recovered and
-	// logged without affecting command execution.
+	// PIDHook, if non-nil, receives the child's pid after Start so the
+	// shell handler can register it with the PAM tracker before the
+	// child execs sudo. Panics are recovered and logged.
 	PIDHook func(pid int)
 
 	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks.

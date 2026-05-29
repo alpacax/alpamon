@@ -53,7 +53,7 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		if cr.command.ID != "" {
 			finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
 			payload := protocol.NewCommandResponse(exitCode == 0, result, time.Since(start).Seconds(), exitCode)
-			// Priority 11 > 10 so trailing chunks drain before fin.
+			// Lower priority than chunks (10) so trailing chunks drain before fin.
 			scheduler.Rqueue.Post(finURL, payload, 11, time.Time{})
 		}
 	}()
