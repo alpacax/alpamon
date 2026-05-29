@@ -1,12 +1,7 @@
 package runner
 
 import (
-	"bufio"
-	"os"
-	"strings"
-
 	"github.com/alpacax/alpamon/v2/pkg/utils"
-	"github.com/rs/zerolog/log"
 )
 
 func getDefaultEnv() map[string]string {
@@ -17,45 +12,7 @@ func getDefaultEnv() map[string]string {
 	env["LANG"] = "en_US.UTF-8"
 	env["PATH"] = utils.DefaultPath()
 
-	loadEtcEnvironment(env)
+	utils.LoadEtcEnvironment(env)
 
 	return env
-}
-
-// loadEtcEnvironment parses /etc/environment and merges system-wide
-// environment variables into the provided map. This supplements the
-// PAM pam_env module which is not invoked for PTY sessions.
-func loadEtcEnvironment(env map[string]string) {
-	envFilePath := utils.EnvironmentFilePath()
-	if envFilePath == "" {
-		return
-	}
-
-	file, err := os.Open(envFilePath)
-	if err != nil {
-		return
-	}
-	defer func() { _ = file.Close() }()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		value = strings.Trim(strings.TrimSpace(value), `"'`)
-		env[key] = value
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Debug().Err(err).Msgf("Error reading %s", envFilePath)
-	}
 }

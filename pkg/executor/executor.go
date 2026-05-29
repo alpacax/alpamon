@@ -24,8 +24,10 @@ func NewExecutor() *Executor {
 
 // Execute runs a command with full control over execution parameters
 func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, string, error) {
-	// Apply environment variable substitution
-	args := e.substituteEnvVars(opts.Args, opts.Env)
+	// Build the environment for the (possibly demoted) command and expand
+	// any variable references in the arguments using it.
+	env := e.buildEnv(opts.Username, opts.Env)
+	args := e.expandArgs(opts.Args, env)
 
 	// Setup context with timeout if specified
 	if opts.Timeout > 0 {
@@ -50,19 +52,18 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 		}
 	}
 
-	// Set environment variables
-	for key, value := range opts.Env {
+	// Set the environment explicitly so the child never inherits Alpamon's
+	// own service environment (e.g. USER=root, systemd-injected variables).
+	for key, value := range env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 	}
 
-	// Set working directory
+	// Set working directory. Reuse the home directory already resolved into
+	// the environment instead of looking the user up a second time.
 	if opts.WorkingDir != "" {
 		cmd.Dir = opts.WorkingDir
 	} else if opts.Username != "" {
-		usr, err := utils.GetSystemUser(opts.Username)
-		if err == nil {
-			cmd.Dir = usr.HomeDir
-		}
+		cmd.Dir = env["HOME"]
 	}
 
 	// Set stdin if provided
@@ -144,21 +145,47 @@ type CommandOptions struct {
 	PIDHook func(pid int)
 }
 
-// substituteEnvVars replaces environment variables in arguments
-func (e *Executor) substituteEnvVars(args []string, env map[string]string) []string {
-	if env == nil {
-		return args
+// buildEnv constructs the environment for a command. It starts from the
+// deterministic default environment, fills in the target user's identity
+// (HOME, USER, LOGNAME, MAIL) from the passwd entry, and finally applies any
+// caller-provided variables as overrides. Building the environment explicitly
+// ensures the child never inherits Alpamon's own service environment.
+func (e *Executor) buildEnv(username string, override map[string]string) map[string]string {
+	env := e.getDefaultEnv()
+	utils.LoadEtcEnvironment(env)
+	e.applyUserIdentity(env, username)
+	for key, value := range override {
+		env[key] = value
 	}
+	return env
+}
 
-	// Add default environment variables
-	defaultEnv := e.getDefaultEnv()
-	for key, value := range defaultEnv {
-		if _, exists := env[key]; !exists {
-			env[key] = value
+// applyUserIdentity sets the identity-related environment variables from the
+// target user's passwd entry, mirroring the Websh PTY path in
+// getPtyUserAndEnv. When the user cannot be resolved it falls back to
+// Alpamon's process environment so execution still proceeds.
+func (e *Executor) applyUserIdentity(env map[string]string, username string) {
+	usr, err := utils.GetSystemUser(username)
+	if err != nil {
+		log.Warn().Err(err).Str("user", username).
+			Msg("Failed to resolve user for environment, falling back to process environment")
+		if home := os.Getenv("HOME"); home != "" {
+			env["HOME"] = home
 		}
+		if name := os.Getenv("USER"); name != "" {
+			env["USER"] = name
+		}
+		return
 	}
 
-	// Substitute variables in arguments
+	env["USER"] = usr.Username
+	env["HOME"] = usr.HomeDir
+	env["LOGNAME"] = usr.Username
+	env["MAIL"] = "/var/mail/" + usr.Username
+}
+
+// expandArgs expands ${VAR} and $VAR references in each argument using env.
+func (e *Executor) expandArgs(args []string, env map[string]string) []string {
 	result := make([]string, len(args))
 	for i, arg := range args {
 		result[i] = e.expandEnvVar(arg, env)
@@ -185,12 +212,12 @@ func (e *Executor) expandEnvVar(s string, env map[string]string) string {
 	return s
 }
 
-// getDefaultEnv returns default environment variables
+// getDefaultEnv returns the deterministic default environment variables.
+// Identity variables (HOME, USER, LOGNAME, MAIL) are intentionally omitted
+// here and set per target user in applyUserIdentity.
 func (e *Executor) getDefaultEnv() map[string]string {
 	return map[string]string{
 		"PATH":      utils.DefaultPath(),
-		"HOME":      os.Getenv("HOME"),
-		"USER":      os.Getenv("USER"),
 		"SHELL":     utils.DefaultShell(),
 		"TERM":      "xterm-256color",
 		"LANG":      "en_US.UTF-8",
