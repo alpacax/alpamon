@@ -46,9 +46,6 @@ func TestExecutor_NoTimeoutOnFastCommand(t *testing.T) {
 	}
 }
 
-// TestExecutor_ExecWithStreamingHook_StreamsChunks runs a real command and
-// verifies that ChunkCallback is invoked, the assembled chunk content matches
-// the returned combined output, and the chunks arrive in produced order.
 func TestExecutor_ExecWithStreamingHook_StreamsChunks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses /bin/sh -c which is Unix-only")
@@ -91,9 +88,6 @@ func TestExecutor_ExecWithStreamingHook_StreamsChunks(t *testing.T) {
 	}
 }
 
-// TestExecutor_PlainExecuteWithoutCallback ensures the non-streaming code path
-// is unchanged when ChunkCallback is nil — output is captured via the legacy
-// CombinedOutput route.
 func TestExecutor_PlainExecuteWithoutCallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses /bin/sh -c which is Unix-only")

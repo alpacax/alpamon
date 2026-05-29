@@ -7,9 +7,6 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 )
 
-// TestShellHandler_StreamingForwardsCallback verifies that a ChunkCallback
-// set on CommandArgs is forwarded down to the executor for a single
-// sub-command path (no shell operators).
 func TestShellHandler_StreamingForwardsCallback(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockExec.SetResult("echo hi", 0, "hi", nil)
@@ -31,12 +28,8 @@ func TestShellHandler_StreamingForwardsCallback(t *testing.T) {
 	}
 }
 
-// TestShellHandler_StreamingAcrossOperators is the regression test for the
-// seq-collision bug: when executeWithOperators runs multiple sub-commands
-// for one logical command, the same ChunkCallback must be invoked for each
-// sub-command. Because seq is owned by the caller (CommandRunner), this
-// test asserts that the runner-side counter would observe each chunk
-// exactly once in order — regardless of how many sub-commands run.
+// Regression: the same callback must fire for every sub-command across
+// operators so the runner-owned seq stays monotonic.
 func TestShellHandler_StreamingAcrossOperators(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockExec.SetResult("cmd1", 0, "out1", nil)
@@ -81,9 +74,6 @@ func TestShellHandler_StreamingAcrossOperators(t *testing.T) {
 	}
 }
 
-// TestShellHandler_NilChunkCallback ensures the streaming path stays optional:
-// when ChunkCallback is nil, executeCommand must fall back to the non-streaming
-// ExecWithHook / Exec path without panic.
 func TestShellHandler_NilChunkCallback(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockExec.SetResult("ls", 0, "file.txt", nil)

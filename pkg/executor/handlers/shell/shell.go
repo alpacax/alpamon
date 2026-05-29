@@ -149,11 +149,8 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 	return exitCode, results.String(), nil
 }
 
-// executeCommand executes a single command.
-// When commandID is non-empty, the child's root pid is registered with
-// the PAM tracker for the duration of the execution so sudo calls made
-// from inside the command can be authorized by command_id.
-// When chunkCallback is non-nil, stdout/stderr are streamed to it in real time.
+// executeCommand registers the child pid with the PAM tracker when commandID
+// is set so sudo inside the command is authorized by command_id.
 func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string) {
 	if len(cmdArgs) == 0 {
 		return 0, ""
@@ -166,10 +163,6 @@ func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, use
 	)
 
 	if commandID != "" {
-		// Track the pid in the PAM tracker before the child can exec
-		// sudo; unregister after the command completes. The register
-		// helper returns a closure that captures the exact (pid,
-		// commandID) pair, so the cleanup is leak-proof by construction.
 		var cleanup func()
 		pidHook := func(pid int) {
 			cleanup = runner.RegisterCommandPID(pid, commandID, username)

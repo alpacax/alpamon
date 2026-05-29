@@ -53,12 +53,7 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		if cr.command.ID != "" {
 			finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
 			payload := protocol.NewCommandResponse(exitCode == 0, result, time.Since(start).Seconds(), exitCode)
-			// fin uses a lower priority (higher number) than chunk so that any
-			// pending chunk POSTs for this command_id are pulled from the
-			// Rqueue first, reducing the chance that fin reaches the server
-			// before the trailing chunks. The server also accepts chunks that
-			// arrive after fin, but enforcing pop order keeps the common path
-			// monotonic.
+			// Priority 11 > 10 so trailing chunks drain before fin.
 			scheduler.Rqueue.Post(finURL, payload, 11, time.Time{})
 		}
 	}()
@@ -102,12 +97,7 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		var chunkCallback func(content string)
 		if commandID != "" {
 			chunkURL := fmt.Sprintf(eventCommandChunkURL, commandID)
-			// seq is owned by the runner so that multiple chunkWriter
-			// instances spawned across shell operators in
-			// executeWithOperators share one monotonic series per
-			// command_id. The executor invokes the callback serially
-			// per command and operator branches run sequentially, so a
-			// plain counter is sufficient.
+			// Runner owns seq so chunks across shell operators share one series.
 			var seq int
 			chunkCallback = func(content string) {
 				payload := map[string]interface{}{
