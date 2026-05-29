@@ -15,14 +15,13 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const chunkSizeThreshold = 4 * 1024 // 4 KB
+const chunkSizeThreshold = 4 * 1024
 
-// chunkWriter emits chunks to callback on newline or at chunkSizeThreshold.
-// Sequencing is the caller's responsibility.
+// chunkWriter forwards stdout/stderr to a callback on newline or at
+// chunkSizeThreshold. No capture: chunks are the only output channel.
 type chunkWriter struct {
 	mu       sync.Mutex
 	buf      bytes.Buffer
-	full     bytes.Buffer
 	callback func(content string)
 }
 
@@ -34,18 +33,15 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	w.full.Write(p)
 	w.buf.Write(p)
 
 	for {
 		line, err := w.buf.ReadString('\n')
 		if err == nil {
-			w.emit(line)
+			// A buffered tail merged with this Write can exceed the cap.
+			w.emitChunked(line)
 			continue
 		}
-		// No newline: split into fixed-size chunks so a single very long
-		// line cannot produce an arbitrarily large payload. Sub-threshold
-		// tail stays buffered for the next Write or Flush.
 		for len(line) >= chunkSizeThreshold {
 			w.emit(line[:chunkSizeThreshold])
 			line = line[chunkSizeThreshold:]
@@ -66,12 +62,22 @@ func (w *chunkWriter) Flush() {
 	if w.buf.Len() > 0 {
 		content := w.buf.String()
 		w.buf.Reset()
+		w.emitChunked(content)
+	}
+}
+
+func (w *chunkWriter) emitChunked(content string) {
+	for len(content) > chunkSizeThreshold {
+		w.emit(content[:chunkSizeThreshold])
+		content = content[chunkSizeThreshold:]
+	}
+	if len(content) > 0 {
 		w.emit(content)
 	}
 }
 
-// emit guards nil and recovers from callback panics so a bad ChunkCallback
-// cannot crash the agent mid-stream or during teardown.
+// emit nil-guards and recovers from callback panics so a bad callback
+// cannot crash the agent.
 func (w *chunkWriter) emit(content string) {
 	if w.callback == nil {
 		return
@@ -82,15 +88,6 @@ func (w *chunkWriter) emit(content string) {
 		}
 	}()
 	w.callback(content)
-}
-
-func (w *chunkWriter) Bytes() []byte {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	out := make([]byte, w.full.Len())
-	copy(out, w.full.Bytes())
-	return out
 }
 
 // Executor provides system command execution with privilege management
@@ -122,7 +119,13 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 		sysProcAttr, err := e.demotePrivileges(opts.Username, opts.Groupname)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to demote privileges")
-			return 1, err.Error(), err
+			msg := err.Error()
+			if opts.ChunkCallback != nil {
+				// In-band so streaming UIs don't see an empty terminal then fin.
+				safeInvokeChunkCallback(opts.ChunkCallback, "alpamon: "+msg+"\n")
+				return 1, "", err
+			}
+			return 1, msg, err
 		}
 		if sysProcAttr != nil {
 			cmd.SysProcAttr = sysProcAttr
@@ -160,23 +163,33 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	start := time.Now()
 	output, err := e.runCommand(cmd, opts.PIDHook, opts.ChunkCallback)
 	exitCode := 0
+	result := string(output)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			elapsed := time.Since(start).Truncate(time.Second)
-			return 124, string(output) + fmt.Sprintf("\n\nCommand timed out after %s", elapsed), err
+			msg := fmt.Sprintf("Command timed out after %s", elapsed)
+			if opts.ChunkCallback != nil {
+				return 124, msg, err
+			}
+			return 124, result + "\n\n" + msg, err
 		}
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode = exitError.ExitCode()
 		} else {
+			// cmd.Start failures (ENOENT, fork EAGAIN) produce no bytes;
+			// surface err so fin carries a diagnostic.
 			exitCode = 1
+			if result == "" {
+				result = err.Error()
+			}
 		}
 	}
 
-	return exitCode, string(output), err
+	return exitCode, result, err
 }
 
-// runCommand splits into Start/Wait when chunkCallback or pidHook is set so
-// streaming and pid reporting are possible; otherwise CombinedOutput.
+// runCommand uses Start/Wait when streaming or pid reporting is needed;
+// otherwise CombinedOutput. The streaming path returns no bytes.
 func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), chunkCallback func(content string)) ([]byte, error) {
 	if chunkCallback != nil {
 		cw := newChunkWriter(chunkCallback)
@@ -184,14 +197,14 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), chunkCallbac
 		cmd.Stderr = cw
 
 		if err := cmd.Start(); err != nil {
-			return cw.Bytes(), err
+			return nil, err
 		}
 		if cmd.Process != nil {
 			invokePIDHook(pidHook, cmd.Process.Pid)
 		}
 		err := cmd.Wait()
 		cw.Flush()
-		return cw.Bytes(), err
+		return nil, err
 	}
 
 	if pidHook == nil {
@@ -212,6 +225,21 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), chunkCallbac
 
 	err := cmd.Wait()
 	return buf.Bytes(), err
+}
+
+// safeInvokeChunkCallback is for pre-launch error paths that bypass the
+// writer. Safe ONLY before cmd.Start — after Start, use chunkWriter.emit
+// so w.mu serializes against concurrent stdout/stderr writes.
+func safeInvokeChunkCallback(cb func(content string), content string) {
+	if cb == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Msg("ChunkCallback panicked")
+		}
+	}()
+	cb(content)
 }
 
 func invokePIDHook(pidHook func(pid int), pid int) {

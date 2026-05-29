@@ -53,7 +53,8 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		if cr.command.ID != "" {
 			finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
 			payload := protocol.NewCommandResponse(exitCode == 0, result, time.Since(start).Seconds(), exitCode)
-			// Lower priority than chunks (10) so trailing chunks drain before fin.
+			// Best-effort hint only (retries and concurrent reporters can
+			// still race); server must reassemble via seq.
 			scheduler.Rqueue.Post(finURL, payload, 11, time.Time{})
 		}
 	}()

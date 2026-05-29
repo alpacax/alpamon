@@ -108,13 +108,10 @@ func TestChunkWriter_ThresholdTriggersEmissionWithoutNewline(t *testing.T) {
 	}
 }
 
-// Very long single-line input must split into fixed-size chunks rather than
-// one arbitrarily large payload (regression for queue/memory pressure).
 func TestChunkWriter_LongSingleLineSplitsIntoFixedChunks(t *testing.T) {
 	var chunks []string
 	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
 
-	// 3 full chunks + 50-byte tail, no newlines.
 	big := strings.Repeat("y", chunkSizeThreshold*3+50)
 	if _, err := cw.Write([]byte(big)); err != nil {
 		t.Fatalf("write: %v", err)
@@ -135,13 +132,11 @@ func TestChunkWriter_LongSingleLineSplitsIntoFixedChunks(t *testing.T) {
 			len(chunks), chunkSizes(chunks))
 	}
 
-	if string(cw.Bytes()) != big {
-		t.Error("Bytes() should still return full input")
+	if assembled := strings.Join(chunks, ""); assembled != big {
+		t.Error("assembled chunks should reproduce the full input")
 	}
 }
 
-// A panicking ChunkCallback must not crash the writer mid-stream or during
-// flush; the rest of the stream should continue to be processed.
 func TestChunkWriter_RecoversFromCallbackPanic(t *testing.T) {
 	var calls int
 	cw := newChunkWriter(func(content string) {
@@ -159,8 +154,6 @@ func TestChunkWriter_RecoversFromCallbackPanic(t *testing.T) {
 	}
 	cw.Flush()
 
-	// 2 line emissions + 1 flush emission = 3 callback invocations even
-	// though the first one panicked.
 	if calls != 3 {
 		t.Errorf("expected 3 callback invocations after recovery, got %d", calls)
 	}
@@ -195,24 +188,6 @@ func TestChunkWriter_MixedLinesAndTail(t *testing.T) {
 	}
 }
 
-func TestChunkWriter_BytesReturnsFullOutput(t *testing.T) {
-	cw := newChunkWriter(func(content string) {})
-
-	inputs := []string{"hello\n", "world", "!\n"}
-	for _, s := range inputs {
-		if _, err := cw.Write([]byte(s)); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
-	cw.Flush()
-
-	got := string(cw.Bytes())
-	want := "hello\nworld!\n"
-	if got != want {
-		t.Errorf("Bytes(): got %q, want %q", got, want)
-	}
-}
-
 func TestChunkWriter_WriteReturnsFullLength(t *testing.T) {
 	cw := newChunkWriter(func(content string) {})
 
@@ -223,5 +198,58 @@ func TestChunkWriter_WriteReturnsFullLength(t *testing.T) {
 	}
 	if n != len(in) {
 		t.Errorf("Write should return full length: got %d, want %d", n, len(in))
+	}
+}
+
+// Regression: buffered tail + next Write must not emit payload > threshold.
+func TestChunkWriter_NewlineLineExceedingThresholdSplits(t *testing.T) {
+	var chunks []string
+	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
+
+	tail := strings.Repeat("a", chunkSizeThreshold-100)
+	if _, err := cw.Write([]byte(tail)); err != nil {
+		t.Fatalf("write tail: %v", err)
+	}
+	if len(chunks) != 0 {
+		t.Fatalf("expected no chunks yet, got %d", len(chunks))
+	}
+
+	if _, err := cw.Write([]byte(strings.Repeat("b", 199) + "\n")); err != nil {
+		t.Fatalf("write line end: %v", err)
+	}
+
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks after split, got %d (%v)", len(chunks), chunkSizes(chunks))
+	}
+	if len(chunks[0]) != chunkSizeThreshold {
+		t.Errorf("chunk[0] size: got %d, want %d", len(chunks[0]), chunkSizeThreshold)
+	}
+	if len(chunks[1]) != (chunkSizeThreshold-100)+200-chunkSizeThreshold {
+		t.Errorf("chunk[1] size: got %d, want 100", len(chunks[1]))
+	}
+	if !strings.HasSuffix(chunks[1], "\n") {
+		t.Errorf("final chunk should retain trailing newline, got %q", chunks[1])
+	}
+}
+
+// Regression: writer must not retain unbounded memory across large writes.
+func TestChunkWriter_LargeStreamDoesNotRetainBody(t *testing.T) {
+	emitted := 0
+	cw := newChunkWriter(func(content string) { emitted += len(content) })
+
+	block := strings.Repeat("z", 256*1024)
+	const writes = 6
+	for i := 0; i < writes; i++ {
+		if _, err := cw.Write([]byte(block)); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	cw.Flush()
+
+	if want := len(block) * writes; emitted != want {
+		t.Errorf("emitted bytes: got %d, want %d", emitted, want)
+	}
+	if cw.buf.Len() != 0 {
+		t.Errorf("buf should be empty after flush, has %d bytes", cw.buf.Len())
 	}
 }

@@ -80,11 +80,56 @@ func TestExecutor_ExecWithStreamingHook_StreamsChunks(t *testing.T) {
 	if len(chunks) == 0 {
 		t.Fatal("expected at least one chunk")
 	}
-	if got, want := strings.Join(chunks, ""), output; got != want {
-		t.Errorf("assembled chunks do not match output:\nchunks: %q\noutput: %q", got, want)
+	assembled := strings.Join(chunks, "")
+	if !strings.Contains(assembled, "line1") || !strings.Contains(assembled, "line3") {
+		t.Errorf("unexpected chunks: %q", assembled)
 	}
-	if !strings.Contains(output, "line1") || !strings.Contains(output, "line3") {
-		t.Errorf("unexpected output: %q", output)
+	if output != "" {
+		t.Errorf("streaming path should not return captured output, got %q", output)
+	}
+}
+
+func TestExecutor_StartFailureSurfacesErrorInResult(t *testing.T) {
+	e := NewExecutor()
+	missing := "/no/such/binary/should/exist/here-" + t.Name()
+
+	exitCode, result, err := e.Execute(context.Background(), CommandOptions{
+		Args:    []string{missing},
+		Timeout: 5 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("expected error for missing binary")
+	}
+	if exitCode == 0 {
+		t.Errorf("expected non-zero exit, got %d", exitCode)
+	}
+	if !strings.Contains(result, missing) && !strings.Contains(result, "no such file") {
+		t.Errorf("result should carry start-failure diagnostic, got %q", result)
+	}
+}
+
+func TestExecutor_StreamingTimeoutBannerHasNoLeadingNewlines(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh -c which is Unix-only")
+	}
+	e := NewExecutor()
+	exitCode, result, err := e.ExecWithStreamingHook(
+		context.Background(),
+		[]string{"/bin/sh", "-c", "sleep 5"},
+		"", "", nil, 500*time.Millisecond,
+		nil, func(content string) {},
+	)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if exitCode != 124 {
+		t.Errorf("expected 124, got %d", exitCode)
+	}
+	if strings.HasPrefix(result, "\n") {
+		t.Errorf("streaming timeout banner should not have leading newline: %q", result)
+	}
+	if !strings.HasPrefix(result, "Command timed out after") {
+		t.Errorf("unexpected banner: %q", result)
 	}
 }
 

@@ -183,10 +183,6 @@ func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, use
 		}
 	}
 
-	if err != nil && exitCode == -1 {
-		// Command execution error (not just non-zero exit)
-		return exitCode, err.Error()
-	}
-
+	_ = err // Execute folds startup errors into output.
 	return exitCode, output
 }
