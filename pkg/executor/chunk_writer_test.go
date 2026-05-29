@@ -94,12 +94,84 @@ func TestChunkWriter_ThresholdTriggersEmissionWithoutNewline(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
+	// First 4KB emits; sub-threshold tail stays buffered until Flush.
 	if len(chunks) != 1 {
-		t.Fatalf("threshold should trigger emission, got %d chunks", len(chunks))
+		t.Fatalf("threshold should trigger one emission, got %d chunks", len(chunks))
 	}
-	if chunks[0] != big {
-		t.Errorf("emitted chunk does not match input")
+	if chunks[0] != strings.Repeat("x", chunkSizeThreshold) {
+		t.Errorf("emitted chunk should be exactly chunkSizeThreshold bytes")
 	}
+
+	cw.Flush()
+	if len(chunks) != 2 || chunks[1] != strings.Repeat("x", 10) {
+		t.Errorf("flush should emit 10-byte tail, got %v", chunks)
+	}
+}
+
+// Very long single-line input must split into fixed-size chunks rather than
+// one arbitrarily large payload (regression for queue/memory pressure).
+func TestChunkWriter_LongSingleLineSplitsIntoFixedChunks(t *testing.T) {
+	var chunks []string
+	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
+
+	// 3 full chunks + 50-byte tail, no newlines.
+	big := strings.Repeat("y", chunkSizeThreshold*3+50)
+	if _, err := cw.Write([]byte(big)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 fixed-size chunks before flush, got %d", len(chunks))
+	}
+	for i, c := range chunks {
+		if len(c) != chunkSizeThreshold {
+			t.Errorf("chunk[%d] size: got %d, want %d", i, len(c), chunkSizeThreshold)
+		}
+	}
+
+	cw.Flush()
+	if len(chunks) != 4 || len(chunks[3]) != 50 {
+		t.Errorf("flush should emit 50-byte tail, got %d chunks with sizes %v",
+			len(chunks), chunkSizes(chunks))
+	}
+
+	if string(cw.Bytes()) != big {
+		t.Error("Bytes() should still return full input")
+	}
+}
+
+// A panicking ChunkCallback must not crash the writer mid-stream or during
+// flush; the rest of the stream should continue to be processed.
+func TestChunkWriter_RecoversFromCallbackPanic(t *testing.T) {
+	var calls int
+	cw := newChunkWriter(func(content string) {
+		calls++
+		if calls == 1 {
+			panic("boom")
+		}
+	})
+
+	if _, err := cw.Write([]byte("first\nsecond\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := cw.Write([]byte("tail")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cw.Flush()
+
+	// 2 line emissions + 1 flush emission = 3 callback invocations even
+	// though the first one panicked.
+	if calls != 3 {
+		t.Errorf("expected 3 callback invocations after recovery, got %d", calls)
+	}
+}
+
+func chunkSizes(chunks []string) []int {
+	sizes := make([]int, len(chunks))
+	for i, c := range chunks {
+		sizes[i] = len(c)
+	}
+	return sizes
 }
 
 func TestChunkWriter_MixedLinesAndTail(t *testing.T) {

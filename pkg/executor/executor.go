@@ -40,15 +40,18 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	for {
 		line, err := w.buf.ReadString('\n')
 		if err == nil {
-			w.callback(line)
+			w.emit(line)
 			continue
 		}
+		// No newline: split into fixed-size chunks so a single very long
+		// line cannot produce an arbitrarily large payload. Sub-threshold
+		// tail stays buffered for the next Write or Flush.
+		for len(line) >= chunkSizeThreshold {
+			w.emit(line[:chunkSizeThreshold])
+			line = line[chunkSizeThreshold:]
+		}
 		if len(line) > 0 {
-			if len(line) >= chunkSizeThreshold {
-				w.callback(line)
-			} else {
-				w.buf.WriteString(line)
-			}
+			w.buf.WriteString(line)
 		}
 		break
 	}
@@ -63,8 +66,22 @@ func (w *chunkWriter) Flush() {
 	if w.buf.Len() > 0 {
 		content := w.buf.String()
 		w.buf.Reset()
-		w.callback(content)
+		w.emit(content)
 	}
+}
+
+// emit guards nil and recovers from callback panics so a bad ChunkCallback
+// cannot crash the agent mid-stream or during teardown.
+func (w *chunkWriter) emit(content string) {
+	if w.callback == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Msg("ChunkCallback panicked")
+		}
+	}()
+	w.callback(content)
 }
 
 func (w *chunkWriter) Bytes() []byte {
