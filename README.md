@@ -1,14 +1,14 @@
 # Alpamon
 
-**Alpamon** is a lightweight server agent for [Alpacon](https://alpacon.io)—the infrastructure access platform that provides secure, unified server access for humans, AI agents, and CI/CD pipelines.
+**Alpamon** is the open-source server agent for [Alpacon](https://alpacon.io), the AI-native PAM that governs *what* humans, AI agents, and CI/CD pipelines execute on your servers.
 
-Installed on each server, Alpamon establishes an outbound-only connection to the Alpacon console, enabling browser-based terminals (Websh), file transfers, system monitoring, and remote command execution—all without VPNs, SSH keys, or firewall changes. Every action is supervised and audited for compliance.
+Installed on each managed server, Alpamon establishes an outbound-only connection to the Alpacon control plane (no inbound ports, no firewall changes) and enforces server-side decisions locally: Websh terminals, file transfers, remote command execution, and sudo verification (via the optional [alpamon-pam](https://github.com/alpacax/alpamon-pam) module). Every action runs inside a scoped work session and is recorded for audit—same shape whether the actor is human, AI agent, or CI/CD pipeline.
 
 ## Supported platforms
 
 | Platform | Versions | Arch |
 | --- | --- | --- |
-| Linux | Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Amazon Linux, Oracle Linux | amd64, arm64 |
+| Linux | Ubuntu, Debian, RHEL, Rocky, AlmaLinux, Fedora, Amazon Linux, Oracle Linux | amd64, arm64 |
 | macOS | 11 (Big Sur) or later | amd64, arm64 (Apple Silicon) |
 | Windows | Windows Server 2019 / 2022 / 2025, Windows 10 1803+, Windows 11 | amd64 |
 
@@ -27,7 +27,7 @@ sudo apt-get install alpamon
 sudo alpamon register --url https://<workspace> --token <TOKEN>
 ```
 
-**RHEL / CentOS / Rocky / Alma / Fedora**
+**RHEL / Rocky / AlmaLinux / Fedora**
 ```bash
 curl -s https://packagecloud.io/install/repositories/alpacax/alpamon/script.rpm.sh?any=true | sudo bash
 sudo yum install alpamon
@@ -204,7 +204,7 @@ docker run \
     alpamon:latest
 ```
 
-Covered distros: Ubuntu 18.04/20.04/22.04, Debian 10/11, RedHat 8/9, CentOS 7.
+Covered distros: Ubuntu 22.04/20.04, Debian 11, RHEL 8/9. Legacy Dockerfiles for Ubuntu 18.04, Debian 10, and CentOS 7 also ship under `Dockerfiles/` for best-effort builds against EOL platforms.
 
 ### Run locally
 
