@@ -154,12 +154,17 @@ type CommandOptions struct {
 }
 
 // buildEnv constructs the environment for a command. It starts from the
-// deterministic default environment, fills in the target user's identity
-// (HOME, USER, LOGNAME, MAIL) from the passwd entry, and finally applies any
-// caller-provided variables as overrides. Building the environment explicitly
-// ensures the child never inherits Alpamon's own service environment.
+// platform base environment (empty on Unix, the inherited process environment
+// on Windows), layers the deterministic defaults and /etc/environment, fills in
+// the target user's identity (HOME, USER, LOGNAME, MAIL) from the passwd entry,
+// and finally applies any caller-provided variables as overrides. On Unix the
+// child never inherits Alpamon's own service environment; on Windows the
+// process environment is preserved so PowerShell keeps its required variables.
 func (e *Executor) buildEnv(username string, override map[string]string) map[string]string {
-	env := e.getDefaultEnv()
+	env := processBaseEnv()
+	for key, value := range e.getDefaultEnv() {
+		env[key] = value
+	}
 	utils.LoadEtcEnvironment(env)
 	e.applyUserIdentity(env, username)
 	for key, value := range override {
