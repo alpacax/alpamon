@@ -48,4 +48,21 @@ func TestLookPath(t *testing.T) {
 	if got, err := LookPath(abs, pathEnv); err != nil || got != abs {
 		t.Errorf("expected %q unchanged, got %q (err %v)", abs, got, err)
 	}
+
+	// Empty PATH entries must not be resolved against the current directory.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	cwdExe := filepath.Join(cwd, "cwdtool")
+	if err := os.WriteFile(cwdExe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("failed to write cwd executable: %v", err)
+	}
+	defer func() { _ = os.Remove(cwdExe) }()
+
+	// PATH with a leading empty entry ("" + sep + ...) must not match cwdtool.
+	emptyFirst := string(os.PathListSeparator) + otherDir
+	if _, err := LookPath("cwdtool", emptyFirst); err == nil {
+		t.Error("expected empty PATH entry not to resolve against cwd, got match")
+	}
 }

@@ -19,8 +19,12 @@ func LookPath(file, pathEnv string) (string, error) {
 		return file, nil
 	}
 	for _, dir := range filepath.SplitList(pathEnv) {
+		// Skip empty PATH entries instead of resolving them against the
+		// current directory. Alpamon runs as root, so honoring "." would
+		// allow a cwd-relative binary to be picked up; the standard
+		// exec.LookPath flags this case (ErrDot) for the same reason.
 		if dir == "" {
-			dir = "."
+			continue
 		}
 		path := filepath.Join(dir, file)
 		if isExecutable(path) {
