@@ -3,7 +3,9 @@
 package utils
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -64,5 +66,31 @@ func TestLookPath(t *testing.T) {
 	emptyFirst := string(os.PathListSeparator) + otherDir
 	if _, err := LookPath("cwdtool", emptyFirst); err == nil {
 		t.Error("expected empty PATH entry not to resolve against cwd, got match")
+	}
+}
+
+func TestApplyCommandPath(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "mytool")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("failed to write executable: %v", err)
+	}
+
+	// A bare command found in the child PATH is pinned to its resolved path.
+	found := exec.CommandContext(context.Background(), "mytool")
+	ApplyCommandPath(found, "mytool", dir)
+	if found.Err != nil {
+		t.Errorf("unexpected error for resolved command: %v", found.Err)
+	}
+	if found.Path != exe {
+		t.Errorf("expected cmd.Path %q, got %q", exe, found.Path)
+	}
+
+	// A bare command missing from the child PATH fails here instead of falling
+	// back to Alpamon's process PATH.
+	missing := exec.CommandContext(context.Background(), "mytool")
+	ApplyCommandPath(missing, "mytool", t.TempDir())
+	if missing.Err == nil {
+		t.Error("expected lookup failure for command missing from child PATH, got nil")
 	}
 }

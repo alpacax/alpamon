@@ -41,14 +41,12 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) // lgtm[go/command-injection]
 
 	// exec.CommandContext resolves a bare executable name against Alpamon's
-	// process PATH, not the env built for the child below. Re-resolve it
-	// against the child's PATH so command lookup and execution use the same
-	// environment. If it is not found there, fall back to the default
-	// resolution rather than failing outright.
-	if resolved, lookErr := utils.LookPath(args[0], env["PATH"]); lookErr == nil {
-		cmd.Path = resolved
-		cmd.Err = nil
-	}
+	// process PATH, not the env built for the child below. Re-resolve it against
+	// the child's PATH so command lookup and execution share one environment. On
+	// Unix, a bare command missing from the child PATH is treated as not found
+	// rather than falling back to the service PATH; Windows keeps the standard
+	// resolution.
+	utils.ApplyCommandPath(cmd, args[0], env["PATH"])
 
 	// Set up privilege demotion if username specified
 	if opts.Username != "" && opts.Username != "root" {

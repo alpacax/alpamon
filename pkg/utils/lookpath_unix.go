@@ -34,6 +34,21 @@ func LookPath(file, pathEnv string) (string, error) {
 	return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
 }
 
+// ApplyCommandPath pins cmd to the executable resolved against pathEnv. On Unix,
+// a bare command name that is not found in pathEnv is recorded as a lookup
+// failure on cmd.Err rather than being left to fall back to Alpamon's process
+// PATH, so command lookup and execution share the same environment.
+func ApplyCommandPath(cmd *exec.Cmd, file, pathEnv string) {
+	resolved, err := LookPath(file, pathEnv)
+	if err != nil {
+		cmd.Path = file
+		cmd.Err = err
+		return
+	}
+	cmd.Path = resolved
+	cmd.Err = nil
+}
+
 // isExecutable reports whether path is a regular file with at least one execute
 // bit set.
 func isExecutable(path string) bool {
