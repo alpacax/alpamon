@@ -22,3 +22,16 @@ func processBaseEnv() map[string]string {
 	}
 	return env
 }
+
+// putEnv sets key=value in env. Windows treats environment variable names
+// case-insensitively, so any existing key that differs only in case (e.g. an
+// inherited "Path" when setting "PATH") is removed first to avoid duplicate
+// keys whose precedence would be nondeterministic in cmd.Env.
+func putEnv(env map[string]string, key, value string) {
+	for k := range env {
+		if k != key && strings.EqualFold(k, key) {
+			delete(env, k)
+		}
+	}
+	env[key] = value
+}

@@ -163,12 +163,12 @@ type CommandOptions struct {
 func (e *Executor) buildEnv(username string, override map[string]string) map[string]string {
 	env := processBaseEnv()
 	for key, value := range e.getDefaultEnv() {
-		env[key] = value
+		putEnv(env, key, value)
 	}
 	utils.LoadEtcEnvironment(env)
 	e.applyUserIdentity(env, username)
 	for key, value := range override {
-		env[key] = value
+		putEnv(env, key, value)
 	}
 	return env
 }
@@ -183,18 +183,18 @@ func (e *Executor) applyUserIdentity(env map[string]string, username string) {
 		log.Warn().Err(err).Str("user", username).
 			Msg("Failed to resolve user for environment, falling back to process environment")
 		if home := os.Getenv("HOME"); home != "" {
-			env["HOME"] = home
+			putEnv(env, "HOME", home)
 		}
 		if name := os.Getenv("USER"); name != "" {
-			env["USER"] = name
+			putEnv(env, "USER", name)
 		}
 		return
 	}
 
-	env["USER"] = usr.Username
-	env["HOME"] = usr.HomeDir
-	env["LOGNAME"] = usr.Username
-	env["MAIL"] = "/var/mail/" + usr.Username
+	putEnv(env, "USER", usr.Username)
+	putEnv(env, "HOME", usr.HomeDir)
+	putEnv(env, "LOGNAME", usr.Username)
+	putEnv(env, "MAIL", "/var/mail/"+usr.Username)
 }
 
 // expandArgs expands ${VAR} and $VAR references in each argument using env.

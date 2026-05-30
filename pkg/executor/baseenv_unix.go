@@ -8,3 +8,9 @@ package executor
 func processBaseEnv() map[string]string {
 	return map[string]string{}
 }
+
+// putEnv sets key=value in env. On Unix environment variable names are
+// case-sensitive, so it is a plain assignment.
+func putEnv(env map[string]string, key, value string) {
+	env[key] = value
+}
