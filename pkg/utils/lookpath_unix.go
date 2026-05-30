@@ -37,7 +37,11 @@ func LookPath(file, pathEnv string) (string, error) {
 // isExecutable reports whether path is a regular file with at least one execute
 // bit set.
 func isExecutable(path string) bool {
-	info, err := os.Stat(path)
+	// codeql[go/path-injection]: Intentional - path is a command name supplied by
+	// the trusted Alpacon console (same accepted flow as the exec.CommandContext
+	// command lookup) and is only searched within a fixed set of trusted PATH
+	// directories; this never executes the file, it only stats it.
+	info, err := os.Stat(path) // lgtm[go/path-injection]
 	if err != nil || info.IsDir() {
 		return false
 	}
