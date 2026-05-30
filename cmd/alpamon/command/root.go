@@ -39,8 +39,26 @@ const (
 )
 
 var RootCmd = &cobra.Command{
-	Use:     "alpamon",
-	Short:   "Secure Server Agent for Alpacon",
+	Use:   "alpamon",
+	Short: "Alpacon agent: outbound-only server connection for AI-native PAM",
+	Long: `Alpamon is the open-source server agent for Alpacon, the AI-native PAM
+control plane. Installed on each managed server, alpamon establishes an
+outbound-only connection to Alpacon (no inbound ports, no firewall changes)
+and enforces server-side decisions locally: command execution, file
+transfer, sudo verification (via alpamon-pam), and remote management.
+
+Typical usage:
+
+  alpamon register --url https://<workspace> --token <TOKEN>   # one-time setup
+  systemctl status alpamon                                     # service state
+  alpamon migrate --to-workspace <new-workspace>               # workspace move
+
+After 'register' completes, the agent runs as a system service and operates
+on its own. Other subcommands (ftp, setup, tunnel-daemon) are internal
+workers spawned by the agent itself and are not meant to be invoked by users.
+
+Run 'alpamon <command> --help' for details. See https://alpacon.io for the
+control plane and https://github.com/alpacax/alpacon-cli for the CLI.`,
 	Version: version.Version,
 	Run: func(cmd *cobra.Command, args []string) {
 		// When launched by the Windows Service Control Manager, run

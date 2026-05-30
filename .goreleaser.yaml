@@ -86,7 +86,14 @@ nfpms:
       - alpamon-linux
     package_name: alpamon
     maintainer: AlpacaX <support@alpacax.com>
-    description: Alpamon
+    description: |
+      Open-source server agent for Alpacon, the AI-native PAM. Installed
+      on each managed server, alpamon establishes an outbound-only
+      connection to the Alpacon control plane (no inbound ports, no
+      firewall changes) and enforces server-side decisions locally:
+      terminal sessions, file transfers, remote command execution, and
+      optional sudo verification via alpamon-pam. Every action runs
+      inside a scoped work session and is recorded for audit.
     homepage: https://github.com/alpacax/alpamon
     license: MIT
     vendor: AlpacaX
