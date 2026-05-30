@@ -40,6 +40,16 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	// codeql[go/command-injection]: Intentional - Alpamon executes admin commands from Alpacon console
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) // lgtm[go/command-injection]
 
+	// exec.CommandContext resolves a bare executable name against Alpamon's
+	// process PATH, not the env built for the child below. Re-resolve it
+	// against the child's PATH so command lookup and execution use the same
+	// environment. If it is not found there, fall back to the default
+	// resolution rather than failing outright.
+	if resolved, lookErr := utils.LookPath(args[0], env["PATH"]); lookErr == nil {
+		cmd.Path = resolved
+		cmd.Err = nil
+	}
+
 	// Set up privilege demotion if username specified
 	if opts.Username != "" && opts.Username != "root" {
 		sysProcAttr, err := e.demotePrivileges(opts.Username, opts.Groupname)

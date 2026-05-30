@@ -1,0 +1,41 @@
+//go:build !windows
+
+package utils
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// LookPath searches for an executable named file in the directories listed in
+// pathEnv (a PATH-style, OS-list-separated string). If file already contains a
+// path separator it is returned unchanged. It mirrors exec.LookPath but uses
+// the supplied PATH instead of the current process environment, so command
+// lookup can match the environment handed to a child process.
+func LookPath(file, pathEnv string) (string, error) {
+	if strings.ContainsRune(file, os.PathSeparator) {
+		return file, nil
+	}
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			dir = "."
+		}
+		path := filepath.Join(dir, file)
+		if isExecutable(path) {
+			return path, nil
+		}
+	}
+	return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+}
+
+// isExecutable reports whether path is a regular file with at least one execute
+// bit set.
+func isExecutable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return info.Mode().Perm()&0o111 != 0
+}
