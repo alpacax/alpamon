@@ -19,11 +19,13 @@ func LookPath(file, pathEnv string) (string, error) {
 		return file, nil
 	}
 	for _, dir := range filepath.SplitList(pathEnv) {
-		// Skip empty PATH entries instead of resolving them against the
-		// current directory. Alpamon runs as root, so honoring "." would
-		// allow a cwd-relative binary to be picked up; the standard
-		// exec.LookPath flags this case (ErrDot) for the same reason.
-		if dir == "" {
+		// Only resolve against absolute, trusted directories. Empty or
+		// relative entries (".", "bin") would be stat'd relative to Alpamon's
+		// current working directory, which may differ from the child's cmd.Dir
+		// and reintroduces cwd-dependent lookup; the standard exec.LookPath
+		// flags relative resolution (ErrDot) for the same reason. Alpamon also
+		// runs as root, making a cwd-relative binary especially dangerous.
+		if !filepath.IsAbs(dir) {
 			continue
 		}
 		path := filepath.Join(dir, file)

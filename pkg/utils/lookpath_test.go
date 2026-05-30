@@ -62,10 +62,15 @@ func TestLookPath(t *testing.T) {
 	}
 	defer func() { _ = os.Remove(cwdExe) }()
 
-	// PATH with a leading empty entry ("" + sep + ...) must not match cwdtool.
-	emptyFirst := string(os.PathListSeparator) + otherDir
-	if _, err := LookPath("cwdtool", emptyFirst); err == nil {
-		t.Error("expected empty PATH entry not to resolve against cwd, got match")
+	// Empty and relative PATH entries must not be resolved against the current
+	// directory; only absolute entries are trusted.
+	for _, pe := range []string{
+		string(os.PathListSeparator) + otherDir, // leading empty entry
+		".",                                     // explicit cwd
+	} {
+		if _, err := LookPath("cwdtool", pe); err == nil {
+			t.Errorf("expected non-absolute PATH entry %q not to resolve against cwd, got match", pe)
+		}
 	}
 }
 
