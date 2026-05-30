@@ -51,8 +51,11 @@ Typical usage:
 
   alpamon register --url https://<workspace> --token <TOKEN>   # one-time setup
   systemctl status alpamon                                     # service state
-  alpamon ftp                                                  # WebFTP worker
   alpamon migrate --to-workspace <new-workspace>               # workspace move
+
+After 'register' completes, the agent runs as a system service and operates
+on its own. Other subcommands (ftp, setup, tunnel-daemon) are internal
+workers spawned by the agent itself and are not meant to be invoked by users.
 
 Run 'alpamon <command> --help' for details. See https://alpacon.io for the
 control plane and https://github.com/alpacax/alpacon-cli for the CLI.`,

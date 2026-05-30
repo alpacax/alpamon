@@ -6,11 +6,11 @@ Installed on each managed server, Alpamon establishes an outbound-only connectio
 
 ## Supported platforms
 
-| Platform | Versions | Arch |
+| Platform | Minimum version | Arch |
 | --- | --- | --- |
-| Linux | Ubuntu, Debian, RHEL, Rocky, AlmaLinux, Fedora, Amazon Linux, Oracle Linux | amd64, arm64 |
+| Linux | Ubuntu 18.04+, Debian 11+, RHEL / Rocky / AlmaLinux 8+, Oracle Linux 8+, Amazon Linux 2 / 2023, Fedora (current or previous) | amd64, arm64 |
 | macOS | 11 (Big Sur) or later | amd64, arm64 (Apple Silicon) |
-| Windows | Windows Server 2019 / 2022 / 2025, Windows 10 1803+, Windows 11 | amd64 |
+| Windows | Windows 10 (1803+) / Windows 11, Windows Server 2019 or later | amd64 |
 
 **System requirements**: 128MB RAM, 150MB free disk, outbound HTTPS to your Alpacon workspace.
 
