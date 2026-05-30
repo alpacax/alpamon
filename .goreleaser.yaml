@@ -86,7 +86,12 @@ nfpms:
       - alpamon-linux
     package_name: alpamon
     maintainer: AlpacaX <support@alpacax.com>
-    description: Alpamon
+    description: |
+      Lightweight server agent for Alpacon. Establishes an outbound-only
+      connection to your Alpacon workspace, enabling browser-based
+      terminals, file transfers, system monitoring, and remote command
+      execution without VPNs, SSH keys, or inbound firewall changes.
+      Every action is supervised and audited.
     homepage: https://github.com/alpacax/alpamon
     license: MIT
     vendor: AlpacaX
