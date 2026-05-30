@@ -151,7 +151,7 @@ brews:
       email: support@alpacax.com
     directory: Formula
     homepage: "https://github.com/alpacax/alpamon"
-    description: "Secure server agent for Alpacon"
+    description: "Server agent for Alpacon, the AI-native PAM"
     license: MIT
     skip_upload: auto
 

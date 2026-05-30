@@ -40,7 +40,7 @@ const (
 
 var RootCmd = &cobra.Command{
 	Use:   "alpamon",
-	Short: "Alpacon agent: outbound-only server connection for AI-native PAM",
+	Short: "Server agent for Alpacon, the AI-native PAM",
 	Long: `Alpamon is the open-source server agent for Alpacon, the AI-native PAM.
 With Alpacon, humans, AI agents, and CI/CD pipelines reach and operate
 your fleet through a single identity; alpamon is what makes that work
