@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Alpamon is the open-source Go-based server agent for [Alpacon](https://alpacon.io), the AI-native PAM that governs *what* humans, AI agents, and CI/CD pipelines execute on managed servers. Installed on each managed host, it establishes an outbound-only WebSocket connection to the Alpacon control plane (no inbound ports, no firewall changes) and enforces server-side decisions locally: Websh terminal sessions, file transfers (WebFTP), command execution, and—via the optional [alpamon-pam](https://github.com/alpacax/alpamon-pam) module—sudo verification. Every action runs inside a scoped work session and is recorded for audit. The agent stores metrics locally in SQLite using Ent ORM.
+Alpamon is the open-source Go-based server agent for [Alpacon](https://alpacon.io), the AI-native PAM. With Alpacon, humans, AI agents, and CI/CD pipelines reach and operate every server in a fleet through a single identity—and every command they run is judged at runtime, recorded, and bounded by a scoped work session. Alpamon is what makes that work locally on each managed host: it establishes an outbound-only WebSocket connection to the Alpacon control plane (no inbound ports, no firewall changes) and enforces server-side decisions—Websh terminal sessions, file transfers (WebFTP), command execution, and (via the optional [alpamon-pam](https://github.com/alpacax/alpamon-pam) module) sudo verification. The agent stores metrics locally in SQLite using Ent ORM.
 
 ## Writing conventions
 

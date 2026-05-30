@@ -1,8 +1,8 @@
 # Alpamon
 
-**Alpamon** is the open-source server agent for [Alpacon](https://alpacon.io), the AI-native PAM that governs *what* humans, AI agents, and CI/CD pipelines execute on your servers.
+**Alpamon** is the open-source server agent for [Alpacon](https://alpacon.io), the AI-native PAM. With Alpacon, humans, AI agents, and CI/CD pipelines reach and operate your entire fleet through a single identity—and every command they run is judged at runtime, recorded, and bounded by a scoped work session.
 
-Installed on each managed server, Alpamon establishes an outbound-only connection to the Alpacon control plane (no inbound ports, no firewall changes) and enforces server-side decisions locally: Websh terminals, file transfers, remote command execution, and sudo verification (via the optional [alpamon-pam](https://github.com/alpacax/alpamon-pam) module). Every action runs inside a scoped work session and is recorded for audit—same shape whether the actor is human, AI agent, or CI/CD pipeline.
+Alpamon is what makes that work on each managed server. It establishes an outbound-only connection to the Alpacon control plane (no inbound ports, no firewall changes) and enforces server-side decisions locally: Websh terminals, file transfers, remote command execution, and sudo verification (via the optional [alpamon-pam](https://github.com/alpacax/alpamon-pam) module). Every action is recorded for audit—same shape whether the actor is human, AI agent, or CI/CD pipeline.
 
 ## Supported platforms
 

@@ -41,10 +41,12 @@ const (
 var RootCmd = &cobra.Command{
 	Use:   "alpamon",
 	Short: "Alpacon agent: outbound-only server connection for AI-native PAM",
-	Long: `Alpamon is the open-source server agent for Alpacon, the AI-native PAM
-control plane. Installed on each managed server, alpamon establishes an
-outbound-only connection to Alpacon (no inbound ports, no firewall changes)
-and enforces server-side decisions locally: command execution, file
+	Long: `Alpamon is the open-source server agent for Alpacon, the AI-native PAM.
+With Alpacon, humans, AI agents, and CI/CD pipelines reach and operate
+your fleet through a single identity; alpamon is what makes that work
+on each managed server. It establishes an outbound-only connection to
+the Alpacon control plane (no inbound ports, no firewall changes) and
+enforces server-side decisions locally: command execution, file
 transfer, sudo verification (via alpamon-pam), and remote management.
 
 Typical usage:
