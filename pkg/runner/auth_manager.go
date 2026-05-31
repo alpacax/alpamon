@@ -86,6 +86,12 @@ type SudoApprovalResponse struct {
 	CommandID    string `json:"command_id,omitempty"`
 	Approved     bool   `json:"approved"`
 	Reason       string `json:"reason"`
+	// ErrorCode is an optional machine-readable denial code (e.g.
+	// SUDO_NO_WORKSESSION_POLICY) from alpacon-server. Its value is forwarded
+	// unchanged to the auth socket so the PAM module / approval plugin can show
+	// a specific reason. omitempty omits the key when the server doesn't send
+	// it, keeping older socket clients unaffected.
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 type MFAResponse struct {
@@ -576,7 +582,7 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 	// Signal completion to unblock the waiting goroutine
 	am.signalCompletion(response.RequestID)
 
-	log.Info().Str("request_id", response.RequestID).Bool("approved", response.Approved).Msg("SudoApprovalResponse processed successfully")
+	log.Info().Str("request_id", response.RequestID).Bool("approved", response.Approved).Str("error_code", response.ErrorCode).Msg("SudoApprovalResponse processed successfully")
 	return nil
 }
 
