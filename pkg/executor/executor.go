@@ -81,6 +81,9 @@ func (w *chunkWriter) emit(content string) {
 	if w.callback == nil {
 		return
 	}
+	// Clone so a chunk sliced from a larger line or buffer doesn't pin the
+	// full backing array alive while the chunk is queued downstream.
+	content = strings.Clone(content)
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error().Interface("panic", r).Msg("ChunkCallback panicked")
