@@ -190,7 +190,15 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 		return 1, fmt.Sprintf("openftp: Failed to start ftp worker process. %v", err), nil
 	}
 
-	go func() { _ = cmd.Wait() }()
+	// Track the worker so graceful shutdown can reap it. systemd's KillMode=process
+	// signals only the main agent, so without this an `alpamon ftp` child would be
+	// orphaned across a restart.
+	done := runner.RegisterFtpWorker(args.SessionID, cmd)
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+		runner.UnregisterFtpWorker(args.SessionID, cmd)
+	}()
 
 	return 0, "Spawned a ftp terminal.", nil
 }
