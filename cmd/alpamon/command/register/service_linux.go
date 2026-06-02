@@ -19,9 +19,18 @@ func ensureDirectories() error {
 		// systemd-tmpfiles can exit 0 without creating the directory (e.g. on
 		// systemd <235 that ignores parts of the drop-in, or when the drop-in
 		// is unresolved). Without this fallback the service crash-loops on
-		// 200/CHDIR because WorkingDirectory does not exist.
-		if _, err := os.Stat(utils.DataDir()); err != nil {
-			return utils.EnsureDirectories()
+		// 200/CHDIR because WorkingDirectory does not exist. Only "does not
+		// exist" triggers the fallback; permission/IO errors and a non-dir
+		// path are surfaced so packaging or filesystem faults are not masked.
+		info, err := os.Stat(utils.DataDir())
+		if err != nil {
+			if os.IsNotExist(err) {
+				return utils.EnsureDirectories()
+			}
+			return fmt.Errorf("stat %s: %w", utils.DataDir(), err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s exists but is not a directory", utils.DataDir())
 		}
 		return nil
 	}
