@@ -1,7 +1,9 @@
 package register
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"syscall"
@@ -22,15 +24,16 @@ func ensureDirectories() error {
 		// 200/CHDIR because WorkingDirectory does not exist. Only "does not
 		// exist" triggers the fallback; permission/IO errors and a non-dir
 		// path are surfaced so packaging or filesystem faults are not masked.
-		info, err := os.Stat(utils.DataDir())
+		dataDir := utils.DataDir()
+		info, err := os.Stat(dataDir)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				return utils.EnsureDirectories()
 			}
-			return fmt.Errorf("stat %s: %w", utils.DataDir(), err)
+			return fmt.Errorf("stat %s: %w", dataDir, err)
 		}
 		if !info.IsDir() {
-			return fmt.Errorf("%s exists but is not a directory", utils.DataDir())
+			return fmt.Errorf("%s exists but is not a directory", dataDir)
 		}
 		return nil
 	}
