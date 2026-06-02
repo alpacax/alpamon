@@ -81,8 +81,8 @@ func (w *chunkWriter) emit(content string) {
 	if w.callback == nil {
 		return
 	}
-	// Clone so a chunk sliced from a larger line or buffer doesn't pin the
-	// full backing array alive while the chunk is queued downstream.
+	// Clone so a chunk sliced from a larger line/buffer doesn't pin the
+	// full backing array alive while queued downstream.
 	content = strings.Clone(content)
 	defer func() {
 		if r := recover(); r != nil {
@@ -141,9 +141,8 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 				// In-band so streaming UIs don't see an empty terminal then fin.
 				cw.emit("alpamon: " + msg + "\n")
 			}
-			// Return msg in result so the fin payload still carries the
-			// diagnostic if chunk delivery fails, consistent with the
-			// streaming timeout path.
+			// Also in result so fin carries the diagnostic if chunk
+			// delivery fails, matching the streaming timeout path.
 			return 1, msg, err
 		}
 		if sysProcAttr != nil {

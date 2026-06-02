@@ -102,8 +102,7 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 			var seq int
 			chunkCallback = func(content string) {
 				// Advance seq before Post so it stays monotonic even if Post
-				// panics (recovered upstream in chunkWriter.emit); reusing a
-				// seq would collide server-side on (command, seq).
+				// panics; a reused seq would collide server-side on (command, seq).
 				s := seq
 				seq++
 				scheduler.Rqueue.Post(chunkURL, &protocol.CommandChunk{

@@ -97,7 +97,7 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 
 // executeWithOperators handles shell operators (&&, ||, ;). Under streaming,
 // per-segment output is empty (chunks carry the body) so the accumulator is
-// skipped entirely.
+// skipped.
 func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string, error) {
 	spl := strings.Fields(command)
 	var currentCmd []string

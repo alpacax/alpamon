@@ -52,7 +52,8 @@ type CommandExecutor interface {
 	ExecWithHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int)) (int, string, error)
 
 	// ExecWithStreamingHook is like ExecWithHook with a chunkCallback that
-	// receives streamed stdout/stderr chunks. Sequencing is the caller's.
+	// receives streamed stdout/stderr chunks. Sequencing is the caller's
+	// responsibility.
 	ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error)
 }
 
