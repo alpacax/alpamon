@@ -101,11 +101,15 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 			// Runner owns seq so chunks across shell operators share one series.
 			var seq int
 			chunkCallback = func(content string) {
+				// Advance seq before Post so it stays monotonic even if Post
+				// panics (recovered upstream in chunkWriter.emit); reusing a
+				// seq would collide server-side on (command, seq).
+				s := seq
+				seq++
 				scheduler.Rqueue.Post(chunkURL, &protocol.CommandChunk{
-					Seq:     seq,
+					Seq:     s,
 					Content: content,
 				}, 10, time.Time{})
-				seq++
 			}
 		}
 		command = common.ShellCmd.String()
