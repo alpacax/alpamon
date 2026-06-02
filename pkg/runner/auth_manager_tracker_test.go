@@ -319,6 +319,54 @@ func TestSudoApprovalRequest_JSONTagsOmitEmpty(t *testing.T) {
 	}
 }
 
+// TestSudoApprovalResponse_ErrorCodePassthrough verifies that the optional
+// error_code field round-trips through the response struct and stays off the
+// wire when empty. alpacon-server emits error_code on denial; alpamon
+// unmarshals the server control message into SudoApprovalResponse and
+// re-marshals it onto the auth socket, so the field must survive that hop. The
+// omitempty guard keeps older servers (which never send error_code) wire-
+// compatible with socket clients that predate the field.
+func TestSudoApprovalResponse_ErrorCodePassthrough(t *testing.T) {
+	// Server sends error_code on denial: it must survive unmarshal→marshal.
+	serverMsg := `{"type":"sudo_approval_response","request_id":"r1","approved":false,"reason":"sudo_no_worksession_policy","error_code":"SUDO_NO_WORKSESSION_POLICY"}`
+	var resp SudoApprovalResponse
+	if err := json.Unmarshal([]byte(serverMsg), &resp); err != nil {
+		t.Fatalf("unmarshal server message: %v", err)
+	}
+	if resp.ErrorCode != "SUDO_NO_WORKSESSION_POLICY" {
+		t.Errorf("expected error_code to be parsed, got %q", resp.ErrorCode)
+	}
+	out, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+	if !strings.Contains(string(out), `"error_code":"SUDO_NO_WORKSESSION_POLICY"`) {
+		t.Errorf("expected error_code in re-marshaled payload, got %s", out)
+	}
+
+	// Backward compat: a server that omits error_code (or an approval) must not
+	// introduce the key on the wire, so clients predating the field are
+	// unaffected.
+	approved := SudoApprovalResponse{Type: "sudo_approval_response", RequestID: "r2", Approved: true}
+	approvedJSON, err := json.Marshal(approved)
+	if err != nil {
+		t.Fatalf("marshal approved response: %v", err)
+	}
+	if strings.Contains(string(approvedJSON), `"error_code"`) {
+		t.Errorf("empty error_code must be omitted from payload, got %s", approvedJSON)
+	}
+
+	// Older server omits error_code entirely: it must unmarshal to "".
+	var legacy SudoApprovalResponse
+	legacyMsg := `{"type":"sudo_approval_response","request_id":"r3","approved":false,"reason":"denied"}`
+	if err := json.Unmarshal([]byte(legacyMsg), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy message: %v", err)
+	}
+	if legacy.ErrorCode != "" {
+		t.Errorf("absent error_code must unmarshal to empty, got %q", legacy.ErrorCode)
+	}
+}
+
 // TestLookupPID_Missing verifies Lookup for a non-existent pid returns
 // ok=false and a zero-value TrackerEntry.
 func TestLookupPID_Missing(t *testing.T) {
