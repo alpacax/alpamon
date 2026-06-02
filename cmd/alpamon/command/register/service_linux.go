@@ -16,6 +16,13 @@ func ensureDirectories() error {
 		if output, err := exec.Command("systemd-tmpfiles", "--create", "alpamon.conf").CombinedOutput(); err != nil {
 			return fmt.Errorf("tmpfiles creation failed: %w\n%s", err, string(output))
 		}
+		// systemd-tmpfiles can exit 0 without creating the directory (e.g. on
+		// systemd <235 that ignores parts of the drop-in, or when the drop-in
+		// is unresolved). Without this fallback the service crash-loops on
+		// 200/CHDIR because WorkingDirectory does not exist.
+		if _, err := os.Stat(utils.DataDir()); err != nil {
+			return utils.EnsureDirectories()
+		}
 		return nil
 	}
 	return utils.EnsureDirectories()
