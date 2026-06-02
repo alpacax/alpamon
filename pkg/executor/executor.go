@@ -137,8 +137,10 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 			if cw != nil {
 				// In-band so streaming UIs don't see an empty terminal then fin.
 				cw.emit("alpamon: " + msg + "\n")
-				return 1, "", err
 			}
+			// Return msg in result so the fin payload still carries the
+			// diagnostic if chunk delivery fails, consistent with the
+			// streaming timeout path.
 			return 1, msg, err
 		}
 		if sysProcAttr != nil {
