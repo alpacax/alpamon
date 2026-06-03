@@ -216,6 +216,7 @@ func runAgent(ready chan<- struct{}) {
 
 func gracefulShutdown(collector *collector.Collector, wsClient *runner.WebsocketClient, controlClient *runner.ControlClient, authManager *runner.AuthManager, workerPool *pool.Pool, logServer *logger.LogServer, reporters *scheduler.ReporterManager, pidPath string) {
 	runner.CloseAllActiveTunnels()
+	runner.CloseAllActiveFtpWorkers()
 
 	if collector != nil {
 		collector.Stop()
