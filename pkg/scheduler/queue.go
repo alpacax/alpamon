@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"container/heap"
+	"context"
 	"errors"
 	"net/http"
 	"sync"
@@ -17,6 +18,13 @@ var (
 const (
 	RetryLimit   = 5
 	MaxQueueSize = 10 * 60 * 60 // 10 entries/second * 1h
+
+	// chunkQueueHighWater is the depth at which chunks back off, reserving slots for other telemetry.
+	chunkQueueHighWater = MaxQueueSize * 8 / 10
+	// chunkBackpressurePoll is how often a throttled chunk re-checks for room.
+	chunkBackpressurePoll = 10 * time.Millisecond
+	// chunkBackpressureMaxWait caps the throttle per chunk so sustained overload can't freeze a command.
+	chunkBackpressureMaxWait = 2 * time.Second
 )
 
 var errQueueFull = errors.New("queue is full")
@@ -139,6 +147,33 @@ func (rq *RequestQueue) Post(url string, data interface{}, priority int, due tim
 
 func (rq *RequestQueue) PostWithHeaders(url string, data interface{}, priority int, due time.Time, headers Headers) {
 	rq.request(http.MethodPost, url, data, priority, due, headers)
+}
+
+// PostChunk enqueues a chunk, throttling the command while the queue is full and dropping past ctx/maxWait.
+func (rq *RequestQueue) PostChunk(ctx context.Context, url string, data interface{}, priority int) {
+	rq.postChunk(ctx, url, data, priority, chunkQueueHighWater, chunkBackpressurePoll, chunkBackpressureMaxWait)
+}
+
+func (rq *RequestQueue) postChunk(ctx context.Context, url string, data interface{}, priority, highWater int, poll, maxWait time.Duration) {
+	start := time.Now()
+	for {
+		rq.cond.L.Lock()
+		size := rq.queue.Size()
+		rq.cond.L.Unlock()
+
+		if size < highWater {
+			rq.Post(url, data, priority, time.Time{})
+			return
+		}
+		if ctx.Err() != nil || time.Since(start) >= maxWait {
+			log.Warn().Str("url", url).Msg("Chunk dropped under sustained backpressure")
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(poll):
+		}
+	}
 }
 
 func (rq *RequestQueue) Patch(url string, data interface{}, priority int, due time.Time) {

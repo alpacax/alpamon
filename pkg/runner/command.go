@@ -105,10 +105,10 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 				// panics; a reused seq would collide server-side on (command, seq).
 				s := seq
 				seq++
-				scheduler.Rqueue.Post(chunkURL, &protocol.CommandChunk{
+				scheduler.Rqueue.PostChunk(ctx, chunkURL, &protocol.CommandChunk{
 					Seq:     s,
 					Content: content,
-				}, 10, time.Time{})
+				}, 10)
 			}
 		}
 		command = common.ShellCmd.String()

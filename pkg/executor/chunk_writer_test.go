@@ -2,10 +2,15 @@ package executor
 
 import (
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
-func TestChunkWriter_EmitsOnNewline(t *testing.T) {
+// Batching contract: newlines no longer trigger emission. Output is buffered
+// and emitted on the size threshold, a flush tick, or final Flush.
+
+func TestChunkWriter_BuffersUntilFlush(t *testing.T) {
 	var chunks []string
 	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
 
@@ -15,31 +20,32 @@ func TestChunkWriter_EmitsOnNewline(t *testing.T) {
 	if _, err := cw.Write([]byte("line2\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-
-	if got, want := len(chunks), 2; got != want {
-		t.Fatalf("chunks: got %d, want %d (%v)", got, want, chunks)
+	if len(chunks) != 0 {
+		t.Fatalf("newlines must not emit; got %v", chunks)
 	}
-	if chunks[0] != "line1\n" || chunks[1] != "line2\n" {
-		t.Errorf("unexpected chunks: %v", chunks)
+
+	cw.Flush()
+	if len(chunks) != 1 || chunks[0] != "line1\nline2\n" {
+		t.Errorf("flush should coalesce buffered writes, got %v", chunks)
 	}
 }
 
-func TestChunkWriter_MultipleLinesInSingleWrite(t *testing.T) {
+func TestChunkWriter_CoalescesMultipleWrites(t *testing.T) {
 	var chunks []string
 	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
 
-	if _, err := cw.Write([]byte("a\nb\nc\n")); err != nil {
-		t.Fatalf("write: %v", err)
+	for _, s := range []string{"a\n", "b\n", "c\n"} {
+		if _, err := cw.Write([]byte(s)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	if len(chunks) != 0 {
+		t.Fatalf("expected no chunks before flush, got %v", chunks)
 	}
 
-	want := []string{"a\n", "b\n", "c\n"}
-	if len(chunks) != len(want) {
-		t.Fatalf("chunks: got %d, want %d (%v)", len(chunks), len(want), chunks)
-	}
-	for i, c := range chunks {
-		if c != want[i] {
-			t.Errorf("chunk[%d]: got %q, want %q", i, c, want[i])
-		}
+	cw.Flush()
+	if len(chunks) != 1 || chunks[0] != "a\nb\nc\n" {
+		t.Errorf("flush should emit one coalesced chunk, got %v", chunks)
 	}
 }
 
@@ -50,13 +56,14 @@ func TestChunkWriter_PartialLineCarriedOver(t *testing.T) {
 	if _, err := cw.Write([]byte("hello")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if len(chunks) != 0 {
-		t.Fatalf("expected no chunks yet, got %v", chunks)
-	}
-
 	if _, err := cw.Write([]byte(" world\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	if len(chunks) != 0 {
+		t.Fatalf("expected no chunks before flush, got %v", chunks)
+	}
+
+	cw.Flush()
 	if len(chunks) != 1 || chunks[0] != "hello world\n" {
 		t.Errorf("expected concatenated line, got %v", chunks)
 	}
@@ -117,7 +124,12 @@ func TestChunkWriter_RecoversFromCallbackPanic(t *testing.T) {
 		}
 	})
 
-	if _, err := cw.Write([]byte("first\nsecond\n")); err != nil {
+	// Each threshold-sized write forces one emit; the first panics.
+	block := strings.Repeat("x", chunkSizeThreshold)
+	if _, err := cw.Write([]byte(block)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := cw.Write([]byte(block)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if _, err := cw.Write([]byte("tail")); err != nil {
@@ -138,27 +150,6 @@ func chunkSizes(chunks []string) []int {
 	return sizes
 }
 
-func TestChunkWriter_MixedLinesAndTail(t *testing.T) {
-	var chunks []string
-	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
-
-	if _, err := cw.Write([]byte("line1\nline2\nincomplete")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	if len(chunks) != 2 {
-		t.Fatalf("expected 2 line chunks before flush, got %v", chunks)
-	}
-	if chunks[0] != "line1\n" || chunks[1] != "line2\n" {
-		t.Errorf("unexpected line chunks: %v", chunks)
-	}
-
-	cw.Flush()
-	if len(chunks) != 3 || chunks[2] != "incomplete" {
-		t.Errorf("flush should append tail, got %v", chunks)
-	}
-}
-
 func TestChunkWriter_WriteReturnsFullLength(t *testing.T) {
 	cw := newChunkWriter(func(content string) {})
 
@@ -172,8 +163,10 @@ func TestChunkWriter_WriteReturnsFullLength(t *testing.T) {
 	}
 }
 
-// Regression: buffered tail + next Write must not emit payload > threshold.
-func TestChunkWriter_NewlineLineExceedingThresholdSplits(t *testing.T) {
+// Regression: a buffer crossing the threshold emits an exact threshold chunk
+// first and never a single oversized payload, even when the crossing write
+// ends in a newline.
+func TestChunkWriter_OversizedBufferSplitsAtThreshold(t *testing.T) {
 	var chunks []string
 	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
 
@@ -189,14 +182,16 @@ func TestChunkWriter_NewlineLineExceedingThresholdSplits(t *testing.T) {
 		t.Fatalf("write line end: %v", err)
 	}
 
-	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks after split, got %d (%v)", len(chunks), chunkSizes(chunks))
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 threshold chunk before flush, got %d (%v)", len(chunks), chunkSizes(chunks))
 	}
 	if len(chunks[0]) != chunkSizeThreshold {
 		t.Errorf("chunk[0] size: got %d, want %d", len(chunks[0]), chunkSizeThreshold)
 	}
-	if len(chunks[1]) != (chunkSizeThreshold-100)+200-chunkSizeThreshold {
-		t.Errorf("chunk[1] size: got %d, want 100", len(chunks[1]))
+
+	cw.Flush()
+	if len(chunks) != 2 || len(chunks[1]) != 100 {
+		t.Fatalf("flush should emit the 100-byte tail, got %v", chunkSizes(chunks))
 	}
 	if !strings.HasSuffix(chunks[1], "\n") {
 		t.Errorf("final chunk should retain trailing newline, got %q", chunks[1])
@@ -222,5 +217,44 @@ func TestChunkWriter_LargeStreamDoesNotRetainBody(t *testing.T) {
 	}
 	if cw.buf.Len() != 0 {
 		t.Errorf("buf should be empty after flush, has %d bytes", cw.buf.Len())
+	}
+}
+
+// The flusher goroutine emits sub-threshold buffered output within the
+// interval, so slow line-rate commands still stream without waiting for close.
+func TestChunkWriter_FlusherEmitsBufferedOutput(t *testing.T) {
+	var mu sync.Mutex
+	var chunks []string
+	cw := newChunkWriter(func(content string) {
+		mu.Lock()
+		defer mu.Unlock()
+		chunks = append(chunks, content)
+	})
+
+	cw.start(5 * time.Millisecond)
+	defer cw.close()
+
+	if _, err := cw.Write([]byte("partial")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(chunks)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("flusher did not emit buffered output within deadline")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if chunks[0] != "partial" {
+		t.Errorf("flusher emitted %q, want %q", chunks[0], "partial")
 	}
 }

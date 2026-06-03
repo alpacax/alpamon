@@ -14,18 +14,51 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const chunkSizeThreshold = 4 * 1024
+const (
+	chunkSizeThreshold = 4 * 1024
+	// chunkFlushInterval caps buffering so small writes coalesce instead of one POST per line.
+	chunkFlushInterval = 100 * time.Millisecond
+)
 
-// chunkWriter forwards stdout/stderr to a callback on newline or at
-// chunkSizeThreshold. No capture: chunks are the only output channel.
+// chunkWriter coalesces stdout/stderr, emitting on chunkSizeThreshold or a flush tick (no capture).
 type chunkWriter struct {
 	mu       sync.Mutex
 	buf      bytes.Buffer
 	callback func(content string)
+
+	done chan struct{}
+	wg   sync.WaitGroup
 }
 
 func newChunkWriter(callback func(content string)) *chunkWriter {
 	return &chunkWriter{callback: callback}
+}
+
+// start launches the periodic flusher so sub-threshold output still streams within interval.
+func (w *chunkWriter) start(interval time.Duration) {
+	w.done = make(chan struct{})
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-w.done:
+				return
+			case <-ticker.C:
+				w.Flush()
+			}
+		}
+	}()
+}
+
+func (w *chunkWriter) close() {
+	if w.done != nil {
+		close(w.done)
+		w.wg.Wait()
+	}
+	w.Flush()
 }
 
 func (w *chunkWriter) Write(p []byte) (int, error) {
@@ -33,22 +66,9 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	defer w.mu.Unlock()
 
 	w.buf.Write(p)
-
-	for {
-		line, err := w.buf.ReadString('\n')
-		if err == nil {
-			// A buffered tail merged with this Write can exceed the cap.
-			w.emitChunked(line)
-			continue
-		}
-		for len(line) >= chunkSizeThreshold {
-			w.emit(line[:chunkSizeThreshold])
-			line = line[chunkSizeThreshold:]
-		}
-		if len(line) > 0 {
-			w.buf.WriteString(line)
-		}
-		break
+	// Emit full-threshold chunks only; the sub-threshold tail waits for the flush tick.
+	for w.buf.Len() >= chunkSizeThreshold {
+		w.emit(string(w.buf.Next(chunkSizeThreshold)))
 	}
 
 	return len(p), nil
@@ -227,12 +247,15 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 		}
 		return buf.Bytes(), err
 	}
+	if cw != nil {
+		cw.start(chunkFlushInterval)
+	}
 	if cmd.Process != nil {
 		invokePIDHook(pidHook, cmd.Process.Pid)
 	}
 	err := cmd.Wait()
 	if cw != nil {
-		cw.Flush()
+		cw.close()
 		return nil, err
 	}
 	return buf.Bytes(), err
