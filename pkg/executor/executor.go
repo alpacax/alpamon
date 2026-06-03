@@ -47,7 +47,7 @@ func (w *chunkWriter) start(interval time.Duration) {
 			case <-w.done:
 				return
 			case <-ticker.C:
-				w.Flush()
+				w.flush()
 			}
 		}
 	}()
@@ -58,7 +58,7 @@ func (w *chunkWriter) close() {
 		close(w.done)
 		w.wg.Wait()
 	}
-	w.Flush()
+	w.flush()
 }
 
 func (w *chunkWriter) Write(p []byte) (int, error) {
@@ -74,7 +74,7 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (w *chunkWriter) Flush() {
+func (w *chunkWriter) flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 

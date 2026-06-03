@@ -24,7 +24,7 @@ func TestChunkWriter_BuffersUntilFlush(t *testing.T) {
 		t.Fatalf("newlines must not emit; got %v", chunks)
 	}
 
-	cw.Flush()
+	cw.flush()
 	if len(chunks) != 1 || chunks[0] != "line1\nline2\n" {
 		t.Errorf("flush should coalesce buffered writes, got %v", chunks)
 	}
@@ -43,7 +43,7 @@ func TestChunkWriter_CoalescesMultipleWrites(t *testing.T) {
 		t.Fatalf("expected no chunks before flush, got %v", chunks)
 	}
 
-	cw.Flush()
+	cw.flush()
 	if len(chunks) != 1 || chunks[0] != "a\nb\nc\n" {
 		t.Errorf("flush should emit one coalesced chunk, got %v", chunks)
 	}
@@ -63,7 +63,7 @@ func TestChunkWriter_PartialLineCarriedOver(t *testing.T) {
 		t.Fatalf("expected no chunks before flush, got %v", chunks)
 	}
 
-	cw.Flush()
+	cw.flush()
 	if len(chunks) != 1 || chunks[0] != "hello world\n" {
 		t.Errorf("expected concatenated line, got %v", chunks)
 	}
@@ -80,13 +80,13 @@ func TestChunkWriter_FlushEmitsRemainder(t *testing.T) {
 		t.Fatalf("expected no chunks before flush, got %v", chunks)
 	}
 
-	cw.Flush()
+	cw.flush()
 	if len(chunks) != 1 || chunks[0] != "no newline" {
 		t.Errorf("flush should emit remainder, got %v", chunks)
 	}
 
 	// Second flush is a no-op.
-	cw.Flush()
+	cw.flush()
 	if len(chunks) != 1 {
 		t.Errorf("second flush should be no-op, got %v", chunks)
 	}
@@ -109,7 +109,7 @@ func TestChunkWriter_ThresholdTriggersEmissionWithoutNewline(t *testing.T) {
 		t.Errorf("emitted chunk should be exactly chunkSizeThreshold bytes")
 	}
 
-	cw.Flush()
+	cw.flush()
 	if len(chunks) != 2 || chunks[1] != strings.Repeat("x", 10) {
 		t.Errorf("flush should emit 10-byte tail, got %v", chunks)
 	}
@@ -135,7 +135,7 @@ func TestChunkWriter_RecoversFromCallbackPanic(t *testing.T) {
 	if _, err := cw.Write([]byte("tail")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	cw.Flush()
+	cw.flush()
 
 	if calls != 3 {
 		t.Errorf("expected 3 callback invocations after recovery, got %d", calls)
@@ -189,7 +189,7 @@ func TestChunkWriter_OversizedBufferSplitsAtThreshold(t *testing.T) {
 		t.Errorf("chunk[0] size: got %d, want %d", len(chunks[0]), chunkSizeThreshold)
 	}
 
-	cw.Flush()
+	cw.flush()
 	if len(chunks) != 2 || len(chunks[1]) != 100 {
 		t.Fatalf("flush should emit the 100-byte tail, got %v", chunkSizes(chunks))
 	}
@@ -210,7 +210,7 @@ func TestChunkWriter_LargeStreamDoesNotRetainBody(t *testing.T) {
 			t.Fatalf("write %d: %v", i, err)
 		}
 	}
-	cw.Flush()
+	cw.flush()
 
 	if want := len(block) * writes; emitted != want {
 		t.Errorf("emitted bytes: got %d, want %d", emitted, want)
