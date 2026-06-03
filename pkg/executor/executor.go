@@ -138,19 +138,10 @@ func (w *chunkWriter) flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Write keeps buf below chunkSizeThreshold, so the remainder is one chunk.
 	if w.buf.Len() > 0 {
 		content := w.buf.String()
 		w.buf.Reset()
-		w.emitChunked(content)
-	}
-}
-
-func (w *chunkWriter) emitChunked(content string) {
-	for len(content) > chunkSizeThreshold {
-		w.emit(content[:chunkSizeThreshold])
-		content = content[chunkSizeThreshold:]
-	}
-	if len(content) > 0 {
 		w.emit(content)
 	}
 }
