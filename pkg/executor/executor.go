@@ -19,7 +19,7 @@ const (
 	// chunkFlushInterval caps buffering so small writes coalesce instead of one POST per line.
 	chunkFlushInterval = 100 * time.Millisecond
 	// captureCap bounds the audit copy teed into the fin payload; output past it is truncated in the middle.
-	captureCap     = 1 << 20 // 1 MiB
+	captureCap     = utils.AuditOutputCap
 	captureHeadCap = captureCap / 2
 	captureTailCap = captureCap - captureHeadCap
 )

@@ -74,6 +74,29 @@ func TestShellHandler_StreamingAcrossOperators(t *testing.T) {
 	}
 }
 
+// Regression: under streaming the fin result must still carry the accumulated
+// per-segment output for audit, not be dropped to "".
+func TestShellHandler_StreamingOperatorsReturnAuditResult(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockExec.SetResult("cmd1", 0, "out1", nil)
+	mockExec.SetResult("cmd2", 0, "out2", nil)
+	handler := NewShellHandler(mockExec)
+	ctx := context.Background()
+
+	args := &common.CommandArgs{
+		Command:       "cmd1 && cmd2",
+		ChunkCallback: func(content string) {},
+	}
+
+	_, result, err := handler.Execute(ctx, common.ShellCmd.String(), args)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result != "out1out2" {
+		t.Errorf("fin result should accumulate streamed segment output, got %q", result)
+	}
+}
+
 func TestShellHandler_NilChunkCallback(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockExec.SetResult("ls", 0, "file.txt", nil)

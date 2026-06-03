@@ -95,9 +95,9 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 	return h.executeWithOperators(ctx, command, username, groupname, env, timeout, args.CommandID, args.ChunkCallback)
 }
 
-// executeWithOperators handles shell operators (&&, ||, ;). Under streaming,
-// per-segment output is empty (chunks carry the body) so the accumulator is
-// skipped.
+// executeWithOperators handles shell operators (&&, ||, ;). Per-segment output
+// (already capped under streaming) is accumulated; under streaming the total is
+// capped again so the fin audit copy stays bounded across segments.
 func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string, error) {
 	spl := strings.Fields(command)
 	var currentCmd []string
@@ -107,13 +107,11 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 	streaming := chunkCallback != nil
 
 	appendResult := func(r string) {
-		if !streaming {
-			results.WriteString(r)
-		}
+		results.WriteString(r)
 	}
 	finalResult := func() string {
 		if streaming {
-			return ""
+			return utils.TruncateMiddle(results.String(), utils.AuditOutputCap)
 		}
 		return results.String()
 	}
