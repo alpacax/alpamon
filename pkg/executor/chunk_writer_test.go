@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// Batching contract: newlines no longer trigger emission. Output is buffered
-// and emitted on the size threshold, a flush tick, or final Flush.
+// Batching contract: newlines don't emit; output emits on the size threshold, a flush tick, or final flush.
 
 func TestChunkWriter_BuffersUntilFlush(t *testing.T) {
 	var chunks []string
@@ -198,8 +197,8 @@ func TestChunkWriter_OversizedBufferSplitsAtThreshold(t *testing.T) {
 	}
 }
 
-// Regression: writer must not retain unbounded memory across large writes.
-func TestChunkWriter_LargeStreamDoesNotRetainBody(t *testing.T) {
+// Regression: chunks stream every byte while the audit capture stays bounded.
+func TestChunkWriter_StreamsAllWithBoundedCapture(t *testing.T) {
 	emitted := 0
 	cw := newChunkWriter(func(content string) { emitted += len(content) })
 
@@ -216,7 +215,10 @@ func TestChunkWriter_LargeStreamDoesNotRetainBody(t *testing.T) {
 		t.Errorf("emitted bytes: got %d, want %d", emitted, want)
 	}
 	if cw.buf.Len() != 0 {
-		t.Errorf("buf should be empty after flush, has %d bytes", cw.buf.Len())
+		t.Errorf("emit buffer should be empty after flush, has %d bytes", cw.buf.Len())
+	}
+	if got := len(cw.captured()); got > captureCap+64 {
+		t.Errorf("capture size %d exceeds cap+marker", got)
 	}
 }
 

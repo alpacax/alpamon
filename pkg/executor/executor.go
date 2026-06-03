@@ -18,12 +18,64 @@ const (
 	chunkSizeThreshold = 4 * 1024
 	// chunkFlushInterval caps buffering so small writes coalesce instead of one POST per line.
 	chunkFlushInterval = 100 * time.Millisecond
+	// captureCap bounds the audit copy teed into the fin payload; output past it is truncated in the middle.
+	captureCap     = 1 << 20 // 1 MiB
+	captureHeadCap = captureCap / 2
+	captureTailCap = captureCap - captureHeadCap
 )
 
-// chunkWriter coalesces stdout/stderr, emitting on chunkSizeThreshold or a flush tick (no capture).
+// capBuffer keeps a stream's first and last halves and drops the middle, bounding retained memory.
+type capBuffer struct {
+	head    []byte
+	tail    []byte
+	dropped int64
+}
+
+func newCapBuffer() *capBuffer {
+	return &capBuffer{}
+}
+
+func (c *capBuffer) write(p []byte) {
+	if len(c.head) < captureHeadCap {
+		n := min(captureHeadCap-len(c.head), len(p))
+		c.head = append(c.head, p[:n]...)
+		p = p[n:]
+	}
+	if len(p) == 0 {
+		return
+	}
+	c.tail = append(c.tail, p...)
+	// Compact lazily (grow to 2x, then drop the front) for amortized O(1).
+	if len(c.tail) > 2*captureTailCap {
+		c.dropTail(len(c.tail) - captureTailCap)
+		c.tail = append([]byte(nil), c.tail...)
+	}
+}
+
+func (c *capBuffer) dropTail(n int) {
+	c.dropped += int64(n)
+	c.tail = c.tail[n:]
+}
+
+func (c *capBuffer) bytes() []byte {
+	if len(c.tail) > captureTailCap {
+		c.dropTail(len(c.tail) - captureTailCap)
+	}
+	var marker string
+	if c.dropped > 0 {
+		marker = fmt.Sprintf("\n... [%d bytes truncated] ...\n", c.dropped)
+	}
+	out := make([]byte, 0, len(c.head)+len(marker)+len(c.tail))
+	out = append(out, c.head...)
+	out = append(out, marker...)
+	return append(out, c.tail...)
+}
+
+// chunkWriter emits coalesced stdout/stderr chunks and tees a capped copy for the fin payload.
 type chunkWriter struct {
 	mu       sync.Mutex
 	buf      bytes.Buffer
+	capture  *capBuffer
 	callback func(content string)
 
 	done chan struct{}
@@ -31,7 +83,7 @@ type chunkWriter struct {
 }
 
 func newChunkWriter(callback func(content string)) *chunkWriter {
-	return &chunkWriter{callback: callback}
+	return &chunkWriter{callback: callback, capture: newCapBuffer()}
 }
 
 // start launches the periodic flusher so sub-threshold output still streams within interval.
@@ -65,6 +117,7 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	w.capture.write(p)
 	w.buf.Write(p)
 	// Emit full-threshold chunks only; the sub-threshold tail waits for the flush tick.
 	for w.buf.Len() >= chunkSizeThreshold {
@@ -72,6 +125,13 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	}
 
 	return len(p), nil
+}
+
+// captured returns the capped audit copy of everything written.
+func (w *chunkWriter) captured() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.capture.bytes()
 }
 
 func (w *chunkWriter) flush() {
@@ -205,7 +265,8 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 		if ctx.Err() == context.DeadlineExceeded {
 			elapsed := time.Since(start).Truncate(time.Second)
 			msg := fmt.Sprintf("Command timed out after %s", elapsed)
-			if cw != nil {
+			// Skip the separator when there's no output so the banner has no leading newlines.
+			if result == "" {
 				return 124, msg, err
 			}
 			return 124, result + "\n\n" + msg, err
@@ -225,8 +286,7 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	return exitCode, result, err
 }
 
-// runCommand uses Start/Wait when streaming or pid reporting is needed;
-// otherwise CombinedOutput. The streaming path returns no bytes.
+// runCommand uses Start/Wait for streaming or pid reporting (returning the capped copy); otherwise CombinedOutput.
 func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
 	if cw == nil && pidHook == nil {
 		return cmd.CombinedOutput()
@@ -256,7 +316,7 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 	err := cmd.Wait()
 	if cw != nil {
 		cw.close()
-		return nil, err
+		return cw.captured(), err
 	}
 	return buf.Bytes(), err
 }

@@ -85,8 +85,9 @@ func TestExecutor_ExecWithStreamingHook_StreamsChunks(t *testing.T) {
 	if !strings.Contains(assembled, "line1") || !strings.Contains(assembled, "line3") {
 		t.Errorf("unexpected chunks: %q", assembled)
 	}
-	if output != "" {
-		t.Errorf("streaming path should not return captured output, got %q", output)
+	// The streaming path returns a capped audit copy so fin carries output even if chunks drop.
+	if output != assembled {
+		t.Errorf("captured output should match streamed chunks: got %q, want %q", output, assembled)
 	}
 }
 
