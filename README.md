@@ -137,6 +137,8 @@ sudo systemctl restart alpamon
 sudo journalctl -u alpamon -f
 ```
 
+The unit sets `KillMode=process`, so restarting or stopping alpamon signals only the agent itself, not the whole control-group. Sessions it launched—Websh terminals and detached jobs such as `tmux`, `screen`, or `nohup`'d commands—keep running across a restart, the same way `sshd` leaves active login sessions alone. Reattach to them from a new session after the agent reconnects.
+
 ### macOS (launchd)
 
 ```bash
