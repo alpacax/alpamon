@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"text/template"
@@ -50,6 +51,15 @@ var (
 // so a non-cloud host (where all probes time out) still finishes registration
 // within a reasonable budget.
 const registerCloudDetectTimeout = 5 * time.Second
+
+// serverNameMaxLength mirrors the server's SlugField(max_length=64) on the
+// register endpoint.
+const serverNameMaxLength = 64
+
+// nameSeparatorRe matches any run of characters outside the slug set
+// [A-Za-z0-9_]; hyphens are intentionally excluded so existing/duplicate
+// hyphens collapse with adjacent separators.
+var nameSeparatorRe = regexp.MustCompile(`[^A-Za-z0-9_]+`)
 
 // RegisterRequest represents the request body for server registration
 type RegisterRequest struct {
@@ -138,6 +148,20 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		}
 		serverName = normalizeHostname(hostname)
 		fmt.Printf("Server name auto-detected: %s\n", serverName)
+	}
+
+	// 2b. Normalize to the server's slug rule (^[-a-zA-Z0-9_]+$). Applies to
+	// both the --name path and the hostname path so registration never fails
+	// with {"code":"invalid"} on a name the server would reject.
+	original := serverName
+	serverName = normalizeServerName(serverName)
+	if serverName == "" {
+		return fmt.Errorf(
+			"server name %q is empty after normalization; pass a valid --name "+
+				"(allowed characters: A-Z a-z 0-9 _ -)", original)
+	}
+	if serverName != original {
+		fmt.Printf("Server name normalized to %q\n", serverName)
 	}
 
 	// 3. Auto-detect platform
@@ -275,6 +299,23 @@ func normalizeHostname(hostname string) string {
 		return hostname[:idx]
 	}
 	return hostname
+}
+
+// normalizeServerName coerces an arbitrary name into the server's SlugField
+// character set (^[-a-zA-Z0-9_]+$, max 64). It replaces every run of
+// disallowed characters (spaces, '.', '/', non-ASCII, ...) with a single '-',
+// trims leading/trailing '-', and truncates to serverNameMaxLength. May return
+// "" — the caller chooses a fallback.
+//
+// MUST stay in sync with alpacon-server's normalize_server_name; shared test
+// vectors live in both repos' plan docs.
+func normalizeServerName(value string) string {
+	n := nameSeparatorRe.ReplaceAllString(value, "-")
+	n = strings.Trim(n, "-")
+	if len(n) > serverNameMaxLength {
+		n = n[:serverNameMaxLength]
+	}
+	return strings.TrimRight(n, "-")
 }
 
 func detectPlatform() string {
