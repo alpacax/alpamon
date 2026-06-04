@@ -304,6 +304,22 @@ func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApproval
 	}
 }
 
+// lookupSessionLocked resolves a sudo request to its tracked session. It prefers
+// the caller's session ID (sid)—shared by every process in the Websh or command
+// session, so it survives the shell exec'ing sudo and any intermediate
+// processes between the shell and sudo—and falls back to the direct parent-pid
+// lookup for sessions whose registered leader is the caller's parent. The caller
+// must hold am.mu (read or write).
+func (am *AuthManager) lookupSessionLocked(sid int, sidOK bool, parentPID int) (*SessionInfo, bool) {
+	if sidOK {
+		if session, exists := am.pidToSessionMap[sid]; exists {
+			return session, true
+		}
+	}
+	session, exists := am.pidToSessionMap[parentPID]
+	return session, exists
+}
+
 func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 	buf := make([]byte, 1024)
 	n, err := unixConn.Read(buf)
@@ -336,18 +352,19 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 			return
 		}
 
+		sid, sidOK := sessionID(isAlpconReq.PID)
 		am.mu.RLock()
-		session, exists := am.pidToSessionMap[isAlpconReq.PPID]
+		session, exists := am.lookupSessionLocked(sid, sidOK, isAlpconReq.PPID)
 		am.mu.RUnlock()
 
 		if !exists {
-			log.Warn().Msgf("No session found for PID %d, username: %s, groupname: %s", isAlpconReq.PPID, isAlpconReq.Username, isAlpconReq.Groupname)
+			log.Warn().Msgf("No session found for PID %d (ppid %d, sid %d), username: %s, groupname: %s", isAlpconReq.PID, isAlpconReq.PPID, sid, isAlpconReq.Username, isAlpconReq.Groupname)
 			am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, false)
 			_ = unixConn.Close()
 			return
 		}
 
-		log.Debug().Msgf("Session found for PID %d: %s", isAlpconReq.PPID, session.SessionID)
+		log.Debug().Msgf("Session found for PID %d (sid %d): %s", isAlpconReq.PID, sid, session.SessionID)
 		am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, true)
 		_ = unixConn.Close()
 
@@ -372,8 +389,9 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	// Create completion channel to signal when response is received
 	completionChan := make(chan struct{})
 
+	sid, sidOK := sessionID(sudoApprovalReq.PID)
 	am.mu.Lock()
-	session, exists := am.pidToSessionMap[sudoApprovalReq.PPID]
+	session, exists := am.lookupSessionLocked(sid, sidOK, sudoApprovalReq.PPID)
 	blockLocalSudo := am.blockLocalSudo
 	if !exists {
 		// Non-WebSH session (local SSH, etc.)
