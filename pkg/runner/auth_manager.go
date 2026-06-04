@@ -352,8 +352,8 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 			return
 		}
 
-		am.mu.RLock()
 		sid, sidOK := sessionID(isAlpconReq.PID)
+		am.mu.RLock()
 		session, exists := am.lookupSessionLocked(sid, sidOK, isAlpconReq.PPID)
 		am.mu.RUnlock()
 
