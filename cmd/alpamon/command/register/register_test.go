@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/cloud"
@@ -205,6 +206,36 @@ func TestHostnameFQDNStripping(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, normalizeHostname(tt.hostname))
+		})
+	}
+}
+
+func TestNormalizeServerName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "space replaced with hyphen", input: "web server", expected: "web-server"},
+		{name: "dot replaced with hyphen", input: "api.prod", expected: "api-prod"},
+		{name: "parentheses and space collapse", input: "db (backup)", expected: "db-backup"},
+		{name: "slash replaced with hyphen", input: "app/v2", expected: "app-v2"},
+		{name: "FQDN dots all replaced", input: "server.example.com", expected: "server-example-com"},
+		{name: "duplicate hyphens collapse", input: "web--server", expected: "web-server"},
+		{name: "underscores preserved", input: "web__server", expected: "web__server"},
+		{name: "leading and trailing separators trimmed", input: "--leading--", expected: "leading"},
+		{name: "surrounding whitespace trimmed", input: "  spaced  ", expected: "spaced"},
+		{name: "mixed case preserved", input: "MyServer", expected: "MyServer"},
+		{name: "EC2 style instance id preserved", input: "i-0abc123", expected: "i-0abc123"},
+		{name: "all non-ASCII returns empty", input: "한글-서버", expected: ""},
+		{name: "truncated to 64 characters", input: strings.Repeat("a", 70), expected: strings.Repeat("a", 64)},
+		{name: "empty input returns empty", input: "", expected: ""},
+		{name: "only separators returns empty", input: "...", expected: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, normalizeServerName(tt.input))
 		})
 	}
 }
