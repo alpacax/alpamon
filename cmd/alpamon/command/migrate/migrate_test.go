@@ -61,11 +61,11 @@ func TestStripGeneratedSuffix(t *testing.T) {
 		"mybox-a3f9c1":                 "mybox",
 		"prod-web-1-deadbe":            "prod-web-1",
 		"production-web-server-abcdef": "production-web-server",
-		"mybox":                        "mybox",                    // no suffix
-		"mybox-AB":                     "mybox-AB",                 // wrong length
-		"mybox-zzzzzz":                 "mybox-zzzzzz",             // non-hex
-		"mybox-a3f9c1-deadbe":          "mybox-a3f9c1",             // strips only the trailing hex suffix
-		"mybox-deadbe-xyz789":          "mybox-deadbe-xyz789",      // trailing non-hex blocks strip
+		"mybox":                        "mybox",               // no suffix
+		"mybox-AB":                     "mybox-AB",            // wrong length
+		"mybox-zzzzzz":                 "mybox-zzzzzz",        // non-hex
+		"mybox-a3f9c1-deadbe":          "mybox-a3f9c1",        // strips only the trailing hex suffix
+		"mybox-deadbe-xyz789":          "mybox-deadbe-xyz789", // trailing non-hex blocks strip
 	}
 	for in, want := range cases {
 		if got := stripGeneratedSuffix(in); got != want {
