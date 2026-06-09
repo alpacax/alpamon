@@ -32,6 +32,7 @@ const (
 	eventCommandAckURL    = "/api/events/commands/%s/ack/"
 	eventCommandFinURL    = "/api/events/commands/%s/fin/"
 	eventCommandRejectURL = "/api/events/commands/%s/reject/"
+	eventCommandChunkURL  = "/api/events/commands/%s/chunk/"
 )
 
 type WebsocketClient struct {

@@ -6,12 +6,162 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
+
+const (
+	chunkSizeThreshold = 4 * 1024
+	// chunkFlushInterval caps buffering so small writes coalesce instead of one POST per line.
+	chunkFlushInterval = 100 * time.Millisecond
+	// captureCap bounds the audit copy teed into the fin payload; output past it is truncated in the middle.
+	captureCap     = utils.AuditOutputCap
+	captureHeadCap = captureCap / 2
+	captureTailCap = captureCap - captureHeadCap
+)
+
+// capBuffer keeps a stream's first and last halves and drops the middle, bounding retained memory.
+type capBuffer struct {
+	head    []byte
+	tail    []byte
+	dropped int64
+}
+
+func newCapBuffer() *capBuffer {
+	return &capBuffer{}
+}
+
+func (c *capBuffer) write(p []byte) {
+	if len(c.head) < captureHeadCap {
+		n := min(captureHeadCap-len(c.head), len(p))
+		c.head = append(c.head, p[:n]...)
+		p = p[n:]
+	}
+	if len(p) == 0 {
+		return
+	}
+	c.tail = append(c.tail, p...)
+	// Compact lazily (grow to 2x, then drop the front) for amortized O(1).
+	if len(c.tail) > 2*captureTailCap {
+		c.dropTail(len(c.tail) - captureTailCap)
+		c.tail = append([]byte(nil), c.tail...)
+	}
+}
+
+func (c *capBuffer) dropTail(n int) {
+	c.dropped += int64(n)
+	c.tail = c.tail[n:]
+}
+
+func (c *capBuffer) bytes() []byte {
+	if len(c.tail) > captureTailCap {
+		c.dropTail(len(c.tail) - captureTailCap)
+	}
+	var marker string
+	if c.dropped > 0 {
+		marker = fmt.Sprintf("\n... [%d bytes truncated] ...\n", c.dropped)
+	}
+	out := make([]byte, 0, len(c.head)+len(marker)+len(c.tail))
+	out = append(out, c.head...)
+	out = append(out, marker...)
+	return append(out, c.tail...)
+}
+
+// chunkWriter emits coalesced stdout/stderr chunks and tees a capped copy for the fin payload.
+type chunkWriter struct {
+	mu       sync.Mutex
+	buf      bytes.Buffer
+	capture  *capBuffer
+	callback func(content string)
+
+	done chan struct{}
+	wg   sync.WaitGroup
+}
+
+func newChunkWriter(callback func(content string)) *chunkWriter {
+	return &chunkWriter{callback: callback, capture: newCapBuffer()}
+}
+
+// start launches the periodic flusher so sub-threshold output still streams within interval.
+func (w *chunkWriter) start(interval time.Duration) {
+	w.done = make(chan struct{})
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-w.done:
+				return
+			case <-ticker.C:
+				w.flush()
+			}
+		}
+	}()
+}
+
+func (w *chunkWriter) close() {
+	if w.done != nil {
+		close(w.done)
+		w.wg.Wait()
+	}
+	w.flush()
+}
+
+func (w *chunkWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.capture.write(p)
+	w.buf.Write(p)
+	// Emit full-threshold chunks only; the sub-threshold tail waits for the flush tick.
+	for w.buf.Len() >= chunkSizeThreshold {
+		w.emit(string(w.buf.Next(chunkSizeThreshold)))
+	}
+
+	return len(p), nil
+}
+
+// captured returns the capped audit copy of everything written.
+func (w *chunkWriter) captured() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.capture.bytes()
+}
+
+func (w *chunkWriter) flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Write keeps buf below chunkSizeThreshold, so the remainder is one chunk.
+	if w.buf.Len() > 0 {
+		content := w.buf.String()
+		w.buf.Reset()
+		w.emit(content)
+	}
+}
+
+// emit nil-guards and recovers from callback panics so a bad callback
+// cannot crash the agent.
+func (w *chunkWriter) emit(content string) {
+	if w.callback == nil {
+		return
+	}
+	// Clone so a chunk sliced from a larger line/buffer doesn't pin the
+	// full backing array alive while queued downstream.
+	content = strings.Clone(content)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Msg("ChunkCallback panicked")
+		}
+	}()
+	w.callback(content)
+}
 
 // Executor provides system command execution with privilege management
 type Executor struct{}
@@ -47,12 +197,24 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	// resolution.
 	utils.ApplyCommandPath(cmd, args[0], env["PATH"])
 
+	var cw *chunkWriter
+	if opts.ChunkCallback != nil {
+		cw = newChunkWriter(opts.ChunkCallback)
+	}
+
 	// Set up privilege demotion if username specified
 	if opts.Username != "" && opts.Username != "root" {
 		sysProcAttr, err := e.demotePrivileges(opts.Username, opts.Groupname)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to demote privileges")
-			return 1, err.Error(), err
+			msg := err.Error()
+			if cw != nil {
+				// In-band so streaming UIs don't see an empty terminal then fin.
+				cw.emit("alpamon: " + msg + "\n")
+			}
+			// Also in result so fin carries the diagnostic if chunk
+			// delivery fails, matching the streaming timeout path.
+			return 1, msg, err
 		}
 		if sysProcAttr != nil {
 			cmd.SysProcAttr = sysProcAttr
@@ -96,46 +258,79 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 
 	// Execute command
 	start := time.Now()
-	output, err := e.runCommand(cmd, opts.PIDHook)
+	output, err := e.runCommand(cmd, opts.PIDHook, cw)
 	exitCode := 0
+	result := string(output)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			elapsed := time.Since(start).Truncate(time.Second)
-			return 124, string(output) + fmt.Sprintf("\n\nCommand timed out after %s", elapsed), err
+			msg := fmt.Sprintf("Command timed out after %s", elapsed)
+			// Skip the separator when there's no output so the banner has no leading newlines.
+			if result == "" {
+				return 124, msg, err
+			}
+			return 124, result + "\n\n" + msg, err
 		}
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode = exitError.ExitCode()
 		} else {
+			// cmd.Start failures (ENOENT, fork EAGAIN) produce no bytes;
+			// surface err so fin carries a diagnostic.
 			exitCode = 1
+			if result == "" {
+				result = err.Error()
+			}
 		}
 	}
 
-	return exitCode, string(output), err
+	return exitCode, result, err
 }
 
-// runCommand executes cmd and returns its combined stdout/stderr output.
-// When pidHook is non-nil, the command is started with cmd.Start() so the
-// child's pid can be reported before Wait blocks. When pidHook is nil,
-// the simpler cmd.CombinedOutput() path is used unchanged.
-func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int)) ([]byte, error) {
-	if pidHook == nil {
+// runCommand uses Start/Wait for streaming or pid reporting (returning the capped copy); otherwise CombinedOutput.
+func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
+	if cw == nil && pidHook == nil {
 		return cmd.CombinedOutput()
 	}
 
 	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+	if cw != nil {
+		cmd.Stdout = cw
+		cmd.Stderr = cw
+	} else {
+		cmd.Stdout = &buf
+		cmd.Stderr = &buf
+	}
 
 	if err := cmd.Start(); err != nil {
+		if cw != nil {
+			return nil, err
+		}
 		return buf.Bytes(), err
 	}
-
-	if cmd.Process != nil {
-		pidHook(cmd.Process.Pid)
+	if cw != nil {
+		cw.start(chunkFlushInterval)
 	}
-
+	if cmd.Process != nil {
+		invokePIDHook(pidHook, cmd.Process.Pid)
+	}
 	err := cmd.Wait()
+	if cw != nil {
+		cw.close()
+		return cw.captured(), err
+	}
 	return buf.Bytes(), err
+}
+
+func invokePIDHook(pidHook func(pid int), pid int) {
+	if pidHook == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Int("pid", pid).Msg("PIDHook panicked")
+		}
+	}()
+	pidHook(pid)
 }
 
 // CommandOptions defines options for command execution
@@ -148,17 +343,14 @@ type CommandOptions struct {
 	Timeout    time.Duration     // Command timeout
 	Input      string            // Input to provide via stdin
 
-	// PIDHook, if non-nil, is invoked with the child's pid immediately
-	// after cmd.Start() returns successfully and before the command is
-	// waited on. It is used to register the root pid of a deploy shell
-	// Command with the PAM tracker so that sudo invoked inside the
-	// command can be attributed to the originating Command.ID.
-	//
-	// When PIDHook is set, Execute uses cmd.Start()/cmd.Wait() instead
-	// of cmd.CombinedOutput() so the pid is visible to the hook before
-	// the child can exec sudo. Any panic from the hook is recovered and
-	// logged without affecting command execution.
+	// PIDHook, if non-nil, receives the child's pid after Start so the
+	// shell handler can register it with the PAM tracker before the
+	// child execs sudo. Panics are recovered and logged.
 	PIDHook func(pid int)
+
+	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks.
+	// Sequencing is the caller's responsibility.
+	ChunkCallback func(content string)
 }
 
 // buildEnv constructs the environment for a command. It starts from the
@@ -317,5 +509,18 @@ func (e *Executor) ExecWithHook(ctx context.Context, args []string, username, gr
 		Env:       env,
 		Timeout:   timeout,
 		PIDHook:   pidHook,
+	})
+}
+
+// ExecWithStreamingHook combines PIDHook and ChunkCallback. Either may be nil.
+func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error) {
+	return e.Execute(ctx, CommandOptions{
+		Args:          args,
+		Username:      username,
+		Groupname:     groupname,
+		Env:           env,
+		Timeout:       timeout,
+		PIDHook:       pidHook,
+		ChunkCallback: chunkCallback,
 	})
 }

@@ -36,6 +36,12 @@ type CommandResponse struct {
 	ExitCode    int     `json:"exit_code"`
 }
 
+// CommandChunk represents one streamed chunk of a command's stdout/stderr.
+type CommandChunk struct {
+	Seq     int    `json:"seq"`
+	Content string `json:"content"`
+}
+
 // PingResponse represents a ping response
 type PingResponse struct {
 	Query     string    `json:"query"`

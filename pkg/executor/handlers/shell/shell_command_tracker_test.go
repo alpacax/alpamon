@@ -12,9 +12,8 @@ import (
 )
 
 // hookRecordingExecutor wraps a MockCommandExecutor and records whether
-// ExecWithHook was invoked and whether it passed through a non-nil hook.
-// It is deliberately local to the shell handler tests so it cannot be
-// accidentally reused by other handlers and mask real breakage.
+// ExecWithStreamingHook (the shell handler's sole entry point into the
+// executor) received a non-nil pidHook.
 type hookRecordingExecutor struct {
 	*common.MockCommandExecutor
 	mu       sync.Mutex
@@ -22,21 +21,20 @@ type hookRecordingExecutor struct {
 	hookSeen bool
 }
 
-func (r *hookRecordingExecutor) ExecWithHook(
+func (r *hookRecordingExecutor) ExecWithStreamingHook(
 	ctx context.Context,
 	args []string,
 	username, groupname string,
 	env map[string]string,
 	timeout time.Duration,
 	pidHook func(pid int),
+	chunkCallback func(content string),
 ) (int, string, error) {
 	r.mu.Lock()
 	r.called = true
 	r.hookSeen = pidHook != nil
 	r.mu.Unlock()
 
-	// Simulate the executor's post-fork callback so the shell handler
-	// exercises the Register/Unregister lifecycle.
 	if pidHook != nil {
 		pidHook(424242)
 	}
@@ -75,7 +73,7 @@ func TestShellHandler_CommandID_RegistersAndUnregistersPID(t *testing.T) {
 		t.Errorf("exit: got %d, want 0", exit)
 	}
 	if !rec.called {
-		t.Error("ExecWithHook was not invoked")
+		t.Error("ExecWithStreamingHook was not invoked")
 	}
 	if !rec.hookSeen {
 		t.Error("shell handler must pass a non-nil hook when CommandID is set")
@@ -85,10 +83,9 @@ func TestShellHandler_CommandID_RegistersAndUnregistersPID(t *testing.T) {
 	}
 }
 
-// TestShellHandler_NoCommandID_UsesPlainExec verifies that internal /
-// non-Command shell invocations keep the original, hook-less code path
-// so we don't accidentally regress performance or behaviour.
-func TestShellHandler_NoCommandID_UsesPlainExec(t *testing.T) {
+// TestShellHandler_NoCommandID_PassesNilHook verifies that shell invocations
+// without CommandID do not install a PID hook (so the PAM tracker is bypassed).
+func TestShellHandler_NoCommandID_PassesNilHook(t *testing.T) {
 	_ = withTrackerAuthManager(t)
 
 	mock := common.NewMockCommandExecutor(t)
@@ -104,7 +101,10 @@ func TestShellHandler_NoCommandID_UsesPlainExec(t *testing.T) {
 	if _, _, err := handler.Execute(context.Background(), common.ShellCmd.String(), args); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if rec.called {
-		t.Error("ExecWithHook should not be used when CommandID is empty")
+	if !rec.called {
+		t.Error("ExecWithStreamingHook should still be the entry point")
+	}
+	if rec.hookSeen {
+		t.Error("shell handler must pass a nil hook when CommandID is empty")
 	}
 }

@@ -53,7 +53,9 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		if cr.command.ID != "" {
 			finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
 			payload := protocol.NewCommandResponse(exitCode == 0, result, time.Since(start).Seconds(), exitCode)
-			scheduler.Rqueue.Post(finURL, payload, 10, time.Time{})
+			// Best-effort hint only (retries and concurrent reporters can
+			// still race); server must reassemble via seq.
+			scheduler.Rqueue.Post(finURL, payload, 11, time.Time{})
 		}
 	}()
 
@@ -92,14 +94,32 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 			args.CommandID = cr.command.ID
 		}
 	case "system":
+		commandID := cr.command.ID
+		var chunkCallback func(content string)
+		if commandID != "" {
+			chunkURL := fmt.Sprintf(eventCommandChunkURL, commandID)
+			// Runner owns seq so chunks across shell operators share one series.
+			var seq int
+			chunkCallback = func(content string) {
+				// Advance seq before Post so it stays monotonic even if Post
+				// panics; a reused seq would collide server-side on (command, seq).
+				s := seq
+				seq++
+				scheduler.Rqueue.PostChunk(ctx, chunkURL, &protocol.CommandChunk{
+					Seq:     s,
+					Content: content,
+				}, 10)
+			}
+		}
 		command = common.ShellCmd.String()
 		args = &common.CommandArgs{
-			CommandID: cr.command.ID,
-			Command:   cr.command.Line,
-			Username:  cr.command.User,
-			Groupname: cr.command.Group,
-			Env:       cr.command.Env,
-			AllowSh:   cr.command.AllowSh,
+			CommandID:     commandID,
+			Command:       cr.command.Line,
+			Username:      cr.command.User,
+			Groupname:     cr.command.Group,
+			Env:           cr.command.Env,
+			AllowSh:       cr.command.AllowSh,
+			ChunkCallback: chunkCallback,
 		}
 	default:
 		exitCode = 1

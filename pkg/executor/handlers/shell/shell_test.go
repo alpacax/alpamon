@@ -382,8 +382,8 @@ func TestShellHandler_UnknownCommand(t *testing.T) {
 
 func TestShellHandler_CommandExecutionError(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
-	// Set up a command that returns -1 exit code with error
-	mockExec.SetResult("failing_cmd", -1, "", errors.New("command not found"))
+	// Executor folds cmd.Start failures into output; mock mirrors that.
+	mockExec.SetResult("failing_cmd", 1, "command not found", errors.New("command not found"))
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
@@ -396,8 +396,8 @@ func TestShellHandler_CommandExecutionError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error from Execute: %v", err)
 	}
-	if exitCode != -1 {
-		t.Errorf("expected exit code -1, got %d", exitCode)
+	if exitCode != 1 {
+		t.Errorf("expected exit code 1, got %d", exitCode)
 	}
 	if !strings.Contains(output, "not found") {
 		t.Errorf("expected output to contain error message, got %q", output)

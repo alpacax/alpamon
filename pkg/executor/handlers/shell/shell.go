@@ -87,52 +87,59 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 		} else {
 			cmdArgs = []string{"/bin/sh", "-c", command}
 		}
-		exitCode, result := h.executeCommand(ctx, cmdArgs, username, groupname, env, timeout, args.CommandID)
+		exitCode, result := h.executeCommand(ctx, cmdArgs, username, groupname, env, timeout, args.CommandID, args.ChunkCallback)
 		return exitCode, result, nil
 	}
 
 	// Fallback: direct execution with manual operator parsing
-	return h.executeWithOperators(ctx, command, username, groupname, env, timeout, args.CommandID)
+	return h.executeWithOperators(ctx, command, username, groupname, env, timeout, args.CommandID, args.ChunkCallback)
 }
 
-// executeWithOperators handles shell operators (&&, ||, ;)
-func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string) (int, string, error) {
+// executeWithOperators handles shell operators (&&, ||, ;). Per-segment output
+// (already capped under streaming) is accumulated; under streaming the total is
+// capped again so the fin audit copy stays bounded across segments.
+func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string, error) {
 	spl := strings.Fields(command)
 	var currentCmd []string
 	var results strings.Builder
 	var exitCode int
 	var result string
+	streaming := chunkCallback != nil
+
+	appendResult := func(r string) {
+		results.WriteString(r)
+	}
+	finalResult := func() string {
+		if streaming {
+			return utils.TruncateMiddle(results.String(), utils.AuditOutputCap)
+		}
+		return results.String()
+	}
 
 	for _, arg := range spl {
 		switch arg {
 		case "&&":
-			// Execute current command
 			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
-				results.WriteString(result)
-				// Stop if command fails
+				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
+				appendResult(result)
 				if exitCode != 0 {
-					return exitCode, results.String(), nil
+					return exitCode, finalResult(), nil
 				}
 				currentCmd = nil
 			}
 		case "||":
-			// Execute current command
 			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
-				results.WriteString(result)
-				// Continue only if command fails
+				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
+				appendResult(result)
 				if exitCode == 0 {
-					return exitCode, results.String(), nil
+					return exitCode, finalResult(), nil
 				}
 				currentCmd = nil
 			}
 		case ";":
-			// Execute current command
 			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
-				results.WriteString(result)
-				// Continue regardless of result
+				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
+				appendResult(result)
 				currentCmd = nil
 			}
 		default:
@@ -140,51 +147,33 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 		}
 	}
 
-	// Execute any remaining command
 	if len(currentCmd) > 0 {
-		exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID)
-		results.WriteString(result)
+		exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
+		appendResult(result)
 	}
 
-	return exitCode, results.String(), nil
+	return exitCode, finalResult(), nil
 }
 
-// executeCommand executes a single command.
-// When commandID is non-empty, the child's root pid is registered with
-// the PAM tracker for the duration of the execution so sudo calls made
-// from inside the command can be authorized by command_id.
-func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string) (int, string) {
+// executeCommand registers the child pid with the PAM tracker when commandID
+// is set so sudo inside the command is authorized by command_id. Execute
+// folds startup errors into output, so the err return is intentionally
+// dropped here.
+func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string) {
 	if len(cmdArgs) == 0 {
 		return 0, ""
 	}
 
-	var (
-		exitCode int
-		output   string
-		err      error
-	)
-
+	var pidHook func(pid int)
+	var cleanup func()
 	if commandID != "" {
-		// Track the pid in the PAM tracker before the child can exec
-		// sudo; unregister after the command completes. The register
-		// helper returns a closure that captures the exact (pid,
-		// commandID) pair, so the cleanup is leak-proof by construction.
-		var cleanup func()
-		pidHook := func(pid int) {
+		pidHook = func(pid int) {
 			cleanup = runner.RegisterCommandPID(pid, commandID, username)
 		}
-		exitCode, output, err = h.Executor.ExecWithHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook)
-		if cleanup != nil {
-			cleanup()
-		}
-	} else {
-		exitCode, output, err = h.Executor.Exec(ctx, cmdArgs, username, groupname, env, timeout)
 	}
-
-	if err != nil && exitCode == -1 {
-		// Command execution error (not just non-zero exit)
-		return exitCode, err.Error()
+	exitCode, output, _ := h.Executor.ExecWithStreamingHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook, chunkCallback)
+	if cleanup != nil {
+		cleanup()
 	}
-
 	return exitCode, output
 }
