@@ -274,15 +274,19 @@ func runRegister(cmd *cobra.Command, args []string) error {
 }
 
 // ensureNotAlreadyRegistered fails if a non-empty config already exists, telling
-// the operator how to re-register (unregister / --force). An empty config (e.g.
-// left by systemd-tmpfiles) is allowed and will be overwritten; a missing or
-// unreadable config does not block registration.
+// the operator how to re-register (unregister / --force). A missing config is the
+// clean case; an empty config (e.g. left by systemd-tmpfiles) is allowed and will
+// be overwritten. A non-not-exist stat error (e.g. permission/ACL) is surfaced
+// rather than silently treated as "no config", which would otherwise fail later
+// with a less actionable error during the config write.
 func ensureNotAlreadyRegistered() error {
 	info, err := os.Stat(configPath)
-	if err != nil {
+	switch {
+	case os.IsNotExist(err):
 		return nil
-	}
-	if info.Size() > 0 {
+	case err != nil:
+		return fmt.Errorf("inspect config %s: %w", configPath, err)
+	case info.Size() > 0:
 		return fmt.Errorf("config file already exists: %s\n"+
 			"this server appears to be already registered; re-register by running "+
 			"'alpamon register --force', or 'alpamon unregister' and then 'alpamon register' again",
