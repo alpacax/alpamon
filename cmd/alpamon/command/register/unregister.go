@@ -51,7 +51,7 @@ func init() {
 func runUnregister(_ *cobra.Command, _ []string) error {
 	// On Windows, run from the installed location so SCM operations match the
 	// service register created. No-op on Linux/macOS.
-	if relaunched, err := ensureInstalled(); err != nil {
+	if relaunched, err := ensureInstalledFn(); err != nil {
 		return err
 	} else if relaunched {
 		return nil

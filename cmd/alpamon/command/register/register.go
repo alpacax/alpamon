@@ -54,6 +54,7 @@ var (
 	// touching the real filesystem, OS service manager, or relying on platform
 	// service behavior. They default to the production implementations, mirroring
 	// the detectCloud seam above.
+	ensureInstalledFn   = ensureInstalled
 	writeConfigFileFn   = writeConfigFile
 	ensureDirectoriesFn = ensureDirectories
 	startServiceFn      = startService
@@ -141,7 +142,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	// re-exec from there so the Service Manager entry we're about to
 	// create points at a stable path. No-op on Linux/macOS, where
 	// apt/brew already handled placement.
-	if relaunched, err := ensureInstalled(); err != nil {
+	if relaunched, err := ensureInstalledFn(); err != nil {
 		return err
 	} else if relaunched {
 		return nil

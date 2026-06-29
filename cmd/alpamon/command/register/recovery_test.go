@@ -54,6 +54,7 @@ func withRecoveryTestEnv(t *testing.T, handler http.HandlerFunc) string {
 		oSSL, oForce, oNoRB, oNCP             = sslVerify, force, noRollback, noCloudProbe
 		oTags                                 = tags
 		oDetect                               = detectCloud
+		oEnsure                               = ensureInstalledFn
 		oWrite, oDirs, oStart, oStop, oRemove = writeConfigFileFn, ensureDirectoriesFn, startServiceFn, stopServiceFn, removeServiceFn
 		oUSSL, oUCA, oUYes, oUKeep            = unregisterSSLVerify, unregisterCaCert, unregisterYes, unregisterKeepConfig
 	)
@@ -62,6 +63,7 @@ func withRecoveryTestEnv(t *testing.T, handler http.HandlerFunc) string {
 		sslVerify, force, noRollback, noCloudProbe = oSSL, oForce, oNoRB, oNCP
 		tags = oTags
 		detectCloud = oDetect
+		ensureInstalledFn = oEnsure
 		writeConfigFileFn, ensureDirectoriesFn, startServiceFn, stopServiceFn, removeServiceFn = oWrite, oDirs, oStart, oStop, oRemove
 		unregisterSSLVerify, unregisterCaCert, unregisterYes, unregisterKeepConfig = oUSSL, oUCA, oUYes, oUKeep
 	})
@@ -81,6 +83,9 @@ func withRecoveryTestEnv(t *testing.T, handler http.HandlerFunc) string {
 
 	// Production config writer (writes to the temp configPath), no-op everything
 	// that would touch the OS. Individual tests override as needed.
+	// ensureInstalled is a no-op on Unix but copies the binary + re-execs +
+	// os.Exit on Windows, so it MUST be stubbed for hermetic, cross-platform tests.
+	ensureInstalledFn = func() (bool, error) { return false, nil }
 	writeConfigFileFn = writeConfigFile
 	ensureDirectoriesFn = func() error { return nil }
 	startServiceFn = func() error { return nil }
