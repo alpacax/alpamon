@@ -325,6 +325,27 @@ func TestRunUnregister_DeletesRemoteServiceAndConfig(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "unregister must remove the config")
 }
 
+func TestRunUnregister_MalformedConfigStillClearsLocalState(t *testing.T) {
+	var deleted bool
+	cfg := withRecoveryTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deleted = true
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	// Present but unparseable: ReadServer fails, but local state must still be cleared.
+	require.NoError(t, os.WriteFile(cfg, []byte("garbage, no [server] section\n"), 0o600))
+	var removeCalled bool
+	removeServiceFn = func() error { removeCalled = true; return nil }
+
+	err := runUnregister(testCmd(), nil)
+	require.NoError(t, err)
+	assert.False(t, deleted, "no id/key in a malformed config → no remote DELETE")
+	assert.True(t, removeCalled, "the OS service must still be removed")
+	_, statErr := os.Stat(cfg)
+	assert.True(t, os.IsNotExist(statErr), "the malformed config must still be removed")
+}
+
 func TestRunUnregister_NoConfigIsNoop(t *testing.T) {
 	var deleted bool
 	withRecoveryTestEnv(t, func(w http.ResponseWriter, r *http.Request) {

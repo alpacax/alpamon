@@ -57,33 +57,47 @@ func runUnregister(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	srv, err := config.ReadServer(configPath)
-	if err != nil {
-		// No usable config: nothing local to clean. The remote record (if any)
-		// can only be removed from the console.
-		fmt.Printf("No registration found at %s (%v).\n", configPath, err)
+	// Genuinely nothing to do only when there is no local config (or just an
+	// empty size-0 placeholder). A present-but-malformed config still needs
+	// local cleanup so the host can re-register.
+	info, statErr := os.Stat(configPath)
+	if statErr != nil || info.Size() == 0 {
+		fmt.Printf("No registration found at %s.\n", configPath)
 		fmt.Println("If a stale server still shows in the Alpacon console, remove it there.")
 		return nil
 	}
 
-	// Talk to the server with its OWN recorded TLS settings by default, so the
-	// DELETE works on self-signed / private-CA workspaces. The flags override
-	// the config only when the operator explicitly sets them.
-	sslVerify, caCert := config.ReadSSL(configPath)
-	if cmd.Flags().Changed("ssl-verify") {
-		sslVerify = unregisterSSLVerify
-	}
-	if cmd.Flags().Changed("ca-cert") {
-		caCert = unregisterCaCert
-	}
+	// Read best-effort: srv is nil when the config is present but malformed
+	// (corrupt INI, missing id/key). We still clear local state in that case;
+	// we just can't address the remote record without id/key.
+	srv, readErr := config.ReadServer(configPath)
 
-	if !unregisterYes && !confirm(fmt.Sprintf("Unregister server %s from %s and remove local state?", srv.ID, srv.URL)) {
+	prompt := fmt.Sprintf("Remove local registration state at %s?", configPath)
+	if srv != nil {
+		prompt = fmt.Sprintf("Unregister server %s from %s and remove local state?", srv.ID, srv.URL)
+	}
+	if !unregisterYes && !confirm(prompt) {
 		return fmt.Errorf("aborted")
 	}
 
-	// Remote delete first (smallest-orphan ordering); best-effort, never fatal.
-	fmt.Printf("Unregistering %s from %s ...\n", srv.ID, srv.URL)
-	migrate.BestEffortUnregister(srv.URL, srv.ID, srv.Key, sslVerify, caCert)
+	if srv != nil {
+		// Talk to the server with its OWN recorded TLS settings by default, so
+		// the DELETE works on self-signed / private-CA workspaces. The flags
+		// override the config only when the operator explicitly sets them.
+		sslVerify, caCert := config.ReadSSL(configPath)
+		if cmd.Flags().Changed("ssl-verify") {
+			sslVerify = unregisterSSLVerify
+		}
+		if cmd.Flags().Changed("ca-cert") {
+			caCert = unregisterCaCert
+		}
+		// Remote delete first (smallest-orphan ordering); best-effort, never fatal.
+		fmt.Printf("Unregistering %s from %s ...\n", srv.ID, srv.URL)
+		migrate.BestEffortUnregister(srv.URL, srv.ID, srv.Key, sslVerify, caCert)
+	} else {
+		fmt.Printf("Config at %s is present but unreadable (%v); skipping the remote unregister.\n", configPath, readErr)
+		fmt.Println("Remove the server from the Alpacon console manually if it lingers.")
+	}
 
 	if err := removeServiceFn(); err != nil {
 		fmt.Printf("Warning: failed to remove service: %v\n", err)
@@ -97,7 +111,7 @@ func runUnregister(cmd *cobra.Command, _ []string) error {
 
 	// The remote DELETE is best-effort (logged, not surfaced), so be honest that
 	// the local side is cleared but the console record should be verified.
-	fmt.Println("Local registration state removed. The remote record was deleted on a")
+	fmt.Println("Local registration state removed. Any remote record was deleted on a")
 	fmt.Println("best-effort basis; verify in the Alpacon console if it still appears.")
 	fmt.Println("You can run 'alpamon register' again.")
 	return nil
