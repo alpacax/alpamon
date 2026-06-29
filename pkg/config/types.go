@@ -24,12 +24,8 @@ type Settings struct {
 }
 
 type Config struct {
-	Server struct {
-		URL string `ini:"url"`
-		ID  string `ini:"id"`
-		Key string `ini:"key"`
-	} `ini:"server"`
-	SSL struct {
+	Server ServerConfig `ini:"server"`
+	SSL    struct {
 		Verify bool   `ini:"verify"`
 		CaCert string `ini:"ca_cert"`
 	} `ini:"ssl"`
