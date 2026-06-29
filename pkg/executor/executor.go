@@ -221,6 +221,15 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 		}
 	}
 
+	// When a PID hook is registered (command exec / deploy shell), start the
+	// command in its own session so sudo invoked inside it resolves back to this
+	// Command by session ID—even if the shell execs sudo and they share a pid
+	// (see auth_manager session resolution). Gated on the hook to keep the blast
+	// radius to the sudo-tracked path.
+	if opts.PIDHook != nil {
+		enableSessionLeader(cmd)
+	}
+
 	// Set the environment explicitly so the child never inherits Alpamon's
 	// own service environment (e.g. USER=root, systemd-injected variables).
 	for key, value := range env {

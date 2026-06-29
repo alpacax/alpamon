@@ -1,7 +1,9 @@
 package register
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"syscall"
@@ -15,6 +17,23 @@ func ensureDirectories() error {
 	if utils.HasSystemd() {
 		if output, err := exec.Command("systemd-tmpfiles", "--create", "alpamon.conf").CombinedOutput(); err != nil {
 			return fmt.Errorf("tmpfiles creation failed: %w\n%s", err, string(output))
+		}
+		// systemd-tmpfiles can exit 0 without creating the directory (e.g. on
+		// systemd <235 that ignores parts of the drop-in, or when the drop-in
+		// is unresolved). Without this fallback the service crash-loops on
+		// 200/CHDIR because WorkingDirectory does not exist. Only "does not
+		// exist" triggers the fallback; permission/IO errors and a non-dir
+		// path are surfaced so packaging or filesystem faults are not masked.
+		dataDir := utils.DataDir()
+		info, err := os.Stat(dataDir)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return utils.EnsureDirectories()
+			}
+			return fmt.Errorf("stat %s: %w", dataDir, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s exists but is not a directory", dataDir)
 		}
 		return nil
 	}

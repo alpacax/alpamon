@@ -7,7 +7,7 @@
 //
 //  1. Operator creates a registration token in workspace B.
 //  2. Operator opens Websh on the agent's current workspace (A) and runs:
-//       sudo alpamon migrate --url https://b... --token <REGISTRATION_TOKEN>
+//     sudo alpamon migrate --url https://b... --token <REGISTRATION_TOKEN>
 //  3. The command registers on B, atomically swaps /etc/alpamon/alpamon.conf,
 //     writes a marker file, schedules a systemd-run timer to restart
 //     alpamon ~30s later, and returns. The Websh session disconnects as

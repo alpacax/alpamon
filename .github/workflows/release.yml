@@ -69,9 +69,9 @@ jobs:
       # "Publish stable-alias checksums file" step.
       - name: Generate App token
         id: release-publisher-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.RELEASE_PUBLISHER_APP_ID }}
+          client-id: ${{ secrets.RELEASE_PUBLISHER_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PUBLISHER_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: |
