@@ -270,10 +270,9 @@ func ensureNotAlreadyRegistered() error {
 	}
 	if info.Size() > 0 {
 		return fmt.Errorf("config file already exists: %s\n"+
-			"This server appears to be already registered. To re-register, run:\n"+
-			"  alpamon unregister       # unregister and clear local state, then\n"+
-			"  alpamon register ...     # register again\n"+
-			"or do both at once with: alpamon register --force ...", configPath)
+			"this server appears to be already registered; re-register by running "+
+			"'alpamon register --force', or 'alpamon unregister' and then 'alpamon register' again",
+			configPath)
 	}
 	fmt.Printf("Note: Empty config file found at %s, will be overwritten\n", configPath)
 	return nil
