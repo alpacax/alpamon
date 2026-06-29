@@ -117,7 +117,9 @@ Options:
   --ssl-verify      SSL certificate verification (default: true)
   --ca-cert         CA certificate path
   --tag             Server tags in key=value format (repeatable, or comma-separated: "k1=v1,k2=v2")
-  --no-cloud-probe  Skip cloud metadata IMDS probe`,
+  --no-cloud-probe  Skip cloud metadata IMDS probe
+  --force           Recover a stuck server: register anew, then retire the previous registration
+  --no-rollback     On failure, leave partial state in place instead of cleaning it up (debug)`,
 	RunE: runRegister,
 }
 
@@ -130,7 +132,7 @@ func init() {
 	RegisterCmd.Flags().StringVar(&caCert, "ca-cert", "", "CA certificate path")
 	RegisterCmd.Flags().StringToStringVar(&tags, "tag", nil, "Server tags in key=value format (repeatable, or comma-separated: \"k1=v1,k2=v2\")")
 	RegisterCmd.Flags().BoolVar(&noCloudProbe, "no-cloud-probe", false, "Skip cloud metadata IMDS probe at registration")
-	RegisterCmd.Flags().BoolVar(&force, "force", false, "Unregister any existing registration before registering (recover a stuck server)")
+	RegisterCmd.Flags().BoolVar(&force, "force", false, "Recover a stuck server: register anew, then retire the previous registration once the new one is committed")
 	RegisterCmd.Flags().BoolVar(&noRollback, "no-rollback", false, "On failure, leave partial state in place instead of cleaning it up (for debugging)")
 
 	_ = RegisterCmd.MarkFlagRequired("url")
