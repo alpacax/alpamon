@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -217,6 +218,40 @@ func TestRunRegister_ForceKeepsOldConfigWhenWriteFails(t *testing.T) {
 
 	data, readErr := os.ReadFile(cfg)
 	require.NoError(t, readErr, "the existing config must NOT be lost on a write failure")
+	assert.Contains(t, string(data), "id = old-id")
+}
+
+// --force must fail fast (before the POST) when an existing config is present
+// but unreadable, rather than overwriting it with no way to restore on rollback.
+func TestRunRegister_ForceFailsFastWhenExistingConfigUnreadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0000 does not block reads on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	var posted bool
+	cfg := withRecoveryTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posted = true
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(RegisterResponse{ID: "new-id", Key: "new-key", Name: "test-server"})
+	})
+	writeConf(t, cfg, serverURL, "old-id", "old-key")
+	require.NoError(t, os.Chmod(cfg, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(cfg, 0o600) })
+	force = true
+
+	err := runRegister(testCmd(), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot read existing config")
+	assert.False(t, posted, "must fail fast before creating a new remote record")
+
+	// The existing config must be left untouched.
+	require.NoError(t, os.Chmod(cfg, 0o600))
+	data, readErr := os.ReadFile(cfg)
+	require.NoError(t, readErr)
 	assert.Contains(t, string(data), "id = old-id")
 }
 

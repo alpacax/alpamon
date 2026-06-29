@@ -157,13 +157,21 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	var oldConf []byte
 	oldConfMode := os.FileMode(0o600)
 	if force {
-		if srv, err := config.ReadServer(configPath); err == nil {
-			priorReg = srv
-		}
-		if b, err := os.ReadFile(configPath); err == nil {
+		// Capture the existing config so a later rollback can restore it. If a
+		// config is present but unreadable, fail fast: writeConfigFile would
+		// atomically replace it and a post-write failure (e.g. dir setup) would
+		// then drop it via removeOnRollback, leaving the host with no config and
+		// breaking the --force guarantee. oldConf is therefore set iff a prior
+		// config existed and was captured (an empty placeholder, size 0, is not).
+		if info, statErr := os.Stat(configPath); statErr == nil && info.Size() > 0 {
+			b, readErr := os.ReadFile(configPath)
+			if readErr != nil {
+				return fmt.Errorf("--force: cannot read existing config %s to enable rollback: %w", configPath, readErr)
+			}
 			oldConf = b
-			if fi, statErr := os.Stat(configPath); statErr == nil {
-				oldConfMode = fi.Mode().Perm()
+			oldConfMode = info.Mode().Perm()
+			if srv, err := config.ReadServer(configPath); err == nil {
+				priorReg = srv
 			}
 		}
 	}
