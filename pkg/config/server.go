@@ -11,7 +11,7 @@ import (
 )
 
 // confTemplate is the on-disk alpamon.conf layout ([server]/[ssl]/[logging];
-// ca_cert is omitted when empty). Compiled once at init via template.Must — a
+// ca_cert is omitted when empty). Compiled once at init via template.Must—a
 // parse failure here is a programmer error in this static template, not a
 // runtime condition, so panicking at startup is appropriate.
 var confTemplate = template.Must(template.New("conf").Parse(`[server]
@@ -40,7 +40,7 @@ type ServerConfig struct {
 
 // ReadServer parses path as INI and returns the [server] url/id/key. Unlike
 // LoadConfig it returns a normal error (no log.Fatal) so callers on recovery
-// paths (migrate, unregister) can degrade gracefully — e.g. treat a missing or
+// paths (migrate, unregister) can degrade gracefully—e.g. treat a missing or
 // malformed config as "nothing to clean up".
 func ReadServer(path string) (*ServerConfig, error) {
 	f, err := ini.Load(path)

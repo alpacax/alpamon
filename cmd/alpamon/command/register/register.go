@@ -150,7 +150,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 
 	// 0b. With --force, capture the existing registration up front: the parsed
 	// [server] block (to retire the old remote record) and the raw config bytes
-	// (to restore on rollback). Reading now — before the new POST — is harmless;
+	// (to restore on rollback). Reading now—before the new POST—is harmless;
 	// the actual teardown happens only once we are committed, so an invalid token
 	// or unreachable --url aborts before we touch the existing healthy install.
 	var priorReg *config.ServerConfig
@@ -200,7 +200,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 
 	// Within-run rollback: unless --no-rollback, undo state THIS invocation
 	// created if a later step fails. Compensations run LIFO (local cleanup
-	// first, the single remote DELETE last — matching the saga ordering in
+	// first, the single remote DELETE last—matching the saga ordering in
 	// pkg/migrate). committed is flipped once the registration is durably
 	// usable; after that point a best-effort service-start failure must NOT
 	// trigger a rollback (a registered server whose service merely failed to
@@ -582,6 +582,6 @@ func writeConfigFile(resp *RegisterResponse) error {
 	// Atomic replace (temp + fsync + rename, creating the dir at 0700): the file
 	// is never left half-written, and any existing config (e.g. an empty file
 	// from systemd-tmpfiles, or a prior registration under --force) is replaced
-	// only at the final rename — so a failed write cannot orphan the host.
+	// only at the final rename—so a failed write cannot orphan the host.
 	return migrate.WriteConfAtomic(configPath, []byte(content), 0o600)
 }

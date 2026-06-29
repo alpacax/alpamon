@@ -207,7 +207,7 @@ func removeService() error {
 // Stopped so the binary handle is released. ERROR_SERVICE_NOT_ACTIVE (already
 // stopped) is fine. The caller owns the handle. Errors are logged, not returned,
 // because both callers are best-effort. The poll only returns early on a
-// confirmed Stopped state — a transient Query error must NOT be mistaken for
+// confirmed Stopped state—a transient Query error must NOT be mistaken for
 // "stopped", otherwise a still-running service could be deleted/bounced
 // prematurely.
 func stopRunningService(s *mgr.Service) {

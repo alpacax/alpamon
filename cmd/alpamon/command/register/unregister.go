@@ -33,7 +33,7 @@ console, stops and removes the OS service, and deletes the local config file.
 Data/log directories and the agent binary are left in place.
 
 Run this on the server itself (locally or via an out-of-band console such as
-RDP / cloud serial console / SSM) — not over Websh, since stopping the service
+RDP / cloud serial console / SSM)—not over Websh, since stopping the service
 would terminate the Websh session before the command finishes.
 
 Run before re-registering a server whose previous 'register' failed, or use
@@ -59,10 +59,18 @@ func runUnregister(cmd *cobra.Command, _ []string) error {
 
 	// Genuinely nothing to do only when there is no local config (or just an
 	// empty size-0 placeholder). A present-but-malformed config still needs
-	// local cleanup so the host can re-register.
+	// local cleanup so the host can re-register. A non-not-exist stat error
+	// (e.g. permission) is surfaced rather than silently treated as "no config".
 	info, statErr := os.Stat(configPath)
-	if statErr != nil || info.Size() == 0 {
+	switch {
+	case os.IsNotExist(statErr):
 		fmt.Printf("No registration found at %s.\n", configPath)
+		fmt.Println("If a stale server still shows in the Alpacon console, remove it there.")
+		return nil
+	case statErr != nil:
+		return fmt.Errorf("inspect config %s: %w", configPath, statErr)
+	case info.Size() == 0:
+		fmt.Printf("No registration found at %s (empty config).\n", configPath)
 		fmt.Println("If a stale server still shows in the Alpacon console, remove it there.")
 		return nil
 	}

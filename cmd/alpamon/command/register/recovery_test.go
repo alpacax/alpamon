@@ -38,7 +38,7 @@ func mockRegisterServer(newID string, deletedIDs *[]string) http.HandlerFunc {
 
 // withRecoveryTestEnv points the package globals at a mock Alpacon server and a
 // temp config path, and stubs the side-effecting seams (dirs/service) to no-ops
-// so registration logic can be exercised hermetically — without touching the
+// so registration logic can be exercised hermetically—without touching the
 // real filesystem, OS service manager, or network. All globals are restored on
 // cleanup. Returns the temp config path.
 func withRecoveryTestEnv(t *testing.T, handler http.HandlerFunc) string {
@@ -186,7 +186,7 @@ func TestRunRegister_ForceRetiresOldRegistrationAfterNewSucceeds(t *testing.T) {
 func TestRunRegister_ForceStopsServiceEvenWhenPriorConfigUnreadable(t *testing.T) {
 	var deletedIDs []string
 	cfg := withRecoveryTestEnv(t, mockRegisterServer("new-id", &deletedIDs))
-	// Corrupt config: config.ReadServer fails (priorReg stays nil) — the core
+	// Corrupt config: config.ReadServer fails (priorReg stays nil)—the core
 	// stuck-after-failed-register case. A leftover service must still be stopped.
 	require.NoError(t, os.WriteFile(cfg, []byte("garbage, no [server] section\n"), 0o600))
 	force = true
