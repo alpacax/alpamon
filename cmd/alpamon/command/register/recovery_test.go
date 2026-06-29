@@ -366,6 +366,7 @@ func TestConfirm(t *testing.T) {
 		"yes\n":  true,
 		"YES\n":  true,
 		" y \n":  true,
+		"y":      true, // no trailing newline (piped) must still count as yes
 		"n\n":    false,
 		"\n":     false,
 		"nope\n": false,

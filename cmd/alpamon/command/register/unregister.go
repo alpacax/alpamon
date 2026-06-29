@@ -48,7 +48,7 @@ func init() {
 	UnregisterCmd.Flags().BoolVar(&unregisterKeepConfig, "keep-config", false, "Remove the remote record and service but keep the local config (debug)")
 }
 
-func runUnregister(_ *cobra.Command, _ []string) error {
+func runUnregister(cmd *cobra.Command, _ []string) error {
 	// On Windows, run from the installed location so SCM operations match the
 	// service register created. No-op on Linux/macOS.
 	if relaunched, err := ensureInstalledFn(); err != nil {
@@ -66,13 +66,24 @@ func runUnregister(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
+	// Talk to the server with its OWN recorded TLS settings by default, so the
+	// DELETE works on self-signed / private-CA workspaces. The flags override
+	// the config only when the operator explicitly sets them.
+	sslVerify, caCert := config.ReadSSL(configPath)
+	if cmd.Flags().Changed("ssl-verify") {
+		sslVerify = unregisterSSLVerify
+	}
+	if cmd.Flags().Changed("ca-cert") {
+		caCert = unregisterCaCert
+	}
+
 	if !unregisterYes && !confirm(fmt.Sprintf("Unregister server %s from %s and remove local state?", srv.ID, srv.URL)) {
 		return fmt.Errorf("aborted")
 	}
 
 	// Remote delete first (smallest-orphan ordering); best-effort, never fatal.
 	fmt.Printf("Unregistering %s from %s ...\n", srv.ID, srv.URL)
-	migrate.BestEffortUnregister(srv.URL, srv.ID, srv.Key, unregisterSSLVerify, unregisterCaCert)
+	migrate.BestEffortUnregister(srv.URL, srv.ID, srv.Key, sslVerify, caCert)
 
 	if err := removeServiceFn(); err != nil {
 		fmt.Printf("Warning: failed to remove service: %v\n", err)
@@ -87,7 +98,7 @@ func runUnregister(_ *cobra.Command, _ []string) error {
 	// The remote DELETE is best-effort (logged, not surfaced), so be honest that
 	// the local side is cleared but the console record should be verified.
 	fmt.Println("Local registration state removed. The remote record was deleted on a")
-	fmt.Println("best-effort basis — verify in the Alpacon console if it still appears.")
+	fmt.Println("best-effort basis; verify in the Alpacon console if it still appears.")
 	fmt.Println("You can run 'alpamon register' again.")
 	return nil
 }
@@ -99,10 +110,11 @@ func runUnregister(_ *cobra.Command, _ []string) error {
 func confirm(prompt string) bool {
 	// Prompt on stderr so stdout stays clean when the command output is piped.
 	fmt.Fprintf(os.Stderr, "%s [y/N]: ", prompt)
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil {
-		return false
-	}
+	// ReadString returns the data read so far together with io.EOF when stdin
+	// ends without a trailing newline (common when piping, e.g. `echo -n y |`),
+	// so parse the line regardless of err; an empty/EOF-only read falls through
+	// to "no", which is the safe default for a destructive action.
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	answer := strings.ToLower(strings.TrimSpace(line))
 	return answer == "y" || answer == "yes"
 }

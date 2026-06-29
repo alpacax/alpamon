@@ -328,7 +328,7 @@ registration.
 If a previous `register` failed partway (or you want to register this
 host again), the leftover config makes a plain re-run stop at the
 `config file already exists` message. There are two supported recovery
-paths — run either from **elevated** PowerShell:
+paths; run either from **elevated** PowerShell:
 
 ```powershell
 # One step: unregister, then register fresh.

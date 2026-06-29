@@ -156,6 +156,8 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	var priorReg *config.ServerConfig
 	var oldConf []byte
 	oldConfMode := os.FileMode(0o600)
+	oldSSLVerify := true
+	var oldCACert string
 	if force {
 		// Capture the existing config so a later rollback can restore it. If a
 		// config is present but unreadable, fail fast: writeConfigFile would
@@ -163,6 +165,8 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		// then drop it via removeOnRollback, leaving the host with no config and
 		// breaking the --force guarantee. oldConf is therefore set iff a prior
 		// config existed and was captured (an empty placeholder, size 0, is not).
+		// Also capture the prior [ssl] so retiring the old remote record speaks
+		// the OLD workspace's TLS, not this invocation's flags.
 		if info, statErr := os.Stat(configPath); statErr == nil && info.Size() > 0 {
 			b, readErr := os.ReadFile(configPath)
 			if readErr != nil {
@@ -173,6 +177,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 			if srv, err := config.ReadServer(configPath); err == nil {
 				priorReg = srv
 			}
+			oldSSLVerify, oldCACert = config.ReadSSL(configPath)
 		}
 	}
 
@@ -253,7 +258,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 
 	// 8b. --force: now that the new registration is committed, retire the old one.
 	if force {
-		retirePriorRegistration(priorReg, resp.ID)
+		retirePriorRegistration(priorReg, resp.ID, oldSSLVerify, oldCACert)
 	}
 
 	// 9. Start service
@@ -328,13 +333,13 @@ func buildRegisterRequest(cmd *cobra.Command) (RegisterRequest, error) {
 
 // retirePriorRegistration tears down the registration that --force is replacing,
 // AFTER the new one is committed. It stops (not deletes) the previously-running
-// service so the fresh start reloads the new config — this runs even when the
+// service so the fresh start reloads the new config; this runs even when the
 // prior config was unreadable, because a leftover service from a failed install
 // may still be running with stale credentials (the stuck case --force exists
 // for). The remote unregister needs the old id/key, so it is gated on a readable
-// prior config; its DELETE uses this invocation's TLS flags (assumes homogeneous
-// TLS across workspaces — the common same-workspace re-register).
-func retirePriorRegistration(priorReg *config.ServerConfig, newID string) {
+// prior config, and it uses the OLD config's TLS settings (sslVerify/caCert) so
+// it works against a self-signed / private-CA prior workspace.
+func retirePriorRegistration(priorReg *config.ServerConfig, newID string, sslVerify bool, caCert string) {
 	if priorReg != nil && priorReg.ID != newID {
 		fmt.Printf("--force: unregistering previous server record %s ...\n", priorReg.ID)
 		migrate.BestEffortUnregister(priorReg.URL, priorReg.ID, priorReg.Key, sslVerify, caCert)

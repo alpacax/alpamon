@@ -68,6 +68,32 @@ func ReadServer(path string) (*ServerConfig, error) {
 	return s, nil
 }
 
+// ReadSSL reads the [ssl] section (verify, ca_cert) from path. Best-effort: a
+// missing file/section/key yields the secure default verify=true and no CA, so
+// callers can use it as a sane TLS baseline. Recovery paths (unregister,
+// register --force) use it so the DELETE to a server speaks that server's own
+// TLS settings rather than whatever flags the current invocation defaulted to.
+func ReadSSL(path string) (verify bool, caCert string) {
+	verify = true
+	f, err := ini.Load(path)
+	if err != nil {
+		return verify, ""
+	}
+	section, err := f.GetSection("ssl")
+	if err != nil {
+		return verify, ""
+	}
+	if k, err := section.GetKey("verify"); err == nil {
+		if b, perr := k.Bool(); perr == nil {
+			verify = b
+		}
+	}
+	if k, err := section.GetKey("ca_cert"); err == nil {
+		caCert = strings.TrimSpace(k.String())
+	}
+	return verify, caCert
+}
+
 // RenderConf produces the alpamon.conf body for the given server identity and
 // SSL settings. It is the single source of truth for the on-disk config format,
 // shared by register and migrate so the two cannot drift.
