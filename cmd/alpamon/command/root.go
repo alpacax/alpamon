@@ -74,7 +74,7 @@ control plane and https://github.com/alpacax/alpacon-cli for the CLI.`,
 
 func init() {
 	setup.SetConfigPaths(name)
-	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelDaemonCmd, register.RegisterCmd, migratecmd.Cmd)
+	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelDaemonCmd, register.RegisterCmd, register.UnregisterCmd, migratecmd.Cmd)
 	// Emit just the version string (no "alpamon version ..." prefix) so
 	// shell one-liners like `alpamon --version` are easy to parse.
 	RootCmd.SetVersionTemplate("{{.Version}}\n")
