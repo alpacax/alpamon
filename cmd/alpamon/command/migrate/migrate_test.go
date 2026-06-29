@@ -4,57 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/alpacax/alpamon/v2/pkg/config"
 )
-
-func TestReadCurrentServer_FindsAllFields(t *testing.T) {
-	dir := t.TempDir()
-	conf := filepath.Join(dir, "alpamon.conf")
-	body := `[server]
-url = https://workspace-a.example.com
-id = abc
-key = secret
-
-[ssl]
-verify = true
-`
-	if err := os.WriteFile(conf, []byte(body), 0600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	got, err := readCurrentServer(conf)
-	if err != nil {
-		t.Fatalf("readCurrentServer: %v", err)
-	}
-	if got.URL != "https://workspace-a.example.com" || got.ID != "abc" || got.Key != "secret" {
-		t.Fatalf("got %+v", got)
-	}
-}
-
-func TestReadCurrentServer_MissingURL(t *testing.T) {
-	dir := t.TempDir()
-	conf := filepath.Join(dir, "alpamon.conf")
-	if err := os.WriteFile(conf, []byte("[server]\nid=abc\nkey=k\n"), 0600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if _, err := readCurrentServer(conf); err == nil {
-		t.Fatalf("expected error on missing url, got nil")
-	}
-}
-
-func TestReadCurrentServer_MissingIDKey(t *testing.T) {
-	dir := t.TempDir()
-	conf := filepath.Join(dir, "alpamon.conf")
-	if err := os.WriteFile(conf, []byte("[server]\nurl=https://a\n"), 0600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if _, err := readCurrentServer(conf); err == nil {
-		t.Fatalf("expected error on missing id/key, got nil")
-	}
-}
 
 func TestStripGeneratedSuffix(t *testing.T) {
 	cases := map[string]string{
@@ -94,7 +48,7 @@ func TestFetchCurrentName_HappyPath(t *testing.T) {
 	sslVerify = false
 	caCert = ""
 
-	got, err := fetchCurrentName(t.Context(), &currentServer{
+	got, err := fetchCurrentName(t.Context(), &config.ServerConfig{
 		URL: srv.URL, ID: "srv-xyz", Key: "key-xyz",
 	})
 	if err != nil {
@@ -115,7 +69,7 @@ func TestFetchCurrentName_404SurfacesAsError(t *testing.T) {
 	sslVerify = false
 	caCert = ""
 
-	_, err := fetchCurrentName(t.Context(), &currentServer{
+	_, err := fetchCurrentName(t.Context(), &config.ServerConfig{
 		URL: srv.URL, ID: "srv-xyz", Key: "key-xyz",
 	})
 	if err == nil {

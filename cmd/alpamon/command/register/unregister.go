@@ -1,0 +1,142 @@
+package register
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/migrate"
+	"github.com/spf13/cobra"
+)
+
+var (
+	unregisterSSLVerify  bool
+	unregisterCaCert     string
+	unregisterYes        bool
+	unregisterKeepConfig bool
+)
+
+// UnregisterCmd reverses register: it drops the server record on the Alpacon
+// console, stops/removes the OS service, and deletes the local config so the
+// host can be registered again. It is the supported recovery path for a server
+// stuck after a failed register (where re-running register hits the
+// "config file already exists" wall).
+var UnregisterCmd = &cobra.Command{
+	Use:   "unregister",
+	Short: "Unregister this server and remove local registration state",
+	Long: `Unregister this server so it can be registered again.
+
+Reads the existing config, best-effort deletes the server record on the Alpacon
+console, stops and removes the OS service, and deletes the local config file.
+Data/log directories and the agent binary are left in place.
+
+Run this on the server itself (locally or via an out-of-band console such as
+RDP / cloud serial console / SSM)—not over Websh, since stopping the service
+would terminate the Websh session before the command finishes.
+
+Run before re-registering a server whose previous 'register' failed, or use
+'alpamon register --force' to do both in one step.`,
+	RunE: runUnregister,
+}
+
+func init() {
+	UnregisterCmd.Flags().BoolVar(&unregisterSSLVerify, "ssl-verify", true, "SSL certificate verification")
+	UnregisterCmd.Flags().StringVar(&unregisterCaCert, "ca-cert", "", "CA certificate path")
+	UnregisterCmd.Flags().BoolVar(&unregisterYes, "yes", false, "Skip the confirmation prompt (required for non-interactive use)")
+	UnregisterCmd.Flags().BoolVar(&unregisterKeepConfig, "keep-config", false, "Remove the remote record and service but keep the local config (debug)")
+}
+
+func runUnregister(cmd *cobra.Command, _ []string) error {
+	// On Windows, run from the installed location so SCM operations match the
+	// service register created. No-op on Linux/macOS.
+	if relaunched, err := ensureInstalledFn(); err != nil {
+		return err
+	} else if relaunched {
+		return nil
+	}
+
+	// Genuinely nothing to do only when there is no local config (or just an
+	// empty size-0 placeholder). A present-but-malformed config still needs
+	// local cleanup so the host can re-register. A non-not-exist stat error
+	// (e.g. permission) is surfaced rather than silently treated as "no config".
+	info, statErr := os.Stat(configPath)
+	switch {
+	case os.IsNotExist(statErr):
+		fmt.Printf("No registration found at %s.\n", configPath)
+		fmt.Println("If a stale server still shows in the Alpacon console, remove it there.")
+		return nil
+	case statErr != nil:
+		return fmt.Errorf("inspect config %s: %w", configPath, statErr)
+	case info.Size() == 0:
+		fmt.Printf("No registration found at %s (empty config).\n", configPath)
+		fmt.Println("If a stale server still shows in the Alpacon console, remove it there.")
+		return nil
+	}
+
+	// Read best-effort: srv is nil when the config is present but malformed
+	// (corrupt INI, missing id/key). We still clear local state in that case;
+	// we just can't address the remote record without id/key.
+	srv, readErr := config.ReadServer(configPath)
+
+	prompt := fmt.Sprintf("Remove local registration state at %s?", configPath)
+	if srv != nil {
+		prompt = fmt.Sprintf("Unregister server %s from %s and remove local state?", srv.ID, srv.URL)
+	}
+	if !unregisterYes && !confirm(prompt) {
+		return fmt.Errorf("aborted")
+	}
+
+	if srv != nil {
+		// Talk to the server with its OWN recorded TLS settings by default, so
+		// the DELETE works on self-signed / private-CA workspaces. The flags
+		// override the config only when the operator explicitly sets them.
+		sslVerify, caCert := config.ReadSSL(configPath)
+		if cmd.Flags().Changed("ssl-verify") {
+			sslVerify = unregisterSSLVerify
+		}
+		if cmd.Flags().Changed("ca-cert") {
+			caCert = unregisterCaCert
+		}
+		// Remote delete first (smallest-orphan ordering); best-effort, never fatal.
+		fmt.Printf("Unregistering %s from %s ...\n", srv.ID, srv.URL)
+		migrate.BestEffortUnregister(srv.URL, srv.ID, srv.Key, sslVerify, caCert)
+	} else {
+		fmt.Printf("Config at %s is present but unreadable (%v); skipping the remote unregister.\n", configPath, readErr)
+		fmt.Println("Remove the server from the Alpacon console manually if it lingers.")
+	}
+
+	if err := removeServiceFn(); err != nil {
+		fmt.Printf("Warning: failed to remove service: %v\n", err)
+	}
+
+	if !unregisterKeepConfig {
+		if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove config %s: %w", configPath, err)
+		}
+	}
+
+	// The remote DELETE is best-effort (logged, not surfaced), so be honest that
+	// the local side is cleared but the console record should be verified.
+	fmt.Println("Local registration state removed. Any remote record was deleted on a")
+	fmt.Println("best-effort basis; verify in the Alpacon console if it still appears.")
+	fmt.Println("You can run 'alpamon register' again.")
+	return nil
+}
+
+// confirm prompts on stdin and returns true only on an explicit "y"/"yes". Any
+// other answer, or a read error (e.g. piped/empty stdin in a non-interactive
+// context without --yes), returns false so the destructive action safely aborts
+// rather than proceeding.
+func confirm(prompt string) bool {
+	// Prompt on stderr so stdout stays clean when the command output is piped.
+	fmt.Fprintf(os.Stderr, "%s [y/N]: ", prompt)
+	// ReadString returns the data read so far together with io.EOF when stdin
+	// ends without a trailing newline (common when piping, e.g. `echo -n y |`),
+	// so parse the line regardless of err; an empty/EOF-only read falls through
+	// to "no", which is the safe default for a destructive action.
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes"
+}

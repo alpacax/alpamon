@@ -92,3 +92,28 @@ func printManualStartHint() {
 		fmt.Printf("  %s\n", alpamonBinPath)
 	}
 }
+
+// stopService stops the alpamon systemd unit without disabling it. Used by
+// register --force to bounce the unit so the fresh start reloads the new config.
+// Best-effort/idempotent: a `systemctl stop` of an already-stopped or
+// non-existent unit is ignored. No-op on hosts without systemd.
+func stopService() error {
+	if utils.HasSystemd() {
+		_, _ = exec.Command("systemctl", "stop", "alpamon.service").CombinedOutput()
+	}
+	return nil
+}
+
+// removeService stops and disables the alpamon systemd unit (full teardown for
+// unregister). Best-effort/idempotent: errors from `systemctl stop`/`disable` on
+// an already-stopped or non-existent unit are intentionally ignored so
+// unregister never fails on an already-clean box. On hosts without systemd there
+// is no durable service to remove (the agent runs as a detached background
+// process that exits on host teardown).
+func removeService() error {
+	if utils.HasSystemd() {
+		_, _ = exec.Command("systemctl", "stop", "alpamon.service").CombinedOutput()
+		_, _ = exec.Command("systemctl", "disable", "alpamon.service").CombinedOutput()
+	}
+	return nil
+}

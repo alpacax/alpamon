@@ -15,10 +15,11 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"text/template"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/cloud"
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/migrate"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/spf13/cobra"
@@ -38,6 +39,8 @@ var (
 	caCert       string
 	tags         map[string]string
 	noCloudProbe bool
+	force        bool
+	noRollback   bool
 
 	// detectCloud is overridable in tests to inject a stub detector. Production
 	// uses cloud.Detect with the default provider list.
@@ -45,6 +48,18 @@ var (
 		_, meta, err := cloud.Detect(ctx, cloud.DefaultProviders())
 		return meta, err
 	}
+
+	// Test seams: indirections over the side-effecting steps so registration
+	// logic (within-run rollback, --force ordering) can be exercised without
+	// touching the real filesystem, OS service manager, or relying on platform
+	// service behavior. They default to the production implementations, mirroring
+	// the detectCloud seam above.
+	ensureInstalledFn   = ensureInstalled
+	writeConfigFileFn   = writeConfigFile
+	ensureDirectoriesFn = ensureDirectories
+	startServiceFn      = startService
+	stopServiceFn       = stopService
+	removeServiceFn     = removeService
 )
 
 // registerCloudDetectTimeout caps the synchronous cloud probe at register time
@@ -102,7 +117,9 @@ Options:
   --ssl-verify      SSL certificate verification (default: true)
   --ca-cert         CA certificate path
   --tag             Server tags in key=value format (repeatable, or comma-separated: "k1=v1,k2=v2")
-  --no-cloud-probe  Skip cloud metadata IMDS probe`,
+  --no-cloud-probe  Skip cloud metadata IMDS probe
+  --force           Recover a stuck server: register anew, then retire the previous registration
+  --no-rollback     On failure, leave partial state in place instead of cleaning it up (debug)`,
 	RunE: runRegister,
 }
 
@@ -115,6 +132,8 @@ func init() {
 	RegisterCmd.Flags().StringVar(&caCert, "ca-cert", "", "CA certificate path")
 	RegisterCmd.Flags().StringToStringVar(&tags, "tag", nil, "Server tags in key=value format (repeatable, or comma-separated: \"k1=v1,k2=v2\")")
 	RegisterCmd.Flags().BoolVar(&noCloudProbe, "no-cloud-probe", false, "Skip cloud metadata IMDS probe at registration")
+	RegisterCmd.Flags().BoolVar(&force, "force", false, "Recover a stuck server: register anew, then retire the previous registration once the new one is committed")
+	RegisterCmd.Flags().BoolVar(&noRollback, "no-rollback", false, "On failure, leave partial state in place instead of cleaning it up (for debugging)")
 
 	_ = RegisterCmd.MarkFlagRequired("url")
 	_ = RegisterCmd.MarkFlagRequired("token")
@@ -125,38 +144,182 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	// re-exec from there so the Service Manager entry we're about to
 	// create points at a stable path. No-op on Linux/macOS, where
 	// apt/brew already handled placement.
-	if relaunched, err := ensureInstalled(); err != nil {
+	if relaunched, err := ensureInstalledFn(); err != nil {
 		return err
 	} else if relaunched {
 		return nil
 	}
 
-	// 1. Check if config file already exists (prevent re-registration)
-	if info, err := os.Stat(configPath); err == nil {
-		if info.Size() > 0 {
-			return fmt.Errorf("config file already exists: %s\nServer is already registered. To re-register, first unregister this server from the Alpacon console, then delete the config file and run register again", configPath)
+	// 0b. With --force, capture the existing registration up front: the parsed
+	// [server] block (to retire the old remote record) and the raw config bytes
+	// (to restore on rollback). Reading now—before the new POST—is harmless;
+	// the actual teardown happens only once we are committed, so an invalid token
+	// or unreachable --url aborts before we touch the existing healthy install.
+	var priorReg *config.ServerConfig
+	var oldConf []byte
+	oldConfMode := os.FileMode(0o600)
+	oldSSLVerify := true
+	var oldCACert string
+	if force {
+		// Capture the existing config so a later rollback can restore it. If a
+		// config is present but unreadable, fail fast: writeConfigFile would
+		// atomically replace it and a post-write failure (e.g. dir setup) would
+		// then drop it via removeOnRollback, leaving the host with no config and
+		// breaking the --force guarantee. oldConf is therefore set iff a prior
+		// config existed and was captured (an empty placeholder, size 0, is not).
+		// Also capture the prior [ssl] so retiring the old remote record speaks
+		// the OLD workspace's TLS, not this invocation's flags.
+		if info, statErr := os.Stat(configPath); statErr == nil && info.Size() > 0 {
+			b, readErr := os.ReadFile(configPath)
+			if readErr != nil {
+				return fmt.Errorf("--force: cannot read existing config %s to enable rollback: %w", configPath, readErr)
+			}
+			oldConf = b
+			oldConfMode = info.Mode().Perm()
+			if srv, err := config.ReadServer(configPath); err == nil {
+				priorReg = srv
+			}
+			oldSSLVerify, oldCACert = config.ReadSSL(configPath)
 		}
-		// Empty config file exists (likely created by systemd-tmpfiles) — will be cleaned up during registration
-		fmt.Printf("Note: Empty config file found at %s, will be overwritten\n", configPath)
 	}
 
-	// 2. Auto-detect server name from hostname if not provided
+	// 1. Reject a re-register when a live config already exists (skipped under
+	// --force, which intentionally replaces an existing registration).
+	if !force {
+		if err := ensureNotAlreadyRegistered(); err != nil {
+			return err
+		}
+	}
+
+	// 2–5. Resolve the server name (hostname fallback + slug normalization),
+	// platform, and merged cloud/user tags, and assemble the request body.
+	reqBody, err := buildRegisterRequest(cmd)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Registering server: %s\n", serverURL)
+
+	// Within-run rollback: unless --no-rollback, undo state THIS invocation
+	// created if a later step fails. Compensations run LIFO (local cleanup
+	// first, the single remote DELETE last—matching the saga ordering in
+	// pkg/migrate). committed is flipped once the registration is durably
+	// usable; after that point a best-effort service-start failure must NOT
+	// trigger a rollback (a registered server whose service merely failed to
+	// start is recoverable, and tearing it down would be hostile).
+	var rollbacks []func() error
+	committed := false
+	defer func() {
+		if committed || noRollback {
+			return
+		}
+		var errs []error
+		for i := len(rollbacks) - 1; i >= 0; i-- {
+			if e := rollbacks[i](); e != nil {
+				errs = append(errs, e)
+			}
+		}
+		if e := errors.Join(errs...); e != nil {
+			fmt.Printf("Warning: cleanup after the failed registration did not fully complete: %v\n", e)
+		}
+	}()
+
+	// 6. API call (creates the remote server record).
+	resp, err := sendRegisterRequest(reqBody)
+	if err != nil {
+		return err
+	}
+	rollbacks = append(rollbacks, func() error {
+		migrate.BestEffortUnregister(serverURL, resp.ID, resp.Key, sslVerify, caCert)
+		return nil
+	})
+
+	// 7. Write the config via atomic replace (temp + rename, see writeConfigFile).
+	// Under --force the previous config stays intact until the new one is renamed
+	// into place, so a failed write can never leave the host with no config. The
+	// rollback compensation restores the previous config under --force, or removes
+	// the freshly written one otherwise.
+	if err := writeConfigFileFn(resp); err != nil {
+		return fmt.Errorf("failed to create config file: %w", err)
+	}
+	if force && oldConf != nil {
+		rollbacks = append(rollbacks, func() error {
+			return migrate.WriteConfAtomic(configPath, oldConf, oldConfMode)
+		})
+	} else {
+		rollbacks = append(rollbacks, func() error { return removeOnRollback(configPath) })
+	}
+
+	// 8. Create required directories
+	if err := ensureDirectoriesFn(); err != nil {
+		return fmt.Errorf("failed to create directories: %w", err)
+	}
+
+	// Registration is durably usable from here (config + dirs written).
+	committed = true
+
+	// 8b. --force: now that the new registration is committed, retire the old one.
+	if force {
+		retirePriorRegistration(priorReg, resp.ID, oldSSLVerify, oldCACert)
+	}
+
+	// 9. Start service
+	fmt.Println("\nStarting alpamon service...")
+	if err := startServiceFn(); err != nil {
+		fmt.Printf("Warning: Failed to start service: %v\n", err)
+		printManualStartHint()
+	}
+
+	// 10. Success message
+	printRegisterSuccess(resp)
+	return nil
+}
+
+// ensureNotAlreadyRegistered fails if a non-empty config already exists, telling
+// the operator how to re-register (unregister / --force). A missing config is the
+// clean case; an empty config (e.g. left by systemd-tmpfiles) is allowed and will
+// be overwritten. A non-not-exist stat error (e.g. permission/ACL) is surfaced
+// rather than silently treated as "no config", which would otherwise fail later
+// with a less actionable error during the config write.
+func ensureNotAlreadyRegistered() error {
+	info, err := os.Stat(configPath)
+	switch {
+	case os.IsNotExist(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("inspect config %s: %w", configPath, err)
+	case info.Size() > 0:
+		return fmt.Errorf("config file already exists: %s\n"+
+			"this server appears to be already registered; re-register by running "+
+			"'alpamon register --force', or 'alpamon unregister' and then 'alpamon register' again",
+			configPath)
+	}
+	fmt.Printf("Note: Empty config file found at %s, will be overwritten\n", configPath)
+	return nil
+}
+
+// buildRegisterRequest resolves the server name (hostname fallback + slug
+// normalization), platform, and merged cloud/user tags, and returns the request
+// body to POST. It prints what it auto-detected/normalized. cmd's context is
+// passed through so the cloud IMDS probe stays cancelable. User-supplied --tag
+// values win over auto-detected cloud tags so an operator can override a
+// misdetection.
+func buildRegisterRequest(cmd *cobra.Command) (RegisterRequest, error) {
 	if serverName == "" {
 		hostname, err := os.Hostname()
 		if err != nil {
-			return fmt.Errorf("failed to get hostname: %w", err)
+			return RegisterRequest{}, fmt.Errorf("failed to get hostname: %w", err)
 		}
 		serverName = normalizeHostname(hostname)
 		fmt.Printf("Server name auto-detected: %s\n", serverName)
 	}
 
-	// 2b. Normalize to the server's slug rule (^[-a-zA-Z0-9_]+$). Applies to
-	// both the --name path and the hostname path so registration never fails
-	// with {"code":"invalid"} on a name the server would reject.
+	// Normalize to the server's slug rule (^[-a-zA-Z0-9_]+$) for both the --name
+	// and hostname paths so registration never fails with {"code":"invalid"}.
 	original := serverName
 	serverName = normalizeServerName(serverName)
 	if serverName == "" {
-		return fmt.Errorf(
+		return RegisterRequest{}, fmt.Errorf(
 			"server name %q is empty after normalization; pass a valid --name "+
 				"(allowed characters: A-Z a-z 0-9 _ -)", original)
 	}
@@ -164,51 +327,36 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Server name normalized to %q\n", serverName)
 	}
 
-	// 3. Auto-detect platform
 	if platform == "" {
 		platform = detectPlatform()
 		fmt.Printf("Platform auto-detected: %s\n", platform)
 	}
 
-	// 4. Auto-detect cloud provider metadata (best-effort) and merge with
-	// operator-supplied --tag flags. User-supplied tags win over auto-detected
-	// values so an operator can override a misdetection (e.g. forcing
-	// `--tag cloud:provider=aws` on a host where IMDS is restricted).
 	finalTags := mergeCloudAndUserTags(detectCloudTags(cmd.Context()), tags)
 
-	// 5. Create registration request body
-	reqBody := RegisterRequest{
-		Name:     serverName,
-		Platform: platform,
-		Tags:     finalTags,
+	return RegisterRequest{Name: serverName, Platform: platform, Tags: finalTags}, nil
+}
+
+// retirePriorRegistration tears down the registration that --force is replacing,
+// AFTER the new one is committed. It stops (not deletes) the previously-running
+// service so the fresh start reloads the new config; this runs even when the
+// prior config was unreadable, because a leftover service from a failed install
+// may still be running with stale credentials (the stuck case --force exists
+// for). The remote unregister needs the old id/key, so it is gated on a readable
+// prior config, and it uses the OLD config's TLS settings (sslVerify/caCert) so
+// it works against a self-signed / private-CA prior workspace.
+func retirePriorRegistration(priorReg *config.ServerConfig, newID string, sslVerify bool, caCert string) {
+	if priorReg != nil && priorReg.ID != newID {
+		fmt.Printf("--force: unregistering previous server record %s ...\n", priorReg.ID)
+		migrate.BestEffortUnregister(priorReg.URL, priorReg.ID, priorReg.Key, sslVerify, caCert)
 	}
-
-	fmt.Printf("Registering server: %s\n", serverURL)
-
-	// 6. API call
-	resp, err := sendRegisterRequest(reqBody)
-	if err != nil {
-		return err
+	if err := stopServiceFn(); err != nil {
+		fmt.Printf("Warning: failed to stop the previous service: %v\n", err)
 	}
+}
 
-	// 7. Create config file
-	if err := writeConfigFile(resp); err != nil {
-		return fmt.Errorf("failed to create config file: %w", err)
-	}
-
-	// 8. Create required directories
-	if err := ensureDirectories(); err != nil {
-		return fmt.Errorf("failed to create directories: %w", err)
-	}
-
-	// 9. Start service
-	fmt.Println("\nStarting alpamon service...")
-	if err := startService(); err != nil {
-		fmt.Printf("Warning: Failed to start service: %v\n", err)
-		printManualStartHint()
-	}
-
-	// 10. Success message
+// printRegisterSuccess prints the post-registration summary banner.
+func printRegisterSuccess(resp *RegisterResponse) {
 	fmt.Printf("\n==========================================\n")
 	fmt.Printf("Server registered successfully!\n")
 	fmt.Printf("==========================================\n")
@@ -216,7 +364,14 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  ID:   %s\n", resp.ID)
 	fmt.Printf("  Config: %s\n", configPath)
 	fmt.Printf("==========================================\n")
+}
 
+// removeOnRollback deletes path, tolerating an already-absent file. Used as a
+// within-run rollback compensation for the config written during registration.
+func removeOnRollback(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	return nil
 }
 
@@ -423,49 +578,16 @@ func createHTTPClient() (*http.Client, error) {
 }
 
 func writeConfigFile(resp *RegisterResponse) error {
-	configTemplate := `[server]
-url = {{ .URL }}
-id = {{ .ID }}
-key = {{ .Key }}
-
-[ssl]
-verify = {{ .Verify }}
-{{- if .CACert }}
-ca_cert = {{ .CACert }}
-{{- end }}
-
-[logging]
-debug = false
-`
-	// Create directory
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	// Remove empty config file left by systemd-tmpfiles if present
-	if info, err := os.Stat(configPath); err == nil && info.Size() == 0 {
-		if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to remove empty config file: %w", err)
-		}
-	}
-
-	// Create config file (fail if already exists)
-	file, err := os.OpenFile(configPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
+	content, err := config.RenderConf(
+		config.ServerConfig{URL: serverURL, ID: resp.ID, Key: resp.Key},
+		sslVerify, caCert,
+	)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = file.Close() }()
-
-	tmpl, err := template.New("config").Parse(configTemplate)
-	if err != nil {
-		return fmt.Errorf("failed to parse template: %w", err)
-	}
-
-	return tmpl.Execute(file, map[string]interface{}{
-		"URL":    serverURL,
-		"ID":     resp.ID,
-		"Key":    resp.Key,
-		"Verify": sslVerify,
-		"CACert": caCert,
-	})
+	// Atomic replace (temp + fsync + rename, creating the dir at 0700): the file
+	// is never left half-written, and any existing config (e.g. an empty file
+	// from systemd-tmpfiles, or a prior registration under --force) is replaced
+	// only at the final rename—so a failed write cannot orphan the host.
+	return migrate.WriteConfAtomic(configPath, []byte(content), 0o600)
 }
