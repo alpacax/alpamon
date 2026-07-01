@@ -10,6 +10,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
@@ -19,6 +20,11 @@ const (
 	serviceDescription   = "Secure server agent for the Alpacon infrastructure access platform."
 	recoveryResetSeconds = 60
 	recoveryRestartDelay = 5 * time.Second
+
+	// serviceStopPoll* bound how long removeService waits for the SCM to report
+	// the service Stopped before deleting it (15s total).
+	serviceStopPollAttempts = 30
+	serviceStopPollInterval = 500 * time.Millisecond
 )
 
 // defaultInstallBinPath returns the canonical SCM BinaryPathName that
@@ -149,6 +155,73 @@ func startService() error {
 func printManualStartHint() {
 	fmt.Println("Please start alpamon manually:")
 	fmt.Println("  sc.exe start alpamon")
+}
+
+// withService connects to the SCM, opens the alpamon service, runs fn against
+// it, and closes both handles. A service that does not exist is treated as a
+// no-op success so the teardown helpers never fail on an already-clean box.
+// Requires Administrator (same as startService).
+func withService(fn func(*mgr.Service) error) error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("connect to service manager: %w%s", err, elevationHint(err))
+	}
+	defer func() { _ = m.Disconnect() }()
+
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		if isServiceNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("open service: %w%s", err, elevationHint(err))
+	}
+	defer func() { _ = s.Close() }()
+
+	return fn(s)
+}
+
+// stopService stops the alpamon SCM service without deleting it. Used by
+// register --force to bounce a running service so it reloads the freshly
+// written config (a delete+recreate would race the SCM with
+// ERROR_SERVICE_MARKED_FOR_DELETE). Best-effort/idempotent.
+func stopService() error {
+	return withService(func(s *mgr.Service) error {
+		stopRunningService(s)
+		return nil
+	})
+}
+
+// removeService stops and deletes the alpamon SCM service (full teardown for
+// unregister). Best-effort/idempotent.
+func removeService() error {
+	return withService(func(s *mgr.Service) error {
+		stopRunningService(s)
+		if err := s.Delete(); err != nil {
+			return fmt.Errorf("delete service: %w%s", err, elevationHint(err))
+		}
+		return nil
+	})
+}
+
+// stopRunningService signals Stop and waits (best-effort) for the SCM to report
+// Stopped so the binary handle is released. ERROR_SERVICE_NOT_ACTIVE (already
+// stopped) is fine. The caller owns the handle. Errors are logged, not returned,
+// because both callers are best-effort. The poll only returns early on a
+// confirmed Stopped state—a transient Query error must NOT be mistaken for
+// "stopped", otherwise a still-running service could be deleted/bounced
+// prematurely.
+func stopRunningService(s *mgr.Service) {
+	if _, err := s.Control(svc.Stop); err != nil {
+		if errno, ok := err.(windows.Errno); !ok || errno != windows.ERROR_SERVICE_NOT_ACTIVE {
+			fmt.Printf("Warning: failed to signal service stop: %v\n", err)
+		}
+	}
+	for i := 0; i < serviceStopPollAttempts; i++ {
+		if status, qerr := s.Query(); qerr == nil && status.State == svc.Stopped {
+			return
+		}
+		time.Sleep(serviceStopPollInterval)
+	}
 }
 
 // elevationHint returns an annotation to append to error messages

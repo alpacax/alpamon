@@ -85,3 +85,26 @@ func printManualStartHint() {
 	fmt.Println("Please start the service manually:")
 	fmt.Printf("  sudo launchctl load %s/%s\n", launchdDir, plistName)
 }
+
+// stopService unloads the launchd job, leaving its plist in place. Used by
+// register --force to bounce the job so the subsequent load reloads the new
+// config (startService keeps the existing plist when present). Best-effort/
+// idempotent: `launchctl unload` of an already-unloaded job is ignored.
+func stopService() error {
+	plistDst := filepath.Join(launchdDir, plistName)
+	_, _ = exec.Command("launchctl", "unload", plistDst).CombinedOutput()
+	return nil
+}
+
+// removeService unloads the launchd job and removes its plist (full teardown for
+// unregister). Best-effort/idempotent: `launchctl unload` of an already-unloaded
+// job is ignored, and a missing plist is treated as success so unregister never
+// fails on an already-clean box.
+func removeService() error {
+	plistDst := filepath.Join(launchdDir, plistName)
+	_, _ = exec.Command("launchctl", "unload", plistDst).CombinedOutput()
+	if err := os.Remove(plistDst); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove launchd plist: %w", err)
+	}
+	return nil
+}

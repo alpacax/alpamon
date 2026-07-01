@@ -36,15 +36,14 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"text/template"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/migrate"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/spf13/cobra"
-	"gopkg.in/ini.v1"
 )
 
 // restartDelay is how long systemd waits after the command returns before
@@ -143,7 +142,7 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 		platform = detectPlatform()
 	}
 
-	current, err := readCurrentServer(configPath)
+	current, err := config.ReadServer(configPath)
 	if err != nil {
 		return fmt.Errorf("read current server from conf: %w", err)
 	}
@@ -253,44 +252,6 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// currentServer is what we need from the active alpamon.conf to (a) know
-// what workspace we're migrating away from and (b) authenticate to that
-// workspace's API to look up our display name.
-type currentServer struct {
-	URL string
-	ID  string
-	Key string
-}
-
-// readCurrentServer parses the conf as INI and returns the [server]
-// section's url/id/key. config.LoadConfig is unsuitable here because it
-// log.Fatal()s on any validation problem; we want a graceful error path.
-func readCurrentServer(path string) (*currentServer, error) {
-	f, err := ini.Load(path)
-	if err != nil {
-		return nil, fmt.Errorf("parse conf: %w", err)
-	}
-	section, err := f.GetSection("server")
-	if err != nil {
-		return nil, errors.New("[server] section missing")
-	}
-	get := func(name string) string {
-		k, err := section.GetKey(name)
-		if err != nil {
-			return ""
-		}
-		return strings.TrimSpace(k.String())
-	}
-	sc := &currentServer{URL: get("url"), ID: get("id"), Key: get("key")}
-	if sc.URL == "" {
-		return nil, errors.New("url not found in [server] section")
-	}
-	if sc.ID == "" || sc.Key == "" {
-		return nil, errors.New("id/key not found in [server] section")
-	}
-	return sc, nil
-}
-
 // generatedSuffixRE matches the 6-hex-char suffix that
 // servers/api/serializers.py:ServerRegisterSerializer.create appends to
 // every registered server name. We strip it before reusing the operator-
@@ -310,7 +271,7 @@ func stripGeneratedSuffix(name string) string {
 //
 // On any failure (network, auth, 404), returns "" with a non-nil error
 // so the caller can fall back to hostname.
-func fetchCurrentName(ctx context.Context, sc *currentServer) (string, error) {
+func fetchCurrentName(ctx context.Context, sc *config.ServerConfig) (string, error) {
 	url := fmt.Sprintf("%s/api/servers/servers/%s/",
 		strings.TrimSuffix(sc.URL, "/"), sc.ID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -349,35 +310,7 @@ func normalizeURL(u string) string {
 }
 
 func buildConfContent(url, id, key string, verify bool, caCertPath string) (string, error) {
-	tpl := `[server]
-url = {{ .URL }}
-id = {{ .ID }}
-key = {{ .Key }}
-
-[ssl]
-verify = {{ .Verify }}
-{{- if .CACert }}
-ca_cert = {{ .CACert }}
-{{- end }}
-
-[logging]
-debug = false
-`
-	t, err := template.New("conf").Parse(tpl)
-	if err != nil {
-		return "", err
-	}
-	var buf bytes.Buffer
-	if err := t.Execute(&buf, map[string]any{
-		"URL":    url,
-		"ID":     id,
-		"Key":    key,
-		"Verify": verify,
-		"CACert": caCertPath,
-	}); err != nil {
-		return "", err
-	}
-	return buf.String(), nil
+	return config.RenderConf(config.ServerConfig{URL: url, ID: id, Key: key}, verify, caCertPath)
 }
 
 // registerRequest mirrors servers/api/serializers.py:ServerRegisterSerializer.

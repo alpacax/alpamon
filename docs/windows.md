@@ -80,7 +80,9 @@ Re-running on an **already-registered** host still fails at the
 `%ProgramData%\alpamon\alpamon.conf` already exists—this matches the
 Linux and macOS behavior and prevents a silent re-registration. To
 upgrade an already-registered host, use `alpamon upgrade` or the
-[Manual fallback](#manual-fallback) recipe below.
+[Manual fallback](#manual-fallback) recipe below. To recover a host left
+half-registered by a failed attempt, or to deliberately register it
+again, see [Unregister and re-register](#unregister-and-re-register).
 
 If the install fails after the service was stopped, the script
 best-effort restarts the previously-running service before exiting
@@ -321,6 +323,40 @@ already-registered machine—it refuses to run when a configuration
 file already exists, to avoid silently clobbering an existing
 registration.
 
+## Unregister and re-register
+
+If a previous `register` failed partway (or you want to register this
+host again), the leftover config makes a plain re-run stop at the
+`config file already exists` message. There are two supported recovery
+paths; run either from **elevated** PowerShell:
+
+```powershell
+# One step: unregister, then register fresh.
+& "$env:ProgramFiles\alpamon\alpamon.exe" register --force `
+    --url https://<workspace> --token <token>
+
+# Or two explicit steps:
+& "$env:ProgramFiles\alpamon\alpamon.exe" unregister --yes
+& "$env:ProgramFiles\alpamon\alpamon.exe" register `
+    --url https://<workspace> --token <token>
+```
+
+`unregister` best-effort deletes the server record on the Alpacon
+console, stops and deletes the `alpamon` service, and removes
+`%ProgramData%\alpamon\alpamon.conf`. The binary and the
+`%ProgramData%\alpamon\{data,log,run}` directories are left in place
+(use [Uninstall](#uninstall) to remove those too). Pass `--yes` to skip
+the confirmation prompt in non-interactive contexts (cloud-init, SSM).
+
+`register --force` performs that teardown and then registers again in a
+single command. It registers with the workspace **first** and only
+retires the old registration after the new one succeeds, so an invalid
+token or unreachable URL leaves the existing registration untouched.
+
+Run these **on the server itself** (locally, or via RDP / cloud serial
+console / SSM), not over Websh: stopping the service would end the Websh
+session before the command finishes.
+
 ## Uninstall
 
 There is no dedicated uninstaller; the footprint is small and cleanup
@@ -339,9 +375,10 @@ deleting the binary. Otherwise `Remove-Item` will fail with a sharing
 violation because `alpamon.exe` is held open by the still-running
 service.
 
-After the uninstall, the server still exists on the Alpacon side.
-Delete it from the Alpacon console separately if you do not plan to
-re-register.
+The commands above leave the server record on the Alpacon side. To drop
+it as part of teardown, run `alpamon unregister` **first** (it deletes
+the remote record and the service), then `Remove-Item` the directories
+above. Otherwise delete the server from the Alpacon console separately.
 
 ## Feature compatibility
 
