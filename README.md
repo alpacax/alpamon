@@ -174,10 +174,10 @@ Go 1.25.10+ is required. `GOPATH/bin` should be on `PATH`.
 
 ### Generate Ent schema code
 
+Runs `pkg/db/ent/entc.go`, which excludes the unused Atlas SQL dialects from the binary. Do not invoke the ent CLI directly—it regenerates the migrate package and pulls the Atlas dialects back in.
+
 ```bash
-go run -mod=mod entgo.io/ent/cmd/ent@v0.14.5 generate \
-    --feature sql/modifier \
-    --target ./pkg/db/ent ./pkg/db/schema
+go generate ./pkg/db/ent
 ```
 
 ### Install Atlas CLI (only for new migrations)
