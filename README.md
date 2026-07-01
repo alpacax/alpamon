@@ -170,14 +170,14 @@ go build -o alpamon ./cmd/alpamon         # native
 GOOS=windows GOARCH=amd64 go build ./cmd/alpamon   # Windows cross-compile
 ```
 
-Go 1.25.10+ is required. `GOPATH/bin` should be on `PATH`.
+Go 1.25.10+ is required. `GOPATH/bin` should be on `PATH`. The generated Ent code is gitignored, so run `go generate ./pkg/db/ent` (see below) before the first build.
 
 ### Generate Ent schema code
 
+Runs `pkg/db/ent/entc.go`, which excludes the unused Atlas SQL dialects from the binary. Do not invoke the ent CLI directly—it regenerates the migrate package and pulls the Atlas dialects back in.
+
 ```bash
-go run -mod=mod entgo.io/ent/cmd/ent@v0.14.5 generate \
-    --feature sql/modifier \
-    --target ./pkg/db/ent ./pkg/db/schema
+go generate ./pkg/db/ent
 ```
 
 ### Install Atlas CLI (only for new migrations)
@@ -188,7 +188,7 @@ Atlas is only needed when modifying schemas under `pkg/db/schema/`. Production d
 curl -sSf https://atlasgo.sh | sh
 atlas migrate diff <migration_name> \
     --dir "file://pkg/db/migration" \
-    --to "ent://pkg/db/ent/schema" \
+    --to "ent://pkg/db/schema" \
     --dev-url "sqlite://alpamon.db?mode=memory"
 ```
 

@@ -16,10 +16,9 @@ Alpamon is a lightweight Go-based server agent for Alpacon—the infrastructure 
 
 ### Code generation
 ```bash
-# Generate Ent schema code (required before building)
-go run -mod=mod entgo.io/ent/cmd/ent@v0.14.5 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
-
-# Alternative using go:generate
+# Generate Ent schema code (required before building). Runs pkg/db/ent/entc.go,
+# which excludes the unused Atlas SQL dialects. Do not invoke the ent CLI directly—
+# it regenerates the migrate package and pulls the Atlas dialects back in.
 go generate ./pkg/db/ent
 ```
 
@@ -31,7 +30,7 @@ curl -sSf https://atlasgo.sh | sh
 # After modifying schemas in pkg/db/schema/, generate migration file
 atlas migrate diff <migration_name> \
   --dir "file://pkg/db/migration" \
-  --to "ent://pkg/db/ent/schema" \
+  --to "ent://pkg/db/schema" \
   --dev-url "sqlite://alpamon.db?mode=memory"
 
 # Note: Atlas CLI is NOT required for production - migrations are executed
