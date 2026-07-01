@@ -122,6 +122,10 @@ func (fc *FtpClient) handleCommands(ctx context.Context, cancel context.CancelFu
 		case <-ctx.Done():
 			return
 		case message := <-fc.commandChan:
+			// A buffered command can be selected after cancel(); don't start a new command during shutdown.
+			if ctx.Err() != nil {
+				return
+			}
 			var content FtpContent
 			if err := json.Unmarshal(message, &content); err != nil {
 				fc.log.Debug().Err(err).Msg("Failed to unmarshal websocket message.")
@@ -165,6 +169,10 @@ func (fc *FtpClient) write(ctx context.Context, cancel context.CancelFunc) {
 		case <-ctx.Done():
 			return
 		case response := <-fc.responseChan:
+			// A buffered response can be selected after cancel(); don't write during shutdown.
+			if ctx.Err() != nil {
+				return
+			}
 			err := fc.conn.WriteMessage(websocket.TextMessage, response)
 			if err != nil {
 				if ctx.Err() != nil {
