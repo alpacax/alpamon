@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/logger"
@@ -25,6 +26,9 @@ type FtpClient struct {
 	homeDirectory    string
 	workingDirectory string
 	log              logger.FtpLogger
+	commandChan      chan []byte
+	responseChan     chan []byte
+	execute          func(command FtpCommand, data FtpData) (CommandResult, error)
 }
 
 func NewFtpClient(data FtpConfigData) *FtpClient {
@@ -45,13 +49,17 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 		data.Logger.Debug().Msg("Refusing to open WebFTP session with empty home directory on Windows.")
 		return nil
 	}
-	return &FtpClient{
+	client := &FtpClient{
 		requestHeader:    headers,
 		url:              data.URL,
 		homeDirectory:    homeDir,
 		workingDirectory: homeDir,
 		log:              data.Logger,
+		commandChan:      make(chan []byte, 1),
+		responseChan:     make(chan []byte, 1),
 	}
+	client.execute = client.handleFtpCommand
+	return client
 }
 
 func (fc *FtpClient) RunFtpBackground() {
@@ -74,6 +82,8 @@ func (fc *FtpClient) RunFtpBackground() {
 	defer cancel()
 
 	go fc.read(ctx, cancel)
+	go fc.handleCommands(ctx, cancel)
+	go fc.write(ctx, cancel)
 
 	<-ctx.Done()
 }
@@ -84,6 +94,7 @@ func (fc *FtpClient) read(ctx context.Context, cancel context.CancelFunc) {
 		case <-ctx.Done():
 			return
 		default:
+			// A parked ReadMessage is woken only by conn.Close() (RunFtpBackground's deferred close()), not cancel().
 			_, message, err := fc.conn.ReadMessage()
 			if err != nil {
 				if ctx.Err() != nil {
@@ -96,9 +107,27 @@ func (fc *FtpClient) read(ctx context.Context, cancel context.CancelFunc) {
 				return
 			}
 
+			select {
+			case fc.commandChan <- message:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+func (fc *FtpClient) handleCommands(ctx context.Context, cancel context.CancelFunc) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case message := <-fc.commandChan:
+			// A buffered command can be selected after cancel(); don't start a new command during shutdown.
+			if ctx.Err() != nil {
+				return
+			}
 			var content FtpContent
-			err = json.Unmarshal(message, &content)
-			if err != nil {
+			if err := json.Unmarshal(message, &content); err != nil {
 				fc.log.Debug().Err(err).Msg("Failed to unmarshal websocket message.")
 				cancel()
 				return
@@ -109,7 +138,7 @@ func (fc *FtpClient) read(ctx context.Context, cancel context.CancelFunc) {
 				Success: true,
 			}
 
-			data, err := fc.handleFtpCommand(content.Command, content.Data)
+			data, err := fc.execute(content.Command, content.Data)
 			if err != nil {
 				result.Success = false
 				result.Data, result.Code = GetFtpErrorCode(content.Command, data)
@@ -120,15 +149,31 @@ func (fc *FtpClient) read(ctx context.Context, cancel context.CancelFunc) {
 
 			response, err := json.Marshal(result)
 			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
 				fc.log.Debug().Err(err).Msg("Failed to marshal response.")
 				cancel()
 				return
 			}
 
-			err = fc.conn.WriteMessage(websocket.TextMessage, response)
+			select {
+			case fc.responseChan <- response:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+func (fc *FtpClient) write(ctx context.Context, cancel context.CancelFunc) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case response := <-fc.responseChan:
+			// A buffered response can be selected after cancel(); don't write during shutdown.
+			if ctx.Err() != nil {
+				return
+			}
+			err := fc.conn.WriteMessage(websocket.TextMessage, response)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -145,7 +190,12 @@ func (fc *FtpClient) read(ctx context.Context, cancel context.CancelFunc) {
 
 func (fc *FtpClient) close() {
 	if fc.conn != nil {
-		_ = fc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		// Use WriteControl, not WriteMessage: the write pump may still be mid-WriteMessage here, and gorilla allows only one concurrent writer.
+		_ = fc.conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			time.Now().Add(5*time.Second),
+		)
 		_ = fc.conn.Close()
 	}
 

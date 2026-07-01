@@ -9,10 +9,19 @@
 package runner
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/logger"
+	"github.com/gorilla/websocket"
 )
 
 func newTestFtpClient(home string) *FtpClient {
@@ -277,5 +286,161 @@ func TestValidateWebSocketURL_ServerWithExplicitPort(t *testing.T) {
 				t.Fatalf("validateWebSocketURL(%q) unexpected error: %v", tc.url, err)
 			}
 		})
+	}
+}
+
+// newWiredFtpClient wires an FtpClient to a real httptest websocket peer; tests drive the pumps directly to avoid RunFtpBackground's os.Exit teardown.
+func newWiredFtpClient(t *testing.T) (*FtpClient, *websocket.Conn, func()) {
+	t.Helper()
+
+	serverConnCh := make(chan *websocket.Conn, 1)
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnCh <- conn
+	}))
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		srv.Close()
+		t.Fatalf("failed to dial test server: %v", err)
+	}
+
+	var serverConn *websocket.Conn
+	select {
+	case serverConn = <-serverConnCh:
+	case <-time.After(3 * time.Second):
+		_ = clientConn.Close()
+		srv.Close()
+		t.Fatal("server did not accept the websocket upgrade")
+	}
+
+	home := t.TempDir()
+	fc := &FtpClient{
+		homeDirectory:    home,
+		workingDirectory: home,
+		log:              logger.NewFtpLogger(),
+		conn:             clientConn,
+		commandChan:      make(chan []byte, 1),
+		responseChan:     make(chan []byte, 1),
+	}
+	fc.execute = fc.handleFtpCommand
+
+	cleanup := func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+		srv.Close()
+	}
+	return fc, serverConn, cleanup
+}
+
+// startPumps launches the read/handleCommands/write goroutines; call it after any fc.execute override so the worker can't race the assignment.
+func startPumps(fc *FtpClient) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go fc.read(ctx, cancel)
+	go fc.handleCommands(ctx, cancel)
+	go fc.write(ctx, cancel)
+	return ctx, cancel
+}
+
+func TestFtpReadLoopStaysResponsiveDuringLongCommand(t *testing.T) {
+	fc, serverConn, cleanup := newWiredFtpClient(t)
+	defer cleanup()
+
+	// execute blocks until released, pinning the worker like a long-running command.
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	fc.execute = func(command FtpCommand, data FtpData) (CommandResult, error) {
+		close(blocked)
+		<-release
+		return CommandResult{}, nil
+	}
+
+	ctx, cancel := startPumps(fc)
+	defer cancel()
+
+	msg, err := json.Marshal(FtpContent{Command: Pwd})
+	if err != nil {
+		t.Fatalf("failed to marshal command: %v", err)
+	}
+	if err := serverConn.WriteMessage(websocket.TextMessage, msg); err != nil {
+		t.Fatalf("failed to send command: %v", err)
+	}
+
+	select {
+	case <-blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never started executing the command")
+	}
+
+	// With the worker stuck, a responsive read loop still observes the peer's close frame and cancels.
+	_ = serverConn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(time.Second),
+	)
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("read loop did not observe close while worker was busy")
+	}
+}
+
+func TestFtpCommandsAreSerializedInOrder(t *testing.T) {
+	fc, serverConn, cleanup := newWiredFtpClient(t)
+	defer cleanup()
+
+	base := fc.workingDirectory
+	names := []string{"dir_a", "dir_b", "dir_c", "dir_d"}
+
+	_, cancel := startPumps(fc)
+	defer cancel()
+
+	for _, name := range names {
+		msg, err := json.Marshal(FtpContent{
+			Command: Mkd,
+			Data:    FtpData{Path: filepath.Join(base, name)},
+		})
+		if err != nil {
+			t.Fatalf("failed to marshal command: %v", err)
+		}
+		if err := serverConn.WriteMessage(websocket.TextMessage, msg); err != nil {
+			t.Fatalf("failed to send command: %v", err)
+		}
+	}
+
+	_ = serverConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for i := range names {
+		_, raw, err := serverConn.ReadMessage()
+		if err != nil {
+			t.Fatalf("failed to read response %d: %v", i, err)
+		}
+		var result FtpResult
+		if err := json.Unmarshal(raw, &result); err != nil {
+			t.Fatalf("failed to unmarshal response %d: %v", i, err)
+		}
+		if result.Command != Mkd {
+			t.Fatalf("response %d: expected command %q, got %q", i, Mkd, result.Command)
+		}
+		if !result.Success {
+			t.Fatalf("response %d: mkd failed: %+v", i, result.Data)
+		}
+		// The ith response must be for the ith requested directory; identical
+		// commands would let out-of-order responses slip past this loop otherwise.
+		if want := filepath.Join(base, names[i]); !strings.Contains(result.Data.Message, want) {
+			t.Fatalf("response %d out of order: want path %q in message, got %q", i, want, result.Data.Message)
+		}
+	}
+
+	for _, name := range names {
+		if _, err := os.Stat(filepath.Join(base, name)); err != nil {
+			t.Fatalf("expected directory %q to exist: %v", name, err)
+		}
 	}
 }
