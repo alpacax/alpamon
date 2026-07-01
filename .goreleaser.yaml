@@ -7,7 +7,7 @@ release:
 
 before:
   hooks:
-    - go run -mod=mod entgo.io/ent/cmd/ent@v0.14.2 generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
+    - go generate ./pkg/db/ent
     - go mod tidy
 
 builds:

@@ -15,7 +15,6 @@ permissions:
 
 env:
   GO_VERSION: '1.25.10'
-  ENT_VERSION: 'v0.14.5'
 
 jobs:
   build-and-test:
@@ -125,7 +124,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Generate go code
-        run: go run -mod=mod entgo.io/ent/cmd/ent@${{ env.ENT_VERSION }} generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
+        run: go generate ./pkg/db/ent
 
       - name: Build
         run: go build -v .
@@ -147,7 +146,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Generate go code
-        run: go run -mod=mod entgo.io/ent/cmd/ent@${{ env.ENT_VERSION }} generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
+        run: go generate ./pkg/db/ent
 
       - name: Build
         run: go build -v .
@@ -238,7 +237,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Generate go code
-        run: go run -mod=mod entgo.io/ent/cmd/ent@${{ env.ENT_VERSION }} generate --feature sql/modifier --target ./pkg/db/ent ./pkg/db/schema
+        run: go generate ./pkg/db/ent
 
       - name: Build
         run: go build -v .
