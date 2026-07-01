@@ -19,6 +19,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// ftpWriteTimeout bounds a single WriteMessage so a stalled peer that stops
+// draining can't wedge the pipeline; one response to a live peer needs only seconds.
+const ftpWriteTimeout = 30 * time.Second
+
 type FtpClient struct {
 	conn             *websocket.Conn
 	requestHeader    http.Header
@@ -28,6 +32,7 @@ type FtpClient struct {
 	log              logger.FtpLogger
 	commandChan      chan []byte
 	responseChan     chan []byte
+	writeTimeout     time.Duration
 	execute          func(command FtpCommand, data FtpData) (CommandResult, error)
 }
 
@@ -57,6 +62,7 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 		log:              data.Logger,
 		commandChan:      make(chan []byte, 1),
 		responseChan:     make(chan []byte, 1),
+		writeTimeout:     ftpWriteTimeout,
 	}
 	client.execute = client.handleFtpCommand
 	return client
@@ -172,6 +178,10 @@ func (fc *FtpClient) write(ctx context.Context, cancel context.CancelFunc) {
 			// A buffered response can be selected after cancel(); don't write during shutdown.
 			if ctx.Err() != nil {
 				return
+			}
+			// Reset each write since the deadline is absolute; zero disables it for test literals.
+			if fc.writeTimeout > 0 {
+				_ = fc.conn.SetWriteDeadline(time.Now().Add(fc.writeTimeout))
 			}
 			err := fc.conn.WriteMessage(websocket.TextMessage, response)
 			if err != nil {
