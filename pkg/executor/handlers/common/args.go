@@ -51,6 +51,10 @@ type CommandArgs struct {
 	// Environment
 	Env map[string]string
 
+	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks.
+	// Sequencing is the caller's responsibility.
+	ChunkCallback func(content string)
+
 	// Firewall operations
 	Keys         []string
 	ChainName    string
