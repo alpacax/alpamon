@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // Batching contract: newlines don't emit; output emits on the size threshold, a flush tick, or final flush.
@@ -258,5 +259,28 @@ func TestChunkWriter_FlusherEmitsBufferedOutput(t *testing.T) {
 	defer mu.Unlock()
 	if chunks[0] != "partial" {
 		t.Errorf("flusher emitted %q, want %q", chunks[0], "partial")
+	}
+}
+
+// A multi-byte rune straddling the 4KB cut must not be split—a split chunk is invalid UTF-8.
+func TestChunkWriter_DoesNotSplitRuneAtThreshold(t *testing.T) {
+	var chunks []string
+	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
+
+	// '가' (3 bytes) starts at chunkSizeThreshold-2 so its 3rd byte lands past the
+	// cut; trailing 'b's keep buf over threshold so the Write loop emits before flush.
+	input := strings.Repeat("a", chunkSizeThreshold-2) + "가" + strings.Repeat("b", chunkSizeThreshold)
+	if _, err := cw.Write([]byte(input)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cw.flush()
+
+	for i, c := range chunks {
+		if !utf8.ValidString(c) {
+			t.Errorf("chunk %d is not valid UTF-8—a rune was split at the boundary", i)
+		}
+	}
+	if got := strings.Join(chunks, ""); got != input {
+		t.Errorf("reassembled output mismatch: got %d bytes, want %d", len(got), len(input))
 	}
 }

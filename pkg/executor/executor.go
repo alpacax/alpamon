@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
@@ -71,6 +72,22 @@ func (c *capBuffer) bytes() []byte {
 	return append(out, c.tail...)
 }
 
+// runeSafeCut returns a cut length <= limit that never ends mid-rune, so a rune
+// straddling the boundary rides the next chunk instead of being split (a split is
+// invalid UTF-8, corrupted to U+FFFD on the wire). Returns 0 if no rune boundary.
+func runeSafeCut(b []byte, limit int) int {
+	end := min(limit, len(b))
+	if r, size := utf8.DecodeLastRune(b[:end]); r == utf8.RuneError && size <= 1 {
+		for end > 0 && !utf8.RuneStart(b[end-1]) {
+			end--
+		}
+		if end > 0 {
+			end-- // drop the incomplete rune's lead byte too
+		}
+	}
+	return end
+}
+
 // chunkWriter emits coalesced stdout/stderr chunks and tees a capped copy for the fin payload.
 type chunkWriter struct {
 	mu       sync.Mutex
@@ -121,7 +138,11 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	w.buf.Write(p)
 	// Emit full-threshold chunks only; the sub-threshold tail waits for the flush tick.
 	for w.buf.Len() >= chunkSizeThreshold {
-		w.emit(string(w.buf.Next(chunkSizeThreshold)))
+		end := runeSafeCut(w.buf.Bytes(), chunkSizeThreshold)
+		if end == 0 {
+			break // no rune boundary in the window (malformed bytes); flush handles it
+		}
+		w.emit(string(w.buf.Next(end)))
 	}
 
 	return len(p), nil
@@ -138,7 +159,8 @@ func (w *chunkWriter) flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// Write keeps buf below chunkSizeThreshold, so the remainder is one chunk.
+	// Emit whatever Write left buffered—normally sub-threshold, but >= threshold
+	// if Write bailed on a malformed (no rune boundary) window.
 	if w.buf.Len() > 0 {
 		content := w.buf.String()
 		w.buf.Reset()
