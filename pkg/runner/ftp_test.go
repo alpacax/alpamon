@@ -314,7 +314,7 @@ func newWiredFtpClient(t *testing.T) (*FtpClient, *websocket.Conn, func()) {
 	select {
 	case serverConn = <-serverConnCh:
 	case <-time.After(3 * time.Second):
-		clientConn.Close()
+		_ = clientConn.Close()
 		srv.Close()
 		t.Fatal("server did not accept the websocket upgrade")
 	}
