@@ -310,7 +310,14 @@ func newWiredFtpClient(t *testing.T) (*FtpClient, *websocket.Conn, func()) {
 		t.Fatalf("failed to dial test server: %v", err)
 	}
 
-	serverConn := <-serverConnCh
+	var serverConn *websocket.Conn
+	select {
+	case serverConn = <-serverConnCh:
+	case <-time.After(3 * time.Second):
+		clientConn.Close()
+		srv.Close()
+		t.Fatal("server did not accept the websocket upgrade")
+	}
 
 	home := t.TempDir()
 	fc := &FtpClient{
@@ -390,7 +397,7 @@ func TestFtpCommandsAreSerializedInOrder(t *testing.T) {
 	defer cleanup()
 
 	base := fc.workingDirectory
-	names := []string{"a", "b", "c", "d"}
+	names := []string{"dir_a", "dir_b", "dir_c", "dir_d"}
 
 	_, cancel := startPumps(fc)
 	defer cancel()
@@ -423,6 +430,11 @@ func TestFtpCommandsAreSerializedInOrder(t *testing.T) {
 		}
 		if !result.Success {
 			t.Fatalf("response %d: mkd failed: %+v", i, result.Data)
+		}
+		// The ith response must be for the ith requested directory; identical
+		// commands would let out-of-order responses slip past this loop otherwise.
+		if want := filepath.Join(base, names[i]); !strings.Contains(result.Data.Message, want) {
+			t.Fatalf("response %d out of order: want path %q in message, got %q", i, want, result.Data.Message)
 		}
 	}
 
