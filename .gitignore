@@ -1,5 +1,6 @@
 /pkg/db/ent/*
 !/pkg/db/ent/generate.go
+!/pkg/db/ent/entc.go
 alpamon.log
 alpamon.db
 /alpamon
