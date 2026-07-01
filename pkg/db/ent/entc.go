@@ -14,9 +14,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("ent codegen storage: %v", err)
 	}
-	// alpamon is SQLite-only and migrates via raw SQL in pkg/db/migration, never
+	// Alpamon is SQLite-only and migrates via raw SQL in pkg/db/migration, never
 	// client.Schema.Create(). Dropping Migrate skips the generated migrate package,
-	// which is the sole entry point for the unused atlas postgres/mysql dialects.
+	// which is the sole entry point for the unused Atlas PostgreSQL/MySQL dialects.
 	storage.SchemaMode &^= gen.Migrate
 
 	if err := entc.Generate("../schema", &gen.Config{
