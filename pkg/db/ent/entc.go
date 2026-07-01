@@ -12,7 +12,7 @@ import (
 func main() {
 	storage, err := gen.NewStorage("sql")
 	if err != nil {
-		log.Fatalf("ent codegen: %v", err)
+		log.Fatalf("ent codegen storage: %v", err)
 	}
 	// alpamon is SQLite-only and migrates via raw SQL in pkg/db/migration, never
 	// client.Schema.Create(). Dropping Migrate skips the generated migrate package,
@@ -25,6 +25,6 @@ func main() {
 		Storage:  storage,
 		Features: []gen.Feature{gen.FeatureModifier}, // .Modify() used in collector batch queries
 	}); err != nil {
-		log.Fatalf("ent codegen: %v", err)
+		log.Fatalf("ent codegen generate: %v", err)
 	}
 }
