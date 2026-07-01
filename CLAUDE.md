@@ -30,7 +30,7 @@ curl -sSf https://atlasgo.sh | sh
 # After modifying schemas in pkg/db/schema/, generate migration file
 atlas migrate diff <migration_name> \
   --dir "file://pkg/db/migration" \
-  --to "ent://pkg/db/ent/schema" \
+  --to "ent://pkg/db/schema" \
   --dev-url "sqlite://alpamon.db?mode=memory"
 
 # Note: Atlas CLI is NOT required for production - migrations are executed

@@ -188,7 +188,7 @@ Atlas is only needed when modifying schemas under `pkg/db/schema/`. Production d
 curl -sSf https://atlasgo.sh | sh
 atlas migrate diff <migration_name> \
     --dir "file://pkg/db/migration" \
-    --to "ent://pkg/db/ent/schema" \
+    --to "ent://pkg/db/schema" \
     --dev-url "sqlite://alpamon.db?mode=memory"
 ```
 
