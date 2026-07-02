@@ -179,7 +179,7 @@ func (fc *FtpClient) write(ctx context.Context, cancel context.CancelFunc) {
 			if ctx.Err() != nil {
 				return
 			}
-			// Reset each write since the deadline is absolute; zero disables it for test literals.
+			// Reset each write since the deadline is absolute; zero disables the deadline.
 			if fc.writeTimeout > 0 {
 				_ = fc.conn.SetWriteDeadline(time.Now().Add(fc.writeTimeout))
 			}
