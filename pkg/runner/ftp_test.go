@@ -392,6 +392,36 @@ func TestFtpReadLoopStaysResponsiveDuringLongCommand(t *testing.T) {
 	}
 }
 
+func TestFtpWriteDeadlineCancelsOnStalledPeer(t *testing.T) {
+	fc, _, cleanup := newWiredFtpClient(t)
+	defer cleanup()
+
+	// The peer (serverConn) never reads, so once the OS socket buffer fills
+	// WriteMessage blocks; a short deadline must turn that into an error.
+	fc.writeTimeout = 200 * time.Millisecond
+
+	ctx, cancel := startPumps(fc)
+	defer cancel()
+
+	// Feed large payloads until the write blocks past the deadline and cancels.
+	go func() {
+		payload := make([]byte, 1<<20)
+		for {
+			select {
+			case fc.responseChan <- payload:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("stalled peer did not trigger write deadline and session teardown")
+	}
+}
+
 func TestFtpCommandsAreSerializedInOrder(t *testing.T) {
 	fc, serverConn, cleanup := newWiredFtpClient(t)
 	defer cleanup()
