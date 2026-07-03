@@ -81,12 +81,17 @@ func GroupGIDConflictMessage(groupname string, existingGID, requestedGID uint64)
 		groupname, existingGID, requestedGID)
 }
 
-// alreadyExists reports whether a create tool's output indicates the entity
-// already exists. This is a locale-sensitive last-resort check—the executor
-// runs commands with LANG=en_US.UTF-8, so the message is English in practice—
-// used only AFTER the lookup-based checks, never as the primary decision (E-16).
-func alreadyExists(output string) bool {
-	return strings.Contains(output, "already exists")
+// alreadyExists reports whether a create tool's output indicates that the
+// REQUESTED entity (by name) already exists. It requires both the "already
+// exists" phrase and the entity name so that a collision on a different entity
+// sharing the requested numeric id—e.g. groupadd printing "GID '1001' already
+// exists" when a differently-named group owns that gid—is NOT mistaken for the
+// requested name existing (which would leave that name uncreated and break a
+// later lookup/Demote by name). This is a locale-sensitive last resort—the
+// executor runs commands with LANG=en_US.UTF-8—used only AFTER the lookup-based
+// checks, never as the primary decision (E-16).
+func alreadyExists(output, name string) bool {
+	return strings.Contains(output, "already exists") && strings.Contains(output, name)
 }
 
 // ClassifyGroupForCreate is the shared idempotency gate for group creation, used
@@ -158,9 +163,11 @@ func ReconcileUserCreate(
 		return 0, "", nil
 	}
 	// Tertiary net: invisible to the pure-Go resolver but the NSS-aware create
-	// tool says it already exists (LDAP/SSSD-backed). Tolerate, since failing
-	// here would reintroduce the #344 breakage; identity is unverifiable.
-	if alreadyExists(out) {
+	// tool says this NAME already exists (LDAP/SSSD-backed). Tolerate, since
+	// failing here would reintroduce the #344 breakage; identity is unverifiable.
+	// A collision on a different account sharing the uid is not tolerated here
+	// (alreadyExists requires the username in the output).
+	if alreadyExists(out, username) {
 		log.Warn().
 			Str("username", username).
 			Str("output", out).
@@ -173,9 +180,9 @@ func ReconcileUserCreate(
 // ReconcileGroupCreate is the create-time secondary net for addgroup/groupadd,
 // mirroring ReconcileUserCreate. A group has no "omitted gid" case in the
 // provisioning payloads (GID is validated required,min=1), so the gid is always
-// compared when the group is visible. The "already exists" tertiary net also
-// covers a gid-in-use collision with a differently-named group (groupadd fails
-// but the numeric gid is usable), preserving the pre-#344 behavior.
+// compared when the group is visible. The "already exists" tertiary net tolerates
+// only a same-name collision (NSS-backed group); a gid-in-use collision by a
+// differently-named group is surfaced, since the requested name stays uncreated.
 func ReconcileGroupCreate(
 	lookup GroupLookupFunc, groupname string, wantGID uint64,
 	code int, out string, cmdErr error,
@@ -196,11 +203,15 @@ func ReconcileGroupCreate(
 			Msg("Create returned non-zero but the group is already present with the expected gid; treating as idempotent success")
 		return 0, "", nil
 	}
-	if alreadyExists(out) {
+	// Tertiary net: tolerate only when the output names THIS group (NSS-backed
+	// same-name group invisible to the pure-Go resolver). A "GID already exists"
+	// collision by a differently-named group is not tolerated—the requested
+	// name would remain uncreated—so it falls through to the original failure.
+	if alreadyExists(out, groupname) {
 		log.Warn().
 			Str("groupname", groupname).
 			Str("output", out).
-			Msg("Create reported the group already exists but it is invisible to the pure-Go resolver (likely NSS-backed or a gid-in-use collision); treating as idempotent (identity unverifiable)")
+			Msg("Create reported the group already exists but it is invisible to the pure-Go resolver (likely NSS-backed); treating as idempotent (identity unverifiable)")
 		return 0, "", nil
 	}
 	return code, out, cmdErr

@@ -269,7 +269,8 @@ func TestGroupHandler_AddGroup_SecondaryNet(t *testing.T) {
 	}{
 		{name: "raced local create, matching gid -> success", createOutput: "addgroup: group already exists", reverifyGID: "1001", wantExitZero: true},
 		{name: "raced local create, different gid -> conflict", createOutput: "addgroup: group already exists", reverifyGID: "2002", wantExitZero: false, wantMsgPart: "already exists with gid 2002"},
-		{name: "NSS-backed/gid-collision, absent at reverify but create says already exists -> tolerated", createOutput: "groupadd: GID '1001' already exists", reverifyErr: user.UnknownGroupError("absent"), wantExitZero: true},
+		{name: "NSS-backed same name, absent at reverify but create names this group -> tolerated", createOutput: "addgroup: group 'testgroup' already exists", reverifyErr: user.UnknownGroupError("absent"), wantExitZero: true},
+		{name: "gid-in-use by a different name, absent at reverify -> surfaced (not masked)", createOutput: "groupadd: GID '1001' already exists", reverifyErr: user.UnknownGroupError("absent"), wantExitZero: false, wantMsgPart: "GID '1001'"},
 		{name: "genuine failure, absent and not already-exists -> surfaced", createOutput: "addgroup: cannot open /etc/group", reverifyErr: user.UnknownGroupError("absent"), wantExitZero: false, wantMsgPart: "cannot open"},
 	}
 

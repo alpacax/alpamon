@@ -309,7 +309,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		Msg("User provisioning completed")
 
 	if userExists {
-		return exitCode, fmt.Sprintf("User '%s' already exists; ensured group membership and permissions", data.Username), nil
+		return exitCode, fmt.Sprintf("User '%s' already exists", data.Username), nil
 	}
 	return exitCode, fmt.Sprintf("User '%s' added successfully", data.Username), nil
 }
