@@ -82,16 +82,32 @@ func GroupGIDConflictMessage(groupname string, existingGID, requestedGID uint64)
 }
 
 // alreadyExists reports whether a create tool's output indicates that the
-// REQUESTED entity (by name) already exists. It requires both the "already
-// exists" phrase and the entity name so that a collision on a different entity
-// sharing the requested numeric id—e.g. groupadd printing "GID '1001' already
-// exists" when a differently-named group owns that gid—is NOT mistaken for the
-// requested name existing (which would leave that name uncreated and break a
-// later lookup/Demote by name). This is a locale-sensitive last resort—the
-// executor runs commands with LANG=en_US.UTF-8—used only AFTER the lookup-based
-// checks, never as the primary decision (E-16).
-func alreadyExists(output, name string) bool {
-	return strings.Contains(output, "already exists") && strings.Contains(output, name)
+// REQUESTED entity already exists, identified by its kind ("user"/"group") and
+// name as the tools quote it—e.g. "group 'x' already exists" or (Debian
+// adduser) "The user `x' already exists". Matching the kind+name token, rather
+// than the bare name, ensures a collision on a DIFFERENT entity that merely
+// shares the requested numeric id—e.g. groupadd printing "GID '1001' already
+// exists" when another group owns that gid, even if the requested name is
+// itself "1001"—is NOT mistaken for the requested name existing (which would
+// leave that name uncreated and break a later lookup/Demote by name). This is a
+// locale-sensitive last resort—the executor runs commands with
+// LANG=en_US.UTF-8—used only AFTER the lookup-based checks, never as the primary
+// decision (E-16).
+func alreadyExists(output, kind, name string) bool {
+	if !strings.Contains(output, "already exists") {
+		return false
+	}
+	// shadow-utils (useradd/groupadd) quote with 'name'; Debian adduser/addgroup
+	// quote with `name'. Accept either so the kind+name token is matched exactly.
+	for _, token := range []string{
+		kind + " '" + name + "'",
+		kind + " `" + name + "'",
+	} {
+		if strings.Contains(output, token) {
+			return true
+		}
+	}
+	return false
 }
 
 // ClassifyGroupForCreate is the shared idempotency gate for group creation, used
@@ -166,8 +182,8 @@ func ReconcileUserCreate(
 	// tool says this NAME already exists (LDAP/SSSD-backed). Tolerate, since
 	// failing here would reintroduce the #344 breakage; identity is unverifiable.
 	// A collision on a different account sharing the uid is not tolerated here
-	// (alreadyExists requires the username in the output).
-	if alreadyExists(out, username) {
+	// (alreadyExists requires the "user 'name'" token in the output).
+	if alreadyExists(out, "user", username) {
 		log.Warn().
 			Str("username", username).
 			Str("output", out).
@@ -207,7 +223,7 @@ func ReconcileGroupCreate(
 	// same-name group invisible to the pure-Go resolver). A "GID already exists"
 	// collision by a differently-named group is not tolerated—the requested
 	// name would remain uncreated—so it falls through to the original failure.
-	if alreadyExists(out, groupname) {
+	if alreadyExists(out, "group", groupname) {
 		log.Warn().
 			Str("groupname", groupname).
 			Str("output", out).

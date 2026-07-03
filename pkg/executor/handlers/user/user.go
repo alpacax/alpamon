@@ -219,18 +219,11 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 				cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
 			}
 			cmdArgs = append(cmdArgs, "--gecos", data.Comment, "--disabled-password", data.Username)
-			createCode, createOut, createErr := h.Executor.Run(ctx, "/usr/sbin/adduser", cmdArgs...)
-			// Secondary net: a raced or LDAP/SSSD-backed account (invisible to
-			// the pure-Go lookup above) may cause a non-zero "already exists".
-			// Re-verify and treat a matching account as idempotent success.
-			exitCode, output, err = common.ReconcileUserCreate(h.lookupUser, data.Username, data.UID, !omitUIDFlag, createCode, createOut, createErr)
-			if exitCode != 0 {
-				return exitCode, output, err
+			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/adduser", cmdArgs, data, !omitUIDFlag)
+			if code != 0 {
+				return code, out, cerr
 			}
-			// A non-zero create that reconciled to success means the account
-			// already existed (raced or NSS-backed); report it as such rather
-			// than "added".
-			if createCode != 0 {
+			if existed {
 				userExists = true
 			}
 		}
@@ -279,15 +272,11 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 				cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
 			}
 			cmdArgs = append(cmdArgs, "--comment", data.Comment, "--create-home", data.Username)
-			createCode, createOut, createErr := h.Executor.Run(ctx, "/usr/sbin/useradd", cmdArgs...)
-			exitCode, output, err = common.ReconcileUserCreate(h.lookupUser, data.Username, data.UID, !omitUIDFlag, createCode, createOut, createErr)
-			if exitCode != 0 {
-				return exitCode, output, err
+			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/useradd", cmdArgs, data, !omitUIDFlag)
+			if code != 0 {
+				return code, out, cerr
 			}
-			// A non-zero create that reconciled to success means the account
-			// already existed (raced or NSS-backed); report it as such rather
-			// than "added".
-			if createCode != 0 {
+			if existed {
 				userExists = true
 			}
 		}
@@ -296,10 +285,17 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	}
 
 	// Set home directory permissions if specified.
+	//
+	// Only for a freshly-created account (!userExists). We do not chmod an
+	// existing user's home: it matches the "don't modify an existing account"
+	// contract (we also don't usermod -g), and it avoids a root chmod that would
+	// follow a symlink an existing—possibly hostile—local user could plant at
+	// their home path.
+	//
 	// Skip when HomeDirectory was omitted (OS default path), since the caller
 	// didn't specify a target and we would otherwise chmod an empty path.
 	// codeql[go/path-injection]: Intentional - Admin-specified home directory permission
-	if data.HomeDirectory != "" && data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
+	if !userExists && data.HomeDirectory != "" && data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
 		mode, err := strconv.ParseUint(data.HomeDirectoryPermission, 8, 32)
 		if err == nil {
 			_ = os.Chmod(data.HomeDirectory, os.FileMode(mode)) // lgtm[go/path-injection]
@@ -328,6 +324,28 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		return exitCode, fmt.Sprintf("User '%s' already exists", data.Username), nil
 	}
 	return exitCode, fmt.Sprintf("User '%s' added successfully", data.Username), nil
+}
+
+// runUserCreate runs the platform create command (adduser/useradd) and applies
+// the create-time reconcile net, so both platform branches share one copy of
+// the "create then reconcile" contract. It returns:
+//   - existed=true when a non-zero create was reconciled to idempotent success
+//     (the account already existed: a raced or NSS/LDAP-backed name); the caller
+//     should treat the user as pre-existing.
+//   - code!=0 when the create genuinely failed—the caller must return
+//     (code, out, err) unchanged.
+//
+// On success (code==0) the caller continues to the idempotent ensure steps.
+func (h *UserHandler) runUserCreate(ctx context.Context, tool string, cmdArgs []string, data UserData, uidRequested bool) (existed bool, code int, out string, err error) {
+	createCode, createOut, createErr := h.Executor.Run(ctx, tool, cmdArgs...)
+	// Secondary net: a raced or LDAP/SSSD-backed account (invisible to the
+	// pure-Go lookup) may cause a non-zero "already exists". Re-verify and treat
+	// a matching account as idempotent success.
+	code, out, err = common.ReconcileUserCreate(h.lookupUser, data.Username, data.UID, uidRequested, createCode, createOut, createErr)
+	if code != 0 {
+		return false, code, out, err
+	}
+	return createCode != 0, 0, out, err
 }
 
 // backupHomeDirectory backs up the user's home directory before deletion

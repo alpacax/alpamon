@@ -702,6 +702,11 @@ func TestUserHandler_AddUser_Idempotent_ExistingUserSkipsCreate(t *testing.T) {
 			if exitCode != 0 {
 				t.Fatalf("Execute() exitCode = %d, want 0 (output=%q)", exitCode, output)
 			}
+			// The gate-detected idempotent path must report "already exists",
+			// not the misleading "added successfully" (this is the crux #344 path).
+			if !strings.Contains(output, "already exists") || strings.Contains(output, "added successfully") {
+				t.Errorf("existing-user path should report 'already exists', got: %q", output)
+			}
 
 			if mock.Invoked(tt.createCmd) {
 				t.Errorf("%s must NOT be invoked when the user already exists; got %+v", tt.createCmd, mock.GetExecutedCommands())

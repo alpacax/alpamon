@@ -252,6 +252,29 @@ func TestGroupHandler_AddGroup_Idempotent(t *testing.T) {
 	})
 }
 
+// TestGroupHandler_AddGroup_NumericNameGidCollisionSurfaced guards the tertiary
+// net against a numeric group name aliasing a gid-in-use message: when the
+// requested name is "1001" and gid 1001 is owned by a DIFFERENT group, groupadd
+// prints "GID '1001' already exists" (naming the gid, not "group '1001'"). The
+// requested name is never created, so this must be surfaced, not tolerated.
+func TestGroupHandler_AddGroup_NumericNameGidCollisionSurfaced(t *testing.T) {
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("rhel")
+	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+	mock := common.NewMockCommandExecutor(t)
+	mock.SetResult("/usr/sbin/groupadd --gid 1001 1001", 1, "groupadd: GID '1001' already exists", errors.New("exit status 4"))
+	handler := newTestGroupHandler(mock) // AbsentGroupLookup: gate + reconcile both see the name as absent
+
+	exitCode, output, _ := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "1001", GID: 1001})
+	if exitCode == 0 {
+		t.Fatalf("a gid-in-use collision by a different group must be surfaced even when the requested name is numeric; got 0 (output=%q)", output)
+	}
+	if !strings.Contains(output, "GID '1001'") {
+		t.Errorf("expected the original gid-collision failure to surface, got: %q", output)
+	}
+}
+
 // TestGroupHandler_AddGroup_SecondaryNet verifies the create-time reconcile:
 // absent at the gate, create fails, then a re-verify (plus an "already exists"
 // tertiary fallback for NSS-backed groups / gid-in-use collisions the pure-Go
