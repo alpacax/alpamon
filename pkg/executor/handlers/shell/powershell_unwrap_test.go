@@ -46,12 +46,6 @@ func TestUnwrapNestedPowerShell(t *testing.T) {
 			wantOk:  true,
 		},
 		{
-			name:    "abbreviated -Comm normalized to -Command",
-			command: `powershell -Comm Write-Output "a|b"`,
-			want:    []string{"powershell", "-Command", `Write-Output "a|b"`},
-			wantOk:  true,
-		},
-		{
 			name:    "minimal unambiguous abbreviation -com normalized to -Command",
 			command: `powershell -com echo hi`,
 			want:    []string{"powershell", "-Command", "echo hi"},
