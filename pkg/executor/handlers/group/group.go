@@ -92,7 +92,7 @@ func (h *GroupHandler) Validate(cmd string, args *common.CommandArgs) error {
 func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	// Extract arguments
 	groupname := args.Groupname
-	gid := int(args.GID)
+	gid := args.GID
 
 	// Validate
 	err := h.Validate(common.AddGroup.String(), args)
@@ -102,7 +102,7 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 
 	log.Info().
 		Str("groupname", groupname).
-		Uint64("gid", uint64(gid)).
+		Uint64("gid", gid).
 		Msg("Adding group")
 
 	// Idempotency gate (M8): verify by lookup whether the group already exists
@@ -120,7 +120,7 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 		// lets Execute still run SyncSystemInfo, reconciling DB<->reality drift.
 		log.Info().
 			Str("groupname", groupname).
-			Uint64("gid", uint64(gid)).
+			Uint64("gid", gid).
 			Msg("Group already exists with matching gid; skipping creation")
 		return 0, fmt.Sprintf("Group '%s' already exists with GID %d", groupname, gid), nil
 	}
@@ -133,14 +133,14 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 		createCode, output, err = h.Executor.Run(
 			ctx,
 			"/usr/sbin/addgroup",
-			"--gid", strconv.Itoa(gid),
+			"--gid", strconv.FormatUint(gid, 10),
 			groupname,
 		)
 	case "rhel":
 		createCode, output, err = h.Executor.Run(
 			ctx,
 			"/usr/sbin/groupadd",
-			"--gid", strconv.Itoa(gid),
+			"--gid", strconv.FormatUint(gid, 10),
 			groupname,
 		)
 	default:
@@ -160,14 +160,14 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 	if createCode != 0 {
 		log.Info().
 			Str("groupname", groupname).
-			Uint64("gid", uint64(gid)).
+			Uint64("gid", gid).
 			Msg("Group already exists; reconciled to idempotent success")
 		return 0, fmt.Sprintf("Group '%s' already exists with GID %d", groupname, gid), nil
 	}
 
 	log.Info().
 		Str("groupname", groupname).
-		Uint64("gid", uint64(gid)).
+		Uint64("gid", gid).
 		Int("exitCode", exitCode).
 		Msg("Group added successfully")
 
