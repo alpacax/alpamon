@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/user"
 	"strings"
 	"testing"
 
@@ -28,6 +29,17 @@ type MockGroupService struct {
 func (m *MockGroupService) AddUserToGroups(ctx context.Context, username string, gids []uint64) error {
 	m.AddUserToGroupsCalled = true
 	return m.AddUserToGroupsError
+}
+
+// newTestUserHandler builds a UserHandler whose user/group lookups report
+// absent by default (via the shared fakes in common/testing.go), so the create
+// path runs deterministically and hermetically. Individual tests override
+// h.lookupUser / h.lookupGroup to exercise the exists/conflict matrix.
+func newTestUserHandler(exec common.CommandExecutor, gs *MockGroupService) *UserHandler {
+	h := NewUserHandler(exec, gs, nil)
+	h.lookupUser = common.AbsentUserLookup
+	h.lookupGroup = common.AbsentGroupLookup
+	return h
 }
 
 func TestUserHandler_Execute(t *testing.T) {
@@ -145,7 +157,7 @@ func TestUserHandler_Execute(t *testing.T) {
 				tt.setupMock(mock)
 			}
 
-			handler := NewUserHandler(mock, tt.groupService, nil)
+			handler := newTestUserHandler(mock, tt.groupService)
 			ctx := context.Background()
 
 			exitCode, output, err := handler.Execute(ctx, tt.cmd, tt.args)
@@ -213,7 +225,7 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			})
 
 			mock := common.NewMockCommandExecutor(t)
-			handler := NewUserHandler(mock, &MockGroupService{}, nil)
+			handler := newTestUserHandler(mock, &MockGroupService{})
 
 			exitCode, _, err := handler.Execute(context.Background(), "adduser", baseArgs)
 			if err != nil {
@@ -313,7 +325,7 @@ func TestUserHandler_AddUser_ServiceAccountWithExplicitUID(t *testing.T) {
 	})
 
 	mock := common.NewMockCommandExecutor(t)
-	handler := NewUserHandler(mock, &MockGroupService{}, nil)
+	handler := newTestUserHandler(mock, &MockGroupService{})
 
 	args := &common.CommandArgs{
 		Username:         "explicit-svc",
@@ -375,7 +387,7 @@ func TestUserHandler_AddUser_ServiceAccountGroupaddFails(t *testing.T) {
 	mock := common.NewMockCommandExecutor(t)
 	mock.SetResult("/usr/sbin/groupadd -f alpacon", 4, "groupadd: cannot lock /etc/group; try again later", errors.New("groupadd failed"))
 
-	handler := NewUserHandler(mock, &MockGroupService{}, nil)
+	handler := newTestUserHandler(mock, &MockGroupService{})
 
 	args := &common.CommandArgs{
 		Username:         "gitlab-runner",
@@ -408,7 +420,7 @@ func TestUserHandler_AddUser_RhelWithUID(t *testing.T) {
 	})
 
 	mock := common.NewMockCommandExecutor(t)
-	handler := NewUserHandler(mock, &MockGroupService{}, nil)
+	handler := newTestUserHandler(mock, &MockGroupService{})
 
 	args := &common.CommandArgs{
 		Username:      "john",
@@ -457,7 +469,7 @@ func TestUserHandler_AddUser_RhelWithUID(t *testing.T) {
 }
 
 func TestUserHandler_Validate(t *testing.T) {
-	handler := NewUserHandler(common.NewMockCommandExecutor(t), &MockGroupService{}, nil)
+	handler := newTestUserHandler(common.NewMockCommandExecutor(t), &MockGroupService{})
 
 	tests := []struct {
 		name    string
@@ -610,7 +622,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 				tt.setupMock(mock)
 			}
 
-			handler := NewUserHandler(mock, tt.groupService, nil)
+			handler := newTestUserHandler(mock, tt.groupService)
 			ctx := context.Background()
 
 			args := &common.CommandArgs{
@@ -640,4 +652,429 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestUserHandler_AddUser_Idempotent_ExistingUserSkipsCreate verifies that when
+// the user already exists with a matching (or omitted) uid, adduser/useradd is
+// NOT invoked, the command still succeeds, and the idempotent ensure step
+// (AddUserToGroups) still runs so groups converge (issue #344, M8).
+func TestUserHandler_AddUser_Idempotent_ExistingUserSkipsCreate(t *testing.T) {
+	tests := []struct {
+		name        string
+		platform    string
+		createCmd   string
+		groupExists bool // whether the RHEL primary group already exists
+	}{
+		{name: "debian existing user", platform: "debian", createCmd: "/usr/sbin/adduser"},
+		{name: "rhel existing user, group exists", platform: "rhel", createCmd: "/usr/sbin/useradd", groupExists: true},
+		{name: "rhel existing user, group absent still ensured", platform: "rhel", createCmd: "/usr/sbin/useradd", groupExists: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalPlatformLike := utils.PlatformLike
+			utils.SetPlatformLike(tt.platform)
+			t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+			mock := common.NewMockCommandExecutor(t)
+			gs := &MockGroupService{}
+			handler := newTestUserHandler(mock, gs)
+			handler.lookupUser = common.ExistingUserLookup("1001") // present, uid matches request
+			if tt.groupExists {
+				handler.lookupGroup = common.ExistingGroupLookup("1001")
+			} // else default AbsentGroupLookup
+
+			args := &common.CommandArgs{
+				Username:      "testuser",
+				UID:           1001,
+				GID:           1001,
+				Comment:       "Test User",
+				HomeDirectory: "/home/testuser",
+				Shell:         "/bin/bash",
+				Groupname:     "testgroup",
+				Groups:        []uint64{1002, 1003},
+			}
+
+			exitCode, output, err := handler.Execute(context.Background(), "adduser", args)
+			if err != nil {
+				t.Fatalf("Execute() unexpected error: %v", err)
+			}
+			if exitCode != 0 {
+				t.Fatalf("Execute() exitCode = %d, want 0 (output=%q)", exitCode, output)
+			}
+
+			if mock.Invoked(tt.createCmd) {
+				t.Errorf("%s must NOT be invoked when the user already exists; got %+v", tt.createCmd, mock.GetExecutedCommands())
+			}
+			// RHEL ensures the primary group; when it already exists, groupadd is skipped.
+			if tt.platform == "rhel" {
+				sawGroupadd := mock.Invoked("/usr/sbin/groupadd")
+				if tt.groupExists && sawGroupadd {
+					t.Errorf("groupadd must be skipped when the group already exists with matching gid; got %+v", mock.GetExecutedCommands())
+				}
+				if !tt.groupExists && !sawGroupadd {
+					t.Errorf("groupadd must run to ensure the primary group exists; got %+v", mock.GetExecutedCommands())
+				}
+			}
+			if !gs.AddUserToGroupsCalled {
+				t.Error("AddUserToGroups must still run for an existing user so groups converge")
+			}
+		})
+	}
+}
+
+// TestUserHandler_AddUser_Idempotent_UIDConflict verifies that a same-name
+// user with a DIFFERENT uid is surfaced as a failure (real drift), never
+// masked, and that no create command runs.
+func TestUserHandler_AddUser_Idempotent_UIDConflict(t *testing.T) {
+	for _, platform := range []string{"debian", "rhel"} {
+		t.Run(platform, func(t *testing.T) {
+			originalPlatformLike := utils.PlatformLike
+			utils.SetPlatformLike(platform)
+			t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+			mock := common.NewMockCommandExecutor(t)
+			handler := newTestUserHandler(mock, &MockGroupService{})
+			handler.lookupUser = common.ExistingUserLookup("9999") // present but uid != requested
+
+			args := &common.CommandArgs{
+				Username:      "testuser",
+				UID:           1001,
+				GID:           1001,
+				Comment:       "Test User",
+				HomeDirectory: "/home/testuser",
+				Shell:         "/bin/bash",
+				Groupname:     "testgroup",
+			}
+
+			exitCode, output, _ := handler.Execute(context.Background(), "adduser", args)
+			if exitCode == 0 {
+				t.Fatalf("expected non-zero exit for uid conflict, got 0 (output=%q)", output)
+			}
+			if !strings.Contains(output, "already exists with uid 9999") || !strings.Contains(output, "requested uid 1001") {
+				t.Errorf("conflict message must name both uids, got: %q", output)
+			}
+			if mock.Invoked("/usr/sbin/adduser") || mock.Invoked("/usr/sbin/useradd") {
+				t.Errorf("no create command may run on a uid conflict; got %+v", mock.GetExecutedCommands())
+			}
+		})
+	}
+}
+
+// TestUserHandler_AddUser_Idempotent_ServiceAccountNameExists verifies that a
+// service account (uid omitted, OS auto-assigns) treats name presence alone as
+// "already provisioned" — no uid comparison, no useradd, success — AND that the
+// load-bearing `groupadd -f` primary-group bootstrap STILL runs for the existing
+// account (design intent #3: needed for utils.Demote(ValidateGroup=true)).
+func TestUserHandler_AddUser_Idempotent_ServiceAccountNameExists(t *testing.T) {
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("rhel")
+	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+	mock := common.NewMockCommandExecutor(t)
+	handler := newTestUserHandler(mock, &MockGroupService{})
+	handler.lookupUser = common.ExistingUserLookup("4321") // any uid; must not be compared
+
+	args := &common.CommandArgs{
+		Username:         "gitlab-runner",
+		Comment:          "GitLab Runner,,,,(alpacon-app)abc",
+		Shell:            "/usr/sbin/nologin",
+		Groupname:        "alpacon",
+		IsServiceAccount: true,
+	}
+
+	exitCode, output, err := handler.Execute(context.Background(), "adduser", args)
+	if err != nil {
+		t.Fatalf("Execute() unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("Execute() exitCode = %d, want 0 (output=%q)", exitCode, output)
+	}
+	if mock.Invoked("/usr/sbin/useradd") {
+		t.Error("useradd must not run when the service account already exists by name")
+	}
+	// Load-bearing invariant: the `groupadd -f <Groupname>` bootstrap must run
+	// even for an already-present service account, or the named primary group is
+	// not ensured and Demote(ValidateGroup=true) breaks at websh runtime.
+	sawGroupaddDashF := false
+	for _, c := range mock.GetExecutedCommands() {
+		if c.Name == "/usr/sbin/groupadd" && len(c.Args) >= 2 && c.Args[0] == "-f" && c.Args[1] == "alpacon" {
+			sawGroupaddDashF = true
+		}
+	}
+	if !sawGroupaddDashF {
+		t.Errorf("`groupadd -f alpacon` must still run for an existing service account; got %+v", mock.GetExecutedCommands())
+	}
+}
+
+// TestUserHandler_AddUser_Idempotent_LookupError verifies that a lookup error
+// other than "not found" fails loud instead of blind-creating over a possibly
+// shadowed entry.
+func TestUserHandler_AddUser_Idempotent_LookupError(t *testing.T) {
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("debian")
+	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+	mock := common.NewMockCommandExecutor(t)
+	handler := newTestUserHandler(mock, &MockGroupService{})
+	handler.lookupUser = func(string) (*user.User, error) {
+		return nil, errors.New("getpwnam_r: connection refused")
+	}
+
+	args := &common.CommandArgs{
+		Username:      "testuser",
+		UID:           1001,
+		GID:           1001,
+		Comment:       "Test User",
+		HomeDirectory: "/home/testuser",
+		Shell:         "/bin/bash",
+		Groupname:     "testgroup",
+	}
+
+	exitCode, output, _ := handler.Execute(context.Background(), "adduser", args)
+	if exitCode == 0 {
+		t.Fatalf("expected non-zero exit when the lookup itself fails, got 0 (output=%q)", output)
+	}
+	if !strings.Contains(output, "unable to verify") {
+		t.Errorf("expected an 'unable to verify' message, got: %q", output)
+	}
+	if mock.Invoked("/usr/sbin/adduser") {
+		t.Error("adduser must not run when existence cannot be verified")
+	}
+}
+
+// TestUserHandler_AddUser_SecondaryNet verifies the create-time reconcile net on
+// the Debian adduser call site: when the up-front lookup reports absent but the
+// create fails, a re-verify (plus an "already exists" tertiary fallback for
+// NSS/LDAP names the pure-Go resolver cannot see) decides the outcome.
+func TestUserHandler_AddUser_SecondaryNet(t *testing.T) {
+	const adduserCmd = "/usr/sbin/adduser --home /home/testuser --shell /bin/bash --uid 1001 --gid 1001 --gecos Test User --disabled-password testuser"
+	args := &common.CommandArgs{
+		Username:      "testuser",
+		UID:           1001,
+		GID:           1001,
+		Comment:       "Test User",
+		HomeDirectory: "/home/testuser",
+		Shell:         "/bin/bash",
+		Groupname:     "testgroup",
+	}
+
+	tests := []struct {
+		name         string
+		createOutput string
+		reverifyUID  string // uid returned on the second (reconcile) lookup; "" with reverifyErr means still-absent
+		reverifyErr  error  // if set, reverify reports the user still not found
+		wantExitZero bool
+		wantMsgPart  string
+	}{
+		{name: "raced local create, matching uid -> idempotent success", createOutput: "adduser: user already exists", reverifyUID: "1001", wantExitZero: true},
+		{name: "raced local create, different uid -> conflict surfaced", createOutput: "adduser: user already exists", reverifyUID: "2002", wantExitZero: false, wantMsgPart: "already exists with uid 2002"},
+		{name: "NSS-backed, absent at reverify but create says already exists -> tolerated", createOutput: "adduser: user 'testuser' already exists", reverifyErr: user.UnknownUserError("absent"), wantExitZero: true},
+		{name: "genuine failure, absent and not already-exists -> surfaced", createOutput: "adduser: cannot create home directory", reverifyErr: user.UnknownUserError("absent"), wantExitZero: false, wantMsgPart: "cannot create home directory"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalPlatformLike := utils.PlatformLike
+			utils.SetPlatformLike("debian")
+			t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+			mock := common.NewMockCommandExecutor(t)
+			mock.SetResult(adduserCmd, 1, tt.createOutput, errors.New("exit status 1"))
+			handler := newTestUserHandler(mock, &MockGroupService{})
+
+			calls := 0
+			handler.lookupUser = func(name string) (*user.User, error) {
+				calls++
+				if calls == 1 {
+					return nil, user.UnknownUserError("absent") // gate: absent -> create attempted
+				}
+				if tt.reverifyErr != nil {
+					return nil, tt.reverifyErr
+				}
+				return &user.User{Username: name, Uid: tt.reverifyUID}, nil
+			}
+
+			exitCode, output, _ := handler.Execute(context.Background(), "adduser", args)
+			if !mock.Invoked("/usr/sbin/adduser") {
+				t.Fatal("adduser should have been attempted after an absent gate lookup")
+			}
+			if tt.wantExitZero && exitCode != 0 {
+				t.Fatalf("expected idempotent success (exit 0), got %d (output=%q)", exitCode, output)
+			}
+			if !tt.wantExitZero && exitCode == 0 {
+				t.Fatalf("expected non-zero exit, got 0 (output=%q)", output)
+			}
+			if tt.wantMsgPart != "" && !strings.Contains(output, tt.wantMsgPart) {
+				t.Errorf("expected output to contain %q, got: %q", tt.wantMsgPart, output)
+			}
+		})
+	}
+}
+
+// TestUserHandler_AddUser_Rhel_SecondaryNet exercises the reconcile net at the
+// RHEL call sites (user.go useradd and primary-group groupadd), which the Debian
+// test above does not reach. These sites have distinct argument wiring, so a
+// copy-paste defect there would otherwise be uncaught (masking drift on RHEL).
+func TestUserHandler_AddUser_Rhel_SecondaryNet(t *testing.T) {
+	// A simple comment keeps the useradd command key predictable.
+	baseArgs := func() *common.CommandArgs {
+		return &common.CommandArgs{
+			Username:      "john",
+			UID:           5001,
+			GID:           5001,
+			Comment:       "John",
+			HomeDirectory: "/home/john",
+			Shell:         "/bin/bash",
+			Groupname:     "alpacon",
+		}
+	}
+	const useraddCmd = "/usr/sbin/useradd --home-dir /home/john --shell /bin/bash --uid 5001 --gid 5001 --comment John --create-home john"
+	const groupaddCmd = "/usr/sbin/groupadd --gid 5001 alpacon"
+
+	t.Run("useradd reconcile: raced matching uid -> idempotent success", func(t *testing.T) {
+		originalPlatformLike := utils.PlatformLike
+		utils.SetPlatformLike("rhel")
+		t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+		mock := common.NewMockCommandExecutor(t)
+		mock.SetResult(useraddCmd, 1, "useradd: user 'john' already exists", errors.New("exit status 9"))
+		handler := newTestUserHandler(mock, &MockGroupService{})
+		handler.lookupGroup = common.ExistingGroupLookup("5001") // group present -> groupadd skipped
+
+		calls := 0
+		handler.lookupUser = func(name string) (*user.User, error) {
+			calls++
+			if calls == 1 {
+				return nil, user.UnknownUserError("absent") // gate
+			}
+			return &user.User{Username: name, Uid: "5001"}, nil // reverify: matches
+		}
+
+		exitCode, output, _ := handler.Execute(context.Background(), "adduser", baseArgs())
+		if !mock.Invoked("/usr/sbin/useradd") {
+			t.Fatal("useradd should have been attempted")
+		}
+		if exitCode != 0 {
+			t.Fatalf("expected idempotent success, got %d (output=%q)", exitCode, output)
+		}
+	})
+
+	t.Run("useradd reconcile: raced different uid -> conflict surfaced", func(t *testing.T) {
+		originalPlatformLike := utils.PlatformLike
+		utils.SetPlatformLike("rhel")
+		t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+		mock := common.NewMockCommandExecutor(t)
+		mock.SetResult(useraddCmd, 1, "useradd: user 'john' already exists", errors.New("exit status 9"))
+		handler := newTestUserHandler(mock, &MockGroupService{})
+		handler.lookupGroup = common.ExistingGroupLookup("5001")
+
+		calls := 0
+		handler.lookupUser = func(name string) (*user.User, error) {
+			calls++
+			if calls == 1 {
+				return nil, user.UnknownUserError("absent")
+			}
+			return &user.User{Username: name, Uid: "6006"}, nil // reverify: uid mismatch
+		}
+
+		exitCode, output, _ := handler.Execute(context.Background(), "adduser", baseArgs())
+		if exitCode == 0 {
+			t.Fatalf("expected conflict (non-zero), got 0 (output=%q)", output)
+		}
+		if !strings.Contains(output, "already exists with uid 6006") {
+			t.Errorf("expected uid conflict message, got: %q", output)
+		}
+	})
+
+	t.Run("primary-group groupadd reconcile: raced NSS group -> tolerated, useradd proceeds", func(t *testing.T) {
+		originalPlatformLike := utils.PlatformLike
+		utils.SetPlatformLike("rhel")
+		t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+		mock := common.NewMockCommandExecutor(t)
+		mock.SetResult(groupaddCmd, 1, "groupadd: group 'alpacon' already exists", errors.New("exit status 9"))
+		handler := newTestUserHandler(mock, &MockGroupService{}) // absentUser -> useradd runs
+
+		gcalls := 0
+		handler.lookupGroup = func(name string) (*user.Group, error) {
+			gcalls++
+			if gcalls == 1 {
+				return nil, user.UnknownGroupError("absent") // gate: absent -> groupadd attempted
+			}
+			return &user.Group{Name: name, Gid: "5001"}, nil // reverify: present, gid matches
+		}
+
+		exitCode, output, err := handler.Execute(context.Background(), "adduser", baseArgs())
+		if err != nil || exitCode != 0 {
+			t.Fatalf("expected groupadd reconcile to tolerate; got exitCode=%d err=%v output=%q", exitCode, err, output)
+		}
+		if !mock.Invoked("/usr/sbin/groupadd") {
+			t.Fatal("groupadd should have been attempted after an absent gate lookup")
+		}
+		if !mock.Invoked("/usr/sbin/useradd") {
+			t.Error("useradd must still run after the primary group is reconciled")
+		}
+	})
+}
+
+// TestUserHandler_AddUser_Rhel_PrimaryGroupGate verifies the RHEL primary-group
+// groupadd is gated by the same lookup rule as standalone addgroup (A-3
+// consistency): existing+match skips groupadd, existing+mismatch surfaces a
+// conflict before useradd runs.
+func TestUserHandler_AddUser_Rhel_PrimaryGroupGate(t *testing.T) {
+	baseArgs := func() *common.CommandArgs {
+		return &common.CommandArgs{
+			Username:      "john",
+			UID:           5001,
+			GID:           5001,
+			Comment:       "John,,,,(alpacon)uuid",
+			HomeDirectory: "/home/john",
+			Shell:         "/bin/bash",
+			Groupname:     "alpacon",
+		}
+	}
+
+	t.Run("group exists with matching gid -> groupadd skipped, useradd runs", func(t *testing.T) {
+		originalPlatformLike := utils.PlatformLike
+		utils.SetPlatformLike("rhel")
+		t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+		mock := common.NewMockCommandExecutor(t)
+		handler := newTestUserHandler(mock, &MockGroupService{}) // absentUser -> useradd runs
+		handler.lookupGroup = common.ExistingGroupLookup("5001")
+
+		exitCode, output, err := handler.Execute(context.Background(), "adduser", baseArgs())
+		if err != nil || exitCode != 0 {
+			t.Fatalf("Execute() exitCode=%d err=%v output=%q", exitCode, err, output)
+		}
+		if mock.Invoked("/usr/sbin/groupadd") {
+			t.Errorf("groupadd must be skipped when the group already exists with matching gid; got %+v", mock.GetExecutedCommands())
+		}
+		if !mock.Invoked("/usr/sbin/useradd") {
+			t.Error("useradd must still run to create the absent user")
+		}
+	})
+
+	t.Run("group exists with different gid -> conflict before useradd", func(t *testing.T) {
+		originalPlatformLike := utils.PlatformLike
+		utils.SetPlatformLike("rhel")
+		t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+		mock := common.NewMockCommandExecutor(t)
+		handler := newTestUserHandler(mock, &MockGroupService{})
+		handler.lookupGroup = common.ExistingGroupLookup("7777")
+
+		exitCode, output, _ := handler.Execute(context.Background(), "adduser", baseArgs())
+		if exitCode == 0 {
+			t.Fatalf("expected non-zero exit for group gid conflict, got 0 (output=%q)", output)
+		}
+		if !strings.Contains(output, "already exists with gid 7777") {
+			t.Errorf("expected group conflict message, got: %q", output)
+		}
+		if mock.Invoked("/usr/sbin/useradd") {
+			t.Error("useradd must not run when the primary group gid conflicts")
+		}
+	})
 }
