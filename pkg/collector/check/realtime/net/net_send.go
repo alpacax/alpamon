@@ -66,7 +66,7 @@ func (c *SendCheck) getTraffic(ctx context.Context) ([]base.TrafficQuerySet, err
 	client := c.GetClient()
 	interval := c.GetInterval()
 	now := time.Now()
-	from := now.Add(-1 * interval * time.Second)
+	from := now.Add(-interval)
 
 	var querySet []base.TrafficQuerySet
 	err := client.Traffic.Query().

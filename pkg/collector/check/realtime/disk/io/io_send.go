@@ -62,7 +62,7 @@ func (c *SendCheck) getDiskIO(ctx context.Context) ([]base.DiskIOQuerySet, error
 	client := c.GetClient()
 	interval := c.GetInterval()
 	now := time.Now()
-	from := now.Add(-1 * interval * time.Second)
+	from := now.Add(-interval)
 
 	var querySet []base.DiskIOQuerySet
 	err := client.DiskIO.Query().
