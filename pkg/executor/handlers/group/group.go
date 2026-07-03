@@ -125,19 +125,19 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 		return 0, fmt.Sprintf("Group '%s' already exists with GID %d", groupname, gid), nil
 	}
 
-	var exitCode int
+	var createCode, exitCode int
 	var output string
 	// Platform-specific group addition
 	switch utils.PlatformLike {
 	case "debian":
-		exitCode, output, err = h.Executor.Run(
+		createCode, output, err = h.Executor.Run(
 			ctx,
 			"/usr/sbin/addgroup",
 			"--gid", strconv.Itoa(gid),
 			groupname,
 		)
 	case "rhel":
-		exitCode, output, err = h.Executor.Run(
+		createCode, output, err = h.Executor.Run(
 			ctx,
 			"/usr/sbin/groupadd",
 			"--gid", strconv.Itoa(gid),
@@ -150,9 +150,19 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 	// Secondary net: a raced or NSS-backed group invisible to the pure-Go
 	// lookup above may cause a non-zero "already exists". Re-verify and treat a
 	// matching group as idempotent success.
-	exitCode, output, err = common.ReconcileGroupCreate(h.lookupGroup, groupname, args.GID, exitCode, output, err)
+	exitCode, output, err = common.ReconcileGroupCreate(h.lookupGroup, groupname, args.GID, createCode, output, err)
 	if exitCode != 0 {
 		return exitCode, output, err
+	}
+
+	// A non-zero create that reconciled to success means the group already
+	// existed (raced or NSS-backed); report it as such rather than "added".
+	if createCode != 0 {
+		log.Info().
+			Str("groupname", groupname).
+			Uint64("gid", uint64(gid)).
+			Msg("Group already exists; reconciled to idempotent success")
+		return 0, fmt.Sprintf("Group '%s' already exists with GID %d", groupname, gid), nil
 	}
 
 	log.Info().

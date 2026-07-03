@@ -1082,3 +1082,45 @@ func TestUserHandler_AddUser_Rhel_PrimaryGroupGate(t *testing.T) {
 		}
 	})
 }
+
+// TestUserHandler_AddUser_ExistingUser_GroupAddSoftFailMessage verifies the
+// AddUserToGroups soft-failure message reflects that the user already existed
+// (not "created") on the re-provision path.
+func TestUserHandler_AddUser_ExistingUser_GroupAddSoftFailMessage(t *testing.T) {
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("debian")
+	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+	mock := common.NewMockCommandExecutor(t)
+	gs := &MockGroupService{AddUserToGroupsError: errors.New("usermod failed")}
+	handler := newTestUserHandler(mock, gs)
+	handler.lookupUser = common.ExistingUserLookup("1001") // user already exists
+
+	args := &common.CommandArgs{
+		Username:      "testuser",
+		UID:           1001,
+		GID:           1001,
+		Comment:       "Test User",
+		HomeDirectory: "/home/testuser",
+		Shell:         "/bin/bash",
+		Groupname:     "testgroup",
+		Groups:        []uint64{1002},
+	}
+
+	exitCode, output, err := handler.Execute(context.Background(), "adduser", args)
+	if err != nil {
+		t.Fatalf("Execute() unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("group-add soft failure must keep exit 0, got %d (output=%q)", exitCode, output)
+	}
+	if !gs.AddUserToGroupsCalled {
+		t.Error("AddUserToGroups should have been called for an existing user")
+	}
+	if strings.Contains(output, "created") || !strings.Contains(output, "already exists but failed to add to groups") {
+		t.Errorf("soft-failure message should say the user already exists, not 'created'; got: %q", output)
+	}
+	if mock.Invoked("/usr/sbin/adduser") {
+		t.Error("adduser must not run for an existing user")
+	}
+}

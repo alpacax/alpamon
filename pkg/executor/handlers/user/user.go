@@ -310,7 +310,11 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	if len(data.Groups) > 0 && h.groupService != nil {
 		if err := h.groupService.AddUserToGroups(ctx, data.Username, data.Groups); err != nil {
 			log.Warn().Err(err).Msg("Failed to add user to additional groups")
-			return 0, fmt.Sprintf("User '%s' created but failed to add to groups: %v", data.Username, err), nil
+			state := "created"
+			if userExists {
+				state = "already exists"
+			}
+			return 0, fmt.Sprintf("User '%s' %s but failed to add to groups: %v", data.Username, state, err), nil
 		}
 	}
 
