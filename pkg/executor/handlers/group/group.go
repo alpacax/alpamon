@@ -14,6 +14,10 @@ import (
 type GroupHandler struct {
 	*common.BaseHandler
 	syncManager common.SystemInfoManager
+	// lookupGroup verifies existence before creating (idempotency gate). It
+	// defaults to an os/user-backed implementation and is overridden in tests.
+	// See pkg/executor/handlers/common/lookup.go.
+	lookupGroup common.GroupLookupFunc
 }
 
 // NewGroupHandler creates a new group handler
@@ -28,6 +32,7 @@ func NewGroupHandler(cmdExecutor common.CommandExecutor, syncManager common.Syst
 			cmdExecutor,
 		),
 		syncManager: syncManager,
+		lookupGroup: common.DefaultGroupLookup,
 	}
 	return h
 }
@@ -100,6 +105,26 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 		Uint64("gid", uint64(gid)).
 		Msg("Adding group")
 
+	// Idempotency gate (M8): verify by lookup whether the group already exists
+	// before attempting creation, so re-provisioning an already-present group
+	// is a no-op instead of a hard addgroup/groupadd "already exists" failure.
+	// A same-name/different-gid group is real drift and is surfaced, not masked.
+	// The classifier is shared with the RHEL primary-group ensure in handleAddUser
+	// so both paths behave identically (A-3 consistency).
+	needCreate, code, out, err := common.ClassifyGroupForCreate(h.lookupGroup, groupname, args.GID)
+	if code != 0 {
+		return code, out, err
+	}
+	if !needCreate {
+		// Group present with the expected gid: idempotent success. Returning 0
+		// lets Execute still run SyncSystemInfo, reconciling DB<->reality drift.
+		log.Info().
+			Str("groupname", groupname).
+			Uint64("gid", uint64(gid)).
+			Msg("Group already exists with matching gid; skipping creation")
+		return 0, fmt.Sprintf("Group '%s' already exists with GID %d", groupname, gid), nil
+	}
+
 	var exitCode int
 	var output string
 	// Platform-specific group addition
@@ -111,9 +136,6 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 			"--gid", strconv.Itoa(gid),
 			groupname,
 		)
-		if exitCode != 0 {
-			return exitCode, output, err
-		}
 	case "rhel":
 		exitCode, output, err = h.Executor.Run(
 			ctx,
@@ -121,11 +143,16 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 			"--gid", strconv.Itoa(gid),
 			groupname,
 		)
-		if exitCode != 0 {
-			return exitCode, output, err
-		}
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported for group management", utils.PlatformLike), nil
+	}
+
+	// Secondary net: a raced or NSS-backed group invisible to the pure-Go
+	// lookup above may cause a non-zero "already exists". Re-verify and treat a
+	// matching group as idempotent success.
+	exitCode, output, err = common.ReconcileGroupCreate(h.lookupGroup, groupname, args.GID, exitCode, output, err)
+	if exitCode != 0 {
+		return exitCode, output, err
 	}
 
 	log.Info().

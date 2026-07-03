@@ -8,10 +8,24 @@
 package group
 
 import (
+	"context"
+	"errors"
+	"os/user"
+	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
+
+// newTestGroupHandler builds a GroupHandler whose lookup reports absent by
+// default (via the shared fake in common/testing.go). Individual tests override
+// h.lookupGroup for the exists/conflict matrix.
+func newTestGroupHandler(exec common.CommandExecutor) *GroupHandler {
+	h := NewGroupHandler(exec, nil)
+	h.lookupGroup = common.AbsentGroupLookup
+	return h
+}
 
 func TestGroupHandler_AddGroup(t *testing.T) {
 	// Create mock executor
@@ -131,5 +145,169 @@ func TestGroupHandler_Name(t *testing.T) {
 
 	if handler.Name() != "group" {
 		t.Errorf("Expected handler name 'group', got '%s'", handler.Name())
+	}
+}
+
+// TestGroupHandler_AddGroup_Execute exercises handleAddGroup end-to-end for the
+// absent (create) path on both platforms.
+func TestGroupHandler_AddGroup_Execute(t *testing.T) {
+	tests := []struct {
+		name       string
+		platform   string
+		createCmd  string
+		createArgs string
+	}{
+		{name: "debian addgroup", platform: "debian", createCmd: "/usr/sbin/addgroup", createArgs: "--gid 1001 testgroup"},
+		{name: "rhel groupadd", platform: "rhel", createCmd: "/usr/sbin/groupadd", createArgs: "--gid 1001 testgroup"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalPlatformLike := utils.PlatformLike
+			utils.SetPlatformLike(tt.platform)
+			t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+			mock := common.NewMockCommandExecutor(t)
+			mock.SetResult(tt.createCmd+" "+tt.createArgs, 0, "Group created", nil)
+			handler := newTestGroupHandler(mock) // AbsentGroupLookup -> create path
+
+			args := &common.CommandArgs{Groupname: "testgroup", GID: 1001}
+			exitCode, output, err := handler.Execute(context.Background(), "addgroup", args)
+			if err != nil || exitCode != 0 {
+				t.Fatalf("Execute() exitCode=%d err=%v output=%q", exitCode, err, output)
+			}
+			if !mock.Invoked(tt.createCmd) {
+				t.Errorf("expected %s to be invoked; got %+v", tt.createCmd, mock.GetExecutedCommands())
+			}
+		})
+	}
+}
+
+// TestGroupHandler_AddGroup_Idempotent covers the exists/conflict/lookup-error
+// matrix (issue #344, M8).
+func TestGroupHandler_AddGroup_Idempotent(t *testing.T) {
+	t.Run("exists with matching gid -> skip create, success", func(t *testing.T) {
+		originalPlatformLike := utils.PlatformLike
+		utils.SetPlatformLike("debian")
+		t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+		mock := common.NewMockCommandExecutor(t)
+		handler := newTestGroupHandler(mock)
+		handler.lookupGroup = common.ExistingGroupLookup("1001")
+
+		exitCode, output, err := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "testgroup", GID: 1001})
+		if err != nil || exitCode != 0 {
+			t.Fatalf("Execute() exitCode=%d err=%v output=%q", exitCode, err, output)
+		}
+		if mock.Invoked("/usr/sbin/addgroup") {
+			t.Error("addgroup must be skipped when the group already exists with matching gid")
+		}
+		if !strings.Contains(output, "already exists with GID 1001") {
+			t.Errorf("expected an 'already exists' message, got: %q", output)
+		}
+	})
+
+	t.Run("exists with different gid -> conflict surfaced", func(t *testing.T) {
+		originalPlatformLike := utils.PlatformLike
+		utils.SetPlatformLike("debian")
+		t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+		mock := common.NewMockCommandExecutor(t)
+		handler := newTestGroupHandler(mock)
+		handler.lookupGroup = common.ExistingGroupLookup("9999")
+
+		exitCode, output, _ := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "testgroup", GID: 1001})
+		if exitCode == 0 {
+			t.Fatalf("expected non-zero exit for gid conflict, got 0 (output=%q)", output)
+		}
+		if !strings.Contains(output, "already exists with gid 9999") || !strings.Contains(output, "requested gid 1001") {
+			t.Errorf("conflict message must name both gids, got: %q", output)
+		}
+		if mock.Invoked("/usr/sbin/addgroup") {
+			t.Error("addgroup must not run on a gid conflict")
+		}
+	})
+
+	t.Run("lookup error -> fail loud, no create", func(t *testing.T) {
+		originalPlatformLike := utils.PlatformLike
+		utils.SetPlatformLike("debian")
+		t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+		mock := common.NewMockCommandExecutor(t)
+		handler := newTestGroupHandler(mock)
+		handler.lookupGroup = func(string) (*user.Group, error) {
+			return nil, errors.New("getgrnam_r: I/O error")
+		}
+
+		exitCode, output, _ := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "testgroup", GID: 1001})
+		if exitCode == 0 {
+			t.Fatalf("expected non-zero exit when the lookup itself fails, got 0 (output=%q)", output)
+		}
+		if !strings.Contains(output, "unable to verify") {
+			t.Errorf("expected an 'unable to verify' message, got: %q", output)
+		}
+		if mock.Invoked("/usr/sbin/addgroup") {
+			t.Error("addgroup must not run when existence cannot be verified")
+		}
+	})
+}
+
+// TestGroupHandler_AddGroup_SecondaryNet verifies the create-time reconcile:
+// absent at the gate, create fails, then a re-verify (plus an "already exists"
+// tertiary fallback for NSS-backed groups / gid-in-use collisions the pure-Go
+// resolver cannot see) decides the outcome.
+func TestGroupHandler_AddGroup_SecondaryNet(t *testing.T) {
+	const createCmd = "/usr/sbin/addgroup --gid 1001 testgroup"
+
+	tests := []struct {
+		name         string
+		createOutput string
+		reverifyGID  string
+		reverifyErr  error
+		wantExitZero bool
+		wantMsgPart  string
+	}{
+		{name: "raced local create, matching gid -> success", createOutput: "addgroup: group already exists", reverifyGID: "1001", wantExitZero: true},
+		{name: "raced local create, different gid -> conflict", createOutput: "addgroup: group already exists", reverifyGID: "2002", wantExitZero: false, wantMsgPart: "already exists with gid 2002"},
+		{name: "NSS-backed/gid-collision, absent at reverify but create says already exists -> tolerated", createOutput: "groupadd: GID '1001' already exists", reverifyErr: user.UnknownGroupError("absent"), wantExitZero: true},
+		{name: "genuine failure, absent and not already-exists -> surfaced", createOutput: "addgroup: cannot open /etc/group", reverifyErr: user.UnknownGroupError("absent"), wantExitZero: false, wantMsgPart: "cannot open"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalPlatformLike := utils.PlatformLike
+			utils.SetPlatformLike("debian")
+			t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+			mock := common.NewMockCommandExecutor(t)
+			mock.SetResult(createCmd, 1, tt.createOutput, errors.New("exit status 1"))
+			handler := newTestGroupHandler(mock)
+
+			calls := 0
+			handler.lookupGroup = func(name string) (*user.Group, error) {
+				calls++
+				if calls == 1 {
+					return nil, user.UnknownGroupError("absent") // gate: absent -> create attempted
+				}
+				if tt.reverifyErr != nil {
+					return nil, tt.reverifyErr
+				}
+				return &user.Group{Name: name, Gid: tt.reverifyGID}, nil
+			}
+
+			exitCode, output, _ := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "testgroup", GID: 1001})
+			if !mock.Invoked("/usr/sbin/addgroup") {
+				t.Fatal("addgroup should have been attempted after an absent gate lookup")
+			}
+			if tt.wantExitZero && exitCode != 0 {
+				t.Fatalf("expected idempotent success (exit 0), got %d (output=%q)", exitCode, output)
+			}
+			if !tt.wantExitZero && exitCode == 0 {
+				t.Fatalf("expected non-zero exit, got 0 (output=%q)", output)
+			}
+			if tt.wantMsgPart != "" && !strings.Contains(output, tt.wantMsgPart) {
+				t.Errorf("expected output to contain %q, got: %q", tt.wantMsgPart, output)
+			}
+		})
 	}
 }
