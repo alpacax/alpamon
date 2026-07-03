@@ -219,13 +219,19 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 				cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
 			}
 			cmdArgs = append(cmdArgs, "--gecos", data.Comment, "--disabled-password", data.Username)
-			exitCode, output, err = h.Executor.Run(ctx, "/usr/sbin/adduser", cmdArgs...)
+			createCode, createOut, createErr := h.Executor.Run(ctx, "/usr/sbin/adduser", cmdArgs...)
 			// Secondary net: a raced or LDAP/SSSD-backed account (invisible to
 			// the pure-Go lookup above) may cause a non-zero "already exists".
 			// Re-verify and treat a matching account as idempotent success.
-			exitCode, output, err = common.ReconcileUserCreate(h.lookupUser, data.Username, data.UID, !omitUIDFlag, exitCode, output, err)
+			exitCode, output, err = common.ReconcileUserCreate(h.lookupUser, data.Username, data.UID, !omitUIDFlag, createCode, createOut, createErr)
 			if exitCode != 0 {
 				return exitCode, output, err
+			}
+			// A non-zero create that reconciled to success means the account
+			// already existed (raced or NSS-backed); report it as such rather
+			// than "added".
+			if createCode != 0 {
+				userExists = true
 			}
 		}
 	case "rhel":
@@ -273,10 +279,16 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 				cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
 			}
 			cmdArgs = append(cmdArgs, "--comment", data.Comment, "--create-home", data.Username)
-			exitCode, output, err = h.Executor.Run(ctx, "/usr/sbin/useradd", cmdArgs...)
-			exitCode, output, err = common.ReconcileUserCreate(h.lookupUser, data.Username, data.UID, !omitUIDFlag, exitCode, output, err)
+			createCode, createOut, createErr := h.Executor.Run(ctx, "/usr/sbin/useradd", cmdArgs...)
+			exitCode, output, err = common.ReconcileUserCreate(h.lookupUser, data.Username, data.UID, !omitUIDFlag, createCode, createOut, createErr)
 			if exitCode != 0 {
 				return exitCode, output, err
+			}
+			// A non-zero create that reconciled to success means the account
+			// already existed (raced or NSS-backed); report it as such rather
+			// than "added".
+			if createCode != 0 {
+				userExists = true
 			}
 		}
 	default:

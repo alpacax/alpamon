@@ -867,9 +867,9 @@ func TestUserHandler_AddUser_SecondaryNet(t *testing.T) {
 		wantExitZero bool
 		wantMsgPart  string
 	}{
-		{name: "raced local create, matching uid -> idempotent success", createOutput: "adduser: user already exists", reverifyUID: "1001", wantExitZero: true},
+		{name: "raced local create, matching uid -> idempotent success", createOutput: "adduser: user already exists", reverifyUID: "1001", wantExitZero: true, wantMsgPart: "already exists"},
 		{name: "raced local create, different uid -> conflict surfaced", createOutput: "adduser: user already exists", reverifyUID: "2002", wantExitZero: false, wantMsgPart: "already exists with uid 2002"},
-		{name: "NSS-backed same name, absent at reverify but create names this user -> tolerated", createOutput: "adduser: user 'testuser' already exists", reverifyErr: user.UnknownUserError("absent"), wantExitZero: true},
+		{name: "NSS-backed same name, absent at reverify but create names this user -> tolerated", createOutput: "adduser: user 'testuser' already exists", reverifyErr: user.UnknownUserError("absent"), wantExitZero: true, wantMsgPart: "already exists"},
 		{name: "uid-in-use by a different name, absent at reverify -> surfaced (not masked)", createOutput: "adduser: UID '1001' already exists", reverifyErr: user.UnknownUserError("absent"), wantExitZero: false, wantMsgPart: "UID '1001'"},
 		{name: "genuine failure, absent and not already-exists -> surfaced", createOutput: "adduser: cannot create home directory", reverifyErr: user.UnknownUserError("absent"), wantExitZero: false, wantMsgPart: "cannot create home directory"},
 	}
@@ -958,6 +958,9 @@ func TestUserHandler_AddUser_Rhel_SecondaryNet(t *testing.T) {
 		}
 		if exitCode != 0 {
 			t.Fatalf("expected idempotent success, got %d (output=%q)", exitCode, output)
+		}
+		if !strings.Contains(output, "already exists") {
+			t.Errorf("reconciled-success path should report 'already exists', got: %q", output)
 		}
 	})
 
