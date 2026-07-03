@@ -111,7 +111,7 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 	// A same-name/different-gid group is real drift and is surfaced, not masked.
 	// The classifier is shared with the RHEL primary-group ensure in handleAddUser
 	// so both paths behave identically (A-3 consistency).
-	needCreate, code, out, err := common.ClassifyGroupForCreate(h.lookupGroup, groupname, args.GID)
+	needCreate, code, out, err := common.ClassifyGroupForCreate(h.lookupGroup, groupname, gid)
 	if code != 0 {
 		return code, out, err
 	}
@@ -150,7 +150,7 @@ func (h *GroupHandler) handleAddGroup(ctx context.Context, args *common.CommandA
 	// Secondary net: a raced or NSS-backed group invisible to the pure-Go
 	// lookup above may cause a non-zero "already exists". Re-verify and treat a
 	// matching group as idempotent success.
-	exitCode, output, err = common.ReconcileGroupCreate(h.lookupGroup, groupname, args.GID, createCode, output, err)
+	exitCode, output, err = common.ReconcileGroupCreate(h.lookupGroup, groupname, gid, createCode, output, err)
 	if exitCode != 0 {
 		return exitCode, output, err
 	}

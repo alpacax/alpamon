@@ -124,10 +124,6 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		Str("home", data.HomeDirectory).
 		Msg("Adding user")
 
-	var exitCode int
-	var output string
-	var err error
-
 	// The omit*Flag booleans govern *flag emission* on adduser/useradd,
 	// NOT whether the underlying entity exists. When a flag is omitted:
 	//   - omitUIDFlag  → OS auto-assigns a uid (the user still gets a uid).
@@ -242,15 +238,15 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 				return code, out, gerr
 			}
 			if needCreate {
-				exitCode, output, err = h.Executor.Run(
+				code, out, gerr = h.Executor.Run(
 					ctx,
 					"/usr/sbin/groupadd",
 					"--gid", strconv.FormatUint(data.GID, 10),
 					data.Groupname,
 				)
-				exitCode, output, err = common.ReconcileGroupCreate(h.lookupGroup, data.Groupname, data.GID, exitCode, output, err)
-				if exitCode != 0 {
-					return exitCode, output, err
+				code, out, gerr = common.ReconcileGroupCreate(h.lookupGroup, data.Groupname, data.GID, code, out, gerr)
+				if code != 0 {
+					return code, out, gerr
 				}
 			}
 		}
@@ -317,13 +313,12 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	log.Info().
 		Str("username", data.Username).
 		Bool("alreadyExisted", userExists).
-		Int("exitCode", exitCode).
 		Msg("User provisioning completed")
 
 	if userExists {
-		return exitCode, fmt.Sprintf("User '%s' already exists", data.Username), nil
+		return 0, fmt.Sprintf("User '%s' already exists", data.Username), nil
 	}
-	return exitCode, fmt.Sprintf("User '%s' added successfully", data.Username), nil
+	return 0, fmt.Sprintf("User '%s' added successfully", data.Username), nil
 }
 
 // runUserCreate runs the platform create command (adduser/useradd) and applies
