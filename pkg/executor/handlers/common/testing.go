@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"os/user"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -126,4 +127,38 @@ func (m *MockCommandExecutor) SetResult(command string, exitCode int, output str
 
 func (m *MockCommandExecutor) GetExecutedCommands() []ExecutedCommand {
 	return m.commands
+}
+
+// Invoked reports whether a command whose program name equals program was run.
+func (m *MockCommandExecutor) Invoked(program string) bool {
+	for _, c := range m.commands {
+		if c.Name == program {
+			return true
+		}
+	}
+	return false
+}
+
+// Lookup fakes shared by the user and group handler tests. They let tests drive
+// the idempotency gate (UserExists/GroupExists) without touching the host's
+// /etc/passwd or /etc/group, keeping create-path tests hermetic.
+
+// AbsentUserLookup reports the user absent (UnknownUserError).
+func AbsentUserLookup(string) (*user.User, error) { return nil, user.UnknownUserError("absent") }
+
+// AbsentGroupLookup reports the group absent (UnknownGroupError).
+func AbsentGroupLookup(string) (*user.Group, error) { return nil, user.UnknownGroupError("absent") }
+
+// ExistingUserLookup returns a fake reporting a user present with the given uid.
+func ExistingUserLookup(uid string) UserLookupFunc {
+	return func(name string) (*user.User, error) {
+		return &user.User{Username: name, Uid: uid, Gid: uid, HomeDir: "/home/" + name}, nil
+	}
+}
+
+// ExistingGroupLookup returns a fake reporting a group present with the given gid.
+func ExistingGroupLookup(gid string) GroupLookupFunc {
+	return func(name string) (*user.Group, error) {
+		return &user.Group{Name: name, Gid: gid}, nil
+	}
 }
