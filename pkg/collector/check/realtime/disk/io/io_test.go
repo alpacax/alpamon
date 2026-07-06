@@ -89,9 +89,21 @@ func (suite *DiskIOCheckSuite) TestGetDiskIO() {
 		SetWriteBps(rand.Float64()).Exec(suite.ctx)
 	assert.NoError(suite.T(), err, "Failed to create disk io.")
 
+	staleDevice := "stale-" + uuid.NewString()
+	err = suite.collectCheck.GetClient().DiskIO.Create().
+		SetTimestamp(time.Now().Add(-2 * time.Second)).
+		SetDevice(staleDevice).
+		SetReadBps(rand.Float64()).
+		SetWriteBps(rand.Float64()).Exec(suite.ctx)
+	assert.NoError(suite.T(), err, "Failed to create stale disk io.")
+
 	querySet, err := suite.sendCheck.getDiskIO(suite.ctx)
 	assert.NoError(suite.T(), err, "Failed to get disk io queryset.")
 	assert.NotEmpty(suite.T(), querySet, "Disk IO queryset should not be empty")
+
+	for _, row := range querySet {
+		assert.NotEqual(suite.T(), staleDevice, row.Device, "Disk IO queryset should exclude rows outside the interval window")
+	}
 }
 
 func TestDiskIOCheckSuite(t *testing.T) {

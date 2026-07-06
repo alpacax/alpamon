@@ -66,7 +66,7 @@ func (c *SendCheck) getTraffic(ctx context.Context) ([]base.TrafficQuerySet, err
 	client := c.GetClient()
 	interval := c.GetInterval()
 	now := time.Now()
-	from := now.Add(-1 * interval * time.Second)
+	from := now.Add(-interval)
 
 	var querySet []base.TrafficQuerySet
 	err := client.Traffic.Query().
@@ -82,9 +82,6 @@ func (c *SendCheck) getTraffic(ctx context.Context) ([]base.TrafficQuerySet, err
 			ent.As(ent.Mean(traffic.FieldOutputPps), "avg_output_pps"),
 			ent.As(ent.Mean(traffic.FieldOutputBps), "avg_output_bps"),
 		).Scan(ctx, &querySet)
-	if err != nil {
-		return querySet, err
-	}
 
-	return querySet, nil
+	return querySet, err
 }
