@@ -52,8 +52,7 @@ func TestCommandCleanup_CancelFallsBackToPIDTreeWithoutJobAssignment(t *testing.
 	}
 	pid := uint32(cmd.Process.Pid)
 
-	// Skip afterStart: assigned stays false and handle stays 0, so cancel
-	// must terminate the process solely via the toolhelp-based PID tree walk.
+	// Skip afterStart so cancel has no job/handle and must fall back to the PID tree walk alone.
 	if err := cleanup.cancel(cmd); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}

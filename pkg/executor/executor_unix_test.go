@@ -143,10 +143,7 @@ func waitForExecutorTimeoutChildExit(pid int, timeout time.Duration) bool {
 	return processGone(pid)
 }
 
-// processGone reports whether pid has stopped running. kill(pid, 0) still
-// succeeds for a zombie, and the test isn't sleep's parent so it can't reap
-// it directly; in a CI container with no init process to reap the orphaned
-// grandchild, it stays a zombie indefinitely, so also accept that state.
+// processGone also accepts a zombie as gone: kill(pid, 0) still succeeds for one, and in a CI container with no init process to reap the orphaned grandchild it stays a zombie indefinitely.
 func processGone(pid int) bool {
 	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
 		return true

@@ -48,7 +48,7 @@ func (c *commandCleanup) afterStart(cmd *exec.Cmd) error {
 	return nil
 }
 
-// tryAssignToJob retains the process handle as a stable kill target (a bare PID can be reused later); a failed open/assign isn't fatal since cancel falls back to the PID-based tree walk.
+// tryAssignToJob returning false isn't fatal to the command: cancel falls back to the PID-based tree walk.
 func (c *commandCleanup) tryAssignToJob(pid uint32) bool {
 	handle, err := windows.OpenProcess(
 		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
@@ -236,9 +236,7 @@ func isWindowsProcessGone(err error) bool {
 	return errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_FOUND)
 }
 
-// isWindowsTerminateGone treats ACCESS_DENIED from TerminateProcess as already-exited (Windows' actual
-// signal when the target died first, e.g. to KILL_ON_JOB_CLOSE) — only valid here since we just opened
-// the handle with PROCESS_TERMINATE ourselves, unlike a bare OpenProcess failure elsewhere.
+// isWindowsTerminateGone treats ACCESS_DENIED as already-exited: Windows' actual signal when the target died first (e.g. to KILL_ON_JOB_CLOSE) — safe to assume only because we just opened this handle with PROCESS_TERMINATE ourselves.
 func isWindowsTerminateGone(err error) bool {
 	return isWindowsProcessGone(err) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
 }
