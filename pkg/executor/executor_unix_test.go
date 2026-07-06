@@ -5,8 +5,10 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -133,10 +135,29 @@ func readExecutorTimeoutChildPID(t *testing.T, path string) int {
 func waitForExecutorTimeoutChildExit(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		if processGone(pid) {
 			return true
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	return processGone(pid)
+}
+
+// processGone reports whether pid has stopped running. kill(pid, 0) still
+// succeeds for a zombie, and the test isn't sleep's parent so it can't reap
+// it directly; in a CI container with no init process to reap the orphaned
+// grandchild, it stays a zombie indefinitely, so also accept that state.
+func processGone(pid int) bool {
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return true
+	}
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	idx := strings.LastIndexByte(string(data), ')')
+	return idx != -1 && idx+2 < len(data) && data[idx+2] == 'Z'
 }
