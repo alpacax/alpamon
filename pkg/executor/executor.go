@@ -287,6 +287,10 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 			}
 			return 124, result + "\n\n" + msg, err
 		}
+		if errors.Is(err, exec.ErrWaitDelay) {
+			// Command itself succeeded; a descendant just held stdout/stderr open past WaitDelay, and runCommand already killed the tree.
+			return 0, result, nil
+		}
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode = exitError.ExitCode()
 		} else {
@@ -306,7 +310,7 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
 	cleanup, err := configureProcessTreeCleanup(cmd, pidHook != nil)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to configure process-tree cleanup")
+		log.Error().Err(err).Msg("Failed to configure process tree cleanup")
 		if cw != nil {
 			cw.emit("alpamon: " + err.Error() + "\n")
 		}
@@ -325,6 +329,13 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 		cmd.Stdout = &buf
 		cmd.Stderr = &buf
 	}
+	finish := func(err error) ([]byte, error) {
+		if cw != nil {
+			cw.close()
+			return cw.captured(), err
+		}
+		return buf.Bytes(), err
+	}
 
 	defer func() {
 		if err := cleanup.close(); err != nil {
@@ -342,11 +353,7 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 			log.Debug().Err(cancelErr).Msg("Failed to clean up command process tree after start")
 		}
 		_ = cmd.Wait()
-		if cw != nil {
-			cw.close()
-			return cw.captured(), err
-		}
-		return buf.Bytes(), err
+		return finish(err)
 	}
 	if cw != nil {
 		cw.start(chunkFlushInterval)
@@ -360,11 +367,7 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 			log.Debug().Err(cancelErr).Msg("Failed to clean up command process tree after WaitDelay")
 		}
 	}
-	if cw != nil {
-		cw.close()
-		return cw.captured(), err
-	}
-	return buf.Bytes(), err
+	return finish(err)
 }
 
 func invokePIDHook(pidHook func(pid int), pid int) {

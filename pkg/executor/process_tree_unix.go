@@ -9,6 +9,7 @@ import (
 	"syscall"
 )
 
+// commandCleanup's afterStart/cancel/close method set is consumed by runCommand (executor.go); process_tree_windows.go must mirror it.
 type commandCleanup struct{}
 
 func configureProcessTreeCleanup(cmd *exec.Cmd, sessionLeader bool) (commandCleanup, error) {
