@@ -93,9 +93,23 @@ func (suite *NetCheckSuite) TestGetTraffic() {
 		SetOutputBps(rand.Float64()).Exec(suite.ctx)
 	assert.NoError(suite.T(), err, "Failed to create traffic.")
 
+	staleName := "stale-" + uuid.NewString()
+	err = suite.sendCheck.GetClient().Traffic.Create().
+		SetTimestamp(time.Now().Add(-2 * time.Second)).
+		SetName(staleName).
+		SetInputPps(rand.Float64()).
+		SetInputBps(rand.Float64()).
+		SetOutputPps(rand.Float64()).
+		SetOutputBps(rand.Float64()).Exec(suite.ctx)
+	assert.NoError(suite.T(), err, "Failed to create stale traffic.")
+
 	querySet, err := suite.sendCheck.getTraffic(suite.ctx)
 	assert.NoError(suite.T(), err, "Failed to get traffic queryset.")
 	assert.NotEmpty(suite.T(), querySet, "Traffic queryset should not be empty")
+
+	for _, row := range querySet {
+		assert.NotEqual(suite.T(), staleName, row.Name, "Traffic queryset should exclude rows outside the interval window")
+	}
 }
 
 func TestNetCheckSuite(t *testing.T) {
