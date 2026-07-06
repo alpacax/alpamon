@@ -92,7 +92,10 @@ func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
 	}
 	if handle != 0 {
 		// Unlike the PID-based terminate below, this handle can't have been reused by an unrelated process.
-		if err := windows.TerminateProcess(handle, 1); err != nil && !isWindowsProcessGone(err) && firstErr == nil {
+		// The job kill above may have already terminated it: Windows then reports TerminateProcess on the
+		// stale handle as ERROR_ACCESS_DENIED rather than "already exited", so treat that as gone too.
+		if err := windows.TerminateProcess(handle, 1); err != nil && !isWindowsProcessGone(err) &&
+			!errors.Is(err, windows.ERROR_ACCESS_DENIED) && firstErr == nil {
 			firstErr = err
 		}
 		if err := windows.CloseHandle(handle); err != nil && firstErr == nil {
