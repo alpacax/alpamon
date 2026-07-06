@@ -74,9 +74,6 @@ func (c *SendCheck) getDiskIO(ctx context.Context) ([]base.DiskIOQuerySet, error
 			ent.As(ent.Mean(diskio.FieldReadBps), "avg_read_bps"),
 			ent.As(ent.Mean(diskio.FieldWriteBps), "avg_write_bps"),
 		).Scan(ctx, &querySet)
-	if err != nil {
-		return querySet, err
-	}
 
-	return querySet, nil
+	return querySet, err
 }

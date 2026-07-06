@@ -82,9 +82,6 @@ func (c *SendCheck) getTraffic(ctx context.Context) ([]base.TrafficQuerySet, err
 			ent.As(ent.Mean(traffic.FieldOutputPps), "avg_output_pps"),
 			ent.As(ent.Mean(traffic.FieldOutputBps), "avg_output_bps"),
 		).Scan(ctx, &querySet)
-	if err != nil {
-		return querySet, err
-	}
 
-	return querySet, nil
+	return querySet, err
 }
