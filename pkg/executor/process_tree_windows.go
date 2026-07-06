@@ -16,6 +16,7 @@ import (
 type commandCleanup struct {
 	mu       sync.Mutex
 	job      windows.Handle
+	handle   windows.Handle // retained handle to the root process; stable identity across PID reuse
 	pid      uint32
 	assigned bool
 	canceled bool
@@ -38,30 +39,28 @@ func (c *commandCleanup) afterStart(cmd *exec.Cmd) error {
 
 	c.mu.Lock()
 	c.pid = pid
-	c.mu.Unlock()
-
-	handle, err := windows.OpenProcess(
-		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
-		false,
-		pid,
-	)
-	if err != nil {
-		return err
-	}
-	defer windows.CloseHandle(handle)
-
-	if err := windows.AssignProcessToJobObject(c.job, handle); err != nil {
-		return err
-	}
-
-	c.mu.Lock()
-	c.assigned = true
+	c.assigned = c.tryAssignToJob(pid)
 	canceled := c.canceled
 	c.mu.Unlock()
 	if canceled {
 		return c.cancel(cmd)
 	}
 	return nil
+}
+
+// tryAssignToJob retains the process handle as a stable kill target (a bare PID can be reused later); a failed open/assign isn't fatal since cancel falls back to the PID-based tree walk.
+func (c *commandCleanup) tryAssignToJob(pid uint32) bool {
+	handle, err := windows.OpenProcess(
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
+		false,
+		pid,
+	)
+	if err != nil {
+		return false
+	}
+	c.handle = handle
+
+	return windows.AssignProcessToJobObject(c.job, handle) == nil
 }
 
 func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
@@ -79,6 +78,7 @@ func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
 	if c.assigned {
 		job = c.takeJobHandleLocked()
 	}
+	handle := c.takeProcessHandleLocked()
 	c.mu.Unlock()
 
 	var firstErr error
@@ -87,6 +87,15 @@ func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
 			firstErr = err
 		}
 		if err := windows.CloseHandle(job); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if handle != 0 {
+		// Unlike the PID-based terminate below, this handle can't have been reused by an unrelated process.
+		if err := windows.TerminateProcess(handle, 1); err != nil && !isWindowsProcessGone(err) && firstErr == nil {
+			firstErr = err
+		}
+		if err := windows.CloseHandle(handle); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -101,11 +110,28 @@ func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
 func (c *commandCleanup) close() error {
 	c.mu.Lock()
 	job := c.takeJobHandleLocked()
+	handle := c.takeProcessHandleLocked()
 	c.mu.Unlock()
-	if job == 0 {
-		return nil
+
+	var firstErr error
+	if job != 0 {
+		firstErr = windows.CloseHandle(job)
 	}
-	return windows.CloseHandle(job)
+	if handle != 0 {
+		if err := windows.CloseHandle(handle); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (c *commandCleanup) takeProcessHandleLocked() windows.Handle {
+	if c.handle == 0 {
+		return 0
+	}
+	handle := c.handle
+	c.handle = 0
+	return handle
 }
 
 func (c *commandCleanup) takeJobHandleLocked() windows.Handle {
