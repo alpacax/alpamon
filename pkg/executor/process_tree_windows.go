@@ -92,10 +92,7 @@ func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
 	}
 	if handle != 0 {
 		// Unlike the PID-based terminate below, this handle can't have been reused by an unrelated process.
-		// The job kill above may have already terminated it: Windows then reports TerminateProcess on the
-		// stale handle as ERROR_ACCESS_DENIED rather than "already exited", so treat that as gone too.
-		if err := windows.TerminateProcess(handle, 1); err != nil && !isWindowsProcessGone(err) &&
-			!errors.Is(err, windows.ERROR_ACCESS_DENIED) && firstErr == nil {
+		if err := windows.TerminateProcess(handle, 1); err != nil && !isWindowsTerminateGone(err) && firstErr == nil {
 			firstErr = err
 		}
 		if err := windows.CloseHandle(handle); err != nil && firstErr == nil {
@@ -229,7 +226,7 @@ func terminateWindowsProcess(pid uint32) error {
 		return err
 	}
 	defer windows.CloseHandle(handle)
-	if err := windows.TerminateProcess(handle, 1); err != nil && !isWindowsProcessGone(err) {
+	if err := windows.TerminateProcess(handle, 1); err != nil && !isWindowsTerminateGone(err) {
 		return err
 	}
 	return nil
@@ -237,4 +234,11 @@ func terminateWindowsProcess(pid uint32) error {
 
 func isWindowsProcessGone(err error) bool {
 	return errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_FOUND)
+}
+
+// isWindowsTerminateGone treats ACCESS_DENIED from TerminateProcess as already-exited (Windows' actual
+// signal when the target died first, e.g. to KILL_ON_JOB_CLOSE) — only valid here since we just opened
+// the handle with PROCESS_TERMINATE ourselves, unlike a bare OpenProcess failure elsewhere.
+func isWindowsTerminateGone(err error) bool {
+	return isWindowsProcessGone(err) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
 }
