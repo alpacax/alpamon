@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -19,6 +20,8 @@ const (
 	chunkSizeThreshold = 4 * 1024
 	// chunkFlushInterval caps buffering so small writes coalesce instead of one POST per line.
 	chunkFlushInterval = 100 * time.Millisecond
+	// commandWaitDelay bounds cancellation and inherited-pipe waits.
+	commandWaitDelay = 2 * time.Second
 	// captureCap bounds the audit copy teed into the fin payload; output past it is truncated in the middle.
 	captureCap     = utils.AuditOutputCap
 	captureHeadCap = captureCap / 2
@@ -243,15 +246,6 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 		}
 	}
 
-	// When a PID hook is registered (command exec / deploy shell), start the
-	// command in its own session so sudo invoked inside it resolves back to this
-	// Command by session ID—even if the shell execs sudo and they share a pid
-	// (see auth_manager session resolution). Gated on the hook to keep the blast
-	// radius to the sudo-tracked path.
-	if opts.PIDHook != nil {
-		enableSessionLeader(cmd)
-	}
-
 	// Set the environment explicitly so the child never inherits Alpamon's
 	// own service environment (e.g. USER=root, systemd-injected variables).
 	for key, value := range env {
@@ -308,10 +302,19 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	return exitCode, result, err
 }
 
-// runCommand uses Start/Wait for streaming or pid reporting (returning the capped copy); otherwise CombinedOutput.
+// runCommand uses Start/Wait so platform cleanup can attach process groups or jobs.
 func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
-	if cw == nil && pidHook == nil {
-		return cmd.CombinedOutput()
+	cleanup, err := configureProcessTreeCleanup(cmd, pidHook != nil)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to configure process-tree cleanup")
+		if cw != nil {
+			cw.emit("alpamon: " + err.Error() + "\n")
+		}
+		return nil, err
+	}
+	cmd.WaitDelay = commandWaitDelay
+	cmd.Cancel = func() error {
+		return cleanup.cancel(cmd)
 	}
 
 	var buf bytes.Buffer
@@ -323,9 +326,25 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 		cmd.Stderr = &buf
 	}
 
+	defer func() {
+		if err := cleanup.close(); err != nil {
+			log.Debug().Err(err).Msg("Failed to close command cleanup handle")
+		}
+	}()
 	if err := cmd.Start(); err != nil {
 		if cw != nil {
 			return nil, err
+		}
+		return buf.Bytes(), err
+	}
+	if err := cleanup.afterStart(cmd); err != nil {
+		if cancelErr := cleanup.cancel(cmd); cancelErr != nil {
+			log.Debug().Err(cancelErr).Msg("Failed to clean up command process tree after start")
+		}
+		_ = cmd.Wait()
+		if cw != nil {
+			cw.close()
+			return cw.captured(), err
 		}
 		return buf.Bytes(), err
 	}
@@ -335,7 +354,12 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 	if cmd.Process != nil {
 		invokePIDHook(pidHook, cmd.Process.Pid)
 	}
-	err := cmd.Wait()
+	err = cmd.Wait()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		if cancelErr := cleanup.cancel(cmd); cancelErr != nil {
+			log.Debug().Err(cancelErr).Msg("Failed to clean up command process tree after WaitDelay")
+		}
+	}
 	if cw != nil {
 		cw.close()
 		return cw.captured(), err
