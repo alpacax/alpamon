@@ -19,6 +19,11 @@ type UserHandler struct {
 	*common.BaseHandler
 	groupService services.GroupService
 	syncManager  common.SystemInfoManager
+	// lookupUser / lookupGroup verify existence before creating (idempotency
+	// gate). They default to os/user-backed implementations and are overridden
+	// in tests. See pkg/executor/handlers/common/lookup.go.
+	lookupUser  common.UserLookupFunc
+	lookupGroup common.GroupLookupFunc
 }
 
 // NewUserHandler creates a new user handler
@@ -35,6 +40,8 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 		),
 		groupService: groupService,
 		syncManager:  syncManager,
+		lookupUser:   common.DefaultUserLookup,
+		lookupGroup:  common.DefaultGroupLookup,
 	}
 	return h
 }
@@ -117,10 +124,6 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		Str("home", data.HomeDirectory).
 		Msg("Adding user")
 
-	var exitCode int
-	var output string
-	var err error
-
 	// The omit*Flag booleans govern *flag emission* on adduser/useradd,
 	// NOT whether the underlying entity exists. When a flag is omitted:
 	//   - omitUIDFlag  → OS auto-assigns a uid (the user still gets a uid).
@@ -166,75 +169,129 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		}
 	}
 
+	// Idempotency gate (M8): verify by lookup whether the user already exists
+	// before attempting creation, so re-provisioning an already-present account
+	// is a no-op instead of a hard adduser/useradd "already exists" failure
+	// (the #344 root cause). The lookup is the PRIMARY decision; a create-time
+	// secondary net (below) covers TOCTOU races and NSS-backed names invisible
+	// to the CGO_ENABLED=0 pure-Go resolver.
+	//
+	// A same-name/different-uid account is real drift and is surfaced as a
+	// failure, never masked. When the uid is omitted (service account, OS
+	// auto-assigns), name presence alone marks the account as provisioned.
+	existing, userExists, lookupErr := common.UserExists(h.lookupUser, data.Username)
+	if lookupErr != nil {
+		// We cannot confirm the current state; do not blind-create over a
+		// possibly-shadowed entry. Fail loud so the drift is visible.
+		return 1, fmt.Sprintf("unable to verify whether user %q exists: %v", data.Username, lookupErr), lookupErr
+	}
+	if userExists && !omitUIDFlag {
+		existingUID, perr := strconv.ParseUint(existing.Uid, 10, 64)
+		if perr != nil {
+			return 1, fmt.Sprintf("user %q exists but its uid %q is not a valid number; refusing to modify an existing account", data.Username, existing.Uid), nil
+		}
+		if existingUID != data.UID {
+			return 1, common.UserUIDConflictMessage(data.Username, existingUID, data.UID), nil
+		}
+	}
+
 	switch utils.PlatformLike {
 	case "debian":
-		cmdArgs := []string{}
-		if !omitHomeFlag {
-			cmdArgs = append(cmdArgs, "--home", data.HomeDirectory)
-		}
-		cmdArgs = append(cmdArgs, "--shell", data.Shell)
-		if !omitUIDFlag {
-			cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
-		}
-		switch {
-		case omitGIDFlag && data.Groupname != "":
-			// Service-account path: set primary group by name so the user
-			// joins `Groupname` regardless of USERGROUPS settings.
-			cmdArgs = append(cmdArgs, "--ingroup", data.Groupname)
-		case !omitGIDFlag:
-			cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
-		}
-		cmdArgs = append(cmdArgs, "--gecos", data.Comment, "--disabled-password", data.Username)
-		exitCode, output, err = h.Executor.Run(ctx, "/usr/sbin/adduser", cmdArgs...)
-		if exitCode != 0 {
-			return exitCode, output, err
+		if !userExists {
+			cmdArgs := []string{}
+			if !omitHomeFlag {
+				cmdArgs = append(cmdArgs, "--home", data.HomeDirectory)
+			}
+			cmdArgs = append(cmdArgs, "--shell", data.Shell)
+			if !omitUIDFlag {
+				cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
+			}
+			switch {
+			case omitGIDFlag && data.Groupname != "":
+				// Service-account path: set primary group by name so the user
+				// joins `Groupname` regardless of USERGROUPS settings.
+				cmdArgs = append(cmdArgs, "--ingroup", data.Groupname)
+			case !omitGIDFlag:
+				cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
+			}
+			cmdArgs = append(cmdArgs, "--gecos", data.Comment, "--disabled-password", data.Username)
+			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/adduser", cmdArgs, data, !omitUIDFlag)
+			if code != 0 {
+				return code, out, cerr
+			}
+			if existed {
+				userExists = true
+			}
 		}
 	case "rhel":
-		// Create primary group with the explicit GID for IAM User payloads.
-		// Service-account payloads (omitGIDFlag=true) already ran `groupadd -f`
-		// above and will use `--gid <Groupname>` below.
+		// Ensure the primary group exists with the explicit GID for IAM User
+		// payloads. Service-account payloads (omitGIDFlag=true) already ran
+		// `groupadd -f` above and will use `--gid <Groupname>` below.
+		//
+		// This runs whether or not the user exists—it is an idempotent
+		// "ensure", gated by the same lookup rule as standalone addgroup (A-3
+		// consistency): a matching gid skips creation, a different gid surfaces
+		// a conflict, and creation keeps a lookup-reverify secondary net.
 		if !omitGIDFlag {
-			exitCode, output, err = h.Executor.Run(
-				ctx,
-				"/usr/sbin/groupadd",
-				"--gid", strconv.FormatUint(data.GID, 10),
-				data.Groupname,
-			)
-			// Ignore if group already exists
-			if exitCode != 0 && !strings.Contains(output, "already exists") {
-				return exitCode, output, err
+			needCreate, code, out, gerr := common.ClassifyGroupForCreate(h.lookupGroup, data.Groupname, data.GID)
+			if code != 0 {
+				return code, out, gerr
+			}
+			if needCreate {
+				code, out, gerr = h.Executor.Run(
+					ctx,
+					"/usr/sbin/groupadd",
+					"--gid", strconv.FormatUint(data.GID, 10),
+					data.Groupname,
+				)
+				code, out, gerr = common.ReconcileGroupCreate(h.lookupGroup, data.Groupname, data.GID, code, out, gerr)
+				if code != 0 {
+					return code, out, gerr
+				}
 			}
 		}
 
-		cmdArgs := []string{}
-		if !omitHomeFlag {
-			cmdArgs = append(cmdArgs, "--home-dir", data.HomeDirectory)
-		}
-		cmdArgs = append(cmdArgs, "--shell", data.Shell)
-		if !omitUIDFlag {
-			cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
-		}
-		switch {
-		case omitGIDFlag && data.Groupname != "":
-			// Service-account path: useradd accepts a group name for --gid.
-			cmdArgs = append(cmdArgs, "--gid", data.Groupname)
-		case !omitGIDFlag:
-			cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
-		}
-		cmdArgs = append(cmdArgs, "--comment", data.Comment, "--create-home", data.Username)
-		exitCode, output, err = h.Executor.Run(ctx, "/usr/sbin/useradd", cmdArgs...)
-		if exitCode != 0 {
-			return exitCode, output, err
+		if !userExists {
+			cmdArgs := []string{}
+			if !omitHomeFlag {
+				cmdArgs = append(cmdArgs, "--home-dir", data.HomeDirectory)
+			}
+			cmdArgs = append(cmdArgs, "--shell", data.Shell)
+			if !omitUIDFlag {
+				cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
+			}
+			switch {
+			case omitGIDFlag && data.Groupname != "":
+				// Service-account path: useradd accepts a group name for --gid.
+				cmdArgs = append(cmdArgs, "--gid", data.Groupname)
+			case !omitGIDFlag:
+				cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
+			}
+			cmdArgs = append(cmdArgs, "--comment", data.Comment, "--create-home", data.Username)
+			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/useradd", cmdArgs, data, !omitUIDFlag)
+			if code != 0 {
+				return code, out, cerr
+			}
+			if existed {
+				userExists = true
+			}
 		}
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported for user management", utils.PlatformLike), nil
 	}
 
 	// Set home directory permissions if specified.
+	//
+	// Only for a freshly-created account (!userExists). We do not chmod an
+	// existing user's home: it matches the "don't modify an existing account"
+	// contract (we also don't usermod -g), and it avoids a root chmod that would
+	// follow a symlink an existing—possibly hostile—local user could plant at
+	// their home path.
+	//
 	// Skip when HomeDirectory was omitted (OS default path), since the caller
 	// didn't specify a target and we would otherwise chmod an empty path.
 	// codeql[go/path-injection]: Intentional - Admin-specified home directory permission
-	if data.HomeDirectory != "" && data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
+	if !userExists && data.HomeDirectory != "" && data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
 		mode, err := strconv.ParseUint(data.HomeDirectoryPermission, 8, 32)
 		if err == nil {
 			_ = os.Chmod(data.HomeDirectory, os.FileMode(mode)) // lgtm[go/path-injection]
@@ -245,16 +302,45 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	if len(data.Groups) > 0 && h.groupService != nil {
 		if err := h.groupService.AddUserToGroups(ctx, data.Username, data.Groups); err != nil {
 			log.Warn().Err(err).Msg("Failed to add user to additional groups")
-			return 0, fmt.Sprintf("User '%s' created but failed to add to groups: %v", data.Username, err), nil
+			state := "created"
+			if userExists {
+				state = "already exists"
+			}
+			return 0, fmt.Sprintf("User '%s' %s but failed to add to groups: %v", data.Username, state, err), nil
 		}
 	}
 
 	log.Info().
 		Str("username", data.Username).
-		Int("exitCode", exitCode).
-		Msg("User added successfully")
+		Bool("alreadyExisted", userExists).
+		Msg("User provisioning completed")
 
-	return exitCode, fmt.Sprintf("User '%s' added successfully", data.Username), nil
+	if userExists {
+		return 0, fmt.Sprintf("User '%s' already exists", data.Username), nil
+	}
+	return 0, fmt.Sprintf("User '%s' added successfully", data.Username), nil
+}
+
+// runUserCreate runs the platform create command (adduser/useradd) and applies
+// the create-time reconcile net, so both platform branches share one copy of
+// the "create then reconcile" contract. It returns:
+//   - existed=true when a non-zero create was reconciled to idempotent success
+//     (the account already existed: a raced or NSS/LDAP-backed name); the caller
+//     should treat the user as pre-existing.
+//   - code!=0 when the create genuinely failed—the caller must return
+//     (code, out, err) unchanged.
+//
+// On success (code==0) the caller continues to the idempotent ensure steps.
+func (h *UserHandler) runUserCreate(ctx context.Context, tool string, cmdArgs []string, data UserData, uidRequested bool) (existed bool, code int, out string, err error) {
+	createCode, createOut, createErr := h.Executor.Run(ctx, tool, cmdArgs...)
+	// Secondary net: a raced or LDAP/SSSD-backed account (invisible to the
+	// pure-Go lookup) may cause a non-zero "already exists". Re-verify and treat
+	// a matching account as idempotent success.
+	code, out, err = common.ReconcileUserCreate(h.lookupUser, data.Username, data.UID, uidRequested, createCode, createOut, createErr)
+	if code != 0 {
+		return false, code, out, err
+	}
+	return createCode != 0, 0, out, err
 }
 
 // backupHomeDirectory backs up the user's home directory before deletion
