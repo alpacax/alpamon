@@ -54,5 +54,11 @@ jobs:
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
+      # Report findings without gating merges: a newly published CVE in a
+      # transitive dep or stdlib would otherwise turn unrelated PRs red.
+      # Dependabot handles proactive dependency bumps; this job is the
+      # stdlib/reachability signal, surfaced in the step log, not a gate.
+      # Setup failures above still fail the job (only this step is soft).
       - name: Run govulncheck
         run: govulncheck ./...
+        continue-on-error: true
