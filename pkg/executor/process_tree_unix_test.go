@@ -43,7 +43,7 @@ func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 			t.Error("Setsid: got false, want true")
 		}
 		if cmd.SysProcAttr.Setpgid {
-			t.Error("Setpgid: got true, want false (setsid already yields PGID == PID)")
+			t.Error("Setpgid: got true, want false (setpgid on a setsid session leader is EPERM, fails Start)")
 		}
 	})
 

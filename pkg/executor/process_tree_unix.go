@@ -9,7 +9,8 @@ import (
 	"syscall"
 )
 
-// commandCleanup's afterStart/cancel/close method set is consumed by runCommand (executor.go); process_tree_windows.go must mirror it.
+// commandCleanup mirrors the type in process_tree_windows.go; runCommand (executor.go) consumes
+// the same afterStart/cancel/close method set, unenforced across build tags, so keep the two in sync.
 type commandCleanup struct{}
 
 func configureProcessTreeCleanup(cmd *exec.Cmd, sessionLeader bool) (commandCleanup, error) {
@@ -18,7 +19,8 @@ func configureProcessTreeCleanup(cmd *exec.Cmd, sessionLeader bool) (commandClea
 	}
 
 	if sessionLeader {
-		// PID-hooked commands stay session leaders for PAM/sudo lookup; setsid also gives PGID == PID for group kill.
+		// PID-hooked commands stay session leaders for PAM/sudo lookup; setsid already gives PGID == PID for group kill.
+		// Setpgid must stay false: setpgid on a setsid session leader is EPERM, which would fail cmd.Start().
 		cmd.SysProcAttr.Setsid = true
 		cmd.SysProcAttr.Setpgid = false
 	} else if !cmd.SysProcAttr.Setsid {
@@ -28,7 +30,7 @@ func configureProcessTreeCleanup(cmd *exec.Cmd, sessionLeader bool) (commandClea
 	return commandCleanup{}, nil
 }
 
-func (commandCleanup) afterStart(cmd *exec.Cmd) error {
+func (commandCleanup) afterStart(_ *exec.Cmd) error {
 	return nil
 }
 
@@ -36,7 +38,12 @@ func (commandCleanup) cancel(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return os.ErrProcessDone
 	}
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+	pid := cmd.Process.Pid
+	// Group-kill only when the child leads its own group (PGID == PID); else -pid could hit an unrelated group.
+	if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
+		pid = -pid
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
