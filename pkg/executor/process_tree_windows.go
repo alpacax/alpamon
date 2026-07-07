@@ -13,6 +13,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// commandCleanup mirrors the type in process_tree_unix.go; runCommand (executor.go) consumes
+// the same afterStart/cancel/close method set, unenforced across build tags, so keep the two in sync.
 type commandCleanup struct {
 	mu       sync.Mutex
 	job      windows.Handle
@@ -35,24 +37,27 @@ func (c *commandCleanup) afterStart(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return os.ErrProcessDone
 	}
-	pid := uint32(cmd.Process.Pid)
-
-	c.mu.Lock()
-	c.pid = pid
-	c.assigned = c.tryAssignToJob(pid)
-	canceled := c.canceled
-	c.mu.Unlock()
-	if canceled {
+	// A cancel between Start and here saw no job/handle yet, so its kill missed; redo it now that we hold them.
+	if canceled := c.assignForStart(uint32(cmd.Process.Pid)); canceled {
 		return c.cancel(cmd)
 	}
 	return nil
+}
+
+// Locked only here (defer-released) so afterStart can re-enter cancel without deadlocking c.mu, and a tryAssignToJob panic can't strand the lock.
+func (c *commandCleanup) assignForStart(pid uint32) (canceled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pid = pid
+	c.assigned = c.tryAssignToJob(pid)
+	return c.canceled
 }
 
 // tryAssignToJob returning false isn't fatal to the command: cancel falls back to the PID-based tree walk.
 func (c *commandCleanup) tryAssignToJob(pid uint32) bool {
 	handle, err := windows.OpenProcess(
 		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
-		false,
+		false, // bInheritHandles: this cleanup handle must not leak into child processes
 		pid,
 	)
 	if err != nil {
@@ -68,18 +73,7 @@ func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
 	if cmd.Process != nil {
 		pid = uint32(cmd.Process.Pid)
 	}
-
-	c.mu.Lock()
-	c.canceled = true
-	if pid == 0 {
-		pid = c.pid
-	}
-	var job windows.Handle
-	if c.assigned {
-		job = c.takeJobHandleLocked()
-	}
-	handle := c.takeProcessHandleLocked()
-	c.mu.Unlock()
+	pid, job, handle := c.takeForCancel(pid)
 
 	var firstErr error
 	if job != 0 {
@@ -107,11 +101,23 @@ func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
 	return firstErr
 }
 
-func (c *commandCleanup) close() error {
+// Confines the locked field work so cancel's slow Win32 kills run lock-free; defer-released so a panic can't strand c.mu.
+func (c *commandCleanup) takeForCancel(pid uint32) (uint32, windows.Handle, windows.Handle) {
 	c.mu.Lock()
-	job := c.takeJobHandleLocked()
-	handle := c.takeProcessHandleLocked()
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	c.canceled = true
+	if pid == 0 {
+		pid = c.pid
+	}
+	var job windows.Handle
+	if c.assigned {
+		job = c.takeJobHandleLocked()
+	}
+	return pid, job, c.takeProcessHandleLocked()
+}
+
+func (c *commandCleanup) close() error {
+	job, handle := c.takeForClose()
 
 	var firstErr error
 	if job != 0 {
@@ -123,6 +129,13 @@ func (c *commandCleanup) close() error {
 		}
 	}
 	return firstErr
+}
+
+// Like takeForCancel: grab the handles under the lock so close's CloseHandle calls run lock-free.
+func (c *commandCleanup) takeForClose() (windows.Handle, windows.Handle) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.takeJobHandleLocked(), c.takeProcessHandleLocked()
 }
 
 func (c *commandCleanup) takeProcessHandleLocked() windows.Handle {
