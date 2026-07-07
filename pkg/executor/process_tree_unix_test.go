@@ -174,6 +174,44 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 	}
 }
 
+// A non-zero exit while a backgrounded descendant holds the inherited pipe must still reap it: no
+// timeout means no Cancel, and Wait returns ExitError not ErrWaitDelay, so only the unconditional cancel covers it.
+func TestExecutor_CleansDescendantWhenCommandExitsNonZero(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	script := "sleep 600 & echo $! > \"$1\"; exit 3"
+
+	type result struct {
+		exitCode int
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		exitCode, _, err := NewExecutor().Execute(context.Background(), CommandOptions{
+			Args: []string{"/bin/sh", "-c", script, "sh", pidFile},
+		})
+		done <- result{exitCode: exitCode, err: err}
+	}()
+
+	var res result
+	select {
+	case res = <-done:
+	case <-time.After(10 * time.Second):
+		pid := readExecutorTimeoutChildPID(t, pidFile)
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("executor did not return; leaked child pid %d", pid)
+	}
+
+	if res.exitCode != 3 {
+		t.Fatalf("exit code: got %d, want 3; err=%v", res.exitCode, res.err)
+	}
+
+	pid := readExecutorTimeoutChildPID(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if !waitForExecutorTimeoutChildExit(pid, 3*time.Second) {
+		t.Fatalf("descendant %d survived after a non-zero command exit", pid)
+	}
+}
+
 func readExecutorTimeoutChildPID(t *testing.T, path string) int {
 	t.Helper()
 

@@ -13,8 +13,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// commandCleanup mirrors the type in process_tree_unix.go; runCommand (executor.go) consumes
-// the same afterStart/cancel/close method set, unenforced across build tags, so keep the two in sync.
+// commandCleanup mirrors the type in process_tree_unix.go; the commandCleaner assertion below pins
+// the shared afterStart/cancel/close method set across build tags. State differs per platform.
 type commandCleanup struct {
 	mu       sync.Mutex
 	job      windows.Handle
@@ -24,6 +24,8 @@ type commandCleanup struct {
 	canceled bool
 	closed   bool
 }
+
+var _ commandCleaner = (*commandCleanup)(nil)
 
 func configureProcessTreeCleanup(_ *exec.Cmd, _ bool) (*commandCleanup, error) {
 	job, err := windows.CreateJobObject(nil, nil)

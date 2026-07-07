@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -341,15 +342,18 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 		}
 	}()
 	if err := cmd.Start(); err != nil {
-		if cw != nil {
-			return nil, err
-		}
-		return buf.Bytes(), err
+		return finish(err)
 	}
-	if err := cleanup.afterStart(cmd); err != nil {
-		if cancelErr := cleanup.cancel(cmd); cancelErr != nil {
-			log.Debug().Err(cancelErr).Msg("Failed to clean up command process tree after start")
+	// Kill the whole tree on every exit path: a non-zero exit that leaves a descendant holding the pipe
+	// fires neither Cancel (timeout-only) nor the ErrWaitDelay branch, so it would otherwise leak. cancel is idempotent.
+	defer func() {
+		if err := cleanup.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			log.Debug().Err(err).Msg("Failed to clean up command process tree")
 		}
+	}()
+	if err := cleanup.afterStart(cmd); err != nil {
+		// Windows afterStart may have already canceled on a Start/cancel race; the deferred cancel
+		// re-runs harmlessly (idempotent). Unix afterStart never errors here.
 		_ = cmd.Wait()
 		return finish(err)
 	}
@@ -360,11 +364,6 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 		invokePIDHook(pidHook, cmd.Process.Pid)
 	}
 	err = cmd.Wait()
-	if errors.Is(err, exec.ErrWaitDelay) {
-		if cancelErr := cleanup.cancel(cmd); cancelErr != nil {
-			log.Debug().Err(cancelErr).Msg("Failed to clean up command process tree after WaitDelay")
-		}
-	}
 	return finish(err)
 }
 
