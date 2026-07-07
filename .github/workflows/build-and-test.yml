@@ -6,7 +6,7 @@ on:
       - "docs/**"
 
   pull_request:
-    types: [opened, ready_for_review, synchronize]
+    types: [opened, reopened, ready_for_review, synchronize]
 
   workflow_call:
 
@@ -24,15 +24,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Set up Go and generate ent code
+        uses: ./.github/actions/setup-go-generate
         with:
           go-version: ${{ env.GO_VERSION }}
-
-      # Generate the ent package first: the tree imports gitignored ent
-      # subpackages, so go mod tidy fails to resolve them otherwise.
-      - name: Generate go code
-        run: go generate ./pkg/db/ent
 
       - name: Verify go.mod and go.sum are tidy
         run: |
@@ -140,13 +135,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Set up Go and generate ent code
+        uses: ./.github/actions/setup-go-generate
         with:
           go-version: ${{ env.GO_VERSION }}
-
-      - name: Generate go code
-        run: go generate ./pkg/db/ent
 
       - name: Build
         run: go build -v .
@@ -162,13 +154,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Set up Go and generate ent code
+        uses: ./.github/actions/setup-go-generate
         with:
           go-version: ${{ env.GO_VERSION }}
-
-      - name: Generate go code
-        run: go generate ./pkg/db/ent
 
       - name: Build
         run: go build -v .
@@ -253,13 +242,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Set up Go and generate ent code
+        uses: ./.github/actions/setup-go-generate
         with:
           go-version: ${{ env.GO_VERSION }}
-
-      - name: Generate go code
-        run: go generate ./pkg/db/ent
 
       - name: Build
         run: go build -v .

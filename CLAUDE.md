@@ -42,7 +42,12 @@ atlas migrate diff <migration_name> \
 # Build the main binary
 go build -v ./cmd/alpamon
 
-# Install dependencies
+# Install dependencies. Drop stale generated ent output first: it's
+# gitignored, so `go generate` never deletes leftovers (e.g. a `migrate/`
+# directory from before entc.go disabled gen.Migrate). A stale tree makes
+# `go mod tidy` add Atlas deps locally that a clean CI checkout removes,
+# failing the verify-tidy job ("tidy on my machine, red in CI").
+git clean -fdx pkg/db/ent && go generate ./pkg/db/ent
 go mod tidy
 ```
 
