@@ -1,0 +1,20 @@
+name: Set up Go and generate ent code
+description: >-
+  Install the Go toolchain and generate the gitignored ent package. The tree
+  imports ent subpackages that aren't checked in, so codegen must run before
+  any command that loads packages (build, test, tidy, govulncheck, lint).
+inputs:
+  go-version:
+    description: Go version to install
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: ${{ inputs.go-version }}
+
+    - name: Generate go code
+      run: go generate ./pkg/db/ent
+      shell: bash
