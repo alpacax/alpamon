@@ -75,22 +75,6 @@ func (c *capBuffer) bytes() []byte {
 	return append(out, c.tail...)
 }
 
-// runeSafeCut returns a cut length <= limit that never ends mid-rune, so a rune
-// straddling the boundary rides the next chunk instead of being split (a split is
-// invalid UTF-8, corrupted to U+FFFD on the wire). Returns 0 if no rune boundary.
-func runeSafeCut(b []byte, limit int) int {
-	end := min(limit, len(b))
-	if r, size := utf8.DecodeLastRune(b[:end]); r == utf8.RuneError && size <= 1 {
-		for end > 0 && !utf8.RuneStart(b[end-1]) {
-			end--
-		}
-		if end > 0 {
-			end-- // drop the incomplete rune's lead byte too
-		}
-	}
-	return end
-}
-
 // chunkWriter emits coalesced stdout/stderr chunks and tees a capped copy for the fin payload.
 type chunkWriter struct {
 	mu       sync.Mutex
@@ -109,9 +93,7 @@ func newChunkWriter(callback func(content string)) *chunkWriter {
 // start launches the periodic flusher so sub-threshold output still streams within interval.
 func (w *chunkWriter) start(interval time.Duration) {
 	w.done = make(chan struct{})
-	w.wg.Add(1)
-	go func() {
-		defer w.wg.Done()
+	w.wg.Go(func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -122,7 +104,7 @@ func (w *chunkWriter) start(interval time.Duration) {
 				w.flush()
 			}
 		}
-	}()
+	})
 }
 
 func (w *chunkWriter) close() {
@@ -186,6 +168,22 @@ func (w *chunkWriter) emit(content string) {
 		}
 	}()
 	w.callback(content)
+}
+
+// runeSafeCut returns a cut length <= limit that never ends mid-rune, so a rune
+// straddling the boundary rides the next chunk instead of being split (a split is
+// invalid UTF-8, corrupted to U+FFFD on the wire). Returns 0 if no rune boundary.
+func runeSafeCut(b []byte, limit int) int {
+	end := min(limit, len(b))
+	if r, size := utf8.DecodeLastRune(b[:end]); r == utf8.RuneError && size <= 1 {
+		for end > 0 && !utf8.RuneStart(b[end-1]) {
+			end--
+		}
+		if end > 0 {
+			end-- // drop the incomplete rune's lead byte too
+		}
+	}
+	return end
 }
 
 // Executor provides system command execution with privilege management
