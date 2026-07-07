@@ -6,7 +6,7 @@ on:
       - "docs/**"
 
   pull_request:
-    types: [opened, ready_for_review, synchronize]
+    types: [opened, reopened, ready_for_review, synchronize]
 
   workflow_call:
 
@@ -14,9 +14,26 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: '1.25.10'
+  GO_VERSION: '1.25.11'
 
 jobs:
+  verify-tidy:
+    name: Verify go.mod and go.sum are tidy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Set up Go and generate ent code
+        uses: ./.github/actions/setup-go-generate
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Verify go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
   build-and-test:
     name: Build and Test (${{ matrix.distro }})
     runs-on: ${{ matrix.runner }}
@@ -118,13 +135,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Set up Go and generate ent code
+        uses: ./.github/actions/setup-go-generate
         with:
           go-version: ${{ env.GO_VERSION }}
-
-      - name: Generate go code
-        run: go generate ./pkg/db/ent
 
       - name: Build
         run: go build -v .
@@ -140,13 +154,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Set up Go and generate ent code
+        uses: ./.github/actions/setup-go-generate
         with:
           go-version: ${{ env.GO_VERSION }}
-
-      - name: Generate go code
-        run: go generate ./pkg/db/ent
 
       - name: Build
         run: go build -v .
@@ -231,13 +242,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Set up Go and generate ent code
+        uses: ./.github/actions/setup-go-generate
         with:
           go-version: ${{ env.GO_VERSION }}
-
-      - name: Generate go code
-        run: go generate ./pkg/db/ent
 
       - name: Build
         run: go build -v .
