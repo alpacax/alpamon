@@ -39,6 +39,7 @@ type PtyClient struct {
 	username      string
 	groupname     string
 	homeDirectory string
+	shell         string
 	sessionID     string
 	wsToPty       chan []byte
 	ptyToWs       chan []byte
@@ -69,6 +70,7 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, mana
 		username:      data.Username,
 		groupname:     data.Groupname,
 		homeDirectory: data.HomeDirectory,
+		shell:         data.Shell,
 		sessionID:     data.SessionID,
 		wsToPty:       make(chan []byte, bufferSize),
 		ptyToWs:       make(chan []byte, bufferSize),
@@ -92,7 +94,8 @@ func (pc *PtyClient) initializePtySession() error {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
 
-	pc.cmd = exec.Command(utils.DefaultShell(), utils.DefaultShellArgs()...)
+	shell, args := resolveShell(pc.shell, loadValidShells())
+	pc.cmd = exec.Command(shell, args...)
 	uid, gid, groupIds, env, err := pc.getPtyUserAndEnv()
 	if err != nil {
 		return fmt.Errorf("failed to get user/env: %w", err)
