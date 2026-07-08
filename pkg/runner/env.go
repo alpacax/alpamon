@@ -6,7 +6,6 @@ import (
 
 func getDefaultEnv() map[string]string {
 	env := make(map[string]string)
-	env["SHELL"] = utils.DefaultShell()
 	env["TERM"] = "xterm-256color"
 	env["LS_COLORS"] = utils.DefaultLSColors
 	env["LANG"] = "en_US.UTF-8"

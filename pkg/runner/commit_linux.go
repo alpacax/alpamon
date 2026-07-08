@@ -16,7 +16,6 @@ const (
 	shadowFilePath = "/etc/shadow"
 )
 
-// loadValidShells returns the host's valid login shells from /etc/shells.
 func loadValidShells() []string {
 	return utils.LoadValidShells()
 }

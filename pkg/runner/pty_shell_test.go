@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -26,5 +27,16 @@ func TestResolveShell(t *testing.T) {
 		shell, args := resolveShell("/not/listed", valid)
 		assert.Equal(t, utils.DefaultShell(), shell)
 		assert.Equal(t, utils.DefaultShellArgs(), args)
+	})
+
+	t.Run("case-differing requested matches only on windows", func(t *testing.T) {
+		shell, args := resolveShell("/Custom/Shell", valid)
+		if runtime.GOOS == "windows" {
+			assert.Equal(t, "/Custom/Shell", shell)
+			assert.Nil(t, args)
+		} else {
+			assert.Equal(t, utils.DefaultShell(), shell)
+			assert.Equal(t, utils.DefaultShellArgs(), args)
+		}
 	})
 }

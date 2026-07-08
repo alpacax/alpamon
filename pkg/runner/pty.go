@@ -100,6 +100,7 @@ func (pc *PtyClient) initializePtySession() error {
 	if err != nil {
 		return fmt.Errorf("failed to get user/env: %w", err)
 	}
+	env["SHELL"] = shell
 	if err = pc.setPtyCmdSysProcAttrAndEnv(uid, gid, groupIds, env); err != nil {
 		return fmt.Errorf("failed to set process credentials: %w", err)
 	}
