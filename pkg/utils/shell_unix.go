@@ -19,7 +19,7 @@ func LoadValidShells() []string { return loadValidShellsFrom(validShellsFilePath
 func loadValidShellsFrom(path string) []string {
 	file, err := os.Open(path)
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to open /etc/shells, skipping shell validation")
+		log.Debug().Err(err).Str("path", path).Msg("Failed to open valid shells file, skipping shell validation")
 		return nil
 	}
 	defer func() { _ = file.Close() }()
@@ -34,7 +34,7 @@ func loadValidShellsFrom(path string) []string {
 		shells = append(shells, line)
 	}
 	if err := scanner.Err(); err != nil {
-		log.Debug().Err(err).Msg("Error reading /etc/shells")
+		log.Debug().Err(err).Str("path", path).Msg("Error reading valid shells file")
 		return nil
 	}
 	return shells
