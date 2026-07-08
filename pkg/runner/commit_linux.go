@@ -6,42 +6,19 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
 const (
 	passwdFilePath = "/etc/passwd"
 	groupFilePath  = "/etc/group"
-	shellsFilePath = "/etc/shells"
 	shadowFilePath = "/etc/shadow"
 )
 
-// loadValidShells reads /etc/shells and returns the list of valid login shells
+// loadValidShells returns the host's valid login shells from /etc/shells.
 func loadValidShells() []string {
-	var shells []string
-
-	file, err := os.Open(shellsFilePath)
-	if err != nil {
-		log.Debug().Err(err).Msg("Failed to open /etc/shells, skipping shell validation")
-		return nil
-	}
-	defer func() { _ = file.Close() }()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		shells = append(shells, line)
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Debug().Err(err).Msg("Error reading /etc/shells")
-		return nil
-	}
-
-	return shells
+	return utils.LoadValidShells()
 }
 
 // loadShadowData reads /etc/shadow and returns expiration info by username
