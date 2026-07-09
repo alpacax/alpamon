@@ -81,9 +81,13 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 	if args.AllowSh {
 		var cmdArgs []string
 		if runtime.GOOS == "windows" {
-			shell := utils.DefaultShell()
-			cmdArgs = append([]string{shell}, utils.DefaultShellArgs()...)
-			cmdArgs = append(cmdArgs, "-Command", command)
+			if unwrapped, ok := unwrapNestedPowerShell(command); ok {
+				cmdArgs = unwrapped
+			} else {
+				shell := utils.DefaultShell()
+				cmdArgs = append([]string{shell}, utils.DefaultShellArgs()...)
+				cmdArgs = append(cmdArgs, "-Command", command)
+			}
 		} else {
 			cmdArgs = []string{"/bin/sh", "-c", command}
 		}
