@@ -20,11 +20,14 @@ func NewDBClientManager(path string) *DBClientManager {
 	}
 }
 
+func sqliteDSN(path string) string {
+	return fmt.Sprintf("file:%s?cache=shared&__pragma=foreign_keys(1)", path)
+}
+
 func (cm *DBClientManager) GetClient() (*ent.Client, error) {
 	var err error
 	cm.once.Do(func() {
-		url := fmt.Sprintf("file:%s?cache=shared&__pragma=foreign_keys(1)", cm.path)
-		cm.client, err = ent.Open("sqlite3", url)
+		cm.client, err = ent.Open("sqlite3", sqliteDSN(cm.path))
 	})
 	return cm.client, err
 }
