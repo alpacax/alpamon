@@ -65,6 +65,7 @@ const (
 	// File commands
 	Upload   CommandType = "upload"
 	Download CommandType = "download"
+	Rm       CommandType = "rm"
 
 	// Terminal commands
 	OpenPty    CommandType = "openpty"

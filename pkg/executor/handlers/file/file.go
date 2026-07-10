@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -60,6 +61,7 @@ func NewFileHandler(cmdExecutor common.CommandExecutor, apiSession common.APISes
 			[]common.CommandType{
 				common.Upload,
 				common.Download,
+				common.Rm,
 			},
 			cmdExecutor,
 		),
@@ -89,6 +91,8 @@ func (h *FileHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 			}
 			return code, message, err
 		}
+	case common.Rm.String():
+		code, message = h.handleRm(args)
 	default:
 		return 1, "", fmt.Errorf("unknown file command: %s", cmd)
 	}
@@ -118,6 +122,12 @@ func (h *FileHandler) Validate(cmd string, args *common.CommandArgs) error {
 		// Either Files array or single Path/Content should be provided
 		if len(args.Files) == 0 && args.Path == "" && args.Content == "" {
 			return fmt.Errorf("download: either Files array or Path/Content is required")
+		}
+		return nil
+
+	case common.Rm.String():
+		if args.Path == "" {
+			return fmt.Errorf("rm: path is required")
 		}
 		return nil
 
@@ -285,6 +295,45 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	}
 
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
+}
+
+// stagedExecScriptPattern matches the exec-wrapper staging path alpacon-server
+// writes oversized commands to before dispatching a client-signed run. The
+// "rm" internal command is issued unsigned (internal commands bypass command
+// signing) to clean up that script on reject/expire, so this pattern is the
+// only thing standing between it and an unsigned arbitrary-file-deletion
+// primitive — do not loosen it.
+var stagedExecScriptPattern = regexp.MustCompile(`^/tmp/\.alpacon-exec-[0-9a-f]+\.sh$`)
+
+// isStagePath reports whether path, after filepath.Clean, falls inside the
+// alpacon-server exec staging namespace. Split out from handleRm so the
+// security guard has standalone test coverage.
+func isStagePath(path string) bool {
+	return stagedExecScriptPattern.MatchString(filepath.Clean(path))
+}
+
+// removeStaged deletes the file at path with `rm -f` semantics: already
+// absent counts as success. Callers must verify path via isStagePath first.
+func removeStaged(path string) (int, string) {
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return 0, fmt.Sprintf("%s does not exist; nothing to remove.", path)
+		}
+		return 1, err.Error()
+	}
+	return 0, fmt.Sprintf("Successfully removed %s.", path)
+}
+
+// handleRm removes a staged exec wrapper script left behind when the command
+// it wraps was never run (rejected or expired). Restricted to the
+// alpacon-server exec staging namespace; see stagedExecScriptPattern.
+func (h *FileHandler) handleRm(args *common.CommandArgs) (int, string) {
+	if !isStagePath(args.Path) {
+		log.Warn().Str("path", args.Path).Msg("Rejected rm outside exec staging namespace")
+		return 1, fmt.Sprintf("rm: refusing to remove path outside staging namespace: %s", args.Path)
+	}
+
+	return removeStaged(filepath.Clean(args.Path))
 }
 
 // demoteWithHomeDir demotes privilege and returns the home directory.
