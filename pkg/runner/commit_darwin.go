@@ -10,7 +10,7 @@ import (
 )
 
 // loadValidShells returns the host's valid login shells from /etc/shells,
-// falling back to the common macOS defaults when the file is unavailable.
+// falling back to the common macOS defaults when the list is empty or unavailable.
 func loadValidShells() []string {
 	shells := utils.LoadValidShells()
 	if len(shells) == 0 {
