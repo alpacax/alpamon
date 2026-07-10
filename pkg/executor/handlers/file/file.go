@@ -300,7 +300,7 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 // stagedExecScriptPattern matches the alpacon-server exec staging path. The
 // "rm" that cleans up this script is an internal command, which bypasses
 // command signing, so this pattern is the only barrier between it and an
-// unsigned arbitrary-file-deletion primitive — do not loosen it.
+// unsigned arbitrary-file-deletion primitive—do not loosen it.
 var stagedExecScriptPattern = regexp.MustCompile(`^/tmp/\.alpacon-exec-[0-9a-f]+\.sh$`)
 
 // isStagePath guards handleRm; split out so the pattern match (after
@@ -324,12 +324,14 @@ func removeStaged(path string) (int, string) {
 // handleRm removes a staged exec wrapper script left behind when the command
 // it wraps never ran (rejected or expired). See stagedExecScriptPattern.
 func (h *FileHandler) handleRm(args *common.CommandArgs) (int, string) {
-	if !isStagePath(args.Path) {
+	log.Debug().Str("path", args.Path).Msg("Removing staged exec script")
+	path := filepath.Clean(args.Path)
+	if !isStagePath(path) {
 		log.Warn().Str("path", args.Path).Msg("Rejected rm outside exec staging namespace")
 		return 1, fmt.Sprintf("rm: refusing to remove path outside staging namespace: %s", args.Path)
 	}
 
-	return removeStaged(filepath.Clean(args.Path))
+	return removeStaged(path)
 }
 
 // demoteWithHomeDir demotes privilege and returns the home directory.
