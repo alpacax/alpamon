@@ -297,23 +297,20 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
 }
 
-// stagedExecScriptPattern matches the exec-wrapper staging path alpacon-server
-// writes oversized commands to before dispatching a client-signed run. The
-// "rm" internal command is issued unsigned (internal commands bypass command
-// signing) to clean up that script on reject/expire, so this pattern is the
-// only thing standing between it and an unsigned arbitrary-file-deletion
-// primitive — do not loosen it.
+// stagedExecScriptPattern matches the alpacon-server exec staging path. The
+// "rm" that cleans up this script is an internal command, which bypasses
+// command signing, so this pattern is the only barrier between it and an
+// unsigned arbitrary-file-deletion primitive — do not loosen it.
 var stagedExecScriptPattern = regexp.MustCompile(`^/tmp/\.alpacon-exec-[0-9a-f]+\.sh$`)
 
-// isStagePath reports whether path, after filepath.Clean, falls inside the
-// alpacon-server exec staging namespace. Split out from handleRm so the
-// security guard has standalone test coverage.
+// isStagePath guards handleRm; split out so the pattern match (after
+// filepath.Clean folds any traversal) has standalone test coverage.
 func isStagePath(path string) bool {
 	return stagedExecScriptPattern.MatchString(filepath.Clean(path))
 }
 
-// removeStaged deletes the file at path with `rm -f` semantics: already
-// absent counts as success. Callers must verify path via isStagePath first.
+// removeStaged deletes path with `rm -f` semantics (already absent counts as
+// success). Callers must verify path via isStagePath first.
 func removeStaged(path string) (int, string) {
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
@@ -325,8 +322,7 @@ func removeStaged(path string) (int, string) {
 }
 
 // handleRm removes a staged exec wrapper script left behind when the command
-// it wraps was never run (rejected or expired). Restricted to the
-// alpacon-server exec staging namespace; see stagedExecScriptPattern.
+// it wraps never ran (rejected or expired). See stagedExecScriptPattern.
 func (h *FileHandler) handleRm(args *common.CommandArgs) (int, string) {
 	if !isStagePath(args.Path) {
 		log.Warn().Str("path", args.Path).Msg("Rejected rm outside exec staging namespace")

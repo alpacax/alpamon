@@ -347,11 +347,8 @@ func TestFileHandler_parsePaths(t *testing.T) {
 	}
 }
 
-// TestIsStagePath locks in the security guard for the internal "rm"
-// command: internal commands bypass command signing, so this pattern is
-// the only thing standing between "rm" and an unsigned arbitrary-file-
-// deletion primitive. Only exact matches on the alpacon-server exec
-// staging namespace may pass.
+// TestIsStagePath locks in the unsigned-rm security guard: only exact
+// matches on the exec staging namespace may pass (see stagedExecScriptPattern).
 func TestIsStagePath(t *testing.T) {
 	tests := []struct {
 		name string
