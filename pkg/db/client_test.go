@@ -33,5 +33,5 @@ func TestSQLiteDSNEnablesForeignKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = conn.ExecContext(ctx, "INSERT INTO children (parent_id) VALUES (1)")
-	require.Error(t, err)
+	require.ErrorContains(t, err, "FOREIGN KEY constraint failed")
 }
