@@ -21,7 +21,7 @@ func NewDBClientManager(path string) *DBClientManager {
 }
 
 func sqliteDSN(path string) string {
-	return fmt.Sprintf("file:%s?cache=shared&__pragma=foreign_keys(1)", path)
+	return fmt.Sprintf("file:%s?cache=shared&_pragma=foreign_keys(1)", path)
 }
 
 func (cm *DBClientManager) GetClient() (*ent.Client, error) {
