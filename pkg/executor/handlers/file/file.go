@@ -302,11 +302,14 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 // the alpacon-server exec staging path; only the trailing hex and ".sh" vary.
 const stagePrefix = "/tmp/.alpacon-exec-"
 
-// stagedExecScriptPattern matches the alpacon-server exec staging path. The
-// "rm" that cleans up this script is an internal command, which bypasses
-// command signing, so this pattern is the only barrier between it and an
-// unsigned arbitrary-file-deletion primitive—do not loosen it.
-var stagedExecScriptPattern = regexp.MustCompile(`^/tmp/\.alpacon-exec-[0-9a-f]+\.sh$`)
+// stagedExecScriptPattern matches the alpacon-server exec staging path,
+// derived from stagePrefix so the two never drift. The "rm" that cleans up
+// this script is an internal command, which bypasses command signing, so this
+// pattern is the only barrier between it and an unsigned arbitrary-file-
+// deletion primitive—do not loosen it.
+var stagedExecScriptPattern = regexp.MustCompile(
+	"^" + regexp.QuoteMeta(stagePrefix) + `[0-9a-f]+\.sh$`,
+)
 
 // isStagePath guards handleRm; split out so the pattern match (after
 // path.Clean folds any traversal) has standalone test coverage. Uses
@@ -316,16 +319,16 @@ func isStagePath(p string) bool {
 	return stagedExecScriptPattern.MatchString(path.Clean(p))
 }
 
-// removeStaged deletes path with `rm -f` semantics (already absent counts as
-// success). Callers must verify path via isStagePath first.
-func removeStaged(path string) (int, string) {
-	if err := os.Remove(path); err != nil {
+// removeStaged deletes filePath with `rm -f` semantics (already absent counts
+// as success). Callers must verify filePath via isStagePath first.
+func removeStaged(filePath string) (int, string) {
+	if err := os.Remove(filePath); err != nil {
 		if os.IsNotExist(err) {
-			return 0, fmt.Sprintf("%s does not exist; nothing to remove.", path)
+			return 0, fmt.Sprintf("%s does not exist; nothing to remove.", filePath)
 		}
 		return 1, err.Error()
 	}
-	return 0, fmt.Sprintf("Successfully removed %s.", path)
+	return 0, fmt.Sprintf("Successfully removed %s.", filePath)
 }
 
 // handleRm removes a staged exec wrapper script left behind when the command
