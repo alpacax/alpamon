@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/user"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -304,9 +305,11 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 var stagedExecScriptPattern = regexp.MustCompile(`^/tmp/\.alpacon-exec-[0-9a-f]+\.sh$`)
 
 // isStagePath guards handleRm; split out so the pattern match (after
-// filepath.Clean folds any traversal) has standalone test coverage.
-func isStagePath(path string) bool {
-	return stagedExecScriptPattern.MatchString(filepath.Clean(path))
+// path.Clean folds any traversal) has standalone test coverage. Uses
+// path.Clean, not filepath.Clean: the staged path is always a POSIX path
+// from the server, so cleaning must stay slash-based regardless of agent OS.
+func isStagePath(p string) bool {
+	return stagedExecScriptPattern.MatchString(path.Clean(p))
 }
 
 // removeStaged deletes path with `rm -f` semantics (already absent counts as
@@ -325,13 +328,13 @@ func removeStaged(path string) (int, string) {
 // it wraps never ran (rejected or expired). See stagedExecScriptPattern.
 func (h *FileHandler) handleRm(args *common.CommandArgs) (int, string) {
 	log.Debug().Str("path", args.Path).Msg("Removing staged exec script")
-	path := filepath.Clean(args.Path)
-	if !isStagePath(path) {
+	cleaned := path.Clean(args.Path)
+	if !isStagePath(cleaned) {
 		log.Warn().Str("path", args.Path).Msg("Rejected rm outside exec staging namespace")
 		return 1, fmt.Sprintf("rm: refusing to remove path outside staging namespace: %s", args.Path)
 	}
 
-	return removeStaged(path)
+	return removeStaged(cleaned)
 }
 
 // demoteWithHomeDir demotes privilege and returns the home directory.
