@@ -400,6 +400,23 @@ func TestIsStagePath(t *testing.T) {
 			path: "",
 			want: false,
 		},
+		// Go's default (?-m) $ anchors to end-of-text only, so a trailing
+		// newline/CR must not pass. Locks that in against a future (?m).
+		{
+			name: "trailing newline rejected",
+			path: "/tmp/.alpacon-exec-deadbeef.sh\n",
+			want: false,
+		},
+		{
+			name: "trailing crlf rejected",
+			path: "/tmp/.alpacon-exec-deadbeef.sh\r\n",
+			want: false,
+		},
+		{
+			name: "trailing cr rejected",
+			path: "/tmp/.alpacon-exec-deadbeef.sh\r",
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
