@@ -298,6 +298,10 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
 }
 
+// stagePrefix is the fixed, non-user-controlled directory-plus-name prefix of
+// the alpacon-server exec staging path; only the trailing hex and ".sh" vary.
+const stagePrefix = "/tmp/.alpacon-exec-"
+
 // stagedExecScriptPattern matches the alpacon-server exec staging path. The
 // "rm" that cleans up this script is an internal command, which bypasses
 // command signing, so this pattern is the only barrier between it and an
@@ -329,7 +333,10 @@ func removeStaged(path string) (int, string) {
 func (h *FileHandler) handleRm(args *common.CommandArgs) (int, string) {
 	log.Debug().Str("path", args.Path).Msg("Removing staged exec script")
 	cleaned := path.Clean(args.Path)
-	if !isStagePath(cleaned) {
+	// HasPrefix pins cleaned to the fixed staging prefix (the barrier the
+	// path-injection scanner recognizes on the value that reaches os.Remove);
+	// isStagePath then enforces the exact <hex>.sh format.
+	if !strings.HasPrefix(cleaned, stagePrefix) || !isStagePath(cleaned) {
 		log.Warn().Str("path", args.Path).Msg("Rejected rm outside exec staging namespace")
 		return 1, fmt.Sprintf("rm: refusing to remove path outside staging namespace: %s", args.Path)
 	}
