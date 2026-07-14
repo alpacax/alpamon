@@ -14,7 +14,7 @@ import (
 // bash/zsh/powershell-specific and break other shells (dash, tcsh, cmd.exe).
 func resolveShell(requested string, validShells []string) (shell string, args []string) {
 	if requested != "" {
-		if shellAllowed(requested, validShells) {
+		if shellAllowed(requested, validShells, runtime.GOOS == "windows") {
 			return requested, nil
 		}
 		log.Warn().Str("requested", requested).
@@ -23,10 +23,9 @@ func resolveShell(requested string, validShells []string) (shell string, args []
 	return utils.DefaultShell(), utils.DefaultShellArgs()
 }
 
-// shellAllowed matches case-insensitively on Windows, where executable
-// names are case-insensitive; exact paths elsewhere.
-func shellAllowed(requested string, validShells []string) bool {
-	if runtime.GOOS == "windows" {
+// caseInsensitive is set on Windows, where executable names are case-insensitive.
+func shellAllowed(requested string, validShells []string, caseInsensitive bool) bool {
+	if caseInsensitive {
 		return slices.ContainsFunc(validShells, func(s string) bool {
 			return strings.EqualFold(s, requested)
 		})

@@ -11,6 +11,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Windows has no /etc/shells equivalent; this fixed list is both the reported
+// ValidShells and the openpty allowlist, so the server round-trips these exact bare names.
 func loadValidShells() []string {
 	return []string{"powershell.exe", "cmd.exe", "pwsh.exe"}
 }
