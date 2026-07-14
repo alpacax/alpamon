@@ -92,6 +92,20 @@ func TestFileHandler_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "rm valid",
+			cmd:  "rm",
+			args: &common.CommandArgs{
+				Path: "/tmp/.alpacon-exec-deadbeef.sh",
+			},
+			wantErr: false,
+		},
+		{
+			name:    "rm missing path",
+			cmd:     "rm",
+			args:    &common.CommandArgs{},
+			wantErr: true,
+		},
+		{
 			name:    "unknown command",
 			cmd:     "unknown",
 			args:    &common.CommandArgs{},
@@ -328,6 +342,176 @@ func TestFileHandler_parsePaths(t *testing.T) {
 			}
 			if err == nil && bulk != tt.wantBulk {
 				t.Errorf("parsePaths() bulk = %v, want %v", bulk, tt.wantBulk)
+			}
+		})
+	}
+}
+
+// TestIsStagePath locks in the unsigned-rm security guard (see stagedExecScriptPattern).
+func TestIsStagePath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{
+			name: "valid staged path",
+			path: "/tmp/.alpacon-exec-deadbeef.sh",
+			want: true,
+		},
+		{
+			name: "valid staged path single hex digit",
+			path: "/tmp/.alpacon-exec-a.sh",
+			want: true,
+		},
+		{
+			name: "non-stage absolute path",
+			path: "/etc/passwd",
+			want: false,
+		},
+		{
+			name: "tmp path but wrong name",
+			path: "/tmp/evil.sh",
+			want: false,
+		},
+		{
+			name: "traversal out of tmp",
+			path: "/tmp/../etc/x",
+			want: false,
+		},
+		{
+			name: "traversal folded back into staged name",
+			path: "/tmp/foo/../.alpacon-exec-deadbeef.sh",
+			want: true,
+		},
+		{
+			name: "uppercase hex rejected",
+			path: "/tmp/.alpacon-exec-DEADBEEF.sh",
+			want: false,
+		},
+		{
+			name: "empty hex rejected",
+			path: "/tmp/.alpacon-exec-.sh",
+			want: false,
+		},
+		{
+			name: "empty path",
+			path: "",
+			want: false,
+		},
+		// Go's default (?-m) $ anchors to end-of-text only, so a trailing
+		// newline/CR must not pass. Locks that in against a future (?m).
+		{
+			name: "trailing newline rejected",
+			path: "/tmp/.alpacon-exec-deadbeef.sh\n",
+			want: false,
+		},
+		{
+			name: "trailing crlf rejected",
+			path: "/tmp/.alpacon-exec-deadbeef.sh\r\n",
+			want: false,
+		},
+		{
+			name: "trailing cr rejected",
+			path: "/tmp/.alpacon-exec-deadbeef.sh\r",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStagePath(tt.path); got != tt.want {
+				t.Errorf("isStagePath(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRemoveStaged exercises rm -f semantics in isolation from the staging-path guard.
+func TestRemoveStaged(t *testing.T) {
+	t.Run("existing file removed", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "staged.sh")
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o600); err != nil {
+			t.Fatalf("write temp: %v", err)
+		}
+
+		code, _ := removeStaged(path)
+		if code != 0 {
+			t.Errorf("removeStaged() code = %v, want 0", code)
+		}
+		if utils.FileExists(path) {
+			t.Error("removeStaged() left the file in place")
+		}
+	})
+
+	t.Run("missing file treated as success", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing.sh")
+
+		code, message := removeStaged(path)
+		if code != 0 {
+			t.Errorf("removeStaged() code = %v, want 0", code)
+		}
+		if message == "" {
+			t.Error("removeStaged() expected a message for the missing-file case")
+		}
+	})
+}
+
+// TestFileHandler_Execute_Rm covers the wiring from Execute through to
+// handleRm. It only drives the missing-file branch: a real staged path
+// under /tmp cannot be created safely from a portable test, and the
+// guard/removal logic already have dedicated coverage above.
+func TestFileHandler_Execute_Rm(t *testing.T) {
+	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+	ctx := context.Background()
+
+	t.Run("valid staged path, file missing", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("handleRm refuses on Windows (POSIX-only staging contract)")
+		}
+		args := &common.CommandArgs{Path: "/tmp/.alpacon-exec-deadbeefcafe.sh"}
+
+		exitCode, _, err := handler.Execute(ctx, "rm", args)
+		if err != nil {
+			t.Errorf("Execute() unexpected error: %v", err)
+		}
+		if exitCode != 0 {
+			t.Errorf("Execute() exitCode = %v, want 0", exitCode)
+		}
+	})
+
+	t.Run("refused on Windows", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("Windows-only staging refusal")
+		}
+		exitCode, output, err := handler.Execute(ctx, "rm", &common.CommandArgs{Path: "/tmp/.alpacon-exec-deadbeefcafe.sh"})
+		if err != nil {
+			t.Errorf("Execute() unexpected error: %v", err)
+		}
+		if exitCode != 1 {
+			t.Errorf("Execute() exitCode = %v, want 1", exitCode)
+		}
+		if output == "" {
+			t.Error("Execute() expected a platform-refusal message")
+		}
+	})
+
+	nonStagePaths := []string{
+		"/etc/passwd",
+		"/tmp/evil.sh",
+		"/tmp/../etc/x",
+	}
+	for _, path := range nonStagePaths {
+		t.Run("rejected: "+path, func(t *testing.T) {
+			exitCode, output, err := handler.Execute(ctx, "rm", &common.CommandArgs{Path: path})
+			if err != nil {
+				t.Errorf("Execute() unexpected error: %v", err)
+			}
+			if exitCode != 1 {
+				t.Errorf("Execute() exitCode = %v, want 1", exitCode)
+			}
+			if output == "" {
+				t.Error("Execute() expected a rejection message")
 			}
 		})
 	}

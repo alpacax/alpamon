@@ -10,7 +10,10 @@ import (
 	"net/url"
 	"os"
 	"os/user"
+	"path"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -60,6 +63,7 @@ func NewFileHandler(cmdExecutor common.CommandExecutor, apiSession common.APISes
 			[]common.CommandType{
 				common.Upload,
 				common.Download,
+				common.Rm,
 			},
 			cmdExecutor,
 		),
@@ -89,6 +93,8 @@ func (h *FileHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 			}
 			return code, message, err
 		}
+	case common.Rm.String():
+		code, message = h.handleRm(args)
 	default:
 		return 1, "", fmt.Errorf("unknown file command: %s", cmd)
 	}
@@ -118,6 +124,12 @@ func (h *FileHandler) Validate(cmd string, args *common.CommandArgs) error {
 		// Either Files array or single Path/Content should be provided
 		if len(args.Files) == 0 && args.Path == "" && args.Content == "" {
 			return fmt.Errorf("download: either Files array or Path/Content is required")
+		}
+		return nil
+
+	case common.Rm.String():
+		if args.Path == "" {
+			return fmt.Errorf("rm: path is required")
 		}
 		return nil
 
@@ -285,6 +297,64 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	}
 
 	return 0, fmt.Sprintf("Successfully downloaded %s.", args.Path)
+}
+
+// stagePrefix is the fixed, non-user-controlled directory-plus-name prefix of
+// the alpacon-server exec staging path; only the trailing hex and ".sh" vary.
+const stagePrefix = "/tmp/.alpacon-exec-"
+
+// stagedExecScriptPattern matches the alpacon-server exec staging path,
+// derived from stagePrefix so the two never drift. The "rm" that cleans up
+// this script is an internal command, which bypasses command signing, so this
+// pattern is the only barrier between it and an unsigned arbitrary-file-
+// deletion primitive—do not loosen it.
+var stagedExecScriptPattern = regexp.MustCompile(
+	"^" + regexp.QuoteMeta(stagePrefix) + `[0-9a-f]+\.sh$`,
+)
+
+// isStagePath guards handleRm; split out so the pattern match (after
+// path.Clean folds any traversal) has standalone test coverage. Uses
+// path.Clean, not filepath.Clean: the staged path is always a POSIX path
+// from the server, so cleaning must stay slash-based regardless of agent OS.
+func isStagePath(p string) bool {
+	return stagedExecScriptPattern.MatchString(path.Clean(p))
+}
+
+// removeStaged deletes filePath with `rm -f` semantics (already absent counts
+// as success). Callers must verify filePath via isStagePath first.
+func removeStaged(filePath string) (int, string) {
+	if err := os.Remove(filePath); err != nil {
+		if os.IsNotExist(err) {
+			return 0, fmt.Sprintf("%s does not exist; nothing to remove.", filePath)
+		}
+		return 1, err.Error()
+	}
+	return 0, fmt.Sprintf("Successfully removed %s.", filePath)
+}
+
+// handleRm removes a staged exec wrapper script left behind when the command
+// it wraps never ran (rejected or expired). See stagedExecScriptPattern.
+func (h *FileHandler) handleRm(args *common.CommandArgs) (int, string) {
+	// Caller contract: oversized-exec staging is POSIX-only and the server
+	// rejects Windows/unknown targets up front, so it never dispatches rm to a
+	// Windows agent. Enforce it here—the guard below is slash-based and would
+	// otherwise accept a "/tmp/.alpacon-exec-<hex>.sh"-shaped path that
+	// os.Remove could resolve against the current drive on Windows.
+	if runtime.GOOS == "windows" {
+		log.Warn().Str("path", args.Path).Msg("Rejected rm: staging cleanup unsupported on Windows")
+		return 1, "rm: staging cleanup is not supported on this platform"
+	}
+	log.Debug().Str("path", args.Path).Msg("Removing staged exec script")
+	cleaned := path.Clean(args.Path)
+	// HasPrefix pins cleaned to the fixed staging prefix (the barrier the
+	// path-injection scanner recognizes on the value that reaches os.Remove);
+	// isStagePath then enforces the exact <hex>.sh format.
+	if !strings.HasPrefix(cleaned, stagePrefix) || !isStagePath(cleaned) {
+		log.Warn().Str("path", args.Path).Msg("Rejected rm outside exec staging namespace")
+		return 1, fmt.Sprintf("rm: refusing to remove path outside staging namespace: %s", args.Path)
+	}
+
+	return removeStaged(cleaned)
 }
 
 // demoteWithHomeDir demotes privilege and returns the home directory.
