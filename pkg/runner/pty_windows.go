@@ -14,7 +14,6 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
-	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
@@ -36,6 +35,7 @@ type PtyClient struct {
 	username      string
 	groupname     string
 	homeDirectory string
+	shell         string
 	sessionID     string
 	wsToPty       chan []byte
 	ptyToWs       chan []byte
@@ -58,6 +58,7 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, mana
 		username:      data.Username,
 		groupname:     data.Groupname,
 		homeDirectory: data.HomeDirectory,
+		shell:         data.Shell,
 		sessionID:     data.SessionID,
 		wsToPty:       make(chan []byte, bufferSize),
 		ptyToWs:       make(chan []byte, bufferSize),
@@ -131,8 +132,7 @@ func (pc *PtyClient) initializeSession() error {
 	}
 
 	// Build command line
-	shell := utils.DefaultShell()
-	args := utils.DefaultShellArgs()
+	shell, args := resolveShell(pc.shell, loadValidShells())
 	commandLine := shell
 	if len(args) > 0 {
 		commandLine = shell + " " + strings.Join(args, " ")
