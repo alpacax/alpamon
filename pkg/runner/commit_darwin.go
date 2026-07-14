@@ -1,8 +1,6 @@
 package runner
 
 import (
-	"bufio"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -11,32 +9,13 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// loadValidShells reads /etc/shells on macOS (which exists and follows the same format as Linux).
+// loadValidShells returns the host's valid login shells from /etc/shells,
+// falling back to the common macOS defaults when the list is empty or unavailable.
 func loadValidShells() []string {
-	const shellsFilePath = "/etc/shells"
-	var shells []string
-
-	file, err := os.Open(shellsFilePath)
-	if err != nil {
-		log.Debug().Err(err).Msg("Failed to open /etc/shells, using defaults")
+	shells := utils.LoadValidShells()
+	if len(shells) == 0 {
 		return []string{"/bin/bash", "/bin/zsh", "/bin/sh"}
 	}
-	defer func() { _ = file.Close() }()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		shells = append(shells, line)
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Debug().Err(err).Msg("Error reading /etc/shells")
-		return []string{"/bin/bash", "/bin/zsh", "/bin/sh"}
-	}
-
 	return shells
 }
 

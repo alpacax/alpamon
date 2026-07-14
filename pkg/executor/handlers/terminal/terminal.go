@@ -115,6 +115,7 @@ func (h *TerminalHandler) handleOpenPTY(args *common.CommandArgs) (int, string, 
 		Username:      args.Username,
 		Groupname:     args.Groupname,
 		HomeDirectory: args.HomeDirectory,
+		Shell:         args.Shell,
 		Rows:          uint16(args.Rows),
 		Cols:          uint16(args.Cols),
 	}
@@ -124,6 +125,7 @@ func (h *TerminalHandler) handleOpenPTY(args *common.CommandArgs) (int, string, 
 		Str("username", data.Username).
 		Uint16("rows", data.Rows).
 		Uint16("cols", data.Cols).
+		Str("shell", data.Shell).
 		Msg("Opening PTY terminal")
 
 	ptyClient := runner.NewPtyClient(data, h.apiSession, h.manager)

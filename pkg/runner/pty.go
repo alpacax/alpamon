@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -39,6 +40,7 @@ type PtyClient struct {
 	username      string
 	groupname     string
 	homeDirectory string
+	shell         string
 	sessionID     string
 	wsToPty       chan []byte
 	ptyToWs       chan []byte
@@ -69,6 +71,7 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, mana
 		username:      data.Username,
 		groupname:     data.Groupname,
 		homeDirectory: data.HomeDirectory,
+		shell:         data.Shell,
 		sessionID:     data.SessionID,
 		wsToPty:       make(chan []byte, bufferSize),
 		ptyToWs:       make(chan []byte, bufferSize),
@@ -92,11 +95,16 @@ func (pc *PtyClient) initializePtySession() error {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
 
-	pc.cmd = exec.Command(utils.DefaultShell(), utils.DefaultShellArgs()...)
+	shell, args := resolveShell(pc.shell, loadValidShells())
+	pc.cmd = exec.Command(shell, args...)
+	// login(1) convention: a leading "-" in argv[0] makes any shell a login
+	// shell, so profile files are sourced without shell-specific -l flags.
+	pc.cmd.Args[0] = "-" + filepath.Base(shell)
 	uid, gid, groupIds, env, err := pc.getPtyUserAndEnv()
 	if err != nil {
 		return fmt.Errorf("failed to get user/env: %w", err)
 	}
+	env["SHELL"] = shell
 	if err = pc.setPtyCmdSysProcAttrAndEnv(uid, gid, groupIds, env); err != nil {
 		return fmt.Errorf("failed to set process credentials: %w", err)
 	}
