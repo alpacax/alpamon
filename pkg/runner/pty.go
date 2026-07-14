@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -96,6 +97,9 @@ func (pc *PtyClient) initializePtySession() error {
 
 	shell, args := resolveShell(pc.shell, loadValidShells())
 	pc.cmd = exec.Command(shell, args...)
+	// login(1) convention: a leading "-" in argv[0] makes any shell a login
+	// shell, so profile files are sourced without shell-specific -l flags.
+	pc.cmd.Args[0] = "-" + filepath.Base(shell)
 	uid, gid, groupIds, env, err := pc.getPtyUserAndEnv()
 	if err != nil {
 		return fmt.Errorf("failed to get user/env: %w", err)
