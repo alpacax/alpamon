@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -334,6 +335,15 @@ func removeStaged(filePath string) (int, string) {
 // handleRm removes a staged exec wrapper script left behind when the command
 // it wraps never ran (rejected or expired). See stagedExecScriptPattern.
 func (h *FileHandler) handleRm(args *common.CommandArgs) (int, string) {
+	// Caller contract: oversized-exec staging is POSIX-only and the server
+	// rejects Windows/unknown targets up front, so it never dispatches rm to a
+	// Windows agent. Enforce it here—the guard below is slash-based and would
+	// otherwise accept a "/tmp/.alpacon-exec-<hex>.sh"-shaped path that
+	// os.Remove could resolve against the current drive on Windows.
+	if runtime.GOOS == "windows" {
+		log.Warn().Str("path", args.Path).Msg("Rejected rm: staging cleanup unsupported on Windows")
+		return 1, "rm: staging cleanup is not supported on this platform"
+	}
 	log.Debug().Str("path", args.Path).Msg("Removing staged exec script")
 	cleaned := path.Clean(args.Path)
 	// HasPrefix pins cleaned to the fixed staging prefix (the barrier the

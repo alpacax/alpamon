@@ -347,8 +347,7 @@ func TestFileHandler_parsePaths(t *testing.T) {
 	}
 }
 
-// TestIsStagePath locks in the unsigned-rm security guard: only exact
-// matches on the exec staging namespace may pass (see stagedExecScriptPattern).
+// TestIsStagePath locks in the unsigned-rm security guard (see stagedExecScriptPattern).
 func TestIsStagePath(t *testing.T) {
 	tests := []struct {
 		name string
@@ -428,8 +427,7 @@ func TestIsStagePath(t *testing.T) {
 	}
 }
 
-// TestRemoveStaged exercises rm -f semantics in isolation from the
-// staging-path guard, using ordinary t.TempDir() paths.
+// TestRemoveStaged exercises rm -f semantics in isolation from the staging-path guard.
 func TestRemoveStaged(t *testing.T) {
 	t.Run("existing file removed", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "staged.sh")
