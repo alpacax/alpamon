@@ -466,6 +466,9 @@ func TestFileHandler_Execute_Rm(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("valid staged path, file missing", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("handleRm refuses on Windows (POSIX-only staging contract)")
+		}
 		args := &common.CommandArgs{Path: "/tmp/.alpacon-exec-deadbeefcafe.sh"}
 
 		exitCode, _, err := handler.Execute(ctx, "rm", args)
@@ -474,6 +477,22 @@ func TestFileHandler_Execute_Rm(t *testing.T) {
 		}
 		if exitCode != 0 {
 			t.Errorf("Execute() exitCode = %v, want 0", exitCode)
+		}
+	})
+
+	t.Run("refused on Windows", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("Windows-only staging refusal")
+		}
+		exitCode, output, err := handler.Execute(ctx, "rm", &common.CommandArgs{Path: "/tmp/.alpacon-exec-deadbeefcafe.sh"})
+		if err != nil {
+			t.Errorf("Execute() unexpected error: %v", err)
+		}
+		if exitCode != 1 {
+			t.Errorf("Execute() exitCode = %v, want 1", exitCode)
+		}
+		if output == "" {
+			t.Error("Execute() expected a platform-refusal message")
 		}
 	})
 
