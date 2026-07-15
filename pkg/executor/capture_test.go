@@ -57,7 +57,7 @@ func TestCapBuffer_CompactsAcrossWrites(t *testing.T) {
 
 	block := bytes.Repeat([]byte("x"), captureTailCap+1000)
 	var total int
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		c.write(block)
 		total += len(block)
 	}

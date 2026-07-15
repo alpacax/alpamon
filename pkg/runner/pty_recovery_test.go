@@ -135,7 +135,7 @@ func TestPtyRecovery_ReadSideOnly(t *testing.T) {
 	// writeToWebsocket is intentionally not started: nothing consumes a write-side completion signal.
 	go pc.runRecoveryLoop(ctx, cancel, recoveryChan)
 
-	for cycle := 0; cycle < 3; cycle++ {
+	for cycle := range 3 {
 		done := pc.awaitRecovery()
 		s.killConn(t, cycle)
 		waitRecovered(t, done, cycle+1)
@@ -155,7 +155,7 @@ func TestPtyRecovery_WriteSideOnly(t *testing.T) {
 	go pc.writeToWebsocket(ctx, cancel, recoveryChan)
 	go pc.runRecoveryLoop(ctx, cancel, recoveryChan)
 
-	for cycle := 0; cycle < 3; cycle++ {
+	for cycle := range 3 {
 		done := pc.awaitRecovery()
 		s.killConn(t, cycle)
 		// Keep feeding PTY output until the write side hits the broken connection (the first writes may still land in the OS buffer).
@@ -189,7 +189,7 @@ func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 	go pc.runRecoveryLoop(ctx, cancel, recoveryChan)
 
 	const cycles = 5
-	for cycle := 0; cycle < cycles; cycle++ {
+	for cycle := range cycles {
 		done := pc.awaitRecovery()
 		s.killConn(t, cycle)
 		waitRecovered(t, done, cycle+1)

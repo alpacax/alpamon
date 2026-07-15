@@ -66,7 +66,7 @@ func TestPerformance_StartupTime(t *testing.T) {
 	ctxManager := agent.NewContextManager()
 
 	// Register some handlers
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		handler := &MockHandler{
 			name:     "handler" + string(rune('A'+i)),
 			commands: []string{"cmd" + string(rune('A'+i))},
@@ -105,7 +105,7 @@ func TestPerformance_CommandOverhead(t *testing.T) {
 	args := &common.CommandArgs{}
 
 	// Warm up
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		_, _, _ = h.Execute(ctx, "perf_cmd", args)
 	}
 
@@ -113,7 +113,7 @@ func TestPerformance_CommandOverhead(t *testing.T) {
 	iterations := 1000
 	start := time.Now()
 
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		_, _, _ = h.Execute(ctx, "perf_cmd", args)
 	}
 
@@ -157,7 +157,7 @@ func TestPerformance_ConcurrentCommandScaling(t *testing.T) {
 
 		start := time.Now()
 
-		for i := 0; i < taskCount; i++ {
+		for range taskCount {
 			wg.Add(1)
 			ctx, cancel := ctxManager.NewContext(5 * time.Second)
 
@@ -191,7 +191,7 @@ func TestPerformance_RegistryLookupSpeed(t *testing.T) {
 	registry := NewRegistry()
 
 	// Register many handlers
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		handler := &MockHandler{
 			name:     "handler" + string(rune(i)),
 			commands: []string{"cmd" + string(rune(i))},
@@ -200,7 +200,7 @@ func TestPerformance_RegistryLookupSpeed(t *testing.T) {
 	}
 
 	// Warm up
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		_, _ = registry.Get("cmd" + string(rune(50)))
 	}
 
@@ -208,7 +208,7 @@ func TestPerformance_RegistryLookupSpeed(t *testing.T) {
 	iterations := 10000
 	start := time.Now()
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		cmdIdx := i % 100
 		_, _ = registry.Get("cmd" + string(rune(cmdIdx)))
 	}
@@ -243,7 +243,7 @@ func TestPerformance_GoroutineLimit(t *testing.T) {
 	var wg sync.WaitGroup
 	taskCount := 50
 
-	for i := 0; i < taskCount; i++ {
+	for range taskCount {
 		wg.Add(1)
 		err := workerPool.Submit(ctx, func() error {
 			defer wg.Done()
@@ -286,7 +286,7 @@ func TestPerformance_ContextCancellationSpeed(t *testing.T) {
 	iterations := 1000
 	start := time.Now()
 
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		ctx, cancel := ctxManager.NewContext(5 * time.Second)
 		_ = ctx
 		cancel()

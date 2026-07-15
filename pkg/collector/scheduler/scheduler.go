@@ -73,7 +73,7 @@ func (s *Scheduler) AddTask(check base.CheckStrategy) {
 }
 
 func (s *Scheduler) Start(ctx context.Context, workerCount int) {
-	for i := 0; i < workerCount; i++ {
+	for range workerCount {
 		go s.worker(ctx)
 	}
 

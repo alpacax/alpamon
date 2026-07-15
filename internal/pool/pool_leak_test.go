@@ -24,7 +24,7 @@ func TestPool_NoGoroutineLeak(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Submit 100 jobs
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(1)
 		err := pool.Submit(ctx, func() error {
 			defer wg.Done()
@@ -71,14 +71,14 @@ func TestPool_NoLeakAfterPanic(t *testing.T) {
 	var completed int32
 
 	// Submit jobs that panic
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		_ = pool.Submit(ctx, func() error {
 			panic("test panic")
 		})
 	}
 
 	// Submit normal jobs after panics
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		_ = pool.Submit(ctx, func() error {
 			atomic.AddInt32(&completed, 1)
 			return nil
@@ -120,7 +120,7 @@ func TestPool_NoLeakAfterContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		wg.Add(1)
 		err := pool.Submit(ctx, func() error {
 			defer wg.Done()
@@ -220,12 +220,12 @@ func TestPool_NoLeakRapidShutdown(t *testing.T) {
 	initial := runtime.NumGoroutine()
 
 	// Create and shutdown multiple pools rapidly
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		pool := NewPool(5, 50)
 		ctx := context.Background()
 
 		// Submit a few jobs
-		for j := 0; j < 10; j++ {
+		for range 10 {
 			_ = pool.Submit(ctx, func() error {
 				time.Sleep(5 * time.Millisecond)
 				return nil
@@ -259,7 +259,7 @@ func TestPool_MaxGoroutineEnforcement(t *testing.T) {
 
 	ctx := context.Background()
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		_ = pool.Submit(ctx, func() error {
 			current := atomic.AddInt32(&concurrent, 1)
 			defer atomic.AddInt32(&concurrent, -1)

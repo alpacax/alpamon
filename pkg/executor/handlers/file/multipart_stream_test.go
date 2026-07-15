@@ -159,7 +159,7 @@ func TestBuildMultipartStream_EarlyCloseNoLeak(t *testing.T) {
 	buf := make([]byte, 64)
 	_, _ = body.Read(buf)
 	_ = body.Close()
-	for i := 0; i < 50; i++ { // settle
+	for range 50 { // settle
 		if runtime.NumGoroutine() <= g0+2 {
 			return
 		}

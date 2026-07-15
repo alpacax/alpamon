@@ -84,7 +84,7 @@ func BenchmarkPool_WithWork(b *testing.B) {
 		err := pool.Submit(ctx, func() error {
 			// Simulate light work
 			sum := 0
-			for j := 0; j < 100; j++ {
+			for j := range 100 {
 				sum += j
 			}
 			_ = sum

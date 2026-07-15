@@ -29,7 +29,7 @@ func BenchmarkRegistry_ListCommands(b *testing.B) {
 	registry := NewRegistry()
 
 	// Register multiple handlers
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		handler := &MockHandler{
 			name:     "handler" + string(rune('A'+i)),
 			commands: []string{"cmd" + string(rune('A'+i))},

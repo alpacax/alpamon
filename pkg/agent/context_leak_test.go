@@ -18,13 +18,13 @@ func TestContextManager_NoGoroutineLeak(t *testing.T) {
 
 	// Create many contexts
 	var cancels []func()
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		_, cancel := cm.NewContext(0)
 		cancels = append(cancels, cancel)
 	}
 
 	// Create contexts with timeout
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		_, cancel := cm.NewContext(100 * time.Millisecond)
 		cancels = append(cancels, cancel)
 	}
@@ -55,11 +55,11 @@ func TestContextManager_RapidCreateCancel(t *testing.T) {
 	initial := runtime.NumGoroutine()
 
 	// Create and shutdown multiple managers rapidly
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		cm := NewContextManager()
 
 		// Create and immediately cancel contexts
-		for j := 0; j < 50; j++ {
+		for j := range 50 {
 			ctx, cancel := cm.NewContext(time.Duration(j) * time.Millisecond)
 			_ = ctx
 			cancel()
@@ -89,7 +89,7 @@ func TestContextManager_ChildCleanup(t *testing.T) {
 
 	// Create child contexts that simulate long-running operations
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -148,11 +148,11 @@ func TestContextManager_ConcurrentOperations(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Concurrent context creation
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < 10; j++ {
+			for j := range 10 {
 				ctx, cancel := cm.NewContext(time.Duration(id+j) * time.Millisecond)
 				select {
 				case <-ctx.Done():

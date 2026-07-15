@@ -17,7 +17,7 @@ func TestFindAvailablePort(t *testing.T) {
 }
 
 func TestFindAvailablePortRepeated(t *testing.T) {
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		port, err := findAvailablePort()
 		assert.NoError(t, err, "Failed to find available port")
 		assert.True(t, port > 0 && port <= 65535, "Port should be in valid range")

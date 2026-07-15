@@ -73,7 +73,7 @@ func TestTerminalManager_ConcurrentRegisterGetRemove(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(n * 3)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		id := fmt.Sprintf("session-%d", i)
 		pc := &PtyClient{sessionID: id}
 
@@ -117,7 +117,7 @@ func TestTerminalManager_ConcurrentResizeAndRemove(t *testing.T) {
 	// Goroutine 1: repeatedly resize (holds read lock during syscall)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			_ = m.Resize("test", uint16(20+i%10), 80)
 		}
 	}()
