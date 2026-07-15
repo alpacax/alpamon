@@ -171,7 +171,7 @@ func (pc *PtyClient) runRecoveryLoop(ctx context.Context, cancel context.CancelF
 		case <-recoveryChan:
 			log.Debug().Msg("Attempting to reconnect Websh channel...")
 			if err := pc.recovery(ctx); err != nil {
-				pc.isRecovering.Store(false)
+				pc.clearRecovering()
 				cancel()
 				return
 			}
@@ -180,14 +180,14 @@ func (pc *PtyClient) runRecoveryLoop(ctx context.Context, cancel context.CancelF
 	}
 }
 
-// awaitRecovery returns the channel closed on the next completed recovery; snapshot it before requesting recovery so a completion in between cannot be missed.
-func (pc *PtyClient) awaitRecovery() <-chan struct{} {
+// clearRecovering releases single-flight without waking waiters; the caller cancels the session, so waiters exit via ctx.Done instead.
+func (pc *PtyClient) clearRecovering() {
 	pc.recoveryMu.Lock()
 	defer pc.recoveryMu.Unlock()
-	return pc.recoveryDone
+	pc.isRecovering.Store(false)
 }
 
-// completeRecovery clears isRecovering and wakes every waiter under recoveryMu in one step, so no waiter can observe the flag cleared against the about-to-be-replaced channel.
+// completeRecovery does flag-clear, close and rotate in one recoveryMu step so no waiter can observe the flag cleared against the about-to-be-replaced channel.
 func (pc *PtyClient) completeRecovery() {
 	pc.recoveryMu.Lock()
 	defer pc.recoveryMu.Unlock()
@@ -203,7 +203,7 @@ func (pc *PtyClient) getConn() *websocket.Conn {
 	return pc.conn
 }
 
-// swapConn installs the recovered connection and returns the replaced one so the caller can close it.
+// swapConn returns the replaced conn; the caller must close it.
 func (pc *PtyClient) swapConn(conn *websocket.Conn) *websocket.Conn {
 	pc.recoveryMu.Lock()
 	defer pc.recoveryMu.Unlock()

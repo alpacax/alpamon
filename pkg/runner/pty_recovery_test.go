@@ -105,6 +105,13 @@ func newTestPtyClient(t *testing.T, s *wshServer) *PtyClient {
 	}
 }
 
+// awaitRecovery snapshots the channel the next completed recovery closes; call it before dropping the conn or the completion lands on a generation the test never observed. Production waiters snapshot inline in waitForRecovery instead, sharing one recoveryMu critical section with the conn check and the CAS.
+func (pc *PtyClient) awaitRecovery() <-chan struct{} {
+	pc.recoveryMu.Lock()
+	defer pc.recoveryMu.Unlock()
+	return pc.recoveryDone
+}
+
 func waitRecovered(t *testing.T, done <-chan struct{}, cycle int) {
 	t.Helper()
 	select {
@@ -166,7 +173,6 @@ func TestPtyRecovery_WriteSideOnly(t *testing.T) {
 	}
 }
 
-// TestPtyRecovery_StormNoGoroutineLeak runs repeated reconnects with both sides active and verifies that goroutines do not accumulate and teardown completes.
 func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 	s := newWshServer(t)
 
@@ -193,7 +199,7 @@ func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 		t.Fatalf("expected at least %d recovery posts, got %d", cycles, got)
 	}
 
-	// Tear down the session; close() unblocks the reader on the live conn.
+	// close() unblocks the reader still parked on the live conn.
 	cancel()
 	pc.close()
 
@@ -212,7 +218,6 @@ func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 	t.Fatalf("goroutines grew after reconnect storm: baseline=%d now=%d\n%s", baseline, runtime.NumGoroutine(), buf[:n])
 }
 
-// trackedConn wraps a net.Conn to force write failures and observe Close.
 type trackedConn struct {
 	net.Conn
 	failWrites atomic.Bool
@@ -231,7 +236,6 @@ func (c *trackedConn) Close() error {
 	return c.Conn.Close()
 }
 
-// TestPtyClose_ClosesConnAfterWriteControlFailure verifies that close() releases the WebSocket connection even when the close handshake fails.
 func TestPtyClose_ClosesConnAfterWriteControlFailure(t *testing.T) {
 	s := newWshServer(t)
 
