@@ -119,17 +119,31 @@ func (c *CodeServerConfig) ToConfigYAML() string {
 		c.Auth, c.DisableTelemetry, c.DisableUpdateCheck)
 }
 
+// codeServerSettings is the settings.json body for the code-server editor.
+// Fields are declared in the alphabetical key order that json.MarshalIndent
+// emits for a map, so the rendered file is byte-identical to the prior literal.
+type codeServerSettings struct {
+	WorkspaceTrust  bool   `json:"security.workspace.trust.enabled"`
+	TelemetryLevel  string `json:"telemetry.telemetryLevel"`
+	UpdateMode      string `json:"update.mode"`
+	RestoreWindows  string `json:"window.restoreWindows"`
+	WindowTitle     string `json:"window.title"`
+	ColorTheme      string `json:"workbench.colorTheme"`
+	StartupEditor   string `json:"workbench.startupEditor"`
+	OpenWalkthrough bool   `json:"workbench.welcomePage.walkthroughs.openOnInstall"`
+}
+
 // ToSettingsJSON generates settings.json content for VS Code editor.
 func (c *CodeServerConfig) ToSettingsJSON() ([]byte, error) {
-	settings := map[string]any{
-		"workbench.colorTheme":                             c.ColorTheme,
-		"workbench.startupEditor":                          c.StartupEditor,
-		"workbench.welcomePage.walkthroughs.openOnInstall": !c.DisableWelcomeWalkthrough,
-		"window.restoreWindows":                            c.RestoreWindows,
-		"window.title":                                     c.WindowTitle,
-		"telemetry.telemetryLevel":                         c.TelemetryLevel,
-		"security.workspace.trust.enabled":                 !c.DisableWorkspaceTrust,
-		"update.mode":                                      c.UpdateMode,
+	settings := codeServerSettings{
+		WorkspaceTrust:  !c.DisableWorkspaceTrust,
+		TelemetryLevel:  c.TelemetryLevel,
+		UpdateMode:      c.UpdateMode,
+		RestoreWindows:  c.RestoreWindows,
+		WindowTitle:     c.WindowTitle,
+		ColorTheme:      c.ColorTheme,
+		StartupEditor:   c.StartupEditor,
+		OpenWalkthrough: !c.DisableWelcomeWalkthrough,
 	}
 	return json.MarshalIndent(settings, "", "  ")
 }

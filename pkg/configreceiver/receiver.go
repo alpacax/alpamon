@@ -163,11 +163,21 @@ func (r *Receiver) fetch(id string) (*configResponse, error) {
 	return &resp, nil
 }
 
+// applySuccess / applyError are the two POST bodies for the applied endpoint.
+// Fields are declared in the alphabetical key order json.Marshal emits for a
+// map, so the wire format is byte-identical to the prior map literals.
+type applySuccess struct {
+	AppliedHash string `json:"applied_hash"`
+	Success     bool   `json:"success"`
+}
+
+type applyError struct {
+	Error   string `json:"error"`
+	Success bool   `json:"success"`
+}
+
 func (r *Receiver) reportApplied(id, hash string) {
-	r.post(id, map[string]any{
-		"success":      true,
-		"applied_hash": hash,
-	})
+	r.post(id, applySuccess{Success: true, AppliedHash: hash})
 }
 
 // maxReportedErrorBytes caps the error string posted to the server.
@@ -202,13 +212,10 @@ func truncateUTF8(s string, maxBytes int) string {
 }
 
 func (r *Receiver) reportError(id, errMsg string) {
-	r.post(id, map[string]any{
-		"success": false,
-		"error":   truncateUTF8(errMsg, maxReportedErrorBytes),
-	})
+	r.post(id, applyError{Success: false, Error: truncateUTF8(errMsg, maxReportedErrorBytes)})
 }
 
-func (r *Receiver) post(id string, payload map[string]any) {
+func (r *Receiver) post(id string, payload any) {
 	url := fmt.Sprintf(appliedURLFmt, id)
 	body, statusCode, err := r.Session.Post(url, payload, requestTimeout)
 	if err != nil {
