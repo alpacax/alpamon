@@ -131,7 +131,7 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 		ControlWSPath:      controlWsPath,
 		UseSSL:             false,
 		SSLVerify:          true,
-		SSLOpt:             make(map[string]interface{}),
+		SSLOpt:             make(map[string]any),
 		HTTPThreads:        4,
 		PoolMaxWorkers:     DefaultPoolMaxWorkers,
 		PoolQueueSize:      DefaultPoolQueueSize,

@@ -121,7 +121,7 @@ func (c *CodeServerConfig) ToConfigYAML() string {
 
 // ToSettingsJSON generates settings.json content for VS Code editor.
 func (c *CodeServerConfig) ToSettingsJSON() ([]byte, error) {
-	settings := map[string]interface{}{
+	settings := map[string]any{
 		"workbench.colorTheme":                             c.ColorTheme,
 		"workbench.startupEditor":                          c.StartupEditor,
 		"workbench.welcomePage.walkthroughs.openOnInstall": !c.DisableWelcomeWalkthrough,

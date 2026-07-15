@@ -20,7 +20,7 @@ type PriorityEntry struct {
 	priority int
 	method   string
 	url      string
-	data     interface{}
+	data     any
 	headers  *Headers
 	due      time.Time
 	expiry   time.Time

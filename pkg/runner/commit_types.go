@@ -178,7 +178,7 @@ type commitData struct {
 // Ensures data retrieval for each key, excluding the ID field, while minimizing the use of reflection for better performance.
 type ComparableData interface {
 	GetID() string
-	GetKey() interface{}
+	GetKey() any
 	GetData() ComparableData           // For transmission (includes all raw data)
 	GetComparableData() ComparableData // For comparison (excludes fields not stored by server)
 }
@@ -187,7 +187,7 @@ func (s SystemData) GetID() string {
 	return s.ID
 }
 
-func (s SystemData) GetKey() interface{} {
+func (s SystemData) GetKey() any {
 	return s.UUID
 }
 
@@ -216,7 +216,7 @@ func (o OSData) GetID() string {
 	return o.ID
 }
 
-func (o OSData) GetKey() interface{} {
+func (o OSData) GetKey() any {
 	return o.Name
 }
 
@@ -240,7 +240,7 @@ func (t TimeData) GetID() string {
 	return t.ID
 }
 
-func (t TimeData) GetKey() interface{} {
+func (t TimeData) GetKey() any {
 	return t.Timezone
 }
 
@@ -260,7 +260,7 @@ func (u UserData) GetID() string {
 	return u.ID
 }
 
-func (u UserData) GetKey() interface{} {
+func (u UserData) GetKey() any {
 	return u.Username
 }
 
@@ -295,7 +295,7 @@ func (g GroupData) GetID() string {
 	return g.ID
 }
 
-func (g GroupData) GetKey() interface{} {
+func (g GroupData) GetKey() any {
 	return g.GID
 }
 
@@ -314,7 +314,7 @@ func (i Interface) GetID() string {
 	return i.ID
 }
 
-func (i Interface) GetKey() interface{} {
+func (i Interface) GetKey() any {
 	return i.Name
 }
 
@@ -337,7 +337,7 @@ func (a Address) GetID() string {
 	return a.ID
 }
 
-func (a Address) GetKey() interface{} {
+func (a Address) GetKey() any {
 	return a.Address
 }
 
@@ -358,7 +358,7 @@ func (d Disk) GetID() string {
 	return d.ID
 }
 
-func (d Disk) GetKey() interface{} {
+func (d Disk) GetKey() any {
 	return d.Name
 }
 
@@ -378,7 +378,7 @@ func (p Partition) GetID() string {
 	return p.ID
 }
 
-func (p Partition) GetKey() interface{} {
+func (p Partition) GetKey() any {
 	return p.Name
 }
 

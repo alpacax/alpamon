@@ -68,7 +68,7 @@ func (session *Session) CheckSession(ctx context.Context) bool {
 			if err != nil || statusCode != http.StatusOK {
 				log.Debug().Err(err).Msgf("Failed to connect to %s, will try again in %ds.", config.GlobalSettings.ServerURL, int(timeout.Seconds()))
 			} else {
-				var response map[string]interface{}
+				var response map[string]any
 				err = json.Unmarshal(resp, &response)
 				if err != nil {
 					log.Debug().Err(err).Msgf("Failed to unmarshal JSON, will try again in %ds.", int(timeout.Seconds()))
@@ -89,7 +89,7 @@ func (session *Session) CheckSession(ctx context.Context) bool {
 	}
 }
 
-func (session *Session) newRequest(method, url string, rawBody interface{}) (*http.Request, error) {
+func (session *Session) newRequest(method, url string, rawBody any) (*http.Request, error) {
 	var body io.Reader
 	if rawBody != nil {
 		switch v := rawBody.(type) {
@@ -137,11 +137,11 @@ func (session *Session) do(req *http.Request, timeout time.Duration) ([]byte, in
 	return body, resp.StatusCode, nil
 }
 
-func (session *Session) Request(method, url string, rawBody interface{}, timeout time.Duration) ([]byte, int, error) {
+func (session *Session) Request(method, url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
 	return session.RequestWithHeaders(method, url, rawBody, timeout, nil)
 }
 
-func (session *Session) RequestWithHeaders(method, url string, rawBody interface{}, timeout time.Duration, headers Headers) ([]byte, int, error) {
+func (session *Session) RequestWithHeaders(method, url string, rawBody any, timeout time.Duration, headers Headers) ([]byte, int, error) {
 	req, err := session.newRequest(method, url, rawBody)
 	if err != nil {
 		return nil, 0, err
@@ -167,7 +167,7 @@ func (session *Session) Get(url string, timeout time.Duration) ([]byte, int, err
 	return session.do(req, timeout)
 }
 
-func (session *Session) Post(url string, rawBody interface{}, timeout time.Duration) ([]byte, int, error) {
+func (session *Session) Post(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
 	req, err := session.newRequest(http.MethodPost, url, rawBody)
 	if err != nil {
 		return nil, 0, err
@@ -176,7 +176,7 @@ func (session *Session) Post(url string, rawBody interface{}, timeout time.Durat
 	return session.do(req, timeout)
 }
 
-func (session *Session) Put(url string, rawBody interface{}, timeout time.Duration) ([]byte, int, error) {
+func (session *Session) Put(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
 	req, err := session.newRequest(http.MethodPut, url, rawBody)
 	if err != nil {
 		return nil, 0, err
@@ -185,7 +185,7 @@ func (session *Session) Put(url string, rawBody interface{}, timeout time.Durati
 	return session.do(req, timeout)
 }
 
-func (session *Session) Patch(url string, rawBody interface{}, timeout time.Duration) ([]byte, int, error) {
+func (session *Session) Patch(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
 	req, err := session.newRequest(http.MethodPatch, url, rawBody)
 	if err != nil {
 		return nil, 0, err
@@ -194,7 +194,7 @@ func (session *Session) Patch(url string, rawBody interface{}, timeout time.Dura
 	return session.do(req, timeout)
 }
 
-func (session *Session) Delete(url string, rawBody interface{}, timeout time.Duration) ([]byte, int, error) {
+func (session *Session) Delete(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
 	req, err := session.newRequest(http.MethodDelete, url, rawBody)
 	if err != nil {
 		return nil, 0, err

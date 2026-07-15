@@ -95,7 +95,7 @@ func newRequestQueue() {
 	}
 }
 
-func (rq *RequestQueue) request(method, url string, data interface{}, priority int, due time.Time, headers Headers) {
+func (rq *RequestQueue) request(method, url string, data any, priority int, due time.Time, headers Headers) {
 	// time.Time{}: 0001-01-01 00:00:00 +0000 UTC
 	if due.IsZero() {
 		due = time.Now()
@@ -141,20 +141,20 @@ func (rq *RequestQueue) Requeue(entry PriorityEntry) error {
 	return err
 }
 
-func (rq *RequestQueue) Post(url string, data interface{}, priority int, due time.Time) {
+func (rq *RequestQueue) Post(url string, data any, priority int, due time.Time) {
 	rq.request(http.MethodPost, url, data, priority, due, nil)
 }
 
-func (rq *RequestQueue) PostWithHeaders(url string, data interface{}, priority int, due time.Time, headers Headers) {
+func (rq *RequestQueue) PostWithHeaders(url string, data any, priority int, due time.Time, headers Headers) {
 	rq.request(http.MethodPost, url, data, priority, due, headers)
 }
 
 // PostChunk enqueues a chunk, throttling the command while the queue is full and dropping past ctx/maxWait.
-func (rq *RequestQueue) PostChunk(ctx context.Context, url string, data interface{}, priority int) {
+func (rq *RequestQueue) PostChunk(ctx context.Context, url string, data any, priority int) {
 	rq.postChunk(ctx, url, data, priority, chunkQueueHighWater, chunkBackpressurePoll, chunkBackpressureMaxWait)
 }
 
-func (rq *RequestQueue) postChunk(ctx context.Context, url string, data interface{}, priority, highWater int, poll, maxWait time.Duration) {
+func (rq *RequestQueue) postChunk(ctx context.Context, url string, data any, priority, highWater int, poll, maxWait time.Duration) {
 	start := time.Now()
 	for {
 		rq.cond.L.Lock()
@@ -176,22 +176,22 @@ func (rq *RequestQueue) postChunk(ctx context.Context, url string, data interfac
 	}
 }
 
-func (rq *RequestQueue) Patch(url string, data interface{}, priority int, due time.Time) {
+func (rq *RequestQueue) Patch(url string, data any, priority int, due time.Time) {
 	rq.request(http.MethodPatch, url, data, priority, due, nil)
 }
 
-func (rq *RequestQueue) PatchWithHeaders(url string, data interface{}, priority int, due time.Time, headers Headers) {
+func (rq *RequestQueue) PatchWithHeaders(url string, data any, priority int, due time.Time, headers Headers) {
 	rq.request(http.MethodPatch, url, data, priority, due, headers)
 }
 
-func (rq *RequestQueue) Put(url string, data interface{}, priority int, due time.Time) {
+func (rq *RequestQueue) Put(url string, data any, priority int, due time.Time) {
 	rq.request(http.MethodPut, url, data, priority, due, nil)
 }
 
-func (rq *RequestQueue) Delete(url string, data interface{}, priority int, due time.Time) {
+func (rq *RequestQueue) Delete(url string, data any, priority int, due time.Time) {
 	rq.request(http.MethodDelete, url, data, priority, due, nil)
 }
 
-func (rq *RequestQueue) DeleteWithHeaders(url string, data interface{}, priority int, due time.Time, headers Headers) {
+func (rq *RequestQueue) DeleteWithHeaders(url string, data any, priority int, due time.Time, headers Headers) {
 	rq.request(http.MethodDelete, url, data, priority, due, headers)
 }

@@ -108,7 +108,7 @@ func TestSetupUserDataDir(t *testing.T) {
 	assert.NoError(t, err, "settings.json should exist and be readable")
 
 	// Verify settings.json content
-	var settings map[string]interface{}
+	var settings map[string]any
 	err = json.Unmarshal(data, &settings)
 	assert.NoError(t, err, "settings.json should be valid JSON")
 
@@ -140,7 +140,7 @@ func TestSetupUserDataDirIdempotent(t *testing.T) {
 	data, err := os.ReadFile(settingsPath)
 	assert.NoError(t, err)
 
-	var settings map[string]interface{}
+	var settings map[string]any
 	err = json.Unmarshal(data, &settings)
 	assert.NoError(t, err)
 	assert.Equal(t, "none", settings["workbench.startupEditor"])

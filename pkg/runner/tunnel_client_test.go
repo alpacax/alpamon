@@ -60,7 +60,7 @@ func TestBuildHealthResponseBody(t *testing.T) {
 	t.Run("status only omits empty error", func(t *testing.T) {
 		body := buildHealthResponseBody("ready", "")
 
-		var decoded map[string]interface{}
+		var decoded map[string]any
 		if err := json.Unmarshal([]byte(body), &decoded); err != nil {
 			t.Fatalf("buildHealthResponseBody returned invalid JSON: %v", err)
 		}
@@ -75,7 +75,7 @@ func TestBuildHealthResponseBody(t *testing.T) {
 	t.Run("includes error field when provided", func(t *testing.T) {
 		body := buildHealthResponseBody("error", "startup failed")
 
-		var decoded map[string]interface{}
+		var decoded map[string]any
 		if err := json.Unmarshal([]byte(body), &decoded); err != nil {
 			t.Fatalf("buildHealthResponseBody returned invalid JSON: %v", err)
 		}

@@ -97,7 +97,7 @@ func (s *Scheduler) dispatcher(ctx context.Context) {
 			return
 		case <-ticker.C:
 			now := time.Now()
-			s.tasks.Range(func(key, value interface{}) bool {
+			s.tasks.Range(func(key, value any) bool {
 				task, ok := value.(*ScheduledTask)
 				if !ok {
 					return true
