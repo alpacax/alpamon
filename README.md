@@ -170,7 +170,7 @@ go build -o alpamon ./cmd/alpamon         # native
 GOOS=windows GOARCH=amd64 go build ./cmd/alpamon   # Windows cross-compile
 ```
 
-Go 1.25.10+ is required. `GOPATH/bin` should be on `PATH`. The generated Ent code is gitignored, so run `go generate ./pkg/db/ent` (see below) before the first build.
+Go 1.25.12+ is required. `GOPATH/bin` should be on `PATH`. The generated Ent code is gitignored, so run `go generate ./pkg/db/ent` (see below) before the first build.
 
 ### Generate Ent schema code
 
