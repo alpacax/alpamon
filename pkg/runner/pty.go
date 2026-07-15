@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -45,6 +46,8 @@ type PtyClient struct {
 	wsToPty       chan []byte
 	ptyToWs       chan []byte
 	isRecovering  atomic.Bool // default : false
+	recoveryMu    sync.Mutex
+	recoveryDone  chan struct{} // closed on each completed recovery, then replaced
 	manager       *TerminalManager
 }
 
@@ -75,6 +78,7 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, mana
 		sessionID:     data.SessionID,
 		wsToPty:       make(chan []byte, bufferSize),
 		ptyToWs:       make(chan []byte, bufferSize),
+		recoveryDone:  make(chan struct{}),
 		manager:       manager,
 	}
 }
@@ -148,40 +152,97 @@ func (pc *PtyClient) RunPtyBackground() {
 	defer cancel()
 
 	recoveryChan := make(chan struct{}, 1)
-	recoveredWsChan := make(chan struct{}, 1)
-	recoveredPtyChan := make(chan struct{}, 1)
 
 	go pc.readFromPty(ctx, cancel)
-	go pc.writeToWebsocket(ctx, cancel, recoveryChan, recoveredPtyChan)
+	go pc.writeToWebsocket(ctx, cancel, recoveryChan)
 
-	go pc.readFromWebsocket(ctx, cancel, recoveryChan, recoveredWsChan)
+	go pc.readFromWebsocket(ctx, cancel, recoveryChan)
 	go pc.writeToPty(ctx, cancel)
 
+	pc.runRecoveryLoop(ctx, cancel, recoveryChan)
+}
+
+// runRecoveryLoop serializes recovery attempts; completion is broadcast by closing recoveryDone so sides that were not waiting cannot stall the next cycle.
+func (pc *PtyClient) runRecoveryLoop(ctx context.Context, cancel context.CancelFunc, recoveryChan chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-recoveryChan:
 			log.Debug().Msg("Attempting to reconnect Websh channel...")
-			err = pc.recovery()
-			pc.isRecovering.Store(false)
-			if err != nil {
+			if err := pc.recovery(ctx); err != nil {
+				pc.clearRecovering()
 				cancel()
 				return
 			}
-			recoveredWsChan <- struct{}{}
-			recoveredPtyChan <- struct{}{}
+			pc.completeRecovery()
 		}
 	}
 }
 
-func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.CancelFunc, recoveryChan, recoveredChan chan struct{}) {
+// clearRecovering releases single-flight without waking waiters; the caller cancels the session, so waiters exit via ctx.Done instead.
+func (pc *PtyClient) clearRecovering() {
+	pc.recoveryMu.Lock()
+	defer pc.recoveryMu.Unlock()
+	pc.isRecovering.Store(false)
+}
+
+// completeRecovery does flag-clear, close and rotate in one recoveryMu step so no waiter can observe the flag cleared against the about-to-be-replaced channel.
+func (pc *PtyClient) completeRecovery() {
+	pc.recoveryMu.Lock()
+	defer pc.recoveryMu.Unlock()
+	pc.isRecovering.Store(false)
+	close(pc.recoveryDone)
+	pc.recoveryDone = make(chan struct{})
+}
+
+// getConn reads pc.conn under recoveryMu because recovery replaces it while the read/write goroutines are still running.
+func (pc *PtyClient) getConn() *websocket.Conn {
+	pc.recoveryMu.Lock()
+	defer pc.recoveryMu.Unlock()
+	return pc.conn
+}
+
+// swapConn returns the replaced conn; the caller must close it.
+func (pc *PtyClient) swapConn(conn *websocket.Conn) *websocket.Conn {
+	pc.recoveryMu.Lock()
+	defer pc.recoveryMu.Unlock()
+	old := pc.conn
+	pc.conn = conn
+	return old
+}
+
+// waitForRecovery requests a reconnect for the conn that errored—unless recovery already replaced it—and blocks until it completes; false means the session ended.
+func (pc *PtyClient) waitForRecovery(ctx context.Context, conn *websocket.Conn, recoveryChan chan struct{}) bool {
+	// Snapshot the completion channel, the conn check, and the single-flight CAS under one lock so completeRecovery cannot interleave and wake this waiter on a stale channel generation.
+	pc.recoveryMu.Lock()
+	if pc.conn != conn {
+		pc.recoveryMu.Unlock()
+		return true
+	}
+	recovered := pc.recoveryDone
+	request := pc.isRecovering.CompareAndSwap(false, true)
+	pc.recoveryMu.Unlock()
+
+	if request {
+		recoveryChan <- struct{}{}
+	}
+	select {
+	case <-recovered:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.CancelFunc, recoveryChan chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			_, msg, err := pc.conn.ReadMessage()
+			conn := pc.getConn()
+			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -192,17 +253,16 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 					return
 				}
 
-				if pc.isRecovering.CompareAndSwap(false, true) {
-					recoveryChan <- struct{}{}
-				}
-				select {
-				case <-recoveredChan:
-					continue
-				case <-ctx.Done():
+				if !pc.waitForRecovery(ctx, conn, recoveryChan) {
 					return
 				}
+				continue
 			}
-			pc.wsToPty <- msg
+			select {
+			case pc.wsToPty <- msg:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
@@ -234,18 +294,23 @@ func (pc *PtyClient) readFromPty(ctx context.Context, cancel context.CancelFunc)
 				cancel()
 				return
 			}
-			pc.ptyToWs <- append([]byte(nil), buf[:n]...)
+			select {
+			case pc.ptyToWs <- append([]byte(nil), buf[:n]...):
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
 
-func (pc *PtyClient) writeToWebsocket(ctx context.Context, cancel context.CancelFunc, recoveryChan, recoveredChan chan struct{}) {
+func (pc *PtyClient) writeToWebsocket(ctx context.Context, cancel context.CancelFunc, recoveryChan chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case msg := <-pc.ptyToWs:
-			err := pc.conn.WriteMessage(websocket.BinaryMessage, msg)
+			conn := pc.getConn()
+			err := conn.WriteMessage(websocket.BinaryMessage, msg)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -256,13 +321,7 @@ func (pc *PtyClient) writeToWebsocket(ctx context.Context, cancel context.Cancel
 					return
 				}
 
-				if pc.isRecovering.CompareAndSwap(false, true) {
-					recoveryChan <- struct{}{}
-				}
-				select {
-				case <-recoveredChan:
-					continue
-				case <-ctx.Done():
+				if !pc.waitForRecovery(ctx, conn, recoveryChan) {
 					return
 				}
 			}
@@ -338,18 +397,18 @@ func (pc *PtyClient) close() {
 		_ = pc.cmd.Wait()
 	}
 
-	if pc.conn != nil {
-		err := pc.conn.WriteControl(
+	if conn := pc.getConn(); conn != nil {
+		err := conn.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 			time.Now().Add(5*time.Second),
 		)
 		if err != nil {
 			log.Debug().Err(err).Msg("Failed to write close message to Websh channel.")
-			return
 		}
 
-		err = pc.conn.Close()
+		// Close the connection even if the close handshake failed; a broken connection must not leak its fd.
+		err = conn.Close()
 		if err != nil {
 			log.Debug().Err(err).Msg("Failed to close Websh channel.")
 		}
@@ -359,10 +418,9 @@ func (pc *PtyClient) close() {
 }
 
 // recovery reconnects the WebSocket while keeping the PTY session alive.
-// Note: recovery doesn't close the existing conn explicitly to avoid breaking the session.
-// The goal is to replace a broken connection, not perform a graceful shutdown.
-func (pc *PtyClient) recovery() error {
-	ctx, cancel := context.WithTimeout(context.Background(), maxRecoveryTimeout)
+func (pc *PtyClient) recovery(ctx context.Context) error {
+	// Derive from the session context so cancellation aborts the retry loop instead of blocking teardown for up to maxRecoveryTimeout.
+	ctx, cancel := context.WithTimeout(ctx, maxRecoveryTimeout)
 	defer cancel()
 
 	b := &retry.ExponentialBackoff{
@@ -409,7 +467,10 @@ func (pc *PtyClient) recovery() error {
 			return err
 		}
 
-		pc.conn = conn
+		// Close the replaced conn: its fd would leak otherwise, and a reader still blocked on a silently dead conn must be forced onto the new one.
+		if old := pc.swapConn(conn); old != nil {
+			_ = old.Close()
+		}
 		log.Debug().Msg("Websh reconnected successfully.")
 		return nil
 	})
