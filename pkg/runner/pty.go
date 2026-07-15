@@ -170,9 +170,8 @@ func (pc *PtyClient) runRecoveryLoop(ctx context.Context, cancel context.CancelF
 			return
 		case <-recoveryChan:
 			log.Debug().Msg("Attempting to reconnect Websh channel...")
-			err := pc.recovery(ctx)
-			pc.isRecovering.Store(false)
-			if err != nil {
+			if err := pc.recovery(ctx); err != nil {
+				pc.isRecovering.Store(false)
 				cancel()
 				return
 			}
@@ -188,10 +187,11 @@ func (pc *PtyClient) awaitRecovery() <-chan struct{} {
 	return pc.recoveryDone
 }
 
-// completeRecovery wakes every awaitRecovery waiter by closing recoveryDone and installing a fresh channel.
+// completeRecovery clears isRecovering and wakes every waiter under recoveryMu in one step, so no waiter can observe the flag cleared against the about-to-be-replaced channel.
 func (pc *PtyClient) completeRecovery() {
 	pc.recoveryMu.Lock()
 	defer pc.recoveryMu.Unlock()
+	pc.isRecovering.Store(false)
 	close(pc.recoveryDone)
 	pc.recoveryDone = make(chan struct{})
 }
@@ -214,11 +214,17 @@ func (pc *PtyClient) swapConn(conn *websocket.Conn) *websocket.Conn {
 
 // waitForRecovery requests a reconnect for the conn that errored—unless recovery already replaced it—and blocks until it completes; false means the session ended.
 func (pc *PtyClient) waitForRecovery(ctx context.Context, conn *websocket.Conn, recoveryChan chan struct{}) bool {
-	recovered := pc.awaitRecovery()
-	if pc.getConn() != conn {
+	// Snapshot the completion channel, the conn check, and the single-flight CAS under one lock so completeRecovery cannot interleave and wake this waiter on a stale channel generation.
+	pc.recoveryMu.Lock()
+	if pc.conn != conn {
+		pc.recoveryMu.Unlock()
 		return true
 	}
-	if pc.isRecovering.CompareAndSwap(false, true) {
+	recovered := pc.recoveryDone
+	request := pc.isRecovering.CompareAndSwap(false, true)
+	pc.recoveryMu.Unlock()
+
+	if request {
 		recoveryChan <- struct{}{}
 	}
 	select {
