@@ -146,8 +146,8 @@ func TestSetupUserDataDirIdempotent(t *testing.T) {
 	assert.Equal(t, "none", settings["workbench.startupEditor"])
 }
 
-// TestToSettingsJSONGolden locks the settings.json wire format so the
-// map-to-struct change stays byte-identical to the prior literal.
+// TestToSettingsJSONGolden locks the settings.json wire format so future
+// edits to codeServerSettings can't silently change the emitted output.
 func TestToSettingsJSONGolden(t *testing.T) {
 	c := &CodeServerConfig{
 		ColorTheme:                "Default Dark Modern",
@@ -160,13 +160,13 @@ func TestToSettingsJSONGolden(t *testing.T) {
 		DisableWelcomeWalkthrough: true,
 	}
 	want := `{
-  "security.workspace.trust.enabled": false,
-  "telemetry.telemetryLevel": "off",
-  "update.mode": "none",
-  "window.restoreWindows": "none",
-  "window.title": "Alpamon Editor",
   "workbench.colorTheme": "Default Dark Modern",
+  "window.title": "Alpamon Editor",
+  "telemetry.telemetryLevel": "off",
   "workbench.startupEditor": "none",
+  "window.restoreWindows": "none",
+  "update.mode": "none",
+  "security.workspace.trust.enabled": false,
   "workbench.welcomePage.walkthroughs.openOnInstall": false
 }`
 	got, err := c.ToSettingsJSON()
