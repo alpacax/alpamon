@@ -123,27 +123,27 @@ func (c *CodeServerConfig) ToConfigYAML() string {
 // Fields are declared in the alphabetical key order that json.MarshalIndent
 // emits for a map, so the rendered file is byte-identical to the prior literal.
 type codeServerSettings struct {
-	WorkspaceTrust  bool   `json:"security.workspace.trust.enabled"`
-	TelemetryLevel  string `json:"telemetry.telemetryLevel"`
-	UpdateMode      string `json:"update.mode"`
-	RestoreWindows  string `json:"window.restoreWindows"`
-	WindowTitle     string `json:"window.title"`
-	ColorTheme      string `json:"workbench.colorTheme"`
-	StartupEditor   string `json:"workbench.startupEditor"`
-	OpenWalkthrough bool   `json:"workbench.welcomePage.walkthroughs.openOnInstall"`
+	WorkspaceTrustEnabled bool   `json:"security.workspace.trust.enabled"`
+	TelemetryLevel        string `json:"telemetry.telemetryLevel"`
+	UpdateMode            string `json:"update.mode"`
+	RestoreWindows        string `json:"window.restoreWindows"`
+	WindowTitle           string `json:"window.title"`
+	ColorTheme            string `json:"workbench.colorTheme"`
+	StartupEditor         string `json:"workbench.startupEditor"`
+	OpenWalkthrough       bool   `json:"workbench.welcomePage.walkthroughs.openOnInstall"`
 }
 
 // ToSettingsJSON generates settings.json content for VS Code editor.
 func (c *CodeServerConfig) ToSettingsJSON() ([]byte, error) {
 	settings := codeServerSettings{
-		WorkspaceTrust:  !c.DisableWorkspaceTrust,
-		TelemetryLevel:  c.TelemetryLevel,
-		UpdateMode:      c.UpdateMode,
-		RestoreWindows:  c.RestoreWindows,
-		WindowTitle:     c.WindowTitle,
-		ColorTheme:      c.ColorTheme,
-		StartupEditor:   c.StartupEditor,
-		OpenWalkthrough: !c.DisableWelcomeWalkthrough,
+		WorkspaceTrustEnabled: !c.DisableWorkspaceTrust,
+		TelemetryLevel:        c.TelemetryLevel,
+		UpdateMode:            c.UpdateMode,
+		RestoreWindows:        c.RestoreWindows,
+		WindowTitle:           c.WindowTitle,
+		ColorTheme:            c.ColorTheme,
+		StartupEditor:         c.StartupEditor,
+		OpenWalkthrough:       !c.DisableWelcomeWalkthrough,
 	}
 	return json.MarshalIndent(settings, "", "  ")
 }
