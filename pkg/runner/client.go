@@ -351,7 +351,7 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 	}
 }
 
-func (wc *WebsocketClient) WriteJSON(data interface{}) error {
+func (wc *WebsocketClient) WriteJSON(data any) error {
 	err := wc.Conn.WriteJSON(data)
 	if err != nil {
 		log.Debug().Err(err).Msgf("Failed to write json data to websocket.")

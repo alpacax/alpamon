@@ -314,3 +314,23 @@ func TestReportErrorTruncates(t *testing.T) {
 		t.Fatalf("truncated error is not valid UTF-8: %q", gotErr)
 	}
 }
+
+// TestApplyReportWireFormat locks the two applied-report bodies so the
+// map-to-struct change stays byte-identical to the prior map literals.
+func TestApplyReportWireFormat(t *testing.T) {
+	okBytes, err := json.Marshal(applySuccess{Success: true, AppliedHash: "abc123"})
+	if err != nil {
+		t.Fatalf("marshal applySuccess: %v", err)
+	}
+	if got, want := string(okBytes), `{"applied_hash":"abc123","success":true}`; got != want {
+		t.Fatalf("applySuccess = %s, want %s", got, want)
+	}
+
+	errBytes, err := json.Marshal(applyError{Success: false, Error: "boom"})
+	if err != nil {
+		t.Fatalf("marshal applyError: %v", err)
+	}
+	if got, want := string(errBytes), `{"error":"boom","success":false}`; got != want {
+		t.Fatalf("applyError = %s, want %s", got, want)
+	}
+}

@@ -119,17 +119,31 @@ func (c *CodeServerConfig) ToConfigYAML() string {
 		c.Auth, c.DisableTelemetry, c.DisableUpdateCheck)
 }
 
+// codeServerSettings is the settings.json body for the code-server editor.
+// Fields follow CodeServerConfig's editor-settings order; the emitted key
+// order is JSON-irrelevant and locked by TestToSettingsJSONGolden.
+type codeServerSettings struct {
+	ColorTheme            string `json:"workbench.colorTheme"`
+	WindowTitle           string `json:"window.title"`
+	TelemetryLevel        string `json:"telemetry.telemetryLevel"`
+	StartupEditor         string `json:"workbench.startupEditor"`
+	RestoreWindows        string `json:"window.restoreWindows"`
+	UpdateMode            string `json:"update.mode"`
+	WorkspaceTrustEnabled bool   `json:"security.workspace.trust.enabled"`
+	OpenWalkthrough       bool   `json:"workbench.welcomePage.walkthroughs.openOnInstall"`
+}
+
 // ToSettingsJSON generates settings.json content for VS Code editor.
 func (c *CodeServerConfig) ToSettingsJSON() ([]byte, error) {
-	settings := map[string]interface{}{
-		"workbench.colorTheme":                             c.ColorTheme,
-		"workbench.startupEditor":                          c.StartupEditor,
-		"workbench.welcomePage.walkthroughs.openOnInstall": !c.DisableWelcomeWalkthrough,
-		"window.restoreWindows":                            c.RestoreWindows,
-		"window.title":                                     c.WindowTitle,
-		"telemetry.telemetryLevel":                         c.TelemetryLevel,
-		"security.workspace.trust.enabled":                 !c.DisableWorkspaceTrust,
-		"update.mode":                                      c.UpdateMode,
+	settings := codeServerSettings{
+		ColorTheme:            c.ColorTheme,
+		WindowTitle:           c.WindowTitle,
+		TelemetryLevel:        c.TelemetryLevel,
+		StartupEditor:         c.StartupEditor,
+		RestoreWindows:        c.RestoreWindows,
+		UpdateMode:            c.UpdateMode,
+		WorkspaceTrustEnabled: !c.DisableWorkspaceTrust,
+		OpenWalkthrough:       !c.DisableWelcomeWalkthrough,
 	}
 	return json.MarshalIndent(settings, "", "  ")
 }

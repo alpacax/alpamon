@@ -20,7 +20,7 @@ func TestPoolBasic(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Submit 10 jobs
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		wg.Add(1)
 		err := pool.Submit(context.Background(), func() error {
 			atomic.AddInt32(&counter, 1)
@@ -101,7 +101,7 @@ func TestPoolConcurrency(t *testing.T) {
 	var maxConcurrent int32
 
 	// Submit many jobs
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		if err := pool.Submit(context.Background(), func() error {
 			current := atomic.AddInt32(&concurrent, 1)
 			defer atomic.AddInt32(&concurrent, -1)
@@ -171,7 +171,7 @@ func TestPoolShutdown(t *testing.T) {
 	var completed int32
 
 	// Submit several jobs
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if err := pool.Submit(context.Background(), func() error {
 			time.Sleep(50 * time.Millisecond)
 			atomic.AddInt32(&completed, 1)

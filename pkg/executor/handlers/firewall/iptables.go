@@ -359,7 +359,7 @@ func (s *IptablesBackend) BatchApply(ctx context.Context, chainName string, rule
 }
 
 // ReorderChains reorders jump rules in INPUT chain
-func (s *IptablesBackend) ReorderChains(ctx context.Context, chainNames []string) (map[string]interface{}, error) {
+func (s *IptablesBackend) ReorderChains(ctx context.Context, chainNames []string) (map[string]any, error) {
 	log.Debug().Msg("Starting iptables chain reordering")
 
 	// Get current INPUT chain rules
@@ -394,7 +394,7 @@ func (s *IptablesBackend) ReorderChains(ctx context.Context, chainNames []string
 
 	if len(jumpLines) == 0 {
 		log.Warn().Msg("No jump rules found to reorder")
-		return map[string]interface{}{
+		return map[string]any{
 			"reordered_chains": chainNames,
 			"deleted_rules":    0,
 		}, nil
@@ -427,7 +427,7 @@ func (s *IptablesBackend) ReorderChains(ctx context.Context, chainNames []string
 		log.Debug().Msgf("Added jump rule for chain: %s", chainName)
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"reordered_chains": chainNames,
 		"deleted_rules":    len(jumpLines),
 	}, nil

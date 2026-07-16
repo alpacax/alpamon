@@ -19,23 +19,23 @@ func NewFtpLogger() FtpLogger {
 		Out:          os.Stderr,
 		TimeFormat:   time.RFC3339,
 		TimeLocation: time.Local,
-		FormatLevel: func(i interface{}) string {
+		FormatLevel: func(i any) string {
 			return "[" + strings.ToUpper(i.(string)) + "]"
 		},
-		FormatMessage: func(i interface{}) string {
+		FormatMessage: func(i any) string {
 			return " " + i.(string)
 		},
-		FormatFieldName: func(i interface{}) string {
+		FormatFieldName: func(i any) string {
 			return "(" + i.(string) + ")"
 		},
-		FormatFieldValue: func(i interface{}) string {
+		FormatFieldValue: func(i any) string {
 			return i.(string)
 		},
 	}
 
 	showCaller := version.Version == "dev"
 	if showCaller {
-		consoleOutput.FormatCaller = func(i interface{}) string {
+		consoleOutput.FormatCaller = func(i any) string {
 			if i == nil || i == "" {
 				return ""
 			}
@@ -46,7 +46,7 @@ func NewFtpLogger() FtpLogger {
 			return "(" + callerStr + ")"
 		}
 	} else {
-		consoleOutput.FormatCaller = func(i interface{}) string { return "" }
+		consoleOutput.FormatCaller = func(i any) string { return "" }
 	}
 
 	logger := zerolog.New(consoleOutput).With().Timestamp().Caller().Logger()

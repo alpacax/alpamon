@@ -73,7 +73,7 @@ func (m *MockAPISession) MultipartRequest(url string, body io.Reader, contentTyp
 	panic("MockAPISession.MultipartRequest: unexpected call (system handler should not invoke MultipartRequest)")
 }
 
-func (m *MockAPISession) Delete(url string, rawBody interface{}, timeout time.Duration) ([]byte, int, error) {
+func (m *MockAPISession) Delete(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.DeleteCalls = append(m.DeleteCalls, url)

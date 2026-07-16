@@ -429,7 +429,7 @@ func (pc *PtyClient) recovery(ctx context.Context) error {
 	}
 
 	return retry.Retry(ctx, b, func() error {
-		data := map[string]interface{}{
+		data := map[string]any{
 			"session": pc.sessionID,
 		}
 		body, statusCode, err := pc.apiSession.Post(reconnectPtyWebsocketURL, data, 5)

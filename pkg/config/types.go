@@ -7,7 +7,7 @@ type Settings struct {
 	UseSSL             bool
 	CaCert             string // CA certificate file path
 	SSLVerify          bool
-	SSLOpt             map[string]interface{}
+	SSLOpt             map[string]any
 	HTTPThreads        int
 	ID                 string
 	Key                string

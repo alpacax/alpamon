@@ -559,7 +559,7 @@ func TestComputeFingerprintStructDeterminism(t *testing.T) {
 	}
 
 	hashes := make(map[string]bool)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		hashes[computeFingerprint(data)] = true
 	}
 	assert.Len(t, hashes, 1, "Same struct should always produce the same hash")

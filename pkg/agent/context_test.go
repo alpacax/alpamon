@@ -134,7 +134,7 @@ func TestConcurrentContextCreation(t *testing.T) {
 	done := make(chan bool)
 
 	// Create contexts concurrently
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		go func(id int) {
 			ctx, cancel := cm.NewContext(time.Duration(id) * time.Millisecond)
 			defer cancel()
@@ -152,7 +152,7 @@ func TestConcurrentContextCreation(t *testing.T) {
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		select {
 		case <-done:
 			// Continue

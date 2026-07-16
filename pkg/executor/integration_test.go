@@ -203,7 +203,7 @@ func TestIntegration_ConcurrentExecution(t *testing.T) {
 	var wg sync.WaitGroup
 	concurrency := 50
 
-	for i := 0; i < concurrency; i++ {
+	for range concurrency {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -240,7 +240,7 @@ func TestIntegration_PoolWithRegistry(t *testing.T) {
 	var wg sync.WaitGroup
 	taskCount := 20
 
-	for i := 0; i < taskCount; i++ {
+	for range taskCount {
 		wg.Add(1)
 		ctx, cancel := ctxManager.NewContext(5 * time.Second)
 

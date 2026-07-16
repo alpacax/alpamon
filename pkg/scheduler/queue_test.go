@@ -22,7 +22,7 @@ func drainOne(t *testing.T) {
 }
 
 func fill(n int) {
-	for i := 0; i < n; i++ {
+	for range n {
 		Rqueue.Post("/other", nil, 10, time.Time{})
 	}
 }

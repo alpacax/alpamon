@@ -205,7 +205,7 @@ func TestChunkWriter_StreamsAllWithBoundedCapture(t *testing.T) {
 
 	block := strings.Repeat("z", 256*1024)
 	const writes = 6
-	for i := 0; i < writes; i++ {
+	for i := range writes {
 		if _, err := cw.Write([]byte(block)); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}

@@ -216,7 +216,7 @@ func (s *NftablesBackend) ListRules(ctx context.Context, chainName string) ([]co
 // parseNftablesJSONOutput parses nft -j output to extract rules
 func (s *NftablesBackend) parseNftablesJSONOutput(output, filterChain string) ([]common.FirewallRule, error) {
 	var nftData struct {
-		Nftables []map[string]interface{} `json:"nftables"`
+		Nftables []map[string]any `json:"nftables"`
 	}
 
 	if err := json.Unmarshal([]byte(output), &nftData); err != nil {
@@ -231,7 +231,7 @@ func (s *NftablesBackend) parseNftablesJSONOutput(output, filterChain string) ([
 			continue
 		}
 
-		ruleMap, ok := ruleData.(map[string]interface{})
+		ruleMap, ok := ruleData.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -253,7 +253,7 @@ func (s *NftablesBackend) parseNftablesJSONOutput(output, filterChain string) ([
 }
 
 // parseNftablesRule parses a single nftables rule map
-func (s *NftablesBackend) parseNftablesRule(ruleMap map[string]interface{}) *common.FirewallRule {
+func (s *NftablesBackend) parseNftablesRule(ruleMap map[string]any) *common.FirewallRule {
 	rule := &common.FirewallRule{
 		Source:      "0.0.0.0/0",
 		Destination: "0.0.0.0/0",
@@ -273,9 +273,9 @@ func (s *NftablesBackend) parseNftablesRule(ruleMap map[string]interface{}) *com
 	}
 
 	// Parse expressions for protocol, ports, source, target, comment
-	if expr, ok := ruleMap["expr"].([]interface{}); ok {
+	if expr, ok := ruleMap["expr"].([]any); ok {
 		for _, e := range expr {
-			exprMap, ok := e.(map[string]interface{})
+			exprMap, ok := e.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -286,9 +286,9 @@ func (s *NftablesBackend) parseNftablesRule(ruleMap map[string]interface{}) *com
 			}
 
 			// Match protocol
-			if match, ok := exprMap["match"].(map[string]interface{}); ok {
-				if left, ok := match["left"].(map[string]interface{}); ok {
-					if meta, ok := left["meta"].(map[string]interface{}); ok {
+			if match, ok := exprMap["match"].(map[string]any); ok {
+				if left, ok := match["left"].(map[string]any); ok {
+					if meta, ok := left["meta"].(map[string]any); ok {
 						if key, ok := meta["key"].(string); ok && key == "l4proto" {
 							if right, ok := match["right"].(string); ok {
 								rule.Protocol = right
@@ -297,7 +297,7 @@ func (s *NftablesBackend) parseNftablesRule(ruleMap map[string]interface{}) *com
 					}
 
 					// Match source/destination
-					if payload, ok := left["payload"].(map[string]interface{}); ok {
+					if payload, ok := left["payload"].(map[string]any); ok {
 						if field, ok := payload["field"].(string); ok {
 							if right, ok := match["right"].(string); ok {
 								switch field {
@@ -317,8 +317,8 @@ func (s *NftablesBackend) parseNftablesRule(ruleMap map[string]interface{}) *com
 					if rule.PortStart == 0 {
 						rule.PortStart = port
 					}
-				} else if right, ok := match["right"].(map[string]interface{}); ok {
-					if set, ok := right["set"].([]interface{}); ok {
+				} else if right, ok := match["right"].(map[string]any); ok {
+					if set, ok := right["set"].([]any); ok {
 						for _, portVal := range set {
 							if p, ok := portVal.(float64); ok {
 								rule.DPorts = append(rule.DPorts, int(p))
@@ -373,7 +373,7 @@ func (s *NftablesBackend) BatchApply(ctx context.Context, chainName string, rule
 }
 
 // ReorderChains reorders jump rules in INPUT chain
-func (s *NftablesBackend) ReorderChains(ctx context.Context, chainNames []string) (map[string]interface{}, error) {
+func (s *NftablesBackend) ReorderChains(ctx context.Context, chainNames []string) (map[string]any, error) {
 	log.Debug().Msg("Starting nftables chain reordering")
 
 	// Get current INPUT chain rules with handles
@@ -412,7 +412,7 @@ func (s *NftablesBackend) ReorderChains(ctx context.Context, chainNames []string
 
 	if len(jumpHandles) == 0 {
 		log.Warn().Msg("No jump rules found to reorder")
-		return map[string]interface{}{
+		return map[string]any{
 			"reordered_chains": chainNames,
 			"deleted_rules":    0,
 		}, nil
@@ -436,7 +436,7 @@ func (s *NftablesBackend) ReorderChains(ctx context.Context, chainNames []string
 		log.Debug().Msgf("Added jump rule for chain: %s", chainName)
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"reordered_chains": chainNames,
 		"deleted_rules":    len(jumpHandles),
 	}, nil

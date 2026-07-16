@@ -34,7 +34,7 @@ type FirewallBackend interface {
 	BatchApply(ctx context.Context, chainName string, rules []common.FirewallRule) (applied int, failed []string, err error)
 
 	// ReorderChains reorders jump rules in INPUT chain
-	ReorderChains(ctx context.Context, chainNames []string) (map[string]interface{}, error)
+	ReorderChains(ctx context.Context, chainNames []string) (map[string]any, error)
 
 	// ReorderRules reorders rules within a chain
 	ReorderRules(ctx context.Context, chainName string, rules []common.FirewallRule) error

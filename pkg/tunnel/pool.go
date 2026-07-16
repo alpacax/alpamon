@@ -8,7 +8,7 @@ import (
 const copyBufferSize = 32 * 1024 // 32KB
 
 var copyBufferPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		buf := make([]byte, copyBufferSize)
 		return &buf
 	},

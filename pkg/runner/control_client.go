@@ -146,7 +146,7 @@ func (cc *ControlClient) Close() {
 }
 
 // WriteJSON sends JSON data through the WebSocket connection
-func (cc *ControlClient) WriteJSON(data interface{}) error {
+func (cc *ControlClient) WriteJSON(data any) error {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 

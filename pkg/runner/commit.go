@@ -388,7 +388,7 @@ func checkSyncHashes(session *scheduler.Session, hashes SyncHashes) ([]string, e
 }
 
 func compareData(entry commitDef, currentData, remoteData ComparableData, syncHash string) {
-	var createData, updateData interface{}
+	var createData, updateData any
 
 	if remoteData == nil {
 		createData = currentData.GetData()
@@ -410,7 +410,7 @@ func compareData(entry commitDef, currentData, remoteData ComparableData, syncHa
 func compareListData[T ComparableData](entry commitDef, currentData, remoteData []T, syncHash string) {
 	h := syncHashHeader(syncHash)
 
-	currentMap := make(map[interface{}]ComparableData)
+	currentMap := make(map[any]ComparableData)
 	for _, currentItem := range currentData {
 		currentMap[currentItem.GetKey()] = currentItem
 	}
@@ -428,7 +428,7 @@ func compareListData[T ComparableData](entry commitDef, currentData, remoteData 
 		}
 	}
 
-	var createData []interface{}
+	var createData []any
 	for _, currentItem := range currentMap {
 		createData = append(createData, currentItem.GetData())
 	}

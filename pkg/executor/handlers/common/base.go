@@ -35,14 +35,14 @@ func (h *BaseHandler) Commands() []string {
 }
 
 // ValidateStruct validates a struct using struct tags
-func (h *BaseHandler) ValidateStruct(s interface{}) error {
+func (h *BaseHandler) ValidateStruct(s any) error {
 	return h.validator.Struct(s)
 }
 
 // Helper functions for common operations
 
 // GetStringArg retrieves a string argument from the args map
-func GetStringArg(args map[string]interface{}, key string, defaultValue string) string {
+func GetStringArg(args map[string]any, key string, defaultValue string) string {
 	if val, ok := args[key]; ok {
 		if str, ok := val.(string); ok {
 			return str
@@ -52,7 +52,7 @@ func GetStringArg(args map[string]interface{}, key string, defaultValue string) 
 }
 
 // GetIntArg retrieves an integer argument from the args map
-func GetIntArg(args map[string]interface{}, key string, defaultValue int) int {
+func GetIntArg(args map[string]any, key string, defaultValue int) int {
 	if val, ok := args[key]; ok {
 		switch v := val.(type) {
 		case int:
@@ -69,7 +69,7 @@ func GetIntArg(args map[string]interface{}, key string, defaultValue int) int {
 }
 
 // GetBoolArg retrieves a boolean argument from the args map
-func GetBoolArg(args map[string]interface{}, key string, defaultValue bool) bool {
+func GetBoolArg(args map[string]any, key string, defaultValue bool) bool {
 	if val, ok := args[key]; ok {
 		if b, ok := val.(bool); ok {
 			return b
@@ -79,12 +79,12 @@ func GetBoolArg(args map[string]interface{}, key string, defaultValue bool) bool
 }
 
 // GetStringSliceArg retrieves a string slice argument from the args map
-func GetStringSliceArg(args map[string]interface{}, key string) []string {
+func GetStringSliceArg(args map[string]any, key string) []string {
 	if val, ok := args[key]; ok {
 		switch v := val.(type) {
 		case []string:
 			return v
-		case []interface{}:
+		case []any:
 			var result []string
 			for _, item := range v {
 				if str, ok := item.(string); ok {

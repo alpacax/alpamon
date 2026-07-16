@@ -17,7 +17,7 @@ func TestFindAvailablePort(t *testing.T) {
 }
 
 func TestFindAvailablePortRepeated(t *testing.T) {
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		port, err := findAvailablePort()
 		assert.NoError(t, err, "Failed to find available port")
 		assert.True(t, port > 0 && port <= 65535, "Port should be in valid range")
@@ -108,7 +108,7 @@ func TestSetupUserDataDir(t *testing.T) {
 	assert.NoError(t, err, "settings.json should exist and be readable")
 
 	// Verify settings.json content
-	var settings map[string]interface{}
+	var settings map[string]any
 	err = json.Unmarshal(data, &settings)
 	assert.NoError(t, err, "settings.json should be valid JSON")
 
@@ -140,8 +140,36 @@ func TestSetupUserDataDirIdempotent(t *testing.T) {
 	data, err := os.ReadFile(settingsPath)
 	assert.NoError(t, err)
 
-	var settings map[string]interface{}
+	var settings map[string]any
 	err = json.Unmarshal(data, &settings)
 	assert.NoError(t, err)
 	assert.Equal(t, "none", settings["workbench.startupEditor"])
+}
+
+// TestToSettingsJSONGolden locks the settings.json wire format so future
+// edits to codeServerSettings can't silently change the emitted output.
+func TestToSettingsJSONGolden(t *testing.T) {
+	c := &CodeServerConfig{
+		ColorTheme:                "Default Dark Modern",
+		StartupEditor:             "none",
+		RestoreWindows:            "none",
+		WindowTitle:               "Alpamon Editor",
+		TelemetryLevel:            "off",
+		UpdateMode:                "none",
+		DisableWorkspaceTrust:     true,
+		DisableWelcomeWalkthrough: true,
+	}
+	want := `{
+  "workbench.colorTheme": "Default Dark Modern",
+  "window.title": "Alpamon Editor",
+  "telemetry.telemetryLevel": "off",
+  "workbench.startupEditor": "none",
+  "window.restoreWindows": "none",
+  "update.mode": "none",
+  "security.workspace.trust.enabled": false,
+  "workbench.welcomePage.walkthroughs.openOnInstall": false
+}`
+	got, err := c.ToSettingsJSON()
+	assert.NoError(t, err)
+	assert.Equal(t, want, string(got))
 }

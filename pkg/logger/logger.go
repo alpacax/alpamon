@@ -73,21 +73,21 @@ func PrettyWriter(out io.Writer, showCaller bool) zerolog.ConsoleWriter {
 		NoColor:      true,
 		TimeFormat:   time.RFC3339,
 		TimeLocation: time.Local,
-		FormatLevel: func(i interface{}) string {
+		FormatLevel: func(i any) string {
 			return "[" + strings.ToUpper(fmt.Sprint(i)) + "]"
 		},
-		FormatMessage: func(i interface{}) string {
+		FormatMessage: func(i any) string {
 			return fmt.Sprint(i)
 		},
-		FormatFieldName: func(i interface{}) string {
+		FormatFieldName: func(i any) string {
 			return "(" + fmt.Sprint(i) + ")"
 		},
-		FormatFieldValue: func(i interface{}) string {
+		FormatFieldValue: func(i any) string {
 			return fmt.Sprint(i)
 		},
 	}
 	if showCaller {
-		cw.FormatCaller = func(i interface{}) string {
+		cw.FormatCaller = func(i any) string {
 			if i == nil || i == "" {
 				return ""
 			}
@@ -98,7 +98,7 @@ func PrettyWriter(out io.Writer, showCaller bool) zerolog.ConsoleWriter {
 			return fmt.Sprintf("(%s)", callerStr)
 		}
 	} else {
-		cw.FormatCaller = func(i interface{}) string { return "" }
+		cw.FormatCaller = func(i any) string { return "" }
 	}
 	return cw
 }
