@@ -8,3 +8,6 @@ alpamon.db
 .DS_Store
 .idea
 alpamon.exe
+
+# Local planning docs (superpowers skill output)
+docs/superpowers/
