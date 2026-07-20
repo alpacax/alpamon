@@ -137,6 +137,10 @@ type AuthManager struct {
 	completionChannels map[string]chan struct{}
 	session            *scheduler.Session
 	blockLocalSudo     bool
+	detectLocalAccess  bool
+	// emitAccessEventFn overrides emitAccessEvent in tests; nil means
+	// the real emitter is used.
+	emitAccessEventFn func(NonAlpaconAccessEvent)
 }
 
 const (
@@ -370,6 +374,9 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 
 	case "sudo_approval":
 		am.handleSudoApprovalRequest(buf[:n], unixConn)
+
+	case "session_event":
+		am.handleSessionEvent(buf[:n], unixConn)
 
 	default:
 		log.Warn().Str("type", baseReq.Type).Msg("Unknown request type")

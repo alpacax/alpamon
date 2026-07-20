@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"encoding/json"
+	"net"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -77,4 +79,60 @@ func (am *AuthManager) resolveSessionEvent(req SessionEventRequest) (NonAlpaconA
 		PPID:      req.PPID,
 		Timestamp: time.Now().UTC(),
 	}, true
+}
+
+// handleSessionEvent processes a session_event from the PAM session
+// hook. The ack is written before any server round-trip so PAM (and
+// thus sshd) never waits on emission; the POST runs on its own
+// goroutine. Fail-open: every path answers the socket.
+func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
+	defer func() { _ = unixConn.Close() }()
+
+	var req SessionEventRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		log.Warn().Err(err).Msg("Invalid session_event request")
+		am.sendSessionEventResponse(unixConn, false)
+		return
+	}
+
+	event, emit := am.resolveSessionEvent(req)
+
+	am.sendSessionEventResponse(unixConn, true)
+
+	am.mu.RLock()
+	detect := am.detectLocalAccess
+	emitFn := am.emitAccessEventFn
+	am.mu.RUnlock()
+
+	if !emit || !detect {
+		return
+	}
+	if emitFn == nil {
+		emitFn = am.emitAccessEvent
+	}
+	go emitFn(event)
+}
+
+func (am *AuthManager) sendSessionEventResponse(conn net.Conn, received bool) {
+	response := SessionEventResponse{
+		Type:     "session_event_response",
+		Received: received,
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to marshal session_event_response")
+		return
+	}
+
+	if _, err := conn.Write(responseJSON); err != nil {
+		log.Warn().Err(err).Msg("Failed to send session_event_response")
+	}
+}
+
+// emitAccessEvent POSTs event to alpacon-server. Implemented in the
+// emission task; this stub only logs.
+func (am *AuthManager) emitAccessEvent(event NonAlpaconAccessEvent) {
+	log.Debug().Str("username", event.Username).Str("service", event.Service).
+		Msg("Access event emitter not yet wired")
 }
