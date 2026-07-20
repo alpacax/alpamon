@@ -115,7 +115,7 @@ func querySSHDUsePAM() string {
 	defer cancel()
 
 	// sshd -T prints the effective config; requires root, which alpamon
-	// runs as in production. Errors simply yield "unknown".
+	// runs as in production. Errors simply yield "" (undeterminable).
 	out, err := exec.CommandContext(ctx, sshdPath, "-T").Output()
 	if err != nil {
 		return ""
