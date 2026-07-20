@@ -11,6 +11,7 @@ func NewEmptyAuthManager() *AuthManager {
 		pidToSessionMap:    make(map[int]*SessionInfo),
 		localSudoRequests:  make(map[string]*SudoRequest),
 		completionChannels: make(map[string]chan struct{}),
+		emitSem:            make(chan struct{}, emitConcurrencyLimit),
 	}
 }
 

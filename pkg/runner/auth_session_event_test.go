@@ -171,6 +171,50 @@ func TestHandleSessionEvent_SuppressedStillAcks(t *testing.T) {
 	time.Sleep(100 * time.Millisecond) // give a wrong emit a chance to fire
 }
 
+// TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted verifies the
+// non-blocking bound: when every emit slot is occupied, a further
+// session_event is still acked but its emission is dropped instead of
+// spawning an unbounded goroutine.
+func TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted(t *testing.T) {
+	am := newTestAuthManager()
+	am.detectLocalAccess = true
+	am.emitSem = make(chan struct{}, 1) // force a single emit slot
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
+		entered <- struct{}{}
+		<-release // hold the slot until the test releases it
+	}
+	defer close(release)
+
+	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
+
+	// First event acquires the only slot and blocks inside emitFn.
+	server1, client1 := net.Pipe()
+	go am.handleSessionEvent(raw, server1)
+	if resp := readSessionEventAck(t, client1); !resp.Received {
+		t.Fatalf("first event must ack true, got %+v", resp)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first emit never started")
+	}
+
+	// Second event finds the slot full: it must still ack but not emit.
+	server2, client2 := net.Pipe()
+	go am.handleSessionEvent(raw, server2)
+	if resp := readSessionEventAck(t, client2); !resp.Received {
+		t.Fatalf("dropped event must still ack true, got %+v", resp)
+	}
+	select {
+	case <-entered:
+		t.Error("second event exceeded the concurrency limit and must be dropped")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 // TestHandleSessionEvent_FlagOffDoesNotEmit verifies the policy gate:
 // detection default-off means ack-only behavior.
 func TestHandleSessionEvent_FlagOffDoesNotEmit(t *testing.T) {

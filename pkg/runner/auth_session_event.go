@@ -123,7 +123,25 @@ func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 	if emitFn == nil {
 		emitFn = am.emitAccessEvent
 	}
-	go emitFn(event)
+
+	// Bound in-flight emit goroutines: each can hold up to authRetryTimeout
+	// of retry against an unreachable server, so a login burst could
+	// otherwise spawn goroutines without limit. Acquire a slot without
+	// blocking (the ack was already sent above); drop the event if the
+	// budget is exhausted.
+	select {
+	case am.emitSem <- struct{}{}:
+	default:
+		log.Debug().
+			Str("username", event.Username).
+			Str("service", event.Service).
+			Msg("access event dropped: emit concurrency limit reached")
+		return
+	}
+	go func() {
+		defer func() { <-am.emitSem }()
+		emitFn(event)
+	}()
 }
 
 func (am *AuthManager) sendSessionEventResponse(conn net.Conn, received bool) {
