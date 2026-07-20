@@ -108,6 +108,19 @@ func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 		return
 	}
 
+	// A well-formed envelope can still carry a useless event (missing user
+	// or pid). Reject it here rather than forwarding a blank audit record
+	// upstream; the ack still goes out so PAM never waits on us.
+	if req.Username == "" || req.Service == "" || req.PID <= 0 {
+		log.Warn().
+			Str("username", req.Username).
+			Str("service", req.Service).
+			Int("pid", req.PID).
+			Msg("Incomplete session_event request; dropping")
+		am.sendSessionEventResponse(unixConn, false)
+		return
+	}
+
 	event, emit := am.resolveSessionEvent(req)
 
 	am.sendSessionEventResponse(unixConn, true)
