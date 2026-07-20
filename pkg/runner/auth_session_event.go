@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,6 +17,14 @@ import (
 // non-Alpacon access events. Phase 2 (server) must implement this path;
 // until then alpamon treats 404 as "not deployed" and drops the event.
 const nonAlpaconAccessEventURL = "/api/events/access/"
+
+// errAccessEndpointNotDeployed marks the expected steady state where
+// alpacon-server has not yet implemented the access event endpoint
+// (Phase 2 not deployed): the POST returns 404. It is the normal
+// condition until the server rolls out, so it is logged quietly rather
+// than as an emit failure. Matched via errors.Is because retry.Retry
+// unwraps the PermanentError and returns this sentinel directly.
+var errAccessEndpointNotDeployed = errors.New("access event endpoint not available (404)")
 
 // SessionEventRequest is sent by alpamon-pam's pam_sm_open_session hook
 // over auth.sock whenever a PAM session opens on a hooked service
@@ -165,7 +174,7 @@ func (am *AuthManager) emitAccessEvent(event NonAlpaconAccessEvent) {
 			return err
 		}
 		if statusCode == http.StatusNotFound {
-			return retry.Permanent(fmt.Errorf("access event endpoint not available (404)"))
+			return retry.Permanent(errAccessEndpointNotDeployed)
 		}
 		if statusCode < 200 || statusCode >= 300 {
 			return fmt.Errorf("access event failed with status code: %d", statusCode)
@@ -173,6 +182,15 @@ func (am *AuthManager) emitAccessEvent(event NonAlpaconAccessEvent) {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errAccessEndpointNotDeployed) {
+			// Expected until Phase 2 (server endpoint) ships; not a
+			// failure, so log quietly and drop.
+			log.Debug().
+				Str("username", event.Username).
+				Str("service", event.Service).
+				Msg("Access event endpoint not deployed (404); dropping event")
+			return
+		}
 		log.Warn().Err(err).
 			Str("username", event.Username).
 			Str("service", event.Service).
