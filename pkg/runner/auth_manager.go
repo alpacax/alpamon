@@ -193,6 +193,16 @@ func (am *AuthManager) UpdateBlockLocalSudo(value bool) {
 	log.Info().Bool("block_local_sudo", value).Msg("Updated block_local_sudo setting")
 }
 
+func (am *AuthManager) UpdateDetectLocalAccess(value bool) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	if am.detectLocalAccess == value {
+		return
+	}
+	am.detectLocalAccess = value
+	log.Info().Bool("detect_local_access", value).Msg("Updated detect_local_access setting")
+}
+
 func (am *AuthManager) Start(ctx context.Context) {
 	am.ctx, am.cancel = context.WithCancel(ctx)
 

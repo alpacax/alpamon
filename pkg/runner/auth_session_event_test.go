@@ -189,3 +189,38 @@ func TestHandleSessionEvent_FlagOffDoesNotEmit(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 }
+
+// TestUpdateDetectLocalAccess verifies the policy flag setter mirrors
+// UpdateBlockLocalSudo semantics.
+func TestUpdateDetectLocalAccess(t *testing.T) {
+	am := newTestAuthManager()
+
+	if am.detectLocalAccess {
+		t.Fatal("detect_local_access must default to false")
+	}
+	am.UpdateDetectLocalAccess(true)
+	if !am.detectLocalAccess {
+		t.Error("expected detect_local_access=true after update")
+	}
+	am.UpdateDetectLocalAccess(false)
+	if am.detectLocalAccess {
+		t.Error("expected detect_local_access=false after update")
+	}
+}
+
+// TestAccessPolicy_ParsesDetectLocalAccess verifies the sync payload
+// field mapping.
+func TestAccessPolicy_ParsesDetectLocalAccess(t *testing.T) {
+	raw := `{"block_local_sudo":false,"detect_local_access":true}`
+
+	var policy AccessPolicy
+	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if !policy.DetectLocalAccess {
+		t.Error("expected DetectLocalAccess=true")
+	}
+	if policy.BlockLocalSudo {
+		t.Error("expected BlockLocalSudo=false")
+	}
+}

@@ -322,6 +322,7 @@ func syncAccessPolicy(session *scheduler.Session) {
 
 	if authManager != nil {
 		authManager.UpdateBlockLocalSudo(accessPolicy.BlockLocalSudo)
+		authManager.UpdateDetectLocalAccess(accessPolicy.DetectLocalAccess)
 	}
 }
 

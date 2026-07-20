@@ -1,10 +1,14 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net"
+	"net/http"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/retry"
 	"github.com/rs/zerolog/log"
 )
 
@@ -130,9 +134,48 @@ func (am *AuthManager) sendSessionEventResponse(conn net.Conn, received bool) {
 	}
 }
 
-// emitAccessEvent POSTs event to alpacon-server. Implemented in the
-// emission task; this stub only logs.
+// emitAccessEvent POSTs a non-Alpacon access event to alpacon-server
+// with bounded best-effort retry (same backoff envelope as the sudo
+// approval path). It runs on its own goroutine; failures are logged and
+// dropped so detection never blocks logins. A 404 means the server does
+// not implement the endpoint yet (Phase 2 not deployed) and is not
+// retried.
 func (am *AuthManager) emitAccessEvent(event NonAlpaconAccessEvent) {
-	log.Debug().Str("username", event.Username).Str("service", event.Service).
-		Msg("Access event emitter not yet wired")
+	if am.session == nil {
+		log.Warn().Msg("HTTP session not available; dropping access event")
+		return
+	}
+
+	baseCtx := am.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, authRetryTimeout)
+	defer cancel()
+
+	b := &retry.ExponentialBackoff{
+		InitialInterval: authRetryInitialInterval,
+		MaxInterval:     authRetryMaxInterval,
+		MaxElapsedTime:  authRetryTimeout,
+	}
+
+	err := retry.Retry(ctx, b, func() error {
+		_, statusCode, err := am.session.Post(nonAlpaconAccessEventURL, event, 10)
+		if err != nil {
+			return err
+		}
+		if statusCode == http.StatusNotFound {
+			return retry.Permanent(fmt.Errorf("access event endpoint not available (404)"))
+		}
+		if statusCode < 200 || statusCode >= 300 {
+			return fmt.Errorf("access event failed with status code: %d", statusCode)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Warn().Err(err).
+			Str("username", event.Username).
+			Str("service", event.Service).
+			Msg("Failed to emit non-Alpacon access event")
+	}
 }

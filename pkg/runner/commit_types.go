@@ -155,7 +155,8 @@ type shadowEntry struct {
 }
 
 type AccessPolicy struct {
-	BlockLocalSudo bool `json:"block_local_sudo"`
+	BlockLocalSudo    bool `json:"block_local_sudo"`
+	DetectLocalAccess bool `json:"detect_local_access"`
 }
 
 type commitData struct {
