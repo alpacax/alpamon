@@ -194,6 +194,7 @@ func collectEssentialData() *commitData {
 	data := &commitData{
 		Version:    version.Version,
 		PamVersion: utils.GetPamVersion(),
+		SshdUsePam: utils.GetSSHDUsePAM(),
 	}
 
 	if load, err := getLoadAverage(); err == nil {
@@ -286,6 +287,7 @@ func syncServerData(session *scheduler.Session) {
 	data := &ServerData{
 		Version:    version.Version,
 		PamVersion: utils.GetPamVersion(),
+		SshdUsePam: utils.GetSSHDUsePAM(),
 		Load:       loadAvg,
 	}
 	scheduler.Rqueue.Patch(utils.JoinPath(entry.URL, entry.URLSuffix), data, 80, time.Time{})
@@ -442,6 +444,7 @@ func collectData() *commitData {
 	data := &commitData{
 		Version:    version.Version,
 		PamVersion: utils.GetPamVersion(),
+		SshdUsePam: utils.GetSSHDUsePAM(),
 	}
 
 	if load, err := getLoadAverage(); err == nil {

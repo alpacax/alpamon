@@ -58,6 +58,7 @@ var commitDefs = map[string]commitDef{
 type ServerData struct {
 	Version    string  `json:"version"`
 	PamVersion string  `json:"pam_version,omitempty"`
+	SshdUsePam string  `json:"sshd_use_pam,omitempty"`
 	Load       float64 `json:"load"`
 }
 
@@ -162,6 +163,7 @@ type AccessPolicy struct {
 type commitData struct {
 	Version    string      `json:"version"`
 	PamVersion string      `json:"pam_version,omitempty"`
+	SshdUsePam string      `json:"sshd_use_pam,omitempty"`
 	Load       float64     `json:"load"`
 	Info       SystemData  `json:"info"`
 	OS         OSData      `json:"os"`
