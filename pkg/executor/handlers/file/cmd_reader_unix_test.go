@@ -76,6 +76,10 @@ func TestCmdReadCloser_EarlyClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Safety net: the Read below can t.Fatalf, which would skip the explicit
+	// Close and leave the cat process unreaped (leaking os/exec's stderr-copy
+	// goroutine). Close() is idempotent, so the tested early Close still stands.
+	defer func() { _ = rc.Close() }()
 	buf := make([]byte, 16)
 	if _, err := rc.Read(buf); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("read: %v", err)
