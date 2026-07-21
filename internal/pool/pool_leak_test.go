@@ -169,9 +169,10 @@ func TestPool_NoLeakRapidShutdown(t *testing.T) {
 			})
 		}
 
-		// Shutdown joins all workers; a timeout here means a worker leaked.
+		// Shutdown joins all workers; a timeout means a leaked worker, so fail
+		// fast rather than spin up more pools and compound the leak.
 		if err := pool.Shutdown(1 * time.Second); err != nil {
-			t.Errorf("shutdown %d failed: %v", i, err)
+			t.Fatalf("shutdown %d failed: %v", i, err)
 		}
 	}
 }

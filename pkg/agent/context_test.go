@@ -89,7 +89,9 @@ func TestShutdownCancelsChildren(t *testing.T) {
 func TestChildCleanup(t *testing.T) {
 	cm := NewContextManager()
 
-	// Create child contexts that simulate long-running operations
+	// Each child blocks purely on cancellation with no self-exit timer, so the
+	// goroutines drain only if Shutdown actually cancels them; otherwise the
+	// outer guard below fires and the test fails.
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Add(1)
@@ -97,14 +99,7 @@ func TestChildCleanup(t *testing.T) {
 			defer wg.Done()
 			ctx, cancel := cm.NewContext(5 * time.Second)
 			defer cancel()
-
-			// Simulate work
-			select {
-			case <-ctx.Done():
-				// Context was cancelled
-			case <-time.After(100 * time.Millisecond):
-				// Work completed normally
-			}
+			<-ctx.Done()
 		}()
 	}
 
