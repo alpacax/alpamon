@@ -177,6 +177,10 @@ func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 	s := newWshServer(t)
 
 	pc := newTestPtyClient(t, s)
+	// Safety net: an early t.Fatalf (waitRecovered / recoveryPosts) would skip the
+	// explicit close below, leaking a reader parked on the live conn and hanging
+	// later tests. close() is idempotent, so the intended mid-test close still stands.
+	defer pc.close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -163,7 +163,10 @@ func TestBuildMultipartStream_EarlyCloseNoLeak(t *testing.T) {
 	// goroutine count. Nothing after src.Close in that teardown can block (only
 	// pool puts and a pipe close remain), so the signal proves it exits.
 	er := &errReader{r: bytes.NewReader(bytes.Repeat([]byte{1}, 4<<20)), failAt: 1 << 30, closed: make(chan struct{})}
-	body, _, _, _ := buildMultipartStream(er, "f", false, -1)
+	body, _, _, err := buildMultipartStream(er, "f", false, -1)
+	if err != nil {
+		t.Fatalf("buildMultipartStream: %v", err)
+	}
 	buf := make([]byte, 64)
 	_, _ = body.Read(buf)
 	_ = body.Close()
