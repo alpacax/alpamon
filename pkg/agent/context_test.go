@@ -94,13 +94,11 @@ func TestChildCleanup(t *testing.T) {
 	// outer guard below fires and the test fails.
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ctx, cancel := cm.NewContext(5 * time.Second)
 			defer cancel()
 			<-ctx.Done()
-		}()
+		})
 	}
 
 	// Give some time for goroutines to start
