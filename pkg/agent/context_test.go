@@ -293,6 +293,16 @@ func TestConcurrentOperations(t *testing.T) {
 	// Wait for all operations
 	wg.Wait()
 
+	// Manager must remain functional after the concurrent churn.
+	ctx, cancel := cm.NewContext(0)
+	cancel()
+	select {
+	case <-ctx.Done():
+		// Expected
+	default:
+		t.Error("context manager not functional after concurrent operations")
+	}
+
 	// Shutdown
 	cm.Shutdown()
 }
