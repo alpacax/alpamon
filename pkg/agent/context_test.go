@@ -61,11 +61,8 @@ func TestContextCancellation(t *testing.T) {
 	}
 }
 
-// TestShutdownCancelsChildren verifies that a directly cancelled child observes
-// context.Canceled, that Shutdown cancels the root so an outstanding child sees
-// cancellation, and that IsShutdown reports the state. The manager itself spawns no
-// goroutines (it only wraps context.WithCancel/WithTimeout), so there is nothing to leak—
-// the meaningful invariants are cancellation propagation and shutdown state.
+// TestShutdownCancelsChildren checks cancellation propagation and shutdown state; the
+// manager only wraps context.WithCancel/WithTimeout, so it spawns no goroutines to leak.
 func TestShutdownCancelsChildren(t *testing.T) {
 	cm := NewContextManager()
 
@@ -245,10 +242,8 @@ func TestConcurrentContextCreation(t *testing.T) {
 	}
 }
 
-// TestRapidCreateCancel exercises rapid create/cancel churn across many managers:
-// every cancelled child must be done, and each manager must report IsShutdown
-// after Shutdown. (Asserts ctx.Err() != nil rather than == Canceled: cancel() guarantees a
-// non-nil Err either way, but a short timeout may have fired first, making it DeadlineExceeded.)
+// TestRapidCreateCancel exercises rapid create/cancel churn. Asserts ctx.Err() != nil, not
+// == Canceled: a short timeout may fire before cancel(), making the error DeadlineExceeded.
 func TestRapidCreateCancel(t *testing.T) {
 	for i := range 20 {
 		cm := NewContextManager()
