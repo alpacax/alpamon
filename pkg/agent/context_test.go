@@ -95,7 +95,7 @@ func TestChildCleanup(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			ctx, cancel := cm.NewContext(5 * time.Second)
+			ctx, cancel := cm.NewContext(0)
 			defer cancel()
 			<-ctx.Done()
 		})
