@@ -13,12 +13,13 @@ import (
 )
 
 type errReader struct {
-	r        io.Reader
-	failAt   int
-	read     int
-	closeCnt int
-	closeErr error
-	closed   chan struct{} // if set, Close() closes it to signal the producer goroutine reached its src.Close defer
+	r          io.Reader
+	failAt     int
+	read       int
+	closeCnt   int
+	closeErr   error
+	closed     chan struct{} // if set, Close() closes it once to signal the producer goroutine reached its src.Close defer
+	closedDone bool          // guards close(closed) so a repeated Close is a no-op instead of a panic
 }
 
 func (e *errReader) Read(p []byte) (int, error) {
@@ -36,7 +37,8 @@ func (e *errReader) Read(p []byte) (int, error) {
 
 func (e *errReader) Close() error {
 	e.closeCnt++
-	if e.closed != nil {
+	if e.closed != nil && !e.closedDone {
+		e.closedDone = true
 		close(e.closed)
 	}
 	return e.closeErr
