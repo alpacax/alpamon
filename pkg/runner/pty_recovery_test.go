@@ -176,17 +176,19 @@ func TestPtyRecovery_WriteSideOnly(t *testing.T) {
 func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 	s := newWshServer(t)
 
-	baseline := runtime.NumGoroutine()
-
 	pc := newTestPtyClient(t, s)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Wrap the three loops in a WaitGroup so the leak check can wait on their
+	// actual return instead of polling runtime.NumGoroutine() against a tolerance.
+	var wg sync.WaitGroup
 	recoveryChan := make(chan struct{}, 1)
-	go pc.readFromWebsocket(ctx, cancel, recoveryChan)
-	go pc.writeToWebsocket(ctx, cancel, recoveryChan)
-	go pc.runRecoveryLoop(ctx, cancel, recoveryChan)
+	wg.Add(3)
+	go func() { defer wg.Done(); pc.readFromWebsocket(ctx, cancel, recoveryChan) }()
+	go func() { defer wg.Done(); pc.writeToWebsocket(ctx, cancel, recoveryChan) }()
+	go func() { defer wg.Done(); pc.runRecoveryLoop(ctx, cancel, recoveryChan) }()
 
 	const cycles = 5
 	for cycle := range cycles {
@@ -203,19 +205,18 @@ func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 	cancel()
 	pc.close()
 
-	// Drop test-infra keep-alive connections (recovery POSTs) so their transport goroutines do not distort the leak check.
-	s.ts.Client().Transport.(*http.Transport).CloseIdleConnections()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if runtime.NumGoroutine() <= baseline+2 {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+	// The three loops must all return: any that stays parked is the leak. The
+	// timeout is a deadlock detector, not a convergence deadline—wg.Wait()
+	// returns the instant they exit, so a generous bound carries no flake risk.
+	allExited := make(chan struct{})
+	go func() { wg.Wait(); close(allExited) }()
+	select {
+	case <-allExited:
+	case <-time.After(10 * time.Second):
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		t.Fatalf("recovery goroutines did not exit after reconnect storm:\n%s", buf[:n])
 	}
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	t.Fatalf("goroutines grew after reconnect storm: baseline=%d now=%d\n%s", baseline, runtime.NumGoroutine(), buf[:n])
 }
 
 type trackedConn struct {

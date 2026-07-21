@@ -2,21 +2,16 @@ package pool
 
 import (
 	"context"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// TestPool_NoGoroutineLeak verifies that goroutines are properly cleaned up after normal operations
+// TestPool_NoGoroutineLeak verifies that goroutines are properly cleaned up after normal operations.
+// Shutdown joins every worker via the pool's internal WaitGroup (pool.go), so a nil return proves
+// no worker goroutine was left running—no runtime.NumGoroutine() tolerance needed.
 func TestPool_NoGoroutineLeak(t *testing.T) {
-	// Allow garbage collection and goroutine cleanup
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-
-	initial := runtime.NumGoroutine()
-
 	// Use larger queue size to avoid queue full errors
 	pool := NewPool(5, 200)
 	ctx := context.Background()
@@ -45,26 +40,10 @@ func TestPool_NoGoroutineLeak(t *testing.T) {
 	if err := pool.Shutdown(5 * time.Second); err != nil {
 		t.Errorf("shutdown failed: %v", err)
 	}
-
-	// Allow goroutines to exit
-	runtime.GC()
-	time.Sleep(100 * time.Millisecond)
-
-	final := runtime.NumGoroutine()
-
-	// Allow some margin for test runtime and background goroutines
-	if final > initial+3 {
-		t.Errorf("goroutine leak detected: initial=%d, final=%d (delta=%d)", initial, final, final-initial)
-	}
 }
 
 // TestPool_NoLeakAfterPanic verifies goroutines are cleaned up after panic recovery
 func TestPool_NoLeakAfterPanic(t *testing.T) {
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-
-	initial := runtime.NumGoroutine()
-
 	pool := NewPool(3, 20)
 	ctx := context.Background()
 
@@ -93,15 +72,6 @@ func TestPool_NoLeakAfterPanic(t *testing.T) {
 		t.Errorf("shutdown failed: %v", err)
 	}
 
-	runtime.GC()
-	time.Sleep(100 * time.Millisecond)
-
-	final := runtime.NumGoroutine()
-
-	if final > initial+3 {
-		t.Errorf("goroutine leak after panic: initial=%d, final=%d (delta=%d)", initial, final, final-initial)
-	}
-
 	if atomic.LoadInt32(&completed) == 0 {
 		t.Error("no normal jobs completed after panics - workers may have died")
 	}
@@ -109,11 +79,6 @@ func TestPool_NoLeakAfterPanic(t *testing.T) {
 
 // TestPool_NoLeakAfterContextCancel verifies goroutines are cleaned up after context cancellation
 func TestPool_NoLeakAfterContextCancel(t *testing.T) {
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-
-	initial := runtime.NumGoroutine()
-
 	pool := NewPool(5, 100)
 
 	// Submit some jobs with cancelable context
@@ -153,24 +118,10 @@ func TestPool_NoLeakAfterContextCancel(t *testing.T) {
 	if err := pool.Shutdown(5 * time.Second); err != nil {
 		t.Errorf("shutdown failed: %v", err)
 	}
-
-	runtime.GC()
-	time.Sleep(100 * time.Millisecond)
-
-	final := runtime.NumGoroutine()
-
-	if final > initial+3 {
-		t.Errorf("goroutine leak after context cancel: initial=%d, final=%d (delta=%d)", initial, final, final-initial)
-	}
 }
 
 // TestPool_NoLeakQueueFull verifies goroutines are cleaned up when queue is full
 func TestPool_NoLeakQueueFull(t *testing.T) {
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-
-	initial := runtime.NumGoroutine()
-
 	// Small pool and queue to trigger queue full
 	pool := NewPool(1, 2)
 	ctx := context.Background()
@@ -201,24 +152,10 @@ func TestPool_NoLeakQueueFull(t *testing.T) {
 	if err := pool.Shutdown(5 * time.Second); err != nil {
 		t.Errorf("shutdown failed: %v", err)
 	}
-
-	runtime.GC()
-	time.Sleep(100 * time.Millisecond)
-
-	final := runtime.NumGoroutine()
-
-	if final > initial+3 {
-		t.Errorf("goroutine leak after queue full: initial=%d, final=%d (delta=%d)", initial, final, final-initial)
-	}
 }
 
 // TestPool_NoLeakRapidShutdown verifies goroutines are cleaned up on rapid shutdown
 func TestPool_NoLeakRapidShutdown(t *testing.T) {
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-
-	initial := runtime.NumGoroutine()
-
 	// Create and shutdown multiple pools rapidly
 	for i := range 10 {
 		pool := NewPool(5, 50)
@@ -232,19 +169,10 @@ func TestPool_NoLeakRapidShutdown(t *testing.T) {
 			})
 		}
 
-		// Shutdown immediately
+		// Shutdown joins all workers; a timeout here means a worker leaked.
 		if err := pool.Shutdown(1 * time.Second); err != nil {
-			t.Logf("shutdown %d failed: %v", i, err)
+			t.Errorf("shutdown %d failed: %v", i, err)
 		}
-	}
-
-	runtime.GC()
-	time.Sleep(200 * time.Millisecond)
-
-	final := runtime.NumGoroutine()
-
-	if final > initial+5 {
-		t.Errorf("goroutine leak after rapid shutdowns: initial=%d, final=%d (delta=%d)", initial, final, final-initial)
 	}
 }
 

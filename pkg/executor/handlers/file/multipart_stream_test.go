@@ -7,7 +7,6 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +18,7 @@ type errReader struct {
 	read     int
 	closeCnt int
 	closeErr error
+	closed   chan struct{} // if set, Close() closes it to signal the producer goroutine reached its src.Close defer
 }
 
 func (e *errReader) Read(p []byte) (int, error) {
@@ -34,7 +34,13 @@ func (e *errReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (e *errReader) Close() error { e.closeCnt++; return e.closeErr }
+func (e *errReader) Close() error {
+	e.closeCnt++
+	if e.closed != nil {
+		close(e.closed)
+	}
+	return e.closeErr
+}
 
 func TestBuildMultipartStream_Roundtrip(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xAB}, 1<<20)
@@ -153,19 +159,19 @@ func TestBuildMultipartStream_SrcCloseErrorPropagates(t *testing.T) {
 }
 
 func TestBuildMultipartStream_EarlyCloseNoLeak(t *testing.T) {
-	g0 := runtime.NumGoroutine()
-	er := &errReader{r: bytes.NewReader(bytes.Repeat([]byte{1}, 4<<20)), failAt: 1 << 30}
+	// Wait on the producer goroutine's src.Close defer instead of polling a
+	// goroutine count. Nothing after src.Close in that teardown can block (only
+	// pool puts and a pipe close remain), so the signal proves it exits.
+	er := &errReader{r: bytes.NewReader(bytes.Repeat([]byte{1}, 4<<20)), failAt: 1 << 30, closed: make(chan struct{})}
 	body, _, _, _ := buildMultipartStream(er, "f", false, -1)
 	buf := make([]byte, 64)
 	_, _ = body.Read(buf)
 	_ = body.Close()
-	for range 50 { // settle
-		if runtime.NumGoroutine() <= g0+2 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-er.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("producer goroutine did not exit after early body close")
 	}
-	t.Fatalf("goroutine leak: %d → %d", g0, runtime.NumGoroutine())
 }
 
 // TestBuildMultipartStream_SmallPath_Roundtrip verifies that the small-file
