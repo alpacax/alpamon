@@ -180,7 +180,8 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 	case "rhel":
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
 	case "darwin", "windows":
-		// needAlpamon is always true here: needPam is always false on non-linux (pam unsupported; see pkg/utils/pam.go) and the switch is reached only when needAlpamon||needPam.
+		// needAlpamon is always true here: needPam is always false on non-linux
+		// (pam unsupported; see pkg/utils/pam.go) and the switch is reached only when needAlpamon||needPam.
 		return h.selfUpdate(ctx, latestVersion)
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
