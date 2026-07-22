@@ -3,6 +3,7 @@ package runner
 import (
 	"encoding/json"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -83,11 +84,8 @@ func TestLoadValidShells(t *testing.T) {
 		commonShells := []string{"/bin/sh", "/bin/bash", "/bin/zsh"}
 		foundAny := false
 		for _, commonShell := range commonShells {
-			for _, shell := range shells {
-				if shell == commonShell {
-					foundAny = true
-					break
-				}
+			if slices.Contains(shells, commonShell) {
+				foundAny = true
 			}
 			if foundAny {
 				break

@@ -47,7 +47,7 @@ func TestPool_NoLeakAfterPanic(t *testing.T) {
 	pool := NewPool(3, 20)
 	ctx := context.Background()
 
-	var completed int32
+	var completed atomic.Int32
 
 	// Submit jobs that panic
 	for range 10 {
@@ -59,7 +59,7 @@ func TestPool_NoLeakAfterPanic(t *testing.T) {
 	// Submit normal jobs after panics
 	for range 10 {
 		_ = pool.Submit(ctx, func() error {
-			atomic.AddInt32(&completed, 1)
+			completed.Add(1)
 			return nil
 		})
 	}
@@ -72,7 +72,7 @@ func TestPool_NoLeakAfterPanic(t *testing.T) {
 		t.Errorf("shutdown failed: %v", err)
 	}
 
-	if atomic.LoadInt32(&completed) == 0 {
+	if completed.Load() == 0 {
 		t.Error("no normal jobs completed after panics - workers may have died")
 	}
 }
@@ -184,14 +184,14 @@ func TestPool_MaxGoroutineEnforcement(t *testing.T) {
 	defer func() { _ = pool.Shutdown(5 * time.Second) }()
 
 	var maxConcurrent int32
-	var concurrent int32
+	var concurrent atomic.Int32
 
 	ctx := context.Background()
 
 	for range 100 {
 		_ = pool.Submit(ctx, func() error {
-			current := atomic.AddInt32(&concurrent, 1)
-			defer atomic.AddInt32(&concurrent, -1)
+			current := concurrent.Add(1)
+			defer concurrent.Add(-1)
 
 			// Track max concurrent
 			for {

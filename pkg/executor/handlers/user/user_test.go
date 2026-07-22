@@ -143,7 +143,6 @@ func TestUserHandler_Execute(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // Capture range variable.
 		t.Run(tt.name, func(t *testing.T) {
 			// Set platform like to debian for the test
 			originalPlatformLike := utils.PlatformLike
@@ -216,7 +215,6 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			originalPlatformLike := utils.PlatformLike
 			utils.SetPlatformLike(tt.platform)
@@ -608,7 +606,6 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // Capture range variable.
 		t.Run(tt.name, func(t *testing.T) {
 			// Set platform like to debian for the test
 			originalPlatformLike := utils.PlatformLike

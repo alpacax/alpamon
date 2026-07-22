@@ -97,14 +97,14 @@ func TestPoolConcurrency(t *testing.T) {
 		}
 	}()
 
-	var concurrent int32
+	var concurrent atomic.Int32
 	var maxConcurrent int32
 
 	// Submit many jobs
 	for range 50 {
 		if err := pool.Submit(context.Background(), func() error {
-			current := atomic.AddInt32(&concurrent, 1)
-			defer atomic.AddInt32(&concurrent, -1)
+			current := concurrent.Add(1)
+			defer concurrent.Add(-1)
 
 			// Track max concurrent
 			for {
@@ -138,7 +138,7 @@ func TestPoolPanicRecovery(t *testing.T) {
 		}
 	}()
 
-	var completed int32
+	var completed atomic.Int32
 
 	// Submit job that panics
 	if err := pool.Submit(context.Background(), func() error {
@@ -149,7 +149,7 @@ func TestPoolPanicRecovery(t *testing.T) {
 
 	// Submit normal job after panic
 	err := pool.Submit(context.Background(), func() error {
-		atomic.AddInt32(&completed, 1)
+		completed.Add(1)
 		return nil
 	})
 
@@ -160,7 +160,7 @@ func TestPoolPanicRecovery(t *testing.T) {
 	// Wait for job completion
 	time.Sleep(100 * time.Millisecond)
 
-	if atomic.LoadInt32(&completed) != 1 {
+	if completed.Load() != 1 {
 		t.Error("normal job did not complete after panic")
 	}
 }

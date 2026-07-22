@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -57,9 +58,7 @@ func startTestServer(t *testing.T) (path string, frames <-chan []byte, stop func
 		wg    sync.WaitGroup
 	)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -85,7 +84,7 @@ func startTestServer(t *testing.T) (path string, frames <-chan []byte, stop func
 				}
 			}(conn)
 		}
-	}()
+	})
 
 	stop = func() {
 		_ = ln.Close()
@@ -104,9 +103,7 @@ func startTestServer(t *testing.T) (path string, frames <-chan []byte, stop func
 // (bypassing SocketPath() so tests don't depend on RunDir()).
 func newTestWriter(path, program string, handlers map[string]int) *Writer {
 	h := make(map[string]int, len(handlers))
-	for k, v := range handlers {
-		h[k] = v
-	}
+	maps.Copy(h, handlers)
 	w := &Writer{
 		program:  program,
 		pid:      4242,
