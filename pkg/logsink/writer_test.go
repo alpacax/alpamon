@@ -58,7 +58,9 @@ func startTestServer(t *testing.T) (path string, frames <-chan []byte, stop func
 		wg    sync.WaitGroup
 	)
 
+	acceptDone := make(chan struct{})
 	wg.Go(func() {
+		defer close(acceptDone)
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -88,6 +90,7 @@ func startTestServer(t *testing.T) (path string, frames <-chan []byte, stop func
 
 	stop = func() {
 		_ = ln.Close()
+		<-acceptDone
 		mu.Lock()
 		for _, c := range conns {
 			_ = c.Close()
