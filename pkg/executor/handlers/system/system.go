@@ -37,6 +37,7 @@ type SystemHandler struct {
 	pool            *pool.Pool
 	versionResolver common.VersionResolver
 	apiSession      common.APISession
+	selfUpdateFn    updater.SelfUpdateFunc // defaults to updater.SelfUpdate; tests inject a fake
 }
 
 // NewSystemHandler creates a new system handler.
@@ -65,6 +66,7 @@ func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClie
 		pool:            pool,
 		versionResolver: versionResolver,
 		apiSession:      apiSession,
+		selfUpdateFn:    updater.SelfUpdate,
 	}
 	return h
 }
@@ -177,10 +179,9 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 		cmd = fmt.Sprintf("apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
 	case "rhel":
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
-	case "darwin":
-		if !needAlpamon {
-			return 0, fmt.Sprintf("Already up-to-date (alpamon: %s). alpamon-pam upgrade is not supported on macOS.", version.Version), nil
-		}
+	case "darwin", "windows":
+		// needAlpamon is always true here: needPam is always false on non-linux
+		// (pam unsupported; see pkg/utils/pam.go) and the switch is reached only when needAlpamon||needPam.
 		return h.selfUpdate(ctx, latestVersion)
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
@@ -196,7 +197,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 
 // selfUpdate downloads and replaces the binary from GitHub Releases, then triggers restart.
 func (h *SystemHandler) selfUpdate(ctx context.Context, latestVersion string) (int, string, error) {
-	if err := updater.SelfUpdate(ctx, latestVersion, updater.Options{}); err != nil {
+	if err := h.selfUpdateFn(ctx, latestVersion, updater.Options{}); err != nil {
 		return 1, fmt.Sprintf("Self-update failed: %v", err), err
 	}
 
