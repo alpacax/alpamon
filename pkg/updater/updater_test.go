@@ -338,10 +338,7 @@ func TestDownloadFile_Oversize(t *testing.T) {
 		chunk := make([]byte, 32*1024)
 		remaining := int64(maxArchiveSize) + 1
 		for remaining > 0 {
-			n := int64(len(chunk))
-			if n > remaining {
-				n = remaining
-			}
+			n := min(int64(len(chunk)), remaining)
 			_, _ = w.Write(chunk[:n])
 			remaining -= n
 		}

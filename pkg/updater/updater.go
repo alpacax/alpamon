@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -43,6 +44,9 @@ func (o Options) baseURL() string {
 	}
 	return defaultReleaseBaseURL
 }
+
+// SelfUpdateFunc is the signature of SelfUpdate, held as a field so tests can inject a fake.
+type SelfUpdateFunc func(ctx context.Context, latestVersion string, opts Options) error
 
 // SelfUpdate downloads the latest binary from GitHub Releases,
 // verifies its checksum, and replaces the current binary.
@@ -319,12 +323,7 @@ func isMachO(magic []byte) bool {
 		return false
 	}
 	m := [4]byte{magic[0], magic[1], magic[2], magic[3]}
-	for _, v := range machoMagics {
-		if m == v {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(machoMagics, m)
 }
 
 // copyFile copies src to dst with the given permissions.

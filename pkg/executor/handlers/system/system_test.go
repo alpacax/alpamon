@@ -12,6 +12,8 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/updater"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/alpacax/alpamon/v2/pkg/version"
 )
 
@@ -576,5 +578,55 @@ func TestSystemHandler_UnregisterFromConsole_DeleteError(t *testing.T) {
 
 	if mockSession.deleteCallCount() != 1 {
 		t.Fatalf("expected 1 Delete call, got %d", mockSession.deleteCallCount())
+	}
+}
+
+// TestSystemHandler_Upgrade_SelfUpdate: darwin and windows route handleUpgrade through selfUpdateFn instead of returning "not supported".
+func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
+	for _, platform := range []string{"darwin", "windows"} {
+		t.Run(platform, func(t *testing.T) {
+			mockExec := common.NewMockCommandExecutor(t)
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			mockVersions := &MockVersionResolver{
+				LatestVersion: "v9.9.9", // differs from version.Version ("dev") -> needAlpamon
+				PamVersion:    "",       // non-linux -> needPam always false anyway
+			}
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+
+			var called bool
+			var gotVersion string
+			handler.selfUpdateFn = func(_ context.Context, v string, _ updater.Options) error {
+				called = true
+				gotVersion = v
+				return nil
+			}
+
+			originalPlatformLike := utils.PlatformLike
+			utils.SetPlatformLike(platform)
+			t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+			exitCode, output, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !called {
+				t.Errorf("expected selfUpdateFn to be called on %s", platform)
+			}
+			if gotVersion != "v9.9.9" {
+				t.Errorf("expected self-update version v9.9.9, got %q", gotVersion)
+			}
+			if exitCode != 0 {
+				t.Errorf("expected exit code 0, got %d", exitCode)
+			}
+			if strings.Contains(output, "not supported") {
+				t.Errorf("%s should route to self-update, got %q", platform, output)
+			}
+		})
 	}
 }
