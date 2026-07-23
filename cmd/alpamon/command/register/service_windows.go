@@ -15,6 +15,9 @@ import (
 )
 
 const (
+	// Keep serviceName and the recovery values in sync with the copies in
+	// pkg/updater/guard_windows.go (the self-update preflight guard) and
+	// svcName in cmd/alpamon/command/svc_windows.go.
 	serviceName          = "alpamon"
 	serviceDisplayName   = "Alpamon Agent"
 	serviceDescription   = "Secure server agent for the Alpacon infrastructure access platform."

@@ -55,6 +55,11 @@ func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
 		return fmt.Errorf("invalid version format: %q", latestVersion)
 	}
 
+	// Abort before touching anything if nothing would restart us afterward.
+	if err := ensureSelfRestartable(); err != nil {
+		return err
+	}
+
 	// On Windows, clear any ".old" binary left behind by a prior update
 	// before we stage a new one, otherwise MoveFileEx will collide.
 	// No-op on Unix.
