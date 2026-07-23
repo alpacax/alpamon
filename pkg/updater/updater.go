@@ -35,6 +35,13 @@ const (
 
 var versionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[\w.]+)?$`)
 
+// selfUpdateInFlight serializes SelfUpdate: concurrent runs race on the same
+// staging paths and can delete each other's files mid-replace, killing the agent.
+var selfUpdateInFlight atomic.Bool
+
+// SelfUpdateFunc is the signature of SelfUpdate, held as a field so tests can inject a fake.
+type SelfUpdateFunc func(ctx context.Context, latestVersion string, opts Options) error
+
 // Options configures the self-update behavior. Use defaults for production.
 type Options struct {
 	BaseURL string // Override release base URL (for testing)
@@ -46,13 +53,6 @@ func (o Options) baseURL() string {
 	}
 	return defaultReleaseBaseURL
 }
-
-// SelfUpdateFunc is the signature of SelfUpdate, held as a field so tests can inject a fake.
-type SelfUpdateFunc func(ctx context.Context, latestVersion string, opts Options) error
-
-// selfUpdateInFlight serializes SelfUpdate: concurrent runs race on the same
-// staging paths and can delete each other's files mid-replace, killing the agent.
-var selfUpdateInFlight atomic.Bool
 
 // SelfUpdate downloads the latest binary from GitHub Releases,
 // verifies its checksum, and replaces the current binary.
