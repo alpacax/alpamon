@@ -69,27 +69,27 @@ func startTestServer(t *testing.T) (path string, frames <-chan []byte, stop func
 			mu.Lock()
 			conns = append(conns, conn)
 			mu.Unlock()
-			wg.Add(1)
-			go func(c net.Conn) {
-				defer wg.Done()
+			wg.Go(func() {
 				var hdr [4]byte
 				for {
-					if _, err := io.ReadFull(c, hdr[:]); err != nil {
+					if _, err := io.ReadFull(conn, hdr[:]); err != nil {
 						return
 					}
 					n := binary.BigEndian.Uint32(hdr[:])
 					body := make([]byte, n)
-					if _, err := io.ReadFull(c, body); err != nil {
+					if _, err := io.ReadFull(conn, body); err != nil {
 						return
 					}
 					ch <- body
 				}
-			}(conn)
+			})
 		}
 	})
 
 	stop = func() {
 		_ = ln.Close()
+		// Drain the accept loop first: an in-flight Accept can append to
+		// conns after stop() has already closed them, stranding its reader.
 		<-acceptDone
 		mu.Lock()
 		for _, c := range conns {
@@ -285,7 +285,6 @@ func TestWriter_ReconnectsAfterServerRestart(t *testing.T) {
 	defer stop2()
 	w.path = path2
 	w.mu.Unlock()
-	_ = path
 
 	_, _ = w.Write(zerologLine(t, "error", "plugin.go:1", "after-restart"))
 	body := recvFrame(t, frames2)

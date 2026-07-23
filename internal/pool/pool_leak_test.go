@@ -183,7 +183,7 @@ func TestPool_MaxGoroutineEnforcement(t *testing.T) {
 	pool := NewPool(maxWorkers, 100)
 	defer func() { _ = pool.Shutdown(5 * time.Second) }()
 
-	var maxConcurrent int32
+	var maxConcurrent atomic.Int32
 	var concurrent atomic.Int32
 
 	ctx := context.Background()
@@ -195,8 +195,8 @@ func TestPool_MaxGoroutineEnforcement(t *testing.T) {
 
 			// Track max concurrent
 			for {
-				max := atomic.LoadInt32(&maxConcurrent)
-				if current <= max || atomic.CompareAndSwapInt32(&maxConcurrent, max, current) {
+				observed := maxConcurrent.Load()
+				if current <= observed || maxConcurrent.CompareAndSwap(observed, current) {
 					break
 				}
 			}
@@ -209,7 +209,7 @@ func TestPool_MaxGoroutineEnforcement(t *testing.T) {
 	// Wait for all jobs to complete
 	time.Sleep(600 * time.Millisecond)
 
-	if int(maxConcurrent) > maxWorkers {
-		t.Errorf("max concurrent workers %d exceeded limit %d", maxConcurrent, maxWorkers)
+	if int(maxConcurrent.Load()) > maxWorkers {
+		t.Errorf("max concurrent workers %d exceeded limit %d", maxConcurrent.Load(), maxWorkers)
 	}
 }
