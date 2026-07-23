@@ -45,7 +45,7 @@ type CommandChunk struct {
 // PingResponse represents a ping response
 type PingResponse struct {
 	Query     string    `json:"query"`
-	Timestamp time.Time `json:"timestamp,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // NewPingResponse creates a new ping response

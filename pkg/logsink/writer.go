@@ -7,6 +7,7 @@ package logsink
 import (
 	"encoding/binary"
 	"encoding/json"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -59,9 +60,7 @@ type Writer struct {
 // Connection failure at construction time is non-fatal; the writer will retry.
 func New(program string, handlers map[string]int) *Writer {
 	h := make(map[string]int, len(handlers))
-	for k, v := range handlers {
-		h[k] = v
-	}
+	maps.Copy(h, handlers)
 	w := &Writer{
 		program:  program,
 		pid:      os.Getpid(),

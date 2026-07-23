@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -214,8 +216,8 @@ func runRegister(cmd *cobra.Command, args []string) error {
 			return
 		}
 		var errs []error
-		for i := len(rollbacks) - 1; i >= 0; i-- {
-			if e := rollbacks[i](); e != nil {
+		for _, rollback := range slices.Backward(rollbacks) {
+			if e := rollback(); e != nil {
 				errs = append(errs, e)
 			}
 		}
@@ -438,12 +440,8 @@ func mergeCloudAndUserTags(auto, user map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(auto)+len(user))
-	for k, v := range auto {
-		out[k] = v
-	}
-	for k, v := range user {
-		out[k] = v
-	}
+	maps.Copy(out, auto)
+	maps.Copy(out, user)
 	return out
 }
 

@@ -169,7 +169,7 @@ func (d *FirewallDetector) detectBackend(ctx context.Context) BackendType {
 	if exitCode == 0 {
 		// Count actual rules (lines starting with -A or -I)
 		ruleCount := 0
-		for _, line := range strings.Split(output, "\n") {
+		for line := range strings.SplitSeq(output, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "-A ") || strings.HasPrefix(line, "-I ") {
 				ruleCount++
@@ -197,7 +197,7 @@ func (d *FirewallDetector) detectBackend(ctx context.Context) BackendType {
 	exitCode, output, _ = d.executor.RunWithTimeout(ctx, 10*time.Second, "iptables", "-S")
 	if exitCode == 0 {
 		// Check for rules (iptables -S output starts with -P, -A, -I, etc)
-		for _, line := range strings.Split(output, "\n") {
+		for line := range strings.SplitSeq(output, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "-A ") || strings.HasPrefix(line, "-I ") {
 				log.Debug().Msg("Found iptables rules via iptables -S")

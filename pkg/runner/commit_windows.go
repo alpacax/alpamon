@@ -56,7 +56,7 @@ func parseGetLocalUserCSV(csvData string) []UserData {
 	validShells := loadValidShells()
 	var users []UserData
 
-	for _, line := range strings.Split(csvData, "\n") {
+	for line := range strings.SplitSeq(csvData, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -119,7 +119,7 @@ func getGroupData() ([]GroupData, error) {
 	}
 
 	var groups []GroupData
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

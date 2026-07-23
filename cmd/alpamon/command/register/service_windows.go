@@ -216,7 +216,7 @@ func stopRunningService(s *mgr.Service) {
 			fmt.Printf("Warning: failed to signal service stop: %v\n", err)
 		}
 	}
-	for i := 0; i < serviceStopPollAttempts; i++ {
+	for range serviceStopPollAttempts {
 		if status, qerr := s.Query(); qerr == nil && status.State == svc.Stopped {
 			return
 		}
