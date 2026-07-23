@@ -9,8 +9,8 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-// scmServiceName mirrors serviceName in cmd/alpamon/command/register; copied
-// because importing cmd from pkg would invert layering.
+// scmServiceName duplicates register's serviceName and svc_windows.go's svcName;
+// pkg can't import cmd without inverting layering.
 const scmServiceName = "alpamon"
 
 // Recovery defaults from 'alpamon register', copied for the same layering reason.
