@@ -50,7 +50,7 @@ func NewPool(maxWorkers int, queueSize int) *Pool {
 
 // startWorkers launches the worker goroutines
 func (p *Pool) startWorkers() {
-	for i := 0; i < p.maxWorkers; i++ {
+	for range p.maxWorkers {
 		p.wg.Add(1)
 		go p.worker()
 	}
