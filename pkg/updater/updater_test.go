@@ -331,6 +331,28 @@ func TestSelfUpdate_InvalidVersion(t *testing.T) {
 	}
 }
 
+func TestSelfUpdate_AlreadyInProgress(t *testing.T) {
+	if !selfUpdateInFlight.CompareAndSwap(false, true) {
+		t.Fatal("in-flight flag unexpectedly set before test")
+	}
+	defer selfUpdateInFlight.Store(false)
+
+	err := SelfUpdate(context.Background(), "v1.0.0", Options{})
+	if err == nil || !strings.Contains(err.Error(), "already in progress") {
+		t.Fatalf("expected in-progress error, got: %v", err)
+	}
+}
+
+func TestSelfUpdate_InFlightFlagResets(t *testing.T) {
+	// A failed run (invalid version) must clear the flag for the next call.
+	if err := SelfUpdate(context.Background(), "not-a-version", Options{}); err == nil {
+		t.Fatal("expected error for invalid version")
+	}
+	if selfUpdateInFlight.Load() {
+		t.Fatal("in-flight flag not reset after SelfUpdate returned")
+	}
+}
+
 func TestDownloadFile_Oversize(t *testing.T) {
 	// Server streams more than maxArchiveSize without Content-Length
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

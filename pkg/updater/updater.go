@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -48,9 +50,18 @@ func (o Options) baseURL() string {
 // SelfUpdateFunc is the signature of SelfUpdate, held as a field so tests can inject a fake.
 type SelfUpdateFunc func(ctx context.Context, latestVersion string, opts Options) error
 
+// selfUpdateInFlight serializes SelfUpdate: concurrent runs race on the same
+// staging paths and can delete each other's files mid-replace, killing the agent.
+var selfUpdateInFlight atomic.Bool
+
 // SelfUpdate downloads the latest binary from GitHub Releases,
 // verifies its checksum, and replaces the current binary.
 func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
+	if !selfUpdateInFlight.CompareAndSwap(false, true) {
+		return errors.New("self-update already in progress")
+	}
+	defer selfUpdateInFlight.Store(false)
+
 	if !versionRe.MatchString(latestVersion) {
 		return fmt.Errorf("invalid version format: %q", latestVersion)
 	}
