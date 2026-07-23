@@ -49,7 +49,21 @@ func ensureSelfRestartable() error {
 	}
 	defer func() { _ = s.Close() }()
 
-	actions, err := s.RecoveryActions()
+	return ensureRecoveryRestart(s)
+}
+
+// recoveryConfigurer is the subset of *mgr.Service that ensureRecoveryRestart
+// needs; an interface so the self-heal path is unit-testable without a live SCM.
+type recoveryConfigurer interface {
+	RecoveryActions() ([]mgr.RecoveryAction, error)
+	SetRecoveryActions(actions []mgr.RecoveryAction, resetPeriod uint32) error
+}
+
+// ensureRecoveryRestart passes when rc's first recovery action is a restart,
+// otherwise self-heals register's defaults and trusts only a confirming
+// re-query. Any SCM error aborts (fail-closed).
+func ensureRecoveryRestart(rc recoveryConfigurer) error {
+	actions, err := rc.RecoveryActions()
 	if err != nil {
 		return abortf("failed to query recovery actions: %w", err)
 	}
@@ -64,11 +78,11 @@ func ensureSelfRestartable() error {
 		{Type: mgr.ServiceRestart, Delay: recoveryRestartDelay},
 		{Type: mgr.NoAction},
 	}
-	if err := s.SetRecoveryActions(defaults, recoveryResetSeconds); err != nil {
+	if err := rc.SetRecoveryActions(defaults, recoveryResetSeconds); err != nil {
 		return abortf("automatic restart is not configured and restoring it failed: %w; run 'alpamon register' to configure it", err)
 	}
 
-	actions, err = s.RecoveryActions()
+	actions, err = rc.RecoveryActions()
 	if err != nil {
 		return abortf("failed to verify restored recovery actions: %w", err)
 	}
