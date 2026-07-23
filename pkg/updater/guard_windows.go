@@ -9,31 +9,33 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-// scmServiceName must match serviceName in cmd/alpamon/command/register;
-// copied because importing a cmd package from pkg would invert layering.
+// scmServiceName mirrors serviceName in cmd/alpamon/command/register; copied
+// because importing cmd from pkg would invert layering.
 const scmServiceName = "alpamon"
 
-// Recovery defaults applied by 'alpamon register'; copies for the same
-// layering reason as scmServiceName.
+// Recovery defaults from 'alpamon register', copied for the same layering reason.
 const (
 	recoveryResetSeconds = 60
 	recoveryRestartDelay = 5 * time.Second
 )
 
-// ensureSelfRestartable verifies something will relaunch alpamon after the
-// self-update exits: under SCM the first recovery action must be a restart,
-// or the replaced binary dies unrelaunched and a remote-only server goes
-// unreachable. A missing restart action is self-healed with register's
-// defaults, trusting only a confirming re-query; any failure aborts
-// (fail-closed). Preflight only: a later config change or a recent failure
-// streak (SCM steps to later actions) can still leave the service stopped.
+// recoveryConfigurer is the subset of *mgr.Service ensureRecoveryRestart needs,
+// an interface so the self-heal path is testable without a live SCM.
+type recoveryConfigurer interface {
+	RecoveryActions() ([]mgr.RecoveryAction, error)
+	SetRecoveryActions(actions []mgr.RecoveryAction, resetPeriod uint32) error
+}
+
+// ensureSelfRestartable aborts the self-update unless a relaunch is guaranteed
+// afterward—otherwise the replaced binary stays dead and a remote-only server
+// goes unreachable. Preflight only: config drift or a failure streak past the
+// first action can still leave the service stopped.
 func ensureSelfRestartable() error {
 	isSvc, err := svc.IsWindowsService()
 	if err != nil {
 		return abortf("failed to determine service mode: %w", err)
 	}
 	if !isSvc {
-		// Interactive mode restarts itself via exec.Command (restartAgent).
 		return nil
 	}
 
@@ -50,13 +52,6 @@ func ensureSelfRestartable() error {
 	defer func() { _ = s.Close() }()
 
 	return ensureRecoveryRestart(s)
-}
-
-// recoveryConfigurer is the subset of *mgr.Service that ensureRecoveryRestart
-// needs; an interface so the self-heal path is unit-testable without a live SCM.
-type recoveryConfigurer interface {
-	RecoveryActions() ([]mgr.RecoveryAction, error)
-	SetRecoveryActions(actions []mgr.RecoveryAction, resetPeriod uint32) error
 }
 
 // ensureRecoveryRestart passes when rc's first recovery action is a restart,
