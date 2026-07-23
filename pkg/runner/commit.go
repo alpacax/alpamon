@@ -179,10 +179,10 @@ func CommitSystemInfo() {
 // commitAndNotify sends commit data to the server and posts a commit event.
 func commitAndNotify(data *commitData) {
 	scheduler.Rqueue.Put(commitURL, data, 80, time.Time{})
-	scheduler.Rqueue.Post(eventURL, []byte(fmt.Sprintf(`{
+	scheduler.Rqueue.Post(eventURL, fmt.Appendf(nil, `{
 		"reporter": "alpamon",
 		"record": "committed",
-		"description": "Committed system information. version: %s"}`, version.Version)), 80, time.Time{})
+		"description": "Committed system information. version: %s"}`, version.Version), 80, time.Time{})
 }
 
 // collectEssentialData collects only the essential categories (info, os)
