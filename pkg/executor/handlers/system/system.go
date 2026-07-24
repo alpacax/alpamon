@@ -198,12 +198,20 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 // selfUpdate downloads and replaces the binary from GitHub Releases, then triggers restart.
 func (h *SystemHandler) selfUpdate(ctx context.Context, latestVersion string) (int, string, error) {
 	if err := h.selfUpdateFn(ctx, latestVersion, updater.Options{}); err != nil {
+		if errors.Is(err, updater.ErrSelfUpdateInProgress) {
+			// Rejecting a duplicate is correct, not a failure; the run that owns
+			// the update handles its own restart, so don't schedule another.
+			return 0, "Self-update already in progress.", nil
+		}
 		return 1, fmt.Sprintf("Self-update failed: %v", err), err
 	}
 
 	if err := h.scheduleDelayedAction(1*time.Second, func(_ context.Context) {
 		h.wsClient.Restart()
 	}); err != nil {
+		// The update landed but no restart will fire, so drop the latch SelfUpdate
+		// holds on success—otherwise a manual retry would be rejected as a duplicate.
+		updater.ReleaseSelfUpdateLatch()
 		log.Error().Err(err).Msg("Failed to submit restart task after self-update. Manual restart required.")
 		return 1, fmt.Sprintf("Updated to %s, but automatic restart failed: %v. Please restart alpamon manually.", latestVersion, err), err
 	}

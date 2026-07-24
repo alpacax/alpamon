@@ -630,3 +630,68 @@ func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 		})
 	}
 }
+
+// TestSystemHandler_SelfUpdate_AlreadyInProgress: a concurrent self-update is a benign no-op—exit 0, no error, no second restart.
+func TestSystemHandler_SelfUpdate_AlreadyInProgress(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, &MockVersionResolver{}, nil)
+	handler.selfUpdateFn = func(_ context.Context, _ string, _ updater.Options) error {
+		return updater.ErrSelfUpdateInProgress
+	}
+
+	exitCode, output, err := handler.selfUpdate(context.Background(), "v9.9.9")
+
+	if err != nil {
+		t.Fatalf("in-progress should not surface as an error, got: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", exitCode)
+	}
+	if !strings.Contains(output, "already in progress") {
+		t.Errorf("expected in-progress message, got %q", output)
+	}
+	if mockWS.RestartCalled {
+		t.Error("in-progress path must not schedule a restart")
+	}
+}
+
+// TestSystemHandler_SelfUpdate_RestartScheduleFails: a successful update whose restart
+// can't be scheduled reports a manual-restart failure and fires no restart. The latch
+// release on this branch is asserted in the updater package.
+func TestSystemHandler_SelfUpdate_RestartScheduleFails(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer ctxManager.Shutdown()
+	// Shut the pool down up front so scheduleDelayedAction's Submit fails.
+	if err := workerPool.Shutdown(1 * time.Second); err != nil {
+		t.Fatalf("failed to shut down pool: %v", err)
+	}
+
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, &MockVersionResolver{}, nil)
+	handler.selfUpdateFn = func(_ context.Context, _ string, _ updater.Options) error {
+		return nil // update succeeded
+	}
+
+	exitCode, output, err := handler.selfUpdate(context.Background(), "v9.9.9")
+
+	if err == nil {
+		t.Fatal("expected error when restart scheduling fails")
+	}
+	if exitCode != 1 {
+		t.Errorf("expected exit code 1, got %d", exitCode)
+	}
+	if !strings.Contains(output, "manually") {
+		t.Errorf("expected manual-restart hint, got %q", output)
+	}
+	if mockWS.RestartCalled {
+		t.Error("restart must not fire when scheduling failed")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -328,6 +329,40 @@ func TestSelfUpdate_InvalidVersion(t *testing.T) {
 				t.Errorf("error should mention invalid version format, got: %v", err)
 			}
 		})
+	}
+}
+
+func TestSelfUpdate_AlreadyInProgress(t *testing.T) {
+	if !selfUpdateInFlight.CompareAndSwap(false, true) {
+		t.Fatal("in-flight flag unexpectedly set before test")
+	}
+	defer selfUpdateInFlight.Store(false)
+
+	err := SelfUpdate(context.Background(), "v1.0.0", Options{})
+	if !errors.Is(err, ErrSelfUpdateInProgress) {
+		t.Fatalf("expected ErrSelfUpdateInProgress, got: %v", err)
+	}
+}
+
+func TestSelfUpdate_InFlightFlagResets(t *testing.T) {
+	// A failed run (invalid version) must clear the flag for the next call.
+	if err := SelfUpdate(context.Background(), "not-a-version", Options{}); err == nil {
+		t.Fatal("expected error for invalid version")
+	}
+	if selfUpdateInFlight.Load() {
+		t.Fatal("in-flight flag not reset after failed SelfUpdate returned")
+	}
+}
+
+func TestReleaseSelfUpdateLatch(t *testing.T) {
+	if !selfUpdateInFlight.CompareAndSwap(false, true) {
+		t.Fatal("in-flight flag unexpectedly set before test")
+	}
+	defer selfUpdateInFlight.Store(false)
+
+	ReleaseSelfUpdateLatch()
+	if selfUpdateInFlight.Load() {
+		t.Fatal("ReleaseSelfUpdateLatch did not clear the latch")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -33,6 +35,19 @@ const (
 
 var versionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[\w.]+)?$`)
 
+// selfUpdateInFlight serializes SelfUpdate: concurrent runs race on the same staging
+// paths and can delete each other's files mid-replace, killing the agent. Process-local,
+// so it does not guard against a second alpamon process. Held through a successful run
+// (the expected restart resets it), released on failure or via ReleaseSelfUpdateLatch.
+var selfUpdateInFlight atomic.Bool
+
+// ErrSelfUpdateInProgress is returned when a self-update is already running.
+// Callers should treat it as a benign no-op, not a failure.
+var ErrSelfUpdateInProgress = errors.New("self-update already in progress")
+
+// SelfUpdateFunc is the signature of SelfUpdate, held as a field so tests can inject a fake.
+type SelfUpdateFunc func(ctx context.Context, latestVersion string, opts Options) error
+
 // Options configures the self-update behavior. Use defaults for production.
 type Options struct {
 	BaseURL string // Override release base URL (for testing)
@@ -45,14 +60,35 @@ func (o Options) baseURL() string {
 	return defaultReleaseBaseURL
 }
 
-// SelfUpdateFunc is the signature of SelfUpdate, held as a field so tests can inject a fake.
-type SelfUpdateFunc func(ctx context.Context, latestVersion string, opts Options) error
+// ReleaseSelfUpdateLatch clears the latch SelfUpdate keeps set after a successful
+// run. Call it only when the expected post-update restart could not be triggered.
+func ReleaseSelfUpdateLatch() {
+	selfUpdateInFlight.Store(false)
+}
 
 // SelfUpdate downloads the latest binary from GitHub Releases,
 // verifies its checksum, and replaces the current binary.
 func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
+	if !selfUpdateInFlight.CompareAndSwap(false, true) {
+		return ErrSelfUpdateInProgress
+	}
+	// Release only on failure: on success the pending restart resets it, and holding
+	// it blocks a duplicate upgrade in that window—which on Windows fails in
+	// replaceBinary after a wasted download.
+	success := false
+	defer func() {
+		if !success {
+			selfUpdateInFlight.Store(false)
+		}
+	}()
+
 	if !versionRe.MatchString(latestVersion) {
 		return fmt.Errorf("invalid version format: %q", latestVersion)
+	}
+
+	// Abort before touching anything if nothing would restart us afterward.
+	if err := ensureSelfRestartable(); err != nil {
+		return err
 	}
 
 	// On Windows, clear any ".old" binary left behind by a prior update
@@ -118,6 +154,7 @@ func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
 	}
 
 	log.Info().Str("version", latestVersion).Msg("Self-update completed.")
+	success = true
 	return nil
 }
 
