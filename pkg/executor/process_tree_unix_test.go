@@ -81,11 +81,33 @@ func TestCommandCleanup_CancelNilProcessReturnsProcessDone(t *testing.T) {
 	}
 }
 
+// When a cancel races ahead of the process group being recorded, afterStart redoes the kill. runCommand
+// always runs afterStart before Wait, so the redo targets a still-unreaped process—never a reaped pid the
+// OS could have handed to an unrelated process. Exercise that exact order: the redo must complete without
+// surfacing an error, so Execute reports the real termination status rather than exit 1. Reap only after.
+func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cleanup, err := configureProcessTreeCleanup(cmd, false)
+	if err != nil {
+		t.Fatalf("configureProcessTreeCleanup: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	// Cancel before the group is recorded: pgid is still 0, so only the leader is targeted.
+	_ = cleanup.cancel(cmd)
+	// Redo while the process is still unreaped, matching runCommand's afterStart-before-Wait order.
+	if err := cleanup.afterStart(cmd); err != nil {
+		t.Fatalf("afterStart redo surfaced %v, want nil after a raced cancel", err)
+	}
+	_ = cmd.Wait()
+}
+
 // White-box counterpart to the Windows job-object test: configure -> Start -> cancel must SIGKILL
 // the whole group, so a backgrounded grandchild holding the pipe open dies too.
 func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	cmd := exec.Command("/bin/sh", "-c", "sleep 600 & echo $! > \"$1\"; wait", "sh", pidFile)
+	cmd := exec.Command("/bin/sh", "-c", `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; wait`, "sh", pidFile)
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	if err != nil {
 		t.Fatalf("configureProcessTreeCleanup: %v", err)
@@ -127,7 +149,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pidFile := filepath.Join(t.TempDir(), "child.pid")
-			script := "sleep 600 & echo $! > \"$1\"; wait"
+			script := `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; wait`
 
 			type result struct {
 				exitCode int
@@ -178,7 +200,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 // timeout means no Cancel, and Wait returns ExitError not ErrWaitDelay, so only the unconditional cancel covers it.
 func TestExecutor_CleansDescendantWhenCommandExitsNonZero(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	script := "sleep 600 & echo $! > \"$1\"; exit 3"
+	script := `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; exit 3`
 
 	type result struct {
 		exitCode int
