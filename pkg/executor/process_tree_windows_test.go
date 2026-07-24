@@ -194,7 +194,7 @@ func isWindowsPidAlive(pid uint32) bool {
 
 // waitForWindowsPidGone fails only if pid is still alive after a bounded wait.
 // cancel() tears the tree down through kill-on-job-close, TerminateProcess, and
-// a PID-tree walk — all asynchronous on Windows — and waitForCmd only proves the
+// a PID-tree walk—all asynchronous on Windows—and waitForCmd only proves the
 // root was reaped, not that every job member has finished terminating. Polling
 // for the pid to disappear mirrors waitForWindowsChild's poll for it to appear,
 // so the check tolerates that teardown latency instead of racing it.
