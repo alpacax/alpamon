@@ -58,12 +58,13 @@ var restartDefaults = []mgr.RecoveryAction{{Type: mgr.ServiceRestart}}
 // fakeRecovery is a recoveryConfigurer whose RecoveryActions() returns each
 // queued result in turn (initial query, then the post-heal re-query).
 type fakeRecovery struct {
-	queries   [][]mgr.RecoveryAction
-	queryErrs []error
-	queryIdx  int
-	setErr    error
-	setCalled bool
-	setReset  uint32
+	queries    [][]mgr.RecoveryAction
+	queryErrs  []error
+	queryIdx   int
+	setErr     error
+	setCalled  bool
+	setActions []mgr.RecoveryAction
+	setReset   uint32
 }
 
 func (f *fakeRecovery) RecoveryActions() ([]mgr.RecoveryAction, error) {
@@ -80,6 +81,7 @@ func (f *fakeRecovery) RecoveryActions() ([]mgr.RecoveryAction, error) {
 
 func (f *fakeRecovery) SetRecoveryActions(actions []mgr.RecoveryAction, resetPeriod uint32) error {
 	f.setCalled = true
+	f.setActions = actions
 	f.setReset = resetPeriod
 	return f.setErr
 }
@@ -87,11 +89,10 @@ func (f *fakeRecovery) SetRecoveryActions(actions []mgr.RecoveryAction, resetPer
 func TestEnsureRecoveryRestart(t *testing.T) {
 	noAction := []mgr.RecoveryAction{{Type: mgr.NoAction}}
 	tests := []struct {
-		name      string
-		fake      fakeRecovery
-		wantErr   bool
-		wantSet   bool
-		wantReset uint32
+		name    string
+		fake    fakeRecovery
+		wantErr bool
+		wantSet bool
 	}{
 		{
 			name:    "first action already restarts: pass without healing",
@@ -100,11 +101,10 @@ func TestEnsureRecoveryRestart(t *testing.T) {
 			wantSet: false,
 		},
 		{
-			name:      "missing: heal then re-query confirms restart",
-			fake:      fakeRecovery{queries: [][]mgr.RecoveryAction{noAction, restartDefaults}},
-			wantErr:   false,
-			wantSet:   true,
-			wantReset: svcdef.RecoveryResetSeconds,
+			name:    "missing: heal then re-query confirms restart",
+			fake:    fakeRecovery{queries: [][]mgr.RecoveryAction{noAction, restartDefaults}},
+			wantErr: false,
+			wantSet: true,
 		},
 		{
 			name:    "missing: SetRecoveryActions fails aborts",
@@ -141,8 +141,16 @@ func TestEnsureRecoveryRestart(t *testing.T) {
 			if f.setCalled != tt.wantSet {
 				t.Errorf("SetRecoveryActions called = %v, want %v", f.setCalled, tt.wantSet)
 			}
-			if tt.wantReset != 0 && f.setReset != tt.wantReset {
-				t.Errorf("SetRecoveryActions reset = %d, want %d", f.setReset, tt.wantReset)
+			if !tt.wantSet {
+				return
+			}
+			// A heal must write register's defaults verbatim—the guard's actual output.
+			// Without this, a regression to NoAction or a dropped Delay passes every case.
+			if want := svcdef.DefaultRecoveryActions(); !slices.Equal(f.setActions, want) {
+				t.Errorf("SetRecoveryActions actions = %v, want %v", f.setActions, want)
+			}
+			if f.setReset != svcdef.RecoveryResetSeconds {
+				t.Errorf("SetRecoveryActions reset = %d, want %d", f.setReset, svcdef.RecoveryResetSeconds)
 			}
 		})
 	}
