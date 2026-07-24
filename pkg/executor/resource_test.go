@@ -153,7 +153,7 @@ func TestPerformance_ConcurrentCommandScaling(t *testing.T) {
 	for _, concurrency := range concurrencyLevels {
 		taskCount := 100
 		var wg sync.WaitGroup
-		var completed int32
+		var completed atomic.Int32
 
 		start := time.Now()
 
@@ -166,7 +166,7 @@ func TestPerformance_ConcurrentCommandScaling(t *testing.T) {
 				defer cancel()
 				_, _, err := h.Execute(ctx, "scale_cmd", args)
 				if err == nil {
-					atomic.AddInt32(&completed, 1)
+					completed.Add(1)
 				}
 				return err
 			})
@@ -179,7 +179,7 @@ func TestPerformance_ConcurrentCommandScaling(t *testing.T) {
 
 		wg.Wait()
 		elapsed := time.Since(start)
-		completedCount := atomic.LoadInt32(&completed)
+		completedCount := completed.Load()
 
 		t.Logf("Concurrency %d: completed %d/%d tasks in %v (%.2f tasks/sec)",
 			concurrency, completedCount, taskCount, elapsed, float64(completedCount)/elapsed.Seconds())

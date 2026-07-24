@@ -3,6 +3,7 @@ package runner
 import (
 	"encoding/json"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -81,18 +82,9 @@ func TestLoadValidShells(t *testing.T) {
 
 		// Common shells that should be in the file on most systems
 		commonShells := []string{"/bin/sh", "/bin/bash", "/bin/zsh"}
-		foundAny := false
-		for _, commonShell := range commonShells {
-			for _, shell := range shells {
-				if shell == commonShell {
-					foundAny = true
-					break
-				}
-			}
-			if foundAny {
-				break
-			}
-		}
+		foundAny := slices.ContainsFunc(commonShells, func(s string) bool {
+			return slices.Contains(shells, s)
+		})
 		assert.True(t, foundAny, "At least one common shell should be in /etc/shells")
 	}
 }
