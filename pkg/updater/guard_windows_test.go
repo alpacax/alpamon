@@ -2,7 +2,9 @@ package updater
 
 import (
 	"errors"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/svcdef"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -28,6 +30,26 @@ func TestFirstActionRestarts(t *testing.T) {
 				t.Errorf("firstActionRestarts() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDescribeActions(t *testing.T) {
+	got := describeActions([]mgr.RecoveryAction{
+		{Type: mgr.RunCommand, Delay: 0},
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+		{Type: mgr.ComputerReboot, Delay: time.Minute},
+		{Type: mgr.NoAction},
+		{Type: 99},
+	})
+	want := []string{
+		"run-command after 0s",
+		"restart after 5s",
+		"reboot after 1m0s",
+		"none after 0s",
+		"unknown(99) after 0s",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("describeActions() = %v, want %v", got, want)
 	}
 }
 

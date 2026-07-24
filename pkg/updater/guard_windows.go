@@ -61,8 +61,10 @@ func ensureRecoveryRestart(rc recoveryConfigurer) error {
 		return nil
 	}
 
-	// Not a new policy: register already applies exactly this configuration.
-	log.Warn().Msg("SCM recovery actions missing; restoring the defaults set by 'alpamon register'.")
+	// register already applies exactly this config, but SetRecoveryActions replaces
+	// the whole array—record what's lost, since this log is the only way back.
+	log.Warn().Strs("replaced", describeActions(actions)).
+		Msg("First SCM recovery action is not a restart; restoring the defaults set by 'alpamon register'.")
 	defaults := svcdef.DefaultRecoveryActions()
 	if err := rc.SetRecoveryActions(defaults, svcdef.RecoveryResetSeconds); err != nil {
 		return abortf("automatic restart is not configured and restoring it failed: %w; run 'alpamon register' to configure it", err)
@@ -82,6 +84,29 @@ func ensureRecoveryRestart(rc recoveryConfigurer) error {
 // abortf formats a fail-closed reason under the shared "self-update aborted" prefix.
 func abortf(format string, args ...any) error {
 	return fmt.Errorf("self-update aborted: "+format, args...)
+}
+
+// describeActions renders recovery actions for the overwrite log; mgr encodes
+// RecoveryAction.Type as a bare int that means nothing to a reader.
+func describeActions(actions []mgr.RecoveryAction) []string {
+	out := make([]string, len(actions))
+	for i, a := range actions {
+		var name string
+		switch a.Type {
+		case mgr.NoAction:
+			name = "none"
+		case mgr.ComputerReboot:
+			name = "reboot"
+		case mgr.ServiceRestart:
+			name = "restart"
+		case mgr.RunCommand:
+			name = "run-command"
+		default:
+			name = fmt.Sprintf("unknown(%d)", a.Type)
+		}
+		out[i] = fmt.Sprintf("%s after %s", name, a.Delay)
+	}
+	return out
 }
 
 // firstActionRestarts reports whether the first recovery action is a
