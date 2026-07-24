@@ -669,13 +669,14 @@ func getFlags(iface net.Interface) int {
 
 func calculateBroadcastAddress(ip net.IP, mask net.IPMask) string {
 	// only ipv4
-	if ip.To4() == nil || len(mask) != net.IPv4len {
+	v4 := ip.To4()
+	if v4 == nil || len(mask) != net.IPv4len {
 		return ""
 	}
 
-	broadcast := make(net.IP, len(ip.To4()))
-	for i := 0; i < len(ip.To4()); i++ {
-		broadcast[i] = ip[i] | ^mask[i]
+	broadcast := make(net.IP, net.IPv4len)
+	for i := range v4 {
+		broadcast[i] = v4[i] | ^mask[i]
 	}
 
 	return broadcast.String()
