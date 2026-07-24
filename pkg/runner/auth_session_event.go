@@ -26,6 +26,11 @@ const nonAlpaconAccessEventURL = "/api/events/access/"
 // unwraps the PermanentError and returns this sentinel directly.
 var errAccessEndpointNotDeployed = errors.New("access event endpoint not available (404)")
 
+// errAccessEventRejected marks a 4xx other than 404: the server refused this
+// event (bad credentials, revoked permission, schema mismatch). Retrying
+// cannot change the outcome, so the emit is abandoned immediately.
+var errAccessEventRejected = errors.New("access event rejected")
+
 // SessionEventRequest is sent by alpamon-pam's pam_sm_open_session hook
 // over auth.sock whenever a PAM session opens on a hooked service
 // (sshd, login, su). rhost/tty are empty for sessions without them
@@ -207,6 +212,14 @@ func (am *AuthManager) emitAccessEvent(event NonAlpaconAccessEvent) {
 		if statusCode == http.StatusNotFound {
 			return retry.Permanent(errAccessEndpointNotDeployed)
 		}
+		// 4xx means the server rejected this event (bad token, revoked
+		// permission, schema mismatch); retrying cannot change the verdict
+		// and would pin an emit slot for the whole backoff window, dropping
+		// the events that arrive meanwhile. Fail fast instead.
+		if statusCode >= 400 && statusCode < 500 {
+			return retry.Permanent(fmt.Errorf(
+				"%w with status code: %d", errAccessEventRejected, statusCode))
+		}
 		if statusCode < 200 || statusCode >= 300 {
 			return fmt.Errorf("access event failed with status code: %d", statusCode)
 		}
@@ -222,9 +235,16 @@ func (am *AuthManager) emitAccessEvent(event NonAlpaconAccessEvent) {
 				Msg("Access event endpoint not deployed (404); dropping event")
 			return
 		}
+		if errors.Is(err, errAccessEventRejected) {
+			log.Warn().Err(err).
+				Str("username", event.Username).
+				Str("service", event.Service).
+				Msg("Access event rejected by server; dropping event")
+			return
+		}
 		log.Warn().Err(err).
 			Str("username", event.Username).
 			Str("service", event.Service).
-			Msg("Failed to emit non-Alpacon access event")
+			Msg("Failed to emit non-Alpacon access event: server unreachable")
 	}
 }
