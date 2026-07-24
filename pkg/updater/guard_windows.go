@@ -6,6 +6,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/svcdef"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -14,8 +15,9 @@ import (
 // the self-update exit; a slower restart is healed to register's defaults, not trusted.
 const maxAcceptableRestartDelay = 60 * time.Second
 
-// recoveryConfigurer is the subset of *mgr.Service ensureRecoveryRestart needs,
-// an interface so the self-heal path is testable without a live SCM.
+// recoveryConfigurer is the RecoveryActions/SetRecoveryActions subset that
+// ensureRecoveryRestart needs—implemented by scmRecovery in production and a
+// fake in tests, so the self-heal path runs without a live SCM.
 type recoveryConfigurer interface {
 	RecoveryActions() ([]mgr.RecoveryAction, error)
 	SetRecoveryActions(actions []mgr.RecoveryAction, resetPeriod uint32) error
@@ -39,19 +41,69 @@ func ensureSelfRestartable() error {
 		return nil
 	}
 
-	m, err := mgr.Connect()
+	// Open with least access; mgr.Connect/OpenService would demand *_ALL_ACCESS.
+	// scmRecovery escalates to write access only when a heal is required.
+	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
 		return abortf("failed to connect to service manager: %w", err)
 	}
-	defer func() { _ = m.Disconnect() }()
+	defer func() { _ = windows.CloseServiceHandle(scm) }()
 
-	s, err := m.OpenService(svcdef.ServiceName)
-	if err != nil {
+	rc := &scmRecovery{scm: scm, name: svcdef.ServiceName}
+	if err := rc.openQuery(); err != nil {
 		return abortf("failed to open service %q: %w", svcdef.ServiceName, err)
 	}
-	defer func() { _ = s.Close() }()
+	defer rc.close()
 
-	return ensureRecoveryRestart(s)
+	return ensureRecoveryRestart(rc)
+}
+
+// scmRecovery opens each SCM handle with the least access the call needs, so the
+// read path never demands SERVICE_CHANGE_CONFIG. It satisfies recoveryConfigurer.
+type scmRecovery struct {
+	scm   windows.Handle
+	name  string
+	query *mgr.Service // opened with SERVICE_QUERY_CONFIG
+}
+
+func (r *scmRecovery) openQuery() error {
+	h, err := r.openService(windows.SERVICE_QUERY_CONFIG)
+	if err != nil {
+		return err
+	}
+	r.query = &mgr.Service{Name: r.name, Handle: h}
+	return nil
+}
+
+func (r *scmRecovery) openService(access uint32) (windows.Handle, error) {
+	namePtr, err := windows.UTF16PtrFromString(r.name)
+	if err != nil {
+		return 0, err
+	}
+	return windows.OpenService(r.scm, namePtr, access)
+}
+
+func (r *scmRecovery) close() {
+	if r.query != nil {
+		_ = r.query.Close()
+	}
+}
+
+func (r *scmRecovery) RecoveryActions() ([]mgr.RecoveryAction, error) {
+	return r.query.RecoveryActions()
+}
+
+// SetRecoveryActions opens a dedicated write handle so the read path stays
+// query-only. SERVICE_START is required alongside SERVICE_CHANGE_CONFIG because
+// the restored policy sets an SC_ACTION_RESTART action.
+func (r *scmRecovery) SetRecoveryActions(actions []mgr.RecoveryAction, resetPeriod uint32) error {
+	h, err := r.openService(windows.SERVICE_CHANGE_CONFIG | windows.SERVICE_START)
+	if err != nil {
+		return err
+	}
+	s := &mgr.Service{Name: r.name, Handle: h}
+	defer func() { _ = s.Close() }()
+	return s.SetRecoveryActions(actions, resetPeriod)
 }
 
 // ensureRecoveryRestart passes when rc's first recovery action is a prompt
