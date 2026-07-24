@@ -36,9 +36,7 @@ func TestCommandCleanup_CancelTerminatesViaJobAssignment(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 	waitForCmd(t, cmd)
-	if isWindowsPidAlive(pid) {
-		t.Fatalf("process %d still running after cancel", pid)
-	}
+	waitForWindowsPidGone(t, pid, "process")
 }
 
 func TestCommandCleanup_CancelFallsBackToPIDTreeWithoutJobAssignment(t *testing.T) {
@@ -59,9 +57,7 @@ func TestCommandCleanup_CancelFallsBackToPIDTreeWithoutJobAssignment(t *testing.
 		t.Fatalf("cancel: %v", err)
 	}
 	waitForCmd(t, cmd)
-	if isWindowsPidAlive(pid) {
-		t.Fatalf("process %d still running after cancel", pid)
-	}
+	waitForWindowsPidGone(t, pid, "process")
 }
 
 // The assigned job must take a descendant with it: cmd.exe -> ping, both die on cancel.
@@ -92,12 +88,8 @@ func TestCommandCleanup_CancelTerminatesMultiLevelTreeViaJob(t *testing.T) {
 	}
 	waitForCmd(t, cmd)
 
-	if isWindowsPidAlive(rootPID) {
-		t.Fatalf("root process %d still running after cancel", rootPID)
-	}
-	if isWindowsPidAlive(childPID) {
-		t.Fatalf("child process %d still running after cancel", childPID)
-	}
+	waitForWindowsPidGone(t, rootPID, "root process")
+	waitForWindowsPidGone(t, childPID, "child process")
 }
 
 // cancel racing ahead of afterStart: afterStart must notice canceled==true and re-run cancel.
@@ -125,9 +117,7 @@ func TestCommandCleanup_AfterStartReCancelsWhenAlreadyCanceled(t *testing.T) {
 		t.Fatalf("afterStart: %v", err)
 	}
 	waitForCmd(t, cmd)
-	if isWindowsPidAlive(pid) {
-		t.Fatalf("process %d still running after afterStart re-cancel", pid)
-	}
+	waitForWindowsPidGone(t, pid, "process")
 }
 
 // Black-box counterpart to the Unix test: cmd.exe runs ping, which inherits and holds stdout open.
@@ -200,6 +190,24 @@ func isWindowsPidAlive(pid uint32) bool {
 	defer windows.CloseHandle(h)
 	event, err := windows.WaitForSingleObject(h, 0)
 	return err == nil && event == uint32(windows.WAIT_TIMEOUT)
+}
+
+// waitForWindowsPidGone fails only if pid is still alive after a bounded wait.
+// cancel() tears the tree down through kill-on-job-close, TerminateProcess, and
+// a PID-tree walk—all asynchronous on Windows—and waitForCmd only proves the
+// root was reaped, not that every job member has finished terminating. Polling
+// for the pid to disappear mirrors waitForWindowsChild's poll for it to appear,
+// so the check tolerates that teardown latency instead of racing it.
+func waitForWindowsPidGone(t *testing.T, pid uint32, what string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !isWindowsPidAlive(pid) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("%s %d still running after cancel", what, pid)
 }
 
 func waitForWindowsChild(t *testing.T, parent uint32) uint32 {
