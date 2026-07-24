@@ -121,13 +121,16 @@ jobs:
           apt-get update -o Acquire::Retries=3
           apt-get install -y -o Acquire::Retries=3 --no-install-recommends git curl gcc libc6-dev ca-certificates
 
+      # --nobest: glibc-devel (AppStream) pins glibc (BaseOS) to an exact NEVR, and
+      # the two repos can be served by mirrors at different sync points. Without it
+      # the newest glibc-devel is picked and its glibc match may not exist yet.
       - name: Install dependencies (yum)
         if: matrix.pkg_manager == 'yum'
-        run: yum install -y git curl gcc glibc-devel tar
+        run: yum install -y --nobest git curl gcc glibc-devel tar
 
       - name: Install dependencies (dnf)
         if: matrix.pkg_manager == 'dnf'
-        run: dnf install -y --allowerasing git curl gcc glibc-devel tar
+        run: dnf install -y --allowerasing --nobest git curl gcc glibc-devel tar
 
       - name: Mark workspace as safe for Git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
