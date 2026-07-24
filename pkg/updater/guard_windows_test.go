@@ -23,6 +23,18 @@ func TestFirstActionRestarts(t *testing.T) {
 		{"noaction first, restart later", []mgr.RecoveryAction{
 			{Type: mgr.NoAction}, {Type: mgr.ServiceRestart},
 		}, false},
+		{"register's own delay is accepted", []mgr.RecoveryAction{
+			{Type: mgr.ServiceRestart, Delay: svcdef.RecoveryRestartDelay},
+		}, true},
+		{"delay exactly at the bound", []mgr.RecoveryAction{
+			{Type: mgr.ServiceRestart, Delay: maxAcceptableRestartDelay},
+		}, true},
+		{"delay past the bound is no guarantee", []mgr.RecoveryAction{
+			{Type: mgr.ServiceRestart, Delay: maxAcceptableRestartDelay + time.Second},
+		}, false},
+		{"restart six hours out leaves the server unreachable", []mgr.RecoveryAction{
+			{Type: mgr.ServiceRestart, Delay: 6 * time.Hour},
+		}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -103,6 +115,15 @@ func TestEnsureRecoveryRestart(t *testing.T) {
 		{
 			name:    "missing: heal then re-query confirms restart",
 			fake:    fakeRecovery{queries: [][]mgr.RecoveryAction{noAction, restartDefaults}},
+			wantErr: false,
+			wantSet: true,
+		},
+		{
+			name: "restart delayed past the bound heals like a missing restart",
+			fake: fakeRecovery{queries: [][]mgr.RecoveryAction{
+				{{Type: mgr.ServiceRestart, Delay: 6 * time.Hour}},
+				restartDefaults,
+			}},
 			wantErr: false,
 			wantSet: true,
 		},

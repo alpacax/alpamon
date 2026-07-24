@@ -2,12 +2,17 @@ package updater
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/svcdef"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+// maxAcceptableRestartDelay bounds how long the server may stay unreachable after
+// the self-update exit; a slower restart is healed to register's defaults, not trusted.
+const maxAcceptableRestartDelay = 60 * time.Second
 
 // recoveryConfigurer is the subset of *mgr.Service ensureRecoveryRestart needs,
 // an interface so the self-heal path is testable without a live SCM.
@@ -49,8 +54,8 @@ func ensureSelfRestartable() error {
 	return ensureRecoveryRestart(s)
 }
 
-// ensureRecoveryRestart passes when rc's first recovery action is a restart,
-// otherwise self-heals register's defaults and trusts only a confirming
+// ensureRecoveryRestart passes when rc's first recovery action is a prompt
+// restart, otherwise self-heals register's defaults and trusts only a confirming
 // re-query. Any SCM error aborts (fail-closed).
 func ensureRecoveryRestart(rc recoveryConfigurer) error {
 	actions, err := rc.RecoveryActions()
@@ -64,10 +69,10 @@ func ensureRecoveryRestart(rc recoveryConfigurer) error {
 	// register already applies exactly this config, but SetRecoveryActions replaces
 	// the whole array—record what's lost, since this log is the only way back.
 	log.Warn().Strs("replaced", describeActions(actions)).
-		Msg("First SCM recovery action is not a restart; restoring the defaults set by 'alpamon register'.")
+		Msg("First SCM recovery action is not a prompt restart; restoring the defaults set by 'alpamon register'.")
 	defaults := svcdef.DefaultRecoveryActions()
 	if err := rc.SetRecoveryActions(defaults, svcdef.RecoveryResetSeconds); err != nil {
-		return abortf("automatic restart is not configured and restoring it failed: %w; run 'alpamon register' to configure it", err)
+		return abortf("a prompt automatic restart is not configured and restoring it failed: %w; run 'alpamon register' to configure it", err)
 	}
 
 	actions, err = rc.RecoveryActions()
@@ -75,7 +80,7 @@ func ensureRecoveryRestart(rc recoveryConfigurer) error {
 		return abortf("failed to verify restored recovery actions: %w", err)
 	}
 	if !firstActionRestarts(actions) {
-		return abortf("automatic restart is still not configured after restoring defaults; run 'alpamon register' to configure it")
+		return abortf("a prompt automatic restart is still not configured after restoring defaults; run 'alpamon register' to configure it")
 	}
 	log.Info().Msg("SCM recovery actions restored and verified.")
 	return nil
@@ -109,9 +114,11 @@ func describeActions(actions []mgr.RecoveryAction) []string {
 	return out
 }
 
-// firstActionRestarts reports whether the first recovery action is a
-// restart—SCM applies element [N-1] on the Nth failure, and the self-update
-// exit is failure 1 in steady state.
+// firstActionRestarts reports whether the first recovery action restarts the
+// service soon enough to count as a guarantee—SCM applies element [N-1] on the
+// Nth failure, and the self-update exit is failure 1 in steady state.
 func firstActionRestarts(actions []mgr.RecoveryAction) bool {
-	return len(actions) > 0 && actions[0].Type == mgr.ServiceRestart
+	return len(actions) > 0 &&
+		actions[0].Type == mgr.ServiceRestart &&
+		actions[0].Delay <= maxAcceptableRestartDelay
 }
