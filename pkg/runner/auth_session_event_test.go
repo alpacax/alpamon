@@ -1,11 +1,16 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/google/uuid"
 )
 
@@ -255,6 +260,70 @@ func TestHandleSessionEvent_FlagOffDoesNotEmit(t *testing.T) {
 		t.Errorf("flag-off events must still ack true, got %+v", resp)
 	}
 	time.Sleep(100 * time.Millisecond)
+}
+
+// newEmitTestAuthManager wires an AuthManager whose session points at the
+// given test server URL, so emitAccessEvent's real HTTP/retry path can be
+// exercised directly instead of through the emitAccessEventFn stub.
+func newEmitTestAuthManager(baseURL string) *AuthManager {
+	am := newTestAuthManager()
+	am.ctx = context.Background()
+	am.session = &scheduler.Session{BaseURL: baseURL, Client: http.DefaultClient}
+	return am
+}
+
+// TestEmitAccessEvent_DropsOn404 verifies the Phase-2-not-deployed case posts
+// once and gives up quietly (no retry).
+func TestEmitAccessEvent_DropsOn404(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	newEmitTestAuthManager(srv.URL).emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("404 must not be retried; got %d calls", got)
+	}
+}
+
+// TestEmitAccessEvent_DropsOnRejection verifies a non-429 4xx is permanent:
+// posted once, then dropped.
+func TestEmitAccessEvent_DropsOnRejection(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	newEmitTestAuthManager(srv.URL).emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("a 4xx rejection must not be retried; got %d calls", got)
+	}
+}
+
+// TestEmitAccessEvent_RetriesOn429 verifies 429 is transient: the event is
+// retried (not dropped) and succeeds once the server stops throttling.
+func TestEmitAccessEvent_RetriesOn429(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	newEmitTestAuthManager(srv.URL).emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
+
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("429 must be retried then succeed; got %d calls", got)
+	}
 }
 
 // TestUpdateDetectLocalAccess verifies the policy flag setter mirrors

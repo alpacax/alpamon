@@ -222,10 +222,17 @@ func (am *AuthManager) emitAccessEvent(event NonAlpaconAccessEvent) {
 		if statusCode == http.StatusNotFound {
 			return retry.Permanent(errAccessEndpointNotDeployed)
 		}
-		// 4xx means the server rejected this event (bad token, revoked
-		// permission, schema mismatch); retrying cannot change the verdict
-		// and would pin an emit slot for the whole backoff window, dropping
-		// the events that arrive meanwhile. Fail fast instead.
+		// 429 is transient: the server is rate-limiting, not rejecting, so
+		// back off and retry rather than dropping the audit event. The
+		// emit-goroutine semaphore already bounds how much retrying can pile
+		// up under sustained throttling.
+		if statusCode == http.StatusTooManyRequests {
+			return fmt.Errorf("access event throttled (429)")
+		}
+		// Any other 4xx means the server rejected this event (bad token,
+		// revoked permission, schema mismatch); retrying cannot change the
+		// verdict and would pin an emit slot for the whole backoff window,
+		// dropping the events that arrive meanwhile. Fail fast instead.
 		if statusCode >= 400 && statusCode < 500 {
 			return retry.Permanent(fmt.Errorf(
 				"%w with status code: %d", errAccessEventRejected, statusCode))
