@@ -23,6 +23,9 @@ type recoveryConfigurer interface {
 func ensureSelfRestartable() error {
 	isSvc, err := svc.IsWindowsService()
 	if err != nil {
+		// Deliberately stricter than runningAsWindowsService(), which assumes
+		// interactive on this error: guessing interactive on a real service would
+		// skip the restart check and leave the replaced binary with nothing to relaunch it.
 		return abortf("failed to determine service mode: %w", err)
 	}
 	if !isSvc {
