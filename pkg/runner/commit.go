@@ -636,11 +636,12 @@ func getNetworkAddresses() ([]Address, error) {
 				ip = v.IP
 				mask = ip.DefaultMask()
 			}
-			if ip == nil || ip.To4() == nil {
+			v4 := ip.To4()
+			if v4 == nil {
 				continue
 			}
 			addresses = append(addresses, Address{
-				Address:       ip.To4().String(),
+				Address:       v4.String(),
 				Broadcast:     calculateBroadcastAddress(ip, mask),
 				InterfaceName: iface.Name,
 				Mask:          net.IP(mask).String(),
@@ -667,8 +668,10 @@ func getFlags(iface net.Interface) int {
 	return flags
 }
 
+// calculateBroadcastAddress returns the IPv4 directed broadcast for ip/mask.
+// It indexes ip.To4(), not ip: net.Interfaces() yields the 16-byte
+// IPv4-in-IPv6 form, where ip[0:4] is the ::ffff: prefix, not the address.
 func calculateBroadcastAddress(ip net.IP, mask net.IPMask) string {
-	// only ipv4
 	v4 := ip.To4()
 	if v4 == nil || len(mask) != net.IPv4len {
 		return ""
