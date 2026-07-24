@@ -209,6 +209,9 @@ func (h *SystemHandler) selfUpdate(ctx context.Context, latestVersion string) (i
 	if err := h.scheduleDelayedAction(1*time.Second, func(_ context.Context) {
 		h.wsClient.Restart()
 	}); err != nil {
+		// The update landed but no restart will fire, so drop the latch SelfUpdate
+		// holds on success—otherwise a manual retry would be rejected as a duplicate.
+		updater.ReleaseSelfUpdateLatch()
 		log.Error().Err(err).Msg("Failed to submit restart task after self-update. Manual restart required.")
 		return 1, fmt.Sprintf("Updated to %s, but automatic restart failed: %v. Please restart alpamon manually.", latestVersion, err), err
 	}

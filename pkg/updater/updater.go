@@ -35,8 +35,10 @@ const (
 
 var versionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[\w.]+)?$`)
 
-// selfUpdateInFlight serializes SelfUpdate: concurrent runs race on the same
-// staging paths and can delete each other's files mid-replace, killing the agent.
+// selfUpdateInFlight serializes SelfUpdate: concurrent runs race on the same staging
+// paths and can delete each other's files mid-replace, killing the agent. Process-local,
+// so it does not guard against a second alpamon process. Held through a successful run
+// (the expected restart resets it), released on failure or via ReleaseSelfUpdateLatch.
 var selfUpdateInFlight atomic.Bool
 
 // ErrSelfUpdateInProgress is returned when a self-update is already running.
@@ -58,13 +60,27 @@ func (o Options) baseURL() string {
 	return defaultReleaseBaseURL
 }
 
+// ReleaseSelfUpdateLatch clears the latch SelfUpdate keeps set after a successful
+// run. Call it only when the expected post-update restart could not be triggered.
+func ReleaseSelfUpdateLatch() {
+	selfUpdateInFlight.Store(false)
+}
+
 // SelfUpdate downloads the latest binary from GitHub Releases,
 // verifies its checksum, and replaces the current binary.
 func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
 	if !selfUpdateInFlight.CompareAndSwap(false, true) {
 		return ErrSelfUpdateInProgress
 	}
-	defer selfUpdateInFlight.Store(false)
+	// Release only on failure: on success the pending restart resets it, and holding
+	// it blocks a duplicate upgrade in that window—which on Windows fails in
+	// replaceBinary after a wasted download.
+	success := false
+	defer func() {
+		if !success {
+			selfUpdateInFlight.Store(false)
+		}
+	}()
 
 	if !versionRe.MatchString(latestVersion) {
 		return fmt.Errorf("invalid version format: %q", latestVersion)
@@ -138,6 +154,7 @@ func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
 	}
 
 	log.Info().Str("version", latestVersion).Msg("Self-update completed.")
+	success = true
 	return nil
 }
 

@@ -350,7 +350,19 @@ func TestSelfUpdate_InFlightFlagResets(t *testing.T) {
 		t.Fatal("expected error for invalid version")
 	}
 	if selfUpdateInFlight.Load() {
-		t.Fatal("in-flight flag not reset after SelfUpdate returned")
+		t.Fatal("in-flight flag not reset after failed SelfUpdate returned")
+	}
+}
+
+func TestReleaseSelfUpdateLatch(t *testing.T) {
+	if !selfUpdateInFlight.CompareAndSwap(false, true) {
+		t.Fatal("in-flight flag unexpectedly set before test")
+	}
+	defer selfUpdateInFlight.Store(false)
+
+	ReleaseSelfUpdateLatch()
+	if selfUpdateInFlight.Load() {
+		t.Fatal("ReleaseSelfUpdateLatch did not clear the latch")
 	}
 }
 
