@@ -85,7 +85,7 @@ func TestCommandCleanup_CancelNilProcessReturnsProcessDone(t *testing.T) {
 // the whole group, so a backgrounded grandchild holding the pipe open dies too.
 func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	cmd := exec.Command("/bin/sh", "-c", "sleep 600 & echo $! > \"$1\"; wait", "sh", pidFile)
+	cmd := exec.Command("/bin/sh", "-c", `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; wait`, "sh", pidFile)
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	if err != nil {
 		t.Fatalf("configureProcessTreeCleanup: %v", err)
@@ -127,7 +127,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pidFile := filepath.Join(t.TempDir(), "child.pid")
-			script := "sleep 600 & echo $! > \"$1\"; wait"
+			script := `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; wait`
 
 			type result struct {
 				exitCode int
@@ -178,7 +178,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 // timeout means no Cancel, and Wait returns ExitError not ErrWaitDelay, so only the unconditional cancel covers it.
 func TestExecutor_CleansDescendantWhenCommandExitsNonZero(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	script := "sleep 600 & echo $! > \"$1\"; exit 3"
+	script := `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; exit 3`
 
 	type result struct {
 		exitCode int
