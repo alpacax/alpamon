@@ -39,6 +39,10 @@ var versionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[\w.]+)?$`)
 // staging paths and can delete each other's files mid-replace, killing the agent.
 var selfUpdateInFlight atomic.Bool
 
+// ErrSelfUpdateInProgress is returned when a self-update is already running.
+// Callers should treat it as a benign no-op, not a failure.
+var ErrSelfUpdateInProgress = errors.New("self-update already in progress")
+
 // SelfUpdateFunc is the signature of SelfUpdate, held as a field so tests can inject a fake.
 type SelfUpdateFunc func(ctx context.Context, latestVersion string, opts Options) error
 
@@ -58,7 +62,7 @@ func (o Options) baseURL() string {
 // verifies its checksum, and replaces the current binary.
 func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
 	if !selfUpdateInFlight.CompareAndSwap(false, true) {
-		return errors.New("self-update already in progress")
+		return ErrSelfUpdateInProgress
 	}
 	defer selfUpdateInFlight.Store(false)
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -338,8 +339,8 @@ func TestSelfUpdate_AlreadyInProgress(t *testing.T) {
 	defer selfUpdateInFlight.Store(false)
 
 	err := SelfUpdate(context.Background(), "v1.0.0", Options{})
-	if err == nil || !strings.Contains(err.Error(), "already in progress") {
-		t.Fatalf("expected in-progress error, got: %v", err)
+	if !errors.Is(err, ErrSelfUpdateInProgress) {
+		t.Fatalf("expected ErrSelfUpdateInProgress, got: %v", err)
 	}
 }
 

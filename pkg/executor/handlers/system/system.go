@@ -198,6 +198,11 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 // selfUpdate downloads and replaces the binary from GitHub Releases, then triggers restart.
 func (h *SystemHandler) selfUpdate(ctx context.Context, latestVersion string) (int, string, error) {
 	if err := h.selfUpdateFn(ctx, latestVersion, updater.Options{}); err != nil {
+		if errors.Is(err, updater.ErrSelfUpdateInProgress) {
+			// Rejecting a duplicate is correct, not a failure; the run that owns
+			// the update handles its own restart, so don't schedule another.
+			return 0, "Self-update already in progress.", nil
+		}
 		return 1, fmt.Sprintf("Self-update failed: %v", err), err
 	}
 
