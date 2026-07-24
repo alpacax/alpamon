@@ -19,7 +19,9 @@ type recoveryConfigurer interface {
 // ensureSelfRestartable aborts the self-update unless a relaunch is guaranteed
 // afterward—otherwise the replaced binary stays dead and a remote-only server
 // goes unreachable. Preflight only: config drift or a failure streak past the
-// first action can still leave the service stopped.
+// first action can still leave the service stopped—permanently so when the reset
+// period is INFINITE, since the failure count never ages out and the third update
+// lands on NoAction. Undetectable here: mgr.RecoveryActions() omits the reset period.
 func ensureSelfRestartable() error {
 	isSvc, err := svc.IsWindowsService()
 	if err != nil {
@@ -77,6 +79,7 @@ func ensureRecoveryRestart(rc recoveryConfigurer) error {
 	return nil
 }
 
+// abortf formats a fail-closed reason under the shared "self-update aborted" prefix.
 func abortf(format string, args ...any) error {
 	return fmt.Errorf("self-update aborted: "+format, args...)
 }
