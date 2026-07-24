@@ -23,7 +23,9 @@ var (
 
 // InvalidatePamCache clears the cached pam version so the next call to
 // GetPamVersion will re-query the system. Call this after upgrading alpamon-pam
-// to avoid reporting a stale version for up to pamCacheTTL.
+// to avoid reporting a stale version for up to pamCacheTTL. The sshd UsePAM
+// cache is deliberately independent (see GetSSHDUsePAM) and is not touched
+// here: a pam-package upgrade does not change sshd's configuration.
 func InvalidatePamCache() {
 	pamCacheMutex.Lock()
 	defer pamCacheMutex.Unlock()
@@ -68,9 +70,14 @@ func queryPamVersion() string {
 	return ""
 }
 
+// The sshd UsePAM check keeps its own cache and mutex, independent of the
+// pam-version cache. The two are unrelated (a pam-package upgrade does not
+// change sshd's config), so InvalidatePamCache must not touch this, and
+// running sshd -T here must not block a concurrent GetPamVersion caller.
 var (
 	sshdUsePAMCache     string
 	sshdUsePAMCacheTime time.Time
+	sshdUsePAMMutex     sync.Mutex
 )
 
 // GetSSHDUsePAM reports sshd's effective UsePAM setting: "yes", "no",
@@ -80,8 +87,8 @@ var (
 // server via sync. Cached with the same TTL as the pam version to avoid
 // spawning sshd -T on every sync cycle.
 func GetSSHDUsePAM() string {
-	pamCacheMutex.Lock()
-	defer pamCacheMutex.Unlock()
+	sshdUsePAMMutex.Lock()
+	defer sshdUsePAMMutex.Unlock()
 
 	if !sshdUsePAMCacheTime.IsZero() && time.Since(sshdUsePAMCacheTime) < pamCacheTTL {
 		return sshdUsePAMCache
