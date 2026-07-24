@@ -81,6 +81,27 @@ func TestCommandCleanup_CancelNilProcessReturnsProcessDone(t *testing.T) {
 	}
 }
 
+// When a cancel races ahead of the process group being recorded, afterStart redoes the kill. An
+// already-gone group is the benign expected outcome, so the redo must not surface os.ErrProcessDone
+// as an afterStart failure—otherwise Execute reports exit 1 instead of the real termination status.
+func TestCommandCleanup_AfterStartRedoSwallowsProcessDone(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cleanup, err := configureProcessTreeCleanup(cmd, false)
+	if err != nil {
+		t.Fatalf("configureProcessTreeCleanup: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	// Simulate a cancel that fired between Start and afterStart, then reap so the redo hits ESRCH.
+	_ = cleanup.cancel(cmd)
+	_ = cmd.Wait()
+
+	if err := cleanup.afterStart(cmd); err != nil {
+		t.Fatalf("afterStart redo surfaced %v, want nil for an already-gone group", err)
+	}
+}
+
 // White-box counterpart to the Windows job-object test: configure -> Start -> cancel must SIGKILL
 // the whole group, so a backgrounded grandchild holding the pipe open dies too.
 func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {

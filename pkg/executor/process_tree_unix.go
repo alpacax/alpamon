@@ -48,9 +48,13 @@ func (c *commandCleanup) afterStart(cmd *exec.Cmd) error {
 	if p, err := syscall.Getpgid(cmd.Process.Pid); err == nil && p == cmd.Process.Pid {
 		pgid = p
 	}
-	// A cancel that fired between Start and here read pgid==0 and hit only the leader; redo it with the group recorded.
+	// A cancel that fired between Start and here read pgid==0 and hit only the leader; redo it with the
+	// group recorded. An already-gone group (ErrProcessDone) is the expected benign outcome, so let the
+	// normal Wait path report the real termination status rather than surfacing it as an afterStart failure.
 	if canceled := c.recordPgid(pgid); canceled {
-		return c.cancel(cmd)
+		if err := c.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
 	}
 	return nil
 }
