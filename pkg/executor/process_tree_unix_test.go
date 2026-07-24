@@ -81,10 +81,11 @@ func TestCommandCleanup_CancelNilProcessReturnsProcessDone(t *testing.T) {
 	}
 }
 
-// When a cancel races ahead of the process group being recorded, afterStart redoes the kill. An
-// already-gone group is the benign expected outcome, so the redo must not surface os.ErrProcessDone
-// as an afterStart failure—otherwise Execute reports exit 1 instead of the real termination status.
-func TestCommandCleanup_AfterStartRedoSwallowsProcessDone(t *testing.T) {
+// When a cancel races ahead of the process group being recorded, afterStart redoes the kill. runCommand
+// always runs afterStart before Wait, so the redo targets a still-unreaped process—never a reaped pid the
+// OS could have handed to an unrelated process. Exercise that exact order: the redo must complete without
+// surfacing an error, so Execute reports the real termination status rather than exit 1. Reap only after.
+func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
 	cmd := exec.Command("/bin/sh", "-c", "exit 0")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	if err != nil {
@@ -93,13 +94,13 @@ func TestCommandCleanup_AfterStartRedoSwallowsProcessDone(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cmd.Start: %v", err)
 	}
-	// Simulate a cancel that fired between Start and afterStart, then reap so the redo hits ESRCH.
+	// Cancel before the group is recorded: pgid is still 0, so only the leader is targeted.
 	_ = cleanup.cancel(cmd)
-	_ = cmd.Wait()
-
+	// Redo while the process is still unreaped, matching runCommand's afterStart-before-Wait order.
 	if err := cleanup.afterStart(cmd); err != nil {
-		t.Fatalf("afterStart redo surfaced %v, want nil for an already-gone group", err)
+		t.Fatalf("afterStart redo surfaced %v, want nil after a raced cancel", err)
 	}
+	_ = cmd.Wait()
 }
 
 // White-box counterpart to the Windows job-object test: configure -> Start -> cancel must SIGKILL
