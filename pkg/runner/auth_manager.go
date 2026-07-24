@@ -137,12 +137,24 @@ type AuthManager struct {
 	completionChannels map[string]chan struct{}
 	session            *scheduler.Session
 	blockLocalSudo     bool
+	detectLocalAccess  bool
+	// emitAccessEventFn overrides emitAccessEvent in tests; nil means
+	// the real emitter is used.
+	emitAccessEventFn func(NonAlpaconAccessEvent)
+	// emitSem bounds concurrent access-event emit goroutines. Each emit
+	// can hold up to authRetryTimeout of retry against an unreachable
+	// server, so a login burst could otherwise spawn goroutines without
+	// limit. A full channel means the budget is exhausted and the event
+	// is dropped (non-blocking, never blocks the ack path).
+	emitSem chan struct{}
 }
 
 const (
 	authRetryInitialInterval = 1 * time.Second
 	authRetryMaxInterval     = 10 * time.Second
 	authRetryTimeout         = 25 * time.Second // Less than PAM 30s timeout
+	// emitConcurrencyLimit caps in-flight access-event emit goroutines.
+	emitConcurrencyLimit = 16
 )
 
 var (
@@ -157,6 +169,7 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 			localSudoRequests:  make(map[string]*SudoRequest),
 			completionChannels: make(map[string]chan struct{}),
 			session:            session,
+			emitSem:            make(chan struct{}, emitConcurrencyLimit),
 		}
 	})
 
@@ -176,6 +189,10 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 		authManager.session = session
 	}
 
+	if authManager.emitSem == nil {
+		authManager.emitSem = make(chan struct{}, emitConcurrencyLimit)
+	}
+
 	return authManager
 }
 
@@ -187,6 +204,16 @@ func (am *AuthManager) UpdateBlockLocalSudo(value bool) {
 	}
 	am.blockLocalSudo = value
 	log.Info().Bool("block_local_sudo", value).Msg("Updated block_local_sudo setting")
+}
+
+func (am *AuthManager) UpdateDetectLocalAccess(value bool) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	if am.detectLocalAccess == value {
+		return
+	}
+	am.detectLocalAccess = value
+	log.Info().Bool("detect_local_access", value).Msg("Updated detect_local_access setting")
 }
 
 func (am *AuthManager) Start(ctx context.Context) {
@@ -370,6 +397,9 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 
 	case "sudo_approval":
 		am.handleSudoApprovalRequest(buf[:n], unixConn)
+
+	case "session_event":
+		am.handleSessionEvent(buf[:n], unixConn)
 
 	default:
 		log.Warn().Str("type", baseReq.Type).Msg("Unknown request type")

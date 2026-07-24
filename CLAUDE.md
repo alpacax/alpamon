@@ -109,6 +109,7 @@ Commands from the Alpacon console flow through:
 - `terminal_manager.go`: PTY session lifecycle
 - `tunnel_client.go`, `tunnel_daemon.go`: Tunnel operations
 - `auth_manager.go`: PAM authentication and sudo approval
+- `auth_session_event.go`: non-Alpacon access detection (PAM session events via auth.sock, gated by `detect_local_access` policy)
 
 **Collector (`pkg/collector/`)**
 - `check/realtime/`: CPU, memory, disk I/O, network traffic (via gopsutil)

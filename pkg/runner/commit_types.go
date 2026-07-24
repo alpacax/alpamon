@@ -58,6 +58,7 @@ var commitDefs = map[string]commitDef{
 type ServerData struct {
 	Version    string  `json:"version"`
 	PamVersion string  `json:"pam_version,omitempty"`
+	SshdUsePam string  `json:"sshd_use_pam,omitempty"`
 	Load       float64 `json:"load"`
 }
 
@@ -155,12 +156,14 @@ type shadowEntry struct {
 }
 
 type AccessPolicy struct {
-	BlockLocalSudo bool `json:"block_local_sudo"`
+	BlockLocalSudo    bool `json:"block_local_sudo"`
+	DetectLocalAccess bool `json:"detect_local_access"`
 }
 
 type commitData struct {
 	Version    string      `json:"version"`
 	PamVersion string      `json:"pam_version,omitempty"`
+	SshdUsePam string      `json:"sshd_use_pam,omitempty"`
 	Load       float64     `json:"load"`
 	Info       SystemData  `json:"info"`
 	OS         OSData      `json:"os"`
