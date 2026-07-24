@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/retry"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
@@ -57,6 +58,12 @@ type SessionEventResponse struct {
 // session opens outside the Alpacon paths (direct SSH, scp/sftp, local
 // console, su from a non-Alpacon shell).
 type NonAlpaconAccessEvent struct {
+	// EventID makes delivery idempotent. Post is retried on transport
+	// errors and 5xx, which cannot distinguish "the server never got it"
+	// from "the server stored it but the reply was lost" — without a
+	// stable id per session, that second case records the same login
+	// twice. The server treats (server, event_id) as unique.
+	EventID   string    `json:"event_id"`
 	Username  string    `json:"username"`
 	Service   string    `json:"service"`
 	RHost     string    `json:"rhost,omitempty"`
@@ -89,6 +96,9 @@ func (am *AuthManager) resolveSessionEvent(req SessionEventRequest) (NonAlpaconA
 	}
 
 	return NonAlpaconAccessEvent{
+		// Generated once here, so every retry of the same session
+		// carries the same id.
+		EventID:   uuid.NewString(),
 		Username:  req.Username,
 		Service:   req.Service,
 		RHost:     req.RHost,

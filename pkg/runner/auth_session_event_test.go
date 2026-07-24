@@ -5,6 +5,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // TestSessionEventRequest_ParsesWithoutOptionalFields verifies that
@@ -50,6 +52,27 @@ func TestResolveSessionEvent_UnknownSessionBuildsEvent(t *testing.T) {
 	}
 	if event.Timestamp.IsZero() {
 		t.Error("Timestamp should be set")
+	}
+	if _, err := uuid.Parse(event.EventID); err != nil {
+		t.Errorf("EventID should be a uuid, got %q: %v", event.EventID, err)
+	}
+}
+
+// TestResolveSessionEvent_EventIDIsUnique verifies each resolved session
+// gets its own idempotency key, so two logins are never deduplicated into
+// one server-side.
+func TestResolveSessionEvent_EventIDIsUnique(t *testing.T) {
+	am := newTestAuthManager()
+	req := SessionEventRequest{
+		Type: "session_event", Username: "alice", Service: "sshd",
+		PID: 712345, PPID: 712340,
+	}
+
+	first, _ := am.resolveSessionEvent(req)
+	second, _ := am.resolveSessionEvent(req)
+
+	if first.EventID == second.EventID {
+		t.Errorf("expected distinct EventIDs, got %q twice", first.EventID)
 	}
 }
 
