@@ -2,6 +2,7 @@ package runner
 
 import (
 	"encoding/json"
+	"net"
 	"runtime"
 	"slices"
 	"strings"
@@ -151,6 +152,38 @@ func TestGetNetworkAddresses(t *testing.T) {
 		assert.NotEmpty(t, addr.Broadcast, "Broadcast address should not be empty.")
 		assert.NotEmpty(t, addr.InterfaceName, "Interface name should not be empty.")
 		assert.NotEmpty(t, addr.Mask, "Mask should not be empty.")
+
+		mask := net.IPMask(net.ParseIP(addr.Mask).To4())
+		ip := net.ParseIP(addr.Address)
+		bcast := net.ParseIP(addr.Broadcast)
+		assert.Equal(t, ip.Mask(mask), bcast.Mask(mask),
+			"Broadcast should be on the same network as the address.")
+	}
+}
+
+func TestCalculateBroadcastAddress(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   net.IP
+		mask net.IPMask
+		want string
+	}{
+		// net.Interfaces() yields 16-byte IPv4-in-IPv6 IPs on all platforms
+		{name: "16-byte IP /24", ip: net.IPv4(192, 168, 1, 10), mask: net.CIDRMask(24, 32), want: "192.168.1.255"},
+		{name: "4-byte IP /24", ip: net.IPv4(192, 168, 1, 10).To4(), mask: net.CIDRMask(24, 32), want: "192.168.1.255"},
+		{name: "16-byte IP /8", ip: net.IPv4(127, 0, 0, 1), mask: net.CIDRMask(8, 32), want: "127.255.255.255"},
+		{name: "4-byte IP /8", ip: net.IPv4(127, 0, 0, 1).To4(), mask: net.CIDRMask(8, 32), want: "127.255.255.255"},
+		{name: "16-byte IP /16", ip: net.IPv4(172, 17, 0, 2), mask: net.CIDRMask(16, 32), want: "172.17.255.255"},
+		{name: "16-byte IP /32", ip: net.IPv4(10, 1, 0, 28), mask: net.CIDRMask(32, 32), want: "10.1.0.28"},
+		{name: "IPv6 address", ip: net.ParseIP("2001:db8::1"), mask: net.CIDRMask(24, 32), want: ""},
+		{name: "16-byte mask", ip: net.IPv4(192, 168, 1, 10), mask: net.CIDRMask(64, 128), want: ""},
+		{name: "nil mask", ip: net.IPv4(192, 168, 1, 10), mask: nil, want: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, calculateBroadcastAddress(tc.ip, tc.mask))
+		})
 	}
 }
 
