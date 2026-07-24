@@ -352,8 +352,8 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 		}
 	}()
 	if err := cleanup.afterStart(cmd); err != nil {
-		// Windows afterStart may have already canceled on a Start/cancel race; the deferred cancel
-		// re-runs harmlessly (idempotent). Unix afterStart never errors here.
+		// afterStart may re-run cancel on a Start/cancel race (both platforms) and surface its error
+		// here; the deferred cancel then re-runs harmlessly (idempotent).
 		_ = cmd.Wait()
 		return finish(err)
 	}
