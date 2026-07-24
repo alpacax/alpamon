@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/svcdef"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -15,14 +16,8 @@ import (
 )
 
 const (
-	// Keep serviceName and the recovery values in sync with the copies in
-	// pkg/updater/guard_windows.go (the self-update preflight guard) and
-	// svcName in cmd/alpamon/command/svc_windows.go.
-	serviceName          = "alpamon"
-	serviceDisplayName   = "Alpamon Agent"
-	serviceDescription   = "Secure server agent for the Alpacon infrastructure access platform."
-	recoveryResetSeconds = 60
-	recoveryRestartDelay = 5 * time.Second
+	serviceDisplayName = "Alpamon Agent"
+	serviceDescription = "Secure server agent for the Alpacon infrastructure access platform."
 
 	// serviceStopPoll* bound how long removeService waits for the SCM to report
 	// the service Stopped before deleting it (15s total).
@@ -67,13 +62,13 @@ func startService() error {
 	// Only treat ERROR_SERVICE_DOES_NOT_EXIST as "go create it"; any
 	// other OpenService failure (access denied, RPC issues) should
 	// surface so the operator can address it.
-	s, err := m.OpenService(serviceName)
+	s, err := m.OpenService(svcdef.ServiceName)
 	if err != nil {
 		if !isServiceNotExist(err) {
 			return fmt.Errorf("open service: %w%s", err, elevationHint(err))
 		}
 		s, err = m.CreateService(
-			serviceName,
+			svcdef.ServiceName,
 			serviceBinPath,
 			mgr.Config{
 				DisplayName:      serviceDisplayName,
@@ -134,12 +129,8 @@ func startService() error {
 
 	// Auto-restart on crash. Use conservative delays so a broken
 	// binary doesn't thrash SCM.
-	recoveryActions := []mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: recoveryRestartDelay},
-		{Type: mgr.ServiceRestart, Delay: recoveryRestartDelay},
-		{Type: mgr.NoAction},
-	}
-	if err := s.SetRecoveryActions(recoveryActions, recoveryResetSeconds); err != nil {
+	recoveryActions := svcdef.DefaultRecoveryActions()
+	if err := s.SetRecoveryActions(recoveryActions, svcdef.RecoveryResetSeconds); err != nil {
 		// Non-fatal; log and continue. The service will still start,
 		// just without automatic recovery.
 		fmt.Printf("Warning: failed to configure service recovery actions: %v\n", err)
@@ -171,7 +162,7 @@ func withService(fn func(*mgr.Service) error) error {
 	}
 	defer func() { _ = m.Disconnect() }()
 
-	s, err := m.OpenService(serviceName)
+	s, err := m.OpenService(svcdef.ServiceName)
 	if err != nil {
 		if isServiceNotExist(err) {
 			return nil

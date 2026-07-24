@@ -2,21 +2,11 @@ package updater
 
 import (
 	"fmt"
-	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/svcdef"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
-)
-
-// scmServiceName duplicates register's serviceName and svc_windows.go's svcName;
-// pkg can't import cmd without inverting layering.
-const scmServiceName = "alpamon"
-
-// Recovery defaults from 'alpamon register', copied for the same layering reason.
-const (
-	recoveryResetSeconds = 60
-	recoveryRestartDelay = 5 * time.Second
 )
 
 // recoveryConfigurer is the subset of *mgr.Service ensureRecoveryRestart needs,
@@ -45,9 +35,9 @@ func ensureSelfRestartable() error {
 	}
 	defer func() { _ = m.Disconnect() }()
 
-	s, err := m.OpenService(scmServiceName)
+	s, err := m.OpenService(svcdef.ServiceName)
 	if err != nil {
-		return abortf("failed to open service %q: %w", scmServiceName, err)
+		return abortf("failed to open service %q: %w", svcdef.ServiceName, err)
 	}
 	defer func() { _ = s.Close() }()
 
@@ -68,12 +58,8 @@ func ensureRecoveryRestart(rc recoveryConfigurer) error {
 
 	// Not a new policy: register already applies exactly this configuration.
 	log.Warn().Msg("SCM recovery actions missing; restoring the defaults set by 'alpamon register'.")
-	defaults := []mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: recoveryRestartDelay},
-		{Type: mgr.ServiceRestart, Delay: recoveryRestartDelay},
-		{Type: mgr.NoAction},
-	}
-	if err := rc.SetRecoveryActions(defaults, recoveryResetSeconds); err != nil {
+	defaults := svcdef.DefaultRecoveryActions()
+	if err := rc.SetRecoveryActions(defaults, svcdef.RecoveryResetSeconds); err != nil {
 		return abortf("automatic restart is not configured and restoring it failed: %w; run 'alpamon register' to configure it", err)
 	}
 

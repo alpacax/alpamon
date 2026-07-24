@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/alpacax/alpamon/v2/pkg/svcdef"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
@@ -81,7 +82,7 @@ func TestEnsureRecoveryRestart(t *testing.T) {
 			fake:      fakeRecovery{queries: [][]mgr.RecoveryAction{noAction, restartDefaults}},
 			wantErr:   false,
 			wantSet:   true,
-			wantReset: recoveryResetSeconds,
+			wantReset: svcdef.RecoveryResetSeconds,
 		},
 		{
 			name:    "missing: SetRecoveryActions fails aborts",
