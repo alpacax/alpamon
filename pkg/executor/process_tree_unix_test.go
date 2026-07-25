@@ -94,13 +94,16 @@ func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cmd.Start: %v", err)
 	}
+	// Reap last—after afterStart, and even when an assertion below fails early.
+	t.Cleanup(func() { _ = cmd.Wait() })
 	// Cancel before the group is recorded: pgid is still 0, so only the leader is targeted.
-	_ = cleanup.cancel(cmd)
+	if err := cleanup.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("cancel: %v", err)
+	}
 	// Redo while the process is still unreaped, matching runCommand's afterStart-before-Wait order.
 	if err := cleanup.afterStart(cmd); err != nil {
 		t.Fatalf("afterStart redo surfaced %v, want nil after a raced cancel", err)
 	}
-	_ = cmd.Wait()
 }
 
 // White-box counterpart to the Windows job-object test: configure -> Start -> cancel must SIGKILL
@@ -115,6 +118,12 @@ func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cmd.Start: %v", err)
 	}
+	// Kill and reap the leader even when an assertion below fails before cancel runs; the in-body
+	// cancel makes this a no-op on the happy path.
+	t.Cleanup(func() {
+		_ = cleanup.cancel(cmd)
+		_ = cmd.Wait()
+	})
 	if err := cleanup.afterStart(cmd); err != nil {
 		t.Fatalf("afterStart: %v", err)
 	}
@@ -125,7 +134,6 @@ func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	if err := cleanup.cancel(cmd); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
-	go func() { _ = cmd.Wait() }()
 
 	if !waitForExecutorTimeoutChildExit(childPID, 3*time.Second) {
 		t.Fatalf("grandchild %d survived the group kill", childPID)
