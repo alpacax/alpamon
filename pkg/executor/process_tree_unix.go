@@ -59,13 +59,6 @@ func (c *commandCleanup) afterStart(cmd *exec.Cmd) error {
 	return nil
 }
 
-func (c *commandCleanup) recordPgid(pgid int) (canceled bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.pgid = pgid
-	return c.canceled
-}
-
 func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return os.ErrProcessDone
@@ -83,6 +76,17 @@ func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
 	return nil
 }
 
+func (c *commandCleanup) close() error {
+	return nil
+}
+
+func (c *commandCleanup) recordPgid(pgid int) (canceled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pgid = pgid
+	return c.canceled
+}
+
 // markCanceled records that a cancel fired and returns the recorded group; afterStart uses the flag to
 // redo a kill that raced ahead of the group being recorded.
 func (c *commandCleanup) markCanceled() int {
@@ -90,8 +94,4 @@ func (c *commandCleanup) markCanceled() int {
 	defer c.mu.Unlock()
 	c.canceled = true
 	return c.pgid
-}
-
-func (c *commandCleanup) close() error {
-	return nil
 }
