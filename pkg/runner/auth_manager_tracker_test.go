@@ -11,12 +11,9 @@ import (
 // tracker tests need populated. It intentionally does not start the
 // socket listener, so tests stay fast and isolated.
 func newTestAuthManager() *AuthManager {
-	return &AuthManager{
-		pidToSessionMap:    make(map[int]*SessionInfo),
-		localSudoRequests:  make(map[string]*SudoRequest),
-		completionChannels: make(map[string]chan struct{}),
-		emitSem:            make(chan struct{}, emitConcurrencyLimit),
-	}
+	// Same field set as NewEmptyAuthManager; defer to it so a new field only
+	// has to be added in one place.
+	return NewEmptyAuthManager()
 }
 
 // TestAddPIDCommandMapping_RegistersCommandKind verifies that Commands

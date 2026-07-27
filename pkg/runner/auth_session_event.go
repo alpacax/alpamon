@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/retry"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
+
+// lastEmitDropWarn holds the Unix second of the last Warn-level emit-drop log,
+// so a sustained outage rate-limits the Warn instead of flooding.
+var lastEmitDropWarn atomic.Int64
 
 // nonAlpaconAccessEventURL is the alpacon-server ingestion endpoint for
 // non-Alpacon access events. Phase 2 (server) must implement this path;
@@ -136,6 +141,10 @@ func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 		return
 	}
 
+	// Resolve (and its suppression Debug log) runs before the flag check on
+	// purpose: it keeps the "why was this suppressed" trace available even
+	// while detect_local_access is off, at the cost of one Getsid syscall and
+	// a map lookup per session. The emit itself stays gated below.
 	event, emit := am.resolveSessionEvent(req)
 
 	am.sendSessionEventResponse(unixConn, true)
@@ -160,7 +169,18 @@ func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 	select {
 	case am.emitSem <- struct{}{}:
 	default:
-		log.Debug().
+		// Every slot busy means the server has been unreachable long enough
+		// for retries to pile up while logins keep arriving — an abnormal
+		// state that loses audit events, so surface it at Warn. Rate-limit the
+		// Warn (at most once per minute) so a sustained outage can't flood the
+		// log; intervening drops still record at Debug.
+		dropLog := log.Debug()
+		now := time.Now().Unix()
+		if prev := lastEmitDropWarn.Load(); now-prev >= 60 &&
+			lastEmitDropWarn.CompareAndSwap(prev, now) {
+			dropLog = log.Warn()
+		}
+		dropLog.
 			Str("username", event.Username).
 			Str("service", event.Service).
 			Msg("access event dropped: emit concurrency limit reached")
@@ -205,6 +225,10 @@ func (am *AuthManager) emitAccessEvent(event NonAlpaconAccessEvent) {
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
+	// authRetryTimeout is reused only for its value here. Its "less than PAM's
+	// 30s" rationale does not apply on this path: emit runs on its own
+	// goroutine after the ack, so it never holds up PAM. The bound just caps
+	// how long a single event keeps retrying an unreachable server.
 	ctx, cancel := context.WithTimeout(baseCtx, authRetryTimeout)
 	defer cancel()
 
