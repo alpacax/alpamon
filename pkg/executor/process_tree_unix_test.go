@@ -20,7 +20,8 @@ import (
 func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 	t.Run("non_session_leader_sets_pgid", func(t *testing.T) {
 		cmd := &exec.Cmd{}
-		if _, err := configureProcessTreeCleanup(cmd, false); err != nil {
+		cleanup, err := configureProcessTreeCleanup(cmd, false)
+		if err != nil {
 			t.Fatalf("configureProcessTreeCleanup: %v", err)
 		}
 		if cmd.SysProcAttr == nil {
@@ -32,11 +33,15 @@ func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 		if cmd.SysProcAttr.Setsid {
 			t.Error("Setsid: got true, want false")
 		}
+		if !cleanup.leadsGroup {
+			t.Error("leadsGroup: got false, want true for setpgid(0,0)")
+		}
 	})
 
 	t.Run("session_leader_sets_sid_not_pgid", func(t *testing.T) {
 		cmd := &exec.Cmd{}
-		if _, err := configureProcessTreeCleanup(cmd, true); err != nil {
+		cleanup, err := configureProcessTreeCleanup(cmd, true)
+		if err != nil {
 			t.Fatalf("configureProcessTreeCleanup: %v", err)
 		}
 		if !cmd.SysProcAttr.Setsid {
@@ -45,16 +50,35 @@ func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 		if cmd.SysProcAttr.Setpgid {
 			t.Error("Setpgid: got true, want false (setpgid on a setsid session leader is EPERM, fails Start)")
 		}
+		if !cleanup.leadsGroup {
+			t.Error("leadsGroup: got false, want true for setsid")
+		}
 	})
 
 	// A caller that already asked for setsid must not also get Setpgid forced on.
 	t.Run("preexisting_setsid_not_overridden", func(t *testing.T) {
 		cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{Setsid: true}}
-		if _, err := configureProcessTreeCleanup(cmd, false); err != nil {
+		cleanup, err := configureProcessTreeCleanup(cmd, false)
+		if err != nil {
 			t.Fatalf("configureProcessTreeCleanup: %v", err)
 		}
 		if cmd.SysProcAttr.Setpgid {
 			t.Error("Setpgid was forced on despite preexisting Setsid")
+		}
+		if !cleanup.leadsGroup {
+			t.Error("leadsGroup: got false, want true for preexisting setsid")
+		}
+	})
+
+	// Joining an existing group means PGID != PID, so afterStart must fall back to the getpgid guard.
+	t.Run("preexisting_pgid_is_not_own_group_leader", func(t *testing.T) {
+		cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{Setpgid: true, Pgid: 1234}}
+		cleanup, err := configureProcessTreeCleanup(cmd, false)
+		if err != nil {
+			t.Fatalf("configureProcessTreeCleanup: %v", err)
+		}
+		if cleanup.leadsGroup {
+			t.Error("leadsGroup: got true, want false for a child joining an existing group")
 		}
 	})
 
@@ -62,7 +86,8 @@ func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 	t.Run("preserves_existing_credential", func(t *testing.T) {
 		cred := &syscall.Credential{Uid: 1000, Gid: 1000}
 		cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{Credential: cred}}
-		if _, err := configureProcessTreeCleanup(cmd, false); err != nil {
+		cleanup, err := configureProcessTreeCleanup(cmd, false)
+		if err != nil {
 			t.Fatalf("configureProcessTreeCleanup: %v", err)
 		}
 		if cmd.SysProcAttr.Credential != cred {
@@ -70,6 +95,9 @@ func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 		}
 		if !cmd.SysProcAttr.Setpgid {
 			t.Error("Setpgid was not set alongside the preserved credential")
+		}
+		if !cleanup.leadsGroup {
+			t.Error("leadsGroup: got false, want true alongside the preserved credential")
 		}
 	})
 }

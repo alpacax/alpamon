@@ -13,10 +13,11 @@ import (
 // commandCleanup mirrors the type in process_tree_windows.go; the commandCleaner assertion below pins
 // the shared afterStart/cancel/close method set across build tags. State differs per platform.
 type commandCleanup struct {
-	mu         sync.Mutex // afterStart (main goroutine) writes pgid while cmd.Cancel's context watcher reads it
-	leadsGroup bool       // configure requested setsid/setpgid(0,0), so PGID == PID by construction
-	pgid       int        // process group to SIGKILL; 0 when the child does not lead its own group
-	canceled   bool       // a cancel already fired; afterStart re-runs it once the group is recorded
+	leadsGroup bool // immutable after configure: setsid/setpgid(0,0) was requested, so PGID == PID
+
+	mu       sync.Mutex // afterStart (main goroutine) writes pgid while cmd.Cancel's context watcher reads it
+	pgid     int        // process group to SIGKILL; 0 when the child does not lead its own group
+	canceled bool       // a cancel already fired; afterStart re-runs it once the group is recorded
 }
 
 var _ commandCleaner = (*commandCleanup)(nil)
