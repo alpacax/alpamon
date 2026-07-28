@@ -490,7 +490,10 @@ func detectPlatform() (string, error) {
 	if runtime.GOOS == "linux" {
 		hostInfo, err := host.Info()
 		if err != nil {
-			return "", fmt.Errorf("failed to detect the host platform: %w", err)
+			return "", fmt.Errorf(
+				"failed to detect the host platform: %w.\n"+
+					"Pass --platform debian|rhel to skip detection if you know the host is compatible",
+				err)
 		}
 		raw = hostInfo.Platform
 	}
