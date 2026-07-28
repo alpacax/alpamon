@@ -36,7 +36,7 @@ func TestCommandCleanup_CancelTerminatesViaJobAssignment(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 	waitForCmd(t, cmd)
-	waitForWindowsPidGone(t, pid, "process")
+	waitForWindowsPidGone(t, pid, "after cancel via job assignment")
 }
 
 func TestCommandCleanup_CancelFallsBackToPIDTreeWithoutJobAssignment(t *testing.T) {
@@ -57,7 +57,7 @@ func TestCommandCleanup_CancelFallsBackToPIDTreeWithoutJobAssignment(t *testing.
 		t.Fatalf("cancel: %v", err)
 	}
 	waitForCmd(t, cmd)
-	waitForWindowsPidGone(t, pid, "process")
+	waitForWindowsPidGone(t, pid, "after cancel via PID-tree fallback")
 }
 
 // The assigned job must take a descendant with it: cmd.exe -> ping, both die on cancel.
@@ -88,8 +88,8 @@ func TestCommandCleanup_CancelTerminatesMultiLevelTreeViaJob(t *testing.T) {
 	}
 	waitForCmd(t, cmd)
 
-	waitForWindowsPidGone(t, rootPID, "root process")
-	waitForWindowsPidGone(t, childPID, "child process")
+	waitForWindowsPidGone(t, rootPID, "root process after cancel")
+	waitForWindowsPidGone(t, childPID, "child process after cancel")
 }
 
 // cancel racing ahead of afterStart: afterStart must notice canceled==true and re-run cancel.
@@ -117,7 +117,7 @@ func TestCommandCleanup_AfterStartReCancelsWhenAlreadyCanceled(t *testing.T) {
 		t.Fatalf("afterStart: %v", err)
 	}
 	waitForCmd(t, cmd)
-	waitForWindowsPidGone(t, pid, "process")
+	waitForWindowsPidGone(t, pid, "after afterStart re-cancel")
 }
 
 // Black-box counterpart to the Unix test: cmd.exe runs ping, which inherits and holds stdout open.
@@ -171,13 +171,20 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 	}
 }
 
+// One bound for every wait in this file: the same teardown latency is what all
+// of them are tolerating, so widening it is a single edit.
+const (
+	windowsPollDeadline = 3 * time.Second
+	windowsPollInterval = 50 * time.Millisecond
+)
+
 func waitForCmd(t *testing.T, cmd *exec.Cmd) {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(windowsPollDeadline):
 		t.Fatal("cmd.Wait did not return after cancel")
 	}
 }
@@ -193,27 +200,37 @@ func isWindowsPidAlive(pid uint32) bool {
 }
 
 // waitForWindowsPidGone fails only if pid is still alive after a bounded wait.
-// cancel() tears the tree down through kill-on-job-close, TerminateProcess, and
-// a PID-tree walk—all asynchronous on Windows—and waitForCmd only proves the
-// root was reaped, not that every job member has finished terminating. Polling
-// for the pid to disappear mirrors waitForWindowsChild's poll for it to appear,
-// so the check tolerates that teardown latency instead of racing it.
-func waitForWindowsPidGone(t *testing.T, pid uint32, what string) {
+// cancel() tears the tree down asynchronously (kill-on-job-close,
+// TerminateProcess, PID-tree walk), and waitForCmd only proves the root was
+// reaped—not that every job member has finished terminating.
+//
+// Only the child-pid assertion was ever racy (#382); where cmd.Wait already
+// reaped the pid the loop returns on iteration zero. Those call sites poll for
+// helper symmetry, deliberately relaxing "gone now" to "gone within
+// windowsPollDeadline".
+//
+// stage names the assertion so a bare CI line identifies which one failed.
+func waitForWindowsPidGone(t *testing.T, pid uint32, stage string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(windowsPollDeadline)
 	for time.Now().Before(deadline) {
 		if !isWindowsPidAlive(pid) {
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(windowsPollInterval)
 	}
-	t.Fatalf("%s %d still running after cancel", what, pid)
+	// Re-check: the loop gives back the last interval to sleep, and a process
+	// that exits inside it is within the stated bound.
+	if !isWindowsPidAlive(pid) {
+		return
+	}
+	t.Fatalf("%s: process %d still running", stage, pid)
 }
 
 func waitForWindowsChild(t *testing.T, parent uint32) uint32 {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := time.Now().Add(windowsPollDeadline)
+	for {
 		children, err := snapshotWindowsChildProcesses()
 		if err != nil {
 			t.Fatalf("snapshotWindowsChildProcesses: %v", err)
@@ -221,7 +238,10 @@ func waitForWindowsChild(t *testing.T, parent uint32) uint32 {
 		if kids := children[parent]; len(kids) > 0 {
 			return kids[0]
 		}
-		time.Sleep(50 * time.Millisecond)
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(windowsPollInterval)
 	}
 	t.Fatalf("child of process %d did not appear", parent)
 	return 0
