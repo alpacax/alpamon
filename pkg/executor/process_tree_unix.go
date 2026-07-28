@@ -95,8 +95,9 @@ func (c *commandCleanup) recordPgid(pgid int) (canceled bool) {
 	return c.canceled
 }
 
-// Mirrors the Windows sibling: records that a cancel fired and hands back the group, so cancel's SIGKILL
-// runs lock-free. afterStart uses the flag to redo a kill that raced ahead of the group being recorded.
+// takeForCancel records that a cancel fired and hands back the group, so cancel's SIGKILL runs lock-free;
+// it mirrors the Windows sibling of the same name. afterStart uses the flag to redo a kill that raced
+// ahead of the group being recorded.
 func (c *commandCleanup) takeForCancel() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
