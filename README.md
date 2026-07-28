@@ -56,9 +56,15 @@ sudo alpamon register --url https://<workspace> --token <TOKEN>
 set and `%wheel` commented out, so `wheel` membership alone does not grant
 sudo. Add a drop-in before granting admin access:
 
+Stage it under a name containing a dot, which sudo ignores when reading the
+include directory, so a typo cannot lock you out before `visudo -cf` has passed:
+
 ```bash
-echo '%wheel ALL=(ALL) ALL' | sudo tee /etc/sudoers.d/alpacon-wheel
-sudo chmod 0440 /etc/sudoers.d/alpacon-wheel
+echo '%wheel ALL=(ALL) ALL' | sudo tee /etc/sudoers.d/alpacon-wheel.stage >/dev/null
+sudo visudo -cf /etc/sudoers.d/alpacon-wheel.stage &&
+  sudo install -m 0440 -o root -g root \
+    /etc/sudoers.d/alpacon-wheel.stage /etc/sudoers.d/alpacon-wheel
+sudo rm -f /etc/sudoers.d/alpacon-wheel.stage
 ```
 
 **Known limitation**: because the host reports `rhel`, console-driven package
