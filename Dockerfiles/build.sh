@@ -31,3 +31,5 @@ docker build -t alpamon:redhat-8 -f Dockerfiles/redhat/8/Dockerfile .
 docker build -t alpamon:redhat-9 -f Dockerfiles/redhat/9/Dockerfile .
 
 docker build -t alpamon:centos-7 -f Dockerfiles/centos/7/Dockerfile .
+
+docker build -t alpamon:opensuse-15 -f Dockerfiles/opensuse/15/Dockerfile .
