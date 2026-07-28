@@ -174,17 +174,21 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 	pkgList := strings.Join(packages, " ")
 
 	var cmd string
-	switch utils.PlatformLike {
-	case "debian":
+	switch utils.PackageManager {
+	case utils.PkgApt:
 		cmd = fmt.Sprintf("apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
-	case "rhel":
+	case utils.PkgYum:
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
-	case "darwin", "windows":
-		// needAlpamon is always true here: needPam is always false on non-linux
-		// (pam unsupported; see pkg/utils/pam.go) and the switch is reached only when needAlpamon||needPam.
+	case utils.PkgZypper:
+		cmd = fmt.Sprintf("zypper --non-interactive update %s", pkgList)
+	case utils.PkgBrew, "":
+		// darwin/windows have no package channel for alpamon, so the binary
+		// replaces itself. needAlpamon is always true here: needPam is always
+		// false on non-linux (pam unsupported; see pkg/utils/pam.go) and the
+		// switch is reached only when needAlpamon||needPam.
 		return h.selfUpdate(ctx, latestVersion)
 	default:
-		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
+		return 1, fmt.Sprintf("Platform '%s' (package manager %q) not supported.", utils.PlatformLike, utils.PackageManager), nil
 	}
 
 	log.Debug().Msgf("Upgrading %s...", pkgList)
@@ -323,20 +327,21 @@ func (h *SystemHandler) executeUninstall() {
 
 	var cmd string
 
-	switch utils.PlatformLike {
-	case "debian":
+	switch utils.PackageManager {
+	case utils.PkgApt:
 		// Use purge to remove package and config files
 		cmd = "apt-get purge alpamon -y && apt-get autoremove -y"
-	case "rhel":
-		// Remove package using yum
+	case utils.PkgYum:
 		cmd = "yum remove alpamon -y"
-	case "darwin":
+	case utils.PkgZypper:
+		cmd = "zypper --non-interactive remove alpamon"
+	case utils.PkgBrew:
 		// For macOS development environment, just shutdown
 		log.Warn().Msgf("Platform '%s' does not support full uninstall. Shutting down instead.", utils.PlatformLike)
 		h.wsClient.ShutDown()
 		return
 	default:
-		log.Error().Msgf("Platform '%s' not supported for uninstall.", utils.PlatformLike)
+		log.Error().Msgf("Platform '%s' (package manager %q) not supported for uninstall.", utils.PlatformLike, utils.PackageManager)
 		h.wsClient.ShutDown()
 		return
 	}
@@ -415,15 +420,24 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	log.Info().Msg("Upgrade system requested.")
 
 	var cmd string
-	switch utils.PlatformLike {
-	case "debian":
+	switch utils.PackageManager {
+	case utils.PkgApt:
 		cmd = "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 && apt-get autoremove -y"
-	case "rhel":
+	case utils.PkgYum:
 		cmd = "yum update -y"
-	case "darwin":
+	case utils.PkgZypper:
+		// Tumbleweed is a rolling release: `zypper update` cannot perform the
+		// vendor changes a distribution upgrade needs. Leap/SLES must NOT use
+		// dup — it would jump to the next service pack.
+		if utils.IsTumbleweed(utils.PlatformID) {
+			cmd = "zypper --non-interactive dup"
+		} else {
+			cmd = "zypper --non-interactive update"
+		}
+	case utils.PkgBrew:
 		cmd = "brew upgrade"
 	default:
-		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
+		return 1, fmt.Sprintf("Platform '%s' (package manager %q) not supported.", utils.PlatformLike, utils.PackageManager), nil
 	}
 
 	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
