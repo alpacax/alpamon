@@ -9,6 +9,7 @@ Installed on each managed server, Alpamon establishes an outbound-only connectio
 | Platform | Minimum version | Arch |
 | --- | --- | --- |
 | Linux | Ubuntu 18.04+, Debian 11+, RHEL / Rocky / AlmaLinux 8+, Oracle Linux 8+, Amazon Linux 2 / 2023, Fedora (current or previous) | amd64, arm64 |
+| Linux (best-effort) | openSUSE Leap 15+, SLES 15+ | amd64, arm64 |
 | macOS | 11 (Big Sur) or later | amd64, arm64 (Apple Silicon) |
 | Windows | Windows 10 (1803+) / Windows 11, Windows Server 2019 or later | amd64 |
 
@@ -33,6 +34,44 @@ curl -s https://packagecloud.io/install/repositories/alpacax/alpamon/script.rpm.
 sudo yum install alpamon
 sudo alpamon register --url https://<workspace> --token <TOKEN>
 ```
+
+**openSUSE / SLES** (best-effort)
+
+openSUSE and SLES report `platform=rhel` to Alpacon: they share RHEL's rpm
+packaging, `wheel` sudo group, and shadow-utils account tooling. The agent
+runs `zypper` locally.
+
+The repository URL below is unverified: see issue #348.
+
+```bash
+# The PackageCloud one-liner writes a yum repo file; add the repo to zypper directly.
+sudo zypper addrepo -f \
+  'https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch' alpamon
+sudo zypper --gpg-auto-import-keys refresh
+sudo zypper install alpamon
+sudo alpamon register --url https://<workspace> --token <TOKEN>
+```
+
+**Sudoers prerequisite**: openSUSE ships `/etc/sudoers` with `Defaults targetpw`
+set and `%wheel` commented out, so `wheel` membership alone does not grant
+sudo. Add a drop-in before granting admin access:
+
+```bash
+echo '%wheel ALL=(ALL) ALL' | sudo tee /etc/sudoers.d/alpacon-wheel
+sudo chmod 0440 /etc/sudoers.d/alpacon-wheel
+```
+
+**Known limitation**: because the host reports `rhel`, console-driven package
+operations that the server composes still emit `yum` commands and fail on a
+SUSE host: Alpacon plugin install/upgrade and the automatic `alpamon-pam`
+install. The agent's own upgrade, uninstall, and system-update paths do use
+`zypper`. Install `alpamon-pam` and plugins manually with `zypper` until the
+server side is zypper-aware.
+
+**Already-registered hosts**: a host that registered before this fix carries a
+wrong `platform` value on the server. That field is write-once, so the host
+must re-register (`sudo alpamon register --force ...`) to pick up the correct
+value.
 
 ### macOS
 
@@ -90,6 +129,8 @@ The optional `alpamon-pam` package provides PAM integration for Alpacon-managed 
 sudo apt-get install alpamon-pam
 # RHEL / CentOS
 sudo yum install alpamon-pam
+# openSUSE / SLES
+sudo zypper install alpamon-pam
 ```
 
 After install, add to `/etc/pam.d/sudo`:
@@ -206,7 +247,7 @@ docker run \
     alpamon:latest
 ```
 
-Covered distros: Ubuntu 22.04/20.04, Debian 11, RHEL 8/9. Legacy Dockerfiles for Ubuntu 18.04, Debian 10, and CentOS 7 also ship under `Dockerfiles/` for best-effort builds against EOL platforms.
+Covered distros: Ubuntu 22.04/20.04, Debian 11, RHEL 8/9, openSUSE Leap 15. Legacy Dockerfiles for Ubuntu 18.04, Debian 10, and CentOS 7 also ship under `Dockerfiles/` for best-effort builds against EOL platforms.
 
 ### Run locally
 
