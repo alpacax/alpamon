@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/cloud"
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -427,5 +428,60 @@ func TestTagFlagParsing(t *testing.T) {
 				assert.Equal(t, tt.expectedTags, parsedTags)
 			}
 		})
+	}
+}
+
+// register carries its own detectPlatform copy; assert it agrees with the
+// shared table rather than trusting the two copies stayed in sync.
+func TestDetectPlatform_SuseMapsToRhel(t *testing.T) {
+	got, err := detectPlatformFor("linux", "opensuse-leap")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "rhel" {
+		t.Errorf("platform = %q, want rhel", got)
+	}
+}
+
+// detectPlatform must not invent a platform for a distribution it cannot
+// classify. The server persists the registration value write-once with no
+// admin edit path, so a silent "debian" default is unrecoverable.
+func TestDetectPlatform_UnsupportedReturnsError(t *testing.T) {
+	_, err := detectPlatformFor("linux", "arch")
+	if err == nil {
+		t.Fatal("expected an error for an unclassifiable distribution")
+	}
+	if !strings.Contains(err.Error(), "arch") {
+		t.Errorf("error must name the distribution, got %q", err)
+	}
+	if !strings.Contains(err.Error(), "--platform") {
+		t.Errorf("error must tell the operator about the override, got %q", err)
+	}
+}
+
+// buildRegisterRequest surfaces the detection failure instead of registering
+// with a guessed platform.
+func TestBuildRegisterRequest_PlatformDetectionFailurePropagates(t *testing.T) {
+	origPlatform := platform
+	origName := serverName
+	t.Cleanup(func() { platform = origPlatform; serverName = origName })
+
+	platform = ""
+	serverName = "test-host"
+
+	orig := detectPlatformFn
+	detectPlatformFn = func() (string, error) {
+		return "", errors.New("unrecognized Linux distribution \"arch\"")
+	}
+	t.Cleanup(func() { detectPlatformFn = orig })
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	_, err := buildRegisterRequest(cmd)
+	if err == nil {
+		t.Fatal("expected buildRegisterRequest to fail when platform detection fails")
+	}
+	if !strings.Contains(err.Error(), "arch") {
+		t.Errorf("error must name the distribution, got %q", err)
 	}
 }

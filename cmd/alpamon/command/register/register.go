@@ -54,14 +54,16 @@ var (
 	// Test seams: indirections over the side-effecting steps so registration
 	// logic (within-run rollback, --force ordering) can be exercised without
 	// touching the real filesystem, OS service manager, or relying on platform
-	// service behavior. They default to the production implementations, mirroring
-	// the detectCloud seam above.
+	// service behavior. detectPlatformFn is the exception: it has no side effect
+	// and exists so a detection failure can be injected on any host. They default
+	// to the production implementations, mirroring the detectCloud seam above.
 	ensureInstalledFn   = ensureInstalled
 	writeConfigFileFn   = writeConfigFile
 	ensureDirectoriesFn = ensureDirectories
 	startServiceFn      = startService
 	stopServiceFn       = stopService
 	removeServiceFn     = removeService
+	detectPlatformFn    = detectPlatform
 )
 
 // registerCloudDetectTimeout caps the synchronous cloud probe at register time
@@ -115,7 +117,7 @@ Options:
   --url             Alpacon server URL (required)
   --token           API token (servers:register scope required)
   --name            Server name (optional, defaults to hostname)
-  --platform        Platform (debian/rhel, auto-detect if omitted)
+  --platform        Platform (debian/rhel, auto-detected if omitted; server record only)
   --ssl-verify      SSL certificate verification (default: true)
   --ca-cert         CA certificate path
   --tag             Server tags in key=value format (repeatable, or comma-separated: "k1=v1,k2=v2")
@@ -129,7 +131,10 @@ func init() {
 	RegisterCmd.Flags().StringVar(&serverURL, "url", "", "Alpacon server URL (required)")
 	RegisterCmd.Flags().StringVar(&apiToken, "token", "", "API token (servers:register scope required)")
 	RegisterCmd.Flags().StringVar(&serverName, "name", "", "Server name (optional, defaults to hostname)")
-	RegisterCmd.Flags().StringVar(&platform, "platform", "", "Platform (debian/rhel, auto-detect)")
+	RegisterCmd.Flags().StringVar(&platform, "platform", "",
+		"Platform (debian/rhel). Auto-detected when omitted.\n"+
+			"Affects the server-side record only; the agent still\n"+
+			"refuses to start on an unsupported distribution.")
 	RegisterCmd.Flags().BoolVar(&sslVerify, "ssl-verify", true, "SSL certificate verification")
 	RegisterCmd.Flags().StringVar(&caCert, "ca-cert", "", "CA certificate path")
 	RegisterCmd.Flags().StringToStringVar(&tags, "tag", nil, "Server tags in key=value format (repeatable, or comma-separated: \"k1=v1,k2=v2\")")
@@ -330,7 +335,11 @@ func buildRegisterRequest(cmd *cobra.Command) (RegisterRequest, error) {
 	}
 
 	if platform == "" {
-		platform = detectPlatform()
+		detected, err := detectPlatformFn()
+		if err != nil {
+			return RegisterRequest{}, err
+		}
+		platform = detected
 		fmt.Printf("Platform auto-detected: %s\n", platform)
 	}
 
@@ -471,39 +480,36 @@ func normalizeServerName(value string) string {
 	return strings.TrimRight(n, "-")
 }
 
-func detectPlatform() string {
-	hostInfo, err := host.Info()
-	if err != nil {
-		fmt.Println("Warning: Failed to detect platform, defaulting to debian")
-		return "debian"
-	}
-
-	if runtime.GOOS == "windows" {
-		return "windows"
-	}
-
-	switch hostInfo.Platform {
-	case "darwin":
-		return "darwin"
-	case "ubuntu", "debian", "raspbian":
-		return "debian"
-	case "centos", "rhel", "redhat", "amazon", "amzn", "fedora", "rocky", "oracle", "ol":
-		return "rhel"
-	default:
-		// Check if platform name contains known keywords
-		platformLower := strings.ToLower(hostInfo.Platform)
-		if strings.Contains(platformLower, "ubuntu") ||
-			strings.Contains(platformLower, "debian") {
-			return "debian"
+// detectPlatform classifies this host for the registration payload.
+//
+// It returns an error rather than a default for a distribution it cannot
+// classify. alpacon-server persists this value write-once with no admin edit
+// path, so a wrong guess is only fixable by re-registering the host.
+func detectPlatform() (string, error) {
+	var raw string
+	if runtime.GOOS == "linux" {
+		hostInfo, err := host.Info()
+		if err != nil {
+			return "", fmt.Errorf("failed to detect the host platform: %w", err)
 		}
-		if strings.Contains(platformLower, "centos") ||
-			strings.Contains(platformLower, "rhel") ||
-			strings.Contains(platformLower, "fedora") ||
-			strings.Contains(platformLower, "rocky") {
-			return "rhel"
-		}
-		return "debian" // default fallback
+		raw = hostInfo.Platform
 	}
+	return detectPlatformFor(runtime.GOOS, raw)
+}
+
+// detectPlatformFor is the pure half of detectPlatform, split out so the
+// mapping and its error text can be tested without a host.
+func detectPlatformFor(goos, raw string) (string, error) {
+	like, _, ok := utils.ResolvePlatform(goos, raw)
+	if !ok {
+		return "", fmt.Errorf(
+			"unrecognized Linux distribution %q.\n"+
+				"alpamon supports debian- and rhel-family distributions, "+
+				"including openSUSE/SLES.\n"+
+				"Pass --platform debian|rhel to override if you know the host is compatible",
+			raw)
+	}
+	return like, nil
 }
 
 func sendRegisterRequest(req RegisterRequest) (*RegisterResponse, error) {
