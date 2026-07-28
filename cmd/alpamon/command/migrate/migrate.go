@@ -99,7 +99,7 @@ func init() {
 	Cmd.Flags().StringVar(&apiToken, "token", "", "Registration token issued by the target workspace (required)")
 	Cmd.Flags().StringVar(&serverName, "name", "", "Server name (optional, defaults to hostname)")
 	Cmd.Flags().StringVar(&platform, "platform", "",
-		"Platform (debian/rhel). Auto-detected when omitted.\n"+
+		"Platform (debian/rhel/darwin/windows). Auto-detected when omitted.\n"+
 			"Affects the target workspace's server record only; the agent still\n"+
 			"refuses to start on an unsupported distribution.")
 	Cmd.Flags().BoolVar(&sslVerify, "ssl-verify", true, "SSL certificate verification")

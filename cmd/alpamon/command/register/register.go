@@ -117,7 +117,7 @@ Options:
   --url             Alpacon server URL (required)
   --token           API token (servers:register scope required)
   --name            Server name (optional, defaults to hostname)
-  --platform        Platform (debian/rhel, auto-detected if omitted; server record only)
+  --platform        Platform (debian/rhel/darwin/windows, auto-detected if omitted; server record only)
   --ssl-verify      SSL certificate verification (default: true)
   --ca-cert         CA certificate path
   --tag             Server tags in key=value format (repeatable, or comma-separated: "k1=v1,k2=v2")
@@ -132,7 +132,7 @@ func init() {
 	RegisterCmd.Flags().StringVar(&apiToken, "token", "", "API token (servers:register scope required)")
 	RegisterCmd.Flags().StringVar(&serverName, "name", "", "Server name (optional, defaults to hostname)")
 	RegisterCmd.Flags().StringVar(&platform, "platform", "",
-		"Platform (debian/rhel). Auto-detected when omitted.\n"+
+		"Platform (debian/rhel/darwin/windows). Auto-detected when omitted.\n"+
 			"Affects the server-side record only; the agent still\n"+
 			"refuses to start on an unsupported distribution.")
 	RegisterCmd.Flags().BoolVar(&sslVerify, "ssl-verify", true, "SSL certificate verification")
