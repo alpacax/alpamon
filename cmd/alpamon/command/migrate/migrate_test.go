@@ -227,3 +227,31 @@ func TestCleanupTargetRegistration_CallsUnregisterEndpoint(t *testing.T) {
 		t.Fatalf("expected unregister endpoint to be hit")
 	}
 }
+
+// migrate carries its own detectPlatform copy; assert it agrees with the
+// shared table rather than trusting the two copies stayed in sync.
+func TestDetectPlatform_SuseMapsToRhel(t *testing.T) {
+	got, err := detectPlatformFor("linux", "opensuse-leap")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "rhel" {
+		t.Errorf("platform = %q, want rhel", got)
+	}
+}
+
+// detectPlatform must not invent a platform for a distribution it cannot
+// classify. The target workspace persists the value write-once with no admin
+// edit path, so a silent "debian" default is unrecoverable.
+func TestDetectPlatform_UnsupportedReturnsError(t *testing.T) {
+	_, err := detectPlatformFor("linux", "arch")
+	if err == nil {
+		t.Fatal("expected an error for an unclassifiable distribution")
+	}
+	if !strings.Contains(err.Error(), "arch") {
+		t.Errorf("error must name the distribution, got %q", err)
+	}
+	if !strings.Contains(err.Error(), "--platform") {
+		t.Errorf("error must tell the operator about the override, got %q", err)
+	}
+}

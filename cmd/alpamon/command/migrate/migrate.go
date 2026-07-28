@@ -98,7 +98,10 @@ func init() {
 	Cmd.Flags().StringVar(&newURL, "url", "", "Target Alpacon workspace URL (required)")
 	Cmd.Flags().StringVar(&apiToken, "token", "", "Registration token issued by the target workspace (required)")
 	Cmd.Flags().StringVar(&serverName, "name", "", "Server name (optional, defaults to hostname)")
-	Cmd.Flags().StringVar(&platform, "platform", "", "Platform (debian/rhel/darwin/windows, auto-detected when omitted)")
+	Cmd.Flags().StringVar(&platform, "platform", "",
+		"Platform (debian/rhel). Auto-detected when omitted.\n"+
+			"Affects the target workspace's server record only; the agent still\n"+
+			"refuses to start on an unsupported distribution.")
 	Cmd.Flags().BoolVar(&sslVerify, "ssl-verify", true, "SSL certificate verification")
 	Cmd.Flags().StringVar(&caCert, "ca-cert", "", "CA certificate path")
 	Cmd.Flags().DurationVar(&rollbackTimeout, "rollback-timeout", migrate.DefaultRollbackTimeout,
@@ -139,7 +142,11 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 	}
 
 	if platform == "" {
-		platform = detectPlatform()
+		detected, err := detectPlatform()
+		if err != nil {
+			return err
+		}
+		platform = detected
 	}
 
 	current, err := config.ReadServer(configPath)
@@ -396,29 +403,35 @@ func normalizeHostname(h string) string {
 	return h
 }
 
-func detectPlatform() string {
-	if runtime.GOOS == "windows" {
-		return "windows"
+// detectPlatform classifies this host for the migration's registration
+// payload on the target workspace.
+//
+// It returns an error rather than a default for a distribution it cannot
+// classify: alpacon-server persists this value write-once, so a wrong guess
+// on workspace B is only fixable by re-registering.
+func detectPlatform() (string, error) {
+	var raw string
+	if runtime.GOOS == "linux" {
+		info, err := host.Info()
+		if err != nil {
+			return "", fmt.Errorf("failed to detect the host platform: %w", err)
+		}
+		raw = info.Platform
 	}
-	info, err := host.Info()
-	if err != nil {
-		return "debian"
+	return detectPlatformFor(runtime.GOOS, raw)
+}
+
+// detectPlatformFor is the pure half of detectPlatform, split out so the
+// mapping and its error text can be tested without a host.
+func detectPlatformFor(goos, raw string) (string, error) {
+	like, _, ok := utils.ResolvePlatform(goos, raw)
+	if !ok {
+		return "", fmt.Errorf(
+			"unrecognized Linux distribution %q.\n"+
+				"alpamon supports debian- and rhel-family distributions, "+
+				"including openSUSE/SLES.\n"+
+				"Pass --platform debian|rhel to override if you know the host is compatible",
+			raw)
 	}
-	switch info.Platform {
-	case "darwin":
-		return "darwin"
-	case "ubuntu", "debian", "raspbian":
-		return "debian"
-	case "centos", "rhel", "redhat", "amazon", "amzn", "fedora", "rocky", "oracle", "ol":
-		return "rhel"
-	}
-	p := strings.ToLower(info.Platform)
-	switch {
-	case strings.Contains(p, "ubuntu"), strings.Contains(p, "debian"):
-		return "debian"
-	case strings.Contains(p, "centos"), strings.Contains(p, "rhel"),
-		strings.Contains(p, "fedora"), strings.Contains(p, "rocky"):
-		return "rhel"
-	}
-	return "debian"
+	return like, nil
 }
