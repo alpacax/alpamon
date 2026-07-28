@@ -87,7 +87,7 @@ func TestCommandCleanup_CancelNilProcessReturnsProcessDone(t *testing.T) {
 // whole group: a backgrounded grandchild that survived the raced cancel must die. Reap only after.
 func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	cmd := exec.Command("/bin/sh", "-c", `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; wait`, "sh", pidFile)
+	cmd := exec.Command("/bin/sh", "-c", bgChildScript("wait"), "sh", pidFile)
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	if err != nil {
 		t.Fatalf("configureProcessTreeCleanup: %v", err)
@@ -145,7 +145,7 @@ func TestCommandCleanup_AfterStartRedoSwallowsProcessDone(t *testing.T) {
 		t.Skipf("pgid %d was reused, cannot exercise an already-gone group", pid)
 	}
 
-	cleanup.markCanceled() // a cancel raced ahead, so afterStart redoes the kill
+	cleanup.takeForCancel() // a cancel raced ahead, so afterStart redoes the kill
 	if err := cleanup.afterStart(cmd); err != nil {
 		t.Fatalf("afterStart: got %v, want nil for an already-gone group", err)
 	}
@@ -155,7 +155,7 @@ func TestCommandCleanup_AfterStartRedoSwallowsProcessDone(t *testing.T) {
 // the whole group, so a backgrounded grandchild holding the pipe open dies too.
 func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	cmd := exec.Command("/bin/sh", "-c", `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; wait`, "sh", pidFile)
+	cmd := exec.Command("/bin/sh", "-c", bgChildScript("wait"), "sh", pidFile)
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	if err != nil {
 		t.Fatalf("configureProcessTreeCleanup: %v", err)
@@ -202,7 +202,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pidFile := filepath.Join(t.TempDir(), "child.pid")
-			script := `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; wait`
+			script := bgChildScript("wait")
 
 			type result struct {
 				exitCode int
@@ -253,7 +253,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 // timeout means no Cancel, and Wait returns ExitError not ErrWaitDelay, so only the unconditional cancel covers it.
 func TestExecutor_CleansDescendantWhenCommandExitsNonZero(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	script := `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; exit 3`
+	script := bgChildScript("exit 3")
 
 	type result struct {
 		exitCode int
@@ -317,6 +317,12 @@ func waitForExecutorTimeoutChildExit(pid int, timeout time.Duration) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return processGone(pid)
+}
+
+// bgChildScript backgrounds a long sleeper and publishes its pid atomically: echo truncate-opens the
+// target, so write to a temp file and rename it in (a same-directory rename(2) is atomic).
+func bgChildScript(tail string) string {
+	return `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; ` + tail
 }
 
 // waitForLeaderStopped waits until the SIGKILL landed but Wait has not reaped the leader yet. Detection is
