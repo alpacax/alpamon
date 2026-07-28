@@ -102,18 +102,6 @@ func GetEnvOrDefault(envVar, defaultValue string) string {
 	return value
 }
 
-func ConvertGroupIds(groupIds []string) []uint32 {
-	var gids []uint32
-	for _, gidStr := range groupIds {
-		gid, err := strconv.ParseUint(gidStr, 10, 32)
-		if err != nil {
-			continue
-		}
-		gids = append(gids, uint32(gid))
-	}
-	return gids
-}
-
 func Quote(s string) string {
 	if len(s) == 0 {
 		return "''"

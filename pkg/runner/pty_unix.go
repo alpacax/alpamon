@@ -20,11 +20,15 @@ func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string,
 		if err != nil {
 			return err
 		}
+		groups, _, err := utils.ResolveGroups(u32gid, groupIds)
+		if err != nil {
+			return err
+		}
 		pc.cmd.SysProcAttr = &syscall.SysProcAttr{
 			Credential: &syscall.Credential{
 				Uid:    u32uid,
 				Gid:    u32gid,
-				Groups: utils.ConvertGroupIds(groupIds),
+				Groups: groups,
 			},
 		}
 	} else if uid != currentUID {
