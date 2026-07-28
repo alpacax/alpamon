@@ -30,7 +30,7 @@ func resolveGroups(gid uint32, groupIds []string, maxGroups int) (groups []uint3
 	for _, gidStr := range groupIds {
 		gidUint, err := strconv.ParseUint(gidStr, 10, 32)
 		if err != nil {
-			return nil, false, err
+			return nil, false, fmt.Errorf("invalid supplementary group id: %w", err)
 		}
 		if uint32(gidUint) == gid {
 			groupInList = true
@@ -39,6 +39,8 @@ func resolveGroups(gid uint32, groupIds []string, maxGroups int) (groups []uint3
 		groups = append(groups, uint32(gidUint))
 	}
 	if maxGroups > 0 && len(groups) > maxGroups {
+		log.Debug().Int("requested", len(groups)).Int("cap", maxGroups).
+			Msg("Supplementary group list truncated to the platform setgroups limit.")
 		groups = groups[:maxGroups]
 	}
 	return groups, groupInList, nil
