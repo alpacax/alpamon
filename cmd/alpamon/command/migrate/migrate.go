@@ -403,12 +403,9 @@ func normalizeHostname(h string) string {
 	return h
 }
 
-// detectPlatform classifies this host for the migration's registration
-// payload on the target workspace.
-//
-// It returns an error rather than a default for a distribution it cannot
-// classify: alpacon-server persists this value write-once, so a wrong guess
-// on workspace B is only fixable by re-registering.
+// detectPlatform returns an error rather than a default for a distribution it
+// cannot classify: the target workspace persists this value write-once, so a
+// wrong guess is only fixable by re-registering there.
 func detectPlatform() (string, error) {
 	var raw string
 	if runtime.GOOS == "linux" {
@@ -424,8 +421,8 @@ func detectPlatform() (string, error) {
 	return detectPlatformFor(runtime.GOOS, raw)
 }
 
-// detectPlatformFor is the pure half of detectPlatform, split out so the
-// mapping and its error text can be tested without a host.
+// detectPlatformFor is detectPlatform's pure half, so the mapping and its
+// error text are testable without a host.
 func detectPlatformFor(goos, raw string) (string, error) {
 	like, _, ok := utils.ResolvePlatform(goos, raw)
 	if !ok {

@@ -581,9 +581,8 @@ func TestSystemHandler_UnregisterFromConsole_DeleteError(t *testing.T) {
 	}
 }
 
-// TestSystemHandler_Upgrade_SelfUpdate: darwin and windows route handleUpgrade
-// through selfUpdateFn instead of returning "not supported". Both axes are set
-// explicitly — leaving PackageManager at its zero value would pass by accident.
+// Both axes are set explicitly: leaving PackageManager at its zero value would
+// pass by accident.
 func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 	for _, tc := range []struct {
 		platformLike   string
@@ -705,8 +704,6 @@ func TestSystemHandler_SelfUpdate_RestartScheduleFails(t *testing.T) {
 	}
 }
 
-// setPackageManagerAndID sets both local-command axes for one test and restores
-// them: PackageManager selects the command, PlatformID resolves the Tumbleweed guard.
 func setPackageManagerAndID(t *testing.T, pkgManager, platformID string) {
 	t.Helper()
 	origPM := utils.PackageManager
@@ -719,8 +716,8 @@ func setPackageManagerAndID(t *testing.T, pkgManager, platformID string) {
 	})
 }
 
-// openSUSE/SLES report platform_like=rhel to the server but must run zypper
-// locally, which is exactly why PackageManager is a separate axis.
+// openSUSE/SLES report platform_like=rhel but must run zypper locally, which is
+// why PackageManager is a separate axis.
 func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -757,9 +754,7 @@ func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
 	}
 }
 
-// Tumbleweed is a rolling release: `zypper update` cannot perform the vendor
-// changes a distribution upgrade needs. Leap/SLES must NOT use dup — it would
-// jump to the next service pack.
+// Leap/SLES must NOT use dup: it would jump to the next service pack.
 func TestSystemHandler_SystemUpdate_ZypperDupOnlyOnTumbleweed(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -805,10 +800,9 @@ func TestSystemHandler_SystemUpdate_ZypperDupOnlyOnTumbleweed(t *testing.T) {
 	}
 }
 
-// executeUninstall is the third PackageManager switch; the other two already have
-// zypper coverage. Asserts against every captured command because the uninstall is
-// scheduled through systemd-run where systemd exists and a deferred subshell where
-// it does not, so the zypper string lands in different argv positions per host.
+// Asserts against every captured command: the uninstall is scheduled through
+// systemd-run where systemd exists and a deferred subshell where it does not, so
+// the zypper string lands in different argv positions per host.
 func TestSystemHandler_Uninstall_UsesZypper(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}

@@ -443,9 +443,8 @@ func TestDetectPlatform_SuseMapsToRhel(t *testing.T) {
 	}
 }
 
-// detectPlatform must not invent a platform for a distribution it cannot
-// classify. The server persists the registration value write-once with no
-// admin edit path, so a silent "debian" default is unrecoverable.
+// A silent "debian" default is unrecoverable: the server persists the
+// registration value write-once with no admin edit path.
 func TestDetectPlatform_UnsupportedReturnsError(t *testing.T) {
 	_, err := detectPlatformFor("linux", "arch")
 	if err == nil {
@@ -459,8 +458,6 @@ func TestDetectPlatform_UnsupportedReturnsError(t *testing.T) {
 	}
 }
 
-// buildRegisterRequest surfaces the detection failure instead of registering
-// with a guessed platform.
 func TestBuildRegisterRequest_PlatformDetectionFailurePropagates(t *testing.T) {
 	origPlatform := platform
 	origName := serverName

@@ -240,9 +240,8 @@ func TestDetectPlatform_SuseMapsToRhel(t *testing.T) {
 	}
 }
 
-// detectPlatform must not invent a platform for a distribution it cannot
-// classify. The target workspace persists the value write-once with no admin
-// edit path, so a silent "debian" default is unrecoverable.
+// A silent "debian" default is unrecoverable: the target workspace persists
+// the value write-once with no admin edit path.
 func TestDetectPlatform_UnsupportedReturnsError(t *testing.T) {
 	_, err := detectPlatformFor("linux", "arch")
 	if err == nil {

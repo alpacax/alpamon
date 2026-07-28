@@ -428,7 +428,7 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	case utils.PkgZypper:
 		// Tumbleweed is a rolling release: `zypper update` cannot perform the
 		// vendor changes a distribution upgrade needs. Leap/SLES must NOT use
-		// dup — it would jump to the next service pack.
+		// dup: it would jump to the next service pack.
 		if utils.IsTumbleweed(utils.PlatformID) {
 			cmd = "zypper --non-interactive dup"
 		} else {

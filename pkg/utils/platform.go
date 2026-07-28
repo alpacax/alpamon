@@ -17,7 +17,7 @@ import (
 //     one of debian/rhel/darwin/windows and nothing else. SUSE reports rhel:
 //     the three things the server gates on (rpm, wheel, useradd) answer
 //     identically for both families.
-//   - PackageManager picks the local command. This is where SUSE diverges —
+//   - PackageManager picks the local command. This is where SUSE diverges:
 //     zypper, not yum.
 //   - PlatformID is the raw os-release id, kept for the one place a
 //     distro-level distinction is unavoidable (Tumbleweed).
@@ -30,7 +30,7 @@ var (
 // platformAliases mirrors alpacon-server servers/constants.py
 // PLATFORM_ALIASES. Server.platform is write-once with no admin edit path,
 // so a value the two sides disagree on corrupts feature gating permanently.
-// Keep the two tables 1:1 — do not add ids the server does not know.
+// Keep the two tables 1:1: do not add ids the server does not know.
 var platformAliases = map[string]string{
 	"debian":    "debian",
 	"ubuntu":    "debian",
@@ -68,9 +68,8 @@ const (
 	PkgBrew   = "brew"
 )
 
-// ResolvePlatform maps a raw gopsutil platform id onto the alpacon-server
-// contract value and the local package manager. Pure: callers pass
-// host.Info() output so the table is testable without a host.
+// ResolvePlatform is pure: callers pass host.Info() output so the table is
+// testable without a host.
 //
 // ok is false for a distribution neither table knows. Callers must not
 // substitute a default (see platformAliases for why).
@@ -134,25 +133,23 @@ func InitPlatform() {
 	PlatformID = raw
 }
 
-// SetPlatformLike allows setting PlatformLike for testing purposes.
+// SetPlatformLike sets PlatformLike for tests.
 func SetPlatformLike(platform string) {
 	PlatformLike = platform
 }
 
-// SetPackageManager allows setting PackageManager for testing purposes.
+// SetPackageManager sets PackageManager for tests.
 func SetPackageManager(pm string) {
 	PackageManager = pm
 }
 
-// SetPlatformID allows setting PlatformID for testing purposes.
+// SetPlatformID sets PlatformID for tests.
 func SetPlatformID(id string) {
 	PlatformID = id
 }
 
-// IsTumbleweed reports whether id names an openSUSE Tumbleweed variant.
-//
-// Lives beside susePrefixes so both SUSE id decisions normalize case the same
-// way. Why the caller cares is documented at the call site.
+// IsTumbleweed lives beside susePrefixes so both SUSE id decisions normalize
+// case the same way. Why the caller cares is documented at the call site.
 func IsTumbleweed(id string) bool {
 	return strings.Contains(strings.ToLower(id), "tumbleweed")
 }

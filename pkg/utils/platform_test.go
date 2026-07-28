@@ -13,12 +13,10 @@ func TestResolvePlatform(t *testing.T) {
 		wantLike   string
 		wantPkgMgr string
 	}{
-		// debian family
 		{"debian", "linux", "debian", "debian", "apt"},
 		{"ubuntu", "linux", "ubuntu", "debian", "apt"},
 		{"raspbian", "linux", "raspbian", "debian", "apt"},
 
-		// rhel family
 		{"rhel", "linux", "rhel", "rhel", "yum"},
 		{"centos", "linux", "centos", "rhel", "yum"},
 		{"redhat", "linux", "redhat", "rhel", "yum"},
@@ -30,7 +28,7 @@ func TestResolvePlatform(t *testing.T) {
 		{"oracle", "linux", "oracle", "rhel", "yum"},
 		{"ol", "linux", "ol", "rhel", "yum"},
 
-		// suse family: prefix match, because the os-release ids keep multiplying
+		// suse family: every row matches by prefix, not by exact id
 		{"suse", "linux", "suse", "rhel", "zypper"},
 		{"opensuse", "linux", "opensuse", "rhel", "zypper"},
 		{"opensuse-leap", "linux", "opensuse-leap", "rhel", "zypper"},
@@ -41,7 +39,6 @@ func TestResolvePlatform(t *testing.T) {
 		{"sle-micro", "linux", "sle-micro", "rhel", "zypper"},
 		{"sle_hpc", "linux", "sle_hpc", "rhel", "zypper"},
 
-		// case and whitespace normalization
 		{"uppercase", "linux", "SLES", "rhel", "zypper"},
 		{"padded", "linux", "  sles ", "rhel", "zypper"},
 
