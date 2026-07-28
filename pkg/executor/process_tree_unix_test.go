@@ -83,10 +83,11 @@ func TestCommandCleanup_CancelNilProcessReturnsProcessDone(t *testing.T) {
 
 // When a cancel races ahead of the process group being recorded, afterStart redoes the kill. runCommand
 // always runs afterStart before Wait, so the redo targets a still-unreaped process—never a reaped pid the
-// OS could have handed to an unrelated process. Exercise that exact order: the redo must complete without
-// surfacing an error, so Execute reports the real termination status rather than exit 1. Reap only after.
+// OS could have handed to an unrelated process. Exercise that exact order and assert the redo reached the
+// whole group: a backgrounded grandchild that survived the raced cancel must die. Reap only after.
 func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	cmd := exec.Command("/bin/sh", "-c", `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; wait`, "sh", pidFile)
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	if err != nil {
 		t.Fatalf("configureProcessTreeCleanup: %v", err)
@@ -96,13 +97,57 @@ func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
 	}
 	// Reap last—after afterStart, and even when an assertion below fails early.
 	t.Cleanup(func() { _ = cmd.Wait() })
+
+	childPID := readExecutorTimeoutChildPID(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+
 	// Cancel before the group is recorded: pgid is still 0, so only the leader is targeted.
 	if err := cleanup.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("cancel: %v", err)
 	}
+	// Let the SIGKILL land before the redo: an unreaped-zombie leader is the state that used to defeat
+	// getpgid, and the redo must cope with it. The raced cancel reaches only the leader, so the grandchild
+	// must still be alive—otherwise the assertion below cannot tell a working redo from a no-op one.
+	if !waitForLeaderStopped(cmd.Process.Pid, 3*time.Second) {
+		t.Fatalf("leader %d still running after the raced cancel", cmd.Process.Pid)
+	}
+	if processGone(childPID) {
+		t.Fatalf("grandchild %d died with the raced cancel; the redo is not exercised", childPID)
+	}
+
 	// Redo while the process is still unreaped, matching runCommand's afterStart-before-Wait order.
 	if err := cleanup.afterStart(cmd); err != nil {
 		t.Fatalf("afterStart redo surfaced %v, want nil after a raced cancel", err)
+	}
+	if !waitForExecutorTimeoutChildExit(childPID, 3*time.Second) {
+		t.Fatalf("grandchild %d survived the afterStart redo", childPID)
+	}
+}
+
+// afterStart swallows os.ErrProcessDone from its redo so Wait reports the real termination status instead
+// of exit 1 with "os: process already finished". runCommand can't reach it—afterStart always precedes
+// Wait, so the group still holds the unreaped leader—so pin the branch white-box on a reaped cmd.
+func TestCommandCleanup_AfterStartRedoSwallowsProcessDone(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cleanup, err := configureProcessTreeCleanup(cmd, false)
+	if err != nil {
+		t.Fatalf("configureProcessTreeCleanup: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("cmd.Wait: %v", err)
+	}
+	// Reaped, so the group must be empty; skip rather than signal a group the OS already handed out.
+	if !errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
+		t.Skipf("pgid %d was reused, cannot exercise an already-gone group", pid)
+	}
+
+	cleanup.markCanceled() // a cancel raced ahead, so afterStart redoes the kill
+	if err := cleanup.afterStart(cmd); err != nil {
+		t.Fatalf("afterStart: got %v, want nil for an already-gone group", err)
 	}
 }
 
@@ -272,6 +317,23 @@ func waitForExecutorTimeoutChildExit(pid int, timeout time.Duration) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return processGone(pid)
+}
+
+// waitForLeaderStopped waits until the SIGKILL landed but Wait has not reaped the leader yet. Detection is
+// split because the platforms disagree about zombies: on linux processGone reads the Z state from /proc,
+// while on darwin getpgid is what stops seeing the leader (proc_find skips SZOMB).
+func waitForLeaderStopped(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if processGone(pid) {
+			return true
+		}
+		if _, err := syscall.Getpgid(pid); errors.Is(err, syscall.ESRCH) {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
 }
 
 // processGone also accepts a zombie as gone: kill(pid, 0) still succeeds for one, and in a CI container with no init process to reap the orphaned grandchild it stays a zombie indefinitely.
