@@ -338,6 +338,8 @@ func buildRegisterRequest(cmd *cobra.Command) (RegisterRequest, error) {
 		}
 		platform = detected
 		fmt.Printf("Platform auto-detected: %s\n", platform)
+	} else if err := utils.ValidateServerPlatform(platform); err != nil {
+		return RegisterRequest{}, err
 	}
 
 	finalTags := mergeCloudAndUserTags(detectCloudTags(cmd.Context()), tags)

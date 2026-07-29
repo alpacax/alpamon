@@ -114,6 +114,22 @@ func TestResolveRegistrationPlatform_UnsupportedReturnsError(t *testing.T) {
 	}
 }
 
+// --platform forwards verbatim to Server.platform, so an explicit value must be checked against the same four-value set the server gates on.
+func TestValidateServerPlatform(t *testing.T) {
+	for _, p := range []string{"debian", "rhel", "darwin", "windows"} {
+		if err := ValidateServerPlatform(p); err != nil {
+			t.Errorf("ValidateServerPlatform(%q) = %v, want nil", p, err)
+		}
+	}
+	err := ValidateServerPlatform("rehl")
+	if err == nil {
+		t.Fatal("expected an error for a value the server rejects")
+	}
+	if !strings.Contains(err.Error(), "rehl") {
+		t.Errorf("error must name the rejected value, got %q", err)
+	}
+}
+
 // Feeds ResolvePlatform what InitPlatform reads, so every CI row guards its own distro — the #348 case the pure vectors miss; CI-gated to keep local runs green off-matrix.
 func TestResolvePlatform_CIHost(t *testing.T) {
 	if os.Getenv("CI") == "" {

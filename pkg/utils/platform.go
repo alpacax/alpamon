@@ -79,6 +79,23 @@ func ResolvePlatform(goos, rawPlatform string) (like, pkgManager string, ok bool
 	return "", "", false
 }
 
+// The alpacon-server SERVER_PLATFORMS set: the register endpoint gates Server.platform with a ChoiceField over exactly these.
+var serverPlatforms = map[string]bool{
+	"debian":  true,
+	"rhel":    true,
+	"darwin":  true,
+	"windows": true,
+}
+
+// Rejects an explicit --platform the server would reject, so the operator fails fast instead of at the registration request.
+func ValidateServerPlatform(p string) error {
+	if !serverPlatforms[p] {
+		return fmt.Errorf(
+			"invalid --platform %q: accepted values are debian, rhel, darwin, windows", p)
+	}
+	return nil
+}
+
 // The value register and migrate send; errors instead of defaulting because the server persists it write-once, fixable only by re-registering.
 func DetectRegistrationPlatform() (string, error) {
 	var raw string

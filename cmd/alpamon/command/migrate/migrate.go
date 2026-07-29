@@ -145,6 +145,8 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 		platform = detected
+	} else if err := utils.ValidateServerPlatform(platform); err != nil {
+		return err
 	}
 
 	current, err := config.ReadServer(configPath)
