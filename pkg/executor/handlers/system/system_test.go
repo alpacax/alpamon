@@ -581,10 +581,17 @@ func TestSystemHandler_UnregisterFromConsole_DeleteError(t *testing.T) {
 	}
 }
 
-// TestSystemHandler_Upgrade_SelfUpdate: darwin and windows route handleUpgrade through selfUpdateFn instead of returning "not supported".
+// Both axes are set explicitly: leaving PackageManager at its zero value would
+// pass by accident.
 func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
-	for _, platform := range []string{"darwin", "windows"} {
-		t.Run(platform, func(t *testing.T) {
+	for _, tc := range []struct {
+		platformLike   string
+		packageManager string
+	}{
+		{"darwin", utils.PkgBrew},
+		{"windows", utils.PkgNone},
+	} {
+		t.Run(tc.platformLike, func(t *testing.T) {
 			mockExec := common.NewMockCommandExecutor(t)
 			mockWS := &MockWSClient{}
 			ctxManager := agent.NewContextManager()
@@ -607,8 +614,9 @@ func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 			}
 
 			originalPlatformLike := utils.PlatformLike
-			utils.SetPlatformLike(platform)
+			utils.SetPlatformLike(tc.platformLike)
 			t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+			setPackageManagerAndID(t, tc.packageManager, "")
 
 			exitCode, output, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
 
@@ -616,7 +624,7 @@ func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if !called {
-				t.Errorf("expected selfUpdateFn to be called on %s", platform)
+				t.Errorf("expected selfUpdateFn to be called on %s", tc.platformLike)
 			}
 			if gotVersion != "v9.9.9" {
 				t.Errorf("expected self-update version v9.9.9, got %q", gotVersion)
@@ -625,7 +633,7 @@ func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 				t.Errorf("expected exit code 0, got %d", exitCode)
 			}
 			if strings.Contains(output, "not supported") {
-				t.Errorf("%s should route to self-update, got %q", platform, output)
+				t.Errorf("%s should route to self-update, got %q", tc.platformLike, output)
 			}
 		})
 	}
@@ -693,5 +701,137 @@ func TestSystemHandler_SelfUpdate_RestartScheduleFails(t *testing.T) {
 	}
 	if mockWS.RestartCalled {
 		t.Error("restart must not fire when scheduling failed")
+	}
+}
+
+func setPackageManagerAndID(t *testing.T, pkgManager, platformID string) {
+	t.Helper()
+	origPM := utils.PackageManager
+	origID := utils.PlatformID
+	utils.SetPackageManager(pkgManager)
+	utils.SetPlatformID(platformID)
+	t.Cleanup(func() {
+		utils.SetPackageManager(origPM)
+		utils.SetPlatformID(origID)
+	})
+}
+
+// openSUSE/SLES report platform_like=rhel but must run zypper locally, which is
+// why PackageManager is a separate axis.
+func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+
+	setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+
+	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	var found bool
+	for _, c := range mockExec.GetExecutedCommands() {
+		joined := strings.Join(c.Args, " ")
+		if strings.Contains(joined, "zypper --non-interactive update alpamon") {
+			found = true
+			// Against stale metadata a bare `update` exits 0 without upgrading,
+			// so the refresh must survive refactors.
+			if !strings.Contains(joined, "refresh && zypper --non-interactive update alpamon") {
+				t.Errorf("update must be preceded by a refresh: %q", joined)
+			}
+		}
+		if strings.Contains(joined, "yum ") || strings.Contains(joined, "apt-get ") {
+			t.Errorf("zypper host must not run yum/apt: %q", joined)
+		}
+	}
+	if !found {
+		t.Errorf("expected a zypper update command, got %+v", mockExec.GetExecutedCommands())
+	}
+}
+
+// Leap/SLES must NOT use dup: it would jump to the next service pack.
+func TestSystemHandler_SystemUpdate_ZypperDupOnlyOnTumbleweed(t *testing.T) {
+	tests := []struct {
+		name       string
+		platformID string
+		wantCmd    string
+		rejectCmd  string
+	}{
+		{"tumbleweed", "opensuse-tumbleweed", "zypper --non-interactive dup", "zypper --non-interactive update"},
+		{"leap", "opensuse-leap", "zypper --non-interactive update", "zypper --non-interactive dup"},
+		{"sles", "sles", "zypper --non-interactive update", "zypper --non-interactive dup"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExec := common.NewMockCommandExecutor(t)
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, &MockVersionResolver{}, nil)
+			setPackageManagerAndID(t, utils.PkgZypper, tt.platformID)
+
+			if _, _, err := handler.Execute(context.Background(), common.Update.String(), &common.CommandArgs{}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var found bool
+			for _, c := range mockExec.GetExecutedCommands() {
+				joined := strings.Join(c.Args, " ")
+				if strings.Contains(joined, tt.rejectCmd) {
+					t.Fatalf("%s must not run %q", tt.name, tt.rejectCmd)
+				}
+				if strings.Contains(joined, tt.wantCmd) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected %q, got %+v", tt.wantCmd, mockExec.GetExecutedCommands())
+			}
+		})
+	}
+}
+
+// Asserts against every captured command: the uninstall is scheduled through
+// systemd-run where systemd exists and a deferred subshell where it does not, so
+// the zypper string lands in different argv positions per host.
+func TestSystemHandler_Uninstall_UsesZypper(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+	setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+
+	handler.executeUninstall()
+
+	var found bool
+	for _, c := range mockExec.GetExecutedCommands() {
+		joined := strings.Join(c.Args, " ")
+		if strings.Contains(joined, "zypper --non-interactive remove alpamon") {
+			found = true
+		}
+		if strings.Contains(joined, "yum remove") || strings.Contains(joined, "apt-get purge") {
+			t.Errorf("zypper host must not run yum/apt: %q", joined)
+		}
+	}
+	if !found {
+		t.Errorf("expected a zypper remove command, got %+v", mockExec.GetExecutedCommands())
 	}
 }
