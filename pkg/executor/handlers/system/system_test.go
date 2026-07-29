@@ -11,6 +11,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
+	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/updater"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -41,9 +42,11 @@ type MockVersionResolver struct {
 	LatestVersion       string
 	PamVersion          string
 	InvalidatePamCalled bool
+	GotProxy            string
 }
 
-func (m *MockVersionResolver) GetLatestVersion() string {
+func (m *MockVersionResolver) GetLatestVersion(proxyURL string) string {
+	m.GotProxy = proxyURL
 	return m.LatestVersion
 }
 
@@ -437,6 +440,237 @@ func TestSystemHandler_Upgrade_UpToDate(t *testing.T) {
 	}
 }
 
+// findExecutedShell returns the last executed "sh" command from the mock, or
+// nil when no shell was spawned.
+func findExecutedShell(mockExec *common.MockCommandExecutor) *common.ExecutedCommand {
+	cmds := mockExec.GetExecutedCommands()
+	for i := len(cmds) - 1; i >= 0; i-- {
+		if cmds[i].Name == "sh" {
+			return &cmds[i]
+		}
+	}
+	return nil
+}
+
+// TestSystemHandler_Upgrade_PackageProxy verifies that a package_proxy in the
+// upgrade payload reaches both the version lookup and the environment of the
+// spawned package-manager shell, and that no_proxy shields the Alpacon server
+// host, IMDS, and localhost.
+func TestSystemHandler_Upgrade_PackageProxy(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9"} // differs from version.Version -> needAlpamon
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("debian")
+	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+	originalServerURL := config.GlobalSettings.ServerURL
+	config.GlobalSettings.ServerURL = "https://console.example.com"
+	t.Cleanup(func() { config.GlobalSettings.ServerURL = originalServerURL })
+
+	const proxy = "http://proxy.internal:3128"
+	args := &common.CommandArgs{PackageProxy: proxy}
+
+	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", exitCode)
+	}
+	if mockVersions.GotProxy != proxy {
+		t.Errorf("expected version lookup to use proxy %q, got %q", proxy, mockVersions.GotProxy)
+	}
+
+	shell := findExecutedShell(mockExec)
+	if shell == nil {
+		t.Fatal("expected a package-manager shell to be spawned")
+	}
+	if shell.User != "root" {
+		t.Errorf("expected shell to run as root, got %q", shell.User)
+	}
+	if len(shell.Args) != 2 || shell.Args[0] != "-c" || !strings.Contains(shell.Args[1], "apt-get") {
+		t.Errorf("expected sh -c apt-get command, got %v", shell.Args)
+	}
+	for _, key := range []string{"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"} {
+		if got := shell.Env[key]; got != proxy {
+			t.Errorf("expected env %s=%q, got %q", key, proxy, got)
+		}
+	}
+	for _, key := range []string{"no_proxy", "NO_PROXY"} {
+		noProxy := shell.Env[key]
+		for _, excluded := range []string{"localhost", "127.0.0.1", "169.254.169.254", "fd00:ec2::254", "metadata.google.internal", "console.example.com"} {
+			if !strings.Contains(noProxy, excluded) {
+				t.Errorf("expected env %s to exclude %q, got %q", key, excluded, noProxy)
+			}
+		}
+	}
+}
+
+// TestSystemHandler_Upgrade_NoPackageProxy pins backward compatibility: an
+// upgrade payload without package_proxy spawns the shell with no proxy
+// environment override.
+func TestSystemHandler_Upgrade_NoPackageProxy(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9"}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("debian")
+	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", exitCode)
+	}
+	if mockVersions.GotProxy != "" {
+		t.Errorf("expected version lookup without proxy, got %q", mockVersions.GotProxy)
+	}
+
+	shell := findExecutedShell(mockExec)
+	if shell == nil {
+		t.Fatal("expected a package-manager shell to be spawned")
+	}
+	if len(shell.Env) != 0 {
+		t.Errorf("expected no env override without package_proxy, got %v", shell.Env)
+	}
+}
+
+// TestSystemHandler_Upgrade_InvalidPackageProxy verifies that an invalid
+// package_proxy is treated as absent consistently: the version lookup goes
+// direct AND no proxy environment is injected into the root shell.
+func TestSystemHandler_Upgrade_InvalidPackageProxy(t *testing.T) {
+	for name, proxy := range map[string]string{
+		"parse error":        "http://[::1",
+		"missing host":       "not a url",
+		"unsupported scheme": "ftp://proxy.internal:21",
+	} {
+		t.Run(name, func(t *testing.T) {
+			mockExec := common.NewMockCommandExecutor(t)
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", GotProxy: "sentinel"}
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+
+			originalPlatformLike := utils.PlatformLike
+			utils.SetPlatformLike("debian")
+			t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+			exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{PackageProxy: proxy})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if exitCode != 0 {
+				t.Errorf("expected exit code 0, got %d", exitCode)
+			}
+			if mockVersions.GotProxy != "" {
+				t.Errorf("expected version lookup without proxy, got %q", mockVersions.GotProxy)
+			}
+
+			shell := findExecutedShell(mockExec)
+			if shell == nil {
+				t.Fatal("expected a package-manager shell to be spawned")
+			}
+			if len(shell.Env) != 0 {
+				t.Errorf("expected no env override for invalid proxy %q, got %v", proxy, shell.Env)
+			}
+		})
+	}
+}
+
+// TestSystemHandler_Upgrade_VersionLookupFailureProceeds verifies that a failed
+// GitHub version lookup (e.g. closed-network deployments) is no longer fatal on
+// linux: the upgrade proceeds and "latest" is delegated to the package manager.
+func TestSystemHandler_Upgrade_VersionLookupFailureProceeds(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: ""} // lookup failure
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("debian")
+	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	if err != nil {
+		t.Fatalf("expected version lookup failure to be non-fatal, got: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", exitCode)
+	}
+
+	shell := findExecutedShell(mockExec)
+	if shell == nil {
+		t.Fatal("expected the package-manager upgrade to proceed despite the lookup failure")
+	}
+	if len(shell.Args) != 2 || !strings.Contains(shell.Args[1], "alpamon") {
+		t.Errorf("expected unpinned alpamon upgrade command, got %v", shell.Args)
+	}
+}
+
+// TestSystemHandler_Upgrade_VersionLookupFailureSelfUpdate pins the non-linux
+// behavior: self-update needs a concrete target version, so a failed lookup
+// still fails the upgrade on darwin/windows (no package manager to delegate to).
+func TestSystemHandler_Upgrade_VersionLookupFailureSelfUpdate(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, &MockVersionResolver{LatestVersion: ""}, nil)
+
+	var called bool
+	handler.selfUpdateFn = func(_ context.Context, _ string, _ updater.Options) error {
+		called = true
+		return nil
+	}
+
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("darwin")
+	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+	exitCode, output, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	if err == nil {
+		t.Fatal("expected error when version lookup fails on darwin")
+	}
+	if exitCode != 1 {
+		t.Errorf("expected exit code 1, got %d", exitCode)
+	}
+	if called {
+		t.Error("self-update must not run without a target version")
+	}
+	if !strings.Contains(output, "GitHub") {
+		t.Errorf("expected lookup failure message, got %q", output)
+	}
+}
+
 func TestSystemHandler_Update(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -478,6 +712,13 @@ func TestSystemHandler_Uninstall(t *testing.T) {
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
+	// Neutralize the deferred-uninstall timer and drain its goroutine before
+	// the test returns: a leaked executeUninstall reads utils.PlatformLike
+	// after the test ends and races with SetPlatformLike in later tests.
+	handler.uninstallDelay = 0
+	done := make(chan struct{})
+	handler.uninstallDone = done
+
 	args := &common.CommandArgs{}
 
 	exitCode, output, err := handler.Execute(ctx, common.ByeBye.String(), args)
@@ -490,6 +731,12 @@ func TestSystemHandler_Uninstall(t *testing.T) {
 	}
 	if !strings.Contains(output, "uninstall") {
 		t.Errorf("expected output to mention uninstall, got %q", output)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("uninstall goroutine did not finish")
 	}
 }
 

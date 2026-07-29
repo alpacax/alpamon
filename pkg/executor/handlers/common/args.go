@@ -51,6 +51,12 @@ type CommandArgs struct {
 	// Environment
 	Env map[string]string
 
+	// Upgrade operations.
+	// PackageProxy is an optional proxy URL for closed-network deployments,
+	// applied only to the package-manager upgrade shell and the GitHub
+	// version lookup. Empty means no proxy (existing behavior).
+	PackageProxy string
+
 	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks.
 	// Sequencing is the caller's responsibility.
 	ChunkCallback func(content string)
