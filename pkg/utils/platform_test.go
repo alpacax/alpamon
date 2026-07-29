@@ -49,7 +49,7 @@ func TestResolvePlatform(t *testing.T) {
 
 		// non-linux: raw platform is ignored
 		{"darwin", "darwin", "darwin", "darwin", "brew"},
-		{"windows", "windows", "Microsoft Windows Server 2025 Datacenter", "windows", ""},
+		{"windows", "windows", "Microsoft Windows Server 2025 Datacenter", "windows", "none"},
 	}
 
 	for _, tt := range tests {

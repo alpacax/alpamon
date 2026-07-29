@@ -37,13 +37,13 @@ var platformAliases = map[string]string{
 // Mirrors SUSE_PLATFORM_PREFIXES; prefix-matched because the ids proliferate (opensuse-microos, sle-micro, sle_hpc) and gopsutil's exact-match PlatformFamily returns "" for several.
 var susePrefixes = []string{"opensuse", "sle", "suse"}
 
-// Exported so the switches in pkg/executor/handlers/system are compiler-checked; PkgNone names windows, which has no package channel and self-updates the binary instead.
+// Exported so the switches in pkg/executor/handlers/system are compiler-checked; PkgNone (windows self-updates) is non-empty so a zero value falls to default instead of that arm.
 const (
 	PkgApt    = "apt"
 	PkgYum    = "yum"
 	PkgZypper = "zypper"
 	PkgBrew   = "brew"
-	PkgNone   = ""
+	PkgNone   = "none"
 )
 
 // Pure, so the table is testable without a host; ok=false must never be defaulted by callers (see platformAliases).

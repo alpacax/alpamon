@@ -581,8 +581,8 @@ func TestSystemHandler_UnregisterFromConsole_DeleteError(t *testing.T) {
 	}
 }
 
-// Both axes are set explicitly: leaving PackageManager at its zero value would
-// pass by accident.
+// Both axes are set explicitly. PkgNone is a non-empty sentinel, so a
+// zero-value PackageManager would hit the unsupported branch, not pass here.
 func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 	for _, tc := range []struct {
 		platformLike   string
