@@ -136,9 +136,14 @@ jobs:
 
       # gzip is explicit here because the Leap base image ships neither tar
       # nor gzip, and actions/setup-go extracts its tarball with `tar xz`.
+      # PATH goes to GITHUB_ENV because the Leap image config defines no PATH
+      # (alone in this matrix); once setup-go calls addPath, the runner rebuilds
+      # PATH from the image value, and an empty base loses /usr/bin.
       - name: Install dependencies (zypper)
         if: matrix.pkg_manager == 'zypper'
-        run: zypper --non-interactive install git curl gcc glibc-devel tar gzip
+        run: |
+          zypper --non-interactive install git curl gcc glibc-devel tar gzip
+          echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" >> "$GITHUB_ENV"
 
       - name: Mark workspace as safe for Git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
