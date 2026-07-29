@@ -1,6 +1,12 @@
 package utils
 
-import "testing"
+import (
+	"os"
+	"runtime"
+	"testing"
+
+	"github.com/shirou/gopsutil/v4/host"
+)
 
 // Vectors deliberately mirror alpacon-server servers/test_utils.py:68-96. The
 // 1:1 correspondence between the two tables is the contract, and Server.platform
@@ -84,6 +90,32 @@ func TestResolvePlatform_Unsupported(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResolvePlatform_CIHost feeds ResolvePlatform the same input
+// InitPlatform reads (host.Info() on linux), so every CI matrix row verifies
+// that its own distro classifies. The vectors above cannot catch the #348
+// class of bug: a distro present in CI but absent from the tables. Gated on
+// CI so a contributor on an unsupported distro keeps a green local run.
+func TestResolvePlatform_CIHost(t *testing.T) {
+	if os.Getenv("CI") == "" {
+		t.Skip("CI-matrix guard: host distros are only pinned supported on CI runners")
+	}
+
+	var raw string
+	if runtime.GOOS == "linux" {
+		info, err := host.Info()
+		if err != nil {
+			t.Fatalf("host.Info() failed: %v", err)
+		}
+		raw = info.Platform
+	}
+
+	like, pkgManager, ok := ResolvePlatform(runtime.GOOS, raw)
+	if !ok {
+		t.Fatalf("CI host not classified: os=%s distribution=%q", runtime.GOOS, raw)
+	}
+	t.Logf("os=%s distribution=%q -> like=%s pkgManager=%s", runtime.GOOS, raw, like, pkgManager)
 }
 
 // Lock both directions: a false negative skips a needed dup, a false positive
