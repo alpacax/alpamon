@@ -55,6 +55,7 @@ func withRecoveryTestEnv(t *testing.T, handler http.HandlerFunc) string {
 		oSSL, oForce, oNoRB, oNCP             = sslVerify, force, noRollback, noCloudProbe
 		oTags                                 = tags
 		oDetect                               = detectCloud
+		oDetectPlatform                       = detectPlatformFn
 		oEnsure                               = ensureInstalledFn
 		oWrite, oDirs, oStart, oStop, oRemove = writeConfigFileFn, ensureDirectoriesFn, startServiceFn, stopServiceFn, removeServiceFn
 		oUSSL, oUCA, oUYes, oUKeep            = unregisterSSLVerify, unregisterCaCert, unregisterYes, unregisterKeepConfig
@@ -64,6 +65,7 @@ func withRecoveryTestEnv(t *testing.T, handler http.HandlerFunc) string {
 		sslVerify, force, noRollback, noCloudProbe = oSSL, oForce, oNoRB, oNCP
 		tags = oTags
 		detectCloud = oDetect
+		detectPlatformFn = oDetectPlatform
 		ensureInstalledFn = oEnsure
 		writeConfigFileFn, ensureDirectoriesFn, startServiceFn, stopServiceFn, removeServiceFn = oWrite, oDirs, oStart, oStop, oRemove
 		unregisterSSLVerify, unregisterCaCert, unregisterYes, unregisterKeepConfig = oUSSL, oUCA, oUYes, oUKeep
@@ -72,7 +74,10 @@ func withRecoveryTestEnv(t *testing.T, handler http.HandlerFunc) string {
 	serverURL = server.URL
 	apiToken = "test-token"
 	serverName = "test-server"
-	platform = "debian"
+	// Detection is stubbed rather than pinning platform: an explicit value is
+	// validated against the running host's OS, which would fail off-linux.
+	platform = ""
+	detectPlatformFn = func() (string, error) { return "debian", nil }
 	caCert = ""
 	sslVerify = true
 	force = false

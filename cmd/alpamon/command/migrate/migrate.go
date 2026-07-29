@@ -34,6 +34,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -145,7 +146,7 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 		platform = detected
-	} else if err := utils.ValidateServerPlatform(platform); err != nil {
+	} else if err := utils.ValidateServerPlatform(runtime.GOOS, platform); err != nil {
 		return err
 	}
 

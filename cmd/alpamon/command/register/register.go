@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -338,7 +339,7 @@ func buildRegisterRequest(cmd *cobra.Command) (RegisterRequest, error) {
 		}
 		platform = detected
 		fmt.Printf("Platform auto-detected: %s\n", platform)
-	} else if err := utils.ValidateServerPlatform(platform); err != nil {
+	} else if err := utils.ValidateServerPlatform(runtime.GOOS, platform); err != nil {
 		return RegisterRequest{}, err
 	}
 

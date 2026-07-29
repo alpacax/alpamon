@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -79,19 +80,23 @@ func ResolvePlatform(goos, rawPlatform string) (like, pkgManager string, ok bool
 	return "", "", false
 }
 
-// The alpacon-server SERVER_PLATFORMS set: the register endpoint gates Server.platform with a ChoiceField over exactly these.
-var serverPlatforms = map[string]bool{
-	"debian":  true,
-	"rhel":    true,
-	"darwin":  true,
-	"windows": true,
+// Which SERVER_PLATFORMS values are true per host — write-once Server.platform makes --platform windows on a Linux box permanent damage.
+var hostServerPlatforms = map[string][]string{
+	"linux":   {"debian", "rhel"},
+	"darwin":  {"darwin"},
+	"windows": {"windows"},
 }
 
-// Rejects an explicit --platform the server would reject, so the operator fails fast instead of at the registration request.
-func ValidateServerPlatform(p string) error {
-	if !serverPlatforms[p] {
+// Rejects an explicit --platform wrong for this host, failing fast instead of misclassifying the write-once record.
+func ValidateServerPlatform(goos, p string) error {
+	accepted, ok := hostServerPlatforms[goos]
+	if !ok {
+		return fmt.Errorf("unsupported os %q for --platform validation", goos)
+	}
+	if !slices.Contains(accepted, p) {
 		return fmt.Errorf(
-			"invalid --platform %q: accepted values are debian, rhel, darwin, windows", p)
+			"invalid --platform %q on %s: accepted values are %s",
+			p, goos, strings.Join(accepted, ", "))
 	}
 	return nil
 }

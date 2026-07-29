@@ -114,19 +114,37 @@ func TestResolveRegistrationPlatform_UnsupportedReturnsError(t *testing.T) {
 	}
 }
 
-// --platform forwards verbatim to Server.platform, so an explicit value must be checked against the same four-value set the server gates on.
+// --platform forwards verbatim to write-once Server.platform: all four values are server-side members, but "windows" on Linux would poison the record.
 func TestValidateServerPlatform(t *testing.T) {
-	for _, p := range []string{"debian", "rhel", "darwin", "windows"} {
-		if err := ValidateServerPlatform(p); err != nil {
-			t.Errorf("ValidateServerPlatform(%q) = %v, want nil", p, err)
-		}
-	}
-	err := ValidateServerPlatform("rehl")
-	if err == nil {
-		t.Fatal("expected an error for a value the server rejects")
-	}
-	if !strings.Contains(err.Error(), "rehl") {
-		t.Errorf("error must name the rejected value, got %q", err)
+	for _, tt := range []struct {
+		goos, p string
+		ok      bool
+	}{
+		{"linux", "debian", true},
+		{"linux", "rhel", true},
+		{"darwin", "darwin", true},
+		{"windows", "windows", true},
+
+		{"linux", "windows", false},
+		{"linux", "darwin", false},
+		{"linux", "rehl", false},
+		{"darwin", "debian", false},
+		{"windows", "rhel", false},
+	} {
+		t.Run(tt.goos+"/"+tt.p, func(t *testing.T) {
+			err := ValidateServerPlatform(tt.goos, tt.p)
+			if tt.ok && err != nil {
+				t.Fatalf("ValidateServerPlatform(%q, %q) = %v, want nil", tt.goos, tt.p, err)
+			}
+			if !tt.ok {
+				if err == nil {
+					t.Fatal("expected an error for a value invalid on this host")
+				}
+				if !strings.Contains(err.Error(), tt.p) {
+					t.Errorf("error must name the rejected value, got %q", err)
+				}
+			}
+		})
 	}
 }
 
