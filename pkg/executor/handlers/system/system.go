@@ -40,6 +40,14 @@ type SystemHandler struct {
 	versionResolver common.VersionResolver
 	apiSession      common.APISession
 	selfUpdateFn    updater.SelfUpdateFunc // defaults to updater.SelfUpdate; tests inject a fake
+
+	// uninstallDelay defers executeUninstall so the byebye response is sent
+	// before the agent starts tearing itself down. Tests shorten it and use
+	// uninstallDone to drain the timer goroutine, which would otherwise
+	// outlive the test and race on package-level state (utils.PlatformLike).
+	uninstallDelay time.Duration
+	// uninstallDone, when non-nil, is closed after executeUninstall returns.
+	uninstallDone chan struct{}
 }
 
 // NewSystemHandler creates a new system handler.
@@ -69,6 +77,7 @@ func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClie
 		versionResolver: versionResolver,
 		apiSession:      apiSession,
 		selfUpdateFn:    updater.SelfUpdate,
+		uninstallDelay:  1 * time.Second,
 	}
 	return h
 }
@@ -221,7 +230,8 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 // packageProxyEnv builds the proxy environment for the package-manager shell
 // in closed-network deployments. It returns nil when no proxy is configured,
 // which keeps behavior identical to an env-less invocation. no_proxy excludes
-// the Alpacon server host, the IMDS address, and localhost as a safeguard so
+// the Alpacon server host, the IMDS endpoints (AWS IPv4/IPv6, GCP), and
+// localhost as a safeguard so
 // nothing spawned by the upgrade can route control-plane or metadata traffic
 // through the package proxy.
 func packageProxyEnv(proxyURL string) map[string]string {
@@ -229,7 +239,7 @@ func packageProxyEnv(proxyURL string) map[string]string {
 		return nil
 	}
 
-	noProxy := "localhost,127.0.0.1,::1,169.254.169.254"
+	noProxy := "localhost,127.0.0.1,::1,169.254.169.254,fd00:ec2::254,metadata.google.internal"
 	if serverURL, err := url.Parse(config.GlobalSettings.ServerURL); err == nil && serverURL.Hostname() != "" {
 		noProxy += "," + serverURL.Hostname()
 	}
@@ -353,9 +363,13 @@ func (h *SystemHandler) unregisterFromConsole() {
 func (h *SystemHandler) handleUninstall() (int, string, error) {
 	log.Info().Msg("Uninstall request received.")
 
-	// Execute uninstall after 1 second to ensure response is sent
-	time.AfterFunc(1*time.Second, func() {
+	// Execute uninstall after a delay (1 second in production) to ensure the
+	// response is sent first.
+	time.AfterFunc(h.uninstallDelay, func() {
 		h.executeUninstall()
+		if h.uninstallDone != nil {
+			close(h.uninstallDone)
+		}
 	})
 
 	return 0, "Starting uninstall process...", nil

@@ -179,7 +179,18 @@ func NewVersionLookupClient(proxyURL string) *http.Client {
 		log.Warn().Str("proxy", proxyURL).Msg("Invalid package proxy URL; using default transport for version lookup.")
 		return client
 	}
-	client.Transport = &http.Transport{Proxy: http.ProxyURL(parsed)}
+	// Clone the default transport so its settings (timeouts, TLS, HTTP/2)
+	// carry over, instead of a bare &http.Transport{} that also leaks its
+	// keep-alive connections. Safe assertion: instrumentation may swap
+	// http.DefaultTransport for a different RoundTripper.
+	var transport *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
+	transport.Proxy = http.ProxyURL(parsed)
+	client.Transport = transport
 	return client
 }
 

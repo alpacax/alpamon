@@ -506,7 +506,7 @@ func TestSystemHandler_Upgrade_PackageProxy(t *testing.T) {
 	}
 	for _, key := range []string{"no_proxy", "NO_PROXY"} {
 		noProxy := shell.Env[key]
-		for _, excluded := range []string{"localhost", "127.0.0.1", "169.254.169.254", "console.example.com"} {
+		for _, excluded := range []string{"localhost", "127.0.0.1", "169.254.169.254", "fd00:ec2::254", "metadata.google.internal", "console.example.com"} {
 			if !strings.Contains(noProxy, excluded) {
 				t.Errorf("expected env %s to exclude %q, got %q", key, excluded, noProxy)
 			}
@@ -666,6 +666,13 @@ func TestSystemHandler_Uninstall(t *testing.T) {
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
+	// Neutralize the deferred-uninstall timer and drain its goroutine before
+	// the test returns: a leaked executeUninstall reads utils.PlatformLike
+	// after the test ends and races with SetPlatformLike in later tests.
+	handler.uninstallDelay = 0
+	done := make(chan struct{})
+	handler.uninstallDone = done
+
 	args := &common.CommandArgs{}
 
 	exitCode, output, err := handler.Execute(ctx, common.ByeBye.String(), args)
@@ -678,6 +685,12 @@ func TestSystemHandler_Uninstall(t *testing.T) {
 	}
 	if !strings.Contains(output, "uninstall") {
 		t.Errorf("expected output to mention uninstall, got %q", output)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("uninstall goroutine did not finish")
 	}
 }
 
