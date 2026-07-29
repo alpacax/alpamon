@@ -213,7 +213,7 @@ docker run \
     -e ALPACON_URL="https://<workspace>" \
     -e PLUGIN_ID="<plugin_id>" \
     -e PLUGIN_KEY="<plugin_key>" \
-    alpamon:latest
+    alpamon:opensuse-15
 ```
 
 Covered distros: Ubuntu 22.04/20.04, Debian 11, RHEL 8/9, openSUSE Leap 15. Legacy Dockerfiles for Ubuntu 18.04, Debian 10, and CentOS 7 also ship under `Dockerfiles/` for best-effort builds against EOL platforms.
