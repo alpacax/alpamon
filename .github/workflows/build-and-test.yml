@@ -100,6 +100,11 @@ jobs:
             container: amazonlinux:2023
             pkg_manager: dnf
             runner: ubuntu-latest
+          # SUSE (amd64)
+          - distro: opensuse-leap-15
+            container: opensuse/leap:15
+            pkg_manager: zypper
+            runner: ubuntu-latest
           # ARM64
           - distro: ubuntu-24.04-arm64
             container: ubuntu:24.04
@@ -128,6 +133,12 @@ jobs:
       - name: Install dependencies (dnf)
         if: matrix.pkg_manager == 'dnf'
         run: dnf install -y --allowerasing git curl gcc glibc-devel tar
+
+      # gzip is explicit here because the Leap base image ships neither tar
+      # nor gzip, and actions/setup-go extracts its tarball with `tar xz`.
+      - name: Install dependencies (zypper)
+        if: matrix.pkg_manager == 'zypper'
+        run: zypper --non-interactive install git curl gcc glibc-devel tar gzip
 
       - name: Mark workspace as safe for Git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
