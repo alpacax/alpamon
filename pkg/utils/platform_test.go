@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -81,6 +82,31 @@ func TestResolvePlatform_Unsupported(t *testing.T) {
 				t.Errorf("unsupported input must return empty values, got (%q, %q)", like, pkgMgr)
 			}
 		})
+	}
+}
+
+// Asserted once here because register and migrate both send this value.
+func TestResolveRegistrationPlatform_SuseMapsToRhel(t *testing.T) {
+	got, err := ResolveRegistrationPlatform("linux", "opensuse-leap")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "rhel" {
+		t.Errorf("platform = %q, want rhel", got)
+	}
+}
+
+// A silent "debian" default is unrecoverable: the server persists it write-once with no admin edit path.
+func TestResolveRegistrationPlatform_UnsupportedReturnsError(t *testing.T) {
+	_, err := ResolveRegistrationPlatform("linux", "arch")
+	if err == nil {
+		t.Fatal("expected an error for an unclassifiable distribution")
+	}
+	if !strings.Contains(err.Error(), "arch") {
+		t.Errorf("error must name the distribution, got %q", err)
+	}
+	if !strings.Contains(err.Error(), "--platform") {
+		t.Errorf("error must tell the operator about the override, got %q", err)
 	}
 }
 

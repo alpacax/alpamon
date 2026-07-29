@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -76,6 +77,36 @@ func ResolvePlatform(goos, rawPlatform string) (like, pkgManager string, ok bool
 		return "rhel", PkgYum, true
 	}
 	return "", "", false
+}
+
+// The value register and migrate send; errors instead of defaulting because the server persists it write-once, fixable only by re-registering.
+func DetectRegistrationPlatform() (string, error) {
+	var raw string
+	if runtime.GOOS == "linux" {
+		info, err := host.Info()
+		if err != nil {
+			return "", fmt.Errorf(
+				"failed to detect the host platform: %w.\n"+
+					"Pass --platform debian|rhel to skip detection if you know the host is compatible",
+				err)
+		}
+		raw = info.Platform
+	}
+	return ResolveRegistrationPlatform(runtime.GOOS, raw)
+}
+
+// DetectRegistrationPlatform's pure half, so the mapping and its error text are testable without a host.
+func ResolveRegistrationPlatform(goos, raw string) (string, error) {
+	like, _, ok := ResolvePlatform(goos, raw)
+	if !ok {
+		return "", fmt.Errorf(
+			"unrecognized Linux distribution %q.\n"+
+				"alpamon supports debian- and rhel-family distributions, "+
+				"including openSUSE/SLES.\n"+
+				"Pass --platform debian|rhel to override if you know the host is compatible",
+			raw)
+	}
+	return like, nil
 }
 
 // Classifies the host once at startup; unclassifiable is fatal because every handler switches on these values and guessing would misreport to the server.
