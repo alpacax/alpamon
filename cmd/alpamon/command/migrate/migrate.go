@@ -34,7 +34,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
 
@@ -42,7 +41,6 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/migrate"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
-	"github.com/shirou/gopsutil/v4/host"
 	"github.com/spf13/cobra"
 )
 
@@ -98,7 +96,10 @@ func init() {
 	Cmd.Flags().StringVar(&newURL, "url", "", "Target Alpacon workspace URL (required)")
 	Cmd.Flags().StringVar(&apiToken, "token", "", "Registration token issued by the target workspace (required)")
 	Cmd.Flags().StringVar(&serverName, "name", "", "Server name (optional, defaults to hostname)")
-	Cmd.Flags().StringVar(&platform, "platform", "", "Platform (debian/rhel/darwin/windows, auto-detected when omitted)")
+	Cmd.Flags().StringVar(&platform, "platform", "",
+		"Platform (debian/rhel/darwin/windows). Auto-detected when omitted.\n"+
+			"Affects the target workspace's server record only; the agent still\n"+
+			"refuses to start on an unsupported distribution.")
 	Cmd.Flags().BoolVar(&sslVerify, "ssl-verify", true, "SSL certificate verification")
 	Cmd.Flags().StringVar(&caCert, "ca-cert", "", "CA certificate path")
 	Cmd.Flags().DurationVar(&rollbackTimeout, "rollback-timeout", migrate.DefaultRollbackTimeout,
@@ -139,7 +140,11 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 	}
 
 	if platform == "" {
-		platform = detectPlatform()
+		detected, err := utils.DetectRegistrationPlatform()
+		if err != nil {
+			return err
+		}
+		platform = detected
 	}
 
 	current, err := config.ReadServer(configPath)
@@ -394,31 +399,4 @@ func normalizeHostname(h string) string {
 		return h[:i]
 	}
 	return h
-}
-
-func detectPlatform() string {
-	if runtime.GOOS == "windows" {
-		return "windows"
-	}
-	info, err := host.Info()
-	if err != nil {
-		return "debian"
-	}
-	switch info.Platform {
-	case "darwin":
-		return "darwin"
-	case "ubuntu", "debian", "raspbian":
-		return "debian"
-	case "centos", "rhel", "redhat", "amazon", "amzn", "fedora", "rocky", "oracle", "ol":
-		return "rhel"
-	}
-	p := strings.ToLower(info.Platform)
-	switch {
-	case strings.Contains(p, "ubuntu"), strings.Contains(p, "debian"):
-		return "debian"
-	case strings.Contains(p, "centos"), strings.Contains(p, "rhel"),
-		strings.Contains(p, "fedora"), strings.Contains(p, "rocky"):
-		return "rhel"
-	}
-	return "debian"
 }
