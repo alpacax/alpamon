@@ -10,56 +10,17 @@ import (
 	"os"
 	"os/user"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/version"
 	"github.com/rs/zerolog/log"
-	"github.com/shirou/gopsutil/v4/host"
 )
 
 var (
-	PlatformLike string
-	pattern      = regexp.MustCompile(`[^\w@%+=:,./-]`)
+	pattern = regexp.MustCompile(`[^\w@%+=:,./-]`)
 )
-
-func InitPlatform() {
-	getPlatformLike()
-}
-
-func getPlatformLike() {
-	system := runtime.GOOS
-
-	switch system {
-	case "darwin":
-		PlatformLike = system
-	case "linux":
-		platformInfo, err := host.Info()
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to retrieve platform information.")
-			os.Exit(1)
-		}
-		switch platformInfo.Platform {
-		case "ubuntu", "debian", "raspbian":
-			PlatformLike = "debian"
-		case "centos", "rhel", "redhat", "amazon", "amzn", "fedora", "rocky", "oracle", "ol":
-			PlatformLike = "rhel"
-		default:
-			log.Fatal().Msgf("Platform %s not supported.", platformInfo.Platform)
-		}
-	case "windows":
-		PlatformLike = "windows"
-	default:
-		log.Fatal().Msgf("Unsupported os: %s.", runtime.GOOS)
-	}
-}
-
-// SetPlatformLike allows setting PlatformLike for testing purposes.
-func SetPlatformLike(platform string) {
-	PlatformLike = platform
-}
 
 func JoinPath(base string, paths ...string) string {
 	fullURL, err := url.JoinPath(base, paths...)
