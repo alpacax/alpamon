@@ -50,6 +50,10 @@ func TestExecutor_ExecEnvReachesShell(t *testing.T) {
 	e := NewExecutor()
 	ctx := context.Background()
 
+	// CI or developer shells may already export https_proxy; assert the value
+	// is unchanged after Exec rather than assuming it starts empty.
+	preexisting := os.Getenv("https_proxy")
+
 	env := map[string]string{
 		"https_proxy": "http://proxy.internal:3128",
 		"no_proxy":    "localhost,169.254.169.254",
@@ -65,7 +69,7 @@ func TestExecutor_ExecEnvReachesShell(t *testing.T) {
 	if output != "http://proxy.internal:3128|localhost,169.254.169.254" {
 		t.Errorf("env override did not reach the shell, got %q", output)
 	}
-	if got := os.Getenv("https_proxy"); got != "" {
-		t.Errorf("child env override leaked into the agent process: https_proxy=%q", got)
+	if got := os.Getenv("https_proxy"); got != preexisting {
+		t.Errorf("child env override leaked into the agent process: https_proxy=%q (was %q)", got, preexisting)
 	}
 }

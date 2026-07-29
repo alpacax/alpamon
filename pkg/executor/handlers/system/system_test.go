@@ -552,6 +552,52 @@ func TestSystemHandler_Upgrade_NoPackageProxy(t *testing.T) {
 	}
 }
 
+// TestSystemHandler_Upgrade_InvalidPackageProxy verifies that an invalid
+// package_proxy is treated as absent consistently: the version lookup goes
+// direct AND no proxy environment is injected into the root shell.
+func TestSystemHandler_Upgrade_InvalidPackageProxy(t *testing.T) {
+	for name, proxy := range map[string]string{
+		"parse error":        "http://[::1",
+		"missing host":       "not a url",
+		"unsupported scheme": "ftp://proxy.internal:21",
+	} {
+		t.Run(name, func(t *testing.T) {
+			mockExec := common.NewMockCommandExecutor(t)
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", GotProxy: "sentinel"}
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+
+			originalPlatformLike := utils.PlatformLike
+			utils.SetPlatformLike("debian")
+			t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+
+			exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{PackageProxy: proxy})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if exitCode != 0 {
+				t.Errorf("expected exit code 0, got %d", exitCode)
+			}
+			if mockVersions.GotProxy != "" {
+				t.Errorf("expected version lookup without proxy, got %q", mockVersions.GotProxy)
+			}
+
+			shell := findExecutedShell(mockExec)
+			if shell == nil {
+				t.Fatal("expected a package-manager shell to be spawned")
+			}
+			if len(shell.Env) != 0 {
+				t.Errorf("expected no env override for invalid proxy %q, got %v", proxy, shell.Env)
+			}
+		})
+	}
+}
+
 // TestSystemHandler_Upgrade_VersionLookupFailureProceeds verifies that a failed
 // GitHub version lookup (e.g. closed-network deployments) is no longer fatal on
 // linux: the upgrade proceeds and "latest" is delegated to the package manager.

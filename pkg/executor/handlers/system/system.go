@@ -165,7 +165,7 @@ func (h *SystemHandler) Validate(cmd string, args *common.CommandArgs) error {
 func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	var packageProxy string
 	if args != nil {
-		packageProxy = args.PackageProxy
+		packageProxy = sanitizePackageProxy(args.PackageProxy)
 	}
 
 	latestVersion := h.versionResolver.GetLatestVersion(packageProxy)
@@ -225,6 +225,30 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		h.versionResolver.InvalidatePamCache()
 	}
 	return exitCode, output, err
+}
+
+// sanitizePackageProxy validates the payload-provided proxy URL once at
+// handleUpgrade entry. An invalid or unsupported value is treated as absent
+// for BOTH the version lookup and the package-manager shell environment, so
+// the two paths stay consistent (no half-applied proxy in the root shell).
+// The raw value is never logged because proxy URLs may embed credentials
+// (user:pass@); the scheme alone is safe to log.
+func sanitizePackageProxy(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() == "" {
+		log.Warn().Msg("Invalid package proxy URL in upgrade payload; ignoring it.")
+		return ""
+	}
+	switch parsed.Scheme {
+	case "http", "https", "socks5", "socks5h":
+		return raw
+	default:
+		log.Warn().Str("scheme", parsed.Scheme).Msg("Unsupported package proxy scheme in upgrade payload; ignoring it.")
+		return ""
+	}
 }
 
 // packageProxyEnv builds the proxy environment for the package-manager shell

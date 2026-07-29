@@ -176,7 +176,8 @@ func NewVersionLookupClient(proxyURL string) *http.Client {
 	}
 	parsed, err := url.Parse(proxyURL)
 	if err != nil || parsed.Host == "" {
-		log.Warn().Str("proxy", proxyURL).Msg("Invalid package proxy URL; using default transport for version lookup.")
+		// Don't log the raw value: proxy URLs may embed credentials (user:pass@).
+		log.Warn().Msg("Invalid package proxy URL; using default transport for version lookup.")
 		return client
 	}
 	// Clone the default transport so its settings (timeouts, TLS, HTTP/2)
