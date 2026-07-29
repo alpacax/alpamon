@@ -1,8 +1,12 @@
 package utils
 
 import (
+	"os"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/shirou/gopsutil/v4/host"
 )
 
 // Vectors mirror alpacon-server servers/test_utils.py:68-96: the 1:1 table correspondence is the contract, and write-once Server.platform makes a divergence permanent.
@@ -108,6 +112,28 @@ func TestResolveRegistrationPlatform_UnsupportedReturnsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "--platform") {
 		t.Errorf("error must tell the operator about the override, got %q", err)
 	}
+}
+
+// Feeds ResolvePlatform what InitPlatform reads, so every CI row guards its own distro — the #348 case the pure vectors miss; CI-gated to keep local runs green off-matrix.
+func TestResolvePlatform_CIHost(t *testing.T) {
+	if os.Getenv("CI") == "" {
+		t.Skip("CI-matrix guard: host distros are only pinned supported on CI runners")
+	}
+
+	var raw string
+	if runtime.GOOS == "linux" {
+		info, err := host.Info()
+		if err != nil {
+			t.Fatalf("host.Info() failed: %v", err)
+		}
+		raw = info.Platform
+	}
+
+	like, pkgManager, ok := ResolvePlatform(runtime.GOOS, raw)
+	if !ok {
+		t.Fatalf("CI host not classified: os=%s distribution=%q", runtime.GOOS, raw)
+	}
+	t.Logf("os=%s distribution=%q -> like=%s pkgManager=%s", runtime.GOOS, raw, like, pkgManager)
 }
 
 // Both directions: a false negative skips a needed dup, a false positive runs a destructive one.
