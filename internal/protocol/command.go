@@ -101,6 +101,13 @@ type CommandData struct {
 	// Tunnel specific fields
 	TargetPort int    `json:"target_port"`
 	ClientType string `json:"client_type"` // cli, web, editor
+
+	// Upgrade specific fields.
+	// PackageProxy is an optional proxy URL for closed-network deployments.
+	// When present, it is applied to the package-manager upgrade shell and the
+	// GitHub version lookup only. Older servers omit it, which keeps the
+	// existing behavior.
+	PackageProxy string `json:"package_proxy,omitempty"`
 }
 
 // ParseCommandData parses the Data field of a Command into CommandData
@@ -189,6 +196,9 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 		// UFW specific
 		Direction: c.Direction,
 		Interface: c.Interface,
+
+		// Upgrade specific
+		PackageProxy: c.PackageProxy,
 	}
 
 	// Convert Files if present

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
+	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/updater"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -75,7 +77,9 @@ func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClie
 func (h *SystemHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
 	switch cmd {
 	case common.Upgrade.String():
-		return h.withTimeout(ctx, common.UpgradeTimeout, h.handleUpgrade)
+		return h.withTimeout(ctx, common.UpgradeTimeout, func(ctx context.Context) (int, string, error) {
+			return h.handleUpgrade(ctx, args)
+		})
 	case common.Restart.String():
 		ctx, cancel := common.WithHandlerTimeout(ctx, common.SystemCmdTimeout)
 		defer cancel()
@@ -144,17 +148,28 @@ func (h *SystemHandler) Validate(cmd string, args *common.CommandArgs) error {
 // It checks alpamon and alpamon-pam versions independently and upgrades only
 // the packages that need it. This prevents skipping a pam-only upgrade when
 // alpamon is already at the latest version.
-func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) {
-	latestVersion := h.versionResolver.GetLatestVersion()
-	if latestVersion == "" {
-		return 1, "Failed to retrieve the latest Alpamon version from GitHub.",
-			errors.New("failed to retrieve the latest Alpamon version from GitHub")
+//
+// args.PackageProxy, when present, routes the GitHub version lookup and the
+// package-manager shell through the given proxy so closed-network deployments
+// with an outbound proxy can upgrade. A failed version lookup is not fatal on
+// linux: "latest" is delegated to the package manager instead.
+func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandArgs) (int, string, error) {
+	var packageProxy string
+	if args != nil {
+		packageProxy = args.PackageProxy
 	}
 
-	needAlpamon := version.Version != latestVersion
+	latestVersion := h.versionResolver.GetLatestVersion(packageProxy)
+	if latestVersion == "" {
+		// Closed-network deployments may not be able to reach api.github.com.
+		// Delegate "latest" to the package manager instead of failing here.
+		log.Warn().Msg("Failed to retrieve the latest Alpamon version from GitHub; proceeding with package manager upgrade.")
+	}
+
+	needAlpamon := latestVersion == "" || version.Version != latestVersion
 
 	currentPamVersion := h.versionResolver.GetPamVersion()
-	needPam := currentPamVersion != "" && currentPamVersion != latestVersion
+	needPam := currentPamVersion != "" && (latestVersion == "" || currentPamVersion != latestVersion)
 
 	if !needAlpamon && !needPam {
 		pamDisplay := currentPamVersion
@@ -182,17 +197,51 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context) (int, string, error) 
 	case "darwin", "windows":
 		// needAlpamon is always true here: needPam is always false on non-linux
 		// (pam unsupported; see pkg/utils/pam.go) and the switch is reached only when needAlpamon||needPam.
+		if latestVersion == "" {
+			// Self-update needs a concrete target version; there is no
+			// package manager to delegate "latest" to on these platforms.
+			return 1, "Failed to retrieve the latest Alpamon version from GitHub.",
+				errors.New("failed to retrieve the latest Alpamon version from GitHub")
+		}
 		return h.selfUpdate(ctx, latestVersion)
 	default:
 		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
 	}
 
 	log.Debug().Msgf("Upgrading %s...", pkgList)
-	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
+	// The proxy environment (nil without a package proxy) applies to the
+	// spawned package-manager shell only, never to the agent process.
+	exitCode, output, err := h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageProxyEnv(packageProxy), 0)
 	if exitCode == 0 && needPam {
 		h.versionResolver.InvalidatePamCache()
 	}
 	return exitCode, output, err
+}
+
+// packageProxyEnv builds the proxy environment for the package-manager shell
+// in closed-network deployments. It returns nil when no proxy is configured,
+// which keeps behavior identical to an env-less invocation. no_proxy excludes
+// the Alpacon server host, the IMDS address, and localhost as a safeguard so
+// nothing spawned by the upgrade can route control-plane or metadata traffic
+// through the package proxy.
+func packageProxyEnv(proxyURL string) map[string]string {
+	if proxyURL == "" {
+		return nil
+	}
+
+	noProxy := "localhost,127.0.0.1,::1,169.254.169.254"
+	if serverURL, err := url.Parse(config.GlobalSettings.ServerURL); err == nil && serverURL.Hostname() != "" {
+		noProxy += "," + serverURL.Hostname()
+	}
+
+	return map[string]string{
+		"http_proxy":  proxyURL,
+		"https_proxy": proxyURL,
+		"HTTP_PROXY":  proxyURL,
+		"HTTPS_PROXY": proxyURL,
+		"no_proxy":    noProxy,
+		"NO_PROXY":    noProxy,
+	}
 }
 
 // selfUpdate downloads and replaces the binary from GitHub Releases, then triggers restart.
