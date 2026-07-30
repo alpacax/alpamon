@@ -12,12 +12,22 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// ResolveGroups builds the supplementary group list for Credential.Groups,
-// applying the current platform's setgroups(2) cap. It is the single entry
-// point shared by every privilege-demotion path (Demote and the websh PTY),
-// so group handling stays identical across them.
-func ResolveGroups(gid uint32, groupIds []string) (groups []uint32, groupInList bool, err error) {
-	return resolveGroups(gid, groupIds, maxSupplementaryGroups())
+// DemotedSysProcAttr is the single entry point for demotions that keep the
+// user's supplementary groups (Demote, websh PTY, code-server): one place for
+// setgroups(2) capping, so those paths cannot drift. Demotions that must drop
+// the group list build their own Credential with Groups left nil.
+func DemotedSysProcAttr(uid, gid uint32, groupIds []string) (attr *syscall.SysProcAttr, groupInList bool, err error) {
+	groups, groupInList, err := resolveGroups(gid, groupIds, maxSupplementaryGroups())
+	if err != nil {
+		return nil, false, err
+	}
+	return &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    uid,
+			Gid:    gid,
+			Groups: groups,
+		},
+	}, groupInList, nil
 }
 
 // resolveGroups builds the supplementary group list for Credential.Groups.
@@ -99,7 +109,7 @@ func Demote(username, groupname string, opts DemoteOptions) (*DemoteResult, erro
 		return nil, err
 	}
 
-	groups, groupInList, err := ResolveGroups(uint32(gid), groupIds)
+	sysProcAttr, groupInList, err := DemotedSysProcAttr(uint32(uid), uint32(gid), groupIds)
 	if err != nil {
 		return nil, err
 	}
@@ -111,13 +121,7 @@ func Demote(username, groupname string, opts DemoteOptions) (*DemoteResult, erro
 	log.Debug().Msgf("Demote permission to match user: %s, group: %s.", username, groupname)
 
 	return &DemoteResult{
-		SysProcAttr: &syscall.SysProcAttr{
-			Credential: &syscall.Credential{
-				Uid:    uint32(uid),
-				Gid:    uint32(gid),
-				Groups: groups,
-			},
-		},
-		User: usr,
+		SysProcAttr: sysProcAttr,
+		User:        usr,
 	}, nil
 }

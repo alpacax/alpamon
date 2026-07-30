@@ -89,17 +89,71 @@ func TestResolveGroups(t *testing.T) {
 	}
 }
 
-func TestResolveGroups_AppliesPlatformCap(t *testing.T) {
+func TestDemotedSysProcAttr(t *testing.T) {
+	tests := []struct {
+		name       string
+		uid        uint32
+		gid        uint32
+		groupIds   []string
+		wantGroups []uint32
+		wantInList bool
+		wantErr    bool
+	}{
+		{
+			name: "assembles credential with resolved groups", uid: 501, gid: 20,
+			groupIds:   []string{"80", "20", "12"},
+			wantGroups: []uint32{20, 80, 12}, wantInList: true,
+		},
+		{
+			// Non-membership is reported, not rejected: enforcing it is the
+			// caller's choice via DemoteOptions.ValidateGroup.
+			name: "reports non-member group without failing", uid: 501, gid: 99,
+			groupIds:   []string{"80"},
+			wantGroups: []uint32{99, 80},
+		},
+		{
+			name: "no supplementary groups keeps only the primary gid", uid: 0, gid: 0,
+			groupIds:   nil,
+			wantGroups: []uint32{0},
+		},
+		{
+			// Must fail the demotion, not silently drop the gid as the old paths did.
+			name: "unparsable group id is an error", uid: 501, gid: 20,
+			groupIds: []string{"nope"}, wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attr, inList, err := DemotedSysProcAttr(tt.uid, tt.gid, tt.groupIds)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, attr)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, attr)
+			require.NotNil(t, attr.Credential)
+			assert.Equal(t, tt.uid, attr.Credential.Uid)
+			assert.Equal(t, tt.gid, attr.Credential.Gid)
+			assert.Equal(t, tt.wantGroups, attr.Credential.Groups)
+			assert.Equal(t, tt.wantInList, inList)
+		})
+	}
+}
+
+func TestDemotedSysProcAttr_AppliesPlatformCap(t *testing.T) {
 	groupIds := make([]string, 0, 64)
 	for i := 1; i <= 64; i++ {
 		groupIds = append(groupIds, strconv.Itoa(i))
 	}
 
-	groups, _, err := ResolveGroups(99, groupIds)
+	attr, _, err := DemotedSysProcAttr(501, 99, groupIds)
 	require.NoError(t, err)
 
 	// The exported entry point must apply maxSupplementaryGroups(); anything
 	// larger would make setgroups(2) fail with EINVAL on a capped platform.
+	groups := attr.Credential.Groups
 	if cap := maxSupplementaryGroups(); cap > 0 {
 		assert.Len(t, groups, cap)
 	} else {
