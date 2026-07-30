@@ -22,7 +22,7 @@ sudo alpamon register --url https://<workspace> --token <TOKEN>
 
 openSUSE ships its sudoers file with `Defaults targetpw` alongside `ALL ALL=(ALL) ALL`, so every user may already run any command—but only by typing root's password, not their own. Both `%wheel` lines in that file are commented out, so `wheel` membership grants nothing by itself. The drop-in below therefore does two things: it grants `%wheel` the rule, and it exempts `%wheel` from `targetpw` so Alpacon-managed admins authenticate as themselves.
 
-Leap keeps that file at `/etc/sudoers`; Tumbleweed ships it as `/usr/etc/sudoers` and has no `/etc/sudoers` at all. The drop-in path is the same on both, because either file ends with `@includedir /etc/sudoers.d`.
+Leap keeps that file at `/etc/sudoers`; Tumbleweed ships it as `/usr/etc/sudoers` and has no `/etc/sudoers` at all. The drop-in path is the same on both, because either file ends with `@includedir /etc/sudoers.d`. Tumbleweed keeps `environment` and `login.defs` under `/usr/etc` for the same reason, which is why the agent reads system environment variables from both `/usr/etc/environment` and `/etc/environment`, the admin copy winning.
 
 Stage the drop-in under a name containing a dot, which sudo ignores when reading the include directory, so a typo cannot lock you out before `visudo -cf` has passed:
 

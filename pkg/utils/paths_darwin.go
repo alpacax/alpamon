@@ -25,6 +25,6 @@ func DefaultPath() string {
 	return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/homebrew/bin"
 }
 
-// EnvironmentFilePath returns the path to the system environment file.
-// macOS does not use /etc/environment; returns empty to skip loading.
-func EnvironmentFilePath() string { return "" }
+// EnvironmentFilePaths returns the system environment files.
+// macOS has no /etc/environment equivalent, so there is nothing to load.
+func EnvironmentFilePaths() []string { return nil }
