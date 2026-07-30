@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
@@ -29,6 +30,8 @@ func getNobodyCredential() (*syscall.SysProcAttr, error) {
 		return nil, fmt.Errorf("failed to parse nobody credentials: %w", err)
 	}
 
+	// Groups stays nil so Go calls setgroups(0, NULL), dropping the daemon's
+	// supplementary groups; resolving them here would widen what it can reach.
 	return &syscall.SysProcAttr{
 		Credential: &syscall.Credential{
 			Uid: uid,
@@ -158,47 +161,38 @@ func getCodeServerCredential(username, groupname string) (*syscall.SysProcAttr, 
 		return nil, fmt.Errorf("user %s not found: %w", username, err)
 	}
 
-	// Use user's primary group if groupname is empty
-	gidStr := usr.Gid
-	if groupname != "" {
-		group, err := user.LookupGroup(groupname)
-		if err != nil {
-			return nil, fmt.Errorf("group %s not found: %w", groupname, err)
-		}
-		gidStr = group.Gid
-	}
-
-	uid, gid, err := parseUserCredentials(usr.Uid, gidStr)
+	uid, gid, err := codeServerIDs(usr, groupname)
 	if err != nil {
 		return nil, err
 	}
 
-	groups := parseGroupIDs(usr)
+	groupIds, err := usr.GroupIds()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list groups of user %s: %w", username, err)
+	}
+
+	sysProcAttr, err := utils.DemotedSysProcAttr(uid, gid, groupIds)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build credentials for user %s: %w", username, err)
+	}
 
 	log.Debug().Msgf("Demoting code-server to user %s (group: %s).", username, groupname)
 
-	return &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid:    uid,
-			Gid:    gid,
-			Groups: groups,
-		},
-	}, nil
+	return sysProcAttr, nil
 }
 
-func parseGroupIDs(usr *user.User) []uint32 {
-	groupIds, err := usr.GroupIds()
-	if err != nil {
-		return nil
+// codeServerIDs resolves the uid and gid to demote code-server to: groupname when
+// set, otherwise the user's primary group. It cannot defer to utils.Demote, which
+// treats an empty groupname as "do not demote" and would leave the session as root.
+func codeServerIDs(usr *user.User, groupname string) (uid, gid uint32, err error) {
+	gidStr := usr.Gid
+	if groupname != "" {
+		group, err := user.LookupGroup(groupname)
+		if err != nil {
+			return 0, 0, fmt.Errorf("group %s not found: %w", groupname, err)
+		}
+		gidStr = group.Gid
 	}
 
-	groups := make([]uint32, 0, len(groupIds))
-	for _, gidStr := range groupIds {
-		gid, err := strconv.ParseUint(gidStr, 10, 32)
-		if err != nil {
-			continue
-		}
-		groups = append(groups, uint32(gid))
-	}
-	return groups
+	return parseUserCredentials(usr.Uid, gidStr)
 }
