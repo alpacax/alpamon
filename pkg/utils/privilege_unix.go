@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"slices"
 	"strconv"
 	"syscall"
 
@@ -46,7 +47,6 @@ func demotedSysProcAttr(uid, gid uint32, groupIds []string) (attr *syscall.SysPr
 func resolveGroups(gid uint32, groupIds []string, maxGroups int) (groups []uint32, groupInList bool, err error) {
 	groups = make([]uint32, 0, len(groupIds)+1)
 	groups = append(groups, gid)
-	seen := map[uint32]struct{}{gid: {}}
 	for _, gidStr := range groupIds {
 		gidUint, err := strconv.ParseUint(gidStr, 10, 32)
 		if err != nil {
@@ -56,10 +56,9 @@ func resolveGroups(gid uint32, groupIds []string, maxGroups int) (groups []uint3
 		if group == gid {
 			groupInList = true
 		}
-		if _, dup := seen[group]; dup {
+		if slices.Contains(groups, group) {
 			continue
 		}
-		seen[group] = struct{}{}
 		groups = append(groups, group)
 	}
 	if maxGroups > 0 && len(groups) > maxGroups {
