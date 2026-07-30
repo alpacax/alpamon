@@ -634,11 +634,17 @@ func (h *SystemHandler) executeUninstall() {
 
 		// This ensures the uninstall continues even after the current process terminates
 		// The service will start 5 seconds after being scheduled
+		// The delay is expressed with --on-active rather than
+		// --timer-property=OnActiveSec, because systemd before 236 rejects a
+		// --timer-property that is not accompanied by a timer option of its own
+		// ("--timer-property= has no effect without any other timer options",
+		// measured on systemd 229 and 228). --on-active is accepted by both and
+		// sets the same property.
 		scheduleCmdArgs := []string{
 			"--uid=0",
 			"--gid=0",
 			"--unit=alpamon-uninstall",
-			"--timer-property=OnActiveSec=5",
+			"--on-active=5",
 			"--timer-property=AccuracySec=1s",
 			"--description=Alpamon Uninstall Service",
 			"/bin/sh", "-c", uninstallCmd,

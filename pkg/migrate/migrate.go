@@ -297,13 +297,20 @@ func ScheduleSelfRestart(delay time.Duration) error {
 	}
 	secs := int(delay.Seconds())
 	unit := fmt.Sprintf("alpamon-restart-%d", time.Now().UnixNano())
-	cmd := exec.Command("systemd-run",
+	schedule := []string{
 		fmt.Sprintf("--on-active=%ds", secs),
-		"--collect",
 		"--unit", unit,
 		"systemctl", "restart", "alpamon",
-	)
-	out, err := cmd.CombinedOutput()
+	}
+
+	// --collect needs systemd 236 and SLES 12, which alpamon classifies, ships
+	// 228: `systemd-run: unrecognized option '--collect'`, measured on 228 and
+	// 229. Without the retry the migration commits its config swap and then has
+	// no way to restart into it, leaving the rollback watchdog as the only exit.
+	out, err := exec.Command("systemd-run", append([]string{"--collect"}, schedule...)...).CombinedOutput()
+	if err != nil {
+		out, err = exec.Command("systemd-run", schedule...).CombinedOutput()
+	}
 	if err != nil {
 		return fmt.Errorf("systemd-run: %w: %s", err, strings.TrimSpace(string(out)))
 	}

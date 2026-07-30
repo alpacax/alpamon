@@ -77,7 +77,11 @@ Tumbleweed is a rolling release, so the console update button runs `zypper dup`,
 
 ## SLES 12 and Leap 42
 
-Detection accepts them, because it prefix-matches the distribution id the way the server does, but only 15 and later are verified. Two differences are handled rather than tested end to end: `systemd-run --collect` needs systemd 236 and SLES 12 ships 228, so the uninstall retries the scheduling without that flag; and SuSEfirewall2, which those releases use instead of firewalld, is detected as an active high-level firewall, which disables Alpacon firewall management the same way ufw and firewalld do. Without that detection Alpacon would write iptables rules that SuSEfirewall2 discards on its next reload.
+Detection accepts them, because it prefix-matches the distribution id the way the server does. Alpamon itself is only verified on 15 and later, but the two places where those releases differ are handled, and the difference was measured on systemd 228 (Leap 42.3, the same version SLES 12 ships) and on a systemd 229 host.
+
+The uninstall schedules the package removal through `systemd-run`, and two of its options behave differently there. `--collect` does not exist before systemd 236, so the scheduling is retried without it. The delay is passed as `--on-active=5` rather than `--timer-property=OnActiveSec=5`, because the older systemd rejects a `--timer-property` that is not accompanied by a timer option of its own; `--on-active` is accepted by every version and sets the same property. Both matter, since a scheduling failure falls back to removing the package synchronously, in the middle of the command that asked for it.
+
+SuSEfirewall2, which those releases use instead of firewalld, is detected as an active high-level firewall (`/usr/lib/systemd/system/SuSEfirewall2.service`), which disables Alpacon firewall management the same way ufw and firewalld do. Without that detection Alpacon would write iptables rules that SuSEfirewall2 discards on its next reload.
 
 ## Known limitations
 

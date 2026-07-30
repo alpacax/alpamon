@@ -1549,7 +1549,7 @@ func TestSystemHandler_Uninstall_RetriesWithoutCollect(t *testing.T) {
 			handler.uninstallDone = make(chan struct{})
 			setPackageManagerAndID(t, utils.PkgZypper, "sles")
 
-			schedule := "--uid=0 --gid=0 --unit=alpamon-uninstall --timer-property=OnActiveSec=5 --timer-property=AccuracySec=1s --description=Alpamon Uninstall Service /bin/sh -c zypper --non-interactive remove alpamon; systemctl reset-failed alpamon-uninstall.service 2>/dev/null || true; systemctl reset-failed alpamon-uninstall.timer 2>/dev/null || true"
+			schedule := "--uid=0 --gid=0 --unit=alpamon-uninstall --on-active=5 --timer-property=AccuracySec=1s --description=Alpamon Uninstall Service /bin/sh -c zypper --non-interactive remove alpamon; systemctl reset-failed alpamon-uninstall.service 2>/dev/null || true; systemctl reset-failed alpamon-uninstall.timer 2>/dev/null || true"
 			mockExec.SetResult("systemd-run --collect "+schedule, 1, "unrecognized option '--collect'", errors.New("exit status 1"))
 			if !tt.plainScheduleOK {
 				mockExec.SetResult("systemd-run "+schedule, 1, "failed", errors.New("exit status 1"))
