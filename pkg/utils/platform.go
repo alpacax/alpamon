@@ -101,6 +101,25 @@ func ValidateServerPlatform(goos, p string) error {
 	return nil
 }
 
+// The warning covers what ValidateServerPlatform cannot catch: --platform debian passes on an openSUSE host, and then the server composes apt while the agent runs zypper. A warning rather than an error because the override may be correcting a real misdetection.
+func ResolveServerPlatform(goos, explicit string, detect func() (string, error)) (platform, warning string, err error) {
+	if explicit == "" {
+		detected, derr := detect()
+		return detected, "", derr
+	}
+	if verr := ValidateServerPlatform(goos, explicit); verr != nil {
+		return "", "", verr
+	}
+	// A failed detection is why --platform exists, so it must not warn.
+	if detected, derr := detect(); derr == nil && detected != explicit {
+		return explicit, fmt.Sprintf(
+			"Warning: --platform %s disagrees with the detected platform %s.\n"+
+				"Server.platform is write-once, so if the override is wrong, the only fix "+
+				"is to register the host again.", explicit, detected), nil
+	}
+	return explicit, "", nil
+}
+
 // The value register and migrate send; errors instead of defaulting because the server persists it write-once, fixable only by re-registering.
 func DetectRegistrationPlatform() (string, error) {
 	var raw string

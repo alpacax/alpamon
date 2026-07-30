@@ -332,16 +332,17 @@ func buildRegisterRequest(cmd *cobra.Command) (RegisterRequest, error) {
 		fmt.Printf("Server name normalized to %q\n", serverName)
 	}
 
-	if platform == "" {
-		detected, err := detectPlatformFn()
-		if err != nil {
-			return RegisterRequest{}, err
-		}
-		platform = detected
-		fmt.Printf("Platform auto-detected: %s\n", platform)
-	} else if err := utils.ValidateServerPlatform(runtime.GOOS, platform); err != nil {
+	resolved, warning, err := utils.ResolveServerPlatform(runtime.GOOS, platform, detectPlatformFn)
+	if err != nil {
 		return RegisterRequest{}, err
 	}
+	if platform == "" {
+		fmt.Printf("Platform auto-detected: %s\n", resolved)
+	}
+	if warning != "" {
+		fmt.Println(warning)
+	}
+	platform = resolved
 
 	finalTags := mergeCloudAndUserTags(detectCloudTags(cmd.Context()), tags)
 

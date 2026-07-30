@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"strings"
@@ -188,6 +189,62 @@ func TestIsTumbleweed(t *testing.T) {
 		t.Run(tt.id, func(t *testing.T) {
 			if got := IsTumbleweed(tt.id); got != tt.want {
 				t.Errorf("IsTumbleweed(%q) = %v, want %v", tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
+// ValidateServerPlatform accepts debian on any Linux host, so a contradicting
+// override is the only signal left that the write-once record is about to
+// disagree with the package manager the agent runs.
+func TestResolveServerPlatform(t *testing.T) {
+	detects := func(p string) func() (string, error) {
+		return func() (string, error) { return p, nil }
+	}
+	fails := func() (string, error) { return "", errors.New("unrecognized Linux distribution \"arch\"") }
+
+	tests := []struct {
+		name        string
+		explicit    string
+		detect      func() (string, error)
+		want        string
+		wantWarning string
+		wantErr     string
+	}{
+		{name: "detection fills an omitted platform", detect: detects("rhel"), want: "rhel"},
+		{name: "detection failure propagates", detect: fails, wantErr: "arch"},
+		{name: "override agreeing with detection is silent", explicit: "rhel", detect: detects("rhel"), want: "rhel"},
+		{
+			name: "override contradicting detection warns", explicit: "debian", detect: detects("rhel"),
+			want: "debian", wantWarning: "rhel",
+		},
+		{
+			// A failed detection is why --platform exists, so it must not warn.
+			name: "override is silent when detection fails", explicit: "debian", detect: fails, want: "debian",
+		},
+		{name: "cross-os override is rejected", explicit: "windows", detect: detects("rhel"), wantErr: "invalid --platform"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, warning, err := ResolveServerPlatform("linux", tt.explicit, tt.detect)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected an error containing %q, got %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("platform = %q, want %q", got, tt.want)
+			}
+			if tt.wantWarning == "" && warning != "" {
+				t.Errorf("expected no warning, got %q", warning)
+			}
+			if tt.wantWarning != "" && !strings.Contains(warning, tt.wantWarning) {
+				t.Errorf("warning must name the detected platform %q, got %q", tt.wantWarning, warning)
 			}
 		})
 	}

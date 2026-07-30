@@ -65,6 +65,9 @@ var (
 	caCert          string
 	rollbackTimeout time.Duration
 	force           bool
+
+	// Test seam mirroring register's: no side effect, and it lets a detection failure be injected on any host.
+	detectPlatformFn = utils.DetectRegistrationPlatform
 )
 
 // Cmd is the migrate subcommand exported for registration in root.go.
@@ -140,15 +143,11 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("active config not found at %s: %w", configPath, err)
 	}
 
-	if platform == "" {
-		detected, err := utils.DetectRegistrationPlatform()
-		if err != nil {
-			return err
-		}
-		platform = detected
-	} else if err := utils.ValidateServerPlatform(runtime.GOOS, platform); err != nil {
+	resolvedPlatform, err := resolvePlatform()
+	if err != nil {
 		return err
 	}
+	platform = resolvedPlatform
 
 	current, err := config.ReadServer(configPath)
 	if err != nil {
@@ -266,6 +265,19 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 // facing prefix on the target workspace so the new server doesn't end up
 // with two stacked suffixes (`mybox-abc123-xyz789`).
 var generatedSuffixRE = regexp.MustCompile(`-[0-9a-f]{6}$`)
+
+// Split out of runMigrate so the detection-failure path is reachable without
+// runMigrate's systemd and config preconditions.
+func resolvePlatform() (string, error) {
+	resolved, warning, err := utils.ResolveServerPlatform(runtime.GOOS, platform, detectPlatformFn)
+	if err != nil {
+		return "", err
+	}
+	if warning != "" {
+		fmt.Println(warning)
+	}
+	return resolved, nil
+}
 
 func stripGeneratedSuffix(name string) string {
 	return generatedSuffixRE.ReplaceAllString(name, "")
