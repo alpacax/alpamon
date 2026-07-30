@@ -20,7 +20,9 @@ sudo alpamon register --url https://<workspace> --token <TOKEN>
 
 ## Sudoers prerequisite
 
-openSUSE ships `/etc/sudoers` with `Defaults targetpw` alongside `ALL ALL=(ALL) ALL`, so every user may already run any command—but only by typing root's password, not their own. Both `%wheel` lines in that file are commented out, so `wheel` membership grants nothing by itself. The drop-in below therefore does two things: it grants `%wheel` the rule, and it exempts `%wheel` from `targetpw` so Alpacon-managed admins authenticate as themselves.
+openSUSE ships its sudoers file with `Defaults targetpw` alongside `ALL ALL=(ALL) ALL`, so every user may already run any command—but only by typing root's password, not their own. Both `%wheel` lines in that file are commented out, so `wheel` membership grants nothing by itself. The drop-in below therefore does two things: it grants `%wheel` the rule, and it exempts `%wheel` from `targetpw` so Alpacon-managed admins authenticate as themselves.
+
+Leap keeps that file at `/etc/sudoers`; Tumbleweed ships it as `/usr/etc/sudoers` and has no `/etc/sudoers` at all. The drop-in path is the same on both, because either file ends with `@includedir /etc/sudoers.d`.
 
 Stage the drop-in under a name containing a dot, which sudo ignores when reading the include directory, so a typo cannot lock you out before `visudo -cf` has passed:
 
@@ -29,7 +31,8 @@ printf '%%wheel ALL=(ALL) ALL\nDefaults:%%wheel !targetpw\n' |
   sudo tee /etc/sudoers.d/alpacon-wheel.stage >/dev/null
 sudo visudo -cf /etc/sudoers.d/alpacon-wheel.stage &&
   sudo install -m 0440 -o root -g root \
-    /etc/sudoers.d/alpacon-wheel.stage /etc/sudoers.d/alpacon-wheel
+    /etc/sudoers.d/alpacon-wheel.stage /etc/sudoers.d/alpacon-wheel ||
+  echo 'sudoers validation failed: drop-in not installed'
 sudo rm -f /etc/sudoers.d/alpacon-wheel.stage
 ```
 
@@ -65,6 +68,10 @@ Unlike `apt-get` and `yum`, zypper reserves codes above 100 for informational st
 | 107 | Installed, but an rpm `%post` script failed | failure |
 
 100 and 101 come from `patch-check`, which the agent never runs, so they are anomalous here rather than informational. 104 means nothing was updated. 107 matters because `%post` is what registers the systemd units and the PAM session lines, so a package that unpacked with a failed script is not a working install.
+
+## Console update on Tumbleweed
+
+Tumbleweed is a rolling release, so the console update button runs `zypper dup`, a full distribution upgrade, not the package-by-package update it runs on Leap and SLES. The vendored alpamon package is safe from being replaced by a distribution build, because `solver.dupAllowVendorChange` defaults to `false`, but `solver.dupAllowDowngrade` and `solver.dupAllowNameChange` both default to `true`, so an unattended `dup` may still downgrade or rename other packages. Leap and SLES never run `dup`: there it would advance the service pack.
 
 ## Known limitations
 
