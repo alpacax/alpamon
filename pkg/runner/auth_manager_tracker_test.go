@@ -7,15 +7,9 @@ import (
 	"time"
 )
 
-// newTestAuthManager returns an AuthManager with only the fields that the
-// tracker tests need populated. It intentionally does not start the
-// socket listener, so tests stay fast and isolated.
+// The shipped helper already builds exactly what these tests need.
 func newTestAuthManager() *AuthManager {
-	return &AuthManager{
-		pidToSessionMap:    make(map[int]*SessionInfo),
-		localSudoRequests:  make(map[string]*SudoRequest),
-		completionChannels: make(map[string]chan struct{}),
-	}
+	return NewEmptyAuthManager()
 }
 
 // TestAddPIDCommandMapping_RegistersCommandKind verifies that Commands
