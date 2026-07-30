@@ -6,23 +6,43 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"slices"
 	"strconv"
 	"syscall"
 
 	"github.com/rs/zerolog/log"
 )
 
-// ResolveGroups builds the supplementary group list for Credential.Groups,
-// applying the current platform's setgroups(2) cap. It is the single entry
-// point shared by every privilege-demotion path (Demote and the websh PTY),
-// so group handling stays identical across them.
-func ResolveGroups(gid uint32, groupIds []string) (groups []uint32, groupInList bool, err error) {
-	return resolveGroups(gid, groupIds, maxSupplementaryGroups())
+// DemotedSysProcAttr is the single entry point for demotions that keep the
+// user's supplementary groups (Demote, Websh PTY, code-server): one place for
+// setgroups(2) capping, so those paths cannot drift. Demotions that must drop
+// the group list build their own Credential with Groups left nil.
+func DemotedSysProcAttr(uid, gid uint32, groupIds []string) (*syscall.SysProcAttr, error) {
+	attr, _, err := demotedSysProcAttr(uid, gid, groupIds)
+	return attr, err
+}
+
+// demotedSysProcAttr additionally reports whether gid was among groupIds. Only
+// Demote's ValidateGroup consumes that, so it stays off the exported signature
+// rather than making both other call sites discard it.
+func demotedSysProcAttr(uid, gid uint32, groupIds []string) (attr *syscall.SysProcAttr, groupInList bool, err error) {
+	groups, groupInList, err := resolveGroups(gid, groupIds, maxSupplementaryGroups())
+	if err != nil {
+		return nil, false, err
+	}
+	return &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    uid,
+			Gid:    gid,
+			Groups: groups,
+		},
+	}, groupInList, nil
 }
 
 // resolveGroups builds the supplementary group list for Credential.Groups.
 // The primary gid is placed first so it survives truncation, and the requested
-// gid's membership is reported via groupInList for ValidateGroup. When
+// gid's membership is reported via groupInList for ValidateGroup. Duplicates are
+// dropped before capping so a repeated gid cannot push a distinct one out. When
 // maxGroups > 0 the list is capped to that many entries.
 func resolveGroups(gid uint32, groupIds []string, maxGroups int) (groups []uint32, groupInList bool, err error) {
 	groups = make([]uint32, 0, len(groupIds)+1)
@@ -32,14 +52,19 @@ func resolveGroups(gid uint32, groupIds []string, maxGroups int) (groups []uint3
 		if err != nil {
 			return nil, false, fmt.Errorf("invalid supplementary group id: %w", err)
 		}
-		if uint32(gidUint) == gid {
+		group := uint32(gidUint)
+		if group == gid {
 			groupInList = true
+		}
+		if slices.Contains(groups, group) {
 			continue
 		}
-		groups = append(groups, uint32(gidUint))
+		groups = append(groups, group)
 	}
 	if maxGroups > 0 && len(groups) > maxGroups {
-		log.Debug().Int("requested", len(groups)).Int("cap", maxGroups).
+		// Warn, not Debug: the process silently loses file access it was granted,
+		// and Debug is off in production (config.go sets InfoLevel).
+		log.Warn().Int("requested", len(groups)).Int("cap", maxGroups).
 			Msg("Supplementary group list truncated to the platform setgroups limit.")
 		groups = groups[:maxGroups]
 	}
@@ -99,7 +124,7 @@ func Demote(username, groupname string, opts DemoteOptions) (*DemoteResult, erro
 		return nil, err
 	}
 
-	groups, groupInList, err := ResolveGroups(uint32(gid), groupIds)
+	sysProcAttr, groupInList, err := demotedSysProcAttr(uint32(uid), uint32(gid), groupIds)
 	if err != nil {
 		return nil, err
 	}
@@ -111,13 +136,7 @@ func Demote(username, groupname string, opts DemoteOptions) (*DemoteResult, erro
 	log.Debug().Msgf("Demote permission to match user: %s, group: %s.", username, groupname)
 
 	return &DemoteResult{
-		SysProcAttr: &syscall.SysProcAttr{
-			Credential: &syscall.Credential{
-				Uid:    uint32(uid),
-				Gid:    uint32(gid),
-				Groups: groups,
-			},
-		},
-		User: usr,
+		SysProcAttr: sysProcAttr,
+		User:        usr,
 	}, nil
 }
