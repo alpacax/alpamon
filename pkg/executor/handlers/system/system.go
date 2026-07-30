@@ -227,7 +227,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 			return h.Executor.Exec(ctx, refresh, "root", "root", packageProxyEnv(packageProxy), 0)
 		})
 		if code != 0 {
-			return code, out, rerr
+			return code, withZypperHint(code, out), rerr
 		}
 		cmd = fmt.Sprintf("zypper --non-interactive update %s", pkgList)
 		versionsBefore = h.installedRPMVersions(ctx, packages)
@@ -267,6 +267,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 			output = strings.TrimRight(output, "\n") + "\n\n" + note
 		}
 	}
+	output = withZypperHint(exitCode, output)
 	if exitCode == 0 && needPam {
 		h.versionResolver.InvalidatePamCache()
 	}
@@ -394,6 +395,39 @@ func (h *SystemHandler) unmovedPackages(ctx context.Context, versionsBefore map[
 	}
 	slices.Sort(stale)
 	return stale
+}
+
+// The console shows an operator the exit code and the command output, and zypper's
+// own output does not say what the operator has to change. Measured on an
+// unregistered sles12sp5 container: `lr` exits 6 and `update alpamon` exits 104,
+// neither of them mentioning the missing subscription that caused both.
+func withZypperHint(exitCode int, output string) string {
+	if utils.PackageManager != utils.PkgZypper {
+		return output
+	}
+
+	var hint string
+	switch exitCode {
+	case 4:
+		hint = "A repository could not be refreshed. One unreachable repository fails the whole " +
+			"command, even when alpamon's own repository is fine: check `zypper lr --uri`."
+	case 6:
+		hint = "No repositories are defined. On SLES this usually means the host has no active " +
+			"subscription (`SUSEConnect --status`); alpamon's repository also has to be added with " +
+			"`zypper addrepo`, because the PackageCloud one-liner writes a yum repo file zypper never reads."
+	case zypperLockedExit:
+		hint = "Another process still holds the libzypp lock after several retries. Find it with " +
+			"`zypper ps`, and expect packagekit or an operator's own zypper session."
+	case 104:
+		hint = "No configured repository carries the package. Add alpamon's repository with " +
+			"`zypper addrepo`, and on SLES check that the subscription is active (`SUSEConnect --status`)."
+	case 106:
+		hint = "A repository was skipped because it failed to refresh, so the update may have missed " +
+			"packages: `zypper refresh` names the one that failed."
+	default:
+		return output
+	}
+	return strings.TrimRight(output, "\n") + "\n\n" + hint
 }
 
 // 102/103 follow a successful install; every other code stays a failure, and the
@@ -700,5 +734,5 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 		return h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
 	})
 	exitCode, err = normalizeZypperExit(exitCode, err, false)
-	return exitCode, output, err
+	return exitCode, withZypperHint(exitCode, output), err
 }

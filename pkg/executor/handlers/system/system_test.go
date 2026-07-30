@@ -1580,3 +1580,67 @@ func TestSystemHandler_Uninstall_RetriesWithoutCollect(t *testing.T) {
 		})
 	}
 }
+
+// zypper's own output does not name the missing subscription or repository that
+// produced these codes, and the console shows the operator nothing else.
+func TestWithZypperHint(t *testing.T) {
+	tests := []struct {
+		name       string
+		pkgManager string
+		exitCode   int
+		wantHint   string
+	}{
+		{"unreachable repo", utils.PkgZypper, 4, "zypper lr --uri"},
+		{"no repositories", utils.PkgZypper, 6, "SUSEConnect --status"},
+		{"package in no repository", utils.PkgZypper, 104, "zypper addrepo"},
+		{"lock never cleared", utils.PkgZypper, 7, "zypper ps"},
+		{"skipped repo that was not tolerated", utils.PkgZypper, 106, "zypper refresh"},
+		{"success is left alone", utils.PkgZypper, 0, ""},
+		{"other failures are left alone", utils.PkgZypper, 8, ""},
+		{"yum is left alone", utils.PkgYum, 6, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setPackageManagerAndID(t, tt.pkgManager, "opensuse-leap")
+
+			got := withZypperHint(tt.exitCode, "zypper said something")
+			if tt.wantHint == "" {
+				if got != "zypper said something" {
+					t.Errorf("expected the output untouched, got %q", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.wantHint) {
+				t.Errorf("expected a hint mentioning %q, got %q", tt.wantHint, got)
+			}
+			if !strings.HasPrefix(got, "zypper said something") {
+				t.Errorf("the hint must follow zypper's own output, got %q", got)
+			}
+		})
+	}
+}
+
+// The refresh runs before the update and returns on its own, so its failures need
+// the hint too.
+func TestSystemHandler_Upgrade_ZypperRefreshFailureCarriesTheHint(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgZypper, "sles")
+	mockExec.SetResult("zypper --non-interactive refresh", 6, "No repositories defined.", errors.New("exit status 6"))
+
+	exitCode, output, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	if exitCode != 6 {
+		t.Fatalf("expected exit 6, got %d", exitCode)
+	}
+	if !strings.Contains(output, "SUSEConnect --status") {
+		t.Errorf("expected the subscription hint, got %q", output)
+	}
+}

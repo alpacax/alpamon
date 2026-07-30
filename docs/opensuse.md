@@ -65,6 +65,8 @@ Unlike `apt-get` and `yum`, zypper reserves codes above 100 for informational st
 | 100, 101 | Patches available, none installed | failure |
 | 104 | No repository carries the requested package | failure |
 | 106 | A repository was skipped because it failed to refresh | success for an agent upgrade whose own repository refreshed, failure otherwise |
+
+Exit 4, 6, 7, 104, and a 106 that was not tolerated get a hint appended to the command output, because zypper's own message does not name what the operator has to change. An unregistered SLES host is the common case: `zypper lr` exits 6 and `zypper update alpamon` exits 104, neither mentioning the inactive subscription behind both. Check `SUSEConnect --status` there, and confirm alpamon's repository is present with `zypper lr --uri`. Exit 7 means the libzypp lock was still held after the retries; `zypper ps` names the holder.
 | 107 | Installed, but an rpm `%post` script failed | failure |
 
 100 and 101 come from `patch-check`, which the agent never runs, so they are anomalous here rather than informational. 104 means nothing was updated. 107 matters because `%post` is what registers the systemd units and the PAM session lines, so a package that unpacked with a failed script is not a working install.
