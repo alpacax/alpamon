@@ -78,7 +78,11 @@ type APISession interface {
 
 // VersionResolver provides version information for upgrade decisions.
 type VersionResolver interface {
-	GetLatestVersion() string
+	// GetLatestVersion returns the latest release tag from GitHub, or "" on
+	// failure. proxyURL, when non-empty, routes this lookup request through
+	// the given proxy (per-request transport; the agent's own process
+	// environment and control-plane connection are never affected).
+	GetLatestVersion(proxyURL string) string
 	GetPamVersion() string
 	InvalidatePamCache()
 }
