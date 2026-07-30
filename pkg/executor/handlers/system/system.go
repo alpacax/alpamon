@@ -207,23 +207,22 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	case utils.PkgYum:
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
 	case utils.PkgZypper:
-		// The refresh is explicit because zypper only auto-refreshes repos that
-		// were added with autorefresh on (`addrepo -f`). Against stale metadata
-		// `update` finds no candidate and still exits 0, which would report a
-		// successful upgrade that never happened.
-		//
-		// It runs as its own command, scoped to alpamon's repo when that can be
-		// resolved: chained with `&&`, one unreachable repo anywhere on the host
-		// exits 4 and update never runs, and a chained exit code cannot say
-		// which half produced it. The update itself stays unscoped because
-		// `update -r` loads only that repo and then cannot resolve dependencies
-		// living in the distribution repos. See docs/opensuse.md.
+		// The refresh is explicit because zypper only auto-refreshes repos added
+		// with autorefresh on (`addrepo -f`), and against stale metadata `update`
+		// finds no candidate and still exits 0. It runs as its own command because
+		// chaining it with `&&` lets one unreachable repo anywhere on the host exit
+		// 4 with update never running, and hides which half produced the code. The
+		// update stays unscoped: `update -r` loads only that repo and then cannot
+		// resolve dependencies from the distribution repos.
 		refresh := []string{"zypper", "--non-interactive", "refresh"}
 		if alias := h.resolveZypperAlpamonRepo(ctx); alias != "" {
 			refresh = append(refresh, alias)
 			alpamonRepoRefreshed = true
 		}
-		if code, out, rerr := h.Executor.Exec(ctx, refresh, "root", "root", packageProxyEnv(packageProxy), 0); code != 0 {
+		code, out, rerr := retryWhileZypperLocked(ctx, func() (int, string, error) {
+			return h.Executor.Exec(ctx, refresh, "root", "root", packageProxyEnv(packageProxy), 0)
+		})
+		if code != 0 {
 			return code, out, rerr
 		}
 		cmd = fmt.Sprintf("zypper --non-interactive update %s", pkgList)
@@ -246,7 +245,9 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	log.Debug().Msgf("Upgrading %s...", pkgList)
 	// The proxy environment (nil without a package proxy) applies to the
 	// spawned package-manager shell only, never to the agent process.
-	exitCode, output, err := h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageProxyEnv(packageProxy), 0)
+	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
+		return h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageProxyEnv(packageProxy), 0)
+	})
 	exitCode, err = normalizeZypperExit(exitCode, err, alpamonRepoRefreshed)
 	if exitCode == 0 && needPam {
 		h.versionResolver.InvalidatePamCache()
@@ -278,14 +279,23 @@ func sanitizePackageProxy(raw string) string {
 	}
 }
 
-// alpamonRepoURL matches the PackageCloud repository that carries alpamon under
-// whatever alias the operator gave it.
-const alpamonRepoURL = "packagecloud.io/alpacax/alpamon"
+// zypper behavior the other package managers do not share; per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
+const (
+	// The PackageCloud repository carrying alpamon, whatever alias the operator gave it.
+	alpamonRepoURL = "packagecloud.io/alpacax/alpamon"
 
-// resolveZypperAlpamonRepo returns the alias of the enabled repo pointing at
-// alpamon's PackageCloud repository, or "" when there is none to scope to.
-// `lr --export -` is parsed instead of the table form because it emits ini
-// (`[alias]` plus `baseurl=`) and needs no column splitting.
+	// ZYPP_LOCKED: packagekit, an operator's session, or a console update racing
+	// the agent's own upgrade holds the libzypp lock. dnf waits for its lock and
+	// apt can be told to retry; zypper --non-interactive gives up at once.
+	zypperLockedExit   = 7
+	zypperLockAttempts = 3
+)
+
+// Var so tests do not sleep. Long enough for a short transaction elsewhere to finish, short enough to stay inside a console command's patience.
+var zypperLockRetryDelay = 15 * time.Second
+
+// The alias to scope the refresh to, or "" when none resolves. `lr --export -` is
+// parsed rather than the table form: it emits ini and needs no column splitting.
 func (h *SystemHandler) resolveZypperAlpamonRepo(ctx context.Context) string {
 	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "zypper", "--non-interactive", "lr", "--export", "-")
 	if err != nil || exitCode != 0 {
@@ -320,12 +330,25 @@ func (h *SystemHandler) resolveZypperAlpamonRepo(ctx context.Context) string {
 	return resolved()
 }
 
-// zypper's 102/103 follow a successful install; every other code stays a
-// failure, and the dropped error is the *exec.ExitError for the same code.
-// 106 (some repos skipped) is success only when alpamonRepoRefreshed says the
-// repo we depend on was refreshed on its own moments earlier, so the skipped one
-// cannot be hiding a missed update. Per-code reasoning and the apt/yum contrast
-// are in docs/opensuse.md.
+func retryWhileZypperLocked(ctx context.Context, run func() (int, string, error)) (int, string, error) {
+	for attempt := 1; ; attempt++ {
+		exitCode, output, err := run()
+		if exitCode != zypperLockedExit || utils.PackageManager != utils.PkgZypper || attempt >= zypperLockAttempts {
+			return exitCode, output, err
+		}
+		log.Info().Int("attempt", attempt).Msg("zypper is locked by another process; retrying.")
+		select {
+		case <-ctx.Done():
+			return exitCode, output, err
+		case <-time.After(zypperLockRetryDelay):
+		}
+	}
+}
+
+// 102/103 follow a successful install; every other code stays a failure, and the
+// dropped error is the *exec.ExitError for the same code. 106 (some repos skipped)
+// is success only when alpamonRepoRefreshed says the repo we depend on was
+// refreshed on its own, so the skipped one cannot hide a missed update.
 func normalizeZypperExit(exitCode int, err error, alpamonRepoRefreshed bool) (int, error) {
 	if utils.PackageManager != utils.PkgZypper {
 		return exitCode, err
@@ -615,7 +638,9 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 
 	// A system-wide update covers every repo by definition, so a skipped repo
 	// means part of the update did not happen: 106 stays a failure here.
-	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
+	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
+		return h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
+	})
 	exitCode, err = normalizeZypperExit(exitCode, err, false)
 	return exitCode, output, err
 }

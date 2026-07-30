@@ -104,6 +104,39 @@ func (m *MockAPISession) lastDeleteURL() string {
 	return m.DeleteCalls[len(m.DeleteCalls)-1]
 }
 
+// Reports the zypper lock exit code for the first lockedRuns `zypper` commands,
+// then defers to the mock, whose one fixed result per command cannot express
+// "locked now, free on the retry".
+type lockedThenFreeExecutor struct {
+	*common.MockCommandExecutor
+	lockedRuns int
+	calls      int
+}
+
+func (e *lockedThenFreeExecutor) zypperLocked(args []string) bool {
+	joined := strings.Join(args, " ")
+	// `zypper lr` does not take the libzypp lock, measured on opensuse/leap:15.
+	if !strings.Contains(joined, "zypper") || strings.Contains(joined, " lr ") {
+		return false
+	}
+	e.calls++
+	return e.calls <= e.lockedRuns
+}
+
+func (e *lockedThenFreeExecutor) Exec(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
+	if e.zypperLocked(args) {
+		return 7, "System management is locked by the application with pid 1234", errors.New("exit status 7")
+	}
+	return e.MockCommandExecutor.Exec(ctx, args, username, groupname, env, timeout)
+}
+
+func (e *lockedThenFreeExecutor) RunAsUser(ctx context.Context, username string, name string, args ...string) (int, string, error) {
+	if e.zypperLocked(args) {
+		return 7, "System management is locked by the application with pid 1234", errors.New("exit status 7")
+	}
+	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
+}
+
 func TestSystemHandler_Name(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -1314,5 +1347,85 @@ func TestSystemHandler_Uninstall_UsesZypper(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a zypper remove command, got %+v", mockExec.GetExecutedCommands())
+	}
+}
+
+func TestRetryWhileZypperLocked(t *testing.T) {
+	orig := zypperLockRetryDelay
+	zypperLockRetryDelay = 0
+	t.Cleanup(func() { zypperLockRetryDelay = orig })
+
+	tests := []struct {
+		name       string
+		pkgManager string
+		lockedRuns int
+		wantCalls  int
+		wantExit   int
+	}{
+		{"retries until the lock clears", utils.PkgZypper, 1, 2, 0},
+		{"gives up after the attempt cap", utils.PkgZypper, 99, zypperLockAttempts, 7},
+		// apt has no ZYPP_LOCKED, so 7 there is a real failure to report as-is.
+		{"apt exit 7 is not retried", utils.PkgApt, 99, 1, 7},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setPackageManagerAndID(t, tt.pkgManager, "opensuse-leap")
+
+			var calls int
+			exitCode, _, _ := retryWhileZypperLocked(context.Background(), func() (int, string, error) {
+				calls++
+				if calls <= tt.lockedRuns {
+					return 7, "locked", errors.New("exit status 7")
+				}
+				return 0, "", nil
+			})
+
+			if calls != tt.wantCalls {
+				t.Errorf("expected %d attempts, got %d", tt.wantCalls, calls)
+			}
+			if exitCode != tt.wantExit {
+				t.Errorf("expected exit %d, got %d", tt.wantExit, exitCode)
+			}
+		})
+	}
+}
+
+// A console update racing the agent's own upgrade, or packagekit holding the
+// lock, must not surface as a failed command when the lock clears.
+func TestSystemHandler_ZypperLockIsRetried(t *testing.T) {
+	orig := zypperLockRetryDelay
+	zypperLockRetryDelay = 0
+	t.Cleanup(func() { zypperLockRetryDelay = orig })
+
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"system update", common.Update.String()},
+		{"agent upgrade", common.Upgrade.String()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExec := &lockedThenFreeExecutor{MockCommandExecutor: common.NewMockCommandExecutor(t), lockedRuns: 1}
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+			setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+
+			exitCode, _, _ := handler.Execute(context.Background(), tt.command, &common.CommandArgs{})
+			if exitCode != 0 {
+				t.Errorf("expected the retry to recover, got exit %d", exitCode)
+			}
+			if mockExec.calls < 2 {
+				t.Errorf("expected a retry, got %d lockable calls", mockExec.calls)
+			}
+		})
 	}
 }
