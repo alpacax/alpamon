@@ -9,7 +9,6 @@ package runner
 func NewEmptyAuthManager() *AuthManager {
 	return &AuthManager{
 		pidToSessionMap:    make(map[int]*SessionInfo),
-		localSudoRequests:  make(map[string]*SudoRequest),
 		completionChannels: make(map[string]chan struct{}),
 	}
 }

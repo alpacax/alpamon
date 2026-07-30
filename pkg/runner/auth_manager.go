@@ -133,7 +133,6 @@ type AuthManager struct {
 	pidToSessionMap    map[int]*SessionInfo
 	controlClient      *ControlClient
 	listener           net.Listener
-	localSudoRequests  map[string]*SudoRequest
 	completionChannels map[string]chan struct{}
 	session            *scheduler.Session
 	blockLocalSudo     bool
@@ -154,7 +153,6 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 	authManagerOnce.Do(func() {
 		authManager = &AuthManager{
 			pidToSessionMap:    make(map[int]*SessionInfo),
-			localSudoRequests:  make(map[string]*SudoRequest),
 			completionChannels: make(map[string]chan struct{}),
 			session:            session,
 		}
@@ -162,10 +160,6 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 
 	if authManager.controlClient == nil {
 		authManager.controlClient = controlClient
-	}
-
-	if authManager.localSudoRequests == nil {
-		authManager.localSudoRequests = make(map[string]*SudoRequest)
 	}
 
 	if authManager.completionChannels == nil {
@@ -386,9 +380,6 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		return
 	}
 
-	// Create completion channel to signal when response is received
-	completionChan := make(chan struct{})
-
 	sid, sidOK := sessionID(sudoApprovalReq.PID)
 	am.mu.Lock()
 	session, exists := am.lookupSessionLocked(sid, sidOK, sudoApprovalReq.PPID)
@@ -447,7 +438,8 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		Str("command_id", sudoApprovalReq.CommandID).
 		Msg("Alpacon user sudo request")
 
-	// Store completion channel for this request
+	// Store completion channel so HandleSudoApprovalResponse can unblock the wait below
+	completionChan := make(chan struct{})
 	am.storeCompletionChannel(sudoApprovalReq.RequestID, completionChan)
 
 	// Send Sudo Approval request to the alpacon-server with retry
@@ -545,7 +537,6 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 	am.mu.Lock()
 	var sudoRequest *SudoRequest
 
-	// 1. find in alpacon user requests
 	for _, session := range am.pidToSessionMap {
 		if req, exists := session.Requests[response.RequestID]; exists {
 			delete(session.Requests, response.RequestID)
@@ -554,22 +545,10 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 			break
 		}
 	}
-
-	// 2. find in local user requests
-	if sudoRequest == nil {
-		if req, exists := am.localSudoRequests[response.RequestID]; exists {
-			delete(am.localSudoRequests, response.RequestID)
-			sudoRequest = req
-			log.Debug().Msgf("Found local user request for ID: %s", response.RequestID)
-		} else {
-			log.Debug().Msgf("Request ID %s not found in localSudoRequests", response.RequestID)
-		}
-	}
 	am.mu.Unlock()
 
 	if sudoRequest == nil {
 		am.mu.RLock()
-		log.Debug().Msgf("Current localSudoRequests: %+v", am.localSudoRequests)
 		for _, session := range am.pidToSessionMap {
 			log.Debug().Msgf("Session %s requests: %+v", session.SessionID, session.Requests)
 		}
@@ -775,16 +754,10 @@ func (am *AuthManager) isRequestPending(requestID string) bool {
 	am.mu.RLock()
 	defer am.mu.RUnlock()
 
-	// Check alpacon user requests
 	for _, session := range am.pidToSessionMap {
 		if _, exists := session.Requests[requestID]; exists {
 			return true
 		}
-	}
-
-	// Check local user requests
-	if _, exists := am.localSudoRequests[requestID]; exists {
-		return true
 	}
 
 	return false
@@ -802,7 +775,6 @@ func (am *AuthManager) Stop() {
 func (am *AuthManager) cleanupTimeoutRequest(requestID string, approved bool, reason string) {
 	am.mu.Lock()
 
-	// 1. Alpacon user
 	for _, session := range am.pidToSessionMap {
 		if req, exists := session.Requests[requestID]; exists {
 			delete(session.Requests, requestID)
@@ -813,17 +785,6 @@ func (am *AuthManager) cleanupTimeoutRequest(requestID string, approved bool, re
 			}
 			return
 		}
-	}
-
-	// 2. Local user
-	if req, exists := am.localSudoRequests[requestID]; exists {
-		delete(am.localSudoRequests, requestID)
-		am.mu.Unlock()
-		if req.Connection != nil {
-			am.sendSudoApprovalResponse(req.Connection, SudoApprovalRequest{RequestID: requestID}, approved, reason)
-			_ = req.Connection.Close()
-		}
-		return
 	}
 
 	am.mu.Unlock()
