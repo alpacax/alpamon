@@ -49,6 +49,11 @@ func TestResolveGroups(t *testing.T) {
 			want: []uint32{99, 80, 12},
 		},
 		{
+			name: "no supplementary groups keeps only the primary gid", gid: 0,
+			groupIds: nil,
+			want:     []uint32{0},
+		},
+		{
 			name: "exactly at cap keeps every entry", gid: 99,
 			groupIds: []string{"1", "2"}, maxGroups: 3,
 			want: []uint32{99, 1, 2},
@@ -116,16 +121,6 @@ func TestDemotedSysProcAttr(t *testing.T) {
 			name: "reports non-member group without failing", uid: 501, gid: 99,
 			groupIds:   []string{"80"},
 			wantGroups: []uint32{99, 80},
-		},
-		{
-			name: "duplicate group ids deduped", uid: 501, gid: 99,
-			groupIds:   []string{"80", "80", "12"},
-			wantGroups: []uint32{99, 80, 12},
-		},
-		{
-			name: "no supplementary groups keeps only the primary gid", uid: 0, gid: 0,
-			groupIds:   nil,
-			wantGroups: []uint32{0},
 		},
 		{
 			// Must fail the demotion, not silently drop the gid as the old paths did.
