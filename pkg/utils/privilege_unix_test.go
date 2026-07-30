@@ -43,6 +43,12 @@ func TestResolveGroups(t *testing.T) {
 			want:      []uint32{99, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
 		},
 		{
+			// Without dedup the repeated 80 would eat a cap slot and push 12 out.
+			name: "duplicate supplementary gids deduped before capping", gid: 99,
+			groupIds: []string{"80", "80", "12"}, maxGroups: 3,
+			want: []uint32{99, 80, 12},
+		},
+		{
 			name: "exactly at cap keeps every entry", gid: 99,
 			groupIds: []string{"1", "2"}, maxGroups: 3,
 			want: []uint32{99, 1, 2},
@@ -110,6 +116,11 @@ func TestDemotedSysProcAttr(t *testing.T) {
 			name: "reports non-member group without failing", uid: 501, gid: 99,
 			groupIds:   []string{"80"},
 			wantGroups: []uint32{99, 80},
+		},
+		{
+			name: "duplicate group ids deduped", uid: 501, gid: 99,
+			groupIds:   []string{"80", "80", "12"},
+			wantGroups: []uint32{99, 80, 12},
 		},
 		{
 			name: "no supplementary groups keeps only the primary gid", uid: 0, gid: 0,

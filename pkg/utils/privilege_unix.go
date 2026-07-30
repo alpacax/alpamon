@@ -32,21 +32,27 @@ func DemotedSysProcAttr(uid, gid uint32, groupIds []string) (attr *syscall.SysPr
 
 // resolveGroups builds the supplementary group list for Credential.Groups.
 // The primary gid is placed first so it survives truncation, and the requested
-// gid's membership is reported via groupInList for ValidateGroup. When
+// gid's membership is reported via groupInList for ValidateGroup. Duplicates are
+// dropped before capping so a repeated gid cannot push a distinct one out. When
 // maxGroups > 0 the list is capped to that many entries.
 func resolveGroups(gid uint32, groupIds []string, maxGroups int) (groups []uint32, groupInList bool, err error) {
 	groups = make([]uint32, 0, len(groupIds)+1)
 	groups = append(groups, gid)
+	seen := map[uint32]struct{}{gid: {}}
 	for _, gidStr := range groupIds {
 		gidUint, err := strconv.ParseUint(gidStr, 10, 32)
 		if err != nil {
 			return nil, false, fmt.Errorf("invalid supplementary group id: %w", err)
 		}
-		if uint32(gidUint) == gid {
+		group := uint32(gidUint)
+		if group == gid {
 			groupInList = true
+		}
+		if _, dup := seen[group]; dup {
 			continue
 		}
-		groups = append(groups, uint32(gidUint))
+		seen[group] = struct{}{}
+		groups = append(groups, group)
 	}
 	if maxGroups > 0 && len(groups) > maxGroups {
 		log.Debug().Int("requested", len(groups)).Int("cap", maxGroups).
