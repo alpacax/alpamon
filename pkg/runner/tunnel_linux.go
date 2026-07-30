@@ -181,9 +181,10 @@ func getCodeServerCredential(username, groupname string) (*syscall.SysProcAttr, 
 	return sysProcAttr, nil
 }
 
-// codeServerIDs cannot defer to utils.Demote: Demote treats an empty groupname
-// as "do not demote", which would leave the code-server session running as root.
-func codeServerIDs(usr *user.User, groupname string) (uint32, uint32, error) {
+// codeServerIDs resolves the uid and gid to demote code-server to: groupname when
+// set, otherwise the user's primary group. It cannot defer to utils.Demote, which
+// treats an empty groupname as "do not demote" and would leave the session as root.
+func codeServerIDs(usr *user.User, groupname string) (uid, gid uint32, err error) {
 	gidStr := usr.Gid
 	if groupname != "" {
 		group, err := user.LookupGroup(groupname)
