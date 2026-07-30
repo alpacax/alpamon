@@ -438,11 +438,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		Str("command_id", sudoApprovalReq.CommandID).
 		Msg("Alpacon user sudo request")
 
-	// Store completion channel so HandleSudoApprovalResponse can unblock the wait below.
-	// Buffered so signalCompletion's non-blocking send lands even if the response is
-	// processed before this goroutine reaches the select.
-	completionChan := make(chan struct{}, 1)
-	am.storeCompletionChannel(sudoApprovalReq.RequestID, completionChan)
+	completionChan := am.newCompletionChannel(sudoApprovalReq.RequestID)
 
 	// Send Sudo Approval request to the alpacon-server with retry
 	if err := am.sendSudoRequestWithRetry(sudoApprovalReq); err != nil {
@@ -724,10 +720,15 @@ func RegisterCommandPID(pid int, commandID, username string) func() {
 	return func() { am.RemovePIDCommandMapping(pid, commandID) }
 }
 
-func (am *AuthManager) storeCompletionChannel(requestID string, ch chan struct{}) {
+// Capacity 1 is load-bearing: signalCompletion sends without blocking, so an
+// unbuffered channel drops the signal when the response beats the waiter's select.
+func (am *AuthManager) newCompletionChannel(requestID string) chan struct{} {
+	ch := make(chan struct{}, 1)
 	am.mu.Lock()
 	am.completionChannels[requestID] = ch
 	am.mu.Unlock()
+
+	return ch
 }
 
 func (am *AuthManager) removeCompletionChannel(requestID string) {
@@ -745,8 +746,7 @@ func (am *AuthManager) signalCompletion(requestID string) {
 		select {
 		case ch <- struct{}{}:
 		default:
-			// Already signaled: the capacity-1 buffer is full and the waiter
-			// only needs one signal. Nothing closes these channels.
+			// Already signaled; the waiter only needs one.
 		}
 	}
 }
