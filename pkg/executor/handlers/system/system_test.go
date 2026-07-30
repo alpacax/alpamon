@@ -991,23 +991,171 @@ func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
 	}
 
-	var found bool
-	for _, c := range mockExec.GetExecutedCommands() {
-		joined := strings.Join(c.Args, " ")
+	refreshedAt, updatedAt := -1, -1
+	for i, c := range mockExec.GetExecutedCommands() {
+		joined := c.Name + " " + strings.Join(c.Args, " ")
+		if strings.Contains(joined, "zypper --non-interactive refresh") {
+			refreshedAt = i
+		}
 		if strings.Contains(joined, "zypper --non-interactive update alpamon") {
-			found = true
-			// Against stale metadata a bare `update` exits 0 without upgrading,
-			// so the refresh must survive refactors.
-			if !strings.Contains(joined, "refresh && zypper --non-interactive update alpamon") {
-				t.Errorf("update must be preceded by a refresh: %q", joined)
-			}
+			updatedAt = i
 		}
 		if strings.Contains(joined, "yum ") || strings.Contains(joined, "apt-get ") {
 			t.Errorf("zypper host must not run yum/apt: %q", joined)
 		}
 	}
-	if !found {
-		t.Errorf("expected a zypper update command, got %+v", mockExec.GetExecutedCommands())
+	if updatedAt < 0 {
+		t.Fatalf("expected a zypper update command, got %+v", mockExec.GetExecutedCommands())
+	}
+	// Against stale metadata a bare `update` exits 0 without upgrading, so the
+	// refresh must survive refactors.
+	if refreshedAt < 0 || refreshedAt > updatedAt {
+		t.Errorf("update must be preceded by a refresh, got %+v", mockExec.GetExecutedCommands())
+	}
+}
+
+// One unreachable repo anywhere on the host exits an unscoped refresh 4, so the
+// chained update never runs. Scoping both halves to alpamon's own repo is what
+// keeps a dead third-party repo from making the agent unupgradable.
+func TestSystemHandler_Upgrade_ScopesZypperToAlpamonRepo(t *testing.T) {
+	const alpamonSection = "[alpamon]\nenabled=1\nautorefresh=1\nbaseurl=https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch\n"
+	const deadSection = "[deadrepo]\nenabled=1\nautorefresh=0\nbaseurl=http://dead.invalid.example/repo\n"
+
+	tests := []struct {
+		name        string
+		repoExport  string
+		wantRefresh string
+	}{
+		{
+			name:        "refresh is scoped to the resolved alias",
+			repoExport:  deadSection + "\n" + alpamonSection,
+			wantRefresh: "zypper --non-interactive refresh alpamon",
+		},
+		{
+			name:        "operator alias is honored",
+			repoExport:  "[alpacax-alpamon]\nenabled=1\nbaseurl=https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch\n",
+			wantRefresh: "zypper --non-interactive refresh alpacax-alpamon",
+		},
+		{
+			name:        "no alpamon repo falls back to an unscoped refresh",
+			repoExport:  deadSection,
+			wantRefresh: "zypper --non-interactive refresh",
+		},
+		{
+			// A disabled repo serves nothing, so scoping to it would turn a
+			// working upgrade into a failing one.
+			name:        "disabled alpamon repo falls back",
+			repoExport:  "[alpamon]\nenabled=0\nbaseurl=https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch\n",
+			wantRefresh: "zypper --non-interactive refresh",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExec := common.NewMockCommandExecutor(t)
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+			setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+			mockExec.SetResult("zypper --non-interactive lr --export -", 0, tt.repoExport, nil)
+
+			if _, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var refreshed, updated bool
+			for _, c := range mockExec.GetExecutedCommands() {
+				switch c.Name + " " + strings.Join(c.Args, " ") {
+				case tt.wantRefresh:
+					refreshed = true
+				// `update -r <alias>` would load only that repo and fail to
+				// resolve dependencies from the distribution repos.
+				case "sh -c zypper --non-interactive update alpamon":
+					updated = true
+				}
+			}
+			if !refreshed {
+				t.Errorf("expected %q, got %+v", tt.wantRefresh, mockExec.GetExecutedCommands())
+			}
+			if !updated {
+				t.Errorf("expected an unscoped update, got %+v", mockExec.GetExecutedCommands())
+			}
+		})
+	}
+}
+
+// The refresh exists to keep a stale-metadata no-op from reporting success, so
+// its failure must stop the upgrade instead of falling through to the update.
+func TestSystemHandler_Upgrade_ZypperRefreshFailureStopsTheUpgrade(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+	mockExec.SetResult("zypper --non-interactive refresh", 4, "repo error", errors.New("exit status 4"))
+
+	exitCode, _, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	if exitCode != 4 {
+		t.Errorf("expected the refresh exit code 4, got %d", exitCode)
+	}
+	for _, c := range mockExec.GetExecutedCommands() {
+		if strings.Contains(strings.Join(c.Args, " "), "update") {
+			t.Errorf("update must not run after a failed refresh: %+v", c)
+		}
+	}
+}
+
+// A repo skipped elsewhere on the host cannot hide a missed alpamon update once
+// alpamon's own repo has been refreshed on its own, so 106 is success there and
+// a failure when there was nothing to scope to.
+func TestSystemHandler_Upgrade_ZypperSkippedRepoDependsOnScope(t *testing.T) {
+	tests := []struct {
+		name       string
+		repoExport string
+		want       int
+	}{
+		{
+			name:       "scoped refresh tolerates a skipped repo",
+			repoExport: "[alpamon]\nenabled=1\nbaseurl=https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch\n",
+			want:       0,
+		},
+		{
+			name:       "unscoped refresh does not",
+			repoExport: "[repo-oss]\nenabled=1\nbaseurl=http://download.opensuse.org/distribution/leap/$releasever/repo/oss/\n",
+			want:       106,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExec := common.NewMockCommandExecutor(t)
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+			setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+			mockExec.SetResult("zypper --non-interactive lr --export -", 0, tt.repoExport, nil)
+			mockExec.SetResult("sh -c zypper --non-interactive update alpamon", 106, "", errors.New("exit status 106"))
+
+			exitCode, _, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+			if exitCode != tt.want {
+				t.Errorf("expected %d, got %d", tt.want, exitCode)
+			}
+		})
 	}
 }
 

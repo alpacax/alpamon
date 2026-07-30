@@ -41,6 +41,16 @@ sudo zypper install alpamon-pam
 
 Configuration is the same as on other distributions; see the PAM section in the main README.
 
+## Repository scope for agent upgrades
+
+An unscoped `zypper refresh` fails with exit 4 if any single enabled repository is unreachable. On a long-lived host with a retired third-party repository or an expired subscription, chaining that refresh into the update would make `alpamon upgrade` and the console update button permanently unusable even though alpamon's own repository is fine.
+
+The agent therefore resolves the alias of the enabled repository whose URL points at `packagecloud.io/alpacax/alpamon` and refreshes only that one, as its own command rather than chained. Any alias works; a disabled repository or no match at all falls back to refreshing everything. A refresh failure still stops the upgrade, because the refresh is what keeps a stale-metadata no-op from being reported as a successful upgrade.
+
+The update itself is never scoped with `-r`. That option loads only the named repository, so dependency resolution then fails against the distribution repositories—`zypper install -r alpamon alpamon` reports `nothing provides 'nftables'`. Because the update stays unscoped, it exits 106 whenever any repository is unreachable; that code counts as success only when alpamon's own repository was refreshed on its own moments earlier, which rules out a skipped repository hiding a missed update.
+
+System-wide updates cannot be scoped this way—by definition they cover every repository—so the console update button still fails while a repository is unreachable.
+
 ## Zypper exit codes
 
 Unlike `apt-get` and `yum`, zypper reserves codes above 100 for informational states, and two of them follow a successful install. The agent maps those two to success and leaves everything else a failure, so a completed update does not surface in the console as a broken command:
@@ -51,7 +61,7 @@ Unlike `apt-get` and `yum`, zypper reserves codes above 100 for informational st
 | 103 | Package manager restart needed after a successful install | success |
 | 100, 101 | Patches available, none installed | failure |
 | 104 | No repository carries the requested package | failure |
-| 106 | A repository was skipped because it failed to refresh | failure |
+| 106 | A repository was skipped because it failed to refresh | success for an agent upgrade whose own repository refreshed, failure otherwise |
 | 107 | Installed, but an rpm `%post` script failed | failure |
 
 100 and 101 come from `patch-check`, which the agent never runs, so they are anomalous here rather than informational. 104 means nothing was updated. 107 matters because `%post` is what registers the systemd units and the PAM session lines, so a package that unpacked with a failed script is not a working install.

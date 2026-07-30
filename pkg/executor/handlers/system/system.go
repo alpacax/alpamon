@@ -198,6 +198,9 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	pkgList := strings.Join(packages, " ")
 
 	var cmd string
+	// Set when the refresh was scoped to alpamon's own repo, which is what makes
+	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
+	var alpamonRepoRefreshed bool
 	switch utils.PackageManager {
 	case utils.PkgApt:
 		cmd = fmt.Sprintf("apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
@@ -208,7 +211,22 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		// were added with autorefresh on (`addrepo -f`). Against stale metadata
 		// `update` finds no candidate and still exits 0, which would report a
 		// successful upgrade that never happened.
-		cmd = fmt.Sprintf("zypper --non-interactive refresh && zypper --non-interactive update %s", pkgList)
+		//
+		// It runs as its own command, scoped to alpamon's repo when that can be
+		// resolved: chained with `&&`, one unreachable repo anywhere on the host
+		// exits 4 and update never runs, and a chained exit code cannot say
+		// which half produced it. The update itself stays unscoped because
+		// `update -r` loads only that repo and then cannot resolve dependencies
+		// living in the distribution repos. See docs/opensuse.md.
+		refresh := []string{"zypper", "--non-interactive", "refresh"}
+		if alias := h.resolveZypperAlpamonRepo(ctx); alias != "" {
+			refresh = append(refresh, alias)
+			alpamonRepoRefreshed = true
+		}
+		if code, out, rerr := h.Executor.Exec(ctx, refresh, "root", "root", packageProxyEnv(packageProxy), 0); code != 0 {
+			return code, out, rerr
+		}
+		cmd = fmt.Sprintf("zypper --non-interactive update %s", pkgList)
 	case utils.PkgBrew, utils.PkgNone:
 		// darwin/windows have no package channel for alpamon, so the binary
 		// replaces itself. needAlpamon is always true here: needPam is always
@@ -229,7 +247,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	// The proxy environment (nil without a package proxy) applies to the
 	// spawned package-manager shell only, never to the agent process.
 	exitCode, output, err := h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageProxyEnv(packageProxy), 0)
-	exitCode, err = normalizeZypperExit(exitCode, err)
+	exitCode, err = normalizeZypperExit(exitCode, err, alpamonRepoRefreshed)
 	if exitCode == 0 && needPam {
 		h.versionResolver.InvalidatePamCache()
 	}
@@ -260,15 +278,60 @@ func sanitizePackageProxy(raw string) string {
 	}
 }
 
+// alpamonRepoURL matches the PackageCloud repository that carries alpamon under
+// whatever alias the operator gave it.
+const alpamonRepoURL = "packagecloud.io/alpacax/alpamon"
+
+// resolveZypperAlpamonRepo returns the alias of the enabled repo pointing at
+// alpamon's PackageCloud repository, or "" when there is none to scope to.
+// `lr --export -` is parsed instead of the table form because it emits ini
+// (`[alias]` plus `baseurl=`) and needs no column splitting.
+func (h *SystemHandler) resolveZypperAlpamonRepo(ctx context.Context) string {
+	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "zypper", "--non-interactive", "lr", "--export", "-")
+	if err != nil || exitCode != 0 {
+		log.Debug().Int("exitCode", exitCode).Msg("Could not list zypper repositories; upgrading without a repo scope.")
+		return ""
+	}
+
+	var alias string
+	enabled, matched := true, false
+	resolved := func() string {
+		if matched && enabled {
+			return alias
+		}
+		return ""
+	}
+
+	for line := range strings.SplitSeq(output, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]"):
+			if got := resolved(); got != "" {
+				return got
+			}
+			alias = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+			enabled, matched = true, false
+		case strings.HasPrefix(line, "enabled="):
+			enabled = strings.TrimPrefix(line, "enabled=") == "1"
+		case strings.Contains(line, alpamonRepoURL):
+			matched = true
+		}
+	}
+	return resolved()
+}
+
 // zypper's 102/103 follow a successful install; every other code stays a
 // failure, and the dropped error is the *exec.ExitError for the same code.
-// Per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
-func normalizeZypperExit(exitCode int, err error) (int, error) {
+// 106 (some repos skipped) is success only when alpamonRepoRefreshed says the
+// repo we depend on was refreshed on its own moments earlier, so the skipped one
+// cannot be hiding a missed update. Per-code reasoning and the apt/yum contrast
+// are in docs/opensuse.md.
+func normalizeZypperExit(exitCode int, err error, alpamonRepoRefreshed bool) (int, error) {
 	if utils.PackageManager != utils.PkgZypper {
 		return exitCode, err
 	}
-	switch exitCode {
-	case 102, 103:
+	switch {
+	case exitCode == 102, exitCode == 103, exitCode == 106 && alpamonRepoRefreshed:
 		log.Info().Int("zypperExitCode", exitCode).Msg("zypper reported an informational exit code; treating the command as successful.")
 		return 0, nil
 	}
@@ -550,7 +613,9 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 		return 1, fmt.Sprintf("Platform '%s' (package manager %q) not supported.", utils.PlatformLike, utils.PackageManager), nil
 	}
 
+	// A system-wide update covers every repo by definition, so a skipped repo
+	// means part of the update did not happen: 106 stays a failure here.
 	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
-	exitCode, err = normalizeZypperExit(exitCode, err)
+	exitCode, err = normalizeZypperExit(exitCode, err, false)
 	return exitCode, output, err
 }
