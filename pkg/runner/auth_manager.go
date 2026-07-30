@@ -745,7 +745,8 @@ func (am *AuthManager) signalCompletion(requestID string) {
 		select {
 		case ch <- struct{}{}:
 		default:
-			// Channel already signaled or closed
+			// Already signaled: the capacity-1 buffer is full and the waiter
+			// only needs one signal. Nothing closes these channels.
 		}
 	}
 }
