@@ -171,7 +171,7 @@ func getCodeServerCredential(username, groupname string) (*syscall.SysProcAttr, 
 		return nil, fmt.Errorf("failed to list groups of user %s: %w", username, err)
 	}
 
-	sysProcAttr, _, err := utils.DemotedSysProcAttr(uid, gid, groupIds)
+	sysProcAttr, err := utils.DemotedSysProcAttr(uid, gid, groupIds)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build credentials for user %s: %w", username, err)
 	}

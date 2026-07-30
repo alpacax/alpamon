@@ -16,10 +16,15 @@ import (
 // user's supplementary groups (Demote, Websh PTY, code-server): one place for
 // setgroups(2) capping, so those paths cannot drift. Demotions that must drop
 // the group list build their own Credential with Groups left nil.
-//
-// groupInList reports whether gid was among groupIds, for callers that enforce
-// membership; it is not an error here, since only the caller knows if it should be.
-func DemotedSysProcAttr(uid, gid uint32, groupIds []string) (attr *syscall.SysProcAttr, groupInList bool, err error) {
+func DemotedSysProcAttr(uid, gid uint32, groupIds []string) (*syscall.SysProcAttr, error) {
+	attr, _, err := demotedSysProcAttr(uid, gid, groupIds)
+	return attr, err
+}
+
+// demotedSysProcAttr additionally reports whether gid was among groupIds. Only
+// Demote's ValidateGroup consumes that, so it stays off the exported signature
+// rather than making both other call sites discard it.
+func demotedSysProcAttr(uid, gid uint32, groupIds []string) (attr *syscall.SysProcAttr, groupInList bool, err error) {
 	groups, groupInList, err := resolveGroups(gid, groupIds, maxSupplementaryGroups())
 	if err != nil {
 		return nil, false, err
@@ -120,7 +125,7 @@ func Demote(username, groupname string, opts DemoteOptions) (*DemoteResult, erro
 		return nil, err
 	}
 
-	sysProcAttr, groupInList, err := DemotedSysProcAttr(uint32(uid), uint32(gid), groupIds)
+	sysProcAttr, groupInList, err := demotedSysProcAttr(uint32(uid), uint32(gid), groupIds)
 	if err != nil {
 		return nil, err
 	}

@@ -19,7 +19,7 @@ func (pc *PtyClient) setPtyCmdSysProcAttrAndEnv(uid, gid int, groupIds []string,
 		if err != nil {
 			return err
 		}
-		sysProcAttr, _, err := utils.DemotedSysProcAttr(u32uid, u32gid, groupIds)
+		sysProcAttr, err := utils.DemotedSysProcAttr(u32uid, u32gid, groupIds)
 		if err != nil {
 			return err
 		}

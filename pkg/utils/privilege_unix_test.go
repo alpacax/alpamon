@@ -136,7 +136,7 @@ func TestDemotedSysProcAttr(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			attr, inList, err := DemotedSysProcAttr(tt.uid, tt.gid, tt.groupIds)
+			attr, inList, err := demotedSysProcAttr(tt.uid, tt.gid, tt.groupIds)
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, attr)
@@ -159,7 +159,7 @@ func TestDemotedSysProcAttr_AppliesPlatformCap(t *testing.T) {
 		groupIds = append(groupIds, strconv.Itoa(i))
 	}
 
-	attr, _, err := DemotedSysProcAttr(501, 99, groupIds)
+	attr, err := DemotedSysProcAttr(501, 99, groupIds)
 	require.NoError(t, err)
 	require.NotNil(t, attr)
 	require.NotNil(t, attr.Credential)
