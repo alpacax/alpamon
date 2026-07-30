@@ -312,6 +312,10 @@ const (
 // Var so tests do not sleep. Long enough for a short transaction elsewhere to finish, short enough to stay inside a console command's patience.
 var zypperLockRetryDelay = 15 * time.Second
 
+// Test seam: the uninstall scheduling it gates is linux-only, so without it the
+// path cannot be exercised from a darwin or windows test run.
+var hasSystemd = utils.HasSystemd
+
 // The alias to scope the refresh to, or "" when none resolves. `lr --export -` is
 // parsed rather than the table form: it emits ini and needs no column splitting.
 func (h *SystemHandler) resolveZypperAlpamonRepo(ctx context.Context) string {
@@ -588,7 +592,7 @@ func (h *SystemHandler) executeUninstall() {
 
 	ctx := context.Background()
 
-	if utils.HasSystemd() {
+	if hasSystemd() {
 		// Build the complete uninstall command that includes:
 		// 1. Package removal
 		// 2. Cleanup of transient systemd units created by this operation
@@ -596,10 +600,7 @@ func (h *SystemHandler) executeUninstall() {
 
 		// This ensures the uninstall continues even after the current process terminates
 		// The service will start 5 seconds after being scheduled
-		// --collect: Automatically clean up transient units after they complete (systemd 236+)
 		scheduleCmdArgs := []string{
-			"systemd-run",
-			"--collect",
 			"--uid=0",
 			"--gid=0",
 			"--unit=alpamon-uninstall",
@@ -609,7 +610,17 @@ func (h *SystemHandler) executeUninstall() {
 			"/bin/sh", "-c", uninstallCmd,
 		}
 
-		exitCode, output, _ := h.Executor.RunWithTimeout(ctx, 30*time.Second, scheduleCmdArgs[0], scheduleCmdArgs[1:]...)
+		// --collect cleans the transient units up on its own, but it needs systemd
+		// 236+ and SLES 12, which the SUSE prefixes accept, ships 228. Retry
+		// without it before falling back: the fallback removes the package
+		// synchronously, which tears the agent down mid-command. The reset-failed
+		// calls above already cover what --collect would have done.
+		withCollect := append([]string{"--collect"}, scheduleCmdArgs...)
+		exitCode, output, _ := h.Executor.RunWithTimeout(ctx, 30*time.Second, "systemd-run", withCollect...)
+		if exitCode != 0 {
+			log.Warn().Msgf("Could not schedule uninstall with --collect, retrying without it: %s", output)
+			exitCode, output, _ = h.Executor.RunWithTimeout(ctx, 30*time.Second, "systemd-run", scheduleCmdArgs...)
+		}
 
 		if exitCode != 0 {
 			log.Error().Msgf("Failed to schedule uninstall: %s", output)

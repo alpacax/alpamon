@@ -1517,3 +1517,66 @@ func TestSystemHandler_Upgrade_NoVersionProbeOnApt(t *testing.T) {
 		t.Error("apt host must not run rpm")
 	}
 }
+
+// SLES 12, which the SUSE prefixes accept, ships systemd 228 and so rejects
+// --collect. Retrying without it keeps the removal scheduled instead of falling
+// back to a synchronous one that tears the agent down mid-command.
+func TestSystemHandler_Uninstall_RetriesWithoutCollect(t *testing.T) {
+	orig := hasSystemd
+	hasSystemd = func() bool { return true }
+	t.Cleanup(func() { hasSystemd = orig })
+
+	tests := []struct {
+		name            string
+		plainScheduleOK bool
+		wantSyncRemoval bool
+	}{
+		{"retry schedules the removal", true, false},
+		{"both attempts fail, removal runs synchronously", false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExec := common.NewMockCommandExecutor(t)
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+			handler.uninstallDelay = time.Millisecond
+			handler.uninstallDone = make(chan struct{})
+			setPackageManagerAndID(t, utils.PkgZypper, "sles")
+
+			schedule := "--uid=0 --gid=0 --unit=alpamon-uninstall --timer-property=OnActiveSec=5 --timer-property=AccuracySec=1s --description=Alpamon Uninstall Service /bin/sh -c zypper --non-interactive remove alpamon; systemctl reset-failed alpamon-uninstall.service 2>/dev/null || true; systemctl reset-failed alpamon-uninstall.timer 2>/dev/null || true"
+			mockExec.SetResult("systemd-run --collect "+schedule, 1, "unrecognized option '--collect'", errors.New("exit status 1"))
+			if !tt.plainScheduleOK {
+				mockExec.SetResult("systemd-run "+schedule, 1, "failed", errors.New("exit status 1"))
+			}
+
+			if _, _, err := handler.Execute(context.Background(), common.ByeBye.String(), &common.CommandArgs{}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			<-handler.uninstallDone
+
+			var retried, syncRemoval bool
+			for _, c := range mockExec.GetExecutedCommands() {
+				joined := c.Name + " " + strings.Join(c.Args, " ")
+				switch {
+				case joined == "systemd-run "+schedule:
+					retried = true
+				case c.Name == "sh" && strings.Contains(joined, "zypper --non-interactive remove alpamon") &&
+					!strings.Contains(joined, "systemd-run"):
+					syncRemoval = true
+				}
+			}
+			if !retried {
+				t.Errorf("expected a retry without --collect, got %+v", mockExec.GetExecutedCommands())
+			}
+			if syncRemoval != tt.wantSyncRemoval {
+				t.Errorf("synchronous removal = %v, want %v", syncRemoval, tt.wantSyncRemoval)
+			}
+		})
+	}
+}

@@ -283,3 +283,27 @@ func TestFirewallHandler_BatchOperation(t *testing.T) {
 		t.Error("Execute() returned no output")
 	}
 }
+
+// SLES 12 and Leap 42 ship SuSEfirewall2 rather than firewalld. It owns the
+// iptables ruleset and regenerates it on reload, so rules Alpacon writes behind
+// its back vanish without an error.
+func TestFirewallDetector_SuSEfirewall2DisablesManagement(t *testing.T) {
+	orig := hasSystemd
+	hasSystemd = func() bool { return true }
+	t.Cleanup(func() { hasSystemd = orig })
+
+	mockExec := common.NewMockCommandExecutor(t)
+	mockExec.SetResult("systemctl is-active SuSEfirewall2", 0, "active", nil)
+
+	result := NewFirewallDetector(mockExec).Detect(context.Background())
+
+	if result.HighLevel != HighLevelSuSEfirewall2 {
+		t.Errorf("expected %q, got %q", HighLevelSuSEfirewall2, result.HighLevel)
+	}
+	if !result.Disabled {
+		t.Error("an active high-level firewall must disable Alpacon firewall management")
+	}
+	if result.Backend != BackendNone {
+		t.Errorf("expected no backend, got %q", result.Backend)
+	}
+}

@@ -73,6 +73,10 @@ Unlike `apt-get` and `yum`, zypper reserves codes above 100 for informational st
 
 Tumbleweed is a rolling release, so the console update button runs `zypper dup`, a full distribution upgrade, not the package-by-package update it runs on Leap and SLES. The vendored alpamon package is safe from being replaced by a distribution build, because `solver.dupAllowVendorChange` defaults to `false`, but `solver.dupAllowDowngrade` and `solver.dupAllowNameChange` both default to `true`, so an unattended `dup` may still downgrade or rename other packages. Leap and SLES never run `dup`: there it would advance the service pack.
 
+## SLES 12 and Leap 42
+
+Detection accepts them, because it prefix-matches the distribution id the way the server does, but only 15 and later are verified. Two differences are handled rather than tested end to end: `systemd-run --collect` needs systemd 236 and SLES 12 ships 228, so the uninstall retries the scheduling without that flag; and SuSEfirewall2, which those releases use instead of firewalld, is detected as an active high-level firewall, which disables Alpacon firewall management the same way ufw and firewalld do. Without that detection Alpacon would write iptables rules that SuSEfirewall2 discards on its next reload.
+
 ## Known limitations
 
 Because the host reports `rhel`, console-driven package operations that the server composes still emit `yum` commands and fail on a SUSE host: Alpacon plugin install/upgrade and the automatic `alpamon-pam` install. Install those manually with `zypper` until the server side is zypper-aware. The agent's own upgrade, uninstall, and system-update paths do use `zypper`.
