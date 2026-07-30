@@ -41,6 +41,21 @@ sudo zypper install alpamon-pam
 
 Configuration is the same as on other distributions; see the PAM section in the main README.
 
+## Zypper exit codes
+
+Unlike `apt-get` and `yum`, zypper reserves codes above 100 for informational states, and two of them follow a successful install. The agent maps those two to success and leaves everything else a failure, so a completed update does not surface in the console as a broken command:
+
+| Code | Meaning | Reported as |
+| --- | --- | --- |
+| 102 | Reboot needed after a successful install | success |
+| 103 | Package manager restart needed after a successful install | success |
+| 100, 101 | Patches available, none installed | failure |
+| 104 | No repository carries the requested package | failure |
+| 106 | A repository was skipped because it failed to refresh | failure |
+| 107 | Installed, but an rpm `%post` script failed | failure |
+
+100 and 101 come from `patch-check`, which the agent never runs, so they are anomalous here rather than informational. 104 means nothing was updated. 107 matters because `%post` is what registers the systemd units and the PAM session lines, so a package that unpacked with a failed script is not a working install.
+
 ## Known limitations
 
 Because the host reports `rhel`, console-driven package operations that the server composes still emit `yum` commands and fail on a SUSE host: Alpacon plugin install/upgrade and the automatic `alpamon-pam` install. Install those manually with `zypper` until the server side is zypper-aware. The agent's own upgrade, uninstall, and system-update paths do use `zypper`.

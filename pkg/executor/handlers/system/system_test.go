@@ -1011,6 +1011,87 @@ func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
 	}
 }
 
+// A kernel or zypper self-update ends the command with an informational code,
+// which must not reach the console as a failure.
+func TestSystemHandler_SystemUpdate_ZypperInformationalExitCodes(t *testing.T) {
+	tests := []struct {
+		name       string
+		pkgManager string
+		platformID string
+		cmd        string
+		exitCode   int
+		want       int
+	}{
+		{"reboot needed", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 102, 0},
+		{"package manager restart needed", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 103, 0},
+		// Informational does not mean successful; see docs/opensuse.md.
+		{"patch-check code stays a failure", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 100, 100},
+		{"capability not found stays a failure", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 104, 104},
+		{"skipped repo stays a failure", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 106, 106},
+		{"failed post script stays a failure", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 107, 107},
+		{"unreachable repo stays a failure", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 4, 4},
+		// apt has no informational family, so 102 there is a real failure.
+		{"apt is untouched", utils.PkgApt, "ubuntu", "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 && apt-get autoremove -y", 102, 102},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExec := common.NewMockCommandExecutor(t)
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, &MockVersionResolver{}, nil)
+			setPackageManagerAndID(t, tt.pkgManager, tt.platformID)
+			mockExec.SetResult("sh -c "+tt.cmd, tt.exitCode, "", errors.New("exit status"))
+
+			exitCode, _, err := handler.Execute(context.Background(), common.Update.String(), &common.CommandArgs{})
+			if exitCode != tt.want {
+				t.Errorf("exit %d: expected %d, got %d", tt.exitCode, tt.want, exitCode)
+			}
+			if tt.want == 0 && err != nil {
+				t.Errorf("a normalized exit must drop the error, got %v", err)
+			}
+			if tt.want != 0 && err == nil {
+				t.Error("a real failure must keep its error")
+			}
+		})
+	}
+}
+
+// The agent's own upgrade shares the normalization, where the exit code also
+// gates the pam version cache invalidation.
+func TestSystemHandler_Upgrade_ZypperRebootNeededIsSuccess(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: "v1.0.0"}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+
+	mockExec.SetResult(
+		"sh -c zypper --non-interactive refresh && zypper --non-interactive update alpamon alpamon-pam",
+		102, "", errors.New("exit status 102"),
+	)
+
+	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0 for reboot-needed, got %d", exitCode)
+	}
+	if err != nil {
+		t.Errorf("a normalized exit must drop the error, got %v", err)
+	}
+	if !mockVersions.InvalidatePamCalled {
+		t.Error("pam cache must be invalidated when the upgrade succeeded")
+	}
+}
+
 // Leap/SLES must NOT use dup: it would jump to the next service pack.
 func TestSystemHandler_SystemUpdate_ZypperDupOnlyOnTumbleweed(t *testing.T) {
 	tests := []struct {

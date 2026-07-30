@@ -229,6 +229,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	// The proxy environment (nil without a package proxy) applies to the
 	// spawned package-manager shell only, never to the agent process.
 	exitCode, output, err := h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageProxyEnv(packageProxy), 0)
+	exitCode, err = normalizeZypperExit(exitCode, err)
 	if exitCode == 0 && needPam {
 		h.versionResolver.InvalidatePamCache()
 	}
@@ -257,6 +258,21 @@ func sanitizePackageProxy(raw string) string {
 		log.Warn().Str("scheme", parsed.Scheme).Msg("Unsupported package proxy scheme in upgrade payload; ignoring it.")
 		return ""
 	}
+}
+
+// zypper's 102/103 follow a successful install; every other code stays a
+// failure, and the dropped error is the *exec.ExitError for the same code.
+// Per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
+func normalizeZypperExit(exitCode int, err error) (int, error) {
+	if utils.PackageManager != utils.PkgZypper {
+		return exitCode, err
+	}
+	switch exitCode {
+	case 102, 103:
+		log.Info().Int("zypperExitCode", exitCode).Msg("zypper reported an informational exit code; treating the command as successful.")
+		return 0, nil
+	}
+	return exitCode, err
 }
 
 // packageProxyEnv builds the proxy environment for the package-manager shell
@@ -535,5 +551,6 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	}
 
 	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
+	exitCode, err = normalizeZypperExit(exitCode, err)
 	return exitCode, output, err
 }
