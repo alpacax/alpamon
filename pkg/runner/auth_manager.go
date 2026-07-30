@@ -438,8 +438,10 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		Str("command_id", sudoApprovalReq.CommandID).
 		Msg("Alpacon user sudo request")
 
-	// Store completion channel so HandleSudoApprovalResponse can unblock the wait below
-	completionChan := make(chan struct{})
+	// Store completion channel so HandleSudoApprovalResponse can unblock the wait below.
+	// Buffered so signalCompletion's non-blocking send lands even if the response is
+	// processed before this goroutine reaches the select.
+	completionChan := make(chan struct{}, 1)
 	am.storeCompletionChannel(sudoApprovalReq.RequestID, completionChan)
 
 	// Send Sudo Approval request to the alpacon-server with retry
