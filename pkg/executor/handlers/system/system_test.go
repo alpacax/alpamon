@@ -137,6 +137,26 @@ func (e *lockedThenFreeExecutor) RunAsUser(ctx context.Context, username string,
 	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
 }
 
+// Answers the rpm version probe with before on the first call and after on the
+// rest, so an upgrade that zypper reported as successful can be shown to have
+// moved the package or not.
+type versionSteppingExecutor struct {
+	*common.MockCommandExecutor
+	before, after string
+	probes        int
+}
+
+func (e *versionSteppingExecutor) RunAsUser(ctx context.Context, username string, name string, args ...string) (int, string, error) {
+	if name == "rpm" {
+		e.probes++
+		if e.probes == 1 {
+			return 0, e.before, nil
+		}
+		return 0, e.after, nil
+	}
+	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
+}
+
 func TestSystemHandler_Name(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -1427,5 +1447,73 @@ func TestSystemHandler_ZypperLockIsRetried(t *testing.T) {
 				t.Errorf("expected a retry, got %d lockable calls", mockExec.calls)
 			}
 		})
+	}
+}
+
+// zypper exits 0 with "No update candidate" when vendor stickiness blocks the
+// upgrade, so the exit code alone cannot say whether the package moved.
+func TestSystemHandler_Upgrade_ZypperNoOpIsReported(t *testing.T) {
+	tests := []struct {
+		name         string
+		afterVersion string
+		wantNote     bool
+	}{
+		{"version moved", "2.4.1-1", false},
+		{"version unchanged", "2.4.0-1", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExec := &versionSteppingExecutor{
+				MockCommandExecutor: common.NewMockCommandExecutor(t),
+				before:              "2.4.0-1",
+				after:               tt.afterVersion,
+			}
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+			setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+
+			exitCode, output, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+			// A repo that has not published the build yet is routine, so the
+			// command stays successful either way.
+			if exitCode != 0 {
+				t.Fatalf("expected exit 0, got %d (%q)", exitCode, output)
+			}
+			if gotNote := strings.Contains(output, "did not move"); gotNote != tt.wantNote {
+				t.Errorf("note present = %v, want %v: %q", gotNote, tt.wantNote, output)
+			}
+			if tt.wantNote && !strings.Contains(output, "2.4.0-1") {
+				t.Errorf("note must name the version still installed, got %q", output)
+			}
+		})
+	}
+}
+
+// An apt host must not pay for the rpm query, and must keep reporting the
+// package manager's own exit code.
+func TestSystemHandler_Upgrade_NoVersionProbeOnApt(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgApt, "ubuntu")
+
+	exitCode, _, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d", exitCode)
+	}
+	if mockExec.Invoked("rpm") {
+		t.Error("apt host must not run rpm")
 	}
 }

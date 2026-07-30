@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -201,6 +202,9 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	// Set when the refresh was scoped to alpamon's own repo, which is what makes
 	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
 	var alpamonRepoRefreshed bool
+	// Populated on the zypper path only, to catch an update that exits 0 without
+	// moving anything; see unmovedPackages.
+	var versionsBefore map[string]string
 	switch utils.PackageManager {
 	case utils.PkgApt:
 		cmd = fmt.Sprintf("apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
@@ -226,6 +230,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 			return code, out, rerr
 		}
 		cmd = fmt.Sprintf("zypper --non-interactive update %s", pkgList)
+		versionsBefore = h.installedRPMVersions(ctx, packages)
 	case utils.PkgBrew, utils.PkgNone:
 		// darwin/windows have no package channel for alpamon, so the binary
 		// replaces itself. needAlpamon is always true here: needPam is always
@@ -249,6 +254,19 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		return h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageProxyEnv(packageProxy), 0)
 	})
 	exitCode, err = normalizeZypperExit(exitCode, err, alpamonRepoRefreshed)
+	// Reported, not failed: a repository that has not published the new build yet
+	// is routine, and the console already shows the version the agent reports.
+	if exitCode == 0 {
+		if stale := h.unmovedPackages(ctx, versionsBefore); len(stale) > 0 {
+			note := fmt.Sprintf(
+				"zypper exited 0 but %s did not move (still %s). The repository may not carry a newer "+
+					"build yet, or its vendor changed: solver.allowVendorChange is off by default, and "+
+					"zypper then declines the upgrade without failing.",
+				strings.Join(stale, ", "), versionsBefore[stale[0]])
+			log.Warn().Msg(note)
+			output = strings.TrimRight(output, "\n") + "\n\n" + note
+		}
+	}
 	if exitCode == 0 && needPam {
 		h.versionResolver.InvalidatePamCache()
 	}
@@ -343,6 +361,35 @@ func retryWhileZypperLocked(ctx context.Context, run func() (int, string, error)
 		case <-time.After(zypperLockRetryDelay):
 		}
 	}
+}
+
+// version-release of each package rpm can report, skipping the rest.
+func (h *SystemHandler) installedRPMVersions(ctx context.Context, packages []string) map[string]string {
+	versions := make(map[string]string, len(packages))
+	for _, pkg := range packages {
+		exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", pkg)
+		if err != nil || exitCode != 0 {
+			continue
+		}
+		versions[pkg] = strings.TrimSpace(output)
+	}
+	return versions
+}
+
+// Packages an upgrade left in place after reporting success. zypper keeps
+// solver.allowVendorChange off, so a vendor change in a published build makes
+// `update` print "No update candidate" and exit 0 with the old version still
+// installed, which is the silent no-op the explicit refresh cannot catch. apt and
+// yum have no vendor gate, so versionsBefore is empty there and this is a no-op.
+func (h *SystemHandler) unmovedPackages(ctx context.Context, versionsBefore map[string]string) []string {
+	var stale []string
+	for pkg, before := range versionsBefore {
+		if after, ok := h.installedRPMVersions(ctx, []string{pkg})[pkg]; ok && after == before {
+			stale = append(stale, pkg)
+		}
+	}
+	slices.Sort(stale)
+	return stale
 }
 
 // 102/103 follow a successful install; every other code stays a failure, and the
