@@ -161,6 +161,8 @@ func TestDemotedSysProcAttr_AppliesPlatformCap(t *testing.T) {
 
 	attr, _, err := DemotedSysProcAttr(501, 99, groupIds)
 	require.NoError(t, err)
+	require.NotNil(t, attr)
+	require.NotNil(t, attr.Credential)
 
 	// The exported entry point must apply maxSupplementaryGroups(); anything
 	// larger would make setgroups(2) fail with EINVAL on a capped platform.

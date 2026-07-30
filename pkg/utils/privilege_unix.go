@@ -13,7 +13,7 @@ import (
 )
 
 // DemotedSysProcAttr is the single entry point for demotions that keep the
-// user's supplementary groups (Demote, websh PTY, code-server): one place for
+// user's supplementary groups (Demote, Websh PTY, code-server): one place for
 // setgroups(2) capping, so those paths cannot drift. Demotions that must drop
 // the group list build their own Credential with Groups left nil.
 func DemotedSysProcAttr(uid, gid uint32, groupIds []string) (attr *syscall.SysProcAttr, groupInList bool, err error) {
