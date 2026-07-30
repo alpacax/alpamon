@@ -55,7 +55,9 @@ func resolveGroups(gid uint32, groupIds []string, maxGroups int) (groups []uint3
 		groups = append(groups, group)
 	}
 	if maxGroups > 0 && len(groups) > maxGroups {
-		log.Debug().Int("requested", len(groups)).Int("cap", maxGroups).
+		// Warn, not Debug: the process silently loses file access it was granted,
+		// and Debug is off in production (config.go sets InfoLevel).
+		log.Warn().Int("requested", len(groups)).Int("cap", maxGroups).
 			Msg("Supplementary group list truncated to the platform setgroups limit.")
 		groups = groups[:maxGroups]
 	}

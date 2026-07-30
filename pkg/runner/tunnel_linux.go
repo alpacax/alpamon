@@ -171,12 +171,13 @@ func getCodeServerCredential(username, groupname string) (*syscall.SysProcAttr, 
 		return nil, fmt.Errorf("failed to list groups of user %s: %w", username, err)
 	}
 
-	log.Debug().Msgf("Demoting code-server to user %s (group: %s).", username, groupname)
-
 	sysProcAttr, _, err := utils.DemotedSysProcAttr(uid, gid, groupIds)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to build credentials for user %s: %w", username, err)
 	}
+
+	log.Debug().Msgf("Demoting code-server to user %s (group: %s).", username, groupname)
+
 	return sysProcAttr, nil
 }
 
