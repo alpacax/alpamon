@@ -23,5 +23,9 @@ func DefaultPath() string {
 	return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 }
 
-// EnvironmentFilePath returns the path to the system environment file.
-func EnvironmentFilePath() string { return "/etc/environment" }
+// EnvironmentFilePaths returns the system environment files, vendor defaults
+// first: Tumbleweed and the transactional variants keep theirs in /usr/etc and
+// ship no /etc/environment at all, where an admin copy overrides it.
+func EnvironmentFilePaths() []string {
+	return []string{"/usr/etc/environment", "/etc/environment"}
+}

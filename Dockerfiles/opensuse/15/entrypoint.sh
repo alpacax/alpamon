@@ -1,0 +1,24 @@
+#!/bin/bash
+
+ALPACON_URL=${ALPACON_URL:-"http://host.docker.internal:8000"}
+PLUGIN_ID=${PLUGIN_ID:-"f4592c6d-cb9a-4b33-af1c-bd67b675b16f"}
+PLUGIN_KEY=${PLUGIN_KEY:-"alpaca"}
+
+mkdir -p /etc/alpamon /var/lib/alpamon /var/log/alpamon /run/alpamon
+chmod 700 /etc/alpamon
+chmod 750 /var/lib/alpamon /var/log/alpamon /run/alpamon
+
+cat > /etc/alpamon/alpamon.conf <<EOL
+[server]
+url = $ALPACON_URL
+id = $PLUGIN_ID
+key = $PLUGIN_KEY
+
+[logging]
+debug = true
+EOL
+
+echo -e "\nThe following configuration file is being used:\n"
+cat /etc/alpamon/alpamon.conf
+
+exec /usr/local/alpamon/alpamon

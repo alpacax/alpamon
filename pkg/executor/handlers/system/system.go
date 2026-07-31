@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -198,14 +199,43 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	pkgList := strings.Join(packages, " ")
 
 	var cmd string
-	switch utils.PlatformLike {
-	case "debian":
+	// Set when the refresh was scoped to alpamon's own repo, which is what makes
+	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
+	var alpamonRepoRefreshed bool
+	// Populated on the zypper path only, to catch an update that exits 0 without
+	// moving anything; see unmovedPackages.
+	var versionsBefore map[string]string
+	switch utils.PackageManager {
+	case utils.PkgApt:
 		cmd = fmt.Sprintf("apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
-	case "rhel":
+	case utils.PkgYum:
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
-	case "darwin", "windows":
-		// needAlpamon is always true here: needPam is always false on non-linux
-		// (pam unsupported; see pkg/utils/pam.go) and the switch is reached only when needAlpamon||needPam.
+	case utils.PkgZypper:
+		// The refresh is explicit because zypper only auto-refreshes repos added
+		// with autorefresh on (`addrepo -f`), and against stale metadata `update`
+		// finds no candidate and still exits 0. It runs as its own command because
+		// chaining it with `&&` lets one unreachable repo anywhere on the host exit
+		// 4 with update never running, and hides which half produced the code. The
+		// update stays unscoped: `update -r` loads only that repo and then cannot
+		// resolve dependencies from the distribution repos.
+		refresh := []string{"zypper", "--non-interactive", "refresh"}
+		if alias := h.resolveZypperAlpamonRepo(ctx); alias != "" {
+			refresh = append(refresh, alias)
+			alpamonRepoRefreshed = true
+		}
+		code, out, rerr := retryWhileZypperLocked(ctx, func() (int, string, error) {
+			return h.Executor.Exec(ctx, refresh, "root", "root", packageProxyEnv(packageProxy), 0)
+		})
+		if code != 0 {
+			return code, withZypperHint(code, out), rerr
+		}
+		cmd = fmt.Sprintf("zypper --non-interactive update %s", pkgList)
+		versionsBefore = h.installedRPMVersions(ctx, packages)
+	case utils.PkgBrew, utils.PkgNone:
+		// darwin/windows have no package channel for alpamon, so the binary
+		// replaces itself. needAlpamon is always true here: needPam is always
+		// false on non-linux (pam unsupported; see pkg/utils/pam.go) and the
+		// switch is reached only when needAlpamon||needPam.
 		if latestVersion == "" {
 			// Self-update needs a concrete target version; there is no
 			// package manager to delegate "latest" to on these platforms.
@@ -214,13 +244,36 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		}
 		return h.selfUpdate(ctx, latestVersion)
 	default:
-		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
+		return 1, fmt.Sprintf("Platform '%s' (package manager %q) not supported.", utils.PlatformLike, utils.PackageManager), nil
 	}
 
 	log.Debug().Msgf("Upgrading %s...", pkgList)
 	// The proxy environment (nil without a package proxy) applies to the
 	// spawned package-manager shell only, never to the agent process.
-	exitCode, output, err := h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageProxyEnv(packageProxy), 0)
+	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
+		return h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageProxyEnv(packageProxy), 0)
+	})
+	exitCode, err = normalizeZypperExit(exitCode, err, alpamonRepoRefreshed)
+	// Reported, not failed: a repository that has not published the new build yet
+	// is routine, and the console already shows the version the agent reports.
+	if exitCode == 0 {
+		if stale := h.unmovedPackages(ctx, versionsBefore); len(stale) > 0 {
+			// Per package: alpamon and alpamon-pam carry their own version-release,
+			// so one shared number would misname the other one's.
+			held := make([]string, 0, len(stale))
+			for _, pkg := range stale {
+				held = append(held, fmt.Sprintf("%s (still %s)", pkg, versionsBefore[pkg]))
+			}
+			note := fmt.Sprintf(
+				"zypper exited 0 but %s did not move. The repository may not carry a newer "+
+					"build yet, or its vendor changed: solver.allowVendorChange is off by default, and "+
+					"zypper then declines the upgrade without failing.",
+				strings.Join(held, ", "))
+			log.Warn().Msg(note)
+			output = strings.TrimRight(output, "\n") + "\n\n" + note
+		}
+	}
+	output = withZypperHint(exitCode, output)
 	if exitCode == 0 && needPam {
 		h.versionResolver.InvalidatePamCache()
 	}
@@ -249,6 +302,154 @@ func sanitizePackageProxy(raw string) string {
 		log.Warn().Str("scheme", parsed.Scheme).Msg("Unsupported package proxy scheme in upgrade payload; ignoring it.")
 		return ""
 	}
+}
+
+// zypper behavior the other package managers do not share; per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
+const (
+	// The PackageCloud repository carrying alpamon, whatever alias the operator gave it.
+	alpamonRepoURL = "packagecloud.io/alpacax/alpamon"
+
+	// ZYPP_LOCKED: packagekit, an operator's session, or a console update racing
+	// the agent's own upgrade holds the libzypp lock. dnf waits for its lock and
+	// apt can be told to retry; zypper --non-interactive gives up at once.
+	zypperLockedExit   = 7
+	zypperLockAttempts = 3
+)
+
+// Var so tests do not sleep. Long enough for a short transaction elsewhere to finish, short enough to stay inside a console command's patience.
+var zypperLockRetryDelay = 15 * time.Second
+
+// Test seam: the uninstall scheduling it gates is linux-only, so without it the
+// path cannot be exercised from a darwin or windows test run.
+var hasSystemd = utils.HasSystemd
+
+// The alias to scope the refresh to, or "" when none resolves. `lr --export -` is
+// parsed rather than the table form: it emits ini and needs no column splitting.
+func (h *SystemHandler) resolveZypperAlpamonRepo(ctx context.Context) string {
+	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "zypper", "--non-interactive", "lr", "--export", "-")
+	if err != nil || exitCode != 0 {
+		log.Debug().Int("exitCode", exitCode).Msg("Could not list zypper repositories; upgrading without a repo scope.")
+		return ""
+	}
+
+	var alias string
+	enabled, matched := true, false
+	resolved := func() string {
+		if matched && enabled {
+			return alias
+		}
+		return ""
+	}
+
+	for line := range strings.SplitSeq(output, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]"):
+			if got := resolved(); got != "" {
+				return got
+			}
+			alias = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+			enabled, matched = true, false
+		case strings.HasPrefix(line, "enabled="):
+			enabled = strings.TrimPrefix(line, "enabled=") == "1"
+		case strings.Contains(line, alpamonRepoURL):
+			matched = true
+		}
+	}
+	return resolved()
+}
+
+func retryWhileZypperLocked(ctx context.Context, run func() (int, string, error)) (int, string, error) {
+	for attempt := 1; ; attempt++ {
+		exitCode, output, err := run()
+		if exitCode != zypperLockedExit || utils.PackageManager != utils.PkgZypper || attempt >= zypperLockAttempts {
+			return exitCode, output, err
+		}
+		log.Info().Int("attempt", attempt).Msg("zypper is locked by another process; retrying.")
+		select {
+		case <-ctx.Done():
+			return exitCode, output, err
+		case <-time.After(zypperLockRetryDelay):
+		}
+	}
+}
+
+// version-release of each package rpm can report, skipping the rest.
+func (h *SystemHandler) installedRPMVersions(ctx context.Context, packages []string) map[string]string {
+	versions := make(map[string]string, len(packages))
+	for _, pkg := range packages {
+		exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", pkg)
+		if err != nil || exitCode != 0 {
+			continue
+		}
+		versions[pkg] = strings.TrimSpace(output)
+	}
+	return versions
+}
+
+// Packages an upgrade left in place after reporting success. zypper keeps
+// solver.allowVendorChange off, so a vendor change in a published build makes
+// `update` print "No update candidate" and exit 0 with the old version still
+// installed, which is the silent no-op the explicit refresh cannot catch. apt and
+// yum have no vendor gate, so versionsBefore is empty there and this is a no-op.
+func (h *SystemHandler) unmovedPackages(ctx context.Context, versionsBefore map[string]string) []string {
+	var stale []string
+	for pkg, before := range versionsBefore {
+		if after, ok := h.installedRPMVersions(ctx, []string{pkg})[pkg]; ok && after == before {
+			stale = append(stale, pkg)
+		}
+	}
+	slices.Sort(stale)
+	return stale
+}
+
+// The console shows an operator the exit code and the command output, and zypper's
+// own output does not say what the operator has to change. Measured on an
+// unregistered sles12sp5 container: `lr` exits 6 and `update alpamon` exits 104,
+// neither of them mentioning the missing subscription that caused both.
+func withZypperHint(exitCode int, output string) string {
+	if utils.PackageManager != utils.PkgZypper {
+		return output
+	}
+
+	var hint string
+	switch exitCode {
+	case 4:
+		hint = "A repository could not be refreshed. One unreachable repository fails the whole " +
+			"command, even when alpamon's own repository is fine: check `zypper lr --uri`."
+	case 6:
+		hint = "No repositories are defined. On SLES this usually means the host has no active " +
+			"subscription (`SUSEConnect --status`); alpamon's repository also has to be added with " +
+			"`zypper addrepo`, because the PackageCloud one-liner writes a yum repo file zypper never reads."
+	case zypperLockedExit:
+		hint = "Another process still holds the libzypp lock after several retries. Find it with " +
+			"`zypper ps`, and expect packagekit or an operator's own zypper session."
+	case 104:
+		hint = "No configured repository carries the package. Add alpamon's repository with " +
+			"`zypper addrepo`, and on SLES check that the subscription is active (`SUSEConnect --status`)."
+	case 106:
+		hint = "A repository was skipped because it failed to refresh, so the update may have missed " +
+			"packages: `zypper refresh` names the one that failed."
+	default:
+		return output
+	}
+	return strings.TrimRight(output, "\n") + "\n\n" + hint
+}
+
+// 102/103 follow a successful install; every other code stays a failure, and the
+// dropped error is the *exec.ExitError for the same code. 106 (some repos skipped)
+// is success only when alpamonRepoRefreshed says the repo we depend on was
+// refreshed on its own, so the skipped one cannot hide a missed update.
+func normalizeZypperExit(exitCode int, err error, alpamonRepoRefreshed bool) (int, error) {
+	if utils.PackageManager != utils.PkgZypper {
+		return exitCode, err
+	}
+	switch {
+	case exitCode == 102, exitCode == 103, exitCode == 106 && alpamonRepoRefreshed:
+		log.Info().Int("zypperExitCode", exitCode).Msg("zypper reported an informational exit code; treating the command as successful.")
+		return 0, nil
+	}
+	return exitCode, err
 }
 
 // packageProxyEnv builds the proxy environment for the package-manager shell
@@ -410,27 +611,28 @@ func (h *SystemHandler) executeUninstall() {
 
 	var cmd string
 
-	switch utils.PlatformLike {
-	case "debian":
+	switch utils.PackageManager {
+	case utils.PkgApt:
 		// Use purge to remove package and config files
 		cmd = "apt-get purge alpamon -y && apt-get autoremove -y"
-	case "rhel":
-		// Remove package using yum
+	case utils.PkgYum:
 		cmd = "yum remove alpamon -y"
-	case "darwin":
+	case utils.PkgZypper:
+		cmd = "zypper --non-interactive remove alpamon"
+	case utils.PkgBrew:
 		// For macOS development environment, just shutdown
 		log.Warn().Msgf("Platform '%s' does not support full uninstall. Shutting down instead.", utils.PlatformLike)
 		h.wsClient.ShutDown()
 		return
 	default:
-		log.Error().Msgf("Platform '%s' not supported for uninstall.", utils.PlatformLike)
+		log.Error().Msgf("Platform '%s' (package manager %q) not supported for uninstall.", utils.PlatformLike, utils.PackageManager)
 		h.wsClient.ShutDown()
 		return
 	}
 
 	ctx := context.Background()
 
-	if utils.HasSystemd() {
+	if hasSystemd() {
 		// Build the complete uninstall command that includes:
 		// 1. Package removal
 		// 2. Cleanup of transient systemd units created by this operation
@@ -438,20 +640,33 @@ func (h *SystemHandler) executeUninstall() {
 
 		// This ensures the uninstall continues even after the current process terminates
 		// The service will start 5 seconds after being scheduled
-		// --collect: Automatically clean up transient units after they complete (systemd 236+)
+		// The delay is expressed with --on-active rather than
+		// --timer-property=OnActiveSec, because systemd before 236 rejects a
+		// --timer-property that is not accompanied by a timer option of its own
+		// ("--timer-property= has no effect without any other timer options",
+		// measured on systemd 229 and 228). --on-active is accepted by both and
+		// sets the same property.
 		scheduleCmdArgs := []string{
-			"systemd-run",
-			"--collect",
 			"--uid=0",
 			"--gid=0",
 			"--unit=alpamon-uninstall",
-			"--timer-property=OnActiveSec=5",
+			"--on-active=5",
 			"--timer-property=AccuracySec=1s",
 			"--description=Alpamon Uninstall Service",
 			"/bin/sh", "-c", uninstallCmd,
 		}
 
-		exitCode, output, _ := h.Executor.RunWithTimeout(ctx, 30*time.Second, scheduleCmdArgs[0], scheduleCmdArgs[1:]...)
+		// --collect cleans the transient units up on its own, but it needs systemd
+		// 236+ and SLES 12, which the SUSE prefixes accept, ships 228. Retry
+		// without it before falling back: the fallback removes the package
+		// synchronously, which tears the agent down mid-command. The reset-failed
+		// calls above already cover what --collect would have done.
+		withCollect := append([]string{"--collect"}, scheduleCmdArgs...)
+		exitCode, output, _ := h.Executor.RunWithTimeout(ctx, 30*time.Second, "systemd-run", withCollect...)
+		if exitCode != 0 {
+			log.Warn().Msgf("Could not schedule uninstall with --collect, retrying without it: %s", output)
+			exitCode, output, _ = h.Executor.RunWithTimeout(ctx, 30*time.Second, "systemd-run", scheduleCmdArgs...)
+		}
 
 		if exitCode != 0 {
 			log.Error().Msgf("Failed to schedule uninstall: %s", output)
@@ -502,17 +717,34 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	log.Info().Msg("Upgrade system requested.")
 
 	var cmd string
-	switch utils.PlatformLike {
-	case "debian":
+	switch utils.PackageManager {
+	case utils.PkgApt:
 		cmd = "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 && apt-get autoremove -y"
-	case "rhel":
+	case utils.PkgYum:
 		cmd = "yum update -y"
-	case "darwin":
+	case utils.PkgZypper:
+		// Tumbleweed is a rolling release: `zypper update` cannot perform the
+		// vendor changes a distribution upgrade needs. Leap/SLES must NOT use
+		// dup: it would jump to the next service pack.
+		//
+		// The refresh mirrors the apt branch's `apt-get update`; see handleUpgrade
+		// for why zypper cannot be relied on to refresh itself.
+		if utils.IsTumbleweed(utils.PlatformID) {
+			cmd = "zypper --non-interactive refresh && zypper --non-interactive dup"
+		} else {
+			cmd = "zypper --non-interactive refresh && zypper --non-interactive update"
+		}
+	case utils.PkgBrew:
 		cmd = "brew upgrade"
 	default:
-		return 1, fmt.Sprintf("Platform '%s' not supported.", utils.PlatformLike), nil
+		return 1, fmt.Sprintf("Platform '%s' (package manager %q) not supported.", utils.PlatformLike, utils.PackageManager), nil
 	}
 
-	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
-	return exitCode, output, err
+	// A system-wide update covers every repo by definition, so a skipped repo
+	// means part of the update did not happen: 106 stays a failure here.
+	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
+		return h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
+	})
+	exitCode, err = normalizeZypperExit(exitCode, err, false)
+	return exitCode, withZypperHint(exitCode, output), err
 }
