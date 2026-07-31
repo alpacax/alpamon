@@ -589,3 +589,32 @@ func TestComputeFingerprintStructDeterminism(t *testing.T) {
 	}
 	assert.Len(t, hashes, 1, "Same struct should always produce the same hash")
 }
+
+// TestSshdUsePamWireShape pins the sync/commit wire contract with
+// alpacon-server: "yes", "no", or an explicit null. The key must be present
+// even when undeterminable, because the server preserves the previous value
+// for an absent key and the stale value would keep claiming that PAM-based
+// detection still covers a host that has lost sshd.
+func TestSshdUsePamWireShape(t *testing.T) {
+	yes, no := "yes", "no"
+	tests := []struct {
+		name  string
+		value *string
+		want  string
+	}{
+		{"yes", &yes, `"sshd_use_pam":"yes"`},
+		{"no", &no, `"sshd_use_pam":"no"`},
+		{"undeterminable", nil, `"sshd_use_pam":null`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, err := json.Marshal(ServerData{SshdUsePam: tt.value})
+			assert.NoError(t, err)
+			assert.Contains(t, string(server), tt.want)
+
+			commit, err := json.Marshal(commitData{SshdUsePam: tt.value})
+			assert.NoError(t, err)
+			assert.Contains(t, string(commit), tt.want)
+		})
+	}
+}
