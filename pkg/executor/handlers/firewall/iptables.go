@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -130,10 +131,8 @@ func (s *IptablesBackend) DeleteRule(ctx context.Context, ruleID, chainName stri
 	}
 
 	// Find rule with matching rule ID in comment
-	lines := strings.Split(output, "\n")
 	lineNum := 0
-
-	for _, line := range lines {
+	for line := range strings.SplitSeq(output, "\n") {
 		if strings.Contains(line, ruleID) {
 			// Extract line number from the beginning of the line
 			parts := strings.Fields(line)
@@ -213,9 +212,7 @@ func (s *IptablesBackend) ListRules(ctx context.Context, chainName string) ([]co
 // parseIptablesSaveOutput parses iptables-save output to extract rules
 func (s *IptablesBackend) parseIptablesSaveOutput(output, filterChain string) []common.FirewallRule {
 	var rules []common.FirewallRule
-	lines := strings.Split(output, "\n")
-
-	for _, line := range lines {
+	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimSpace(line)
 
 		// Skip non-rule lines
@@ -242,10 +239,10 @@ func (s *IptablesBackend) parseIptablesSaveOutput(output, filterChain string) []
 // parseIptablesSaveRuleLine parses a single iptables-save rule line
 func (s *IptablesBackend) parseIptablesSaveRuleLine(line string) *common.FirewallRule {
 	// Remove -A or -I prefix
-	if strings.HasPrefix(line, "-A ") {
-		line = strings.TrimPrefix(line, "-A ")
-	} else if strings.HasPrefix(line, "-I ") {
-		line = strings.TrimPrefix(line, "-I ")
+	if after, ok := strings.CutPrefix(line, "-A "); ok {
+		line = after
+	} else if after, ok := strings.CutPrefix(line, "-I "); ok {
+		line = after
 	}
 
 	parts := strings.Fields(line)
@@ -308,8 +305,7 @@ func (s *IptablesBackend) parseIptablesSaveRuleLine(line string) *common.Firewal
 			}
 		case "--dports":
 			if i+1 < len(parts) {
-				portStrs := strings.Split(parts[i+1], ",")
-				for _, ps := range portStrs {
+				for ps := range strings.SplitSeq(parts[i+1], ",") {
 					if port, err := strconv.Atoi(ps); err == nil {
 						rule.DPorts = append(rule.DPorts, port)
 					}
@@ -373,9 +369,7 @@ func (s *IptablesBackend) ReorderChains(ctx context.Context, chainNames []string
 
 	// Find alpacon jump rule line numbers
 	var jumpLines []int
-	lines := strings.Split(output, "\n")
-
-	for _, line := range lines {
+	for line := range strings.SplitSeq(output, "\n") {
 		parts := strings.Fields(line)
 		if len(parts) < 3 {
 			continue
@@ -401,13 +395,8 @@ func (s *IptablesBackend) ReorderChains(ctx context.Context, chainNames []string
 	}
 
 	// Sort in reverse order (delete from bottom to preserve line numbers)
-	for i := 0; i < len(jumpLines); i++ {
-		for j := i + 1; j < len(jumpLines); j++ {
-			if jumpLines[i] < jumpLines[j] {
-				jumpLines[i], jumpLines[j] = jumpLines[j], jumpLines[i]
-			}
-		}
-	}
+	slices.Sort(jumpLines)
+	slices.Reverse(jumpLines)
 
 	// Delete old jump rules
 	for _, lineNum := range jumpLines {

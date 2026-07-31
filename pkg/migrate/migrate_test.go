@@ -259,8 +259,7 @@ func TestStartWatchdog_FiresOnTimeout(t *testing.T) {
 
 	var fired atomic.Int32
 	done := make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	_ = StartWatchdog(ctx, st, func(_ *PendingState) {
 		fired.Add(1)
@@ -292,8 +291,7 @@ func TestStartWatchdog_DoesNotFireAfterConfirm(t *testing.T) {
 	}
 
 	var fired atomic.Int32
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	_ = StartWatchdog(ctx, st, func(_ *PendingState) {
 		fired.Add(1)
@@ -324,8 +322,7 @@ func TestStartWatchdog_FiresImmediatelyIfAlreadyExpired(t *testing.T) {
 	}
 
 	done := make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	_ = StartWatchdog(ctx, st, func(_ *PendingState) {
 		close(done)
@@ -351,8 +348,7 @@ func TestStartWatchdog_CancelDisarmsBeforeTimer(t *testing.T) {
 	}
 
 	var fired atomic.Int32
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	cancelWatchdog := StartWatchdog(ctx, st, func(_ *PendingState) {
 		fired.Add(1)

@@ -63,7 +63,7 @@ type FtpResult struct {
 	Command FtpCommand    `json:"command"`
 	Success bool          `json:"success"`
 	Code    int           `json:"code,omitempty"`
-	Data    CommandResult `json:"data,omitempty"`
+	Data    CommandResult `json:"data"`
 }
 
 type CommandResult struct {

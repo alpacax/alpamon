@@ -204,11 +204,9 @@ func TestIntegration_ConcurrentExecution(t *testing.T) {
 	concurrency := 50
 
 	for range concurrency {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _, _ = h.Execute(ctx, "concurrent_cmd", args)
-		}()
+		})
 	}
 
 	wg.Wait()

@@ -16,14 +16,14 @@ func TestPoolBasic(t *testing.T) {
 		}
 	}()
 
-	var counter int32
+	var counter atomic.Int32
 	var wg sync.WaitGroup
 
 	// Submit 10 jobs
 	for i := range 10 {
 		wg.Add(1)
 		err := pool.Submit(context.Background(), func() error {
-			atomic.AddInt32(&counter, 1)
+			counter.Add(1)
 			wg.Done()
 			time.Sleep(10 * time.Millisecond)
 			return nil
@@ -37,8 +37,8 @@ func TestPoolBasic(t *testing.T) {
 	// Wait for all jobs to complete
 	wg.Wait()
 
-	if atomic.LoadInt32(&counter) != 10 {
-		t.Errorf("expected 10 jobs to complete, got %d", counter)
+	if counter.Load() != 10 {
+		t.Errorf("expected 10 jobs to complete, got %d", counter.Load())
 	}
 }
 
@@ -97,19 +97,19 @@ func TestPoolConcurrency(t *testing.T) {
 		}
 	}()
 
-	var concurrent int32
-	var maxConcurrent int32
+	var concurrent atomic.Int32
+	var maxConcurrent atomic.Int32
 
 	// Submit many jobs
 	for range 50 {
 		if err := pool.Submit(context.Background(), func() error {
-			current := atomic.AddInt32(&concurrent, 1)
-			defer atomic.AddInt32(&concurrent, -1)
+			current := concurrent.Add(1)
+			defer concurrent.Add(-1)
 
 			// Track max concurrent
 			for {
-				max := atomic.LoadInt32(&maxConcurrent)
-				if current <= max || atomic.CompareAndSwapInt32(&maxConcurrent, max, current) {
+				observed := maxConcurrent.Load()
+				if current <= observed || maxConcurrent.CompareAndSwap(observed, current) {
 					break
 				}
 			}
@@ -125,8 +125,8 @@ func TestPoolConcurrency(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Max concurrent should not exceed worker count
-	if int(maxConcurrent) > maxWorkers {
-		t.Errorf("exceeded max concurrency: got %d, want <= %d", maxConcurrent, maxWorkers)
+	if int(maxConcurrent.Load()) > maxWorkers {
+		t.Errorf("exceeded max concurrency: got %d, want <= %d", maxConcurrent.Load(), maxWorkers)
 	}
 }
 
@@ -138,7 +138,7 @@ func TestPoolPanicRecovery(t *testing.T) {
 		}
 	}()
 
-	var completed int32
+	var completed atomic.Int32
 
 	// Submit job that panics
 	if err := pool.Submit(context.Background(), func() error {
@@ -149,7 +149,7 @@ func TestPoolPanicRecovery(t *testing.T) {
 
 	// Submit normal job after panic
 	err := pool.Submit(context.Background(), func() error {
-		atomic.AddInt32(&completed, 1)
+		completed.Add(1)
 		return nil
 	})
 
@@ -160,7 +160,7 @@ func TestPoolPanicRecovery(t *testing.T) {
 	// Wait for job completion
 	time.Sleep(100 * time.Millisecond)
 
-	if atomic.LoadInt32(&completed) != 1 {
+	if completed.Load() != 1 {
 		t.Error("normal job did not complete after panic")
 	}
 }
@@ -168,13 +168,13 @@ func TestPoolPanicRecovery(t *testing.T) {
 func TestPoolShutdown(t *testing.T) {
 	pool := NewPool(2, 10)
 
-	var completed int32
+	var completed atomic.Int32
 
 	// Submit several jobs
 	for range 5 {
 		if err := pool.Submit(context.Background(), func() error {
 			time.Sleep(50 * time.Millisecond)
-			atomic.AddInt32(&completed, 1)
+			completed.Add(1)
 			return nil
 		}); err != nil {
 			t.Errorf("failed to submit job: %v", err)
@@ -188,8 +188,8 @@ func TestPoolShutdown(t *testing.T) {
 	}
 
 	// All jobs should have completed
-	if atomic.LoadInt32(&completed) != 5 {
-		t.Errorf("not all jobs completed: got %d, want 5", completed)
+	if completed.Load() != 5 {
+		t.Errorf("not all jobs completed: got %d, want 5", completed.Load())
 	}
 
 	// New submissions should fail

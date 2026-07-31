@@ -7,12 +7,8 @@ import (
 	"time"
 )
 
-// newTestAuthManager returns an AuthManager with only the fields that the
-// tracker tests need populated. It intentionally does not start the
-// socket listener, so tests stay fast and isolated.
+// The shipped helper already builds exactly what these tests need.
 func newTestAuthManager() *AuthManager {
-	// Same field set as NewEmptyAuthManager; defer to it so a new field only
-	// has to be added in one place.
 	return NewEmptyAuthManager()
 }
 

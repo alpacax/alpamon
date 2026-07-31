@@ -8,8 +8,8 @@ func NewDefaultVersionResolver() *DefaultVersionResolver {
 	return &DefaultVersionResolver{}
 }
 
-func (r *DefaultVersionResolver) GetLatestVersion() string {
-	return GetLatestVersion()
+func (r *DefaultVersionResolver) GetLatestVersion(proxyURL string) string {
+	return GetLatestVersion(proxyURL)
 }
 
 func (r *DefaultVersionResolver) GetPamVersion() string {

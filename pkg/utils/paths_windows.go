@@ -33,5 +33,5 @@ func DefaultShellArgs() []string { return []string{"-NoLogo"} }
 // DefaultPath returns the system PATH on Windows.
 func DefaultPath() string { return os.Getenv("PATH") }
 
-// EnvironmentFilePath returns empty on Windows (no /etc/environment equivalent).
-func EnvironmentFilePath() string { return "" }
+// EnvironmentFilePaths returns nothing on Windows (no /etc/environment equivalent).
+func EnvironmentFilePaths() []string { return nil }

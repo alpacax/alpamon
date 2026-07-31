@@ -65,15 +65,13 @@ func ParseFirewallComment(comment string) (ruleID, ruleType, existingComment str
 		return "", "", ""
 	}
 
-	parts := strings.Split(comment, ",")
 	var otherParts []string
-
-	for _, part := range parts {
+	for part := range strings.SplitSeq(comment, ",") {
 		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "rule_id:") {
-			ruleID = strings.TrimPrefix(part, "rule_id:")
-		} else if strings.HasPrefix(part, "type:") {
-			ruleType = strings.TrimPrefix(part, "type:")
+		if after, ok := strings.CutPrefix(part, "rule_id:"); ok {
+			ruleID = after
+		} else if after, ok := strings.CutPrefix(part, "type:"); ok {
+			ruleType = after
 		} else if part != "" {
 			otherParts = append(otherParts, part)
 		}

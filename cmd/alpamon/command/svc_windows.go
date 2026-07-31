@@ -3,13 +3,10 @@ package command
 import (
 	"sync"
 
+	"github.com/alpacax/alpamon/v2/pkg/svcdef"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/windows/svc"
 )
-
-// svcName is the Windows Service name registered by `alpamon register`.
-// Must match what register creates.
-const svcName = "alpamon"
 
 // Shutdown hook bridge: runAgent installs its ContextManager.Shutdown
 // via setShutdownFunc, and the SCM handler below invokes it on Stop /
@@ -85,7 +82,7 @@ func runService() {
 	// error it encountered, if any; log it and exit normally so SCM
 	// doesn't reboot the service under a Recovery Action for a
 	// clean stop.
-	if err := svc.Run(svcName, handler); err != nil {
+	if err := svc.Run(svcdef.ServiceName, handler); err != nil {
 		log.Error().Err(err).Msg("Windows Service dispatcher returned an error.")
 	}
 }

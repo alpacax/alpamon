@@ -144,7 +144,7 @@ func (c *Collector) Start() {
 
 	go c.scheduler.Start(c.ctx, c.buffer.Capacity)
 
-	for i := 0; i < c.buffer.Capacity; i++ {
+	for range c.buffer.Capacity {
 		c.wg.Add(1)
 		go c.successQueueWorker(c.ctx)
 	}

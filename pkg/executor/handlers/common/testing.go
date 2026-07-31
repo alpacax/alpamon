@@ -30,6 +30,7 @@ type ExecutedCommand struct {
 	Name    string
 	Args    []string
 	User    string
+	Env     map[string]string
 	Timeout time.Duration
 }
 
@@ -91,7 +92,7 @@ func (m *MockCommandExecutor) Exec(ctx context.Context, args []string, username,
 	if len(args) == 0 {
 		return 0, "", nil
 	}
-	m.commands = append(m.commands, ExecutedCommand{Name: args[0], Args: args[1:], User: username, Timeout: timeout})
+	m.commands = append(m.commands, ExecutedCommand{Name: args[0], Args: args[1:], User: username, Env: env, Timeout: timeout})
 	return m.lookupResult(args[0], args[1:]...)
 }
 

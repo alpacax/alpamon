@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -57,9 +58,9 @@ func startTestServer(t *testing.T) (path string, frames <-chan []byte, stop func
 		wg    sync.WaitGroup
 	)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	acceptDone := make(chan struct{})
+	wg.Go(func() {
+		defer close(acceptDone)
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -68,27 +69,28 @@ func startTestServer(t *testing.T) (path string, frames <-chan []byte, stop func
 			mu.Lock()
 			conns = append(conns, conn)
 			mu.Unlock()
-			wg.Add(1)
-			go func(c net.Conn) {
-				defer wg.Done()
+			wg.Go(func() {
 				var hdr [4]byte
 				for {
-					if _, err := io.ReadFull(c, hdr[:]); err != nil {
+					if _, err := io.ReadFull(conn, hdr[:]); err != nil {
 						return
 					}
 					n := binary.BigEndian.Uint32(hdr[:])
 					body := make([]byte, n)
-					if _, err := io.ReadFull(c, body); err != nil {
+					if _, err := io.ReadFull(conn, body); err != nil {
 						return
 					}
 					ch <- body
 				}
-			}(conn)
+			})
 		}
-	}()
+	})
 
 	stop = func() {
 		_ = ln.Close()
+		// Drain the accept loop first: an in-flight Accept can append to
+		// conns after stop() has already closed them, stranding its reader.
+		<-acceptDone
 		mu.Lock()
 		for _, c := range conns {
 			_ = c.Close()
@@ -104,9 +106,7 @@ func startTestServer(t *testing.T) (path string, frames <-chan []byte, stop func
 // (bypassing SocketPath() so tests don't depend on RunDir()).
 func newTestWriter(path, program string, handlers map[string]int) *Writer {
 	h := make(map[string]int, len(handlers))
-	for k, v := range handlers {
-		h[k] = v
-	}
+	maps.Copy(h, handlers)
 	w := &Writer{
 		program:  program,
 		pid:      4242,
@@ -285,7 +285,6 @@ func TestWriter_ReconnectsAfterServerRestart(t *testing.T) {
 	defer stop2()
 	w.path = path2
 	w.mu.Unlock()
-	_ = path
 
 	_, _ = w.Write(zerologLine(t, "error", "plugin.go:1", "after-restart"))
 	body := recvFrame(t, frames2)

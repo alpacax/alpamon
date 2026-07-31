@@ -20,7 +20,8 @@ import (
 func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 	t.Run("non_session_leader_sets_pgid", func(t *testing.T) {
 		cmd := &exec.Cmd{}
-		if _, err := configureProcessTreeCleanup(cmd, false); err != nil {
+		cleanup, err := configureProcessTreeCleanup(cmd, false)
+		if err != nil {
 			t.Fatalf("configureProcessTreeCleanup: %v", err)
 		}
 		if cmd.SysProcAttr == nil {
@@ -32,11 +33,15 @@ func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 		if cmd.SysProcAttr.Setsid {
 			t.Error("Setsid: got true, want false")
 		}
+		if !cleanup.leadsGroup {
+			t.Error("leadsGroup: got false, want true for setpgid(0,0)")
+		}
 	})
 
 	t.Run("session_leader_sets_sid_not_pgid", func(t *testing.T) {
 		cmd := &exec.Cmd{}
-		if _, err := configureProcessTreeCleanup(cmd, true); err != nil {
+		cleanup, err := configureProcessTreeCleanup(cmd, true)
+		if err != nil {
 			t.Fatalf("configureProcessTreeCleanup: %v", err)
 		}
 		if !cmd.SysProcAttr.Setsid {
@@ -45,16 +50,35 @@ func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 		if cmd.SysProcAttr.Setpgid {
 			t.Error("Setpgid: got true, want false (setpgid on a setsid session leader is EPERM, fails Start)")
 		}
+		if !cleanup.leadsGroup {
+			t.Error("leadsGroup: got false, want true for setsid")
+		}
 	})
 
 	// A caller that already asked for setsid must not also get Setpgid forced on.
 	t.Run("preexisting_setsid_not_overridden", func(t *testing.T) {
 		cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{Setsid: true}}
-		if _, err := configureProcessTreeCleanup(cmd, false); err != nil {
+		cleanup, err := configureProcessTreeCleanup(cmd, false)
+		if err != nil {
 			t.Fatalf("configureProcessTreeCleanup: %v", err)
 		}
 		if cmd.SysProcAttr.Setpgid {
 			t.Error("Setpgid was forced on despite preexisting Setsid")
+		}
+		if !cleanup.leadsGroup {
+			t.Error("leadsGroup: got false, want true for preexisting setsid")
+		}
+	})
+
+	// Joining an existing group means PGID != PID, so afterStart must fall back to the getpgid guard.
+	t.Run("preexisting_pgid_is_not_own_group_leader", func(t *testing.T) {
+		cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{Setpgid: true, Pgid: 1234}}
+		cleanup, err := configureProcessTreeCleanup(cmd, false)
+		if err != nil {
+			t.Fatalf("configureProcessTreeCleanup: %v", err)
+		}
+		if cleanup.leadsGroup {
+			t.Error("leadsGroup: got true, want false for a child joining an existing group")
 		}
 	})
 
@@ -62,7 +86,8 @@ func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 	t.Run("preserves_existing_credential", func(t *testing.T) {
 		cred := &syscall.Credential{Uid: 1000, Gid: 1000}
 		cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{Credential: cred}}
-		if _, err := configureProcessTreeCleanup(cmd, false); err != nil {
+		cleanup, err := configureProcessTreeCleanup(cmd, false)
+		if err != nil {
 			t.Fatalf("configureProcessTreeCleanup: %v", err)
 		}
 		if cmd.SysProcAttr.Credential != cred {
@@ -71,7 +96,80 @@ func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 		if !cmd.SysProcAttr.Setpgid {
 			t.Error("Setpgid was not set alongside the preserved credential")
 		}
+		if !cleanup.leadsGroup {
+			t.Error("leadsGroup: got false, want true alongside the preserved credential")
+		}
 	})
+}
+
+// When a cancel races ahead of the process group being recorded, afterStart redoes the kill. runCommand
+// always runs afterStart before Wait, so the redo targets a still-unreaped process—never a reaped pid the
+// OS could have handed to an unrelated process. Exercise that exact order and assert the redo reached the
+// whole group: a backgrounded grandchild that survived the raced cancel must die. Reap only after.
+func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	cmd := exec.Command("/bin/sh", "-c", bgChildScript("wait"), "sh", pidFile)
+	cleanup, err := configureProcessTreeCleanup(cmd, false)
+	if err != nil {
+		t.Fatalf("configureProcessTreeCleanup: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	// Reap last—after afterStart, and even when an assertion below fails early.
+	t.Cleanup(func() { _ = cmd.Wait() })
+
+	childPID := readChildPID(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+
+	// Cancel before the group is recorded: pgid is still 0, so only the leader is targeted.
+	if err := cleanup.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("cancel: %v", err)
+	}
+	// Let the SIGKILL land before the redo: an unreaped-zombie leader is the state that used to defeat
+	// getpgid, and the redo must cope with it. The raced cancel reaches only the leader, so the grandchild
+	// must still be alive—otherwise the assertion below cannot tell a working redo from a no-op one.
+	if !waitForLeaderStopped(cmd.Process.Pid, 3*time.Second) {
+		t.Fatalf("leader %d still running after the raced cancel", cmd.Process.Pid)
+	}
+	if processGone(childPID) {
+		t.Fatalf("grandchild %d died with the raced cancel; the redo is not exercised", childPID)
+	}
+
+	// Redo while the process is still unreaped, matching runCommand's afterStart-before-Wait order.
+	if err := cleanup.afterStart(cmd); err != nil {
+		t.Fatalf("afterStart redo surfaced %v, want nil after a raced cancel", err)
+	}
+	if !waitForProcessGone(childPID, 3*time.Second) {
+		t.Fatalf("grandchild %d survived the afterStart redo", childPID)
+	}
+}
+
+// afterStart swallows os.ErrProcessDone from its redo so Wait reports the real termination status instead
+// of exit 1 with "os: process already finished". runCommand can't reach it—afterStart always precedes
+// Wait, so the group still holds the unreaped leader—so pin the branch white-box on a reaped cmd.
+func TestCommandCleanup_AfterStartRedoSwallowsProcessDone(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cleanup, err := configureProcessTreeCleanup(cmd, false)
+	if err != nil {
+		t.Fatalf("configureProcessTreeCleanup: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("cmd.Wait: %v", err)
+	}
+	// Reaped, so the group must be empty; skip rather than signal a group the OS already handed out.
+	if !errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
+		t.Skipf("pgid %d was reused, cannot exercise an already-gone group", pid)
+	}
+
+	cleanup.takeForCancel() // a cancel raced ahead, so afterStart redoes the kill
+	if err := cleanup.afterStart(cmd); err != nil {
+		t.Fatalf("afterStart: got %v, want nil for an already-gone group", err)
+	}
 }
 
 func TestCommandCleanup_CancelNilProcessReturnsProcessDone(t *testing.T) {
@@ -85,7 +183,7 @@ func TestCommandCleanup_CancelNilProcessReturnsProcessDone(t *testing.T) {
 // the whole group, so a backgrounded grandchild holding the pipe open dies too.
 func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	cmd := exec.Command("/bin/sh", "-c", "sleep 600 & echo $! > \"$1\"; wait", "sh", pidFile)
+	cmd := exec.Command("/bin/sh", "-c", bgChildScript("wait"), "sh", pidFile)
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	if err != nil {
 		t.Fatalf("configureProcessTreeCleanup: %v", err)
@@ -93,19 +191,24 @@ func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cmd.Start: %v", err)
 	}
+	// Kill and reap the leader even when an assertion below fails before cancel runs; the in-body
+	// cancel makes this a no-op on the happy path.
+	t.Cleanup(func() {
+		_ = cleanup.cancel(cmd)
+		_ = cmd.Wait()
+	})
 	if err := cleanup.afterStart(cmd); err != nil {
 		t.Fatalf("afterStart: %v", err)
 	}
 
-	childPID := readExecutorTimeoutChildPID(t, pidFile)
+	childPID := readChildPID(t, pidFile)
 	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 
 	if err := cleanup.cancel(cmd); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
-	go func() { _ = cmd.Wait() }()
 
-	if !waitForExecutorTimeoutChildExit(childPID, 3*time.Second) {
+	if !waitForProcessGone(childPID, 3*time.Second) {
 		t.Fatalf("grandchild %d survived the group kill", childPID)
 	}
 }
@@ -127,7 +230,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pidFile := filepath.Join(t.TempDir(), "child.pid")
-			script := "sleep 600 & echo $! > \"$1\"; wait"
+			script := bgChildScript("wait")
 
 			type result struct {
 				exitCode int
@@ -148,7 +251,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 			select {
 			case res = <-done:
 			case <-time.After(5 * time.Second):
-				pid := readExecutorTimeoutChildPID(t, pidFile)
+				pid := readChildPID(t, pidFile)
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 				t.Fatalf("executor did not return after timeout; leaked child pid %d", pid)
 			}
@@ -163,11 +266,11 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 				t.Fatalf("expected timeout banner, got %q", res.output)
 			}
 
-			pid := readExecutorTimeoutChildPID(t, pidFile)
+			pid := readChildPID(t, pidFile)
 			t.Cleanup(func() {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 			})
-			if !waitForExecutorTimeoutChildExit(pid, 3*time.Second) {
+			if !waitForProcessGone(pid, 3*time.Second) {
 				t.Fatalf("child process %d was still alive after executor timeout cleanup", pid)
 			}
 		})
@@ -178,7 +281,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 // timeout means no Cancel, and Wait returns ExitError not ErrWaitDelay, so only the unconditional cancel covers it.
 func TestExecutor_CleansDescendantWhenCommandExitsNonZero(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	script := "sleep 600 & echo $! > \"$1\"; exit 3"
+	script := bgChildScript("exit 3")
 
 	type result struct {
 		exitCode int
@@ -196,7 +299,7 @@ func TestExecutor_CleansDescendantWhenCommandExitsNonZero(t *testing.T) {
 	select {
 	case res = <-done:
 	case <-time.After(10 * time.Second):
-		pid := readExecutorTimeoutChildPID(t, pidFile)
+		pid := readChildPID(t, pidFile)
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		t.Fatalf("executor did not return; leaked child pid %d", pid)
 	}
@@ -205,14 +308,20 @@ func TestExecutor_CleansDescendantWhenCommandExitsNonZero(t *testing.T) {
 		t.Fatalf("exit code: got %d, want 3; err=%v", res.exitCode, res.err)
 	}
 
-	pid := readExecutorTimeoutChildPID(t, pidFile)
+	pid := readChildPID(t, pidFile)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	if !waitForExecutorTimeoutChildExit(pid, 3*time.Second) {
+	if !waitForProcessGone(pid, 3*time.Second) {
 		t.Fatalf("descendant %d survived after a non-zero command exit", pid)
 	}
 }
 
-func readExecutorTimeoutChildPID(t *testing.T, path string) int {
+// bgChildScript backgrounds a long sleeper and publishes its pid atomically: echo truncate-opens the
+// target, so write to a temp file and rename it in (a same-directory rename(2) is atomic).
+func bgChildScript(tail string) string {
+	return `sleep 600 & echo $! > "$1.tmp"; mv "$1.tmp" "$1"; ` + tail
+}
+
+func readChildPID(t *testing.T, path string) int {
 	t.Helper()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -233,15 +342,35 @@ func readExecutorTimeoutChildPID(t *testing.T, path string) int {
 	return 0
 }
 
-func waitForExecutorTimeoutChildExit(pid int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+func waitForProcessGone(pid int, timeout time.Duration) bool {
+	return waitFor(timeout, func() bool { return processGone(pid) })
+}
+
+// waitForLeaderStopped waits until the SIGKILL landed but Wait has not reaped the leader yet. Detection is
+// split because the platforms disagree about zombies: on linux processGone reads the Z state from /proc,
+// while on darwin getpgid is what stops seeing the leader (proc_find skips SZOMB).
+func waitForLeaderStopped(pid int, timeout time.Duration) bool {
+	return waitFor(timeout, func() bool {
 		if processGone(pid) {
 			return true
 		}
+		_, err := syscall.Getpgid(pid)
+		return errors.Is(err, syscall.ESRCH)
+	})
+}
+
+// waitFor polls cond every 20ms until it reports true or timeout elapses.
+func waitFor(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return processGone(pid)
 }
 
 // processGone also accepts a zombie as gone: kill(pid, 0) still succeeds for one, and in a CI container with no init process to reap the orphaned grandchild it stays a zombie indefinitely.

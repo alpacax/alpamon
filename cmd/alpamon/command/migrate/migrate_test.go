@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -225,5 +226,41 @@ func TestCleanupTargetRegistration_CallsUnregisterEndpoint(t *testing.T) {
 	case <-called:
 	default:
 		t.Fatalf("expected unregister endpoint to be hit")
+	}
+}
+
+// A detection failure must name the distribution instead of defaulting the write-once platform value.
+func TestResolvePlatform_DetectionFailurePropagates(t *testing.T) {
+	origPlatform := platform
+	origDetect := detectPlatformFn
+	t.Cleanup(func() { platform = origPlatform; detectPlatformFn = origDetect })
+
+	platform = ""
+	detectPlatformFn = func() (string, error) {
+		return "", errors.New("unrecognized Linux distribution \"arch\"")
+	}
+
+	if _, err := resolvePlatform(); err == nil {
+		t.Fatal("expected resolvePlatform to fail when platform detection fails")
+	} else if !strings.Contains(err.Error(), "arch") {
+		t.Errorf("error must name the distribution, got %q", err)
+	}
+}
+
+// The override and validation matrix is host-dependent and lives in utils.TestResolveServerPlatform.
+func TestResolvePlatform_UsesDetectionSeam(t *testing.T) {
+	origPlatform := platform
+	origDetect := detectPlatformFn
+	t.Cleanup(func() { platform = origPlatform; detectPlatformFn = origDetect })
+
+	platform = ""
+	detectPlatformFn = func() (string, error) { return "rhel", nil }
+
+	got, err := resolvePlatform()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "rhel" {
+		t.Errorf("expected the detected platform, got %q", got)
 	}
 }

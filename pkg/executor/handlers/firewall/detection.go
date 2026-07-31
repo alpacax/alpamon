@@ -27,7 +27,14 @@ const (
 	HighLevelNone      HighLevelFirewall = ""
 	HighLevelUFW       HighLevelFirewall = "ufw"
 	HighLevelFirewalld HighLevelFirewall = "firewalld"
+	// SLES 12 and Leap 42, which the SUSE prefixes accept, ship SuSEfirewall2
+	// instead of firewalld. It owns the iptables ruleset and regenerates it on
+	// reload, so rules written behind its back disappear without an error.
+	HighLevelSuSEfirewall2 HighLevelFirewall = "SuSEfirewall2"
 )
+
+// Test seam: the units these checks query only exist on linux.
+var hasSystemd = utils.HasSystemd
 
 // DetectionResult holds the cached detection results
 type DetectionResult struct {
@@ -123,9 +130,9 @@ func (d *FirewallDetector) GetBackendType() BackendType {
 
 // detectHighLevelFirewall detects if high-level firewall management tools are active
 func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLevelFirewall {
-	hasSystemd := utils.HasSystemd()
+	systemdAvailable := hasSystemd()
 
-	if hasSystemd {
+	if systemdAvailable {
 		// Check ufw via systemctl (most reliable)
 		exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "ufw")
 		if exitCode == 0 && strings.TrimSpace(output) == "active" {
@@ -141,7 +148,7 @@ func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLeve
 		return HighLevelUFW
 	}
 
-	if hasSystemd {
+	if systemdAvailable {
 		// Check firewalld via systemctl
 		exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "firewalld")
 		if exitCode == 0 && strings.TrimSpace(output) == "active" {
@@ -157,6 +164,15 @@ func (d *FirewallDetector) detectHighLevelFirewall(ctx context.Context) HighLeve
 		return HighLevelFirewalld
 	}
 
+	if systemdAvailable {
+		// SuSEfirewall2 has no query command of its own; the unit is the only signal.
+		exitCode, output, _ := d.executor.RunWithTimeout(ctx, 5*time.Second, "systemctl", "is-active", "SuSEfirewall2")
+		if exitCode == 0 && strings.TrimSpace(output) == "active" {
+			log.Info().Msg("Detected active SuSEfirewall2 - Alpacon firewall management will be disabled")
+			return HighLevelSuSEfirewall2
+		}
+	}
+
 	log.Debug().Msg("No high-level firewall detected - Alpacon firewall management enabled")
 	return HighLevelNone
 }
@@ -169,7 +185,7 @@ func (d *FirewallDetector) detectBackend(ctx context.Context) BackendType {
 	if exitCode == 0 {
 		// Count actual rules (lines starting with -A or -I)
 		ruleCount := 0
-		for _, line := range strings.Split(output, "\n") {
+		for line := range strings.SplitSeq(output, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "-A ") || strings.HasPrefix(line, "-I ") {
 				ruleCount++
@@ -197,7 +213,7 @@ func (d *FirewallDetector) detectBackend(ctx context.Context) BackendType {
 	exitCode, output, _ = d.executor.RunWithTimeout(ctx, 10*time.Second, "iptables", "-S")
 	if exitCode == 0 {
 		// Check for rules (iptables -S output starts with -P, -A, -I, etc)
-		for _, line := range strings.Split(output, "\n") {
+		for line := range strings.SplitSeq(output, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "-A ") || strings.HasPrefix(line, "-I ") {
 				log.Debug().Msg("Found iptables rules via iptables -S")

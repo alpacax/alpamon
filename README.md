@@ -9,6 +9,7 @@ Installed on each managed server, Alpamon establishes an outbound-only connectio
 | Platform | Minimum version | Arch |
 | --- | --- | --- |
 | Linux | Ubuntu 18.04+, Debian 11+, RHEL / Rocky / AlmaLinux 8+, Oracle Linux 8+, Amazon Linux 2 / 2023, Fedora (current or previous) | amd64, arm64 |
+| Linux (best-effort) | openSUSE Leap 15+, SLES 15+ | amd64, arm64 |
 | macOS | 11 (Big Sur) or later | amd64, arm64 (Apple Silicon) |
 | Windows | Windows 10 (1803+) / Windows 11, Windows Server 2019 or later | amd64 |
 
@@ -31,6 +32,13 @@ sudo alpamon register --url https://<workspace> --token <TOKEN>
 ```bash
 curl -s https://packagecloud.io/install/repositories/alpacax/alpamon/script.rpm.sh?any=true | sudo bash
 sudo yum install alpamon
+sudo alpamon register --url https://<workspace> --token <TOKEN>
+```
+
+**openSUSE / SLES** (best-effort) — see [**docs/opensuse.md**](docs/opensuse.md) for the sudoers prerequisite and the `yum`-only server operations that still fail here.
+```bash
+sudo zypper addrepo -f 'https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch' alpamon
+sudo zypper --gpg-auto-import-keys refresh && sudo zypper install alpamon
 sudo alpamon register --url https://<workspace> --token <TOKEN>
 ```
 
@@ -90,6 +98,8 @@ The optional `alpamon-pam` package provides PAM integration for Alpacon-managed 
 sudo apt-get install alpamon-pam
 # RHEL / CentOS
 sudo yum install alpamon-pam
+# openSUSE / SLES
+sudo zypper install alpamon-pam
 ```
 
 After install, add to `/etc/pam.d/sudo`:
@@ -203,10 +213,10 @@ docker run \
     -e ALPACON_URL="https://<workspace>" \
     -e PLUGIN_ID="<plugin_id>" \
     -e PLUGIN_KEY="<plugin_key>" \
-    alpamon:latest
+    alpamon:opensuse-15
 ```
 
-Covered distros: Ubuntu 22.04/20.04, Debian 11, RHEL 8/9. Legacy Dockerfiles for Ubuntu 18.04, Debian 10, and CentOS 7 also ship under `Dockerfiles/` for best-effort builds against EOL platforms.
+Covered distros: Ubuntu 22.04/20.04, Debian 11, RHEL 8/9, openSUSE Leap 15. Legacy Dockerfiles for Ubuntu 18.04, Debian 10, and CentOS 7 also ship under `Dockerfiles/` for best-effort builds against EOL platforms.
 
 ### Run locally
 

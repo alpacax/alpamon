@@ -134,10 +134,9 @@ func (s *NftablesBackend) DeleteRule(ctx context.Context, ruleID, chainName stri
 	}
 
 	// Find rule with matching rule ID and extract handle
-	lines := strings.Split(output, "\n")
 	handleRegex := regexp.MustCompile(`# handle (\d+)`)
 
-	for _, line := range lines {
+	for line := range strings.SplitSeq(output, "\n") {
 		if !strings.Contains(line, ruleID) {
 			continue
 		}
@@ -387,10 +386,9 @@ func (s *NftablesBackend) ReorderChains(ctx context.Context, chainNames []string
 
 	// Parse and find jump rule handles
 	var jumpHandles []string
-	lines := strings.Split(output, "\n")
 	handleRegex := regexp.MustCompile(`# handle (\d+)`)
 
-	for _, line := range lines {
+	for line := range strings.SplitSeq(output, "\n") {
 		isJumpRule := false
 		for _, chainName := range chainNames {
 			if strings.Contains(line, fmt.Sprintf("jump %s", chainName)) {

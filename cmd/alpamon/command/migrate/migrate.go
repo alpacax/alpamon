@@ -42,7 +42,6 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/migrate"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
-	"github.com/shirou/gopsutil/v4/host"
 	"github.com/spf13/cobra"
 )
 
@@ -66,6 +65,9 @@ var (
 	caCert          string
 	rollbackTimeout time.Duration
 	force           bool
+
+	// Test seam mirroring register's: no side effect, and it lets a detection failure be injected on any host.
+	detectPlatformFn = utils.DetectRegistrationPlatform
 )
 
 // Cmd is the migrate subcommand exported for registration in root.go.
@@ -98,7 +100,10 @@ func init() {
 	Cmd.Flags().StringVar(&newURL, "url", "", "Target Alpacon workspace URL (required)")
 	Cmd.Flags().StringVar(&apiToken, "token", "", "Registration token issued by the target workspace (required)")
 	Cmd.Flags().StringVar(&serverName, "name", "", "Server name (optional, defaults to hostname)")
-	Cmd.Flags().StringVar(&platform, "platform", "", "Platform (debian/rhel/darwin/windows, auto-detected when omitted)")
+	Cmd.Flags().StringVar(&platform, "platform", "",
+		"Platform (debian/rhel/darwin/windows). Auto-detected when omitted.\n"+
+			"Affects the target workspace's server record only; the agent still\n"+
+			"refuses to start on an unsupported distribution.")
 	Cmd.Flags().BoolVar(&sslVerify, "ssl-verify", true, "SSL certificate verification")
 	Cmd.Flags().StringVar(&caCert, "ca-cert", "", "CA certificate path")
 	Cmd.Flags().DurationVar(&rollbackTimeout, "rollback-timeout", migrate.DefaultRollbackTimeout,
@@ -138,9 +143,11 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("active config not found at %s: %w", configPath, err)
 	}
 
-	if platform == "" {
-		platform = detectPlatform()
+	resolvedPlatform, err := resolvePlatform()
+	if err != nil {
+		return err
 	}
+	platform = resolvedPlatform
 
 	current, err := config.ReadServer(configPath)
 	if err != nil {
@@ -258,6 +265,19 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 // facing prefix on the target workspace so the new server doesn't end up
 // with two stacked suffixes (`mybox-abc123-xyz789`).
 var generatedSuffixRE = regexp.MustCompile(`-[0-9a-f]{6}$`)
+
+// Split out of runMigrate so the detection-failure path is reachable without
+// runMigrate's systemd and config preconditions.
+func resolvePlatform() (string, error) {
+	resolved, warning, err := utils.ResolveServerPlatform(runtime.GOOS, platform, detectPlatformFn)
+	if err != nil {
+		return "", err
+	}
+	if warning != "" {
+		fmt.Println(warning)
+	}
+	return resolved, nil
+}
 
 func stripGeneratedSuffix(name string) string {
 	return generatedSuffixRE.ReplaceAllString(name, "")
@@ -394,31 +414,4 @@ func normalizeHostname(h string) string {
 		return h[:i]
 	}
 	return h
-}
-
-func detectPlatform() string {
-	if runtime.GOOS == "windows" {
-		return "windows"
-	}
-	info, err := host.Info()
-	if err != nil {
-		return "debian"
-	}
-	switch info.Platform {
-	case "darwin":
-		return "darwin"
-	case "ubuntu", "debian", "raspbian":
-		return "debian"
-	case "centos", "rhel", "redhat", "amazon", "amzn", "fedora", "rocky", "oracle", "ol":
-		return "rhel"
-	}
-	p := strings.ToLower(info.Platform)
-	switch {
-	case strings.Contains(p, "ubuntu"), strings.Contains(p, "debian"):
-		return "debian"
-	case strings.Contains(p, "centos"), strings.Contains(p, "rhel"),
-		strings.Contains(p, "fedora"), strings.Contains(p, "rocky"):
-		return "rhel"
-	}
-	return "debian"
 }
