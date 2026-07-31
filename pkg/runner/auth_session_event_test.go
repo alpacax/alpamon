@@ -6,9 +6,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/google/uuid"
@@ -110,6 +112,193 @@ func TestResolveSessionEvent_CommandSessionSuppressed(t *testing.T) {
 	_, emit := am.resolveSessionEvent(req)
 	if emit {
 		t.Error("expected suppression for tracked Command session")
+	}
+}
+
+// fakeParents turns a pid->ppid table into the parentOf lookup ancestorPIDs
+// takes, so process topologies can be asserted without spawning processes.
+func fakeParents(tree map[int]int) func(int) (int, bool) {
+	return func(pid int) (int, bool) {
+		ppid, ok := tree[pid]
+		return ppid, ok
+	}
+}
+
+// TestAncestorPIDs_WalksChain verifies the walk returns ancestors nearest
+// first and stops at init.
+func TestAncestorPIDs_WalksChain(t *testing.T) {
+	// su(400) -> sudo monitor(300) -> sudo(200) -> websh shell(100) -> init(1)
+	got := ancestorPIDs(400, fakeParents(map[int]int{400: 300, 300: 200, 200: 100, 100: 1}))
+
+	want := []int{300, 200, 100}
+	if len(got) != len(want) {
+		t.Fatalf("chain: got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("chain: got %v, want %v", got, want)
+		}
+	}
+}
+
+// TestAncestorPIDs_StopsOnBrokenLink verifies a process reparented to init
+// (setsid, nohup with a double fork, systemd-run) ends the walk instead of
+// silently jumping to an unrelated tree.
+func TestAncestorPIDs_StopsOnBrokenLink(t *testing.T) {
+	if got := ancestorPIDs(400, fakeParents(map[int]int{400: 1})); len(got) != 0 {
+		t.Errorf("a process reparented to init has no usable ancestors, got %v", got)
+	}
+	if got := ancestorPIDs(400, fakeParents(map[int]int{})); len(got) != 0 {
+		t.Errorf("an unreadable parent must end the walk, got %v", got)
+	}
+}
+
+// TestAncestorPIDs_BoundedAndLoopSafe verifies the walk cannot run away: a
+// self-parenting pid terminates, and a deep chain is capped.
+func TestAncestorPIDs_BoundedAndLoopSafe(t *testing.T) {
+	if got := ancestorPIDs(400, fakeParents(map[int]int{400: 400})); len(got) != 0 {
+		t.Errorf("a self-parenting pid must not be walked, got %v", got)
+	}
+
+	deep := make(map[int]int)
+	for pid := 100; pid < 200; pid++ {
+		deep[pid] = pid + 1
+	}
+	if got := ancestorPIDs(100, fakeParents(deep)); len(got) != maxSessionAncestorDepth {
+		t.Errorf("walk depth: got %d, want %d", len(got), maxSessionAncestorDepth)
+	}
+}
+
+// TestLookupSessionAncestor_SudoUsePtyTopology pins the case the direct
+// (sid, ppid) pair cannot see. With sudo's use_pty on (the default on current
+// Debian/Ubuntu) `sudo su -` inside Websh runs su in a session created by
+// sudo's monitor, so su's sid is the monitor and su's parent is the monitor —
+// neither is tracked. Only the grandparent chain still reaches the Websh PTY
+// leader.
+func TestLookupSessionAncestor_SudoUsePtyTopology(t *testing.T) {
+	const (
+		webshLeaderPID = 100
+		sudoPID        = 200
+		monitorPID     = 300
+		suPID          = 400
+	)
+	am := newTestAuthManager()
+	am.AddPIDSessionMapping(webshLeaderPID, &SessionInfo{
+		SessionID: "sess-1",
+		Requests:  make(map[string]*SudoRequest),
+	})
+
+	// su's own keys both miss: sid is the monitor's new session, ppid is the
+	// monitor. This is what makes the event look non-Alpacon today.
+	am.mu.RLock()
+	_, direct := am.lookupSessionLocked(monitorPID, true, monitorPID)
+	am.mu.RUnlock()
+	if direct {
+		t.Fatal("test topology is wrong: the direct lookup must miss")
+	}
+
+	chain := ancestorPIDs(suPID, fakeParents(map[int]int{
+		suPID: monitorPID, monitorPID: sudoPID, sudoPID: webshLeaderPID, webshLeaderPID: 1,
+	}))
+	am.mu.RLock()
+	session, found := am.lookupSessionAncestorLocked(chain)
+	am.mu.RUnlock()
+
+	if !found {
+		t.Fatal("su under sudo use_pty must resolve to the Websh session via its ancestors")
+	}
+	if session.SessionID != "sess-1" {
+		t.Errorf("SessionID: got %q, want sess-1", session.SessionID)
+	}
+}
+
+// TestLookupSessionAncestor_UntrackedChainEmits verifies the walk does not
+// over-suppress: a genuine outside login whose ancestors are all untracked
+// still resolves to no session.
+func TestLookupSessionAncestor_UntrackedChainEmits(t *testing.T) {
+	am := newTestAuthManager()
+	am.AddPIDSessionMapping(100, &SessionInfo{
+		SessionID: "sess-1",
+		Requests:  make(map[string]*SudoRequest),
+	})
+
+	// sshd child(900) -> sshd daemon(800) -> init.
+	chain := ancestorPIDs(900, fakeParents(map[int]int{900: 800, 800: 1}))
+	am.mu.RLock()
+	_, found := am.lookupSessionAncestorLocked(chain)
+	am.mu.RUnlock()
+
+	if found {
+		t.Error("an untracked ancestor chain must not suppress the event")
+	}
+}
+
+// TestResolveSessionEvent_TruncatesToServerLimits verifies each string is cut
+// to the server's max_length. An over-length field would come back as a 400,
+// which this client treats as permanent, losing the whole audit record.
+func TestResolveSessionEvent_TruncatesToServerLimits(t *testing.T) {
+	am := newTestAuthManager()
+
+	event, emit := am.resolveSessionEvent(SessionEventRequest{
+		Username: strings.Repeat("u", maxAccessEventUsernameLen+10),
+		Service:  strings.Repeat("s", maxAccessEventServiceLen+10),
+		RHost:    strings.Repeat("r", maxAccessEventRHostLen+10),
+		TTY:      strings.Repeat("t", maxAccessEventTTYLen+10),
+		PID:      712345,
+		PPID:     712340,
+	})
+	if !emit {
+		t.Fatal("expected emit=true for unknown session")
+	}
+
+	for _, tc := range []struct {
+		field string
+		got   string
+		want  int
+	}{
+		{"username", event.Username, maxAccessEventUsernameLen},
+		{"service", event.Service, maxAccessEventServiceLen},
+		{"rhost", event.RHost, maxAccessEventRHostLen},
+		{"tty", event.TTY, maxAccessEventTTYLen},
+	} {
+		if len(tc.got) != tc.want {
+			t.Errorf("%s: got %d chars, want %d", tc.field, len(tc.got), tc.want)
+		}
+	}
+}
+
+// TestTruncateRunes_CutsOnCodepointBoundary verifies a multi-byte rune is
+// never split, which would put invalid UTF-8 on the wire.
+func TestTruncateRunes_CutsOnCodepointBoundary(t *testing.T) {
+	got, cut := truncateRunes("héllo", 2)
+	if !cut {
+		t.Fatal("expected cut=true")
+	}
+	if got != "hé" {
+		t.Errorf("got %q, want %q", got, "hé")
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncation produced invalid UTF-8: %q", got)
+	}
+
+	if got, cut := truncateRunes("héllo", 5); cut || got != "héllo" {
+		t.Errorf("a string within the limit must pass through unchanged, got %q cut=%v", got, cut)
+	}
+}
+
+// TestResolveSessionEvent_ClampsNegativePPID verifies a malformed frame cannot
+// produce a payload the server's PositiveIntegerField would reject outright.
+func TestResolveSessionEvent_ClampsNegativePPID(t *testing.T) {
+	am := newTestAuthManager()
+
+	event, emit := am.resolveSessionEvent(SessionEventRequest{
+		Username: "alice", Service: "sshd", PID: 712345, PPID: -1,
+	})
+	if !emit {
+		t.Fatal("expected emit=true for unknown session")
+	}
+	if event.PPID != 0 {
+		t.Errorf("PPID: got %d, want 0", event.PPID)
 	}
 }
 
@@ -306,23 +495,50 @@ func TestEmitAccessEvent_DropsOnRejection(t *testing.T) {
 	}
 }
 
-// TestEmitAccessEvent_RetriesOn429 verifies 429 is transient: the event is
-// retried (not dropped) and succeeds once the server stops throttling.
-func TestEmitAccessEvent_RetriesOn429(t *testing.T) {
+// TestEmitAccessEvent_DropsOn429 verifies 429 is permanent: the server's
+// throttle window (60s, a DRF SimpleRateThrottle) outlives this client's whole
+// retry budget (authRetryTimeout, 25s), so every retry is guaranteed to
+// re-throttle while pinning an emit slot. Posted once, then dropped.
+func TestEmitAccessEvent_DropsOn429(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.WriteHeader(http.StatusCreated)
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer srv.Close()
 
 	newEmitTestAuthManager(srv.URL).emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
 
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("429 must not be retried; got %d calls", got)
+	}
+}
+
+// TestEmitAccessEvent_404AfterSuccessIsReported verifies the 404 sunset: once
+// the endpoint has answered 2xx, a later 404 means the server row is gone
+// (console-deleted server, agent still running) rather than "Phase 2 not
+// deployed", so it must not take the quiet path. Both are permanent, so the
+// observable difference is the sentinel the emit resolves to.
+func TestEmitAccessEvent_404AfterSuccessIsReported(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	am := newEmitTestAuthManager(srv.URL)
+	am.emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
+	if !am.accessEndpointSeen.Load() {
+		t.Fatal("a 2xx must latch the endpoint as deployed")
+	}
+
+	am.emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 2})
 	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Errorf("429 must be retried then succeed; got %d calls", got)
+		t.Errorf("404 must not be retried; got %d calls", got)
 	}
 }
 
