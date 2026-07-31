@@ -80,23 +80,36 @@ var (
 	sshdUsePAMMutex     sync.Mutex
 )
 
-// GetSSHDUsePAM reports sshd's effective UsePAM setting: "yes", "no",
-// or "" when it cannot be determined (no sshd, non-linux, query error).
-// A host reporting anything but "yes" bypasses PAM-based access
-// detection for pubkey SSH logins, so the value is surfaced to the
-// server via sync. Cached with the same TTL as the pam version to avoid
-// spawning sshd -T on every sync cycle.
-func GetSSHDUsePAM() string {
+// GetSSHDUsePAM reports sshd's UsePAM setting as configured on disk:
+// "yes", "no", or nil when it cannot be determined (no sshd, non-linux,
+// query error). A host reporting anything but "yes" bypasses PAM-based
+// access detection for pubkey SSH logins, so the value is surfaced to
+// the server via sync. Cached with the same TTL as the pam version to
+// avoid spawning sshd -T on every sync cycle.
+//
+// It returns a pointer so that "undeterminable" reaches the server as an
+// explicit JSON null instead of an omitted key: the server preserves the
+// previous value for an absent key, which would keep a host that has lost
+// sshd reporting its last known value forever.
+//
+// The value is what sshd -T reads from the config files, not what the
+// running daemon loaded. An operator who edits UsePAM without reloading
+// sshd gets the on-disk answer, which may not match the live daemon.
+func GetSSHDUsePAM() *string {
 	sshdUsePAMMutex.Lock()
 	defer sshdUsePAMMutex.Unlock()
 
-	if !sshdUsePAMCacheTime.IsZero() && time.Since(sshdUsePAMCacheTime) < pamCacheTTL {
-		return sshdUsePAMCache
+	if sshdUsePAMCacheTime.IsZero() || time.Since(sshdUsePAMCacheTime) >= pamCacheTTL {
+		sshdUsePAMCache = querySSHDUsePAM()
+		sshdUsePAMCacheTime = time.Now()
 	}
 
-	sshdUsePAMCache = querySSHDUsePAM()
-	sshdUsePAMCacheTime = time.Now()
-	return sshdUsePAMCache
+	if sshdUsePAMCache == "" {
+		return nil
+	}
+	// Copy so callers can never mutate the cached value through the pointer.
+	value := sshdUsePAMCache
+	return &value
 }
 
 func querySSHDUsePAM() string {
@@ -104,16 +117,7 @@ func querySSHDUsePAM() string {
 		return ""
 	}
 
-	sshdPath, err := exec.LookPath("sshd")
-	if err != nil {
-		// sshd is typically in sbin, which may not be on PATH.
-		for _, p := range []string{"/usr/sbin/sshd", "/usr/local/sbin/sshd"} {
-			if _, statErr := os.Stat(p); statErr == nil {
-				sshdPath = p
-				break
-			}
-		}
-	}
+	sshdPath := lookupSSHDPath()
 	if sshdPath == "" {
 		return ""
 	}
@@ -130,12 +134,37 @@ func querySSHDUsePAM() string {
 	return parseSSHDUsePAM(string(out))
 }
 
-// parseSSHDUsePAM extracts the usepam value from sshd -T output.
+// lookupSSHDPath returns the sshd binary to exec, or "" when none is found.
+// The canonical sbin locations are tried first so PATH plays no part in what
+// alpamon runs as root, and LookPath is only a fallback whose result is
+// discarded on any error: since Go 1.19 it returns a non-empty *relative*
+// path together with exec.ErrDot when the match resolved through a "." (or
+// empty) entry in PATH.
+func lookupSSHDPath() string {
+	for _, p := range []string{"/usr/sbin/sshd", "/usr/local/sbin/sshd"} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	sshdPath, err := exec.LookPath("sshd")
+	if err != nil {
+		return ""
+	}
+	return sshdPath
+}
+
+// parseSSHDUsePAM extracts the usepam value from sshd -T output. Anything
+// other than yes/no is reported as undeterminable rather than forwarded:
+// the value rides the same sync PATCH as version, pam_version and load, so
+// an unexpected token would make DRF reject all of them, not just this field.
 func parseSSHDUsePAM(out string) string {
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(strings.ToLower(line))
 		if len(fields) == 2 && fields[0] == "usepam" {
-			return fields[1]
+			if fields[1] == "yes" || fields[1] == "no" {
+				return fields[1]
+			}
+			return ""
 		}
 	}
 	return ""
