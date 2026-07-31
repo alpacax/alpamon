@@ -299,6 +299,9 @@ func ScheduleSelfRestart(delay time.Duration) error {
 	unit := fmt.Sprintf("alpamon-restart-%d", time.Now().UnixNano())
 	schedule := []string{
 		fmt.Sprintf("--on-active=%ds", secs),
+		// Without this the default AccuracySec of 1min lets systemd coalesce
+		// the trigger up to a minute past the requested delay.
+		"--timer-property=AccuracySec=1s",
 		"--unit", unit,
 		"systemctl", "restart", "alpamon",
 	}
