@@ -258,11 +258,17 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	// is routine, and the console already shows the version the agent reports.
 	if exitCode == 0 {
 		if stale := h.unmovedPackages(ctx, versionsBefore); len(stale) > 0 {
+			// Per package: alpamon and alpamon-pam carry their own version-release,
+			// so one shared number would misname the other one's.
+			held := make([]string, 0, len(stale))
+			for _, pkg := range stale {
+				held = append(held, fmt.Sprintf("%s (still %s)", pkg, versionsBefore[pkg]))
+			}
 			note := fmt.Sprintf(
-				"zypper exited 0 but %s did not move (still %s). The repository may not carry a newer "+
+				"zypper exited 0 but %s did not move. The repository may not carry a newer "+
 					"build yet, or its vendor changed: solver.allowVendorChange is off by default, and "+
 					"zypper then declines the upgrade without failing.",
-				strings.Join(stale, ", "), versionsBefore[stale[0]])
+				strings.Join(held, ", "))
 			log.Warn().Msg(note)
 			output = strings.TrimRight(output, "\n") + "\n\n" + note
 		}
