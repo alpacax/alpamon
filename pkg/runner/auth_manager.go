@@ -56,7 +56,6 @@ func (s *SessionInfo) effectiveKind() string {
 }
 
 type SudoRequest struct {
-	RequestID  string
 	Connection net.Conn
 }
 
@@ -426,7 +425,6 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	}
 
 	session.Requests[sudoApprovalReq.RequestID] = &SudoRequest{
-		RequestID:  sudoApprovalReq.RequestID,
 		Connection: unixConn,
 	}
 	am.mu.Unlock()
