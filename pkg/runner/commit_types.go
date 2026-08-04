@@ -56,8 +56,16 @@ var commitDefs = map[string]commitDef{
 }
 
 type ServerData struct {
-	Version    string  `json:"version"`
-	PamVersion string  `json:"pam_version,omitempty"`
+	Version    string `json:"version"`
+	PamVersion string `json:"pam_version,omitempty"`
+	// SshdUsePam carries "yes", "no", or null. It deliberately has no
+	// omitempty: the server preserves the previous value for an absent key,
+	// so omitting the field on a host that has lost sshd (package removed,
+	// sshd -T now failing) would leave the console showing the last known
+	// answer forever. This field's whole job is reporting when PAM-based
+	// detection is structurally bypassed, so it has to be able to go stale
+	// loudly rather than quietly.
+	SshdUsePam *string `json:"sshd_use_pam"`
 	Load       float64 `json:"load"`
 }
 
@@ -155,12 +163,14 @@ type shadowEntry struct {
 }
 
 type AccessPolicy struct {
-	BlockLocalSudo bool `json:"block_local_sudo"`
+	BlockLocalSudo    bool `json:"block_local_sudo"`
+	DetectLocalAccess bool `json:"detect_local_access"`
 }
 
 type commitData struct {
 	Version    string      `json:"version"`
 	PamVersion string      `json:"pam_version,omitempty"`
+	SshdUsePam *string     `json:"sshd_use_pam"` // no omitempty; see ServerData
 	Load       float64     `json:"load"`
 	Info       SystemData  `json:"info"`
 	OS         OSData      `json:"os"`

@@ -2,7 +2,10 @@
 
 package runner
 
-import "golang.org/x/sys/unix"
+import (
+	"github.com/shirou/gopsutil/v4/process"
+	"golang.org/x/sys/unix"
+)
 
 // sessionID returns the session ID (sid) of pid. Every process in the same
 // session shares one sid—the session-leader pid—so sudo invoked anywhere inside
@@ -19,4 +22,22 @@ func sessionID(pid int) (int, bool) {
 		return 0, false
 	}
 	return sid, true
+}
+
+// parentPID returns the parent pid of pid. Reports ok=false when the process
+// is gone or its parent cannot be read, which ends any ancestor walk rather
+// than guessing. On Linux this is a single /proc/<pid>/stat read.
+func parentPID(pid int) (int, bool) {
+	if pid <= 1 {
+		return 0, false
+	}
+	proc, err := process.NewProcess(int32(pid))
+	if err != nil {
+		return 0, false
+	}
+	ppid, err := proc.Ppid()
+	if err != nil || ppid <= 0 {
+		return 0, false
+	}
+	return int(ppid), true
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/retry"
@@ -135,12 +136,38 @@ type AuthManager struct {
 	completionChannels map[string]chan struct{}
 	session            *scheduler.Session
 	blockLocalSudo     bool
+	detectLocalAccess  bool
+	// emitAccessEventFn overrides emitAccessEvent in tests; nil means
+	// the real emitter is used.
+	emitAccessEventFn func(NonAlpaconAccessEvent)
+	// emitSem bounds concurrent access-event emit goroutines. Each emit
+	// can hold a slot for roughly authRetryTimeout plus one HTTP timeout —
+	// retry.Retry checks MaxElapsedTime only after an attempt returns, so the
+	// attempt in flight at the 25s mark still runs its full 10s budget, giving
+	// a ~35s worst case. A login burst could otherwise spawn goroutines
+	// without limit. A full channel means the budget is exhausted and the
+	// event is dropped (non-blocking, never blocks the ack path).
+	emitSem chan struct{}
+	// accessEndpointSeen latches once the access event endpoint has answered
+	// 2xx on this agent, which is what lets a later 404 be reported instead of
+	// being read as "Phase 2 not deployed yet". Per-manager rather than
+	// package-level so tests cannot leak the latch into one another.
+	accessEndpointSeen atomic.Bool
 }
 
 const (
 	authRetryInitialInterval = 1 * time.Second
 	authRetryMaxInterval     = 10 * time.Second
 	authRetryTimeout         = 25 * time.Second // Less than PAM 30s timeout
+	// emitConcurrencyLimit caps in-flight access-event emit goroutines.
+	emitConcurrencyLimit = 16
+	// authSocketReadBufferSize bounds a single auth.sock request. The largest
+	// frame is a session_event carrying all four PAM items at alpamon-pam's
+	// PAM_ITEM_MAX_LEN of 256 bytes: ~1.1 KB of plain ASCII, but jansson
+	// escapes control bytes 6:1, so the encoded form can reach ~6.5 KB. The
+	// previous 1 KB truncated those into a JSON parse error, which closed the
+	// connection and lost the audit event.
+	authSocketReadBufferSize = 8192
 )
 
 var (
@@ -154,6 +181,7 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 			pidToSessionMap:    make(map[int]*SessionInfo),
 			completionChannels: make(map[string]chan struct{}),
 			session:            session,
+			emitSem:            make(chan struct{}, emitConcurrencyLimit),
 		}
 	})
 
@@ -169,6 +197,10 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 		authManager.session = session
 	}
 
+	if authManager.emitSem == nil {
+		authManager.emitSem = make(chan struct{}, emitConcurrencyLimit)
+	}
+
 	return authManager
 }
 
@@ -180,6 +212,16 @@ func (am *AuthManager) UpdateBlockLocalSudo(value bool) {
 	}
 	am.blockLocalSudo = value
 	log.Info().Bool("block_local_sudo", value).Msg("Updated block_local_sudo setting")
+}
+
+func (am *AuthManager) UpdateDetectLocalAccess(value bool) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	if am.detectLocalAccess == value {
+		return
+	}
+	am.detectLocalAccess = value
+	log.Info().Bool("detect_local_access", value).Msg("Updated detect_local_access setting")
 }
 
 func (am *AuthManager) Start(ctx context.Context) {
@@ -314,7 +356,20 @@ func (am *AuthManager) lookupSessionLocked(sid int, sidOK bool, parentPID int) (
 }
 
 func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
-	buf := make([]byte, 1024)
+	// Panic recovery per the repo convention (internal/pool/pool.go,
+	// pkg/executor/executor.go). This handler used to run only on sudo
+	// invocations; with session events it runs on every PAM session open, so
+	// an unrecovered panic here would take the whole agent down from the login
+	// path. Close the socket on the way out so the PAM module reads EOF and
+	// fails open immediately instead of waiting out its own timeout.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Msg("Auth socket request handler panicked")
+			_ = unixConn.Close()
+		}
+	}()
+
+	buf := make([]byte, authSocketReadBufferSize)
 	n, err := unixConn.Read(buf)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to read sudo request")
@@ -363,6 +418,9 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 
 	case "sudo_approval":
 		am.handleSudoApprovalRequest(buf[:n], unixConn)
+
+	case "session_event":
+		am.handleSessionEvent(buf[:n], unixConn)
 
 	default:
 		log.Warn().Str("type", baseReq.Type).Msg("Unknown request type")
