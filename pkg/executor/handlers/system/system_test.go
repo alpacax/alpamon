@@ -505,6 +505,18 @@ func findExecutedShell(mockExec *common.MockCommandExecutor) *common.ExecutedCom
 	return nil
 }
 
+// mustFindExecutedShell requires a package-manager shell to have been
+// spawned, failing the test immediately with msg otherwise, so callers can
+// use the result without a local nil check.
+func mustFindExecutedShell(t *testing.T, mockExec *common.MockCommandExecutor, msg string) *common.ExecutedCommand {
+	t.Helper()
+	shell := findExecutedShell(mockExec)
+	if shell == nil {
+		t.Fatal(msg)
+	}
+	return shell
+}
+
 // TestSystemHandler_Upgrade_PackageProxy verifies that a package_proxy in the
 // upgrade payload reaches both the version lookup and the environment of the
 // spawned package-manager shell, and that no_proxy shields the Alpacon server
@@ -543,10 +555,7 @@ func TestSystemHandler_Upgrade_PackageProxy(t *testing.T) {
 		t.Errorf("expected version lookup to use proxy %q, got %q", proxy, mockVersions.GotProxy)
 	}
 
-	shell := findExecutedShell(mockExec)
-	if shell == nil {
-		t.Fatal("expected a package-manager shell to be spawned")
-	}
+	shell := mustFindExecutedShell(t, mockExec, "expected a package-manager shell to be spawned")
 	if shell.User != "root" {
 		t.Errorf("expected shell to run as root, got %q", shell.User)
 	}
@@ -598,10 +607,7 @@ func TestSystemHandler_Upgrade_NoPackageProxy(t *testing.T) {
 		t.Errorf("expected version lookup without proxy, got %q", mockVersions.GotProxy)
 	}
 
-	shell := findExecutedShell(mockExec)
-	if shell == nil {
-		t.Fatal("expected a package-manager shell to be spawned")
-	}
+	shell := mustFindExecutedShell(t, mockExec, "expected a package-manager shell to be spawned")
 	if len(shell.Env) != 0 {
 		t.Errorf("expected no env override without package_proxy, got %v", shell.Env)
 	}
@@ -643,10 +649,7 @@ func TestSystemHandler_Upgrade_InvalidPackageProxy(t *testing.T) {
 				t.Errorf("expected version lookup without proxy, got %q", mockVersions.GotProxy)
 			}
 
-			shell := findExecutedShell(mockExec)
-			if shell == nil {
-				t.Fatal("expected a package-manager shell to be spawned")
-			}
+			shell := mustFindExecutedShell(t, mockExec, "expected a package-manager shell to be spawned")
 			if len(shell.Env) != 0 {
 				t.Errorf("expected no env override for invalid proxy %q, got %v", proxy, shell.Env)
 			}
@@ -681,10 +684,7 @@ func TestSystemHandler_Upgrade_VersionLookupFailureProceeds(t *testing.T) {
 		t.Errorf("expected exit code 0, got %d", exitCode)
 	}
 
-	shell := findExecutedShell(mockExec)
-	if shell == nil {
-		t.Fatal("expected the package-manager upgrade to proceed despite the lookup failure")
-	}
+	shell := mustFindExecutedShell(t, mockExec, "expected the package-manager upgrade to proceed despite the lookup failure")
 	if len(shell.Args) != 2 || !strings.Contains(shell.Args[1], "alpamon") {
 		t.Errorf("expected unpinned alpamon upgrade command, got %v", shell.Args)
 	}

@@ -188,11 +188,8 @@ func TestAWS_Fetch_TokenFailure(t *testing.T) {
 	// Contract: Fetch returns a non-nil *Metadata with Provider=aws on every
 	// failure path, matching GCPProvider/AzureProvider so callers can call
 	// .ToTags() without nil-guarding.
-	if meta == nil {
-		t.Fatal("expected non-nil meta even on token failure")
-	}
-	if meta.Provider != ProviderAWS {
-		t.Errorf("meta.Provider = %q, want %q", meta.Provider, ProviderAWS)
+	if meta == nil || meta.Provider != ProviderAWS {
+		t.Errorf("expected non-nil meta with Provider=%q, got %+v", ProviderAWS, meta)
 	}
 }
 
