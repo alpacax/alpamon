@@ -2,6 +2,8 @@ package runner
 
 import (
 	"encoding/json"
+	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +211,41 @@ func TestAddPIDSessionMapping_NormalisesWebshKind(t *testing.T) {
 	}
 }
 
+// TestAddPIDSessionMapping_CapturesProcessCreateTime verifies a live pid's
+// OS creation time is captured at registration, which is what later lets a
+// stale entry (its process gone, pid reused) be told apart from a live one.
+func TestAddPIDSessionMapping_CapturesProcessCreateTime(t *testing.T) {
+	am := newTestAuthManager()
+	livePID := os.Getpid()
+
+	am.AddPIDSessionMapping(livePID, &SessionInfo{
+		SessionID: "sess-1",
+		Requests:  make(map[string]*SudoRequest),
+	})
+
+	if am.pidToSessionMap[livePID].ProcessCreateTimeMs == 0 {
+		t.Error("ProcessCreateTimeMs should be captured for a live pid")
+	}
+}
+
+// TestAddPIDSessionMapping_LeavesCreateTimeUnsetForDeadPID verifies a pid
+// with no live process leaves ProcessCreateTimeMs at zero rather than
+// failing the registration, so lookups on this entry fall back to the
+// pre-liveness-check trust-unconditionally behavior instead of erroring.
+func TestAddPIDSessionMapping_LeavesCreateTimeUnsetForDeadPID(t *testing.T) {
+	am := newTestAuthManager()
+	const deadPID = 999999999 // outside any real pid range
+
+	am.AddPIDSessionMapping(deadPID, &SessionInfo{
+		SessionID: "sess-1",
+		Requests:  make(map[string]*SudoRequest),
+	})
+
+	if got := am.pidToSessionMap[deadPID].ProcessCreateTimeMs; got != 0 {
+		t.Errorf("ProcessCreateTimeMs: got %d, want 0 for a pid with no live process", got)
+	}
+}
+
 // TestRegisterCommandPID_NoopWithoutManager verifies that the package-
 // level helper degrades gracefully when the AuthManager singleton has
 // not been initialised (tests, early boot, non-agent binaries).
@@ -394,5 +431,154 @@ func TestAddPIDCommandMapping_OverwritesStaleEntry(t *testing.T) {
 	}
 	if entry.Username != "bob" {
 		t.Errorf("Username: got %q, want bob", entry.Username)
+	}
+}
+
+// sendAndAwaitAuthSocketResponse drives a raw auth.sock request through
+// handleSudoRequest (which does its own socket read before dispatching) and
+// returns the raw response bytes written back.
+func sendAndAwaitAuthSocketResponse(t *testing.T, am *AuthManager, raw []byte) []byte {
+	t.Helper()
+	server, client := net.Pipe()
+	go am.handleSudoRequest(server)
+
+	if _, err := client.Write(raw); err != nil {
+		t.Fatalf("failed to write request: %v", err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 4096)
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read response: %v", err)
+	}
+	return buf[:n]
+}
+
+// TestHandleSudoRequest_CheckUser_ReusedPIDNotTrusted verifies that the
+// check_user path no longer reports is_alpacon_user=true through a
+// pidToSessionMap entry whose pid has been reused by an unrelated process,
+// and that the stale entry is evicted.
+func TestHandleSudoRequest_CheckUser_ReusedPIDNotTrusted(t *testing.T) {
+	am := newTestAuthManager()
+	leaderPID := os.Getpid()
+	am.AddPIDSessionMapping(leaderPID, &SessionInfo{
+		SessionID: "sess-1",
+		Requests:  make(map[string]*SudoRequest),
+	})
+	if am.pidToSessionMap[leaderPID].ProcessCreateTimeMs == 0 {
+		t.Fatal("test process is alive; ProcessCreateTimeMs must have been captured")
+	}
+	// Simulate leaderPID having been reused by an unrelated process.
+	am.pidToSessionMap[leaderPID].ProcessCreateTimeMs = 1
+
+	raw, err := json.Marshal(IsAlpconRequest{
+		Type: "check_user", Username: "mallory", Groupname: "mallory",
+		PID: 900002, PPID: leaderPID,
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+
+	respRaw := sendAndAwaitAuthSocketResponse(t, am, raw)
+	var resp IsAlpconResponse
+	if err := json.Unmarshal(respRaw, &resp); err != nil {
+		t.Fatalf("invalid response JSON %q: %v", respRaw, err)
+	}
+	if resp.IsAlpconUser {
+		t.Error("a stale entry (pid reused) must not report is_alpacon_user=true")
+	}
+	if _, exists := am.pidToSessionMap[leaderPID]; exists {
+		t.Error("the stale entry must be evicted once detected")
+	}
+}
+
+// TestHandleSudoApprovalRequest_ReusedPIDFallsBackToLocalPolicy verifies
+// that a sudo_approval request whose ppid resolves to a stale
+// pidToSessionMap entry (pid reused) is treated as local sudo and evaluated
+// against blockLocalSudo, rather than silently granted Alpacon-approved
+// status through the leaked entry.
+func TestHandleSudoApprovalRequest_ReusedPIDFallsBackToLocalPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		blockLocalSudo bool
+		wantApproved   bool
+		wantReason     string
+	}{
+		{name: "block_local_sudo=false allows it", blockLocalSudo: false, wantApproved: true, wantReason: "Approved"},
+		{name: "block_local_sudo=true rejects it", blockLocalSudo: true, wantApproved: false, wantReason: "No Authority"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			am := newTestAuthManager()
+			am.blockLocalSudo = tc.blockLocalSudo
+			leaderPID := os.Getpid()
+			am.AddPIDSessionMapping(leaderPID, &SessionInfo{
+				SessionID: "sess-1",
+				Requests:  make(map[string]*SudoRequest),
+			})
+			am.pidToSessionMap[leaderPID].ProcessCreateTimeMs = 1 // simulate a reused pid
+
+			raw, err := json.Marshal(SudoApprovalRequest{
+				Type: "sudo_approval", RequestID: "req-1", Username: "mallory",
+				Groupname: "mallory", PID: 900003, PPID: leaderPID, Command: "id",
+			})
+			if err != nil {
+				t.Fatalf("failed to marshal request: %v", err)
+			}
+
+			respRaw := sendAndAwaitAuthSocketResponse(t, am, raw)
+			var resp SudoApprovalResponse
+			if err := json.Unmarshal(respRaw, &resp); err != nil {
+				t.Fatalf("invalid response JSON %q: %v", respRaw, err)
+			}
+			if resp.IsAlpconUser {
+				t.Error("a stale entry (pid reused) must not report is_alpacon_user=true")
+			}
+			if resp.Approved != tc.wantApproved || resp.Reason != tc.wantReason {
+				t.Errorf("Approved/Reason: got %v/%q, want %v/%q", resp.Approved, resp.Reason, tc.wantApproved, tc.wantReason)
+			}
+			if _, exists := am.pidToSessionMap[leaderPID]; exists {
+				t.Error("the stale entry must be evicted once detected")
+			}
+		})
+	}
+}
+
+// TestHandleSudoApprovalRequest_RemovedSessionFallsBackToLocalPolicy
+// verifies that a sudo_approval request arriving after its session's entry
+// has already been removed (normal session close, or any other path that
+// leaves pidToSessionMap without a match) falls back to local sudo policy
+// end-to-end through handleSudoRequest, rather than erroring or hanging.
+// The lock-scoped re-validation added alongside the liveness check
+// (am.pidToSessionMap[session.PID] != session, guarding the narrower window
+// between an unlocked verify and the write-lock re-acquisition) shares this
+// same fallback path; its pointer-identity safety is covered directly by
+// TestSessionStillLive_DoesNotEvictReplacedEntry.
+func TestHandleSudoApprovalRequest_RemovedSessionFallsBackToLocalPolicy(t *testing.T) {
+	am := newTestAuthManager()
+	leaderPID := os.Getpid()
+	session := &SessionInfo{SessionID: "sess-1", Requests: make(map[string]*SudoRequest)}
+	am.AddPIDSessionMapping(leaderPID, session)
+	// Remove it right away to simulate the session having already closed
+	// normally by the time this sudo_approval request arrives.
+	am.RemovePIDSessionMapping(leaderPID)
+
+	raw, err := json.Marshal(SudoApprovalRequest{
+		Type: "sudo_approval", RequestID: "req-2", Username: "alice",
+		Groupname: "alice", PID: 900004, PPID: leaderPID, Command: "id",
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+
+	respRaw := sendAndAwaitAuthSocketResponse(t, am, raw)
+	var resp SudoApprovalResponse
+	if err := json.Unmarshal(respRaw, &resp); err != nil {
+		t.Fatalf("invalid response JSON %q: %v", respRaw, err)
+	}
+	if resp.IsAlpconUser {
+		t.Error("a removed entry must not report is_alpacon_user=true")
+	}
+	if !resp.Approved || resp.Reason != "Approved" {
+		t.Errorf("expected local sudo approval (block_local_sudo defaults to false), got %+v", resp)
 	}
 }

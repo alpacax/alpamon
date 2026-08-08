@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -201,7 +202,7 @@ func TestLookupSessionAncestor_SudoUsePtyTopology(t *testing.T) {
 		suPID: monitorPID, monitorPID: sudoPID, sudoPID: webshLeaderPID, webshLeaderPID: 1,
 	}))
 	am.mu.RLock()
-	session, found := am.lookupSessionAncestorLocked(chain)
+	session, _, found := am.lookupSessionAncestorLocked(chain)
 	am.mu.RUnlock()
 
 	if !found {
@@ -225,11 +226,170 @@ func TestLookupSessionAncestor_UntrackedChainEmits(t *testing.T) {
 	// sshd child(900) -> sshd daemon(800) -> init.
 	chain := ancestorPIDs(900, fakeParents(map[int]int{900: 800, 800: 1}))
 	am.mu.RLock()
-	_, found := am.lookupSessionAncestorLocked(chain)
+	_, _, found := am.lookupSessionAncestorLocked(chain)
 	am.mu.RUnlock()
 
 	if found {
 		t.Error("an untracked ancestor chain must not suppress the event")
+	}
+}
+
+// TestResolveSessionEvent_ReusedPIDNotSuppressed verifies that a
+// pidToSessionMap entry whose process has exited without
+// RemovePIDSessionMapping running (a leak) no longer suppresses an event
+// through the direct ppid lookup once its pid has been reused by an
+// unrelated process, and that the stale entry is evicted so it cannot match
+// again.
+func TestResolveSessionEvent_ReusedPIDNotSuppressed(t *testing.T) {
+	am := newTestAuthManager()
+	leaderPID := os.Getpid()
+	am.AddPIDSessionMapping(leaderPID, &SessionInfo{
+		SessionID: "sess-1",
+		Requests:  make(map[string]*SudoRequest),
+	})
+	if am.pidToSessionMap[leaderPID].ProcessCreateTimeMs == 0 {
+		t.Fatal("test process is alive; ProcessCreateTimeMs must have been captured")
+	}
+	// Simulate leaderPID having been reused: the process on record at
+	// registration is no longer the one now occupying it.
+	am.pidToSessionMap[leaderPID].ProcessCreateTimeMs = 1
+
+	req := SessionEventRequest{PID: 900001, PPID: leaderPID, Username: "alice", Service: "su"}
+	_, emit := am.resolveSessionEvent(req)
+	if !emit {
+		t.Error("a stale entry (pid reused) must not suppress the event")
+	}
+	if _, exists := am.pidToSessionMap[leaderPID]; exists {
+		t.Error("the stale entry must be evicted once detected, closing the leak")
+	}
+}
+
+// TestLookupSessionAncestor_StaleEntryEvictedOnVerify verifies the same
+// exposure for the ancestor-walk path added in #365: a map key hit through
+// an ancestor pid is not enough on its own, since the walk widens how many
+// pids a single leaked entry can be reused under.
+func TestLookupSessionAncestor_StaleEntryEvictedOnVerify(t *testing.T) {
+	am := newTestAuthManager()
+	leaderPID := os.Getpid()
+	am.AddPIDSessionMapping(leaderPID, &SessionInfo{
+		SessionID: "sess-1",
+		Requests:  make(map[string]*SudoRequest),
+	})
+	am.pidToSessionMap[leaderPID].ProcessCreateTimeMs = 1 // simulate a reused pid
+
+	am.mu.RLock()
+	session, _, found := am.lookupSessionAncestorLocked([]int{leaderPID})
+	am.mu.RUnlock()
+	if !found {
+		t.Fatal("the map lookup by key must still find the stale entry")
+	}
+
+	if am.sessionStillLive(session) {
+		t.Error("an entry with a mismatched create time must not be reported live")
+	}
+	if _, exists := am.pidToSessionMap[leaderPID]; exists {
+		t.Error("sessionStillLive must evict the stale entry")
+	}
+}
+
+// TestResolveAncestorSession_ContinuesPastStaleHitToLiveAncestor verifies
+// that a stale (pid-reused) tracker entry near the bottom of the ancestor
+// chain does not shadow a genuinely live, correctly-tracked entry further
+// up the same chain. Without resuming the scan past the evicted pid, a
+// leaked entry from an old session would cause the real Websh PTY leader
+// a few hops further along to be missed, wrongly reporting the event as
+// non-Alpacon.
+func TestResolveAncestorSession_ContinuesPastStaleHitToLiveAncestor(t *testing.T) {
+	am := newTestAuthManager()
+
+	// The nearest ancestor (a monitor pid) is a leaked entry whose process
+	// has since been reused by something unrelated.
+	const staleAncestorPID = 424999
+	am.pidToSessionMap[staleAncestorPID] = &SessionInfo{
+		SessionID:           "stale-session",
+		Requests:            make(map[string]*SudoRequest),
+		PID:                 staleAncestorPID,
+		ProcessCreateTimeMs: 1, // definitely mismatches whatever is live at this pid, if anything
+	}
+
+	// A grandparent further up the same chain is the real, still-live
+	// Websh PTY leader.
+	leaderPID := os.Getpid()
+	am.AddPIDSessionMapping(leaderPID, &SessionInfo{
+		SessionID: "live-session",
+		Requests:  make(map[string]*SudoRequest),
+	})
+
+	chain := []int{staleAncestorPID, leaderPID}
+
+	session, found := am.resolveAncestorSession(chain)
+	if !found {
+		t.Fatal("expected the scan to continue past the stale hit and find the live ancestor")
+	}
+	if session.SessionID != "live-session" {
+		t.Errorf("SessionID: got %q, want live-session", session.SessionID)
+	}
+	if _, exists := am.pidToSessionMap[staleAncestorPID]; exists {
+		t.Error("the stale ancestor entry must be evicted along the way")
+	}
+	if _, exists := am.pidToSessionMap[leaderPID]; !exists {
+		t.Error("the live ancestor entry must survive")
+	}
+}
+
+// TestResolveAncestorSession_AllStaleReportsNotFound verifies that when
+// every entry in the chain turns out to be stale, the scan exhausts the
+// chain and reports not-found rather than looping or panicking.
+func TestResolveAncestorSession_AllStaleReportsNotFound(t *testing.T) {
+	am := newTestAuthManager()
+	const pidA, pidB = 425001, 425002
+	am.pidToSessionMap[pidA] = &SessionInfo{SessionID: "a", Requests: make(map[string]*SudoRequest), PID: pidA, ProcessCreateTimeMs: 1}
+	am.pidToSessionMap[pidB] = &SessionInfo{SessionID: "b", Requests: make(map[string]*SudoRequest), PID: pidB, ProcessCreateTimeMs: 1}
+
+	_, found := am.resolveAncestorSession([]int{pidA, pidB})
+	if found {
+		t.Error("expected no match once every chain entry is stale")
+	}
+	if _, exists := am.pidToSessionMap[pidA]; exists {
+		t.Error("pidA should have been evicted")
+	}
+	if _, exists := am.pidToSessionMap[pidB]; exists {
+		t.Error("pidB should have been evicted")
+	}
+}
+
+// TestSessionStillLive_TrustsZeroCreateTime verifies entries with no
+// captured create time (registration raced the process's own exit, or the
+// entry predates this field) are trusted unconditionally rather than
+// treated as stale, matching the pre-liveness-check behavior.
+func TestSessionStillLive_TrustsZeroCreateTime(t *testing.T) {
+	am := newTestAuthManager()
+	session := &SessionInfo{SessionID: "legacy", PID: 424242}
+	am.pidToSessionMap[424242] = session
+
+	if !am.sessionStillLive(session) {
+		t.Error("a zero ProcessCreateTimeMs must be trusted, not treated as stale")
+	}
+	if _, exists := am.pidToSessionMap[424242]; !exists {
+		t.Error("a trusted entry must not be evicted")
+	}
+}
+
+// TestSessionStillLive_DoesNotEvictReplacedEntry verifies the eviction is
+// scoped to the exact stale entry sampled by the caller: if a fresh entry
+// has already replaced it at the same pid key by the time verification
+// runs, that fresh entry must survive.
+func TestSessionStillLive_DoesNotEvictReplacedEntry(t *testing.T) {
+	am := newTestAuthManager()
+	stale := &SessionInfo{SessionID: "stale", PID: 5000, ProcessCreateTimeMs: 1}
+	fresh := &SessionInfo{SessionID: "fresh", PID: 5000}
+	am.pidToSessionMap[5000] = fresh
+
+	if am.sessionStillLive(stale) {
+		t.Fatal("a mismatched create time must never be reported live")
+	}
+	if got := am.pidToSessionMap[5000]; got != fresh {
+		t.Error("eviction must not remove an unrelated entry that replaced the stale one")
 	}
 }
 

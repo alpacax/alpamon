@@ -152,11 +152,38 @@ func ancestorPIDs(pid int, parentOf func(int) (int, bool)) []int {
 // leads back to the Websh PTY leader, which is what this walks. The caller
 // must hold am.mu and must have collected chain outside the lock, since
 // reading a process's parent is I/O.
-func (am *AuthManager) lookupSessionAncestorLocked(chain []int) (*SessionInfo, bool) {
-	for _, pid := range chain {
+//
+// The returned index is chain's position of the matched pid, so a caller
+// that finds the hit stale can resume the scan from chain[index+1:] instead
+// of restarting from the beginning.
+func (am *AuthManager) lookupSessionAncestorLocked(chain []int) (*SessionInfo, int, bool) {
+	for i, pid := range chain {
 		if session, exists := am.pidToSessionMap[pid]; exists {
+			return session, i, true
+		}
+	}
+	return nil, -1, false
+}
+
+// resolveAncestorSession walks chain via lookupSessionAncestorLocked,
+// verifying each hit's liveness and resuming past a stale one rather than
+// stopping there. Without this, a leaked entry near the bottom of the chain
+// (e.g. a reused pid from an old, uncleaned-up Websh session) would shadow a
+// genuinely live, correctly-tracked entry further up the same chain — the
+// scan would report "no session" even though the real Websh PTY leader is
+// still trackable a few hops further along.
+func (am *AuthManager) resolveAncestorSession(chain []int) (*SessionInfo, bool) {
+	for len(chain) > 0 {
+		am.mu.RLock()
+		session, idx, found := am.lookupSessionAncestorLocked(chain)
+		am.mu.RUnlock()
+		if !found {
+			return nil, false
+		}
+		if am.sessionStillLive(session) {
 			return session, true
 		}
+		chain = chain[idx+1:]
 	}
 	return nil, false
 }
@@ -195,15 +222,25 @@ func (am *AuthManager) resolveSessionEvent(req SessionEventRequest) (NonAlpaconA
 	session, exists := am.lookupSessionLocked(sid, sidOK, req.PPID)
 	am.mu.RUnlock()
 
+	// A hit only means the pid is a key in the map, not that it is still the
+	// process that registered it: a leaked entry (its owner exited without
+	// RemovePIDSessionMapping running) goes on matching whatever unrelated
+	// process the kernel later reuses that pid for. sessionStillLive reads
+	// the process table to tell the two apart, which is why it runs outside
+	// am.mu just like the ancestor walk below.
+	if exists && !am.sessionStillLive(session) {
+		exists = false
+	}
+
 	if !exists {
 		// Only now walk the ancestor chain: it reads /proc, so it stays off the
 		// path a direct hit already answers, and it must run outside am.mu
 		// because no I/O may happen under that lock — the PAM producer is
-		// blocked on our ack for the duration.
+		// blocked on our ack for the duration. resolveAncestorSession verifies
+		// liveness itself and continues past a stale hit, so a leaked entry
+		// near the bottom of the chain cannot shadow a live one further up it.
 		chain := ancestorPIDs(req.PID, parentPID)
-		am.mu.RLock()
-		session, exists = am.lookupSessionAncestorLocked(chain)
-		am.mu.RUnlock()
+		session, exists = am.resolveAncestorSession(chain)
 	}
 
 	if exists {

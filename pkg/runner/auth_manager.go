@@ -16,6 +16,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 // Kinds of tracked processes that may issue sudo through alpamon-pam.
@@ -45,6 +46,14 @@ type SessionInfo struct {
 	StartedAt time.Time
 	PtyClient *PtyClient
 	Requests  map[string]*SudoRequest
+	// ProcessCreateTimeMs is the OS creation time (Unix ms) of PID at
+	// registration, used to confirm a later pidToSessionMap[PID] hit still
+	// refers to this same process rather than an unrelated one that reused
+	// PID after this entry leaked (e.g. a Websh PTY that died without
+	// RemovePIDSessionMapping running). Zero when the capture failed at
+	// registration or the entry predates this field; such entries are
+	// trusted unconditionally, matching prior behavior.
+	ProcessCreateTimeMs int64
 }
 
 // effectiveKind returns the Kind of an entry, defaulting to websh when
@@ -405,6 +414,16 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		session, exists := am.lookupSessionLocked(sid, sidOK, isAlpconReq.PPID)
 		am.mu.RUnlock()
 
+		// A map hit alone does not mean the entry is still live: a leaked
+		// entry (its process exited without RemovePIDSessionMapping running)
+		// can go on matching whatever unrelated process later reuses its
+		// pid. sessionStillLive confirms the pid is still occupied by the
+		// process that registered it and evicts the entry otherwise; it must
+		// run without am.mu held since it reads the process table.
+		if exists && !am.sessionStillLive(session) {
+			exists = false
+		}
+
 		if !exists {
 			log.Warn().Msgf("No session found for PID %d (ppid %d, sid %d), username: %s, groupname: %s", isAlpconReq.PID, isAlpconReq.PPID, sid, isAlpconReq.Username, isAlpconReq.Groupname)
 			am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, false)
@@ -438,31 +457,56 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	}
 
 	sid, sidOK := sessionID(sudoApprovalReq.PID)
-	am.mu.Lock()
+	am.mu.RLock()
 	session, exists := am.lookupSessionLocked(sid, sidOK, sudoApprovalReq.PPID)
 	blockLocalSudo := am.blockLocalSudo
-	if !exists {
-		// Non-WebSH session (local SSH, etc.)
-		am.mu.Unlock()
-		sudoApprovalReq.IsAlpconUser = false
+	am.mu.RUnlock()
 
+	// A map hit alone does not mean the entry is still live: a leaked entry
+	// (its process exited without RemovePIDSessionMapping running) can go on
+	// matching whatever unrelated process later reuses its pid, which would
+	// otherwise grant that process Alpacon-approved sudo and bypass
+	// blockLocalSudo entirely. sessionStillLive confirms the pid is still
+	// occupied by the process that registered it and evicts the entry
+	// otherwise; it must run without am.mu held since it reads the process
+	// table.
+	if exists && !am.sessionStillLive(session) {
+		exists = false
+	}
+
+	respondAsLocalSudo := func() {
+		sudoApprovalReq.IsAlpconUser = false
 		if blockLocalSudo {
 			// block_local_sudo=true: reject all local sudo (original behavior)
 			log.Debug().Msgf("Local sudo blocked by policy: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
 			am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority")
-			_ = unixConn.Close()
-			return
+		} else {
+			// block_local_sudo=false: allow local sudo, respect existing sudoers permissions
+			log.Debug().Msgf("Local sudo approved: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
+			am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, true, "Approved")
 		}
-
-		// block_local_sudo=false: allow local sudo, respect existing sudoers permissions
-		log.Debug().Msgf("Local sudo approved: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
-		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, true, "Approved")
 		_ = unixConn.Close()
+	}
+
+	if !exists {
+		// Non-WebSH session (local SSH, etc.), or a tracker entry that just
+		// turned out to be stale.
+		respondAsLocalSudo()
 		return
 	}
 
-	// Alpacon user: pidToSessionMap
+	// Alpacon user: pidToSessionMap. Re-acquire the lock (now to mutate
+	// session.Requests) and re-validate that this is still the exact entry
+	// sampled above: sessionStillLive ran unlocked, so a concurrent
+	// RemovePIDSessionMapping (normal session close) or a fresh entry
+	// reusing the same pid could have landed in the window since.
 	sudoApprovalReq.IsAlpconUser = true
+	am.mu.Lock()
+	if am.pidToSessionMap[session.PID] != session {
+		am.mu.Unlock()
+		respondAsLocalSudo()
+		return
+	}
 	kind := session.effectiveKind()
 	switch kind {
 	case TrackerKindCommand:
@@ -637,6 +681,27 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 	return nil
 }
 
+// processCreateTimeMs returns the OS creation time (Unix ms) of pid via the
+// process table, or ok=false when it cannot be read (pid gone, permission
+// denied, or platform lookup failure). Backed by gopsutil, which sources this
+// from /proc/<pid>/stat field 22 on Linux, so it stays stable for the whole
+// life of the process and is safe to compare across two separate reads taken
+// at different times.
+func processCreateTimeMs(pid int) (int64, bool) {
+	if pid <= 0 {
+		return 0, false
+	}
+	proc, err := process.NewProcess(int32(pid))
+	if err != nil {
+		return 0, false
+	}
+	ms, err := proc.CreateTime()
+	if err != nil || ms <= 0 {
+		return 0, false
+	}
+	return ms, true
+}
+
 // AddPIDSessionMapping registers an entry for a Websh PTY session.
 // Kind and StartedAt are filled in when unset so callers don't have to
 // remember to populate them; CommandID is always cleared to keep the
@@ -654,6 +719,11 @@ func (am *AuthManager) AddPIDSessionMapping(pid int, session *SessionInfo) {
 	}
 	if session.PID == 0 {
 		session.PID = pid
+	}
+	if session.ProcessCreateTimeMs == 0 {
+		// Read before taking the lock: this hits the process table, and
+		// nothing may block on am.mu while holding it.
+		session.ProcessCreateTimeMs, _ = processCreateTimeMs(pid)
 	}
 	am.mu.Lock()
 	am.pidToSessionMap[pid] = session
@@ -674,6 +744,43 @@ func (am *AuthManager) RemovePIDSessionMapping(pid int) {
 	am.mu.Unlock()
 }
 
+// sessionStillLive reports whether session's registered pid is still the
+// same OS process that registered it. A mismatch means the process has
+// exited and pid was reused by something unrelated (session's entry leaked
+// past its owner's exit), so the stale entry is evicted from
+// pidToSessionMap here rather than left to keep matching future lookups.
+// The eviction re-checks pointer identity under the lock so a legitimate
+// entry added for the same pid in between is never dropped.
+//
+// Must be called without holding am.mu: it reads the process table, which
+// is I/O the lock's other callers (the auth.sock request handlers) cannot
+// afford to block on. A zero ProcessCreateTimeMs (capture failed at
+// registration, or an entry that predates this field) is trusted
+// unconditionally, matching the pre-liveness-check behavior.
+func (am *AuthManager) sessionStillLive(session *SessionInfo) bool {
+	if session == nil {
+		return false
+	}
+	if session.ProcessCreateTimeMs == 0 {
+		return true
+	}
+	if current, ok := processCreateTimeMs(session.PID); ok && current == session.ProcessCreateTimeMs {
+		return true
+	}
+	am.mu.Lock()
+	if am.pidToSessionMap[session.PID] == session {
+		delete(am.pidToSessionMap, session.PID)
+		log.Debug().
+			Int("pid", session.PID).
+			Str("kind", session.effectiveKind()).
+			Str("session_id", session.SessionID).
+			Str("command_id", session.CommandID).
+			Msg("Evicted stale PID mapping: pid was reused by a different process")
+	}
+	am.mu.Unlock()
+	return false
+}
+
 // AddPIDCommandMapping registers the root pid of a deploy shell Command
 // execution so alpamon-pam can attribute a sudo call made inside the
 // Command (or any descendant) to the originating Command.ID. It must be
@@ -686,13 +793,15 @@ func (am *AuthManager) AddPIDCommandMapping(pid int, commandID, username string)
 	if pid <= 0 || commandID == "" {
 		return
 	}
+	createTimeMs, _ := processCreateTimeMs(pid)
 	info := &SessionInfo{
-		Kind:      TrackerKindCommand,
-		CommandID: commandID,
-		Username:  username,
-		PID:       pid,
-		StartedAt: time.Now(),
-		Requests:  make(map[string]*SudoRequest),
+		Kind:                TrackerKindCommand,
+		CommandID:           commandID,
+		Username:            username,
+		PID:                 pid,
+		StartedAt:           time.Now(),
+		Requests:            make(map[string]*SudoRequest),
+		ProcessCreateTimeMs: createTimeMs,
 	}
 	am.mu.Lock()
 	am.pidToSessionMap[pid] = info
