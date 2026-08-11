@@ -241,6 +241,13 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 			if v, ok := ruleMap["port_end"].(float64); ok {
 				rule.PortEnd = int(v)
 			}
+			if v, ok := ruleMap["dports"].([]any); ok {
+				for _, p := range v {
+					if n, ok := p.(float64); ok {
+						rule.DPorts = append(rule.DPorts, int(n))
+					}
+				}
+			}
 			if v, ok := ruleMap["icmp_type"].(string); ok {
 				rule.ICMPType = v
 			}

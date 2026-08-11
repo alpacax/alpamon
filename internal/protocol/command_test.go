@@ -43,3 +43,32 @@ func TestParseCommandData_PackageProxyAbsent(t *testing.T) {
 		})
 	}
 }
+
+// TestParseCommandData_BatchRuleDPorts pins the batch rule conversion: a rule
+// carrying dports must reach CommandArgs with its ports intact. Dropping them
+// installs a rule with no port match at all, which opens every port on the
+// protocol instead of the two the console shows.
+func TestParseCommandData_BatchRuleDPorts(t *testing.T) {
+	cmd := &Command{
+		ID:    "fw-batch-1",
+		Shell: "internal",
+		Line:  "batch",
+		Data: `{"chain_name": "ALPACON_INPUT", "operation": "batch", "rules": [
+			{"chain": "INPUT", "protocol": "tcp", "dports": [80, 443], "target": "ACCEPT"},
+			{"chain": "INPUT", "protocol": "tcp", "port_start": 8000, "port_end": 8010, "target": "ACCEPT"}
+		]}`,
+	}
+
+	data, err := cmd.ParseCommandData()
+	require.NoError(t, err)
+
+	args := data.ToArgs()
+	require.Len(t, args.Rules, 2)
+
+	assert.Equal(t, []int{80, 443}, args.Rules[0].DPorts)
+	assert.Zero(t, args.Rules[0].PortStart)
+
+	assert.Empty(t, args.Rules[1].DPorts)
+	assert.Equal(t, 8000, args.Rules[1].PortStart)
+	assert.Equal(t, 8010, args.Rules[1].PortEnd)
+}
