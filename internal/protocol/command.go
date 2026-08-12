@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"strconv"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 )
@@ -243,8 +244,17 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 			}
 			if v, ok := ruleMap["dports"].([]any); ok {
 				for _, p := range v {
-					if n, ok := p.(float64); ok {
+					switch n := p.(type) {
+					case float64:
 						rule.DPorts = append(rule.DPorts, int(n))
+					case string:
+						// Not every sender emits numbers: the snapshot-restore
+						// payload carries dports as strings. Dropping one leaves
+						// the rule with no port match, which opens every port on
+						// the protocol.
+						if port, err := strconv.Atoi(n); err == nil {
+							rule.DPorts = append(rule.DPorts, port)
+						}
 					}
 				}
 			}
