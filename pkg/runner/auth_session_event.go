@@ -361,6 +361,7 @@ func (am *AuthManager) sendSessionEventResponse(conn net.Conn, received bool) {
 		return
 	}
 
+	_ = conn.SetWriteDeadline(time.Now().Add(authSocketWriteTimeout))
 	if _, err := conn.Write(responseJSON); err != nil {
 		log.Warn().Err(err).Msg("Failed to send session_event_response")
 	}
