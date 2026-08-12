@@ -104,7 +104,9 @@ func TestParseCommandData_BatchRuleFields(t *testing.T) {
 }
 
 // TestParseCommandData_BatchRuleDPortsAsStrings covers senders that emit dports
-// as strings rather than numbers, which the snapshot-restore payload does.
+// as strings rather than numbers, which the snapshot-restore payload does. Its
+// elements can carry a leading space: the server stores dports verbatim, so a
+// rule entered as "80, 443" is split into ["80", " 443"] on restore.
 func TestParseCommandData_BatchRuleDPortsAsStrings(t *testing.T) {
 	cmd := &Command{
 		ID:    "fw-batch-2",
@@ -112,7 +114,8 @@ func TestParseCommandData_BatchRuleDPortsAsStrings(t *testing.T) {
 		Line:  "batch",
 		Data: `{"chain_name": "ALPACON_INPUT", "operation": "batch", "rules": [
 			{"chain": "INPUT", "protocol": "tcp", "dports": ["80", "443"], "target": "ACCEPT"},
-			{"chain": "INPUT", "protocol": "tcp", "dports": ["80", "not-a-port"], "target": "ACCEPT"}
+			{"chain": "INPUT", "protocol": "tcp", "dports": ["80", "not-a-port"], "target": "ACCEPT"},
+			{"chain": "INPUT", "protocol": "tcp", "dports": ["80", " 443"], "target": "ACCEPT"}
 		]}`,
 	}
 
@@ -120,8 +123,9 @@ func TestParseCommandData_BatchRuleDPortsAsStrings(t *testing.T) {
 	require.NoError(t, err)
 
 	args := data.ToArgs()
-	require.Len(t, args.Rules, 2)
+	require.Len(t, args.Rules, 3)
 
 	assert.Equal(t, []int{80, 443}, args.Rules[0].DPorts)
 	assert.Equal(t, []int{80}, args.Rules[1].DPorts)
+	assert.Equal(t, []int{80, 443}, args.Rules[2].DPorts)
 }
