@@ -560,8 +560,7 @@ func (am *AuthManager) sendIsAlpconResponse(conn net.Conn, username, groupname s
 	_ = conn.SetWriteDeadline(time.Now().Add(authSocketWriteTimeout))
 	_, err = conn.Write(responseJSON)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to send is_alpacon_response")
-		return
+		log.WithLevel(authSocketWriteLevel(err)).Err(err).Msg("Failed to send is_alpacon_response")
 	}
 }
 
@@ -597,17 +596,21 @@ func (am *AuthManager) sendSudoApprovalResponse(conn net.Conn, req SudoApprovalR
 	}
 }
 
-// logSudoResponseWriteError downgrades a client that is already gone to a
-// warning: by the time a denial reaches a torn-down session, sudo has usually
-// exited, and the write fails as a broken pipe, a reset, a closed socket, or
-// authSocketWriteTimeout expiring on a peer that stopped reading.
-func logSudoResponseWriteError(err error, requestID string) {
-	level := zerolog.ErrorLevel
+// authSocketWriteLevel downgrades a client that is already gone to a warning:
+// by the time a response reaches a torn-down session, the PAM client has
+// usually exited, and the write fails as a broken pipe, a reset, a closed
+// socket, or authSocketWriteTimeout expiring on a peer that stopped reading.
+func authSocketWriteLevel(err error) zerolog.Level {
 	if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) ||
 		errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrDeadlineExceeded) {
-		level = zerolog.WarnLevel
+		return zerolog.WarnLevel
 	}
-	log.WithLevel(level).Err(err).Str("request_id", requestID).Msg("Failed to send sudo_approval_response")
+
+	return zerolog.ErrorLevel
+}
+
+func logSudoResponseWriteError(err error, requestID string) {
+	log.WithLevel(authSocketWriteLevel(err)).Err(err).Str("request_id", requestID).Msg("Failed to send sudo_approval_response")
 }
 
 // HandleSudoApprovalResponse owns the response and close for the request it
