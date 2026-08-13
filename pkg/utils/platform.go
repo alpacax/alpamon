@@ -1,13 +1,12 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"slices"
 	"strings"
 
-	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/host"
 )
 
@@ -17,6 +16,10 @@ var (
 	PackageManager string
 	PlatformID     string
 )
+
+// ErrUnsupportedPlatform marks the classification failure callers translate
+// into ConfigErrorExitCode.
+var ErrUnsupportedPlatform = errors.New("unsupported platform")
 
 // Mirrors alpacon-server servers/constants.py PLATFORM_ALIASES 1:1 — never add ids the server lacks: write-once Server.platform makes a divergence permanent.
 var platformAliases = map[string]string{
@@ -120,18 +123,26 @@ func ResolveServerPlatform(goos, explicit string, detect func() (string, error))
 	return explicit, "", nil
 }
 
+// The raw distribution id for this host; empty off Linux, where GOOS alone classifies. The callers' error texts differ, so wrapping stays with them.
+func rawHostPlatform() (string, error) {
+	if runtime.GOOS != "linux" {
+		return "", nil
+	}
+	info, err := host.Info()
+	if err != nil {
+		return "", err
+	}
+	return info.Platform, nil
+}
+
 // The value register and migrate send; errors instead of defaulting because the server persists it write-once, fixable only by re-registering.
 func DetectRegistrationPlatform() (string, error) {
-	var raw string
-	if runtime.GOOS == "linux" {
-		info, err := host.Info()
-		if err != nil {
-			return "", fmt.Errorf(
-				"failed to detect the host platform: %w.\n"+
-					"Pass --platform debian|rhel to skip detection if you know the host is compatible",
-				err)
-		}
-		raw = info.Platform
+	raw, err := rawHostPlatform()
+	if err != nil {
+		return "", fmt.Errorf(
+			"failed to detect the host platform: %w.\n"+
+				"Pass --platform debian|rhel to skip detection if you know the host is compatible",
+			err)
 	}
 	return ResolveRegistrationPlatform(runtime.GOOS, raw)
 }
@@ -150,30 +161,31 @@ func ResolveRegistrationPlatform(goos, raw string) (string, error) {
 	return like, nil
 }
 
-// Classifies the host once at startup; unclassifiable is fatal because every handler switches on these values and guessing would misreport to the server.
-func InitPlatform() {
-	var raw string
-	if runtime.GOOS == "linux" {
-		info, err := host.Info()
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to retrieve platform information.")
-			os.Exit(1)
-		}
-		raw = info.Platform
+// Classifies the host once at startup; the error is terminal for the caller because every handler switches on these values and guessing would misreport to the server.
+func InitPlatform() error {
+	raw, err := rawHostPlatform()
+	if err != nil {
+		return fmt.Errorf("failed to retrieve platform information: %w", err)
 	}
+	return applyPlatform(runtime.GOOS, raw)
+}
 
-	like, pkgManager, ok := ResolvePlatform(runtime.GOOS, raw)
+// InitPlatform's host-free half, split the way DetectRegistrationPlatform splits from ResolveRegistrationPlatform, so the sentinel and the globals it writes are testable without a host.
+func applyPlatform(goos, raw string) error {
+	like, pkgManager, ok := ResolvePlatform(goos, raw)
 	if !ok {
-		log.Fatal().Msgf(
-			"Unsupported platform: os=%s distribution=%q. "+
+		return fmt.Errorf(
+			"%w: os=%s distribution=%q. "+
 				"alpamon supports debian- and rhel-family Linux distributions "+
-				"(including openSUSE/SLES), macOS, and Windows.",
-			runtime.GOOS, raw)
+				"(including openSUSE/SLES), macOS, and Windows",
+			ErrUnsupportedPlatform, goos, raw)
 	}
 
 	PlatformLike = like
 	PackageManager = pkgManager
 	PlatformID = raw
+
+	return nil
 }
 
 // SetPlatformLike sets PlatformLike for tests.

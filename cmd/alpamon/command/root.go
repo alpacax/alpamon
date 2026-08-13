@@ -104,7 +104,10 @@ func runAgent(ready chan<- struct{}) {
 	updater.CleanupStaleOld()
 
 	// platform
-	utils.InitPlatform()
+	if err := utils.InitPlatform(); err != nil {
+		log.Error().Err(err).Msg("Failed to initialize platform.")
+		os.Exit(utils.StartupExitCode(err))
+	}
 
 	// Pid
 	pidFilePath, err := pidfile.WritePID(pidfile.FilePath(name))

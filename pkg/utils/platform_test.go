@@ -6,9 +6,16 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/shirou/gopsutil/v4/host"
 )
+
+// applyPlatform writes package globals, so restore them and keep test ordering from leaking.
+func savePlatformGlobals(t *testing.T) {
+	t.Helper()
+	like, pkgManager, id := PlatformLike, PackageManager, PlatformID
+	t.Cleanup(func() {
+		PlatformLike, PackageManager, PlatformID = like, pkgManager, id
+	})
+}
 
 // Vectors mirror alpacon-server servers/test_utils.py:68-96: the 1:1 table correspondence is the contract, and write-once Server.platform makes a divergence permanent.
 func TestResolvePlatform(t *testing.T) {
@@ -149,26 +156,17 @@ func TestValidateServerPlatform(t *testing.T) {
 	}
 }
 
-// Feeds ResolvePlatform what InitPlatform reads, so every CI row guards its own distro — the #348 case the pure vectors miss; CI-gated to keep local runs green off-matrix.
-func TestResolvePlatform_CIHost(t *testing.T) {
+// Runs the real startup path instead of re-reading the host itself, so every CI row guards its own distro — the #348 case the pure vectors miss; CI-gated to keep local runs green off-matrix.
+func TestInitPlatform_CIHost(t *testing.T) {
 	if os.Getenv("CI") == "" {
 		t.Skip("CI-matrix guard: host distros are only pinned supported on CI runners")
 	}
+	savePlatformGlobals(t)
 
-	var raw string
-	if runtime.GOOS == "linux" {
-		info, err := host.Info()
-		if err != nil {
-			t.Fatalf("host.Info() failed: %v", err)
-		}
-		raw = info.Platform
+	if err := InitPlatform(); err != nil {
+		t.Fatalf("CI host not classified: %v", err)
 	}
-
-	like, pkgManager, ok := ResolvePlatform(runtime.GOOS, raw)
-	if !ok {
-		t.Fatalf("CI host not classified: os=%s distribution=%q", runtime.GOOS, raw)
-	}
-	t.Logf("os=%s distribution=%q -> like=%s pkgManager=%s", runtime.GOOS, raw, like, pkgManager)
+	t.Logf("os=%s -> like=%s pkgManager=%s id=%q", runtime.GOOS, PlatformLike, PackageManager, PlatformID)
 }
 
 // Both directions: a false negative skips a needed dup, a false positive runs a destructive one.
@@ -245,6 +243,51 @@ func TestResolveServerPlatform(t *testing.T) {
 			}
 			if tt.wantWarning != "" && !strings.Contains(warning, tt.wantWarning) {
 				t.Errorf("warning must name the detected platform %q, got %q", tt.wantWarning, warning)
+			}
+		})
+	}
+}
+
+// Callers pick ConfigErrorExitCode off this sentinel, so an unwrapped error would silently downgrade the failure back to a restartable exit 1.
+func TestApplyPlatform_UnsupportedWrapsSentinel(t *testing.T) {
+	savePlatformGlobals(t)
+	SetPlatformLike("untouched")
+	SetPackageManager("untouched")
+	SetPlatformID("untouched")
+
+	err := applyPlatform("linux", "gentoo")
+	if !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("error must wrap ErrUnsupportedPlatform, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "gentoo") {
+		t.Errorf("error must name the distribution, got %q", err)
+	}
+	if PlatformLike != "untouched" || PackageManager != "untouched" || PlatformID != "untouched" {
+		t.Errorf("a failed classification must leave the globals alone, got like=%q pkgManager=%q id=%q",
+			PlatformLike, PackageManager, PlatformID)
+	}
+}
+
+// The three globals disagree on SUSE, so each has to land from its own source rather than be derived from another.
+func TestApplyPlatform_SetsGlobals(t *testing.T) {
+	savePlatformGlobals(t)
+
+	for _, tt := range []struct {
+		goos, raw, like, pkgManager, id string
+	}{
+		{"linux", "ubuntu", "debian", PkgApt, "ubuntu"},
+		{"linux", "rocky", "rhel", PkgYum, "rocky"},
+		{"linux", "opensuse-tumbleweed", "rhel", PkgZypper, "opensuse-tumbleweed"},
+		{"darwin", "", "darwin", PkgBrew, ""},
+		{"windows", "", "windows", PkgNone, ""},
+	} {
+		t.Run(tt.goos+"/"+tt.raw, func(t *testing.T) {
+			if err := applyPlatform(tt.goos, tt.raw); err != nil {
+				t.Fatalf("applyPlatform(%q, %q) = %v", tt.goos, tt.raw, err)
+			}
+			if PlatformLike != tt.like || PackageManager != tt.pkgManager || PlatformID != tt.id {
+				t.Errorf("got like=%q pkgManager=%q id=%q, want %q %q %q",
+					PlatformLike, PackageManager, PlatformID, tt.like, tt.pkgManager, tt.id)
 			}
 		})
 	}

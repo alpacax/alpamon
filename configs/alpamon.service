@@ -12,6 +12,8 @@ KillMode=process
 SELinuxContext=-unconfined_u:unconfined_r:unconfined_t:s0
 AppArmorProfile=-unconfined
 Restart=on-failure
+# EX_CONFIG from utils.ConfigErrorExitCode: a startup failure no restart can clear.
+RestartPreventExitStatus=78
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=alpamon
