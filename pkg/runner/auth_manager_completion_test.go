@@ -5,12 +5,21 @@ import (
 	"time"
 )
 
-// The channel must come from newCompletionChannel, not from the test: a channel
-// the test allocates itself would keep passing after the production capacity is
-// dropped, pinning nothing.
+// registerCompletionChannel mirrors what handleSudoApprovalRequest does inside
+// its registration critical section.
+func registerCompletionChannel(am *AuthManager, requestID string) chan struct{} {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	return am.newCompletionChannelLocked(requestID)
+}
+
+// TestNewCompletionChannel_SurvivesSignalBeforeReceive takes its channel from
+// newCompletionChannelLocked: one the test allocates itself would keep passing
+// after the production capacity is dropped.
 func TestNewCompletionChannel_SurvivesSignalBeforeReceive(t *testing.T) {
 	am := newTestAuthManager()
-	ch := am.newCompletionChannel("req-1")
+	ch := registerCompletionChannel(am, "req-1")
 
 	// The websocket read loop can process the response while the waiter is still
 	// inside sendSudoRequestWithRetry, before it reaches its select.
@@ -23,11 +32,12 @@ func TestNewCompletionChannel_SurvivesSignalBeforeReceive(t *testing.T) {
 	}
 }
 
-// signalCompletion runs on the websocket read loop, so it must never wait for a
-// receiver, not even when the buffer already holds a signal.
+// TestSignalCompletion_DoesNotBlockWhenAlreadySignaled pins that signalCompletion,
+// which runs on the websocket read loop, never waits for a receiver—not even when
+// the buffer already holds a signal.
 func TestSignalCompletion_DoesNotBlockWhenAlreadySignaled(t *testing.T) {
 	am := newTestAuthManager()
-	am.newCompletionChannel("req-1")
+	registerCompletionChannel(am, "req-1")
 	am.signalCompletion("req-1")
 
 	returned := make(chan struct{})
@@ -43,11 +53,11 @@ func TestSignalCompletion_DoesNotBlockWhenAlreadySignaled(t *testing.T) {
 	}
 }
 
-// The timeout path removes the channel, so a response arriving afterwards reaches
-// signalCompletion with nothing registered.
+// TestSignalCompletion_UnknownRequestIsNoop covers a response arriving after the
+// timeout path removed the channel.
 func TestSignalCompletion_UnknownRequestIsNoop(t *testing.T) {
 	am := newTestAuthManager()
-	am.newCompletionChannel("req-1")
+	registerCompletionChannel(am, "req-1")
 	am.removeCompletionChannel("req-1")
 
 	am.signalCompletion("req-1")

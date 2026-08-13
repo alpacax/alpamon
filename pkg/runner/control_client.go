@@ -206,10 +206,9 @@ func (cc *ControlClient) HandleMessage(message []byte) {
 	case "sudo_approval_response":
 		log.Debug().Msgf("Received sudo_approval_response: %+v", response)
 		if authManager != nil {
-			err := authManager.HandleSudoApprovalResponse(response)
-			if err != nil {
-				log.Error().Err(err).Msg("Failed to handle sudo approval response")
-			}
+			// Each failure path logs at its own level inside the handler; a client
+			// that already left is a warning, not an error.
+			_ = authManager.HandleSudoApprovalResponse(response)
 		} else {
 			log.Error().Msg("AuthManager not available")
 		}
