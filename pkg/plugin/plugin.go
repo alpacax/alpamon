@@ -7,6 +7,12 @@
 //
 // A plugin defines a Plugin value and either calls Plugin.Run directly or
 // embeds it under a Cobra root command via NewRootCmd.
+//
+// Run exits with utils.ConfigErrorExitCode (78) when startup hits a condition
+// no restart can clear, such as a host the platform classifier cannot map. A
+// plugin's service unit should carry RestartPreventExitStatus=78 alongside its
+// Restart= setting, the way configs/alpamon.service does; without it systemd
+// relaunches straight back into the same failure.
 package plugin
 
 import (
