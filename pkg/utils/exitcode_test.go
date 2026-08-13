@@ -1,11 +1,31 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 )
+
+// The callers turn this into os.Exit / a return code, neither reachable from a test, so the mapping itself is what gets pinned.
+func TestStartupExitCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"wrapped sentinel", fmt.Errorf("%w: os=linux distribution=%q", ErrUnsupportedPlatform, "gentoo"), ConfigErrorExitCode},
+		{"host lookup failure", fmt.Errorf("failed to retrieve platform information: %w", errors.New("no os-release")), 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StartupExitCode(tt.err); got != tt.want {
+				t.Errorf("StartupExitCode(%v) = %d, want %d", tt.err, got, tt.want)
+			}
+		})
+	}
+}
 
 // systemd parses RestartPreventExitStatus as a literal and cannot read the Go constant, so drift between the two silently restores the restart loop this code exists to stop.
 func TestConfigErrorExitCodeMatchesUnitFile(t *testing.T) {
