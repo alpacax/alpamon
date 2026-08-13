@@ -521,8 +521,9 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	// Wait for response, timeout, or context cancellation
 	select {
 	case <-completionChan:
-		// Response received and processed by HandleSudoApprovalResponse
-		log.Debug().Msgf("sudo_approval response received for request %s", sudoApprovalReq.RequestID)
+		// Signaled by whoever took the request: HandleSudoApprovalResponse on a
+		// server response, denyPendingRequests on a locally decided deny.
+		log.Debug().Str("request_id", sudoApprovalReq.RequestID).Msg("sudo_approval request answered")
 	case <-time.After(30 * time.Second):
 		// The take under am.mu is what settles the race; this check only keeps the
 		// timeout from warning about a request the response path already took.
@@ -626,7 +627,7 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 		am.mu.RUnlock()
 
 		// Routine after a timeout: the waiter already answered and deregistered.
-		log.Warn().Str("request_id", response.RequestID).Msg("No pending sudo_approval request for response")
+		log.Debug().Str("request_id", response.RequestID).Msg("No pending sudo_approval request for response")
 
 		return fmt.Errorf("no pending sudo_approval request found for request_id: %s", response.RequestID)
 	}
