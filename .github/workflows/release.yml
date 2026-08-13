@@ -87,7 +87,8 @@ jobs:
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
-          version: latest
+          # Explicit v2 lock; also silences the per-run 'latest' warning.
+          version: '~> v2'
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ steps.release-publisher-token.outputs.token }}
