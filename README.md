@@ -147,6 +147,8 @@ sudo systemctl restart alpamon
 sudo journalctl -u alpamon -f
 ```
 
+The unit also sets `RestartPreventExitStatus=78`. Alpamon exits with 78 (`EX_CONFIG`) when startup hits a condition a restart cannot clear, such as a Linux distribution it cannot classify. systemd then leaves the service in `failed` instead of restarting it, so `systemctl status alpamon` still shows the reason. Fix the underlying condition and start the service again.
+
 The unit sets `KillMode=process`, so restarting or stopping alpamon signals only the agent itself, not the whole control-group. Sessions it launched—Websh terminals and detached jobs such as `tmux`, `screen`, or `nohup`'d commands—keep running across a restart, the same way `sshd` leaves active login sessions alone. Reattach to them from a new session after the agent reconnects.
 
 ### macOS (launchd)
