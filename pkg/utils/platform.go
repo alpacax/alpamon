@@ -1,13 +1,12 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"slices"
 	"strings"
 
-	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/host"
 )
 
@@ -150,30 +149,39 @@ func ResolveRegistrationPlatform(goos, raw string) (string, error) {
 	return like, nil
 }
 
-// Classifies the host once at startup; unclassifiable is fatal because every handler switches on these values and guessing would misreport to the server.
-func InitPlatform() {
+// ErrUnsupportedPlatform marks the classification failure callers translate
+// into ConfigErrorExitCode.
+var ErrUnsupportedPlatform = errors.New("unsupported platform")
+
+// Classifies the host once at startup; the error is terminal for the caller because every handler switches on these values and guessing would misreport to the server.
+func InitPlatform() error {
 	var raw string
 	if runtime.GOOS == "linux" {
 		info, err := host.Info()
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to retrieve platform information.")
-			os.Exit(1)
+			return fmt.Errorf("failed to retrieve platform information: %w", err)
 		}
 		raw = info.Platform
 	}
+	return applyPlatform(runtime.GOOS, raw)
+}
 
-	like, pkgManager, ok := ResolvePlatform(runtime.GOOS, raw)
+// InitPlatform's host-free half, split the way DetectRegistrationPlatform splits from ResolveRegistrationPlatform, so the sentinel and the globals it writes are testable without a host.
+func applyPlatform(goos, raw string) error {
+	like, pkgManager, ok := ResolvePlatform(goos, raw)
 	if !ok {
-		log.Fatal().Msgf(
-			"Unsupported platform: os=%s distribution=%q. "+
+		return fmt.Errorf(
+			"%w: os=%s distribution=%q. "+
 				"alpamon supports debian- and rhel-family Linux distributions "+
-				"(including openSUSE/SLES), macOS, and Windows.",
-			runtime.GOOS, raw)
+				"(including openSUSE/SLES), macOS, and Windows",
+			ErrUnsupportedPlatform, goos, raw)
 	}
 
 	PlatformLike = like
 	PackageManager = pkgManager
 	PlatformID = raw
+
+	return nil
 }
 
 // SetPlatformLike sets PlatformLike for tests.

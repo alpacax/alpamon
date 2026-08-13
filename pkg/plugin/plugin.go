@@ -11,6 +11,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -174,7 +175,13 @@ func (p *Plugin) run() int {
 	if p.InitLogger != nil {
 		p.InitLogger()
 	}
-	utils.InitPlatform()
+	if err := utils.InitPlatform(); err != nil {
+		log.Error().Err(err).Msg("Failed to initialize platform.")
+		if errors.Is(err, utils.ErrUnsupportedPlatform) {
+			return utils.ConfigErrorExitCode
+		}
+		return 1
+	}
 
 	pidFilePath, err := pidfile.WritePID(pidfile.FilePath(p.Name))
 	if err != nil {

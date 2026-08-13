@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,7 +105,13 @@ func runAgent(ready chan<- struct{}) {
 	updater.CleanupStaleOld()
 
 	// platform
-	utils.InitPlatform()
+	if err := utils.InitPlatform(); err != nil {
+		log.Error().Err(err).Msg("Failed to initialize platform.")
+		if errors.Is(err, utils.ErrUnsupportedPlatform) {
+			os.Exit(utils.ConfigErrorExitCode)
+		}
+		os.Exit(1)
+	}
 
 	// Pid
 	pidFilePath, err := pidfile.WritePID(pidfile.FilePath(name))
