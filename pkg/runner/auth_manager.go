@@ -888,7 +888,11 @@ func (am *AuthManager) finalizeRequest(requestID, reason string) {
 	am.mu.Unlock()
 
 	if req == nil {
-		log.Warn().Msgf("No pending sudo request to finalize: %s", requestID)
+		// Routine: the server response or a session teardown took the request first.
+		log.Debug().
+			Str("request_id", requestID).
+			Str("reason", reason).
+			Msg("No pending sudo request to finalize")
 		return
 	}
 
