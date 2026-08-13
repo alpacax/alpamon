@@ -17,6 +17,10 @@ var (
 	PlatformID     string
 )
 
+// ErrUnsupportedPlatform marks the classification failure callers translate
+// into ConfigErrorExitCode.
+var ErrUnsupportedPlatform = errors.New("unsupported platform")
+
 // Mirrors alpacon-server servers/constants.py PLATFORM_ALIASES 1:1 — never add ids the server lacks: write-once Server.platform makes a divergence permanent.
 var platformAliases = map[string]string{
 	"debian":    "debian",
@@ -119,18 +123,26 @@ func ResolveServerPlatform(goos, explicit string, detect func() (string, error))
 	return explicit, "", nil
 }
 
+// The raw distribution id for this host; empty off Linux, where GOOS alone classifies. The callers' error texts differ, so wrapping stays with them.
+func rawHostPlatform() (string, error) {
+	if runtime.GOOS != "linux" {
+		return "", nil
+	}
+	info, err := host.Info()
+	if err != nil {
+		return "", err
+	}
+	return info.Platform, nil
+}
+
 // The value register and migrate send; errors instead of defaulting because the server persists it write-once, fixable only by re-registering.
 func DetectRegistrationPlatform() (string, error) {
-	var raw string
-	if runtime.GOOS == "linux" {
-		info, err := host.Info()
-		if err != nil {
-			return "", fmt.Errorf(
-				"failed to detect the host platform: %w.\n"+
-					"Pass --platform debian|rhel to skip detection if you know the host is compatible",
-				err)
-		}
-		raw = info.Platform
+	raw, err := rawHostPlatform()
+	if err != nil {
+		return "", fmt.Errorf(
+			"failed to detect the host platform: %w.\n"+
+				"Pass --platform debian|rhel to skip detection if you know the host is compatible",
+			err)
 	}
 	return ResolveRegistrationPlatform(runtime.GOOS, raw)
 }
@@ -149,19 +161,11 @@ func ResolveRegistrationPlatform(goos, raw string) (string, error) {
 	return like, nil
 }
 
-// ErrUnsupportedPlatform marks the classification failure callers translate
-// into ConfigErrorExitCode.
-var ErrUnsupportedPlatform = errors.New("unsupported platform")
-
 // Classifies the host once at startup; the error is terminal for the caller because every handler switches on these values and guessing would misreport to the server.
 func InitPlatform() error {
-	var raw string
-	if runtime.GOOS == "linux" {
-		info, err := host.Info()
-		if err != nil {
-			return fmt.Errorf("failed to retrieve platform information: %w", err)
-		}
-		raw = info.Platform
+	raw, err := rawHostPlatform()
+	if err != nil {
+		return fmt.Errorf("failed to retrieve platform information: %w", err)
 	}
 	return applyPlatform(runtime.GOOS, raw)
 }
