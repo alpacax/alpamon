@@ -14,7 +14,17 @@ func TestConfigErrorExitCodeMatchesUnitFile(t *testing.T) {
 		t.Fatalf("failed to read the unit file: %v", err)
 	}
 	want := fmt.Sprintf("RestartPreventExitStatus=%d", ConfigErrorExitCode)
-	if !strings.Contains(string(unit), want) {
-		t.Errorf("configs/alpamon.service must contain %q", want)
+	// A commented-out or misplaced directive is inert to systemd, so a substring match would pass on a unit that still restart-loops.
+	var section string
+	for line := range strings.SplitSeq(string(unit), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = line
+			continue
+		}
+		if section == "[Service]" && line == want {
+			return
+		}
 	}
+	t.Errorf("configs/alpamon.service must set %q under [Service]", want)
 }
