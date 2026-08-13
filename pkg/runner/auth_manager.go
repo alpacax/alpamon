@@ -623,12 +623,6 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 	am.mu.Unlock()
 
 	if sudoRequest == nil {
-		am.mu.RLock()
-		for _, session := range am.pidToSessionMap {
-			log.Debug().Msgf("Session %s requests: %+v", session.SessionID, session.Requests)
-		}
-		am.mu.RUnlock()
-
 		// Routine after a timeout: the waiter already answered and deregistered.
 		log.Debug().Str("request_id", response.RequestID).Msg("No pending sudo_approval request for response")
 
