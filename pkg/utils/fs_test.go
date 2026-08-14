@@ -198,33 +198,43 @@ func TestOpenIfZip(t *testing.T) {
 		_ = rc.Close()
 	})
 
-	t.Run("non-zip file returns nil", func(t *testing.T) {
-		p := filepath.Join(tmpDir, "plain.txt")
-		require.NoError(t, os.WriteFile(p, []byte("hello"), 0644))
-		rc := OpenIfZip(p, ".txt")
-		if rc != nil {
-			_ = rc.Close()
-		}
-		assert.Nil(t, rc)
-	})
+	tests := []struct {
+		name  string
+		file  string
+		ext   string
+		isZip bool
+	}{
+		{
+			name: "non-zip file returns nil",
+			file: "plain.txt",
+			ext:  ".txt",
+		},
+		{
+			name:  "denylisted extension returns nil",
+			file:  "lib.jar",
+			ext:   ".jar",
+			isZip: true,
+		},
+		{
+			name:  "uppercase denylisted extension returns nil",
+			file:  "lib.JAR",
+			ext:   ".JAR",
+			isZip: true,
+		},
+	}
 
-	t.Run("denylisted extension returns nil", func(t *testing.T) {
-		p := filepath.Join(tmpDir, "lib.jar")
-		makeZipFile(t, p)
-		rc := OpenIfZip(p, ".jar")
-		if rc != nil {
-			_ = rc.Close()
-		}
-		assert.Nil(t, rc)
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(tmpDir, tc.file)
+			if tc.isZip {
+				makeZipFile(t, p)
+			} else {
+				require.NoError(t, os.WriteFile(p, []byte("hello"), 0644))
+			}
 
-	t.Run("uppercase denylisted extension returns nil", func(t *testing.T) {
-		p := filepath.Join(tmpDir, "lib.JAR")
-		makeZipFile(t, p)
-		rc := OpenIfZip(p, ".JAR")
-		if rc != nil {
-			_ = rc.Close()
-		}
-		assert.Nil(t, rc)
-	})
+			if rc := OpenIfZip(p, tc.ext); !assert.Nil(t, rc) {
+				_ = rc.Close()
+			}
+		})
+	}
 }
