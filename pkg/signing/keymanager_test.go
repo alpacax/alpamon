@@ -49,9 +49,8 @@ func TestIsLocalEnv(t *testing.T) {
 }
 
 func TestKeyManager_Refresh(t *testing.T) {
-	pub, _ := newTestKey(t)
-	server := newTestServer(t, pub, "key-test-123")
-	defer server.Close()
+	pub, _ := testKey(t)
+	server := pathCheckingKeyServer(t, pub, "key-test-123")
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
@@ -65,11 +64,9 @@ func TestKeyManager_Refresh(t *testing.T) {
 }
 
 func TestKeyManager_CacheHit(t *testing.T) {
-	pub, _ := newTestKey(t)
+	pub, _ := testKey(t)
 
-	var fetchCount atomic.Int32
-	server := keyServer(t, &fetchCount, testKeyResponse(pub, "key-test"))
-	defer server.Close()
+	server, fetchCount := keyServer(t, testKeyResponse(pub, "key-test"))
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
@@ -82,11 +79,9 @@ func TestKeyManager_CacheHit(t *testing.T) {
 }
 
 func TestKeyManager_CacheExpiry(t *testing.T) {
-	pub, _ := newTestKey(t)
+	pub, _ := testKey(t)
 
-	var fetchCount atomic.Int32
-	server := keyServer(t, &fetchCount, testKeyResponse(pub, "key-test"))
-	defer server.Close()
+	server, fetchCount := keyServer(t, testKeyResponse(pub, "key-test"))
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
@@ -104,13 +99,11 @@ func TestKeyManager_CacheExpiry(t *testing.T) {
 }
 
 func TestKeyManager_ExpiresAt(t *testing.T) {
-	pub, _ := newTestKey(t)
+	pub, _ := testKey(t)
 
-	var fetchCount atomic.Int32
 	resp := testKeyResponse(pub, "key-test")
 	resp.ExpiresAt = "2099-01-01T00:00:00Z"
-	server := keyServer(t, &fetchCount, resp)
-	defer server.Close()
+	server, fetchCount := keyServer(t, resp)
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client()) // Long TTL, but expires_at overrides
 
@@ -131,7 +124,7 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 }
 
 func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
-	pub, _ := newTestKey(t)
+	pub, _ := testKey(t)
 
 	var callCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -168,8 +161,7 @@ func TestKeyManager_ServerUnavailable(t *testing.T) {
 func TestKeyManager_InvalidAlgorithm(t *testing.T) {
 	resp := testKeyResponse(make([]byte, ed25519.PublicKeySize), "key-test")
 	resp.Algorithm = "RSA"
-	server := keyServer(t, nil, resp)
-	defer server.Close()
+	server, _ := keyServer(t, resp)
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
@@ -178,8 +170,7 @@ func TestKeyManager_InvalidAlgorithm(t *testing.T) {
 }
 
 func TestKeyManager_InvalidKeySize(t *testing.T) {
-	server := keyServer(t, nil, testKeyResponse([]byte("tooshort"), "key-test"))
-	defer server.Close()
+	server, _ := keyServer(t, testKeyResponse([]byte("tooshort"), "key-test"))
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
@@ -188,11 +179,9 @@ func TestKeyManager_InvalidKeySize(t *testing.T) {
 }
 
 func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
-	pub, _ := newTestKey(t)
+	pub, _ := testKey(t)
 
-	var fetchCount atomic.Int32
-	server := keyServer(t, &fetchCount, testKeyResponse(pub, "key-test-123"))
-	defer server.Close()
+	server, fetchCount := keyServer(t, testKeyResponse(pub, "key-test-123"))
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
@@ -201,17 +190,17 @@ func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
 	key2, err := km.GetPublicKeyForKID("key-test-123")
 	require.NoError(t, err)
 
+	assert.Equal(t, pub, key1)
 	assert.Equal(t, key1, key2)
 	assert.Equal(t, int32(1), fetchCount.Load())
 }
 
 func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
-	pub, _ := newTestKey(t)
+	pub, _ := testKey(t)
 
 	// Alpamon must reject a kid that does not match the active key, even
 	// though the refresh returns that same active key.
-	server := keyServer(t, nil, testKeyResponse(pub, "key-v2"))
-	defer server.Close()
+	server, _ := keyServer(t, testKeyResponse(pub, "key-v2"))
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
@@ -223,8 +212,8 @@ func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
 }
 
 func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
-	pub1, _ := newTestKey(t)
-	pub2, _ := newTestKey(t)
+	pub1, _ := testKey(t)
+	pub2, _ := testKey(t)
 
 	var fetchCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -249,7 +238,7 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 }
 
 func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
-	pub, _ := newTestKey(t)
+	pub, _ := testKey(t)
 
 	// The handler runs on the server's goroutine and the assertions read from
 	// the test's, so the query crosses goroutines and needs to be published.
@@ -266,7 +255,6 @@ func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	require.NoError(t, err)
 	q := lastQuery.Load()
 	require.NotNil(t, q)
-	assert.Contains(t, *q, "auth_env")
 	assert.Equal(t, "dev", q.Get("auth_env"))
 
 	km2 := NewKeyManager(server.URL, 3600, "", server.Client())

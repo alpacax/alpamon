@@ -110,13 +110,13 @@ func TestBuildCanonicalPayload_LiteralBackslashU2028(t *testing.T) {
 }
 
 func TestVerifyCommand_Valid(t *testing.T) {
-	pub, priv := newTestKey(t)
+	pub, priv := testKey(t)
 
 	assert.NoError(t, VerifyCommand(signedCommand(t, priv, testServerID), testServerID, pub))
 }
 
 func TestVerifyCommand_TamperedPayload(t *testing.T) {
-	pub, priv := newTestKey(t)
+	pub, priv := testKey(t)
 
 	cmd := signedCommand(t, priv, testServerID)
 	cmd.Line = "rm -rf /"
@@ -125,7 +125,7 @@ func TestVerifyCommand_TamperedPayload(t *testing.T) {
 }
 
 func TestVerifyCommand_WrongServerID(t *testing.T) {
-	pub, priv := newTestKey(t)
+	pub, priv := testKey(t)
 
 	cmd := signedCommand(t, priv, testServerID)
 
@@ -133,7 +133,7 @@ func TestVerifyCommand_WrongServerID(t *testing.T) {
 }
 
 func TestVerifyCommand_Errors(t *testing.T) {
-	pub, _ := newTestKey(t)
+	pub, _ := testKey(t)
 
 	tests := []struct {
 		name string

@@ -14,7 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+const testServerID = "server-456"
+
+func testKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
@@ -37,27 +39,29 @@ func writeKeyResponse(t *testing.T, w http.ResponseWriter, resp publicKeyRespons
 	assert.NoError(t, json.NewEncoder(w).Encode(resp))
 }
 
-// keyServer serves resp for every request, counting fetches when count is non-nil.
-func keyServer(t *testing.T, count *atomic.Int32, resp publicKeyResponse) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if count != nil {
-			count.Add(1)
-		}
+// keyServer serves resp for every request, counting fetches.
+func keyServer(t *testing.T, resp publicKeyResponse) (*httptest.Server, *atomic.Int32) {
+	var count atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		count.Add(1)
 		writeKeyResponse(t, w, resp)
 	}))
+	t.Cleanup(srv.Close)
+	return srv, &count
 }
 
-func newTestServer(t *testing.T, pub ed25519.PublicKey, kid string) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// pathCheckingKeyServer is like keyServer but 404s outside the public-key path.
+func pathCheckingKeyServer(t *testing.T, pub ed25519.PublicKey, kid string) *httptest.Server {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/commands/public-key/" {
 			http.NotFound(w, r)
 			return
 		}
 		writeKeyResponse(t, w, testKeyResponse(pub, kid))
 	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
-
-const testServerID = "server-456"
 
 func testCommand(sig string) *protocol.Command {
 	return &protocol.Command{
