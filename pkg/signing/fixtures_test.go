@@ -47,13 +47,13 @@ func keyServer(t *testing.T, count *atomic.Int32, resp publicKeyResponse) *httpt
 	}))
 }
 
-func newTestServer(t *testing.T, pub ed25519.PublicKey) *httptest.Server {
+func newTestServer(t *testing.T, pub ed25519.PublicKey, kid string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/commands/public-key/" {
 			http.NotFound(w, r)
 			return
 		}
-		writeKeyResponse(t, w, testKeyResponse(pub, "key-test-123"))
+		writeKeyResponse(t, w, testKeyResponse(pub, kid))
 	}))
 }
 

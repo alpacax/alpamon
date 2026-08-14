@@ -50,7 +50,7 @@ func TestIsLocalEnv(t *testing.T) {
 
 func TestKeyManager_Refresh(t *testing.T) {
 	pub, _ := newTestKey(t)
-	server := newTestServer(t, pub)
+	server := newTestServer(t, pub, "key-test-123")
 	defer server.Close()
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
