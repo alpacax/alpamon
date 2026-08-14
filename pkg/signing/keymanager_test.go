@@ -112,7 +112,7 @@ func TestKeyManager_ServerUnavailable(t *testing.T) {
 	km := NewKeyManager("http://localhost:1", 3600, "", &http.Client{Timeout: 1 * time.Second})
 
 	_, err := km.GetPublicKey()
-	assert.Error(t, err)
+	assert.ErrorContains(t, err, "failed to fetch public key")
 }
 
 func TestKeyManager_InvalidAlgorithm(t *testing.T) {
@@ -130,7 +130,7 @@ func TestKeyManager_InvalidAlgorithm(t *testing.T) {
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
 	_, err := km.GetPublicKey()
-	assert.Error(t, err)
+	assert.ErrorContains(t, err, "unsupported algorithm: RSA")
 }
 
 func TestKeyManager_InvalidKeySize(t *testing.T) {
@@ -148,7 +148,7 @@ func TestKeyManager_InvalidKeySize(t *testing.T) {
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
 	_, err := km.GetPublicKey()
-	assert.Error(t, err)
+	assert.ErrorContains(t, err, "invalid public key size")
 }
 
 func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
@@ -209,7 +209,7 @@ func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
 	// doesn't match → error. This prevents a compromised relay from
 	// directing alpamon to accept an arbitrary key.
 	_, err = km.GetPublicKeyForKID("key-v999")
-	assert.Error(t, err, "expected error when kid doesn't match the active key for this environment")
+	assert.ErrorContains(t, err, `key "key-v999" is not the active key for this environment`)
 }
 
 func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
@@ -326,7 +326,7 @@ func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
 
 	// Expired key + refresh failure should return error, not stale key
 	_, err = km.GetPublicKey()
-	assert.Error(t, err, "expected error when key is expired and refresh fails")
+	assert.ErrorContains(t, err, "public key expired and refresh failed")
 }
 
 func TestResolveAuthEnv(t *testing.T) {

@@ -84,7 +84,7 @@ func TestVerifyCommand_TamperedPayload(t *testing.T) {
 	// Tamper with the command
 	cmd.Line = "rm -rf /"
 
-	assert.Error(t, VerifyCommand(cmd, serverID, pub))
+	assert.ErrorIs(t, VerifyCommand(cmd, serverID, pub), ErrSignatureMismatch)
 }
 
 func TestVerifyCommand_WrongServerID(t *testing.T) {
@@ -103,7 +103,7 @@ func TestVerifyCommand_WrongServerID(t *testing.T) {
 	sig := ed25519.Sign(priv, payload)
 	cmd.Signature = base64.StdEncoding.EncodeToString(sig)
 
-	assert.Error(t, VerifyCommand(cmd, "different-server", pub))
+	assert.ErrorIs(t, VerifyCommand(cmd, "different-server", pub), ErrSignatureMismatch)
 }
 
 func TestVerifyCommand_EmptySignature(t *testing.T) {
@@ -117,7 +117,7 @@ func TestVerifyCommand_EmptySignature(t *testing.T) {
 		Group: "root",
 	}
 
-	assert.Error(t, VerifyCommand(cmd, "server-456", pub))
+	assert.ErrorContains(t, VerifyCommand(cmd, "server-456", pub), "empty signature")
 }
 
 func TestVerifyCommand_InvalidBase64(t *testing.T) {
@@ -132,7 +132,7 @@ func TestVerifyCommand_InvalidBase64(t *testing.T) {
 		Signature: "not-valid-base64!!!",
 	}
 
-	assert.Error(t, VerifyCommand(cmd, "server-456", pub))
+	assert.ErrorContains(t, VerifyCommand(cmd, "server-456", pub), "invalid signature encoding")
 }
 
 func TestVerifyCommand_WrongSignatureSize(t *testing.T) {
@@ -147,7 +147,7 @@ func TestVerifyCommand_WrongSignatureSize(t *testing.T) {
 		Signature: base64.StdEncoding.EncodeToString([]byte("tooshort")),
 	}
 
-	assert.Error(t, VerifyCommand(cmd, "server-456", pub))
+	assert.ErrorContains(t, VerifyCommand(cmd, "server-456", pub), "invalid signature size")
 }
 
 func TestVerifyCommand_NilPublicKey(t *testing.T) {
@@ -160,13 +160,13 @@ func TestVerifyCommand_NilPublicKey(t *testing.T) {
 		Signature: base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize)),
 	}
 
-	assert.Error(t, VerifyCommand(cmd, "server-456", nil))
+	assert.ErrorContains(t, VerifyCommand(cmd, "server-456", nil), "invalid public key size")
 }
 
 func TestVerifyCommand_NilCommand(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 
-	assert.Error(t, VerifyCommand(nil, "server-456", pub))
+	assert.ErrorContains(t, VerifyCommand(nil, "server-456", pub), "nil command")
 }
 
 func TestBuildCanonicalPayload_NilCommand(t *testing.T) {
