@@ -3,17 +3,17 @@ description: >-
   Install the Go toolchain and generate the gitignored ent package. The tree
   imports ent subpackages that aren't checked in, so codegen must run before
   any command that loads packages (build, test, tidy, govulncheck, lint).
-inputs:
-  go-version:
-    description: Go version to install
-    required: true
 runs:
   using: composite
   steps:
+    # go.mod is the only source of truth for the toolchain. setup-go pins
+    # GOTOOLCHAIN=local, so a version resolved from anywhere else (a workflow
+    # env, a `1.25.x` wildcard hitting a stale runner cache) fails every
+    # package-loading command the moment it lags behind the go directive.
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
-        go-version: ${{ inputs.go-version }}
+        go-version-file: go.mod
 
     - name: Generate go code
       run: go generate ./pkg/db/ent
