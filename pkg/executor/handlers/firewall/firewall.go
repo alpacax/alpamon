@@ -153,7 +153,8 @@ func (h *FirewallHandler) Validate(cmd string, args *common.CommandArgs) error {
 			if args.RuleID == "" {
 				return fmt.Errorf("firewall update: rule ID is required")
 			}
-			return nil
+			// Update without rules only deletes, so rules stay optional here (unlike add).
+			return h.validator.ValidateBatchRules(args.Rules)
 		default:
 			return fmt.Errorf("firewall: unknown operation '%s'", operation)
 		}

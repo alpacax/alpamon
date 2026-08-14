@@ -181,6 +181,39 @@ func TestFirewallHandler_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "firewall update valid rule",
+			cmd:  "firewall",
+			args: &common.CommandArgs{
+				Operation: "update",
+				RuleID:    "1",
+				Rules: []common.FirewallRule{
+					{Protocol: "tcp", PortStart: 80, Target: "ACCEPT"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "firewall update invalid rule",
+			cmd:  "firewall",
+			args: &common.CommandArgs{
+				Operation: "update",
+				RuleID:    "1",
+				Rules: []common.FirewallRule{
+					{Protocol: "bogus-proto", Source: "not-a-cidr", Target: "ACCEPT"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "firewall update without rules",
+			cmd:  "firewall",
+			args: &common.CommandArgs{
+				Operation: "update",
+				RuleID:    "1",
+			},
+			wantErr: false,
+		},
+		{
 			name:    "firewall-rollback valid",
 			cmd:     "firewall-rollback",
 			args:    &common.CommandArgs{},
