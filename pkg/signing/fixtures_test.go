@@ -22,7 +22,6 @@ func newTestKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 }
 
 // testKeyResponse is what the AI server returns for an active Ed25519 key.
-// Tests that need an invalid response override a field on the result.
 func testKeyResponse(pub ed25519.PublicKey, kid string) publicKeyResponse {
 	return publicKeyResponse{
 		Algorithm: "Ed25519",

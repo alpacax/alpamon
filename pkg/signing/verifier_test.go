@@ -83,10 +83,8 @@ func TestBuildCanonicalPayload_LineSeparators(t *testing.T) {
 
 	payload := string(BuildCanonicalPayload(cmd, "srv-1"))
 
-	// Payload must contain raw UTF-8 bytes, not \u2028/\u2029 escapes
 	assert.NotContains(t, payload, `\u2028`)
 	assert.NotContains(t, payload, `\u2029`)
-	// Verify the raw bytes are present
 	assert.Contains(t, payload, "\u2028")
 	assert.Contains(t, payload, "\u2029")
 }
@@ -105,10 +103,8 @@ func TestBuildCanonicalPayload_LiteralBackslashU2028(t *testing.T) {
 
 	payload := string(BuildCanonicalPayload(cmd, "srv-1"))
 
-	// Must NOT contain raw U+2028/U+2029 bytes (those would mean corruption)
 	assert.NotContains(t, payload, "\u2028")
 	assert.NotContains(t, payload, "\u2029")
-	// JSON should contain the escaped form \\u2028/\\u2029
 	assert.Contains(t, payload, `\\u2028`)
 	assert.Contains(t, payload, `\\u2029`)
 }

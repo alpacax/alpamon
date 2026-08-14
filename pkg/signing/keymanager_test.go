@@ -73,10 +73,8 @@ func TestKeyManager_CacheHit(t *testing.T) {
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
-	// First call fetches
 	_, err := km.GetPublicKey()
 	require.NoError(t, err)
-	// Second call should use cache
 	_, err = km.GetPublicKey()
 	require.NoError(t, err)
 
@@ -94,7 +92,7 @@ func TestKeyManager_CacheExpiry(t *testing.T) {
 
 	_, err := km.GetPublicKey()
 	require.NoError(t, err)
-	// Simulate cache expiry by moving lastFetch into the past
+	// Simulate cache expiry
 	km.mu.Lock()
 	km.lastFetch = time.Now().Add(-2 * time.Hour)
 	km.mu.Unlock()
@@ -118,12 +116,11 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 
 	_, err := km.GetPublicKey()
 	require.NoError(t, err)
-	// Should use cache (not expired yet)
 	_, err = km.GetPublicKey()
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), fetchCount.Load())
 
-	// Simulate expires_at having passed by moving it into the past
+	// Simulate expires_at having passed
 	km.mu.Lock()
 	km.expiresAt = time.Now().Add(-1 * time.Second)
 	km.mu.Unlock()
@@ -148,7 +145,6 @@ func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
-	// First fetch succeeds
 	_, err := km.GetPublicKey()
 	require.NoError(t, err)
 
@@ -157,7 +153,7 @@ func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
 	km.lastFetch = time.Now().Add(-2 * time.Hour)
 	km.mu.Unlock()
 
-	// Expired key + refresh failure should return error, not stale key
+	// Must not fall back to the stale key
 	_, err = km.GetPublicKey()
 	assert.ErrorContains(t, err, "public key expired and refresh failed")
 }
@@ -200,10 +196,8 @@ func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
-	// First call fetches
 	key1, err := km.GetPublicKeyForKID("key-test-123")
 	require.NoError(t, err)
-	// Second call with same kid should use cache
 	key2, err := km.GetPublicKeyForKID("key-test-123")
 	require.NoError(t, err)
 
@@ -214,21 +208,16 @@ func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
 func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
 	pub, _ := newTestKey(t)
 
-	// Server always returns the active key for this env (key-v2).
-	// Alpamon should reject commands signed with a kid that doesn't match
-	// the active key, even after refreshing.
+	// Alpamon must reject a kid that does not match the active key, even
+	// though the refresh returns that same active key.
 	server := keyServer(t, nil, testKeyResponse(pub, "key-v2"))
 	defer server.Close()
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
-	// Request matching kid: success
 	_, err := km.GetPublicKeyForKID("key-v2")
 	require.NoError(t, err, "expected success when kid matches active key")
 
-	// Request non-matching kid: refresh returns key-v2 again, kid still
-	// doesn't match → error. This prevents a compromised relay from
-	// directing alpamon to accept an arbitrary key.
 	_, err = km.GetPublicKeyForKID("key-v999")
 	assert.ErrorContains(t, err, `key "key-v999" is not the active key for this environment`)
 }
@@ -238,8 +227,6 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 	pub2, _ := newTestKey(t)
 
 	var fetchCount atomic.Int32
-	// Server simulates key rotation: first fetch returns key-v1,
-	// subsequent fetches return key-v2 (the new active key).
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		resp := testKeyResponse(pub2, "key-v2")
 		if fetchCount.Add(1) == 1 {
@@ -251,13 +238,10 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
 
-	// Fetch key-v1 (active before rotation)
 	key1, err := km.GetPublicKeyForKID("key-v1")
 	require.NoError(t, err)
 	assert.Equal(t, pub1, key1)
 
-	// Request key-v2: kid mismatch triggers env-scoped refresh,
-	// which now returns key-v2 (rotated active key).
 	key2, err := km.GetPublicKeyForKID("key-v2")
 	require.NoError(t, err)
 	assert.Equal(t, pub2, key2)
@@ -277,7 +261,6 @@ func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// With authEnv="dev", requests should include ?auth_env=dev
 	km := NewKeyManager(server.URL, 3600, "dev", server.Client())
 	_, err := km.GetPublicKey()
 	require.NoError(t, err)
@@ -286,7 +269,6 @@ func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	assert.Contains(t, *q, "auth_env")
 	assert.Equal(t, "dev", q.Get("auth_env"))
 
-	// With empty authEnv, requests should not include auth_env param at all
 	km2 := NewKeyManager(server.URL, 3600, "", server.Client())
 	_, err = km2.GetPublicKey()
 	require.NoError(t, err)
