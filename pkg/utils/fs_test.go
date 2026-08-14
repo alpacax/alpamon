@@ -79,8 +79,10 @@ func TestCopyFile(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, string(content), string(got))
 
-		srcInfo, _ := os.Stat(srcPath)
-		dstInfo, _ := os.Stat(dstPath)
+		srcInfo, err := os.Stat(srcPath)
+		require.NoError(t, err)
+		dstInfo, err := os.Stat(dstPath)
+		require.NoError(t, err)
 		assert.Equal(t, srcInfo.Mode(), dstInfo.Mode())
 	})
 
