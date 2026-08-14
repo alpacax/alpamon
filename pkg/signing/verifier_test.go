@@ -7,7 +7,6 @@ import (
 
 	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestBuildCanonicalPayload(t *testing.T) {
@@ -44,8 +43,7 @@ func TestBuildCanonicalPayload_EmptyAnalyzedAt(t *testing.T) {
 }
 
 func TestVerifyCommand_Valid(t *testing.T) {
-	pub, priv, err := ed25519.GenerateKey(nil)
-	require.NoError(t, err)
+	pub, priv := newTestKey(t)
 
 	cmd := &protocol.Command{
 		ID:         "cmd-123",
@@ -65,7 +63,7 @@ func TestVerifyCommand_Valid(t *testing.T) {
 }
 
 func TestVerifyCommand_TamperedPayload(t *testing.T) {
-	pub, priv, _ := ed25519.GenerateKey(nil)
+	pub, priv := newTestKey(t)
 
 	cmd := &protocol.Command{
 		ID:         "cmd-123",
@@ -88,7 +86,7 @@ func TestVerifyCommand_TamperedPayload(t *testing.T) {
 }
 
 func TestVerifyCommand_WrongServerID(t *testing.T) {
-	pub, priv, _ := ed25519.GenerateKey(nil)
+	pub, priv := newTestKey(t)
 
 	cmd := &protocol.Command{
 		ID:         "cmd-123",
@@ -107,7 +105,7 @@ func TestVerifyCommand_WrongServerID(t *testing.T) {
 }
 
 func TestVerifyCommand_EmptySignature(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	cmd := &protocol.Command{
 		ID:    "cmd-123",
@@ -121,7 +119,7 @@ func TestVerifyCommand_EmptySignature(t *testing.T) {
 }
 
 func TestVerifyCommand_InvalidBase64(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	cmd := &protocol.Command{
 		ID:        "cmd-123",
@@ -136,7 +134,7 @@ func TestVerifyCommand_InvalidBase64(t *testing.T) {
 }
 
 func TestVerifyCommand_WrongSignatureSize(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	cmd := &protocol.Command{
 		ID:        "cmd-123",
@@ -164,7 +162,7 @@ func TestVerifyCommand_NilPublicKey(t *testing.T) {
 }
 
 func TestVerifyCommand_NilCommand(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	assert.ErrorContains(t, VerifyCommand(nil, "server-456", pub), "nil command")
 }

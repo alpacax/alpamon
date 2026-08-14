@@ -14,26 +14,53 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestServer(pub ed25519.PublicKey) *httptest.Server {
+func newTestKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	return pub, priv
+}
+
+// testKeyResponse is what the AI server returns for an active Ed25519 key.
+// Tests that need an invalid response override a field on the result.
+func testKeyResponse(pub ed25519.PublicKey, kid string) publicKeyResponse {
+	return publicKeyResponse{
+		Algorithm: "Ed25519",
+		PublicKey: base64.StdEncoding.EncodeToString(pub),
+		KeyID:     kid,
+		ValidFrom: "2026-01-01T00:00:00Z",
+	}
+}
+
+func writeKeyResponse(t *testing.T, w http.ResponseWriter, resp publicKeyResponse) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	assert.NoError(t, json.NewEncoder(w).Encode(resp))
+}
+
+// keyServer serves resp for every request, counting fetches when count is non-nil.
+func keyServer(t *testing.T, count *atomic.Int32, resp publicKeyResponse) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if count != nil {
+			count.Add(1)
+		}
+		writeKeyResponse(t, w, resp)
+	}))
+}
+
+func newTestServer(t *testing.T, pub ed25519.PublicKey) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/commands/public-key/" {
 			http.NotFound(w, r)
 			return
 		}
-		resp := publicKeyResponse{
-			Algorithm: "Ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString(pub),
-			KeyID:     "key-test-123",
-			ValidFrom: "2026-01-01T00:00:00Z",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		writeKeyResponse(t, w, testKeyResponse(pub, "key-test-123"))
 	}))
 }
 
 func TestKeyManager_Refresh(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
-	server := newTestServer(pub)
+	pub, _ := newTestKey(t)
+	server := newTestServer(t, pub)
 	defer server.Close()
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
@@ -48,20 +75,10 @@ func TestKeyManager_Refresh(t *testing.T) {
 }
 
 func TestKeyManager_CacheHit(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	var fetchCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount.Add(1)
-		resp := publicKeyResponse{
-			Algorithm: "Ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString(pub),
-			KeyID:     "key-test",
-			ValidFrom: "2026-01-01T00:00:00Z",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
+	server := keyServer(t, &fetchCount, testKeyResponse(pub, "key-test"))
 	defer server.Close()
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
@@ -77,20 +94,10 @@ func TestKeyManager_CacheHit(t *testing.T) {
 }
 
 func TestKeyManager_CacheExpiry(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	var fetchCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount.Add(1)
-		resp := publicKeyResponse{
-			Algorithm: "Ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString(pub),
-			KeyID:     "key-test",
-			ValidFrom: "2026-01-01T00:00:00Z",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
+	server := keyServer(t, &fetchCount, testKeyResponse(pub, "key-test"))
 	defer server.Close()
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
@@ -116,15 +123,9 @@ func TestKeyManager_ServerUnavailable(t *testing.T) {
 }
 
 func TestKeyManager_InvalidAlgorithm(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := publicKeyResponse{
-			Algorithm: "RSA",
-			PublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
-			KeyID:     "key-test",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
+	resp := testKeyResponse(make([]byte, ed25519.PublicKeySize), "key-test")
+	resp.Algorithm = "RSA"
+	server := keyServer(t, nil, resp)
 	defer server.Close()
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
@@ -134,15 +135,7 @@ func TestKeyManager_InvalidAlgorithm(t *testing.T) {
 }
 
 func TestKeyManager_InvalidKeySize(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := publicKeyResponse{
-			Algorithm: "Ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString([]byte("tooshort")),
-			KeyID:     "key-test",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
+	server := keyServer(t, nil, testKeyResponse([]byte("tooshort"), "key-test"))
 	defer server.Close()
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
@@ -152,20 +145,10 @@ func TestKeyManager_InvalidKeySize(t *testing.T) {
 }
 
 func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	var fetchCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount.Add(1)
-		resp := publicKeyResponse{
-			Algorithm: "Ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString(pub),
-			KeyID:     "key-test-123",
-			ValidFrom: "2026-01-01T00:00:00Z",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
+	server := keyServer(t, &fetchCount, testKeyResponse(pub, "key-test-123"))
 	defer server.Close()
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
@@ -182,21 +165,12 @@ func TestKeyManager_GetPublicKeyForKID_CacheHit(t *testing.T) {
 }
 
 func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	// Server always returns the active key for this env (key-v2).
 	// Alpamon should reject commands signed with a kid that doesn't match
 	// the active key, even after refreshing.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := publicKeyResponse{
-			Algorithm: "Ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString(pub),
-			KeyID:     "key-v2",
-			ValidFrom: "2026-01-01T00:00:00Z",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
+	server := keyServer(t, nil, testKeyResponse(pub, "key-v2"))
 	defer server.Close()
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client())
@@ -213,31 +187,18 @@ func TestKeyManager_GetPublicKeyForKID_Mismatch(t *testing.T) {
 }
 
 func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
-	pub1, _, _ := ed25519.GenerateKey(nil)
-	pub2, _, _ := ed25519.GenerateKey(nil)
+	pub1, _ := newTestKey(t)
+	pub2, _ := newTestKey(t)
 
 	var fetchCount atomic.Int32
 	// Server simulates key rotation: first fetch returns key-v1,
 	// subsequent fetches return key-v2 (the new active key).
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := fetchCount.Add(1)
-		var pub ed25519.PublicKey
-		var kid string
-		if n == 1 {
-			pub = pub1
-			kid = "key-v1"
-		} else {
-			pub = pub2
-			kid = "key-v2"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := testKeyResponse(pub2, "key-v2")
+		if fetchCount.Add(1) == 1 {
+			resp = testKeyResponse(pub1, "key-v1")
 		}
-		resp := publicKeyResponse{
-			Algorithm: "Ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString(pub),
-			KeyID:     kid,
-			ValidFrom: "2026-01-01T00:00:00Z",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		writeKeyResponse(t, w, resp)
 	}))
 	defer server.Close()
 
@@ -257,21 +218,12 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 }
 
 func TestKeyManager_ExpiresAt(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	var fetchCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount.Add(1)
-		resp := publicKeyResponse{
-			Algorithm: "Ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString(pub),
-			KeyID:     "key-test",
-			ValidFrom: "2026-01-01T00:00:00Z",
-			ExpiresAt: "2099-01-01T00:00:00Z",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
+	resp := testKeyResponse(pub, "key-test")
+	resp.ExpiresAt = "2099-01-01T00:00:00Z"
+	server := keyServer(t, &fetchCount, resp)
 	defer server.Close()
 
 	km := NewKeyManager(server.URL, 3600, "", server.Client()) // Long TTL, but expires_at overrides
@@ -294,22 +246,15 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 }
 
 func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	var callCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if callCount.Add(1) > 1 {
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
 		}
-		resp := publicKeyResponse{
-			Algorithm: "Ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString(pub),
-			KeyID:     "key-test",
-			ValidFrom: "2026-01-01T00:00:00Z",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		writeKeyResponse(t, w, testKeyResponse(pub, "key-test"))
 	}))
 	defer server.Close()
 
@@ -365,21 +310,14 @@ func TestIsLocalEnv(t *testing.T) {
 }
 
 func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, _ := newTestKey(t)
 
 	var receivedAuthEnv string
 	var authEnvPresent bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, authEnvPresent = r.URL.Query()["auth_env"]
 		receivedAuthEnv = r.URL.Query().Get("auth_env")
-		resp := publicKeyResponse{
-			Algorithm: "Ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString(pub),
-			KeyID:     "key-dev-1",
-			ValidFrom: "2026-01-01T00:00:00Z",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		writeKeyResponse(t, w, testKeyResponse(pub, "key-dev-1"))
 	}))
 	defer server.Close()
 
