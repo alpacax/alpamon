@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"archive/zip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -178,21 +177,12 @@ func TestChownRecursive(t *testing.T) {
 	})
 }
 
-func makeZipFile(t *testing.T, path string) {
-	t.Helper()
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	w := zip.NewWriter(f)
-	_ = w.Close()
-	_ = f.Close()
-}
-
 func TestOpenIfZip(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	t.Run("valid zip returns handle", func(t *testing.T) {
 		p := filepath.Join(tmpDir, "valid.zip")
-		makeZipFile(t, p)
+		writeZip(t, p, nil)
 		rc := OpenIfZip(p, ".zip")
 		require.NotNil(t, rc)
 		_ = rc.Close()
@@ -227,7 +217,7 @@ func TestOpenIfZip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := filepath.Join(tmpDir, tc.file)
 			if tc.isZip {
-				makeZipFile(t, p)
+				writeZip(t, p, nil)
 			} else {
 				require.NoError(t, os.WriteFile(p, []byte("hello"), 0644))
 			}

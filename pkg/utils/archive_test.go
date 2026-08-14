@@ -10,6 +10,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// writeZip builds a zip at path with one entry per name/content pair. A nil
+// map produces an empty zip.
+func writeZip(t *testing.T, path string, entries map[string]string) {
+	t.Helper()
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	w := zip.NewWriter(f)
+	for name, content := range entries {
+		zw, err := w.Create(name)
+		require.NoError(t, err)
+		_, err = zw.Write([]byte(content))
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Close())
+	require.NoError(t, f.Close())
+}
+
 func TestCreateZip_SingleFile(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "hello.txt")
@@ -63,17 +80,11 @@ func TestCreateZip_BulkMultiplePaths(t *testing.T) {
 func TestUnzip(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a zip with a file and subdirectory
 	zipPath := filepath.Join(dir, "test.zip")
-	f, err := os.Create(zipPath)
-	require.NoError(t, err)
-	w := zip.NewWriter(f)
-	zw, _ := w.Create("root.txt")
-	_, _ = zw.Write([]byte("root"))
-	zw, _ = w.Create("sub/nested.txt")
-	_, _ = zw.Write([]byte("nested"))
-	_ = w.Close()
-	_ = f.Close()
+	writeZip(t, zipPath, map[string]string{
+		"root.txt":       "root",
+		"sub/nested.txt": "nested",
+	})
 
 	extractDir := filepath.Join(dir, "out")
 	require.NoError(t, os.MkdirAll(extractDir, 0755))
@@ -92,15 +103,8 @@ func TestUnzip(t *testing.T) {
 func TestUnzip_ZipSlipRejected(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a malicious zip with path traversal
 	zipPath := filepath.Join(dir, "evil.zip")
-	f, err := os.Create(zipPath)
-	require.NoError(t, err)
-	w := zip.NewWriter(f)
-	zw, _ := w.Create("../../etc/passwd")
-	_, _ = zw.Write([]byte("malicious"))
-	_ = w.Close()
-	_ = f.Close()
+	writeZip(t, zipPath, map[string]string{"../../etc/passwd": "malicious"})
 
 	extractDir := filepath.Join(dir, "out")
 	require.NoError(t, os.MkdirAll(extractDir, 0755))
