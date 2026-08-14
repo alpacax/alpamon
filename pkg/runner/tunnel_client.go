@@ -379,17 +379,17 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	targetAddr := fmt.Sprintf("127.0.0.1:%d", targetPort)
 
 	// Dial the relay target (Unix: via daemon UDS, Windows: direct TCP)
-	daemonConn, err := tc.dialTunnelTarget(targetAddr)
+	targetConn, err := tc.dialTunnelTarget(targetAddr)
 	if err != nil {
-		log.Debug().Err(err).Msgf("Failed to connect to tunnel daemon for %s.", targetAddr)
+		log.Debug().Err(err).Msgf("Failed to dial relay target %s.", targetAddr)
 		return
 	}
-	defer func() { _ = daemonConn.Close() }()
+	defer func() { _ = targetConn.Close() }()
 
-	log.Debug().Msgf("Connected to tunnel daemon for %s.", targetAddr)
+	log.Debug().Msgf("Relay target dialed for %s.", targetAddr)
 
 	dataReader := tc.buildDataReader(bufReader, stream)
-	tc.relayBidirectional(stream, daemonConn, dataReader)
+	tc.relayBidirectional(stream, targetConn, dataReader)
 
 	log.Debug().Msgf("Tunnel stream closed for port %d.", targetPort)
 }
@@ -439,30 +439,36 @@ func (tc *TunnelClient) buildDataReader(bufReader *bufio.Reader, stream *smux.St
 	return io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
 }
 
-func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, daemonConn net.Conn, dataReader io.Reader) {
+func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, targetConn net.Conn, dataReader io.Reader) {
 	errChan := make(chan error, 2)
 
-	// stream -> daemon (via UDS)
+	// stream -> target
 	go func() {
-		_, err := tunnel.CopyBuffered(daemonConn, dataReader)
-		// Half-close the write side to signal EOF to daemon
-		if uc, ok := daemonConn.(*net.UnixConn); ok {
-			_ = uc.CloseWrite()
-		}
+		_, err := tunnel.CopyBuffered(targetConn, dataReader)
+		// Half-close the write side to signal EOF to the target
+		closeWriteSide(targetConn)
 		errChan <- err
 	}()
 
-	// daemon -> stream (via UDS)
+	// target -> stream
 	go func() {
-		_, err := tunnel.CopyBuffered(stream, daemonConn)
+		_, err := tunnel.CopyBuffered(stream, targetConn)
 		errChan <- err
 	}()
 
 	// Wait for one direction to complete, then close both connections to unblock the other goroutine
 	<-errChan
 	_ = stream.Close()
-	_ = daemonConn.Close()
+	_ = targetConn.Close()
 	<-errChan
+}
+
+// closeWriteSide half-closes the write direction to signal EOF to the peer.
+// Covers *net.UnixConn (Unix daemon path) and *net.TCPConn (Windows direct path).
+func closeWriteSide(conn net.Conn) {
+	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
 }
 
 // Close cleanly shuts down the tunnel connection.
