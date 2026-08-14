@@ -144,7 +144,7 @@ func TestCopyDir(t *testing.T) {
 
 		// Old content should not exist
 		_, err = os.Stat(filepath.Join(dstDir, "old.txt"))
-		assert.True(t, os.IsNotExist(err), "old.txt should not exist after overwrite")
+		assert.ErrorIs(t, err, os.ErrNotExist, "old.txt should not exist after overwrite")
 	})
 
 	t.Run("non-existent source returns error", func(t *testing.T) {
