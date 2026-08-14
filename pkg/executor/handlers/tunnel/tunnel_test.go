@@ -1,20 +1,43 @@
 package tunnel
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestEditorTunnelSupported(t *testing.T) {
+	assert.False(t, editorTunnelSupported("windows"))
+	assert.True(t, editorTunnelSupported("linux"))
+	assert.True(t, editorTunnelSupported("darwin"))
+}
+
+func TestValidateClientTypeRequirementsEditorOnWindows(t *testing.T) {
+	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+	data := OpenTunnelData{SessionID: "s1", URL: "wss://tunnel.example.com", ClientType: runner.ClientTypeEditor, Username: "u"}
+
+	if runtime.GOOS == "windows" {
+		err := h.validateClientTypeRequirements(runner.ClientTypeEditor, data)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "editor tunnel is not supported on Windows")
+	} else {
+		assert.NoError(t, h.validateClientTypeRequirements(runner.ClientTypeEditor, data))
+	}
+}
 
 func TestTunnelHandler_Validate(t *testing.T) {
 	handler := NewTunnelHandler(common.NewMockCommandExecutor(t))
 
 	tests := []struct {
-		name    string
-		cmd     string
-		args    *common.CommandArgs
-		wantErr bool
+		name          string
+		cmd           string
+		args          *common.CommandArgs
+		wantErr       bool
+		wantErrOnGOOS string // non-empty: wantErr is forced true when runtime.GOOS matches
 	}{
 		{
 			name: "opentunnel cli valid",
@@ -48,7 +71,8 @@ func TestTunnelHandler_Validate(t *testing.T) {
 				Username:   "testuser",
 				Groupname:  "testgroup",
 			},
-			wantErr: false,
+			wantErr:       false,
+			wantErrOnGOOS: "windows",
 		},
 		{
 			name: "opentunnel editor valid without groupname",
@@ -59,7 +83,8 @@ func TestTunnelHandler_Validate(t *testing.T) {
 				ClientType: runner.ClientTypeEditor,
 				Username:   "testuser",
 			},
-			wantErr: false,
+			wantErr:       false,
+			wantErrOnGOOS: "windows",
 		},
 		{
 			name: "opentunnel cli missing target port",
@@ -199,9 +224,10 @@ func TestTunnelHandler_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			wantErr := tt.wantErr || (tt.wantErrOnGOOS != "" && runtime.GOOS == tt.wantErrOnGOOS)
 			err := handler.Validate(tt.cmd, tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			if (err != nil) != wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, wantErr)
 			}
 		})
 	}

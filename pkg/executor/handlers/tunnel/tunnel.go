@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"fmt"
+	"runtime"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
@@ -86,11 +87,20 @@ func (h *TunnelHandler) validateClientTypeRequirements(clientType string, data O
 			return fmt.Errorf("target_port is required for %s tunnel (must be 1-65535)", clientType)
 		}
 	case runner.ClientTypeEditor:
+		if !editorTunnelSupported(runtime.GOOS) {
+			return fmt.Errorf("editor tunnel is not supported on Windows")
+		}
 		if data.Username == "" {
 			return fmt.Errorf("username is required for editor tunnel")
 		}
 	}
 	return nil
+}
+
+// editorTunnelSupported reports whether the platform can run editor tunnels.
+// Windows is excluded until code-server support lands (#379).
+func editorTunnelSupported(goos string) bool {
+	return goos != "windows"
 }
 
 func (h *TunnelHandler) validateCloseTunnel(args *common.CommandArgs) error {
