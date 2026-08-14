@@ -58,6 +58,41 @@ func newTestServer(t *testing.T, pub ed25519.PublicKey) *httptest.Server {
 	}))
 }
 
+func TestResolveAuthEnv(t *testing.T) {
+	tests := []struct {
+		serverURL string
+		want      string
+	}{
+		{"https://dev.alpacon.io", "dev"},
+		{"https://dev.alpacon.io/", "dev"},
+		{"https://us.alpacon.io", ""},
+		{"https://kr.alpacon.io", ""},
+		{"https://dev.example.com", ""},
+		{"http://localhost:8000", ""},
+		{"invalid-url", ""},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, ResolveAuthEnv(tt.serverURL), "ResolveAuthEnv(%q)", tt.serverURL)
+	}
+}
+
+func TestIsLocalEnv(t *testing.T) {
+	tests := []struct {
+		serverURL string
+		want      bool
+	}{
+		{"http://localhost:8000", true},
+		{"http://127.0.0.1:8000", true},
+		{"http://[::1]:8000", true},
+		{"https://dev.alpacon.io", false},
+		{"https://us.alpacon.io", false},
+		{"invalid-url", false},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, IsLocalEnv(tt.serverURL), "IsLocalEnv(%q)", tt.serverURL)
+	}
+}
+
 func TestKeyManager_Refresh(t *testing.T) {
 	pub, _ := newTestKey(t)
 	server := newTestServer(t, pub)
@@ -113,6 +148,63 @@ func TestKeyManager_CacheExpiry(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, int32(2), fetchCount.Load())
+}
+
+func TestKeyManager_ExpiresAt(t *testing.T) {
+	pub, _ := newTestKey(t)
+
+	var fetchCount atomic.Int32
+	resp := testKeyResponse(pub, "key-test")
+	resp.ExpiresAt = "2099-01-01T00:00:00Z"
+	server := keyServer(t, &fetchCount, resp)
+	defer server.Close()
+
+	km := NewKeyManager(server.URL, 3600, "", server.Client()) // Long TTL, but expires_at overrides
+
+	_, err := km.GetPublicKey()
+	require.NoError(t, err)
+	// Should use cache (not expired yet)
+	_, err = km.GetPublicKey()
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), fetchCount.Load())
+
+	// Simulate expires_at having passed by moving it into the past
+	km.mu.Lock()
+	km.expiresAt = time.Now().Add(-1 * time.Second)
+	km.mu.Unlock()
+
+	_, err = km.GetPublicKey()
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), fetchCount.Load())
+}
+
+func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
+	pub, _ := newTestKey(t)
+
+	var callCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if callCount.Add(1) > 1 {
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		writeKeyResponse(t, w, testKeyResponse(pub, "key-test"))
+	}))
+	defer server.Close()
+
+	km := NewKeyManager(server.URL, 3600, "", server.Client())
+
+	// First fetch succeeds
+	_, err := km.GetPublicKey()
+	require.NoError(t, err)
+
+	// Simulate cache expiry
+	km.mu.Lock()
+	km.lastFetch = time.Now().Add(-2 * time.Hour)
+	km.mu.Unlock()
+
+	// Expired key + refresh failure should return error, not stale key
+	_, err = km.GetPublicKey()
+	assert.ErrorContains(t, err, "public key expired and refresh failed")
 }
 
 func TestKeyManager_ServerUnavailable(t *testing.T) {
@@ -215,98 +307,6 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, pub2, key2)
 	assert.Equal(t, int32(2), fetchCount.Load())
-}
-
-func TestKeyManager_ExpiresAt(t *testing.T) {
-	pub, _ := newTestKey(t)
-
-	var fetchCount atomic.Int32
-	resp := testKeyResponse(pub, "key-test")
-	resp.ExpiresAt = "2099-01-01T00:00:00Z"
-	server := keyServer(t, &fetchCount, resp)
-	defer server.Close()
-
-	km := NewKeyManager(server.URL, 3600, "", server.Client()) // Long TTL, but expires_at overrides
-
-	_, err := km.GetPublicKey()
-	require.NoError(t, err)
-	// Should use cache (not expired yet)
-	_, err = km.GetPublicKey()
-	require.NoError(t, err)
-	assert.Equal(t, int32(1), fetchCount.Load())
-
-	// Simulate expires_at having passed by moving it into the past
-	km.mu.Lock()
-	km.expiresAt = time.Now().Add(-1 * time.Second)
-	km.mu.Unlock()
-
-	_, err = km.GetPublicKey()
-	require.NoError(t, err)
-	assert.Equal(t, int32(2), fetchCount.Load())
-}
-
-func TestKeyManager_ExpiredKeyRefreshFailure(t *testing.T) {
-	pub, _ := newTestKey(t)
-
-	var callCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if callCount.Add(1) > 1 {
-			http.Error(w, "server error", http.StatusInternalServerError)
-			return
-		}
-		writeKeyResponse(t, w, testKeyResponse(pub, "key-test"))
-	}))
-	defer server.Close()
-
-	km := NewKeyManager(server.URL, 3600, "", server.Client())
-
-	// First fetch succeeds
-	_, err := km.GetPublicKey()
-	require.NoError(t, err)
-
-	// Simulate cache expiry
-	km.mu.Lock()
-	km.lastFetch = time.Now().Add(-2 * time.Hour)
-	km.mu.Unlock()
-
-	// Expired key + refresh failure should return error, not stale key
-	_, err = km.GetPublicKey()
-	assert.ErrorContains(t, err, "public key expired and refresh failed")
-}
-
-func TestResolveAuthEnv(t *testing.T) {
-	tests := []struct {
-		serverURL string
-		want      string
-	}{
-		{"https://dev.alpacon.io", "dev"},
-		{"https://dev.alpacon.io/", "dev"},
-		{"https://us.alpacon.io", ""},
-		{"https://kr.alpacon.io", ""},
-		{"https://dev.example.com", ""},
-		{"http://localhost:8000", ""},
-		{"invalid-url", ""},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, ResolveAuthEnv(tt.serverURL), "ResolveAuthEnv(%q)", tt.serverURL)
-	}
-}
-
-func TestIsLocalEnv(t *testing.T) {
-	tests := []struct {
-		serverURL string
-		want      bool
-	}{
-		{"http://localhost:8000", true},
-		{"http://127.0.0.1:8000", true},
-		{"http://[::1]:8000", true},
-		{"https://dev.alpacon.io", false},
-		{"https://us.alpacon.io", false},
-		{"invalid-url", false},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, IsLocalEnv(tt.serverURL), "IsLocalEnv(%q)", tt.serverURL)
-	}
 }
 
 func TestKeyManager_AuthEnvQueryParam(t *testing.T) {

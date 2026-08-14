@@ -9,6 +9,28 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+const testServerID = "server-456"
+
+func testCommand(sig string) *protocol.Command {
+	return &protocol.Command{
+		ID:         "cmd-123",
+		Shell:      "system",
+		Line:       "whoami",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-03-01T12:00:00+00:00",
+		Signature:  sig,
+	}
+}
+
+// signedCommand returns a command carrying a signature valid for serverID.
+func signedCommand(t *testing.T, priv ed25519.PrivateKey, serverID string) *protocol.Command {
+	t.Helper()
+	cmd := testCommand("")
+	cmd.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, BuildCanonicalPayload(cmd, serverID)))
+	return cmd
+}
+
 func TestBuildCanonicalPayload(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -64,72 +86,6 @@ func TestBuildCanonicalPayload(t *testing.T) {
 	}
 }
 
-const testServerID = "server-456"
-
-func testCommand(sig string) *protocol.Command {
-	return &protocol.Command{
-		ID:         "cmd-123",
-		Shell:      "system",
-		Line:       "whoami",
-		User:       "root",
-		Group:      "root",
-		AnalyzedAt: "2026-03-01T12:00:00+00:00",
-		Signature:  sig,
-	}
-}
-
-// signedCommand returns a command carrying a signature valid for serverID.
-func signedCommand(t *testing.T, priv ed25519.PrivateKey, serverID string) *protocol.Command {
-	t.Helper()
-	cmd := testCommand("")
-	cmd.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, BuildCanonicalPayload(cmd, serverID)))
-	return cmd
-}
-
-func TestVerifyCommand_Valid(t *testing.T) {
-	pub, priv := newTestKey(t)
-
-	assert.NoError(t, VerifyCommand(signedCommand(t, priv, testServerID), testServerID, pub))
-}
-
-func TestVerifyCommand_TamperedPayload(t *testing.T) {
-	pub, priv := newTestKey(t)
-
-	cmd := signedCommand(t, priv, testServerID)
-	cmd.Line = "rm -rf /"
-
-	assert.ErrorIs(t, VerifyCommand(cmd, testServerID, pub), ErrSignatureMismatch)
-}
-
-func TestVerifyCommand_WrongServerID(t *testing.T) {
-	pub, priv := newTestKey(t)
-
-	cmd := signedCommand(t, priv, testServerID)
-
-	assert.ErrorIs(t, VerifyCommand(cmd, "different-server", pub), ErrSignatureMismatch)
-}
-
-func TestVerifyCommand_Errors(t *testing.T) {
-	pub, _ := newTestKey(t)
-
-	tests := []struct {
-		name string
-		cmd  *protocol.Command
-		key  ed25519.PublicKey
-		want string
-	}{
-		{"empty signature", testCommand(""), pub, "empty signature"},
-		{"invalid base64", testCommand("not-valid-base64!!!"), pub, "invalid signature encoding"},
-		{"wrong signature size", testCommand(base64.StdEncoding.EncodeToString([]byte("tooshort"))), pub, "invalid signature size"},
-		{"nil public key", testCommand(base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))), nil, "invalid public key size"},
-		{"nil command", nil, pub, "nil command"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.ErrorContains(t, VerifyCommand(tt.cmd, testServerID, tt.key), tt.want)
-		})
-	}
-}
 func TestBuildCanonicalPayload_NilCommand(t *testing.T) {
 	assert.Nil(t, BuildCanonicalPayload(nil, "srv-1"))
 }
@@ -177,4 +133,49 @@ func TestBuildCanonicalPayload_LiteralBackslashU2028(t *testing.T) {
 	// JSON should contain the escaped form \\u2028/\\u2029
 	assert.Contains(t, payload, `\\u2028`)
 	assert.Contains(t, payload, `\\u2029`)
+}
+
+func TestVerifyCommand_Valid(t *testing.T) {
+	pub, priv := newTestKey(t)
+
+	assert.NoError(t, VerifyCommand(signedCommand(t, priv, testServerID), testServerID, pub))
+}
+
+func TestVerifyCommand_TamperedPayload(t *testing.T) {
+	pub, priv := newTestKey(t)
+
+	cmd := signedCommand(t, priv, testServerID)
+	cmd.Line = "rm -rf /"
+
+	assert.ErrorIs(t, VerifyCommand(cmd, testServerID, pub), ErrSignatureMismatch)
+}
+
+func TestVerifyCommand_WrongServerID(t *testing.T) {
+	pub, priv := newTestKey(t)
+
+	cmd := signedCommand(t, priv, testServerID)
+
+	assert.ErrorIs(t, VerifyCommand(cmd, "different-server", pub), ErrSignatureMismatch)
+}
+
+func TestVerifyCommand_Errors(t *testing.T) {
+	pub, _ := newTestKey(t)
+
+	tests := []struct {
+		name string
+		cmd  *protocol.Command
+		key  ed25519.PublicKey
+		want string
+	}{
+		{"empty signature", testCommand(""), pub, "empty signature"},
+		{"invalid base64", testCommand("not-valid-base64!!!"), pub, "invalid signature encoding"},
+		{"wrong signature size", testCommand(base64.StdEncoding.EncodeToString([]byte("tooshort"))), pub, "invalid signature size"},
+		{"nil public key", testCommand(base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))), nil, "invalid public key size"},
+		{"nil command", nil, pub, "nil command"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.ErrorContains(t, VerifyCommand(tt.cmd, testServerID, tt.key), tt.want)
+		})
+	}
 }
