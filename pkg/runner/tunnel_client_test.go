@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -113,37 +112,6 @@ func TestResolveTargetPort(t *testing.T) {
 			}
 			if gotPort != tt.wantPort {
 				t.Fatalf("resolveTargetPort(%q) = %d, want %d", tt.remotePort, gotPort, tt.wantPort)
-			}
-		})
-	}
-}
-
-func TestStartTunnelDaemonInvalidSessionID(t *testing.T) {
-	tests := []struct {
-		name      string
-		sessionID string
-	}{
-		{name: "traversal pattern", sessionID: "../bad"},
-		{name: "path separator", sessionID: "bad/session"},
-		{name: "backslash separator", sessionID: `bad\session`},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			client := &TunnelClient{sessionID: tc.sessionID}
-
-			err := client.startTunnelDaemon()
-			if err == nil {
-				t.Fatalf("startTunnelDaemon(%q) expected error, got nil", tc.sessionID)
-			}
-			if !strings.Contains(err.Error(), "invalid session ID") {
-				t.Fatalf("startTunnelDaemon(%q) error = %v, want contains %q", tc.sessionID, err, "invalid session ID")
-			}
-			if client.daemonCmd != nil {
-				t.Fatalf("daemonCmd should remain nil for invalid session ID")
-			}
-			if client.daemonSocket != "" {
-				t.Fatalf("daemonSocket should remain empty for invalid session ID, got %q", client.daemonSocket)
 			}
 		})
 	}

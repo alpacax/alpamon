@@ -11,12 +11,10 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
@@ -176,9 +174,9 @@ func (tc *TunnelClient) RunTunnelBackground() {
 
 	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort.Load())
 
-	// Start tunnel daemon (single subprocess for all streams)
-	if err := tc.startTunnelDaemon(); err != nil {
-		log.Error().Err(err).Msgf("Failed to start tunnel daemon for session %s.", tc.sessionID)
+	// Start the platform relay (daemon subprocess on Unix, no-op on Windows)
+	if err := tc.startTunnelRelay(); err != nil {
+		log.Error().Err(err).Msgf("Failed to start tunnel relay for session %s.", tc.sessionID)
 		return
 	}
 
@@ -351,8 +349,8 @@ func (tc *TunnelClient) logStreamPressure() {
 	}
 }
 
-// handleStream processes a single smux stream by connecting to the tunnel daemon
-// via Unix domain socket and relaying data to the local service.
+// handleStream processes a single smux stream by dialing the relay target
+// and relaying data to the local service.
 func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	defer func() { _ = stream.Close() }()
 
@@ -380,8 +378,8 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 
 	targetAddr := fmt.Sprintf("127.0.0.1:%d", targetPort)
 
-	// Connect to tunnel daemon via UDS (daemon runs as nobody user for security)
-	daemonConn, err := tc.connectToDaemon(targetAddr)
+	// Dial the relay target (Unix: via daemon UDS, Windows: direct TCP)
+	daemonConn, err := tc.dialTunnelTarget(targetAddr)
 	if err != nil {
 		log.Debug().Err(err).Msgf("Failed to connect to tunnel daemon for %s.", targetAddr)
 		return
@@ -467,98 +465,6 @@ func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, daemonConn net.C
 	<-errChan
 }
 
-// startTunnelDaemon starts a tunnel daemon subprocess for this session.
-// The daemon runs with demoted credentials and handles all stream relay via UDS.
-func (tc *TunnelClient) startTunnelDaemon() error {
-	if !IsValidSessionID(tc.sessionID) {
-		return fmt.Errorf("invalid session ID for tunnel daemon socket")
-	}
-
-	socketDir, err := ensureTunnelSocketDir()
-	if err != nil {
-		return fmt.Errorf("failed to ensure tunnel socket directory: %w", err)
-	}
-	tc.daemonSocket = filepath.Join(socketDir, tc.sessionID+".sock")
-
-	cmd, err := spawnTunnelDaemon(tc.daemonSocket)
-	if err != nil {
-		return fmt.Errorf("failed to spawn tunnel daemon: %w", err)
-	}
-	tc.daemonCmd = cmd
-
-	if err := tc.waitForDaemonReady(); err != nil {
-		// Daemon failed to start, clean up
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = safeRemoveSocket(tc.daemonSocket)
-		return fmt.Errorf("tunnel daemon not ready: %w", err)
-	}
-
-	log.Info().Msgf("Tunnel daemon ready for session %s, socket: %s.", tc.sessionID, tc.daemonSocket)
-	return nil
-}
-
-// waitForDaemonReady polls the UDS socket until the daemon is accepting connections.
-func (tc *TunnelClient) waitForDaemonReady() error {
-	deadline := time.Now().Add(5 * time.Second)
-
-	for time.Now().Before(deadline) {
-		conn, err := net.Dial("unix", tc.daemonSocket)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	return fmt.Errorf("timeout waiting for daemon socket %s", tc.daemonSocket)
-}
-
-// connectToDaemon connects to the tunnel daemon via UDS and sends the target address.
-func (tc *TunnelClient) connectToDaemon(targetAddr string) (net.Conn, error) {
-	conn, err := net.Dial("unix", tc.daemonSocket)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to daemon socket: %w", err)
-	}
-
-	if _, err := fmt.Fprintf(conn, "%s\n", targetAddr); err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("failed to send target address to daemon: %w", err)
-	}
-
-	return conn, nil
-}
-
-// stopTunnelDaemon gracefully stops the tunnel daemon subprocess.
-func (tc *TunnelClient) stopTunnelDaemon() {
-	if tc.daemonCmd == nil || tc.daemonCmd.Process == nil {
-		return
-	}
-
-	log.Info().Msgf("Stopping tunnel daemon for session %s...", tc.sessionID)
-
-	if err := tc.daemonCmd.Process.Signal(syscall.SIGTERM); err != nil {
-		log.Debug().Err(err).Msg("SIGTERM failed for tunnel daemon, trying SIGKILL.")
-		_ = tc.daemonCmd.Process.Kill()
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		done <- tc.daemonCmd.Wait()
-	}()
-
-	select {
-	case <-done:
-		log.Info().Msg("Tunnel daemon stopped.")
-	case <-time.After(10 * time.Second):
-		_ = tc.daemonCmd.Process.Kill()
-		log.Warn().Msg("Tunnel daemon killed after timeout.")
-	}
-
-	_ = safeRemoveSocket(tc.daemonSocket)
-	tc.daemonCmd = nil
-}
-
 // Close cleanly shuts down the tunnel connection.
 // Safe to call multiple times; only the first call performs cleanup.
 func (tc *TunnelClient) Close() {
@@ -573,7 +479,7 @@ func (tc *TunnelClient) Close() {
 
 		// Stop tunnel daemon
 		if tc.daemonCmd != nil {
-			tc.stopTunnelDaemon()
+			tc.stopTunnelRelay()
 		}
 
 		if tc.cancel != nil {
