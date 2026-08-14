@@ -42,6 +42,11 @@ const (
 	ClientTypeCLI    = "cli"
 	ClientTypeWeb    = "web"
 	ClientTypeEditor = "editor"
+
+	// Relay TCP dial timeout and keepalive tuning, shared by the Unix daemon
+	// and the Windows direct-dial path.
+	tunnelDialTimeout     = 10 * time.Second
+	tunnelKeepAlivePeriod = 30 * time.Second
 )
 
 var (

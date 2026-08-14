@@ -43,6 +43,27 @@ func safeRemoveSocket(path string) error {
 	return os.Remove(path)
 }
 
+// dialDirect dials a localhost target over TCP with relay tuning applied.
+// Used by the Unix daemon and as the whole relay path on Windows.
+func dialDirect(targetAddr string) (net.Conn, error) {
+	if !validateTargetAddr(targetAddr) {
+		return nil, fmt.Errorf("invalid target address %s: must be localhost (127.0.0.1 or localhost)", targetAddr)
+	}
+
+	conn, err := net.DialTimeout("tcp", targetAddr, tunnelDialTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(tunnelKeepAlivePeriod)
+	}
+
+	return conn, nil
+}
+
 // RunTunnelDaemon runs the tunnel daemon subprocess.
 // It listens on a Unix domain socket and relays connections to local TCP services.
 // This function is called by the tunnel-daemon subcommand and runs with demoted user credentials.
@@ -133,18 +154,12 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 		return
 	}
 
-	tcpConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+	tcpConn, err := dialDirect(targetAddr)
 	if err != nil {
 		log.Debug().Err(err).Msgf("Tunnel daemon failed to connect to %s.", targetAddr)
 		return
 	}
 	defer func() { _ = tcpConn.Close() }()
-
-	if tc, ok := tcpConn.(*net.TCPConn); ok {
-		_ = tc.SetNoDelay(true)
-		_ = tc.SetKeepAlive(true)
-		_ = tc.SetKeepAlivePeriod(30 * time.Second)
-	}
 
 	log.Debug().Msgf("Tunnel daemon connected to %s.", targetAddr)
 
