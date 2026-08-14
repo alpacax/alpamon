@@ -105,7 +105,7 @@ func TestUnzip_ZipSlipRejected(t *testing.T) {
 	extractDir := filepath.Join(dir, "out")
 	require.NoError(t, os.MkdirAll(extractDir, 0755))
 
-	assert.Error(t, Unzip(zipPath, extractDir))
+	assert.ErrorContains(t, Unzip(zipPath, extractDir), "illegal file path in zip")
 }
 
 func TestCreateZipAndUnzip_RoundTrip(t *testing.T) {
