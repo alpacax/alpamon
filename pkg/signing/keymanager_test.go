@@ -27,7 +27,9 @@ func TestResolveAuthEnv(t *testing.T) {
 		{"invalid-url", ""},
 	}
 	for _, tt := range tests {
-		assert.Equal(t, tt.want, ResolveAuthEnv(tt.serverURL), "ResolveAuthEnv(%q)", tt.serverURL)
+		t.Run(tt.serverURL, func(t *testing.T) {
+			assert.Equal(t, tt.want, ResolveAuthEnv(tt.serverURL))
+		})
 	}
 }
 
@@ -44,7 +46,9 @@ func TestIsLocalEnv(t *testing.T) {
 		{"invalid-url", false},
 	}
 	for _, tt := range tests {
-		assert.Equal(t, tt.want, IsLocalEnv(tt.serverURL), "IsLocalEnv(%q)", tt.serverURL)
+		t.Run(tt.serverURL, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsLocalEnv(tt.serverURL))
+		})
 	}
 }
 
