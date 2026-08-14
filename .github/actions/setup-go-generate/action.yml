@@ -3,6 +3,8 @@ description: >-
   Install the Go toolchain and generate the gitignored ent package. The tree
   imports ent subpackages that aren't checked in, so codegen must run before
   any command that loads packages (build, test, tidy, govulncheck, lint).
+  Assumes the repository is checked out at the workspace root: both the go.mod
+  the toolchain is read from and the generate path resolve from there.
 runs:
   using: composite
   steps:
