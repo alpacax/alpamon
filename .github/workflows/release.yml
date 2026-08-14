@@ -188,7 +188,7 @@ jobs:
             arch: amd64
             install_cmd: apt-get install -y -o Acquire::Retries=3
           - pkg_type: rpm
-            container: rockylinux:9
+            container: rockylinux/rockylinux:9
             arch: amd64
             install_cmd: dnf install -y
     container: ${{ matrix.container }}

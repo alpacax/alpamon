@@ -69,7 +69,7 @@ jobs:
             runner: ubuntu-latest
           # RHEL/CentOS yum-based (amd64)
           - distro: rocky-8
-            container: rockylinux:8
+            container: rockylinux/rockylinux:8
             pkg_manager: yum
             runner: ubuntu-latest
           - distro: rhel-8
@@ -78,7 +78,7 @@ jobs:
             runner: ubuntu-latest
           # RHEL/CentOS dnf-based (amd64)
           - distro: rocky-9
-            container: rockylinux:9
+            container: rockylinux/rockylinux:9
             pkg_manager: dnf
             runner: ubuntu-latest
           - distro: almalinux-9
@@ -115,7 +115,7 @@ jobs:
             pkg_manager: apt-get
             runner: ubuntu-24.04-arm
           - distro: rocky-9-arm64
-            container: rockylinux:9
+            container: rockylinux/rockylinux:9
             pkg_manager: dnf
             runner: ubuntu-24.04-arm
           - distro: amazonlinux-2023-arm64
