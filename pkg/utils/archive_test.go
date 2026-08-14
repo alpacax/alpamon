@@ -5,157 +5,111 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// writeZip builds a zip at path with one entry per name/content pair. A nil
+// map produces an empty zip.
+func writeZip(t *testing.T, path string, entries map[string]string) {
+	t.Helper()
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	w := zip.NewWriter(f)
+	for name, content := range entries {
+		zw, err := w.Create(name)
+		require.NoError(t, err)
+		_, err = zw.Write([]byte(content))
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Close())
+	require.NoError(t, f.Close())
+}
 
 func TestCreateZip_SingleFile(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "hello.txt")
-	if err := os.WriteFile(src, []byte("hello world"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(src, []byte("hello world"), 0644))
 
 	dest := filepath.Join(dir, "out.zip")
-	if err := CreateZip(dest, []string{src}, false); err != nil {
-		t.Fatalf("CreateZip() error: %v", err)
-	}
+	require.NoError(t, CreateZip(dest, []string{src}, false))
 
 	r, err := zip.OpenReader(dest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = r.Close() }()
 
-	if len(r.File) != 1 {
-		t.Fatalf("expected 1 file in zip, got %d", len(r.File))
-	}
-	if r.File[0].Name != "hello.txt" {
-		t.Errorf("expected entry name hello.txt, got %s", r.File[0].Name)
-	}
+	require.Len(t, r.File, 1)
+	assert.Equal(t, "hello.txt", r.File[0].Name)
 }
 
 func TestCreateZip_RecursiveDirectory(t *testing.T) {
 	dir := t.TempDir()
 	subdir := filepath.Join(dir, "mydir", "sub")
-	if err := os.MkdirAll(subdir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "mydir", "a.txt"), []byte("a"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(subdir, "b.txt"), []byte("b"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(subdir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "mydir", "a.txt"), []byte("a"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(subdir, "b.txt"), []byte("b"), 0644))
 
 	dest := filepath.Join(dir, "out.zip")
-	if err := CreateZip(dest, []string{filepath.Join(dir, "mydir")}, true); err != nil {
-		t.Fatalf("CreateZip() error: %v", err)
-	}
+	require.NoError(t, CreateZip(dest, []string{filepath.Join(dir, "mydir")}, true))
 
 	r, err := zip.OpenReader(dest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = r.Close() }()
 
-	if len(r.File) != 2 {
-		t.Fatalf("expected 2 files in zip, got %d", len(r.File))
-	}
+	assert.Len(t, r.File, 2)
 }
 
 func TestCreateZip_BulkMultiplePaths(t *testing.T) {
 	dir := t.TempDir()
 	f1 := filepath.Join(dir, "one.txt")
 	f2 := filepath.Join(dir, "two.txt")
-	if err := os.WriteFile(f1, []byte("1"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(f2, []byte("2"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(f1, []byte("1"), 0644))
+	require.NoError(t, os.WriteFile(f2, []byte("2"), 0644))
 
 	dest := filepath.Join(dir, "out.zip")
-	if err := CreateZip(dest, []string{f1, f2}, true); err != nil {
-		t.Fatalf("CreateZip() error: %v", err)
-	}
+	require.NoError(t, CreateZip(dest, []string{f1, f2}, true))
 
 	r, err := zip.OpenReader(dest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = r.Close() }()
 
-	if len(r.File) != 2 {
-		t.Fatalf("expected 2 files in zip, got %d", len(r.File))
-	}
+	assert.Len(t, r.File, 2)
 }
 
 func TestUnzip(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a zip with a file and subdirectory
 	zipPath := filepath.Join(dir, "test.zip")
-	f, err := os.Create(zipPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := zip.NewWriter(f)
-	zw, _ := w.Create("root.txt")
-	_, _ = zw.Write([]byte("root"))
-	zw, _ = w.Create("sub/nested.txt")
-	_, _ = zw.Write([]byte("nested"))
-	_ = w.Close()
-	_ = f.Close()
+	writeZip(t, zipPath, map[string]string{
+		"root.txt":       "root",
+		"sub/nested.txt": "nested",
+	})
 
 	extractDir := filepath.Join(dir, "out")
-	if err := os.MkdirAll(extractDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(extractDir, 0755))
 
-	if err := Unzip(zipPath, extractDir); err != nil {
-		t.Fatalf("Unzip() error: %v", err)
-	}
+	require.NoError(t, Unzip(zipPath, extractDir))
 
 	content, err := os.ReadFile(filepath.Join(extractDir, "root.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(content) != "root" {
-		t.Errorf("root.txt content = %q, want %q", content, "root")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "root", string(content))
 
 	content, err = os.ReadFile(filepath.Join(extractDir, "sub", "nested.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(content) != "nested" {
-		t.Errorf("nested.txt content = %q, want %q", content, "nested")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "nested", string(content))
 }
 
 func TestUnzip_ZipSlipRejected(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a malicious zip with path traversal
 	zipPath := filepath.Join(dir, "evil.zip")
-	f, err := os.Create(zipPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := zip.NewWriter(f)
-	zw, _ := w.Create("../../etc/passwd")
-	_, _ = zw.Write([]byte("malicious"))
-	_ = w.Close()
-	_ = f.Close()
+	writeZip(t, zipPath, map[string]string{"../../etc/passwd": "malicious"})
 
 	extractDir := filepath.Join(dir, "out")
-	if err := os.MkdirAll(extractDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(extractDir, 0755))
 
-	err = Unzip(zipPath, extractDir)
-	if err == nil {
-		t.Fatal("expected zip-slip rejection error")
-	}
+	assert.ErrorContains(t, Unzip(zipPath, extractDir), "illegal file path in zip")
 }
 
 func TestCreateZipAndUnzip_RoundTrip(t *testing.T) {
@@ -163,45 +117,25 @@ func TestCreateZipAndUnzip_RoundTrip(t *testing.T) {
 
 	// Create source files
 	srcDir := filepath.Join(dir, "src")
-	if err := os.MkdirAll(filepath.Join(srcDir, "sub"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("aaa"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(srcDir, "sub", "b.txt"), []byte("bbb"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "sub"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("aaa"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "sub", "b.txt"), []byte("bbb"), 0644))
 
 	// Zip
 	zipPath := filepath.Join(dir, "archive.zip")
-	if err := CreateZip(zipPath, []string{srcDir}, true); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, CreateZip(zipPath, []string{srcDir}, true))
 
 	// Unzip
 	outDir := filepath.Join(dir, "out")
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := Unzip(zipPath, outDir); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(outDir, 0755))
+	require.NoError(t, Unzip(zipPath, outDir))
 
 	// Verify round-trip
 	content, err := os.ReadFile(filepath.Join(outDir, "src", "a.txt"))
-	if err != nil {
-		t.Fatalf("a.txt not found after round-trip: %v", err)
-	}
-	if string(content) != "aaa" {
-		t.Errorf("a.txt = %q, want %q", content, "aaa")
-	}
+	require.NoError(t, err, "a.txt not found after round-trip")
+	assert.Equal(t, "aaa", string(content))
 
 	content, err = os.ReadFile(filepath.Join(outDir, "src", "sub", "b.txt"))
-	if err != nil {
-		t.Fatalf("sub/b.txt not found after round-trip: %v", err)
-	}
-	if string(content) != "bbb" {
-		t.Errorf("sub/b.txt = %q, want %q", content, "bbb")
-	}
+	require.NoError(t, err, "sub/b.txt not found after round-trip")
+	assert.Equal(t, "bbb", string(content))
 }
