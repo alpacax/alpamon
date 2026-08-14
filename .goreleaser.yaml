@@ -8,7 +8,6 @@ release:
 before:
   hooks:
     - go generate ./pkg/db/ent
-    - go mod tidy
 
 builds:
   - id: alpamon-linux

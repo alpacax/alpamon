@@ -1,6 +1,6 @@
 module github.com/alpacax/alpamon/v2
 
-go 1.25.12
+go 1.25.13
 
 require (
 	entgo.io/ent v0.14.5
