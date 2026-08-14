@@ -9,28 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-const testServerID = "server-456"
-
-func testCommand(sig string) *protocol.Command {
-	return &protocol.Command{
-		ID:         "cmd-123",
-		Shell:      "system",
-		Line:       "whoami",
-		User:       "root",
-		Group:      "root",
-		AnalyzedAt: "2026-03-01T12:00:00+00:00",
-		Signature:  sig,
-	}
-}
-
-// signedCommand returns a command carrying a signature valid for serverID.
-func signedCommand(t *testing.T, priv ed25519.PrivateKey, serverID string) *protocol.Command {
-	t.Helper()
-	cmd := testCommand("")
-	cmd.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, BuildCanonicalPayload(cmd, serverID)))
-	return cmd
-}
-
 func TestBuildCanonicalPayload(t *testing.T) {
 	tests := []struct {
 		name     string

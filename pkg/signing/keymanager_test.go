@@ -2,8 +2,6 @@ package signing
 
 import (
 	"crypto/ed25519"
-	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,50 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func newTestKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
-	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(nil)
-	require.NoError(t, err)
-	return pub, priv
-}
-
-// testKeyResponse is what the AI server returns for an active Ed25519 key.
-// Tests that need an invalid response override a field on the result.
-func testKeyResponse(pub ed25519.PublicKey, kid string) publicKeyResponse {
-	return publicKeyResponse{
-		Algorithm: "Ed25519",
-		PublicKey: base64.StdEncoding.EncodeToString(pub),
-		KeyID:     kid,
-		ValidFrom: "2026-01-01T00:00:00Z",
-	}
-}
-
-func writeKeyResponse(t *testing.T, w http.ResponseWriter, resp publicKeyResponse) {
-	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
-	assert.NoError(t, json.NewEncoder(w).Encode(resp))
-}
-
-// keyServer serves resp for every request, counting fetches when count is non-nil.
-func keyServer(t *testing.T, count *atomic.Int32, resp publicKeyResponse) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if count != nil {
-			count.Add(1)
-		}
-		writeKeyResponse(t, w, resp)
-	}))
-}
-
-func newTestServer(t *testing.T, pub ed25519.PublicKey) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/commands/public-key/" {
-			http.NotFound(w, r)
-			return
-		}
-		writeKeyResponse(t, w, testKeyResponse(pub, "key-test-123"))
-	}))
-}
 
 func TestResolveAuthEnv(t *testing.T) {
 	tests := []struct {
