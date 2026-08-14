@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -312,11 +313,12 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	pub, _ := newTestKey(t)
 
-	var receivedAuthEnv string
-	var authEnvPresent bool
+	// The handler runs on the server's goroutine and the assertions read from
+	// the test's, so the query crosses goroutines and needs to be published.
+	var lastQuery atomic.Pointer[url.Values]
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, authEnvPresent = r.URL.Query()["auth_env"]
-		receivedAuthEnv = r.URL.Query().Get("auth_env")
+		q := r.URL.Query()
+		lastQuery.Store(&q)
 		writeKeyResponse(t, w, testKeyResponse(pub, "key-dev-1"))
 	}))
 	defer server.Close()
@@ -325,13 +327,16 @@ func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	km := NewKeyManager(server.URL, 3600, "dev", server.Client())
 	_, err := km.GetPublicKey()
 	require.NoError(t, err)
-	assert.True(t, authEnvPresent, "expected auth_env in request")
-	assert.Equal(t, "dev", receivedAuthEnv)
+	q := lastQuery.Load()
+	require.NotNil(t, q)
+	assert.Contains(t, *q, "auth_env")
+	assert.Equal(t, "dev", q.Get("auth_env"))
 
 	// With empty authEnv, requests should not include auth_env param at all
-	authEnvPresent = true // reset
 	km2 := NewKeyManager(server.URL, 3600, "", server.Client())
 	_, err = km2.GetPublicKey()
 	require.NoError(t, err)
-	assert.False(t, authEnvPresent, "expected auth_env param to be absent, but it was present with value %q", receivedAuthEnv)
+	q = lastQuery.Load()
+	require.NotNil(t, q)
+	assert.NotContains(t, *q, "auth_env")
 }
