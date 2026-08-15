@@ -3,29 +3,29 @@ module github.com/alpacax/alpamon/v2
 go 1.25.13
 
 require (
-	entgo.io/ent v0.14.5
+	entgo.io/ent v0.14.6
 	github.com/UserExistsError/conpty v0.1.4
 	github.com/creack/pty v1.1.24
 	github.com/glebarez/go-sqlite v1.22.0
-	github.com/go-playground/validator/v10 v10.30.2
+	github.com/go-playground/validator/v10 v10.30.3
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/rs/zerolog v1.34.0
-	github.com/shirou/gopsutil/v4 v4.26.1
+	github.com/rs/zerolog v1.35.1
+	github.com/shirou/gopsutil/v4 v4.26.7
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.9
+	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
-	github.com/xtaci/smux v1.5.56
-	golang.org/x/sys v0.45.0
-	golang.org/x/term v0.43.0
-	gopkg.in/ini.v1 v1.67.1
+	github.com/xtaci/smux v1.5.57
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
+	gopkg.in/ini.v1 v1.67.3
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/ebitengine/purego v0.9.1 // indirect
+	github.com/ebitengine/purego v0.10.2 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
