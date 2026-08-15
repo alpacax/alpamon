@@ -47,11 +47,20 @@ jobs:
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
 
-      # Report findings without gating merges: a newly published CVE in a
-      # transitive dep or stdlib would otherwise turn unrelated PRs red.
-      # Dependabot handles proactive dependency bumps; this job is the
-      # stdlib/reachability signal, surfaced in the step log, not a gate.
-      # Setup failures above still fail the job (only this step is soft).
+      # Hard gate: a called vulnerability fails the job and blocks the PR.
+      # This was previously soft, on the reasoning that a newly published
+      # advisory would turn unrelated PRs red. The cost of that trade showed
+      # up elsewhere in the fleet: a sibling repo carried called standard
+      # library advisories for two weeks without anyone noticing, because a
+      # reported-but-not-gating signal is only read when someone goes looking.
+      # Alpamon ships to customer machines, so it should not rely on that.
+      #
+      # govulncheck reports reachability, not mere presence: an advisory in a
+      # dependency the code does not call does not fail this step. Dependabot
+      # still handles proactive dependency bumps.
+      #
+      # govulncheck has no per-ID exclusion. If this fires on an advisory with
+      # no fix released, unblock with a `continue-on-error: true` naming the
+      # advisory and a tracking issue, and revert it when the fix lands.
       - name: Run govulncheck
         run: govulncheck ./...
-        continue-on-error: true
