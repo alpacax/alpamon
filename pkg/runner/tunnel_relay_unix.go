@@ -45,6 +45,10 @@ func (tc *TunnelClient) startTunnelRelay() error {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		_ = safeRemoveSocket(tc.daemonSocket)
+		// Cleared so a later stopTunnelRelay is a no-op instead of
+		// re-signaling and re-Waiting the already-reaped process.
+		tc.daemonCmd = nil
+		tc.daemonSocket = ""
 		return fmt.Errorf("tunnel daemon not ready: %w", err)
 	}
 
@@ -52,19 +56,29 @@ func (tc *TunnelClient) startTunnelRelay() error {
 	return nil
 }
 
+// waitForDaemonReady polls the daemon socket until it accepts. It gives up as
+// soon as the session context is canceled: daemonMu is held for the whole wait,
+// so a blocking poll would stall Close for the full timeout.
 func (tc *TunnelClient) waitForDaemonReady() error {
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 
-	for time.Now().Before(deadline) {
+	for {
 		conn, err := net.Dial("unix", tc.daemonSocket)
 		if err == nil {
 			_ = conn.Close()
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
 
-	return fmt.Errorf("timeout waiting for daemon socket %s", tc.daemonSocket)
+		select {
+		case <-tc.ctx.Done():
+			return fmt.Errorf("tunnel session closed while waiting for daemon socket %s: %w", tc.daemonSocket, tc.ctx.Err())
+		case <-deadline:
+			return fmt.Errorf("timeout waiting for daemon socket %s", tc.daemonSocket)
+		case <-ticker.C:
+		}
+	}
 }
 
 // dialTunnelTarget connects to the tunnel daemon via UDS and sends the target address.

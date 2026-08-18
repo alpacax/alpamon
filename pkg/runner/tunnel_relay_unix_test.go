@@ -4,7 +4,9 @@ package runner
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,4 +44,21 @@ func TestStartTunnelRelayClosedSession(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "closed before relay start")
 	assert.Nil(t, client.daemonCmd)
+}
+
+func TestWaitForDaemonReadyClosedSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := &TunnelClient{
+		sessionID:    "session123",
+		ctx:          ctx,
+		daemonSocket: filepath.Join(t.TempDir(), "never-created.sock"),
+	}
+
+	// Returns on cancellation instead of polling for the full 5s deadline.
+	start := time.Now()
+	err := client.waitForDaemonReady()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "closed while waiting for daemon socket")
+	assert.Less(t, time.Since(start), time.Second)
 }
