@@ -666,6 +666,7 @@ func TestSystemHandler_Uninstall(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("uninstall goroutine did not finish")
 	}
+	assert.True(t, mockWS.ShutDownCalled, "the agent must shut itself down once the uninstall is scheduled")
 }
 
 // TestSystemHandler_UnregisterFromConsole_CallsDelete verifies that byebye
