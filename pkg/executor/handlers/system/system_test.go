@@ -889,8 +889,8 @@ func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
 	require.GreaterOrEqual(t, updatedAt, 0, "a zypper update command must run, got %+v", mockExec.GetExecutedCommands())
 	// Against stale metadata a bare `update` exits 0 without upgrading, so the
 	// refresh must survive refactors.
-	assert.True(t, refreshedAt >= 0 && refreshedAt <= updatedAt,
-		"the update must be preceded by a refresh, got %+v", mockExec.GetExecutedCommands())
+	assert.GreaterOrEqual(t, refreshedAt, 0, "a zypper refresh command must run, got %+v", mockExec.GetExecutedCommands())
+	assert.LessOrEqual(t, refreshedAt, updatedAt, "the update must be preceded by a refresh, got %+v", mockExec.GetExecutedCommands())
 }
 
 // One unreachable repo anywhere on the host exits an unscoped refresh 4, so the
