@@ -175,7 +175,6 @@ func (tc *TunnelClient) RunTunnelBackground() {
 
 	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort.Load())
 
-	// Start the platform relay (daemon subprocess on Unix, no-op on Windows)
 	if err := tc.startTunnelRelay(); err != nil {
 		log.Error().Err(err).Msgf("Failed to start tunnel relay for session %s.", tc.sessionID)
 		return
@@ -350,8 +349,6 @@ func (tc *TunnelClient) logStreamPressure() {
 	}
 }
 
-// handleStream processes a single smux stream by dialing the relay target
-// and relaying data to the local service.
 func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	defer func() { _ = stream.Close() }()
 
@@ -379,7 +376,6 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 
 	targetAddr := fmt.Sprintf("127.0.0.1:%d", targetPort)
 
-	// Dial the relay target (Unix: via daemon UDS, Windows: direct TCP)
 	targetConn, err := tc.dialTunnelTarget(targetAddr)
 	if err != nil {
 		log.Debug().Err(err).Msgf("Failed to dial relay target %s.", targetAddr)
@@ -446,7 +442,6 @@ func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, targetConn net.C
 	// stream -> target
 	go func() {
 		_, err := tunnel.CopyBuffered(targetConn, dataReader)
-		// Half-close the write side to signal EOF to the target
 		closeWriteSide(targetConn)
 		errChan <- err
 	}()
@@ -457,15 +452,16 @@ func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, targetConn net.C
 		errChan <- err
 	}()
 
-	// Wait for one direction to complete, then close both connections to unblock the other goroutine
+	// Closing both ends unblocks the goroutine still copying.
 	<-errChan
 	_ = stream.Close()
 	_ = targetConn.Close()
 	<-errChan
 }
 
-// closeWriteSide half-closes the write direction to signal EOF to the peer.
-// Covers *net.UnixConn (Unix daemon path) and *net.TCPConn (Windows direct path).
+// closeWriteSide signals EOF to the peer. The assertion covers *net.UnixConn
+// (Unix daemon path) and *net.TCPConn (Windows direct path); anything else is
+// left alone.
 func closeWriteSide(conn net.Conn) {
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()

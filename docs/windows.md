@@ -400,6 +400,7 @@ implemented.
 | Realtime metrics | CPU, memory, disk, network (gopsutil) |
 | Self-update | `MoveFileEx` for locked-binary replace; reboot-time cleanup of `.old` |
 | Service lifecycle | Windows SCM integration with Stop / Shutdown / recovery actions |
+| Tunnel (cli / web client types) | In-process relay dialing `127.0.0.1:<port>` directly—no daemon subprocess; see `pkg/runner/tunnel_relay_windows.go` |
 
 ### Unsupported on Windows
 
@@ -408,7 +409,7 @@ implemented.
 | User management (`adduser` / `deluser` / `moduser`) | Intentionally not registered in `factory_windows.go`—server enforces via `NO_ADDUSER_PLATFORMS` |
 | Group management (`addgroup` / `delgroup`) | Same as above |
 | Windows Firewall integration | Not implemented; Linux `nftables` / `iptables` handler has no Windows equivalent today |
-| Tunnel (reverse-proxy) | `pkg/runner/tunnel_windows.go` returns an explicit error |
+| Tunnel (editor client type) | Rejected at `opentunnel` validation until code-server support lands (#379) |
 | Code-Server integration | Returns an explicit error on Windows |
 | Privilege demotion (run-as user) | Stub: all commands execute as `LocalSystem`. No `setuid` equivalent; full fix requires `CreateProcessAsUser` |
 | TTY resize via `SIGWINCH` | ConPTY has no Unix signal equivalent; the resize event is still forwarded over the wire, so terminals resize correctly |

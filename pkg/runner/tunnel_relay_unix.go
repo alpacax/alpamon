@@ -42,7 +42,6 @@ func (tc *TunnelClient) startTunnelRelay() error {
 	tc.daemonCmd = cmd
 
 	if err := tc.waitForDaemonReady(); err != nil {
-		// Daemon failed to start, clean up
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		_ = safeRemoveSocket(tc.daemonSocket)
@@ -53,7 +52,6 @@ func (tc *TunnelClient) startTunnelRelay() error {
 	return nil
 }
 
-// waitForDaemonReady polls the UDS socket until the daemon is accepting connections.
 func (tc *TunnelClient) waitForDaemonReady() error {
 	deadline := time.Now().Add(5 * time.Second)
 

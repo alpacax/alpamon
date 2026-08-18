@@ -97,7 +97,6 @@ func (h *TunnelHandler) validateClientTypeRequirements(clientType string, data O
 	return nil
 }
 
-// editorTunnelSupported reports whether the platform can run editor tunnels.
 // Windows is excluded until code-server support lands (#379).
 func editorTunnelSupported(goos string) bool {
 	return goos != "windows"

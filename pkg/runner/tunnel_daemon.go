@@ -71,9 +71,9 @@ func dialDirect(targetAddr string) (net.Conn, error) {
 	return conn, nil
 }
 
-// RunTunnelDaemon runs the tunnel daemon subprocess.
-// It listens on a Unix domain socket and relays connections to local TCP services.
-// This function is called by the tunnel-daemon subcommand and runs with demoted user credentials.
+// RunTunnelDaemon serves the tunnel-daemon subcommand, relaying Unix domain
+// socket connections to local TCP services. The parent demotes it to nobody on
+// Linux; on macOS it inherits the parent's credentials.
 func RunTunnelDaemon(socketPath string) {
 	// Remove stale socket file if it exists (safe against symlink attacks)
 	if err := safeRemoveSocket(socketPath); err != nil {
@@ -170,7 +170,6 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 
 	log.Debug().Msgf("Tunnel daemon connected to %s.", targetAddr)
 
-	// Bidirectional relay between UDS connection and TCP connection
 	errChan := make(chan error, 2)
 
 	// UDS -> TCP
