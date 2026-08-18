@@ -43,8 +43,15 @@ func safeRemoveSocket(path string) error {
 	return os.Remove(path)
 }
 
-// dialDirect dials a localhost target over TCP with relay tuning applied.
-// Used by the Unix daemon and as the whole relay path on Windows.
+// Shared by the Unix daemon and the Windows direct-dial path.
+const (
+	tunnelDialTimeout     = 10 * time.Second
+	tunnelKeepAlivePeriod = 30 * time.Second
+)
+
+// dialDirect dials targetAddr over TCP with relay tuning applied, rejecting
+// anything that is not localhost. Used by the Unix daemon and as the whole
+// relay path on Windows.
 func dialDirect(targetAddr string) (net.Conn, error) {
 	if !validateTargetAddr(targetAddr) {
 		return nil, fmt.Errorf("invalid target address %s: must be localhost (127.0.0.1 or localhost)", targetAddr)
