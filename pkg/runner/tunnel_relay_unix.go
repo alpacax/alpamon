@@ -64,8 +64,12 @@ func (tc *TunnelClient) waitForDaemonReady() error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
+	// DialContext, not net.Dial: a plain dial on a socket whose accept queue is
+	// full blocks, and the select below cannot run until it returns.
+	dialer := &net.Dialer{Timeout: time.Second}
+
 	for {
-		conn, err := net.Dial("unix", tc.daemonSocket)
+		conn, err := dialer.DialContext(tc.ctx, "unix", tc.daemonSocket)
 		if err == nil {
 			_ = conn.Close()
 			return nil
@@ -129,4 +133,5 @@ func (tc *TunnelClient) stopTunnelRelay() {
 
 	_ = safeRemoveSocket(tc.daemonSocket)
 	tc.daemonCmd = nil
+	tc.daemonSocket = ""
 }
