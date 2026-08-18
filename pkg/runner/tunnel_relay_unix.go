@@ -12,9 +12,19 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// startTunnelRelay starts a tunnel daemon subprocess for this session.
-// The daemon runs with demoted credentials and handles all stream relay via UDS.
+// startTunnelRelay spawns the per-session tunnel daemon (demoted to nobody on
+// Linux, current user on macOS), which relays every stream over UDS.
+// daemonMu serializes it against stopTunnelRelay: a concurrent closetunnel
+// either waits for the spawn and then kills it, or wins the lock first and
+// the closed context stops the spawn from happening at all.
 func (tc *TunnelClient) startTunnelRelay() error {
+	tc.daemonMu.Lock()
+	defer tc.daemonMu.Unlock()
+
+	if err := tc.ctx.Err(); err != nil {
+		return fmt.Errorf("tunnel session closed before relay start: %w", err)
+	}
+
 	if !IsValidSessionID(tc.sessionID) {
 		return fmt.Errorf("invalid session ID for tunnel daemon socket")
 	}
@@ -74,29 +84,34 @@ func (tc *TunnelClient) dialTunnelTarget(targetAddr string) (net.Conn, error) {
 	return conn, nil
 }
 
-// stopTunnelRelay gracefully stops the tunnel daemon subprocess.
 func (tc *TunnelClient) stopTunnelRelay() {
-	if tc.daemonCmd == nil || tc.daemonCmd.Process == nil {
+	tc.daemonMu.Lock()
+	defer tc.daemonMu.Unlock()
+
+	// Local copy so the Wait goroutine below cannot observe the nil
+	// assignment at the end of this function.
+	cmd := tc.daemonCmd
+	if cmd == nil || cmd.Process == nil {
 		return
 	}
 
 	log.Info().Msgf("Stopping tunnel daemon for session %s...", tc.sessionID)
 
-	if err := tc.daemonCmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		log.Debug().Err(err).Msg("SIGTERM failed for tunnel daemon, trying SIGKILL.")
-		_ = tc.daemonCmd.Process.Kill()
+		_ = cmd.Process.Kill()
 	}
 
 	done := make(chan error, 1)
 	go func() {
-		done <- tc.daemonCmd.Wait()
+		done <- cmd.Wait()
 	}()
 
 	select {
 	case <-done:
 		log.Info().Msg("Tunnel daemon stopped.")
 	case <-time.After(10 * time.Second):
-		_ = tc.daemonCmd.Process.Kill()
+		_ = cmd.Process.Kill()
 		log.Warn().Msg("Tunnel daemon killed after timeout.")
 	}
 

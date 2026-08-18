@@ -88,10 +88,11 @@ type TunnelClient struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	codeServerMgr *CodeServerManager // for editor type
-	daemonCmd     *exec.Cmd          // tunnel daemon subprocess
-	daemonSocket  string             // UDS path for daemon communication
-	streamSem     chan struct{}      // per-session stream concurrency limiter
-	closeOnce     sync.Once          // ensures Close is executed only once
+	daemonMu      sync.Mutex         // serializes daemon start against stop
+	daemonCmd     *exec.Cmd
+	daemonSocket  string        // UDS path, written once before any stream reads it
+	streamSem     chan struct{} // per-session stream concurrency limiter
+	closeOnce     sync.Once     // ensures Close is executed only once
 }
 
 // IsValidSessionID reports whether sessionID is safe to use in paths and map keys.
@@ -488,14 +489,14 @@ func (tc *TunnelClient) Close() {
 			tc.codeServerMgr = nil
 		}
 
-		// Stop tunnel daemon
-		if tc.daemonCmd != nil {
-			tc.stopTunnelRelay()
-		}
-
+		// Cancel before stopping the relay so a not-yet-started
+		// startTunnelRelay observes the closed context and never spawns.
 		if tc.cancel != nil {
 			tc.cancel()
 		}
+
+		// Unconditional: a no-op when no daemon is running.
+		tc.stopTunnelRelay()
 		if tc.session != nil {
 			_ = tc.session.Close()
 		}
