@@ -16,7 +16,7 @@ func TestEditorTunnelSupported(t *testing.T) {
 	assert.True(t, editorTunnelSupported("darwin"))
 }
 
-func TestValidateClientTypeRequirementsEditorOnWindows(t *testing.T) {
+func TestTunnelHandler_ValidateClientTypeRequirements(t *testing.T) {
 	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
 	data := OpenTunnelData{SessionID: "s1", URL: "wss://tunnel.example.com", ClientType: runner.ClientTypeEditor, Username: "u"}
 
@@ -33,11 +33,10 @@ func TestTunnelHandler_Validate(t *testing.T) {
 	handler := NewTunnelHandler(common.NewMockCommandExecutor(t))
 
 	tests := []struct {
-		name          string
-		cmd           string
-		args          *common.CommandArgs
-		wantErr       bool
-		wantErrOnGOOS string // non-empty: wantErr is forced true when runtime.GOOS matches
+		name    string
+		cmd     string
+		args    *common.CommandArgs
+		wantErr bool
 	}{
 		{
 			name: "opentunnel cli valid",
@@ -71,8 +70,7 @@ func TestTunnelHandler_Validate(t *testing.T) {
 				Username:   "testuser",
 				Groupname:  "testgroup",
 			},
-			wantErr:       false,
-			wantErrOnGOOS: "windows",
+			wantErr: runtime.GOOS == "windows",
 		},
 		{
 			name: "opentunnel editor valid without groupname",
@@ -83,8 +81,7 @@ func TestTunnelHandler_Validate(t *testing.T) {
 				ClientType: runner.ClientTypeEditor,
 				Username:   "testuser",
 			},
-			wantErr:       false,
-			wantErrOnGOOS: "windows",
+			wantErr: runtime.GOOS == "windows",
 		},
 		{
 			name: "opentunnel cli missing target port",
@@ -224,10 +221,9 @@ func TestTunnelHandler_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wantErr := tt.wantErr || (tt.wantErrOnGOOS != "" && runtime.GOOS == tt.wantErrOnGOOS)
 			err := handler.Validate(tt.cmd, tt.args)
-			if (err != nil) != wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, wantErr)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
