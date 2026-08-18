@@ -609,7 +609,7 @@ func TestSystemHandler_Upgrade_VersionLookupFailureSelfUpdate(t *testing.T) {
 	require.ErrorContains(t, err, "failed to retrieve the latest Alpamon version from GitHub")
 	assert.Equal(t, 1, exitCode)
 	assert.False(t, called, "self-update must not run without a target version")
-	assert.Contains(t, output, "GitHub")
+	assert.Contains(t, output, "Failed to retrieve the latest Alpamon version from GitHub.")
 }
 
 func TestSystemHandler_Update(t *testing.T) {
