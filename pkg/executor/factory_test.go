@@ -37,6 +37,14 @@ func TestPlatformHandlers(t *testing.T) {
 		assertNoHandler(t, handlers, string(common.User))
 		assertNoHandler(t, handlers, string(common.Group))
 		assertNoHandler(t, handlers, string(common.Firewall))
+	case "windows":
+		// Windows: system, tunnel (no user, group, firewall)
+		assertHandlerCount(t, handlers, 2, names)
+		assertHasHandler(t, handlers, string(common.System))
+		assertHasHandler(t, handlers, string(common.Tunnel))
+		assertNoHandler(t, handlers, string(common.User))
+		assertNoHandler(t, handlers, string(common.Group))
+		assertNoHandler(t, handlers, string(common.Firewall))
 	default:
 		t.Skipf("no handler expectations defined for %s", runtime.GOOS)
 	}
