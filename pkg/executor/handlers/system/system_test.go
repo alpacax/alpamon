@@ -385,7 +385,6 @@ func TestSystemHandler_PoolShutdown(t *testing.T) {
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
-	// Shutdown pool first
 	_ = workerPool.Shutdown(100 * time.Millisecond)
 	ctxManager.Shutdown()
 
@@ -393,11 +392,9 @@ func TestSystemHandler_PoolShutdown(t *testing.T) {
 		Target: "alpamon",
 	}
 
-	// Should handle pool submission failure gracefully
 	exitCode, output, err := handler.Execute(ctx, common.Restart.String(), args)
 
 	require.NoError(t, err)
-	// Should still return success message even if pool submission fails
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, output, "restart")
 }
@@ -631,11 +628,8 @@ func TestSystemHandler_Update(t *testing.T) {
 	// This test depends on the actual platform
 	exitCode, output, err := handler.Execute(ctx, common.Update.String(), args)
 
-	// Should not return an error
 	require.NoError(t, err)
-	// exitCode could be 0 (success) or 1 (platform not supported)
 	assert.Contains(t, []int{0, 1}, exitCode)
-	// Output should be present
 	if exitCode == 1 {
 		assert.NotEmpty(t, output, "an unsupported platform must say so")
 	}
