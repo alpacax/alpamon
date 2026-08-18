@@ -16,11 +16,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // MockGroupService implements services.GroupService for testing
