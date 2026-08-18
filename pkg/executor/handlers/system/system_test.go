@@ -9,9 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/config"
@@ -19,6 +16,8 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/updater"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/alpacax/alpamon/v2/pkg/version"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // MockWSClient is a mock implementation of WSClient for testing
