@@ -16,6 +16,8 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/updater"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/alpacax/alpamon/v2/pkg/version"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // MockWSClient is a mock implementation of WSClient for testing
@@ -166,9 +168,7 @@ func TestSystemHandler_Name(t *testing.T) {
 	defer ctxManager.Shutdown()
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
-	if handler.Name() != common.System.String() {
-		t.Errorf("expected name %q, got %q", common.System.String(), handler.Name())
-	}
+	assert.Equal(t, common.System.String(), handler.Name())
 }
 
 func TestSystemHandler_Commands(t *testing.T) {
@@ -192,16 +192,7 @@ func TestSystemHandler_Commands(t *testing.T) {
 		common.ByeBye.String(),
 	}
 
-	if len(commands) != len(expected) {
-		t.Errorf("expected %d commands, got %d", len(expected), len(commands))
-		return
-	}
-
-	for i, cmd := range commands {
-		if cmd != expected[i] {
-			t.Errorf("command %d: expected %q, got %q", i, expected[i], cmd)
-		}
-	}
+	assert.Equal(t, expected, commands)
 }
 
 func TestSystemHandler_Restart_Collector(t *testing.T) {
@@ -221,18 +212,10 @@ func TestSystemHandler_Restart_Collector(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Restart.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !mockWS.RestartCollectorCalled {
-		t.Error("expected RestartCollector to be called")
-	}
-	if !strings.Contains(output, "restarted") {
-		t.Errorf("expected output to contain 'restarted', got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.True(t, mockWS.RestartCollectorCalled)
+	assert.Contains(t, output, "restarted")
 }
 
 func TestSystemHandler_Restart_Default(t *testing.T) {
@@ -252,15 +235,9 @@ func TestSystemHandler_Restart_Default(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Restart.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "restart") {
-		t.Errorf("expected output to mention restart, got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "restart")
 	// Give time for the pool task to execute
 	time.Sleep(100 * time.Millisecond)
 }
@@ -282,15 +259,9 @@ func TestSystemHandler_Restart_Alpamon(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Restart.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "restart") {
-		t.Errorf("expected output to mention restart, got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "restart")
 }
 
 func TestSystemHandler_Quit(t *testing.T) {
@@ -308,15 +279,9 @@ func TestSystemHandler_Quit(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Quit.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "shutdown") {
-		t.Errorf("expected output to mention shutdown, got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "shutdown")
 }
 
 func TestSystemHandler_Reboot(t *testing.T) {
@@ -334,15 +299,9 @@ func TestSystemHandler_Reboot(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Reboot.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "reboot") {
-		t.Errorf("expected output to mention reboot, got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "reboot")
 }
 
 func TestSystemHandler_Shutdown(t *testing.T) {
@@ -360,15 +319,9 @@ func TestSystemHandler_Shutdown(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Shutdown.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "shutdown") {
-		t.Errorf("expected output to mention shutdown, got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "shutdown")
 }
 
 func TestSystemHandler_UnknownCommand(t *testing.T) {
@@ -386,15 +339,8 @@ func TestSystemHandler_UnknownCommand(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, "unknown_command", args)
 
-	if err == nil {
-		t.Error("expected error for unknown command")
-	}
-	if exitCode != 1 {
-		t.Errorf("expected exit code 1, got %d", exitCode)
-	}
-	if !strings.Contains(err.Error(), "unknown system command") {
-		t.Errorf("error should mention 'unknown system command', got: %v", err)
-	}
+	assert.Equal(t, 1, exitCode)
+	assert.ErrorContains(t, err, "unknown system command")
 }
 
 func TestSystemHandler_Validate(t *testing.T) {
@@ -424,9 +370,7 @@ func TestSystemHandler_Validate(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := handler.Validate(tc.cmd, tc.args)
-			if err != nil {
-				t.Errorf("unexpected validation error: %v", err)
-			}
+			assert.NoError(t, err)
 		})
 	}
 }
@@ -440,7 +384,6 @@ func TestSystemHandler_PoolShutdown(t *testing.T) {
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 	ctx := context.Background()
 
-	// Shutdown pool first
 	_ = workerPool.Shutdown(100 * time.Millisecond)
 	ctxManager.Shutdown()
 
@@ -448,19 +391,11 @@ func TestSystemHandler_PoolShutdown(t *testing.T) {
 		Target: "alpamon",
 	}
 
-	// Should handle pool submission failure gracefully
 	exitCode, output, err := handler.Execute(ctx, common.Restart.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// Should still return success message even if pool submission fails
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "restart") {
-		t.Errorf("expected output to mention restart, got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "restart")
 }
 
 func TestSystemHandler_Upgrade_UpToDate(t *testing.T) {
@@ -482,15 +417,9 @@ func TestSystemHandler_Upgrade_UpToDate(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Upgrade.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "up-to-date") {
-		t.Errorf("expected output to contain 'up-to-date', got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "up-to-date")
 }
 
 // findExecutedShell returns the last executed "sh" command from the mock, or
@@ -533,37 +462,24 @@ func TestSystemHandler_Upgrade_PackageProxy(t *testing.T) {
 	args := &common.CommandArgs{PackageProxy: proxy}
 
 	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), args)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if mockVersions.GotProxy != proxy {
-		t.Errorf("expected version lookup to use proxy %q, got %q", proxy, mockVersions.GotProxy)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Equal(t, proxy, mockVersions.GotProxy, "the version lookup must use the proxy")
 
 	shell := findExecutedShell(mockExec)
-	if shell == nil {
-		t.Fatal("expected a package-manager shell to be spawned")
-	}
-	if shell.User != "root" {
-		t.Errorf("expected shell to run as root, got %q", shell.User)
-	}
-	if len(shell.Args) != 2 || shell.Args[0] != "-c" || !strings.Contains(shell.Args[1], "apt-get") {
-		t.Errorf("expected sh -c apt-get command, got %v", shell.Args)
+	require.NotNil(t, shell, "a package-manager shell must be spawned")
+	assert.Equal(t, "root", shell.User)
+	if assert.Len(t, shell.Args, 2) {
+		assert.Equal(t, "-c", shell.Args[0])
+		assert.Contains(t, shell.Args[1], "apt-get")
 	}
 	for _, key := range []string{"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"} {
-		if got := shell.Env[key]; got != proxy {
-			t.Errorf("expected env %s=%q, got %q", key, proxy, got)
-		}
+		assert.Equal(t, proxy, shell.Env[key], "env %s", key)
 	}
 	for _, key := range []string{"no_proxy", "NO_PROXY"} {
 		noProxy := shell.Env[key]
 		for _, excluded := range []string{"localhost", "127.0.0.1", "169.254.169.254", "fd00:ec2::254", "metadata.google.internal", "console.example.com"} {
-			if !strings.Contains(noProxy, excluded) {
-				t.Errorf("expected env %s to exclude %q, got %q", key, excluded, noProxy)
-			}
+			assert.Contains(t, noProxy, excluded, "env %s must exclude it", key)
 		}
 	}
 }
@@ -588,23 +504,13 @@ func TestSystemHandler_Upgrade_NoPackageProxy(t *testing.T) {
 	setPackageManagerAndID(t, utils.PkgApt, "")
 
 	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if mockVersions.GotProxy != "" {
-		t.Errorf("expected version lookup without proxy, got %q", mockVersions.GotProxy)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Empty(t, mockVersions.GotProxy, "the version lookup must go direct")
 
 	shell := findExecutedShell(mockExec)
-	if shell == nil {
-		t.Fatal("expected a package-manager shell to be spawned")
-	}
-	if len(shell.Env) != 0 {
-		t.Errorf("expected no env override without package_proxy, got %v", shell.Env)
-	}
+	require.NotNil(t, shell, "a package-manager shell must be spawned")
+	assert.Empty(t, shell.Env, "no env override without package_proxy")
 }
 
 // TestSystemHandler_Upgrade_InvalidPackageProxy verifies that an invalid
@@ -633,23 +539,13 @@ func TestSystemHandler_Upgrade_InvalidPackageProxy(t *testing.T) {
 			setPackageManagerAndID(t, utils.PkgApt, "")
 
 			exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{PackageProxy: proxy})
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if exitCode != 0 {
-				t.Errorf("expected exit code 0, got %d", exitCode)
-			}
-			if mockVersions.GotProxy != "" {
-				t.Errorf("expected version lookup without proxy, got %q", mockVersions.GotProxy)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, 0, exitCode)
+			assert.Empty(t, mockVersions.GotProxy, "the version lookup must go direct")
 
 			shell := findExecutedShell(mockExec)
-			if shell == nil {
-				t.Fatal("expected a package-manager shell to be spawned")
-			}
-			if len(shell.Env) != 0 {
-				t.Errorf("expected no env override for invalid proxy %q, got %v", proxy, shell.Env)
-			}
+			require.NotNil(t, shell, "a package-manager shell must be spawned")
+			assert.Empty(t, shell.Env, "no env override for invalid proxy %q", proxy)
 		})
 	}
 }
@@ -674,19 +570,13 @@ func TestSystemHandler_Upgrade_VersionLookupFailureProceeds(t *testing.T) {
 	setPackageManagerAndID(t, utils.PkgApt, "")
 
 	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-	if err != nil {
-		t.Fatalf("expected version lookup failure to be non-fatal, got: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
+	require.NoError(t, err, "a version lookup failure must be non-fatal")
+	assert.Equal(t, 0, exitCode)
 
 	shell := findExecutedShell(mockExec)
-	if shell == nil {
-		t.Fatal("expected the package-manager upgrade to proceed despite the lookup failure")
-	}
-	if len(shell.Args) != 2 || !strings.Contains(shell.Args[1], "alpamon") {
-		t.Errorf("expected unpinned alpamon upgrade command, got %v", shell.Args)
+	require.NotNil(t, shell, "the upgrade must proceed despite the lookup failure")
+	if assert.Len(t, shell.Args, 2) {
+		assert.Contains(t, shell.Args[1], "alpamon")
 	}
 }
 
@@ -715,18 +605,10 @@ func TestSystemHandler_Upgrade_VersionLookupFailureSelfUpdate(t *testing.T) {
 	setPackageManagerAndID(t, utils.PkgBrew, "")
 
 	exitCode, output, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-	if err == nil {
-		t.Fatal("expected error when version lookup fails on darwin")
-	}
-	if exitCode != 1 {
-		t.Errorf("expected exit code 1, got %d", exitCode)
-	}
-	if called {
-		t.Error("self-update must not run without a target version")
-	}
-	if !strings.Contains(output, "GitHub") {
-		t.Errorf("expected lookup failure message, got %q", output)
-	}
+	require.ErrorContains(t, err, "failed to retrieve the latest Alpamon version from GitHub")
+	assert.Equal(t, 1, exitCode)
+	assert.False(t, called, "self-update must not run without a target version")
+	assert.Contains(t, output, "Failed to retrieve the latest Alpamon version from GitHub.")
 }
 
 func TestSystemHandler_Update(t *testing.T) {
@@ -745,17 +627,10 @@ func TestSystemHandler_Update(t *testing.T) {
 	// This test depends on the actual platform
 	exitCode, output, err := handler.Execute(ctx, common.Update.String(), args)
 
-	// Should not return an error
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// exitCode could be 0 (success) or 1 (platform not supported)
-	if exitCode != 0 && exitCode != 1 {
-		t.Errorf("expected exit code 0 or 1, got %d", exitCode)
-	}
-	// Output should be present
-	if output == "" && exitCode == 1 {
-		t.Errorf("expected some output for unsupported platform")
+	require.NoError(t, err)
+	assert.Contains(t, []int{0, 1}, exitCode)
+	if exitCode == 1 {
+		assert.NotEmpty(t, output, "an unsupported platform must say so")
 	}
 }
 
@@ -781,21 +656,16 @@ func TestSystemHandler_Uninstall(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.ByeBye.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "uninstall") {
-		t.Errorf("expected output to mention uninstall, got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "uninstall")
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("uninstall goroutine did not finish")
 	}
+	assert.True(t, mockWS.ShutDownCalled, "the agent must shut itself down once the uninstall is scheduled")
 }
 
 // TestSystemHandler_UnregisterFromConsole_CallsDelete verifies that byebye
@@ -816,12 +686,8 @@ func TestSystemHandler_UnregisterFromConsole_CallsDelete(t *testing.T) {
 
 	handler.unregisterFromConsole()
 
-	if mockSession.deleteCallCount() != 1 {
-		t.Fatalf("expected 1 Delete call, got %d", mockSession.deleteCallCount())
-	}
-	if got := mockSession.lastDeleteURL(); got != unregisterURL {
-		t.Errorf("expected DELETE to %q, got %q", unregisterURL, got)
-	}
+	require.Equal(t, 1, mockSession.deleteCallCount())
+	assert.Equal(t, unregisterURL, mockSession.lastDeleteURL())
 }
 
 // TestSystemHandler_UnregisterFromConsole_NilSession ensures the helper is a
@@ -859,9 +725,7 @@ func TestSystemHandler_UnregisterFromConsole_NonSuccessStatus(t *testing.T) {
 
 	handler.unregisterFromConsole()
 
-	if mockSession.deleteCallCount() != 1 {
-		t.Fatalf("expected 1 Delete call, got %d", mockSession.deleteCallCount())
-	}
+	require.Equal(t, 1, mockSession.deleteCallCount())
 }
 
 // TestSystemHandler_UnregisterFromConsole_DeleteError pins the best-effort
@@ -881,9 +745,7 @@ func TestSystemHandler_UnregisterFromConsole_DeleteError(t *testing.T) {
 
 	handler.unregisterFromConsole()
 
-	if mockSession.deleteCallCount() != 1 {
-		t.Fatalf("expected 1 Delete call, got %d", mockSession.deleteCallCount())
-	}
+	require.Equal(t, 1, mockSession.deleteCallCount())
 }
 
 // Both axes are set explicitly. PkgNone is a non-empty sentinel, so a
@@ -925,21 +787,11 @@ func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 
 			exitCode, output, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
 
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !called {
-				t.Errorf("expected selfUpdateFn to be called on %s", tc.platformLike)
-			}
-			if gotVersion != "v9.9.9" {
-				t.Errorf("expected self-update version v9.9.9, got %q", gotVersion)
-			}
-			if exitCode != 0 {
-				t.Errorf("expected exit code 0, got %d", exitCode)
-			}
-			if strings.Contains(output, "not supported") {
-				t.Errorf("%s should route to self-update, got %q", tc.platformLike, output)
-			}
+			require.NoError(t, err)
+			assert.True(t, called, "selfUpdateFn must be called on %s", tc.platformLike)
+			assert.Equal(t, "v9.9.9", gotVersion)
+			assert.Equal(t, 0, exitCode)
+			assert.NotContains(t, output, "not supported", "%s must route to self-update", tc.platformLike)
 		})
 	}
 }
@@ -960,18 +812,10 @@ func TestSystemHandler_SelfUpdate_AlreadyInProgress(t *testing.T) {
 
 	exitCode, output, err := handler.selfUpdate(context.Background(), "v9.9.9")
 
-	if err != nil {
-		t.Fatalf("in-progress should not surface as an error, got: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "already in progress") {
-		t.Errorf("expected in-progress message, got %q", output)
-	}
-	if mockWS.RestartCalled {
-		t.Error("in-progress path must not schedule a restart")
-	}
+	require.NoError(t, err, "in-progress must not surface as an error")
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "already in progress")
+	assert.False(t, mockWS.RestartCalled, "the in-progress path must not schedule a restart")
 }
 
 // TestSystemHandler_SelfUpdate_RestartScheduleFails: a successful update whose restart
@@ -984,9 +828,7 @@ func TestSystemHandler_SelfUpdate_RestartScheduleFails(t *testing.T) {
 	workerPool := pool.NewPool(2, 10)
 	defer ctxManager.Shutdown()
 	// Shut the pool down up front so scheduleDelayedAction's Submit fails.
-	if err := workerPool.Shutdown(1 * time.Second); err != nil {
-		t.Fatalf("failed to shut down pool: %v", err)
-	}
+	require.NoError(t, workerPool.Shutdown(1*time.Second))
 
 	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, &MockVersionResolver{}, nil)
 	handler.selfUpdateFn = func(_ context.Context, _ string, _ updater.Options) error {
@@ -995,18 +837,10 @@ func TestSystemHandler_SelfUpdate_RestartScheduleFails(t *testing.T) {
 
 	exitCode, output, err := handler.selfUpdate(context.Background(), "v9.9.9")
 
-	if err == nil {
-		t.Fatal("expected error when restart scheduling fails")
-	}
-	if exitCode != 1 {
-		t.Errorf("expected exit code 1, got %d", exitCode)
-	}
-	if !strings.Contains(output, "manually") {
-		t.Errorf("expected manual-restart hint, got %q", output)
-	}
-	if mockWS.RestartCalled {
-		t.Error("restart must not fire when scheduling failed")
-	}
+	require.Error(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Contains(t, output, "manually")
+	assert.False(t, mockWS.RestartCalled, "restart must not fire when scheduling failed")
 }
 
 func setPackageManagerAndID(t *testing.T, pkgManager, platformID string) {
@@ -1037,12 +871,8 @@ func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
 	setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
 
 	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Fatalf("expected exit code 0, got %d", exitCode)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode)
 
 	refreshedAt, updatedAt := -1, -1
 	for i, c := range mockExec.GetExecutedCommands() {
@@ -1053,18 +883,14 @@ func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
 		if strings.Contains(joined, "zypper --non-interactive update alpamon") {
 			updatedAt = i
 		}
-		if strings.Contains(joined, "yum ") || strings.Contains(joined, "apt-get ") {
-			t.Errorf("zypper host must not run yum/apt: %q", joined)
-		}
+		assert.NotContains(t, joined, "yum ", "a zypper host must not run yum")
+		assert.NotContains(t, joined, "apt-get ", "a zypper host must not run apt")
 	}
-	if updatedAt < 0 {
-		t.Fatalf("expected a zypper update command, got %+v", mockExec.GetExecutedCommands())
-	}
+	require.GreaterOrEqual(t, updatedAt, 0, "a zypper update command must run, got %+v", mockExec.GetExecutedCommands())
 	// Against stale metadata a bare `update` exits 0 without upgrading, so the
 	// refresh must survive refactors.
-	if refreshedAt < 0 || refreshedAt > updatedAt {
-		t.Errorf("update must be preceded by a refresh, got %+v", mockExec.GetExecutedCommands())
-	}
+	assert.GreaterOrEqual(t, refreshedAt, 0, "a zypper refresh command must run, got %+v", mockExec.GetExecutedCommands())
+	assert.LessOrEqual(t, refreshedAt, updatedAt, "the update must be preceded by a refresh, got %+v", mockExec.GetExecutedCommands())
 }
 
 // One unreachable repo anywhere on the host exits an unscoped refresh 4, so the
@@ -1117,9 +943,8 @@ func TestSystemHandler_Upgrade_ScopesZypperToAlpamonRepo(t *testing.T) {
 			setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
 			mockExec.SetResult("zypper --non-interactive lr --export -", 0, tt.repoExport, nil)
 
-			if _, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{}); err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			_, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+			require.NoError(t, err)
 
 			var refreshed, updated bool
 			for _, c := range mockExec.GetExecutedCommands() {
@@ -1132,12 +957,8 @@ func TestSystemHandler_Upgrade_ScopesZypperToAlpamonRepo(t *testing.T) {
 					updated = true
 				}
 			}
-			if !refreshed {
-				t.Errorf("expected %q, got %+v", tt.wantRefresh, mockExec.GetExecutedCommands())
-			}
-			if !updated {
-				t.Errorf("expected an unscoped update, got %+v", mockExec.GetExecutedCommands())
-			}
+			assert.True(t, refreshed, "expected %q, got %+v", tt.wantRefresh, mockExec.GetExecutedCommands())
+			assert.True(t, updated, "expected an unscoped update, got %+v", mockExec.GetExecutedCommands())
 		})
 	}
 }
@@ -1158,13 +979,9 @@ func TestSystemHandler_Upgrade_ZypperRefreshFailureStopsTheUpgrade(t *testing.T)
 	mockExec.SetResult("zypper --non-interactive refresh", 4, "repo error", errors.New("exit status 4"))
 
 	exitCode, _, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-	if exitCode != 4 {
-		t.Errorf("expected the refresh exit code 4, got %d", exitCode)
-	}
+	assert.Equal(t, 4, exitCode, "the refresh exit code must survive")
 	for _, c := range mockExec.GetExecutedCommands() {
-		if strings.Contains(strings.Join(c.Args, " "), "update") {
-			t.Errorf("update must not run after a failed refresh: %+v", c)
-		}
+		assert.NotContains(t, strings.Join(c.Args, " "), "update", "the update must not run after a failed refresh")
 	}
 }
 
@@ -1205,9 +1022,7 @@ func TestSystemHandler_Upgrade_ZypperSkippedRepoDependsOnScope(t *testing.T) {
 			mockExec.SetResult("sh -c zypper --non-interactive update alpamon", 106, "", errors.New("exit status 106"))
 
 			exitCode, _, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-			if exitCode != tt.want {
-				t.Errorf("expected %d, got %d", tt.want, exitCode)
-			}
+			assert.Equal(t, tt.want, exitCode)
 		})
 	}
 }
@@ -1249,14 +1064,11 @@ func TestSystemHandler_SystemUpdate_ZypperInformationalExitCodes(t *testing.T) {
 			mockExec.SetResult("sh -c "+tt.cmd, tt.exitCode, "", errors.New("exit status"))
 
 			exitCode, _, err := handler.Execute(context.Background(), common.Update.String(), &common.CommandArgs{})
-			if exitCode != tt.want {
-				t.Errorf("exit %d: expected %d, got %d", tt.exitCode, tt.want, exitCode)
-			}
-			if tt.want == 0 && err != nil {
-				t.Errorf("a normalized exit must drop the error, got %v", err)
-			}
-			if tt.want != 0 && err == nil {
-				t.Error("a real failure must keep its error")
+			assert.Equal(t, tt.want, exitCode, "zypper exit %d", tt.exitCode)
+			if tt.want == 0 {
+				assert.NoError(t, err, "a normalized exit must drop the error")
+			} else {
+				assert.Error(t, err, "a real failure must keep its error")
 			}
 		})
 	}
@@ -1282,15 +1094,9 @@ func TestSystemHandler_Upgrade_ZypperRebootNeededIsSuccess(t *testing.T) {
 	)
 
 	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0 for reboot-needed, got %d", exitCode)
-	}
-	if err != nil {
-		t.Errorf("a normalized exit must drop the error, got %v", err)
-	}
-	if !mockVersions.InvalidatePamCalled {
-		t.Error("pam cache must be invalidated when the upgrade succeeded")
-	}
+	assert.Equal(t, 0, exitCode, "reboot-needed must normalize to success")
+	assert.NoError(t, err, "a normalized exit must drop the error")
+	assert.True(t, mockVersions.InvalidatePamCalled, "the pam cache must be invalidated when the upgrade succeeded")
 }
 
 // Leap/SLES must NOT use dup: it would jump to the next service pack.
@@ -1318,23 +1124,18 @@ func TestSystemHandler_SystemUpdate_ZypperDupOnlyOnTumbleweed(t *testing.T) {
 			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, &MockVersionResolver{}, nil)
 			setPackageManagerAndID(t, utils.PkgZypper, tt.platformID)
 
-			if _, _, err := handler.Execute(context.Background(), common.Update.String(), &common.CommandArgs{}); err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			_, _, err := handler.Execute(context.Background(), common.Update.String(), &common.CommandArgs{})
+			require.NoError(t, err)
 
 			var found bool
 			for _, c := range mockExec.GetExecutedCommands() {
 				joined := strings.Join(c.Args, " ")
-				if strings.Contains(joined, tt.rejectCmd) {
-					t.Fatalf("%s must not run %q", tt.name, tt.rejectCmd)
-				}
+				require.NotContains(t, joined, tt.rejectCmd, "%s must not run it", tt.name)
 				if strings.Contains(joined, tt.wantCmd) {
 					found = true
 				}
 			}
-			if !found {
-				t.Errorf("expected %q, got %+v", tt.wantCmd, mockExec.GetExecutedCommands())
-			}
+			assert.True(t, found, "expected %q, got %+v", tt.wantCmd, mockExec.GetExecutedCommands())
 		})
 	}
 }
@@ -1361,13 +1162,10 @@ func TestSystemHandler_Uninstall_UsesZypper(t *testing.T) {
 		if strings.Contains(joined, "zypper --non-interactive remove alpamon") {
 			found = true
 		}
-		if strings.Contains(joined, "yum remove") || strings.Contains(joined, "apt-get purge") {
-			t.Errorf("zypper host must not run yum/apt: %q", joined)
-		}
+		assert.NotContains(t, joined, "yum remove", "a zypper host must not run yum")
+		assert.NotContains(t, joined, "apt-get purge", "a zypper host must not run apt")
 	}
-	if !found {
-		t.Errorf("expected a zypper remove command, got %+v", mockExec.GetExecutedCommands())
-	}
+	assert.True(t, found, "expected a zypper remove command, got %+v", mockExec.GetExecutedCommands())
 }
 
 func TestRetryWhileZypperLocked(t *testing.T) {
@@ -1401,12 +1199,8 @@ func TestRetryWhileZypperLocked(t *testing.T) {
 				return 0, "", nil
 			})
 
-			if calls != tt.wantCalls {
-				t.Errorf("expected %d attempts, got %d", tt.wantCalls, calls)
-			}
-			if exitCode != tt.wantExit {
-				t.Errorf("expected exit %d, got %d", tt.wantExit, exitCode)
-			}
+			assert.Equal(t, tt.wantCalls, calls)
+			assert.Equal(t, tt.wantExit, exitCode)
 		})
 	}
 }
@@ -1440,12 +1234,8 @@ func TestSystemHandler_ZypperLockIsRetried(t *testing.T) {
 			setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
 
 			exitCode, _, _ := handler.Execute(context.Background(), tt.command, &common.CommandArgs{})
-			if exitCode != 0 {
-				t.Errorf("expected the retry to recover, got exit %d", exitCode)
-			}
-			if mockExec.calls < 2 {
-				t.Errorf("expected a retry, got %d lockable calls", mockExec.calls)
-			}
+			assert.Equal(t, 0, exitCode, "the retry must recover")
+			assert.GreaterOrEqual(t, mockExec.calls, 2, "the lock must be retried")
 		})
 	}
 }
@@ -1482,14 +1272,10 @@ func TestSystemHandler_Upgrade_ZypperNoOpIsReported(t *testing.T) {
 			exitCode, output, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
 			// A repo that has not published the build yet is routine, so the
 			// command stays successful either way.
-			if exitCode != 0 {
-				t.Fatalf("expected exit 0, got %d (%q)", exitCode, output)
-			}
-			if gotNote := strings.Contains(output, "did not move"); gotNote != tt.wantNote {
-				t.Errorf("note present = %v, want %v: %q", gotNote, tt.wantNote, output)
-			}
-			if tt.wantNote && !strings.Contains(output, "2.4.0-1") {
-				t.Errorf("note must name the version still installed, got %q", output)
+			require.Equal(t, 0, exitCode, "output: %q", output)
+			assert.Equal(t, tt.wantNote, strings.Contains(output, "did not move"), "output: %q", output)
+			if tt.wantNote {
+				assert.Contains(t, output, "2.4.0-1", "the note must name the version still installed")
 			}
 		})
 	}
@@ -1510,12 +1296,8 @@ func TestSystemHandler_Upgrade_NoVersionProbeOnApt(t *testing.T) {
 	setPackageManagerAndID(t, utils.PkgApt, "ubuntu")
 
 	exitCode, _, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-	if exitCode != 0 {
-		t.Errorf("expected exit 0, got %d", exitCode)
-	}
-	if mockExec.Invoked("rpm") {
-		t.Error("apt host must not run rpm")
-	}
+	assert.Equal(t, 0, exitCode)
+	assert.False(t, mockExec.Invoked("rpm"), "an apt host must not run rpm")
 }
 
 // SLES 12, which the SUSE prefixes accept, ships systemd 228 and so rejects
@@ -1555,9 +1337,8 @@ func TestSystemHandler_Uninstall_RetriesWithoutCollect(t *testing.T) {
 				mockExec.SetResult("systemd-run "+schedule, 1, "failed", errors.New("exit status 1"))
 			}
 
-			if _, _, err := handler.Execute(context.Background(), common.ByeBye.String(), &common.CommandArgs{}); err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			_, _, err := handler.Execute(context.Background(), common.ByeBye.String(), &common.CommandArgs{})
+			require.NoError(t, err)
 			<-handler.uninstallDone
 
 			var retried, syncRemoval bool
@@ -1571,12 +1352,8 @@ func TestSystemHandler_Uninstall_RetriesWithoutCollect(t *testing.T) {
 					syncRemoval = true
 				}
 			}
-			if !retried {
-				t.Errorf("expected a retry without --collect, got %+v", mockExec.GetExecutedCommands())
-			}
-			if syncRemoval != tt.wantSyncRemoval {
-				t.Errorf("synchronous removal = %v, want %v", syncRemoval, tt.wantSyncRemoval)
-			}
+			assert.True(t, retried, "expected a retry without --collect, got %+v", mockExec.GetExecutedCommands())
+			assert.Equal(t, tt.wantSyncRemoval, syncRemoval, "synchronous removal")
 		})
 	}
 }
@@ -1606,17 +1383,12 @@ func TestWithZypperHint(t *testing.T) {
 
 			got := withZypperHint(tt.exitCode, "zypper said something")
 			if tt.wantHint == "" {
-				if got != "zypper said something" {
-					t.Errorf("expected the output untouched, got %q", got)
-				}
+				assert.Equal(t, "zypper said something", got, "the output must be left untouched")
 				return
 			}
-			if !strings.Contains(got, tt.wantHint) {
-				t.Errorf("expected a hint mentioning %q, got %q", tt.wantHint, got)
-			}
-			if !strings.HasPrefix(got, "zypper said something") {
-				t.Errorf("the hint must follow zypper's own output, got %q", got)
-			}
+			assert.Contains(t, got, tt.wantHint, "the hint must be present")
+			assert.True(t, strings.HasPrefix(got, "zypper said something"),
+				"the hint must follow zypper's own output, got %q", got)
 		})
 	}
 }
@@ -1637,10 +1409,6 @@ func TestSystemHandler_Upgrade_ZypperRefreshFailureCarriesTheHint(t *testing.T) 
 	mockExec.SetResult("zypper --non-interactive refresh", 6, "No repositories defined.", errors.New("exit status 6"))
 
 	exitCode, output, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-	if exitCode != 6 {
-		t.Fatalf("expected exit 6, got %d", exitCode)
-	}
-	if !strings.Contains(output, "SUSEConnect --status") {
-		t.Errorf("expected the subscription hint, got %q", output)
-	}
+	require.Equal(t, 6, exitCode)
+	assert.Contains(t, output, "SUSEConnect --status")
 }
