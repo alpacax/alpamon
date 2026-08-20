@@ -67,6 +67,9 @@ func TestUserHandler_Execute(t *testing.T) {
 		groupService *MockGroupService
 		wantCode     int
 		wantErrMsg   string
+		// wantOutputPart pins the diagnostic a failing row hands the
+		// operator, for the paths that report through output, not err.
+		wantOutputPart string
 	}{
 		{
 			name: "adduser success debian",
@@ -131,8 +134,9 @@ func TestUserHandler_Execute(t *testing.T) {
 				UID: 1001,
 				GID: 1001,
 			},
-			groupService: &MockGroupService{},
-			wantCode:     1,
+			groupService:   &MockGroupService{},
+			wantCode:       1,
+			wantOutputPart: "Username",
 		},
 		{
 			name: "adduser failure",
@@ -180,6 +184,9 @@ func TestUserHandler_Execute(t *testing.T) {
 				assert.NoError(t, err)
 			}
 			assert.Equal(t, tt.wantCode, exitCode)
+			if tt.wantOutputPart != "" {
+				assert.Contains(t, output, tt.wantOutputPart)
+			}
 			if exitCode == 0 && tt.wantErrMsg == "" {
 				assert.NotEmpty(t, output, "a successful command must carry output")
 			}
