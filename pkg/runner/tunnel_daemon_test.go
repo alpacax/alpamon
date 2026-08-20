@@ -15,11 +15,10 @@ func TestValidateTargetAddr(t *testing.T) {
 		targetAddr string
 		want       bool
 	}{
-		{name: "allow localhost ip", targetAddr: "127.0.0.1:8080", want: true},
-		{name: "allow localhost hostname", targetAddr: "localhost:3000", want: true},
-		{name: "allow localhost hostname any case", targetAddr: "LocalHost:3000", want: true},
+		{name: "allow loopback ip", targetAddr: "127.0.0.1:8080", want: true},
 		{name: "allow ipv6 loopback", targetAddr: "[::1]:8080", want: true},
 		{name: "allow loopback range", targetAddr: "127.0.0.53:53", want: true},
+		{name: "reject localhost name", targetAddr: "localhost:3000", want: false},
 		{name: "reject missing port", targetAddr: "127.0.0.1", want: false},
 		{name: "reject host merely starting with loopback", targetAddr: "127.0.0.1.evil.example:80", want: false},
 		{name: "reject all interfaces", targetAddr: "0.0.0.0:80", want: false},
@@ -53,8 +52,8 @@ func acceptOne(t *testing.T, ln net.Listener) <-chan net.Conn {
 }
 
 func TestDialDirect(t *testing.T) {
-	t.Run("rejects non-loopback without dialing", func(t *testing.T) {
-		for _, addr := range []string{"10.0.0.1:80", "example.com:80", "127.0.0.1"} {
+	t.Run("rejects invalid targets without dialing", func(t *testing.T) {
+		for _, addr := range []string{"10.0.0.1:80", "example.com:80", "localhost:80", "127.0.0.1"} {
 			conn, err := dialDirect(addr)
 			require.Error(t, err, addr)
 			assert.Nil(t, conn, addr)

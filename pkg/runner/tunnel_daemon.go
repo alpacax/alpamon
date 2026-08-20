@@ -17,17 +17,16 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// validateTargetAddr ensures the target address is a loopback endpoint, so the
-// tunnel cannot be used to reach arbitrary hosts. It parses rather than matching
-// prefixes: this is the only boundary on the Windows path, where the relay dials
-// from the agent process itself.
+// validateTargetAddr ensures the target address is a literal loopback endpoint,
+// so the tunnel cannot be used to reach arbitrary hosts. This is the only
+// boundary on the Windows path, where the relay dials from the agent process
+// itself, so it parses the host rather than matching a prefix and rejects names
+// outright: a name would hand the decision to whatever the resolver says.
+// Every caller formats the address from a port, so no name is ever passed.
 func validateTargetAddr(targetAddr string) bool {
 	host, _, err := net.SplitHostPort(targetAddr)
 	if err != nil {
 		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
 	}
 	addr, err := netip.ParseAddr(host)
 	return err == nil && addr.IsLoopback()
@@ -61,11 +60,11 @@ const (
 )
 
 // dialDirect dials targetAddr over TCP with relay tuning applied, rejecting
-// anything that is not localhost. Used by the Unix daemon and as the whole
-// relay path on Windows.
+// anything that is not a loopback address. Used by the Unix daemon and as the
+// whole relay path on Windows.
 func dialDirect(targetAddr string) (net.Conn, error) {
 	if !validateTargetAddr(targetAddr) {
-		return nil, fmt.Errorf("invalid target address %s: must be a loopback address or localhost", targetAddr)
+		return nil, fmt.Errorf("invalid target address %s: must be a loopback address", targetAddr)
 	}
 
 	conn, err := net.DialTimeout("tcp", targetAddr, tunnelDialTimeout)
@@ -169,7 +168,7 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 	// Redundant with dialDirect, kept so a rejected target is visible at error
 	// level rather than only in dialDirect's debug log.
 	if !validateTargetAddr(targetAddr) {
-		log.Error().Str("targetAddr", targetAddr).Msg("Invalid target address: must be a loopback address or localhost.")
+		log.Error().Str("targetAddr", targetAddr).Msg("Invalid target address: must be a loopback address.")
 		return
 	}
 
