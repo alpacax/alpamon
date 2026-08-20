@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,10 +17,20 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// validateTargetAddr ensures the target address is localhost only for security.
-// This prevents the tunnel from being used to connect to arbitrary external hosts.
+// validateTargetAddr ensures the target address is a loopback endpoint, so the
+// tunnel cannot be used to reach arbitrary hosts. It parses rather than matching
+// prefixes: this is the only boundary on the Windows path, where the relay dials
+// from the agent process itself.
 func validateTargetAddr(targetAddr string) bool {
-	return strings.HasPrefix(targetAddr, "127.0.0.1:") || strings.HasPrefix(targetAddr, "localhost:")
+	host, _, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
 
 // safeRemoveSocket removes a Unix domain socket file after verifying it is not a symlink.
@@ -54,7 +65,7 @@ const (
 // relay path on Windows.
 func dialDirect(targetAddr string) (net.Conn, error) {
 	if !validateTargetAddr(targetAddr) {
-		return nil, fmt.Errorf("invalid target address %s: must be localhost (127.0.0.1 or localhost)", targetAddr)
+		return nil, fmt.Errorf("invalid target address %s: must be a loopback address or localhost", targetAddr)
 	}
 
 	conn, err := net.DialTimeout("tcp", targetAddr, tunnelDialTimeout)
@@ -155,9 +166,10 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 
 	targetAddr := strings.TrimSpace(line)
 
-	// Security: Only allow connections to localhost
+	// Redundant with dialDirect, kept so a rejected target is visible at error
+	// level rather than only in dialDirect's debug log.
 	if !validateTargetAddr(targetAddr) {
-		log.Error().Str("targetAddr", targetAddr).Msg("Invalid target address: must be localhost (127.0.0.1 or localhost).")
+		log.Error().Str("targetAddr", targetAddr).Msg("Invalid target address: must be a loopback address or localhost.")
 		return
 	}
 
