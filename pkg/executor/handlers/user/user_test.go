@@ -559,7 +559,6 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 		name         string
 		setupMock    func(*common.MockCommandExecutor)
 		groupService *MockGroupService
-		wantCode     int
 		wantOutput   string
 	}{
 		{
@@ -568,7 +567,6 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 				mock.SetResult(fmt.Sprintf("/usr/sbin/adduser --home /home/testuser --shell /bin/bash --uid %d --gid %d --gecos Test User --disabled-password testuser", 1001, 1001), 0, "User created", nil)
 			},
 			groupService: &MockGroupService{},
-			wantCode:     0,
 			wantOutput:   "User 'testuser' added successfully",
 		},
 		{
@@ -577,7 +575,6 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 				mock.SetResult(fmt.Sprintf("/usr/sbin/adduser --home /home/testuser --shell /bin/bash --uid %d --gid %d --gecos Test User --disabled-password testuser", 1001, 1001), 0, "User created", nil)
 			},
 			groupService: &MockGroupService{AddUserToGroupsError: errors.New("failed to add to groups")},
-			wantCode:     0, // Still want 0 for user creation, group error is logged
 			wantOutput:   "User 'testuser' created but failed to add to groups: failed to add to groups",
 		},
 	}
@@ -614,7 +611,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 
 			// A group-add failure reaches the operator through the output, not err.
 			assert.NoError(t, err)
-			assert.Equal(t, tt.wantCode, exitCode)
+			assert.Equal(t, 0, exitCode, "a group-add failure must not change the exit code")
 			assert.Equal(t, tt.wantOutput, output)
 			assert.True(t, tt.groupService.AddUserToGroupsCalled, "AddUserToGroups must run when the args carry additional groups")
 		})
