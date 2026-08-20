@@ -13,12 +13,42 @@ import (
 	"errors"
 	"fmt"
 	"os/user"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/go-playground/validator/v10"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// validationFields names the struct fields a ValidateStruct error flags, so a
+// table row can pin exactly which fields failed instead of accepting any error.
+func validationFields(t *testing.T, err error) []string {
+	t.Helper()
+	var verrs validator.ValidationErrors
+	require.ErrorAs(t, err, &verrs)
+	fields := make([]string, 0, len(verrs))
+	for _, verr := range verrs {
+		fields = append(fields, verr.Field())
+	}
+	return fields
+}
+
+// invokedAt returns the execution order of the first command that ran as
+// program with exactly args, or -1 if none did. The index is what lets a test
+// assert that one command preceded another; common.Invoked answers the plain
+// did-it-run question.
+func invokedAt(mock *common.MockCommandExecutor, program string, args ...string) int {
+	for i, c := range mock.GetExecutedCommands() {
+		if c.Name == program && slices.Equal(c.Args, args) {
+			return i
+		}
+	}
+	return -1
+}
 
 // MockGroupService implements services.GroupService for testing
 type MockGroupService struct {
@@ -50,7 +80,10 @@ func TestUserHandler_Execute(t *testing.T) {
 		setupMock    func(*common.MockCommandExecutor)
 		groupService *MockGroupService
 		wantCode     int
-		wantErr      bool
+		wantErrMsg   string
+		// wantOutputPart pins the diagnostic a failing row hands the
+		// operator, for the paths that report through output, not err.
+		wantOutputPart string
 	}{
 		{
 			name: "adduser success debian",
@@ -63,14 +96,14 @@ func TestUserHandler_Execute(t *testing.T) {
 				HomeDirectory: "/home/testuser",
 				Shell:         "/bin/bash",
 				Groupname:     "testgroup",
-				Groups:        []uint64{1002, 1003},
+				// No additional Groups: the group-add path is covered by
+				// TestUserHandler_AddUserWithGroups, which pins its output.
 			},
 			setupMock: func(mock *common.MockCommandExecutor) {
 				mock.SetResult(fmt.Sprintf("/usr/sbin/adduser --home /home/testuser --shell /bin/bash --uid %d --gid %d --gecos Test User --disabled-password testuser", 1001, 1001), 0, "User created", nil)
 			},
 			groupService: &MockGroupService{},
 			wantCode:     0,
-			wantErr:      false,
 		},
 		{
 			name: "deluser success",
@@ -84,7 +117,6 @@ func TestUserHandler_Execute(t *testing.T) {
 			},
 			groupService: &MockGroupService{},
 			wantCode:     0,
-			wantErr:      false,
 		},
 		{
 			name: "moduser success",
@@ -100,7 +132,6 @@ func TestUserHandler_Execute(t *testing.T) {
 			},
 			groupService: &MockGroupService{},
 			wantCode:     0,
-			wantErr:      false,
 		},
 		{
 			name:         "unknown command",
@@ -108,7 +139,7 @@ func TestUserHandler_Execute(t *testing.T) {
 			args:         &common.CommandArgs{},
 			groupService: &MockGroupService{},
 			wantCode:     1,
-			wantErr:      true,
+			wantErrMsg:   "unknown user command: unknownuser",
 		},
 		{
 			name: "adduser missing username",
@@ -117,9 +148,9 @@ func TestUserHandler_Execute(t *testing.T) {
 				UID: 1001,
 				GID: 1001,
 			},
-			groupService: &MockGroupService{},
-			wantCode:     1,
-			wantErr:      false,
+			groupService:   &MockGroupService{},
+			wantCode:       1,
+			wantOutputPart: "Username",
 		},
 		{
 			name: "adduser failure",
@@ -138,7 +169,7 @@ func TestUserHandler_Execute(t *testing.T) {
 			},
 			groupService: &MockGroupService{},
 			wantCode:     1,
-			wantErr:      true, // error is returned as part of output, not actual go error
+			wantErrMsg:   "user add error",
 		},
 	}
 
@@ -161,14 +192,17 @@ func TestUserHandler_Execute(t *testing.T) {
 
 			exitCode, output, err := handler.Execute(ctx, tt.cmd, tt.args)
 
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Execute() error = %v, wantErr %v", err, tt.wantErr)
+			if tt.wantErrMsg != "" {
+				assert.EqualError(t, err, tt.wantErrMsg)
+			} else {
+				assert.NoError(t, err)
 			}
-			if exitCode != tt.wantCode {
-				t.Errorf("Execute() exitCode = %v, want %v", exitCode, tt.wantCode)
+			assert.Equal(t, tt.wantCode, exitCode)
+			if tt.wantOutputPart != "" {
+				assert.Contains(t, output, tt.wantOutputPart)
 			}
-			if exitCode == 0 && output == "" && !tt.wantErr {
-				t.Error("Execute() returned success but no output")
+			if exitCode == 0 && tt.wantErrMsg == "" {
+				assert.NotEmpty(t, output, "a successful command must carry output")
 			}
 		})
 	}
@@ -226,53 +260,32 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			handler := newTestUserHandler(mock, &MockGroupService{})
 
 			exitCode, _, err := handler.Execute(context.Background(), "adduser", baseArgs)
-			if err != nil {
-				t.Fatalf("Execute() unexpected error: %v", err)
-			}
-			if exitCode != 0 {
-				t.Fatalf("Execute() exitCode = %d, want 0", exitCode)
-			}
+			require.NoError(t, err)
+			require.Equal(t, 0, exitCode)
 
 			executed := mock.GetExecutedCommands()
 			var target *common.ExecutedCommand
-			var sawGidGroupadd, sawGroupaddDashF, sawUsermod bool
-			var groupaddDashFIndex, useraddIndex = -1, -1
+			var sawGidGroupadd bool
+			useraddIndex := -1
 			for i := range executed {
 				c := executed[i]
 				if c.Name == tt.wantProgram {
 					target = &executed[i]
 					useraddIndex = i
 				}
-				if c.Name == "/usr/sbin/groupadd" {
-					joined := strings.Join(c.Args, " ")
-					if strings.Contains(joined, "--gid") {
-						sawGidGroupadd = true
-					}
-					if len(c.Args) >= 2 && c.Args[0] == "-f" && c.Args[1] == "alpacon" {
-						sawGroupaddDashF = true
-						groupaddDashFIndex = i
-					}
-				}
-				if c.Name == "/usr/sbin/usermod" {
-					sawUsermod = true
+				if c.Name == "/usr/sbin/groupadd" && strings.Contains(strings.Join(c.Args, " "), "--gid") {
+					sawGidGroupadd = true
 				}
 			}
+			groupaddDashFIndex := invokedAt(mock, "/usr/sbin/groupadd", "-f", "alpacon")
 
-			if target == nil {
-				t.Fatalf("expected %s to be invoked, got commands: %+v", tt.wantProgram, executed)
-			}
+			require.NotNil(t, target, "%s must be invoked, got: %+v", tt.wantProgram, executed)
 			joined := strings.Join(target.Args, " ")
 			for _, want := range tt.wantFlags {
-				if !strings.Contains(joined, want) {
-					t.Errorf("expected flag %q in args, got: %s", want, joined)
-				}
+				assert.Contains(t, joined, want, "flag %q must be present", want)
 			}
 			for _, forbid := range tt.forbidFlags {
-				for _, a := range target.Args {
-					if a == forbid {
-						t.Errorf("flag %q must not appear in args, got: %s", forbid, joined)
-					}
-				}
+				assert.NotContains(t, joined, forbid, "args: %s", joined)
 			}
 
 			// Service account must NOT use the gid-based groupadd path
@@ -281,30 +294,19 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			// and adduser/useradd MUST set the primary group by name
 			// (--ingroup on Debian, --gid <name> on RHEL). Post-fact
 			// `usermod -aG` is no longer used.
-			if sawGidGroupadd {
-				t.Error("service account path must not call groupadd with --gid")
+			assert.False(t, sawGidGroupadd, "the service-account path must not call groupadd with --gid")
+			assert.NotEqual(t, -1, groupaddDashFIndex, "`groupadd -f alpacon` must ensure the named primary group exists")
+			if groupaddDashFIndex >= 0 && useraddIndex >= 0 {
+				assert.Less(t, groupaddDashFIndex, useraddIndex, "`groupadd -f` must run before %s", tt.wantProgram)
 			}
-			if !sawGroupaddDashF {
-				t.Error("expected `groupadd -f alpacon` to ensure the named primary group exists")
-			}
-			if groupaddDashFIndex >= 0 && useraddIndex >= 0 && groupaddDashFIndex >= useraddIndex {
-				t.Errorf("`groupadd -f` must run BEFORE %s, got order groupadd=%d useradd=%d",
-					tt.wantProgram, groupaddDashFIndex, useraddIndex)
-			}
-			if sawUsermod {
-				t.Error("post-fact `usermod` should no longer run; primary group is set during adduser/useradd")
-			}
+			assert.False(t, mock.Invoked("/usr/sbin/usermod"), "post-fact `usermod` must not run; the primary group is set during adduser/useradd")
 
 			// Verify the primary-group-by-name flag is on the create command itself.
 			switch tt.platform {
 			case "debian":
-				if !strings.Contains(joined, "--ingroup alpacon") {
-					t.Errorf("expected `--ingroup alpacon` on adduser, got: %s", joined)
-				}
+				assert.Contains(t, joined, "--ingroup alpacon", "adduser must set the primary group by name")
 			case "rhel":
-				if !strings.Contains(joined, "--gid alpacon") {
-					t.Errorf("expected `--gid alpacon` on useradd, got: %s", joined)
-				}
+				assert.Contains(t, joined, "--gid alpacon", "useradd must set the primary group by name")
 			}
 		})
 	}
@@ -337,12 +339,8 @@ func TestUserHandler_AddUser_ServiceAccountWithExplicitUID(t *testing.T) {
 	}
 
 	exitCode, _, err := handler.Execute(context.Background(), "adduser", args)
-	if err != nil {
-		t.Fatalf("Execute() unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Fatalf("Execute() exitCode = %d, want 0", exitCode)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode)
 
 	executed := mock.GetExecutedCommands()
 	var useradd *common.ExecutedCommand
@@ -356,18 +354,12 @@ func TestUserHandler_AddUser_ServiceAccountWithExplicitUID(t *testing.T) {
 			}
 		}
 	}
-	if useradd == nil {
-		t.Fatalf("expected useradd to be invoked; got %+v", executed)
-	}
+	require.NotNil(t, useradd, "useradd must be invoked, got: %+v", executed)
 	joined := strings.Join(useradd.Args, " ")
 	for _, want := range []string{"--uid", "7000", "--gid", "7000", "--home-dir", "/var/lib/explicit-svc"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("expected flag %q on useradd (explicit values must be honored), got: %s", want, joined)
-		}
+		assert.Contains(t, joined, want, "an explicit value must be honored on useradd")
 	}
-	if sawNamedGidUseradd {
-		t.Error("when GID is explicit (non-zero), useradd must NOT use the by-name `--gid alpacon` path")
-	}
+	assert.False(t, sawNamedGidUseradd, "an explicit non-zero GID must not take the by-name `--gid alpacon` path")
 }
 
 // TestUserHandler_AddUser_ServiceAccountGroupaddFails verifies that a
@@ -396,16 +388,11 @@ func TestUserHandler_AddUser_ServiceAccountGroupaddFails(t *testing.T) {
 	}
 
 	exitCode, output, _ := handler.Execute(context.Background(), "adduser", args)
-	if exitCode == 0 {
-		t.Fatalf("expected non-zero exit code when groupadd fails on service-account path, got 0; output=%q", output)
-	}
+	require.NotEqual(t, 0, exitCode, "a failing groupadd on the service-account path must surface, output: %q", output)
 
 	// useradd must not be reached if the primary group cannot be ensured.
-	for _, c := range mock.GetExecutedCommands() {
-		if c.Name == "/usr/sbin/useradd" {
-			t.Errorf("useradd must not run when `groupadd -f` failed; got args=%v", c.Args)
-		}
-	}
+	assert.False(t, mock.Invoked("/usr/sbin/useradd"),
+		"useradd must not run when `groupadd -f` failed; got %+v", mock.GetExecutedCommands())
 }
 
 // TestUserHandler_AddUser_RhelWithUID verifies the existing IAM User path
@@ -431,12 +418,8 @@ func TestUserHandler_AddUser_RhelWithUID(t *testing.T) {
 	}
 
 	exitCode, _, err := handler.Execute(context.Background(), "adduser", args)
-	if err != nil {
-		t.Fatalf("Execute() unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Fatalf("Execute() exitCode = %d, want 0", exitCode)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode)
 
 	executed := mock.GetExecutedCommands()
 	var sawGroupadd, sawUseradd bool
@@ -444,36 +427,33 @@ func TestUserHandler_AddUser_RhelWithUID(t *testing.T) {
 		if c.Name == "/usr/sbin/groupadd" {
 			sawGroupadd = true
 			joined := strings.Join(c.Args, " ")
-			if !strings.Contains(joined, "--gid 5001") || !strings.Contains(joined, "alpacon") {
-				t.Errorf("groupadd missing expected args: %s", joined)
-			}
+			assert.Contains(t, joined, "--gid 5001")
+			assert.Contains(t, joined, "alpacon")
 		}
 		if c.Name == "/usr/sbin/useradd" {
 			sawUseradd = true
 			joined := strings.Join(c.Args, " ")
 			for _, want := range []string{"--uid", "5001", "--gid", "--home-dir", "/home/john", "--shell", "/bin/bash", "--create-home", "john"} {
-				if !strings.Contains(joined, want) {
-					t.Errorf("useradd missing %q: %s", want, joined)
-				}
+				assert.Contains(t, joined, want, "useradd is missing a flag")
 			}
 		}
 	}
-	if !sawGroupadd {
-		t.Error("expected groupadd to be invoked")
-	}
-	if !sawUseradd {
-		t.Error("expected useradd to be invoked")
-	}
+	assert.True(t, sawGroupadd, "groupadd must be invoked")
+	assert.True(t, sawUseradd, "useradd must be invoked")
 }
 
 func TestUserHandler_Validate(t *testing.T) {
 	handler := newTestUserHandler(common.NewMockCommandExecutor(t), &MockGroupService{})
 
 	tests := []struct {
-		name    string
-		cmd     string
-		args    *common.CommandArgs
-		wantErr bool
+		name string
+		cmd  string
+		args *common.CommandArgs
+		// wantErrMsg pins a non-validator error to its exact message;
+		// wantErrFields pins a validator error to the exact set of fields it
+		// must flag. Both empty means the args must validate.
+		wantErrMsg    string
+		wantErrFields []string
 	}{
 		{
 			name: "adduser valid",
@@ -487,7 +467,6 @@ func TestUserHandler_Validate(t *testing.T) {
 				Shell:         "/bin/bash",
 				Groupname:     "testgroup",
 			},
-			wantErr: false,
 		},
 		{
 			name: "adduser missing required fields",
@@ -496,9 +475,10 @@ func TestUserHandler_Validate(t *testing.T) {
 				Username: "testuser",
 				// IsServiceAccount=false (default), so UID/GID/HomeDirectory
 				// are required_unless and also missing. Comment/Groupname are
-				// required unconditionally. Shell is defaulted by the helper.
+				// required unconditionally. Shell carries `validate:"required"`
+				// and is deliberately not defaulted (types.go:52), so it fails too.
 			},
-			wantErr: true,
+			wantErrFields: []string{"UID", "GID", "Comment", "HomeDirectory", "Shell", "Groupname"},
 		},
 		{
 			name: "adduser uid-less service account valid",
@@ -511,10 +491,9 @@ func TestUserHandler_Validate(t *testing.T) {
 				IsServiceAccount: true,
 				// UID/GID/HomeDirectory intentionally omitted (OS auto-assign)
 			},
-			wantErr: false,
 		},
 		{
-			name: "adduser IAM User path must still require uid/gid/home",
+			name: "adduser IAM User path must still require uid, gid and home",
 			cmd:  "adduser",
 			args: &common.CommandArgs{
 				Username:  "john",
@@ -524,7 +503,7 @@ func TestUserHandler_Validate(t *testing.T) {
 				// IsServiceAccount=false (default)
 				// UID/GID/HomeDirectory missing: must fail
 			},
-			wantErr: true,
+			wantErrFields: []string{"UID", "GID", "HomeDirectory"},
 		},
 		{
 			name: "adduser IAM User with uid=0 must fail (cannot silently auto-assign)",
@@ -539,7 +518,7 @@ func TestUserHandler_Validate(t *testing.T) {
 				Groupname:     "alpacon",
 				// IsServiceAccount=false: uid=0 must be rejected
 			},
-			wantErr: true,
+			wantErrFields: []string{"UID"},
 		},
 		{
 			name: "deluser valid",
@@ -547,7 +526,6 @@ func TestUserHandler_Validate(t *testing.T) {
 			args: &common.CommandArgs{
 				Username: "testuser",
 			},
-			wantErr: false,
 		},
 		{
 			name: "moduser valid",
@@ -557,21 +535,25 @@ func TestUserHandler_Validate(t *testing.T) {
 				Groupnames: []string{"sudo"},
 				Comment:    "Updated",
 			},
-			wantErr: false,
 		},
 		{
-			name:    "unknown command",
-			cmd:     "unknown",
-			args:    &common.CommandArgs{},
-			wantErr: true,
+			name:       "unknown command",
+			cmd:        "unknown",
+			args:       &common.CommandArgs{},
+			wantErrMsg: "unknown user command: unknown",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := handler.Validate(tt.cmd, tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			switch {
+			case tt.wantErrMsg != "":
+				assert.EqualError(t, err, tt.wantErrMsg)
+			case len(tt.wantErrFields) > 0:
+				assert.ElementsMatch(t, tt.wantErrFields, validationFields(t, err))
+			default:
+				assert.NoError(t, err)
 			}
 		})
 	}
@@ -582,8 +564,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 		name         string
 		setupMock    func(*common.MockCommandExecutor)
 		groupService *MockGroupService
-		wantCode     int
-		calledGroups bool
+		wantOutput   string
 	}{
 		{
 			name: "add user to groups success",
@@ -591,8 +572,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 				mock.SetResult(fmt.Sprintf("/usr/sbin/adduser --home /home/testuser --shell /bin/bash --uid %d --gid %d --gecos Test User --disabled-password testuser", 1001, 1001), 0, "User created", nil)
 			},
 			groupService: &MockGroupService{},
-			wantCode:     0,
-			calledGroups: true,
+			wantOutput:   "User 'testuser' added successfully",
 		},
 		{
 			name: "add user to groups failure",
@@ -600,8 +580,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 				mock.SetResult(fmt.Sprintf("/usr/sbin/adduser --home /home/testuser --shell /bin/bash --uid %d --gid %d --gecos Test User --disabled-password testuser", 1001, 1001), 0, "User created", nil)
 			},
 			groupService: &MockGroupService{AddUserToGroupsError: errors.New("failed to add to groups")},
-			wantCode:     0, // Still want 0 for user creation, group error is logged
-			calledGroups: true,
+			wantOutput:   "User 'testuser' created but failed to add to groups: failed to add to groups",
 		},
 	}
 
@@ -633,20 +612,13 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 				Groups:        []uint64{1002, 1003},
 			}
 
-			exitCode, _, err := handler.Execute(ctx, "adduser", args)
+			exitCode, output, err := handler.Execute(ctx, "adduser", args)
 
-			if err != nil && !tt.groupService.AddUserToGroupsCalled { // only expect error if AddUserToGroups not called
-				t.Errorf("Execute() unexpected error: %v", err)
-			}
-			if exitCode != tt.wantCode {
-				t.Errorf("Execute() exitCode = %v, want %v", exitCode, tt.wantCode)
-			}
-			if tt.calledGroups && !tt.groupService.AddUserToGroupsCalled {
-				t.Error("Execute() did not call AddUserToGroups on group service")
-			}
-			if !tt.calledGroups && tt.groupService.AddUserToGroupsCalled {
-				t.Error("Execute() unexpectedly called AddUserToGroups on group service")
-			}
+			// A group-add failure reaches the operator through the output, not err.
+			assert.NoError(t, err)
+			assert.Equal(t, 0, exitCode, "the create path exits 0 whether or not the group-add step fails")
+			assert.Equal(t, tt.wantOutput, output)
+			assert.True(t, tt.groupService.AddUserToGroupsCalled, "AddUserToGroups must run when the args carry additional groups")
 		})
 	}
 }
@@ -693,34 +665,21 @@ func TestUserHandler_AddUser_Idempotent_ExistingUserSkipsCreate(t *testing.T) {
 			}
 
 			exitCode, output, err := handler.Execute(context.Background(), "adduser", args)
-			if err != nil {
-				t.Fatalf("Execute() unexpected error: %v", err)
-			}
-			if exitCode != 0 {
-				t.Fatalf("Execute() exitCode = %d, want 0 (output=%q)", exitCode, output)
-			}
+			require.NoError(t, err)
+			require.Equal(t, 0, exitCode, "output: %q", output)
 			// The gate-detected idempotent path must report "already exists",
 			// not the misleading "added successfully" (this is the crux #344 path).
-			if !strings.Contains(output, "already exists") || strings.Contains(output, "added successfully") {
-				t.Errorf("existing-user path should report 'already exists', got: %q", output)
-			}
+			assert.Contains(t, output, "already exists")
+			assert.NotContains(t, output, "added successfully")
 
-			if mock.Invoked(tt.createCmd) {
-				t.Errorf("%s must NOT be invoked when the user already exists; got %+v", tt.createCmd, mock.GetExecutedCommands())
-			}
+			assert.False(t, mock.Invoked(tt.createCmd),
+				"%s must not be invoked when the user already exists; got %+v", tt.createCmd, mock.GetExecutedCommands())
 			// RHEL ensures the primary group; when it already exists, groupadd is skipped.
 			if tt.platform == "rhel" {
-				sawGroupadd := mock.Invoked("/usr/sbin/groupadd")
-				if tt.groupExists && sawGroupadd {
-					t.Errorf("groupadd must be skipped when the group already exists with matching gid; got %+v", mock.GetExecutedCommands())
-				}
-				if !tt.groupExists && !sawGroupadd {
-					t.Errorf("groupadd must run to ensure the primary group exists; got %+v", mock.GetExecutedCommands())
-				}
+				assert.Equal(t, !tt.groupExists, mock.Invoked("/usr/sbin/groupadd"),
+					"groupadd runs exactly when the primary group is absent; got %+v", mock.GetExecutedCommands())
 			}
-			if !gs.AddUserToGroupsCalled {
-				t.Error("AddUserToGroups must still run for an existing user so groups converge")
-			}
+			assert.True(t, gs.AddUserToGroupsCalled, "AddUserToGroups must still run for an existing user so groups converge")
 		})
 	}
 }
@@ -750,15 +709,13 @@ func TestUserHandler_AddUser_Idempotent_UIDConflict(t *testing.T) {
 			}
 
 			exitCode, output, _ := handler.Execute(context.Background(), "adduser", args)
-			if exitCode == 0 {
-				t.Fatalf("expected non-zero exit for uid conflict, got 0 (output=%q)", output)
-			}
-			if !strings.Contains(output, "already exists with uid 9999") || !strings.Contains(output, "requested uid 1001") {
-				t.Errorf("conflict message must name both uids, got: %q", output)
-			}
-			if mock.Invoked("/usr/sbin/adduser") || mock.Invoked("/usr/sbin/useradd") {
-				t.Errorf("no create command may run on a uid conflict; got %+v", mock.GetExecutedCommands())
-			}
+			require.NotEqual(t, 0, exitCode, "a uid conflict must surface, output: %q", output)
+			assert.Contains(t, output, "already exists with uid 9999", "the conflict message must name both uids")
+			assert.Contains(t, output, "requested uid 1001", "the conflict message must name both uids")
+			assert.False(t, mock.Invoked("/usr/sbin/adduser"),
+				"no create command may run on a uid conflict; got %+v", mock.GetExecutedCommands())
+			assert.False(t, mock.Invoked("/usr/sbin/useradd"),
+				"no create command may run on a uid conflict; got %+v", mock.GetExecutedCommands())
 		})
 	}
 }
@@ -786,27 +743,14 @@ func TestUserHandler_AddUser_Idempotent_ServiceAccountNameExists(t *testing.T) {
 	}
 
 	exitCode, output, err := handler.Execute(context.Background(), "adduser", args)
-	if err != nil {
-		t.Fatalf("Execute() unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Fatalf("Execute() exitCode = %d, want 0 (output=%q)", exitCode, output)
-	}
-	if mock.Invoked("/usr/sbin/useradd") {
-		t.Error("useradd must not run when the service account already exists by name")
-	}
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode, "output: %q", output)
+	assert.False(t, mock.Invoked("/usr/sbin/useradd"), "useradd must not run when the service account already exists by name")
 	// Load-bearing invariant: the `groupadd -f <Groupname>` bootstrap must run
 	// even for an already-present service account, or the named primary group is
 	// not ensured and Demote(ValidateGroup=true) breaks at websh runtime.
-	sawGroupaddDashF := false
-	for _, c := range mock.GetExecutedCommands() {
-		if c.Name == "/usr/sbin/groupadd" && len(c.Args) >= 2 && c.Args[0] == "-f" && c.Args[1] == "alpacon" {
-			sawGroupaddDashF = true
-		}
-	}
-	if !sawGroupaddDashF {
-		t.Errorf("`groupadd -f alpacon` must still run for an existing service account; got %+v", mock.GetExecutedCommands())
-	}
+	assert.NotEqual(t, -1, invokedAt(mock, "/usr/sbin/groupadd", "-f", "alpacon"),
+		"`groupadd -f alpacon` must still run for an existing service account; got %+v", mock.GetExecutedCommands())
 }
 
 // TestUserHandler_AddUser_Idempotent_LookupError verifies that a lookup error
@@ -834,15 +778,9 @@ func TestUserHandler_AddUser_Idempotent_LookupError(t *testing.T) {
 	}
 
 	exitCode, output, _ := handler.Execute(context.Background(), "adduser", args)
-	if exitCode == 0 {
-		t.Fatalf("expected non-zero exit when the lookup itself fails, got 0 (output=%q)", output)
-	}
-	if !strings.Contains(output, "unable to verify") {
-		t.Errorf("expected an 'unable to verify' message, got: %q", output)
-	}
-	if mock.Invoked("/usr/sbin/adduser") {
-		t.Error("adduser must not run when existence cannot be verified")
-	}
+	require.NotEqual(t, 0, exitCode, "a failing lookup must surface, output: %q", output)
+	assert.Contains(t, output, "unable to verify")
+	assert.False(t, mock.Invoked("/usr/sbin/adduser"), "adduser must not run when existence cannot be verified")
 }
 
 // TestUserHandler_AddUser_SecondaryNet verifies the create-time reconcile net on
@@ -899,17 +837,14 @@ func TestUserHandler_AddUser_SecondaryNet(t *testing.T) {
 			}
 
 			exitCode, output, _ := handler.Execute(context.Background(), "adduser", args)
-			if !mock.Invoked("/usr/sbin/adduser") {
-				t.Fatal("adduser should have been attempted after an absent gate lookup")
+			require.True(t, mock.Invoked("/usr/sbin/adduser"), "adduser must be attempted after an absent gate lookup")
+			if tt.wantExitZero {
+				require.Equal(t, 0, exitCode, "the reconcile must land on idempotent success, output: %q", output)
+			} else {
+				require.NotEqual(t, 0, exitCode, "output: %q", output)
 			}
-			if tt.wantExitZero && exitCode != 0 {
-				t.Fatalf("expected idempotent success (exit 0), got %d (output=%q)", exitCode, output)
-			}
-			if !tt.wantExitZero && exitCode == 0 {
-				t.Fatalf("expected non-zero exit, got 0 (output=%q)", output)
-			}
-			if tt.wantMsgPart != "" && !strings.Contains(output, tt.wantMsgPart) {
-				t.Errorf("expected output to contain %q, got: %q", tt.wantMsgPart, output)
+			if tt.wantMsgPart != "" {
+				assert.Contains(t, output, tt.wantMsgPart)
 			}
 		})
 	}
@@ -955,15 +890,9 @@ func TestUserHandler_AddUser_Rhel_SecondaryNet(t *testing.T) {
 		}
 
 		exitCode, output, _ := handler.Execute(context.Background(), "adduser", baseArgs())
-		if !mock.Invoked("/usr/sbin/useradd") {
-			t.Fatal("useradd should have been attempted")
-		}
-		if exitCode != 0 {
-			t.Fatalf("expected idempotent success, got %d (output=%q)", exitCode, output)
-		}
-		if !strings.Contains(output, "already exists") {
-			t.Errorf("reconciled-success path should report 'already exists', got: %q", output)
-		}
+		require.True(t, mock.Invoked("/usr/sbin/useradd"), "useradd must be attempted")
+		require.Equal(t, 0, exitCode, "the reconcile must land on idempotent success, output: %q", output)
+		assert.Contains(t, output, "already exists", "the reconciled-success path must say so")
 	})
 
 	t.Run("useradd reconcile: raced different uid -> conflict surfaced", func(t *testing.T) {
@@ -986,12 +915,8 @@ func TestUserHandler_AddUser_Rhel_SecondaryNet(t *testing.T) {
 		}
 
 		exitCode, output, _ := handler.Execute(context.Background(), "adduser", baseArgs())
-		if exitCode == 0 {
-			t.Fatalf("expected conflict (non-zero), got 0 (output=%q)", output)
-		}
-		if !strings.Contains(output, "already exists with uid 6006") {
-			t.Errorf("expected uid conflict message, got: %q", output)
-		}
+		require.NotEqual(t, 0, exitCode, "the uid conflict must surface, output: %q", output)
+		assert.Contains(t, output, "already exists with uid 6006")
 	})
 
 	t.Run("primary-group groupadd reconcile: raced NSS group -> tolerated, useradd proceeds", func(t *testing.T) {
@@ -1013,15 +938,10 @@ func TestUserHandler_AddUser_Rhel_SecondaryNet(t *testing.T) {
 		}
 
 		exitCode, output, err := handler.Execute(context.Background(), "adduser", baseArgs())
-		if err != nil || exitCode != 0 {
-			t.Fatalf("expected groupadd reconcile to tolerate; got exitCode=%d err=%v output=%q", exitCode, err, output)
-		}
-		if !mock.Invoked("/usr/sbin/groupadd") {
-			t.Fatal("groupadd should have been attempted after an absent gate lookup")
-		}
-		if !mock.Invoked("/usr/sbin/useradd") {
-			t.Error("useradd must still run after the primary group is reconciled")
-		}
+		require.NoError(t, err, "the groupadd reconcile must tolerate a raced group")
+		require.Equal(t, 0, exitCode, "output: %q", output)
+		require.True(t, mock.Invoked("/usr/sbin/groupadd"), "groupadd must be attempted after an absent gate lookup")
+		assert.True(t, mock.Invoked("/usr/sbin/useradd"), "useradd must still run after the primary group is reconciled")
 	})
 }
 
@@ -1052,15 +972,11 @@ func TestUserHandler_AddUser_Rhel_PrimaryGroupGate(t *testing.T) {
 		handler.lookupGroup = common.ExistingGroupLookup("5001")
 
 		exitCode, output, err := handler.Execute(context.Background(), "adduser", baseArgs())
-		if err != nil || exitCode != 0 {
-			t.Fatalf("Execute() exitCode=%d err=%v output=%q", exitCode, err, output)
-		}
-		if mock.Invoked("/usr/sbin/groupadd") {
-			t.Errorf("groupadd must be skipped when the group already exists with matching gid; got %+v", mock.GetExecutedCommands())
-		}
-		if !mock.Invoked("/usr/sbin/useradd") {
-			t.Error("useradd must still run to create the absent user")
-		}
+		require.NoError(t, err)
+		require.Equal(t, 0, exitCode, "output: %q", output)
+		assert.False(t, mock.Invoked("/usr/sbin/groupadd"),
+			"groupadd must be skipped when the group already exists with a matching gid; got %+v", mock.GetExecutedCommands())
+		assert.True(t, mock.Invoked("/usr/sbin/useradd"), "useradd must still run to create the absent user")
 	})
 
 	t.Run("group exists with different gid -> conflict before useradd", func(t *testing.T) {
@@ -1073,15 +989,9 @@ func TestUserHandler_AddUser_Rhel_PrimaryGroupGate(t *testing.T) {
 		handler.lookupGroup = common.ExistingGroupLookup("7777")
 
 		exitCode, output, _ := handler.Execute(context.Background(), "adduser", baseArgs())
-		if exitCode == 0 {
-			t.Fatalf("expected non-zero exit for group gid conflict, got 0 (output=%q)", output)
-		}
-		if !strings.Contains(output, "already exists with gid 7777") {
-			t.Errorf("expected group conflict message, got: %q", output)
-		}
-		if mock.Invoked("/usr/sbin/useradd") {
-			t.Error("useradd must not run when the primary group gid conflicts")
-		}
+		require.NotEqual(t, 0, exitCode, "a group gid conflict must surface, output: %q", output)
+		assert.Contains(t, output, "already exists with gid 7777")
+		assert.False(t, mock.Invoked("/usr/sbin/useradd"), "useradd must not run when the primary group gid conflicts")
 	})
 }
 
@@ -1110,19 +1020,10 @@ func TestUserHandler_AddUser_ExistingUser_GroupAddSoftFailMessage(t *testing.T) 
 	}
 
 	exitCode, output, err := handler.Execute(context.Background(), "adduser", args)
-	if err != nil {
-		t.Fatalf("Execute() unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Fatalf("group-add soft failure must keep exit 0, got %d (output=%q)", exitCode, output)
-	}
-	if !gs.AddUserToGroupsCalled {
-		t.Error("AddUserToGroups should have been called for an existing user")
-	}
-	if strings.Contains(output, "created") || !strings.Contains(output, "already exists but failed to add to groups") {
-		t.Errorf("soft-failure message should say the user already exists, not 'created'; got: %q", output)
-	}
-	if mock.Invoked("/usr/sbin/adduser") {
-		t.Error("adduser must not run for an existing user")
-	}
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode, "a group-add soft failure must keep exit 0, output: %q", output)
+	assert.True(t, gs.AddUserToGroupsCalled, "AddUserToGroups must be called for an existing user")
+	assert.NotContains(t, output, "created", "the soft-failure message must not claim the user was created")
+	assert.Contains(t, output, "already exists but failed to add to groups")
+	assert.False(t, mock.Invoked("/usr/sbin/adduser"), "adduser must not run for an existing user")
 }
