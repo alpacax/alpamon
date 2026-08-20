@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"os/user"
+	"slices"
 	"strings"
 	"testing"
 
@@ -34,6 +35,19 @@ func validationFields(t *testing.T, err error) []string {
 		fields = append(fields, verr.Field())
 	}
 	return fields
+}
+
+// invokedAt returns the execution order of the first command that ran as
+// program with exactly args, or -1 if none did. The index is what lets a test
+// assert that one command preceded another; common.Invoked answers the plain
+// did-it-run question.
+func invokedAt(mock *common.MockCommandExecutor, program string, args ...string) int {
+	for i, c := range mock.GetExecutedCommands() {
+		if c.Name == program && slices.Equal(c.Args, args) {
+			return i
+		}
+	}
+	return -1
 }
 
 // MockGroupService implements services.GroupService for testing
@@ -251,28 +265,19 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 
 			executed := mock.GetExecutedCommands()
 			var target *common.ExecutedCommand
-			var sawGidGroupadd, sawGroupaddDashF, sawUsermod bool
-			var groupaddDashFIndex, useraddIndex = -1, -1
+			var sawGidGroupadd bool
+			useraddIndex := -1
 			for i := range executed {
 				c := executed[i]
 				if c.Name == tt.wantProgram {
 					target = &executed[i]
 					useraddIndex = i
 				}
-				if c.Name == "/usr/sbin/groupadd" {
-					joined := strings.Join(c.Args, " ")
-					if strings.Contains(joined, "--gid") {
-						sawGidGroupadd = true
-					}
-					if len(c.Args) >= 2 && c.Args[0] == "-f" && c.Args[1] == "alpacon" {
-						sawGroupaddDashF = true
-						groupaddDashFIndex = i
-					}
-				}
-				if c.Name == "/usr/sbin/usermod" {
-					sawUsermod = true
+				if c.Name == "/usr/sbin/groupadd" && strings.Contains(strings.Join(c.Args, " "), "--gid") {
+					sawGidGroupadd = true
 				}
 			}
+			groupaddDashFIndex := invokedAt(mock, "/usr/sbin/groupadd", "-f", "alpacon")
 
 			require.NotNil(t, target, "%s must be invoked, got: %+v", tt.wantProgram, executed)
 			joined := strings.Join(target.Args, " ")
@@ -290,11 +295,11 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			// (--ingroup on Debian, --gid <name> on RHEL). Post-fact
 			// `usermod -aG` is no longer used.
 			assert.False(t, sawGidGroupadd, "the service-account path must not call groupadd with --gid")
-			assert.True(t, sawGroupaddDashF, "`groupadd -f alpacon` must ensure the named primary group exists")
+			assert.NotEqual(t, -1, groupaddDashFIndex, "`groupadd -f alpacon` must ensure the named primary group exists")
 			if groupaddDashFIndex >= 0 && useraddIndex >= 0 {
 				assert.Less(t, groupaddDashFIndex, useraddIndex, "`groupadd -f` must run before %s", tt.wantProgram)
 			}
-			assert.False(t, sawUsermod, "post-fact `usermod` must not run; the primary group is set during adduser/useradd")
+			assert.False(t, mock.Invoked("/usr/sbin/usermod"), "post-fact `usermod` must not run; the primary group is set during adduser/useradd")
 
 			// Verify the primary-group-by-name flag is on the create command itself.
 			switch tt.platform {
@@ -744,13 +749,7 @@ func TestUserHandler_AddUser_Idempotent_ServiceAccountNameExists(t *testing.T) {
 	// Load-bearing invariant: the `groupadd -f <Groupname>` bootstrap must run
 	// even for an already-present service account, or the named primary group is
 	// not ensured and Demote(ValidateGroup=true) breaks at websh runtime.
-	sawGroupaddDashF := false
-	for _, c := range mock.GetExecutedCommands() {
-		if c.Name == "/usr/sbin/groupadd" && len(c.Args) >= 2 && c.Args[0] == "-f" && c.Args[1] == "alpacon" {
-			sawGroupaddDashF = true
-		}
-	}
-	assert.True(t, sawGroupaddDashF,
+	assert.NotEqual(t, -1, invokedAt(mock, "/usr/sbin/groupadd", "-f", "alpacon"),
 		"`groupadd -f alpacon` must still run for an existing service account; got %+v", mock.GetExecutedCommands())
 }
 
