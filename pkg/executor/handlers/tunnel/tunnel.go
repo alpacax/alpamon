@@ -88,7 +88,7 @@ func (h *TunnelHandler) validateClientTypeRequirements(clientType string, data O
 		}
 	case runner.ClientTypeEditor:
 		if !editorTunnelSupported(runtime.GOOS) {
-			return fmt.Errorf("editor tunnel is not supported on Windows")
+			return fmt.Errorf("editor tunnel is not supported on %s", runtime.GOOS)
 		}
 		if data.Username == "" {
 			return fmt.Errorf("username is required for editor tunnel")

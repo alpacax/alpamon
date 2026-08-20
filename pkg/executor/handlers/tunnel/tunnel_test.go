@@ -23,7 +23,7 @@ func TestTunnelHandler_ValidateClientTypeRequirements(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		err := h.validateClientTypeRequirements(runner.ClientTypeEditor, data)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "editor tunnel is not supported on Windows")
+		assert.Contains(t, err.Error(), "editor tunnel is not supported on "+runtime.GOOS)
 	} else {
 		assert.NoError(t, h.validateClientTypeRequirements(runner.ClientTypeEditor, data))
 	}
