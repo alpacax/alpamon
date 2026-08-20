@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -113,7 +114,7 @@ func CheckSystemResources() error {
 }
 
 // NewTunnelClient creates a new tunnel client for the given WebSocket URL.
-func NewTunnelClient(sessionID, clientType string, targetPort int, username, groupname, url string) *TunnelClient {
+func NewTunnelClient(sessionID, clientType string, targetPort int, username, groupname, serverURL string) *TunnelClient {
 	headers := http.Header{
 		"Authorization": {fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)},
 		"Origin":        {config.GlobalSettings.ServerURL},
@@ -126,7 +127,7 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 		clientType:    clientType,
 		username:      username,
 		groupname:     groupname,
-		serverURL:     url,
+		serverURL:     serverURL,
 		requestHeader: headers,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -134,6 +135,17 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 	}
 	tc.targetPort.Store(int32(targetPort))
 	return tc
+}
+
+// TunnelServerHost returns the host of a tunnel server URL. The path carries a
+// session-scoped token, and agent logs are shipped off-host, so the host is the
+// only part of the URL that may be logged.
+func TunnelServerHost(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return "invalid"
+	}
+	return parsed.Host
 }
 
 // RegisterTunnel atomically checks for an existing tunnel and registers a new one.
@@ -255,7 +267,7 @@ func buildHealthResponseBody(status, errMsg string) string {
 
 // connect establishes WebSocket connection and creates smux session.
 func (tc *TunnelClient) connect() error {
-	log.Info().Msgf("Connecting to tunnel server at %s...", tc.serverURL)
+	log.Info().Msgf("Connecting to tunnel server at %s...", TunnelServerHost(tc.serverURL))
 
 	dialer := websocket.Dialer{
 		TLSClientConfig: &tls.Config{

@@ -77,6 +77,25 @@ func TestIsValidSessionID(t *testing.T) {
 	}
 }
 
+func TestTunnelServerHost(t *testing.T) {
+	tests := []struct {
+		name   string
+		rawURL string
+		want   string
+	}{
+		{name: "strips the token bearing path", rawURL: "wss://alpacon.io/ws/tunnels/abc123secret/", want: "alpacon.io"},
+		{name: "keeps the port", rawURL: "ws://127.0.0.1:8000/ws/tunnels/abc123secret/", want: "127.0.0.1:8000"},
+		{name: "hostless URL", rawURL: "not-a-url", want: "invalid"},
+		{name: "empty URL", rawURL: "", want: "invalid"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, TunnelServerHost(tc.rawURL))
+		})
+	}
+}
+
 func TestGetHTTPStatusForHealth(t *testing.T) {
 	tests := []struct {
 		name   string

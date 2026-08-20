@@ -135,7 +135,7 @@ func (h *TunnelHandler) handleOpenTunnel(args *common.CommandArgs) (int, string,
 		Str("clientType", clientType).
 		Int("targetPort", args.TargetPort).
 		Str("username", args.Username).
-		Str("url", args.URL).
+		Str("server", runner.TunnelServerHost(args.URL)).
 		Msg("Opening tunnel connection")
 
 	tunnelClient := runner.NewTunnelClient(
