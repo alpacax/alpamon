@@ -538,7 +538,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 		setupMock    func(*common.MockCommandExecutor)
 		groupService *MockGroupService
 		wantCode     int
-		calledGroups bool
+		wantOutput   string
 	}{
 		{
 			name: "add user to groups success",
@@ -547,7 +547,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 			},
 			groupService: &MockGroupService{},
 			wantCode:     0,
-			calledGroups: true,
+			wantOutput:   "User 'testuser' added successfully",
 		},
 		{
 			name: "add user to groups failure",
@@ -556,7 +556,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 			},
 			groupService: &MockGroupService{AddUserToGroupsError: errors.New("failed to add to groups")},
 			wantCode:     0, // Still want 0 for user creation, group error is logged
-			calledGroups: true,
+			wantOutput:   "User 'testuser' created but failed to add to groups: failed to add to groups",
 		},
 	}
 
@@ -588,14 +588,13 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 				Groups:        []uint64{1002, 1003},
 			}
 
-			exitCode, _, err := handler.Execute(ctx, "adduser", args)
+			exitCode, output, err := handler.Execute(ctx, "adduser", args)
 
-			// A group-add failure is reported through the group service, not err.
-			if !tt.groupService.AddUserToGroupsCalled {
-				assert.NoError(t, err)
-			}
+			// A group-add failure reaches the operator through the output, not err.
+			assert.NoError(t, err)
 			assert.Equal(t, tt.wantCode, exitCode)
-			assert.Equal(t, tt.calledGroups, tt.groupService.AddUserToGroupsCalled, "AddUserToGroups called")
+			assert.Equal(t, tt.wantOutput, output)
+			assert.True(t, tt.groupService.AddUserToGroupsCalled, "AddUserToGroups must run when the args carry additional groups")
 		})
 	}
 }
