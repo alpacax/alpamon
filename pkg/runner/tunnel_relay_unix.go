@@ -133,5 +133,4 @@ func (tc *TunnelClient) stopTunnelRelay() {
 
 	_ = safeRemoveSocket(tc.daemonSocket)
 	tc.daemonCmd = nil
-	tc.daemonSocket = ""
 }
