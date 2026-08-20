@@ -144,7 +144,7 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 	log.Info().
 		Str("sessionID", args.SessionID).
 		Str("username", args.Username).
-		Str("url", args.URL).
+		Str("server", runner.ServerHostFromURL(args.URL)).
 		Msg("Opening FTP session")
 
 	result, err := utils.Demote(args.Username, args.Groupname, utils.DemoteOptions{ValidateGroup: false})

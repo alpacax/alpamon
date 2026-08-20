@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -137,15 +138,30 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 	return tc
 }
 
-// TunnelServerHost returns the host of a tunnel server URL. The path carries a
-// session-scoped token, and agent logs are shipped off-host, so the host is the
-// only part of the URL that may be logged.
-func TunnelServerHost(rawURL string) string {
+// unknownServerHost stands in when a URL has no host to report, either because
+// it does not parse or because it carries no authority.
+const unknownServerHost = "invalid"
+
+// ServerHostFromURL returns the host of a session URL. Tunnel and FTP URLs carry
+// a session-scoped token in the path, and agent logs are shipped off-host, so the
+// host is the only part of such a URL that may be logged.
+func ServerHostFromURL(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Host == "" {
-		return "invalid"
+		return unknownServerHost
 	}
 	return parsed.Host
+}
+
+// sanitizeURLError rewrites a *url.Error to name the host instead of the whole
+// URL. net/http and net/url put the URL they were given into these errors, and
+// the tunnel URL carries a session-scoped token that must stay out of the log.
+func sanitizeURLError(err error) error {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return err
+	}
+	return fmt.Errorf("%s %s: %w", urlErr.Op, ServerHostFromURL(urlErr.URL), urlErr.Err)
 }
 
 // RegisterTunnel atomically checks for an existing tunnel and registers a new one.
@@ -267,7 +283,7 @@ func buildHealthResponseBody(status, errMsg string) string {
 
 // connect establishes WebSocket connection and creates smux session.
 func (tc *TunnelClient) connect() error {
-	log.Info().Msgf("Connecting to tunnel server at %s...", TunnelServerHost(tc.serverURL))
+	log.Info().Msgf("Connecting to tunnel server at %s...", ServerHostFromURL(tc.serverURL))
 
 	dialer := websocket.Dialer{
 		TLSClientConfig: &tls.Config{
@@ -279,7 +295,7 @@ func (tc *TunnelClient) connect() error {
 	// Server URL is provided by the authenticated Alpacon console which the agent trusts.
 	conn, _, err := dialer.Dial(tc.serverURL, tc.requestHeader) // lgtm[go/request-forgery]
 	if err != nil {
-		return fmt.Errorf("failed to connect to tunnel server: %w", err)
+		return fmt.Errorf("failed to connect to tunnel server: %w", sanitizeURLError(err))
 	}
 
 	tc.wsConn = conn

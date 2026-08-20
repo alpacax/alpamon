@@ -3,8 +3,10 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -77,7 +79,7 @@ func TestIsValidSessionID(t *testing.T) {
 	}
 }
 
-func TestTunnelServerHost(t *testing.T) {
+func TestServerHostFromURL(t *testing.T) {
 	tests := []struct {
 		name   string
 		rawURL string
@@ -91,9 +93,25 @@ func TestTunnelServerHost(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, TunnelServerHost(tc.rawURL))
+			assert.Equal(t, tc.want, ServerHostFromURL(tc.rawURL))
 		})
 	}
+}
+
+func TestSanitizeURLError(t *testing.T) {
+	t.Run("replaces the URL with its host", func(t *testing.T) {
+		inner := errors.New("dial tcp: connection refused")
+		err := sanitizeURLError(&url.Error{Op: "parse", URL: "wss://alpacon.io/ws/tunnels/abc123secret/", Err: inner})
+
+		assert.NotContains(t, err.Error(), "abc123secret")
+		assert.Contains(t, err.Error(), "alpacon.io")
+		assert.ErrorIs(t, err, inner)
+	})
+
+	t.Run("passes other errors through", func(t *testing.T) {
+		inner := errors.New("websocket: bad handshake")
+		assert.Equal(t, inner, sanitizeURLError(inner))
+	})
 }
 
 func TestGetHTTPStatusForHealth(t *testing.T) {
