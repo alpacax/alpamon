@@ -18,9 +18,23 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/go-playground/validator/v10"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// validationFields names the struct fields a ValidateStruct error flags, so a
+// table row can pin exactly which fields failed instead of accepting any error.
+func validationFields(t *testing.T, err error) []string {
+	t.Helper()
+	var verrs validator.ValidationErrors
+	require.ErrorAs(t, err, &verrs)
+	fields := make([]string, 0, len(verrs))
+	for _, verr := range verrs {
+		fields = append(fields, verr.Field())
+	}
+	return fields
+}
 
 // MockGroupService implements services.GroupService for testing
 type MockGroupService struct {
@@ -52,7 +66,7 @@ func TestUserHandler_Execute(t *testing.T) {
 		setupMock    func(*common.MockCommandExecutor)
 		groupService *MockGroupService
 		wantCode     int
-		wantErr      bool
+		wantErrMsg   string
 	}{
 		{
 			name: "adduser success debian",
@@ -72,7 +86,6 @@ func TestUserHandler_Execute(t *testing.T) {
 			},
 			groupService: &MockGroupService{},
 			wantCode:     0,
-			wantErr:      false,
 		},
 		{
 			name: "deluser success",
@@ -86,7 +99,6 @@ func TestUserHandler_Execute(t *testing.T) {
 			},
 			groupService: &MockGroupService{},
 			wantCode:     0,
-			wantErr:      false,
 		},
 		{
 			name: "moduser success",
@@ -102,7 +114,6 @@ func TestUserHandler_Execute(t *testing.T) {
 			},
 			groupService: &MockGroupService{},
 			wantCode:     0,
-			wantErr:      false,
 		},
 		{
 			name:         "unknown command",
@@ -110,7 +121,7 @@ func TestUserHandler_Execute(t *testing.T) {
 			args:         &common.CommandArgs{},
 			groupService: &MockGroupService{},
 			wantCode:     1,
-			wantErr:      true,
+			wantErrMsg:   "unknown user command: unknownuser",
 		},
 		{
 			name: "adduser missing username",
@@ -121,7 +132,6 @@ func TestUserHandler_Execute(t *testing.T) {
 			},
 			groupService: &MockGroupService{},
 			wantCode:     1,
-			wantErr:      false,
 		},
 		{
 			name: "adduser failure",
@@ -140,7 +150,7 @@ func TestUserHandler_Execute(t *testing.T) {
 			},
 			groupService: &MockGroupService{},
 			wantCode:     1,
-			wantErr:      true, // error is returned as part of output, not actual go error
+			wantErrMsg:   "user add error",
 		},
 	}
 
@@ -163,13 +173,13 @@ func TestUserHandler_Execute(t *testing.T) {
 
 			exitCode, output, err := handler.Execute(ctx, tt.cmd, tt.args)
 
-			if tt.wantErr {
-				assert.Error(t, err)
+			if tt.wantErrMsg != "" {
+				assert.EqualError(t, err, tt.wantErrMsg)
 			} else {
 				assert.NoError(t, err)
 			}
 			assert.Equal(t, tt.wantCode, exitCode)
-			if exitCode == 0 && !tt.wantErr {
+			if exitCode == 0 && tt.wantErrMsg == "" {
 				assert.NotEmpty(t, output, "a successful command must carry output")
 			}
 		})
@@ -423,10 +433,14 @@ func TestUserHandler_Validate(t *testing.T) {
 	handler := newTestUserHandler(common.NewMockCommandExecutor(t), &MockGroupService{})
 
 	tests := []struct {
-		name    string
-		cmd     string
-		args    *common.CommandArgs
-		wantErr bool
+		name string
+		cmd  string
+		args *common.CommandArgs
+		// wantErrMsg pins a non-validator error to its exact message;
+		// wantErrFields pins a validator error to the exact set of fields it
+		// must flag. Both empty means the args must validate.
+		wantErrMsg    string
+		wantErrFields []string
 	}{
 		{
 			name: "adduser valid",
@@ -440,7 +454,6 @@ func TestUserHandler_Validate(t *testing.T) {
 				Shell:         "/bin/bash",
 				Groupname:     "testgroup",
 			},
-			wantErr: false,
 		},
 		{
 			name: "adduser missing required fields",
@@ -451,7 +464,7 @@ func TestUserHandler_Validate(t *testing.T) {
 				// are required_unless and also missing. Comment/Groupname are
 				// required unconditionally. Shell is defaulted by the helper.
 			},
-			wantErr: true,
+			wantErrFields: []string{"UID", "GID", "Comment", "HomeDirectory", "Shell", "Groupname"},
 		},
 		{
 			name: "adduser uid-less service account valid",
@@ -464,7 +477,6 @@ func TestUserHandler_Validate(t *testing.T) {
 				IsServiceAccount: true,
 				// UID/GID/HomeDirectory intentionally omitted (OS auto-assign)
 			},
-			wantErr: false,
 		},
 		{
 			name: "adduser IAM User path must still require uid, gid and home",
@@ -477,7 +489,7 @@ func TestUserHandler_Validate(t *testing.T) {
 				// IsServiceAccount=false (default)
 				// UID/GID/HomeDirectory missing: must fail
 			},
-			wantErr: true,
+			wantErrFields: []string{"UID", "GID", "HomeDirectory"},
 		},
 		{
 			name: "adduser IAM User with uid=0 must fail (cannot silently auto-assign)",
@@ -492,7 +504,7 @@ func TestUserHandler_Validate(t *testing.T) {
 				Groupname:     "alpacon",
 				// IsServiceAccount=false: uid=0 must be rejected
 			},
-			wantErr: true,
+			wantErrFields: []string{"UID"},
 		},
 		{
 			name: "deluser valid",
@@ -500,7 +512,6 @@ func TestUserHandler_Validate(t *testing.T) {
 			args: &common.CommandArgs{
 				Username: "testuser",
 			},
-			wantErr: false,
 		},
 		{
 			name: "moduser valid",
@@ -510,22 +521,24 @@ func TestUserHandler_Validate(t *testing.T) {
 				Groupnames: []string{"sudo"},
 				Comment:    "Updated",
 			},
-			wantErr: false,
 		},
 		{
-			name:    "unknown command",
-			cmd:     "unknown",
-			args:    &common.CommandArgs{},
-			wantErr: true,
+			name:       "unknown command",
+			cmd:        "unknown",
+			args:       &common.CommandArgs{},
+			wantErrMsg: "unknown user command: unknown",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := handler.Validate(tt.cmd, tt.args)
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
+			switch {
+			case tt.wantErrMsg != "":
+				assert.EqualError(t, err, tt.wantErrMsg)
+			case len(tt.wantErrFields) > 0:
+				assert.ElementsMatch(t, tt.wantErrFields, validationFields(t, err))
+			default:
 				assert.NoError(t, err)
 			}
 		})
