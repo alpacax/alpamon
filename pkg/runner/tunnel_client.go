@@ -87,7 +87,7 @@ type TunnelClient struct {
 	codeServerMgr *CodeServerManager // for editor type
 	daemonMu      sync.Mutex         // serializes daemon start against stop
 	daemonCmd     *exec.Cmd
-	daemonSocket  string        // UDS path, written once before any stream reads it
+	daemonSocket  string        // UDS path, written before any stream reads it
 	streamSem     chan struct{} // per-session stream concurrency limiter
 	closeOnce     sync.Once     // ensures Close is executed only once
 }

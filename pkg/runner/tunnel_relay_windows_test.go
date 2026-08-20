@@ -18,7 +18,7 @@ func TestWindowsTunnelRelay(t *testing.T) {
 		assert.Empty(t, tc.daemonSocket)
 	})
 
-	t.Run("dialTunnelTarget rejects non-localhost", func(t *testing.T) {
+	t.Run("dialTunnelTarget rejects a non-loopback target", func(t *testing.T) {
 		tc := &TunnelClient{sessionID: "session123"}
 
 		conn, err := tc.dialTunnelTarget("10.0.0.1:80")

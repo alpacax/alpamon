@@ -84,9 +84,10 @@ func dialDirect(targetAddr string) (net.Conn, error) {
 	return conn, nil
 }
 
-// RunTunnelDaemon serves the tunnel-daemon subcommand, relaying Unix domain
-// socket connections to local TCP services. The parent demotes it to nobody on
-// Linux; on macOS it inherits the parent's credentials.
+// RunTunnelDaemon serves the tunnel-daemon subcommand, which is registered on
+// Unix only, relaying Unix domain socket connections to local TCP services. The
+// parent demotes it to nobody on Linux; on macOS it inherits the parent's
+// credentials.
 func RunTunnelDaemon(socketPath string) {
 	// Remove stale socket file if it exists (safe against symlink attacks)
 	if err := safeRemoveSocket(socketPath); err != nil {
@@ -155,7 +156,6 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer func() { _ = conn.Close() }()
 
-	// Read target address from first line
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadString('\n')
 	if err != nil {
