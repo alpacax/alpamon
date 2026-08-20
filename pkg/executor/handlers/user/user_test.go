@@ -462,7 +462,8 @@ func TestUserHandler_Validate(t *testing.T) {
 				Username: "testuser",
 				// IsServiceAccount=false (default), so UID/GID/HomeDirectory
 				// are required_unless and also missing. Comment/Groupname are
-				// required unconditionally. Shell is defaulted by the helper.
+				// required unconditionally. Shell carries `validate:"required"`
+				// and is deliberately not defaulted (types.go:52), so it fails too.
 			},
 			wantErrFields: []string{"UID", "GID", "Comment", "HomeDirectory", "Shell", "Groupname"},
 		},
