@@ -467,7 +467,7 @@ func TestUserHandler_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "adduser IAM User path must still require uid/gid/home",
+			name: "adduser IAM User path must still require uid, gid and home",
 			cmd:  "adduser",
 			args: &common.CommandArgs{
 				Username:  "john",
