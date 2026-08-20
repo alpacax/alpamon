@@ -400,7 +400,7 @@ implemented.
 | Realtime metrics | CPU, memory, disk, network (gopsutil) |
 | Self-update | `MoveFileEx` for locked-binary replace; reboot-time cleanup of `.old` |
 | Service lifecycle | Windows SCM integration with Stop / Shutdown / recovery actions |
-| Tunnel (cli / web client types) | In-process relay dialing `127.0.0.1:<port>` directly—no daemon subprocess; see `pkg/runner/tunnel_relay_windows.go` |
+| Tunnel (cli / web client types) | In-process relay dialing `127.0.0.1:<port>` directly—no daemon subprocess; see `pkg/runner/tunnel_relay_windows.go`. The target is IPv4 loopback, so a service listening on `::1` only is refused. The relay dials from the agent process, so a loopback service that authenticates by process token sees `LocalSystem`; see [Permissions and identity](#permissions-and-identity) |
 
 ### Unsupported on Windows
 
