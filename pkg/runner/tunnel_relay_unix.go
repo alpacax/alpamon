@@ -12,6 +12,16 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const (
+	// Bounds on the wait for the freshly spawned daemon to accept.
+	daemonReadyTimeout      = 5 * time.Second
+	daemonReadyPollInterval = 100 * time.Millisecond
+	daemonReadyDialTimeout  = time.Second
+
+	// How long the daemon gets to exit after SIGTERM before it is killed.
+	daemonStopGrace = 10 * time.Second
+)
+
 // startTunnelRelay spawns the per-session tunnel daemon (demoted to nobody on
 // Linux, current user on macOS), which relays every stream over UDS.
 // daemonMu serializes it against stopTunnelRelay: a concurrent closetunnel
@@ -60,13 +70,13 @@ func (tc *TunnelClient) startTunnelRelay() error {
 // soon as the session context is canceled: daemonMu is held for the whole wait,
 // so a blocking poll would stall Close for the full timeout.
 func (tc *TunnelClient) waitForDaemonReady() error {
-	deadline := time.After(5 * time.Second)
-	ticker := time.NewTicker(100 * time.Millisecond)
+	deadline := time.After(daemonReadyTimeout)
+	ticker := time.NewTicker(daemonReadyPollInterval)
 	defer ticker.Stop()
 
 	// DialContext, not net.Dial: a plain dial on a socket whose accept queue is
 	// full blocks, and the select below cannot run until it returns.
-	dialer := &net.Dialer{Timeout: time.Second}
+	dialer := &net.Dialer{Timeout: daemonReadyDialTimeout}
 
 	for {
 		conn, err := dialer.DialContext(tc.ctx, "unix", tc.daemonSocket)
@@ -126,7 +136,7 @@ func (tc *TunnelClient) stopTunnelRelay() {
 	select {
 	case <-done:
 		log.Info().Msg("Tunnel daemon stopped.")
-	case <-time.After(10 * time.Second):
+	case <-time.After(daemonStopGrace):
 		_ = cmd.Process.Kill()
 		log.Warn().Msg("Tunnel daemon killed after timeout.")
 	}

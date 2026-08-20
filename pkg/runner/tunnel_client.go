@@ -402,7 +402,7 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 		return
 	}
 
-	targetAddr := fmt.Sprintf("127.0.0.1:%d", targetPort)
+	targetAddr := net.JoinHostPort(loopbackHost, strconv.Itoa(targetPort))
 
 	targetConn, err := tc.dialTunnelTarget(targetAddr)
 	if err != nil {

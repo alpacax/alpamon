@@ -159,7 +159,7 @@ func (c *CodeServerConfig) ToArgs(port int, userDataDir string) []string {
 	return []string{
 		"--config", filepath.Join(userDataDir, "config.yaml"),
 		"--user-data-dir", userDataDir,
-		"--bind-addr", fmt.Sprintf("127.0.0.1:%d", port),
+		"--bind-addr", net.JoinHostPort(loopbackHost, strconv.Itoa(port)),
 		"--idle-timeout-seconds", fmt.Sprintf("%d", int(c.IdleTimeout.Seconds())),
 	}
 }
@@ -425,7 +425,7 @@ func (m *CodeServerManager) IsRunning() bool {
 // waitForReady waits for code-server to start listening on its port.
 func (m *CodeServerManager) waitForReady() error {
 	cfg := GetCodeServerConfig()
-	addr := fmt.Sprintf("127.0.0.1:%d", m.port)
+	addr := net.JoinHostPort(loopbackHost, strconv.Itoa(m.port))
 	deadline := time.Now().Add(cfg.StartupTimeout)
 
 	for time.Now().Before(deadline) {
@@ -532,7 +532,7 @@ func downloadInstallScript(url string) ([]byte, error) {
 
 // findAvailablePort finds an available port by letting the OS assign one.
 func findAvailablePort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
 	if err != nil {
 		return 0, fmt.Errorf("failed to find available port: %w", err)
 	}

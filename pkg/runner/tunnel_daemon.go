@@ -57,6 +57,9 @@ func safeRemoveSocket(path string) error {
 const (
 	tunnelDialTimeout     = 10 * time.Second
 	tunnelKeepAlivePeriod = 30 * time.Second
+
+	// The only host a relay target or a code-server bind may name.
+	loopbackHost = "127.0.0.1"
 )
 
 // dialDirect dials targetAddr over TCP with relay tuning applied, rejecting
