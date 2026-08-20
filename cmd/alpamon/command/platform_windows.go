@@ -7,7 +7,12 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/rs/zerolog/log"
+	"github.com/spf13/cobra"
 )
+
+// platformCommands returns no subcommands: tunnel-daemon is Unix-only, since
+// the Windows relay dials in process and never spawns a daemon.
+func platformCommands() []*cobra.Command { return nil }
 
 func setupSignalHandler(ctxManager *agent.ContextManager) {
 	sigChan := make(chan os.Signal, 1)

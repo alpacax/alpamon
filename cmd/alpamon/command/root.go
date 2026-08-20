@@ -13,7 +13,6 @@ import (
 	migratecmd "github.com/alpacax/alpamon/v2/cmd/alpamon/command/migrate"
 	"github.com/alpacax/alpamon/v2/cmd/alpamon/command/register"
 	"github.com/alpacax/alpamon/v2/cmd/alpamon/command/setup"
-	"github.com/alpacax/alpamon/v2/cmd/alpamon/command/tunnel"
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/collector"
@@ -74,7 +73,8 @@ control plane and https://github.com/alpacax/alpacon-cli for the CLI.`,
 
 func init() {
 	setup.SetConfigPaths(name)
-	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, tunnel.TunnelDaemonCmd, register.RegisterCmd, register.UnregisterCmd, migratecmd.Cmd)
+	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, register.RegisterCmd, register.UnregisterCmd, migratecmd.Cmd)
+	RootCmd.AddCommand(platformCommands()...)
 	// Emit just the version string (no "alpamon version ..." prefix) so
 	// shell one-liners like `alpamon --version` are easy to parse.
 	RootCmd.SetVersionTemplate("{{.Version}}\n")
