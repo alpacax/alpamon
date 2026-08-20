@@ -12,7 +12,9 @@ import (
 
 // platformCommands returns no subcommands: tunnel-daemon is Unix-only, since
 // the Windows relay dials in process and never spawns a daemon.
-func platformCommands() []*cobra.Command { return nil }
+func platformCommands() []*cobra.Command {
+	return nil
+}
 
 func setupSignalHandler(ctxManager *agent.ContextManager) {
 	sigChan := make(chan os.Signal, 1)
