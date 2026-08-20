@@ -616,7 +616,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 
 			// A group-add failure reaches the operator through the output, not err.
 			assert.NoError(t, err)
-			assert.Equal(t, 0, exitCode, "a group-add failure must not change the exit code")
+			assert.Equal(t, 0, exitCode, "the create path exits 0 whether or not the group-add step fails")
 			assert.Equal(t, tt.wantOutput, output)
 			assert.True(t, tt.groupService.AddUserToGroupsCalled, "AddUserToGroups must run when the args carry additional groups")
 		})
