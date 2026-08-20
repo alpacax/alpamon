@@ -79,7 +79,8 @@ func TestUserHandler_Execute(t *testing.T) {
 				HomeDirectory: "/home/testuser",
 				Shell:         "/bin/bash",
 				Groupname:     "testgroup",
-				Groups:        []uint64{1002, 1003},
+				// No additional Groups: the group-add path is covered by
+				// TestUserHandler_AddUserWithGroups, which pins its output.
 			},
 			setupMock: func(mock *common.MockCommandExecutor) {
 				mock.SetResult(fmt.Sprintf("/usr/sbin/adduser --home /home/testuser --shell /bin/bash --uid %d --gid %d --gecos Test User --disabled-password testuser", 1001, 1001), 0, "User created", nil)
