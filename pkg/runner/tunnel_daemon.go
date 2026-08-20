@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,10 +17,28 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// validateTargetAddr ensures the target address is localhost only for security.
-// This prevents the tunnel from being used to connect to arbitrary external hosts.
+// Shared by the Unix daemon and the Windows direct-dial path.
+const (
+	tunnelDialTimeout     = 10 * time.Second
+	tunnelKeepAlivePeriod = 30 * time.Second
+
+	// The only host a relay target or a code-server bind may name.
+	loopbackHost = "127.0.0.1"
+)
+
+// validateTargetAddr ensures the target address is a literal loopback endpoint,
+// so the tunnel cannot be used to reach arbitrary hosts. This is the only
+// boundary on the Windows path, where the relay dials from the agent process
+// itself, so it parses the host rather than matching a prefix and rejects names
+// outright: a name would hand the decision to whatever the resolver says.
+// Every caller formats the address from a port, so no name is ever passed.
 func validateTargetAddr(targetAddr string) bool {
-	return strings.HasPrefix(targetAddr, "127.0.0.1:") || strings.HasPrefix(targetAddr, "localhost:")
+	host, _, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		return false
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
 
 // safeRemoveSocket removes a Unix domain socket file after verifying it is not a symlink.
@@ -43,9 +62,32 @@ func safeRemoveSocket(path string) error {
 	return os.Remove(path)
 }
 
-// RunTunnelDaemon runs the tunnel daemon subprocess.
-// It listens on a Unix domain socket and relays connections to local TCP services.
-// This function is called by the tunnel-daemon subcommand and runs with demoted user credentials.
+// dialDirect dials targetAddr over TCP with relay tuning applied, rejecting
+// anything that is not a loopback address. Used by the Unix daemon and as the
+// whole relay path on Windows.
+func dialDirect(targetAddr string) (net.Conn, error) {
+	if !validateTargetAddr(targetAddr) {
+		return nil, fmt.Errorf("invalid target address %s: must be a loopback address", targetAddr)
+	}
+
+	conn, err := net.DialTimeout("tcp", targetAddr, tunnelDialTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(tunnelKeepAlivePeriod)
+	}
+
+	return conn, nil
+}
+
+// RunTunnelDaemon serves the tunnel-daemon subcommand, which is registered on
+// Unix only, relaying Unix domain socket connections to local TCP services. The
+// parent demotes it to nobody on Linux; on macOS it inherits the parent's
+// credentials.
 func RunTunnelDaemon(socketPath string) {
 	// Remove stale socket file if it exists (safe against symlink attacks)
 	if err := safeRemoveSocket(socketPath); err != nil {
@@ -114,7 +156,6 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer func() { _ = conn.Close() }()
 
-	// Read target address from first line
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -127,28 +168,22 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 
 	targetAddr := strings.TrimSpace(line)
 
-	// Security: Only allow connections to localhost
+	// Redundant with dialDirect, kept so a rejected target is visible at error
+	// level rather than only in dialDirect's debug log.
 	if !validateTargetAddr(targetAddr) {
-		log.Error().Str("targetAddr", targetAddr).Msg("Invalid target address: must be localhost (127.0.0.1 or localhost).")
+		log.Error().Str("targetAddr", targetAddr).Msg("Invalid target address: must be a loopback address.")
 		return
 	}
 
-	tcpConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+	tcpConn, err := dialDirect(targetAddr)
 	if err != nil {
 		log.Debug().Err(err).Msgf("Tunnel daemon failed to connect to %s.", targetAddr)
 		return
 	}
 	defer func() { _ = tcpConn.Close() }()
 
-	if tc, ok := tcpConn.(*net.TCPConn); ok {
-		_ = tc.SetNoDelay(true)
-		_ = tc.SetKeepAlive(true)
-		_ = tc.SetKeepAlivePeriod(30 * time.Second)
-	}
-
 	log.Debug().Msgf("Tunnel daemon connected to %s.", targetAddr)
 
-	// Bidirectional relay between UDS connection and TCP connection
 	errChan := make(chan error, 2)
 
 	// UDS -> TCP

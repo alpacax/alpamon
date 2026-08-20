@@ -1,11 +1,33 @@
 package tunnel
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestEditorTunnelSupported(t *testing.T) {
+	assert.False(t, editorTunnelSupported("windows"))
+	assert.True(t, editorTunnelSupported("linux"))
+	assert.True(t, editorTunnelSupported("darwin"))
+}
+
+func TestTunnelHandler_ValidateClientTypeRequirements(t *testing.T) {
+	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+	data := OpenTunnelData{SessionID: "s1", URL: "wss://tunnel.example.com", ClientType: runner.ClientTypeEditor, Username: "u"}
+
+	if runtime.GOOS == "windows" {
+		err := h.validateClientTypeRequirements(runner.ClientTypeEditor, data)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "editor tunnel is not supported on "+runtime.GOOS)
+	} else {
+		assert.NoError(t, h.validateClientTypeRequirements(runner.ClientTypeEditor, data))
+	}
+}
 
 func TestTunnelHandler_Validate(t *testing.T) {
 	handler := NewTunnelHandler(common.NewMockCommandExecutor(t))
@@ -48,7 +70,7 @@ func TestTunnelHandler_Validate(t *testing.T) {
 				Username:   "testuser",
 				Groupname:  "testgroup",
 			},
-			wantErr: false,
+			wantErr: runtime.GOOS == "windows",
 		},
 		{
 			name: "opentunnel editor valid without groupname",
@@ -59,7 +81,7 @@ func TestTunnelHandler_Validate(t *testing.T) {
 				ClientType: runner.ClientTypeEditor,
 				Username:   "testuser",
 			},
-			wantErr: false,
+			wantErr: runtime.GOOS == "windows",
 		},
 		{
 			name: "opentunnel cli missing target port",
