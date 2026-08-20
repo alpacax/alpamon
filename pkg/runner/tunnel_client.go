@@ -6,12 +6,10 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -136,32 +134,6 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 	}
 	tc.targetPort.Store(int32(targetPort))
 	return tc
-}
-
-// unknownServerHost stands in when a URL has no host to report, either because
-// it does not parse or because it carries no authority.
-const unknownServerHost = "invalid"
-
-// ServerHostFromURL returns the host of a session URL. Tunnel and FTP URLs carry
-// a session-scoped token in the path, and agent logs are shipped off-host, so the
-// host is the only part of such a URL that may be logged.
-func ServerHostFromURL(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.Host == "" {
-		return unknownServerHost
-	}
-	return parsed.Host
-}
-
-// sanitizeURLError rewrites a *url.Error to name the host instead of the whole
-// URL. net/http and net/url put the URL they were given into these errors, and
-// the tunnel URL carries a session-scoped token that must stay out of the log.
-func sanitizeURLError(err error) error {
-	var urlErr *url.Error
-	if !errors.As(err, &urlErr) {
-		return err
-	}
-	return fmt.Errorf("%s %s: %w", urlErr.Op, ServerHostFromURL(urlErr.URL), urlErr.Err)
 }
 
 // RegisterTunnel atomically checks for an existing tunnel and registers a new one.

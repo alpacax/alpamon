@@ -17,6 +17,15 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Shared by the Unix daemon and the Windows direct-dial path.
+const (
+	tunnelDialTimeout     = 10 * time.Second
+	tunnelKeepAlivePeriod = 30 * time.Second
+
+	// The only host a relay target or a code-server bind may name.
+	loopbackHost = "127.0.0.1"
+)
+
 // validateTargetAddr ensures the target address is a literal loopback endpoint,
 // so the tunnel cannot be used to reach arbitrary hosts. This is the only
 // boundary on the Windows path, where the relay dials from the agent process
@@ -52,15 +61,6 @@ func safeRemoveSocket(path string) error {
 
 	return os.Remove(path)
 }
-
-// Shared by the Unix daemon and the Windows direct-dial path.
-const (
-	tunnelDialTimeout     = 10 * time.Second
-	tunnelKeepAlivePeriod = 30 * time.Second
-
-	// The only host a relay target or a code-server bind may name.
-	loopbackHost = "127.0.0.1"
-)
 
 // dialDirect dials targetAddr over TCP with relay tuning applied, rejecting
 // anything that is not a loopback address. Used by the Unix daemon and as the
