@@ -280,7 +280,7 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 				assert.Contains(t, joined, want, "flag %q must be present", want)
 			}
 			for _, forbid := range tt.forbidFlags {
-				assert.NotContains(t, target.Args, forbid, "args: %s", joined)
+				assert.NotContains(t, joined, forbid, "args: %s", joined)
 			}
 
 			// Service account must NOT use the gid-based groupadd path
