@@ -3,7 +3,6 @@ package runner
 import (
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -293,10 +292,6 @@ func TestLookupPID_Missing(t *testing.T) {
 func TestAddPIDCommandMapping_OverwritesStaleEntry(t *testing.T) {
 	am := newTestAuthManager()
 	am.AddPIDCommandMapping(4001, "old-cmd", "alice")
-	// Force a distinguishable time gap without sleeping.
-	if entry, ok := am.LookupPID(4001); ok {
-		entry.StartedAt = time.Now().Add(-time.Hour)
-	}
 	am.AddPIDCommandMapping(4001, "new-cmd", "bob")
 
 	entry, _ := am.LookupPID(4001)
