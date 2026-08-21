@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type errReader struct {
@@ -44,84 +47,72 @@ func (e *errReader) Close() error {
 	return e.closeErr
 }
 
+// requireMultipartReader parses ct as a multipart/form-data content type and
+// returns a reader over body, failing the test when either step does not hold.
+func requireMultipartReader(t *testing.T, body io.Reader, ct string) *multipart.Reader {
+	t.Helper()
+	mt, params, err := mime.ParseMediaType(ct)
+	require.NoError(t, err, "ct=%q", ct)
+	require.Equal(t, "multipart/form-data", mt)
+	return multipart.NewReader(body, params["boundary"])
+}
+
 func TestBuildMultipartStream_Roundtrip(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xAB}, 1<<20)
 	src := io.NopCloser(bytes.NewReader(payload))
 	body, ct, _, err := buildMultipartStream(src, "f.bin", false, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = body.Close() }()
-	mt, params, err := mime.ParseMediaType(ct)
-	if err != nil || mt != "multipart/form-data" {
-		t.Fatalf("ct=%q err=%v", ct, err)
-	}
-	mr := multipart.NewReader(body, params["boundary"])
+
+	mr := requireMultipartReader(t, body, ct)
 	part, err := mr.NextPart()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if part.FormName() != "content" || part.FileName() != "f.bin" {
-		t.Fatalf("name=%q file=%q", part.FormName(), part.FileName())
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "content", part.FormName())
+	assert.Equal(t, "f.bin", part.FileName())
+
 	got := sha256.New()
-	if _, err := io.Copy(got, part); err != nil {
-		t.Fatal(err)
-	}
+	_, err = io.Copy(got, part)
+	require.NoError(t, err)
 	want := sha256.Sum256(payload)
-	if !bytes.Equal(got.Sum(nil), want[:]) {
-		t.Fatal("payload digest mismatch")
-	}
-	if _, err := mr.NextPart(); err != io.EOF {
-		t.Fatalf("expected EOF, got %v", err)
-	}
+	assert.Equal(t, want[:], got.Sum(nil), "payload digest mismatch")
+
+	_, err = mr.NextPart()
+	assert.ErrorIs(t, err, io.EOF)
 }
 
 func TestBuildMultipartStream_Recursive(t *testing.T) {
 	src := io.NopCloser(strings.NewReader("zip-data"))
 	body, ct, _, err := buildMultipartStream(src, "tree.zip", true, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = body.Close() }()
-	_, params, _ := mime.ParseMediaType(ct)
-	mr := multipart.NewReader(body, params["boundary"])
+
+	mr := requireMultipartReader(t, body, ct)
 	sawName := false
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
 			break
 		}
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 		if part.FormName() == "name" {
 			data, _ := io.ReadAll(part)
-			if string(data) != "tree.zip" {
-				t.Fatalf("name=%q", data)
-			}
+			assert.Equal(t, "tree.zip", string(data))
 			sawName = true
 		}
 	}
-	if !sawName {
-		t.Fatal("expected name field for recursive upload")
-	}
+	assert.True(t, sawName, "expected name field for recursive upload")
 }
 
 func TestBuildMultipartStream_SrcErrorPropagates(t *testing.T) {
 	er := &errReader{r: bytes.NewReader(bytes.Repeat([]byte{1}, 1024)), failAt: 256}
 	body, _, _, err := buildMultipartStream(er, "f", false, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+
 	_, err = io.Copy(io.Discard, body)
-	if err == nil || !strings.Contains(err.Error(), "synthetic") {
-		t.Fatalf("expected synthetic error, got %v", err)
-	}
+	assert.ErrorContains(t, err, "synthetic")
+
 	_ = body.Close()
-	if er.closeCnt == 0 {
-		t.Fatal("src.Close() was not called")
-	}
+	assert.NotZero(t, er.closeCnt, "src.Close() was not called")
 }
 
 // TestBuildMultipartStream_SrcCloseErrorPropagates exercises the demoted-cat
@@ -148,13 +139,11 @@ func TestBuildMultipartStream_SrcCloseErrorPropagates(t *testing.T) {
 				closeErr: errors.New("synthetic-close-fail"),
 			}
 			body, _, _, err := buildMultipartStream(er, "f.bin", false, tc.hint)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
+
 			_, err = io.Copy(io.Discard, body)
-			if err == nil || !strings.Contains(err.Error(), "synthetic-close-fail") {
-				t.Fatalf("expected src.Close error to propagate, got %v", err)
-			}
+			assert.ErrorContains(t, err, "synthetic-close-fail", "expected src.Close error to propagate")
+
 			_ = body.Close()
 		})
 	}
@@ -166,9 +155,7 @@ func TestBuildMultipartStream_EarlyCloseNoLeak(t *testing.T) {
 	// pool puts and a pipe close remain), so the signal proves it exits.
 	er := &errReader{r: bytes.NewReader(bytes.Repeat([]byte{1}, 4<<20)), failAt: 1 << 30, closed: make(chan struct{})}
 	body, _, _, err := buildMultipartStream(er, "f", false, -1)
-	if err != nil {
-		t.Fatalf("buildMultipartStream: %v", err)
-	}
+	require.NoError(t, err, "buildMultipartStream")
 	buf := make([]byte, 64)
 	_, _ = body.Read(buf)
 	_ = body.Close()
@@ -186,34 +173,23 @@ func TestBuildMultipartStream_SmallPath_Roundtrip(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xCD}, 512<<10) // 512 KiB — well below multipartPipeBufSize (4 MiB)
 	src := io.NopCloser(bytes.NewReader(payload))
 	body, ct, _, err := buildMultipartStream(src, "small.bin", false, int64(len(payload)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = body.Close() }()
 
-	mt, params, err := mime.ParseMediaType(ct)
-	if err != nil || mt != "multipart/form-data" {
-		t.Fatalf("ct=%q err=%v", ct, err)
-	}
-	mr := multipart.NewReader(body, params["boundary"])
+	mr := requireMultipartReader(t, body, ct)
 	part, err := mr.NextPart()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if part.FormName() != multipartFieldContent || part.FileName() != "small.bin" {
-		t.Fatalf("name=%q file=%q", part.FormName(), part.FileName())
-	}
+	require.NoError(t, err)
+	assert.Equal(t, multipartFieldContent, part.FormName())
+	assert.Equal(t, "small.bin", part.FileName())
+
 	got := sha256.New()
-	if _, err := io.Copy(got, part); err != nil {
-		t.Fatal(err)
-	}
+	_, err = io.Copy(got, part)
+	require.NoError(t, err)
 	want := sha256.Sum256(payload)
-	if !bytes.Equal(got.Sum(nil), want[:]) {
-		t.Fatal("payload digest mismatch")
-	}
-	if _, err := mr.NextPart(); err != io.EOF {
-		t.Fatalf("expected EOF, got %v", err)
-	}
+	assert.Equal(t, want[:], got.Sum(nil), "payload digest mismatch")
+
+	_, err = mr.NextPart()
+	assert.ErrorIs(t, err, io.EOF)
 }
 
 // TestBuildMultipartStream_BufferedPath_Roundtrip verifies the buffered path
@@ -233,47 +209,30 @@ func TestBuildMultipartStream_BufferedPath_Roundtrip(t *testing.T) {
 			payload := bytes.Repeat([]byte{0xCD}, tc.size)
 			er := &errReader{r: bytes.NewReader(payload), failAt: 1 << 30}
 			body, ct, contentLength, err := buildMultipartStream(er, "f.bin", tc.recursive, int64(tc.size))
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 			defer func() { _ = body.Close() }()
-			if contentLength <= 0 {
-				t.Fatalf("expected positive contentLength, got %d", contentLength)
-			}
-			if er.closeCnt == 0 {
-				t.Fatal("expected src.Close to be called synchronously")
-			}
-			mt, params, err := mime.ParseMediaType(ct)
-			if err != nil || mt != "multipart/form-data" {
-				t.Fatalf("ct=%q err=%v", ct, err)
-			}
+
+			assert.Positive(t, contentLength)
+			assert.NotZero(t, er.closeCnt, "expected src.Close to be called synchronously")
+
 			// Drain into a buffer so we can both verify wire size and parse
 			// (boundary is per-call, so a second buildMultipartStream() would
 			// have a different boundary than the ct we captured here).
 			var captured bytes.Buffer
 			n, err := captured.ReadFrom(body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if n != contentLength {
-				t.Fatalf("wire size %d != contentLength %d", n, contentLength)
-			}
-			mr := multipart.NewReader(&captured, params["boundary"])
-			part, err := mr.NextPart()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if part.FormName() != multipartFieldContent || part.FileName() != "f.bin" {
-				t.Fatalf("name=%q file=%q", part.FormName(), part.FileName())
-			}
+			require.NoError(t, err)
+			assert.Equal(t, contentLength, n, "wire size must match contentLength")
+
+			part, err := requireMultipartReader(t, &captured, ct).NextPart()
+			require.NoError(t, err)
+			assert.Equal(t, multipartFieldContent, part.FormName())
+			assert.Equal(t, "f.bin", part.FileName())
+
 			got := sha256.New()
-			if _, err := io.Copy(got, part); err != nil {
-				t.Fatal(err)
-			}
+			_, err = io.Copy(got, part)
+			require.NoError(t, err)
 			want := sha256.Sum256(payload)
-			if !bytes.Equal(got.Sum(nil), want[:]) {
-				t.Fatal("payload digest mismatch")
-			}
+			assert.Equal(t, want[:], got.Sum(nil), "payload digest mismatch")
 		})
 	}
 }
@@ -288,12 +247,7 @@ func TestBuildMultipartStream_BufferedPath_SrcCloseErrorPropagates(t *testing.T)
 		closeErr: errors.New("synthetic-close-fail"),
 	}
 	_, _, _, err := buildMultipartStream(er, "f.bin", false, int64(len("payload")))
-	if err == nil {
-		t.Fatal("expected close error to propagate, got nil")
-	}
-	if !strings.Contains(err.Error(), "synthetic-close-fail") {
-		t.Fatalf("expected synthetic-close-fail, got %v", err)
-	}
+	assert.ErrorContains(t, err, "synthetic-close-fail", "expected close error to propagate")
 }
 
 // TestBuildMultipartStream_SmallPathContentLengthMatchesWire verifies the
@@ -313,20 +267,13 @@ func TestBuildMultipartStream_SmallPathContentLengthMatchesWire(t *testing.T) {
 			payload := bytes.Repeat([]byte{0xEE}, tc.size)
 			src := io.NopCloser(bytes.NewReader(payload))
 			body, _, contentLength, err := buildMultipartStream(src, "f.bin", tc.recursive, int64(tc.size))
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 			defer func() { _ = body.Close() }()
-			if contentLength <= 0 {
-				t.Fatalf("expected positive contentLength, got %d", contentLength)
-			}
+
+			assert.Positive(t, contentLength)
 			n, err := io.Copy(io.Discard, body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if n != contentLength {
-				t.Fatalf("wire size %d != precomputed contentLength %d", n, contentLength)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, contentLength, n, "wire size must match precomputed contentLength")
 		})
 	}
 }
@@ -346,13 +293,9 @@ func TestBuildMultipartStream_LargePathReturnsMinusOne(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			src := io.NopCloser(bytes.NewReader(bytes.Repeat([]byte{1}, 5<<20)))
 			body, _, contentLength, err := buildMultipartStream(src, "f.bin", false, tc.hint)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 			defer func() { _ = body.Close() }()
-			if contentLength != -1 {
-				t.Fatalf("expected contentLength=-1, got %d", contentLength)
-			}
+			assert.Equal(t, int64(-1), contentLength)
 		})
 	}
 }
@@ -363,31 +306,22 @@ func TestBuildMultipartStream_SmallPath_Recursive(t *testing.T) {
 	payload := []byte("small-zip-data")
 	src := io.NopCloser(bytes.NewReader(payload))
 	body, ct, _, err := buildMultipartStream(src, "arch.zip", true, int64(len(payload)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = body.Close() }()
 
-	_, params, _ := mime.ParseMediaType(ct)
-	mr := multipart.NewReader(body, params["boundary"])
+	mr := requireMultipartReader(t, body, ct)
 	sawName := false
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
 			break
 		}
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 		if part.FormName() == multipartFieldName {
 			data, _ := io.ReadAll(part)
-			if string(data) != "arch.zip" {
-				t.Fatalf("name=%q", data)
-			}
+			assert.Equal(t, "arch.zip", string(data))
 			sawName = true
 		}
 	}
-	if !sawName {
-		t.Fatal("expected name field for recursive small upload")
-	}
+	assert.True(t, sawName, "expected name field for recursive small upload")
 }
