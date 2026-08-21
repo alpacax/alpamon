@@ -2,6 +2,7 @@ package updater
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -30,31 +31,22 @@ func createTestArchive(t *testing.T, binaryContent []byte) []byte {
 // and Windows-style "alpamon.exe" archive entries.
 func createTestArchiveNamed(t *testing.T, entryName string, binaryContent []byte) []byte {
 	t.Helper()
-	tmpFile, err := os.CreateTemp("", "test-archive-*.tar.gz")
-	require.NoError(t, err)
-	defer func() {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpFile.Name())
-	}()
-
-	gw := gzip.NewWriter(tmpFile)
+	var archive bytes.Buffer
+	gw := gzip.NewWriter(&archive)
 	tw := tar.NewWriter(gw)
 
-	hdr := &tar.Header{
+	require.NoError(t, tw.WriteHeader(&tar.Header{
 		Name: entryName,
 		Mode: 0755,
 		Size: int64(len(binaryContent)),
-	}
-	require.NoError(t, tw.WriteHeader(hdr))
-	_, err = tw.Write(binaryContent)
+	}))
+	_, err := tw.Write(binaryContent)
 	require.NoError(t, err)
 
-	_ = tw.Close()
-	_ = gw.Close()
-
-	data, err := os.ReadFile(tmpFile.Name())
-	require.NoError(t, err)
-	return data
+	// Both Close calls flush, so a failure here means a truncated archive.
+	require.NoError(t, tw.Close())
+	require.NoError(t, gw.Close())
+	return archive.Bytes()
 }
 
 func sha256Hex(data []byte) string {
@@ -63,13 +55,13 @@ func sha256Hex(data []byte) string {
 }
 
 func TestArchiveFilename(t *testing.T) {
-	expected := fmt.Sprintf("alpamon-1.2.3-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
-	assert.Equal(t, expected, archiveFilename("v1.2.3"))
+	assert.Equal(t, fmt.Sprintf("alpamon-1.2.3-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH), archiveFilename("v1.2.3"))
 }
 
 func TestChecksumURL(t *testing.T) {
-	expected := "https://github.com/alpacax/alpamon/releases/download/v1.2.3/alpamon-1.2.3-checksums.sha256"
-	assert.Equal(t, expected, checksumURL(defaultReleaseBaseURL, "v1.2.3"))
+	assert.Equal(t,
+		"https://github.com/alpacax/alpamon/releases/download/v1.2.3/alpamon-1.2.3-checksums.sha256",
+		checksumURL(defaultReleaseBaseURL, "v1.2.3"))
 }
 
 func TestDownloadFile(t *testing.T) {
@@ -104,6 +96,42 @@ func TestDownloadFile_NotFound(t *testing.T) {
 	assert.ErrorContains(t, err, "404")
 }
 
+func TestDownloadFile_Oversize(t *testing.T) {
+	// Server streams more than maxArchiveSize without Content-Length
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Write maxArchiveSize+1 bytes in chunks to avoid setting Content-Length
+		chunk := make([]byte, 32*1024)
+		remaining := int64(maxArchiveSize) + 1
+		for remaining > 0 {
+			n := min(int64(len(chunk)), remaining)
+			_, _ = w.Write(chunk[:n])
+			remaining -= n
+		}
+	}))
+	defer server.Close()
+
+	destPath := filepath.Join(t.TempDir(), "downloaded")
+	err := downloadFile(context.Background(), server.URL, destPath)
+	assert.ErrorContains(t, err, "too large")
+}
+
+func TestDownloadFile_ContextCancelled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Slow server that never finishes
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	destPath := filepath.Join(t.TempDir(), "downloaded")
+	assert.Error(t, downloadFile(ctx, server.URL, destPath), "expected error for cancelled context")
+}
+
 func TestVerifyChecksum(t *testing.T) {
 	archiveContent := []byte("fake archive content")
 	hash := sha256Hex(archiveContent)
@@ -116,8 +144,7 @@ func TestVerifyChecksum(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tempDir := t.TempDir()
-	archivePath := filepath.Join(tempDir, archiveName)
+	archivePath := filepath.Join(t.TempDir(), archiveName)
 	require.NoError(t, os.WriteFile(archivePath, archiveContent, 0644))
 
 	err := verifyChecksum(context.Background(), archivePath, archiveName, server.URL+"/checksums.sha256")
@@ -133,8 +160,7 @@ func TestVerifyChecksum_Mismatch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tempDir := t.TempDir()
-	archivePath := filepath.Join(tempDir, archiveName)
+	archivePath := filepath.Join(t.TempDir(), archiveName)
 	require.NoError(t, os.WriteFile(archivePath, []byte("different content"), 0644))
 
 	err := verifyChecksum(context.Background(), archivePath, archiveName, server.URL+"/checksums.sha256")
@@ -183,22 +209,14 @@ func TestExtractBinary_WindowsExe(t *testing.T) {
 }
 
 func TestExtractBinary_NotFound(t *testing.T) {
-	// Archive with a different filename
-	tmpFile, err := os.CreateTemp("", "test-archive-*.tar.gz")
-	require.NoError(t, err)
-	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	// Archive whose only entry is not the alpamon binary.
+	archive := createTestArchiveNamed(t, "not-alpamon", []byte("hello"))
 
-	gw := gzip.NewWriter(tmpFile)
-	tw := tar.NewWriter(gw)
-	hdr := &tar.Header{Name: "not-alpamon", Mode: 0755, Size: 5}
-	_ = tw.WriteHeader(hdr)
-	_, _ = tw.Write([]byte("hello"))
-	_ = tw.Close()
-	_ = gw.Close()
-	_ = tmpFile.Close()
+	tempDir := t.TempDir()
+	archivePath := filepath.Join(tempDir, "test.tar.gz")
+	require.NoError(t, os.WriteFile(archivePath, archive, 0644))
 
-	destPath := filepath.Join(t.TempDir(), "extracted")
-	err = extractBinary(tmpFile.Name(), destPath)
+	err := extractBinary(archivePath, filepath.Join(tempDir, "extracted"))
 	assert.ErrorContains(t, err, "not found in archive")
 }
 
@@ -269,42 +287,6 @@ func TestReleaseSelfUpdateLatch(t *testing.T) {
 
 	ReleaseSelfUpdateLatch()
 	assert.False(t, selfUpdateInFlight.Load(), "ReleaseSelfUpdateLatch did not clear the latch")
-}
-
-func TestDownloadFile_Oversize(t *testing.T) {
-	// Server streams more than maxArchiveSize without Content-Length
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Write maxArchiveSize+1 bytes in chunks to avoid setting Content-Length
-		chunk := make([]byte, 32*1024)
-		remaining := int64(maxArchiveSize) + 1
-		for remaining > 0 {
-			n := min(int64(len(chunk)), remaining)
-			_, _ = w.Write(chunk[:n])
-			remaining -= n
-		}
-	}))
-	defer server.Close()
-
-	destPath := filepath.Join(t.TempDir(), "downloaded")
-	err := downloadFile(context.Background(), server.URL, destPath)
-	assert.ErrorContains(t, err, "too large")
-}
-
-func TestDownloadFile_ContextCancelled(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Slow server that never finishes
-		select {
-		case <-r.Context().Done():
-		case <-time.After(10 * time.Second):
-		}
-	}))
-	defer server.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
-
-	destPath := filepath.Join(t.TempDir(), "downloaded")
-	assert.Error(t, downloadFile(ctx, server.URL, destPath), "expected error for cancelled context")
 }
 
 func TestIsMachO(t *testing.T) {
