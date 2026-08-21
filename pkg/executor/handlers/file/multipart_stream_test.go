@@ -67,7 +67,7 @@ func TestBuildMultipartStream_Roundtrip(t *testing.T) {
 	mr := requireMultipartReader(t, body, ct)
 	part, err := mr.NextPart()
 	require.NoError(t, err)
-	assert.Equal(t, "content", part.FormName())
+	assert.Equal(t, multipartFieldContent, part.FormName())
 	assert.Equal(t, "f.bin", part.FileName())
 
 	got := sha256.New()
@@ -90,12 +90,13 @@ func TestBuildMultipartStream_Recursive(t *testing.T) {
 	sawName := false
 	for {
 		part, err := mr.NextPart()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		require.NoError(t, err)
-		if part.FormName() == "name" {
-			data, _ := io.ReadAll(part)
+		if part.FormName() == multipartFieldName {
+			data, err := io.ReadAll(part)
+			require.NoError(t, err, "read name field")
 			assert.Equal(t, "tree.zip", string(data))
 			sawName = true
 		}
@@ -313,12 +314,13 @@ func TestBuildMultipartStream_SmallPath_Recursive(t *testing.T) {
 	sawName := false
 	for {
 		part, err := mr.NextPart()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		require.NoError(t, err)
 		if part.FormName() == multipartFieldName {
-			data, _ := io.ReadAll(part)
+			data, err := io.ReadAll(part)
+			require.NoError(t, err, "read name field")
 			assert.Equal(t, "arch.zip", string(data))
 			sawName = true
 		}
