@@ -29,7 +29,7 @@ Key packages:
 ## Code conventions
 
 - Run `go test -v ./... -p 1` for tests (sequential due to SQLite locking)
-- Assert with testify: `require` when a failed check makes the rest of the test meaningless, `assert` for the checks themselves. New tests never call `t.Errorf` or `t.Fatalf` directly, except where there is no error value to assert on (the timeout branch of a `select`)
+- Assert with testify: `require` when a failed check makes the rest of the test meaningless, `assert` for the checks themselves. Prefer the specific helper over a hand-rolled comparison: `require.NoError`, `assert.ErrorContains`, `assert.DirExists`. Read what a helper accepts before reaching for it, because the shorter spelling is sometimes the weaker check: `assert.NoFileExists` treats a directory at the path, and any other `Lstat` error, as absence, so a test that must prove a path was removed asserts `os.ErrNotExist` from `os.Stat` instead. New tests never call `t.Error`, `t.Errorf`, `t.Fatal` or `t.Fatalf` directly; the single exception is a bare `t.Fatal` where there is no error value to assert on, such as the timeout branch of a `select`
 - Run Ent code generation after schema changes; never edit `pkg/db/ent/` manually
 - Platform-specific files use `_darwin.go` / `_linux.go` suffixes
 - Timeout exit code is 124 (GNU `timeout` convention)
