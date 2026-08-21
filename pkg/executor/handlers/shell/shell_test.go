@@ -149,6 +149,7 @@ func TestShellHandler_OrStopsOnSuccess(t *testing.T) {
 	assert.Equal(t, 0, exitCode)
 	// Only cmd1's output should be present (cmd2 shouldn't run)
 	assert.Contains(t, output, "success")
+	assert.NotContains(t, output, "output2")
 }
 
 func TestShellHandler_Execute_Semicolon(t *testing.T) {
