@@ -69,7 +69,7 @@ func TestRemovePIDCommandMapping_PIDReuseGuard(t *testing.T) {
 }
 
 // TestRemovePIDCommandMapping_LeavesWebshEntryAlone verifies that a
-// Command-style remove does not touch a websh entry that happens to
+// Command-style remove does not touch a Websh entry that happens to
 // share the same pid (defence in depth).
 func TestRemovePIDCommandMapping_LeavesWebshEntryAlone(t *testing.T) {
 	am := newTestAuthManager()
@@ -85,7 +85,7 @@ func TestRemovePIDCommandMapping_LeavesWebshEntryAlone(t *testing.T) {
 	am.RemovePIDCommandMapping(3333, "cmd-bystander")
 
 	entry, ok := am.LookupPID(3333)
-	require.True(t, ok, "websh entry should not have been removed")
+	require.True(t, ok, "Websh entry should not have been removed")
 	assert.Equal(t, TrackerKindWebsh, entry.Kind)
 }
 
@@ -141,13 +141,13 @@ func TestLegacyWebshEntry_ReadsAsWebsh(t *testing.T) {
 
 	entry, ok := am.LookupPID(7777)
 	require.True(t, ok, "legacy entry missing")
-	assert.Equal(t, TrackerKindWebsh, entry.Kind, "legacy entry should default to websh")
+	assert.Equal(t, TrackerKindWebsh, entry.Kind, "legacy entry should default to the Websh kind")
 	assert.Equal(t, "legacy-session", entry.SessionID)
 }
 
-// TestAddPIDSessionMapping_NormalisesWebshKind verifies that websh
-// registrations always end up with Kind=websh and no CommandID, even
-// when the caller forgot to set the fields explicitly.
+// TestAddPIDSessionMapping_NormalisesWebshKind verifies that Websh
+// registrations always end up with Kind == TrackerKindWebsh and no
+// CommandID, even when the caller forgot to set the fields explicitly.
 func TestAddPIDSessionMapping_NormalisesWebshKind(t *testing.T) {
 	am := newTestAuthManager()
 
@@ -226,9 +226,9 @@ func TestSudoApprovalRequest_JSONTagsOmitEmpty(t *testing.T) {
 		Username:  "alice",
 	}
 	webshJSON, err := json.Marshal(webshReq)
-	require.NoError(t, err, "marshal websh request")
+	require.NoError(t, err, "marshal Websh request")
 	assert.Contains(t, string(webshJSON), `"session_id":"session-uuid"`)
-	assert.NotContains(t, string(webshJSON), `"command_id"`, "websh payload must omit command_id")
+	assert.NotContains(t, string(webshJSON), `"command_id"`, "Websh payload must omit command_id")
 
 	// Neither-set path: both identifier keys must be absent, making the
 	// payload unambiguous for the server's 2-branch resolver.
@@ -246,7 +246,7 @@ func TestSudoApprovalRequest_JSONTagsOmitEmpty(t *testing.T) {
 
 // TestSudoApprovalResponse_ErrorCodePassthrough verifies that the optional
 // error_code field round-trips through the response struct and stays off the
-// wire when empty. alpacon-server emits error_code on denial; alpamon
+// wire when empty. alpacon-server emits error_code on denial; Alpamon
 // unmarshals the server control message into SudoApprovalResponse and
 // re-marshals it onto the auth socket, so the field must survive that hop. The
 // omitempty guard keeps older servers (which never send error_code) wire-
