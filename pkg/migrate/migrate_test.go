@@ -25,7 +25,7 @@ func setupTempDataDir(t *testing.T) string {
 	return dir
 }
 
-func writeFile(t *testing.T, path string, content string) {
+func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(path, []byte(content), 0600), "write %s", path)
 }
@@ -123,7 +123,8 @@ func TestRestoreBackup_RestoresContent(t *testing.T) {
 
 	require.NoError(t, RestoreBackup(backup, dest))
 
-	got, _ := os.ReadFile(dest)
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err, "read dest")
 	assert.Equal(t, "[server]\nold=true\n", string(got))
 }
 
@@ -153,7 +154,8 @@ func TestRollback_RestoresConf(t *testing.T) {
 	_ = Rollback(st, confPath, false, "")
 
 	// Conf must be restored to backup content.
-	got, _ := os.ReadFile(confPath)
+	got, err := os.ReadFile(confPath)
+	require.NoError(t, err, "read conf")
 	assert.Equal(t, "[server]\nurl=https://a.example.com\n", string(got), "conf not restored")
 	// When ScheduleSelfRestart fails, the marker and backup must remain
 	// so the next agent startup's watchdog can retry. This is the
@@ -174,7 +176,7 @@ func TestRollback_TolerantOfMissingBackup(t *testing.T) {
 		NewURL:         "https://invalid.example.invalid",
 		NewServerID:    "srv-xyz",
 		NewServerKey:   "key-xyz",
-		ExpiresAt:      time.Now().Add(-1 * time.Minute),
+		ExpiresAt:      time.Now().Add(-time.Minute),
 	}
 	require.NoError(t, WritePending(st))
 
@@ -183,7 +185,8 @@ func TestRollback_TolerantOfMissingBackup(t *testing.T) {
 	// so we only assert on the no-overwrite invariant.
 	_ = Rollback(st, confPath, false, "")
 
-	got, _ := os.ReadFile(confPath)
+	got, err := os.ReadFile(confPath)
+	require.NoError(t, err, "read conf")
 	assert.Equal(t, "restored already", string(got), "Rollback overwrote conf when backup was missing")
 }
 
@@ -257,7 +260,7 @@ func TestStartWatchdog_FiresImmediatelyIfAlreadyExpired(t *testing.T) {
 	st := &PendingState{
 		BackupConfPath: "/tmp/whatever",
 		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(-1 * time.Minute),
+		ExpiresAt:      time.Now().Add(-time.Minute),
 	}
 	require.NoError(t, WritePending(st))
 
@@ -312,7 +315,7 @@ func TestStartWatchdog_StopsOnContextCancel(t *testing.T) {
 	require.NoError(t, WritePending(st))
 
 	var fired atomic.Int32
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 
 	_ = StartWatchdog(ctx, st, func(_ *PendingState) {
 		fired.Add(1)
