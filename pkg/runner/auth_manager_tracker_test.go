@@ -2,9 +2,10 @@ package runner
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
-	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The shipped helper already builds exactly what these tests need.
@@ -20,24 +21,12 @@ func TestAddPIDCommandMapping_RegistersCommandKind(t *testing.T) {
 	am.AddPIDCommandMapping(4242, "cmd-uuid-1", "alice")
 
 	entry, ok := am.LookupPID(4242)
-	if !ok {
-		t.Fatal("expected tracker entry to be registered")
-	}
-	if entry.Kind != TrackerKindCommand {
-		t.Errorf("Kind: got %q, want %q", entry.Kind, TrackerKindCommand)
-	}
-	if entry.CommandID != "cmd-uuid-1" {
-		t.Errorf("CommandID: got %q, want cmd-uuid-1", entry.CommandID)
-	}
-	if entry.SessionID != "" {
-		t.Errorf("SessionID should be empty for command entries, got %q", entry.SessionID)
-	}
-	if entry.Username != "alice" {
-		t.Errorf("Username: got %q, want alice", entry.Username)
-	}
-	if entry.StartedAt.IsZero() {
-		t.Error("StartedAt should be set")
-	}
+	require.True(t, ok, "expected tracker entry to be registered")
+	assert.Equal(t, TrackerKindCommand, entry.Kind)
+	assert.Equal(t, "cmd-uuid-1", entry.CommandID)
+	assert.Empty(t, entry.SessionID, "SessionID should be empty for command entries")
+	assert.Equal(t, "alice", entry.Username)
+	assert.False(t, entry.StartedAt.IsZero(), "StartedAt should be set")
 }
 
 // TestAddPIDCommandMapping_IgnoresInvalidInput verifies that bogus
@@ -49,9 +38,7 @@ func TestAddPIDCommandMapping_IgnoresInvalidInput(t *testing.T) {
 	am.AddPIDCommandMapping(-1, "cmd", "user")
 	am.AddPIDCommandMapping(100, "", "user")
 
-	if len(am.pidToSessionMap) != 0 {
-		t.Errorf("expected no entries, got %d", len(am.pidToSessionMap))
-	}
+	assert.Empty(t, am.pidToSessionMap, "expected no entries")
 }
 
 // TestRemovePIDCommandMapping_RemovesMatchingEntry verifies removal on
@@ -62,9 +49,8 @@ func TestRemovePIDCommandMapping_RemovesMatchingEntry(t *testing.T) {
 
 	am.RemovePIDCommandMapping(1111, "cmd-a")
 
-	if _, ok := am.LookupPID(1111); ok {
-		t.Fatal("entry should have been removed")
-	}
+	_, ok := am.LookupPID(1111)
+	assert.False(t, ok, "entry should have been removed")
 }
 
 // TestRemovePIDCommandMapping_PIDReuseGuard verifies that removing with
@@ -78,16 +64,12 @@ func TestRemovePIDCommandMapping_PIDReuseGuard(t *testing.T) {
 	am.RemovePIDCommandMapping(2222, "some-other-command-id")
 
 	entry, ok := am.LookupPID(2222)
-	if !ok {
-		t.Fatal("entry should still exist after mismatched remove")
-	}
-	if entry.CommandID != "cmd-b" {
-		t.Errorf("CommandID: got %q, want cmd-b", entry.CommandID)
-	}
+	require.True(t, ok, "entry should still exist after mismatched remove")
+	assert.Equal(t, "cmd-b", entry.CommandID)
 }
 
 // TestRemovePIDCommandMapping_LeavesWebshEntryAlone verifies that a
-// Command-style remove does not touch a websh entry that happens to
+// Command-style remove does not touch a Websh entry that happens to
 // share the same pid (defence in depth).
 func TestRemovePIDCommandMapping_LeavesWebshEntryAlone(t *testing.T) {
 	am := newTestAuthManager()
@@ -103,12 +85,8 @@ func TestRemovePIDCommandMapping_LeavesWebshEntryAlone(t *testing.T) {
 	am.RemovePIDCommandMapping(3333, "cmd-bystander")
 
 	entry, ok := am.LookupPID(3333)
-	if !ok {
-		t.Fatal("websh entry should not have been removed")
-	}
-	if entry.Kind != TrackerKindWebsh {
-		t.Errorf("Kind: got %q, want websh", entry.Kind)
-	}
+	require.True(t, ok, "Websh entry should not have been removed")
+	assert.Equal(t, TrackerKindWebsh, entry.Kind)
 }
 
 // TestParallelCommands_TrackedIndependently verifies concurrent
@@ -131,29 +109,21 @@ func TestParallelCommands_TrackedIndependently(t *testing.T) {
 	}
 	for _, tc := range cases {
 		entry, ok := am.LookupPID(tc.pid)
-		if !ok {
-			t.Errorf("pid %d: expected entry, got none", tc.pid)
+		if !assert.True(t, ok, "pid %d: expected entry, got none", tc.pid) {
 			continue
 		}
-		if entry.CommandID != tc.commandID {
-			t.Errorf("pid %d: CommandID got %q, want %q", tc.pid, entry.CommandID, tc.commandID)
-		}
-		if entry.Username != tc.username {
-			t.Errorf("pid %d: Username got %q, want %q", tc.pid, entry.Username, tc.username)
-		}
+		assert.Equal(t, tc.commandID, entry.CommandID, "pid %d: CommandID", tc.pid)
+		assert.Equal(t, tc.username, entry.Username, "pid %d: Username", tc.pid)
 	}
 
 	// Remove middle entry, verify others survive.
 	am.RemovePIDCommandMapping(5002, "cmd-parallel-2")
-	if _, ok := am.LookupPID(5002); ok {
-		t.Error("5002 should have been removed")
-	}
-	if _, ok := am.LookupPID(5001); !ok {
-		t.Error("5001 should still exist")
-	}
-	if _, ok := am.LookupPID(5003); !ok {
-		t.Error("5003 should still exist")
-	}
+	_, ok := am.LookupPID(5002)
+	assert.False(t, ok, "5002 should have been removed")
+	_, ok = am.LookupPID(5001)
+	assert.True(t, ok, "5001 should still exist")
+	_, ok = am.LookupPID(5003)
+	assert.True(t, ok, "5003 should still exist")
 }
 
 // TestLegacyWebshEntry_ReadsAsWebsh verifies backward compatibility with
@@ -170,20 +140,14 @@ func TestLegacyWebshEntry_ReadsAsWebsh(t *testing.T) {
 	}
 
 	entry, ok := am.LookupPID(7777)
-	if !ok {
-		t.Fatal("legacy entry missing")
-	}
-	if entry.Kind != TrackerKindWebsh {
-		t.Errorf("legacy entry should default to %q, got %q", TrackerKindWebsh, entry.Kind)
-	}
-	if entry.SessionID != "legacy-session" {
-		t.Errorf("SessionID: got %q, want legacy-session", entry.SessionID)
-	}
+	require.True(t, ok, "legacy entry missing")
+	assert.Equal(t, TrackerKindWebsh, entry.Kind, "legacy entry should default to the Websh kind")
+	assert.Equal(t, "legacy-session", entry.SessionID)
 }
 
-// TestAddPIDSessionMapping_NormalisesWebshKind verifies that websh
-// registrations always end up with Kind=websh and no CommandID, even
-// when the caller forgot to set the fields explicitly.
+// TestAddPIDSessionMapping_NormalisesWebshKind verifies that Websh
+// registrations always end up with Kind == TrackerKindWebsh and no
+// CommandID, even when the caller forgot to set the fields explicitly.
 func TestAddPIDSessionMapping_NormalisesWebshKind(t *testing.T) {
 	am := newTestAuthManager()
 
@@ -195,18 +159,10 @@ func TestAddPIDSessionMapping_NormalisesWebshKind(t *testing.T) {
 	})
 
 	entry, ok := am.LookupPID(8888)
-	if !ok {
-		t.Fatal("expected entry")
-	}
-	if entry.Kind != TrackerKindWebsh {
-		t.Errorf("Kind: got %q, want %q", entry.Kind, TrackerKindWebsh)
-	}
-	if entry.CommandID != "" {
-		t.Errorf("CommandID should have been cleared, got %q", entry.CommandID)
-	}
-	if entry.StartedAt.IsZero() {
-		t.Error("StartedAt should be populated by AddPIDSessionMapping when unset")
-	}
+	require.True(t, ok, "expected entry")
+	assert.Equal(t, TrackerKindWebsh, entry.Kind)
+	assert.Empty(t, entry.CommandID, "CommandID should have been cleared")
+	assert.False(t, entry.StartedAt.IsZero(), "StartedAt should be populated by AddPIDSessionMapping when unset")
 }
 
 // TestRegisterCommandPID_NoopWithoutManager verifies that the package-
@@ -218,11 +174,9 @@ func TestRegisterCommandPID_NoopWithoutManager(t *testing.T) {
 	t.Cleanup(func() { authManager = prev })
 
 	cleanup := RegisterCommandPID(123, "cmd", "user")
-	if cleanup == nil {
-		t.Error("RegisterCommandPID should always return a non-nil cleanup closure")
-	}
+	require.NotNil(t, cleanup, "RegisterCommandPID should always return a non-nil cleanup closure")
 	// Must not panic even when the AuthManager is absent.
-	cleanup()
+	assert.NotPanics(t, cleanup)
 }
 
 // TestRegisterCommandPID_RoundTrip exercises the package-level helper
@@ -233,21 +187,14 @@ func TestRegisterCommandPID_RoundTrip(t *testing.T) {
 	t.Cleanup(func() { authManager = prev })
 
 	cleanup := RegisterCommandPID(9001, "cmd-round", "eve")
-	if cleanup == nil {
-		t.Fatal("RegisterCommandPID returned a nil cleanup closure")
-	}
+	require.NotNil(t, cleanup, "RegisterCommandPID returned a nil cleanup closure")
 	entry, ok := authManager.LookupPID(9001)
-	if !ok {
-		t.Fatal("entry should be present after RegisterCommandPID")
-	}
-	if entry.CommandID != "cmd-round" {
-		t.Errorf("CommandID: got %q, want cmd-round", entry.CommandID)
-	}
+	require.True(t, ok, "entry should be present after RegisterCommandPID")
+	assert.Equal(t, "cmd-round", entry.CommandID)
 
 	cleanup()
-	if _, ok := authManager.LookupPID(9001); ok {
-		t.Error("entry should be gone after cleanup()")
-	}
+	_, ok = authManager.LookupPID(9001)
+	assert.False(t, ok, "entry should be gone after cleanup()")
 }
 
 // TestSudoApprovalRequest_JSONTagsOmitEmpty is a guardrail against
@@ -266,15 +213,9 @@ func TestSudoApprovalRequest_JSONTagsOmitEmpty(t *testing.T) {
 		Username:  "alice",
 	}
 	cmdJSON, err := json.Marshal(cmdReq)
-	if err != nil {
-		t.Fatalf("marshal command request: %v", err)
-	}
-	if !strings.Contains(string(cmdJSON), `"command_id":"cmd-uuid"`) {
-		t.Errorf("expected command_id in payload, got %s", cmdJSON)
-	}
-	if strings.Contains(string(cmdJSON), `"session_id"`) {
-		t.Errorf("deploy shell payload must omit session_id, got %s", cmdJSON)
-	}
+	require.NoError(t, err, "marshal command request")
+	assert.Contains(t, string(cmdJSON), `"command_id":"cmd-uuid"`)
+	assert.NotContains(t, string(cmdJSON), `"session_id"`, "deploy shell payload must omit session_id")
 
 	// Websh path: session_id set, command_id must be omitted.
 	webshReq := SudoApprovalRequest{
@@ -285,15 +226,9 @@ func TestSudoApprovalRequest_JSONTagsOmitEmpty(t *testing.T) {
 		Username:  "alice",
 	}
 	webshJSON, err := json.Marshal(webshReq)
-	if err != nil {
-		t.Fatalf("marshal websh request: %v", err)
-	}
-	if !strings.Contains(string(webshJSON), `"session_id":"session-uuid"`) {
-		t.Errorf("expected session_id in payload, got %s", webshJSON)
-	}
-	if strings.Contains(string(webshJSON), `"command_id"`) {
-		t.Errorf("websh payload must omit command_id, got %s", webshJSON)
-	}
+	require.NoError(t, err, "marshal Websh request")
+	assert.Contains(t, string(webshJSON), `"session_id":"session-uuid"`)
+	assert.NotContains(t, string(webshJSON), `"command_id"`, "Websh payload must omit command_id")
 
 	// Neither-set path: both identifier keys must be absent, making the
 	// payload unambiguous for the server's 2-branch resolver.
@@ -304,18 +239,14 @@ func TestSudoApprovalRequest_JSONTagsOmitEmpty(t *testing.T) {
 		Username: "alice",
 	}
 	emptyJSON, err := json.Marshal(emptyReq)
-	if err != nil {
-		t.Fatalf("marshal empty-id request: %v", err)
-	}
-	if strings.Contains(string(emptyJSON), `"session_id"`) ||
-		strings.Contains(string(emptyJSON), `"command_id"`) {
-		t.Errorf("payload with neither id must omit both keys, got %s", emptyJSON)
-	}
+	require.NoError(t, err, "marshal empty-id request")
+	assert.NotContains(t, string(emptyJSON), `"session_id"`, "payload with neither id must omit both keys")
+	assert.NotContains(t, string(emptyJSON), `"command_id"`, "payload with neither id must omit both keys")
 }
 
 // TestSudoApprovalResponse_ErrorCodePassthrough verifies that the optional
 // error_code field round-trips through the response struct and stays off the
-// wire when empty. alpacon-server emits error_code on denial; alpamon
+// wire when empty. alpacon-server emits error_code on denial; Alpamon
 // unmarshals the server control message into SudoApprovalResponse and
 // re-marshals it onto the auth socket, so the field must survive that hop. The
 // omitempty guard keeps older servers (which never send error_code) wire-
@@ -324,41 +255,25 @@ func TestSudoApprovalResponse_ErrorCodePassthrough(t *testing.T) {
 	// Server sends error_code on denial: it must survive unmarshal→marshal.
 	serverMsg := `{"type":"sudo_approval_response","request_id":"r1","approved":false,"reason":"sudo_no_worksession_policy","error_code":"SUDO_NO_WORKSESSION_POLICY"}`
 	var resp SudoApprovalResponse
-	if err := json.Unmarshal([]byte(serverMsg), &resp); err != nil {
-		t.Fatalf("unmarshal server message: %v", err)
-	}
-	if resp.ErrorCode != "SUDO_NO_WORKSESSION_POLICY" {
-		t.Errorf("expected error_code to be parsed, got %q", resp.ErrorCode)
-	}
+	require.NoError(t, json.Unmarshal([]byte(serverMsg), &resp), "unmarshal server message")
+	assert.Equal(t, "SUDO_NO_WORKSESSION_POLICY", resp.ErrorCode, "expected error_code to be parsed")
 	out, err := json.Marshal(resp)
-	if err != nil {
-		t.Fatalf("marshal response: %v", err)
-	}
-	if !strings.Contains(string(out), `"error_code":"SUDO_NO_WORKSESSION_POLICY"`) {
-		t.Errorf("expected error_code in re-marshaled payload, got %s", out)
-	}
+	require.NoError(t, err, "marshal response")
+	assert.Contains(t, string(out), `"error_code":"SUDO_NO_WORKSESSION_POLICY"`)
 
 	// Backward compat: a server that omits error_code (or an approval) must not
 	// introduce the key on the wire, so clients predating the field are
 	// unaffected.
 	approved := SudoApprovalResponse{Type: "sudo_approval_response", RequestID: "r2", Approved: true}
 	approvedJSON, err := json.Marshal(approved)
-	if err != nil {
-		t.Fatalf("marshal approved response: %v", err)
-	}
-	if strings.Contains(string(approvedJSON), `"error_code"`) {
-		t.Errorf("empty error_code must be omitted from payload, got %s", approvedJSON)
-	}
+	require.NoError(t, err, "marshal approved response")
+	assert.NotContains(t, string(approvedJSON), `"error_code"`, "empty error_code must be omitted from payload")
 
 	// Older server omits error_code entirely: it must unmarshal to "".
 	var legacy SudoApprovalResponse
 	legacyMsg := `{"type":"sudo_approval_response","request_id":"r3","approved":false,"reason":"denied"}`
-	if err := json.Unmarshal([]byte(legacyMsg), &legacy); err != nil {
-		t.Fatalf("unmarshal legacy message: %v", err)
-	}
-	if legacy.ErrorCode != "" {
-		t.Errorf("absent error_code must unmarshal to empty, got %q", legacy.ErrorCode)
-	}
+	require.NoError(t, json.Unmarshal([]byte(legacyMsg), &legacy), "unmarshal legacy message")
+	assert.Empty(t, legacy.ErrorCode, "absent error_code must unmarshal to empty")
 }
 
 // TestLookupPID_Missing verifies Lookup for a non-existent pid returns
@@ -366,13 +281,8 @@ func TestSudoApprovalResponse_ErrorCodePassthrough(t *testing.T) {
 func TestLookupPID_Missing(t *testing.T) {
 	am := newTestAuthManager()
 	entry, ok := am.LookupPID(99999)
-	if ok {
-		t.Error("expected ok=false for missing pid")
-	}
-	var zero TrackerEntry
-	if entry != zero {
-		t.Errorf("expected zero TrackerEntry, got %+v", entry)
-	}
+	assert.False(t, ok, "expected ok=false for missing pid")
+	assert.Equal(t, TrackerEntry{}, entry, "expected zero TrackerEntry")
 }
 
 // TestAddPIDCommandMapping_OverwritesStaleEntry verifies that if the
@@ -382,17 +292,10 @@ func TestLookupPID_Missing(t *testing.T) {
 func TestAddPIDCommandMapping_OverwritesStaleEntry(t *testing.T) {
 	am := newTestAuthManager()
 	am.AddPIDCommandMapping(4001, "old-cmd", "alice")
-	// Force a distinguishable time gap without sleeping.
-	if entry, ok := am.LookupPID(4001); ok {
-		entry.StartedAt = time.Now().Add(-time.Hour)
-	}
 	am.AddPIDCommandMapping(4001, "new-cmd", "bob")
 
-	entry, _ := am.LookupPID(4001)
-	if entry.CommandID != "new-cmd" {
-		t.Errorf("CommandID: got %q, want new-cmd", entry.CommandID)
-	}
-	if entry.Username != "bob" {
-		t.Errorf("Username: got %q, want bob", entry.Username)
-	}
+	entry, ok := am.LookupPID(4001)
+	require.True(t, ok, "entry should survive the overwrite")
+	assert.Equal(t, "new-cmd", entry.CommandID)
+	assert.Equal(t, "bob", entry.Username)
 }
