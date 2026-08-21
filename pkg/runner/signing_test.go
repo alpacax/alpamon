@@ -58,6 +58,58 @@ func TestVerifyCommandSignature_InternalBypass(t *testing.T) {
 	assert.NoError(t, err, "internal commands should bypass verification")
 }
 
+// Only "internal" bypasses signature verification. File commands carry a
+// signature like system commands do, and the file-hash check is independent of
+// it: neither one stands in for the other.
+func TestVerifyCommandSignature_FileShellIsNotBypassed(t *testing.T) {
+	wc := &WebsocketClient{
+		signingMode: "enforce",
+		keyManager:  signing.NewKeyManager("http://localhost:9999", 3600, "", nil),
+	}
+
+	cmd := &protocol.Command{
+		ID:    "cmd-1",
+		Shell: "file",
+		Line:  "/bin/bash /opt/deploy.sh --fast",
+		Data:  `{"path":"/opt/deploy.sh","interpreter":"/bin/bash","args":["--fast"],"sha256":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+	}
+
+	err := wc.verifyCommandSignature(cmd)
+	assert.Error(t, err, "file commands must not bypass signature verification")
+	assert.Equal(t, rejectReasonUnsigned, err.Error())
+}
+
+// A signed file command passes verification on the same terms as a system one:
+// the canonical payload covers shell and line, and the structured payload in
+// Data is verified separately by the digest check.
+func TestVerifyCommandSignature_FileShellValidSignature(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	srv := newTestKeyServer(t, pub, "kid-1")
+	defer srv.Close()
+
+	wc := &WebsocketClient{
+		signingMode: "enforce",
+		serverID:    testServerID,
+		keyManager:  signing.NewKeyManager(srv.URL, 3600, "", nil),
+	}
+
+	cmd := &protocol.Command{
+		ID:         "cmd-1",
+		Shell:      "file",
+		Line:       "/bin/bash /opt/deploy.sh --fast",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-03-01T12:00:00+00:00",
+		KeyID:      "kid-1",
+		Data:       `{"path":"/opt/deploy.sh","interpreter":"/bin/bash","args":["--fast"],"sha256":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+	}
+	signCommand(t, cmd, testServerID, priv)
+
+	assert.NoError(t, wc.verifyCommandSignature(cmd))
+}
+
 func TestVerifyCommandSignature_UnsignedMonitorMode(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "monitor",

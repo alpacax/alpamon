@@ -1,0 +1,72 @@
+package protocol
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// FileExecPayload is the structured instruction carried in Command.Data when
+// Command.Shell is "file" (ADR 0053).
+//
+// It is the only thing that decides what runs. Command.Line renders the same
+// intent for humans—display, audit, and the Ed25519 signing payload—and must
+// never be parsed to derive the entrypoint, the interpreter, or the arguments.
+type FileExecPayload struct {
+	// Path is where the entrypoint is opened from. It selects the object to
+	// verify; what an approval binds is the digest, not the path.
+	Path string `json:"path"`
+
+	// Interpreter runs the entrypoint. There is no shell wrapping it, so
+	// composition belongs inside the script.
+	Interpreter string `json:"interpreter"`
+
+	// Args are handed to the entrypoint verbatim, one argv entry each.
+	Args []string `json:"args"`
+
+	// SHA256 is the approved digest, in the "sha256:<64 hex>" shape Alpamon
+	// and the server already speak for sync hashes.
+	SHA256 string `json:"sha256"`
+}
+
+// sha256DigestPattern matches the "sha256:<64 hex>" digest shape.
+var sha256DigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// ParseFileExecPayload parses and validates Command.Data as a file execution
+// instruction.
+//
+// Every field it needs is required and a malformed payload is refused rather
+// than guessed at: a guess here would run bytes that no approval covers.
+func (c *Command) ParseFileExecPayload() (*FileExecPayload, error) {
+	if strings.TrimSpace(c.Data) == "" {
+		return nil, errors.New("file command carries no data payload")
+	}
+
+	var payload FileExecPayload
+	if err := json.Unmarshal([]byte(c.Data), &payload); err != nil {
+		return nil, fmt.Errorf("file command payload is not valid JSON: %w", err)
+	}
+
+	// Hex case is not part of the digest's identity, so normalize before the
+	// shape check rather than refusing an upper-case but otherwise valid one.
+	payload.SHA256 = strings.ToLower(payload.SHA256)
+
+	switch {
+	case payload.Path == "":
+		return nil, errors.New("file command payload has no path")
+	case payload.Interpreter == "":
+		return nil, errors.New("file command payload has no interpreter")
+	case !sha256DigestPattern.MatchString(payload.SHA256):
+		return nil, fmt.Errorf("file command payload has no valid sha256 digest: %q", payload.SHA256)
+	}
+
+	return &payload, nil
+}
+
+// ExpectedDigest returns the hex digest without the "sha256:" prefix, ready to
+// compare against a computed sum.
+func (p *FileExecPayload) ExpectedDigest() string {
+	return strings.TrimPrefix(p.SHA256, "sha256:")
+}

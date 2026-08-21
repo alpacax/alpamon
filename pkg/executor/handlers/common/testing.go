@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"os"
 	"os/user"
 	"strings"
 	"sync/atomic"
@@ -32,6 +33,9 @@ type ExecutedCommand struct {
 	User    string
 	Env     map[string]string
 	Timeout time.Duration
+	// File is the inherited descriptor for a verified file execution, so
+	// tests can assert which open object was handed to the child.
+	File *os.File
 }
 
 // CommandResult represents the result of a mocked command execution.
@@ -116,6 +120,27 @@ func (m *MockCommandExecutor) ExecWithStreamingHook(ctx context.Context, args []
 		pidHook(pid)
 	}
 	exitCode, output, err := m.Exec(ctx, args, username, groupname, env, timeout)
+	if chunkCallback != nil && output != "" {
+		chunkCallback(output)
+	}
+	return exitCode, output, err
+}
+
+// ExecFileWithStreamingHook mirrors ExecWithStreamingHook and additionally
+// records the inherited descriptor, so tests can assert that the object handed
+// to the child is the one the verifier opened.
+func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error) {
+	if len(args) == 0 {
+		return 0, "", nil
+	}
+	if pidHook != nil {
+		pid := int(mockSyntheticPIDBase + mockSyntheticPID.Add(1))
+		pidHook(pid)
+	}
+	m.commands = append(m.commands, ExecutedCommand{
+		Name: args[0], Args: args[1:], User: username, Env: env, Timeout: timeout, File: file,
+	})
+	exitCode, output, err := m.lookupResult(args[0], args[1:]...)
 	if chunkCallback != nil && output != "" {
 		chunkCallback(output)
 	}

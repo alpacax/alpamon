@@ -26,6 +26,7 @@ func NewShellHandler(cmdExecutor common.CommandExecutor) *ShellHandler {
 			[]common.CommandType{
 				common.ShellCmd,
 				common.Exec,
+				common.ExecFile,
 			},
 			cmdExecutor,
 		),
@@ -38,6 +39,8 @@ func (h *ShellHandler) Execute(ctx context.Context, cmd string, args *common.Com
 	switch cmd {
 	case common.ShellCmd.String(), common.Exec.String():
 		return h.handleShellCommand(ctx, args)
+	case common.ExecFile.String():
+		return h.handleExecFile(ctx, args)
 	default:
 		return 1, "", fmt.Errorf("unknown shell command: %s", cmd)
 	}
@@ -45,6 +48,15 @@ func (h *ShellHandler) Execute(ctx context.Context, cmd string, args *common.Com
 
 // Validate checks if the arguments are valid for the command
 func (h *ShellHandler) Validate(cmd string, args *common.CommandArgs) error {
+	if cmd == common.ExecFile.String() {
+		if args.VerifiedFile == nil {
+			return fmt.Errorf("verified file descriptor is required")
+		}
+		if len(args.ExecArgs) == 0 {
+			return fmt.Errorf("file execution arguments are required")
+		}
+		return nil
+	}
 	if args.Command == "" {
 		return fmt.Errorf("shell command is required")
 	}
@@ -97,6 +109,52 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 
 	// Fallback: direct execution with manual operator parsing
 	return h.executeWithOperators(ctx, command, username, groupname, env, timeout, args.CommandID, args.ChunkCallback)
+}
+
+// handleExecFile runs a digest-verified entrypoint. The digest check happens in
+// the runner before dispatch, so reaching here means the descriptor in
+// args.VerifiedFile already matched the approved sha256; all that is left is
+// handing that same descriptor to the child. args.ExecArgs already names it by
+// its descriptor path, and there is no shell around it.
+func (h *ShellHandler) handleExecFile(ctx context.Context, args *common.CommandArgs) (int, string, error) {
+	username := args.Username
+	if username == "" {
+		username = "root"
+	}
+	groupname := args.Groupname
+	if groupname == "" {
+		groupname = username
+	}
+
+	timeout := args.Timeout
+	if timeout == 0 {
+		timeout = common.ShellTimeout
+	}
+
+	log.Debug().
+		Strs("args", args.ExecArgs).
+		Str("user", username).
+		Str("group", groupname).
+		Dur("timeout", timeout).
+		Msg("Executing verified file")
+
+	var pidHook func(pid int)
+	var cleanup func()
+	if args.CommandID != "" {
+		pidHook = func(pid int) {
+			cleanup = runner.RegisterCommandPID(pid, args.CommandID, username)
+		}
+	}
+
+	// Execute folds startup errors into output, so the err return is dropped
+	// here for the same reason as executeCommand.
+	exitCode, output, _ := h.Executor.ExecFileWithStreamingHook(
+		ctx, args.VerifiedFile, args.ExecArgs, username, groupname, args.Env, timeout, pidHook, args.ChunkCallback,
+	)
+	if cleanup != nil {
+		cleanup()
+	}
+	return exitCode, output, nil
 }
 
 // executeWithOperators handles shell operators (&&, ||, ;). Per-segment output

@@ -27,6 +27,7 @@ func TestShellHandler_Commands(t *testing.T) {
 	expected := []string{
 		common.ShellCmd.String(),
 		common.Exec.String(),
+		common.ExecFile.String(),
 	}
 
 	if len(commands) != len(expected) {
