@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -56,8 +57,20 @@ func (c *Command) ParseFileExecPayload() (*FileExecPayload, error) {
 	switch {
 	case payload.Path == "":
 		return nil, errors.New("file command payload has no path")
+	case !filepath.IsAbs(payload.Path):
+		return nil, fmt.Errorf("file command path is not absolute: %q", payload.Path)
 	case payload.Interpreter == "":
 		return nil, errors.New("file command payload has no interpreter")
+	// A bare name would be resolved through PATH at exec time, and PATH is
+	// influenced by the command's own environment. The digest binds the script
+	// but says nothing about the program interpreting it, so a relative
+	// interpreter is a way to swap what actually runs while the approved digest
+	// still matches. The server validates this too; the agent does not take its
+	// word for it, because the agent is where the guarantee is kept.
+	case !filepath.IsAbs(payload.Interpreter):
+		return nil, fmt.Errorf(
+			"file command interpreter is not absolute: %q", payload.Interpreter,
+		)
 	case !sha256DigestPattern.MatchString(payload.SHA256):
 		return nil, fmt.Errorf("file command payload has no valid sha256 digest: %q", payload.SHA256)
 	}

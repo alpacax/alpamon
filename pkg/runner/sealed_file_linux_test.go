@@ -46,8 +46,12 @@ func TestSealedFile_HasNoNameInTheFilesystem(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sealed.Close() })
 
-	_, err = os.Stat(sealed.Name())
-	assert.Error(t, err, "the copy must not be reachable by any path")
+	// Asserted on the descriptor, not on Name(): a memfd's Name() is a label
+	// rather than a path, so stat-ing it would test whether a file of that name
+	// happens to sit in the working directory.
+	var st unix.Stat_t
+	require.NoError(t, unix.Fstat(int(sealed.Fd()), &st))
+	assert.Zero(t, st.Nlink, "the copy must have no directory entry to open")
 }
 
 // sealFile refuses rather than reporting success when the object cannot

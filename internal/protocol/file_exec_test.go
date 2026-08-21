@@ -146,3 +146,35 @@ func TestParseFileExecPayload_Malformed(t *testing.T) {
 		})
 	}
 }
+
+func TestParseFileExecPayload_RelativeInterpreterRefused(t *testing.T) {
+	// A bare name resolves through PATH at exec time, and PATH comes from the
+	// command's own environment. The digest binds the script, never the program
+	// interpreting it, so this would swap what actually runs while the approved
+	// digest still matched.
+	cmd := &Command{Data: `{
+		"path": "/opt/deploy.sh",
+		"interpreter": "bash",
+		"args": [],
+		"sha256": "sha256:` + strings.Repeat("a", 64) + `"
+	}`}
+
+	_, err := cmd.ParseFileExecPayload()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "interpreter is not absolute")
+}
+
+func TestParseFileExecPayload_RelativePathRefused(t *testing.T) {
+	cmd := &Command{Data: `{
+		"path": "deploy.sh",
+		"interpreter": "/bin/bash",
+		"args": [],
+		"sha256": "sha256:` + strings.Repeat("a", 64) + `"
+	}`}
+
+	_, err := cmd.ParseFileExecPayload()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path is not absolute")
+}
