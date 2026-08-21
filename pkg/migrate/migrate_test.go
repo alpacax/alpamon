@@ -295,7 +295,7 @@ func TestStartWatchdog_CancelDisarmsBeforeTimer(t *testing.T) {
 		fired.Add(1)
 	})
 
-	// Disarm before the timer would fire — mirrors the on-connect-success
+	// Disarm before the timer would fire: mirrors the on-connect-success
 	// path that races against the watchdog.
 	time.Sleep(200 * time.Millisecond)
 	cancelWatchdog()

@@ -78,7 +78,7 @@ func TestDownloadFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, string(content), string(got))
 
-	// Verify file permissions are restrictive (Unix only — Windows doesn't enforce Unix perms)
+	// Verify file permissions are restrictive (Unix only: Windows doesn't enforce Unix perms)
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(destPath)
 		require.NoError(t, err)

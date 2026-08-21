@@ -175,7 +175,7 @@ func TestBuildMultipartStream_EarlyCloseNoLeak(t *testing.T) {
 // path (hint < multipartPipeBufSize, currently 4 MiB) produces a well-formed
 // multipart body with correct payload.
 func TestBuildMultipartStream_SmallPath_Roundtrip(t *testing.T) {
-	payload := bytes.Repeat([]byte{0xCD}, 512<<10) // 512 KiB — well below multipartPipeBufSize (4 MiB)
+	payload := bytes.Repeat([]byte{0xCD}, 512<<10) // 512 KiB, well below multipartPipeBufSize (4 MiB)
 	src := io.NopCloser(bytes.NewReader(payload))
 	body, ct, _, err := buildMultipartStream(src, "small.bin", false, int64(len(payload)))
 	require.NoError(t, err)
