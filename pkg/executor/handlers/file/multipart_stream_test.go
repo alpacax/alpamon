@@ -61,6 +61,23 @@ func requireMultipartReader(t *testing.T, body io.Reader, ct string) *multipart.
 	return multipart.NewReader(body, params["boundary"])
 }
 
+// assertSinglePart consumes the next part of mr and checks it is the content
+// field for fileName carrying payload. Comparing sha256 digests keeps a
+// megabyte-sized mismatch out of the failure output.
+func assertSinglePart(t *testing.T, mr *multipart.Reader, fileName string, payload []byte) {
+	t.Helper()
+	part, err := mr.NextPart()
+	require.NoError(t, err)
+	assert.Equal(t, multipartFieldContent, part.FormName())
+	assert.Equal(t, fileName, part.FileName())
+
+	got := sha256.New()
+	_, err = io.Copy(got, part)
+	require.NoError(t, err)
+	want := sha256.Sum256(payload)
+	assert.Equal(t, want[:], got.Sum(nil), "payload digest mismatch")
+}
+
 func TestBuildMultipartStream_Roundtrip(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xAB}, 1<<20)
 	src := io.NopCloser(bytes.NewReader(payload))
@@ -69,16 +86,7 @@ func TestBuildMultipartStream_Roundtrip(t *testing.T) {
 	defer func() { _ = body.Close() }()
 
 	mr := requireMultipartReader(t, body, ct)
-	part, err := mr.NextPart()
-	require.NoError(t, err)
-	assert.Equal(t, multipartFieldContent, part.FormName())
-	assert.Equal(t, "f.bin", part.FileName())
-
-	got := sha256.New()
-	_, err = io.Copy(got, part)
-	require.NoError(t, err)
-	want := sha256.Sum256(payload)
-	assert.Equal(t, want[:], got.Sum(nil), "payload digest mismatch")
+	assertSinglePart(t, mr, "f.bin", payload)
 
 	_, err = mr.NextPart()
 	assert.ErrorIs(t, err, io.EOF)
@@ -182,16 +190,7 @@ func TestBuildMultipartStream_SmallPath_Roundtrip(t *testing.T) {
 	defer func() { _ = body.Close() }()
 
 	mr := requireMultipartReader(t, body, ct)
-	part, err := mr.NextPart()
-	require.NoError(t, err)
-	assert.Equal(t, multipartFieldContent, part.FormName())
-	assert.Equal(t, "small.bin", part.FileName())
-
-	got := sha256.New()
-	_, err = io.Copy(got, part)
-	require.NoError(t, err)
-	want := sha256.Sum256(payload)
-	assert.Equal(t, want[:], got.Sum(nil), "payload digest mismatch")
+	assertSinglePart(t, mr, "small.bin", payload)
 
 	_, err = mr.NextPart()
 	assert.ErrorIs(t, err, io.EOF)
@@ -228,16 +227,7 @@ func TestBuildMultipartStream_BufferedPath_Roundtrip(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, contentLength, n, "wire size must match contentLength")
 
-			part, err := requireMultipartReader(t, &captured, ct).NextPart()
-			require.NoError(t, err)
-			assert.Equal(t, multipartFieldContent, part.FormName())
-			assert.Equal(t, "f.bin", part.FileName())
-
-			got := sha256.New()
-			_, err = io.Copy(got, part)
-			require.NoError(t, err)
-			want := sha256.Sum256(payload)
-			assert.Equal(t, want[:], got.Sum(nil), "payload digest mismatch")
+			assertSinglePart(t, requireMultipartReader(t, &captured, ct), "f.bin", payload)
 		})
 	}
 }
