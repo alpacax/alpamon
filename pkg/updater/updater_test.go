@@ -20,6 +20,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// assertGone fails unless path is absent, which os.Stat reports as
+// os.ErrNotExist. assert.NoFileExists is the shorter spelling but it treats a
+// directory at path, and any other Lstat error, as absence; both callers here
+// are proving that a cleanup step ran, so nothing but a missing path passes.
+func assertGone(t *testing.T, path, msg string) {
+	t.Helper()
+	_, err := os.Stat(path)
+	assert.ErrorIs(t, err, os.ErrNotExist, msg)
+}
+
 // createTestArchive creates a tar.gz archive containing a fake alpamon binary.
 func createTestArchive(t *testing.T, binaryContent []byte) []byte {
 	t.Helper()
@@ -241,10 +251,10 @@ func TestReplaceBinary(t *testing.T) {
 		assert.Equal(t, os.FileMode(0755), info.Mode().Perm())
 	}
 
-	assert.NoFileExists(t, currentPath+".new", "staged file should be cleaned up")
+	assertGone(t, currentPath+".new", "staged file should be cleaned up")
 
 	// Backup should be removed on success
-	assert.NoFileExists(t, currentPath+".bak", "backup file should be cleaned up on success")
+	assertGone(t, currentPath+".bak", "backup file should be cleaned up on success")
 }
 
 func TestSelfUpdate_InvalidVersion(t *testing.T) {

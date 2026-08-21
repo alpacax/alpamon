@@ -30,6 +30,16 @@ func writeFile(t *testing.T, path, content string) {
 	require.NoError(t, os.WriteFile(path, []byte(content), 0600), "write %s", path)
 }
 
+// assertGone fails unless path is absent, which os.Stat reports as
+// os.ErrNotExist. assert.NoFileExists is the shorter spelling but it treats a
+// directory at path, and any other Lstat error, as absence; every caller here
+// is proving that a cleanup step ran, so nothing but a missing path passes.
+func assertGone(t *testing.T, path, msg string) {
+	t.Helper()
+	_, err := os.Stat(path)
+	assert.ErrorIs(t, err, os.ErrNotExist, msg)
+}
+
 func TestWritePending_AndLoadPending_RoundTrip(t *testing.T) {
 	setupTempDataDir(t)
 
@@ -51,7 +61,7 @@ func TestWritePending_AndLoadPending_RoundTrip(t *testing.T) {
 	assert.Equal(t, st.NewServerID, got.NewServerID)
 
 	// No .tmp leftover after a successful atomic rename.
-	assert.NoFileExists(t, MarkerPath()+".tmp", "expected marker .tmp to be cleaned up")
+	assertGone(t, MarkerPath()+".tmp", "expected marker .tmp to be cleaned up")
 }
 
 func TestLoadPending_NoFile_ReturnsNilNil(t *testing.T) {
@@ -76,8 +86,8 @@ func TestConfirm_RemovesMarkerAndBackup(t *testing.T) {
 
 	Confirm(st)
 
-	assert.NoFileExists(t, MarkerPath(), "Confirm did not remove the marker")
-	assert.NoFileExists(t, backup, "Confirm did not remove the backup")
+	assertGone(t, MarkerPath(), "Confirm did not remove the marker")
+	assertGone(t, backup, "Confirm did not remove the backup")
 	// Sanity: dataDir still exists.
 	assert.DirExists(t, dataDir, "dataDir unexpectedly removed")
 }
@@ -111,7 +121,7 @@ func TestWriteConfAtomic_LeavesNoTmpFile(t *testing.T) {
 	got, err := os.ReadFile(conf)
 	require.NoError(t, err, "read conf")
 	assert.Equal(t, "new content", string(got))
-	assert.NoFileExists(t, conf+".new", "expected .new to be cleaned up")
+	assertGone(t, conf+".new", "expected .new to be cleaned up")
 }
 
 func TestRestoreBackup_RestoresContent(t *testing.T) {
