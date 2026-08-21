@@ -32,14 +32,11 @@ func TestShellHandler_Name(t *testing.T) {
 func TestShellHandler_Commands(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	handler := NewShellHandler(mockExec)
-	commands := handler.Commands()
 
-	expected := []string{
+	assert.Equal(t, []string{
 		common.ShellCmd.String(),
 		common.Exec.String(),
-	}
-
-	assert.Equal(t, expected, commands)
+	}, handler.Commands())
 }
 
 func TestShellHandler_Execute_Basic(t *testing.T) {
