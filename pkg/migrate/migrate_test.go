@@ -7,6 +7,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/alpacax/alpamon/v2/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // setupTempDataDir reroutes dataDirFn at a temporary directory so MarkerPath
@@ -22,11 +26,9 @@ func setupTempDataDir(t *testing.T) string {
 	return dir
 }
 
-func writeFile(t *testing.T, path string, content string) {
+func writeFile(t *testing.T, path, content string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
+	require.NoError(t, os.WriteFile(path, []byte(content), 0600), "write %s", path)
 }
 
 func TestWritePending_AndLoadPending_RoundTrip(t *testing.T) {
@@ -41,36 +43,23 @@ func TestWritePending_AndLoadPending_RoundTrip(t *testing.T) {
 		StartedAt:      time.Now().UTC(),
 		ExpiresAt:      time.Now().UTC().Add(5 * time.Minute),
 	}
-	if err := WritePending(st); err != nil {
-		t.Fatalf("WritePending: %v", err)
-	}
+	require.NoError(t, WritePending(st))
 
 	got, err := LoadPending()
-	if err != nil {
-		t.Fatalf("LoadPending: %v", err)
-	}
-	if got == nil {
-		t.Fatalf("LoadPending returned nil after WritePending")
-	}
-	if got.NewURL != st.NewURL || got.NewServerID != st.NewServerID {
-		t.Fatalf("LoadPending round-trip mismatch: %+v", got)
-	}
+	require.NoError(t, err)
+	require.NotNil(t, got, "LoadPending returned nil after WritePending")
+	assert.Equal(t, st.NewURL, got.NewURL)
+	assert.Equal(t, st.NewServerID, got.NewServerID)
 
 	// No .tmp leftover after a successful atomic rename.
-	if _, err := os.Stat(MarkerPath() + ".tmp"); !os.IsNotExist(err) {
-		t.Fatalf("expected marker .tmp to be cleaned up; stat err=%v", err)
-	}
+	testutil.AssertGone(t, MarkerPath()+".tmp", "expected marker .tmp to be cleaned up")
 }
 
 func TestLoadPending_NoFile_ReturnsNilNil(t *testing.T) {
 	setupTempDataDir(t)
 	got, err := LoadPending()
-	if err != nil {
-		t.Fatalf("LoadPending on missing file: %v", err)
-	}
-	if got != nil {
-		t.Fatalf("LoadPending on missing file: got %+v, want nil", got)
-	}
+	require.NoError(t, err, "LoadPending on missing file")
+	assert.Nil(t, got, "LoadPending on missing file must return a nil state")
 }
 
 func TestConfirm_RemovesMarkerAndBackup(t *testing.T) {
@@ -84,27 +73,19 @@ func TestConfirm_RemovesMarkerAndBackup(t *testing.T) {
 		NewURL:         "https://b.example.com",
 		ExpiresAt:      time.Now().Add(5 * time.Minute),
 	}
-	if err := WritePending(st); err != nil {
-		t.Fatalf("WritePending: %v", err)
-	}
+	require.NoError(t, WritePending(st))
 
 	Confirm(st)
 
-	if _, err := os.Stat(MarkerPath()); !os.IsNotExist(err) {
-		t.Fatalf("Confirm did not remove marker at %s (err=%v)", MarkerPath(), err)
-	}
-	if _, err := os.Stat(backup); !os.IsNotExist(err) {
-		t.Fatalf("Confirm did not remove backup at %s (err=%v)", backup, err)
-	}
+	testutil.AssertGone(t, MarkerPath(), "Confirm did not remove the marker")
+	testutil.AssertGone(t, backup, "Confirm did not remove the backup")
 	// Sanity: dataDir still exists.
-	if _, err := os.Stat(dataDir); err != nil {
-		t.Fatalf("dataDir unexpectedly removed: %v", err)
-	}
+	assert.DirExists(t, dataDir, "dataDir unexpectedly removed")
 }
 
 func TestConfirm_NilState_IsNoop(t *testing.T) {
 	setupTempDataDir(t)
-	Confirm(nil) // must not panic
+	assert.NotPanics(t, func() { Confirm(nil) })
 }
 
 func TestBackupConf_PreservesContentAndCleansUpOnNoError(t *testing.T) {
@@ -114,38 +95,24 @@ func TestBackupConf_PreservesContentAndCleansUpOnNoError(t *testing.T) {
 	writeFile(t, src, content)
 
 	backup, err := BackupConf(src)
-	if err != nil {
-		t.Fatalf("BackupConf: %v", err)
-	}
-	if backup == src {
-		t.Fatalf("backup path equals source")
-	}
+	require.NoError(t, err)
+	assert.NotEqual(t, src, backup, "backup path must differ from the source")
+
 	got, err := os.ReadFile(backup)
-	if err != nil {
-		t.Fatalf("read backup: %v", err)
-	}
-	if string(got) != content {
-		t.Fatalf("backup content mismatch:\nwant %q\ngot  %q", content, string(got))
-	}
+	require.NoError(t, err, "read backup")
+	assert.Equal(t, content, string(got), "backup content mismatch")
 }
 
 func TestWriteConfAtomic_LeavesNoTmpFile(t *testing.T) {
 	dir := t.TempDir()
 	conf := filepath.Join(dir, "alpamon.conf")
 
-	if err := WriteConfAtomic(conf, []byte("new content"), 0600); err != nil {
-		t.Fatalf("WriteConfAtomic: %v", err)
-	}
+	require.NoError(t, WriteConfAtomic(conf, []byte("new content"), 0600))
+
 	got, err := os.ReadFile(conf)
-	if err != nil {
-		t.Fatalf("read conf: %v", err)
-	}
-	if string(got) != "new content" {
-		t.Fatalf("conf content mismatch: %q", string(got))
-	}
-	if _, err := os.Stat(conf + ".new"); !os.IsNotExist(err) {
-		t.Fatalf("expected .new to be cleaned up; stat err=%v", err)
-	}
+	require.NoError(t, err, "read conf")
+	assert.Equal(t, "new content", string(got))
+	testutil.AssertGone(t, conf+".new", "expected .new to be cleaned up")
 }
 
 func TestRestoreBackup_RestoresContent(t *testing.T) {
@@ -155,13 +122,11 @@ func TestRestoreBackup_RestoresContent(t *testing.T) {
 	writeFile(t, backup, "[server]\nold=true\n")
 	writeFile(t, dest, "[server]\nnew=true\n")
 
-	if err := RestoreBackup(backup, dest); err != nil {
-		t.Fatalf("RestoreBackup: %v", err)
-	}
-	got, _ := os.ReadFile(dest)
-	if string(got) != "[server]\nold=true\n" {
-		t.Fatalf("RestoreBackup content mismatch: %q", string(got))
-	}
+	require.NoError(t, RestoreBackup(backup, dest))
+
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err, "read dest")
+	assert.Equal(t, "[server]\nold=true\n", string(got))
 }
 
 func TestRollback_RestoresConf(t *testing.T) {
@@ -182,9 +147,7 @@ func TestRollback_RestoresConf(t *testing.T) {
 		StartedAt:      time.Now().Add(-10 * time.Minute),
 		ExpiresAt:      time.Now().Add(-5 * time.Minute),
 	}
-	if err := WritePending(st); err != nil {
-		t.Fatalf("WritePending: %v", err)
-	}
+	require.NoError(t, WritePending(st))
 
 	// We deliberately do not assert on Rollback's return value: without
 	// systemd, ScheduleSelfRestart fails and Rollback returns that error,
@@ -192,20 +155,15 @@ func TestRollback_RestoresConf(t *testing.T) {
 	_ = Rollback(st, confPath, false, "")
 
 	// Conf must be restored to backup content.
-	got, _ := os.ReadFile(confPath)
-	if string(got) != "[server]\nurl=https://a.example.com\n" {
-		t.Fatalf("conf not restored, got %q", string(got))
-	}
+	got, err := os.ReadFile(confPath)
+	require.NoError(t, err, "read conf")
+	assert.Equal(t, "[server]\nurl=https://a.example.com\n", string(got), "conf not restored")
 	// When ScheduleSelfRestart fails, the marker and backup must remain
 	// so the next agent startup's watchdog can retry. This is the
 	// post-review ordering: clean up durable state only after the restart
 	// is queued.
-	if _, err := os.Stat(backupPath); err != nil {
-		t.Fatalf("backup unexpectedly removed before restart was scheduled: %v", err)
-	}
-	if _, err := os.Stat(MarkerPath()); err != nil {
-		t.Fatalf("marker unexpectedly removed before restart was scheduled: %v", err)
-	}
+	assert.FileExists(t, backupPath, "backup unexpectedly removed before restart was scheduled")
+	assert.FileExists(t, MarkerPath(), "marker unexpectedly removed before restart was scheduled")
 }
 
 func TestRollback_TolerantOfMissingBackup(t *testing.T) {
@@ -219,26 +177,22 @@ func TestRollback_TolerantOfMissingBackup(t *testing.T) {
 		NewURL:         "https://invalid.example.invalid",
 		NewServerID:    "srv-xyz",
 		NewServerKey:   "key-xyz",
-		ExpiresAt:      time.Now().Add(-1 * time.Minute),
+		ExpiresAt:      time.Now().Add(-time.Minute),
 	}
-	if err := WritePending(st); err != nil {
-		t.Fatalf("WritePending: %v", err)
-	}
+	require.NoError(t, WritePending(st))
 
 	// With backup gone, the restore step is skipped (warn logged) and
 	// the rest of Rollback runs. ScheduleSelfRestart still fails on CI,
 	// so we only assert on the no-overwrite invariant.
 	_ = Rollback(st, confPath, false, "")
 
-	if got, _ := os.ReadFile(confPath); string(got) != "restored already" {
-		t.Fatalf("Rollback overwrote conf when backup was missing: %q", string(got))
-	}
+	got, err := os.ReadFile(confPath)
+	require.NoError(t, err, "read conf")
+	assert.Equal(t, "restored already", string(got), "Rollback overwrote conf when backup was missing")
 }
 
 func TestRollback_NilState_ReturnsError(t *testing.T) {
-	if err := Rollback(nil, "/tmp/x", false, ""); err == nil {
-		t.Fatalf("expected error from Rollback(nil), got nil")
-	}
+	assert.Error(t, Rollback(nil, "/tmp/x", false, ""), "expected error from Rollback(nil)")
 }
 
 func TestStartWatchdog_FiresOnTimeout(t *testing.T) {
@@ -253,9 +207,7 @@ func TestStartWatchdog_FiresOnTimeout(t *testing.T) {
 		NewURL:         "https://b.example.com",
 		ExpiresAt:      time.Now().Add(1 * time.Second),
 	}
-	if err := WritePending(st); err != nil {
-		t.Fatalf("WritePending: %v", err)
-	}
+	require.NoError(t, WritePending(st))
 
 	var fired atomic.Int32
 	done := make(chan struct{})
@@ -268,11 +220,9 @@ func TestStartWatchdog_FiresOnTimeout(t *testing.T) {
 
 	select {
 	case <-done:
-		if fired.Load() != 1 {
-			t.Fatalf("expected single fire, got %d", fired.Load())
-		}
+		assert.Equal(t, int32(1), fired.Load(), "expected a single fire")
 	case <-time.After(5 * time.Second):
-		t.Fatalf("watchdog did not fire within deadline")
+		t.Fatal("watchdog did not fire within deadline")
 	}
 }
 
@@ -286,9 +236,7 @@ func TestStartWatchdog_DoesNotFireAfterConfirm(t *testing.T) {
 		NewURL:         "https://b.example.com",
 		ExpiresAt:      time.Now().Add(3 * time.Second),
 	}
-	if err := WritePending(st); err != nil {
-		t.Fatalf("WritePending: %v", err)
-	}
+	require.NoError(t, WritePending(st))
 
 	var fired atomic.Int32
 	ctx := t.Context()
@@ -304,9 +252,7 @@ func TestStartWatchdog_DoesNotFireAfterConfirm(t *testing.T) {
 	// Wait past the original deadline plus jitter.
 	time.Sleep(4 * time.Second)
 
-	if fired.Load() != 0 {
-		t.Fatalf("watchdog fired despite Confirm: count=%d", fired.Load())
-	}
+	assert.Zero(t, fired.Load(), "watchdog fired despite Confirm")
 }
 
 func TestStartWatchdog_FiresImmediatelyIfAlreadyExpired(t *testing.T) {
@@ -315,11 +261,9 @@ func TestStartWatchdog_FiresImmediatelyIfAlreadyExpired(t *testing.T) {
 	st := &PendingState{
 		BackupConfPath: "/tmp/whatever",
 		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(-1 * time.Minute),
+		ExpiresAt:      time.Now().Add(-time.Minute),
 	}
-	if err := WritePending(st); err != nil {
-		t.Fatalf("WritePending: %v", err)
-	}
+	require.NoError(t, WritePending(st))
 
 	done := make(chan struct{})
 	ctx := t.Context()
@@ -331,7 +275,7 @@ func TestStartWatchdog_FiresImmediatelyIfAlreadyExpired(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatalf("watchdog did not fire immediately for expired marker")
+		t.Fatal("watchdog did not fire immediately for expired marker")
 	}
 }
 
@@ -343,9 +287,7 @@ func TestStartWatchdog_CancelDisarmsBeforeTimer(t *testing.T) {
 		NewURL:         "https://b.example.com",
 		ExpiresAt:      time.Now().Add(3 * time.Second),
 	}
-	if err := WritePending(st); err != nil {
-		t.Fatalf("WritePending: %v", err)
-	}
+	require.NoError(t, WritePending(st))
 
 	var fired atomic.Int32
 	ctx := t.Context()
@@ -354,15 +296,13 @@ func TestStartWatchdog_CancelDisarmsBeforeTimer(t *testing.T) {
 		fired.Add(1)
 	})
 
-	// Disarm before the timer would fire — mirrors the on-connect-success
+	// Disarm before the timer would fire: mirrors the on-connect-success
 	// path that races against the watchdog.
 	time.Sleep(200 * time.Millisecond)
 	cancelWatchdog()
 
 	time.Sleep(4 * time.Second)
-	if fired.Load() != 0 {
-		t.Fatalf("watchdog fired despite cancel: count=%d", fired.Load())
-	}
+	assert.Zero(t, fired.Load(), "watchdog fired despite cancel")
 }
 
 func TestStartWatchdog_StopsOnContextCancel(t *testing.T) {
@@ -373,12 +313,10 @@ func TestStartWatchdog_StopsOnContextCancel(t *testing.T) {
 		NewURL:         "https://b.example.com",
 		ExpiresAt:      time.Now().Add(3 * time.Second),
 	}
-	if err := WritePending(st); err != nil {
-		t.Fatalf("WritePending: %v", err)
-	}
+	require.NoError(t, WritePending(st))
 
 	var fired atomic.Int32
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 
 	_ = StartWatchdog(ctx, st, func(_ *PendingState) {
 		fired.Add(1)
@@ -387,7 +325,5 @@ func TestStartWatchdog_StopsOnContextCancel(t *testing.T) {
 	cancel()
 	time.Sleep(4 * time.Second)
 
-	if fired.Load() != 0 {
-		t.Fatalf("watchdog fired after ctx cancel: count=%d", fired.Load())
-	}
+	assert.Zero(t, fired.Load(), "watchdog fired after ctx cancel")
 }

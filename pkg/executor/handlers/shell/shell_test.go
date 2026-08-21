@@ -4,42 +4,40 @@ import (
 	"context"
 	"errors"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// executedUsers lists the user each executed command ran as, so a test can
+// assert on the whole set and see every actual user when the check fails.
+func executedUsers(mock *common.MockCommandExecutor) []string {
+	cmds := mock.GetExecutedCommands()
+	users := make([]string, 0, len(cmds))
+	for _, cmd := range cmds {
+		users = append(users, cmd.User)
+	}
+	return users
+}
 
 func TestShellHandler_Name(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	handler := NewShellHandler(mockExec)
-	if handler.Name() != common.Shell.String() {
-		t.Errorf("expected name %q, got %q", common.Shell.String(), handler.Name())
-	}
+	assert.Equal(t, common.Shell.String(), handler.Name())
 }
 
 func TestShellHandler_Commands(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	handler := NewShellHandler(mockExec)
-	commands := handler.Commands()
 
-	expected := []string{
+	assert.Equal(t, []string{
 		common.ShellCmd.String(),
 		common.Exec.String(),
 		common.ExecFile.String(),
-	}
-
-	if len(commands) != len(expected) {
-		t.Errorf("expected %d commands, got %d", len(expected), len(commands))
-		return
-	}
-
-	for i, cmd := range commands {
-		if cmd != expected[i] {
-			t.Errorf("command %d: expected %q, got %q", i, expected[i], cmd)
-		}
-	}
+	}, handler.Commands())
 }
 
 func TestShellHandler_Execute_Basic(t *testing.T) {
@@ -55,15 +53,9 @@ func TestShellHandler_Execute_Basic(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "file1.txt") {
-		t.Errorf("expected output to contain 'file1.txt', got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "file1.txt")
 }
 
 func TestShellHandler_Execute_Exec(t *testing.T) {
@@ -78,15 +70,9 @@ func TestShellHandler_Execute_Exec(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Exec.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "hello") {
-		t.Errorf("expected output to contain 'hello', got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "hello")
 }
 
 func TestShellHandler_Execute_AndOperator(t *testing.T) {
@@ -103,15 +89,10 @@ func TestShellHandler_Execute_AndOperator(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "output1") || !strings.Contains(output, "output2") {
-		t.Errorf("expected output to contain both outputs, got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "output1")
+	assert.Contains(t, output, "output2")
 }
 
 func TestShellHandler_AndStopsOnFailure(t *testing.T) {
@@ -127,12 +108,8 @@ func TestShellHandler_AndStopsOnFailure(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 1 {
-		t.Errorf("expected exit code 1, got %d", exitCode)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
 }
 
 func TestShellHandler_Execute_OrOperator(t *testing.T) {
@@ -148,15 +125,9 @@ func TestShellHandler_Execute_OrOperator(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "success") {
-		t.Errorf("expected output to contain 'success', got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "success")
 }
 
 func TestShellHandler_OrStopsOnSuccess(t *testing.T) {
@@ -172,16 +143,11 @@ func TestShellHandler_OrStopsOnSuccess(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
 	// Only cmd1's output should be present (cmd2 shouldn't run)
-	if !strings.Contains(output, "success") {
-		t.Errorf("expected output to contain 'success', got %q", output)
-	}
+	assert.Contains(t, output, "success")
+	assert.NotContains(t, output, "output2")
 }
 
 func TestShellHandler_Execute_Semicolon(t *testing.T) {
@@ -197,17 +163,12 @@ func TestShellHandler_Execute_Semicolon(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 	// Last command exit code
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0 (from cmd2), got %d", exitCode)
-	}
+	assert.Equal(t, 0, exitCode, "the exit code must come from cmd2")
 	// Both outputs should be present
-	if !strings.Contains(output, "error") || !strings.Contains(output, "success") {
-		t.Errorf("expected output to contain both outputs, got %q", output)
-	}
+	assert.Contains(t, output, "error")
+	assert.Contains(t, output, "success")
 }
 
 func TestShellHandler_CustomUser(t *testing.T) {
@@ -223,26 +184,12 @@ func TestShellHandler_CustomUser(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
 
-	cmds := mockExec.GetExecutedCommands()
 	// Exec method adds to commands, then calls Run which also adds
 	// So we check that at least one command has the right user
-	foundCorrectUser := false
-	for _, cmd := range cmds {
-		if cmd.User == "testuser" {
-			foundCorrectUser = true
-			break
-		}
-	}
-	if !foundCorrectUser {
-		t.Errorf("expected at least one command with user 'testuser', got %+v", cmds)
-	}
+	assert.Contains(t, executedUsers(mockExec), "testuser")
 }
 
 func TestShellHandler_DefaultUser(t *testing.T) {
@@ -258,21 +205,8 @@ func TestShellHandler_DefaultUser(t *testing.T) {
 
 	_, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	cmds := mockExec.GetExecutedCommands()
-	foundRootUser := false
-	for _, cmd := range cmds {
-		if cmd.User == "root" {
-			foundRootUser = true
-			break
-		}
-	}
-	if !foundRootUser {
-		t.Errorf("expected at least one command with default user 'root', got %+v", cmds)
-	}
+	require.NoError(t, err)
+	assert.Contains(t, executedUsers(mockExec), "root")
 }
 
 func TestShellHandler_WithTimeout(t *testing.T) {
@@ -288,12 +222,8 @@ func TestShellHandler_WithTimeout(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
 }
 
 func TestShellHandler_DefaultTimeout(t *testing.T) {
@@ -309,21 +239,13 @@ func TestShellHandler_DefaultTimeout(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
 
 	// Verify the default 30m timeout was passed to the executor
 	cmds := mockExec.GetExecutedCommands()
-	if len(cmds) == 0 {
-		t.Fatal("expected at least one executed command")
-	}
-	if cmds[0].Timeout != 30*time.Minute {
-		t.Errorf("expected default timeout 30m, got %v", cmds[0].Timeout)
-	}
+	require.NotEmpty(t, cmds, "expected at least one executed command")
+	assert.Equal(t, 30*time.Minute, cmds[0].Timeout)
 }
 
 func TestShellHandler_Validate_Empty(t *testing.T) {
@@ -336,12 +258,7 @@ func TestShellHandler_Validate_Empty(t *testing.T) {
 
 	err := handler.Validate(common.ShellCmd.String(), args)
 
-	if err == nil {
-		t.Error("expected error for empty command")
-	}
-	if !strings.Contains(err.Error(), "required") {
-		t.Errorf("error should mention 'required', got: %v", err)
-	}
+	assert.ErrorContains(t, err, "required")
 }
 
 func TestShellHandler_Validate_Valid(t *testing.T) {
@@ -354,9 +271,7 @@ func TestShellHandler_Validate_Valid(t *testing.T) {
 
 	err := handler.Validate(common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Errorf("unexpected validation error: %v", err)
-	}
+	assert.NoError(t, err)
 }
 
 func TestShellHandler_UnknownCommand(t *testing.T) {
@@ -370,15 +285,8 @@ func TestShellHandler_UnknownCommand(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, "unknown_command", args)
 
-	if err == nil {
-		t.Error("expected error for unknown command")
-	}
-	if exitCode != 1 {
-		t.Errorf("expected exit code 1, got %d", exitCode)
-	}
-	if !strings.Contains(err.Error(), "unknown shell command") {
-		t.Errorf("error should mention 'unknown shell command', got: %v", err)
-	}
+	assert.Equal(t, 1, exitCode)
+	assert.ErrorContains(t, err, "unknown shell command")
 }
 
 func TestShellHandler_CommandExecutionError(t *testing.T) {
@@ -394,15 +302,9 @@ func TestShellHandler_CommandExecutionError(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error from Execute: %v", err)
-	}
-	if exitCode != 1 {
-		t.Errorf("expected exit code 1, got %d", exitCode)
-	}
-	if !strings.Contains(output, "not found") {
-		t.Errorf("expected output to contain error message, got %q", output)
-	}
+	require.NoError(t, err, "the executor error must be folded into the output, not returned")
+	assert.Equal(t, 1, exitCode)
+	assert.Contains(t, output, "not found")
 }
 
 func TestShellHandler_WithEnv(t *testing.T) {
@@ -420,12 +322,8 @@ func TestShellHandler_WithEnv(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
 }
 
 func TestShellHandler_MixedOperators(t *testing.T) {
@@ -445,16 +343,10 @@ func TestShellHandler_MixedOperators(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
 	// cmd1's output should be present
-	if !strings.Contains(output, "out1") {
-		t.Errorf("expected output to contain 'out1', got %q", output)
-	}
+	assert.Contains(t, output, "out1")
 }
 
 func TestShellHandler_AllowSh(t *testing.T) {
@@ -479,27 +371,15 @@ func TestShellHandler_AllowSh(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "error line 1") {
-		t.Errorf("expected output to contain 'error line 1', got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "error line 1")
 
 	// Verify it was called via /bin/sh -c, not split by Fields
 	cmds := mockExec.GetExecutedCommands()
-	if len(cmds) == 0 {
-		t.Fatal("expected at least one executed command")
-	}
-	if cmds[0].Name != "/bin/sh" {
-		t.Errorf("expected command name '/bin/sh', got %q", cmds[0].Name)
-	}
-	if len(cmds[0].Args) != 2 || cmds[0].Args[0] != "-c" || cmds[0].Args[1] != "grep err /log | head" {
-		t.Errorf("expected args ['-c', 'grep err /log | head'], got %v", cmds[0].Args)
-	}
+	require.NotEmpty(t, cmds, "expected at least one executed command")
+	assert.Equal(t, "/bin/sh", cmds[0].Name)
+	assert.Equal(t, []string{"-c", "grep err /log | head"}, cmds[0].Args)
 }
 
 func TestShellHandler_AllowSh_False_UsesDirectExec(t *testing.T) {
@@ -516,21 +396,13 @@ func TestShellHandler_AllowSh_False_UsesDirectExec(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
 
 	// Verify it was NOT called via /bin/sh
 	cmds := mockExec.GetExecutedCommands()
-	if len(cmds) == 0 {
-		t.Fatal("expected at least one executed command")
-	}
-	if cmds[0].Name == "/bin/sh" {
-		t.Error("expected direct exec, not /bin/sh")
-	}
+	require.NotEmpty(t, cmds, "expected at least one executed command")
+	assert.NotEqual(t, "/bin/sh", cmds[0].Name, "expected direct exec, not /bin/sh")
 }
 
 func TestShellHandler_MultiWordCommand(t *testing.T) {
@@ -548,13 +420,7 @@ func TestShellHandler_MultiWordCommand(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "total") {
-		t.Errorf("expected output to contain 'total', got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "total")
 }

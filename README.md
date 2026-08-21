@@ -204,6 +204,18 @@ atlas migrate diff <migration_name> \
     --dev-url "sqlite://alpamon.db?mode=memory"
 ```
 
+### Tests
+
+```bash
+go test ./... -p 1        # whole suite
+go test -v ./pkg/updater  # one package
+```
+
+`-p 1` is required. The SQLite store and the system resource checks both break when packages run in parallel.
+
+<!-- This testing-conventions paragraph is mirrored in CLAUDE.md, README.md and .github/copilot-instructions.md. Edit all three together. -->
+Assert with [testify](https://github.com/stretchr/testify): `require` when a failed check makes the rest of the test meaningless, `assert` for the checks themselves. Prefer the specific helper over a hand-rolled comparison: `require.NoError`, `assert.ErrorContains`, `assert.DirExists`. Read what a helper accepts before reaching for it, because the shorter spelling is sometimes the weaker check. `assert.NoFileExists` is the example: it treats a directory at the path, and any other `Lstat` error, as absence, so a test that must prove a path was removed asserts `os.ErrNotExist` from `os.Stat` instead. Write every new test this way. Many older tests still call `t.Errorf` and `t.Fatalf` directly; convert one while you are already editing it rather than as a separate sweep. A bare `t.Fatal` stays correct where there is no error value to assert on, such as the timeout branch of a `select`.
+
 ### Docker testing (Linux distros)
 
 ```bash

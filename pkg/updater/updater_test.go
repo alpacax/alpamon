@@ -2,21 +2,34 @@ package updater
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/alpacax/alpamon/v2/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// writeTestArchive writes archive into a fresh temporary directory and returns
+// the archive path together with the extraction destination beside it.
+func writeTestArchive(t *testing.T, archive []byte) (archivePath, destPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	archivePath = filepath.Join(dir, "test.tar.gz")
+	require.NoError(t, os.WriteFile(archivePath, archive, 0644))
+	return archivePath, filepath.Join(dir, "extracted")
+}
 
 // createTestArchive creates a tar.gz archive containing a fake alpamon binary.
 func createTestArchive(t *testing.T, binaryContent []byte) []byte {
@@ -29,38 +42,22 @@ func createTestArchive(t *testing.T, binaryContent []byte) []byte {
 // and Windows-style "alpamon.exe" archive entries.
 func createTestArchiveNamed(t *testing.T, entryName string, binaryContent []byte) []byte {
 	t.Helper()
-	tmpFile, err := os.CreateTemp("", "test-archive-*.tar.gz")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpFile.Name())
-	}()
-
-	gw := gzip.NewWriter(tmpFile)
+	var archive bytes.Buffer
+	gw := gzip.NewWriter(&archive)
 	tw := tar.NewWriter(gw)
 
-	hdr := &tar.Header{
+	require.NoError(t, tw.WriteHeader(&tar.Header{
 		Name: entryName,
 		Mode: 0755,
 		Size: int64(len(binaryContent)),
-	}
-	if err := tw.WriteHeader(hdr); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tw.Write(binaryContent); err != nil {
-		t.Fatal(err)
-	}
+	}))
+	_, err := tw.Write(binaryContent)
+	require.NoError(t, err)
 
-	_ = tw.Close()
-	_ = gw.Close()
-
-	data, err := os.ReadFile(tmpFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
+	// Both Close calls flush, so a failure here means a truncated archive.
+	require.NoError(t, tw.Close())
+	require.NoError(t, gw.Close())
+	return archive.Bytes()
 }
 
 func sha256Hex(data []byte) string {
@@ -69,19 +66,13 @@ func sha256Hex(data []byte) string {
 }
 
 func TestArchiveFilename(t *testing.T) {
-	got := archiveFilename("v1.2.3")
-	expected := fmt.Sprintf("alpamon-1.2.3-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
-	if got != expected {
-		t.Errorf("archiveFilename(v1.2.3) = %q, want %q", got, expected)
-	}
+	assert.Equal(t, fmt.Sprintf("alpamon-1.2.3-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH), archiveFilename("v1.2.3"))
 }
 
 func TestChecksumURL(t *testing.T) {
-	got := checksumURL(defaultReleaseBaseURL, "v1.2.3")
-	expected := "https://github.com/alpacax/alpamon/releases/download/v1.2.3/alpamon-1.2.3-checksums.sha256"
-	if got != expected {
-		t.Errorf("checksumURL() = %q, want %q", got, expected)
-	}
+	assert.Equal(t,
+		"https://github.com/alpacax/alpamon/releases/download/v1.2.3/alpamon-1.2.3-checksums.sha256",
+		checksumURL(defaultReleaseBaseURL, "v1.2.3"))
 }
 
 func TestDownloadFile(t *testing.T) {
@@ -92,27 +83,18 @@ func TestDownloadFile(t *testing.T) {
 	defer server.Close()
 
 	destPath := filepath.Join(t.TempDir(), "downloaded")
-	if err := downloadFile(context.Background(), server.URL, destPath); err != nil {
-		t.Fatalf("downloadFile() error: %v", err)
-	}
+	require.NoError(t, downloadFile(context.Background(), server.URL, destPath))
 
 	got, err := os.ReadFile(destPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(content) {
-		t.Errorf("downloaded content = %q, want %q", got, content)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, string(content), string(got))
 
-	// Verify file permissions are restrictive (Unix only — Windows doesn't enforce Unix perms)
+	// Verify file permissions are restrictive (Unix only: Windows doesn't enforce Unix perms)
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(destPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm()&0077 != 0 {
-			t.Errorf("downloaded file should not be group/world accessible, got %o", info.Mode().Perm())
-		}
+		require.NoError(t, err)
+		assert.Zero(t, info.Mode().Perm()&0077,
+			"downloaded file should not be group/world accessible, got %o", info.Mode().Perm())
 	}
 }
 
@@ -122,248 +104,7 @@ func TestDownloadFile_NotFound(t *testing.T) {
 
 	destPath := filepath.Join(t.TempDir(), "downloaded")
 	err := downloadFile(context.Background(), server.URL, destPath)
-	if err == nil {
-		t.Fatal("expected error for 404 response")
-	}
-	if !strings.Contains(err.Error(), "404") {
-		t.Errorf("error should mention 404, got: %v", err)
-	}
-}
-
-func TestVerifyChecksum(t *testing.T) {
-	archiveContent := []byte("fake archive content")
-	hash := sha256Hex(archiveContent)
-	archiveName := "alpamon-1.0.0-darwin-arm64.tar.gz"
-
-	checksumBody := fmt.Sprintf("%s  %s\n%s  other-file.tar.gz\n", hash, archiveName, "deadbeef")
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(checksumBody))
-	}))
-	defer server.Close()
-
-	tempDir := t.TempDir()
-	archivePath := filepath.Join(tempDir, archiveName)
-	if err := os.WriteFile(archivePath, archiveContent, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	err := verifyChecksum(context.Background(), archivePath, archiveName, server.URL+"/checksums.sha256")
-	if err != nil {
-		t.Fatalf("verifyChecksum() error: %v", err)
-	}
-}
-
-func TestVerifyChecksum_Mismatch(t *testing.T) {
-	archiveName := "alpamon-1.0.0-darwin-arm64.tar.gz"
-	checksumBody := fmt.Sprintf("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  %s\n", archiveName)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(checksumBody))
-	}))
-	defer server.Close()
-
-	tempDir := t.TempDir()
-	archivePath := filepath.Join(tempDir, archiveName)
-	if err := os.WriteFile(archivePath, []byte("different content"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	err := verifyChecksum(context.Background(), archivePath, archiveName, server.URL+"/checksums.sha256")
-	if err == nil {
-		t.Fatal("expected checksum mismatch error")
-	}
-	if !strings.Contains(err.Error(), "mismatch") {
-		t.Errorf("error should mention mismatch, got: %v", err)
-	}
-}
-
-func TestExtractBinary(t *testing.T) {
-	binaryContent := []byte("#!/bin/sh\necho hello")
-	archive := createTestArchive(t, binaryContent)
-
-	tempDir := t.TempDir()
-	archivePath := filepath.Join(tempDir, "test.tar.gz")
-	if err := os.WriteFile(archivePath, archive, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	destPath := filepath.Join(tempDir, "extracted")
-	if err := extractBinary(archivePath, destPath); err != nil {
-		t.Fatalf("extractBinary() error: %v", err)
-	}
-
-	got, err := os.ReadFile(destPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(binaryContent) {
-		t.Errorf("extracted content = %q, want %q", got, binaryContent)
-	}
-
-	info, statErr := os.Stat(destPath)
-	if statErr != nil {
-		t.Fatalf("failed to stat extracted binary: %v", statErr)
-	}
-	if runtime.GOOS != "windows" && info.Mode()&0111 == 0 {
-		t.Error("extracted binary should be executable")
-	}
-}
-
-func TestExtractBinary_WindowsExe(t *testing.T) {
-	// goreleaser appends ".exe" to the binary name on Windows; the
-	// extractor must recognise that entry too. Regression guard for
-	// isAlpamonBinary.
-	binaryContent := []byte("fake pe binary")
-	archive := createTestArchiveNamed(t, "alpamon.exe", binaryContent)
-
-	tempDir := t.TempDir()
-	archivePath := filepath.Join(tempDir, "test.tar.gz")
-	if err := os.WriteFile(archivePath, archive, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	destPath := filepath.Join(tempDir, "extracted")
-	if err := extractBinary(archivePath, destPath); err != nil {
-		t.Fatalf("extractBinary() error on alpamon.exe entry: %v", err)
-	}
-
-	got, err := os.ReadFile(destPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(binaryContent) {
-		t.Errorf("extracted content = %q, want %q", got, binaryContent)
-	}
-}
-
-func TestExtractBinary_NotFound(t *testing.T) {
-	// Archive with a different filename
-	tmpFile, err := os.CreateTemp("", "test-archive-*.tar.gz")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Remove(tmpFile.Name()) }()
-
-	gw := gzip.NewWriter(tmpFile)
-	tw := tar.NewWriter(gw)
-	hdr := &tar.Header{Name: "not-alpamon", Mode: 0755, Size: 5}
-	_ = tw.WriteHeader(hdr)
-	_, _ = tw.Write([]byte("hello"))
-	_ = tw.Close()
-	_ = gw.Close()
-	_ = tmpFile.Close()
-
-	destPath := filepath.Join(t.TempDir(), "extracted")
-	err = extractBinary(tmpFile.Name(), destPath)
-	if err == nil {
-		t.Fatal("expected error when binary not found in archive")
-	}
-	if !strings.Contains(err.Error(), "not found in archive") {
-		t.Errorf("error should mention not found, got: %v", err)
-	}
-}
-
-func TestReplaceBinary(t *testing.T) {
-	tempDir := t.TempDir()
-
-	currentPath := filepath.Join(tempDir, "alpamon")
-	if err := os.WriteFile(currentPath, []byte("old"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	newPath := filepath.Join(tempDir, "alpamon-new")
-	if err := os.WriteFile(newPath, []byte("new"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := replaceBinary(newPath, currentPath); err != nil {
-		t.Fatalf("replaceBinary() error: %v", err)
-	}
-
-	got, err := os.ReadFile(currentPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "new" {
-		t.Errorf("binary content = %q, want %q", got, "new")
-	}
-
-	info, err := os.Stat(currentPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0755 {
-		t.Errorf("permissions = %o, want 0755", info.Mode().Perm())
-	}
-
-	if _, err := os.Stat(currentPath + ".new"); !os.IsNotExist(err) {
-		t.Error("staged file should be cleaned up")
-	}
-
-	// Backup should be removed on success
-	if _, err := os.Stat(currentPath + ".bak"); !os.IsNotExist(err) {
-		t.Error("backup file should be cleaned up on success")
-	}
-}
-
-func TestSelfUpdate_InvalidVersion(t *testing.T) {
-	tests := []struct {
-		name    string
-		version string
-	}{
-		{"path traversal", "../../../etc/passwd"},
-		{"empty", ""},
-		{"no v prefix", "1.2.3"},
-		{"shell injection", "v1.0.0; rm -rf /"},
-		{"url encoded", "v1.0.0%2F..%2F.."},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := SelfUpdate(context.Background(), tt.version, Options{})
-			if err == nil {
-				t.Fatal("expected error for invalid version")
-			}
-			if !strings.Contains(err.Error(), "invalid version format") {
-				t.Errorf("error should mention invalid version format, got: %v", err)
-			}
-		})
-	}
-}
-
-func TestSelfUpdate_AlreadyInProgress(t *testing.T) {
-	if !selfUpdateInFlight.CompareAndSwap(false, true) {
-		t.Fatal("in-flight flag unexpectedly set before test")
-	}
-	defer selfUpdateInFlight.Store(false)
-
-	err := SelfUpdate(context.Background(), "v1.0.0", Options{})
-	if !errors.Is(err, ErrSelfUpdateInProgress) {
-		t.Fatalf("expected ErrSelfUpdateInProgress, got: %v", err)
-	}
-}
-
-func TestSelfUpdate_InFlightFlagResets(t *testing.T) {
-	// A failed run (invalid version) must clear the flag for the next call.
-	if err := SelfUpdate(context.Background(), "not-a-version", Options{}); err == nil {
-		t.Fatal("expected error for invalid version")
-	}
-	if selfUpdateInFlight.Load() {
-		t.Fatal("in-flight flag not reset after failed SelfUpdate returned")
-	}
-}
-
-func TestReleaseSelfUpdateLatch(t *testing.T) {
-	if !selfUpdateInFlight.CompareAndSwap(false, true) {
-		t.Fatal("in-flight flag unexpectedly set before test")
-	}
-	defer selfUpdateInFlight.Store(false)
-
-	ReleaseSelfUpdateLatch()
-	if selfUpdateInFlight.Load() {
-		t.Fatal("ReleaseSelfUpdateLatch did not clear the latch")
-	}
+	assert.ErrorContains(t, err, "404")
 }
 
 func TestDownloadFile_Oversize(t *testing.T) {
@@ -382,12 +123,7 @@ func TestDownloadFile_Oversize(t *testing.T) {
 
 	destPath := filepath.Join(t.TempDir(), "downloaded")
 	err := downloadFile(context.Background(), server.URL, destPath)
-	if err == nil {
-		t.Fatal("expected error for oversize response")
-	}
-	if !strings.Contains(err.Error(), "too large") {
-		t.Errorf("error should mention too large, got: %v", err)
-	}
+	assert.ErrorContains(t, err, "too large")
 }
 
 func TestDownloadFile_ContextCancelled(t *testing.T) {
@@ -404,10 +140,154 @@ func TestDownloadFile_ContextCancelled(t *testing.T) {
 	cancel() // Cancel immediately
 
 	destPath := filepath.Join(t.TempDir(), "downloaded")
-	err := downloadFile(ctx, server.URL, destPath)
-	if err == nil {
-		t.Fatal("expected error for cancelled context")
+	assert.Error(t, downloadFile(ctx, server.URL, destPath), "expected error for cancelled context")
+}
+
+func TestVerifyChecksum(t *testing.T) {
+	archiveContent := []byte("fake archive content")
+	hash := sha256Hex(archiveContent)
+	archiveName := "alpamon-1.0.0-darwin-arm64.tar.gz"
+
+	checksumBody := fmt.Sprintf("%s  %s\n%s  other-file.tar.gz\n", hash, archiveName, "deadbeef")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(checksumBody))
+	}))
+	defer server.Close()
+
+	archivePath := filepath.Join(t.TempDir(), archiveName)
+	require.NoError(t, os.WriteFile(archivePath, archiveContent, 0644))
+
+	err := verifyChecksum(context.Background(), archivePath, archiveName, server.URL+"/checksums.sha256")
+	require.NoError(t, err)
+}
+
+func TestVerifyChecksum_Mismatch(t *testing.T) {
+	archiveName := "alpamon-1.0.0-darwin-arm64.tar.gz"
+	checksumBody := fmt.Sprintf("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  %s\n", archiveName)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(checksumBody))
+	}))
+	defer server.Close()
+
+	archivePath := filepath.Join(t.TempDir(), archiveName)
+	require.NoError(t, os.WriteFile(archivePath, []byte("different content"), 0644))
+
+	err := verifyChecksum(context.Background(), archivePath, archiveName, server.URL+"/checksums.sha256")
+	assert.ErrorContains(t, err, "mismatch")
+}
+
+func TestExtractBinary(t *testing.T) {
+	binaryContent := []byte("#!/bin/sh\necho hello")
+	archive := createTestArchive(t, binaryContent)
+
+	archivePath, destPath := writeTestArchive(t, archive)
+	require.NoError(t, extractBinary(archivePath, destPath))
+
+	got, err := os.ReadFile(destPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(binaryContent), string(got))
+
+	info, err := os.Stat(destPath)
+	require.NoError(t, err, "failed to stat extracted binary")
+	if runtime.GOOS != "windows" {
+		assert.NotZero(t, info.Mode()&0111, "extracted binary should be executable")
 	}
+}
+
+func TestExtractBinary_WindowsExe(t *testing.T) {
+	// goreleaser appends ".exe" to the binary name on Windows; the
+	// extractor must recognise that entry too. Regression guard for
+	// isAlpamonBinary.
+	binaryContent := []byte("fake pe binary")
+	archive := createTestArchiveNamed(t, "alpamon.exe", binaryContent)
+
+	archivePath, destPath := writeTestArchive(t, archive)
+	require.NoError(t, extractBinary(archivePath, destPath), "extractBinary() must accept an alpamon.exe entry")
+
+	got, err := os.ReadFile(destPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(binaryContent), string(got))
+}
+
+func TestExtractBinary_NotFound(t *testing.T) {
+	// Archive whose only entry is not the alpamon binary.
+	archive := createTestArchiveNamed(t, "not-alpamon", []byte("hello"))
+
+	archivePath, destPath := writeTestArchive(t, archive)
+
+	err := extractBinary(archivePath, destPath)
+	assert.ErrorContains(t, err, "not found in archive")
+}
+
+func TestReplaceBinary(t *testing.T) {
+	tempDir := t.TempDir()
+
+	currentPath := filepath.Join(tempDir, "alpamon")
+	require.NoError(t, os.WriteFile(currentPath, []byte("old"), 0755))
+
+	newPath := filepath.Join(tempDir, "alpamon-new")
+	require.NoError(t, os.WriteFile(newPath, []byte("new"), 0755))
+
+	require.NoError(t, replaceBinary(newPath, currentPath))
+
+	got, err := os.ReadFile(currentPath)
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(got))
+
+	info, err := os.Stat(currentPath)
+	require.NoError(t, err)
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0755), info.Mode().Perm())
+	}
+
+	testutil.AssertGone(t, currentPath+".new", "staged file should be cleaned up")
+
+	// Backup should be removed on success
+	testutil.AssertGone(t, currentPath+".bak", "backup file should be cleaned up on success")
+}
+
+func TestSelfUpdate_InvalidVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+	}{
+		{"path traversal", "../../../etc/passwd"},
+		{"empty", ""},
+		{"no v prefix", "1.2.3"},
+		{"shell injection", "v1.0.0; rm -rf /"},
+		{"url encoded", "v1.0.0%2F..%2F.."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := SelfUpdate(context.Background(), tt.version, Options{})
+			assert.ErrorContains(t, err, "invalid version format")
+		})
+	}
+}
+
+func TestSelfUpdate_AlreadyInProgress(t *testing.T) {
+	require.True(t, selfUpdateInFlight.CompareAndSwap(false, true), "in-flight flag unexpectedly set before test")
+	defer selfUpdateInFlight.Store(false)
+
+	err := SelfUpdate(context.Background(), "v1.0.0", Options{})
+	assert.ErrorIs(t, err, ErrSelfUpdateInProgress)
+}
+
+func TestSelfUpdate_InFlightFlagResets(t *testing.T) {
+	// A failed run (invalid version) must clear the flag for the next call.
+	require.Error(t, SelfUpdate(context.Background(), "not-a-version", Options{}), "expected error for invalid version")
+	assert.False(t, selfUpdateInFlight.Load(), "in-flight flag not reset after failed SelfUpdate returned")
+}
+
+func TestReleaseSelfUpdateLatch(t *testing.T) {
+	require.True(t, selfUpdateInFlight.CompareAndSwap(false, true), "in-flight flag unexpectedly set before test")
+	defer selfUpdateInFlight.Store(false)
+
+	ReleaseSelfUpdateLatch()
+	assert.False(t, selfUpdateInFlight.Load(), "ReleaseSelfUpdateLatch did not clear the latch")
 }
 
 func TestIsMachO(t *testing.T) {
@@ -430,9 +310,7 @@ func TestIsMachO(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isMachO(tt.magic); got != tt.want {
-				t.Errorf("isMachO(%x) = %v, want %v", tt.magic, got, tt.want)
-			}
+			assert.Equal(t, tt.want, isMachO(tt.magic), "magic %x", tt.magic)
 		})
 	}
 }
@@ -442,13 +320,8 @@ func TestValidateBinaryFormat(t *testing.T) {
 
 	// Test with invalid file
 	invalidPath := filepath.Join(tempDir, "invalid")
-	if err := os.WriteFile(invalidPath, []byte("not a binary"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	err := validateBinaryFormat(invalidPath)
-	if err == nil {
-		t.Error("expected error for invalid binary format")
-	}
+	require.NoError(t, os.WriteFile(invalidPath, []byte("not a binary"), 0755))
+	assert.Error(t, validateBinaryFormat(invalidPath), "expected error for invalid binary format")
 
 	// Test with valid binary for the current platform
 	var magic []byte
@@ -463,10 +336,6 @@ func TestValidateBinaryFormat(t *testing.T) {
 
 	validPath := filepath.Join(tempDir, "valid")
 	content := append(magic, []byte("dummy")...)
-	if err := os.WriteFile(validPath, content, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateBinaryFormat(validPath); err != nil {
-		t.Errorf("expected valid binary format, got error: %v", err)
-	}
+	require.NoError(t, os.WriteFile(validPath, content, 0755))
+	assert.NoError(t, validateBinaryFormat(validPath), "expected valid binary format")
 }
