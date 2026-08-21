@@ -21,6 +21,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// writeTestArchive writes archive into a fresh temporary directory and returns
+// the archive path together with the extraction destination beside it.
+func writeTestArchive(t *testing.T, archive []byte) (archivePath, destPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	archivePath = filepath.Join(dir, "test.tar.gz")
+	require.NoError(t, os.WriteFile(archivePath, archive, 0644))
+	return archivePath, filepath.Join(dir, "extracted")
+}
+
 // createTestArchive creates a tar.gz archive containing a fake alpamon binary.
 func createTestArchive(t *testing.T, binaryContent []byte) []byte {
 	t.Helper()
@@ -172,11 +182,7 @@ func TestExtractBinary(t *testing.T) {
 	binaryContent := []byte("#!/bin/sh\necho hello")
 	archive := createTestArchive(t, binaryContent)
 
-	tempDir := t.TempDir()
-	archivePath := filepath.Join(tempDir, "test.tar.gz")
-	require.NoError(t, os.WriteFile(archivePath, archive, 0644))
-
-	destPath := filepath.Join(tempDir, "extracted")
+	archivePath, destPath := writeTestArchive(t, archive)
 	require.NoError(t, extractBinary(archivePath, destPath))
 
 	got, err := os.ReadFile(destPath)
@@ -197,11 +203,7 @@ func TestExtractBinary_WindowsExe(t *testing.T) {
 	binaryContent := []byte("fake pe binary")
 	archive := createTestArchiveNamed(t, "alpamon.exe", binaryContent)
 
-	tempDir := t.TempDir()
-	archivePath := filepath.Join(tempDir, "test.tar.gz")
-	require.NoError(t, os.WriteFile(archivePath, archive, 0644))
-
-	destPath := filepath.Join(tempDir, "extracted")
+	archivePath, destPath := writeTestArchive(t, archive)
 	require.NoError(t, extractBinary(archivePath, destPath), "extractBinary() must accept an alpamon.exe entry")
 
 	got, err := os.ReadFile(destPath)
@@ -213,11 +215,9 @@ func TestExtractBinary_NotFound(t *testing.T) {
 	// Archive whose only entry is not the alpamon binary.
 	archive := createTestArchiveNamed(t, "not-alpamon", []byte("hello"))
 
-	tempDir := t.TempDir()
-	archivePath := filepath.Join(tempDir, "test.tar.gz")
-	require.NoError(t, os.WriteFile(archivePath, archive, 0644))
+	archivePath, destPath := writeTestArchive(t, archive)
 
-	err := extractBinary(archivePath, filepath.Join(tempDir, "extracted"))
+	err := extractBinary(archivePath, destPath)
 	assert.ErrorContains(t, err, "not found in archive")
 }
 
