@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -79,6 +80,8 @@ func (d *fakeDispatcher) Execute(_ context.Context, command string, args *common
 func (d *fakeDispatcher) HasHandler(string) bool { return true }
 
 func TestOpenVerifiedFile_DigestMatchReturnsRewoundDescriptor(t *testing.T) {
+	skipIfNoVerifiedFileExec(t)
+
 	content := []byte("#!/bin/sh\necho original\n")
 	path := writeScript(t, content)
 
@@ -88,13 +91,15 @@ func TestOpenVerifiedFile_DigestMatchReturnsRewoundDescriptor(t *testing.T) {
 	t.Cleanup(func() { _ = file.Close() })
 
 	// Hashing consumed the offset; the descriptor handed to the child must
-	// start at the beginning of the file.
+	// start at the beginning of the copy.
 	read, err := io.ReadAll(file)
 	require.NoError(t, err)
 	assert.Equal(t, content, read)
 }
 
 func TestOpenVerifiedFile_DigestMismatchRefuses(t *testing.T) {
+	skipIfNoVerifiedFileExec(t)
+
 	path := writeScript(t, []byte("#!/bin/sh\necho original\n"))
 
 	file, err := openVerifiedFile(path, hexDigest([]byte("something else")))
@@ -121,6 +126,86 @@ func TestOpenVerifiedFile_NonRegularFileRefused(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Nil(t, file)
+}
+
+func TestOpenVerifiedFile_ExactlyAtSizeCapAccepted(t *testing.T) {
+	skipIfNoVerifiedFileExec(t)
+
+	content := bytes.Repeat([]byte("a"), maxVerifiedFileSize)
+	path := writeScript(t, content)
+
+	file, err := openVerifiedFile(path, hexDigest(content))
+
+	require.NoError(t, err, "a file sitting exactly on the cap must still run")
+	t.Cleanup(func() { _ = file.Close() })
+}
+
+func TestOpenVerifiedFile_OverSizeCapRefused(t *testing.T) {
+	skipIfNoVerifiedFileExec(t)
+
+	// The agent holds the copy in memory and reads from disk, where the file
+	// is whatever the requester made it—the server's own 64 KiB cap is not
+	// something the agent can see or rely on.
+	content := bytes.Repeat([]byte("a"), maxVerifiedFileSize+1)
+	path := writeScript(t, content)
+
+	file, err := openVerifiedFile(path, hexDigest(content))
+
+	require.Error(t, err)
+	assert.Nil(t, file)
+	assert.ErrorIs(t, err, errFileTooLarge)
+	assert.NotErrorIs(t, err, errHashMismatch, "an oversize file is not a mismatch")
+}
+
+// TestOpenVerifiedFile_InPlaceRewriteKeepsOriginalBytes is the case the sealed
+// copy exists for.
+//
+// The requester owns the file it submitted, so it needs no compromise of
+// anything to rewrite those bytes in place—same inode, same path, same
+// descriptor the agent verified—in the window before the interpreter reads
+// them. An implementation that executes the on-disk inode, even through a
+// descriptor opened before hashing, runs the rewritten bytes and fails here.
+func TestOpenVerifiedFile_InPlaceRewriteKeepsOriginalBytes(t *testing.T) {
+	skipIfNoVerifiedFileExec(t)
+
+	// Equal lengths so the rewrite lands over the whole file without
+	// truncating, the way dd conv=notrunc would.
+	original := []byte("#!/bin/sh\necho original!\n")
+	rewritten := []byte("#!/bin/sh\necho rewrite!!\n")
+	require.Len(t, rewritten, len(original))
+
+	path := writeScript(t, original)
+	file, err := openVerifiedFile(path, hexDigest(original))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = file.Close() })
+
+	rewriteInPlace(t, path, rewritten)
+
+	onDisk, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, rewritten, onDisk,
+		"the in-place rewrite must have landed or this test proves nothing")
+
+	fromDescriptor, err := io.ReadAll(file)
+	require.NoError(t, err)
+	assert.Equal(t, original, fromDescriptor,
+		"the verified copy must still yield the bytes that were hashed")
+}
+
+// rewriteInPlace overwrites path's contents through a separate handle without
+// truncating, so the inode, its link and its length are all unchanged. This is
+// the write the requester can always make to its own file.
+func rewriteInPlace(t *testing.T, path string, content []byte) {
+	t.Helper()
+
+	handle, err := os.OpenFile(path, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, handle.Close()) }()
+
+	written, err := handle.WriteAt(content, 0)
+	require.NoError(t, err)
+	require.Equal(t, len(content), written)
+	require.NoError(t, handle.Sync())
 }
 
 // TestOpenVerifiedFile_SwapAfterVerifyKeepsOriginalBytes is the fd invariant.
@@ -241,6 +326,33 @@ func TestPrepareFileCommand_RefusalCodes(t *testing.T) {
 			assert.Equal(t, tt.code, refusal.code)
 		})
 	}
+}
+
+func TestPrepareFileCommand_OverSizeCapRefusesWithItsOwnCode(t *testing.T) {
+	skipIfNoVerifiedFileExec(t)
+
+	content := bytes.Repeat([]byte("a"), maxVerifiedFileSize+1)
+	path := writeScript(t, content)
+	cr := &CommandRunner{command: fileCommand(t, "cmd-1", path, "/bin/bash", nil, digestOf(content))}
+
+	args, refusal := cr.prepareFileCommand(context.Background())
+
+	assert.Nil(t, args)
+	require.NotNil(t, refusal)
+	assert.Equal(t, FileTooLargeCode, refusal.code)
+}
+
+func TestCommandRunner_Run_FileOverSizeCapNeverDispatches(t *testing.T) {
+	skipIfNoVerifiedFileExec(t)
+
+	content := bytes.Repeat([]byte("a"), maxVerifiedFileSize+1)
+	path := writeScript(t, content)
+	dispatcher := &fakeDispatcher{}
+	cr := NewCommandRunner(nil, nil, fileCommand(t, "", path, "/bin/bash", nil, digestOf(content)), protocol.CommandData{}, dispatcher)
+
+	require.NoError(t, cr.Run(context.Background()))
+
+	assert.Empty(t, dispatcher.calls, "an oversize entrypoint must never reach execution")
 }
 
 func TestPrepareFileCommand_UnsupportedPlatformDeclinesCleanly(t *testing.T) {
