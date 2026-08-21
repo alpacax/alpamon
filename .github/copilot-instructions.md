@@ -29,6 +29,7 @@ Key packages:
 ## Code conventions
 
 - Run `go test -v ./... -p 1` for tests (sequential due to SQLite locking)
+- Assert with testify: `require` when a failed check makes the rest of the test meaningless, `assert` for the checks themselves. New tests never call `t.Errorf` or `t.Fatalf` directly, except where there is no error value to assert on (the timeout branch of a `select`)
 - Run Ent code generation after schema changes; never edit `pkg/db/ent/` manually
 - Platform-specific files use `_darwin.go` / `_linux.go` suffixes
 - Timeout exit code is 124 (GNU `timeout` convention)

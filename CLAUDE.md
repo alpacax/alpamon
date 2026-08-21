@@ -60,6 +60,8 @@ go test -v ./... -p 1
 go test -v ./pkg/collector/check/realtime/cpu
 ```
 
+Assert with [testify](https://github.com/stretchr/testify): `require` when a failed check makes the rest of the test meaningless, `assert` for the checks themselves. Prefer the specific helper over a hand-rolled comparison—`require.NoError`, `assert.ErrorContains`, `assert.NoFileExists`. Write every new test this way. Many older tests still call `t.Errorf` and `t.Fatalf` directly; convert one while you are already editing it rather than as a separate sweep. A bare `t.Fatal` stays correct where there is no error value to assert on, such as the timeout branch of a `select`.
+
 ### Running locally
 ```bash
 # Run from source
