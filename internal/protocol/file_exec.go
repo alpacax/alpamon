@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -57,7 +56,7 @@ func (c *Command) ParseFileExecPayload() (*FileExecPayload, error) {
 	switch {
 	case payload.Path == "":
 		return nil, errors.New("file command payload has no path")
-	case !filepath.IsAbs(payload.Path):
+	case !isPOSIXAbsolute(payload.Path):
 		return nil, fmt.Errorf("file command path is not absolute: %q", payload.Path)
 	case payload.Interpreter == "":
 		return nil, errors.New("file command payload has no interpreter")
@@ -67,7 +66,7 @@ func (c *Command) ParseFileExecPayload() (*FileExecPayload, error) {
 	// interpreter is a way to swap what actually runs while the approved digest
 	// still matches. The server validates this too; the agent does not take its
 	// word for it, because the agent is where the guarantee is kept.
-	case !filepath.IsAbs(payload.Interpreter):
+	case !isPOSIXAbsolute(payload.Interpreter):
 		return nil, fmt.Errorf(
 			"file command interpreter is not absolute: %q", payload.Interpreter,
 		)
@@ -82,4 +81,15 @@ func (c *Command) ParseFileExecPayload() (*FileExecPayload, error) {
 // compare against a computed sum.
 func (p *FileExecPayload) ExpectedDigest() string {
 	return strings.TrimPrefix(p.SHA256, "sha256:")
+}
+
+// isPOSIXAbsolute reports whether a wire path is absolute in POSIX terms.
+//
+// Deliberately not filepath.IsAbs: that is evaluated against the *building*
+// OS, so a Windows build would read "/opt/deploy.sh" as relative and refuse a
+// payload every other build accepts. The wire contract is a POSIX path — the
+// lane declines on Windows before a payload is ever parsed — so the check has
+// to mean the same thing wherever it compiles.
+func isPOSIXAbsolute(p string) bool {
+	return strings.HasPrefix(p, "/")
 }
