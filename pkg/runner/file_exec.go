@@ -82,7 +82,14 @@ func (r *fileRefusal) String() string {
 // On any failure the copy is closed before returning: no descriptor carrying
 // unverified bytes reaches a caller.
 func openVerifiedFile(path, expectedDigest string) (*os.File, error) {
-	source, err := os.Open(path)
+	// codeql[go/path-injection]: Intentional - the path names a file the operator
+	// asked to run on their own host, sent by the trusted Alpacon console over the
+	// same authenticated channel that already carries arbitrary command lines
+	// (the `system` shell), so the path is not a privilege boundary here and there
+	// is no root to confine it to. What bounds this lane is the digest, checked
+	// below over the sealed copy before anything executes: a path the approver did
+	// not clear yields a mismatch and the command is refused.
+	source, err := os.Open(path) // lgtm[go/path-injection]
 	if err != nil {
 		return nil, err
 	}
