@@ -294,7 +294,8 @@ func TestAddPIDCommandMapping_OverwritesStaleEntry(t *testing.T) {
 	am.AddPIDCommandMapping(4001, "old-cmd", "alice")
 	am.AddPIDCommandMapping(4001, "new-cmd", "bob")
 
-	entry, _ := am.LookupPID(4001)
+	entry, ok := am.LookupPID(4001)
+	require.True(t, ok, "entry should survive the overwrite")
 	assert.Equal(t, "new-cmd", entry.CommandID)
 	assert.Equal(t, "bob", entry.Username)
 }
