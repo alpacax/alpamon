@@ -48,12 +48,16 @@ func (e *errReader) Close() error {
 }
 
 // requireMultipartReader parses ct as a multipart/form-data content type and
-// returns a reader over body, failing the test when either step does not hold.
+// returns a reader over body, failing the test when the type does not parse, is
+// not multipart/form-data, or carries no boundary. Without the boundary check a
+// missing one would surface later as an opaque "boundary is empty" from the
+// reader instead of naming the content type that lacked it.
 func requireMultipartReader(t *testing.T, body io.Reader, ct string) *multipart.Reader {
 	t.Helper()
 	mt, params, err := mime.ParseMediaType(ct)
 	require.NoError(t, err, "ct=%q", ct)
 	require.Equal(t, "multipart/form-data", mt)
+	require.NotEmpty(t, params["boundary"], "ct=%q", ct)
 	return multipart.NewReader(body, params["boundary"])
 }
 
