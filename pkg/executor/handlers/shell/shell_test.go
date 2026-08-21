@@ -36,6 +36,7 @@ func TestShellHandler_Commands(t *testing.T) {
 	assert.Equal(t, []string{
 		common.ShellCmd.String(),
 		common.Exec.String(),
+		common.ExecFile.String(),
 	}, handler.Commands())
 }
 

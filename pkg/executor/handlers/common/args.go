@@ -1,6 +1,9 @@
 package common
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
 // CommandArgs is a strongly-typed struct for all command arguments
 type CommandArgs struct {
@@ -38,6 +41,15 @@ type CommandArgs struct {
 	AllowOverwrite bool
 	AllowUnzip     bool
 	UseBlob        bool
+
+	// Verified file execution (shell type "file", ADR 0053).
+	// VerifiedFile is an open descriptor whose sha256 already matched the
+	// approved digest. The child inherits that descriptor and ExecArgs names
+	// it by its descriptor path, so the object that was verified is the object
+	// that runs—nothing between the check and the exec resolves the path
+	// again. The runner owns the descriptor and closes it after execution.
+	VerifiedFile *os.File
+	ExecArgs     []string
 
 	// Terminal operations
 	Rows  uint16

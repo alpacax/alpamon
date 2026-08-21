@@ -200,7 +200,13 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	// Build the environment for the (possibly demoted) command and expand
 	// any variable references in the arguments using it.
 	env := e.buildEnv(opts.Username, opts.Env)
-	args := e.expandArgs(opts.Args, env)
+	// A verified entrypoint's argv is itself part of the approved instruction,
+	// so it is passed through exactly as given—no expansion here, and no shell
+	// downstream to split words or honor operators.
+	args := opts.Args
+	if opts.ExecFile == nil {
+		args = e.expandArgs(opts.Args, env)
+	}
 
 	// Setup context with timeout if specified
 	if opts.Timeout > 0 {
@@ -220,6 +226,15 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	// rather than falling back to the service PATH; Windows keeps the standard
 	// resolution.
 	utils.ApplyCommandPath(cmd, args[0], env["PATH"])
+
+	// Hand the already-verified descriptor to the child. os/exec dups
+	// ExtraFiles[i] onto fd 3+i without close-on-exec, so it survives the exec
+	// and args can name it as common.VerifiedFilePath(). Nothing here reopens
+	// the original path, which is what keeps hashed-object and executed-object
+	// the same object.
+	if opts.ExecFile != nil {
+		cmd.ExtraFiles = []*os.File{opts.ExecFile}
+	}
 
 	var cw *chunkWriter
 	if opts.ChunkCallback != nil {
@@ -388,6 +403,13 @@ type CommandOptions struct {
 	WorkingDir string            // Working directory
 	Timeout    time.Duration     // Command timeout
 	Input      string            // Input to provide via stdin
+
+	// ExecFile, when non-nil, is an already-opened and digest-verified
+	// entrypoint. It is inherited by the child at common.VerifiedFileChildFD
+	// and must already be named in Args by common.VerifiedFilePath(). Setting
+	// it also suppresses argument expansion. The caller keeps ownership and
+	// closes it after Execute returns.
+	ExecFile *os.File
 
 	// PIDHook, if non-nil, receives the child's pid after Start so the
 	// shell handler can register it with the PAM tracker before the
@@ -562,6 +584,22 @@ func (e *Executor) ExecWithHook(ctx context.Context, args []string, username, gr
 func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error) {
 	return e.Execute(ctx, CommandOptions{
 		Args:          args,
+		Username:      username,
+		Groupname:     groupname,
+		Env:           env,
+		Timeout:       timeout,
+		PIDHook:       pidHook,
+		ChunkCallback: chunkCallback,
+	})
+}
+
+// ExecFileWithStreamingHook is ExecWithStreamingHook for a digest-verified
+// entrypoint: file is inherited by the child and args names it by its
+// descriptor path, so the verified object is the one that runs.
+func (e *Executor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error) {
+	return e.Execute(ctx, CommandOptions{
+		Args:          args,
+		ExecFile:      file,
 		Username:      username,
 		Groupname:     groupname,
 		Env:           env,

@@ -43,6 +43,8 @@ const (
 	// Shell commands
 	ShellCmd CommandType = "shell"
 	Exec     CommandType = "exec"
+	// ExecFile runs a digest-verified entrypoint (shell type "file").
+	ExecFile CommandType = "execfile"
 
 	// User commands
 	AddUser CommandType = "adduser"
