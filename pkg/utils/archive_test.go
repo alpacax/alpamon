@@ -98,8 +98,10 @@ func TestCreateZip_SymlinksStoredAsEntries(t *testing.T) {
 	}
 
 	// One real file plus the three links: following any link would add
-	// duplicates or recurse into loop.
-	require.Len(t, entries, 4)
+	// duplicates or recurse into loop. Assert on r.File as well, because the
+	// map collapses a name written twice into one key.
+	require.Len(t, r.File, 4)
+	require.Len(t, entries, 4, "archive holds duplicate entry names")
 	require.Contains(t, entries, "demo/real/file.txt")
 	for name, target := range map[string]string{
 		"demo/link":     "real",
