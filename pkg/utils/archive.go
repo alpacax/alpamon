@@ -53,19 +53,35 @@ func CreateZip(destPath string, paths []string, recursive bool) error {
 				if fi.Mode()&os.ModeSymlink != 0 {
 					return addSymlinkToZip(w, fpath, name, fi)
 				}
-				return addFileToZip(w, fpath, name)
+				return addFileToZip(w, fpath, name, fi)
 			})
 			if err != nil {
 				return err
 			}
 		} else {
-			if err := addFileToZip(w, path, filepath.Base(path)); err != nil {
+			if err := addFileToZip(w, path, filepath.Base(path), info); err != nil {
 				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+// newZipEntry opens an entry carrying the source mode bits, which w.Create
+// would replace with 0666. Zip archive names use forward slashes (ZIP spec).
+func newZipEntry(w *zip.Writer, archiveName string, fi os.FileInfo, method uint16) (io.Writer, error) {
+	hdr := &zip.FileHeader{
+		Name:   filepath.ToSlash(archiveName),
+		Method: method,
+	}
+	hdr.SetMode(fi.Mode())
+
+	zw, err := w.CreateHeader(hdr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zip entry: %w", err)
+	}
+	return zw, nil
 }
 
 // addSymlinkToZip writes the link target as the entry body with ModeSymlink
@@ -76,15 +92,9 @@ func addSymlinkToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo
 		return fmt.Errorf("failed to read symlink %s: %w", filePath, err)
 	}
 
-	hdr := &zip.FileHeader{
-		Name:   filepath.ToSlash(archiveName),
-		Method: zip.Store,
-	}
-	hdr.SetMode(fi.Mode())
-
-	zw, err := w.CreateHeader(hdr)
+	zw, err := newZipEntry(w, archiveName, fi, zip.Store)
 	if err != nil {
-		return fmt.Errorf("failed to create zip entry: %w", err)
+		return err
 	}
 
 	if _, err := zw.Write([]byte(target)); err != nil {
@@ -94,19 +104,16 @@ func addSymlinkToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo
 	return nil
 }
 
-func addFileToZip(w *zip.Writer, filePath, archiveName string) error {
+func addFileToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open %s: %w", filePath, err)
 	}
 	defer func() { _ = f.Close() }()
 
-	// Use forward slashes in zip archive names (ZIP spec)
-	archiveName = filepath.ToSlash(archiveName)
-
-	zw, err := w.Create(archiveName)
+	zw, err := newZipEntry(w, archiveName, fi, zip.Deflate)
 	if err != nil {
-		return fmt.Errorf("failed to create zip entry: %w", err)
+		return err
 	}
 
 	if _, err := io.Copy(zw, f); err != nil {

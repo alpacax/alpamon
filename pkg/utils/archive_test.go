@@ -115,6 +115,45 @@ func TestCreateZip_SymlinksStoredAsEntries(t *testing.T) {
 	}
 }
 
+func TestCreateZip_FileModeIsPreserved(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	scripts := filepath.Join(dir, "scripts")
+	require.NoError(t, os.MkdirAll(scripts, 0755))
+	script := filepath.Join(scripts, "run.sh")
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\n"), 0644))
+	require.NoError(t, os.Chmod(script, 0755))
+	plain := filepath.Join(dir, "plain.txt")
+	require.NoError(t, os.WriteFile(plain, []byte("x"), 0644))
+	require.NoError(t, os.Chmod(plain, 0644))
+
+	dest := filepath.Join(dir, "out.zip")
+	require.NoError(t, CreateZip(dest, []string{scripts, plain}, true))
+
+	r, err := zip.OpenReader(dest)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+
+	modes := make(map[string]os.FileMode, len(r.File))
+	for _, f := range r.File {
+		modes[f.Name] = f.Mode().Perm()
+	}
+	assert.Equal(t, os.FileMode(0755), modes["scripts/run.sh"])
+	assert.Equal(t, os.FileMode(0644), modes["plain.txt"])
+
+	outDir := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(outDir, 0755))
+	require.NoError(t, Unzip(dest, outDir))
+
+	// Only the owner-execute bit: umask can clear the group and other bits.
+	fi, err := os.Stat(filepath.Join(outDir, "scripts", "run.sh"))
+	require.NoError(t, err)
+	assert.NotZero(t, fi.Mode().Perm()&0100, "extracted script lost its execute bit")
+}
+
 func TestCreateZip_SymlinkedRootIsFollowed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")
