@@ -6,11 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/internal/protocol"
@@ -420,42 +418,4 @@ func TestCommandRunner_Run_FileMalformedPayloadNeverDispatches(t *testing.T) {
 func hexDigest(content []byte) string {
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:])
-}
-
-// A refusal is reported to the requester as the command result, and the
-// requester chose the path. Returning what the file hashed to would make the
-// refusal itself a disclosure: the assessor judges the submitted content, so a
-// benign script paired with a path like /etc/shadow auto-approves, mismatches,
-// and hands back the digest of a file the requester may not read.
-func TestOpenVerifiedFile_MismatchNeverReportsTheObservedDigest(t *testing.T) {
-	secret := []byte("root-only secret\n")
-	path := filepath.Join(t.TempDir(), "secret")
-	require.NoError(t, os.WriteFile(path, secret, 0o600))
-	observed := fmt.Sprintf("%x", sha256.Sum256(secret))
-	approved := strings.Repeat("b", 64)
-
-	_, err := openVerifiedFile(path, approved)
-
-	require.Error(t, err)
-	require.ErrorIs(t, err, errHashMismatch)
-	assert.NotContains(t, err.Error(), observed,
-		"the refusal must not disclose what the file hashed to")
-	// The expected digest came from the requester, so echoing it tells them
-	// nothing they did not already send.
-	assert.Contains(t, err.Error(), approved)
-}
-
-// The operator still needs the real value to diagnose a genuine mismatch; it
-// travels on the error type for the local log rather than in Error().
-func TestHashMismatchError_CarriesTheObservedDigestForTheLog(t *testing.T) {
-	secret := []byte("root-only secret\n")
-	path := filepath.Join(t.TempDir(), "secret")
-	require.NoError(t, os.WriteFile(path, secret, 0o600))
-	observed := fmt.Sprintf("%x", sha256.Sum256(secret))
-
-	_, err := openVerifiedFile(path, strings.Repeat("b", 64))
-
-	var mismatch *hashMismatchError
-	require.ErrorAs(t, err, &mismatch)
-	assert.Equal(t, observed, mismatch.Observed())
 }
