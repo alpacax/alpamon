@@ -14,7 +14,8 @@ import (
 // A symlink listed explicitly is followed, so its whole target tree is archived
 // even when that tree lives outside the listed path. A symlink met while walking
 // is stored as a link entry (target path, not content), so it cannot recurse into
-// a cycle and its target is not pulled in.
+// a cycle and its target is not pulled in. Sockets, FIFOs and device nodes met
+// while walking are skipped; listed explicitly, they are an error.
 func CreateZip(destPath string, paths []string, recursive bool) error {
 	f, err := os.Create(destPath)
 	if err != nil {
@@ -54,12 +55,20 @@ func CreateZip(destPath string, paths []string, recursive bool) error {
 				if fi.Mode()&os.ModeSymlink != 0 {
 					return addSymlinkToZip(w, fpath, name, fi)
 				}
+				if !fi.Mode().IsRegular() {
+					// Sockets, FIFOs and device nodes carry nothing to archive,
+					// and opening a FIFO blocks until a writer shows up.
+					return nil
+				}
 				return addFileToZip(w, fpath, name, fi)
 			})
 			if err != nil {
 				return err
 			}
 		} else {
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("cannot archive %s: unsupported file type %s", path, info.Mode().Type())
+			}
 			if err := addFileToZip(w, path, filepath.Base(path), info); err != nil {
 				return err
 			}
