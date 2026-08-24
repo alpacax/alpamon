@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -158,6 +159,25 @@ func TestCreateZip_FileModeIsPreserved(t *testing.T) {
 	fi, err := os.Stat(filepath.Join(outDir, "scripts", "run.sh"))
 	require.NoError(t, err)
 	assert.NotZero(t, fi.Mode().Perm()&0100, "extracted script lost its execute bit")
+}
+
+func TestCreateZip_ModTimeIsPreserved(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "old.txt")
+	require.NoError(t, os.WriteFile(src, []byte("x"), 0644))
+	mtime := time.Date(2021, 3, 4, 5, 6, 8, 0, time.UTC)
+	require.NoError(t, os.Chtimes(src, mtime, mtime))
+
+	dest := filepath.Join(dir, "out.zip")
+	require.NoError(t, CreateZip(dest, []string{src}, false))
+
+	r, err := zip.OpenReader(dest)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+
+	require.Len(t, r.File, 1)
+	// Zip's DOS timestamp has two-second granularity.
+	assert.WithinDuration(t, mtime, r.File[0].Modified, 2*time.Second)
 }
 
 func TestCreateZip_SymlinkedRootIsFollowed(t *testing.T) {

@@ -40,6 +40,10 @@ func CreateZip(destPath string, paths []string, recursive bool) error {
 				return fmt.Errorf("failed to resolve %s: %w", path, err)
 			}
 			base := filepath.Base(path)
+			if base == string(filepath.Separator) {
+				// Base of "/" is "/", which would make every entry name absolute.
+				base = ""
+			}
 			err = filepath.Walk(root, func(fpath string, fi os.FileInfo, err error) error {
 				if err != nil {
 					return err
@@ -82,8 +86,9 @@ func CreateZip(destPath string, paths []string, recursive bool) error {
 // would replace with 0666. Zip archive names use forward slashes (ZIP spec).
 func newZipEntry(w *zip.Writer, archiveName string, fi os.FileInfo, method uint16) (io.Writer, error) {
 	hdr := &zip.FileHeader{
-		Name:   filepath.ToSlash(archiveName),
-		Method: method,
+		Name:     filepath.ToSlash(archiveName),
+		Method:   method,
+		Modified: fi.ModTime(),
 	}
 	// Permissions and the link flag only: setuid, setgid and sticky mean
 	// nothing in a download and Unzip would hand them to os.OpenFile.
