@@ -85,7 +85,9 @@ func newZipEntry(w *zip.Writer, archiveName string, fi os.FileInfo, method uint1
 		Name:   filepath.ToSlash(archiveName),
 		Method: method,
 	}
-	hdr.SetMode(fi.Mode())
+	// Permissions and the link flag only: setuid, setgid and sticky mean
+	// nothing in a download and Unzip would hand them to os.OpenFile.
+	hdr.SetMode(fi.Mode().Perm() | fi.Mode()&os.ModeSymlink)
 
 	zw, err := w.CreateHeader(hdr)
 	if err != nil {

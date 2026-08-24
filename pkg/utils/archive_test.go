@@ -128,7 +128,7 @@ func TestCreateZip_FileModeIsPreserved(t *testing.T) {
 	require.NoError(t, os.MkdirAll(scripts, 0755))
 	script := filepath.Join(scripts, "run.sh")
 	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\n"), 0644))
-	require.NoError(t, os.Chmod(script, 0755))
+	require.NoError(t, os.Chmod(script, os.ModeSetuid|0755))
 	plain := filepath.Join(dir, "plain.txt")
 	require.NoError(t, os.WriteFile(plain, []byte("x"), 0644))
 	require.NoError(t, os.Chmod(plain, 0644))
@@ -142,10 +142,13 @@ func TestCreateZip_FileModeIsPreserved(t *testing.T) {
 
 	modes := make(map[string]os.FileMode, len(r.File))
 	for _, f := range r.File {
-		modes[f.Name] = f.Mode().Perm()
+		modes[f.Name] = f.Mode()
 	}
-	assert.Equal(t, os.FileMode(0755), modes["scripts/run.sh"])
-	assert.Equal(t, os.FileMode(0644), modes["plain.txt"])
+	assert.Equal(t, os.FileMode(0755), modes["scripts/run.sh"].Perm())
+	assert.Equal(t, os.FileMode(0644), modes["plain.txt"].Perm())
+	// A download has no use for setuid, and Unzip hands the entry mode to
+	// os.OpenFile, so the extracted file would carry it.
+	assert.Zero(t, modes["scripts/run.sh"]&os.ModeSetuid)
 
 	outDir := filepath.Join(dir, "out")
 	require.NoError(t, os.MkdirAll(outDir, 0755))
