@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -131,11 +132,17 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		// it for humans. Nothing runs until the file's digest matches.
 		fileArgs, refusal := cr.prepareFileCommand(ctx)
 		if refusal != nil {
-			log.Warn().
+			event := log.Warn().
 				Str("command_id", cr.command.ID).
 				Str("code", refusal.code).
-				Err(refusal.err).
-				Msg("Refused file command")
+				Err(refusal.err)
+			// Only the local log learns what the file hashed to; the result
+			// string the requester reads must not carry it.
+			var mismatch *hashMismatchError
+			if errors.As(refusal.err, &mismatch) {
+				event = event.Str("observed_digest", mismatch.Observed())
+			}
+			event.Msg("Refused file command")
 			exitCode = 1
 			result = refusal.String()
 			return nil

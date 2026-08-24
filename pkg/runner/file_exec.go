@@ -46,6 +46,23 @@ const maxVerifiedFileSize = 1 << 20
 // errHashMismatch is the sentinel behind FileHashMismatchCode.
 var errHashMismatch = errors.New("file digest does not match the approved digest")
 
+// hashMismatchError carries the observed digest for the local log while keeping
+// it out of Error(), which is reported to the requester verbatim.
+type hashMismatchError struct {
+	expected string
+	observed string
+}
+
+func (e *hashMismatchError) Error() string {
+	return fmt.Sprintf("%s (expected sha256:%s)", errHashMismatch, e.expected)
+}
+
+func (e *hashMismatchError) Unwrap() error { return errHashMismatch }
+
+// Observed is the digest the file actually hashed to. Log-only: see the
+// construction site for why it must never reach the command result.
+func (e *hashMismatchError) Observed() string { return e.observed }
+
 // errFileTooLarge is the sentinel behind FileTooLargeCode.
 var errFileTooLarge = errors.New("file is larger than the agent will execute")
 
@@ -136,7 +153,16 @@ func openVerifiedFile(path, expectedDigest string) (*os.File, error) {
 	}
 	if digest != expectedDigest {
 		_ = sealed.Close()
-		return nil, fmt.Errorf("%w (expected sha256:%s, read sha256:%s)", errHashMismatch, expectedDigest, digest)
+		// The observed digest is deliberately absent from the error. The
+		// error text is reported back to the requester as the command result,
+		// and the requester chose this path: returning what the file hashed to
+		// would turn a refusal into "tell me the sha256 of any file on this
+		// host, read as root". The assessor judges the submitted *content*, so
+		// a benign script paired with /etc/shadow auto-approves and the refusal
+		// itself becomes the disclosure. Only the expected digest — which the
+		// requester supplied — may be echoed. The real value goes to the local
+		// log below, where the operator can see it and the requester cannot.
+		return nil, &hashMismatchError{expected: expectedDigest, observed: digest}
 	}
 
 	// Hashing consumed the offset. Rewind so the child reads from the start:
