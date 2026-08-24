@@ -84,6 +84,7 @@ func TestCreateZip_SymlinksStoredAsEntries(t *testing.T) {
 	require.NoError(t, os.Symlink("real", filepath.Join(dir, "demo", "link")))
 	require.NoError(t, os.Symlink("real/file.txt", filepath.Join(dir, "demo", "filelink")))
 	require.NoError(t, os.Symlink(".", filepath.Join(dir, "demo", "loop")))
+	require.NoError(t, os.Symlink("nowhere", filepath.Join(dir, "demo", "broken")))
 
 	dest := filepath.Join(dir, "out.zip")
 	require.NoError(t, CreateZip(dest, []string{filepath.Join(dir, "demo")}, true))
@@ -97,16 +98,18 @@ func TestCreateZip_SymlinksStoredAsEntries(t *testing.T) {
 		entries[f.Name] = f
 	}
 
-	// One real file plus the three links: following any link would add
-	// duplicates or recurse into loop. Assert on r.File as well, because the
-	// map collapses a name written twice into one key.
-	require.Len(t, r.File, 4)
-	require.Len(t, entries, 4, "archive holds duplicate entry names")
+	// One real file plus the four links: following any link would add
+	// duplicates, recurse into loop, or fail outright on broken. Assert on
+	// r.File as well, because the map collapses a name written twice into
+	// one key.
+	require.Len(t, r.File, 5)
+	require.Len(t, entries, 5, "archive holds duplicate entry names")
 	require.Contains(t, entries, "demo/real/file.txt")
 	for name, target := range map[string]string{
 		"demo/link":     "real",
 		"demo/filelink": "real/file.txt",
 		"demo/loop":     ".",
+		"demo/broken":   "nowhere",
 	} {
 		entry, ok := entries[name]
 		require.True(t, ok, "link entry %s missing from archive", name)
@@ -174,6 +177,29 @@ func TestCreateZip_SymlinkedRootIsFollowed(t *testing.T) {
 
 	require.Len(t, r.File, 1)
 	assert.Equal(t, "link/file.txt", r.File[0].Name)
+}
+
+func TestCreateZip_SymlinkedFileIsFollowed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "real.txt"), []byte("hi"), 0644))
+	link := filepath.Join(dir, "link.txt")
+	require.NoError(t, os.Symlink("real.txt", link))
+
+	dest := filepath.Join(dir, "out.zip")
+	require.NoError(t, CreateZip(dest, []string{link}, false))
+
+	r, err := zip.OpenReader(dest)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+
+	require.Len(t, r.File, 1)
+	assert.Equal(t, "link.txt", r.File[0].Name)
+	assert.Zero(t, r.File[0].Mode()&os.ModeSymlink)
+	assert.Equal(t, "hi", readZipEntry(t, r.File[0]))
 }
 
 func TestCreateZip_BulkMultiplePaths(t *testing.T) {
