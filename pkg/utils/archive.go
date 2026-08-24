@@ -11,9 +11,10 @@ import (
 
 // CreateZip creates a zip archive at destPath containing the specified paths.
 // If recursive is true and a path is a directory, its contents are included recursively.
-// Explicitly listed paths are followed if they are symlinks; symlinks met while
-// walking are stored as link entries (target path, not content), so cycles cannot
-// recurse and out-of-tree targets are not pulled in.
+// A symlink listed explicitly is followed, so its whole target tree is archived
+// even when that tree lives outside the listed path. A symlink met while walking
+// is stored as a link entry (target path, not content), so it cannot recurse into
+// a cycle and its target is not pulled in.
 func CreateZip(destPath string, paths []string, recursive bool) error {
 	f, err := os.Create(destPath)
 	if err != nil {
