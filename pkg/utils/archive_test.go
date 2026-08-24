@@ -2,8 +2,10 @@ package utils
 
 import (
 	"archive/zip"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -58,6 +60,79 @@ func TestCreateZip_RecursiveDirectory(t *testing.T) {
 	defer func() { _ = r.Close() }()
 
 	assert.Len(t, r.File, 2)
+}
+
+func readZipEntry(t *testing.T, f *zip.File) string {
+	t.Helper()
+	rc, err := f.Open()
+	require.NoError(t, err)
+	body, err := io.ReadAll(rc)
+	require.NoError(t, rc.Close())
+	require.NoError(t, err)
+	return string(body)
+}
+
+func TestCreateZip_SymlinksStoredAsEntries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "demo", "real")
+	require.NoError(t, os.MkdirAll(realDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, "file.txt"), []byte("hi"), 0644))
+	require.NoError(t, os.Symlink("real", filepath.Join(dir, "demo", "link")))
+	require.NoError(t, os.Symlink("real/file.txt", filepath.Join(dir, "demo", "filelink")))
+	require.NoError(t, os.Symlink(".", filepath.Join(dir, "demo", "loop")))
+
+	dest := filepath.Join(dir, "out.zip")
+	require.NoError(t, CreateZip(dest, []string{filepath.Join(dir, "demo")}, true))
+
+	r, err := zip.OpenReader(dest)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+
+	entries := make(map[string]*zip.File, len(r.File))
+	for _, f := range r.File {
+		entries[f.Name] = f
+	}
+
+	// One real file plus the three links: following any link would add
+	// duplicates or recurse into loop.
+	require.Len(t, entries, 4)
+	require.Contains(t, entries, "demo/real/file.txt")
+	for name, target := range map[string]string{
+		"demo/link":     "real",
+		"demo/filelink": "real/file.txt",
+		"demo/loop":     ".",
+	} {
+		entry, ok := entries[name]
+		require.True(t, ok, "link entry %s missing from archive", name)
+		assert.NotZero(t, entry.Mode()&os.ModeSymlink, name)
+		assert.Equal(t, target, readZipEntry(t, entry), name)
+	}
+}
+
+func TestCreateZip_SymlinkedRootIsFollowed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	require.NoError(t, os.MkdirAll(realDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, "file.txt"), []byte("hi"), 0644))
+	require.NoError(t, os.Symlink("real", filepath.Join(dir, "link")))
+
+	dest := filepath.Join(dir, "out.zip")
+	require.NoError(t, CreateZip(dest, []string{filepath.Join(dir, "link")}, true))
+
+	r, err := zip.OpenReader(dest)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+
+	require.Len(t, r.File, 1)
+	assert.Equal(t, "link/file.txt", r.File[0].Name)
 }
 
 func TestCreateZip_BulkMultiplePaths(t *testing.T) {
