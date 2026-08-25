@@ -16,15 +16,25 @@ import (
 // is stored as a link entry (target path, not content), so it cannot recurse into
 // a cycle and its target is not pulled in. Sockets, FIFOs and device nodes met
 // while walking are skipped; listed explicitly, they are an error.
-func CreateZip(destPath string, paths []string, recursive bool) error {
+func CreateZip(destPath string, paths []string, recursive bool) (err error) {
 	f, err := os.Create(destPath)
 	if err != nil {
 		return fmt.Errorf("failed to create zip file: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close zip file: %w", cerr)
+		}
+	}()
 
 	w := zip.NewWriter(f)
-	defer func() { _ = w.Close() }()
+	// Close writes the central directory, so discarding its error would
+	// report a truncated archive as a successful one.
+	defer func() {
+		if cerr := w.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to finalize zip file: %w", cerr)
+		}
+	}()
 
 	for _, path := range paths {
 		info, err := os.Stat(path)
