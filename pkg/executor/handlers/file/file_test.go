@@ -523,10 +523,14 @@ func TestUploadSummary(t *testing.T) {
 		return utils.SkippedEntry{Path: path, Reason: errors.New(reason)}
 	}
 
+	report := func(entries ...utils.SkippedEntry) utils.SkippedReport {
+		return utils.SkippedReport{Entries: entries, Total: len(entries)}
+	}
+
 	tests := []struct {
 		name    string
 		count   int
-		skipped []utils.SkippedEntry
+		skipped utils.SkippedReport
 		want    string
 	}{
 		{
@@ -537,7 +541,7 @@ func TestUploadSummary(t *testing.T) {
 		{
 			name:    "a skipped path is named with its cause",
 			count:   2,
-			skipped: []utils.SkippedEntry{skip("/home/u/secret.txt", "permission denied")},
+			skipped: report(skip("/home/u/secret.txt", "permission denied")),
 			want:    "Uploaded the archive, skipping 1 path(s): /home/u/secret.txt: permission denied",
 		},
 		{
@@ -545,21 +549,37 @@ func TestUploadSummary(t *testing.T) {
 			// a summary that still named it would contradict the list.
 			name:    "a requested path that was skipped is not counted as uploaded",
 			count:   1,
-			skipped: []utils.SkippedEntry{skip("/home/u/locked", "permission denied")},
+			skipped: report(skip("/home/u/locked", "permission denied")),
 			want:    "Uploaded the archive, skipping 1 path(s): /home/u/locked: permission denied",
 		},
 		{
 			name:  "the tail collapses into a count",
 			count: 1,
-			skipped: []utils.SkippedEntry{
+			skipped: report(
 				skip("/a", "permission denied"),
 				skip("/b", "permission denied"),
 				skip("/c", "permission denied"),
 				skip("/d", "no such file or directory"),
 				skip("/e", "input/output error"),
-			},
+			),
 			want: "Uploaded the archive, skipping 5 path(s): " +
 				"/a: permission denied; /b: permission denied; /c: permission denied; and 2 more",
+		},
+		{
+			// The archive worker bounds the list it sends so its status message
+			// cannot outgrow the capped buffer it rides. The total still has to
+			// be the real one, or the summary understates what was left out.
+			name:  "a bounded list still reports the true total",
+			count: 1,
+			skipped: utils.SkippedReport{
+				Entries: []utils.SkippedEntry{
+					skip("/a", "permission denied"),
+					skip("/b", "permission denied"),
+				},
+				Total: 137,
+			},
+			want: "Uploaded the archive, skipping 137 path(s): " +
+				"/a: permission denied; /b: permission denied; and 135 more",
 		},
 	}
 

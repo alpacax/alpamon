@@ -25,19 +25,20 @@ const archiveWorkerCommand = "archive"
 // so the directory walk and every file open are subject to that user's
 // filesystem permissions. Without demotion, which is every non-root agent, it
 // builds in-process, because there is no identity to drop to.
-func createArchiveAs(ctx context.Context, destPath string, paths []string, recursive bool, sysProcAttr *syscall.SysProcAttr) ([]utils.SkippedEntry, error) {
+func createArchiveAs(ctx context.Context, destPath string, paths []string, recursive bool, sysProcAttr *syscall.SysProcAttr) (utils.SkippedReport, error) {
 	if sysProcAttr == nil {
-		return utils.CreateZip(destPath, paths, recursive)
+		skipped, err := utils.CreateZip(destPath, paths, recursive)
+		return utils.SkippedReport{Entries: skipped, Total: len(skipped)}, err
 	}
 
 	executable, err := os.Executable()
 	if err != nil {
-		return nil, fmt.Errorf("failed to locate the alpamon binary: %w", err)
+		return utils.SkippedReport{}, fmt.Errorf("failed to locate the alpamon binary: %w", err)
 	}
 
 	request, err := json.Marshal(utils.ArchiveRequest{Paths: paths, Recursive: recursive})
 	if err != nil {
-		return nil, fmt.Errorf("failed to build the archive request: %w", err)
+		return utils.SkippedReport{}, fmt.Errorf("failed to build the archive request: %w", err)
 	}
 
 	// The parent opens the destination and hands over the descriptor, so the
@@ -45,7 +46,7 @@ func createArchiveAs(ctx context.Context, destPath string, paths []string, recur
 	// redirect the archive. O_EXCL because os.TempDir() is world-writable.
 	archive, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		return nil, err
+		return utils.SkippedReport{}, err
 	}
 
 	cmd := exec.CommandContext(ctx, executable, archiveWorkerCommand)
@@ -61,7 +62,7 @@ func createArchiveAs(ctx context.Context, destPath string, paths []string, recur
 
 	runErr := cmd.Run()
 	if cerr := archive.Close(); runErr == nil && cerr != nil {
-		return nil, cerr
+		return utils.SkippedReport{}, cerr
 	}
 
 	return archiveWorkerResult(status.buf.String(), runErr)
@@ -70,31 +71,38 @@ func createArchiveAs(ctx context.Context, destPath string, paths []string, recur
 // archiveWorkerResult turns the worker's status stream into the skipped list.
 // runErr is the process outcome, which stays authoritative when the status
 // cannot be read: a worker killed by the handler timeout never reports.
-func archiveWorkerResult(status string, runErr error) ([]utils.SkippedEntry, error) {
+func archiveWorkerResult(status string, runErr error) (utils.SkippedReport, error) {
 	var response utils.ArchiveResponse
 	if err := json.Unmarshal([]byte(strings.TrimSpace(status)), &response); err != nil {
 		if runErr != nil {
 			if msg := strings.TrimSpace(status); msg != "" {
-				return nil, fmt.Errorf("%w: %s", runErr, msg)
+				return utils.SkippedReport{}, fmt.Errorf("%w: %s", runErr, msg)
 			}
-			return nil, runErr
+			return utils.SkippedReport{}, runErr
 		}
-		return nil, fmt.Errorf("failed to read the archive worker status: %w", err)
+		return utils.SkippedReport{}, fmt.Errorf("failed to read the archive worker status: %w", err)
 	}
 
-	var skipped []utils.SkippedEntry
+	report := utils.SkippedReport{Total: response.SkippedTotal}
 	for _, entry := range response.Skipped {
-		skipped = append(skipped, utils.SkippedEntry{
+		report.Entries = append(report.Entries, utils.SkippedEntry{
 			Path:   entry.Path,
 			Reason: errors.New(entry.Reason),
 		})
 	}
 
+	// The total can never be smaller than the sample it came with. A response
+	// that carried entries but no total would otherwise make the summary
+	// understate what the download left out.
+	if report.Total < len(report.Entries) {
+		report.Total = len(report.Entries)
+	}
+
 	if response.Error != "" {
-		return skipped, errors.New(response.Error)
+		return report, errors.New(response.Error)
 	}
 	if runErr != nil {
-		return skipped, runErr
+		return report, runErr
 	}
-	return skipped, nil
+	return report, nil
 }

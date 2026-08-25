@@ -458,12 +458,12 @@ const skippedSummaryNamed = 3
 
 // uploadSummary reports the archive that was uploaded along with whatever it
 // could not hold, so a partial archive never looks like a complete one.
-func uploadSummary(count int, skipped []utils.SkippedEntry) string {
-	if len(skipped) == 0 {
+func uploadSummary(count int, skipped utils.SkippedReport) string {
+	if skipped.Total == 0 {
 		return fmt.Sprintf("Successfully uploaded %d file(s).", count)
 	}
 
-	named := skipped
+	named := skipped.Entries
 	if len(named) > skippedSummaryNamed {
 		named = named[:skippedSummaryNamed]
 	}
@@ -471,14 +471,14 @@ func uploadSummary(count int, skipped []utils.SkippedEntry) string {
 	for _, entry := range named {
 		reasons = append(reasons, fmt.Sprintf("%s: %v", entry.Path, entry.Reason))
 	}
-	if rest := len(skipped) - len(named); rest > 0 {
+	if rest := skipped.Total - len(named); rest > 0 {
 		reasons = append(reasons, fmt.Sprintf("and %d more", rest))
 	}
 
 	// count is what the user asked for, and a skipped path is still in it, so
 	// naming a success count here would contradict the list that follows.
 	return fmt.Sprintf("Uploaded the archive, skipping %d path(s): %s",
-		len(skipped), strings.Join(reasons, "; "))
+		skipped.Total, strings.Join(reasons, "; "))
 }
 
 // makeArchive creates a zip archive from the specified paths.
@@ -490,11 +490,11 @@ func uploadSummary(count int, skipped []utils.SkippedEntry) string {
 // sysProcAttr is the requesting user's demotion descriptor. createArchiveAs
 // applies it, so the walk and every open below run as that user rather than
 // as the agent's root.
-func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, string, []utils.SkippedEntry, error) {
+func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, string, utils.SkippedReport, error) {
 	path := paths[0]
 
 	if !bulk && !recursive {
-		return path, "", nil, nil
+		return path, "", utils.SkippedReport{}, nil
 	}
 
 	archiveName := filepath.Join(os.TempDir(), uuid.New().String()+".zip")
@@ -502,7 +502,7 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 	skipped, err := createArchiveAs(ctx, archiveName, paths, recursive || bulk, sysProcAttr)
 	if err != nil {
 		_ = os.Remove(archiveName)
-		return "", "", nil, err
+		return "", "", utils.SkippedReport{}, err
 	}
 
 	return archiveName, archiveName, skipped, nil

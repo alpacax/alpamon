@@ -49,6 +49,15 @@ type SkippedEntry struct {
 	Reason error
 }
 
+// SkippedReport is what an archive left out: the paths it can name, and how
+// many there were altogether. The two differ when the archive worker had to
+// bound the list to keep its status message inside the capped buffer that
+// carries it, so Total is the only honest source for a count.
+type SkippedReport struct {
+	Entries []SkippedEntry
+	Total   int
+}
+
 // unreadable separates a source that cannot be opened, which costs one entry,
 // from a failure once the entry is already being written, which costs the whole
 // archive. It carries the cause unchanged so the reported reason stays readable.

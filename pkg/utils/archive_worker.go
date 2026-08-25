@@ -35,9 +35,18 @@ type ArchiveSkipped struct {
 // ArchiveResponse is the worker's stderr message. It is written whether or not
 // the archive succeeded, so the parent always has the skipped list to report.
 type ArchiveResponse struct {
-	Skipped []ArchiveSkipped `json:"skipped,omitempty"`
-	Error   string           `json:"error,omitempty"`
+	Skipped      []ArchiveSkipped `json:"skipped,omitempty"`
+	SkippedTotal int              `json:"skipped_total,omitempty"`
+	Error        string           `json:"error,omitempty"`
 }
+
+// archiveSkippedReported bounds how many skipped paths the worker spells out.
+// The status rides a capped buffer that silently drops the overflow, so an
+// unbounded list truncates into JSON the parent cannot read, and a download
+// whose archive is complete fails. A tree with a few hundred unreadable paths
+// is ordinary once the walk runs as the requesting user, and the summary names
+// three of them, so a small sample plus SkippedTotal is all the parent needs.
+const archiveSkippedReported = 32
 
 // RunArchiveWorker reads an ArchiveRequest from in, writes the archive to dst
 // and an ArchiveResponse to status, and returns the process exit code.
@@ -49,6 +58,10 @@ func RunArchiveWorker(in io.Reader, dst io.Writer, status io.Writer) int {
 		resp.Error = fmt.Sprintf("failed to read archive request: %v", err)
 	} else {
 		skipped, err := WriteZip(dst, req.Paths, req.Recursive)
+		resp.SkippedTotal = len(skipped)
+		if len(skipped) > archiveSkippedReported {
+			skipped = skipped[:archiveSkippedReported]
+		}
 		for _, entry := range skipped {
 			resp.Skipped = append(resp.Skipped, ArchiveSkipped{
 				Path:   entry.Path,
