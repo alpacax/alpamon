@@ -12,14 +12,15 @@ import (
 // files and directories belong to the requesting user and the extraction
 // cannot write over paths that user could not have touched.
 //
-// The archive arrives on stdin as the descriptor the parent opened and
-// validated, so this process never resolves the archive path itself.
+// It takes the source path rather than an inherited descriptor: opening it
+// here is what keeps the agent from resolving a path the requesting user
+// controls. See utils.RunExtractWorker.
 var ExtractCmd = &cobra.Command{
-	Use:          "extract <destDir>",
+	Use:          "extract <srcPath> <destDir>",
 	Short:        "Extract worker subprocess for WebFTP allow_unzip",
-	Args:         cobra.ExactArgs(1),
+	Args:         cobra.ExactArgs(2),
 	SilenceUsage: true,
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(utils.RunExtractWorker(os.Stdin, args[0], os.Stderr))
+		os.Exit(utils.RunExtractWorker(args[0], args[1], os.Stderr))
 	},
 }

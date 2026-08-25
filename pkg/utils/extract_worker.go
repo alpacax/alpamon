@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // The extract worker exists for the same reason as the archive worker:
@@ -12,16 +13,32 @@ import (
 // files the right owner and stops the extraction from writing over paths the
 // user could not have touched.
 //
-// The archive arrives as the descriptor the parent already opened and
-// validated, so the worker never resolves the path and the file that was
-// checked is the file that gets extracted.
+// The worker also opens the source and removes it afterwards, so the agent
+// never resolves a path the requesting user controls. O_NOFOLLOW refuses a
+// symlink at the final component, but the directories above it are still
+// dereferenced by whoever opens, and the user can swap those. Doing the open
+// here means such a swap resolves against the user's own credentials and buys
+// nothing. The same argument covers the unlink, which traverses those
+// directories too.
 
-// RunExtractWorker extracts the zip on src into destDir, writing any failure
-// to status, and returns the process exit code.
-func RunExtractWorker(src *os.File, destDir string, status io.Writer) int {
+// RunExtractWorker extracts the archive at srcPath into destDir, writing any
+// failure to status, and returns the process exit code. A source that is not a
+// readable archive is not a failure: nothing is extracted, the source is left
+// alone, and the download stands.
+func RunExtractWorker(srcPath, destDir string, status io.Writer) int {
+	src := OpenIfZip(srcPath, filepath.Ext(srcPath))
+	if src == nil {
+		return 0
+	}
+	defer func() { _ = src.Close() }()
+
 	if err := UnzipFile(src, destDir); err != nil {
 		_, _ = fmt.Fprintln(status, err.Error())
 		return 1
 	}
+
+	// The archive has been unpacked, so the copy of it is redundant. A failed
+	// unlink does not undo the extraction, so it does not fail the download.
+	_ = os.Remove(srcPath)
 	return 0
 }

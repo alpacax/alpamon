@@ -3,8 +3,10 @@
 package file
 
 import (
+	"bytes"
 	"context"
-	"os"
+	"errors"
+	"strings"
 	"syscall"
 
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -13,6 +15,10 @@ import (
 // extractZipAs extracts in-process. Windows has no privilege demotion here, so
 // the agent's own rights apply and access control rests on Alpacon RBAC and
 // server-side path restrictions alone.
-func extractZipAs(_ context.Context, src *os.File, destDir string, _ *syscall.SysProcAttr) error {
-	return utils.UnzipFile(src, destDir)
+func extractZipAs(_ context.Context, srcPath, destDir string, _ *syscall.SysProcAttr) error {
+	var status bytes.Buffer
+	if utils.RunExtractWorker(srcPath, destDir, &status) != 0 {
+		return errors.New(strings.TrimSpace(status.String()))
+	}
+	return nil
 }

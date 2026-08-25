@@ -3,7 +3,9 @@
 package file
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,17 +19,23 @@ import (
 // See cmd/alpamon/command/extract.
 const extractWorkerCommand = "extract"
 
-// extractZipAs extracts src into destDir. With demotion active the extraction
-// happens in a child process carrying the requesting user's credentials, so
-// every file and directory it creates belongs to that user and it cannot write
-// over a path the user has no rights to. Without demotion it extracts
-// in-process, because there is no identity to drop to.
+// extractZipAs extracts the archive at srcPath into destDir. With demotion
+// active the work happens in a child process carrying the requesting user's
+// credentials, so every file and directory it creates belongs to that user, it
+// cannot write over a path the user has no rights to, and the source open and
+// unlink resolve as the user rather than as the agent. Without demotion it
+// runs the same code in-process, because there is no identity to drop to.
 //
-// src is handed over as an inherited descriptor, so the worker extracts the
-// archive the caller already validated rather than reopening the path.
-func extractZipAs(ctx context.Context, src *os.File, destDir string, sysProcAttr *syscall.SysProcAttr) error {
+// srcPath is passed rather than an open descriptor on purpose: opening it here
+// would make the agent resolve a path the requesting user controls, and
+// O_NOFOLLOW only covers the final component.
+func extractZipAs(ctx context.Context, srcPath, destDir string, sysProcAttr *syscall.SysProcAttr) error {
 	if sysProcAttr == nil {
-		return utils.UnzipFile(src, destDir)
+		var status bytes.Buffer
+		if utils.RunExtractWorker(srcPath, destDir, &status) != 0 {
+			return errors.New(strings.TrimSpace(status.String()))
+		}
+		return nil
 	}
 
 	executable, err := os.Executable()
@@ -35,9 +43,8 @@ func extractZipAs(ctx context.Context, src *os.File, destDir string, sysProcAttr
 		return fmt.Errorf("failed to locate the alpamon binary: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, executable, extractWorkerCommand, destDir)
+	cmd := exec.CommandContext(ctx, executable, extractWorkerCommand, srcPath, destDir)
 	cmd.SysProcAttr = sysProcAttr
-	cmd.Stdin = src
 	status := &stderrCap{cap: stderrCapSize}
 	cmd.Stderr = status
 	// Nothing here reads the environment, and the worker runs as the
