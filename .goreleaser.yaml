@@ -141,7 +141,17 @@ nfpms:
         dependencies:
           - zip
           - sqlite
-          - nftables | iptables
+          # rpm has no `|` alternation. nfpm parses `nftables | iptables` with
+          # the same regex it uses for `name >= version`, so the requirement
+          # became a hard `Requires: nftables` with `| iptables` stranded in the
+          # (unused) version field: the alternative was dropped and hosts that
+          # firewall with iptables were made to pull nftables in. rpm spells the
+          # alternation as a boolean dependency, which needs rpm 4.13 or newer:
+          # RHEL/Rocky/Alma/Oracle 8+, Fedora, Amazon Linux 2023 and SLES/Leap
+          # 15+. The rpm 4.11 platforms (Amazon Linux 2, CentOS 7) cannot read
+          # it, but they ship no nftables package either, so the requirement did
+          # not resolve there before this change.
+          - (nftables or iptables)
         file_name_template: '{{ .PackageName }}-{{ trimprefix .Version "v" }}-1.{{ .Os }}.{{ .Arch }}'
         recommends:
           - alpamon-pam
