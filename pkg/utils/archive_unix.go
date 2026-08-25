@@ -12,7 +12,9 @@ import (
 // link support and a plain permission denial alike.
 func symlinkUnsupported(error) bool { return false }
 
-// noFollow makes createFile refuse a link sitting at its path.
+// noFollow makes an open refuse a link sitting at the final path component:
+// createFile so an entry is not written through one, OpenIfZip so the extract
+// source is the file that was checked. It covers that component only.
 const noFollow = syscall.O_NOFOLLOW
 
 // chmodDir sets mode on the directory at path without following a link that
