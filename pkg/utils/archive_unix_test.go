@@ -115,3 +115,25 @@ func TestCreateZip_UnreadableEntriesAreSkipped(t *testing.T) {
 		filepath.Join(resolved, "secret.txt"),
 	}, reported)
 }
+
+func TestCreateZip_NothingArchivedIsAnError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 directory whatever its mode says")
+	}
+
+	dir := t.TempDir()
+	demo := filepath.Join(dir, "demo")
+	require.NoError(t, os.MkdirAll(demo, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(demo, "hidden.txt"), []byte("h"), 0644))
+	require.NoError(t, os.Chmod(demo, 0000))
+	// TempDir cannot delete what it cannot enter, and cleanups run last in first.
+	t.Cleanup(func() { _ = os.Chmod(demo, 0755) })
+
+	dest := filepath.Join(dir, "out.zip")
+	// Skipping every path leaves an archive holding nothing, and the caller
+	// keys off the exit code, so success here would read as a finished download.
+	skipped, err := CreateZip(dest, []string{demo}, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, os.ErrPermission)
+	require.Len(t, skipped, 1)
+}

@@ -37,7 +37,9 @@ func (u unreadable) Unwrap() error { return u.error }
 // A listed path that cannot be opened, or that is not a regular file, is left
 // out and reported in skipped, so one bad path does not cost the user the rest
 // of the archive. A failure to write the archive itself returns an error, and so
-// does a read that fails once an entry is already being written.
+// does a read that fails once an entry is already being written. An archive that
+// holds nothing while something was skipped is an error too: an empty archive is
+// a failed request, not a partial one.
 func CreateZip(destPath string, paths []string, recursive bool) (skipped []SkippedEntry, err error) {
 	note := func(path string, reason error) {
 		// A PathError repeats the path the entry already carries, so keep
@@ -58,6 +60,10 @@ func CreateZip(destPath string, paths []string, recursive bool) (skipped []Skipp
 		note(path, u.error)
 		return true
 	}
+
+	// A caller keys off success, so an archive that ended up holding nothing
+	// must not be handed over as one.
+	archived := false
 
 	f, err := os.Create(destPath)
 	if err != nil {
@@ -126,7 +132,11 @@ func CreateZip(destPath string, paths []string, recursive bool) (skipped []Skipp
 				if skip(fpath, err) {
 					return nil
 				}
-				return err
+				if err != nil {
+					return err
+				}
+				archived = true
+				return nil
 			})
 			if err != nil {
 				return skipped, err
@@ -144,7 +154,15 @@ func CreateZip(destPath string, paths []string, recursive bool) (skipped []Skipp
 			if err != nil {
 				return skipped, err
 			}
+			archived = true
 		}
+	}
+
+	if !archived && len(skipped) > 0 {
+		// Every path was skipped, so this is the all-or-nothing failure in the
+		// other direction: an empty archive that reports a finished download.
+		return skipped, fmt.Errorf("nothing could be archived, skipped %d path(s): %w",
+			len(skipped), skipped[0].Reason)
 	}
 
 	return skipped, nil
