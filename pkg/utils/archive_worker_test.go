@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,4 +75,27 @@ func TestRunArchiveWorker_ReportsAnArchiveThatHeldNothing(t *testing.T) {
 	require.NoError(t, json.Unmarshal(status.Bytes(), &resp))
 	assert.Contains(t, resp.Error, "nothing could be archived")
 	assert.Len(t, resp.Skipped, 1)
+}
+
+func TestShortenSkippedPath_KeepsThePathReadable(t *testing.T) {
+	// Non-ASCII names are ordinary on the machines this runs on, and Hangul is
+	// three bytes a rune, so most byte offsets land inside one. The padding
+	// walks the cut across every offset within a rune.
+	base := "/home/사용자/" + strings.Repeat("내려받기폴더/", 12)
+	for i := 0; i < 12; i++ {
+		path := base + strings.Repeat("a", i) + "비밀문서.zip"
+		require.Greater(t, len(path), archiveSkippedPathMax, "input must be long enough to shorten")
+
+		got := shortenSkippedPath(path)
+
+		assert.True(t, utf8.ValidString(got),
+			"padding %d produced invalid UTF-8, which json.Marshal replaces with U+FFFD: %q", i, got)
+		assert.LessOrEqual(t, len(got), archiveSkippedPathMax+3, "padding %d overshot the bound", i)
+		assert.True(t, strings.HasSuffix(got, "비밀문서.zip"), "padding %d lost the leaf", i)
+	}
+}
+
+func TestShortenSkippedPath_LeavesAShortPathAlone(t *testing.T) {
+	path := "/home/u/secret.txt"
+	assert.Equal(t, path, shortenSkippedPath(path))
 }

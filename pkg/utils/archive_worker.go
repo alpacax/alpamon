@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"unicode/utf8"
 )
 
 // The archive worker exists because CreateZip walks and opens the requested
@@ -66,7 +67,15 @@ func shortenSkippedPath(path string) string {
 	if len(path) <= archiveSkippedPathMax {
 		return path
 	}
-	return "..." + path[len(path)-archiveSkippedPathMax:]
+	tail := path[len(path)-archiveSkippedPathMax:]
+	// Cutting at a byte offset lands inside a multi-byte rune for most offsets,
+	// and non-ASCII names are ordinary on the machines this runs on. The broken
+	// rune survives json.Marshal as U+FFFD, so the path the summary shows to
+	// identify what was skipped arrives mangled. Advance to the next boundary.
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return "..." + tail
 }
 
 // RunArchiveWorker reads an ArchiveRequest from in, writes the archive to dst
