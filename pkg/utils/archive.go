@@ -399,7 +399,10 @@ func extractFile(f *zip.File, fpath string) error {
 		}
 	}
 
-	outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+	// Perm only: extraction runs in the alpamon process, which is root on a
+	// normal install, so setuid, setgid and sticky off an entry would land on
+	// a root-owned file. newZipEntry drops the same bits on the way in.
+	outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode().Perm())
 	if err != nil {
 		return err
 	}

@@ -323,6 +323,7 @@ type zipEntry struct {
 	name   string
 	body   string
 	isLink bool
+	mode   os.FileMode // zero means a plain 0644 file
 }
 
 func writeEntryZip(t *testing.T, path string, entries []zipEntry) {
@@ -331,9 +332,12 @@ func writeEntryZip(t *testing.T, path string, entries []zipEntry) {
 	require.NoError(t, err)
 	w := zip.NewWriter(f)
 	for _, e := range entries {
-		mode := os.FileMode(0644)
-		if e.isLink {
+		mode := e.mode
+		switch {
+		case e.isLink:
 			mode = 0777 | os.ModeSymlink
+		case mode == 0:
+			mode = 0644
 		}
 		hdr := &zip.FileHeader{Name: e.name, Method: zip.Store}
 		hdr.SetMode(mode)
@@ -378,6 +382,29 @@ func TestUnzip_SymlinkIsRestored(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(link, "file.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "hi", string(content))
+}
+
+func TestUnzip_SetuidBitIsNotRestored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows has no setuid bit")
+	}
+
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "suid.zip")
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "payload", body: "x", mode: 0755 | os.ModeSetuid | os.ModeSetgid | os.ModeSticky},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+	require.NoError(t, Unzip(zipPath, out))
+
+	// Extraction runs in the alpamon process, which is root on a normal
+	// install, so an entry carrying setuid would land as a root-owned setuid
+	// file. newZipEntry already drops these bits when writing an archive.
+	fi, err := os.Stat(filepath.Join(out, "payload"))
+	require.NoError(t, err)
+	assert.Zero(t, fi.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky))
 }
 
 func TestUnzip_AbsoluteLinkTargetIsRejected(t *testing.T) {
