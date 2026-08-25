@@ -42,14 +42,15 @@ type ArchiveResponse struct {
 }
 
 // The status rides a capped buffer that silently drops the overflow, so a
-// sample that outgrows it truncates into JSON the parent cannot read and a
-// download whose archive is complete fails. Bounding the entry count alone is
-// not enough: a tree of deeply nested paths overruns the buffer with far fewer
-// than archiveSkippedReported entries. The sample is therefore bounded twice,
-// by count and by serialized size, and individual paths are shortened.
+// status that outgrows it becomes JSON the parent cannot read, and a download
+// whose archive is complete fails. Three bounds keep it inside: the sample is
+// capped by entry count and by serialized size, since a tree of deeply nested
+// paths overruns the buffer with far fewer entries than the count allows, and
+// the encoded form is capped as a whole, since the error field is not part of
+// the sample budget.
 //
-// The summary names three paths, so a small sample plus SkippedTotal is all
-// the parent needs; both bounds are far above that.
+// The summary names three paths, so a small sample plus SkippedTotal is all the
+// parent needs; every bound here is far above that.
 const (
 	// archiveSkippedReported bounds how many skipped paths the worker names.
 	archiveSkippedReported = 32
@@ -59,6 +60,12 @@ const (
 	// archiveSkippedPathMax shortens one path. The tail is kept because the
 	// leaf names what was skipped; the elision marks that a head was dropped.
 	archiveSkippedPathMax = 200
+	// archiveStatusMax bounds the encoded status. The two bounds above budget
+	// the sample only, and the error field is not part of that budget: a
+	// wrapped *PathError reaches PATH_MAX on its own, so a full sample beside
+	// one still overruns the buffer. This bound is enforced on the encoded
+	// form, so the parent can always read a status whatever it carries.
+	archiveStatusMax = 6 << 10
 )
 
 // shortenSkippedPath keeps a path within archiveSkippedPathMax, preserving the
@@ -76,6 +83,37 @@ func shortenSkippedPath(path string) string {
 		tail = tail[1:]
 	}
 	return "..." + tail
+}
+
+// truncateHead keeps the first max bytes of s, backing off to a rune boundary
+// so what survives stays readable. The head is kept because an error names its
+// cause there.
+func truncateHead(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	head := s[:max]
+	for len(head) > 0 && !utf8.ValidString(head) {
+		head = head[:len(head)-1]
+	}
+	return head + "..."
+}
+
+// encodeArchiveStatus writes resp to status within archiveStatusMax. The buffer
+// carrying the status drops its overflow silently, and a status the parent
+// cannot parse costs it the skipped list and the error message both, so the
+// sample is dropped and the error shortened rather than letting that happen.
+// SkippedTotal survives either way, so the summary can still report the count.
+func encodeArchiveStatus(status io.Writer, resp ArchiveResponse) {
+	encoded, err := json.Marshal(resp)
+	if err != nil || len(encoded) < archiveStatusMax {
+		_ = json.NewEncoder(status).Encode(resp)
+		return
+	}
+
+	resp.Skipped = nil
+	resp.Error = truncateHead(resp.Error, archiveStatusMax/2)
+	_ = json.NewEncoder(status).Encode(resp)
 }
 
 // RunArchiveWorker reads an ArchiveRequest from in, writes the archive to dst
@@ -109,9 +147,9 @@ func RunArchiveWorker(in io.Reader, dst io.Writer, status io.Writer) int {
 		}
 	}
 
-	// A response the parent cannot parse is still better than none: it falls
-	// back to the raw stream, so an encode failure must not change the exit code.
-	_ = json.NewEncoder(status).Encode(resp)
+	// An encode failure must not change the exit code: the parent falls back to
+	// the raw stream, which is worse than a status but better than none.
+	encodeArchiveStatus(status, resp)
 
 	if resp.Error != "" {
 		return 1

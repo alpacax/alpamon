@@ -99,3 +99,32 @@ func TestShortenSkippedPath_LeavesAShortPathAlone(t *testing.T) {
 	path := "/home/u/secret.txt"
 	assert.Equal(t, path, shortenSkippedPath(path))
 }
+
+func TestEncodeArchiveStatus_StaysParseableWhateverItCarries(t *testing.T) {
+	// A wrapped *PathError reaches PATH_MAX, and the sample budget does not
+	// count the error field, so a full sample plus a long error overruns the
+	// buffer that carries the status. A status the parent cannot parse costs it
+	// the error message too, which is the one thing it still needed.
+	resp := ArchiveResponse{
+		SkippedTotal: 500,
+		Error:        "failed to write zip entry: read " + strings.Repeat("긴경로/", 900) + ": i/o error",
+	}
+	for i := 0; i < archiveSkippedReported; i++ {
+		resp.Skipped = append(resp.Skipped, ArchiveSkipped{
+			Path:   "..." + strings.Repeat("p", archiveSkippedPathMax),
+			Reason: "permission denied",
+		})
+	}
+
+	var buf bytes.Buffer
+	encodeArchiveStatus(&buf, resp)
+
+	assert.LessOrEqual(t, buf.Len(), archiveStatusMax, "encoded status overran its bound")
+	var got ArchiveResponse
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got), "status must always parse")
+	// The count survives even when the sample is dropped, so the summary can
+	// still say how much was left out.
+	assert.Equal(t, 500, got.SkippedTotal)
+	assert.NotEmpty(t, got.Error, "the reason for the failure must survive")
+	assert.True(t, utf8.ValidString(got.Error), "a truncated error must stay readable")
+}
