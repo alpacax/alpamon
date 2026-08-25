@@ -30,13 +30,23 @@ func writeZip(t *testing.T, path string, entries map[string]string) {
 	require.NoError(t, f.Close())
 }
 
+// requireZip builds the archive and requires that nothing was left out of it,
+// so a test that does not care about skipping still fails if an entry silently
+// goes missing.
+func requireZip(t *testing.T, dest string, paths []string, recursive bool) {
+	t.Helper()
+	skipped, err := CreateZip(dest, paths, recursive)
+	require.NoError(t, err)
+	require.Empty(t, skipped)
+}
+
 func TestCreateZip_SingleFile(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "hello.txt")
 	require.NoError(t, os.WriteFile(src, []byte("hello world"), 0644))
 
 	dest := filepath.Join(dir, "out.zip")
-	require.NoError(t, CreateZip(dest, []string{src}, false))
+	requireZip(t, dest, []string{src}, false)
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)
@@ -54,7 +64,7 @@ func TestCreateZip_RecursiveDirectory(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(subdir, "b.txt"), []byte("b"), 0644))
 
 	dest := filepath.Join(dir, "out.zip")
-	require.NoError(t, CreateZip(dest, []string{filepath.Join(dir, "mydir")}, true))
+	requireZip(t, dest, []string{filepath.Join(dir, "mydir")}, true)
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)
@@ -88,7 +98,7 @@ func TestCreateZip_SymlinksStoredAsEntries(t *testing.T) {
 	require.NoError(t, os.Symlink("nowhere", filepath.Join(dir, "demo", "broken")))
 
 	dest := filepath.Join(dir, "out.zip")
-	require.NoError(t, CreateZip(dest, []string{filepath.Join(dir, "demo")}, true))
+	requireZip(t, dest, []string{filepath.Join(dir, "demo")}, true)
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)
@@ -135,7 +145,7 @@ func TestCreateZip_FileModeIsPreserved(t *testing.T) {
 	require.NoError(t, os.Chmod(plain, 0644))
 
 	dest := filepath.Join(dir, "out.zip")
-	require.NoError(t, CreateZip(dest, []string{scripts, plain}, true))
+	requireZip(t, dest, []string{scripts, plain}, true)
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)
@@ -169,7 +179,7 @@ func TestCreateZip_ModTimeIsPreserved(t *testing.T) {
 	require.NoError(t, os.Chtimes(src, mtime, mtime))
 
 	dest := filepath.Join(dir, "out.zip")
-	require.NoError(t, CreateZip(dest, []string{src}, false))
+	requireZip(t, dest, []string{src}, false)
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)
@@ -192,7 +202,7 @@ func TestCreateZip_SymlinkedRootIsFollowed(t *testing.T) {
 	require.NoError(t, os.Symlink("real", filepath.Join(dir, "link")))
 
 	dest := filepath.Join(dir, "out.zip")
-	require.NoError(t, CreateZip(dest, []string{filepath.Join(dir, "link")}, true))
+	requireZip(t, dest, []string{filepath.Join(dir, "link")}, true)
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)
@@ -213,7 +223,7 @@ func TestCreateZip_SymlinkedFileIsFollowed(t *testing.T) {
 	require.NoError(t, os.Symlink("real.txt", link))
 
 	dest := filepath.Join(dir, "out.zip")
-	require.NoError(t, CreateZip(dest, []string{link}, false))
+	requireZip(t, dest, []string{link}, false)
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)
@@ -233,7 +243,7 @@ func TestCreateZip_BulkMultiplePaths(t *testing.T) {
 	require.NoError(t, os.WriteFile(f2, []byte("2"), 0644))
 
 	dest := filepath.Join(dir, "out.zip")
-	require.NoError(t, CreateZip(dest, []string{f1, f2}, true))
+	requireZip(t, dest, []string{f1, f2}, true)
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)
@@ -288,7 +298,7 @@ func TestCreateZipAndUnzip_RoundTrip(t *testing.T) {
 
 	// Zip
 	zipPath := filepath.Join(dir, "archive.zip")
-	require.NoError(t, CreateZip(zipPath, []string{srcDir}, true))
+	requireZip(t, zipPath, []string{srcDir}, true)
 
 	// Unzip
 	outDir := filepath.Join(dir, "out")

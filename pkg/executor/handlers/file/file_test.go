@@ -14,6 +14,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestFileHandler_Validate(t *testing.T) {
@@ -513,6 +514,58 @@ func TestFileHandler_Execute_Rm(t *testing.T) {
 			if output == "" {
 				t.Error("Execute() expected a rejection message")
 			}
+		})
+	}
+}
+
+func TestUploadSummary(t *testing.T) {
+	skip := func(path, reason string) utils.SkippedEntry {
+		return utils.SkippedEntry{Path: path, Reason: errors.New(reason)}
+	}
+
+	tests := []struct {
+		name    string
+		count   int
+		skipped []utils.SkippedEntry
+		want    string
+	}{
+		{
+			name:  "nothing skipped reads as before",
+			count: 3,
+			want:  "Successfully uploaded 3 file(s).",
+		},
+		{
+			name:    "a skipped path is named with its cause",
+			count:   2,
+			skipped: []utils.SkippedEntry{skip("/home/u/secret.txt", "permission denied")},
+			want:    "Uploaded the archive, skipping 1 path(s): /home/u/secret.txt: permission denied",
+		},
+		{
+			// count is every path the user asked for, skipped ones included, so
+			// a summary that still named it would contradict the list.
+			name:    "a requested path that was skipped is not counted as uploaded",
+			count:   1,
+			skipped: []utils.SkippedEntry{skip("/home/u/locked", "permission denied")},
+			want:    "Uploaded the archive, skipping 1 path(s): /home/u/locked: permission denied",
+		},
+		{
+			name:  "the tail collapses into a count",
+			count: 1,
+			skipped: []utils.SkippedEntry{
+				skip("/a", "permission denied"),
+				skip("/b", "permission denied"),
+				skip("/c", "permission denied"),
+				skip("/d", "no such file or directory"),
+				skip("/e", "input/output error"),
+			},
+			want: "Uploaded the archive, skipping 5 path(s): " +
+				"/a: permission denied; /b: permission denied; /c: permission denied; and 2 more",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, uploadSummary(tt.count, tt.skipped))
 		})
 	}
 }

@@ -2,12 +2,29 @@ package utils
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+var errNotRegular = errors.New("not a regular file")
+
+// SkippedEntry is a path left out of the archive, with the reason it was left
+// out. Everything else was archived.
+type SkippedEntry struct {
+	Path   string
+	Reason error
+}
+
+// unreadable separates a source that cannot be opened, which costs one entry,
+// from a failure once the entry is already being written, which costs the whole
+// archive. It carries the cause unchanged so the reported reason stays readable.
+type unreadable struct{ error }
+
+func (u unreadable) Unwrap() error { return u.error }
 
 // CreateZip creates a zip archive at destPath containing the specified paths.
 // If recursive is true and a path is a directory, its contents are included recursively.
@@ -16,10 +33,35 @@ import (
 // is stored as a link entry (target path, not content), so it cannot recurse into
 // a cycle and its target is not pulled in. Sockets, FIFOs and device nodes are
 // never archived, wherever they are found.
-func CreateZip(destPath string, paths []string, recursive bool) (err error) {
+//
+// A listed path that cannot be opened, or that is not a regular file, is left
+// out and reported in skipped, so one bad path does not cost the user the rest
+// of the archive. A failure to write the archive itself returns an error, and so
+// does a read that fails once an entry is already being written.
+func CreateZip(destPath string, paths []string, recursive bool) (skipped []SkippedEntry, err error) {
+	note := func(path string, reason error) {
+		// A PathError repeats the path the entry already carries, so keep
+		// the cause on its own and let the caller pair the two.
+		var perr *os.PathError
+		if errors.As(reason, &perr) {
+			reason = perr.Err
+		}
+		skipped = append(skipped, SkippedEntry{Path: path, Reason: reason})
+	}
+	// skip records a source that could not be opened and reports whether err
+	// was one, so both branches agree on what costs a single entry.
+	skip := func(path string, err error) bool {
+		var u unreadable
+		if !errors.As(err, &u) {
+			return false
+		}
+		note(path, u.error)
+		return true
+	}
+
 	f, err := os.Create(destPath)
 	if err != nil {
-		return fmt.Errorf("failed to create zip file: %w", err)
+		return nil, fmt.Errorf("failed to create zip file: %w", err)
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil && err == nil {
@@ -39,7 +81,8 @@ func CreateZip(destPath string, paths []string, recursive bool) (err error) {
 	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil {
-			return fmt.Errorf("failed to stat %s: %w", path, err)
+			note(path, err)
+			continue
 		}
 
 		if info.IsDir() && recursive {
@@ -47,7 +90,8 @@ func CreateZip(destPath string, paths []string, recursive bool) (err error) {
 			// symlinked directory, so resolve the explicitly requested path.
 			root, err := filepath.EvalSymlinks(path)
 			if err != nil {
-				return fmt.Errorf("failed to resolve %s: %w", path, err)
+				note(path, err)
+				continue
 			}
 			base := filepath.Base(path)
 			if base == string(filepath.Separator) {
@@ -56,7 +100,10 @@ func CreateZip(destPath string, paths []string, recursive bool) (err error) {
 			}
 			err = filepath.Walk(root, func(fpath string, fi os.FileInfo, err error) error {
 				if err != nil {
-					return err
+					// Walk hands over the directory it could not read and
+					// carries on with its siblings once this returns nil.
+					note(fpath, err)
+					return nil
 				}
 				if fi.IsDir() {
 					return nil
@@ -66,31 +113,41 @@ func CreateZip(destPath string, paths []string, recursive bool) (err error) {
 					return err
 				}
 				name := filepath.Join(base, relPath)
-				if fi.Mode()&os.ModeSymlink != 0 {
-					return addSymlinkToZip(w, fpath, name, fi)
-				}
-				if !fi.Mode().IsRegular() {
+				switch {
+				case fi.Mode()&os.ModeSymlink != 0:
+					err = addSymlinkToZip(w, fpath, name, fi)
+				case !fi.Mode().IsRegular():
 					// Sockets, FIFOs and device nodes carry nothing to archive,
 					// and opening a FIFO blocks until a writer shows up.
 					return nil
+				default:
+					err = addFileToZip(w, fpath, name, fi)
 				}
-				return addFileToZip(w, fpath, name, fi)
+				if skip(fpath, err) {
+					return nil
+				}
+				return err
 			})
 			if err != nil {
-				return err
+				return skipped, err
 			}
 		} else {
 			if !info.Mode().IsRegular() {
 				// Failing here would cost the user every path listed alongside it.
+				note(path, errNotRegular)
 				continue
 			}
-			if err := addFileToZip(w, path, filepath.Base(path), info); err != nil {
-				return err
+			err := addFileToZip(w, path, filepath.Base(path), info)
+			if skip(path, err) {
+				continue
+			}
+			if err != nil {
+				return skipped, err
 			}
 		}
 	}
 
-	return nil
+	return skipped, nil
 }
 
 // newZipEntry opens an entry carrying the source mode bits, which w.Create
@@ -117,7 +174,7 @@ func newZipEntry(w *zip.Writer, archiveName string, fi os.FileInfo, method uint1
 func addSymlinkToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo) error {
 	target, err := os.Readlink(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to read symlink %s: %w", filePath, err)
+		return unreadable{err}
 	}
 
 	zw, err := newZipEntry(w, archiveName, fi, zip.Store)
@@ -135,7 +192,7 @@ func addSymlinkToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo
 func addFileToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo) error {
 	f, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to open %s: %w", filePath, err)
+		return unreadable{err}
 	}
 	defer func() { _ = f.Close() }()
 
@@ -145,6 +202,9 @@ func addFileToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo) e
 	}
 
 	if _, err := io.Copy(zw, f); err != nil {
+		// A read failing here has already written a partial entry that
+		// archive/zip cannot take back, so it ends the archive rather than
+		// leaving a silently truncated file in it.
 		return fmt.Errorf("failed to write zip entry: %w", err)
 	}
 

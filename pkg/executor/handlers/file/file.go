@@ -164,7 +164,7 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		return 1, err.Error()
 	}
 
-	name, cleanupPath, err := h.makeArchive(ctx, paths, bulk, recursive, sysProcAttr)
+	name, cleanupPath, skipped, err := h.makeArchive(ctx, paths, bulk, recursive, sysProcAttr)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create archive")
 		return 1, err.Error()
@@ -189,7 +189,7 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 	}
 
 	if statusCode == http.StatusOK {
-		return 0, fmt.Sprintf("Successfully uploaded %d file(s).", len(paths))
+		return 0, uploadSummary(len(paths), skipped)
 	}
 
 	return 1, "You do not have permission to read on the directory. or directory does not exist"
@@ -438,25 +438,57 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 	return paths, isBulk, isRecursive, nil
 }
 
+// skippedSummaryNamed caps how many skipped paths the upload summary spells out
+// before the rest collapse into a count, so one unreadable directory cannot fill
+// the console with a wall of paths.
+const skippedSummaryNamed = 3
+
+// uploadSummary reports the archive that was uploaded along with whatever it
+// could not hold, so a partial archive never looks like a complete one.
+func uploadSummary(count int, skipped []utils.SkippedEntry) string {
+	if len(skipped) == 0 {
+		return fmt.Sprintf("Successfully uploaded %d file(s).", count)
+	}
+
+	named := skipped
+	if len(named) > skippedSummaryNamed {
+		named = named[:skippedSummaryNamed]
+	}
+	reasons := make([]string, 0, len(named)+1)
+	for _, entry := range named {
+		reasons = append(reasons, fmt.Sprintf("%s: %v", entry.Path, entry.Reason))
+	}
+	if rest := len(skipped) - len(named); rest > 0 {
+		reasons = append(reasons, fmt.Sprintf("and %d more", rest))
+	}
+
+	// count is what the user asked for, and a skipped path is still in it, so
+	// naming a success count here would contradict the list that follows.
+	return fmt.Sprintf("Uploaded the archive, skipping %d path(s): %s",
+		len(skipped), strings.Join(reasons, "; "))
+}
+
 // makeArchive creates a zip archive from the specified paths using Go's archive/zip.
-// It returns the archive file path, a cleanup path (non-empty only for temp archives), and any error.
+// It returns the archive file path, a cleanup path (non-empty only for temp archives),
+// the paths left out of the archive, and any error.
 // cleanupPath is always derived from os.TempDir() and never from user input,
 // ensuring os.Remove(cleanupPath) is safe from path-injection.
-func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, string, error) {
+func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, string, []utils.SkippedEntry, error) {
 	path := paths[0]
 
 	if !bulk && !recursive {
-		return path, "", nil
+		return path, "", nil, nil
 	}
 
 	archiveName := filepath.Join(os.TempDir(), uuid.New().String()+".zip")
 
-	if err := utils.CreateZip(archiveName, paths, recursive || bulk); err != nil {
+	skipped, err := utils.CreateZip(archiveName, paths, recursive || bulk)
+	if err != nil {
 		_ = os.Remove(archiveName)
-		return "", "", err
+		return "", "", nil, err
 	}
 
-	return archiveName, archiveName, nil
+	return archiveName, archiveName, skipped, nil
 }
 
 // fileUpload uploads the file to the server. Owns src.Close():

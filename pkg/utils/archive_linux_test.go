@@ -22,6 +22,6 @@ func TestCreateZip_CloseFailureIsReported(t *testing.T) {
 	// /dev/full accepts the open and fails every write with ENOSPC. The
 	// zip.Writer buffers, so a small entry only fails once Close flushes it
 	// along with the central directory.
-	err := CreateZip("/dev/full", []string{src}, false)
+	_, err := CreateZip("/dev/full", []string{src}, false)
 	assert.ErrorContains(t, err, "no space left on device")
 }

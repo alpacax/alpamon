@@ -32,7 +32,7 @@ func TestCreateZip_IrregularEntriesAreSkipped(t *testing.T) {
 	dest := filepath.Join(dir, "out.zip")
 	// The socket used to fail the whole archive and the FIFO used to block
 	// os.Open forever, with no context to cancel it.
-	require.NoError(t, CreateZip(dest, []string{demo}, true))
+	requireZip(t, dest, []string{demo}, true)
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)
@@ -43,9 +43,7 @@ func TestCreateZip_IrregularEntriesAreSkipped(t *testing.T) {
 }
 
 func TestCreateZip_ListedIrregularPathIsSkipped(t *testing.T) {
-	dir, err := os.MkdirTemp("", "z")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := t.TempDir()
 
 	file := filepath.Join(dir, "file.txt")
 	require.NoError(t, os.WriteFile(file, []byte("hi"), 0644))
@@ -56,7 +54,8 @@ func TestCreateZip_ListedIrregularPathIsSkipped(t *testing.T) {
 	// The shape a multi-select produces, and the only one that reaches this
 	// branch: several paths listed at once, one of them irregular. A lone
 	// FIFO is streamed without an archive and never gets here.
-	require.NoError(t, CreateZip(dest, []string{file, fifo}, true))
+	skipped, err := CreateZip(dest, []string{file, fifo}, true)
+	require.NoError(t, err)
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)
@@ -64,4 +63,55 @@ func TestCreateZip_ListedIrregularPathIsSkipped(t *testing.T) {
 
 	require.Len(t, r.File, 1)
 	assert.Equal(t, "file.txt", r.File[0].Name)
+
+	// The user picked this path by hand, so dropping it without a word would
+	// leave them reading an archive that is quietly short one entry.
+	require.Len(t, skipped, 1)
+	assert.Equal(t, fifo, skipped[0].Path)
+	assert.ErrorIs(t, skipped[0].Reason, errNotRegular)
+}
+
+func TestCreateZip_UnreadableEntriesAreSkipped(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 file whatever its mode says")
+	}
+
+	dir := t.TempDir()
+	demo := filepath.Join(dir, "demo")
+	locked := filepath.Join(demo, "locked")
+	secret := filepath.Join(demo, "secret.txt")
+	require.NoError(t, os.MkdirAll(locked, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(demo, "readable.txt"), []byte("hi"), 0644))
+	require.NoError(t, os.WriteFile(secret, []byte("s"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(locked, "hidden.txt"), []byte("h"), 0644))
+	require.NoError(t, os.Chmod(secret, 0000))
+	require.NoError(t, os.Chmod(locked, 0000))
+	// TempDir cannot delete what it cannot enter, and cleanups run last in first.
+	t.Cleanup(func() { _ = os.Chmod(locked, 0755) })
+
+	dest := filepath.Join(dir, "out.zip")
+	skipped, err := CreateZip(dest, []string{demo}, true)
+	require.NoError(t, err)
+
+	r, err := zip.OpenReader(dest)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+
+	require.Len(t, r.File, 1)
+	assert.Equal(t, "demo/readable.txt", r.File[0].Name)
+
+	var reported []string
+	for _, entry := range skipped {
+		reported = append(reported, entry.Path)
+		assert.ErrorIs(t, entry.Reason, os.ErrPermission)
+	}
+	// Walk runs on the resolved root, and on darwin /var is a link to
+	// /private/var, so the reported paths carry the resolved prefix.
+	resolved, err := filepath.EvalSymlinks(demo)
+	require.NoError(t, err)
+	// The unreadable directory is reported once, not once per file inside it.
+	assert.ElementsMatch(t, []string{
+		filepath.Join(resolved, "locked"),
+		filepath.Join(resolved, "secret.txt"),
+	}, reported)
 }
