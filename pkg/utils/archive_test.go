@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -569,4 +570,44 @@ func TestUnzip_EntryWrittenThroughExistingLinkIsRejected(t *testing.T) {
 
 	_, err := os.Stat(filepath.Join(outside, "passwd"))
 	assert.ErrorIs(t, err, os.ErrNotExist, "the entry was written through the link")
+}
+
+func TestUnzip_ConcurrentExtractionsIntoOneDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "links.zip")
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "file.txt", body: "hi"},
+		{name: "sub/file.txt", body: "hi"},
+		{name: "link", body: "file.txt", isLink: true},
+		{name: "sub/link", body: "file.txt", isLink: true},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+
+	// Commands run on a worker pool, so one directory can take two extractions
+	// at once. A regular entry rides that out because O_TRUNC overwrites in a
+	// single call, while a link is removed and created in two.
+	const workers = 8
+	errs := make(chan error, workers)
+	var start sync.WaitGroup
+	start.Add(1)
+	for range workers {
+		go func() {
+			start.Wait()
+			errs <- Unzip(zipPath, out)
+		}()
+	}
+	start.Done()
+	for range workers {
+		assert.NoError(t, <-errs)
+	}
+
+	target, err := os.Readlink(filepath.Join(out, "link"))
+	require.NoError(t, err)
+	assert.Equal(t, "file.txt", target)
 }

@@ -399,20 +399,35 @@ func extractSymlink(f *zip.File, root, fpath string) error {
 		return fmt.Errorf("illegal link target in zip: %q -> %q", f.Name, target)
 	}
 
-	// os.Symlink will not overwrite where a regular entry truncates, so clear
-	// the way and keep the two kinds symmetric.
-	if err := os.Remove(fpath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
+	return createSymlink(target, fpath)
+}
 
-	if err := os.Symlink(target, fpath); err != nil {
-		if symlinkUnsupported(err) {
+const symlinkAttempts = 3
+
+// createSymlink puts a link to target at fpath, over whatever is already there.
+// A regular entry gets that from O_TRUNC in one call, and this is the same
+// thing in two: commands run on a worker pool, so a second extraction can fill
+// the path back in between them, and losing that race is not a failure.
+func createSymlink(target, fpath string) error {
+	for attempt := 0; ; attempt++ {
+		if err := os.Remove(fpath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+
+		err := os.Symlink(target, fpath)
+		if err == nil || symlinkUnsupported(err) {
 			return nil
 		}
-		return err
-	}
+		if !os.IsExist(err) || attempt == symlinkAttempts-1 {
+			return err
+		}
 
-	return nil
+		// Whoever won carries the same entry when the target matches, so
+		// there is nothing left to write.
+		if got, rerr := os.Readlink(fpath); rerr == nil && got == target {
+			return nil
+		}
+	}
 }
 
 // maxLinkResolution bounds the chain isValidLinkTarget will walk, the way ELOOP
@@ -475,7 +490,7 @@ func extractFile(f *zip.File, fpath string) error {
 	// os.OpenFile would write through a link sitting at the path, the one
 	// component mkdirAllInside does not cover.
 	if fi, err := os.Lstat(fpath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		if err := os.Remove(fpath); err != nil {
+		if err := os.Remove(fpath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
