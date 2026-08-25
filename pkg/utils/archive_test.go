@@ -474,6 +474,65 @@ func TestUnzip_EscapingLinkTargetIsRejected(t *testing.T) {
 	}
 }
 
+func TestUnzip_LinkTargetThroughAnotherLinkIsRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	// filepath.Join folds "subdir/parent/.." into "subdir", so a target checked
+	// by text alone lands inside. The kernel follows subdir/parent first and
+	// ends up one level above destDir.
+	chain := []zipEntry{
+		{name: "subdir/keep", body: "x"},
+		{name: "subdir/parent", body: "..", isLink: true},
+		{name: "escape", body: "subdir/parent/..", isLink: true},
+	}
+	// Nothing constrains entry order, so the link that makes the chain escape
+	// may also arrive after the link that rides it.
+	for name, entries := range map[string][]zipEntry{
+		"rider last":  chain,
+		"rider first": {chain[2], chain[0], chain[1]},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			zipPath := filepath.Join(dir, "chain.zip")
+			writeEntryZip(t, zipPath, entries)
+
+			out := filepath.Join(dir, "out")
+			require.NoError(t, os.MkdirAll(out, 0755))
+
+			assert.ErrorContains(t, Unzip(zipPath, out), "illegal link target in zip")
+
+			_, err := os.Lstat(filepath.Join(out, "escape"))
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
+func TestUnzip_LinkTargetMayGoThroughALinkInsideRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "chain.zip")
+	// Resolving the target must not turn every earlier link into a refusal:
+	// this chain stays inside destDir the whole way.
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "subdir/file.txt", body: "hi"},
+		{name: "alias", body: "subdir", isLink: true},
+		{name: "indirect", body: "alias/file.txt", isLink: true},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+	require.NoError(t, Unzip(zipPath, out))
+
+	content, err := os.ReadFile(filepath.Join(out, "indirect"))
+	require.NoError(t, err)
+	assert.Equal(t, "hi", string(content))
+}
+
 func TestUnzip_EntryWrittenThroughExistingLinkIsRejected(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")

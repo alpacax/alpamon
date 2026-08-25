@@ -247,8 +247,9 @@ func Unzip(src, destDir string) error {
 // CreateZip writes—comes back as a real symlink, dropped on a Windows host that
 // makes none rather than failing the whole extraction.
 //
-// Nothing may leave destDir: an escaping entry name, a link target resolving
-// outside, and an entry written through a link are each refused.
+// Nothing may leave destDir: an escaping entry name, a link target that lands
+// outside once every link on the way to it is followed, and an entry written
+// through a link are each refused.
 func UnzipReader(r *zip.ReadCloser, destDir string) error {
 	// Unresolved, every extraction under /tmp on darwin reads as an escape,
 	// since /tmp is itself a link.
@@ -257,6 +258,7 @@ func UnzipReader(r *zip.ReadCloser, destDir string) error {
 		return fmt.Errorf("failed to resolve destination directory: %w", err)
 	}
 
+	var links []extractedLink
 	for _, f := range r.File {
 		fpath := filepath.Join(root, f.Name)
 		if !isInside(root, fpath) {
@@ -274,16 +276,51 @@ func UnzipReader(r *zip.ReadCloser, destDir string) error {
 			return err
 		}
 
+		// Links go last: on Windows os.Symlink picks a file or a directory link
+		// by what the target is at creation time, and entry order does not
+		// promise the target has been extracted yet.
 		if f.Mode()&os.ModeSymlink != 0 {
-			if err := extractSymlink(f, root, fpath); err != nil {
-				return err
-			}
+			links = append(links, extractedLink{file: f, path: fpath})
 			continue
 		}
 
 		if err := extractFile(f, fpath); err != nil {
 			return err
 		}
+	}
+
+	for _, link := range links {
+		if err := extractSymlink(link.file, root, link.path); err != nil {
+			return err
+		}
+	}
+
+	return recheckLinks(root, links)
+}
+
+// extractedLink is a link entry held back until the regular ones are out.
+type extractedLink struct {
+	file *zip.File
+	path string
+}
+
+// recheckLinks walks every link the extraction wrote once the archive is fully
+// on disk. A target is checked against what exists when the link is written, so
+// a link the archive lists later can still turn an earlier one into an escape.
+func recheckLinks(root string, links []extractedLink) error {
+	for _, link := range links {
+		target, err := os.Readlink(link.path)
+		if err != nil {
+			// Dropped on a host that makes no links, so there is none to check.
+			continue
+		}
+		if isValidLinkTarget(root, link.path, filepath.ToSlash(target)) {
+			continue
+		}
+		if err := os.Remove(link.path); err != nil {
+			return err
+		}
+		return fmt.Errorf("illegal link target in zip: %q -> %q", link.file.Name, target)
 	}
 
 	return nil
@@ -372,14 +409,59 @@ func extractSymlink(f *zip.File, root, fpath string) error {
 	return nil
 }
 
-// isValidLinkTarget counts a leading slash as absolute itself: zip entries carry
-// slash-separated paths whatever wrote them, so filepath.IsAbs alone would let a
-// Unix-absolute target through on Windows.
+// maxLinkResolution bounds the chain isValidLinkTarget will walk, the way ELOOP
+// bounds the kernel's own resolution.
+const maxLinkResolution = 64
+
+// isValidLinkTarget reports whether a link at fpath may carry target. It walks
+// the target component by component, following every link already on disk,
+// because filepath.Join folds "a/link/.." down to "a" while the kernel follows
+// the link first and lands somewhere else entirely. It starts from
+// filepath.Dir(fpath), which mkdirAllInside has already shown to be link-free.
 func isValidLinkTarget(root, fpath, target string) bool {
+	// Zip entries carry slash-separated paths whatever wrote them, so a leading
+	// slash is absolute even where filepath.IsAbs alone would miss it.
 	if target == "" || strings.HasPrefix(target, "/") || filepath.IsAbs(target) {
 		return false
 	}
-	return isInside(root, filepath.Join(filepath.Dir(fpath), filepath.FromSlash(target)))
+
+	current := filepath.Dir(fpath)
+	parts := strings.Split(target, "/")
+	for steps := 0; len(parts) > 0; steps++ {
+		if steps > maxLinkResolution {
+			return false
+		}
+
+		part := parts[0]
+		parts = parts[1:]
+
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			current = filepath.Dir(current)
+		default:
+			next := filepath.Join(current, part)
+			if fi, err := os.Lstat(next); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				link, err := os.Readlink(next)
+				// An absolute link is refused rather than followed: only a link
+				// the extraction did not write can be one, and reasoning about
+				// where it lands is not worth the archive.
+				if err != nil || strings.HasPrefix(filepath.ToSlash(link), "/") || filepath.IsAbs(link) {
+					return false
+				}
+				parts = append(strings.Split(filepath.ToSlash(link), "/"), parts...)
+				continue
+			}
+			current = next
+		}
+
+		if !isInside(root, current) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // extractFile is the mirror of addFileToZip.
