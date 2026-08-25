@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/cmd/alpamon/command/archive"
 	"github.com/alpacax/alpamon/v2/cmd/alpamon/command/ftp"
 	migratecmd "github.com/alpacax/alpamon/v2/cmd/alpamon/command/migrate"
 	"github.com/alpacax/alpamon/v2/cmd/alpamon/command/register"
@@ -53,7 +54,7 @@ Typical usage:
   alpamon migrate --to-workspace <new-workspace>               # workspace move
 
 After 'register' completes, the agent runs as a system service and operates
-on its own. Other subcommands (ftp, setup, tunnel-daemon) are internal
+on its own. Other subcommands (archive, ftp, setup, tunnel-daemon) are internal
 workers spawned by the agent itself and are not meant to be invoked by users.
 
 Run 'alpamon <command> --help' for details. See https://alpacon.io for the
@@ -73,7 +74,7 @@ control plane and https://github.com/alpacax/alpacon-cli for the CLI.`,
 
 func init() {
 	setup.SetConfigPaths(name)
-	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, register.RegisterCmd, register.UnregisterCmd, migratecmd.Cmd)
+	RootCmd.AddCommand(setup.SetupCmd, ftp.FtpCmd, archive.ArchiveCmd, register.RegisterCmd, register.UnregisterCmd, migratecmd.Cmd)
 	RootCmd.AddCommand(platformCommands()...)
 	// Emit just the version string (no "alpamon version ..." prefix) so
 	// shell one-liners like `alpamon --version` are easy to parse.

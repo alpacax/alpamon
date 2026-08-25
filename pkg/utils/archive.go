@@ -81,6 +81,25 @@ type deferredEntry struct {
 // holds nothing while something was skipped is an error too: an empty archive is
 // a failed request, not a partial one.
 func CreateZip(destPath string, paths []string, recursive bool) (skipped []SkippedEntry, err error) {
+	f, err := os.Create(destPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zip file: %w", err)
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close zip file: %w", cerr)
+		}
+	}()
+
+	return WriteZip(f, paths, recursive)
+}
+
+// WriteZip writes the archive CreateZip describes to dst instead of to a path,
+// so a caller that already holds the destination open can hand over the file
+// descriptor. The archive worker runs demoted and writes to the descriptor it
+// inherits, which is how the requesting user's credentials end up applied to
+// every open below.
+func WriteZip(dst io.Writer, paths []string, recursive bool) (skipped []SkippedEntry, err error) {
 	note := func(path string, reason error) {
 		// A PathError repeats the path the entry already carries, so keep
 		// the cause on its own and let the caller pair the two.
@@ -105,17 +124,7 @@ func CreateZip(destPath string, paths []string, recursive bool) (skipped []Skipp
 	// must not be handed over as one.
 	archived := false
 
-	f, err := os.Create(destPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create zip file: %w", err)
-	}
-	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close zip file: %w", cerr)
-		}
-	}()
-
-	w := zip.NewWriter(f)
+	w := zip.NewWriter(dst)
 	// Close writes the central directory, so discarding its error would
 	// report a truncated archive as a successful one.
 	defer func() {
