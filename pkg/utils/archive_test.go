@@ -349,6 +349,21 @@ func writeEntryZip(t *testing.T, path string, entries []zipEntry) {
 	require.NoError(t, f.Close())
 }
 
+func TestUnzip_MissingDestinationDirectoryIsCreated(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "plain.zip")
+	writeEntryZip(t, zipPath, []zipEntry{{name: "file.txt", body: "hi"}})
+
+	// The destination used to appear on its own with the first entry, and the
+	// upload path is not the only caller of an exported function.
+	out := filepath.Join(dir, "missing")
+	require.NoError(t, Unzip(zipPath, out))
+
+	content, err := os.ReadFile(filepath.Join(out, "file.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "hi", string(content))
+}
+
 func TestUnzip_SymlinkIsRestored(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")

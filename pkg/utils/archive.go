@@ -251,6 +251,12 @@ func Unzip(src, destDir string) error {
 // outside once every link on the way to it is followed, and an entry written
 // through a link are each refused.
 func UnzipReader(r *zip.ReadCloser, destDir string) error {
+	// destDir used to appear on its own with the first entry, back when every
+	// entry called os.MkdirAll on its own parent.
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
 	// Unresolved, every extraction under /tmp on darwin reads as an escape,
 	// since /tmp is itself a link.
 	root, err := filepath.EvalSymlinks(destDir)
