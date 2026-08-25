@@ -436,6 +436,22 @@ func TestUnzip_OversizedLinkTargetIsRejected(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestUnzip_RejectionMessageEscapesControlBytes(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "esc.zip")
+	// A zip entry name is arbitrary bytes, and the rejection message is
+	// returned to the console as the command result, so an escape sequence
+	// in it would reach a terminal as live input.
+	writeEntryZip(t, zipPath, []zipEntry{{name: "\x1b[2Jgone", body: "/etc", isLink: true}})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+
+	err := Unzip(zipPath, out)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "\x1b")
+}
+
 func TestUnzip_EscapingLinkTargetIsRejected(t *testing.T) {
 	// The entry-name check passes for both: "a" sits inside destDir and so
 	// does "a/passwd". Only the link target puts the second write outside.

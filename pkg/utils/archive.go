@@ -264,7 +264,7 @@ func UnzipReader(r *zip.ReadCloser, destDir string) error {
 	for _, f := range r.File {
 		fpath := filepath.Join(root, f.Name)
 		if !isInside(root, fpath) {
-			return fmt.Errorf("illegal file path in zip: %s", f.Name)
+			return fmt.Errorf("illegal file path in zip: %q", f.Name)
 		}
 
 		if f.FileInfo().IsDir() {
@@ -308,7 +308,7 @@ func isInside(root, path string) bool {
 func mkdirAllInside(root, dir, name string) error {
 	rel, err := filepath.Rel(root, dir)
 	if err != nil {
-		return fmt.Errorf("illegal file path in zip: %s", name)
+		return fmt.Errorf("illegal file path in zip: %q", name)
 	}
 	if rel == "." {
 		return nil
@@ -331,7 +331,7 @@ func mkdirAllInside(root, dir, name string) error {
 			return err
 		}
 		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("illegal link target in zip: %s is written through a symlink", name)
+			return fmt.Errorf("illegal link target in zip: %q is written through a symlink", name)
 		}
 	}
 
@@ -355,12 +355,12 @@ func extractSymlink(f *zip.File, root, fpath string) error {
 		return err
 	}
 	if len(body) > maxSymlinkTarget {
-		return fmt.Errorf("illegal link target in zip: %s exceeds %d bytes", f.Name, maxSymlinkTarget)
+		return fmt.Errorf("illegal link target in zip: %q exceeds %d bytes", f.Name, maxSymlinkTarget)
 	}
 
 	target := string(body)
 	if !isValidLinkTarget(root, fpath, target) {
-		return fmt.Errorf("illegal link target in zip: %s -> %s", f.Name, target)
+		return fmt.Errorf("illegal link target in zip: %q -> %q", f.Name, target)
 	}
 
 	// os.Symlink refuses an existing path where a regular entry would have
