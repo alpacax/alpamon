@@ -1,0 +1,19 @@
+//go:build windows
+
+package utils
+
+import (
+	"errors"
+
+	"golang.org/x/sys/windows"
+)
+
+// symlinkUnsupported reports whether os.Symlink failed because this host makes
+// no links: no SeCreateSymbolicLink and developer mode off, or a filesystem
+// without link support. Neither says anything about the archive, so the entry
+// is dropped instead of failing the extraction.
+func symlinkUnsupported(err error) bool {
+	return errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) ||
+		errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
+		errors.Is(err, windows.ERROR_INVALID_FUNCTION)
+}

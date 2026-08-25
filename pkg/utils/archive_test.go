@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -313,4 +314,146 @@ func TestCreateZipAndUnzip_RoundTrip(t *testing.T) {
 	content, err = os.ReadFile(filepath.Join(outDir, "src", "sub", "b.txt"))
 	require.NoError(t, err, "sub/b.txt not found after round-trip")
 	assert.Equal(t, "bbb", string(content))
+}
+
+// zipEntry is one entry for writeEntryZip: with isLink set it carries its
+// target as the body. A slice keeps the archive order, which the map writeZip
+// takes cannot.
+type zipEntry struct {
+	name   string
+	body   string
+	isLink bool
+}
+
+func writeEntryZip(t *testing.T, path string, entries []zipEntry) {
+	t.Helper()
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	w := zip.NewWriter(f)
+	for _, e := range entries {
+		mode := os.FileMode(0644)
+		if e.isLink {
+			mode = 0777 | os.ModeSymlink
+		}
+		hdr := &zip.FileHeader{Name: e.name, Method: zip.Store}
+		hdr.SetMode(mode)
+		zw, err := w.CreateHeader(hdr)
+		require.NoError(t, err)
+		_, err = zw.Write([]byte(e.body))
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Close())
+	require.NoError(t, f.Close())
+}
+
+func TestUnzip_SymlinkIsRestored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	demo := filepath.Join(dir, "demo")
+	require.NoError(t, os.MkdirAll(filepath.Join(demo, "real"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(demo, "real", "file.txt"), []byte("hi"), 0644))
+	require.NoError(t, os.Symlink("real", filepath.Join(demo, "link")))
+
+	zipPath := filepath.Join(dir, "demo.zip")
+	requireZip(t, zipPath, []string{demo}, true)
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+	require.NoError(t, Unzip(zipPath, out))
+
+	link := filepath.Join(out, "demo", "link")
+	fi, err := os.Lstat(link)
+	require.NoError(t, err)
+	// A link entry used to come back as a plain file holding the target path,
+	// so assert the type rather than just that something is there.
+	require.NotZero(t, fi.Mode()&os.ModeSymlink, "link came back as %v", fi.Mode())
+
+	target, err := os.Readlink(link)
+	require.NoError(t, err)
+	assert.Equal(t, "real", target)
+
+	content, err := os.ReadFile(filepath.Join(link, "file.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "hi", string(content))
+}
+
+func TestUnzip_AbsoluteLinkTargetIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "abs.zip")
+	writeEntryZip(t, zipPath, []zipEntry{{name: "etc", body: "/etc", isLink: true}})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+
+	assert.ErrorContains(t, Unzip(zipPath, out), "illegal link target in zip")
+}
+
+func TestUnzip_OversizedLinkTargetIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "long.zip")
+	// The read is bounded, so an over-long body used to arrive truncated and
+	// become a link to a path the archive never named.
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "link", body: strings.Repeat("a", maxSymlinkTarget+1), isLink: true},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+
+	assert.ErrorContains(t, Unzip(zipPath, out), "illegal link target in zip")
+
+	_, err := os.Lstat(filepath.Join(out, "link"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestUnzip_EscapingLinkTargetIsRejected(t *testing.T) {
+	// The entry-name check passes for both: "a" sits inside destDir and so
+	// does "a/passwd". Only the link target puts the second write outside.
+	escaping := []zipEntry{
+		{name: "a", body: "../../etc", isLink: true},
+		{name: "a/passwd", body: "malicious"},
+	}
+	// Nothing constrains the order entries appear in, so the link arriving
+	// after the path that goes through it must be rejected just the same.
+	for name, entries := range map[string][]zipEntry{
+		"link first": escaping,
+		"link last":  {escaping[1], escaping[0]},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			zipPath := filepath.Join(dir, "evil.zip")
+			writeEntryZip(t, zipPath, entries)
+
+			out := filepath.Join(dir, "out")
+			require.NoError(t, os.MkdirAll(out, 0755))
+
+			assert.ErrorContains(t, Unzip(zipPath, out), "illegal link target in zip")
+		})
+	}
+}
+
+func TestUnzip_EntryWrittenThroughExistingLinkIsRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0755))
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+	// A link the archive never carried: the upload path extracts into the
+	// user's own directory, so one can already be sitting in it.
+	require.NoError(t, os.Symlink(outside, filepath.Join(out, "a")))
+
+	zipPath := filepath.Join(dir, "evil.zip")
+	writeZip(t, zipPath, map[string]string{"a/passwd": "malicious"})
+
+	assert.ErrorContains(t, Unzip(zipPath, out), "illegal link target in zip")
+
+	_, err := os.Stat(filepath.Join(outside, "passwd"))
+	assert.ErrorIs(t, err, os.ErrNotExist, "the entry was written through the link")
 }
