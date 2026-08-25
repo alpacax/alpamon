@@ -611,3 +611,21 @@ func TestUnzip_ConcurrentExtractionsIntoOneDestination(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "file.txt", target)
 }
+
+func TestCreateZipAndUnzip_EmptyDirectorySurvives(t *testing.T) {
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "empty"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("aaa"), 0644))
+
+	zipPath := filepath.Join(dir, "archive.zip")
+	requireZip(t, zipPath, []string{srcDir}, true)
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+	require.NoError(t, Unzip(zipPath, out))
+
+	// A directory holding nothing has no file entry to carry it, so it needs an
+	// entry of its own or the download drops it.
+	assert.DirExists(t, filepath.Join(out, "src", "empty"))
+}

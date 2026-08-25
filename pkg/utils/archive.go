@@ -27,7 +27,9 @@ type unreadable struct{ error }
 func (u unreadable) Unwrap() error { return u.error }
 
 // CreateZip creates a zip archive at destPath containing the specified paths.
-// If recursive is true and a path is a directory, its contents are included recursively.
+// If recursive is true and a path is a directory, its contents are included
+// recursively. A directory holding nothing gets an entry of its own, since it
+// has no contents to carry it across.
 // A symlink listed explicitly is followed, so its whole target tree is archived
 // even when that tree lives outside the listed path. A symlink met while walking
 // is stored as a link entry (target path, not content), so it cannot recurse into
@@ -111,14 +113,30 @@ func CreateZip(destPath string, paths []string, recursive bool) (skipped []Skipp
 					note(fpath, err)
 					return nil
 				}
-				if fi.IsDir() {
-					return nil
-				}
 				relPath, err := filepath.Rel(root, fpath)
 				if err != nil {
 					return err
 				}
 				name := filepath.Join(base, relPath)
+				if fi.IsDir() {
+					if name == "." {
+						// Base of "/" left nothing to name the walk root with.
+						return nil
+					}
+					// Every other directory arrives with the entries below it,
+					// so only one holding nothing needs an entry of its own. It
+					// is still not content, and must not make an archive that
+					// holds only directories look like a finished one.
+					empty, err := isEmptyDir(fpath)
+					if err != nil {
+						note(fpath, err)
+						return nil
+					}
+					if !empty {
+						return nil
+					}
+					return addDirToZip(w, name, fi)
+				}
 				switch {
 				case fi.Mode()&os.ModeSymlink != 0:
 					err = addSymlinkToZip(w, fpath, name, fi)
@@ -176,9 +194,9 @@ func newZipEntry(w *zip.Writer, archiveName string, fi os.FileInfo, method uint1
 		Method:   method,
 		Modified: fi.ModTime(),
 	}
-	// Permissions and the link flag only: setuid, setgid and sticky mean
+	// Permissions and the type flags only: setuid, setgid and sticky mean
 	// nothing in a download and Unzip would hand them to os.OpenFile.
-	hdr.SetMode(fi.Mode().Perm() | fi.Mode()&os.ModeSymlink)
+	hdr.SetMode(fi.Mode().Perm() | fi.Mode()&(os.ModeSymlink|os.ModeDir))
 
 	zw, err := w.CreateHeader(hdr)
 	if err != nil {
@@ -205,6 +223,21 @@ func addSymlinkToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo
 	}
 
 	return nil
+}
+
+func isEmptyDir(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, err
+	}
+	return len(entries) == 0, nil
+}
+
+// addDirToZip writes a directory entry. The trailing slash is what every other
+// zip reader keys off; the mode bit alone is not enough.
+func addDirToZip(w *zip.Writer, archiveName string, fi os.FileInfo) error {
+	_, err := newZipEntry(w, archiveName+"/", fi, zip.Store)
+	return err
 }
 
 func addFileToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo) error {
