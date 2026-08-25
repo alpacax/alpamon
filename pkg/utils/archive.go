@@ -244,18 +244,14 @@ func Unzip(src, destDir string) error {
 // Used when the caller has pre-validated the same handle to close TOCTOU windows.
 //
 // A link entry—the target path as the body with ModeSymlink set, the layout
-// CreateZip writes—comes back as a real symlink, except on a host that makes
-// no links, where the entry is dropped rather than failing the whole
-// extraction or landing as a file holding the target path.
+// CreateZip writes—comes back as a real symlink, dropped on a Windows host that
+// makes none rather than failing the whole extraction.
 //
-// Nothing may leave destDir: an escaping entry name is rejected, so is a link
-// target that resolves outside, and no entry is written through a link, since
-// one an earlier entry created—or one already sitting in destDir—turns a name
-// that passes into a route out.
+// Nothing may leave destDir: an escaping entry name, a link target resolving
+// outside, and an entry written through a link are each refused.
 func UnzipReader(r *zip.ReadCloser, destDir string) error {
-	// Comparing against destDir unresolved reads an extraction that merely
-	// goes through a link as an escape, which is every extraction under /tmp
-	// on darwin.
+	// Unresolved, every extraction under /tmp on darwin reads as an escape,
+	// since /tmp is itself a link.
 	root, err := filepath.EvalSymlinks(destDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve destination directory: %w", err)
@@ -293,7 +289,6 @@ func UnzipReader(r *zip.ReadCloser, destDir string) error {
 	return nil
 }
 
-// isInside reports whether path stays within root.
 func isInside(root, path string) bool {
 	rel, err := filepath.Rel(root, filepath.Clean(path))
 	if err != nil || filepath.IsAbs(rel) {
@@ -302,9 +297,8 @@ func isInside(root, path string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
-// mkdirAllInside walks dir one component at a time because os.MkdirAll follows
-// a symlink, which would let a link extracted earlier, or one already sitting
-// in destDir, put the entries below it outside root.
+// mkdirAllInside walks dir one component at a time because os.MkdirAll follows a
+// symlink, which would put the entries below one outside root.
 func mkdirAllInside(root, dir, name string) error {
 	rel, err := filepath.Rel(root, dir)
 	if err != nil {
@@ -319,9 +313,9 @@ func mkdirAllInside(root, dir, name string) error {
 		current = filepath.Join(current, part)
 		fi, err := os.Lstat(current)
 		if os.IsNotExist(err) {
-			// Commands run on a worker pool, so a second extraction may
-			// create the directory first. Losing that race is not a failure,
-			// but the check below still has to see what landed.
+			// Commands run on a worker pool, so another extraction may win
+			// the create. Not a failure, but the check below still needs
+			// to see what landed.
 			if err := os.Mkdir(current, 0755); err != nil && !os.IsExist(err) {
 				return err
 			}
@@ -338,12 +332,11 @@ func mkdirAllInside(root, dir, name string) error {
 	return nil
 }
 
-// maxSymlinkTarget is longer than any platform's path limit, so a body past it
-// is a malformed entry rather than a target worth reading into memory.
+// maxSymlinkTarget is past any platform's path limit, so a longer body is a
+// malformed entry, not a target worth reading into memory.
 const maxSymlinkTarget = 4096
 
-// extractSymlink restores a link entry, refusing a target that leaves root.
-// The mirror of addSymlinkToZip.
+// extractSymlink is the mirror of addSymlinkToZip.
 func extractSymlink(f *zip.File, root, fpath string) error {
 	rc, err := f.Open()
 	if err != nil {
@@ -363,8 +356,8 @@ func extractSymlink(f *zip.File, root, fpath string) error {
 		return fmt.Errorf("illegal link target in zip: %q -> %q", f.Name, target)
 	}
 
-	// os.Symlink refuses an existing path where a regular entry would have
-	// truncated it, so clear the way first and keep the two kinds symmetric.
+	// os.Symlink will not overwrite where a regular entry truncates, so clear
+	// the way and keep the two kinds symmetric.
 	if err := os.Remove(fpath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -379,9 +372,9 @@ func extractSymlink(f *zip.File, root, fpath string) error {
 	return nil
 }
 
-// isValidLinkTarget rejects an empty or absolute target, and a relative one
-// that resolves outside root. Zip entries carry slash-separated paths whatever
-// wrote them, so a leading slash is absolute on every platform.
+// isValidLinkTarget counts a leading slash as absolute itself: zip entries carry
+// slash-separated paths whatever wrote them, so filepath.IsAbs alone would let a
+// Unix-absolute target through on Windows.
 func isValidLinkTarget(root, fpath, target string) bool {
 	if target == "" || strings.HasPrefix(target, "/") || filepath.IsAbs(target) {
 		return false
@@ -389,19 +382,19 @@ func isValidLinkTarget(root, fpath, target string) bool {
 	return isInside(root, filepath.Join(filepath.Dir(fpath), filepath.FromSlash(target)))
 }
 
-// extractFile writes a regular entry. The mirror of addFileToZip.
+// extractFile is the mirror of addFileToZip.
 func extractFile(f *zip.File, fpath string) error {
-	// os.OpenFile would write through a link sitting at the path: the last
-	// component, the one mkdirAllInside does not cover.
+	// os.OpenFile would write through a link sitting at the path, the one
+	// component mkdirAllInside does not cover.
 	if fi, err := os.Lstat(fpath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if err := os.Remove(fpath); err != nil {
 			return err
 		}
 	}
 
-	// Perm only: extraction runs in the alpamon process, which is root on a
-	// normal install, so setuid, setgid and sticky off an entry would land on
-	// a root-owned file. newZipEntry drops the same bits on the way in.
+	// Perm only: extraction runs as root on a normal install, so setuid, setgid
+	// or sticky off an entry would land on a root-owned file. newZipEntry drops
+	// the same bits on the way in.
 	outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode().Perm())
 	if err != nil {
 		return err

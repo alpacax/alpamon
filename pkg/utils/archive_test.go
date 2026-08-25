@@ -316,9 +316,8 @@ func TestCreateZipAndUnzip_RoundTrip(t *testing.T) {
 	assert.Equal(t, "bbb", string(content))
 }
 
-// zipEntry is one entry for writeEntryZip: with isLink set it carries its
-// target as the body. A slice keeps the archive order, which the map writeZip
-// takes cannot.
+// zipEntry is one entry for writeEntryZip: with isLink set, body is the link
+// target. A slice keeps the archive order, which the map writeZip takes cannot.
 type zipEntry struct {
 	name   string
 	body   string
@@ -371,8 +370,7 @@ func TestUnzip_SymlinkIsRestored(t *testing.T) {
 	link := filepath.Join(out, "demo", "link")
 	fi, err := os.Lstat(link)
 	require.NoError(t, err)
-	// A link entry used to come back as a plain file holding the target path,
-	// so assert the type rather than just that something is there.
+	// A link entry used to come back as a plain file holding the target path.
 	require.NotZero(t, fi.Mode()&os.ModeSymlink, "link came back as %v", fi.Mode())
 
 	target, err := os.Readlink(link)
@@ -399,9 +397,8 @@ func TestUnzip_SetuidBitIsNotRestored(t *testing.T) {
 	require.NoError(t, os.MkdirAll(out, 0755))
 	require.NoError(t, Unzip(zipPath, out))
 
-	// Extraction runs in the alpamon process, which is root on a normal
-	// install, so an entry carrying setuid would land as a root-owned setuid
-	// file. newZipEntry already drops these bits when writing an archive.
+	// Extraction runs as root on a normal install, so this entry would land as
+	// a root-owned setuid file.
 	fi, err := os.Stat(filepath.Join(out, "payload"))
 	require.NoError(t, err)
 	assert.Zero(t, fi.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky))
@@ -421,8 +418,8 @@ func TestUnzip_AbsoluteLinkTargetIsRejected(t *testing.T) {
 func TestUnzip_OversizedLinkTargetIsRejected(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "long.zip")
-	// The read is bounded, so an over-long body used to arrive truncated and
-	// become a link to a path the archive never named.
+	// An over-long body used to arrive truncated: a link to a path the archive
+	// never named.
 	writeEntryZip(t, zipPath, []zipEntry{
 		{name: "link", body: strings.Repeat("a", maxSymlinkTarget+1), isLink: true},
 	})
@@ -439,9 +436,8 @@ func TestUnzip_OversizedLinkTargetIsRejected(t *testing.T) {
 func TestUnzip_RejectionMessageEscapesControlBytes(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "esc.zip")
-	// A zip entry name is arbitrary bytes, and the rejection message is
-	// returned to the console as the command result, so an escape sequence
-	// in it would reach a terminal as live input.
+	// The rejection reaches the console as the command result, so an escape
+	// sequence in an entry name would arrive at a terminal as live input.
 	writeEntryZip(t, zipPath, []zipEntry{{name: "\x1b[2Jgone", body: "/etc", isLink: true}})
 
 	out := filepath.Join(dir, "out")
@@ -453,14 +449,14 @@ func TestUnzip_RejectionMessageEscapesControlBytes(t *testing.T) {
 }
 
 func TestUnzip_EscapingLinkTargetIsRejected(t *testing.T) {
-	// The entry-name check passes for both: "a" sits inside destDir and so
-	// does "a/passwd". Only the link target puts the second write outside.
+	// Both names pass the entry-name check; only the link target puts the
+	// second write outside.
 	escaping := []zipEntry{
 		{name: "a", body: "../../etc", isLink: true},
 		{name: "a/passwd", body: "malicious"},
 	}
-	// Nothing constrains the order entries appear in, so the link arriving
-	// after the path that goes through it must be rejected just the same.
+	// Nothing constrains entry order, so a link arriving after the path that
+	// goes through it must be rejected just the same.
 	for name, entries := range map[string][]zipEntry{
 		"link first": escaping,
 		"link last":  {escaping[1], escaping[0]},
@@ -489,7 +485,7 @@ func TestUnzip_EntryWrittenThroughExistingLinkIsRejected(t *testing.T) {
 	out := filepath.Join(dir, "out")
 	require.NoError(t, os.MkdirAll(out, 0755))
 	// A link the archive never carried: the upload path extracts into the
-	// user's own directory, so one can already be sitting in it.
+	// user's own directory, where one can already be sitting.
 	require.NoError(t, os.Symlink(outside, filepath.Join(out, "a")))
 
 	zipPath := filepath.Join(dir, "evil.zip")

@@ -8,10 +8,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// symlinkUnsupported reports whether os.Symlink failed because this host makes
-// no links: no SeCreateSymbolicLink and developer mode off, or a filesystem
-// without link support. Neither says anything about the archive, so the entry
-// is dropped instead of failing the extraction.
+// symlinkUnsupported reports whether os.Symlink failed because this host makes no
+// links: no SeCreateSymbolicLink with developer mode off, or a filesystem without
+// link support. Neither says anything about the archive.
 func symlinkUnsupported(err error) bool {
 	return errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) ||
 		errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
