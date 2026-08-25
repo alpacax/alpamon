@@ -40,13 +40,34 @@ type ArchiveResponse struct {
 	Error        string           `json:"error,omitempty"`
 }
 
-// archiveSkippedReported bounds how many skipped paths the worker spells out.
-// The status rides a capped buffer that silently drops the overflow, so an
-// unbounded list truncates into JSON the parent cannot read, and a download
-// whose archive is complete fails. A tree with a few hundred unreadable paths
-// is ordinary once the walk runs as the requesting user, and the summary names
-// three of them, so a small sample plus SkippedTotal is all the parent needs.
-const archiveSkippedReported = 32
+// The status rides a capped buffer that silently drops the overflow, so a
+// sample that outgrows it truncates into JSON the parent cannot read and a
+// download whose archive is complete fails. Bounding the entry count alone is
+// not enough: a tree of deeply nested paths overruns the buffer with far fewer
+// than archiveSkippedReported entries. The sample is therefore bounded twice,
+// by count and by serialized size, and individual paths are shortened.
+//
+// The summary names three paths, so a small sample plus SkippedTotal is all
+// the parent needs; both bounds are far above that.
+const (
+	// archiveSkippedReported bounds how many skipped paths the worker names.
+	archiveSkippedReported = 32
+	// archiveSkippedBudget bounds what those paths may occupy, well under the
+	// buffer that carries them.
+	archiveSkippedBudget = 4 << 10
+	// archiveSkippedPathMax shortens one path. The tail is kept because the
+	// leaf names what was skipped; the elision marks that a head was dropped.
+	archiveSkippedPathMax = 200
+)
+
+// shortenSkippedPath keeps a path within archiveSkippedPathMax, preserving the
+// tail so the reported name still identifies what could not be archived.
+func shortenSkippedPath(path string) string {
+	if len(path) <= archiveSkippedPathMax {
+		return path
+	}
+	return "..." + path[len(path)-archiveSkippedPathMax:]
+}
 
 // RunArchiveWorker reads an ArchiveRequest from in, writes the archive to dst
 // and an ArchiveResponse to status, and returns the process exit code.
@@ -62,11 +83,17 @@ func RunArchiveWorker(in io.Reader, dst io.Writer, status io.Writer) int {
 		if len(skipped) > archiveSkippedReported {
 			skipped = skipped[:archiveSkippedReported]
 		}
+		spent := 0
 		for _, entry := range skipped {
-			resp.Skipped = append(resp.Skipped, ArchiveSkipped{
-				Path:   entry.Path,
+			reported := ArchiveSkipped{
+				Path:   shortenSkippedPath(entry.Path),
 				Reason: entry.Reason.Error(),
-			})
+			}
+			spent += len(reported.Path) + len(reported.Reason)
+			if spent > archiveSkippedBudget {
+				break
+			}
+			resp.Skipped = append(resp.Skipped, reported)
 		}
 		if err != nil {
 			resp.Error = err.Error()

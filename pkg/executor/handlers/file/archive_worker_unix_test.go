@@ -179,3 +179,31 @@ func TestMakeArchive_LeavesASingleFileAlone(t *testing.T) {
 	assert.Empty(t, cleanup)
 	assert.Zero(t, skipped.Total)
 }
+
+func TestArchiveWorkerResult_SurvivesLongSkippedPaths(t *testing.T) {
+	dir := t.TempDir()
+	present := filepath.Join(dir, "keep.txt")
+	require.NoError(t, os.WriteFile(present, []byte("x"), 0644))
+
+	// Bounding the sample by entry count says nothing about its size. A tree
+	// whose unreadable paths are long overruns the status buffer just as a
+	// tree with many short ones did, and turns a complete archive into a
+	// failed download.
+	deep := strings.Repeat(strings.Repeat("d", 120)+string(filepath.Separator), 4)
+	paths := []string{present}
+	for i := 0; i < 100; i++ {
+		paths = append(paths, filepath.Join(dir, deep, fmt.Sprintf("missing%03d.txt", i)))
+	}
+	request, err := json.Marshal(utils.ArchiveRequest{Paths: paths})
+	require.NoError(t, err)
+
+	status := &stderrCap{cap: stderrCapSize}
+	require.Zero(t, utils.RunArchiveWorker(bytes.NewReader(request), io.Discard, status))
+	require.Less(t, status.buf.Len(), stderrCapSize, "status was truncated by the buffer")
+
+	report, err := archiveWorkerResult(status.buf.String(), nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, 100, report.Total)
+	assert.NotEmpty(t, report.Entries)
+}
