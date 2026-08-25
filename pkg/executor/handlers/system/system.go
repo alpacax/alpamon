@@ -176,17 +176,28 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		log.Warn().Msg("Failed to retrieve the latest Alpamon version from GitHub; proceeding with package manager upgrade.")
 	}
 
-	needAlpamon := latestVersion == "" || version.Version != latestVersion
+	// goreleaser injects version.Version from {{.Version}}, which is the tag with
+	// its leading "v" stripped ("2.5.0"), while GetLatestVersion returns the tag
+	// verbatim ("v2.5.0"). Comparing them as-is never matched, so every released
+	// build considered itself outdated: on darwin and windows that drove a
+	// self-update which re-downloaded, re-verified and replaced an identical
+	// binary, then restarted the agent, on every upgrade command.
+	// latestVersion itself stays untouched: updater.SelfUpdate requires the
+	// "v"-prefixed form.
+	needAlpamon := latestVersion == "" || !sameVersion(version.Version, latestVersion)
 
+	// alpamon-pam is versioned independently of alpamon, so alpamon's latest
+	// release tag says nothing about whether the installed pam package is
+	// current (alpamon v2.5.0 against alpamon-pam 1.1.5). The package manager is
+	// the only authority here, so alpamon-pam joins the transaction whenever it
+	// is installed and apt/yum/zypper decides whether anything moves.
 	currentPamVersion := h.versionResolver.GetPamVersion()
-	needPam := currentPamVersion != "" && (latestVersion == "" || currentPamVersion != latestVersion)
+	needPam := currentPamVersion != ""
 
+	// Reached only when alpamon-pam is absent, since an installed one always
+	// goes to the package manager.
 	if !needAlpamon && !needPam {
-		pamDisplay := currentPamVersion
-		if pamDisplay == "" {
-			pamDisplay = "not installed"
-		}
-		return 0, fmt.Sprintf("Already up-to-date (alpamon: %s, pam: %s)", version.Version, pamDisplay), nil
+		return 0, fmt.Sprintf("Already up-to-date (alpamon: %s, pam: not installed)", version.Version), nil
 	}
 
 	var packages []string
@@ -278,6 +289,14 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		h.versionResolver.InvalidatePamCache()
 	}
 	return exitCode, output, err
+}
+
+// sameVersion reports whether two version strings name the same release,
+// ignoring a leading "v" on either side. The two sources disagree on the
+// prefix: the build-time injected version has it stripped, a GitHub release
+// tag keeps it.
+func sameVersion(a, b string) bool {
+	return strings.TrimPrefix(a, "v") == strings.TrimPrefix(b, "v")
 }
 
 // sanitizePackageProxy validates the payload-provided proxy URL once at
