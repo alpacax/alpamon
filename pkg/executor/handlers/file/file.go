@@ -481,6 +481,10 @@ func uploadSummary(count int, skipped utils.SkippedReport) string {
 		skipped.Total, strings.Join(reasons, "; "))
 }
 
+// archiveNamePrefix marks the temp archives alpamon builds for a WebFTP
+// folder download, so a leftover in os.TempDir() is identifiable.
+const archiveNamePrefix = "alpamon-webftp-"
+
 // makeArchive creates a zip archive from the specified paths.
 // It returns the archive file path, a cleanup path (non-empty only for temp archives),
 // the paths left out of the archive, and any error.
@@ -497,7 +501,10 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 		return path, "", utils.SkippedReport{}, nil
 	}
 
-	archiveName := filepath.Join(os.TempDir(), uuid.New().String()+".zip")
+	// An agent killed between here and the deferred cleanup leaves this file
+	// behind, and a bare UUID gives an operator nothing to go on. The prefix
+	// names the owner and makes a future sweep of stale archives possible.
+	archiveName := filepath.Join(os.TempDir(), archiveNamePrefix+uuid.New().String()+".zip")
 
 	skipped, err := createArchiveAs(ctx, archiveName, paths, recursive || bulk, sysProcAttr)
 	if err != nil {

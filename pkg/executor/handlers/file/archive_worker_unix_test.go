@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -107,6 +108,11 @@ func TestMakeArchive_ArchivesADirectoryWithoutDemotion(t *testing.T) {
 	require.NotEmpty(t, cleanup, "a temp archive must report a cleanup path")
 	assert.Equal(t, name, cleanup)
 	assert.Zero(t, skipped.Total)
+
+	// An agent killed mid-download leaves this behind, and a bare UUID gives
+	// nobody a way to tell whose file it is.
+	assert.True(t, strings.HasPrefix(filepath.Base(name), "alpamon-webftp-"),
+		"temp archive %q does not name its owner", filepath.Base(name))
 
 	// The archive holds whatever the requested tree held and it sits in
 	// os.TempDir(), so it must not be readable by everyone.
