@@ -10,6 +10,20 @@ import (
 	"strings"
 )
 
+const (
+	// maxSymlinkTarget is past any platform's path limit, so a longer body is a
+	// malformed entry, not a target worth reading into memory.
+	maxSymlinkTarget = 4096
+
+	// maxLinkResolution bounds the chain isValidLinkTarget will walk, the way
+	// ELOOP bounds the kernel's own resolution.
+	maxLinkResolution = 64
+
+	// symlinkAttempts bounds createSymlink's retry, so a path that another
+	// extraction keeps refilling ends the entry instead of spinning on it.
+	symlinkAttempts = 3
+)
+
 var errNotRegular = errors.New("not a regular file")
 
 // SkippedEntry is a path left out of the archive, with the reason it was left
@@ -25,6 +39,12 @@ type SkippedEntry struct {
 type unreadable struct{ error }
 
 func (u unreadable) Unwrap() error { return u.error }
+
+// extractedLink is a link entry held back until the regular ones are out.
+type extractedLink struct {
+	file *zip.File
+	path string
+}
 
 // CreateZip creates a zip archive at destPath containing the specified paths.
 // If recursive is true and a path is a directory, its contents are included
@@ -225,14 +245,6 @@ func addSymlinkToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo
 	return nil
 }
 
-func isEmptyDir(path string) (bool, error) {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return false, err
-	}
-	return len(entries) == 0, nil
-}
-
 // addDirToZip writes a directory entry. The trailing slash is what every other
 // zip reader keys off; the mode bit alone is not enough.
 func addDirToZip(w *zip.Writer, archiveName string, fi os.FileInfo) error {
@@ -260,6 +272,14 @@ func addFileToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo) e
 	}
 
 	return nil
+}
+
+func isEmptyDir(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, err
+	}
+	return len(entries) == 0, nil
 }
 
 // Unzip extracts a zip archive to the specified destination directory.
@@ -337,12 +357,6 @@ func UnzipReader(r *zip.ReadCloser, destDir string) error {
 	return recheckLinks(root, links)
 }
 
-// extractedLink is a link entry held back until the regular ones are out.
-type extractedLink struct {
-	file *zip.File
-	path string
-}
-
 // recheckLinks walks every link the extraction wrote once the archive is fully
 // on disk. A target is checked against what exists when the link is written, so
 // a link the archive lists later can still turn an earlier one into an escape.
@@ -408,10 +422,6 @@ func mkdirAllInside(root, dir, name string) error {
 	return nil
 }
 
-// maxSymlinkTarget is past any platform's path limit, so a longer body is a
-// malformed entry, not a target worth reading into memory.
-const maxSymlinkTarget = 4096
-
 // extractSymlink is the mirror of addSymlinkToZip.
 func extractSymlink(f *zip.File, root, fpath string) error {
 	rc, err := f.Open()
@@ -434,8 +444,6 @@ func extractSymlink(f *zip.File, root, fpath string) error {
 
 	return createSymlink(target, fpath)
 }
-
-const symlinkAttempts = 3
 
 // createSymlink puts a link to target at fpath, over whatever is already there.
 // A regular entry gets that from O_TRUNC in one call, and this is the same
@@ -462,10 +470,6 @@ func createSymlink(target, fpath string) error {
 		}
 	}
 }
-
-// maxLinkResolution bounds the chain isValidLinkTarget will walk, the way ELOOP
-// bounds the kernel's own resolution.
-const maxLinkResolution = 64
 
 // isValidLinkTarget reports whether a link at fpath may carry target. It walks
 // the target component by component, following every link already on disk,
