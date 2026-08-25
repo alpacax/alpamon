@@ -32,8 +32,11 @@ main() {
         create_directories
         start_alpamon_process
       fi
+      # setup has consumed the template, so it has served its purpose. A generic
+      # installation skips setup and keeps it: the operator completes
+      # registration afterwards, and `alpamon setup` still needs it then.
+      cleanup_tmpl_files
     fi
-    cleanup_tmpl_files
   fi
 }
 
