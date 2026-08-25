@@ -162,3 +162,17 @@ func TestCreateZip_NothingArchivedIsAnError(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrPermission)
 	require.Len(t, skipped, 1)
 }
+func TestCreateZip_ArchiveIsNotWorldReadable(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "secret.txt")
+	require.NoError(t, os.WriteFile(src, []byte("s"), 0600))
+
+	dest := filepath.Join(dir, "out.zip")
+	requireZip(t, dest, []string{src}, false)
+
+	fi, err := os.Stat(dest)
+	require.NoError(t, err)
+	// The archive holds whatever the requested paths held, and the WebFTP
+	// download builds it under os.TempDir(), which every user can read.
+	assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
+}

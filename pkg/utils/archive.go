@@ -81,7 +81,9 @@ type deferredEntry struct {
 // holds nothing while something was skipped is an error too: an empty archive is
 // a failed request, not a partial one.
 func CreateZip(destPath string, paths []string, recursive bool) (skipped []SkippedEntry, err error) {
-	f, err := os.Create(destPath)
+	// 0600, not os.Create's 0666: the archive holds whatever the requested
+	// paths held, and the WebFTP download builds it under os.TempDir().
+	f, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create zip file: %w", err)
 	}

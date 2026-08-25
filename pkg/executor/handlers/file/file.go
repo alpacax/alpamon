@@ -174,7 +174,17 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		defer func() { _ = os.Remove(cleanupPath) }()
 	}
 
-	src, size, err := readFileAs(ctx, name, sysProcAttr)
+	// A temp archive is alpamon's own 0600 file and the requesting user's
+	// permissions were already applied to every path that went into it, so
+	// there is nothing left for a demoted read to decide. Going through the
+	// demoted cat would only fail on the mode. A single file is still read as
+	// the user, because that read is the permission check.
+	readAttr := sysProcAttr
+	if cleanupPath != "" {
+		readAttr = nil
+	}
+
+	src, size, err := readFileAs(ctx, name, readAttr)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to read file for upload.")
 		return 1, err.Error()
@@ -468,11 +478,15 @@ func uploadSummary(count int, skipped []utils.SkippedEntry) string {
 		len(skipped), strings.Join(reasons, "; "))
 }
 
-// makeArchive creates a zip archive from the specified paths using Go's archive/zip.
+// makeArchive creates a zip archive from the specified paths.
 // It returns the archive file path, a cleanup path (non-empty only for temp archives),
 // the paths left out of the archive, and any error.
 // cleanupPath is always derived from os.TempDir() and never from user input,
 // ensuring os.Remove(cleanupPath) is safe from path-injection.
+//
+// sysProcAttr is the requesting user's demotion descriptor. createArchiveAs
+// applies it, so the walk and every open below run as that user rather than
+// as the agent's root.
 func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, string, []utils.SkippedEntry, error) {
 	path := paths[0]
 
@@ -482,7 +496,7 @@ func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, rec
 
 	archiveName := filepath.Join(os.TempDir(), uuid.New().String()+".zip")
 
-	skipped, err := utils.CreateZip(archiveName, paths, recursive || bulk)
+	skipped, err := createArchiveAs(ctx, archiveName, paths, recursive || bulk, sysProcAttr)
 	if err != nil {
 		_ = os.Remove(archiveName)
 		return "", "", nil, err
