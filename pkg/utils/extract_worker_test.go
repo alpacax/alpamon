@@ -64,7 +64,7 @@ func TestRunExtractWorker_LeavesANonZipAlone(t *testing.T) {
 	assert.Empty(t, entries)
 }
 
-func TestRunExtractWorker_ReportsAnUnreadableSource(t *testing.T) {
+func TestRunExtractWorker_TreatsAnUnopenableSourceAsNotAnArchive(t *testing.T) {
 	dir := t.TempDir()
 	var status bytes.Buffer
 

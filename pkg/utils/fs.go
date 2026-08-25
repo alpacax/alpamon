@@ -251,15 +251,15 @@ func FileExists(path string) bool {
 }
 
 // OpenIfZip returns the open file if path is a valid zip and ext is not in the
-// denylist, else nil. Caller must Close. Handing back the file rather than a
-// zip reader lets the caller pass the descriptor to the extract worker, so the
-// archive that was validated is the archive that gets extracted.
+// denylist, else nil. Caller must Close. Returning the file rather than a zip
+// reader means the handle that was validated is the handle that gets read, so
+// the archive cannot change between the check and the extraction.
 //
-// The open uses O_NOFOLLOW. The caller re-opens a file the requesting user
-// just wrote, and on the extract path the agent does that as root, so a
-// symlink raced in at this path must not be dereferenced: opening it fails and
-// the file is treated as not a zip, so nothing is extracted rather than root
-// reading a target the user could not.
+// The open uses O_NOFOLLOW. On the extract path this runs inside the demoted
+// worker, so a symlink raced in at this path resolves against the requesting
+// user either way; refusing it keeps the worker from being steered at a target
+// the user reached some other way, and the file is then treated as not a zip,
+// so nothing is extracted.
 func OpenIfZip(path, ext string) *os.File {
 	if _, found := nonZipExt[strings.ToLower(ext)]; found {
 		return nil

@@ -18,7 +18,10 @@ import (
 func extractZipAs(_ context.Context, srcPath, destDir string, _ *syscall.SysProcAttr) error {
 	var status bytes.Buffer
 	if utils.RunExtractWorker(srcPath, destDir, &status) != 0 {
-		return errors.New(strings.TrimSpace(status.String()))
+		if msg := strings.TrimSpace(status.String()); msg != "" {
+			return errors.New(msg)
+		}
+		return errors.New("extraction failed without reporting a reason")
 	}
 	return nil
 }

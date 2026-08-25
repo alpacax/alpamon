@@ -33,7 +33,7 @@ func extractZipAs(ctx context.Context, srcPath, destDir string, sysProcAttr *sys
 	if sysProcAttr == nil {
 		var status bytes.Buffer
 		if utils.RunExtractWorker(srcPath, destDir, &status) != 0 {
-			return errors.New(strings.TrimSpace(status.String()))
+			return extractFailure(status.String())
 		}
 		return nil
 	}
@@ -59,4 +59,13 @@ func extractZipAs(ctx context.Context, srcPath, destDir string, sysProcAttr *sys
 		return runErr
 	}
 	return nil
+}
+
+// extractFailure turns the worker's status stream into an error, so a non-zero
+// result never reaches the caller as an error carrying no message.
+func extractFailure(status string) error {
+	if msg := strings.TrimSpace(status); msg != "" {
+		return errors.New(msg)
+	}
+	return errors.New("extraction failed without reporting a reason")
 }

@@ -12,11 +12,9 @@ import (
 )
 
 // TestOpenIfZip_RefusesASymlink pins the O_NOFOLLOW open. The extract path
-// re-opens a file the requesting user just wrote, and the agent does that as
-// root, so a symlink raced in at that path must not be dereferenced. Without
-// O_NOFOLLOW the open follows the link and hands back a valid zip the user
-// could not have read; with it the open fails and OpenIfZip returns nil, so
-// nothing is extracted.
+// re-opens a file the requesting user just wrote, from inside the demoted
+// worker. Without O_NOFOLLOW the open follows whatever link sits at that path;
+// with it the open fails and OpenIfZip returns nil, so nothing is extracted.
 func TestOpenIfZip_RefusesASymlink(t *testing.T) {
 	dir := t.TempDir()
 
