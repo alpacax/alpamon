@@ -337,12 +337,28 @@ func isEmptyDir(path string) (bool, error) {
 // Unzip extracts a zip archive to the specified destination directory.
 // It validates that extracted paths stay within the destination (zip slip protection).
 func Unzip(src, destDir string) error {
-	r, err := zip.OpenReader(src)
+	f, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("failed to open zip: %w", err)
 	}
-	defer func() { _ = r.Close() }()
-	return UnzipReader(&r.Reader, destDir)
+	defer func() { _ = f.Close() }()
+	return UnzipFile(f, destDir)
+}
+
+// UnzipFile extracts an already-opened zip file into destDir. Caller owns f.
+// Taking the open file rather than a path is what lets the extract worker read
+// the descriptor its parent validated, so the archive is never resolved by name
+// twice.
+func UnzipFile(f *os.File, destDir string) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	r, err := zip.NewReader(f, info.Size())
+	if err != nil {
+		return fmt.Errorf("failed to open zip: %w", err)
+	}
+	return UnzipReader(r, destDir)
 }
 
 // UnzipReader extracts an already-opened zip into destDir. Caller owns r.

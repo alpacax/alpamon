@@ -292,9 +292,12 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	}
 
 	if args.AllowUnzip {
-		if rc := utils.OpenIfZip(args.Path, filepath.Ext(args.Path)); rc != nil {
-			err := utils.UnzipReader(&rc.Reader, filepath.Dir(args.Path))
-			_ = rc.Close()
+		if src := utils.OpenIfZip(args.Path, filepath.Ext(args.Path)); src != nil {
+			// Extraction runs as the requesting user, so the files it creates
+			// belong to them and it cannot write over paths they have no
+			// rights to. Running it here would create them as root.
+			err := extractZipAs(ctx, src, filepath.Dir(args.Path), sysProcAttr)
+			_ = src.Close()
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to unzip file.")
 				return 1, err.Error()
