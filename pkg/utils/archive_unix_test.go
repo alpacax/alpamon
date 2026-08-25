@@ -42,14 +42,26 @@ func TestCreateZip_IrregularEntriesAreSkipped(t *testing.T) {
 	assert.Equal(t, "demo/file.txt", r.File[0].Name)
 }
 
-func TestCreateZip_IrregularPathIsRejected(t *testing.T) {
+func TestCreateZip_ListedIrregularPathIsSkipped(t *testing.T) {
 	dir, err := os.MkdirTemp("", "z")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
+	file := filepath.Join(dir, "file.txt")
+	require.NoError(t, os.WriteFile(file, []byte("hi"), 0644))
 	fifo := filepath.Join(dir, "fifo")
 	require.NoError(t, syscall.Mkfifo(fifo, 0600))
 
 	dest := filepath.Join(dir, "out.zip")
-	assert.ErrorContains(t, CreateZip(dest, []string{fifo}, false), "unsupported file type")
+	// The shape a multi-select produces, and the only one that reaches this
+	// branch: several paths listed at once, one of them irregular. A lone
+	// FIFO is streamed without an archive and never gets here.
+	require.NoError(t, CreateZip(dest, []string{file, fifo}, true))
+
+	r, err := zip.OpenReader(dest)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+
+	require.Len(t, r.File, 1)
+	assert.Equal(t, "file.txt", r.File[0].Name)
 }
