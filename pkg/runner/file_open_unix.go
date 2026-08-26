@@ -20,7 +20,13 @@ import (
 // O_CLOEXEC keeps this descriptor out of the child; the child receives the
 // sealed copy through ExtraFiles instead.
 func openEntrypoint(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	// codeql[go/path-injection]: Intentional - the path names a file the operator
+	// asked to run on their own host, arriving over the authenticated channel that
+	// already carries arbitrary command lines (the `system` shell), so it crosses
+	// no privilege boundary and there is no root to confine it to. Payload
+	// validation requires a POSIX-absolute path, and what bounds this lane is the
+	// digest verified over the sealed copy before anything executes.
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0) // lgtm[go/path-injection]
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}

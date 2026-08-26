@@ -99,21 +99,7 @@ func (r *fileRefusal) String() string {
 // On any failure the copy is closed before returning: no descriptor carrying
 // unverified bytes reaches a caller.
 func openVerifiedFile(path, expectedDigest string) (*os.File, error) {
-	// codeql[go/path-injection]: Intentional - the path names a file the operator
-	// asked to run on their own host, sent by the trusted Alpacon console over the
-	// same authenticated channel that already carries arbitrary command lines
-	// (the `system` shell), so the path is not a privilege boundary here and there
-	// is no root to confine it to. What bounds this lane is the digest, checked
-	// below over the sealed copy before anything executes: a path the approver did
-	// not clear yields a mismatch and the command is refused.
-	//
-	// O_NONBLOCK because a read-only open of a FIFO blocks until a writer
-	// appears, and this runs before dispatcher.Execute — so no ShellTimeout
-	// deadline covers it. A requester can mkfifo a path in its own account and
-	// park the runner goroutine forever, leaking a goroutine and a descriptor
-	// per attempt with nothing to bound it. The flag is a no-op on regular
-	// files, which is the only kind this proceeds with anyway.
-	source, err := openEntrypoint(path) // lgtm[go/path-injection]
+	source, err := openEntrypoint(path)
 	if err != nil {
 		return nil, err
 	}
