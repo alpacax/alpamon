@@ -9,13 +9,19 @@ main() {
   check_systemd_status
   check_alpamon_binary
 
+  cleanup_old_binary
+
   if is_upgrade "$@"; then
-    cleanup_old_binary
     if [ "$SYSTEMD_AVAILABLE" = "true" ]; then
       restart_alpamon_by_timer
     else
       restart_alpamon_process
     fi
+    # No cleanup_tmpl_files here on purpose. The package re-ships the template
+    # on every upgrade and only `alpamon setup` ever consumes it, so deleting it
+    # on an upgrade throws away a newly added config key before anything can
+    # read it. Leaving it in place keeps the new release's template on disk to
+    # diff against the live config.
   else
     # setup_alpamon returns 1 if ENV not set (generic installation)
     # In that case, skip start_systemd_service - user will run 'alpamon register'
@@ -26,10 +32,12 @@ main() {
         create_directories
         start_alpamon_process
       fi
+      # setup has consumed the template, so it has served its purpose. A generic
+      # installation skips setup and keeps it: the operator completes
+      # registration afterwards, and `alpamon setup` still needs it then.
+      cleanup_tmpl_files
     fi
   fi
-
-  cleanup_tmpl_files
 }
 
 check_root_permission() {
@@ -158,9 +166,14 @@ restart_alpamon_by_timer() {
   echo "Systemd timer to restart Alpamon has been set. It will restart the service in 5 minutes."
 }
 
-# TODO: remove after v2.1.x rollout completes
+# Remove the binary left at the install location used before v2.1.1, when the
+# packaged binary moved to /usr/bin. /usr/local/bin comes before /usr/bin in the
+# default PATH, so a leftover copy there shadows the packaged one and an operator
+# keeps running the old agent from the shell. This runs on every install, not
+# only on upgrades: gating it on the upgrade path left the stale copy in place
+# forever after a remove-then-reinstall.
 cleanup_old_binary() {
-  if [ -f "/usr/local/bin/alpamon" ] && [ -f "/usr/bin/alpamon" ]; then
+  if [ -f "/usr/local/bin/alpamon" ] && [ -f "$ALPAMON_BIN" ]; then
     rm -f /usr/local/bin/alpamon
   fi
 }
@@ -172,22 +185,22 @@ cleanup_tmpl_files() {
   fi
 }
 
-# debian
-# Initial installation: $1 == configure
-# Upgrade: $1 == configure, $2 == old version
-
-# rhel
-# Initial installation: $1 == 1
-# Upgrade: $1 == 2, and configured to restart on upgrade
+# The two packagers disagree on how they say "upgrade":
+#   dpkg: "$1" is an action verb -- 'configure', or an 'abort-*' verb when a
+#         failed upgrade is being rolled back -- and "$2" holds the previously
+#         configured version, which is empty only on a fresh install. Keying
+#         on "$2" rather than on 'configure' keeps the rollback verbs working.
+#   rpm:  "$1" is the number of installed instances after the transaction,
+#         1 on a fresh install and 2 or more on an upgrade. A multi-package
+#         transaction can leave more than 2, so this is a >= test, not == 2.
+#         rpm never passes a second argument, so the dpkg test cannot fire there.
 is_upgrade() {
-    # RHEL
-    if [ "$1" -eq 2 ] 2>/dev/null; then
-      return 0  # Upgrade
+    if [ -n "$2" ]; then
+      return 0  # Upgrade (dpkg)
     fi
 
-    # Debian
-    if [ "$1" = "configure" ] && [ -n "$2" ]; then
-      return 0  # Upgrade
+    if [ "$1" -ge 2 ] 2>/dev/null; then
+      return 0  # Upgrade (rpm)
     fi
 
     return 1 # Initial installation
