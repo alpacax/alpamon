@@ -5,13 +5,17 @@ package runner
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"golang.org/x/sys/unix"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -147,4 +151,58 @@ func TestHashMismatchError_CarriesTheObservedDigestForTheLog(t *testing.T) {
 	var mismatch *hashMismatchError
 	require.ErrorAs(t, err, &mismatch)
 	assert.Equal(t, observed, mismatch.Observed())
+}
+
+// A read-only open of a FIFO blocks until a writer appears, and this runs
+// before dispatcher.Execute so no ShellTimeout deadline covers it. Without the
+// non-blocking open a requester could mkfifo a path in its own account and park
+// the runner goroutine forever, one leaked goroutine and descriptor per
+// attempt. This test hangs rather than fails if that regresses, so it carries
+// its own deadline.
+func TestOpenVerifiedFile_FifoRefusedWithoutBlocking(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pipe")
+	require.NoError(t, unix.Mkfifo(path, 0o600))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := openVerifiedFile(path, strings.Repeat("a", 64))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, errHashMismatch,
+			"a fifo must be refused as a non-regular file, never hashed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("openVerifiedFile blocked on a fifo; the open is not O_NONBLOCK")
+	}
+}
+
+// A symlink resolves to its target, so what gets hashed and sealed is the
+// target's bytes. Swapping the link afterwards cannot reach the sealed copy —
+// the same property the rename test proves for the path, stated for links
+// because "non-regular" in the refusal test only demonstrates a directory.
+func TestOpenVerifiedFile_SymlinkIsResolvedThenSealed(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.sh")
+	link := filepath.Join(dir, "link.sh")
+	body := []byte("printf 'ORIGINAL\\n'\n")
+	require.NoError(t, os.WriteFile(target, body, 0o700))
+	require.NoError(t, os.Symlink(target, link))
+	digest := fmt.Sprintf("%x", sha256.Sum256(body))
+
+	sealed, err := openVerifiedFile(link, digest)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sealed.Close() })
+
+	// Repoint the link at different content; the sealed copy is unaffected.
+	other := filepath.Join(dir, "other.sh")
+	require.NoError(t, os.WriteFile(other, []byte("printf 'SWAPPED\\n'\n"), 0o700))
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink(other, link))
+
+	got, err := io.ReadAll(sealed)
+	require.NoError(t, err)
+	assert.Equal(t, body, got)
 }

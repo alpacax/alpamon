@@ -79,9 +79,11 @@ func TestVerifyCommandSignature_FileShellIsNotBypassed(t *testing.T) {
 	assert.Equal(t, rejectReasonUnsigned, err.Error())
 }
 
-// A signed file command passes verification on the same terms as a system one:
-// the canonical payload covers shell and line, and the structured payload in
-// Data is verified separately by the digest check.
+// A signed file command passes verification on the same terms as a system one.
+// The canonical payload covers Data on this lane precisely because it is NOT
+// verified separately: the digest inside it is its own expected value, so a
+// signature omitting it would leave a rewritten payload verifying against
+// itself. See BuildCanonicalPayload.
 func TestVerifyCommandSignature_FileShellValidSignature(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)

@@ -3,6 +3,7 @@ package signing
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/internal/protocol"
@@ -152,4 +153,47 @@ func TestVerifyCommand_Errors(t *testing.T) {
 			assert.ErrorContains(t, VerifyCommand(tt.cmd, testServerID, tt.key), tt.want)
 		})
 	}
+}
+
+// On the file lane `line` is a human rendering and the structured payload is
+// the only authoritative field, so a signature that omits Data binds nothing:
+// rewriting it on a legitimately signed command would leave the signature
+// valid while the digest verifies against itself.
+func TestBuildCanonicalPayload_FileLaneCoversData(t *testing.T) {
+	cmd := &protocol.Command{
+		ID:         "11111111-1111-1111-1111-111111111111",
+		Shell:      "file",
+		Line:       "/bin/bash /opt/deploy.sh",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-08-26T00:00:00+00:00",
+		Data:       `{"path":"/opt/deploy.sh"}`,
+	}
+
+	got := string(BuildCanonicalPayload(cmd, "22222222-2222-2222-2222-222222222222"))
+
+	assert.Contains(t, got, `"data":"{\"path\":\"/opt/deploy.sh\"}"`)
+	// Sorted position matters: the signer emits sort_keys=True, so `data` sits
+	// between command_id and groupname or the two canonical forms diverge.
+	assert.Less(t, strings.Index(got, `"data"`), strings.Index(got, `"groupname"`))
+	assert.Greater(t, strings.Index(got, `"data"`), strings.Index(got, `"command_id"`))
+}
+
+// Scoped to the file lane so no existing signature changes shape — a system
+// command carrying data must serialize exactly as it did before.
+func TestBuildCanonicalPayload_OtherShellsOmitData(t *testing.T) {
+	cmd := &protocol.Command{
+		ID:         "11111111-1111-1111-1111-111111111111",
+		Shell:      "system",
+		Line:       "uptime",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-08-26T00:00:00+00:00",
+		Data:       "carried but never signed here",
+	}
+
+	got := string(BuildCanonicalPayload(cmd, "22222222-2222-2222-2222-222222222222"))
+
+	assert.NotContains(t, got, `"data"`)
+	assert.NotContains(t, got, "carried but never signed here")
 }

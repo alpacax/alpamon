@@ -54,7 +54,7 @@ type hashMismatchError struct {
 }
 
 func (e *hashMismatchError) Error() string {
-	return fmt.Sprintf("%s (expected sha256:%s)", errHashMismatch, e.expected)
+	return fmt.Sprintf("%v (expected sha256:%s)", errHashMismatch, e.expected)
 }
 
 func (e *hashMismatchError) Unwrap() error { return errHashMismatch }
@@ -106,14 +106,22 @@ func openVerifiedFile(path, expectedDigest string) (*os.File, error) {
 	// is no root to confine it to. What bounds this lane is the digest, checked
 	// below over the sealed copy before anything executes: a path the approver did
 	// not clear yields a mismatch and the command is refused.
-	source, err := os.Open(path) // lgtm[go/path-injection]
+	//
+	// O_NONBLOCK because a read-only open of a FIFO blocks until a writer
+	// appears, and this runs before dispatcher.Execute — so no ShellTimeout
+	// deadline covers it. A requester can mkfifo a path in its own account and
+	// park the runner goroutine forever, leaking a goroutine and a descriptor
+	// per attempt with nothing to bound it. The flag is a no-op on regular
+	// files, which is the only kind this proceeds with anyway.
+	source, err := openEntrypoint(path) // lgtm[go/path-injection]
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = source.Close() }()
 
-	// Refuse anything but a regular file: a fifo or a device says nothing
-	// about what a later read would produce.
+	// Refuse anything but a regular file, on the descriptor rather than the
+	// path: a fifo or a device says nothing about what a later read would
+	// produce, and re-stating the path here would reintroduce a lookup.
 	info, err := source.Stat()
 	if err != nil {
 		return nil, err
