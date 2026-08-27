@@ -8,6 +8,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildCanonicalPayload(t *testing.T) {
@@ -196,4 +197,70 @@ func TestBuildCanonicalPayload_OtherShellsOmitData(t *testing.T) {
 
 	assert.NotContains(t, got, `"data"`)
 	assert.NotContains(t, got, "carried but never signed here")
+}
+
+// The shape assertions above say Data is in the payload; this says what that
+// buys. Without it the whole `shell == "file"` branch can be deleted and only
+// a shape test fails, which proves nothing about the property the branch
+// exists for: that rewriting the structured instruction under a valid
+// signature is caught.
+//
+// The attack it stands for: on this lane `line` is a human rendering and Data
+// decides what runs, so an attacker inside the command transport takes a
+// legitimately signed file command and swaps in a new path plus the digest of
+// a file it already controls. The digest then verifies against itself, and the
+// signature is the only thing that can notice.
+func TestVerifyCommand_FileLaneRejectsRewrittenData(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	cmd := &protocol.Command{
+		ID:         "11111111-1111-1111-1111-111111111111",
+		Shell:      "file",
+		Line:       "/bin/bash /opt/deploy.sh",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-08-27T00:00:00+00:00",
+		Data:       `{"path":"/opt/deploy.sh","sha256":"sha256:aaa"}`,
+	}
+	const serverID = "22222222-2222-2222-2222-222222222222"
+	cmd.Signature = base64.StdEncoding.EncodeToString(
+		ed25519.Sign(priv, BuildCanonicalPayload(cmd, serverID)),
+	)
+	require.NoError(t, VerifyCommand(cmd, serverID, pub))
+
+	// Same signature, same line, different instruction.
+	cmd.Data = `{"path":"/tmp/attacker.sh","sha256":"sha256:bbb"}`
+
+	assert.ErrorIs(t, VerifyCommand(cmd, serverID, pub), ErrSignatureMismatch)
+}
+
+// The counterpart: on every other shell Data is not signed, so rewriting it
+// leaves the signature valid. Stated so the scope of the branch is explicit
+// rather than incidental — `line` is the instruction there, and it is covered.
+func TestVerifyCommand_OtherShellsDoNotCoverData(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	cmd := &protocol.Command{
+		ID:         "11111111-1111-1111-1111-111111111111",
+		Shell:      "system",
+		Line:       "uptime",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-08-27T00:00:00+00:00",
+		Data:       "before",
+	}
+	const serverID = "22222222-2222-2222-2222-222222222222"
+	cmd.Signature = base64.StdEncoding.EncodeToString(
+		ed25519.Sign(priv, BuildCanonicalPayload(cmd, serverID)),
+	)
+	require.NoError(t, VerifyCommand(cmd, serverID, pub))
+
+	cmd.Data = "after"
+
+	assert.NoError(t, VerifyCommand(cmd, serverID, pub))
+	// But the instruction on that lane is the line, and it IS bound.
+	cmd.Line = "rm -rf /"
+	assert.ErrorIs(t, VerifyCommand(cmd, serverID, pub), ErrSignatureMismatch)
 }
