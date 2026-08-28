@@ -256,7 +256,10 @@ func addSymlinkToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo
 		return err
 	}
 
-	if _, err := zw.Write([]byte(target)); err != nil {
+	// The separator the reading host expects, the same normalization entry
+	// names get: a backslash target written on Windows must not come back on
+	// Unix as a single opaque component.
+	if _, err := zw.Write([]byte(filepath.ToSlash(target))); err != nil {
 		return fmt.Errorf("failed to write zip entry: %w", err)
 	}
 
@@ -486,7 +489,7 @@ func recheckLinks(root string, links []deferredEntry) (rejected, left error) {
 			// after the entry that ended the extraction. Nothing to check.
 			continue
 		}
-		if isValidLinkTarget(root, link.path, filepath.ToSlash(target)) {
+		if isValidLinkTarget(root, link.path, target) {
 			continue
 		}
 		// Another extraction into the same destination may have swept it first.
@@ -642,7 +645,7 @@ func isValidLinkTarget(root, fpath, target string) bool {
 	}
 
 	current := filepath.Dir(fpath)
-	parts := strings.Split(target, "/")
+	parts := strings.Split(filepath.ToSlash(target), "/")
 	hops, visited := 0, 0
 	for len(parts) > 0 {
 		visited++
