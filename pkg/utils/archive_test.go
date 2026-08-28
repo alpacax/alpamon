@@ -621,6 +621,26 @@ func TestCreateZipAndUnzip_EmptyDirectorySurvives(t *testing.T) {
 	assert.DirExists(t, filepath.Join(out, "src", "empty"))
 }
 
+func TestUnzip_ErrorNamesTheEntry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "collide.zip")
+	// The error reaches the console as the command result, so a bare OS error
+	// with an internal absolute path and no entry name is not actionable.
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "d/file.txt", body: "hi"},
+		{name: "d", body: "file.txt", isLink: true},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+
+	assert.ErrorContains(t, Unzip(zipPath, out), `link "d"`)
+}
+
 func TestIsEmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	empty, err := isEmptyDir(dir)

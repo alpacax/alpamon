@@ -353,7 +353,7 @@ func UnzipReader(r *zip.ReadCloser, destDir string) error {
 		}
 
 		if err := extractFile(f, fpath); err != nil {
-			return err
+			return fmt.Errorf("failed to extract %q: %w", f.Name, err)
 		}
 	}
 
@@ -416,12 +416,12 @@ func mkdirAllInside(root, dir, name string) error {
 			// the create. Not a failure, but the check below still needs
 			// to see what landed.
 			if err := os.Mkdir(current, 0755); err != nil && !os.IsExist(err) {
-				return err
+				return fmt.Errorf("failed to create directory for %q: %w", name, err)
 			}
 			fi, err = os.Lstat(current)
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to create directory for %q: %w", name, err)
 		}
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("illegal link target in zip: %q is written through a symlink", name)
@@ -435,12 +435,12 @@ func mkdirAllInside(root, dir, name string) error {
 func extractSymlink(f *zip.File, root, fpath string) error {
 	rc, err := f.Open()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to restore link %q: %w", f.Name, err)
 	}
 	body, err := io.ReadAll(io.LimitReader(rc, maxSymlinkTarget+1))
 	_ = rc.Close()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to restore link %q: %w", f.Name, err)
 	}
 	if len(body) > maxSymlinkTarget {
 		return fmt.Errorf("illegal link target in zip: %q exceeds %d bytes", f.Name, maxSymlinkTarget)
@@ -451,7 +451,10 @@ func extractSymlink(f *zip.File, root, fpath string) error {
 		return fmt.Errorf("illegal link target in zip: %q -> %q", f.Name, target)
 	}
 
-	return createSymlink(target, fpath)
+	if err := createSymlink(target, fpath); err != nil {
+		return fmt.Errorf("failed to restore link %q: %w", f.Name, err)
+	}
+	return nil
 }
 
 // createSymlink puts a link to target at fpath, over whatever is already there.
