@@ -554,8 +554,10 @@ func mkdirAllInside(root, dir, name string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create directory for %q: %w", name, err)
 		}
+		// The entry is refused, whatever it is: what is a link here is a
+		// component of the path it would be written through, not the entry.
 		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("illegal link target in zip: %q is written through a symlink", name)
+			return fmt.Errorf("illegal entry in zip: %q is written through a symlink", name)
 		}
 		// A file entry that took this component's name would only surface
 		// later as the raw ENOTDIR off whatever tries to write below it.

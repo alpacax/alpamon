@@ -835,7 +835,9 @@ func TestUnzip_EntryWrittenThroughExistingLinkIsRejected(t *testing.T) {
 	zipPath := filepath.Join(dir, "evil.zip")
 	writeEntryZip(t, zipPath, []zipEntry{{name: "a/passwd", body: "malicious"}})
 
-	assert.ErrorContains(t, Unzip(zipPath, out), "illegal link target in zip")
+	// The entry is a plain file, so the rejection names the entry rather than
+	// a link target it does not have.
+	assert.ErrorContains(t, Unzip(zipPath, out), `illegal entry in zip: "a/passwd" is written through a symlink`)
 
 	_, err := os.Stat(filepath.Join(outside, "passwd"))
 	assert.ErrorIs(t, err, os.ErrNotExist, "the entry was written through the link")
