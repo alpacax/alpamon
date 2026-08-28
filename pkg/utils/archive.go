@@ -15,8 +15,9 @@ const (
 	// malformed entry, not a target worth reading into memory.
 	maxSymlinkTarget = 4096
 
-	// maxLinkResolution bounds the chain isValidLinkTarget will walk, the way
-	// ELOOP bounds the kernel's own resolution.
+	// maxLinkResolution bounds the links isValidLinkTarget will follow, the
+	// way ELOOP bounds the kernel's own resolution. Components are not
+	// counted: a deep tree with no link in it is not a chain.
 	maxLinkResolution = 64
 
 	// symlinkAttempts bounds createSymlink's retry, so a path that another
@@ -495,11 +496,8 @@ func isValidLinkTarget(root, fpath, target string) bool {
 
 	current := filepath.Dir(fpath)
 	parts := strings.Split(target, "/")
-	for steps := 0; len(parts) > 0; steps++ {
-		if steps > maxLinkResolution {
-			return false
-		}
-
+	hops := 0
+	for len(parts) > 0 {
 		part := parts[0]
 		parts = parts[1:]
 
@@ -511,6 +509,10 @@ func isValidLinkTarget(root, fpath, target string) bool {
 		default:
 			next := filepath.Join(current, part)
 			if fi, err := os.Lstat(next); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				hops++
+				if hops > maxLinkResolution {
+					return false
+				}
 				link, err := os.Readlink(next)
 				// An absolute link is refused rather than followed: only a link
 				// the extraction did not write can be one, and reasoning about

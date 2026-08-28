@@ -517,6 +517,32 @@ func TestUnzip_LinkTargetThroughAnotherLinkIsRejected(t *testing.T) {
 	}
 }
 
+func TestUnzip_DeepLinkTargetWithoutLinksIsAccepted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "deep.zip")
+	// The resolution bound counts links followed, not path components, so a
+	// tree deeper than the bound still round-trips when nothing in it is a
+	// link.
+	deep := strings.Repeat("d/", maxLinkResolution+8) + "file.txt"
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: deep, body: "hi"},
+		{name: "link", body: deep, isLink: true},
+		{name: "dots", body: strings.Repeat("./", maxLinkResolution+8) + "link", isLink: true},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+	require.NoError(t, Unzip(zipPath, out))
+
+	content, err := os.ReadFile(filepath.Join(out, "dots"))
+	require.NoError(t, err)
+	assert.Equal(t, "hi", string(content))
+}
+
 func TestUnzip_LinkTargetMayGoThroughALinkInsideRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")
