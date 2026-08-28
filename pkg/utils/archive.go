@@ -522,6 +522,11 @@ func mkdirAllInside(root, dir, name string) error {
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("illegal link target in zip: %q is written through a symlink", name)
 		}
+		// A file entry that took this component's name would only surface
+		// later as the raw ENOTDIR off whatever tries to write below it.
+		if !fi.IsDir() {
+			return fmt.Errorf("illegal entry in zip: %q is written through a non-directory", name)
+		}
 	}
 
 	return nil

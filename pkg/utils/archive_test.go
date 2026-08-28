@@ -481,6 +481,25 @@ func TestUnzip_ControlBytesInLinkTargetAreRejected(t *testing.T) {
 	assert.NotContains(t, err.Error(), "\x1b")
 }
 
+func TestUnzip_EntryWrittenUnderAFileIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "under.zip")
+	// Without its own check this surfaces as the raw ENOTDIR from OpenFile.
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "d", body: "keep"},
+		{name: "d/child.txt", body: "y"},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+
+	assert.ErrorContains(t, Unzip(zipPath, out), "illegal entry in zip")
+
+	content, err := os.ReadFile(filepath.Join(out, "d"))
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(content))
+}
+
 func TestUnzip_LinkThroughAnEarlierLinkEntryIsRejected(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")
