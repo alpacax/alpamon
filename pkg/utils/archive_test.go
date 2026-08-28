@@ -518,6 +518,59 @@ func TestUnzip_LinkTargetThroughAnotherLinkIsRejected(t *testing.T) {
 	}
 }
 
+func TestUnzip_RejectionLeavesNoEscapingLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	// Every link passes the check at creation time because subdir/parent is
+	// not on disk yet, so the sweep after the last entry is the only barrier
+	// these links have. It must keep going past the first one it removes,
+	// and it must run even when a later entry ended the extraction early.
+	for _, tt := range []struct {
+		name    string
+		entries []zipEntry
+		links   []string
+	}{
+		{
+			name: "second offender after the first",
+			entries: []zipEntry{
+				{name: "subdir/keep", body: "x"},
+				{name: "escape1", body: "subdir/parent/..", isLink: true},
+				{name: "escape2", body: "subdir/parent/..", isLink: true},
+				{name: "subdir/parent", body: "..", isLink: true},
+			},
+			links: []string{"escape1", "escape2"},
+		},
+		{
+			name: "entry rejected at creation",
+			entries: []zipEntry{
+				{name: "subdir/keep", body: "x"},
+				{name: "escape", body: "subdir/parent/..", isLink: true},
+				{name: "subdir/parent", body: "..", isLink: true},
+				{name: "bad", body: "/etc", isLink: true},
+			},
+			links: []string{"escape"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			zipPath := filepath.Join(dir, "chain.zip")
+			writeEntryZip(t, zipPath, tt.entries)
+
+			out := filepath.Join(dir, "out")
+			require.NoError(t, os.MkdirAll(out, 0755))
+
+			assert.ErrorContains(t, Unzip(zipPath, out), "illegal link target in zip")
+
+			for _, name := range tt.links {
+				_, err := os.Lstat(filepath.Join(out, name))
+				assert.ErrorIs(t, err, os.ErrNotExist, name)
+			}
+		})
+	}
+}
+
 func TestUnzip_DeepLinkTargetWithoutLinksIsAccepted(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")

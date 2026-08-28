@@ -363,35 +363,59 @@ func UnzipReader(r *zip.Reader, destDir string) error {
 		}
 	}
 
+	var failed error
 	for _, link := range links {
 		if err := extractSymlink(link.file, root, link.path); err != nil {
-			return err
+			failed = err
+			break
 		}
 	}
+	// Links already on disk were validated against an archive that was not
+	// fully written yet, so sweep them even when a later entry ended the run.
+	rejected, left := recheckLinks(root, links)
+	switch {
+	case left != nil:
+		return left
+	case failed != nil:
+		return failed
+	case rejected != nil:
+		return rejected
+	}
 
-	return recheckLinks(root, links)
+	return nil
 }
 
 // recheckLinks walks every link the extraction wrote once the archive is fully
 // on disk. A target is checked against what exists when the link is written, so
 // a link the archive lists later can still turn an earlier one into an escape.
-func recheckLinks(root string, links []extractedLink) error {
+// Every link is swept, since the ones after an offender are just as unchecked
+// as it was. rejected is the first offender removed and left the first one
+// still on disk. The caller reports left ahead of everything else, since it
+// means destDir still holds an escape.
+func recheckLinks(root string, links []extractedLink) (rejected, left error) {
 	for _, link := range links {
 		target, err := os.Readlink(link.path)
 		if err != nil {
-			// Dropped on a host that makes no links, so there is none to check.
+			// Never written: dropped on a host that makes no links, or listed
+			// after the entry that ended the extraction. Nothing to check.
 			continue
 		}
 		if isValidLinkTarget(root, link.path, filepath.ToSlash(target)) {
 			continue
 		}
-		if err := os.Remove(link.path); err != nil {
-			return err
+		// Another extraction into the same destination may have swept it first.
+		if err := os.Remove(link.path); err != nil && !os.IsNotExist(err) {
+			if left == nil {
+				left = fmt.Errorf("failed to remove link %q: %w", link.file.Name, err)
+			}
+			continue
 		}
-		return fmt.Errorf("illegal link target in zip: %q -> %q", link.file.Name, target)
+		if rejected == nil {
+			rejected = fmt.Errorf("illegal link target in zip: %q -> %q", link.file.Name, target)
+		}
 	}
 
-	return nil
+	return rejected, left
 }
 
 func isInside(root, path string) bool {
