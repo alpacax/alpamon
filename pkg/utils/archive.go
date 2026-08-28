@@ -616,7 +616,7 @@ func createSymlink(target, fpath string) error {
 		if err == nil || symlinkUnsupported(err) {
 			return nil
 		}
-		if !os.IsExist(err) || attempt == symlinkAttempts-1 {
+		if !os.IsExist(err) {
 			return err
 		}
 
@@ -624,6 +624,9 @@ func createSymlink(target, fpath string) error {
 		// there is nothing left to write.
 		if got, rerr := os.Readlink(fpath); rerr == nil && got == target {
 			return nil
+		}
+		if attempt == symlinkAttempts-1 {
+			return err
 		}
 	}
 }
@@ -669,11 +672,15 @@ func isValidLinkTarget(root, fpath, target string) bool {
 				// An absolute link is refused rather than followed: only a link
 				// the extraction did not write can be one, and reasoning about
 				// where it lands is not worth the archive.
-				if err != nil || isAbsTarget(link) {
+				if err == nil && !isAbsTarget(link) {
+					parts = append(strings.Split(filepath.ToSlash(link), "/"), parts...)
+					continue
+				}
+				// Swept between the two calls by a concurrent extraction:
+				// gone, it is no longer a link on the way.
+				if !os.IsNotExist(err) {
 					return false
 				}
-				parts = append(strings.Split(filepath.ToSlash(link), "/"), parts...)
-				continue
 			}
 			current = next
 		}
