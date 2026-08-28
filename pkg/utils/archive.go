@@ -299,7 +299,7 @@ func Unzip(src, destDir string) error {
 		return fmt.Errorf("failed to open zip: %w", err)
 	}
 	defer func() { _ = r.Close() }()
-	return UnzipReader(r, destDir)
+	return UnzipReader(&r.Reader, destDir)
 }
 
 // UnzipReader extracts an already-opened zip into destDir. Caller owns r.
@@ -312,7 +312,7 @@ func Unzip(src, destDir string) error {
 // Nothing may leave destDir: an escaping entry name, a link target that lands
 // outside once every link on the way to it is followed, and an entry written
 // through a link are each refused.
-func UnzipReader(r *zip.ReadCloser, destDir string) error {
+func UnzipReader(r *zip.Reader, destDir string) error {
 	// destDir used to appear on its own with the first entry, back when every
 	// entry called os.MkdirAll on its own parent.
 	if err := os.MkdirAll(destDir, 0755); err != nil {

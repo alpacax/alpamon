@@ -2,6 +2,7 @@ package utils
 
 import (
 	"archive/zip"
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
@@ -619,6 +620,27 @@ func TestCreateZipAndUnzip_EmptyDirectorySurvives(t *testing.T) {
 	// A directory holding nothing has no file entry to carry it, so it needs an
 	// entry of its own or the download drops it.
 	assert.DirExists(t, filepath.Join(out, "src", "empty"))
+}
+
+func TestUnzipReader_ExtractsAnInMemoryArchive(t *testing.T) {
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	zw, err := w.Create("hello.txt")
+	require.NoError(t, err)
+	_, err = zw.Write([]byte("hi"))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	// Nothing here was ever a file, so there is no ReadCloser to hand over.
+	r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	require.NoError(t, err)
+
+	out := filepath.Join(t.TempDir(), "out")
+	require.NoError(t, UnzipReader(r, out))
+
+	content, err := os.ReadFile(filepath.Join(out, "hello.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "hi", string(content))
 }
 
 func TestUnzip_ErrorNamesTheEntry(t *testing.T) {
