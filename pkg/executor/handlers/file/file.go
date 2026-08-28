@@ -174,7 +174,17 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		defer func() { _ = os.Remove(cleanupPath) }()
 	}
 
-	src, size, err := readFileAs(ctx, name, sysProcAttr)
+	// A temp archive is alpamon's own 0600 file and the requesting user's
+	// permissions were already applied to every path that went into it, so
+	// there is nothing left for a demoted read to decide. Going through the
+	// demoted cat would only fail on the mode. A single file is still read as
+	// the user, because that read is the permission check.
+	readAttr := sysProcAttr
+	if cleanupPath != "" {
+		readAttr = nil
+	}
+
+	src, size, err := readFileAs(ctx, name, readAttr)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to read file for upload.")
 		return 1, err.Error()
@@ -282,17 +292,13 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	}
 
 	if args.AllowUnzip {
-		if rc := utils.OpenIfZip(args.Path, filepath.Ext(args.Path)); rc != nil {
-			err := utils.UnzipReader(&rc.Reader, filepath.Dir(args.Path))
-			_ = rc.Close()
-			if err != nil {
-				log.Error().Err(err).Msg("Failed to unzip file.")
-				return 1, err.Error()
-			}
-			// lgtm[go/path-injection]: args.Path sanitized via SanitizePath, which
-			// rejects null bytes, UNC/device prefixes, and literal ".." after
-			// cleaning. Wire input is admin-authenticated.
-			_ = os.Remove(args.Path) // lgtm[go/path-injection]
+		// The worker opens the source, extracts and removes it, all as the
+		// requesting user. Deciding here whether the file is an archive would
+		// mean opening it as the agent, and the directories above it are the
+		// user's to swap, so that decision belongs to the worker too.
+		if err := extractZipAs(ctx, args.Path, filepath.Dir(args.Path), sysProcAttr); err != nil {
+			log.Error().Err(err).Msg("Failed to unzip file.")
+			return 1, err.Error()
 		}
 	}
 
@@ -445,12 +451,12 @@ const skippedSummaryNamed = 3
 
 // uploadSummary reports the archive that was uploaded along with whatever it
 // could not hold, so a partial archive never looks like a complete one.
-func uploadSummary(count int, skipped []utils.SkippedEntry) string {
-	if len(skipped) == 0 {
+func uploadSummary(count int, skipped utils.SkippedReport) string {
+	if skipped.Total == 0 {
 		return fmt.Sprintf("Successfully uploaded %d file(s).", count)
 	}
 
-	named := skipped
+	named := skipped.Entries
 	if len(named) > skippedSummaryNamed {
 		named = named[:skippedSummaryNamed]
 	}
@@ -458,34 +464,45 @@ func uploadSummary(count int, skipped []utils.SkippedEntry) string {
 	for _, entry := range named {
 		reasons = append(reasons, fmt.Sprintf("%s: %v", entry.Path, entry.Reason))
 	}
-	if rest := len(skipped) - len(named); rest > 0 {
+	if rest := skipped.Total - len(named); rest > 0 {
 		reasons = append(reasons, fmt.Sprintf("and %d more", rest))
 	}
 
 	// count is what the user asked for, and a skipped path is still in it, so
 	// naming a success count here would contradict the list that follows.
 	return fmt.Sprintf("Uploaded the archive, skipping %d path(s): %s",
-		len(skipped), strings.Join(reasons, "; "))
+		skipped.Total, strings.Join(reasons, "; "))
 }
 
-// makeArchive creates a zip archive from the specified paths using Go's archive/zip.
+// archiveNamePrefix marks the temp archives alpamon builds for a WebFTP
+// folder download, so a leftover in os.TempDir() is identifiable.
+const archiveNamePrefix = "alpamon-webftp-"
+
+// makeArchive creates a zip archive from the specified paths.
 // It returns the archive file path, a cleanup path (non-empty only for temp archives),
 // the paths left out of the archive, and any error.
 // cleanupPath is always derived from os.TempDir() and never from user input,
 // ensuring os.Remove(cleanupPath) is safe from path-injection.
-func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, string, []utils.SkippedEntry, error) {
+//
+// sysProcAttr is the requesting user's demotion descriptor. createArchiveAs
+// applies it, so the walk and every open below run as that user rather than
+// as the agent's root.
+func (h *FileHandler) makeArchive(ctx context.Context, paths []string, bulk, recursive bool, sysProcAttr *syscall.SysProcAttr) (string, string, utils.SkippedReport, error) {
 	path := paths[0]
 
 	if !bulk && !recursive {
-		return path, "", nil, nil
+		return path, "", utils.SkippedReport{}, nil
 	}
 
-	archiveName := filepath.Join(os.TempDir(), uuid.New().String()+".zip")
+	// An agent killed between here and the deferred cleanup leaves this file
+	// behind, and a bare UUID gives an operator nothing to go on. The prefix
+	// names the owner and makes a future sweep of stale archives possible.
+	archiveName := filepath.Join(os.TempDir(), archiveNamePrefix+uuid.New().String()+".zip")
 
-	skipped, err := utils.CreateZip(archiveName, paths, recursive || bulk)
+	skipped, err := createArchiveAs(ctx, archiveName, paths, recursive || bulk, sysProcAttr)
 	if err != nil {
 		_ = os.Remove(archiveName)
-		return "", "", nil, err
+		return "", "", utils.SkippedReport{}, err
 	}
 
 	return archiveName, archiveName, skipped, nil

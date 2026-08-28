@@ -250,15 +250,39 @@ func FileExists(path string) bool {
 	return !os.IsNotExist(err)
 }
 
-// OpenIfZip returns a zip handle if path is a valid zip and ext is not in the denylist, else nil.
-// Caller must Close. Reusing this handle for extraction closes the TOCTOU window.
-func OpenIfZip(path, ext string) *zip.ReadCloser {
+// OpenIfZip returns the open file if path is a valid zip and ext is not in the
+// denylist, else nil. Caller must Close. Returning the file rather than a zip
+// reader means the handle that was validated is the handle that gets read, so
+// the archive cannot change between the check and the extraction.
+//
+// The open uses O_NOFOLLOW. On the extract path this runs inside the demoted
+// worker, so a symlink raced in at this path resolves against the requesting
+// user either way; refusing it keeps the worker from being steered at a target
+// the user reached some other way, and the file is then treated as not a zip,
+// so nothing is extracted.
+func OpenIfZip(path, ext string) *os.File {
 	if _, found := nonZipExt[strings.ToLower(ext)]; found {
 		return nil
 	}
-	rc, err := zip.OpenReader(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|noFollow, 0)
 	if err != nil {
 		return nil
 	}
-	return rc
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil
+	}
+	if _, err := zip.NewReader(f, info.Size()); err != nil {
+		_ = f.Close()
+		return nil
+	}
+	// zip.NewReader reads through ReadAt, which leaves the offset alone, but
+	// the worker reads the descriptor from the start and should not depend on
+	// that detail holding.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		return nil
+	}
+	return f
 }

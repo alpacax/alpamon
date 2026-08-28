@@ -19,7 +19,7 @@ func symlinkUnsupported(err error) bool {
 }
 
 // noFollow is empty: Windows has no O_NOFOLLOW, so a link put at a path
-// between extractFile's check and its open is followed.
+// between a check and the open that follows it is followed.
 const noFollow = 0
 
 // chmodDir sets mode on the directory at path. Windows has no O_NOFOLLOW to

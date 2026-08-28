@@ -49,6 +49,15 @@ type SkippedEntry struct {
 	Reason error
 }
 
+// SkippedReport is what an archive left out: the paths it can name, and how
+// many there were altogether. The two differ when the archive worker had to
+// bound the list to keep its status message inside the capped buffer that
+// carries it, so Total is the only honest source for a count.
+type SkippedReport struct {
+	Entries []SkippedEntry
+	Total   int
+}
+
 // unreadable separates a source that cannot be opened, which costs one entry,
 // from a failure once the entry is already being written, which costs the whole
 // archive. It carries the cause unchanged so the reported reason stays readable.
@@ -81,6 +90,27 @@ type deferredEntry struct {
 // holds nothing while something was skipped is an error too: an empty archive is
 // a failed request, not a partial one.
 func CreateZip(destPath string, paths []string, recursive bool) (skipped []SkippedEntry, err error) {
+	// 0600, not os.Create's 0666: the archive holds whatever the requested
+	// paths held, and the WebFTP download builds it under os.TempDir().
+	f, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zip file: %w", err)
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close zip file: %w", cerr)
+		}
+	}()
+
+	return WriteZip(f, paths, recursive)
+}
+
+// WriteZip writes the archive CreateZip describes to dst instead of to a path,
+// so a caller that already holds the destination open can hand over the file
+// descriptor. The archive worker runs demoted and writes to the descriptor it
+// inherits, which is how the requesting user's credentials end up applied to
+// every open below.
+func WriteZip(dst io.Writer, paths []string, recursive bool) (skipped []SkippedEntry, err error) {
 	note := func(path string, reason error) {
 		// A PathError repeats the path the entry already carries, so keep
 		// the cause on its own and let the caller pair the two.
@@ -105,17 +135,7 @@ func CreateZip(destPath string, paths []string, recursive bool) (skipped []Skipp
 	// must not be handed over as one.
 	archived := false
 
-	f, err := os.Create(destPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create zip file: %w", err)
-	}
-	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close zip file: %w", cerr)
-		}
-	}()
-
-	w := zip.NewWriter(f)
+	w := zip.NewWriter(dst)
 	// Close writes the central directory, so discarding its error would
 	// report a truncated archive as a successful one.
 	defer func() {
@@ -326,12 +346,28 @@ func isEmptyDir(path string) (bool, error) {
 // Unzip extracts a zip archive to the specified destination directory.
 // It validates that extracted paths stay within the destination (zip slip protection).
 func Unzip(src, destDir string) error {
-	r, err := zip.OpenReader(src)
+	f, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("failed to open zip: %w", err)
 	}
-	defer func() { _ = r.Close() }()
-	return UnzipReader(&r.Reader, destDir)
+	defer func() { _ = f.Close() }()
+	return UnzipFile(f, destDir)
+}
+
+// UnzipFile extracts an already-opened zip file into destDir. Caller owns f.
+// Taking the open file rather than a path is what lets the extract worker read
+// the descriptor its parent validated, so the archive is never resolved by name
+// twice.
+func UnzipFile(f *os.File, destDir string) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	r, err := zip.NewReader(f, info.Size())
+	if err != nil {
+		return fmt.Errorf("failed to open zip: %w", err)
+	}
+	return UnzipReader(r, destDir)
 }
 
 // UnzipReader extracts an already-opened zip into destDir. Caller owns r.
