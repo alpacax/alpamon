@@ -2,11 +2,13 @@ package utils
 
 import (
 	"archive/zip"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -46,8 +48,10 @@ type unreadable struct{ error }
 
 func (u unreadable) Unwrap() error { return u.error }
 
-// extractedLink is a link entry held back until the regular ones are out.
-type extractedLink struct {
+// deferredEntry is an entry whose work waits until the regular entries are out:
+// a link, so what it points at exists first, or a directory's mode, so a
+// read-only one cannot block the entries below it.
+type deferredEntry struct {
 	file *zip.File
 	path string
 }
@@ -318,6 +322,9 @@ func Unzip(src, destDir string) error {
 // Nothing may leave destDir: an escaping entry name, a link target that lands
 // outside once every link on the way to it is followed, and an entry written
 // through a link are each refused.
+//
+// A directory entry's mode lands last, deepest first, so a read-only directory
+// cannot block the entries below it.
 func UnzipReader(r *zip.Reader, destDir string) error {
 	// destDir used to appear on its own with the first entry, back when every
 	// entry called os.MkdirAll on its own parent.
@@ -332,7 +339,8 @@ func UnzipReader(r *zip.Reader, destDir string) error {
 		return fmt.Errorf("failed to resolve destination directory: %w", err)
 	}
 
-	var links []extractedLink
+	var links []deferredEntry
+	var dirs []deferredEntry
 	for _, f := range r.File {
 		fpath := filepath.Join(root, f.Name)
 		if !isInside(root, fpath) {
@@ -343,6 +351,7 @@ func UnzipReader(r *zip.Reader, destDir string) error {
 			if err := mkdirAllInside(root, fpath, f.Name); err != nil {
 				return err
 			}
+			dirs = append(dirs, deferredEntry{file: f, path: fpath})
 			continue
 		}
 
@@ -354,7 +363,7 @@ func UnzipReader(r *zip.Reader, destDir string) error {
 		// by what the target is at creation time, and entry order does not
 		// promise the target has been extracted yet.
 		if f.Mode()&os.ModeSymlink != 0 {
-			links = append(links, extractedLink{file: f, path: fpath})
+			links = append(links, deferredEntry{file: f, path: fpath})
 			continue
 		}
 
@@ -382,6 +391,41 @@ func UnzipReader(r *zip.Reader, destDir string) error {
 		return rejected
 	}
 
+	return applyDirModes(dirs)
+}
+
+// applyDirModes lands each directory entry's mode once everything below it is
+// out, because a directory entry from zip -r comes before its children and a
+// read-only mode landing first would block them. Deepest first for the same
+// reason: a parent without search permission blocks the chmod below it. A
+// child's path is longer than its parent's, so longest first is deepest first.
+func applyDirModes(dirs []deferredEntry) error {
+	slices.SortStableFunc(dirs, func(a, b deferredEntry) int {
+		return cmp.Compare(len(b.path), len(a.path))
+	})
+
+	for _, dir := range dirs {
+		// A link entry that took the directory's name has nothing for this
+		// mode to land on, and os.Chmod would follow it to whatever it points
+		// at.
+		fi, err := os.Lstat(dir.path)
+		if err != nil {
+			return fmt.Errorf("failed to set mode of %q: %w", dir.file.Name, err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("illegal entry in zip: %q is no longer a directory", dir.file.Name)
+		}
+		// Perm only, for the reason extractFile gives. Zero is an archive that
+		// carried no mode at all, not a directory nobody may enter.
+		mode := dir.file.Mode().Perm()
+		if mode == 0 {
+			continue
+		}
+		if err := chmodDir(dir.path, mode); err != nil {
+			return fmt.Errorf("failed to set mode of %q: %w", dir.file.Name, err)
+		}
+	}
+
 	return nil
 }
 
@@ -392,7 +436,7 @@ func UnzipReader(r *zip.Reader, destDir string) error {
 // as it was. rejected is the first offender removed and left the first one
 // still on disk. The caller reports left ahead of everything else, since it
 // means destDir still holds an escape.
-func recheckLinks(root string, links []extractedLink) (rejected, left error) {
+func recheckLinks(root string, links []deferredEntry) (rejected, left error) {
 	for _, link := range links {
 		target, err := os.Readlink(link.path)
 		if err != nil {

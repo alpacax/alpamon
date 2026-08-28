@@ -736,6 +736,175 @@ func TestCreateZipAndUnzip_EmptyDirectorySurvives(t *testing.T) {
 	assert.DirExists(t, filepath.Join(out, "src", "empty"))
 }
 
+func TestCreateZipAndUnzip_EmptyDirectoryModeIsPreserved(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	private := filepath.Join(srcDir, "private")
+	require.NoError(t, os.MkdirAll(private, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("aaa"), 0644))
+
+	zipPath := filepath.Join(dir, "archive.zip")
+	requireZip(t, zipPath, []string{srcDir}, true)
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+	require.NoError(t, Unzip(zipPath, out))
+
+	// Only a directory holding nothing gets an entry of its own, so it is the
+	// one whose mode makes the trip; one holding files comes back with the
+	// default. Extraction runs as root on a normal install, so a directory
+	// that came back wider than it left would be readable by everyone on the
+	// host.
+	fi, err := os.Stat(filepath.Join(out, "src", "private"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), fi.Mode().Perm())
+}
+
+func TestRecheckLinks_OffenderLeftOnDiskOutranksTheOnesRemoved(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root removes from a read-only directory regardless")
+	}
+
+	// No archive can leave a link's parent read-only before the sweep, since
+	// directory modes land after it, so the sweep is driven directly.
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, "ro"), 0755))
+	require.NoError(t, os.Symlink("../..", filepath.Join(root, "ro", "stuck")))
+	require.NoError(t, os.Symlink("..", filepath.Join(root, "gone")))
+	require.NoError(t, os.Chmod(filepath.Join(root, "ro"), 0500))
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "ro"), 0700) })
+
+	rejected, left := recheckLinks(root, []deferredEntry{
+		{file: &zip.File{FileHeader: zip.FileHeader{Name: "gone"}}, path: filepath.Join(root, "gone")},
+		{file: &zip.File{FileHeader: zip.FileHeader{Name: "ro/stuck"}}, path: filepath.Join(root, "ro", "stuck")},
+	})
+	assert.ErrorContains(t, rejected, `illegal link target in zip: "gone"`)
+	assert.ErrorContains(t, left, `failed to remove link "ro/stuck"`)
+
+	_, err := os.Lstat(filepath.Join(root, "gone"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Lstat(filepath.Join(root, "ro", "stuck"))
+	assert.NoError(t, err)
+}
+
+func TestUnzip_ReadOnlyDirectoryEntryDoesNotBlockItsChildren(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root writes into a read-only directory regardless")
+	}
+
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "ro.zip")
+	// zip -r lists a directory before what it holds, whatever the directory's
+	// mode, so the mode has to land after the children or none of them can be
+	// written. The parent's mode has to land after the child's too, since a
+	// parent without search permission blocks the chmod below it.
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "ro/", mode: 0400 | os.ModeDir},
+		{name: "ro/sub/", mode: 0700 | os.ModeDir},
+		{name: "ro/sub/file.txt", body: "hi"},
+		{name: "ro/sub/link", body: "file.txt", isLink: true},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(out, "ro"), 0700) })
+	require.NoError(t, Unzip(zipPath, out))
+
+	fi, err := os.Stat(filepath.Join(out, "ro"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0400), fi.Mode().Perm())
+
+	require.NoError(t, os.Chmod(filepath.Join(out, "ro"), 0700))
+	content, err := os.ReadFile(filepath.Join(out, "ro", "sub", "link"))
+	require.NoError(t, err)
+	assert.Equal(t, "hi", string(content))
+
+	fi, err = os.Stat(filepath.Join(out, "ro", "sub"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), fi.Mode().Perm())
+}
+
+func TestUnzip_LinkReplacingADirectoryEntryIsRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	// The link lands after the directory it is named for, so by the time the
+	// directory's mode is applied the path is a link. os.Chmod follows links,
+	// and the mode would land on whatever the link points at. An entry that
+	// carries no mode gets nothing applied, and is refused all the same.
+	for _, tt := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"with mode", 0777 | os.ModeDir},
+		{"without mode", os.ModeDir},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			zipPath := filepath.Join(dir, "swap.zip")
+			writeEntryZip(t, zipPath, []zipEntry{
+				{name: "victim.txt", body: "secret", mode: 0600},
+				{name: "d/", mode: tt.mode},
+				{name: "d", body: "victim.txt", isLink: true},
+			})
+
+			out := filepath.Join(dir, "out")
+			require.NoError(t, os.MkdirAll(out, 0755))
+
+			assert.ErrorContains(t, Unzip(zipPath, out), "illegal entry in zip")
+
+			fi, err := os.Stat(filepath.Join(out, "victim.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
+		})
+	}
+}
+
+func TestUnzip_DirectoryEntryWithoutModeKeepsTheDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "nomode.zip")
+	// A Unix-flagged archive with empty external attributes reads back as
+	// mode 0, which is an absent mode rather than a directory nobody may
+	// enter.
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "d/", mode: os.ModeDir},
+		{name: "d/file.txt", body: "hi"},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+	require.NoError(t, Unzip(zipPath, out))
+
+	// The default is whatever os.Mkdir leaves under this process's umask, so
+	// a directory made the same way is the reference, not a literal 0755.
+	ref := filepath.Join(dir, "ref")
+	require.NoError(t, os.Mkdir(ref, 0755))
+	want, err := os.Stat(ref)
+	require.NoError(t, err)
+	fi, err := os.Stat(filepath.Join(out, "d"))
+	require.NoError(t, err)
+	assert.Equal(t, want.Mode().Perm(), fi.Mode().Perm())
+
+	content, err := os.ReadFile(filepath.Join(out, "d", "file.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "hi", string(content))
+}
+
 func TestUnzipReader_ExtractsAnInMemoryArchive(t *testing.T) {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)

@@ -4,6 +4,7 @@ package utils
 
 import (
 	"errors"
+	"os"
 
 	"golang.org/x/sys/windows"
 )
@@ -15,4 +16,11 @@ func symlinkUnsupported(err error) bool {
 	return errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) ||
 		errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
 		errors.Is(err, windows.ERROR_INVALID_FUNCTION)
+}
+
+// chmodDir sets mode on the directory at path. Windows has no O_NOFOLLOW to
+// pin the handle to the directory itself, and os.Chmod there only toggles the
+// read-only attribute, so there is no mode to misplace.
+func chmodDir(path string, mode os.FileMode) error {
+	return os.Chmod(path, mode)
 }
