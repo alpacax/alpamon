@@ -275,11 +275,20 @@ func addFileToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo) e
 }
 
 func isEmptyDir(path string) (bool, error) {
-	entries, err := os.ReadDir(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return false, err
 	}
-	return len(entries) == 0, nil
+	defer func() { _ = f.Close() }()
+
+	// One entry answers the question; os.ReadDir would read and sort them all.
+	if _, err := f.Readdirnames(1); err != nil {
+		if errors.Is(err, io.EOF) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // Unzip extracts a zip archive to the specified destination directory.

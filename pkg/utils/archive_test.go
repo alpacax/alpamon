@@ -620,3 +620,18 @@ func TestCreateZipAndUnzip_EmptyDirectorySurvives(t *testing.T) {
 	// entry of its own or the download drops it.
 	assert.DirExists(t, filepath.Join(out, "src", "empty"))
 }
+
+func TestIsEmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	empty, err := isEmptyDir(dir)
+	require.NoError(t, err)
+	assert.True(t, empty)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a"), nil, 0644))
+	empty, err = isEmptyDir(dir)
+	require.NoError(t, err)
+	assert.False(t, empty)
+
+	_, err = isEmptyDir(filepath.Join(dir, "missing"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
