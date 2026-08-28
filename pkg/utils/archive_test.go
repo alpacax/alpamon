@@ -451,6 +451,36 @@ func TestUnzip_RejectionMessageEscapesControlBytes(t *testing.T) {
 	assert.NotContains(t, err.Error(), "\x1b")
 }
 
+func TestUnzip_ControlBytesInEntryNameAreRejected(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "esc.zip")
+	// An OS error embeds the raw path where %q cannot reach it, so a name
+	// carrying control bytes must not get far enough to raise one.
+	writeEntryZip(t, zipPath, []zipEntry{{name: "d\x1b[2J/x.txt", body: "x"}})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+
+	err := Unzip(zipPath, out)
+	assert.ErrorContains(t, err, "illegal file path in zip")
+	assert.NotContains(t, err.Error(), "\x1b")
+}
+
+func TestUnzip_ControlBytesInLinkTargetAreRejected(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "esc.zip")
+	// The same route the entry-name check closes: a failure past the checks
+	// wraps the OS error, which embeds the raw target where %q cannot reach.
+	writeEntryZip(t, zipPath, []zipEntry{{name: "lnk", body: "\x1b[2Jx", isLink: true}})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+
+	err := Unzip(zipPath, out)
+	assert.ErrorContains(t, err, "illegal link target in zip")
+	assert.NotContains(t, err.Error(), "\x1b")
+}
+
 func TestUnzip_LinkThroughAnEarlierLinkEntryIsRejected(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")
