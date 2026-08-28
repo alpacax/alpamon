@@ -764,6 +764,71 @@ func TestCreateZipAndUnzip_EmptyDirectoryModeIsPreserved(t *testing.T) {
 	assert.Equal(t, os.FileMode(0700), fi.Mode().Perm())
 }
 
+func TestUnzip_EntryNamingTheDestinationLeavesItsModeAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	// filepath.Join folds each of these names onto the destination itself. That
+	// directory is the caller's, so the mode the archive carries for it must
+	// not land: extraction runs as root, and 0777 here would open a user's home
+	// directory to everyone on the host.
+	for _, name := range []string{".", "./", "", "sub/../"} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			dir := t.TempDir()
+			zipPath := filepath.Join(dir, "self.zip")
+			writeEntryZip(t, zipPath, []zipEntry{
+				{name: name, mode: 0777 | os.ModeDir},
+				{name: "a.txt", body: "aaa"},
+			})
+
+			out := filepath.Join(dir, "out")
+			require.NoError(t, os.Mkdir(out, 0750))
+			before, err := os.Stat(out)
+			require.NoError(t, err)
+
+			require.NoError(t, Unzip(zipPath, out))
+
+			after, err := os.Stat(out)
+			require.NoError(t, err)
+			assert.Equal(t, before.Mode().Perm(), after.Mode().Perm())
+			assert.FileExists(t, filepath.Join(out, "a.txt"))
+		})
+	}
+}
+
+func TestUnzip_EntryReplacingTheDestinationIsRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	// A link entry at the destination's own name passes the target check with
+	// "." and would then swap the caller's directory for a link, since
+	// createSymlink removes whatever holds the path first.
+	for _, tt := range []struct {
+		name  string
+		entry zipEntry
+	}{
+		{name: "link", entry: zipEntry{name: ".", body: ".", isLink: true}},
+		{name: "file", entry: zipEntry{name: ".", body: "x"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			zipPath := filepath.Join(dir, "self.zip")
+			writeEntryZip(t, zipPath, []zipEntry{tt.entry})
+
+			out := filepath.Join(dir, "out")
+			require.NoError(t, os.Mkdir(out, 0755))
+
+			assert.ErrorContains(t, Unzip(zipPath, out), "illegal file path in zip")
+
+			fi, err := os.Lstat(out)
+			require.NoError(t, err)
+			assert.True(t, fi.IsDir())
+		})
+	}
+}
+
 func TestRecheckLinks_OffenderLeftOnDiskOutranksTheOnesRemoved(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")

@@ -321,7 +321,9 @@ func Unzip(src, destDir string) error {
 //
 // Nothing may leave destDir: an escaping entry name, a link target that lands
 // outside once every link on the way to it is followed, and an entry written
-// through a link are each refused.
+// through a link are each refused. An entry naming destDir itself adds nothing
+// and changes nothing, since the destination is the caller's and not the
+// archive's.
 //
 // A directory entry's mode lands last, deepest first, so a read-only directory
 // cannot block the entries below it.
@@ -344,6 +346,15 @@ func UnzipReader(r *zip.Reader, destDir string) error {
 	for _, f := range r.File {
 		fpath := filepath.Join(root, f.Name)
 		if !isInside(root, fpath) {
+			return fmt.Errorf("illegal file path in zip: %q", f.Name)
+		}
+		if fpath == root {
+			// "./" and "sub/../" both land here. A directory entry has nothing
+			// to make and its mode would land on the caller's directory, and
+			// anything else would replace that directory.
+			if f.FileInfo().IsDir() {
+				continue
+			}
 			return fmt.Errorf("illegal file path in zip: %q", f.Name)
 		}
 
