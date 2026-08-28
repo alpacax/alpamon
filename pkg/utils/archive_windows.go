@@ -18,6 +18,10 @@ func symlinkUnsupported(err error) bool {
 		errors.Is(err, windows.ERROR_INVALID_FUNCTION)
 }
 
+// noFollow is empty: Windows has no O_NOFOLLOW, so a link put at a path
+// between extractFile's check and its open is followed.
+const noFollow = 0
+
 // chmodDir sets mode on the directory at path. Windows has no O_NOFOLLOW to
 // pin the handle to the directory itself, and os.Chmod there only toggles the
 // read-only attribute, so there is no mode to misplace.

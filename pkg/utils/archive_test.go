@@ -904,6 +904,31 @@ func TestUnzip_EntryReplacingTheDestinationIsRejected(t *testing.T) {
 	}
 }
 
+func TestCreateFile_DoesNotWriteThroughALink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	// extractFile clears a link before it opens the path, but another
+	// extraction into the same destination can put one back in between, and
+	// the open must not carry the entry's content through it.
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.txt")
+	require.NoError(t, os.WriteFile(victim, []byte("keep"), 0644))
+	link := filepath.Join(dir, "link")
+	require.NoError(t, os.Symlink("victim.txt", link))
+
+	f, err := createFile(link, 0644)
+	if err == nil {
+		_ = f.Close()
+	}
+	assert.Error(t, err)
+
+	content, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(content))
+}
+
 func TestRecheckLinks_OffenderLeftOnDiskOutranksTheOnesRemoved(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")

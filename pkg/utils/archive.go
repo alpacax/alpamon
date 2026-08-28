@@ -484,6 +484,13 @@ func hasControlBytes(s string) bool {
 	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
+// createFile opens path for writing, made or truncated, and where the host
+// has O_NOFOLLOW it fails instead of following a link that another extraction
+// into the same destination may have put there since extractFile looked.
+func createFile(path string, mode os.FileMode) (*os.File, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|noFollow, mode)
+}
+
 func isInside(root, path string) bool {
 	rel, err := filepath.Rel(root, filepath.Clean(path))
 	if err != nil || filepath.IsAbs(rel) {
@@ -660,8 +667,9 @@ func isAbsTarget(target string) bool {
 
 // extractFile is the mirror of addFileToZip.
 func extractFile(f *zip.File, fpath string) error {
-	// os.OpenFile would write through a link sitting at the path, the one
-	// component mkdirAllInside does not cover.
+	// A link sitting at the path is the one component mkdirAllInside does not
+	// cover. createFile refuses to write through one, so it is cleared first
+	// rather than followed.
 	if fi, err := os.Lstat(fpath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if err := os.Remove(fpath); err != nil && !os.IsNotExist(err) {
 			return err
@@ -671,7 +679,7 @@ func extractFile(f *zip.File, fpath string) error {
 	// Perm only: extraction runs as root on a normal install, so setuid, setgid
 	// or sticky off an entry would land on a root-owned file. newZipEntry drops
 	// the same bits on the way in.
-	outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode().Perm())
+	outFile, err := createFile(fpath, f.Mode().Perm())
 	if err != nil {
 		return err
 	}

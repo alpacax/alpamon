@@ -12,6 +12,9 @@ import (
 // link support and a plain permission denial alike.
 func symlinkUnsupported(error) bool { return false }
 
+// noFollow makes createFile refuse a link sitting at its path.
+const noFollow = syscall.O_NOFOLLOW
+
 // chmodDir sets mode on the directory at path without following a link that
 // may have taken its place since it was checked: a handle opened with
 // O_NOFOLLOW is the directory itself, and fchmod acts on the handle.
