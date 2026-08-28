@@ -2,12 +2,42 @@ package utils
 
 import (
 	"archive/zip"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+)
+
+const (
+	// maxSymlinkTarget is past any platform's path limit, so a longer body is a
+	// malformed entry, not a target worth reading into memory.
+	maxSymlinkTarget = 4096
+
+	// maxLinkResolution is past every kernel's own resolution bound (Linux
+	// follows at most 40 links, darwin 32), so a walk still following links
+	// here is resolving something no program will ever be handed. Components
+	// are not counted: a deep tree with no link in it is not a chain.
+	maxLinkResolution = 64
+
+	// maxLinkWalk bounds the components isValidLinkTarget will visit in all,
+	// since every link it follows splices a whole target in and the hop bound
+	// alone leaves a small archive able to hold a worker for tens of seconds.
+	maxLinkWalk = 8192
+
+	// zipCreatorUnix and zipCreatorMacOSX are the creator halves of a zip
+	// header's CreatorVersion under which archive/zip reads a Unix mode out of
+	// ExternalAttrs; SetMode writes the first. Every other creator gets a mode
+	// derived from FAT attributes instead.
+	zipCreatorUnix   = 3
+	zipCreatorMacOSX = 19
+
+	// symlinkAttempts bounds createSymlink's retry, so a path that another
+	// extraction keeps refilling ends the entry instead of spinning on it.
+	symlinkAttempts = 3
 )
 
 var errNotRegular = errors.New("not a regular file")
@@ -26,8 +56,18 @@ type unreadable struct{ error }
 
 func (u unreadable) Unwrap() error { return u.error }
 
+// deferredEntry is an entry whose work waits until the regular entries are out:
+// a link, so what it points at exists first, or a directory's mode, so a
+// read-only one cannot block the entries below it.
+type deferredEntry struct {
+	file *zip.File
+	path string
+}
+
 // CreateZip creates a zip archive at destPath containing the specified paths.
-// If recursive is true and a path is a directory, its contents are included recursively.
+// If recursive is true and a path is a directory, its contents are included
+// recursively. A directory holding nothing gets an entry of its own, since it
+// has no contents to carry it across.
 // A symlink listed explicitly is followed, so its whole target tree is archived
 // even when that tree lives outside the listed path. A symlink met while walking
 // is stored as a link entry (target path, not content), so it cannot recurse into
@@ -111,14 +151,30 @@ func CreateZip(destPath string, paths []string, recursive bool) (skipped []Skipp
 					note(fpath, err)
 					return nil
 				}
-				if fi.IsDir() {
-					return nil
-				}
 				relPath, err := filepath.Rel(root, fpath)
 				if err != nil {
 					return err
 				}
 				name := filepath.Join(base, relPath)
+				if fi.IsDir() {
+					if name == "." {
+						// Base of "/" left nothing to name the walk root with.
+						return nil
+					}
+					// Every other directory arrives with the entries below it,
+					// so only one holding nothing needs an entry of its own. It
+					// is still not content, and must not make an archive that
+					// holds only directories look like a finished one.
+					empty, err := isEmptyDir(fpath)
+					if err != nil {
+						note(fpath, err)
+						return nil
+					}
+					if !empty {
+						return nil
+					}
+					return addDirToZip(w, name, fi)
+				}
 				switch {
 				case fi.Mode()&os.ModeSymlink != 0:
 					err = addSymlinkToZip(w, fpath, name, fi)
@@ -176,9 +232,9 @@ func newZipEntry(w *zip.Writer, archiveName string, fi os.FileInfo, method uint1
 		Method:   method,
 		Modified: fi.ModTime(),
 	}
-	// Permissions and the link flag only: setuid, setgid and sticky mean
+	// Permissions and the type flags only: setuid, setgid and sticky mean
 	// nothing in a download and Unzip would hand them to os.OpenFile.
-	hdr.SetMode(fi.Mode().Perm() | fi.Mode()&os.ModeSymlink)
+	hdr.SetMode(fi.Mode().Perm() | fi.Mode()&(os.ModeSymlink|os.ModeDir))
 
 	zw, err := w.CreateHeader(hdr)
 	if err != nil {
@@ -200,11 +256,21 @@ func addSymlinkToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo
 		return err
 	}
 
-	if _, err := zw.Write([]byte(target)); err != nil {
+	// The separator the reading host expects, the same normalization entry
+	// names get: a backslash target written on Windows must not come back on
+	// Unix as a single opaque component.
+	if _, err := zw.Write([]byte(filepath.ToSlash(target))); err != nil {
 		return fmt.Errorf("failed to write zip entry: %w", err)
 	}
 
 	return nil
+}
+
+// addDirToZip writes a directory entry. The trailing slash is what every other
+// zip reader keys off; the mode bit alone is not enough.
+func addDirToZip(w *zip.Writer, archiveName string, fi os.FileInfo) error {
+	_, err := newZipEntry(w, archiveName+"/", fi, zip.Store)
+	return err
 }
 
 func addFileToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo) error {
@@ -229,6 +295,34 @@ func addFileToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo) e
 	return nil
 }
 
+// isEmptyDir reports whether the archive will see the directory as empty.
+// FIFOs, sockets and device nodes are dropped by the walk, so they must not
+// hold a directory back from the entry that keeps it in the download.
+func isEmptyDir(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+
+	for {
+		// One archivable entry answers the question; os.ReadDir would read
+		// and sort them all.
+		entries, err := f.ReadDir(64)
+		for _, e := range entries {
+			if t := e.Type(); t.IsRegular() || t.IsDir() || t&os.ModeSymlink != 0 {
+				return false, nil
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return true, nil
+			}
+			return false, err
+		}
+	}
+}
+
 // Unzip extracts a zip archive to the specified destination directory.
 // It validates that extracted paths stay within the destination (zip slip protection).
 func Unzip(src, destDir string) error {
@@ -237,50 +331,408 @@ func Unzip(src, destDir string) error {
 		return fmt.Errorf("failed to open zip: %w", err)
 	}
 	defer func() { _ = r.Close() }()
-	return UnzipReader(r, destDir)
+	return UnzipReader(&r.Reader, destDir)
 }
 
 // UnzipReader extracts an already-opened zip into destDir. Caller owns r.
 // Used when the caller has pre-validated the same handle to close TOCTOU windows.
-func UnzipReader(r *zip.ReadCloser, destDir string) error {
-	for _, f := range r.File {
-		fpath := filepath.Join(destDir, f.Name)
+//
+// A link entry—the target path as the body with ModeSymlink set, the layout
+// CreateZip writes—comes back as a real symlink, dropped on a Windows host that
+// makes none rather than failing the whole extraction.
+//
+// Nothing may leave destDir: an escaping entry name, a link target that lands
+// outside once every link on the way to it is followed, and an entry written
+// through a link are each refused. An entry naming destDir itself adds nothing
+// and changes nothing, since the destination is the caller's and not the
+// archive's.
+//
+// A directory entry's mode lands last, deepest first, so a read-only directory
+// cannot block the entries below it.
+func UnzipReader(r *zip.Reader, destDir string) error {
+	// destDir used to appear on its own with the first entry, back when every
+	// entry called os.MkdirAll on its own parent.
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
 
-		// Zip-slip protection using filepath.Rel (handles root dirs and all platforms)
-		rel, err := filepath.Rel(destDir, filepath.Clean(fpath))
-		if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("illegal file path in zip: %s", f.Name)
+	// Unresolved, every extraction under /tmp on darwin reads as an escape,
+	// since /tmp is itself a link.
+	root, err := filepath.EvalSymlinks(destDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve destination directory: %w", err)
+	}
+
+	var links []deferredEntry
+	var dirs []deferredEntry
+	for _, f := range r.File {
+		// The rejection below quotes the name, but an OS error raised further
+		// in embeds the raw path where %q cannot reach it, and it travels to
+		// the console as the command result.
+		if hasControlBytes(f.Name) {
+			return fmt.Errorf("illegal file path in zip: %q", f.Name)
+		}
+		fpath := filepath.Join(root, f.Name)
+		if !isInside(root, fpath) {
+			return fmt.Errorf("illegal file path in zip: %q", f.Name)
+		}
+		if fpath == root {
+			// "./" and "sub/../" both land here. A directory entry has nothing
+			// to make and its mode would land on the caller's directory, and
+			// anything else would replace that directory.
+			if f.FileInfo().IsDir() {
+				continue
+			}
+			return fmt.Errorf("illegal file path in zip: %q", f.Name)
 		}
 
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(fpath, 0755); err != nil {
+			if err := mkdirAllInside(root, fpath, f.Name); err != nil {
 				return err
 			}
+			dirs = append(dirs, deferredEntry{file: f, path: fpath})
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
+		if err := mkdirAllInside(root, filepath.Dir(fpath), f.Name); err != nil {
 			return err
 		}
 
-		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			return err
+		// Links go last: on Windows os.Symlink picks a file or a directory link
+		// by what the target is at creation time, and entry order does not
+		// promise the target has been extracted yet.
+		if f.Mode()&os.ModeSymlink != 0 {
+			links = append(links, deferredEntry{file: f, path: fpath})
+			continue
 		}
 
-		rc, err := f.Open()
-		if err != nil {
-			_ = outFile.Close()
-			return err
+		if err := extractFile(f, fpath); err != nil {
+			return fmt.Errorf("failed to extract %q: %w", f.Name, err)
 		}
+	}
 
-		_, err = io.Copy(outFile, rc)
-		_ = rc.Close()
-		_ = outFile.Close()
+	var failed error
+	for _, link := range links {
+		if err := extractSymlink(link.file, root, link.path); err != nil {
+			failed = err
+			break
+		}
+	}
+	// Links already on disk were validated against an archive that was not
+	// fully written yet, so sweep them even when a later entry ended the run.
+	rejected, left := recheckLinks(root, links)
+	switch {
+	case left != nil:
+		return left
+	case failed != nil:
+		return failed
+	case rejected != nil:
+		return rejected
+	}
+
+	return applyDirModes(dirs)
+}
+
+// applyDirModes lands each directory entry's mode once everything below it is
+// out, because a directory entry from zip -r comes before its children and a
+// read-only mode landing first would block them. Deepest first for the same
+// reason: a parent without search permission blocks the chmod below it. A
+// child's path is longer than its parent's, so longest first is deepest first.
+func applyDirModes(dirs []deferredEntry) error {
+	slices.SortStableFunc(dirs, func(a, b deferredEntry) int {
+		return cmp.Compare(len(b.path), len(a.path))
+	})
+
+	for _, dir := range dirs {
+		// A link entry that took the directory's name has nothing for this
+		// mode to land on, and os.Chmod would follow it to whatever it points
+		// at.
+		fi, err := os.Lstat(dir.path)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to set mode of %q: %w", dir.file.Name, err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("illegal entry in zip: %q is no longer a directory", dir.file.Name)
+		}
+		// A header only carries a mode a Unix host chose; archive/zip derives
+		// 0666 from any other creator's attributes, which would leave the
+		// directory impossible to enter.
+		if creator := dir.file.CreatorVersion >> 8; creator != zipCreatorUnix && creator != zipCreatorMacOSX {
+			continue
+		}
+		// Perm only, for the reason extractFile gives. Zero is an archive that
+		// carried no mode at all, not a directory nobody may enter.
+		mode := dir.file.Mode().Perm()
+		if mode == 0 {
+			continue
+		}
+		if err := chmodDir(dir.path, mode); err != nil {
+			return fmt.Errorf("failed to set mode of %q: %w", dir.file.Name, err)
 		}
 	}
 
 	return nil
+}
+
+// recheckLinks walks every link the extraction wrote once the archive is fully
+// on disk. A target is checked against what exists when the link is written, so
+// a link the archive lists later can still turn an earlier one into an escape.
+// Every link is swept, since the ones after an offender are just as unchecked
+// as it was. rejected is the first offender removed and left the first one
+// still on disk. The caller reports left ahead of everything else, since it
+// means destDir still holds an escape.
+func recheckLinks(root string, links []deferredEntry) (rejected, left error) {
+	for _, link := range links {
+		target, err := os.Readlink(link.path)
+		if err != nil {
+			// Never written: dropped on a host that makes no links, or listed
+			// after the entry that ended the extraction. Nothing to check.
+			continue
+		}
+		if isValidLinkTarget(root, link.path, target) {
+			continue
+		}
+		// Another extraction into the same destination may have swept it first.
+		if err := os.Remove(link.path); err != nil && !os.IsNotExist(err) {
+			if left == nil {
+				left = fmt.Errorf("failed to remove link %q: %w", link.file.Name, err)
+			}
+			continue
+		}
+		if rejected == nil {
+			rejected = fmt.Errorf("illegal link target in zip: %q -> %q", link.file.Name, target)
+		}
+	}
+
+	return rejected, left
+}
+
+// hasControlBytes reports whether s carries a byte a terminal would act on.
+func hasControlBytes(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
+}
+
+// createFile opens path for writing, made or truncated, and where the host
+// has O_NOFOLLOW it fails instead of following a link that another extraction
+// into the same destination may have put there since extractFile looked.
+func createFile(path string, mode os.FileMode) (*os.File, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|noFollow, mode)
+}
+
+func isInside(root, path string) bool {
+	rel, err := filepath.Rel(root, filepath.Clean(path))
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// mkdirAllInside walks dir one component at a time because os.MkdirAll follows a
+// symlink, which would put the entries below one outside root.
+func mkdirAllInside(root, dir, name string) error {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return fmt.Errorf("illegal file path in zip: %q", name)
+	}
+	if rel == "." {
+		return nil
+	}
+
+	current := root
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		current = filepath.Join(current, part)
+		fi, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			// Commands run on a worker pool, so another extraction may win
+			// the create. Not a failure, but the check below still needs
+			// to see what landed.
+			if err := os.Mkdir(current, 0755); err != nil && !os.IsExist(err) {
+				return fmt.Errorf("failed to create directory for %q: %w", name, err)
+			}
+			fi, err = os.Lstat(current)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to create directory for %q: %w", name, err)
+		}
+		// The entry is refused, whatever it is: what is a link here is a
+		// component of the path it would be written through, not the entry.
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("illegal entry in zip: %q is written through a symlink", name)
+		}
+		// A file entry that took this component's name would only surface
+		// later as the raw ENOTDIR off whatever tries to write below it.
+		if !fi.IsDir() {
+			return fmt.Errorf("illegal entry in zip: %q is written through a non-directory", name)
+		}
+	}
+
+	return nil
+}
+
+// extractSymlink is the mirror of addSymlinkToZip.
+func extractSymlink(f *zip.File, root, fpath string) error {
+	// The first pass checked this parent before any link entry was written,
+	// and a link entry ahead of this one may have swapped a directory on it
+	// for a link since—one to ".." would carry this entry outside root.
+	if err := mkdirAllInside(root, filepath.Dir(fpath), f.Name); err != nil {
+		return err
+	}
+
+	rc, err := f.Open()
+	if err != nil {
+		return fmt.Errorf("failed to restore link %q: %w", f.Name, err)
+	}
+	body, err := io.ReadAll(io.LimitReader(rc, maxSymlinkTarget+1))
+	_ = rc.Close()
+	if err != nil {
+		return fmt.Errorf("failed to restore link %q: %w", f.Name, err)
+	}
+	if len(body) > maxSymlinkTarget {
+		return fmt.Errorf("illegal link target in zip: %q exceeds %d bytes", f.Name, maxSymlinkTarget)
+	}
+
+	target := string(body)
+	// The same route the entry-name check closes: a failure past this point
+	// wraps the OS error, which embeds the raw target where %q cannot reach.
+	if hasControlBytes(target) {
+		return fmt.Errorf("illegal link target in zip: %q -> %q", f.Name, target)
+	}
+	if !isValidLinkTarget(root, fpath, target) {
+		return fmt.Errorf("illegal link target in zip: %q -> %q", f.Name, target)
+	}
+
+	if err := createSymlink(target, fpath); err != nil {
+		return fmt.Errorf("failed to restore link %q: %w", f.Name, err)
+	}
+	return nil
+}
+
+// createSymlink puts a link to target at fpath, over whatever is already there.
+// A regular entry gets that from O_TRUNC in one call, and this is the same
+// thing in two: commands run on a worker pool, so a second extraction can fill
+// the path back in between them, and losing that race is not a failure.
+func createSymlink(target, fpath string) error {
+	for attempt := 0; ; attempt++ {
+		if err := os.Remove(fpath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+
+		err := os.Symlink(target, fpath)
+		if err == nil || symlinkUnsupported(err) {
+			return nil
+		}
+		if !os.IsExist(err) {
+			return err
+		}
+
+		// Whoever won carries the same entry when the target matches, so
+		// there is nothing left to write.
+		if got, rerr := os.Readlink(fpath); rerr == nil && got == target {
+			return nil
+		}
+		if attempt == symlinkAttempts-1 {
+			return err
+		}
+	}
+}
+
+// isValidLinkTarget reports whether a link at fpath may carry target. It walks
+// the target component by component, following every link already on disk,
+// because filepath.Join folds "a/link/.." down to "a" while the kernel follows
+// the link first and lands somewhere else entirely. It starts from
+// filepath.Dir(fpath), which the caller has just shown to be link-free.
+func isValidLinkTarget(root, fpath, target string) bool {
+	if target == "" || isAbsTarget(target) {
+		return false
+	}
+
+	current := filepath.Dir(fpath)
+	parts := strings.Split(filepath.ToSlash(target), "/")
+	hops, visited := 0, 0
+	for len(parts) > 0 {
+		visited++
+		if visited > maxLinkWalk {
+			return false
+		}
+
+		part := parts[0]
+		parts = parts[1:]
+
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			current = filepath.Dir(current)
+		default:
+			next := filepath.Join(current, part)
+			if fi, err := os.Lstat(next); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				hops++
+				if hops > maxLinkResolution {
+					// Past the kernel's own bound nothing resolves this
+					// link—ELOOP for whoever tries—so a cycle or a chain this
+					// deep carries nobody anywhere, outside included.
+					return true
+				}
+				link, err := os.Readlink(next)
+				// An absolute link is refused rather than followed: only a link
+				// the extraction did not write can be one, and reasoning about
+				// where it lands is not worth the archive.
+				if err == nil && !isAbsTarget(link) {
+					parts = append(strings.Split(filepath.ToSlash(link), "/"), parts...)
+					continue
+				}
+				// Swept between the two calls by a concurrent extraction:
+				// gone, it is no longer a link on the way.
+				if !os.IsNotExist(err) {
+					return false
+				}
+			}
+			current = next
+		}
+
+		if !isInside(root, current) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isAbsTarget reports whether a link target is absolute. Zip entries carry
+// slash-separated paths whatever wrote them, so a leading slash counts even
+// where filepath.IsAbs alone would miss it.
+func isAbsTarget(target string) bool {
+	return strings.HasPrefix(filepath.ToSlash(target), "/") || filepath.IsAbs(target)
+}
+
+// extractFile is the mirror of addFileToZip.
+func extractFile(f *zip.File, fpath string) error {
+	// A link sitting at the path is the one component mkdirAllInside does not
+	// cover. createFile refuses to write through one, so it is cleared first
+	// rather than followed.
+	if fi, err := os.Lstat(fpath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(fpath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	// Perm only: extraction runs as root on a normal install, so setuid, setgid
+	// or sticky off an entry would land on a root-owned file. newZipEntry drops
+	// the same bits on the way in.
+	outFile, err := createFile(fpath, f.Mode().Perm())
+	if err != nil {
+		return err
+	}
+
+	rc, err := f.Open()
+	if err != nil {
+		_ = outFile.Close()
+		return err
+	}
+
+	_, err = io.Copy(outFile, rc)
+	_ = rc.Close()
+	_ = outFile.Close()
+
+	return err
 }

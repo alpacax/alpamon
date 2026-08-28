@@ -42,6 +42,31 @@ func TestCreateZip_IrregularEntriesAreSkipped(t *testing.T) {
 	assert.Equal(t, "demo/file.txt", r.File[0].Name)
 }
 
+func TestCreateZip_DirectoryHoldingOnlySpecialFilesKeepsItsEntry(t *testing.T) {
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	sub := filepath.Join(srcDir, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0755))
+	require.NoError(t, syscall.Mkfifo(filepath.Join(sub, "fifo"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("aaa"), 0644))
+
+	dest := filepath.Join(dir, "out.zip")
+	// The FIFO is dropped the way the walk drops every special file, but that
+	// must not take the directory down with it: without an entry of its own
+	// it would vanish from the download without a trace.
+	requireZip(t, dest, []string{srcDir}, true)
+
+	r, err := zip.OpenReader(dest)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+
+	names := make([]string, 0, len(r.File))
+	for _, f := range r.File {
+		names = append(names, f.Name)
+	}
+	assert.Contains(t, names, "src/sub/")
+}
+
 func TestCreateZip_ListedIrregularPathIsSkipped(t *testing.T) {
 	dir := t.TempDir()
 

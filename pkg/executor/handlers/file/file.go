@@ -283,7 +283,7 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 
 	if args.AllowUnzip {
 		if rc := utils.OpenIfZip(args.Path, filepath.Ext(args.Path)); rc != nil {
-			err := utils.UnzipReader(rc, filepath.Dir(args.Path))
+			err := utils.UnzipReader(&rc.Reader, filepath.Dir(args.Path))
 			_ = rc.Close()
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to unzip file.")

@@ -182,7 +182,7 @@ func TestOpenIfZip(t *testing.T) {
 
 	t.Run("valid zip returns handle", func(t *testing.T) {
 		p := filepath.Join(tmpDir, "valid.zip")
-		writeZip(t, p, nil)
+		writeEntryZip(t, p, nil)
 		rc := OpenIfZip(p, ".zip")
 		require.NotNil(t, rc)
 		_ = rc.Close()
@@ -217,7 +217,7 @@ func TestOpenIfZip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := filepath.Join(tmpDir, tc.file)
 			if tc.isZip {
-				writeZip(t, p, nil)
+				writeEntryZip(t, p, nil)
 			} else {
 				require.NoError(t, os.WriteFile(p, []byte("hello"), 0644))
 			}
