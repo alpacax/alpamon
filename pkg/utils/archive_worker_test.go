@@ -40,7 +40,13 @@ func TestRunArchiveWorker_WritesZipAndReportsSkipped(t *testing.T) {
 	// reason has to survive the process boundary as text.
 	require.Len(t, resp.Skipped, 1)
 	assert.Equal(t, missing, resp.Skipped[0].Path)
-	assert.Contains(t, resp.Skipped[0].Reason, "no such file")
+	// The wording is the host's own, so ask the host for it rather than
+	// hard-coding one platform's: Unix says "no such file or directory" and
+	// Windows says "The system cannot find the file specified."
+	_, openErr := os.Open(missing)
+	var pathErr *os.PathError
+	require.ErrorAs(t, openErr, &pathErr)
+	assert.Contains(t, resp.Skipped[0].Reason, pathErr.Err.Error())
 
 	r, err := zip.OpenReader(dest)
 	require.NoError(t, err)

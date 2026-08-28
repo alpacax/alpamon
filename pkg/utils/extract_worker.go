@@ -30,9 +30,14 @@ func RunExtractWorker(srcPath, destDir string, status io.Writer) int {
 	if src == nil {
 		return 0
 	}
-	defer func() { _ = src.Close() }()
 
-	if err := UnzipFile(src, destDir); err != nil {
+	err := UnzipFile(src, destDir)
+	// Closed here rather than on a defer, because the unlink below has to come
+	// after it. Go opens without FILE_SHARE_DELETE, so on Windows a remove runs
+	// into a sharing violation while the handle is still open, and the error is
+	// discarded, which would leave the source behind on every extraction.
+	_ = src.Close()
+	if err != nil {
 		_, _ = fmt.Fprintln(status, err.Error())
 		return 1
 	}
