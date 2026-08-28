@@ -292,6 +292,9 @@ func addFileToZip(w *zip.Writer, filePath, archiveName string, fi os.FileInfo) e
 	return nil
 }
 
+// isEmptyDir reports whether the archive will see the directory as empty.
+// FIFOs, sockets and device nodes are dropped by the walk, so they must not
+// hold a directory back from the entry that keeps it in the download.
 func isEmptyDir(path string) (bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -299,14 +302,22 @@ func isEmptyDir(path string) (bool, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	// One entry answers the question; os.ReadDir would read and sort them all.
-	if _, err := f.Readdirnames(1); err != nil {
-		if errors.Is(err, io.EOF) {
-			return true, nil
+	for {
+		// One archivable entry answers the question; os.ReadDir would read
+		// and sort them all.
+		entries, err := f.ReadDir(64)
+		for _, e := range entries {
+			if t := e.Type(); t.IsRegular() || t.IsDir() || t&os.ModeSymlink != 0 {
+				return false, nil
+			}
 		}
-		return false, err
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return true, nil
+			}
+			return false, err
+		}
 	}
-	return false, nil
 }
 
 // Unzip extracts a zip archive to the specified destination directory.
