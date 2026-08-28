@@ -17,9 +17,10 @@ const (
 	// malformed entry, not a target worth reading into memory.
 	maxSymlinkTarget = 4096
 
-	// maxLinkResolution bounds the links isValidLinkTarget will follow, the
-	// way ELOOP bounds the kernel's own resolution. Components are not
-	// counted: a deep tree with no link in it is not a chain.
+	// maxLinkResolution is past every kernel's own resolution bound (Linux
+	// follows at most 40 links, darwin 32), so a walk still following links
+	// here is resolving something no program will ever be handed. Components
+	// are not counted: a deep tree with no link in it is not a chain.
 	maxLinkResolution = 64
 
 	// maxLinkWalk bounds the components isValidLinkTarget will visit in all,
@@ -635,7 +636,10 @@ func isValidLinkTarget(root, fpath, target string) bool {
 			if fi, err := os.Lstat(next); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 				hops++
 				if hops > maxLinkResolution {
-					return false
+					// Past the kernel's own bound nothing resolves this
+					// link—ELOOP for whoever tries—so a cycle or a chain this
+					// deep carries nobody anywhere, outside included.
+					return true
 				}
 				link, err := os.Readlink(next)
 				// An absolute link is refused rather than followed: only a link

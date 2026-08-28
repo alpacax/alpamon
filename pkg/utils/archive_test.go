@@ -706,6 +706,58 @@ func TestUnzip_LinkWalkPastTheComponentBoundIsRejected(t *testing.T) {
 	assert.ErrorContains(t, Unzip(zipPath, out), "illegal link target in zip")
 }
 
+func TestUnzip_LinkCycleIsKeptButUnresolvable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "cycle.zip")
+	// A link that resolves through a cycle never lands anywhere: the kernel
+	// answers anyone who tries with ELOOP, so it can carry nobody outside and
+	// failing the archive over it would refuse a tree the host itself allows.
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "a", body: "b", isLink: true},
+		{name: "b", body: "a", isLink: true},
+		{name: "rider", body: "a/file.txt", isLink: true},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+
+	require.NoError(t, Unzip(zipPath, out))
+
+	got, err := os.Readlink(filepath.Join(out, "a"))
+	require.NoError(t, err)
+	assert.Equal(t, "b", got)
+	_, err = os.Stat(filepath.Join(out, "rider"))
+	assert.ErrorContains(t, err, "too many levels of symbolic links")
+}
+
+func TestCreateZipAndUnzip_SelfReferentialLinkSurvives(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	// The host allows x -> x on disk, so CreateZip archives it and the round
+	// trip must not end in a rejection.
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	require.NoError(t, os.Mkdir(srcDir, 0755))
+	require.NoError(t, os.Symlink("x", filepath.Join(srcDir, "x")))
+
+	zipPath := filepath.Join(dir, "self.zip")
+	requireZip(t, zipPath, []string{srcDir}, true)
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.Mkdir(out, 0755))
+	require.NoError(t, Unzip(zipPath, out))
+
+	got, err := os.Readlink(filepath.Join(out, "src", "x"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", got)
+}
+
 func TestUnzip_LinkTargetMayGoThroughALinkInsideRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")
