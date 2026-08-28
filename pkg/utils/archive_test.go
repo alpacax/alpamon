@@ -17,21 +17,6 @@ import (
 
 // writeZip builds a zip at path with one entry per name/content pair. A nil
 // map produces an empty zip.
-func writeZip(t *testing.T, path string, entries map[string]string) {
-	t.Helper()
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	w := zip.NewWriter(f)
-	for name, content := range entries {
-		zw, err := w.Create(name)
-		require.NoError(t, err)
-		_, err = zw.Write([]byte(content))
-		require.NoError(t, err)
-	}
-	require.NoError(t, w.Close())
-	require.NoError(t, f.Close())
-}
-
 // requireZip builds the archive and requires that nothing was left out of it,
 // so a test that does not care about skipping still fails if an entry silently
 // goes missing.
@@ -258,9 +243,9 @@ func TestUnzip(t *testing.T) {
 	dir := t.TempDir()
 
 	zipPath := filepath.Join(dir, "test.zip")
-	writeZip(t, zipPath, map[string]string{
-		"root.txt":       "root",
-		"sub/nested.txt": "nested",
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "root.txt", body: "root"},
+		{name: "sub/nested.txt", body: "nested"},
 	})
 
 	extractDir := filepath.Join(dir, "out")
@@ -281,7 +266,7 @@ func TestUnzip_ZipSlipRejected(t *testing.T) {
 	dir := t.TempDir()
 
 	zipPath := filepath.Join(dir, "evil.zip")
-	writeZip(t, zipPath, map[string]string{"../../etc/passwd": "malicious"})
+	writeEntryZip(t, zipPath, []zipEntry{{name: "../../etc/passwd", body: "malicious"}})
 
 	extractDir := filepath.Join(dir, "out")
 	require.NoError(t, os.MkdirAll(extractDir, 0755))
@@ -473,14 +458,17 @@ func TestUnzip_EscapingLinkTargetIsRejected(t *testing.T) {
 	}
 	// Nothing constrains entry order, so a link arriving after the path that
 	// goes through it must be rejected just the same.
-	for name, entries := range map[string][]zipEntry{
-		"link first": escaping,
-		"link last":  {escaping[1], escaping[0]},
+	for _, tt := range []struct {
+		name    string
+		entries []zipEntry
+	}{
+		{"link first", escaping},
+		{"link last", []zipEntry{escaping[1], escaping[0]}},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			zipPath := filepath.Join(dir, "evil.zip")
-			writeEntryZip(t, zipPath, entries)
+			writeEntryZip(t, zipPath, tt.entries)
 
 			out := filepath.Join(dir, "out")
 			require.NoError(t, os.MkdirAll(out, 0755))
@@ -505,14 +493,17 @@ func TestUnzip_LinkTargetThroughAnotherLinkIsRejected(t *testing.T) {
 	}
 	// Nothing constrains entry order, so the link that makes the chain escape
 	// may also arrive after the link that rides it.
-	for name, entries := range map[string][]zipEntry{
-		"rider last":  chain,
-		"rider first": {chain[2], chain[0], chain[1]},
+	for _, tt := range []struct {
+		name    string
+		entries []zipEntry
+	}{
+		{"rider last", chain},
+		{"rider first", []zipEntry{chain[2], chain[0], chain[1]}},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			zipPath := filepath.Join(dir, "chain.zip")
-			writeEntryZip(t, zipPath, entries)
+			writeEntryZip(t, zipPath, tt.entries)
 
 			out := filepath.Join(dir, "out")
 			require.NoError(t, os.MkdirAll(out, 0755))
@@ -564,7 +555,7 @@ func TestUnzip_EntryWrittenThroughExistingLinkIsRejected(t *testing.T) {
 	require.NoError(t, os.Symlink(outside, filepath.Join(out, "a")))
 
 	zipPath := filepath.Join(dir, "evil.zip")
-	writeZip(t, zipPath, map[string]string{"a/passwd": "malicious"})
+	writeEntryZip(t, zipPath, []zipEntry{{name: "a/passwd", body: "malicious"}})
 
 	assert.ErrorContains(t, Unzip(zipPath, out), "illegal link target in zip")
 
