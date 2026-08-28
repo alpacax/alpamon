@@ -20,6 +20,11 @@ const (
 	// counted: a deep tree with no link in it is not a chain.
 	maxLinkResolution = 64
 
+	// maxLinkWalk bounds the components isValidLinkTarget will visit in all,
+	// since every link it follows splices a whole target in and the hop bound
+	// alone leaves a small archive able to hold a worker for tens of seconds.
+	maxLinkWalk = 8192
+
 	// symlinkAttempts bounds createSymlink's retry, so a path that another
 	// extraction keeps refilling ends the entry instead of spinning on it.
 	symlinkAttempts = 3
@@ -496,8 +501,13 @@ func isValidLinkTarget(root, fpath, target string) bool {
 
 	current := filepath.Dir(fpath)
 	parts := strings.Split(target, "/")
-	hops := 0
+	hops, visited := 0, 0
 	for len(parts) > 0 {
+		visited++
+		if visited > maxLinkWalk {
+			return false
+		}
+
 		part := parts[0]
 		parts = parts[1:]
 

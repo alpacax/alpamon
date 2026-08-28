@@ -3,6 +3,7 @@ package utils
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -541,6 +542,40 @@ func TestUnzip_DeepLinkTargetWithoutLinksIsAccepted(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(out, "dots"))
 	require.NoError(t, err)
 	assert.Equal(t, "hi", string(content))
+}
+
+func TestUnzip_LinkWalkPastTheComponentBoundIsRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	// The hops stay under maxLinkResolution and each target under what the
+	// host allows, yet the walk visits far more components than the bound
+	// allows, since every hop splices its whole target in. Left unbounded, a
+	// small archive keeps a worker busy for tens of seconds.
+	// Under the 1024-byte target macOS allows.
+	padding := strings.Repeat("x/../", 196)
+	perHop := strings.Count(padding, "/")
+	hops := maxLinkWalk/perHop + 2
+	require.Less(t, hops, maxLinkResolution)
+
+	entries := []zipEntry{{name: "file.txt", body: "hi"}}
+	for i := range hops {
+		next := fmt.Sprintf("hop%d", i+1)
+		if i == hops-1 {
+			next = "file.txt"
+		}
+		entries = append(entries, zipEntry{name: fmt.Sprintf("hop%d", i), body: padding + next, isLink: true})
+	}
+
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "long.zip")
+	writeEntryZip(t, zipPath, entries)
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+
+	assert.ErrorContains(t, Unzip(zipPath, out), "illegal link target in zip")
 }
 
 func TestUnzip_LinkTargetMayGoThroughALinkInsideRoot(t *testing.T) {
