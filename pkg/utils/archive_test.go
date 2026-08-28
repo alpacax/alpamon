@@ -758,6 +758,42 @@ func TestCreateZipAndUnzip_SelfReferentialLinkSurvives(t *testing.T) {
 	assert.Equal(t, "x", got)
 }
 
+func TestUnzip_DirectoryModeFromANonUnixArchiveIsIgnored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "fat.zip")
+	f, err := os.Create(zipPath)
+	require.NoError(t, err)
+	w := zip.NewWriter(f)
+	// No SetMode: a FAT-creator header, the kind Compress-Archive writes.
+	// archive/zip derives 0666 from its attributes, a directory nobody chose
+	// to make unenterable.
+	_, err = w.CreateHeader(&zip.FileHeader{Name: "sub/", Method: zip.Store})
+	require.NoError(t, err)
+	zw, err := w.Create("sub/f.txt")
+	require.NoError(t, err)
+	_, err = zw.Write([]byte("x"))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	require.NoError(t, f.Close())
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.Mkdir(out, 0755))
+	require.NoError(t, Unzip(zipPath, out))
+
+	ref := filepath.Join(dir, "ref")
+	require.NoError(t, os.Mkdir(ref, 0755))
+	refInfo, err := os.Stat(ref)
+	require.NoError(t, err)
+
+	fi, err := os.Stat(filepath.Join(out, "sub"))
+	require.NoError(t, err)
+	assert.Equal(t, refInfo.Mode().Perm(), fi.Mode().Perm())
+}
+
 func TestUnzip_LinkTargetMayGoThroughALinkInsideRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-specific behavior")

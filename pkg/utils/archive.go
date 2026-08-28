@@ -28,6 +28,13 @@ const (
 	// alone leaves a small archive able to hold a worker for tens of seconds.
 	maxLinkWalk = 8192
 
+	// zipCreatorUnix and zipCreatorMacOSX are the creator halves of a zip
+	// header's CreatorVersion under which archive/zip reads a Unix mode out of
+	// ExternalAttrs; SetMode writes the first. Every other creator gets a mode
+	// derived from FAT attributes instead.
+	zipCreatorUnix   = 3
+	zipCreatorMacOSX = 19
+
 	// symlinkAttempts bounds createSymlink's retry, so a path that another
 	// extraction keeps refilling ends the entry instead of spinning on it.
 	symlinkAttempts = 3
@@ -432,6 +439,12 @@ func applyDirModes(dirs []deferredEntry) error {
 		}
 		if !fi.IsDir() {
 			return fmt.Errorf("illegal entry in zip: %q is no longer a directory", dir.file.Name)
+		}
+		// A header only carries a mode a Unix host chose; archive/zip derives
+		// 0666 from any other creator's attributes, which would leave the
+		// directory impossible to enter.
+		if creator := dir.file.CreatorVersion >> 8; creator != zipCreatorUnix && creator != zipCreatorMacOSX {
+			continue
 		}
 		// Perm only, for the reason extractFile gives. Zero is an archive that
 		// carried no mode at all, not a directory nobody may enter.
