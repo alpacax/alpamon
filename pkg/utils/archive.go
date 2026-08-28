@@ -518,6 +518,13 @@ func mkdirAllInside(root, dir, name string) error {
 
 // extractSymlink is the mirror of addSymlinkToZip.
 func extractSymlink(f *zip.File, root, fpath string) error {
+	// The first pass checked this parent before any link entry was written,
+	// and a link entry ahead of this one may have swapped a directory on it
+	// for a link since—one to ".." would carry this entry outside root.
+	if err := mkdirAllInside(root, filepath.Dir(fpath), f.Name); err != nil {
+		return err
+	}
+
 	rc, err := f.Open()
 	if err != nil {
 		return fmt.Errorf("failed to restore link %q: %w", f.Name, err)
@@ -572,7 +579,7 @@ func createSymlink(target, fpath string) error {
 // the target component by component, following every link already on disk,
 // because filepath.Join folds "a/link/.." down to "a" while the kernel follows
 // the link first and lands somewhere else entirely. It starts from
-// filepath.Dir(fpath), which mkdirAllInside has already shown to be link-free.
+// filepath.Dir(fpath), which the caller has just shown to be link-free.
 func isValidLinkTarget(root, fpath, target string) bool {
 	if target == "" || isAbsTarget(target) {
 		return false

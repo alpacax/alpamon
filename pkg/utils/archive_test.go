@@ -451,6 +451,32 @@ func TestUnzip_RejectionMessageEscapesControlBytes(t *testing.T) {
 	assert.NotContains(t, err.Error(), "\x1b")
 }
 
+func TestUnzip_LinkThroughAnEarlierLinkEntryIsRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	// "a" is a real directory while the first pass checks a/c's parent, and a
+	// link to "." by the time the second pass writes a/c: written through it,
+	// the entry would land at c and its target would resolve from the
+	// destination's parent, straight past every lexical check.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "secret"), []byte("TOP SECRET"), 0600))
+	zipPath := filepath.Join(dir, "esc.zip")
+	writeEntryZip(t, zipPath, []zipEntry{
+		{name: "a", body: ".", isLink: true},
+		{name: "a/c", body: "../secret", isLink: true},
+	})
+
+	out := filepath.Join(dir, "out")
+	require.NoError(t, os.Mkdir(out, 0755))
+
+	assert.ErrorContains(t, Unzip(zipPath, out), "written through a symlink")
+
+	_, err := os.Lstat(filepath.Join(out, "c"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestUnzip_EscapingLinkTargetIsRejected(t *testing.T) {
 	// Both names pass the entry-name check; only the link target puts the
 	// second write outside.
