@@ -486,9 +486,7 @@ func createSymlink(target, fpath string) error {
 // the link first and lands somewhere else entirely. It starts from
 // filepath.Dir(fpath), which mkdirAllInside has already shown to be link-free.
 func isValidLinkTarget(root, fpath, target string) bool {
-	// Zip entries carry slash-separated paths whatever wrote them, so a leading
-	// slash is absolute even where filepath.IsAbs alone would miss it.
-	if target == "" || strings.HasPrefix(target, "/") || filepath.IsAbs(target) {
+	if target == "" || isAbsTarget(target) {
 		return false
 	}
 
@@ -514,7 +512,7 @@ func isValidLinkTarget(root, fpath, target string) bool {
 				// An absolute link is refused rather than followed: only a link
 				// the extraction did not write can be one, and reasoning about
 				// where it lands is not worth the archive.
-				if err != nil || strings.HasPrefix(filepath.ToSlash(link), "/") || filepath.IsAbs(link) {
+				if err != nil || isAbsTarget(link) {
 					return false
 				}
 				parts = append(strings.Split(filepath.ToSlash(link), "/"), parts...)
@@ -529,6 +527,13 @@ func isValidLinkTarget(root, fpath, target string) bool {
 	}
 
 	return true
+}
+
+// isAbsTarget reports whether a link target is absolute. Zip entries carry
+// slash-separated paths whatever wrote them, so a leading slash counts even
+// where filepath.IsAbs alone would miss it.
+func isAbsTarget(target string) bool {
+	return strings.HasPrefix(filepath.ToSlash(target), "/") || filepath.IsAbs(target)
 }
 
 // extractFile is the mirror of addFileToZip.
