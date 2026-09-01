@@ -19,6 +19,7 @@ type trackedConn struct {
 	failWrites    atomic.Bool
 	closed        atomic.Bool
 	readDeadlines atomic.Int32
+	onWrite       func() // set before the write under test, and only from the goroutine that drives it
 }
 
 func (c *trackedConn) SetReadDeadline(t time.Time) error {
@@ -27,6 +28,9 @@ func (c *trackedConn) SetReadDeadline(t time.Time) error {
 }
 
 func (c *trackedConn) Write(b []byte) (int, error) {
+	if c.onWrite != nil {
+		c.onWrite()
+	}
 	if c.failWrites.Load() {
 		return 0, errors.New("simulated write failure")
 	}

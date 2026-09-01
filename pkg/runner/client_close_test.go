@@ -90,3 +90,19 @@ func TestWebsocketClientClose_IsSafeToCallTwice(t *testing.T) {
 	require.True(t, tracked.closed.Load(), "the first Close() did not close the websocket connection")
 	require.NotPanics(t, wc.Close, "the second Close() on an already closed connection panicked")
 }
+
+func TestWebsocketClientClose_ClosesTheConnItStartedWith(t *testing.T) {
+	// Connect() writes wc.Conn from the RunForever goroutine while Close() runs on another; the field swap is played out here from inside the close-frame write.
+	s := newCloseReplyServer(t)
+	first, firstTracked := dialTracked(t, s.url)
+	second, secondTracked := dialTracked(t, s.url)
+	t.Cleanup(func() { _ = second.Close() })
+
+	wc := &WebsocketClient{Conn: first}
+	firstTracked.onWrite = func() { wc.Conn = second }
+
+	wc.Close()
+
+	require.True(t, firstTracked.closed.Load(), "Close() left the connection it started with open")
+	require.False(t, secondTracked.closed.Load(), "Close() closed the connection Connect() had just swapped in")
+}
