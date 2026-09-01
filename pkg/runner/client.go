@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"sync/atomic"
@@ -244,8 +245,8 @@ func (wc *WebsocketClient) Close() {
 		drainCloseReply(conn)
 	}
 
-	err = conn.Close() // a broken connection must not leak its fd across reconnects
-	if err != nil {
+	// Close unconditionally so a broken connection cannot leak its fd; net.ErrClosed only means the reconnect path already closed it.
+	if err = conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		log.Debug().Err(err).Msg("Failed to close websocket connection.")
 	}
 }
