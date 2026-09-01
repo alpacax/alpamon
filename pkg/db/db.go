@@ -18,12 +18,12 @@ const dbFileName = "alpamon.db"
 
 func InitDB() *ent.Client {
 	dataDir := utils.DataDir()
-	fileName := fmt.Sprintf("%s/%s", dataDir, dbFileName)
+	dbPath := fmt.Sprintf("%s/%s", dataDir, dbFileName)
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
-		fileName, _ = filepath.Abs(dbFileName)
+		dbPath, _ = filepath.Abs(dbFileName)
 	}
 
-	dbFile, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0750)
+	dbFile, err := os.OpenFile(dbPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0750)
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to open db file: %v.", err)
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to open db file: %v\n", err)
@@ -36,13 +36,13 @@ func InitDB() *ent.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	err = RunMigration(fileName, ctx)
+	err = RunMigration(dbPath, ctx)
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to migrate db: %v.", err)
 		os.Exit(1)
 	}
 
-	dbManager := NewDBClientManager(fileName)
+	dbManager := NewDBClientManager(dbPath)
 	client, err := dbManager.GetClient()
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to get db client: %v.", err)
@@ -53,8 +53,8 @@ func InitDB() *ent.Client {
 }
 
 func InitTestDB(path string) *ent.Client {
-	fileName, _ := filepath.Abs(path)
-	dbFile, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0750)
+	dbPath, _ := filepath.Abs(path)
+	dbFile, err := os.OpenFile(dbPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0750)
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to open test db file: %v.", err)
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to open test db file: %v\n", err)
@@ -72,13 +72,13 @@ func InitTestDB(path string) *ent.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	err = RunMigration(fileName, ctx)
+	err = RunMigration(dbPath, ctx)
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to migrate test db: %v.", err)
 		os.Exit(1)
 	}
 
-	dbManager := NewDBClientManager(fileName)
+	dbManager := NewDBClientManager(dbPath)
 	client, err := dbManager.GetClient()
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to get db client: %v.", err)
