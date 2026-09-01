@@ -5,7 +5,7 @@ package runner
 import (
 	"bufio"
 	"context"
-	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
@@ -217,22 +217,25 @@ func TestStopKillsGroupIgnoringSIGTERM(t *testing.T) {
 	}
 
 	// Signalling before the trap is installed kills the child by default.
-	line, err := bufio.NewReader(pr).ReadString('\n')
+	child := bufio.NewReader(pr)
+	line, err := child.ReadString('\n')
 	require.NoError(t, err)
 	require.Equal(t, "ready\n", line)
 
 	require.ErrorContains(t, m.Stop(), "did not exit within")
 
-	// Signal 0 only checks for members, and ESRCH means the group is empty.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		err := syscall.Kill(-pgid, syscall.Signal(0))
-		if errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("Stop gave up on the process group but left it running")
-		}
-		time.Sleep(20 * time.Millisecond)
+	// Both shells hold the write end, so EOF means both are gone. kill(-pgid, 0)
+	// would not do: it still finds a zombie that a container init never reaps.
+	drained := make(chan error, 1)
+	go func() {
+		_, err := io.ReadAll(child)
+		drained <- err
+	}()
+
+	select {
+	case err := <-drained:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop gave up on the process group but left it running")
 	}
 }
