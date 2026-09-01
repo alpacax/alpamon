@@ -6,8 +6,6 @@ package runner
 
 import (
 	"context"
-	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -20,6 +18,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/require"
 )
 
 // wshServer is a local Websh test double: a WebSocket endpoint plus the pty-channels recovery API, with server-side handles to kill connections.
@@ -223,42 +222,9 @@ func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 	}
 }
 
-type trackedConn struct {
-	net.Conn
-	failWrites atomic.Bool
-	closed     atomic.Bool
-}
-
-func (c *trackedConn) Write(b []byte) (int, error) {
-	if c.failWrites.Load() {
-		return 0, errors.New("simulated write failure")
-	}
-	return c.Conn.Write(b)
-}
-
-func (c *trackedConn) Close() error {
-	c.closed.Store(true)
-	return c.Conn.Close()
-}
-
 func TestPtyClose_ClosesConnAfterWriteControlFailure(t *testing.T) {
 	s := newWshServer(t)
-
-	var tracked *trackedConn
-	dialer := websocket.Dialer{
-		NetDial: func(network, addr string) (net.Conn, error) {
-			c, err := net.Dial(network, addr)
-			if err != nil {
-				return nil, err
-			}
-			tracked = &trackedConn{Conn: c}
-			return tracked, nil
-		},
-	}
-	conn, _, err := dialer.Dial(s.wsURL(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn, tracked := dialTracked(t, s.wsURL())
 
 	pc := &PtyClient{
 		conn:      conn,
@@ -269,7 +235,5 @@ func TestPtyClose_ClosesConnAfterWriteControlFailure(t *testing.T) {
 	tracked.failWrites.Store(true)
 	pc.close()
 
-	if !tracked.closed.Load() {
-		t.Fatal("close() did not close the websocket connection after WriteControl failure")
-	}
+	require.True(t, tracked.closed.Load(), "close() did not close the websocket connection after WriteControl failure")
 }

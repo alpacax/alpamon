@@ -29,7 +29,10 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-  build-and-test:
+  # Renamed from `build-and-test` so the flat aggregator at the bottom of this
+  # file can take that id: a job id and the aggregate check name cannot be the
+  # same string, and the aggregate is the one that has to be `build-and-test`.
+  build-and-test-linux:
     name: Build and Test (${{ matrix.distro }})
     runs-on: ${{ matrix.runner }}
     # PATH is pinned because the runner rebuilds each exec PATH from the container config, and opensuse/leap:15 alone defines none.
@@ -256,3 +259,43 @@ jobs:
 
       - name: Run Tests
         run: go test -v ./... -p 1
+
+  # The aggregate check. Every job above is matrixed or platform-specific, so
+  # each reports under a name that carries its distro—nineteen strings that
+  # change whenever the matrix does. A name that moves cannot be a required
+  # status check: a ruleset naming one that stops reporting leaves the pull
+  # request pending forever rather than red. This job is the one flat,
+  # stable string the matrix can be gated on.
+  #
+  # No `name:`, so the context is the job id: `build-and-test`, matching the
+  # other Go repositories.
+  #
+  # `if: always()` is load-bearing. Without it a failed leg SKIPS this job, and
+  # a skipped check run counts as PASSING for a required status check—so the
+  # gate would go green exactly when it has to go red. Running is not enough
+  # either: a job that runs and does nothing reports success whatever its legs
+  # did, hence the explicit check below.
+  build-and-test:
+    needs:
+      - verify-tidy
+      - build-and-test-linux
+      - build-and-test-windows
+      - build-and-test-macos
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # Anything other than `success` fails, so a cancelled or skipped leg is
+      # a failure too. No job here is conditional, so a skip means something
+      # went wrong upstream rather than a leg that correctly opted out.
+      - name: Require every job to have succeeded
+        # Through the environment rather than interpolated into the script:
+        # the values are GitHub's own job results, but keeping `${{ }}` out of
+        # `run:` is the habit that stops a future edit from pasting attacker
+        # input into a shell.
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for r in $RESULTS; do
+            [ "$r" = success ] || exit 1
+          done

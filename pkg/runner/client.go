@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"sync/atomic"
@@ -223,38 +224,39 @@ func (wc *WebsocketClient) CloseAndReconnect(ctx context.Context) {
 	wc.Connect()
 }
 
-// Cleanly close the websocket connection by sending a close message
+// Cleanly close the websocket connection by sending a close message, waiting for
+// the peer's reply when that frame went out, and closing the connection either way.
 // Do not close quitChan, as the purpose here is to disconnect the WebSocket,
 // not to terminate RunForever.
 func (wc *WebsocketClient) Close() {
-	if wc.Conn == nil {
+	conn := wc.Conn // Connect() may swap wc.Conn from the RunForever goroutine mid-close; every step below must act on the one connection we started with.
+	if conn == nil {
 		return
 	}
 
-	err := wc.Conn.WriteControl(
+	err := conn.WriteControl(
 		websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		time.Now().Add(5*time.Second),
 	)
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to write close message to websocket.")
-		return
+	} else {
+		drainCloseReply(conn)
 	}
 
-	_ = wc.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	for {
-		_, _, err = wc.Conn.NextReader()
-		if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-			break
-		}
-		if err != nil {
-			break
-		}
-	}
-
-	err = wc.Conn.Close()
-	if err != nil {
+	// Close unconditionally so a broken connection cannot leak its fd; net.ErrClosed only means the reconnect path already closed it.
+	if err = conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		log.Debug().Err(err).Msg("Failed to close websocket connection.")
+	}
+}
+
+func drainCloseReply(conn *websocket.Conn) {
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // the peer only answers a close frame that actually went out
+	for {
+		if _, _, err := conn.NextReader(); err != nil {
+			break
+		}
 	}
 }
 
