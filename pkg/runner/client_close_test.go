@@ -1,11 +1,8 @@
-//go:build !windows
-
 package runner
 
 // The backhaul mirror of the pty client's close tests in pty_recovery_test.go; keep the two in step.
 
 import (
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -54,30 +51,9 @@ func newCloseReplyServer(t *testing.T) *closeReplyServer {
 	return s
 }
 
-func dialTracked(t *testing.T, url string) (*websocket.Conn, *trackedConn) {
-	t.Helper()
-
-	var tracked *trackedConn
-	dialer := websocket.Dialer{
-		NetDial: func(network, addr string) (net.Conn, error) {
-			c, err := net.Dial(network, addr)
-			if err != nil {
-				return nil, err
-			}
-			tracked = &trackedConn{Conn: c}
-			return tracked, nil
-		},
-	}
-	conn, _, err := dialer.Dial(url, nil)
-	require.NoError(t, err)
-	require.NotNil(t, tracked, "the dialer never went through NetDial, so nothing is being tracked")
-
-	return conn, tracked
-}
-
 func TestWebsocketClientClose_ClosesConnAfterWriteControlFailure(t *testing.T) {
-	s := newWshServer(t)
-	conn, tracked := dialTracked(t, s.wsURL())
+	s := newCloseReplyServer(t)
+	conn, tracked := dialTracked(t, s.url)
 
 	wc := &WebsocketClient{Conn: conn}
 
