@@ -223,15 +223,17 @@ func (wc *WebsocketClient) CloseAndReconnect(ctx context.Context) {
 	wc.Connect()
 }
 
-// Cleanly close the websocket connection by sending a close message
+// Cleanly close the websocket connection by sending a close message, waiting for
+// the peer's reply when that frame went out, and closing the connection either way.
 // Do not close quitChan, as the purpose here is to disconnect the WebSocket,
 // not to terminate RunForever.
 func (wc *WebsocketClient) Close() {
-	if wc.Conn == nil {
+	conn := wc.Conn // Connect() may swap wc.Conn from the RunForever goroutine mid-close; every step below must act on the one connection we started with.
+	if conn == nil {
 		return
 	}
 
-	err := wc.Conn.WriteControl(
+	err := conn.WriteControl(
 		websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		time.Now().Add(5*time.Second),
@@ -239,19 +241,19 @@ func (wc *WebsocketClient) Close() {
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to write close message to websocket.")
 	} else {
-		wc.drainCloseReply()
+		drainCloseReply(conn)
 	}
 
-	err = wc.Conn.Close() // a broken connection must not leak its fd across reconnects
+	err = conn.Close() // a broken connection must not leak its fd across reconnects
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to close websocket connection.")
 	}
 }
 
-func (wc *WebsocketClient) drainCloseReply() {
-	_ = wc.Conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // the peer only answers a close frame that actually went out
+func drainCloseReply(conn *websocket.Conn) {
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // the peer only answers a close frame that actually went out
 	for {
-		if _, _, err := wc.Conn.NextReader(); err != nil {
+		if _, _, err := conn.NextReader(); err != nil {
 			break
 		}
 	}
