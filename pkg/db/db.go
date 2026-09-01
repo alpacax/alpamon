@@ -18,7 +18,7 @@ const dbFileName = "alpamon.db"
 
 func InitDB() *ent.Client {
 	dataDir := utils.DataDir()
-	dbPath := fmt.Sprintf("%s/%s", dataDir, dbFileName)
+	dbPath := filepath.Join(dataDir, dbFileName)
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		dbPath, _ = filepath.Abs(dbFileName)
 	}
