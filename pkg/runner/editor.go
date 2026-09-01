@@ -60,9 +60,8 @@ const minFreeMemoryForEditor uint64 = 512 * 1024 * 1024 // 512MB
 const (
 	codeServerReadyPollInterval = time.Second
 	codeServerReadyDialTimeout  = time.Second
+	codeServerStopGrace         = 10 * time.Second
 )
-
-var codeServerStopGrace = 10 * time.Second
 
 // defaultConfig is the singleton configuration instance.
 var defaultConfig = &CodeServerConfig{
@@ -209,7 +208,7 @@ const (
 // CodeServerManager manages a code-server process for editor tunneling.
 type CodeServerManager struct {
 	cmd       *exec.Cmd
-	waitDone  chan struct{}
+	waitDone  <-chan struct{}
 	port      int
 	username  string
 	groupname string
@@ -222,6 +221,9 @@ type CodeServerManager struct {
 	lastError string
 	startOnce sync.Once
 	startErr  error
+
+	stopGrace   time.Duration
+	terminateFn func(*os.Process) error // a seam: a test needs signalling to fail
 }
 
 func NewCodeServerManager(parentCtx context.Context, username, groupname string) (*CodeServerManager, error) {
@@ -239,6 +241,9 @@ func NewCodeServerManager(parentCtx context.Context, username, groupname string)
 		ctx:       ctx,
 		cancel:    cancel,
 		status:    CodeServerStatusIdle,
+
+		stopGrace:   codeServerStopGrace,
+		terminateFn: terminateProcess,
 	}, nil
 }
 
@@ -376,15 +381,13 @@ func (m *CodeServerManager) doStart() error {
 	return nil
 }
 
-// A seam: a test needs signalling to fail without picking a pid it does not own.
-var terminateProcessFn = terminateProcess
-
-// reapProcess runs the only cmd.Wait this process gets—a second one would race it
-// over cmd.ProcessState—and closes done, so every waiter sees the reap, not just one.
-func reapProcess(cmd *exec.Cmd) chan struct{} {
+// reapProcess owns the only cmd.Wait: a second one would race it over cmd.ProcessState.
+func reapProcess(cmd *exec.Cmd) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
-		_ = cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+			log.Debug().Err(err).Msg("code-server process exited.")
+		}
 		close(done)
 	}()
 	return done
@@ -396,6 +399,7 @@ func reapProcess(cmd *exec.Cmd) chan struct{} {
 func (m *CodeServerManager) Stop() error {
 	m.mu.Lock()
 	cmd, waitDone, port := m.cmd, m.waitDone, m.port
+	grace, terminate := m.stopGrace, m.terminateFn
 	m.cmd = nil
 	m.waitDone = nil
 	m.started = false
@@ -419,11 +423,11 @@ func (m *CodeServerManager) Stop() error {
 	log.Info().Msgf("Stopping code-server on port %d...", port)
 
 	// A failed signal still leaves a child to collect, so the wait below runs anyway.
-	if err := terminateProcessFn(cmd.Process); err != nil {
+	if err := terminate(cmd.Process); err != nil {
 		log.Warn().Err(err).Msg("Failed to signal code-server, waiting for it anyway.")
 	}
 
-	timer := time.NewTimer(codeServerStopGrace)
+	timer := time.NewTimer(grace)
 	defer timer.Stop()
 
 	select {
@@ -433,11 +437,10 @@ func (m *CodeServerManager) Stop() error {
 		select {
 		case <-waitDone:
 		default:
-			// Not terminateProcessFn: it would repeat the SIGTERM just ignored.
-			timedOut := fmt.Errorf("code-server did not exit within %v", codeServerStopGrace)
+			// Not terminate: it would repeat the SIGTERM just ignored.
 			killErr := killProcess(cmd.Process)
-			log.Warn().Err(killErr).Msgf("%v, sending SIGKILL.", timedOut)
-			return timedOut
+			log.Warn().Err(killErr).Dur("grace", grace).Msg("code-server did not exit in time, sending SIGKILL.")
+			return fmt.Errorf("code-server did not exit within %v", grace)
 		}
 	}
 

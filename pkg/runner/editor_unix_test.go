@@ -53,13 +53,55 @@ func newManagerWithProcess(t *testing.T) (*CodeServerManager, *exec.Cmd) {
 	killGroupOnCleanup(t, cmd, waitDone)
 
 	m := &CodeServerManager{
-		cmd:      cmd,
-		waitDone: waitDone,
-		ctx:      ctx,
-		cancel:   cancel,
-		status:   CodeServerStatusStarting,
+		cmd:         cmd,
+		waitDone:    waitDone,
+		ctx:         ctx,
+		cancel:      cancel,
+		status:      CodeServerStatusStarting,
+		stopGrace:   codeServerStopGrace,
+		terminateFn: terminateProcess,
 	}
 	return m, cmd
+}
+
+// newManagerWithScript reads the "ready" line the script prints: a signal arriving
+// before the script installs its trap would kill it by the default disposition.
+func newManagerWithScript(t *testing.T, script string) (*CodeServerManager, *exec.Cmd, *bufio.Reader) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// os.Pipe, not cmd.StdoutPipe: the read end stays ours, so reading does not
+	// race the cmd.Wait() the reaper runs concurrently.
+	pr, pw, err := os.Pipe()
+	require.NoError(t, err)
+	cmd.Stdout = pw
+	t.Cleanup(func() { _ = pr.Close() })
+
+	require.NoError(t, cmd.Start())
+	require.NoError(t, pw.Close())
+
+	waitDone := reapProcess(cmd)
+	killGroupOnCleanup(t, cmd, waitDone)
+
+	child := bufio.NewReader(pr)
+	line, err := child.ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "ready\n", line)
+
+	m := &CodeServerManager{
+		cmd:         cmd,
+		waitDone:    waitDone,
+		ctx:         ctx,
+		cancel:      cancel,
+		status:      CodeServerStatusStarting,
+		stopGrace:   codeServerStopGrace,
+		terminateFn: terminateProcess,
+	}
+	return m, cmd, child
 }
 
 // TestStopBeforeStarted covers doStart's waitForReady failure path: it calls
@@ -109,45 +151,15 @@ func TestStopClearsRunningState(t *testing.T) {
 // TestStopKeepsStatusAnswerable pins Stop inside its wait with a child that
 // ignores SIGTERM and reports it, so no sleep or deadline is needed.
 func TestStopKeepsStatusAnswerable(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-
-	cmd := exec.CommandContext(ctx, "sh", "-c", `trap 'echo signalled' TERM; echo ready; while :; do sleep 1; done`)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	// os.Pipe, not cmd.StdoutPipe: the read end stays ours, so reading does not
-	// race the cmd.Wait() the reaper runs concurrently.
-	pr, pw, err := os.Pipe()
-	require.NoError(t, err)
-	cmd.Stdout = pw
-	t.Cleanup(func() { _ = pr.Close() })
-
-	require.NoError(t, cmd.Start())
-	require.NoError(t, pw.Close())
-
-	waitDone := reapProcess(cmd)
-	killGroupOnCleanup(t, cmd, waitDone)
-
-	m := &CodeServerManager{
-		cmd:      cmd,
-		waitDone: waitDone,
-		ctx:      ctx,
-		cancel:   cancel,
-		status:   CodeServerStatusStarting,
-	}
-
-	// The child announces itself once the trap is installed: an earlier SIGTERM
-	// would kill it by default and the read below would see EOF.
-	child := bufio.NewReader(pr)
-	line, err := child.ReadString('\n')
-	require.NoError(t, err)
-	require.Equal(t, "ready\n", line)
+	m, cmd, child := newManagerWithScript(t,
+		`trap 'echo signalled' TERM; echo ready; while :; do sleep 1; done`)
 
 	stopped := make(chan error, 1)
 	go func() {
 		stopped <- m.Stop()
 	}()
 
-	line, err = child.ReadString('\n')
+	line, err := child.ReadString('\n')
 	require.NoError(t, err)
 	require.Equal(t, "signalled\n", line, "the child should have reported the SIGTERM Stop sent")
 
@@ -165,13 +177,11 @@ func TestStopKeepsStatusAnswerable(t *testing.T) {
 func TestStopWaitsAfterSignalFailure(t *testing.T) {
 	m, cmd := newManagerWithProcess(t)
 
-	orig := terminateProcessFn
 	// Kills the child from inside the failing call, so the reap cannot land first.
-	terminateProcessFn = func(p *os.Process) error {
+	m.terminateFn = func(p *os.Process) error {
 		_ = syscall.Kill(-p.Pid, syscall.SIGKILL)
 		return syscall.ESRCH
 	}
-	t.Cleanup(func() { terminateProcessFn = orig })
 
 	require.NoError(t, m.Stop(), "a failed signal is not a failure to stop")
 	require.NotNil(t, cmd.ProcessState, "Stop returned before the process was reaped")
@@ -200,41 +210,10 @@ func TestWaitForReadySurvivesConcurrentStop(t *testing.T) {
 // TestStopKillsGroupIgnoringSIGTERM: on timeout the whole group must die.
 // exec.CommandContext's own kill reaches only the leader.
 func TestStopKillsGroupIgnoringSIGTERM(t *testing.T) {
-	origGrace := codeServerStopGrace
-	codeServerStopGrace = 200 * time.Millisecond
-	t.Cleanup(func() { codeServerStopGrace = origGrace })
-
-	ctx, cancel := context.WithCancel(t.Context())
-
 	// Both shells ignore SIGTERM, so only SIGKILL at the group ends them.
-	cmd := exec.CommandContext(ctx, "sh", "-c",
+	m, _, child := newManagerWithScript(t,
 		`trap '' TERM; sh -c "trap '' TERM; while :; do sleep 1; done" & echo ready; while :; do sleep 1; done`)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	pr, pw, err := os.Pipe()
-	require.NoError(t, err)
-	cmd.Stdout = pw
-	t.Cleanup(func() { _ = pr.Close() })
-
-	require.NoError(t, cmd.Start())
-	require.NoError(t, pw.Close())
-
-	waitDone := reapProcess(cmd)
-	killGroupOnCleanup(t, cmd, waitDone)
-
-	m := &CodeServerManager{
-		cmd:      cmd,
-		waitDone: waitDone,
-		ctx:      ctx,
-		cancel:   cancel,
-		status:   CodeServerStatusStarting,
-	}
-
-	// Signalling before the trap is installed kills the child by default.
-	child := bufio.NewReader(pr)
-	line, err := child.ReadString('\n')
-	require.NoError(t, err)
-	require.Equal(t, "ready\n", line)
+	m.stopGrace = 200 * time.Millisecond
 
 	require.ErrorContains(t, m.Stop(), "did not exit within")
 
