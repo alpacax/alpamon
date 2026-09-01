@@ -238,21 +238,20 @@ func (wc *WebsocketClient) Close() {
 	)
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to write close message to websocket.")
-		return
+	} else {
+		_ = wc.Conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // the peer only answers a close frame that actually went out
+		for {
+			_, _, err = wc.Conn.NextReader()
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				break
+			}
+			if err != nil {
+				break
+			}
+		}
 	}
 
-	_ = wc.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	for {
-		_, _, err = wc.Conn.NextReader()
-		if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-			break
-		}
-		if err != nil {
-			break
-		}
-	}
-
-	err = wc.Conn.Close()
+	err = wc.Conn.Close() // a broken connection must not leak its fd across reconnects
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to close websocket connection.")
 	}

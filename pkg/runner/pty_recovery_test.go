@@ -25,8 +25,14 @@ import (
 // trackedConn fails writes on demand, so a test can play out a broken connection without breaking a real one.
 type trackedConn struct {
 	net.Conn
-	failWrites atomic.Bool
-	closed     atomic.Bool
+	failWrites    atomic.Bool
+	closed        atomic.Bool
+	readDeadlines atomic.Int32
+}
+
+func (c *trackedConn) SetReadDeadline(t time.Time) error {
+	c.readDeadlines.Add(1)
+	return c.Conn.SetReadDeadline(t)
 }
 
 func (c *trackedConn) Write(b []byte) (int, error) {
