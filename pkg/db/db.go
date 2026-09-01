@@ -29,19 +29,20 @@ func InitDB() *ent.Client {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to open db file: %v\n", err)
 		os.Exit(1)
 	}
+	_ = dbFile.Close() // The migration and the ent client open the path themselves.
 
 	sql.Register("sqlite3", &sqlite.Driver{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	err = RunMigration(dbFile.Name(), ctx)
+	err = RunMigration(fileName, ctx)
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to migrate db: %v.", err)
 		os.Exit(1)
 	}
 
-	dbManager := NewDBClientManager(dbFile.Name())
+	dbManager := NewDBClientManager(fileName)
 	client, err := dbManager.GetClient()
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to get db client: %v.", err)
