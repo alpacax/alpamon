@@ -429,11 +429,10 @@ func (m *CodeServerManager) Stop() error {
 		case <-waitDone:
 		default:
 			// Not terminateProcessFn: it would repeat the SIGTERM just ignored.
-			if err := killProcess(cmd.Process); err != nil {
-				log.Warn().Err(err).Msg("Failed to kill code-server after timeout.")
-			}
-			log.Warn().Msg("code-server killed after timeout.")
-			return fmt.Errorf("code-server did not exit within %v", codeServerStopGrace)
+			timedOut := fmt.Errorf("code-server did not exit within %v", codeServerStopGrace)
+			killErr := killProcess(cmd.Process)
+			log.Warn().Err(killErr).Msgf("%v, sending SIGKILL.", timedOut)
+			return timedOut
 		}
 	}
 
