@@ -61,12 +61,7 @@ func InitTestDB(path string) *ent.Client {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to open test db file: %v\n", err)
 		os.Exit(1)
 	}
-	// We only needed OpenFile to create-on-absence; the filename (and
-	// the sqlite driver, which opens its own handle) is what the
-	// migration and ent client consume. Keeping this handle open would
-	// prevent the test's TearDownSuite from os.Remove'ing the file on
-	// Windows, where open handles block deletion.
-	_ = dbFile.Close()
+	_ = dbFile.Close() // On Windows an open handle blocks TearDownSuite's os.Remove.
 
 	sql.Register("sqlite3", &sqlite.Driver{})
 
