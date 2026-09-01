@@ -57,6 +57,11 @@ type CodeServerConfig struct {
 // Minimum free memory required to start code-server.
 const minFreeMemoryForEditor uint64 = 512 * 1024 * 1024 // 512MB
 
+const (
+	codeServerReadyPollInterval = time.Second
+	codeServerReadyDialTimeout  = time.Second
+)
+
 var codeServerStopGrace = 10 * time.Second
 
 // defaultConfig is the singleton configuration instance.
@@ -459,10 +464,14 @@ func (m *CodeServerManager) IsRunning() bool {
 func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 	cfg := GetCodeServerConfig()
 	addr := net.JoinHostPort(loopbackHost, strconv.Itoa(m.port))
-	deadline := time.After(cfg.StartupTimeout)
+	deadline := time.NewTimer(cfg.StartupTimeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(codeServerReadyPollInterval)
+	defer ticker.Stop()
 
 	for {
-		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		conn, err := net.DialTimeout("tcp", addr, codeServerReadyDialTimeout)
 		if err == nil {
 			_ = conn.Close()
 			return nil
@@ -471,9 +480,9 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 		select {
 		case <-waitDone:
 			return fmt.Errorf("code-server process exited unexpectedly")
-		case <-deadline:
+		case <-deadline.C:
 			return fmt.Errorf("code-server not ready after %v", cfg.StartupTimeout)
-		case <-time.After(time.Second):
+		case <-ticker.C:
 		}
 	}
 }
