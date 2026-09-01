@@ -471,6 +471,13 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 	defer ticker.Stop()
 
 	for {
+		// Before the dial: a dead code-server's port may already answer for someone else.
+		select {
+		case <-waitDone:
+			return fmt.Errorf("code-server process exited unexpectedly")
+		default:
+		}
+
 		conn, err := net.DialTimeout("tcp", addr, codeServerReadyDialTimeout)
 		if err == nil {
 			_ = conn.Close()
@@ -479,7 +486,7 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 
 		select {
 		case <-waitDone:
-			return fmt.Errorf("code-server process exited unexpectedly")
+			// The loop head reports it.
 		case <-deadline.C:
 			return fmt.Errorf("code-server not ready after %v", cfg.StartupTimeout)
 		case <-ticker.C:
