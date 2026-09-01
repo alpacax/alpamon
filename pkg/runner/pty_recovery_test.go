@@ -22,6 +22,25 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// trackedConn fails writes on demand, so a test can play out a broken connection without breaking a real one.
+type trackedConn struct {
+	net.Conn
+	failWrites atomic.Bool
+	closed     atomic.Bool
+}
+
+func (c *trackedConn) Write(b []byte) (int, error) {
+	if c.failWrites.Load() {
+		return 0, errors.New("simulated write failure")
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *trackedConn) Close() error {
+	c.closed.Store(true)
+	return c.Conn.Close()
+}
+
 // wshServer is a local Websh test double: a WebSocket endpoint plus the pty-channels recovery API, with server-side handles to kill connections.
 type wshServer struct {
 	ts            *httptest.Server
@@ -221,24 +240,6 @@ func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 		n := runtime.Stack(buf, true)
 		t.Fatalf("recovery goroutines did not exit after reconnect storm:\n%s", buf[:n])
 	}
-}
-
-type trackedConn struct {
-	net.Conn
-	failWrites atomic.Bool
-	closed     atomic.Bool
-}
-
-func (c *trackedConn) Write(b []byte) (int, error) {
-	if c.failWrites.Load() {
-		return 0, errors.New("simulated write failure")
-	}
-	return c.Conn.Write(b)
-}
-
-func (c *trackedConn) Close() error {
-	c.closed.Store(true)
-	return c.Conn.Close()
 }
 
 func TestPtyClose_ClosesConnAfterWriteControlFailure(t *testing.T) {
