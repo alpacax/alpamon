@@ -351,9 +351,7 @@ func (m *CodeServerManager) doStart() error {
 
 	// Wait for code-server to be ready (no lock needed)
 	if err := m.waitForReady(); err != nil {
-		m.mu.Lock()
-		_ = m.stopProcess()
-		m.mu.Unlock()
+		_ = m.Stop()
 		return fmt.Errorf("code-server failed to start: %w", err)
 	}
 
@@ -367,44 +365,43 @@ func (m *CodeServerManager) doStart() error {
 	return nil
 }
 
-// Stop gracefully terminates the code-server process.
+// Stop gracefully terminates the code-server process, and reaps it even when
+// m.started is false—the doStart failure path. It takes m.mu itself, so a
+// caller holding it deadlocks; the wait runs unlocked so Status() still answers.
 func (m *CodeServerManager) Stop() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	cmd, port := m.cmd, m.port
+	m.cmd = nil
+	m.started = false
+	m.mu.Unlock()
 
-	return m.stopProcess()
-}
+	if m.cancel != nil {
+		defer m.cancel()
+	}
 
-// stopProcess stops the code-server process
-func (m *CodeServerManager) stopProcess() error {
-	if !m.started || m.cmd == nil || m.cmd.Process == nil {
+	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
 
-	log.Info().Msgf("Stopping code-server on port %d...", m.port)
+	log.Info().Msgf("Stopping code-server on port %d...", port)
 
-	if err := terminateProcess(m.cmd.Process); err != nil {
+	if err := terminateProcess(cmd.Process); err != nil {
 		return fmt.Errorf("failed to stop code-server: %w", err)
 	}
 
 	done := make(chan error, 1)
 	go func() {
-		done <- m.cmd.Wait()
+		done <- cmd.Wait()
 	}()
 
 	select {
 	case <-done:
 		log.Info().Msg("code-server stopped.")
 	case <-time.After(10 * time.Second):
-		_ = terminateProcess(m.cmd.Process)
+		_ = terminateProcess(cmd.Process)
 		log.Warn().Msg("code-server killed after timeout.")
 	}
 
-	if m.cancel != nil {
-		m.cancel()
-	}
-
-	m.started = false
 	return nil
 }
 
