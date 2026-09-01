@@ -23,6 +23,7 @@ func InitDB() *ent.Client {
 		dbPath, _ = filepath.Abs(dbFileName)
 	}
 
+	// O_CREATE at 0750 is the point: the sqlite driver would create the file at 0644.
 	dbFile, err := os.OpenFile(dbPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0750)
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to open db file: %v.", err)
