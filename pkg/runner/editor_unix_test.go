@@ -16,6 +16,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// killGroupOnCleanup kills the child's group unless the reaper already closed
+// done: a reaped pid is free for reuse, so the group may no longer be ours.
+func killGroupOnCleanup(t *testing.T, cmd *exec.Cmd, done <-chan struct{}) {
+	t.Helper()
+
+	pgid := cmd.Process.Pid
+	t.Cleanup(func() {
+		select {
+		case <-done:
+			return
+		default:
+		}
+
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("process group %d outlived the test", pgid)
+		}
+	})
+}
+
 // newManagerWithProcess puts the child in its own process group, so
 // terminateProcess signals it and not the test binary.
 func newManagerWithProcess(t *testing.T) (*CodeServerManager, *exec.Cmd) {
@@ -28,13 +50,7 @@ func newManagerWithProcess(t *testing.T) (*CodeServerManager, *exec.Cmd) {
 	require.NoError(t, cmd.Start())
 
 	waitDone := reapProcess(cmd)
-	t.Cleanup(func() {
-		select {
-		case <-waitDone:
-		default:
-			_ = terminateProcess(cmd.Process)
-		}
-	})
+	killGroupOnCleanup(t, cmd, waitDone)
 
 	m := &CodeServerManager{
 		cmd:      cmd,
@@ -107,13 +123,13 @@ func TestStopKeepsStatusAnswerable(t *testing.T) {
 
 	require.NoError(t, cmd.Start())
 	require.NoError(t, pw.Close())
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	})
+
+	waitDone := reapProcess(cmd)
+	killGroupOnCleanup(t, cmd, waitDone)
 
 	m := &CodeServerManager{
 		cmd:      cmd,
-		waitDone: reapProcess(cmd),
+		waitDone: waitDone,
 		ctx:      ctx,
 		cancel:   cancel,
 		status:   CodeServerStatusStarting,
@@ -203,14 +219,12 @@ func TestStopKillsGroupIgnoringSIGTERM(t *testing.T) {
 	require.NoError(t, cmd.Start())
 	require.NoError(t, pw.Close())
 
-	pgid := cmd.Process.Pid
-	t.Cleanup(func() {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	})
+	waitDone := reapProcess(cmd)
+	killGroupOnCleanup(t, cmd, waitDone)
 
 	m := &CodeServerManager{
 		cmd:      cmd,
-		waitDone: reapProcess(cmd),
+		waitDone: waitDone,
 		ctx:      ctx,
 		cancel:   cancel,
 		status:   CodeServerStatusStarting,
