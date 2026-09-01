@@ -122,10 +122,6 @@ jobs:
             runner: ubuntu-24.04-arm
 
     steps:
-      - name: TEMPORARY - fail one matrix leg to prove the aggregate reports red
-        if: matrix.distro == 'ubuntu-24.04'
-        run: exit 1
-
       - name: Install dependencies (Debian/Ubuntu)
         if: matrix.pkg_manager == 'apt-get'
         run: |
