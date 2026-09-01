@@ -418,18 +418,26 @@ func (m *CodeServerManager) Stop() error {
 		log.Warn().Err(err).Msg("Failed to signal code-server, waiting for it anyway.")
 	}
 
+	timer := time.NewTimer(codeServerStopGrace)
+	defer timer.Stop()
+
 	select {
 	case <-waitDone:
-		log.Info().Msg("code-server stopped.")
-	case <-time.After(codeServerStopGrace):
-		// Not terminateProcessFn: it would repeat the SIGTERM just ignored.
-		if err := killProcess(cmd.Process); err != nil {
-			log.Warn().Err(err).Msg("Failed to kill code-server after timeout.")
+	case <-timer.C:
+		// select picks at random when both are ready, so give the reap another look.
+		select {
+		case <-waitDone:
+		default:
+			// Not terminateProcessFn: it would repeat the SIGTERM just ignored.
+			if err := killProcess(cmd.Process); err != nil {
+				log.Warn().Err(err).Msg("Failed to kill code-server after timeout.")
+			}
+			log.Warn().Msg("code-server killed after timeout.")
+			return fmt.Errorf("code-server did not exit within %v", codeServerStopGrace)
 		}
-		log.Warn().Msg("code-server killed after timeout.")
-		return fmt.Errorf("code-server did not exit within %v", codeServerStopGrace)
 	}
 
+	log.Info().Msg("code-server stopped.")
 	return nil
 }
 
