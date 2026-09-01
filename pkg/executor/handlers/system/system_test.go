@@ -1412,3 +1412,88 @@ func TestSystemHandler_Upgrade_ZypperRefreshFailureCarriesTheHint(t *testing.T) 
 	require.Equal(t, 6, exitCode)
 	assert.Contains(t, output, "SUSEConnect --status")
 }
+
+// setVersion pins the build-time injected agent version for one test.
+func setVersion(t *testing.T, v string) {
+	t.Helper()
+	original := version.Version
+	version.Version = v
+	t.Cleanup(func() { version.Version = original })
+}
+
+// TestSystemHandler_Upgrade_TagPrefixIsNotAnUpgrade pins the normalization of
+// the two version sources. goreleaser injects version.Version without the
+// leading "v" while the GitHub release tag keeps it, so a released agent that
+// is already current must still recognize itself as up-to-date. Without the
+// normalization every released build looks outdated, and on darwin/windows
+// that re-downloads and reinstalls an identical binary and restarts the agent.
+func TestSystemHandler_Upgrade_TagPrefixIsNotAnUpgrade(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	setVersion(t, "2.5.0") // as injected by goreleaser's {{.Version}}
+
+	mockVersions := &MockVersionResolver{
+		LatestVersion: "v2.5.0", // as returned by the GitHub releases API
+		PamVersion:    "",
+	}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+
+	var selfUpdateCalled bool
+	handler.selfUpdateFn = func(_ context.Context, _ string, _ updater.Options) error {
+		selfUpdateCalled = true
+		return nil
+	}
+
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("darwin")
+	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+	setPackageManagerAndID(t, utils.PkgBrew, "")
+
+	exitCode, output, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "up-to-date")
+	assert.False(t, selfUpdateCalled, "an already-current agent must not reinstall itself")
+	assert.False(t, mockWS.RestartCalled, "an already-current agent must not restart")
+}
+
+// TestSystemHandler_Upgrade_PamIsNotComparedToAlpamonRelease pins that the
+// installed alpamon-pam version is never compared against alpamon's own release
+// tag: the two are independent version streams. alpamon-pam is handed to the
+// package manager whenever it is installed, and alpamon joins the transaction
+// only when it is genuinely behind.
+func TestSystemHandler_Upgrade_PamIsNotComparedToAlpamonRelease(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	setVersion(t, "2.5.0")
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v2.5.0", PamVersion: "1.1.5"}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+
+	originalPlatformLike := utils.PlatformLike
+	utils.SetPlatformLike("debian")
+	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+	setPackageManagerAndID(t, utils.PkgApt, "")
+
+	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+
+	shell := findExecutedShell(mockExec)
+	require.NotNil(t, shell, "an installed alpamon-pam must reach the package manager")
+	require.Len(t, shell.Args, 2)
+	assert.Contains(t, shell.Args[1], "--only-upgrade alpamon-pam -y",
+		"only alpamon-pam is behind; alpamon itself is already current")
+	assert.True(t, mockVersions.InvalidatePamCalled, "the cached pam version must be refreshed after the upgrade")
+}
