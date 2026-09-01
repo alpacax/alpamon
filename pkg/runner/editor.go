@@ -57,6 +57,8 @@ type CodeServerConfig struct {
 // Minimum free memory required to start code-server.
 const minFreeMemoryForEditor uint64 = 512 * 1024 * 1024 // 512MB
 
+const codeServerStopGrace = 10 * time.Second
+
 // defaultConfig is the singleton configuration instance.
 var defaultConfig = &CodeServerConfig{
 	// Timeouts
@@ -202,6 +204,7 @@ const (
 // CodeServerManager manages a code-server process for editor tunneling.
 type CodeServerManager struct {
 	cmd       *exec.Cmd
+	waitDone  chan struct{}
 	port      int
 	username  string
 	groupname string
@@ -345,12 +348,15 @@ func (m *CodeServerManager) doStart() error {
 		return err
 	}
 
+	waitDone := reapProcess(cmd)
+
 	m.mu.Lock()
 	m.cmd = cmd
+	m.waitDone = waitDone
 	m.mu.Unlock()
 
 	// Wait for code-server to be ready (no lock needed)
-	if err := m.waitForReady(); err != nil {
+	if err := m.waitForReady(waitDone); err != nil {
 		_ = m.Stop()
 		return fmt.Errorf("code-server failed to start: %w", err)
 	}
@@ -365,13 +371,28 @@ func (m *CodeServerManager) doStart() error {
 	return nil
 }
 
-// Stop gracefully terminates the code-server process, and reaps it even when
-// m.started is false—the doStart failure path. It takes m.mu itself, so a
-// caller holding it deadlocks; the wait runs unlocked so Status() still answers.
+// A seam: a test needs signalling to fail without picking a pid it does not own.
+var terminateProcessFn = terminateProcess
+
+// reapProcess runs the only cmd.Wait this process gets—a second one would race it
+// over cmd.ProcessState—and closes done, so every waiter sees the reap, not just one.
+func reapProcess(cmd *exec.Cmd) chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	return done
+}
+
+// Stop terminates code-server and waits for the reap, even before m.started is
+// set—the doStart failure path. It takes m.mu itself, so a caller holding it
+// deadlocks; the wait runs unlocked so Status() still answers.
 func (m *CodeServerManager) Stop() error {
 	m.mu.Lock()
-	cmd, port := m.cmd, m.port
+	cmd, waitDone, port := m.cmd, m.waitDone, m.port
 	m.cmd = nil
+	m.waitDone = nil
 	m.started = false
 	m.mu.Unlock()
 
@@ -383,23 +404,27 @@ func (m *CodeServerManager) Stop() error {
 		return nil
 	}
 
-	log.Info().Msgf("Stopping code-server on port %d...", port)
-
-	if err := terminateProcess(cmd.Process); err != nil {
-		return fmt.Errorf("failed to stop code-server: %w", err)
+	// A reaped pid is free for reuse: once the reaper is done, nothing here is ours.
+	select {
+	case <-waitDone:
+		return nil
+	default:
 	}
 
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
+	log.Info().Msgf("Stopping code-server on port %d...", port)
+
+	// A failed signal still leaves a child to collect, so the wait below runs anyway.
+	if err := terminateProcessFn(cmd.Process); err != nil {
+		log.Warn().Err(err).Msg("Failed to signal code-server, waiting for it anyway.")
+	}
 
 	select {
-	case <-done:
+	case <-waitDone:
 		log.Info().Msg("code-server stopped.")
-	case <-time.After(10 * time.Second):
-		_ = terminateProcess(cmd.Process)
+	case <-time.After(codeServerStopGrace):
+		_ = terminateProcessFn(cmd.Process)
 		log.Warn().Msg("code-server killed after timeout.")
+		return fmt.Errorf("code-server did not exit within %v", codeServerStopGrace)
 	}
 
 	return nil
@@ -419,27 +444,28 @@ func (m *CodeServerManager) IsRunning() bool {
 	return m.started
 }
 
-// waitForReady waits for code-server to start listening on its port.
-func (m *CodeServerManager) waitForReady() error {
+// waitForReady waits for code-server to listen on its port. It watches the reaper
+// channel, not m.cmd, which a concurrent Stop may have already cleared.
+func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 	cfg := GetCodeServerConfig()
 	addr := net.JoinHostPort(loopbackHost, strconv.Itoa(m.port))
-	deadline := time.Now().Add(cfg.StartupTimeout)
+	deadline := time.After(cfg.StartupTimeout)
 
-	for time.Now().Before(deadline) {
-		if m.cmd.ProcessState != nil && m.cmd.ProcessState.Exited() {
-			return fmt.Errorf("code-server process exited unexpectedly")
-		}
-
+	for {
 		conn, err := net.DialTimeout("tcp", addr, time.Second)
 		if err == nil {
 			_ = conn.Close()
 			return nil
 		}
 
-		time.Sleep(time.Second)
+		select {
+		case <-waitDone:
+			return fmt.Errorf("code-server process exited unexpectedly")
+		case <-deadline:
+			return fmt.Errorf("code-server not ready after %v", cfg.StartupTimeout)
+		case <-time.After(time.Second):
+		}
 	}
-
-	return fmt.Errorf("code-server not ready after %v", cfg.StartupTimeout)
 }
 
 func isCodeServerInstalled() bool {

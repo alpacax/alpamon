@@ -24,15 +24,22 @@ func newManagerWithProcess(t *testing.T) (*CodeServerManager, *exec.Cmd) {
 	cmd := exec.CommandContext(ctx, "sleep", "300")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	require.NoError(t, cmd.Start())
+
+	waitDone := reapProcess(cmd)
 	t.Cleanup(func() {
-		_ = terminateProcess(cmd.Process)
+		select {
+		case <-waitDone:
+		default:
+			_ = terminateProcess(cmd.Process)
+		}
 	})
 
 	m := &CodeServerManager{
-		cmd:    cmd,
-		ctx:    ctx,
-		cancel: cancel,
-		status: CodeServerStatusStarting,
+		cmd:      cmd,
+		waitDone: waitDone,
+		ctx:      ctx,
+		cancel:   cancel,
+		status:   CodeServerStatusStarting,
 	}
 	return m, cmd
 }
@@ -90,7 +97,7 @@ func TestStopKeepsStatusAnswerable(t *testing.T) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// os.Pipe, not cmd.StdoutPipe: the read end stays ours, so reading does not
-	// race the cmd.Wait() Stop runs concurrently.
+	// race the cmd.Wait() the reaper runs concurrently.
 	pr, pw, err := os.Pipe()
 	require.NoError(t, err)
 	cmd.Stdout = pw
@@ -103,10 +110,11 @@ func TestStopKeepsStatusAnswerable(t *testing.T) {
 	})
 
 	m := &CodeServerManager{
-		cmd:    cmd,
-		ctx:    ctx,
-		cancel: cancel,
-		status: CodeServerStatusStarting,
+		cmd:      cmd,
+		waitDone: reapProcess(cmd),
+		ctx:      ctx,
+		cancel:   cancel,
+		status:   CodeServerStatusStarting,
 	}
 
 	// The child announces itself once the trap is installed: an earlier SIGTERM
@@ -133,4 +141,40 @@ func TestStopKeepsStatusAnswerable(t *testing.T) {
 
 	require.NoError(t, syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
 	require.NoError(t, <-stopped)
+}
+
+// TestStopWaitsAfterSignalFailure: a signal that does not land still leaves a child to collect.
+func TestStopWaitsAfterSignalFailure(t *testing.T) {
+	m, cmd := newManagerWithProcess(t)
+
+	orig := terminateProcessFn
+	// Kills the child from inside the failing call, so the reap cannot land first.
+	terminateProcessFn = func(p *os.Process) error {
+		_ = syscall.Kill(-p.Pid, syscall.SIGKILL)
+		return syscall.ESRCH
+	}
+	t.Cleanup(func() { terminateProcessFn = orig })
+
+	require.NoError(t, m.Stop(), "a failed signal is not a failure to stop")
+	require.NotNil(t, cmd.ProcessState, "Stop returned before the process was reaped")
+}
+
+// TestWaitForReadySurvivesConcurrentStop covers TunnelClient.Close mid-startup, where Stop clears m.cmd.
+func TestWaitForReadySurvivesConcurrentStop(t *testing.T) {
+	m, _ := newManagerWithProcess(t)
+
+	// Nothing listens on it, so every dial fails and the loop keeps running.
+	port, err := findAvailablePort()
+	require.NoError(t, err)
+	m.port = port
+
+	// Read before Stop nils the field, not from inside the goroutine.
+	waitDone := m.waitDone
+	ready := make(chan error, 1)
+	go func() {
+		ready <- m.waitForReady(waitDone)
+	}()
+
+	require.NoError(t, m.Stop())
+	assert.ErrorContains(t, <-ready, "exited unexpectedly")
 }
