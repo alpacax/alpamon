@@ -5,10 +5,12 @@ package runner
 import (
 	"bufio"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -177,4 +179,60 @@ func TestWaitForReadySurvivesConcurrentStop(t *testing.T) {
 
 	require.NoError(t, m.Stop())
 	assert.ErrorContains(t, <-ready, "exited unexpectedly")
+}
+
+// TestStopKillsGroupIgnoringSIGTERM: on timeout the whole group must die.
+// exec.CommandContext's own kill reaches only the leader.
+func TestStopKillsGroupIgnoringSIGTERM(t *testing.T) {
+	origGrace := codeServerStopGrace
+	codeServerStopGrace = 200 * time.Millisecond
+	t.Cleanup(func() { codeServerStopGrace = origGrace })
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	// Both shells ignore SIGTERM, so only SIGKILL at the group ends them.
+	cmd := exec.CommandContext(ctx, "sh", "-c",
+		`trap '' TERM; sh -c "trap '' TERM; while :; do sleep 1; done" & echo ready; while :; do sleep 1; done`)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	pr, pw, err := os.Pipe()
+	require.NoError(t, err)
+	cmd.Stdout = pw
+	t.Cleanup(func() { _ = pr.Close() })
+
+	require.NoError(t, cmd.Start())
+	require.NoError(t, pw.Close())
+
+	pgid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	})
+
+	m := &CodeServerManager{
+		cmd:      cmd,
+		waitDone: reapProcess(cmd),
+		ctx:      ctx,
+		cancel:   cancel,
+		status:   CodeServerStatusStarting,
+	}
+
+	// Signalling before the trap is installed kills the child by default.
+	line, err := bufio.NewReader(pr).ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "ready\n", line)
+
+	require.ErrorContains(t, m.Stop(), "did not exit within")
+
+	// Signal 0 only checks for members, and ESRCH means the group is empty.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		err := syscall.Kill(-pgid, syscall.Signal(0))
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Stop gave up on the process group but left it running")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

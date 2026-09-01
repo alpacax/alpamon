@@ -57,7 +57,7 @@ type CodeServerConfig struct {
 // Minimum free memory required to start code-server.
 const minFreeMemoryForEditor uint64 = 512 * 1024 * 1024 // 512MB
 
-const codeServerStopGrace = 10 * time.Second
+var codeServerStopGrace = 10 * time.Second
 
 // defaultConfig is the singleton configuration instance.
 var defaultConfig = &CodeServerConfig{
@@ -422,7 +422,10 @@ func (m *CodeServerManager) Stop() error {
 	case <-waitDone:
 		log.Info().Msg("code-server stopped.")
 	case <-time.After(codeServerStopGrace):
-		_ = terminateProcessFn(cmd.Process)
+		// Not terminateProcessFn: it would repeat the SIGTERM just ignored.
+		if err := killProcess(cmd.Process); err != nil {
+			log.Warn().Err(err).Msg("Failed to kill code-server after timeout.")
+		}
 		log.Warn().Msg("code-server killed after timeout.")
 		return fmt.Errorf("code-server did not exit within %v", codeServerStopGrace)
 	}

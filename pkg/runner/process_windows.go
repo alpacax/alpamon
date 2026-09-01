@@ -7,3 +7,8 @@ import "os"
 func terminateProcess(p *os.Process) error {
 	return p.Kill()
 }
+
+// killProcess matches terminateProcess: Windows has no SIGTERM to ignore.
+func killProcess(p *os.Process) error {
+	return p.Kill()
+}
