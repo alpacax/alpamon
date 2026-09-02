@@ -58,6 +58,60 @@ func TestVerifyCommandSignature_InternalBypass(t *testing.T) {
 	assert.NoError(t, err, "internal commands should bypass verification")
 }
 
+// Only "internal" bypasses signature verification. File commands carry a
+// signature like system commands do, and the file-hash check is independent of
+// it: neither one stands in for the other.
+func TestVerifyCommandSignature_FileShellIsNotBypassed(t *testing.T) {
+	wc := &WebsocketClient{
+		signingMode: "enforce",
+		keyManager:  signing.NewKeyManager("http://localhost:9999", 3600, "", nil),
+	}
+
+	cmd := &protocol.Command{
+		ID:    "cmd-1",
+		Shell: "file",
+		Line:  "/bin/bash /opt/deploy.sh --fast",
+		Data:  `{"path":"/opt/deploy.sh","interpreter":"/bin/bash","args":["--fast"],"sha256":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+	}
+
+	err := wc.verifyCommandSignature(cmd)
+	assert.Error(t, err, "file commands must not bypass signature verification")
+	assert.Equal(t, rejectReasonUnsigned, err.Error())
+}
+
+// A signed file command passes verification on the same terms as a system one.
+// The canonical payload covers Data on this lane precisely because it is NOT
+// verified separately: the digest inside it is its own expected value, so a
+// signature omitting it would leave a rewritten payload verifying against
+// itself. See BuildCanonicalPayload.
+func TestVerifyCommandSignature_FileShellValidSignature(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	srv := newTestKeyServer(t, pub, "kid-1")
+	defer srv.Close()
+
+	wc := &WebsocketClient{
+		signingMode: "enforce",
+		serverID:    testServerID,
+		keyManager:  signing.NewKeyManager(srv.URL, 3600, "", nil),
+	}
+
+	cmd := &protocol.Command{
+		ID:         "cmd-1",
+		Shell:      "file",
+		Line:       "/bin/bash /opt/deploy.sh --fast",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-03-01T12:00:00+00:00",
+		KeyID:      "kid-1",
+		Data:       `{"path":"/opt/deploy.sh","interpreter":"/bin/bash","args":["--fast"],"sha256":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+	}
+	signCommand(t, cmd, testServerID, priv)
+
+	assert.NoError(t, wc.verifyCommandSignature(cmd))
+}
+
 func TestVerifyCommandSignature_UnsignedMonitorMode(t *testing.T) {
 	wc := &WebsocketClient{
 		signingMode: "monitor",
@@ -72,6 +126,125 @@ func TestVerifyCommandSignature_UnsignedMonitorMode(t *testing.T) {
 
 	err := wc.verifyCommandSignature(cmd)
 	assert.NoError(t, err, "monitor mode should allow unsigned commands")
+}
+
+// The file lane enforces whatever the fleet mode says, so an unsigned file
+// command is refused in monitor mode where an unsigned system command runs.
+// The pair above and below is the point: monitor still means monitor
+// everywhere else.
+func TestVerifyCommandSignature_UnsignedFileCommandIsRefusedInMonitorMode(t *testing.T) {
+	wc := &WebsocketClient{
+		signingMode: "monitor",
+		keyManager:  signing.NewKeyManager("http://localhost:9999", 3600, "", nil),
+	}
+
+	cmd := &protocol.Command{
+		ID:    "cmd-1",
+		Shell: "file",
+		Line:  "/bin/bash /opt/deploy.sh",
+		Data:  `{"path":"/opt/deploy.sh","interpreter":"/bin/bash","args":[],"sha256":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+	}
+
+	err := wc.verifyCommandSignature(cmd)
+	require.Error(t, err, "the file lane must refuse an unsigned command in monitor mode")
+	assert.Equal(t, rejectReasonUnsigned, err.Error())
+}
+
+// Monitor mode runs a system command whose signature does not verify. That is
+// what monitor means, and the file-lane test below has to differ from it or the
+// lane rule is a blanket flip to enforce rather than a lane rule.
+func TestVerifyCommandSignature_MisSignedSystemCommandStillRunsInMonitorMode(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	_, otherPriv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	srv := newTestKeyServer(t, pub, "kid-1")
+	defer srv.Close()
+
+	wc := &WebsocketClient{
+		signingMode: "monitor",
+		serverID:    testServerID,
+		keyManager:  signing.NewKeyManager(srv.URL, 3600, "", nil),
+	}
+
+	cmd := &protocol.Command{
+		ID:         "cmd-1",
+		Shell:      "system",
+		Line:       "echo hello",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-03-01T12:00:00+00:00",
+		KeyID:      "kid-1",
+	}
+	signCommand(t, cmd, testServerID, otherPriv)
+
+	assert.NoError(t, wc.verifyCommandSignature(cmd))
+}
+
+// The attack the file lane closes: an attacker in the command transport rewrites
+// Data to name a file it controls and the digest of that file. The digest then
+// verifies against itself, so the signature is the only thing that can notice —
+// and under monitor mode it would only log. Here it refuses.
+func TestVerifyCommandSignature_MisSignedFileCommandIsRefusedInMonitorMode(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	srv := newTestKeyServer(t, pub, "kid-1")
+	defer srv.Close()
+
+	wc := &WebsocketClient{
+		signingMode: "monitor",
+		serverID:    testServerID,
+		keyManager:  signing.NewKeyManager(srv.URL, 3600, "", nil),
+	}
+
+	cmd := &protocol.Command{
+		ID:         "cmd-1",
+		Shell:      "file",
+		Line:       "/bin/bash /opt/deploy.sh",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-03-01T12:00:00+00:00",
+		KeyID:      "kid-1",
+		Data:       `{"path":"/opt/deploy.sh","interpreter":"/bin/bash","args":[],"sha256":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+	}
+	signCommand(t, cmd, testServerID, priv)
+	require.NoError(t, wc.verifyCommandSignature(cmd), "the signature must verify before it is broken")
+
+	cmd.Data = `{"path":"/tmp/attacker.sh","interpreter":"/bin/bash","args":[],"sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}`
+
+	err = wc.verifyCommandSignature(cmd)
+	require.Error(t, err, "a rewritten instruction must not execute in monitor mode")
+	assert.Equal(t, rejectReasonSignatureMismatch, err.Error())
+}
+
+// The third enforcement site. A file command whose key cannot be fetched is
+// unverifiable, and unverifiable is refused on this lane rather than warned
+// about — otherwise an attacker who can reach the key endpoint downgrades the
+// lane by making it unreachable.
+func TestVerifyCommandSignature_KeyUnavailableRefusesFileCommandInMonitorMode(t *testing.T) {
+	wc := &WebsocketClient{
+		signingMode: "monitor",
+		serverID:    testServerID,
+		keyManager:  signing.NewKeyManager("http://127.0.0.1:9999", 3600, "", nil),
+	}
+
+	cmd := &protocol.Command{
+		ID:         "cmd-1",
+		Shell:      "file",
+		Line:       "/bin/bash /opt/deploy.sh",
+		User:       "root",
+		Group:      "root",
+		AnalyzedAt: "2026-03-01T12:00:00+00:00",
+		KeyID:      "kid-1",
+		Signature:  base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize)),
+		Data:       `{"path":"/opt/deploy.sh","interpreter":"/bin/bash","args":[],"sha256":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`,
+	}
+
+	err := wc.verifyCommandSignature(cmd)
+	require.Error(t, err, "an unverifiable file command must not run")
+	assert.Equal(t, rejectReasonKeyUnavailable, err.Error())
 }
 
 func TestVerifyCommandSignature_UnsignedEnforceMode(t *testing.T) {

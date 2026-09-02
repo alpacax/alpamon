@@ -22,12 +22,19 @@ var ErrSignatureMismatch = errors.New("signature verification failed")
 // json.dumps(sort_keys=True, separators=(',', ':')).
 type signingPayload struct {
 	CommandID string `json:"command_id"`
-	GroupName string `json:"groupname"`
-	Line      string `json:"line"`
-	ServerID  string `json:"server_id"`
-	Shell     string `json:"shell"`
-	Timestamp string `json:"timestamp"`
-	Username  string `json:"username"`
+	// Present only on the file lane, where `line` is a human rendering and this
+	// is the only authoritative field: a signature omitting it binds nothing,
+	// so rewriting Data on a legitimately signed command would leave the
+	// signature valid and the digest verifying against itself. A pointer so it
+	// is absent — not empty — on every other shell, keeping existing signatures
+	// byte-identical. Sorts after command_id, matching Python's sort_keys.
+	Data      *string `json:"data,omitempty"`
+	GroupName string  `json:"groupname"`
+	Line      string  `json:"line"`
+	ServerID  string  `json:"server_id"`
+	Shell     string  `json:"shell"`
+	Timestamp string  `json:"timestamp"`
+	Username  string  `json:"username"`
 }
 
 // BuildCanonicalPayload constructs the signing payload that must match
@@ -48,6 +55,10 @@ func BuildCanonicalPayload(cmd *protocol.Command, serverID string) []byte {
 		Shell:     cmd.Shell,
 		Timestamp: cmd.AnalyzedAt,
 		Username:  cmd.User,
+	}
+	if cmd.Shell == "file" {
+		data := cmd.Data
+		p.Data = &data
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

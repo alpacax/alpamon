@@ -36,10 +36,28 @@ func newRejection(reason string, err error) *rejectionError {
 	return &rejectionError{reason: reason, err: err}
 }
 
+// enforcesSignature reports whether a command that fails verification must be
+// refused rather than warned about and run.
+//
+// The fleet mode decides for every lane but one. A "file" command always
+// enforces, because there the command line is a rendering and the structured
+// payload decides what runs (ADR 0053): the signature is the only thing between
+// a rewritten instruction and a digest that then verifies against the file the
+// rewriter named. Verifying the entrypoint against an instruction nothing
+// vouches for proves the requester's own claim back to them.
+//
+// The reason the general lane runs unenforced does not reach here. That reason
+// is skew—older agents that cannot verify—and the server admits this lane only
+// for an agent version that can, so there is no such agent to break.
+func (wc *WebsocketClient) enforcesSignature(cmd *protocol.Command) bool {
+	return wc.signingMode == "enforce" || cmd.Shell == "file"
+}
+
 // verifyCommandSignature checks the Ed25519 signature on a command.
 // Internal commands bypass verification. In monitor mode, unsigned or
-// invalid signatures log a warning but allow execution. In enforce mode,
-// they return an error which prevents ACK and execution.
+// invalid signatures log a warning but allow execution. In enforce mode—and on
+// the file lane whatever the mode is, see enforcesSignature—they return an
+// error which prevents ACK and execution.
 func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 	// Internal commands bypass verification (no signature expected)
 	if cmd.Shell == "internal" {
@@ -48,9 +66,9 @@ func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 
 	// No signature: unsigned command
 	if cmd.Signature == "" {
-		if wc.signingMode == "enforce" {
+		if wc.enforcesSignature(cmd) {
 			return newRejection(rejectReasonUnsigned,
-				errors.New("missing signature in enforce mode"))
+				errors.New("missing signature on a command that requires one"))
 		}
 		log.Warn().Str("command_id", cmd.ID).Msg("Command has no signature (unsigned).")
 		return nil
@@ -67,7 +85,7 @@ func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 	}
 
 	if err != nil {
-		if wc.signingMode == "enforce" {
+		if wc.enforcesSignature(cmd) {
 			return newRejection(rejectReasonKeyUnavailable,
 				fmt.Errorf("public key unavailable: %w", err))
 		}
@@ -97,7 +115,7 @@ func (wc *WebsocketClient) verifyCommandSignature(cmd *protocol.Command) error {
 		}
 	}
 
-	if wc.signingMode == "enforce" {
+	if wc.enforcesSignature(cmd) {
 		reason := rejectReasonInvalidSignature
 		if errors.Is(err, signing.ErrSignatureMismatch) {
 			reason = rejectReasonSignatureMismatch

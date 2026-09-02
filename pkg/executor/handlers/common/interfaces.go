@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"io"
+	"os"
 	"time"
 )
 
@@ -55,6 +56,15 @@ type CommandExecutor interface {
 	// receives streamed stdout/stderr chunks. Sequencing is the caller's
 	// responsibility.
 	ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error)
+
+	// ExecFileWithStreamingHook is ExecWithStreamingHook for a digest-verified
+	// entrypoint. file is handed to the child as an inherited descriptor at
+	// VerifiedFileChildFD, and args must already name it by VerifiedFilePath()
+	// rather than by its original path, so the bytes that were hashed are the
+	// bytes that run. args is passed through literally: no environment
+	// expansion, and no shell to split words or honor operators. The caller
+	// retains ownership of file and closes it once this returns.
+	ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error)
 }
 
 // WSClient interface for WebSocket client operations

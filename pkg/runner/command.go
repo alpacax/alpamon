@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -41,6 +42,28 @@ func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, 
 		wsClient:   wsClient,
 		apiSession: apiSession,
 		dispatcher: dispatcher,
+	}
+}
+
+// newChunkCallback returns the streaming callback for this command, or nil when
+// there is no command ID to stream against.
+func (cr *CommandRunner) newChunkCallback(ctx context.Context) func(content string) {
+	if cr.command.ID == "" {
+		return nil
+	}
+
+	chunkURL := fmt.Sprintf(eventCommandChunkURL, cr.command.ID)
+	// Runner owns seq so chunks across shell operators share one series.
+	var seq int
+	return func(content string) {
+		// Advance seq before Post so it stays monotonic even if Post
+		// panics; a reused seq would collide server-side on (command, seq).
+		s := seq
+		seq++
+		scheduler.Rqueue.PostChunk(ctx, chunkURL, &protocol.CommandChunk{
+			Seq:     s,
+			Content: content,
+		}, 10)
 	}
 }
 
@@ -94,33 +117,39 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 			args.CommandID = cr.command.ID
 		}
 	case "system":
-		commandID := cr.command.ID
-		var chunkCallback func(content string)
-		if commandID != "" {
-			chunkURL := fmt.Sprintf(eventCommandChunkURL, commandID)
-			// Runner owns seq so chunks across shell operators share one series.
-			var seq int
-			chunkCallback = func(content string) {
-				// Advance seq before Post so it stays monotonic even if Post
-				// panics; a reused seq would collide server-side on (command, seq).
-				s := seq
-				seq++
-				scheduler.Rqueue.PostChunk(ctx, chunkURL, &protocol.CommandChunk{
-					Seq:     s,
-					Content: content,
-				}, 10)
-			}
-		}
 		command = common.ShellCmd.String()
 		args = &common.CommandArgs{
-			CommandID:     commandID,
+			CommandID:     cr.command.ID,
 			Command:       cr.command.Line,
 			Username:      cr.command.User,
 			Groupname:     cr.command.Group,
 			Env:           cr.command.Env,
 			AllowSh:       cr.command.AllowSh,
-			ChunkCallback: chunkCallback,
+			ChunkCallback: cr.newChunkCallback(ctx),
 		}
+	case "file":
+		// The structured payload in Data is the instruction; Line only renders
+		// it for humans. Nothing runs until the file's digest matches.
+		fileArgs, refusal := cr.prepareFileCommand(ctx)
+		if refusal != nil {
+			event := log.Warn().
+				Str("command_id", cr.command.ID).
+				Str("code", refusal.code).
+				Err(refusal.err)
+			// Only the local log learns what the file hashed to; the result
+			// string the requester reads must not carry it.
+			var mismatch *hashMismatchError
+			if errors.As(refusal.err, &mismatch) {
+				event = event.Str("observed_digest", mismatch.Observed())
+			}
+			event.Msg("Refused file command")
+			exitCode = 1
+			result = refusal.String()
+			return nil
+		}
+		defer func() { _ = fileArgs.VerifiedFile.Close() }()
+		command = common.ExecFile.String()
+		args = fileArgs
 	default:
 		exitCode = 1
 		result = "Invalid command shell argument."
