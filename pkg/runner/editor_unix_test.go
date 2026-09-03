@@ -612,6 +612,21 @@ func TestChownUserDataDirRefusesADeepTree(t *testing.T) {
 	assert.ErrorContains(t, chownUserDataDir(root, current.Username, ""), "nests deeper than")
 }
 
+// TestSetupUserDataDirRefusesAMissingHome pins the behavior for an account
+// whose home directory is listed in passwd but absent from disk (an LDAP user,
+// or useradd -M). The path-based MkdirAll this replaced created it root-owned,
+// which left the user locked out of their own home; resolving one component at
+// a time against a held fd cannot create it, so setup fails instead.
+func TestSetupUserDataDirRefusesAMissingHome(t *testing.T) {
+	homeDir := filepath.Join(t.TempDir(), "absent")
+
+	_, err := setupUserDataDir(homeDir, "", "")
+
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	_, statErr := os.Stat(homeDir)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "a missing home directory must not be created here")
+}
+
 // TestSetupUserDataDirSweepsStaleTempFiles: a process killed between the temp
 // create and the rename leaves the temp behind, and nothing else collects it.
 // The sweep is bounded by age and by name so that neither a write in flight in
