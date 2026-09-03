@@ -27,22 +27,25 @@ func BenchmarkRegistry_Get(b *testing.B) {
 
 // BenchmarkRegistry_GetManyHandlers measures lookup once the command map holds
 // a realistic number of handlers, which BenchmarkRegistry_Get's single entry
-// cannot show.
+// cannot show. Keys are built up front so the timed loop holds the lookup alone and
+// the two numbers stay comparable.
 func BenchmarkRegistry_GetManyHandlers(b *testing.B) {
 	const handlers = 100
 
 	registry := NewRegistry()
+	keys := make([]string, handlers)
 	for i := range handlers {
 		name := strconv.Itoa(i)
+		keys[i] = "cmd" + name
 		_ = registry.Register(&MockHandler{
 			name:     "handler" + name,
-			commands: []string{"cmd" + name},
+			commands: []string{keys[i]},
 		})
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = registry.Get("cmd" + strconv.Itoa(i%handlers))
+		_, _ = registry.Get(keys[i%handlers])
 	}
 }
 
