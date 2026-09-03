@@ -6,10 +6,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -506,4 +509,107 @@ func TestHandleSudoRequest_ClosesConnectionOnPanic(t *testing.T) {
 
 	assert.True(t, conn.isClosed(), "a panicking handler left the descriptor open")
 	_ = client.Close()
+}
+
+// blockingWriteConn parks the first Write until release is closed, holding a
+// response in flight while the test drives the waiter out.
+type blockingWriteConn struct {
+	net.Conn
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingWriteConn) Write(b []byte) (int, error) {
+	c.once.Do(func() {
+		close(c.entered)
+		<-c.release
+	})
+	return c.Conn.Write(b)
+}
+
+// TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse pins the handover the
+// deferred close depends on. HandleSudoApprovalResponse deregisters the request
+// before it writes, so a shutdown landing in that window finds nothing pending and
+// the waiter must still not close on a response already going out.
+func TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse(t *testing.T) {
+	// Registration happens before the post, so a served request is one that can be taken.
+	registered := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(registered)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	am := newTestAuthManager()
+	ctx, cancel := context.WithCancel(context.Background())
+	am.ctx = ctx
+	am.session = &scheduler.Session{BaseURL: srv.URL, Client: http.DefaultClient}
+	am.pidToSessionMap[4200] = &SessionInfo{
+		Kind:      TrackerKindWebsh,
+		SessionID: "sess-shutdown",
+		PID:       4200,
+		Requests:  make(map[string]*SudoRequest),
+	}
+
+	data, err := json.Marshal(SudoApprovalRequest{
+		RequestID: "req-shutdown",
+		Type:      "sudo_approval",
+		Username:  "alice",
+		PID:       424242,
+		PPID:      4200,
+		Command:   "sudo reboot",
+	})
+	require.NoError(t, err)
+
+	client, server := net.Pipe()
+	conn := &blockingWriteConn{
+		Conn:    server,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	go am.handleSudoRequest(conn)
+	_, err = client.Write(data)
+	require.NoError(t, err)
+
+	type readResult struct {
+		resp SudoApprovalResponse
+		err  error
+	}
+	results := make(chan readResult, 1)
+	go func() {
+		_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var resp SudoApprovalResponse
+		err := json.NewDecoder(client).Decode(&resp)
+		results <- readResult{resp: resp, err: err}
+	}()
+
+	select {
+	case <-registered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the server")
+	}
+
+	go func() {
+		_ = am.HandleSudoApprovalResponse(SudoApprovalResponse{
+			RequestID: "req-shutdown",
+			Type:      "sudo_approval_response",
+			Username:  "alice",
+			Approved:  true,
+		})
+	}()
+
+	select {
+	case <-conn.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the response write never started")
+	}
+
+	cancel()
+	time.Sleep(100 * time.Millisecond) // Long enough for the waiter to close, if it is going to.
+	close(conn.release)
+
+	got := <-results
+	require.NoError(t, got.err, "the approved response never reached the PAM client")
+	assert.True(t, got.resp.Approved, "response: got %+v", got.resp)
 }
