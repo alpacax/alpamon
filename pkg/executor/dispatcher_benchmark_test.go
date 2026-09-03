@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
@@ -21,6 +22,27 @@ func BenchmarkRegistry_Get(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = registry.Get("cmd1")
+	}
+}
+
+// BenchmarkRegistry_GetManyHandlers measures lookup once the command map holds
+// a realistic number of handlers, which BenchmarkRegistry_Get's single entry
+// cannot show.
+func BenchmarkRegistry_GetManyHandlers(b *testing.B) {
+	const handlers = 100
+
+	registry := NewRegistry()
+	for i := range handlers {
+		name := strconv.Itoa(i)
+		_ = registry.Register(&MockHandler{
+			name:     "handler" + name,
+			commands: []string{"cmd" + name},
+		})
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = registry.Get("cmd" + strconv.Itoa(i%handlers))
 	}
 }
 
