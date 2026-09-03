@@ -79,12 +79,19 @@ func chownChildren(dir *os.File, uid, gid int) error {
 	}
 	dirfd := int(dir.Fd())
 	for _, name := range names {
-		if err := unix.Fchownat(dirfd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return &os.PathError{Op: "lchown", Path: filepath.Join(dir.Name(), name), Err: err}
-		}
+		// Stat before the chown, not after: AT_SYMLINK_NOFOLLOW speaks only for
+		// symlinks, and a hard link is not a link to a file but a second name
+		// for the same inode, one the user can plant pointing anywhere they can
+		// read. Handing that inode away is exactly what this walk must not do.
 		var st unix.Stat_t
 		if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return &os.PathError{Op: "stat", Path: filepath.Join(dir.Name(), name), Err: err}
+		}
+		if st.Mode&unix.S_IFMT == unix.S_IFREG && st.Nlink > 1 {
+			continue
+		}
+		if err := unix.Fchownat(dirfd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return &os.PathError{Op: "lchown", Path: filepath.Join(dir.Name(), name), Err: err}
 		}
 		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 			continue

@@ -320,14 +320,14 @@ func TestChownUserDataDirDoesNotFollowSymlinks(t *testing.T) {
 		require.NoError(t, err)
 		username = current.Username
 	}
-	before := fileUID(t, target)
+	before := fileOwner(t, target)
 
 	link := filepath.Join(userDataDir, "x")
 	require.NoError(t, os.Symlink(target, link))
 
 	require.NoError(t, chownUserDataDir(userDataDir, username, ""))
 
-	assert.Equal(t, before, fileUID(t, target), "symlink target must keep its owner")
+	assert.Equal(t, before, fileOwner(t, target), "symlink target must keep its owner")
 
 	usr, err := user.Lookup(username)
 	require.NoError(t, err)
@@ -338,11 +338,47 @@ func TestChownUserDataDirDoesNotFollowSymlinks(t *testing.T) {
 	assert.Equal(t, uint32(wantUID), linkInfo.Sys().(*syscall.Stat_t).Uid, "the link itself is chowned")
 }
 
-func fileUID(t *testing.T, path string) uint32 {
+// fileOwner reads both ids, since a non-root process can only ever move the
+// group, and a test that watched the uid alone would pass without chowning.
+func fileOwner(t *testing.T, path string) [2]uint32 {
 	t.Helper()
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	return info.Sys().(*syscall.Stat_t).Uid
+	st := info.Sys().(*syscall.Stat_t)
+	return [2]uint32{st.Uid, st.Gid}
+}
+
+// movableOwnership returns a user and group chownUserDataDir can actually move
+// an entry at path to: as root any account, and as a regular user their own
+// name plus a group they belong to that the file is not already in—the only
+// ownership change the kernel lets them make.
+func movableOwnership(t *testing.T, path string) (username, groupname string) {
+	t.Helper()
+
+	if os.Getuid() == 0 {
+		// Not every distro image ships "nobody" (opensuse/leap:15 does not).
+		if _, err := user.Lookup("nobody"); err != nil {
+			t.Skipf("no nobody account on this system: %v", err)
+		}
+		return "nobody", ""
+	}
+
+	current, err := user.Current()
+	require.NoError(t, err)
+	gids, err := current.GroupIds()
+	require.NoError(t, err)
+	own := strconv.FormatUint(uint64(fileOwner(t, path)[1]), 10)
+
+	for _, gid := range gids {
+		if gid == own {
+			continue
+		}
+		if group, err := user.LookupGroupId(gid); err == nil {
+			return current.Username, group.Name
+		}
+	}
+	t.Skip("the current user belongs to no group other than the one already on the file")
+	return "", ""
 }
 
 // TestWriteFileAtReplacesInPlaceFile proves the swap is atomic from the reader's
@@ -521,4 +557,32 @@ func TestSetupUserDataDirIdempotent(t *testing.T) {
 	err = json.Unmarshal(data, &settings)
 	assert.NoError(t, err)
 	assert.Equal(t, "none", settings["workbench.startupEditor"])
+}
+
+// TestChownUserDataDirSkipsHardLinkedFiles: AT_SYMLINK_NOFOLLOW speaks for
+// symlinks only. A hard link is a second name for one inode, and the user can
+// plant one pointing at any file they can read, so chowning it would hand that
+// file's ownership to them.
+func TestChownUserDataDirSkipsHardLinkedFiles(t *testing.T) {
+	userDataDir := t.TempDir()
+
+	outside := filepath.Join(t.TempDir(), "victim")
+	require.NoError(t, os.WriteFile(outside, []byte("keep"), 0600))
+	require.NoError(t, os.Link(outside, filepath.Join(userDataDir, "planted")))
+
+	// A file with only this one name proves the walk re-owned anything at all,
+	// so the assertion below cannot pass by the chown having been a no-op.
+	ordinary := filepath.Join(userDataDir, "ordinary")
+	require.NoError(t, os.WriteFile(ordinary, nil, 0600))
+
+	username, groupname := movableOwnership(t, outside)
+	beforeOutside := fileOwner(t, outside)
+	beforeOrdinary := fileOwner(t, ordinary)
+
+	require.NoError(t, chownUserDataDir(userDataDir, username, groupname))
+
+	assert.Equal(t, beforeOutside, fileOwner(t, outside),
+		"an inode that answers to another name outside the tree must keep its owner")
+	assert.NotEqual(t, beforeOrdinary, fileOwner(t, ordinary),
+		"the walk must still re-own the files this tree is the only name for")
 }
