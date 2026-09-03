@@ -940,14 +940,33 @@ func takePendingRequestsLocked(session *SessionInfo) []*SudoRequest {
 
 // denyPendingRequests answers each detached request, closes its connection, and
 // releases the goroutine waiting on it—which would otherwise hold an answered
-// request until its own 30s timeout. Must run without am.mu held: signalCompletion
-// takes it.
+// request until its own 30s timeout. One goroutine per request is what keeps
+// authSocketHandoverTimeout honest: answered in sequence, request k's signal would
+// sit behind every write before it, so one peer that stopped reading pushes the
+// later waiters past their bound and they close connections this loop has yet to
+// write to. Must run without am.mu held: signalCompletion takes it.
 func (am *AuthManager) denyPendingRequests(pending []*SudoRequest, reason string) {
+	var wg sync.WaitGroup
 	for _, req := range pending {
-		if req.Connection != nil {
-			am.sendSudoApprovalResponse(req.Connection, req.Request, false, reason)
-			_ = req.Connection.Close()
-		}
-		am.signalCompletion(req.Request.RequestID)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// handleSudoRequest's recover used to cover this work, back when
+			// finalizeRequest ran it on the waiter's own stack. Off that stack, an
+			// unrecovered panic takes the whole agent down instead of one request.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error().Interface("panic", r).
+						Str("request_id", req.Request.RequestID).
+						Msg("Denying a pending sudo request panicked")
+				}
+			}()
+			if req.Connection != nil {
+				am.sendSudoApprovalResponse(req.Connection, req.Request, false, reason)
+				_ = req.Connection.Close()
+			}
+			am.signalCompletion(req.Request.RequestID)
+		}()
 	}
+	wg.Wait()
 }
