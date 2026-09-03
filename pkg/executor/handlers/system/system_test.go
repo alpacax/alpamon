@@ -22,10 +22,19 @@ import (
 )
 
 // restart, quit, reboot, shutdown and the post-self-update restart all hand the
-// pool a job that sleeps a second before acting, and Shutdown cannot interrupt a
-// sleeping job. The drain wait therefore has to outlast that second; inside a
-// synctest bubble neither span costs real time.
+// pool a job that sleeps delayedActionDelay before acting, and Shutdown cannot
+// interrupt a sleeping job. The drain wait therefore has to outlast that delay,
+// which requireDrainOutlastsDelay makes executable rather than a promise in a
+// comment. Inside a synctest bubble neither span costs real time.
 const poolDrainWait = 5 * time.Second
+
+// requireDrainOutlastsDelay fails with the reason rather than as a bare shutdown
+// timeout if delayedActionDelay ever grows past the budget these tests drain on.
+func requireDrainOutlastsDelay(t *testing.T) {
+	t.Helper()
+	require.Greater(t, poolDrainWait, delayedActionDelay,
+		"a job sleeping delayedActionDelay cannot drain inside poolDrainWait")
+}
 
 // MockWSClient is a mock implementation of WSClient for testing
 type MockWSClient struct {
@@ -231,6 +240,7 @@ func TestSystemHandler_Restart_Default(t *testing.T) {
 		mockWS := &MockWSClient{}
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
+		requireDrainOutlastsDelay(t)
 		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
 		defer ctxManager.Shutdown()
 
@@ -255,6 +265,7 @@ func TestSystemHandler_Restart_Alpamon(t *testing.T) {
 		mockWS := &MockWSClient{}
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
+		requireDrainOutlastsDelay(t)
 		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
 		defer ctxManager.Shutdown()
 
@@ -279,6 +290,7 @@ func TestSystemHandler_Quit(t *testing.T) {
 		mockWS := &MockWSClient{}
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
+		requireDrainOutlastsDelay(t)
 		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
 		defer ctxManager.Shutdown()
 
@@ -301,6 +313,7 @@ func TestSystemHandler_Reboot(t *testing.T) {
 		mockWS := &MockWSClient{}
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
+		requireDrainOutlastsDelay(t)
 		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
 		defer ctxManager.Shutdown()
 
@@ -323,6 +336,7 @@ func TestSystemHandler_Shutdown(t *testing.T) {
 		mockWS := &MockWSClient{}
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
+		requireDrainOutlastsDelay(t)
 		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
 		defer ctxManager.Shutdown()
 
@@ -779,6 +793,7 @@ func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 				mockWS := &MockWSClient{}
 				ctxManager := agent.NewContextManager()
 				workerPool := pool.NewPool(2, 10)
+				requireDrainOutlastsDelay(t)
 				defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
 				defer ctxManager.Shutdown()
 
