@@ -613,3 +613,57 @@ func TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse(t *testing.T) {
 	require.NoError(t, got.err, "the approved response never reached the PAM client")
 	assert.True(t, got.resp.Approved, "response: got %+v", got.resp)
 }
+
+// TestDenyPendingRequests_StalledPeerDoesNotDelayTheRest pins what
+// authSocketHandoverTimeout claims: a waiter's handover bound has to outlive one
+// bounded write, not a whole batch of them. A peer that stopped reading holds up
+// its own request only, so the next request's waiter is released well inside its
+// bound instead of returning and closing a connection the deny loop has yet to
+// reach.
+func TestDenyPendingRequests_StalledPeerDoesNotDelayTheRest(t *testing.T) {
+	am := newTestAuthManager()
+
+	stalledClient, stalledServer := net.Pipe()
+	defer func() { _ = stalledClient.Close() }()
+	stalled := &blockingWriteConn{
+		Conn:    stalledServer,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	go func() { _, _ = io.Copy(io.Discard, client) }()
+
+	stalledDone := registerCompletionChannel(am, "req-stalled")
+	nextDone := registerCompletionChannel(am, "req-next")
+
+	pending := []*SudoRequest{
+		{Connection: stalled, Request: SudoApprovalRequest{RequestID: "req-stalled", Username: "alice"}},
+		{Connection: server, Request: SudoApprovalRequest{RequestID: "req-next", Username: "bob"}},
+	}
+	go am.denyPendingRequests(pending, "Session ended")
+
+	select {
+	case <-stalled.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stalled request's write never started")
+	}
+
+	select {
+	case <-nextDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second request's waiter was held behind the stalled peer's write")
+	}
+
+	// Let the stalled write through so the batch finishes on its own rather than on
+	// the write deadline.
+	go func() { _, _ = io.Copy(io.Discard, stalledClient) }()
+	close(stalled.release)
+
+	select {
+	case <-stalledDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stalled request never signaled once its write went through")
+	}
+}
