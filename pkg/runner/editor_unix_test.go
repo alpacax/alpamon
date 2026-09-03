@@ -19,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // killGroupOnCleanup kills the child's group unless the reaper already closed
@@ -415,11 +416,17 @@ func TestWriteFileAtReplacesInPlaceFile(t *testing.T) {
 // TestWriteFileAtKeepsTheModeItReplaces pins the mode across a replacement. The
 // renamed file arrives with the temp file's mode, so the old one has to be
 // carried over or a tightened settings.json widens again on the next start.
+// The mode and the umask are chosen to disagree: O_CREAT applies the mode as
+// mode &^ umask, so a carry-over resting on that call alone narrows the file
+// instead of preserving it, and a mode no common umask touches hides that.
 func TestWriteFileAtKeepsTheModeItReplaces(t *testing.T) {
+	previous := unix.Umask(0077)
+	t.Cleanup(func() { unix.Umask(previous) })
+
 	dir := t.TempDir()
 	target := filepath.Join(dir, "f")
-	require.NoError(t, os.WriteFile(target, []byte("old"), 0600))
-	require.NoError(t, os.Chmod(target, 0600))
+	require.NoError(t, os.WriteFile(target, []byte("old"), 0644))
+	require.NoError(t, os.Chmod(target, 0644))
 
 	parent, err := openDir(dir, dirFlags)
 	require.NoError(t, err)
@@ -429,7 +436,7 @@ func TestWriteFileAtKeepsTheModeItReplaces(t *testing.T) {
 
 	info, err := os.Stat(target)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(), "the replacement keeps the mode it replaced")
+	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(), "the replacement keeps the mode it replaced")
 }
 
 // nameLimit returns the longest file name dir accepts. NAME_MAX is not portable

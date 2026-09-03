@@ -184,6 +184,13 @@ func writeFileAt(parent *os.File, name string, data []byte) error {
 		return &os.PathError{Op: "open", Path: tmpPath, Err: err}
 	}
 	f := os.NewFile(uintptr(fd), tmpPath)
+	// O_CREAT applies the mode as mode &^ umask, which would narrow the mode
+	// carried over above; fchmod is not subject to the umask.
+	if err := unix.Fchmod(fd, mode); err != nil {
+		_ = f.Close()
+		_ = unix.Unlinkat(dirfd, tmp, 0)
+		return &os.PathError{Op: "chmod", Path: tmpPath, Err: err}
+	}
 	_, writeErr := f.Write(data)
 	closeErr := f.Close()
 	if err := cmp.Or(writeErr, closeErr); err != nil {
