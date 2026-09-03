@@ -48,39 +48,43 @@ func TestPool_NoGoroutineLeak(t *testing.T) {
 
 // TestPool_NoLeakAfterPanic verifies goroutines are cleaned up after panic recovery
 func TestPool_NoLeakAfterPanic(t *testing.T) {
-	pool := NewPool(3, 20)
-	ctx := context.Background()
+	synctest.Test(t, func(t *testing.T) {
+		pool := NewPool(3, 20)
+		ctx := context.Background()
 
-	var completed atomic.Int32
-	var wg sync.WaitGroup
+		var completed atomic.Int32
+		var wg sync.WaitGroup
 
-	// Submit jobs that panic
-	for range 10 {
-		_ = pool.Submit(ctx, func() error {
-			panic("test panic")
-		})
-	}
-
-	// Submit normal jobs after panics
-	for range 10 {
-		wg.Add(1)
-		if err := pool.Submit(ctx, func() error {
-			defer wg.Done()
-			completed.Add(1)
-			return nil
-		}); err != nil {
-			wg.Done()
+		// Submit jobs that panic
+		for range 10 {
+			_ = pool.Submit(ctx, func() error {
+				panic("test panic")
+			})
 		}
-	}
 
-	// The queue is FIFO, so every normal job finishing proves the panicking
-	// ones were already drained by workers that survived them.
-	wg.Wait()
+		// Submit normal jobs after panics
+		for range 10 {
+			wg.Add(1)
+			if err := pool.Submit(ctx, func() error {
+				defer wg.Done()
+				completed.Add(1)
+				return nil
+			}); err != nil {
+				wg.Done()
+			}
+		}
 
-	// Shutdown pool
-	assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		// The queue is FIFO, so every normal job finishing proves the panicking
+		// ones were already drained by workers that survived them. A worker lost to
+		// a panic leaves this Wait unsatisfiable, which the bubble reports as a
+		// deadlock rather than hanging until the package timeout.
+		wg.Wait()
 
-	assert.NotZero(t, completed.Load(), "no normal jobs completed after panics - workers may have died")
+		// Shutdown pool
+		assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+
+		assert.NotZero(t, completed.Load(), "no normal jobs completed after panics - workers may have died")
+	})
 }
 
 // TestPool_NoLeakAfterContextCancel verifies goroutines are cleaned up after context cancellation
