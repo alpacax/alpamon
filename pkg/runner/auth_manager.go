@@ -599,8 +599,9 @@ func logSudoResponseWriteError(err error, requestID string) {
 	log.WithLevel(authSocketWriteLevel(err)).Err(err).Str("request_id", requestID).Msg("Failed to send sudo_approval_response")
 }
 
-// HandleSudoApprovalResponse owns the response and close for the request it
-// takes, the way finalizeRequest does for the paths alpamon answers itself.
+// HandleSudoApprovalResponse answers and closes the request it takes, the way
+// finalizeRequest does for the paths alpamon answers itself; handleSudoRequest
+// closes again once the released waiter returns, which is harmless.
 func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse) error {
 	log.Info().Str("request_id", response.RequestID).Bool("approved", response.Approved).Msg("Processing sudo_approval response")
 
@@ -860,12 +861,12 @@ func (am *AuthManager) Stop() {
 	}
 }
 
-// finalizeRequest is the single owner of the final response and close for a
-// registered request: the PAM client parses everything it reads as one JSON
-// document, so a second response breaks it. Whoever removes the request from the
-// map under am.mu finalizes it, and nobody else may write to or close its
-// connection. It always denies—approvals arrive from the server and are answered
-// by HandleSudoApprovalResponse.
+// finalizeRequest is the single owner of the final response for a registered
+// request: the PAM client parses everything it reads as one JSON document, so a
+// second response breaks it. Whoever removes the request from the map under
+// am.mu finalizes it, and nobody else may write to its connection. It always
+// denies—approvals arrive from the server and are answered by
+// HandleSudoApprovalResponse.
 func (am *AuthManager) finalizeRequest(requestID, reason string) {
 	am.mu.Lock()
 	req := am.takeRequestLocked(requestID)
@@ -883,10 +884,10 @@ func (am *AuthManager) finalizeRequest(requestID, reason string) {
 	am.denyPendingRequests([]*SudoRequest{req}, reason)
 }
 
-// takeRequestLocked deregisters one request by id and hands its response and
-// close to the caller; takePendingRequestsLocked does the same for a whole
-// session. Deregistering nowhere else is what keeps a request from being answered
-// twice. Callers must hold am.mu.
+// takeRequestLocked deregisters one request by id and hands its response to the
+// caller; takePendingRequestsLocked does the same for a whole session.
+// Deregistering nowhere else is what keeps a request from being answered twice.
+// Callers must hold am.mu.
 func (am *AuthManager) takeRequestLocked(requestID string) *SudoRequest {
 	for _, session := range am.pidToSessionMap {
 		if req, exists := session.Requests[requestID]; exists {
@@ -899,7 +900,7 @@ func (am *AuthManager) takeRequestLocked(requestID string) *SudoRequest {
 }
 
 // takePendingRequestsLocked detaches a session's pending requests. They are then
-// beyond finalizeRequest's reach, so the taker owns answering and closing them.
+// beyond finalizeRequest's reach, so the taker owns answering them.
 // Callers must hold am.mu.
 func takePendingRequestsLocked(session *SessionInfo) []*SudoRequest {
 	pending := slices.Collect(maps.Values(session.Requests))
