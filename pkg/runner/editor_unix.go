@@ -4,6 +4,7 @@ package runner
 
 import (
 	"cmp"
+	"errors"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -117,7 +118,7 @@ func openDir(path string, flags int) (*os.File, error) {
 // regular file squatting on the name fails the open (ELOOP or ENOTDIR).
 func mkdirOpenAt(parent *os.File, name string) (*os.File, error) {
 	path := filepath.Join(parent.Name(), name)
-	if err := unix.Mkdirat(int(parent.Fd()), name, 0755); err != nil && err != unix.EEXIST {
+	if err := unix.Mkdirat(int(parent.Fd()), name, 0755); err != nil && !errors.Is(err, unix.EEXIST) {
 		return nil, &os.PathError{Op: "mkdir", Path: path, Err: err}
 	}
 	fd, err := unix.Openat(int(parent.Fd()), name, dirFlags, 0)
