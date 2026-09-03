@@ -11,6 +11,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -355,4 +356,26 @@ func TestWriteFileAtReplacesInPlaceFile(t *testing.T) {
 		names = append(names, entry.Name())
 	}
 	assert.ElementsMatch(t, []string{"f", "witness"}, names, "the temp file must not outlive the write")
+}
+
+// TestWriteFileAtLeavesNothingWhenTheTempWriteFails pins the failure path: the
+// call must not create the target it never managed to fill. The name is sized so
+// that it fits but the longer temp name derived from it does not, which fails the
+// temp create and nothing else.
+func TestWriteFileAtLeavesNothingWhenTheTempWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	parent, err := openDir(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parent.Close() })
+
+	name := strings.Repeat("n", 250)
+
+	require.Error(t, writeFileAt(parent, name, []byte("x")))
+
+	_, err = os.Stat(filepath.Join(dir, name))
+	assert.ErrorIs(t, err, os.ErrNotExist, "a write that failed must leave no file at the target")
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "the temp file must not survive the failure either")
 }

@@ -129,13 +129,17 @@ func writeFileAt(parent *os.File, name string, data []byte) error {
 	path := filepath.Join(parent.Name(), name)
 
 	// renameat replaces a symlink at name rather than following it, which is
-	// safe but silent. This open refuses one first, so a planted link is an error.
-	probe, err := unix.Openat(dirfd, name,
-		unix.O_WRONLY|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
-	if err != nil {
-		return &os.PathError{Op: "open", Path: path, Err: err}
+	// safe but silent, so a planted link is reported here instead. The report is
+	// all this is: the rename stays inside the tree whatever appears after the
+	// check, and stat creates nothing, so a failure below leaves no file behind.
+	var st unix.Stat_t
+	switch err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); {
+	case err == unix.ENOENT:
+	case err != nil:
+		return &os.PathError{Op: "stat", Path: path, Err: err}
+	case st.Mode&unix.S_IFMT == unix.S_IFLNK:
+		return &os.PathError{Op: "open", Path: path, Err: unix.ELOOP}
 	}
-	_ = unix.Close(probe)
 
 	// Two editor sessions for one user set the directory up concurrently, so the
 	// temp name has to be unique per call, not per process.
