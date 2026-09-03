@@ -73,6 +73,8 @@ func TestInfoHandler_Ping(t *testing.T) {
 		parsedTime, parseErr := time.Parse(time.RFC3339, output)
 		require.NoError(t, parseErr, "output is not valid RFC3339 timestamp")
 
+		// RFC3339 truncates to seconds; the compare holds because the bubble's clock
+		// starts on a whole second and nothing here has advanced it.
 		assert.True(t, parsedTime.Equal(time.Now()), "timestamp %v is not the current time %v", parsedTime, time.Now())
 	})
 }
