@@ -610,17 +610,25 @@ func getCodeServerEnv(homeDir string, includeXDG bool) []string {
 	return GetCodeServerConfig().ToEnv(homeDir, includeXDG)
 }
 
+// validateUserDataDirName rejects a name setupUserDataFiles could not guard.
+// That helper opens the name with O_NOFOLLOW, which covers only the last path
+// component: IsLocal rejects "" and anything absolute or escaping, the Base
+// comparison rejects an embedded separator, and "." would still resolve to the
+// home directory itself.
+func validateUserDataDirName(name string) error {
+	if !filepath.IsLocal(name) || name != filepath.Base(name) || name == "." {
+		return fmt.Errorf("invalid user data dir name %q", name)
+	}
+	return nil
+}
+
 // setupUserDataDir creates the user-data-dir with config.yaml and settings.json for code-server.
 // If running as root on Linux, ownership of created files is changed to the specified user.
 func setupUserDataDir(homeDir, username, groupname string) (string, error) {
 	cfg := GetCodeServerConfig()
 
-	// setupUserDataFiles opens the name with O_NOFOLLOW, which only guards the
-	// last path component, so the name must be one plain component: IsLocal
-	// rejects "" and anything absolute or escaping, the Base comparison rejects
-	// an embedded separator, and "." would still resolve to homeDir itself.
-	if name := cfg.UserDataDirName; !filepath.IsLocal(name) || name != filepath.Base(name) || name == "." {
-		return "", fmt.Errorf("invalid user data dir name %q", name)
+	if err := validateUserDataDirName(cfg.UserDataDirName); err != nil {
+		return "", err
 	}
 	userDataDir := filepath.Join(homeDir, cfg.UserDataDirName)
 

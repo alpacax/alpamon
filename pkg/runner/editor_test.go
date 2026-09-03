@@ -74,20 +74,25 @@ func TestGetCodeServerPath(t *testing.T) {
 	}
 }
 
-// TestSetupUserDataDirRejectsUnsafeDirName covers the precondition the
-// O_NOFOLLOW helpers rely on: the name must be one usable path component.
-func TestSetupUserDataDirRejectsUnsafeDirName(t *testing.T) {
-	cfg := GetCodeServerConfig()
-	original := cfg.UserDataDirName
-	t.Cleanup(func() { cfg.UserDataDirName = original })
-
+// TestValidateUserDataDirNameRejectsUnsafeNames covers the precondition the
+// O_NOFOLLOW helpers rely on: the name must be one usable path component. The
+// check is exercised directly rather than through the config singleton, which
+// a test may not mutate once anything in this package runs in parallel.
+func TestValidateUserDataDirNameRejectsUnsafeNames(t *testing.T) {
 	for _, name := range []string{"", ".", "..", filepath.Join("..", "escape"), filepath.Join(".config", "editor")} {
 		t.Run(name, func(t *testing.T) {
-			cfg.UserDataDirName = name
+			assert.ErrorContains(t, validateUserDataDirName(name), "invalid user data dir name")
+		})
+	}
+}
 
-			_, err := setupUserDataDir(t.TempDir(), "", "")
-
-			assert.ErrorContains(t, err, "invalid user data dir name")
+// TestValidateUserDataDirNameAcceptsAPlainComponent guards the other side: a
+// leading dot or a doubled one is an ordinary name, and rejecting it would
+// take the shipped default down with it.
+func TestValidateUserDataDirNameAcceptsAPlainComponent(t *testing.T) {
+	for _, name := range []string{".alpamon-editor", "..foo", "editor"} {
+		t.Run(name, func(t *testing.T) {
+			assert.NoError(t, validateUserDataDirName(name))
 		})
 	}
 }
