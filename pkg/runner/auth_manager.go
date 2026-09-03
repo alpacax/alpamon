@@ -367,17 +367,13 @@ func (am *AuthManager) lookupSessionLocked(sid int, sidOK bool, parentPID int) (
 }
 
 func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
-	// Panic recovery per the repo convention (internal/pool/pool.go,
-	// pkg/executor/executor.go). This handler used to run only on sudo
-	// invocations; with session events it runs on every PAM session open, so
-	// an unrecovered panic here would take the whole agent down from the login
-	// path. Close the socket on the way out so the PAM module reads EOF and
-	// fails open immediately instead of waiting out its own timeout.
+	// This runs on every PAM session open, so an unrecovered panic here would
+	// take the whole agent down from the login path.
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error().Interface("panic", r).Msg("Auth socket request handler panicked")
-			_ = unixConn.Close()
 		}
+		_ = unixConn.Close() // Closing on every exit lets PAM read EOF and fail open at once.
 	}()
 
 	buf := make([]byte, authSocketReadBufferSize)
@@ -391,13 +387,11 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 	var baseReq BaseRequest
 	if err := json.Unmarshal(buf[:n], &baseReq); err != nil {
 		log.Warn().Err(err).Msg("Invalid JSON request")
-		_ = unixConn.Close()
 		return
 	}
 
 	if baseReq.Type == "" {
 		log.Warn().Msg("Missing or invalid type field")
-		_ = unixConn.Close()
 		return
 	}
 
@@ -407,7 +401,6 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		if err := json.Unmarshal(buf[:n], &isAlpconReq); err != nil {
 			log.Warn().Err(err).Msg("Invalid is_alpcon_request")
 			am.sendIsAlpconResponse(unixConn, "", "", 0, 0, false)
-			_ = unixConn.Close()
 			return
 		}
 
@@ -419,13 +412,11 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		if !exists {
 			log.Warn().Msgf("No session found for PID %d (ppid %d, sid %d), username: %s, groupname: %s", isAlpconReq.PID, isAlpconReq.PPID, sid, isAlpconReq.Username, isAlpconReq.Groupname)
 			am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, false)
-			_ = unixConn.Close()
 			return
 		}
 
 		log.Debug().Msgf("Session found for PID %d (sid %d): %s", isAlpconReq.PID, sid, session.SessionID)
 		am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, true)
-		_ = unixConn.Close()
 
 	case "sudo_approval":
 		am.handleSudoApprovalRequest(buf[:n], unixConn)
@@ -435,7 +426,6 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 
 	default:
 		log.Warn().Str("type", baseReq.Type).Msg("Unknown request type")
-		_ = unixConn.Close()
 	}
 }
 
