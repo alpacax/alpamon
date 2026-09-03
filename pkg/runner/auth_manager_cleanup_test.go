@@ -338,23 +338,18 @@ func TestHandleSudoApprovalRequest_LocalSudoRegistersNothing(t *testing.T) {
 		Username:  "alice",
 		PID:       999999,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	client, server := net.Pipe()
 
-	go am.handleSudoApprovalRequest(data, server)
+	go am.handleSudoRequest(server) // Driven through the owner, since that is what closes now.
+	_, err = client.Write(data)
+	require.NoError(t, err)
 
 	resp := expectSingleResponse(t, client)
-	if !resp.Approved || resp.IsAlpconUser {
-		t.Errorf("local sudo response: got %+v, want approved non-Alpacon", resp)
-	}
-	if len(am.completionChannels) != 0 {
-		t.Errorf("completion channels left behind: %v", am.completionChannels)
-	}
-	if len(am.pidToSessionMap) != 0 {
-		t.Errorf("tracker entries left behind: %v", am.pidToSessionMap)
-	}
+	assert.True(t, resp.Approved, "local sudo is approved while block_local_sudo is off")
+	assert.False(t, resp.IsAlpconUser, "a sudo outside every tracked session is not an Alpacon user")
+	assert.Empty(t, am.completionChannels, "completion channels left behind")
+	assert.Empty(t, am.pidToSessionMap, "tracker entries left behind")
 }
 
 func TestRemovePIDCommandMapping_DeniesPendingRequests(t *testing.T) {

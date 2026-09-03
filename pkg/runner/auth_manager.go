@@ -434,7 +434,6 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	if err := json.Unmarshal(data, &sudoApprovalReq); err != nil {
 		log.Warn().Err(err).Msg("Invalid sudo_approval_request")
 		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Invalid sudo_approval_request")
-		_ = unixConn.Close()
 		return
 	}
 
@@ -451,14 +450,12 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 			// block_local_sudo=true: reject all local sudo (original behavior)
 			log.Debug().Msgf("Local sudo blocked by policy: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
 			am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority")
-			_ = unixConn.Close()
 			return
 		}
 
 		// block_local_sudo=false: allow local sudo, respect existing sudoers permissions
 		log.Debug().Msgf("Local sudo approved: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
 		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, true, "Approved")
-		_ = unixConn.Close()
 		return
 	}
 
@@ -479,7 +476,6 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		am.mu.Unlock()
 		log.Warn().Str("kind", kind).Msg("Unknown tracker kind; rejecting sudo")
 		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Unknown session kind")
-		_ = unixConn.Close()
 		return
 	}
 
