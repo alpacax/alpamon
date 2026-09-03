@@ -396,17 +396,49 @@ func TestWriteFileAtKeepsTheModeItReplaces(t *testing.T) {
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(), "the replacement keeps the mode it replaced")
 }
 
+// nameLimit returns the longest file name dir accepts. NAME_MAX is not portable
+// to query from Go here—unix.Pathconf exists on darwin and not on linux—so the
+// limit is found by bisecting between one character and a length no filesystem
+// in use accepts. The upper bound is asserted rather than assumed.
+func nameLimit(t *testing.T, dir string) int {
+	t.Helper()
+
+	fits := func(n int) bool {
+		path := filepath.Join(dir, strings.Repeat("n", n))
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			return false
+		}
+		require.NoError(t, os.Remove(path))
+		return true
+	}
+
+	lo, hi := 1, 4097
+	require.True(t, fits(lo))
+	require.False(t, fits(hi), "no name length is rejected, so this test cannot fail the temp create")
+	for hi-lo > 1 {
+		mid := (lo + hi) / 2
+		if fits(mid) {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
 // TestWriteFileAtLeavesNothingWhenTheTempWriteFails pins the failure path: the
-// call must not create the target it never managed to fill. The name is sized so
-// that it fits but the longer temp name derived from it does not, which fails the
-// temp create and nothing else.
+// call must not create the target it never managed to fill. The name sits just
+// under what the filesystem accepts, so it fits while the longer temp name
+// derived from it does not, which fails the temp create and nothing else.
 func TestWriteFileAtLeavesNothingWhenTheTempWriteFails(t *testing.T) {
 	dir := t.TempDir()
 	parent, err := openDir(dir, dirFlags)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parent.Close() })
 
-	name := strings.Repeat("n", 250)
+	// The temp name adds a leading dot, a separating dot, at least one base36
+	// digit and ".tmp", so three under the limit is enough to push it over.
+	name := strings.Repeat("n", nameLimit(t, dir)-3)
 
 	require.Error(t, writeFileAt(parent, name, []byte("x")))
 

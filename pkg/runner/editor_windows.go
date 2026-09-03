@@ -10,7 +10,7 @@ import "errors"
 // path-based MkdirAll and WriteFile, which nothing here would protect: the
 // agent runs as LocalSystem, and a directory junction, which any user can
 // create without the privilege a symlink requires, redirects a path-based
-// write the same way a symlink does on unix. Whoever enables editor tunnels on
+// write the same way a symlink does on Unix. Whoever enables editor tunnels on
 // Windows (#379) writes the junction-safe counterpart to editor_unix.go first,
 // and the tests below are what says so.
 

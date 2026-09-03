@@ -129,8 +129,8 @@ func mkdirOpenAt(parent *os.File, name string) (*os.File, error) {
 
 // writeFileAt replaces name under parent, refusing to write through a symlink.
 // The bytes land in a sibling temp file that renameat swaps into place, so a
-// concurrent reader — a running code-server watches settings.json — gets the
-// old file or the new one, never the empty window an O_TRUNC write opens.
+// concurrent reader—a running code-server watches settings.json—gets the old
+// file or the new one, never the empty window an O_TRUNC write opens.
 func writeFileAt(parent *os.File, name string, data []byte) error {
 	dirfd := int(parent.Fd())
 	path := filepath.Join(parent.Name(), name)
