@@ -149,6 +149,24 @@ func TestSetupUserDataDirIdempotent(t *testing.T) {
 	assert.Equal(t, "none", settings["workbench.startupEditor"])
 }
 
+// TestSetupUserDataDirRejectsUnsafeDirName covers the precondition the
+// O_NOFOLLOW helpers rely on: the name must be one usable path component.
+func TestSetupUserDataDirRejectsUnsafeDirName(t *testing.T) {
+	cfg := GetCodeServerConfig()
+	original := cfg.UserDataDirName
+	t.Cleanup(func() { cfg.UserDataDirName = original })
+
+	for _, name := range []string{"", ".", "..", filepath.Join("..", "escape"), filepath.Join(".config", "editor")} {
+		t.Run(name, func(t *testing.T) {
+			cfg.UserDataDirName = name
+
+			_, err := setupUserDataDir(t.TempDir(), "", "")
+
+			assert.ErrorContains(t, err, "invalid user data dir name")
+		})
+	}
+}
+
 // TestToSettingsJSONGolden locks the settings.json wire format so future
 // edits to codeServerSettings can't silently change the emitted output.
 func TestToSettingsJSONGolden(t *testing.T) {

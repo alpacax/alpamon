@@ -1,0 +1,135 @@
+//go:build !windows
+
+package runner
+
+import (
+	"os"
+	"path/filepath"
+
+	"golang.org/x/sys/unix"
+)
+
+// The user owns the home directory, so any path under it can be swapped for a
+// symlink between a check and the use of the checked path. Every operation
+// below the home directory therefore resolves one path component at a time
+// against a held directory fd with O_NOFOLLOW, which leaves no window to
+// redirect root's writes or chowns elsewhere. The home directory itself is
+// opened by full path, and every name handed to these helpers must be a single
+// component: O_NOFOLLOW guards only the last one, so a separator inside a name
+// would let the components before it be followed.
+
+const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+// setupUserDataFiles creates dirName/User under homeDir and writes config.yaml
+// and User/settings.json, refusing to traverse or write through symlinks.
+func setupUserDataFiles(homeDir, dirName string, configData, settingsData []byte) error {
+	home, err := openDir(homeDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+
+	dataDir, err := mkdirOpenAt(home, dirName)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dataDir.Close() }()
+
+	userDir, err := mkdirOpenAt(dataDir, userDataUserDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = userDir.Close() }()
+
+	if err := writeFileAt(dataDir, userDataConfigFile, configData); err != nil {
+		return err
+	}
+	return writeFileAt(userDir, userDataSettingsFile, settingsData)
+}
+
+// chownTreeNoFollow recursively changes ownership under root without ever
+// following a symlink: links themselves are re-owned, their targets untouched.
+func chownTreeNoFollow(root string, uid, gid int) error {
+	dir, err := openDir(root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+
+	if err := dir.Chown(uid, gid); err != nil {
+		return err
+	}
+	return chownChildren(dir, uid, gid)
+}
+
+func chownChildren(dir *os.File, uid, gid int) error {
+	names, err := dir.Readdirnames(-1)
+	if err != nil {
+		return err
+	}
+	dirfd := int(dir.Fd())
+	for _, name := range names {
+		path := filepath.Join(dir.Name(), name)
+		if err := unix.Fchownat(dirfd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return &os.PathError{Op: "lchown", Path: path, Err: err}
+		}
+		var st unix.Stat_t
+		if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return &os.PathError{Op: "stat", Path: path, Err: err}
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+			continue
+		}
+		childFd, err := unix.Openat(dirfd, name, dirFlags, 0)
+		if err != nil {
+			return &os.PathError{Op: "open", Path: path, Err: err}
+		}
+		child := os.NewFile(uintptr(childFd), path)
+		err = chownChildren(child, uid, gid)
+		_ = child.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// openDir opens path as a directory fd. The final component must not be a symlink.
+func openDir(path string) (*os.File, error) {
+	fd, err := unix.Open(path, dirFlags, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+// mkdirOpenAt creates name under parent if missing and opens it. A symlink or
+// regular file squatting on the name fails the open (ELOOP or ENOTDIR).
+func mkdirOpenAt(parent *os.File, name string) (*os.File, error) {
+	path := filepath.Join(parent.Name(), name)
+	if err := unix.Mkdirat(int(parent.Fd()), name, 0755); err != nil && err != unix.EEXIST {
+		return nil, &os.PathError{Op: "mkdir", Path: path, Err: err}
+	}
+	fd, err := unix.Openat(int(parent.Fd()), name, dirFlags, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+// writeFileAt writes data to name under parent, refusing to write through a symlink.
+func writeFileAt(parent *os.File, name string, data []byte) error {
+	path := filepath.Join(parent.Name(), name)
+	fd, err := unix.Openat(int(parent.Fd()), name,
+		unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
+	if err != nil {
+		return &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), path)
+	_, writeErr := f.Write(data)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
+}

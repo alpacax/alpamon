@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -231,4 +234,94 @@ func TestStopKillsGroupIgnoringSIGTERM(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop gave up on the process group but left it running")
 	}
+}
+
+func TestSetupUserDataDirRefusesSymlinkedFiles(t *testing.T) {
+	cfg := GetCodeServerConfig()
+	for _, rel := range []string{"config.yaml", filepath.Join("User", "settings.json")} {
+		t.Run(rel, func(t *testing.T) {
+			homeDir := t.TempDir()
+			target := filepath.Join(t.TempDir(), "victim")
+			require.NoError(t, os.WriteFile(target, []byte("keep"), 0600))
+
+			link := filepath.Join(homeDir, cfg.UserDataDirName, rel)
+			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0755))
+			require.NoError(t, os.Symlink(target, link))
+
+			_, err := setupUserDataDir(homeDir, "", "")
+			assert.Error(t, err)
+
+			data, err := os.ReadFile(target)
+			require.NoError(t, err)
+			assert.Equal(t, "keep", string(data))
+		})
+	}
+}
+
+func TestSetupUserDataDirRefusesSymlinkedDirs(t *testing.T) {
+	cfg := GetCodeServerConfig()
+	for _, rel := range []string{".", "User"} {
+		t.Run(rel, func(t *testing.T) {
+			homeDir := t.TempDir()
+			target := t.TempDir()
+
+			link := filepath.Join(homeDir, cfg.UserDataDirName, rel)
+			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0755))
+			require.NoError(t, os.Symlink(target, link))
+
+			_, err := setupUserDataDir(homeDir, "", "")
+			assert.Error(t, err)
+
+			entries, err := os.ReadDir(target)
+			require.NoError(t, err)
+			assert.Empty(t, entries, "nothing may be written through the symlinked directory")
+		})
+	}
+}
+
+// TestChownUserDataDirDoesNotFollowSymlinks plants a symlink to a file the
+// target user must not own. As root the file is created in the temp dir and
+// ownership goes to nobody; as a regular user /etc/passwd stands in, where
+// following the link would fail with EPERM.
+func TestChownUserDataDirDoesNotFollowSymlinks(t *testing.T) {
+	userDataDir := t.TempDir()
+
+	var target, username string
+	if os.Getuid() == 0 {
+		// Not every distro image ships "nobody" (opensuse/leap:15 does not).
+		if _, err := user.Lookup("nobody"); err != nil {
+			t.Skipf("no nobody account on this system: %v", err)
+		}
+		target = filepath.Join(t.TempDir(), "victim")
+		require.NoError(t, os.WriteFile(target, []byte("keep"), 0600))
+		username = "nobody"
+	} else {
+		target = "/etc/passwd"
+		current, err := user.Current()
+		require.NoError(t, err)
+		username = current.Username
+	}
+	before := fileUID(t, target)
+
+	link := filepath.Join(userDataDir, "x")
+	require.NoError(t, os.Symlink(target, link))
+
+	require.NoError(t, chownUserDataDir(userDataDir, username, ""))
+
+	assert.Equal(t, before, fileUID(t, target), "symlink target must keep its owner")
+
+	usr, err := user.Lookup(username)
+	require.NoError(t, err)
+	wantUID, err := strconv.Atoi(usr.Uid)
+	require.NoError(t, err)
+	linkInfo, err := os.Lstat(link)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(wantUID), linkInfo.Sys().(*syscall.Stat_t).Uid, "the link itself is chowned")
+}
+
+func fileUID(t *testing.T, path string) uint32 {
+	t.Helper()
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	return info.Sys().(*syscall.Stat_t).Uid
 }
