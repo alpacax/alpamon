@@ -36,9 +36,10 @@ func TestWorkerPool_SpreadsCommandsAcrossWorkers(t *testing.T) {
 				commands:       []string{"scale_cmd"},
 				executionDelay: jobTime,
 			}
-			_ = registry.Register(handler)
+			require.NoError(t, registry.Register(handler), "workers=%d: register failed", workers)
 
-			h, _ := registry.Get("scale_cmd")
+			h, err := registry.Get("scale_cmd")
+			require.NoError(t, err, "workers=%d: the handler must be reachable", workers)
 			args := &common.CommandArgs{}
 
 			var wg sync.WaitGroup
@@ -50,7 +51,7 @@ func TestWorkerPool_SpreadsCommandsAcrossWorkers(t *testing.T) {
 				wg.Add(1)
 				ctx, cancel := ctxManager.NewContext(5 * time.Second)
 
-				err := workerPool.Submit(ctx, func() error {
+				submitErr := workerPool.Submit(ctx, func() error {
 					defer wg.Done()
 					defer cancel()
 					_, _, err := h.Execute(ctx, "scale_cmd", args)
@@ -60,10 +61,10 @@ func TestWorkerPool_SpreadsCommandsAcrossWorkers(t *testing.T) {
 					return err
 				})
 
-				if err != nil {
+				if submitErr != nil {
 					wg.Done()
 					cancel()
-					t.Errorf("workers=%d: submit failed: %v", workers, err)
+					assert.Failf(t, "submit failed", "workers=%d: %v", workers, submitErr)
 				}
 			}
 
@@ -90,7 +91,7 @@ func TestWorkerPool_SaturatesWithoutExceedingWorkers(t *testing.T) {
 		)
 
 		workerPool := pool.NewPool(maxWorkers, taskCount)
-		defer func() { _ = workerPool.Shutdown(5 * time.Second) }()
+		defer func() { assert.NoError(t, workerPool.Shutdown(5*time.Second), "shutdown failed") }()
 
 		ctx := context.Background()
 
@@ -125,7 +126,7 @@ func TestWorkerPool_SaturatesWithoutExceedingWorkers(t *testing.T) {
 			})
 			if err != nil {
 				wg.Done()
-				t.Errorf("submit failed: %v", err)
+				assert.Failf(t, "submit failed", "%v", err)
 			}
 		}
 
