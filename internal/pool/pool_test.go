@@ -136,38 +136,38 @@ func TestPoolConcurrency(t *testing.T) {
 }
 
 func TestPoolPanicRecovery(t *testing.T) {
-	pool := NewPool(2, 10)
-	defer func() {
-		if err := pool.Shutdown(5 * time.Second); err != nil {
-			t.Errorf("shutdown failed: %v", err)
+	synctest.Test(t, func(t *testing.T) {
+		pool := NewPool(2, 10)
+		defer func() {
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		}()
+
+		var completed atomic.Int32
+		done := make(chan struct{})
+
+		// Submit job that panics
+		require.NoError(t, pool.Submit(context.Background(), func() error {
+			panic("test panic")
+		}), "failed to submit panic job")
+
+		// Submit normal job after panic
+		err := pool.Submit(context.Background(), func() error {
+			completed.Add(1)
+			close(done)
+			return nil
+		})
+		require.NoError(t, err, "failed to submit job after panic")
+
+		// A worker lost to the panic never reaches this job, and the bubble
+		// settles instead of burning five real seconds waiting for the guard.
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("normal job did not complete after panic")
 		}
-	}()
 
-	var completed atomic.Int32
-	done := make(chan struct{})
-
-	// Submit job that panics
-	if err := pool.Submit(context.Background(), func() error {
-		panic("test panic")
-	}); err != nil {
-		t.Errorf("failed to submit panic job: %v", err)
-	}
-
-	// Submit normal job after panic
-	err := pool.Submit(context.Background(), func() error {
-		completed.Add(1)
-		close(done)
-		return nil
+		assert.Equal(t, int32(1), completed.Load())
 	})
-	require.NoError(t, err, "failed to submit job after panic")
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("normal job did not complete after panic")
-	}
-
-	assert.Equal(t, int32(1), completed.Load())
 }
 
 func TestPoolShutdown(t *testing.T) {
