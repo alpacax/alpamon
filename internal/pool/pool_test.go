@@ -26,18 +26,18 @@ func TestPoolBasic(t *testing.T) {
 		for i := range 10 {
 			wg.Add(1)
 			err := pool.Submit(context.Background(), func() error {
+				defer wg.Done()
 				counter.Add(1)
-				wg.Done()
+				// Hold the worker so the jobs overlap.
 				time.Sleep(10 * time.Millisecond)
 				return nil
 			})
-			if err != nil {
-				t.Errorf("failed to submit job %d: %v", i, err)
-				wg.Done()
-			}
+			require.NoErrorf(t, err, "failed to submit job %d", i)
 		}
 
-		// Wait for all jobs to complete
+		// Wait for every job to return, not merely to start: the Done above is
+		// deferred, so a worker that never finishes one leaves this Wait
+		// unsatisfiable and the bubble reports it as a deadlock.
 		wg.Wait()
 
 		assert.Equal(t, int32(10), counter.Load(), "expected 10 jobs to complete")
