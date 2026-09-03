@@ -45,47 +45,48 @@ func TestPoolBasic(t *testing.T) {
 }
 
 func TestPoolQueueFull(t *testing.T) {
-	// Small queue size to test overflow
-	// Queue size = 1, Workers = 1
-	pool := NewPool(1, 1)
-	defer func() {
-		if err := pool.Shutdown(5 * time.Second); err != nil {
-			t.Errorf("shutdown failed: %v", err)
-		}
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		// Small queue size to test overflow
+		// Queue size = 1, Workers = 1
+		pool := NewPool(1, 1)
+		defer func() {
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		}()
 
-	// Use a channel to control task execution
-	started := make(chan struct{})
-	blocker := make(chan struct{})
+		// Use a channel to control task execution
+		started := make(chan struct{})
+		blocker := make(chan struct{})
 
-	// Block the worker - this job will be picked up by the worker immediately
-	err := pool.Submit(context.Background(), func() error {
-		close(started)
-		<-blocker // Wait until we signal
-		return nil
+		// Block the worker - this job will be picked up by the worker immediately
+		err := pool.Submit(context.Background(), func() error {
+			close(started)
+			<-blocker // Wait until we signal
+			return nil
+		})
+		require.NoError(t, err, "failed to submit blocking task")
+
+		// Once this returns, the worker has taken the job off the queue and the queue
+		// is empty again. Nothing here needs a fake clock; the bubble is what bounds
+		// the wait, reporting a worker that never starts as a deadlock rather than
+		// hanging until the package timeout.
+		<-started
+
+		// Fill the queue (capacity is 1)
+		err = pool.Submit(context.Background(), func() error {
+			return nil
+		})
+		require.NoError(t, err, "failed to submit to queue")
+
+		// This should fail immediately (worker is blocked, queue is full)
+		err = pool.Submit(context.Background(), func() error {
+			return nil
+		})
+
+		assert.EqualError(t, err, "job queue is full")
+
+		// Unblock the worker to allow shutdown
+		close(blocker)
 	})
-	require.NoError(t, err, "failed to submit blocking task")
-
-	// The worker has taken the job off the queue, so the queue is empty again.
-	<-started
-
-	// Fill the queue (capacity is 1)
-	err = pool.Submit(context.Background(), func() error {
-		return nil
-	})
-	require.NoError(t, err, "failed to submit to queue")
-
-	// This should fail immediately (worker is blocked, queue is full)
-	err = pool.Submit(context.Background(), func() error {
-		return nil
-	})
-
-	if err == nil || err.Error() != "job queue is full" {
-		t.Errorf("expected queue full error, got: %v", err)
-	}
-
-	// Unblock the worker to allow shutdown
-	close(blocker)
 }
 
 func TestPoolConcurrency(t *testing.T) {

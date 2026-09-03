@@ -135,38 +135,38 @@ func TestPool_NoLeakAfterContextCancel(t *testing.T) {
 
 // TestPool_NoLeakQueueFull verifies goroutines are cleaned up when queue is full
 func TestPool_NoLeakQueueFull(t *testing.T) {
-	// Small pool and queue to trigger queue full
-	pool := NewPool(1, 2)
-	ctx := context.Background()
+	synctest.Test(t, func(t *testing.T) {
+		// Small pool and queue to trigger queue full
+		pool := NewPool(1, 2)
+		ctx := context.Background()
 
-	// Block the worker
-	started := make(chan struct{})
-	blocker := make(chan struct{})
-	_ = pool.Submit(ctx, func() error {
-		close(started)
-		<-blocker
-		return nil
+		// Block the worker
+		started := make(chan struct{})
+		blocker := make(chan struct{})
+		_ = pool.Submit(ctx, func() error {
+			close(started)
+			<-blocker
+			return nil
+		})
+
+		// Wait for the worker to pick up the blocking job. Nothing here needs a fake
+		// clock; the bubble is what bounds the wait, reporting a worker that never
+		// starts as a deadlock rather than hanging until the package timeout.
+		<-started
+
+		// Fill the queue
+		_ = pool.Submit(ctx, func() error { return nil })
+		_ = pool.Submit(ctx, func() error { return nil })
+
+		// This should fail - queue full
+		err := pool.Submit(ctx, func() error { return nil })
+		assert.Error(t, err, "expected queue full error")
+
+		// Unblock and shutdown
+		close(blocker)
+
+		assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
 	})
-
-	// Wait for worker to pick up the blocking job
-	<-started
-
-	// Fill the queue
-	_ = pool.Submit(ctx, func() error { return nil })
-	_ = pool.Submit(ctx, func() error { return nil })
-
-	// This should fail - queue full
-	err := pool.Submit(ctx, func() error { return nil })
-	if err == nil {
-		t.Error("expected queue full error")
-	}
-
-	// Unblock and shutdown
-	close(blocker)
-
-	if err := pool.Shutdown(5 * time.Second); err != nil {
-		t.Errorf("shutdown failed: %v", err)
-	}
 }
 
 // TestPool_NoLeakRapidShutdown verifies goroutines are cleaned up on rapid shutdown
