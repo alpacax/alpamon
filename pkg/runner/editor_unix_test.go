@@ -611,3 +611,33 @@ func TestChownUserDataDirRefusesADeepTree(t *testing.T) {
 
 	assert.ErrorContains(t, chownUserDataDir(root, current.Username, ""), "nests deeper than")
 }
+
+// TestSetupUserDataDirSweepsStaleTempFiles: a process killed between the temp
+// create and the rename leaves the temp behind, and nothing else collects it.
+// The sweep is bounded by age and by name so that neither a write in flight in
+// another session nor an unrelated dot file is taken with it.
+func TestSetupUserDataDirSweepsStaleTempFiles(t *testing.T) {
+	homeDir := t.TempDir()
+	userDataDir, err := setupUserDataDir(homeDir, "", "")
+	require.NoError(t, err)
+
+	aged := time.Now().Add(-2 * staleTempAge)
+	abandoned := filepath.Join(userDataDir, tempPrefix(userDataConfigFile)+"abandoned"+tempSuffix)
+	require.NoError(t, os.WriteFile(abandoned, nil, 0600))
+	require.NoError(t, os.Chtimes(abandoned, aged, aged))
+
+	unrelated := filepath.Join(userDataDir, ".editor-state"+tempSuffix)
+	require.NoError(t, os.WriteFile(unrelated, nil, 0600))
+	require.NoError(t, os.Chtimes(unrelated, aged, aged))
+
+	inFlight := filepath.Join(userDataDir, tempPrefix(userDataConfigFile)+"inflight"+tempSuffix)
+	require.NoError(t, os.WriteFile(inFlight, nil, 0600))
+
+	_, err = setupUserDataDir(homeDir, "", "")
+	require.NoError(t, err)
+
+	_, err = os.Stat(abandoned)
+	assert.ErrorIs(t, err, os.ErrNotExist, "an abandoned temp file must not outlive the next setup")
+	assert.FileExists(t, inFlight, "a temp file another session is still filling must be left alone")
+	assert.FileExists(t, unrelated, "the sweep must take only names writeFileAt could have made")
+}

@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
 )
 
@@ -38,6 +41,17 @@ const homeDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
 // code-server writes comes close to this depth.
 const maxChownDepth = 64
 
+// A temp file only outlives writeFileAt when the process dies between the
+// create and the rename, and the age cut keeps a sweep away from one another
+// session is filling right now.
+const staleTempAge = time.Hour
+
+// A temp file is named for the file it will become, so a sweep can tell one
+// apart from whatever else the user keeps in the directory.
+const tempSuffix = ".tmp"
+
+func tempPrefix(name string) string { return "." + name + "." }
+
 // setupUserDataFiles creates dirName/User under homeDir and writes config.yaml
 // and User/settings.json, refusing to traverse or write through symlinks.
 func setupUserDataFiles(homeDir, dirName string, configData, settingsData []byte) error {
@@ -58,6 +72,9 @@ func setupUserDataFiles(homeDir, dirName string, configData, settingsData []byte
 		return err
 	}
 	defer func() { _ = userDir.Close() }()
+
+	sweepStaleTemps(dataDir, userDataConfigFile)
+	sweepStaleTemps(userDir, userDataSettingsFile)
 
 	if err := writeFileAt(dataDir, userDataConfigFile, configData); err != nil {
 		return err
@@ -147,6 +164,39 @@ func mkdirOpenAt(parent *os.File, name string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil
 }
 
+// sweepStaleTemps removes the temp files a writeFileAt of name left behind by
+// dying before its rename. Nothing else collects them, and the directory
+// belongs to the user, so they would sit there for the life of the account.
+// A failure here is not worth refusing to start the editor over.
+func sweepStaleTemps(parent *os.File, name string) {
+	names, err := parent.Readdirnames(-1)
+	if err != nil {
+		log.Debug().Err(err).Msgf("Failed to list %s while sweeping temp files.", parent.Name())
+		return
+	}
+
+	dirfd := int(parent.Fd())
+	prefix, cutoff := tempPrefix(name), time.Now().Add(-staleTempAge)
+	for _, entry := range names {
+		if !strings.HasPrefix(entry, prefix) || !strings.HasSuffix(entry, tempSuffix) {
+			continue
+		}
+		// Stat through an fd rather than the name, so the age that decides the
+		// unlink is read off the very entry the name resolved to.
+		fd, err := unix.Openat(dirfd, entry, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			continue
+		}
+		f := os.NewFile(uintptr(fd), entry)
+		info, err := f.Stat()
+		_ = f.Close()
+		if err != nil || !info.Mode().IsRegular() || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = unix.Unlinkat(dirfd, entry, 0)
+	}
+}
+
 // writeFileAt replaces name under parent, refusing to write through a symlink.
 // The bytes land in a sibling temp file that renameat swaps into place, so a
 // concurrent reader—a running code-server watches settings.json—gets the old
@@ -176,7 +226,7 @@ func writeFileAt(parent *os.File, name string, data []byte) error {
 
 	// Two editor sessions for one user set the directory up concurrently, so the
 	// temp name has to be unique per call, not per process.
-	tmp := "." + name + "." + strconv.FormatUint(rand.Uint64(), 36) + ".tmp"
+	tmp := tempPrefix(name) + strconv.FormatUint(rand.Uint64(), 36) + tempSuffix
 	tmpPath := filepath.Join(parent.Name(), tmp)
 	fd, err := unix.Openat(dirfd, tmp,
 		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
