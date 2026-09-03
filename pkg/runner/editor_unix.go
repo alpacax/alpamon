@@ -5,6 +5,7 @@ package runner
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -29,6 +30,13 @@ const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLO
 // home directories at another filesystem that way, and refusing them would turn
 // a supported layout into an editor that will not start.
 const homeDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
+
+// The walk holds one directory fd per level, and the tree below the user data
+// dir is whatever the user puts there. alpamon.service sets no LimitNOFILE, so
+// the systemd default applies to the whole agent: a deep enough chain would
+// starve the WebSocket connection and the FTP sessions of descriptors. Nothing
+// code-server writes comes close to this depth.
+const maxChownDepth = 64
 
 // setupUserDataFiles creates dirName/User under homeDir and writes config.yaml
 // and User/settings.json, refusing to traverse or write through symlinks.
@@ -69,10 +77,14 @@ func chownTreeNoFollow(root string, uid, gid int) error {
 	if err := dir.Chown(uid, gid); err != nil {
 		return err
 	}
-	return chownChildren(dir, uid, gid)
+	return chownChildren(dir, uid, gid, maxChownDepth)
 }
 
-func chownChildren(dir *os.File, uid, gid int) error {
+func chownChildren(dir *os.File, uid, gid, depth int) error {
+	if depth <= 0 {
+		return fmt.Errorf("user data dir nests deeper than %d levels at %s", maxChownDepth, dir.Name())
+	}
+
 	names, err := dir.Readdirnames(-1)
 	if err != nil {
 		return err
@@ -102,7 +114,7 @@ func chownChildren(dir *os.File, uid, gid int) error {
 			return &os.PathError{Op: "open", Path: path, Err: err}
 		}
 		child := os.NewFile(uintptr(childFd), path)
-		err = chownChildren(child, uid, gid)
+		err = chownChildren(child, uid, gid, depth-1)
 		_ = child.Close()
 		if err != nil {
 			return err

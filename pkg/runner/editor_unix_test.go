@@ -586,3 +586,21 @@ func TestChownUserDataDirSkipsHardLinkedFiles(t *testing.T) {
 	assert.NotEqual(t, beforeOrdinary, fileOwner(t, ordinary),
 		"the walk must still re-own the files this tree is the only name for")
 }
+
+// TestChownUserDataDirRefusesADeepTree: the walk holds one directory fd per
+// level, and the agent shares its descriptors with the WebSocket connection
+// and the FTP sessions, so a tree the user nested deep enough would take those
+// down with it rather than merely failing the chown.
+func TestChownUserDataDirRefusesADeepTree(t *testing.T) {
+	root := t.TempDir()
+	deep := root
+	for range maxChownDepth + 1 {
+		deep = filepath.Join(deep, "d")
+	}
+	require.NoError(t, os.MkdirAll(deep, 0755))
+
+	current, err := user.Current()
+	require.NoError(t, err)
+
+	assert.ErrorContains(t, chownUserDataDir(root, current.Username, ""), "nests deeper than")
+}
