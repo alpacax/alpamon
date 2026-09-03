@@ -11,8 +11,8 @@ import "errors"
 // agent runs as LocalSystem, and a directory junction, which any user can
 // create without the privilege a symlink requires, redirects a path-based
 // write the same way a symlink does on Unix. Whoever enables editor tunnels on
-// Windows (#379) writes the junction-safe counterpart to editor_unix.go first,
-// and the tests below are what says so.
+// Windows (#379) writes the junction-safe counterpart of editor_unix.go here
+// first, and editor_windows_test.go is what says so.
 
 var errUserDataDirUnsupported = errors.New("code-server user data dir is not implemented on Windows")
 
