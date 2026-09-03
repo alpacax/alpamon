@@ -16,9 +16,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// newSessionEventPipe returns the handler and client ends of a net.Pipe and
-// closes both when the test ends. handleSessionEvent leaves closing unixConn
-// to its caller, and in these tests the caller is the test itself.
+// newSessionEventPipe closes both ends on cleanup because handleSessionEvent
+// leaves closing unixConn to its caller, and in these tests that is the test.
 func newSessionEventPipe(t *testing.T) (server, client net.Conn) {
 	t.Helper()
 	server, client = net.Pipe()
