@@ -79,17 +79,17 @@ func chownChildren(dir *os.File, uid, gid int) error {
 	}
 	dirfd := int(dir.Fd())
 	for _, name := range names {
-		path := filepath.Join(dir.Name(), name)
 		if err := unix.Fchownat(dirfd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return &os.PathError{Op: "lchown", Path: path, Err: err}
+			return &os.PathError{Op: "lchown", Path: filepath.Join(dir.Name(), name), Err: err}
 		}
 		var st unix.Stat_t
 		if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return &os.PathError{Op: "stat", Path: path, Err: err}
+			return &os.PathError{Op: "stat", Path: filepath.Join(dir.Name(), name), Err: err}
 		}
 		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 			continue
 		}
+		path := filepath.Join(dir.Name(), name)
 		childFd, err := unix.Openat(dirfd, name, dirFlags, 0)
 		if err != nil {
 			return &os.PathError{Op: "open", Path: path, Err: err}
