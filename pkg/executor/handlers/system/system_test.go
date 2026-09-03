@@ -36,6 +36,17 @@ func requireDrainOutlastsDelay(t *testing.T) {
 		"a job sleeping delayedActionDelay cannot drain inside poolDrainWait")
 }
 
+// drainThen returns a deferred teardown that waits the scheduled job out and only
+// then checks it landed, because a fire-and-forget action has not run when the
+// handler returns. Shutdown closes the job queue, so it must run exactly once,
+// which is why the check rides on the drain instead of being a second call.
+func drainThen(t *testing.T, p *pool.Pool, check func()) func() {
+	return func() {
+		require.NoError(t, p.Shutdown(poolDrainWait))
+		check()
+	}
+}
+
 // MockWSClient is a mock implementation of WSClient for testing
 type MockWSClient struct {
 	RestartCalled          bool
@@ -241,7 +252,9 @@ func TestSystemHandler_Restart_Default(t *testing.T) {
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
 		requireDrainOutlastsDelay(t)
-		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+		defer drainThen(t, workerPool, func() {
+			assert.True(t, mockWS.RestartCalled, "the scheduled restart never fired")
+		})()
 		defer ctxManager.Shutdown()
 
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
@@ -266,7 +279,9 @@ func TestSystemHandler_Restart_Alpamon(t *testing.T) {
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
 		requireDrainOutlastsDelay(t)
-		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+		defer drainThen(t, workerPool, func() {
+			assert.True(t, mockWS.RestartCalled, "the scheduled restart never fired")
+		})()
 		defer ctxManager.Shutdown()
 
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
@@ -291,7 +306,9 @@ func TestSystemHandler_Quit(t *testing.T) {
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
 		requireDrainOutlastsDelay(t)
-		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+		defer drainThen(t, workerPool, func() {
+			assert.True(t, mockWS.ShutDownCalled, "the scheduled quit never fired")
+		})()
 		defer ctxManager.Shutdown()
 
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
@@ -314,7 +331,9 @@ func TestSystemHandler_Reboot(t *testing.T) {
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
 		requireDrainOutlastsDelay(t)
-		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+		defer drainThen(t, workerPool, func() {
+			assert.True(t, mockExec.Invoked("reboot"), "the scheduled reboot never ran")
+		})()
 		defer ctxManager.Shutdown()
 
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
@@ -337,7 +356,9 @@ func TestSystemHandler_Shutdown(t *testing.T) {
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
 		requireDrainOutlastsDelay(t)
-		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+		defer drainThen(t, workerPool, func() {
+			assert.True(t, mockExec.Invoked("shutdown"), "the scheduled shutdown never ran")
+		})()
 		defer ctxManager.Shutdown()
 
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
@@ -794,7 +815,9 @@ func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 				ctxManager := agent.NewContextManager()
 				workerPool := pool.NewPool(2, 10)
 				requireDrainOutlastsDelay(t)
-				defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+				defer drainThen(t, workerPool, func() {
+					assert.True(t, mockWS.RestartCalled, "the restart scheduled after a self-update never fired")
+				})()
 				defer ctxManager.Shutdown()
 
 				mockVersions := &MockVersionResolver{
