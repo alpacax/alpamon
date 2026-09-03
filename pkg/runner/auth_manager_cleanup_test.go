@@ -563,8 +563,9 @@ func TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse(t *testing.T) {
 	require.NoError(t, err)
 
 	client, server := net.Pipe()
+	tracked := &closeTrackingConn{Conn: server}
 	conn := &blockingWriteConn{
-		Conn:    server,
+		Conn:    tracked,
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
@@ -606,7 +607,12 @@ func TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse(t *testing.T) {
 	}
 
 	cancel()
-	time.Sleep(100 * time.Millisecond) // Long enough for the waiter to close, if it is going to.
+	// Long enough for the waiter to close, if it is going to. The assertion is what
+	// keeps the wait from going vacuous: on a loaded box the waiter may not have
+	// reached its close yet, and a pass that never entered the window looks the same
+	// as one that held it.
+	time.Sleep(100 * time.Millisecond)
+	assert.False(t, tracked.isClosed(), "the waiter closed a connection whose response was still going out")
 	close(conn.release)
 
 	got := <-results
