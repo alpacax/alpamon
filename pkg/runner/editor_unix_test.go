@@ -627,6 +627,36 @@ func TestSetupUserDataDirRefusesAMissingHome(t *testing.T) {
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "a missing home directory must not be created here")
 }
 
+// TestSetupUserDataDirUnderConcurrentSessions covers the case the temp+rename
+// replacement exists for: one user opening two editor sessions sets the
+// directory up twice at once, and neither may see a half-written settings.json.
+func TestSetupUserDataDirUnderConcurrentSessions(t *testing.T) {
+	homeDir := t.TempDir()
+
+	const sessions = 8
+	start := make(chan struct{})
+	errs := make(chan error, sessions)
+	for range sessions {
+		go func() {
+			<-start
+			_, err := setupUserDataDir(homeDir, "", "")
+			errs <- err
+		}()
+	}
+	close(start)
+	for range sessions {
+		require.NoError(t, <-errs)
+	}
+
+	cfg := GetCodeServerConfig()
+	data, err := os.ReadFile(filepath.Join(homeDir, cfg.UserDataDirName, userDataUserDir, userDataSettingsFile))
+	require.NoError(t, err)
+
+	var settings map[string]any
+	require.NoError(t, json.Unmarshal(data, &settings),
+		"every reader must find one of the two complete files, never a partial one")
+}
+
 // TestSetupUserDataDirSweepsStaleTempFiles: a process killed between the temp
 // create and the rename leaves the temp behind, and nothing else collects it.
 // The sweep is bounded by age and by name so that neither a write in flight in
