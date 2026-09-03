@@ -3,8 +3,11 @@
 package runner
 
 import (
+	"cmp"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 )
@@ -117,19 +120,43 @@ func mkdirOpenAt(parent *os.File, name string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil
 }
 
-// writeFileAt writes data to name under parent, refusing to write through a symlink.
+// writeFileAt replaces name under parent, refusing to write through a symlink.
+// The bytes land in a sibling temp file that renameat swaps into place, so a
+// concurrent reader — a running code-server watches settings.json — gets the
+// old file or the new one, never the empty window an O_TRUNC write opens.
 func writeFileAt(parent *os.File, name string, data []byte) error {
+	dirfd := int(parent.Fd())
 	path := filepath.Join(parent.Name(), name)
-	fd, err := unix.Openat(int(parent.Fd()), name,
-		unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
+
+	// renameat replaces a symlink at name rather than following it, which is
+	// safe but silent. This open refuses one first, so a planted link is an error.
+	probe, err := unix.Openat(dirfd, name,
+		unix.O_WRONLY|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
 	if err != nil {
 		return &os.PathError{Op: "open", Path: path, Err: err}
 	}
-	f := os.NewFile(uintptr(fd), path)
+	_ = unix.Close(probe)
+
+	// Two editor sessions for one user set the directory up concurrently, so the
+	// temp name has to be unique per call, not per process.
+	tmp := "." + name + "." + strconv.FormatUint(rand.Uint64(), 36) + ".tmp"
+	tmpPath := filepath.Join(parent.Name(), tmp)
+	fd, err := unix.Openat(dirfd, tmp,
+		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
+	if err != nil {
+		return &os.PathError{Op: "open", Path: tmpPath, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), tmpPath)
 	_, writeErr := f.Write(data)
 	closeErr := f.Close()
-	if writeErr != nil {
-		return writeErr
+	if err := cmp.Or(writeErr, closeErr); err != nil {
+		_ = unix.Unlinkat(dirfd, tmp, 0)
+		return err
 	}
-	return closeErr
+
+	if err := unix.Renameat(dirfd, tmp, dirfd, name); err != nil {
+		_ = unix.Unlinkat(dirfd, tmp, 0)
+		return &os.PathError{Op: "rename", Path: path, Err: err}
+	}
+	return nil
 }

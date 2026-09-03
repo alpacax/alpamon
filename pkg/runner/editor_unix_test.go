@@ -325,3 +325,34 @@ func fileUID(t *testing.T, path string) uint32 {
 	require.NoError(t, err)
 	return info.Sys().(*syscall.Stat_t).Uid
 }
+
+// TestWriteFileAtReplacesInPlaceFile proves the swap is atomic from the reader's
+// side: a second link to the old inode keeps the old bytes, which an in-place
+// truncate would have destroyed, and no temp file survives the call.
+func TestWriteFileAtReplacesInPlaceFile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "f"), []byte("old"), 0644))
+	require.NoError(t, os.Link(filepath.Join(dir, "f"), filepath.Join(dir, "witness")))
+
+	parent, err := openDir(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parent.Close() })
+
+	require.NoError(t, writeFileAt(parent, "f", []byte("new")))
+
+	kept, err := os.ReadFile(filepath.Join(dir, "witness"))
+	require.NoError(t, err)
+	assert.Equal(t, "old", string(kept), "the replaced file must keep the bytes a reader already had open")
+
+	got, err := os.ReadFile(filepath.Join(dir, "f"))
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(got))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	assert.ElementsMatch(t, []string{"f", "witness"}, names, "the temp file must not outlive the write")
+}
