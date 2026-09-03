@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRetry_Success(t *testing.T) {
@@ -52,46 +56,47 @@ func TestRetry_PermanentError(t *testing.T) {
 }
 
 func TestRetry_ContextCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
 
-	b := &ExponentialBackoff{
-		InitialInterval: 1 * time.Second,
-		MaxInterval:     1 * time.Second,
-	}
+		b := &ExponentialBackoff{
+			InitialInterval: 1 * time.Second,
+			MaxInterval:     1 * time.Second,
+		}
 
-	calls := 0
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
+		calls := 0
+		go func() {
+			// Cancel once Retry is parked on its backoff timer, not mid-operation.
+			synctest.Wait()
+			cancel()
+		}()
 
-	err := Retry(ctx, b, func() error {
-		calls++
-		return errors.New("keep trying")
+		err := Retry(ctx, b, func() error {
+			calls++
+			return errors.New("keep trying")
+		})
+
+		require.ErrorIs(t, err, context.Canceled)
+		assert.GreaterOrEqual(t, calls, 1, "expected at least 1 call")
 	})
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Canceled, got %v", err)
-	}
-	if calls < 1 {
-		t.Fatal("expected at least 1 call")
-	}
 }
 
 func TestRetry_MaxElapsedTime(t *testing.T) {
-	b := &ExponentialBackoff{
-		InitialInterval: 10 * time.Millisecond,
-		MaxInterval:     10 * time.Millisecond,
-		MaxElapsedTime:  50 * time.Millisecond,
-	}
+	synctest.Test(t, func(t *testing.T) {
+		b := &ExponentialBackoff{
+			InitialInterval: 10 * time.Millisecond,
+			MaxInterval:     10 * time.Millisecond,
+			MaxElapsedTime:  50 * time.Millisecond,
+		}
 
-	err := Retry(context.Background(), b, func() error {
-		return errors.New("always fail")
+		start := time.Now()
+		err := Retry(context.Background(), b, func() error {
+			return errors.New("always fail")
+		})
+
+		require.Error(t, err, "expected error after max elapsed time")
+		assert.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond, "gave up before MaxElapsedTime")
 	})
-
-	if err == nil {
-		t.Fatal("expected error after max elapsed time")
-	}
 }
 
 func TestNextBackOff_CappedAtMax(t *testing.T) {

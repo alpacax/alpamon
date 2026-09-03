@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -52,41 +53,43 @@ func expectSingleResponse(t *testing.T, client net.Conn) SudoApprovalResponse {
 // the PAM client parses all it reads until EOF as one JSON document (alpamon-pam
 // alpacon_approval.c), so a second response would break it.
 func TestFinalizeRequest_SendsSingleFullResponseAndCloses(t *testing.T) {
-	am := newTestAuthManager()
-	req := SudoApprovalRequest{
-		RequestID: "req-1",
-		Username:  "alice",
-		Groupname: "wheel",
-		PID:       4242,
-		PPID:      4200,
-		Command:   "sudo systemctl restart nginx",
-		SessionID: "sess-1",
-	}
-	client := registerPipeRequest(am, req)
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		req := SudoApprovalRequest{
+			RequestID: "req-1",
+			Username:  "alice",
+			Groupname: "wheel",
+			PID:       4242,
+			PPID:      4200,
+			Command:   "sudo systemctl restart nginx",
+			SessionID: "sess-1",
+		}
+		client := registerPipeRequest(am, req)
 
-	// net.Pipe is unbuffered, so the write has to run against this goroutine's reads.
-	go am.finalizeRequest(req.RequestID, "Communication error")
+		// net.Pipe is unbuffered, so the write has to run against this goroutine's reads.
+		go am.finalizeRequest(req.RequestID, "Communication error")
 
-	want := SudoApprovalResponse{
-		RequestID: "req-1",
-		Type:      "sudo_approval_response",
-		Username:  "alice",
-		Groupname: "wheel",
-		PID:       4242,
-		PPID:      4200,
-		Command:   "sudo systemctl restart nginx",
-		SessionID: "sess-1",
-		Reason:    "Communication error",
-	}
-	if resp := expectSingleResponse(t, client); resp != want {
-		t.Errorf("response: got %+v, want %+v", resp, want)
-	}
+		want := SudoApprovalResponse{
+			RequestID: "req-1",
+			Type:      "sudo_approval_response",
+			Username:  "alice",
+			Groupname: "wheel",
+			PID:       4242,
+			PPID:      4200,
+			Command:   "sudo systemctl restart nginx",
+			SessionID: "sess-1",
+			Reason:    "Communication error",
+		}
+		if resp := expectSingleResponse(t, client); resp != want {
+			t.Errorf("response: got %+v, want %+v", resp, want)
+		}
 
-	// finalizeRequest deregisters before it writes, so the close seen above
-	// means the deletion already happened.
-	if _, exists := am.pidToSessionMap[4242].Requests["req-1"]; exists {
-		t.Error("request was not deregistered")
-	}
+		// finalizeRequest deregisters before it writes, so the close seen above
+		// means the deletion already happened.
+		if _, exists := am.pidToSessionMap[4242].Requests["req-1"]; exists {
+			t.Error("request was not deregistered")
+		}
+	})
 }
 
 // TestFinalizeRequest_UnknownRequestIsNoop covers a request HandleSudoApprovalResponse
@@ -150,37 +153,39 @@ func TestFinalizeRequest_RacesHandleResponse(t *testing.T) {
 // back to its fail-open setting, and signalling handleSudoApprovalRequest, which is
 // still parked on the completion channel holding an already-answered request.
 func TestRemovePIDSessionMapping_DeniesPendingRequestsAndSignalsWaiter(t *testing.T) {
-	am := newTestAuthManager()
-	req := SudoApprovalRequest{
-		RequestID: "req-websh",
-		Username:  "alice",
-		PID:       7777,
-		Command:   "sudo reboot",
-		SessionID: "sess-websh",
-	}
-	client := registerPipeRequest(am, req)
-	completion := registerCompletionChannel(am, req.RequestID)
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		req := SudoApprovalRequest{
+			RequestID: "req-websh",
+			Username:  "alice",
+			PID:       7777,
+			Command:   "sudo reboot",
+			SessionID: "sess-websh",
+		}
+		client := registerPipeRequest(am, req)
+		completion := registerCompletionChannel(am, req.RequestID)
 
-	go am.RemovePIDSessionMapping(7777)
+		go am.RemovePIDSessionMapping(7777)
 
-	want := SudoApprovalResponse{
-		RequestID: "req-websh",
-		Type:      "sudo_approval_response",
-		Username:  "alice",
-		PID:       7777,
-		Command:   "sudo reboot",
-		SessionID: "sess-websh",
-		Reason:    "Session ended",
-	}
-	if resp := expectSingleResponse(t, client); resp != want {
-		t.Errorf("response: got %+v, want %+v", resp, want)
-	}
+		want := SudoApprovalResponse{
+			RequestID: "req-websh",
+			Type:      "sudo_approval_response",
+			Username:  "alice",
+			PID:       7777,
+			Command:   "sudo reboot",
+			SessionID: "sess-websh",
+			Reason:    "Session ended",
+		}
+		if resp := expectSingleResponse(t, client); resp != want {
+			t.Errorf("response: got %+v, want %+v", resp, want)
+		}
 
-	select {
-	case <-completion:
-	case <-time.After(2 * time.Second):
-		t.Error("waiter was never signaled")
-	}
+		select {
+		case <-completion:
+		case <-time.After(2 * time.Second):
+			t.Error("waiter was never signaled")
+		}
+	})
 }
 
 // TestHandleSudoApprovalResponse_SignalsWaiterOnWriteFailure covers a client that
@@ -233,46 +238,50 @@ func TestAddPIDSessionMapping_SameEntryKeepsRequests(t *testing.T) {
 // session: overwriting puts the old entry's requests out of reach just as removing
 // it does, so the replacement has to answer them too.
 func TestAddPIDSessionMapping_DeniesReplacedRequests(t *testing.T) {
-	am := newTestAuthManager()
-	req := SudoApprovalRequest{RequestID: "req-stale", Username: "alice", PID: 5555, SessionID: "sess-old"}
-	client := registerPipeRequest(am, req)
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		req := SudoApprovalRequest{RequestID: "req-stale", Username: "alice", PID: 5555, SessionID: "sess-old"}
+		client := registerPipeRequest(am, req)
 
-	go am.AddPIDSessionMapping(5555, &SessionInfo{
-		SessionID: "sess-new",
-		PID:       5555,
-		Requests:  map[string]*SudoRequest{},
+		go am.AddPIDSessionMapping(5555, &SessionInfo{
+			SessionID: "sess-new",
+			PID:       5555,
+			Requests:  map[string]*SudoRequest{},
+		})
+
+		want := SudoApprovalResponse{
+			RequestID: "req-stale",
+			Type:      "sudo_approval_response",
+			Username:  "alice",
+			PID:       5555,
+			SessionID: "sess-old",
+			Reason:    "Session replaced",
+		}
+		if resp := expectSingleResponse(t, client); resp != want {
+			t.Errorf("response: got %+v, want %+v", resp, want)
+		}
 	})
-
-	want := SudoApprovalResponse{
-		RequestID: "req-stale",
-		Type:      "sudo_approval_response",
-		Username:  "alice",
-		PID:       5555,
-		SessionID: "sess-old",
-		Reason:    "Session replaced",
-	}
-	if resp := expectSingleResponse(t, client); resp != want {
-		t.Errorf("response: got %+v, want %+v", resp, want)
-	}
 }
 
 func TestAddPIDCommandMapping_DeniesReplacedRequests(t *testing.T) {
-	am := newTestAuthManager()
-	req := SudoApprovalRequest{RequestID: "req-stale-cmd", Username: "bob", PID: 6666}
-	client := registerPipeRequest(am, req)
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		req := SudoApprovalRequest{RequestID: "req-stale-cmd", Username: "bob", PID: 6666}
+		client := registerPipeRequest(am, req)
 
-	go am.AddPIDCommandMapping(6666, "cmd-new", "bob")
+		go am.AddPIDCommandMapping(6666, "cmd-new", "bob")
 
-	want := SudoApprovalResponse{
-		RequestID: "req-stale-cmd",
-		Type:      "sudo_approval_response",
-		Username:  "bob",
-		PID:       6666,
-		Reason:    "Session replaced",
-	}
-	if resp := expectSingleResponse(t, client); resp != want {
-		t.Errorf("response: got %+v, want %+v", resp, want)
-	}
+		want := SudoApprovalResponse{
+			RequestID: "req-stale-cmd",
+			Type:      "sudo_approval_response",
+			Username:  "bob",
+			PID:       6666,
+			Reason:    "Session replaced",
+		}
+		if resp := expectSingleResponse(t, client); resp != want {
+			t.Errorf("response: got %+v, want %+v", resp, want)
+		}
+	})
 }
 
 // TestHandleSudoApprovalRequest_RetryFailureAnswersOnce is issue #396 itself: the
@@ -280,99 +289,105 @@ func TestAddPIDCommandMapping_DeniesReplacedRequests(t *testing.T) {
 // still-registered request for a second response and close. The cancelled context
 // fails the retry immediately instead of spending its 25s budget.
 func TestHandleSudoApprovalRequest_RetryFailureAnswersOnce(t *testing.T) {
-	am := newTestAuthManager()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	am.ctx = ctx
-	am.pidToSessionMap[4200] = &SessionInfo{
-		Kind:      TrackerKindWebsh,
-		SessionID: "sess-retry",
-		PID:       4200,
-		Requests:  make(map[string]*SudoRequest),
-	}
-	data, err := json.Marshal(SudoApprovalRequest{
-		RequestID: "req-retry",
-		Type:      "sudo_approval",
-		Username:  "alice",
-		PID:       424242,
-		PPID:      4200,
-		Command:   "sudo reboot",
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		am.ctx = ctx
+		am.pidToSessionMap[4200] = &SessionInfo{
+			Kind:      TrackerKindWebsh,
+			SessionID: "sess-retry",
+			PID:       4200,
+			Requests:  make(map[string]*SudoRequest),
+		}
+		data, err := json.Marshal(SudoApprovalRequest{
+			RequestID: "req-retry",
+			Type:      "sudo_approval",
+			Username:  "alice",
+			PID:       424242,
+			PPID:      4200,
+			Command:   "sudo reboot",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		client, server := net.Pipe()
+
+		go am.handleSudoApprovalRequest(data, server)
+
+		want := SudoApprovalResponse{
+			RequestID:    "req-retry",
+			Type:         "sudo_approval_response",
+			Username:     "alice",
+			PID:          424242,
+			PPID:         4200,
+			Command:      "sudo reboot",
+			IsAlpconUser: true,
+			SessionID:    "sess-retry",
+			Reason:       "Communication error",
+		}
+		if resp := expectSingleResponse(t, client); resp != want {
+			t.Errorf("response: got %+v, want %+v", resp, want)
+		}
+		if _, exists := am.pidToSessionMap[4200].Requests["req-retry"]; exists {
+			t.Error("request was not deregistered")
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, server := net.Pipe()
-
-	go am.handleSudoApprovalRequest(data, server)
-
-	want := SudoApprovalResponse{
-		RequestID:    "req-retry",
-		Type:         "sudo_approval_response",
-		Username:     "alice",
-		PID:          424242,
-		PPID:         4200,
-		Command:      "sudo reboot",
-		IsAlpconUser: true,
-		SessionID:    "sess-retry",
-		Reason:       "Communication error",
-	}
-	if resp := expectSingleResponse(t, client); resp != want {
-		t.Errorf("response: got %+v, want %+v", resp, want)
-	}
-	if _, exists := am.pidToSessionMap[4200].Requests["req-retry"]; exists {
-		t.Error("request was not deregistered")
-	}
 }
 
 // TestHandleSudoApprovalRequest_LocalSudoRegistersNothing checks a sudo outside any
 // tracked session is answered on the spot and registers nothing—no request, and no
 // completion channel for a waiter that never exists.
 func TestHandleSudoApprovalRequest_LocalSudoRegistersNothing(t *testing.T) {
-	am := newTestAuthManager()
-	data, err := json.Marshal(SudoApprovalRequest{
-		RequestID: "req-local",
-		Type:      "sudo_approval",
-		Username:  "alice",
-		PID:       999999,
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		data, err := json.Marshal(SudoApprovalRequest{
+			RequestID: "req-local",
+			Type:      "sudo_approval",
+			Username:  "alice",
+			PID:       999999,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		client, server := net.Pipe()
+
+		go am.handleSudoApprovalRequest(data, server)
+
+		resp := expectSingleResponse(t, client)
+		if !resp.Approved || resp.IsAlpconUser {
+			t.Errorf("local sudo response: got %+v, want approved non-Alpacon", resp)
+		}
+		if len(am.completionChannels) != 0 {
+			t.Errorf("completion channels left behind: %v", am.completionChannels)
+		}
+		if len(am.pidToSessionMap) != 0 {
+			t.Errorf("tracker entries left behind: %v", am.pidToSessionMap)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, server := net.Pipe()
-
-	go am.handleSudoApprovalRequest(data, server)
-
-	resp := expectSingleResponse(t, client)
-	if !resp.Approved || resp.IsAlpconUser {
-		t.Errorf("local sudo response: got %+v, want approved non-Alpacon", resp)
-	}
-	if len(am.completionChannels) != 0 {
-		t.Errorf("completion channels left behind: %v", am.completionChannels)
-	}
-	if len(am.pidToSessionMap) != 0 {
-		t.Errorf("tracker entries left behind: %v", am.pidToSessionMap)
-	}
 }
 
 func TestRemovePIDCommandMapping_DeniesPendingRequests(t *testing.T) {
-	am := newTestAuthManager()
-	req := SudoApprovalRequest{RequestID: "req-cmd", Username: "bob", PID: 8888}
-	client := registerPipeRequest(am, req)
-	session := am.pidToSessionMap[8888]
-	session.Kind = TrackerKindCommand
-	session.SessionID = ""
-	session.CommandID = "cmd-1"
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		req := SudoApprovalRequest{RequestID: "req-cmd", Username: "bob", PID: 8888}
+		client := registerPipeRequest(am, req)
+		session := am.pidToSessionMap[8888]
+		session.Kind = TrackerKindCommand
+		session.SessionID = ""
+		session.CommandID = "cmd-1"
 
-	go am.RemovePIDCommandMapping(8888, "cmd-1")
+		go am.RemovePIDCommandMapping(8888, "cmd-1")
 
-	want := SudoApprovalResponse{
-		RequestID: "req-cmd",
-		Type:      "sudo_approval_response",
-		Username:  "bob",
-		PID:       8888,
-		Reason:    "Session ended",
-	}
-	if resp := expectSingleResponse(t, client); resp != want {
-		t.Errorf("response: got %+v, want %+v", resp, want)
-	}
+		want := SudoApprovalResponse{
+			RequestID: "req-cmd",
+			Type:      "sudo_approval_response",
+			Username:  "bob",
+			PID:       8888,
+			Reason:    "Session ended",
+		}
+		if resp := expectSingleResponse(t, client); resp != want {
+			t.Errorf("response: got %+v, want %+v", resp, want)
+		}
+	})
 }

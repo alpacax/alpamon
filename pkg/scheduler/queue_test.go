@@ -3,7 +3,10 @@ package scheduler
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func queueSize() int {
@@ -38,43 +41,46 @@ func TestPostChunk_EnqueuesBelowHighWater(t *testing.T) {
 }
 
 func TestPostChunk_BlocksUntilSpaceFrees(t *testing.T) {
-	newRequestQueue()
-	fill(3) // at the high-water mark
+	synctest.Test(t, func(t *testing.T) {
+		newRequestQueue()
+		fill(3) // at the high-water mark
 
-	done := make(chan struct{})
-	go func() {
-		Rqueue.postChunk(context.Background(), "/chunk", nil, 10, 3, time.Millisecond, time.Second)
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			Rqueue.postChunk(context.Background(), "/chunk", nil, 10, 3, time.Millisecond, time.Second)
+			close(done)
+		}()
 
-	select {
-	case <-done:
-		t.Fatal("postChunk returned at high-water; expected backpressure")
-	case <-time.After(50 * time.Millisecond):
-	}
+		// Wait returns once postChunk parks on its poll timer, proving it
+		// reached the backpressure loop rather than merely not finishing yet.
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("postChunk returned at high-water; expected backpressure")
+		default:
+		}
 
-	drainOne(t) // drop below high-water
+		drainOne(t) // drop below high-water
 
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("postChunk did not return after space freed")
-	}
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("postChunk did not return after space freed")
+		}
+	})
 }
 
 func TestPostChunk_DropsAfterMaxWait(t *testing.T) {
-	newRequestQueue()
-	fill(3)
+	synctest.Test(t, func(t *testing.T) {
+		newRequestQueue()
+		fill(3)
 
-	start := time.Now()
-	Rqueue.postChunk(context.Background(), "/chunk", nil, 10, 3, time.Millisecond, 30*time.Millisecond)
+		start := time.Now()
+		Rqueue.postChunk(context.Background(), "/chunk", nil, 10, 3, time.Millisecond, 30*time.Millisecond)
 
-	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
-		t.Errorf("expected to wait ~maxWait before dropping, waited %v", elapsed)
-	}
-	if got := queueSize(); got != 3 {
-		t.Errorf("chunk should be dropped under sustained pressure, size got %d want 3", got)
-	}
+		assert.Equal(t, 30*time.Millisecond, time.Since(start), "expected to wait exactly maxWait before dropping")
+		assert.Equal(t, 3, queueSize(), "chunk should be dropped under sustained pressure")
+	})
 }
 
 func TestPostChunk_DropsOnContextCancel(t *testing.T) {

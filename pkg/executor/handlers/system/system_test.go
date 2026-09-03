@@ -238,8 +238,6 @@ func TestSystemHandler_Restart_Default(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, output, "restart")
-	// Give time for the pool task to execute
-	time.Sleep(100 * time.Millisecond)
 }
 
 func TestSystemHandler_Restart_Alpamon(t *testing.T) {

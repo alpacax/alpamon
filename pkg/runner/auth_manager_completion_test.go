@@ -2,6 +2,7 @@ package runner
 
 import (
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -36,21 +37,23 @@ func TestNewCompletionChannel_SurvivesSignalBeforeReceive(t *testing.T) {
 // which runs on the websocket read loop, never waits for a receiver—not even when
 // the buffer already holds a signal.
 func TestSignalCompletion_DoesNotBlockWhenAlreadySignaled(t *testing.T) {
-	am := newTestAuthManager()
-	registerCompletionChannel(am, "req-1")
-	am.signalCompletion("req-1")
-
-	returned := make(chan struct{})
-	go func() {
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		registerCompletionChannel(am, "req-1")
 		am.signalCompletion("req-1")
-		close(returned)
-	}()
 
-	select {
-	case <-returned:
-	case <-time.After(2 * time.Second):
-		t.Fatal("signalCompletion blocked on a full buffer")
-	}
+		returned := make(chan struct{})
+		go func() {
+			am.signalCompletion("req-1")
+			close(returned)
+		}()
+
+		select {
+		case <-returned:
+		case <-time.After(2 * time.Second):
+			t.Fatal("signalCompletion blocked on a full buffer")
+		}
+	})
 }
 
 // TestSignalCompletion_UnknownRequestIsNoop covers a response arriving after the

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/testutil"
@@ -196,134 +197,138 @@ func TestRollback_NilState_ReturnsError(t *testing.T) {
 }
 
 func TestStartWatchdog_FiresOnTimeout(t *testing.T) {
-	setupTempDataDir(t)
+	synctest.Test(t, func(t *testing.T) {
+		setupTempDataDir(t)
 
-	// Timer margin sized for slow CI runners (containers with throttled
-	// disks where WritePending alone can take 100ms+). Keep watchdog
-	// timeouts in tests >= ~1s so a slow WritePending doesn't push
-	// ExpiresAt into the past before StartWatchdog reads it.
-	st := &PendingState{
-		BackupConfPath: "/tmp/whatever",
-		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(1 * time.Second),
-	}
-	require.NoError(t, WritePending(st))
+		st := &PendingState{
+			BackupConfPath: "/tmp/whatever",
+			NewURL:         "https://b.example.com",
+			ExpiresAt:      time.Now().Add(1 * time.Second),
+		}
+		require.NoError(t, WritePending(st))
 
-	var fired atomic.Int32
-	done := make(chan struct{})
-	ctx := t.Context()
+		var fired atomic.Int32
+		done := make(chan struct{})
+		ctx := t.Context()
 
-	_ = StartWatchdog(ctx, st, func(_ *PendingState) {
-		fired.Add(1)
-		close(done)
+		_ = StartWatchdog(ctx, st, func(_ *PendingState) {
+			fired.Add(1)
+			close(done)
+		})
+
+		select {
+		case <-done:
+			assert.Equal(t, int32(1), fired.Load(), "expected a single fire")
+		case <-time.After(5 * time.Second):
+			t.Fatal("watchdog did not fire within deadline")
+		}
 	})
-
-	select {
-	case <-done:
-		assert.Equal(t, int32(1), fired.Load(), "expected a single fire")
-	case <-time.After(5 * time.Second):
-		t.Fatal("watchdog did not fire within deadline")
-	}
 }
 
 func TestStartWatchdog_DoesNotFireAfterConfirm(t *testing.T) {
-	setupTempDataDir(t)
+	synctest.Test(t, func(t *testing.T) {
+		setupTempDataDir(t)
 
-	// 3s window leaves plenty of room to call Confirm even if
-	// WritePending takes several hundred ms on a slow CI runner.
-	st := &PendingState{
-		BackupConfPath: "/tmp/whatever",
-		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(3 * time.Second),
-	}
-	require.NoError(t, WritePending(st))
+		st := &PendingState{
+			BackupConfPath: "/tmp/whatever",
+			NewURL:         "https://b.example.com",
+			ExpiresAt:      time.Now().Add(3 * time.Second),
+		}
+		require.NoError(t, WritePending(st))
 
-	var fired atomic.Int32
-	ctx := t.Context()
+		var fired atomic.Int32
+		ctx := t.Context()
 
-	_ = StartWatchdog(ctx, st, func(_ *PendingState) {
-		fired.Add(1)
+		_ = StartWatchdog(ctx, st, func(_ *PendingState) {
+			fired.Add(1)
+		})
+
+		// Confirm well before the timer would fire.
+		time.Sleep(200 * time.Millisecond)
+		Confirm(st)
+
+		// Wait past the original deadline.
+		time.Sleep(4 * time.Second)
+
+		assert.Zero(t, fired.Load(), "watchdog fired despite Confirm")
 	})
-
-	// Confirm well before the timer would fire.
-	time.Sleep(200 * time.Millisecond)
-	Confirm(st)
-
-	// Wait past the original deadline plus jitter.
-	time.Sleep(4 * time.Second)
-
-	assert.Zero(t, fired.Load(), "watchdog fired despite Confirm")
 }
 
 func TestStartWatchdog_FiresImmediatelyIfAlreadyExpired(t *testing.T) {
-	setupTempDataDir(t)
+	synctest.Test(t, func(t *testing.T) {
+		setupTempDataDir(t)
 
-	st := &PendingState{
-		BackupConfPath: "/tmp/whatever",
-		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(-time.Minute),
-	}
-	require.NoError(t, WritePending(st))
+		st := &PendingState{
+			BackupConfPath: "/tmp/whatever",
+			NewURL:         "https://b.example.com",
+			ExpiresAt:      time.Now().Add(-time.Minute),
+		}
+		require.NoError(t, WritePending(st))
 
-	done := make(chan struct{})
-	ctx := t.Context()
+		done := make(chan struct{})
+		ctx := t.Context()
 
-	_ = StartWatchdog(ctx, st, func(_ *PendingState) {
-		close(done)
+		_ = StartWatchdog(ctx, st, func(_ *PendingState) {
+			close(done)
+		})
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("watchdog did not fire immediately for expired marker")
+		}
 	})
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("watchdog did not fire immediately for expired marker")
-	}
 }
 
 func TestStartWatchdog_CancelDisarmsBeforeTimer(t *testing.T) {
-	setupTempDataDir(t)
+	synctest.Test(t, func(t *testing.T) {
+		setupTempDataDir(t)
 
-	st := &PendingState{
-		BackupConfPath: "/tmp/whatever",
-		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(3 * time.Second),
-	}
-	require.NoError(t, WritePending(st))
+		st := &PendingState{
+			BackupConfPath: "/tmp/whatever",
+			NewURL:         "https://b.example.com",
+			ExpiresAt:      time.Now().Add(3 * time.Second),
+		}
+		require.NoError(t, WritePending(st))
 
-	var fired atomic.Int32
-	ctx := t.Context()
+		var fired atomic.Int32
+		ctx := t.Context()
 
-	cancelWatchdog := StartWatchdog(ctx, st, func(_ *PendingState) {
-		fired.Add(1)
+		cancelWatchdog := StartWatchdog(ctx, st, func(_ *PendingState) {
+			fired.Add(1)
+		})
+
+		// Disarm before the timer would fire: mirrors the on-connect-success
+		// path that races against the watchdog.
+		time.Sleep(200 * time.Millisecond)
+		cancelWatchdog()
+
+		time.Sleep(4 * time.Second)
+		assert.Zero(t, fired.Load(), "watchdog fired despite cancel")
 	})
-
-	// Disarm before the timer would fire: mirrors the on-connect-success
-	// path that races against the watchdog.
-	time.Sleep(200 * time.Millisecond)
-	cancelWatchdog()
-
-	time.Sleep(4 * time.Second)
-	assert.Zero(t, fired.Load(), "watchdog fired despite cancel")
 }
 
 func TestStartWatchdog_StopsOnContextCancel(t *testing.T) {
-	setupTempDataDir(t)
+	synctest.Test(t, func(t *testing.T) {
+		setupTempDataDir(t)
 
-	st := &PendingState{
-		BackupConfPath: "/tmp/whatever",
-		NewURL:         "https://b.example.com",
-		ExpiresAt:      time.Now().Add(3 * time.Second),
-	}
-	require.NoError(t, WritePending(st))
+		st := &PendingState{
+			BackupConfPath: "/tmp/whatever",
+			NewURL:         "https://b.example.com",
+			ExpiresAt:      time.Now().Add(3 * time.Second),
+		}
+		require.NoError(t, WritePending(st))
 
-	var fired atomic.Int32
-	ctx, cancel := context.WithCancel(t.Context())
+		var fired atomic.Int32
+		ctx, cancel := context.WithCancel(t.Context())
 
-	_ = StartWatchdog(ctx, st, func(_ *PendingState) {
-		fired.Add(1)
+		_ = StartWatchdog(ctx, st, func(_ *PendingState) {
+			fired.Add(1)
+		})
+
+		cancel()
+		time.Sleep(4 * time.Second)
+
+		assert.Zero(t, fired.Load(), "watchdog fired after ctx cancel")
 	})
-
-	cancel()
-	time.Sleep(4 * time.Second)
-
-	assert.Zero(t, fired.Load(), "watchdog fired after ctx cancel")
 }

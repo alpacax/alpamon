@@ -5,7 +5,10 @@ import (
 	"errors"
 	"runtime"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // fakeProvider is a configurable in-memory Provider for testing Detect.
@@ -126,34 +129,28 @@ func TestDetect_ContextCancelled(t *testing.T) {
 }
 
 func TestDetect_ContextDeadlineRespectedBetweenProbes(t *testing.T) {
-	// Each fake probe sleeps 30ms; ctx deadline is 50ms. With the in-loop
-	// ctx.Err short-circuit working correctly, Detect returns
-	// context.DeadlineExceeded after 1-2 probes — not ErrNoCloudProvider.
-	//
-	// If the short-circuit regresses (e.g. the ctx.Err check is removed),
-	// each probe still returns quickly via its own ctx.Done case, the loop
-	// drains all providers, and Detect falls out with ErrNoCloudProvider.
-	// Tolerating ErrNoCloudProvider here would silently accept that
-	// regression, so the assertion requires DeadlineExceeded strictly.
-	slow := func() *fakeProvider {
-		return &fakeProvider{name: ProviderAWS, probeOK: false, probeDelay: 30 * time.Millisecond}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
+	// Each fake probe sleeps 30ms against a 50ms deadline, so the in-loop
+	// ctx.Err check must end the walk during the second probe. The returned
+	// error cannot show that on its own: the post-loop ctx.Err check in Detect
+	// reports DeadlineExceeded whether or not the in-loop one survives. The
+	// third provider going unprobed is what distinguishes them.
+	synctest.Test(t, func(t *testing.T) {
+		newSlow := func() *fakeProvider {
+			return &fakeProvider{name: ProviderAWS, probeOK: false, probeDelay: 30 * time.Millisecond}
+		}
+		first, second, third := newSlow(), newSlow(), newSlow()
 
-	start := time.Now()
-	_, _, err := Detect(ctx, []Provider{slow(), slow(), slow()})
-	elapsed := time.Since(start)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
 
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("expected context.DeadlineExceeded, got %v", err)
-	}
-	// Upper bound guards against the regression where Detect ignores the
-	// deadline and serializes all probes (3 * 30ms = 90ms). Generous slack
-	// for CI scheduling jitter.
-	if elapsed > 200*time.Millisecond {
-		t.Errorf("Detect ran for %v; ctx short-circuit appears broken", elapsed)
-	}
+		start := time.Now()
+		_, _, err := Detect(ctx, []Provider{first, second, third})
+		elapsed := time.Since(start)
+
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Equal(t, 50*time.Millisecond, elapsed, "Detect ran past its deadline")
+		assert.Zero(t, third.probeCalls, "the walk must stop at the deadline instead of draining every provider")
+	})
 }
 
 func TestDetect_ContextExpiresDuringLastProbe_ReturnsCtxErr(t *testing.T) {
@@ -166,17 +163,15 @@ func TestDetect_ContextExpiresDuringLastProbe_ReturnsCtxErr(t *testing.T) {
 	// returns false (via its own ctx.Done case) AFTER ctx expires. Without the
 	// post-loop ctx.Err() check, Detect would return ErrNoCloudProvider; with
 	// the check it returns context.DeadlineExceeded.
-	slow := &fakeProvider{name: ProviderAWS, probeOK: false, probeDelay: 60 * time.Millisecond}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		slow := &fakeProvider{name: ProviderAWS, probeOK: false, probeDelay: 60 * time.Millisecond}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
 
-	_, _, err := Detect(ctx, []Provider{slow})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("expected context.DeadlineExceeded, got %v", err)
-	}
-	if errors.Is(err, ErrNoCloudProvider) {
-		t.Error("must not collapse ctx deadline into ErrNoCloudProvider")
-	}
+		_, _, err := Detect(ctx, []Provider{slow})
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.NotErrorIs(t, err, ErrNoCloudProvider, "must not collapse ctx deadline into ErrNoCloudProvider")
+	})
 }
 
 func TestReorderByDMI_NoHint(t *testing.T) {

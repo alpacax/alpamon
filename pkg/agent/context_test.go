@@ -5,7 +5,10 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestContextManagerCreation verifies context manager initialization
@@ -30,35 +33,37 @@ func TestContextManagerCreation(t *testing.T) {
 
 // TestContextCancellation verifies that shutdown cancels all child contexts
 func TestContextCancellation(t *testing.T) {
-	cm := NewContextManager()
+	synctest.Test(t, func(t *testing.T) {
+		cm := NewContextManager()
 
-	// Create multiple child contexts
-	ctx1, cancel1 := cm.NewContext(0)
-	defer cancel1()
+		// Create multiple child contexts
+		ctx1, cancel1 := cm.NewContext(0)
+		defer cancel1()
 
-	ctx2, cancel2 := cm.NewContext(5 * time.Second)
-	defer cancel2()
+		ctx2, cancel2 := cm.NewContext(5 * time.Second)
+		defer cancel2()
 
-	ctx3, cancel3 := cm.NewContext(0)
-	defer cancel3()
+		ctx3, cancel3 := cm.NewContext(0)
+		defer cancel3()
 
-	// Shutdown the manager
-	cm.Shutdown()
+		// Shutdown the manager
+		cm.Shutdown()
 
-	// All contexts should be cancelled
-	for i, ctx := range []context.Context{ctx1, ctx2, ctx3} {
-		select {
-		case <-ctx.Done():
-			// Expected
-		case <-time.After(100 * time.Millisecond):
-			t.Errorf("context %d not cancelled after shutdown", i+1)
+		// All contexts should be cancelled
+		for i, ctx := range []context.Context{ctx1, ctx2, ctx3} {
+			select {
+			case <-ctx.Done():
+				// Expected
+			case <-time.After(100 * time.Millisecond):
+				t.Errorf("context %d not cancelled after shutdown", i+1)
+			}
 		}
-	}
 
-	// Manager should report as shutdown
-	if !cm.IsShutdown() {
-		t.Error("IsShutdown() should return true after Shutdown()")
-	}
+		// Manager should report as shutdown
+		if !cm.IsShutdown() {
+			t.Error("IsShutdown() should return true after Shutdown()")
+		}
+	})
 }
 
 // TestShutdownCancelsChildren checks cancellation propagation and shutdown state; the
@@ -87,152 +92,162 @@ func TestShutdownCancelsChildren(t *testing.T) {
 
 // TestChildCleanup verifies child context cleanup on parent shutdown.
 func TestChildCleanup(t *testing.T) {
-	cm := NewContextManager()
+	synctest.Test(t, func(t *testing.T) {
+		cm := NewContextManager()
 
-	// Each child blocks purely on cancellation with no self-exit timer, so the
-	// goroutines drain only if Shutdown actually cancels them; otherwise the
-	// outer guard below fires and the test fails.
-	var wg sync.WaitGroup
-	for range 20 {
-		wg.Go(func() {
-			ctx, cancel := cm.NewContext(0)
-			defer cancel()
-			<-ctx.Done()
-		})
-	}
+		// Each child blocks purely on cancellation with no self-exit timer, so the
+		// goroutines drain only if Shutdown actually cancels them; otherwise the
+		// outer guard below fires and the test fails.
+		var registered sync.WaitGroup
+		registered.Add(20)
 
-	// Give some time for goroutines to start
-	time.Sleep(20 * time.Millisecond)
+		var wg sync.WaitGroup
+		for range 20 {
+			wg.Go(func() {
+				ctx, cancel := cm.NewContext(0)
+				defer cancel()
+				registered.Done()
+				<-ctx.Done()
+			})
+		}
 
-	// Shutdown manager - should cancel all child contexts
-	cm.Shutdown()
+		// Shutdown proves nothing about children the manager has not seen yet.
+		registered.Wait()
 
-	// Wait for all goroutines to exit
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
+		// Shutdown manager - should cancel all child contexts
+		cm.Shutdown()
 
-	select {
-	case <-done:
-		// All goroutines exited
-	case <-time.After(2 * time.Second):
-		t.Error("child goroutines did not exit after parent shutdown")
-	}
+		// Wait for all goroutines to exit
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// All goroutines exited
+		case <-time.After(2 * time.Second):
+			t.Error("child goroutines did not exit after parent shutdown")
+		}
+	})
 }
 
 // TestContextTimeout verifies timeout context creation
 func TestContextTimeout(t *testing.T) {
-	cm := NewContextManager()
-	defer cm.Shutdown()
+	synctest.Test(t, func(t *testing.T) {
+		cm := NewContextManager()
+		defer cm.Shutdown()
 
-	// Create context with timeout
-	ctx, cancel := cm.NewContext(50 * time.Millisecond)
-	defer cancel()
+		// Create context with timeout
+		ctx, cancel := cm.NewContext(50 * time.Millisecond)
+		defer cancel()
 
-	// Should timeout
-	select {
-	case <-ctx.Done():
-		if ctx.Err() != context.DeadlineExceeded {
-			t.Errorf("expected DeadlineExceeded, got %v", ctx.Err())
+		// Should timeout
+		select {
+		case <-ctx.Done():
+			assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+		case <-time.After(100 * time.Millisecond):
+			t.Error("context did not timeout")
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("context did not timeout")
-	}
+	})
 }
 
 // TestContextDeadline verifies deadline context creation
 func TestContextDeadline(t *testing.T) {
-	cm := NewContextManager()
-	defer cm.Shutdown()
+	synctest.Test(t, func(t *testing.T) {
+		cm := NewContextManager()
+		defer cm.Shutdown()
 
-	deadline := time.Now().Add(50 * time.Millisecond)
-	ctx, cancel := cm.NewContextWithDeadline(deadline)
-	defer cancel()
+		deadline := time.Now().Add(50 * time.Millisecond)
+		ctx, cancel := cm.NewContextWithDeadline(deadline)
+		defer cancel()
 
-	// Should respect deadline
-	select {
-	case <-ctx.Done():
-		if ctx.Err() != context.DeadlineExceeded {
-			t.Errorf("expected DeadlineExceeded, got %v", ctx.Err())
+		// Should respect deadline
+		select {
+		case <-ctx.Done():
+			assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+		case <-time.After(100 * time.Millisecond):
+			t.Error("context did not respect deadline")
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("context did not respect deadline")
-	}
+	})
 }
 
 // TestContextNoTimeout verifies context without timeout
 func TestContextNoTimeout(t *testing.T) {
-	cm := NewContextManager()
-	defer cm.Shutdown()
+	synctest.Test(t, func(t *testing.T) {
+		cm := NewContextManager()
+		defer cm.Shutdown()
 
-	// Create context without timeout (0 duration)
-	ctx, cancel := cm.NewContext(0)
-	defer cancel()
+		// Create context without timeout (0 duration)
+		ctx, cancel := cm.NewContext(0)
+		defer cancel()
 
-	// Should not timeout on its own
-	select {
-	case <-ctx.Done():
-		t.Error("context should not be cancelled without explicit cancellation")
-	case <-time.After(100 * time.Millisecond):
-		// Expected
-	}
+		// Should not timeout on its own
+		select {
+		case <-ctx.Done():
+			t.Error("context should not be cancelled without explicit cancellation")
+		case <-time.After(100 * time.Millisecond):
+			// Expected
+		}
 
-	// Manual cancellation should work
-	cancel()
-	select {
-	case <-ctx.Done():
-		// Expected
-	case <-time.After(100 * time.Millisecond):
-		t.Error("context not cancelled after explicit cancel")
-	}
+		// Manual cancellation should work
+		cancel()
+		select {
+		case <-ctx.Done():
+			// Expected
+		case <-time.After(100 * time.Millisecond):
+			t.Error("context not cancelled after explicit cancel")
+		}
+	})
 }
 
 // TestConcurrentContextCreation verifies thread-safe context creation
 func TestConcurrentContextCreation(t *testing.T) {
-	cm := NewContextManager()
-	defer cm.Shutdown()
+	synctest.Test(t, func(t *testing.T) {
+		cm := NewContextManager()
+		defer cm.Shutdown()
 
-	done := make(chan bool)
+		done := make(chan bool)
 
-	// Create contexts concurrently
-	for i := range 100 {
-		go func(id int) {
-			ctx, cancel := cm.NewContext(time.Duration(id) * time.Millisecond)
-			defer cancel()
+		// Create contexts concurrently
+		for i := range 100 {
+			go func(id int) {
+				ctx, cancel := cm.NewContext(time.Duration(id) * time.Millisecond)
+				defer cancel()
 
-			// Do some work
-			select {
-			case <-ctx.Done():
-				// Timeout expected for non-zero durations
-			case <-time.After(200 * time.Millisecond):
-				// Maximum wait
-			}
+				// Do some work
+				select {
+				case <-ctx.Done():
+					// Timeout expected for non-zero durations
+				case <-time.After(200 * time.Millisecond):
+					// Maximum wait
+				}
 
-			done <- true
-		}(i)
-	}
-
-	// Wait for all goroutines
-	for range 100 {
-		select {
-		case <-done:
-			// Continue
-		case <-time.After(5 * time.Second):
-			t.Fatal("concurrent operations timed out")
+				done <- true
+			}(i)
 		}
-	}
 
-	// Context manager should still be functional
-	ctx, cancel := cm.NewContext(0)
-	cancel()
-	select {
-	case <-ctx.Done():
-		// Expected
-	default:
-		t.Error("context manager not functional after concurrent operations")
-	}
+		// Wait for all goroutines
+		for range 100 {
+			select {
+			case <-done:
+				// Continue
+			case <-time.After(5 * time.Second):
+				t.Fatal("concurrent operations timed out")
+			}
+		}
+
+		// Context manager should still be functional
+		ctx, cancel := cm.NewContext(0)
+		cancel()
+		select {
+		case <-ctx.Done():
+			// Expected
+		default:
+			t.Error("context manager not functional after concurrent operations")
+		}
+	})
 }
 
 // TestRapidCreateCancel exercises rapid create/cancel churn. Asserts ctx.Err() != nil, not
@@ -258,41 +273,43 @@ func TestRapidCreateCancel(t *testing.T) {
 
 // TestConcurrentOperations verifies thread safety under concurrent access.
 func TestConcurrentOperations(t *testing.T) {
-	cm := NewContextManager()
+	synctest.Test(t, func(t *testing.T) {
+		cm := NewContextManager()
 
-	var wg sync.WaitGroup
+		var wg sync.WaitGroup
 
-	// Concurrent context creation
-	for i := range 50 {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for j := range 10 {
-				ctx, cancel := cm.NewContext(time.Duration(id+j) * time.Millisecond)
-				select {
-				case <-ctx.Done():
-				case <-time.After(50 * time.Millisecond):
+		// Concurrent context creation
+		for i := range 50 {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				for j := range 10 {
+					ctx, cancel := cm.NewContext(time.Duration(id+j) * time.Millisecond)
+					select {
+					case <-ctx.Done():
+					case <-time.After(50 * time.Millisecond):
+					}
+					cancel()
 				}
-				cancel()
-			}
-		}(i)
-	}
+			}(i)
+		}
 
-	// Wait for all operations
-	wg.Wait()
+		// Wait for all operations
+		wg.Wait()
 
-	// Manager must remain functional after the concurrent churn.
-	ctx, cancel := cm.NewContext(0)
-	cancel()
-	select {
-	case <-ctx.Done():
-		// Expected
-	default:
-		t.Error("context manager not functional after concurrent operations")
-	}
+		// Manager must remain functional after the concurrent churn.
+		ctx, cancel := cm.NewContext(0)
+		cancel()
+		select {
+		case <-ctx.Done():
+			// Expected
+		default:
+			t.Error("context manager not functional after concurrent operations")
+		}
 
-	// Shutdown
-	cm.Shutdown()
+		// Shutdown
+		cm.Shutdown()
+	})
 }
 
 // TestShutdownIdempotency verifies that Shutdown can be called multiple times
