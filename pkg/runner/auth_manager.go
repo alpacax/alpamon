@@ -367,8 +367,9 @@ func (am *AuthManager) lookupSessionLocked(sid int, sidOK bool, parentPID int) (
 }
 
 func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
-	// This runs on every PAM session open, so an unrecovered panic here would
-	// take the whole agent down from the login path.
+	// Panic recovery per the repo convention (internal/pool/pool.go,
+	// pkg/executor/executor.go). This runs on every PAM session open, so an
+	// unrecovered panic here would take the whole agent down from the login path.
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error().Interface("panic", r).Msg("Auth socket request handler panicked")
