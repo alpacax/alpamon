@@ -95,7 +95,9 @@ func TestRetry_MaxElapsedTime(t *testing.T) {
 		})
 
 		require.Error(t, err, "expected error after max elapsed time")
-		assert.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond, "gave up before MaxElapsedTime")
+		// The bubble's clock is exact, so the stop lands on MaxElapsedTime itself.
+		// A ">=" here would also pass for a retry loop that overran it.
+		assert.Equal(t, 50*time.Millisecond, time.Since(start), "the give-up must land on MaxElapsedTime")
 	})
 }
 
