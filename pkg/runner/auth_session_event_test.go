@@ -16,6 +16,19 @@ import (
 	"github.com/google/uuid"
 )
 
+// newSessionEventPipe returns the handler and client ends of a net.Pipe and
+// closes both when the test ends. handleSessionEvent leaves closing unixConn
+// to its caller, and in these tests the caller is the test itself.
+func newSessionEventPipe(t *testing.T) (server, client net.Conn) {
+	t.Helper()
+	server, client = net.Pipe()
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = client.Close()
+	})
+	return server, client
+}
+
 // TestSessionEventRequest_ParsesWithoutOptionalFields verifies that
 // rhost/tty may be absent (local console logins have no rhost).
 func TestSessionEventRequest_ParsesWithoutOptionalFields(t *testing.T) {
@@ -327,7 +340,7 @@ func TestHandleSessionEvent_AcksAndEmits(t *testing.T) {
 	emitted := make(chan NonAlpaconAccessEvent, 1)
 	am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) { emitted <- ev }
 
-	server, client := net.Pipe()
+	server, client := newSessionEventPipe(t)
 	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","rhost":"203.0.113.5","tty":"pts/1","pid":712345,"ppid":712340}`)
 	go am.handleSessionEvent(raw, server)
 
@@ -355,7 +368,7 @@ func TestHandleSessionEvent_MalformedJSONAcksFalse(t *testing.T) {
 		t.Error("must not emit on malformed input")
 	}
 
-	server, client := net.Pipe()
+	server, client := newSessionEventPipe(t)
 	go am.handleSessionEvent([]byte(`{not-json`), server)
 
 	resp := readSessionEventAck(t, client)
@@ -377,7 +390,7 @@ func TestHandleSessionEvent_SuppressedStillAcks(t *testing.T) {
 		t.Error("must not emit for tracked Alpacon session")
 	}
 
-	server, client := net.Pipe()
+	server, client := newSessionEventPipe(t)
 	raw := []byte(`{"type":"session_event","username":"alice","service":"su","pid":424242,"ppid":5555}`)
 	go am.handleSessionEvent(raw, server)
 
@@ -408,7 +421,7 @@ func TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted(t *testing.T) {
 	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
 
 	// First event acquires the only slot and blocks inside emitFn.
-	server1, client1 := net.Pipe()
+	server1, client1 := newSessionEventPipe(t)
 	go am.handleSessionEvent(raw, server1)
 	if resp := readSessionEventAck(t, client1); !resp.Received {
 		t.Fatalf("first event must ack true, got %+v", resp)
@@ -420,7 +433,7 @@ func TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted(t *testing.T) {
 	}
 
 	// Second event finds the slot full: it must still ack but not emit.
-	server2, client2 := net.Pipe()
+	server2, client2 := newSessionEventPipe(t)
 	go am.handleSessionEvent(raw, server2)
 	if resp := readSessionEventAck(t, client2); !resp.Received {
 		t.Fatalf("dropped event must still ack true, got %+v", resp)
@@ -440,7 +453,7 @@ func TestHandleSessionEvent_FlagOffDoesNotEmit(t *testing.T) {
 		t.Error("must not emit while detect_local_access is off")
 	}
 
-	server, client := net.Pipe()
+	server, client := newSessionEventPipe(t)
 	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
 	go am.handleSessionEvent(raw, server)
 
