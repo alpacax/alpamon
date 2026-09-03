@@ -17,7 +17,9 @@ func BenchmarkRegistry_Get(b *testing.B) {
 		name:     "test",
 		commands: []string{"cmd1", "cmd2", "cmd3"},
 	}
-	_ = registry.Register(handler)
+	if err := registry.Register(handler); err != nil {
+		b.Fatalf("register handler: %v", err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -37,10 +39,12 @@ func BenchmarkRegistry_GetManyHandlers(b *testing.B) {
 	for i := range handlers {
 		name := strconv.Itoa(i)
 		keys[i] = "cmd" + name
-		_ = registry.Register(&MockHandler{
+		if err := registry.Register(&MockHandler{
 			name:     "handler" + name,
 			commands: []string{keys[i]},
-		})
+		}); err != nil {
+			b.Fatalf("register handler %d: %v", i, err)
+		}
 	}
 
 	b.ResetTimer()
@@ -59,7 +63,9 @@ func BenchmarkRegistry_ListCommands(b *testing.B) {
 			name:     "handler" + string(rune('A'+i)),
 			commands: []string{"cmd" + string(rune('A'+i))},
 		}
-		_ = registry.Register(handler)
+		if err := registry.Register(handler); err != nil {
+			b.Fatalf("register handler: %v", err)
+		}
 	}
 
 	b.ResetTimer()
@@ -76,7 +82,9 @@ func BenchmarkRegistry_IsCommandRegistered(b *testing.B) {
 		name:     "test",
 		commands: []string{"cmd1", "cmd2", "cmd3"},
 	}
-	_ = registry.Register(handler)
+	if err := registry.Register(handler); err != nil {
+		b.Fatalf("register handler: %v", err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -92,7 +100,9 @@ func BenchmarkRegistry_ConcurrentGet(b *testing.B) {
 		name:     "test",
 		commands: []string{"cmd1", "cmd2", "cmd3"},
 	}
-	_ = registry.Register(handler)
+	if err := registry.Register(handler); err != nil {
+		b.Fatalf("register handler: %v", err)
+	}
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
