@@ -57,6 +57,12 @@ type CodeServerConfig struct {
 // Minimum free memory required to start code-server.
 const minFreeMemoryForEditor uint64 = 512 * 1024 * 1024 // 512MB
 
+const (
+	codeServerReadyPollInterval = time.Second
+	codeServerReadyDialTimeout  = time.Second
+	codeServerStopGrace         = 10 * time.Second
+)
+
 // defaultConfig is the singleton configuration instance.
 var defaultConfig = &CodeServerConfig{
 	// Timeouts
@@ -202,6 +208,7 @@ const (
 // CodeServerManager manages a code-server process for editor tunneling.
 type CodeServerManager struct {
 	cmd       *exec.Cmd
+	waitDone  <-chan struct{}
 	port      int
 	username  string
 	groupname string
@@ -214,6 +221,9 @@ type CodeServerManager struct {
 	lastError string
 	startOnce sync.Once
 	startErr  error
+
+	stopGrace   time.Duration
+	terminateFn func(*os.Process) error // a seam: a test needs signalling to fail
 }
 
 func NewCodeServerManager(parentCtx context.Context, username, groupname string) (*CodeServerManager, error) {
@@ -231,6 +241,9 @@ func NewCodeServerManager(parentCtx context.Context, username, groupname string)
 		ctx:       ctx,
 		cancel:    cancel,
 		status:    CodeServerStatusIdle,
+
+		stopGrace:   codeServerStopGrace,
+		terminateFn: terminateProcess,
 	}, nil
 }
 
@@ -345,15 +358,16 @@ func (m *CodeServerManager) doStart() error {
 		return err
 	}
 
+	waitDone := reapProcess(cmd)
+
 	m.mu.Lock()
 	m.cmd = cmd
+	m.waitDone = waitDone
 	m.mu.Unlock()
 
 	// Wait for code-server to be ready (no lock needed)
-	if err := m.waitForReady(); err != nil {
-		m.mu.Lock()
-		_ = m.stopProcess()
-		m.mu.Unlock()
+	if err := m.waitForReady(waitDone); err != nil {
+		_ = m.Stop()
 		return fmt.Errorf("code-server failed to start: %w", err)
 	}
 
@@ -367,44 +381,70 @@ func (m *CodeServerManager) doStart() error {
 	return nil
 }
 
-// Stop gracefully terminates the code-server process.
-func (m *CodeServerManager) Stop() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	return m.stopProcess()
+// reapProcess owns the only cmd.Wait: a second one would race it over cmd.ProcessState.
+func reapProcess(cmd *exec.Cmd) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			log.Debug().Err(err).Msg("code-server process exited.")
+		}
+		close(done)
+	}()
+	return done
 }
 
-// stopProcess stops the code-server process
-func (m *CodeServerManager) stopProcess() error {
-	if !m.started || m.cmd == nil || m.cmd.Process == nil {
+// Stop terminates code-server and waits for the reap, even before m.started is
+// set—the doStart failure path. It takes m.mu itself, so a caller holding it
+// deadlocks; the wait runs unlocked so Status() still answers.
+func (m *CodeServerManager) Stop() error {
+	m.mu.Lock()
+	cmd, waitDone, port := m.cmd, m.waitDone, m.port
+	grace, terminate := m.stopGrace, m.terminateFn
+	m.cmd = nil
+	m.waitDone = nil
+	m.started = false
+	m.mu.Unlock()
+
+	if m.cancel != nil {
+		defer m.cancel()
+	}
+
+	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
 
-	log.Info().Msgf("Stopping code-server on port %d...", m.port)
-
-	if err := terminateProcess(m.cmd.Process); err != nil {
-		return fmt.Errorf("failed to stop code-server: %w", err)
+	// A reaped pid is free for reuse: once the reaper is done, nothing here is ours.
+	select {
+	case <-waitDone:
+		return nil
+	default:
 	}
 
-	done := make(chan error, 1)
-	go func() {
-		done <- m.cmd.Wait()
-	}()
+	log.Info().Msgf("Stopping code-server on port %d...", port)
+
+	// A failed signal still leaves a child to collect, so the wait below runs anyway.
+	if err := terminate(cmd.Process); err != nil {
+		log.Warn().Err(err).Msg("Failed to signal code-server, waiting for it anyway.")
+	}
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
 
 	select {
-	case <-done:
-		log.Info().Msg("code-server stopped.")
-	case <-time.After(10 * time.Second):
-		_ = terminateProcess(m.cmd.Process)
-		log.Warn().Msg("code-server killed after timeout.")
+	case <-waitDone:
+	case <-timer.C:
+		// select picks at random when both are ready, so give the reap another look.
+		select {
+		case <-waitDone:
+		default:
+			// Not terminate: it would repeat the SIGTERM just ignored.
+			killErr := killProcess(cmd.Process)
+			log.Warn().Err(killErr).Dur("grace", grace).Msg("code-server did not exit in time, sending SIGKILL.")
+			return fmt.Errorf("code-server did not exit within %v", grace)
+		}
 	}
 
-	if m.cancel != nil {
-		m.cancel()
-	}
-
-	m.started = false
+	log.Info().Msg("code-server stopped.")
 	return nil
 }
 
@@ -422,27 +462,39 @@ func (m *CodeServerManager) IsRunning() bool {
 	return m.started
 }
 
-// waitForReady waits for code-server to start listening on its port.
-func (m *CodeServerManager) waitForReady() error {
+// waitForReady waits for code-server to listen on its port. It watches the reaper
+// channel, not m.cmd, which a concurrent Stop may have already cleared.
+func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 	cfg := GetCodeServerConfig()
 	addr := net.JoinHostPort(loopbackHost, strconv.Itoa(m.port))
-	deadline := time.Now().Add(cfg.StartupTimeout)
+	deadline := time.NewTimer(cfg.StartupTimeout)
+	defer deadline.Stop()
 
-	for time.Now().Before(deadline) {
-		if m.cmd.ProcessState != nil && m.cmd.ProcessState.Exited() {
+	ticker := time.NewTicker(codeServerReadyPollInterval)
+	defer ticker.Stop()
+
+	for {
+		// Before the dial: a dead code-server's port may already answer for someone else.
+		select {
+		case <-waitDone:
 			return fmt.Errorf("code-server process exited unexpectedly")
+		default:
 		}
 
-		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		conn, err := net.DialTimeout("tcp", addr, codeServerReadyDialTimeout)
 		if err == nil {
 			_ = conn.Close()
 			return nil
 		}
 
-		time.Sleep(time.Second)
+		select {
+		case <-waitDone:
+			// The loop head reports it.
+		case <-deadline.C:
+			return fmt.Errorf("code-server not ready after %v", cfg.StartupTimeout)
+		case <-ticker.C:
+		}
 	}
-
-	return fmt.Errorf("code-server not ready after %v", cfg.StartupTimeout)
 }
 
 func isCodeServerInstalled() bool {

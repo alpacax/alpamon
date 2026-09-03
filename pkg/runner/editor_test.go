@@ -2,11 +2,14 @@ package runner
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFindAvailablePort(t *testing.T) {
@@ -172,4 +175,24 @@ func TestToSettingsJSONGolden(t *testing.T) {
 	got, err := c.ToSettingsJSON()
 	assert.NoError(t, err)
 	assert.Equal(t, want, string(got))
+}
+
+// TestWaitForReadyChecksTheExitBeforeTheDial: another process can grab the port
+// the moment code-server dies, and a dial that answers is then not our server.
+func TestWaitForReadyChecksTheExitBeforeTheDial(t *testing.T) {
+	ln, err := net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	require.NoError(t, err)
+
+	m := &CodeServerManager{}
+	m.port, err = strconv.Atoi(port)
+	require.NoError(t, err)
+
+	waitDone := make(chan struct{})
+	close(waitDone)
+
+	assert.ErrorContains(t, m.waitForReady(waitDone), "exited unexpectedly")
 }

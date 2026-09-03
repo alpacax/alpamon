@@ -17,3 +17,8 @@ func terminateProcess(p *os.Process) error {
 	}
 	return nil
 }
+
+// killProcess SIGKILLs the process group, for a SIGTERM that was ignored.
+func killProcess(p *os.Process) error {
+	return syscall.Kill(-p.Pid, syscall.SIGKILL)
+}
