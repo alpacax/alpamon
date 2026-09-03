@@ -300,50 +300,40 @@ func TestSetupUserDataDirFollowsASymlinkedHome(t *testing.T) {
 }
 
 // TestChownUserDataDirDoesNotFollowSymlinks plants a symlink to a file the
-// target user must not own. As root the file is created in the temp dir and
-// ownership goes to nobody; as a regular user /etc/passwd stands in, where
-// following the link would fail with EPERM.
+// target user must not own. As root the file is created in the temp dir; as a
+// regular user /etc/passwd stands in, where following the link would fail with
+// EPERM.
 func TestChownUserDataDirDoesNotFollowSymlinks(t *testing.T) {
 	userDataDir := t.TempDir()
 
-	var target, username string
+	target := "/etc/passwd"
 	if os.Getuid() == 0 {
-		// Not every distro image ships "nobody" (opensuse/leap:15 does not).
-		if _, err := user.Lookup("nobody"); err != nil {
-			t.Skipf("no nobody account on this system: %v", err)
-		}
 		target = filepath.Join(t.TempDir(), "victim")
 		require.NoError(t, os.WriteFile(target, []byte("keep"), 0600))
-		username = "nobody"
-	} else {
-		target = "/etc/passwd"
-		current, err := user.Current()
-		require.NoError(t, err)
-		username = current.Username
 	}
-	before := fileOwner(t, target)
+	beforeTarget := fileOwner(t, target)
 
 	link := filepath.Join(userDataDir, "x")
 	require.NoError(t, os.Symlink(target, link))
 
-	require.NoError(t, chownUserDataDir(userDataDir, username, ""))
+	// Ownership the kernel will really move the link to. Asking for the ids the
+	// link already carries would let the assertion below pass with no lchown
+	// having happened at all.
+	username, groupname := movableOwnership(t, link)
+	beforeLink := fileOwner(t, link)
 
-	assert.Equal(t, before, fileOwner(t, target), "symlink target must keep its owner")
+	require.NoError(t, chownUserDataDir(userDataDir, username, groupname))
 
-	usr, err := user.Lookup(username)
-	require.NoError(t, err)
-	wantUID, err := strconv.Atoi(usr.Uid)
-	require.NoError(t, err)
-	linkInfo, err := os.Lstat(link)
-	require.NoError(t, err)
-	assert.Equal(t, uint32(wantUID), linkInfo.Sys().(*syscall.Stat_t).Uid, "the link itself is chowned")
+	assert.Equal(t, beforeTarget, fileOwner(t, target), "symlink target must keep its owner")
+	assert.NotEqual(t, beforeLink, fileOwner(t, link), "the link itself is chowned")
 }
 
 // fileOwner reads both ids, since a non-root process can only ever move the
 // group, and a test that watched the uid alone would pass without chowning.
+// Lstat, not Stat: on a symlink the ownership under test is the link's own.
 func fileOwner(t *testing.T, path string) [2]uint32 {
 	t.Helper()
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	require.NoError(t, err)
 	st := info.Sys().(*syscall.Stat_t)
 	return [2]uint32{st.Uid, st.Gid}
