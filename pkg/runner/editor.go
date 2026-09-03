@@ -63,8 +63,8 @@ const (
 	codeServerStopGrace         = 10 * time.Second
 )
 
-// Layout of the user-data-dir, written by the platform-specific
-// setupUserDataFiles and read back by ToArgs.
+// Layout of the user-data-dir that the platform-specific setupUserDataFiles
+// writes; ToArgs points code-server at the config file.
 const (
 	userDataConfigFile   = "config.yaml"
 	userDataUserDir      = "User"
