@@ -281,6 +281,23 @@ func TestSetupUserDataDirRefusesSymlinkedDirs(t *testing.T) {
 	}
 }
 
+// TestSetupUserDataDirFollowsASymlinkedHome covers a home directory an admin
+// pointed at another filesystem. That entry is not the user's to swap, so the
+// link is followed; the refusals below it are what the other tests pin.
+func TestSetupUserDataDirFollowsASymlinkedHome(t *testing.T) {
+	target := t.TempDir()
+	homeDir := filepath.Join(t.TempDir(), "home")
+	require.NoError(t, os.Symlink(target, homeDir))
+
+	userDataDir, err := setupUserDataDir(homeDir, "", "")
+	require.NoError(t, err)
+
+	cfg := GetCodeServerConfig()
+	assert.Equal(t, filepath.Join(homeDir, cfg.UserDataDirName), userDataDir)
+	assert.FileExists(t, filepath.Join(target, cfg.UserDataDirName, "config.yaml"),
+		"the files belong in the directory the link points at")
+}
+
 // TestChownUserDataDirDoesNotFollowSymlinks plants a symlink to a file the
 // target user must not own. As root the file is created in the temp dir and
 // ownership goes to nobody; as a regular user /etc/passwd stands in, where
@@ -336,7 +353,7 @@ func TestWriteFileAtReplacesInPlaceFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "f"), []byte("old"), 0644))
 	require.NoError(t, os.Link(filepath.Join(dir, "f"), filepath.Join(dir, "witness")))
 
-	parent, err := openDir(dir)
+	parent, err := openDir(dir, dirFlags)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parent.Close() })
 
@@ -368,7 +385,7 @@ func TestWriteFileAtKeepsTheModeItReplaces(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, []byte("old"), 0600))
 	require.NoError(t, os.Chmod(target, 0600))
 
-	parent, err := openDir(dir)
+	parent, err := openDir(dir, dirFlags)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parent.Close() })
 
@@ -385,7 +402,7 @@ func TestWriteFileAtKeepsTheModeItReplaces(t *testing.T) {
 // temp create and nothing else.
 func TestWriteFileAtLeavesNothingWhenTheTempWriteFails(t *testing.T) {
 	dir := t.TempDir()
-	parent, err := openDir(dir)
+	parent, err := openDir(dir, dirFlags)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parent.Close() })
 

@@ -23,10 +23,16 @@ import (
 
 const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
+// The home directory's own entry sits in a directory the user does not own, so
+// nothing there is theirs to swap and following a link is safe. Admins do point
+// home directories at another filesystem that way, and refusing them would turn
+// a supported layout into an editor that will not start.
+const homeDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
+
 // setupUserDataFiles creates dirName/User under homeDir and writes config.yaml
 // and User/settings.json, refusing to traverse or write through symlinks.
 func setupUserDataFiles(homeDir, dirName string, configData, settingsData []byte) error {
-	home, err := openDir(homeDir)
+	home, err := openDir(homeDir, homeDirFlags)
 	if err != nil {
 		return err
 	}
@@ -53,7 +59,7 @@ func setupUserDataFiles(homeDir, dirName string, configData, settingsData []byte
 // chownTreeNoFollow recursively changes ownership under root without ever
 // following a symlink: links themselves are re-owned, their targets untouched.
 func chownTreeNoFollow(root string, uid, gid int) error {
-	dir, err := openDir(root)
+	dir, err := openDir(root, dirFlags)
 	if err != nil {
 		return err
 	}
@@ -97,9 +103,10 @@ func chownChildren(dir *os.File, uid, gid int) error {
 	return nil
 }
 
-// openDir opens path as a directory fd. The final component must not be a symlink.
-func openDir(path string) (*os.File, error) {
-	fd, err := unix.Open(path, dirFlags, 0)
+// openDir opens path as a directory fd. Under dirFlags the final component must
+// not be a symlink; homeDirFlags drops that and is only for the home directory.
+func openDir(path string, flags int) (*os.File, error) {
+	fd, err := unix.Open(path, flags, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
