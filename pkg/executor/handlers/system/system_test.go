@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/pool"
@@ -19,6 +20,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// restart, quit, reboot, shutdown and the post-self-update restart all hand the
+// pool a job that sleeps a second before acting, and Shutdown cannot interrupt a
+// sleeping job. The drain wait therefore has to outlast that second; inside a
+// synctest bubble neither span costs real time.
+const poolDrainWait = 5 * time.Second
 
 // MockWSClient is a mock implementation of WSClient for testing
 type MockWSClient struct {
@@ -219,107 +226,117 @@ func TestSystemHandler_Restart_Collector(t *testing.T) {
 }
 
 func TestSystemHandler_Restart_Default(t *testing.T) {
-	mockExec := common.NewMockCommandExecutor(t)
-	mockWS := &MockWSClient{}
-	ctxManager := agent.NewContextManager()
-	workerPool := pool.NewPool(2, 10)
-	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
-	defer ctxManager.Shutdown()
+	synctest.Test(t, func(t *testing.T) {
+		mockExec := common.NewMockCommandExecutor(t)
+		mockWS := &MockWSClient{}
+		ctxManager := agent.NewContextManager()
+		workerPool := pool.NewPool(2, 10)
+		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+		defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
-	ctx := context.Background()
+		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+		ctx := context.Background()
 
-	args := &common.CommandArgs{
-		// No target - should default to alpamon
-	}
+		args := &common.CommandArgs{
+			// No target - should default to alpamon
+		}
 
-	exitCode, output, err := handler.Execute(ctx, common.Restart.String(), args)
+		exitCode, output, err := handler.Execute(ctx, common.Restart.String(), args)
 
-	require.NoError(t, err)
-	assert.Equal(t, 0, exitCode)
-	assert.Contains(t, output, "restart")
+		require.NoError(t, err)
+		assert.Equal(t, 0, exitCode)
+		assert.Contains(t, output, "restart")
+	})
 }
 
 func TestSystemHandler_Restart_Alpamon(t *testing.T) {
-	mockExec := common.NewMockCommandExecutor(t)
-	mockWS := &MockWSClient{}
-	ctxManager := agent.NewContextManager()
-	workerPool := pool.NewPool(2, 10)
-	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
-	defer ctxManager.Shutdown()
+	synctest.Test(t, func(t *testing.T) {
+		mockExec := common.NewMockCommandExecutor(t)
+		mockWS := &MockWSClient{}
+		ctxManager := agent.NewContextManager()
+		workerPool := pool.NewPool(2, 10)
+		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+		defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
-	ctx := context.Background()
+		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+		ctx := context.Background()
 
-	args := &common.CommandArgs{
-		Target: "alpamon",
-	}
+		args := &common.CommandArgs{
+			Target: "alpamon",
+		}
 
-	exitCode, output, err := handler.Execute(ctx, common.Restart.String(), args)
+		exitCode, output, err := handler.Execute(ctx, common.Restart.String(), args)
 
-	require.NoError(t, err)
-	assert.Equal(t, 0, exitCode)
-	assert.Contains(t, output, "restart")
+		require.NoError(t, err)
+		assert.Equal(t, 0, exitCode)
+		assert.Contains(t, output, "restart")
+	})
 }
 
 func TestSystemHandler_Quit(t *testing.T) {
-	mockExec := common.NewMockCommandExecutor(t)
-	mockWS := &MockWSClient{}
-	ctxManager := agent.NewContextManager()
-	workerPool := pool.NewPool(2, 10)
-	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
-	defer ctxManager.Shutdown()
+	synctest.Test(t, func(t *testing.T) {
+		mockExec := common.NewMockCommandExecutor(t)
+		mockWS := &MockWSClient{}
+		ctxManager := agent.NewContextManager()
+		workerPool := pool.NewPool(2, 10)
+		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+		defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
-	ctx := context.Background()
+		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+		ctx := context.Background()
 
-	args := &common.CommandArgs{}
+		args := &common.CommandArgs{}
 
-	exitCode, output, err := handler.Execute(ctx, common.Quit.String(), args)
+		exitCode, output, err := handler.Execute(ctx, common.Quit.String(), args)
 
-	require.NoError(t, err)
-	assert.Equal(t, 0, exitCode)
-	assert.Contains(t, output, "shutdown")
+		require.NoError(t, err)
+		assert.Equal(t, 0, exitCode)
+		assert.Contains(t, output, "shutdown")
+	})
 }
 
 func TestSystemHandler_Reboot(t *testing.T) {
-	mockExec := common.NewMockCommandExecutor(t)
-	mockWS := &MockWSClient{}
-	ctxManager := agent.NewContextManager()
-	workerPool := pool.NewPool(2, 10)
-	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
-	defer ctxManager.Shutdown()
+	synctest.Test(t, func(t *testing.T) {
+		mockExec := common.NewMockCommandExecutor(t)
+		mockWS := &MockWSClient{}
+		ctxManager := agent.NewContextManager()
+		workerPool := pool.NewPool(2, 10)
+		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+		defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
-	ctx := context.Background()
+		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+		ctx := context.Background()
 
-	args := &common.CommandArgs{}
+		args := &common.CommandArgs{}
 
-	exitCode, output, err := handler.Execute(ctx, common.Reboot.String(), args)
+		exitCode, output, err := handler.Execute(ctx, common.Reboot.String(), args)
 
-	require.NoError(t, err)
-	assert.Equal(t, 0, exitCode)
-	assert.Contains(t, output, "reboot")
+		require.NoError(t, err)
+		assert.Equal(t, 0, exitCode)
+		assert.Contains(t, output, "reboot")
+	})
 }
 
 func TestSystemHandler_Shutdown(t *testing.T) {
-	mockExec := common.NewMockCommandExecutor(t)
-	mockWS := &MockWSClient{}
-	ctxManager := agent.NewContextManager()
-	workerPool := pool.NewPool(2, 10)
-	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
-	defer ctxManager.Shutdown()
+	synctest.Test(t, func(t *testing.T) {
+		mockExec := common.NewMockCommandExecutor(t)
+		mockWS := &MockWSClient{}
+		ctxManager := agent.NewContextManager()
+		workerPool := pool.NewPool(2, 10)
+		defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+		defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
-	ctx := context.Background()
+		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+		ctx := context.Background()
 
-	args := &common.CommandArgs{}
+		args := &common.CommandArgs{}
 
-	exitCode, output, err := handler.Execute(ctx, common.Shutdown.String(), args)
+		exitCode, output, err := handler.Execute(ctx, common.Shutdown.String(), args)
 
-	require.NoError(t, err)
-	assert.Equal(t, 0, exitCode)
-	assert.Contains(t, output, "shutdown")
+		require.NoError(t, err)
+		assert.Equal(t, 0, exitCode)
+		assert.Contains(t, output, "shutdown")
+	})
 }
 
 func TestSystemHandler_UnknownCommand(t *testing.T) {
@@ -757,39 +774,41 @@ func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 		{"windows", utils.PkgNone},
 	} {
 		t.Run(tc.platformLike, func(t *testing.T) {
-			mockExec := common.NewMockCommandExecutor(t)
-			mockWS := &MockWSClient{}
-			ctxManager := agent.NewContextManager()
-			workerPool := pool.NewPool(2, 10)
-			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
-			defer ctxManager.Shutdown()
+			synctest.Test(t, func(t *testing.T) {
+				mockExec := common.NewMockCommandExecutor(t)
+				mockWS := &MockWSClient{}
+				ctxManager := agent.NewContextManager()
+				workerPool := pool.NewPool(2, 10)
+				defer func() { require.NoError(t, workerPool.Shutdown(poolDrainWait)) }()
+				defer ctxManager.Shutdown()
 
-			mockVersions := &MockVersionResolver{
-				LatestVersion: "v9.9.9", // differs from version.Version ("dev") -> needAlpamon
-				PamVersion:    "",       // non-linux -> needPam always false anyway
-			}
-			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+				mockVersions := &MockVersionResolver{
+					LatestVersion: "v9.9.9", // differs from version.Version ("dev") -> needAlpamon
+					PamVersion:    "",       // non-linux -> needPam always false anyway
+				}
+				handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
 
-			var called bool
-			var gotVersion string
-			handler.selfUpdateFn = func(_ context.Context, v string, _ updater.Options) error {
-				called = true
-				gotVersion = v
-				return nil
-			}
+				var called bool
+				var gotVersion string
+				handler.selfUpdateFn = func(_ context.Context, v string, _ updater.Options) error {
+					called = true
+					gotVersion = v
+					return nil
+				}
 
-			originalPlatformLike := utils.PlatformLike
-			utils.SetPlatformLike(tc.platformLike)
-			t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
-			setPackageManagerAndID(t, tc.packageManager, "")
+				originalPlatformLike := utils.PlatformLike
+				utils.SetPlatformLike(tc.platformLike)
+				t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
+				setPackageManagerAndID(t, tc.packageManager, "")
 
-			exitCode, output, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+				exitCode, output, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
 
-			require.NoError(t, err)
-			assert.True(t, called, "selfUpdateFn must be called on %s", tc.platformLike)
-			assert.Equal(t, "v9.9.9", gotVersion)
-			assert.Equal(t, 0, exitCode)
-			assert.NotContains(t, output, "not supported", "%s must route to self-update", tc.platformLike)
+				require.NoError(t, err)
+				assert.True(t, called, "selfUpdateFn must be called on %s", tc.platformLike)
+				assert.Equal(t, "v9.9.9", gotVersion)
+				assert.Equal(t, 0, exitCode)
+				assert.NotContains(t, output, "not supported", "%s must route to self-update", tc.platformLike)
+			})
 		})
 	}
 }
