@@ -525,14 +525,14 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 			am.finalizeRequest(sudoApprovalReq.RequestID, "Response timeout")
 		} else {
 			log.Debug().Msgf("sudo_approval timeout triggered but request already handled: %s", sudoApprovalReq.RequestID)
-			am.awaitTakenRequest(sudoApprovalReq.RequestID)
+			am.awaitTakenRequest(sudoApprovalReq.RequestID, completionChan)
 		}
 	case <-am.ctx.Done():
 		log.Debug().Msg("Context cancelled, cleaning up sudo_approval connection")
 		if am.isRequestPending(sudoApprovalReq.RequestID) {
 			am.finalizeRequest(sudoApprovalReq.RequestID, "Service shutdown")
 		} else {
-			am.awaitTakenRequest(sudoApprovalReq.RequestID)
+			am.awaitTakenRequest(sudoApprovalReq.RequestID, completionChan)
 		}
 	}
 }
@@ -541,10 +541,12 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 // signal only after writing and closing, so an earlier return would let the caller's
 // deferred close cut a response mid-write and leave PAM an empty body to parse. The
 // bound is there because a taker that died before signaling must not strand this
-// goroutine with the descriptor open.
-func (am *AuthManager) awaitTakenRequest(requestID string) {
+// goroutine with the descriptor open. The channel comes from the caller rather than
+// the map: a lookup that missed would return nil and park here for the full bound
+// instead of failing.
+func (am *AuthManager) awaitTakenRequest(requestID string, completionChan <-chan struct{}) {
 	select {
-	case <-am.completionChannel(requestID):
+	case <-completionChan:
 	case <-time.After(authSocketHandoverTimeout):
 		log.Warn().Str("request_id", requestID).Msg("Taken sudo_approval request never signaled completion")
 	}
@@ -838,13 +840,6 @@ func (am *AuthManager) newCompletionChannelLocked(requestID string) chan struct{
 	am.completionChannels[requestID] = ch
 
 	return ch
-}
-
-func (am *AuthManager) completionChannel(requestID string) <-chan struct{} {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-
-	return am.completionChannels[requestID]
 }
 
 func (am *AuthManager) removeCompletionChannel(requestID string) {
