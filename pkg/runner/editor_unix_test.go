@@ -358,6 +358,26 @@ func TestWriteFileAtReplacesInPlaceFile(t *testing.T) {
 	assert.ElementsMatch(t, []string{"f", "witness"}, names, "the temp file must not outlive the write")
 }
 
+// TestWriteFileAtKeepsTheModeItReplaces pins the mode across a replacement. The
+// renamed file arrives with the temp file's mode, so the old one has to be
+// carried over or a tightened settings.json widens again on the next start.
+func TestWriteFileAtKeepsTheModeItReplaces(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f")
+	require.NoError(t, os.WriteFile(target, []byte("old"), 0600))
+	require.NoError(t, os.Chmod(target, 0600))
+
+	parent, err := openDir(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parent.Close() })
+
+	require.NoError(t, writeFileAt(parent, "f", []byte("new")))
+
+	info, err := os.Stat(target)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(), "the replacement keeps the mode it replaced")
+}
+
 // TestWriteFileAtLeavesNothingWhenTheTempWriteFails pins the failure path: the
 // call must not create the target it never managed to fill. The name is sized so
 // that it fits but the longer temp name derived from it does not, which fails the

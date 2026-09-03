@@ -132,6 +132,7 @@ func writeFileAt(parent *os.File, name string, data []byte) error {
 	// safe but silent, so a planted link is reported here instead. The report is
 	// all this is: the rename stays inside the tree whatever appears after the
 	// check, and stat creates nothing, so a failure below leaves no file behind.
+	mode := uint32(0644)
 	var st unix.Stat_t
 	switch err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); {
 	case err == unix.ENOENT:
@@ -139,6 +140,11 @@ func writeFileAt(parent *os.File, name string, data []byte) error {
 		return &os.PathError{Op: "stat", Path: path, Err: err}
 	case st.Mode&unix.S_IFMT == unix.S_IFLNK:
 		return &os.PathError{Op: "open", Path: path, Err: unix.ELOOP}
+	case st.Mode&unix.S_IFMT == unix.S_IFREG:
+		// A replacement takes its mode from this call rather than from the file
+		// it lands on, so carry the old one over: an admin who tightened
+		// settings.json keeps that on the next start.
+		mode = uint32(st.Mode) & 0777
 	}
 
 	// Two editor sessions for one user set the directory up concurrently, so the
@@ -146,7 +152,7 @@ func writeFileAt(parent *os.File, name string, data []byte) error {
 	tmp := "." + name + "." + strconv.FormatUint(rand.Uint64(), 36) + ".tmp"
 	tmpPath := filepath.Join(parent.Name(), tmp)
 	fd, err := unix.Openat(dirfd, tmp,
-		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
+		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 	if err != nil {
 		return &os.PathError{Op: "open", Path: tmpPath, Err: err}
 	}
