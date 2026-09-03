@@ -9,6 +9,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // registerPipeRequest registers a pending request the way handleSudoApprovalRequest
@@ -375,4 +378,137 @@ func TestRemovePIDCommandMapping_DeniesPendingRequests(t *testing.T) {
 	if resp := expectSingleResponse(t, client); resp != want {
 		t.Errorf("response: got %+v, want %+v", resp, want)
 	}
+}
+
+type closeTrackingConn struct {
+	net.Conn
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *closeTrackingConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return c.Conn.Close()
+}
+
+func (c *closeTrackingConn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+func TestHandleSudoRequest_ClosesConnectionWhenReadFails(t *testing.T) {
+	am := newTestAuthManager()
+	client, server := net.Pipe()
+	conn := &closeTrackingConn{Conn: server}
+	require.NoError(t, client.Close()) // Makes the handler's first Read fail.
+
+	am.handleSudoRequest(conn)
+
+	assert.True(t, conn.isClosed(), "connection was left open after the read failed")
+}
+
+func TestHandleSudoRequest_ClosesConnectionOnEveryPath(t *testing.T) {
+	// Every payload here leaves handleSudoRequest by a different return, and each
+	// of those returns gave up its own Close call to the deferred one.
+	tests := []struct {
+		name         string
+		payload      string
+		wantResponse bool
+	}{
+		{name: "malformed JSON", payload: "{"},
+		{name: "missing type", payload: `{"username":"alice"}`},
+		{name: "unknown type", payload: `{"type":"nope"}`},
+		{name: "check_user with a malformed body", payload: `{"type":"check_user","pid":"not-an-int"}`, wantResponse: true},
+		{name: "check_user with no session", payload: `{"type":"check_user","username":"alice","pid":4242,"ppid":1}`, wantResponse: true},
+		{name: "sudo_approval with a malformed body", payload: `{"type":"sudo_approval","pid":"not-an-int"}`, wantResponse: true},
+		{name: "session_event with no username", payload: `{"type":"session_event","service":"sshd","pid":4242}`, wantResponse: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			am := newTestAuthManager()
+			client, server := net.Pipe()
+			conn := &closeTrackingConn{Conn: server}
+
+			done := make(chan struct{})
+			go func() {
+				am.handleSudoRequest(conn)
+				close(done)
+			}()
+
+			_, err := client.Write([]byte(tt.payload))
+			require.NoError(t, err)
+
+			// Without this a regression hangs until the suite-wide panic instead of failing here.
+			_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+			data, err := io.ReadAll(client)
+			require.NoError(t, err, "the PAM side never saw EOF, so the handler left the connection open")
+			if tt.wantResponse {
+				assert.NotEmpty(t, data, "the handler closed without answering, so PAM has to time out instead of failing open")
+			} else {
+				assert.Empty(t, data)
+			}
+
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("handleSudoRequest did not return")
+			}
+			assert.True(t, conn.isClosed(), "connection was left open")
+			_ = client.Close()
+		})
+	}
+}
+
+// readErrConn fails every Read while leaving Write to the real connection, so a
+// test can watch what the handler answers on the read-failure path.
+type readErrConn struct{ *closeTrackingConn }
+
+func (readErrConn) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+type panicOnReadConn struct{ *closeTrackingConn }
+
+func (panicOnReadConn) Read([]byte) (int, error) { panic("read exploded") }
+
+func TestHandleSudoRequest_AnswersBeforeClosingWhenReadFails(t *testing.T) {
+	am := newTestAuthManager()
+	client, server := net.Pipe()
+	conn := readErrConn{&closeTrackingConn{Conn: server}}
+
+	done := make(chan struct{})
+	go func() {
+		am.handleSudoRequest(conn)
+		close(done)
+	}()
+
+	// Without this a regression hangs until the suite-wide panic instead of failing here.
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	data, err := io.ReadAll(client)
+	require.NoError(t, err, "the PAM side never saw EOF, so the handler left the connection open")
+
+	var resp IsAlpconResponse
+	require.NoError(t, json.Unmarshal(data, &resp), "a request that cannot be read still has to be answered, or PAM waits out its own timeout")
+	assert.False(t, resp.IsAlpconUser, "an unreadable request must not be answered as an Alpacon session")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleSudoRequest did not return")
+	}
+	assert.True(t, conn.isClosed(), "connection was left open after the read failed")
+	_ = client.Close()
+}
+
+func TestHandleSudoRequest_ClosesConnectionOnPanic(t *testing.T) {
+	am := newTestAuthManager()
+	client, server := net.Pipe()
+	conn := panicOnReadConn{&closeTrackingConn{Conn: server}}
+
+	am.handleSudoRequest(conn) // The handler's recover is what keeps the panic from failing this test.
+
+	assert.True(t, conn.isClosed(), "a panicking handler left the descriptor open")
+	_ = client.Close()
 }
