@@ -257,7 +257,8 @@ func (am *AuthManager) resolveSessionEvent(req SessionEventRequest) (NonAlpaconA
 // handleSessionEvent processes a session_event from the PAM session
 // hook. The ack is written before any server round-trip so PAM (and
 // thus sshd) never waits on emission; the POST runs on its own
-// goroutine. Fail-open: every path answers the socket.
+// goroutine. Fail-open: every path answers the socket. Closing
+// unixConn is the caller's job.
 func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 	var req SessionEventRequest
 	if err := json.Unmarshal(data, &req); err != nil {

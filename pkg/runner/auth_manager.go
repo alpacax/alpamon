@@ -429,6 +429,9 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 	}
 }
 
+// handleSudoApprovalRequest answers one sudo_approval request, parking the
+// caller's goroutine until the server replies or the wait times out. Closing
+// unixConn is the caller's job.
 func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn) {
 	var sudoApprovalReq SudoApprovalRequest
 	if err := json.Unmarshal(data, &sudoApprovalReq); err != nil {
