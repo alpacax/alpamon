@@ -64,7 +64,8 @@ func TestPostChunk_BlocksUntilSpaceFrees(t *testing.T) {
 
 		select {
 		case <-done:
-		case <-time.After(time.Second):
+		// Longer than postChunk's own maxWait: at the same duration the two would tie, and the select would break it arbitrarily.
+		case <-time.After(5 * time.Second):
 			t.Fatal("postChunk did not return after space freed")
 		}
 	})
