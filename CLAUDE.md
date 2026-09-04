@@ -24,6 +24,8 @@ Alpamon is a lightweight Go-based server agent for Alpacon—the infrastructure 
 go generate ./pkg/db/ent
 ```
 
+Building the codegen tool links `ariga.io/atlas`, so it stays in `go.mod` as an indirect dependency—do not remove it. It never reaches the binary: `cmd/alpamon` does not import it.
+
 ### Database schema changes (development only)
 ```bash
 # Install Atlas CLI (only needed for generating new migration files)
