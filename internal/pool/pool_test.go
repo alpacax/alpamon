@@ -89,50 +89,52 @@ func TestPoolQueueFull(t *testing.T) {
 	})
 }
 
-func TestPoolConcurrency(t *testing.T) {
+// TestPool_SaturatesWithoutExceedingWorkers pins that the pool runs exactly as many
+// jobs at once as it has workers—never more, and never fewer once the queue can fill them.
+func TestPool_SaturatesWithoutExceedingWorkers(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		maxWorkers := 3
-		pool := NewPool(maxWorkers, 100)
+		const (
+			maxWorkers = 10
+			taskCount  = 50
+		)
+
+		pool := NewPool(maxWorkers, taskCount)
 		defer func() {
-			if err := pool.Shutdown(5 * time.Second); err != nil {
-				t.Errorf("shutdown failed: %v", err)
-			}
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
 		}()
 
-		var concurrent atomic.Int32
-		var maxConcurrent atomic.Int32
-		var wg sync.WaitGroup
+		var maxConcurrent int
+		var current int
+		var mu sync.Mutex
 
-		// Submit many jobs
-		for range 50 {
+		var wg sync.WaitGroup
+		for i := range taskCount {
 			wg.Add(1)
-			if err := pool.Submit(context.Background(), func() error {
+			err := pool.Submit(context.Background(), func() error {
 				defer wg.Done()
 
-				current := concurrent.Add(1)
-				defer concurrent.Add(-1)
-
-				// Track max concurrent
-				for {
-					observed := maxConcurrent.Load()
-					if current <= observed || maxConcurrent.CompareAndSwap(observed, current) {
-						break
-					}
+				mu.Lock()
+				current++
+				if current > maxConcurrent {
+					maxConcurrent = current
 				}
+				mu.Unlock()
 
-				// Hold the worker long enough for the jobs to actually overlap.
-				time.Sleep(10 * time.Millisecond)
+				// Hold the worker so the jobs actually overlap.
+				time.Sleep(20 * time.Millisecond)
+
+				mu.Lock()
+				current--
+				mu.Unlock()
+
 				return nil
-			}); err != nil {
-				wg.Done()
-				t.Errorf("failed to submit job: %v", err)
-			}
+			})
+			require.NoErrorf(t, err, "failed to submit job %d", i)
 		}
 
 		wg.Wait()
 
-		// Max concurrent should not exceed worker count
-		assert.LessOrEqual(t, int(maxConcurrent.Load()), maxWorkers, "exceeded max concurrency")
+		assert.Equal(t, maxWorkers, maxConcurrent, "the pool must saturate its workers, and never exceed them")
 	})
 }
 

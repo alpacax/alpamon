@@ -1,7 +1,7 @@
 package executor
 
 import (
-	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,118 +20,64 @@ import (
 // the queue in taskCount/n batches—an exact figure on the bubble's clock, which
 // a pool that serialized its jobs could not produce.
 func TestWorkerPool_SpreadsCommandsAcrossWorkers(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		const (
-			taskCount = 100
-			jobTime   = 1 * time.Millisecond
-		)
+	const (
+		taskCount = 100
+		jobTime   = 1 * time.Millisecond
+	)
 
-		for _, workers := range []int{1, 5, 10} {
-			workerPool := pool.NewPool(workers, taskCount)
-			ctxManager := agent.NewContextManager()
+	for _, workers := range []int{1, 5, 10} {
+		t.Run(fmt.Sprintf("workers=%d", workers), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctxManager := agent.NewContextManager()
+				defer ctxManager.Shutdown()
 
-			registry := NewRegistry()
-			handler := &IntegrationMockHandler{
-				name:           "scale_handler",
-				commands:       []string{"scale_cmd"},
-				executionDelay: jobTime,
-			}
-			require.NoError(t, registry.Register(handler), "workers=%d: register failed", workers)
+				// Both teardowns are deferred: run at the end of the body they never would,
+				// because FailNow exits with the workers still alive and the bubble reports that.
+				workerPool := pool.NewPool(workers, taskCount)
+				defer func() {
+					assert.NoError(t, workerPool.Shutdown(5*time.Second), "shutdown failed")
+				}()
 
-			h, err := registry.Get("scale_cmd")
-			require.NoError(t, err, "workers=%d: the handler must be reachable", workers)
-			args := &common.CommandArgs{}
-
-			var wg sync.WaitGroup
-			var completed atomic.Int32
-
-			start := time.Now()
-
-			for range taskCount {
-				wg.Add(1)
-				ctx, cancel := ctxManager.NewContext(5 * time.Second)
-
-				submitErr := workerPool.Submit(ctx, func() error {
-					defer wg.Done()
-					defer cancel()
-					_, _, err := h.Execute(ctx, "scale_cmd", args)
-					if err == nil {
-						completed.Add(1)
-					}
-					return err
-				})
-
-				if submitErr != nil {
-					wg.Done()
-					cancel()
-					assert.Failf(t, "submit failed", "workers=%d: %v", workers, submitErr)
+				registry := NewRegistry()
+				handler := &IntegrationMockHandler{
+					name:           "scale_handler",
+					commands:       []string{"scale_cmd"},
+					executionDelay: jobTime,
 				}
-			}
+				require.NoError(t, registry.Register(handler), "register failed")
 
-			wg.Wait()
+				h, err := registry.Get("scale_cmd")
+				require.NoError(t, err, "the handler must be reachable")
+				args := &common.CommandArgs{}
 
-			assert.Equal(t, int32(taskCount), completed.Load(), "workers=%d: not every task ran", workers)
-			assert.Equal(t, time.Duration(taskCount/workers)*jobTime, time.Since(start),
-				"workers=%d: the pool did not spread the tasks across its workers", workers)
+				var wg sync.WaitGroup
+				var completed atomic.Int32
 
-			require.NoError(t, workerPool.Shutdown(5*time.Second), "workers=%d: shutdown failed", workers)
-			ctxManager.Shutdown()
-		}
-	})
-}
+				start := time.Now()
 
-// TestWorkerPool_SaturatesWithoutExceedingWorkers verifies the pool runs exactly as many jobs at
-// once as it has workers—never more, and never fewer once enough work is queued
-// to occupy them all.
-func TestWorkerPool_SaturatesWithoutExceedingWorkers(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		const (
-			maxWorkers = 10
-			taskCount  = 50
-		)
+				for range taskCount {
+					wg.Add(1)
+					ctx, cancel := ctxManager.NewContext(5 * time.Second)
 
-		workerPool := pool.NewPool(maxWorkers, taskCount)
-		defer func() { assert.NoError(t, workerPool.Shutdown(5*time.Second), "shutdown failed") }()
+					submitErr := workerPool.Submit(ctx, func() error {
+						defer wg.Done()
+						defer cancel()
+						_, _, err := h.Execute(ctx, "scale_cmd", args)
+						if err == nil {
+							completed.Add(1)
+						}
+						return err
+					})
 
-		ctx := context.Background()
-
-		// Track concurrent goroutines
-		var maxConcurrent int
-		var current int
-		var mu sync.Mutex
-
-		// Submit tasks that take some time
-		var wg sync.WaitGroup
-
-		for range taskCount {
-			wg.Add(1)
-			err := workerPool.Submit(ctx, func() error {
-				defer wg.Done()
-
-				mu.Lock()
-				current++
-				if current > maxConcurrent {
-					maxConcurrent = current
+					require.NoError(t, submitErr, "submit failed")
 				}
-				mu.Unlock()
 
-				// Hold the worker so the jobs actually overlap.
-				time.Sleep(20 * time.Millisecond)
+				wg.Wait()
 
-				mu.Lock()
-				current--
-				mu.Unlock()
-
-				return nil
+				assert.Equal(t, int32(taskCount), completed.Load(), "not every task ran")
+				assert.Equal(t, time.Duration(taskCount/workers)*jobTime, time.Since(start),
+					"the pool did not spread the tasks across its workers")
 			})
-			if err != nil {
-				wg.Done()
-				assert.Failf(t, "submit failed", "%v", err)
-			}
-		}
-
-		wg.Wait()
-
-		assert.Equal(t, maxWorkers, maxConcurrent, "the pool must saturate its workers, and never exceed them")
-	})
+		})
+	}
 }
