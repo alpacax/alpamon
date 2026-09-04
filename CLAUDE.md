@@ -16,10 +16,12 @@ Alpamon is a lightweight Go-based server agent for Alpacon—the infrastructure 
 
 ### Code generation
 ```bash
-# Generate Ent schema code (required before building). Runs tools/entc, the
-# `tool` directive program that excludes the unused Atlas SQL dialects. Do not
-# invoke the ent CLI directly—it regenerates the migrate package and pulls the
-# Atlas dialects back in.
+# Generate Ent schema code (required before building). The go:generate directive
+# runs `go tool entc`, the `tool` directive program that excludes the unused
+# Atlas SQL dialects. It resolves its schema and target paths relative to
+# pkg/db/ent, so always run it through `go generate` as shown. Do not invoke the
+# ent CLI directly—it regenerates the migrate package and pulls the Atlas
+# dialects back in.
 go generate ./pkg/db/ent
 ```
 
