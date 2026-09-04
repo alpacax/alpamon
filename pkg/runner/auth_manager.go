@@ -505,7 +505,9 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 
 	if err := am.sendSudoRequestWithRetry(sudoApprovalReq); err != nil {
 		log.Error().Err(err).Msg("Failed to send sudo_approval request after retries")
-		am.finalizeRequest(sudoApprovalReq.RequestID, "Communication error")
+		if !am.finalizeRequest(sudoApprovalReq.RequestID, "Communication error") {
+			am.awaitTakenRequest(sudoApprovalReq.RequestID, completionChan)
+		}
 		return
 	}
 
@@ -518,20 +520,18 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		// server response, denyPendingRequests on a locally decided deny.
 		log.Debug().Str("request_id", sudoApprovalReq.RequestID).Msg("sudo_approval request answered")
 	case <-time.After(30 * time.Second):
-		// The take under am.mu is what settles the race; this check only keeps the
-		// timeout from warning about a request the response path already took.
-		if am.isRequestPending(sudoApprovalReq.RequestID) {
+		// finalizeRequest's own take under am.mu is what settles the race with the
+		// response path; a separate pending check ahead of it would only reopen the
+		// gap between the two locks.
+		if am.finalizeRequest(sudoApprovalReq.RequestID, "Response timeout") {
 			log.Warn().Msg("sudo_approval response timeout")
-			am.finalizeRequest(sudoApprovalReq.RequestID, "Response timeout")
 		} else {
 			log.Debug().Msgf("sudo_approval timeout triggered but request already handled: %s", sudoApprovalReq.RequestID)
 			am.awaitTakenRequest(sudoApprovalReq.RequestID, completionChan)
 		}
 	case <-am.ctx.Done():
 		log.Debug().Msg("Context cancelled, cleaning up sudo_approval connection")
-		if am.isRequestPending(sudoApprovalReq.RequestID) {
-			am.finalizeRequest(sudoApprovalReq.RequestID, "Service shutdown")
-		} else {
+		if !am.finalizeRequest(sudoApprovalReq.RequestID, "Service shutdown") {
 			am.awaitTakenRequest(sudoApprovalReq.RequestID, completionChan)
 		}
 	}
@@ -862,21 +862,6 @@ func (am *AuthManager) signalCompletion(requestID string) {
 	}
 }
 
-// isRequestPending checks if a sudo request is still pending (not yet handled).
-// Used to prevent race condition between timeout and response handling.
-func (am *AuthManager) isRequestPending(requestID string) bool {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-
-	for _, session := range am.pidToSessionMap {
-		if _, exists := session.Requests[requestID]; exists {
-			return true
-		}
-	}
-
-	return false
-}
-
 func (am *AuthManager) Stop() {
 	if am.cancel != nil {
 		am.cancel()
@@ -892,7 +877,11 @@ func (am *AuthManager) Stop() {
 // am.mu finalizes it, and nobody else may write to its connection. It always
 // denies—approvals arrive from the server and are answered by
 // HandleSudoApprovalResponse.
-func (am *AuthManager) finalizeRequest(requestID, reason string) {
+//
+// It reports whether it took the request. A false means someone else did, and
+// that taker's response may still be going out, so a caller holding the
+// connection owes it an awaitTakenRequest before its own close.
+func (am *AuthManager) finalizeRequest(requestID, reason string) bool {
 	am.mu.Lock()
 	req := am.takeRequestLocked(requestID)
 	am.mu.Unlock()
@@ -903,10 +892,12 @@ func (am *AuthManager) finalizeRequest(requestID, reason string) {
 			Str("request_id", requestID).
 			Str("reason", reason).
 			Msg("No pending sudo request to finalize")
-		return
+		return false
 	}
 
 	am.denyPendingRequests([]*SudoRequest{req}, reason)
+
+	return true
 }
 
 // takeRequestLocked deregisters one request by id and hands its response to the
