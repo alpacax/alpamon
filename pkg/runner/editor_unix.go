@@ -259,7 +259,7 @@ func writeFileAt(parent *os.File, name string, data []byte) error {
 	mode := uint32(userDataFileMode)
 	var st unix.Stat_t
 	switch err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); {
-	case err == unix.ENOENT:
+	case errors.Is(err, unix.ENOENT):
 	case err != nil:
 		return &os.PathError{Op: "stat", Path: path, Err: err}
 	case st.Mode&unix.S_IFMT == unix.S_IFLNK:
