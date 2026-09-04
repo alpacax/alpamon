@@ -528,6 +528,26 @@ func (c *blockingWriteConn) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
+type readResult struct {
+	resp SudoApprovalResponse
+	err  error
+}
+
+// readResponseAsync decodes the one response the connection carries, on its own
+// goroutine: a handover test has to keep reading while it drives the waiter out,
+// and net.Pipe gives the taker's write nowhere to land otherwise.
+func readResponseAsync(client net.Conn) <-chan readResult {
+	results := make(chan readResult, 1)
+	go func() {
+		_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var resp SudoApprovalResponse
+		err := json.NewDecoder(client).Decode(&resp)
+		results <- readResult{resp: resp, err: err}
+	}()
+
+	return results
+}
+
 // TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse pins the handover the
 // deferred close depends on. HandleSudoApprovalResponse deregisters the request
 // before it writes, so a shutdown landing in that window finds nothing pending and
@@ -573,17 +593,7 @@ func TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse(t *testing.T) {
 	_, err = client.Write(data)
 	require.NoError(t, err)
 
-	type readResult struct {
-		resp SudoApprovalResponse
-		err  error
-	}
-	results := make(chan readResult, 1)
-	go func() {
-		_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
-		var resp SudoApprovalResponse
-		err := json.NewDecoder(client).Decode(&resp)
-		results <- readResult{resp: resp, err: err}
-	}()
+	results := readResponseAsync(client)
 
 	select {
 	case <-registered:
@@ -723,17 +733,7 @@ func TestHandleSudoApprovalRequest_RetryFailureWaitsForTakenResponse(t *testing.
 	_, err = client.Write(data)
 	require.NoError(t, err)
 
-	type readResult struct {
-		resp SudoApprovalResponse
-		err  error
-	}
-	results := make(chan readResult, 1)
-	go func() {
-		_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
-		var resp SudoApprovalResponse
-		err := json.NewDecoder(client).Decode(&resp)
-		results <- readResult{resp: resp, err: err}
-	}()
+	results := readResponseAsync(client)
 
 	select {
 	case <-posted:
