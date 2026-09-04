@@ -538,12 +538,13 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 }
 
 // awaitTakenRequest parks until whoever took this request has answered it. Takers
-// signal only after writing and closing, so an earlier return would let the caller's
-// deferred close cut a response mid-write and leave PAM an empty body to parse. The
-// bound is there because a taker that died before signaling must not strand this
-// goroutine with the descriptor open. The channel comes from the caller rather than
-// the map: a lookup that missed would return nil and park here for the full bound
-// instead of failing.
+// signal only once they are done with the connection—after the write and the close
+// on the ordinary path, and while unwinding a panicked write, where there is no
+// response left to cut—so an earlier return would let the caller's deferred close
+// cut a response mid-write and leave PAM an empty body to parse. The bound is there
+// because a taker that died before signaling must not strand this goroutine with the
+// descriptor open. The channel comes from the caller rather than the map: a lookup
+// that missed would return nil and park here for the full bound instead of failing.
 func (am *AuthManager) awaitTakenRequest(requestID string, completionChan <-chan struct{}) {
 	select {
 	case <-completionChan:
@@ -947,11 +948,15 @@ func (am *AuthManager) denyPendingRequests(pending []*SudoRequest, reason string
 						Msg("Denying a pending sudo request panicked")
 				}
 			}()
+			// Registered last so it runs first on the way out: after the write and the
+			// close on the ordinary path, and during unwinding on the panic path, where
+			// the write has already failed and the waiter would otherwise park out the
+			// whole handover bound for a body that is never coming.
+			defer am.signalCompletion(req.Request.RequestID)
 			if req.Connection != nil {
 				am.sendSudoApprovalResponse(req.Connection, req.Request, false, reason)
 				_ = req.Connection.Close()
 			}
-			am.signalCompletion(req.Request.RequestID)
 		}()
 	}
 	wg.Wait()
