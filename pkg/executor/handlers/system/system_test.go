@@ -251,11 +251,10 @@ func TestSystemHandler_Restart_Default(t *testing.T) {
 		mockWS := &MockWSClient{}
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
-		requireDrainOutlastsDelay(t)
+		defer ctxManager.Shutdown()
 		defer drainThen(t, workerPool, func() {
 			assert.True(t, mockWS.RestartCalled, "the scheduled restart never fired")
 		})()
-		defer ctxManager.Shutdown()
 
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 		ctx := context.Background()
@@ -278,11 +277,10 @@ func TestSystemHandler_Restart_Alpamon(t *testing.T) {
 		mockWS := &MockWSClient{}
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
-		requireDrainOutlastsDelay(t)
+		defer ctxManager.Shutdown()
 		defer drainThen(t, workerPool, func() {
 			assert.True(t, mockWS.RestartCalled, "the scheduled restart never fired")
 		})()
-		defer ctxManager.Shutdown()
 
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 		ctx := context.Background()
@@ -305,11 +303,10 @@ func TestSystemHandler_Quit(t *testing.T) {
 		mockWS := &MockWSClient{}
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
-		requireDrainOutlastsDelay(t)
+		defer ctxManager.Shutdown()
 		defer drainThen(t, workerPool, func() {
 			assert.True(t, mockWS.ShutDownCalled, "the scheduled quit never fired")
 		})()
-		defer ctxManager.Shutdown()
 
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 		ctx := context.Background()
@@ -330,11 +327,10 @@ func TestSystemHandler_Reboot(t *testing.T) {
 		mockWS := &MockWSClient{}
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
-		requireDrainOutlastsDelay(t)
+		defer ctxManager.Shutdown()
 		defer drainThen(t, workerPool, func() {
 			assert.True(t, mockExec.Invoked("reboot"), "the scheduled reboot never ran")
 		})()
-		defer ctxManager.Shutdown()
 
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 		ctx := context.Background()
@@ -355,11 +351,10 @@ func TestSystemHandler_Shutdown(t *testing.T) {
 		mockWS := &MockWSClient{}
 		ctxManager := agent.NewContextManager()
 		workerPool := pool.NewPool(2, 10)
-		requireDrainOutlastsDelay(t)
+		defer ctxManager.Shutdown()
 		defer drainThen(t, workerPool, func() {
 			assert.True(t, mockExec.Invoked("shutdown"), "the scheduled shutdown never ran")
 		})()
-		defer ctxManager.Shutdown()
 
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 		ctx := context.Background()
@@ -814,11 +809,10 @@ func TestSystemHandler_Upgrade_SelfUpdate(t *testing.T) {
 				mockWS := &MockWSClient{}
 				ctxManager := agent.NewContextManager()
 				workerPool := pool.NewPool(2, 10)
-				requireDrainOutlastsDelay(t)
+				defer ctxManager.Shutdown()
 				defer drainThen(t, workerPool, func() {
 					assert.True(t, mockWS.RestartCalled, "the restart scheduled after a self-update never fired")
 				})()
-				defer ctxManager.Shutdown()
 
 				mockVersions := &MockVersionResolver{
 					LatestVersion: "v9.9.9", // differs from version.Version ("dev") -> needAlpamon
