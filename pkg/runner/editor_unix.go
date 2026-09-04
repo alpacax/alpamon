@@ -141,12 +141,17 @@ func chownChildren(ctx context.Context, dir *os.File, uid, gid, depth int) error
 	dirfd := int(dir.Fd())
 	return eachName(ctx, dir, func(name string) error {
 		path := filepath.Join(dir.Name(), name)
-		// An open that fails skips the entry, not the walk: ELOOP is a symlink,
-		// ENXIO a socket, ENOENT one a live code-server just removed, and none
-		// is worth leaving the settings.json elsewhere in the tree root-owned.
 		fd, err := unix.Openat(dirfd, name, entryFlags, 0)
 		if err != nil {
-			return nil
+			// ELOOP is a symlink, ENXIO a socket, ENOENT one a live code-server
+			// just removed, and none is worth leaving the settings.json elsewhere
+			// in the tree root-owned. Anything else is about the process rather
+			// than the entry—EMFILE and ENFILE would skip every one of them and
+			// still report success—so it fails the walk.
+			if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENOENT) {
+				return nil
+			}
+			return &os.PathError{Op: "open", Path: path, Err: err}
 		}
 		var st unix.Stat_t
 		if err := unix.Fstat(fd, &st); err != nil {
