@@ -35,9 +35,12 @@ const unregisterTimeoutSeconds = 10
 // delayedActionDelay is how long restart, quit, reboot, shutdown and the
 // post-self-update restart wait before acting, so the response reaches the
 // console first. Pool.Shutdown cannot interrupt a job sleeping this out, so any
-// drain budget must outlast it; the user-facing messages below still spell the
-// second out in words, so keep them in step if this changes.
+// drain budget must outlast it.
 const delayedActionDelay = 1 * time.Second
+
+// noticeSpellsOutDelay fails the build ("constant -N overflows uint") when the
+// constant stops matching the "1 second" the four messages below spell out.
+const noticeSpellsOutDelay = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
 
 // SystemHandler handles system-level commands like restart, reboot, shutdown, upgrade
 type SystemHandler struct {
