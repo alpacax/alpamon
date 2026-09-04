@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/stretchr/testify/require"
 )
 
 // BenchmarkRegistry_Get measures registry lookup performance
@@ -17,9 +18,7 @@ func BenchmarkRegistry_Get(b *testing.B) {
 		name:     "test",
 		commands: []string{"cmd1", "cmd2", "cmd3"},
 	}
-	if err := registry.Register(handler); err != nil {
-		b.Fatalf("register handler: %v", err)
-	}
+	require.NoError(b, registry.Register(handler), "register handler")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -39,12 +38,10 @@ func BenchmarkRegistry_GetManyHandlers(b *testing.B) {
 	for i := range handlers {
 		name := strconv.Itoa(i)
 		keys[i] = "cmd" + name
-		if err := registry.Register(&MockHandler{
+		require.NoErrorf(b, registry.Register(&MockHandler{
 			name:     "handler" + name,
 			commands: []string{keys[i]},
-		}); err != nil {
-			b.Fatalf("register handler %d: %v", i, err)
-		}
+		}), "register handler %d", i)
 	}
 
 	b.ResetTimer()
@@ -63,9 +60,7 @@ func BenchmarkRegistry_ListCommands(b *testing.B) {
 			name:     "handler" + string(rune('A'+i)),
 			commands: []string{"cmd" + string(rune('A'+i))},
 		}
-		if err := registry.Register(handler); err != nil {
-			b.Fatalf("register handler: %v", err)
-		}
+		require.NoError(b, registry.Register(handler), "register handler")
 	}
 
 	b.ResetTimer()
@@ -82,9 +77,7 @@ func BenchmarkRegistry_IsCommandRegistered(b *testing.B) {
 		name:     "test",
 		commands: []string{"cmd1", "cmd2", "cmd3"},
 	}
-	if err := registry.Register(handler); err != nil {
-		b.Fatalf("register handler: %v", err)
-	}
+	require.NoError(b, registry.Register(handler), "register handler")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -100,9 +93,7 @@ func BenchmarkRegistry_ConcurrentGet(b *testing.B) {
 		name:     "test",
 		commands: []string{"cmd1", "cmd2", "cmd3"},
 	}
-	if err := registry.Register(handler); err != nil {
-		b.Fatalf("register handler: %v", err)
-	}
+	require.NoError(b, registry.Register(handler), "register handler")
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
