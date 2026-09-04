@@ -2,33 +2,22 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestContextManagerCreation verifies context manager initialization
 func TestContextManagerCreation(t *testing.T) {
 	cm := NewContextManager()
-	if cm == nil {
-		t.Fatal("NewContextManager returned nil")
-	}
+	require.NotNil(t, cm, "NewContextManager returned nil")
 
-	if cm.IsShutdown() {
-		t.Error("new context manager should not be shutdown")
-	}
-
-	// Root context should be active
-	select {
-	case <-cm.Root().Done():
-		t.Error("root context should not be cancelled")
-	default:
-		// Expected
-	}
+	assert.False(t, cm.IsShutdown(), "new context manager should not be shutdown")
+	assert.NoError(t, cm.Root().Err(), "root context should not be cancelled")
 }
 
 // TestContextCancellation verifies that shutdown cancels all child contexts
@@ -51,18 +40,10 @@ func TestContextCancellation(t *testing.T) {
 
 		// All contexts should be cancelled
 		for i, ctx := range []context.Context{ctx1, ctx2, ctx3} {
-			select {
-			case <-ctx.Done():
-				// Expected
-			case <-time.After(100 * time.Millisecond):
-				t.Errorf("context %d not cancelled after shutdown", i+1)
-			}
+			assert.ErrorIsf(t, ctx.Err(), context.Canceled, "context %d not cancelled after shutdown", i+1)
 		}
 
-		// Manager should report as shutdown
-		if !cm.IsShutdown() {
-			t.Error("IsShutdown() should return true after Shutdown()")
-		}
+		assert.True(t, cm.IsShutdown(), "IsShutdown() should return true after Shutdown()")
 	})
 }
 
@@ -73,21 +54,15 @@ func TestShutdownCancelsChildren(t *testing.T) {
 
 	ctx, cancel := cm.NewContext(0)
 	cancel()
-	if !errors.Is(ctx.Err(), context.Canceled) {
-		t.Errorf("cancelled child: got %v, want context.Canceled", ctx.Err())
-	}
+	assert.ErrorIs(t, ctx.Err(), context.Canceled, "cancelled child")
 
 	// A child left open before Shutdown must be cancelled by Shutdown.
 	child, childCancel := cm.NewContext(0)
 	defer childCancel()
 	cm.Shutdown()
 
-	if !cm.IsShutdown() {
-		t.Error("IsShutdown() = false after Shutdown()")
-	}
-	if !errors.Is(child.Err(), context.Canceled) {
-		t.Errorf("child after Shutdown: got %v, want context.Canceled", child.Err())
-	}
+	assert.True(t, cm.IsShutdown(), "IsShutdown() = false after Shutdown()")
+	assert.ErrorIs(t, child.Err(), context.Canceled, "child after Shutdown")
 }
 
 // TestChildCleanup verifies child context cleanup on parent shutdown.
@@ -117,19 +92,7 @@ func TestChildCleanup(t *testing.T) {
 		// Shutdown manager - should cancel all child contexts
 		cm.Shutdown()
 
-		// Wait for all goroutines to exit
-		done := make(chan struct{})
-		go func() {
-			wg.Wait()
-			close(done)
-		}()
-
-		select {
-		case <-done:
-			// All goroutines exited
-		case <-time.After(2 * time.Second):
-			t.Error("child goroutines did not exit after parent shutdown")
-		}
+		wg.Wait()
 	})
 }
 
@@ -143,13 +106,11 @@ func TestContextTimeout(t *testing.T) {
 		ctx, cancel := cm.NewContext(50 * time.Millisecond)
 		defer cancel()
 
-		// Should timeout
-		select {
-		case <-ctx.Done():
-			assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
-		case <-time.After(100 * time.Millisecond):
-			t.Error("context did not timeout")
-		}
+		start := time.Now()
+		<-ctx.Done()
+
+		assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+		assert.Equal(t, 50*time.Millisecond, time.Since(start), "the deadline must land on the timeout itself")
 	})
 }
 
@@ -159,17 +120,14 @@ func TestContextDeadline(t *testing.T) {
 		cm := NewContextManager()
 		defer cm.Shutdown()
 
-		deadline := time.Now().Add(50 * time.Millisecond)
-		ctx, cancel := cm.NewContextWithDeadline(deadline)
+		start := time.Now()
+		ctx, cancel := cm.NewContextWithDeadline(start.Add(50 * time.Millisecond))
 		defer cancel()
 
-		// Should respect deadline
-		select {
-		case <-ctx.Done():
-			assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
-		case <-time.After(100 * time.Millisecond):
-			t.Error("context did not respect deadline")
-		}
+		<-ctx.Done()
+
+		assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+		assert.Equal(t, 50*time.Millisecond, time.Since(start), "the context must run to its deadline, no further")
 	})
 }
 
@@ -183,22 +141,13 @@ func TestContextNoTimeout(t *testing.T) {
 		ctx, cancel := cm.NewContext(0)
 		defer cancel()
 
-		// Should not timeout on its own
-		select {
-		case <-ctx.Done():
-			t.Error("context should not be cancelled without explicit cancellation")
-		case <-time.After(100 * time.Millisecond):
-			// Expected
-		}
+		// A zero timeout arms no timer, so settling the bubble is the whole proof.
+		synctest.Wait()
+		assert.NoError(t, ctx.Err(), "context should not be cancelled without explicit cancellation")
 
 		// Manual cancellation should work
 		cancel()
-		select {
-		case <-ctx.Done():
-			// Expected
-		case <-time.After(100 * time.Millisecond):
-			t.Error("context not cancelled after explicit cancel")
-		}
+		assert.ErrorIs(t, ctx.Err(), context.Canceled, "context not cancelled after explicit cancel")
 	})
 }
 
@@ -230,23 +179,13 @@ func TestConcurrentContextCreation(t *testing.T) {
 
 		// Wait for all goroutines
 		for range 100 {
-			select {
-			case <-done:
-				// Continue
-			case <-time.After(5 * time.Second):
-				t.Fatal("concurrent operations timed out")
-			}
+			<-done
 		}
 
 		// Context manager should still be functional
 		ctx, cancel := cm.NewContext(0)
 		cancel()
-		select {
-		case <-ctx.Done():
-			// Expected
-		default:
-			t.Error("context manager not functional after concurrent operations")
-		}
+		assert.ErrorIs(t, ctx.Err(), context.Canceled, "context manager not functional after concurrent operations")
 	})
 }
 
@@ -259,15 +198,11 @@ func TestRapidCreateCancel(t *testing.T) {
 		for j := range 50 {
 			ctx, cancel := cm.NewContext(time.Duration(j) * time.Millisecond)
 			cancel()
-			if ctx.Err() == nil {
-				t.Fatalf("cycle %d/%d: child not done after cancel", i, j)
-			}
+			require.Errorf(t, ctx.Err(), "cycle %d/%d: child not done after cancel", i, j)
 		}
 
 		cm.Shutdown()
-		if !cm.IsShutdown() {
-			t.Fatalf("cycle %d: IsShutdown() = false after Shutdown()", i)
-		}
+		require.Truef(t, cm.IsShutdown(), "cycle %d: IsShutdown() = false after Shutdown()", i)
 	}
 }
 
@@ -300,12 +235,7 @@ func TestConcurrentOperations(t *testing.T) {
 		// Manager must remain functional after the concurrent churn.
 		ctx, cancel := cm.NewContext(0)
 		cancel()
-		select {
-		case <-ctx.Done():
-			// Expected
-		default:
-			t.Error("context manager not functional after concurrent operations")
-		}
+		assert.ErrorIs(t, ctx.Err(), context.Canceled, "context manager not functional after concurrent operations")
 
 		// Shutdown
 		cm.Shutdown()
@@ -325,16 +255,6 @@ func TestShutdownIdempotency(t *testing.T) {
 	cm.Shutdown() // Should not panic
 	cm.Shutdown() // Should not panic
 
-	// Context should still be cancelled
-	select {
-	case <-ctx.Done():
-		// Expected
-	default:
-		t.Error("context not cancelled after shutdown")
-	}
-
-	// IsShutdown should still return true
-	if !cm.IsShutdown() {
-		t.Error("IsShutdown() should return true after multiple shutdowns")
-	}
+	assert.ErrorIs(t, ctx.Err(), context.Canceled, "context not cancelled after shutdown")
+	assert.True(t, cm.IsShutdown(), "IsShutdown() should return true after multiple shutdowns")
 }
