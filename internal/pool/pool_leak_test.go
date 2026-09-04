@@ -44,6 +44,9 @@ func TestPool_NoGoroutineLeak(t *testing.T) {
 		// Shutdown pool
 		assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
 	})
+		defer func() {
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		}()
 }
 
 // TestPool_NoLeakAfterPanic verifies goroutines are cleaned up after panic recovery
@@ -55,11 +58,10 @@ func TestPool_NoLeakAfterPanic(t *testing.T) {
 		var completed atomic.Int32
 		var wg sync.WaitGroup
 
-		// Submit jobs that panic
-		for range 10 {
-			_ = pool.Submit(ctx, func() error {
+		for i := range 10 {
+			require.NoErrorf(t, pool.Submit(ctx, func() error {
 				panic("test panic")
-			})
+			}), "failed to submit panic job %d", i)
 		}
 
 		// Submit normal jobs after panics
@@ -79,9 +81,6 @@ func TestPool_NoLeakAfterPanic(t *testing.T) {
 		// a panic leaves this Wait unsatisfiable, which the bubble reports as a
 		// deadlock rather than hanging until the package timeout.
 		wg.Wait()
-
-		// Shutdown pool
-		assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
 
 		assert.NotZero(t, completed.Load(), "no normal jobs completed after panics - workers may have died")
 	})
@@ -120,9 +119,12 @@ func TestPool_NoLeakAfterContextCancel(t *testing.T) {
 
 		// Try to submit more jobs with cancelled context
 		// Note: Pool may or may not check context before submission depending on implementation
+		defer func() {
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		}()
 		err := pool.Submit(ctx, func() error {
 			return nil
-		})
+		}), "failed to submit the blocking job")
 		// Just log the result - this tests if the pool handles cancelled context
 		if err != nil {
 			t.Logf("submit to cancelled context returned: %v", err)
@@ -143,7 +145,9 @@ func TestPool_NoLeakQueueFull(t *testing.T) {
 		// Block the worker
 		started := make(chan struct{})
 		blocker := make(chan struct{})
-		_ = pool.Submit(ctx, func() error {
+		// Deferred: a require below would otherwise exit with the worker still parked here, and the bubble would report that leak instead of the failure.
+		defer close(blocker)
+		require.NoError(t, pool.Submit(ctx, func() error {
 			close(started)
 			<-blocker
 			return nil
@@ -154,18 +158,13 @@ func TestPool_NoLeakQueueFull(t *testing.T) {
 		// starts as a deadlock rather than hanging until the package timeout.
 		<-started
 
-		// Fill the queue
-		_ = pool.Submit(ctx, func() error { return nil })
-		_ = pool.Submit(ctx, func() error { return nil })
+		// Both must land, or the submit below would never reach a full queue.
+		require.NoError(t, pool.Submit(ctx, func() error { return nil }))
+		require.NoError(t, pool.Submit(ctx, func() error { return nil }))
 
 		// This should fail - queue full
 		err := pool.Submit(ctx, func() error { return nil })
 		assert.Error(t, err, "expected queue full error")
-
-		// Unblock and shutdown
-		close(blocker)
-
-		assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
 	})
 }
 
@@ -174,20 +173,22 @@ func TestPool_NoLeakRapidShutdown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// Create and shutdown multiple pools rapidly
 		for i := range 10 {
-			pool := NewPool(5, 50)
-			ctx := context.Background()
+			// A closure per pool so the shutdown is deferred; a failed submit would otherwise leave this pool's workers running.
+			func() {
+				pool := NewPool(5, 50)
+				// A timeout here means a leaked worker, so stop before more pools compound it.
+				defer func() {
+					require.NoErrorf(t, pool.Shutdown(1*time.Second), "shutdown %d failed", i)
+				}()
+				ctx := context.Background()
 
-			// Submit a few jobs
-			for range 10 {
-				_ = pool.Submit(ctx, func() error {
-					time.Sleep(5 * time.Millisecond)
-					return nil
-				})
-			}
-
-			// Shutdown joins all workers; a timeout means a leaked worker, so fail
-			// fast rather than spin up more pools and compound the leak.
-			require.NoErrorf(t, pool.Shutdown(1*time.Second), "shutdown %d failed", i)
+				for j := range 10 {
+					require.NoErrorf(t, pool.Submit(ctx, func() error {
+						time.Sleep(5 * time.Millisecond)
+						return nil
+					}), "pool %d: failed to submit job %d", i, j)
+				}
+			}()
 		}
 	})
 }

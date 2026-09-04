@@ -50,6 +50,8 @@ func TestPoolQueueFull(t *testing.T) {
 		// Queue size = 1, Workers = 1
 		pool := NewPool(1, 1)
 		defer func() {
+		// Deferred: a require below would otherwise exit with the worker still parked here, and the bubble would report that leak instead of the failure.
+		defer close(blocker)
 			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
 		}()
 
@@ -83,9 +85,6 @@ func TestPoolQueueFull(t *testing.T) {
 		})
 
 		assert.EqualError(t, err, "job queue is full")
-
-		// Unblock the worker to allow shutdown
-		close(blocker)
 	})
 }
 
