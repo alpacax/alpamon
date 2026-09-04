@@ -211,10 +211,12 @@ func TestStartWatchdog_FiresOnTimeout(t *testing.T) {
 		done := make(chan struct{})
 		ctx := t.Context()
 
-		_ = StartWatchdog(ctx, st, func(_ *PendingState) {
+		// Disarmed on the way out: the t.Fatal below would otherwise strand the watchdog on its timer, and the bubble would report that instead.
+		disarm := StartWatchdog(ctx, st, func(_ *PendingState) {
 			fired.Add(1)
 			close(done)
 		})
+		defer disarm()
 
 		select {
 		case <-done:
@@ -268,9 +270,11 @@ func TestStartWatchdog_FiresImmediatelyIfAlreadyExpired(t *testing.T) {
 		done := make(chan struct{})
 		ctx := t.Context()
 
-		_ = StartWatchdog(ctx, st, func(_ *PendingState) {
+		// Disarmed on the way out, for the same reason as the timeout test above.
+		disarm := StartWatchdog(ctx, st, func(_ *PendingState) {
 			close(done)
 		})
+		defer disarm()
 
 		select {
 		case <-done:
