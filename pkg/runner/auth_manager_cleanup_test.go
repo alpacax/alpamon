@@ -3,13 +3,15 @@ package runner
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // registerPipeRequest registers a pending request the way handleSudoApprovalRequest
@@ -38,14 +40,10 @@ func expectSingleResponse(t *testing.T, client net.Conn) SudoApprovalResponse {
 
 	dec := json.NewDecoder(client)
 	var resp SudoApprovalResponse
-	if err := dec.Decode(&resp); err != nil {
-		t.Fatalf("decoding response: %v", err)
-	}
+	require.NoError(t, dec.Decode(&resp), "decoding response")
 
 	// EOF proves both: no second response, and the connection was closed.
-	if err := dec.Decode(&resp); !errors.Is(err, io.EOF) {
-		t.Errorf("expected EOF after single response, got %v", err)
-	}
+	assert.ErrorIs(t, dec.Decode(&resp), io.EOF, "expected EOF after single response")
 	return resp
 }
 
@@ -80,15 +78,10 @@ func TestFinalizeRequest_SendsSingleFullResponseAndCloses(t *testing.T) {
 			SessionID: "sess-1",
 			Reason:    "Communication error",
 		}
-		if resp := expectSingleResponse(t, client); resp != want {
-			t.Errorf("response: got %+v, want %+v", resp, want)
-		}
+		assert.Equal(t, want, expectSingleResponse(t, client))
 
-		// finalizeRequest deregisters before it writes, so the close seen above
-		// means the deletion already happened.
-		if _, exists := am.pidToSessionMap[4242].Requests["req-1"]; exists {
-			t.Error("request was not deregistered")
-		}
+		// finalizeRequest deregisters before it writes, so the close above means the deletion already happened.
+		assert.NotContains(t, am.pidToSessionMap[4242].Requests, "req-1", "request was not deregistered")
 	})
 }
 
@@ -101,9 +94,7 @@ func TestFinalizeRequest_UnknownRequestIsNoop(t *testing.T) {
 
 	am.finalizeRequest("req-gone", "Response timeout")
 
-	if _, exists := am.pidToSessionMap[2].Requests["req-pending"]; !exists {
-		t.Error("an unrelated pending request was dropped")
-	}
+	assert.Contains(t, am.pidToSessionMap[2].Requests, "req-pending", "an unrelated pending request was dropped")
 }
 
 // TestFinalizeRequest_RacesHandleResponse is the race the single-ownership rule
@@ -133,16 +124,12 @@ func TestFinalizeRequest_RacesHandleResponse(t *testing.T) {
 	}()
 
 	resp := expectSingleResponse(t, client)
-	if resp.RequestID != req.RequestID {
-		t.Errorf("request_id: got %q, want %q", resp.RequestID, req.RequestID)
-	}
+	assert.Equal(t, req.RequestID, resp.RequestID)
 	// Exactly one of the two wrote, so the response is wholly one path's or
 	// wholly the other's—never a mix.
 	approval := resp.Approved && resp.Reason == ""
 	timeout := !resp.Approved && resp.Reason == "Response timeout"
-	if !approval && !timeout {
-		t.Errorf("response belongs to neither path: %+v", resp)
-	}
+	assert.Truef(t, approval || timeout, "response belongs to neither path: %+v", resp)
 
 	wg.Wait()
 }
@@ -176,15 +163,10 @@ func TestRemovePIDSessionMapping_DeniesPendingRequestsAndSignalsWaiter(t *testin
 			SessionID: "sess-websh",
 			Reason:    "Session ended",
 		}
-		if resp := expectSingleResponse(t, client); resp != want {
-			t.Errorf("response: got %+v, want %+v", resp, want)
-		}
+		assert.Equal(t, want, expectSingleResponse(t, client))
 
-		select {
-		case <-completion:
-		case <-time.After(2 * time.Second):
-			t.Error("waiter was never signaled")
-		}
+		// No wall-clock guard: a waiter that is never signalled makes this receive unsatisfiable, and the bubble says so.
+		<-completion
 	})
 }
 
@@ -206,14 +188,12 @@ func TestHandleSudoApprovalResponse_SignalsWaiterOnWriteFailure(t *testing.T) {
 		PID:       9999,
 		SessionID: "sess-dead",
 	})
-	if err == nil {
-		t.Error("a write to a closed client should be reported")
-	}
+	assert.Error(t, err, "a write to a closed client should be reported")
 
 	select {
 	case <-completion:
 	default:
-		t.Error("waiter was never signaled")
+		assert.Fail(t, "waiter was never signaled")
 	}
 }
 
@@ -229,9 +209,7 @@ func TestAddPIDSessionMapping_SameEntryKeepsRequests(t *testing.T) {
 
 	am.AddPIDSessionMapping(1212, session)
 
-	if _, exists := session.Requests[req.RequestID]; !exists {
-		t.Error("re-registering the same entry dropped its pending request")
-	}
+	assert.Contains(t, session.Requests, req.RequestID, "re-registering the same entry dropped its pending request")
 }
 
 // TestAddPIDSessionMapping_DeniesReplacedRequests covers a pid reused by a new
@@ -257,9 +235,7 @@ func TestAddPIDSessionMapping_DeniesReplacedRequests(t *testing.T) {
 			SessionID: "sess-old",
 			Reason:    "Session replaced",
 		}
-		if resp := expectSingleResponse(t, client); resp != want {
-			t.Errorf("response: got %+v, want %+v", resp, want)
-		}
+		assert.Equal(t, want, expectSingleResponse(t, client))
 	})
 }
 
@@ -278,9 +254,7 @@ func TestAddPIDCommandMapping_DeniesReplacedRequests(t *testing.T) {
 			PID:       6666,
 			Reason:    "Session replaced",
 		}
-		if resp := expectSingleResponse(t, client); resp != want {
-			t.Errorf("response: got %+v, want %+v", resp, want)
-		}
+		assert.Equal(t, want, expectSingleResponse(t, client))
 	})
 }
 
@@ -308,9 +282,7 @@ func TestHandleSudoApprovalRequest_RetryFailureAnswersOnce(t *testing.T) {
 			PPID:      4200,
 			Command:   "sudo reboot",
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 		client, server := net.Pipe()
 
 		go am.handleSudoApprovalRequest(data, server)
@@ -326,12 +298,8 @@ func TestHandleSudoApprovalRequest_RetryFailureAnswersOnce(t *testing.T) {
 			SessionID:    "sess-retry",
 			Reason:       "Communication error",
 		}
-		if resp := expectSingleResponse(t, client); resp != want {
-			t.Errorf("response: got %+v, want %+v", resp, want)
-		}
-		if _, exists := am.pidToSessionMap[4200].Requests["req-retry"]; exists {
-			t.Error("request was not deregistered")
-		}
+		assert.Equal(t, want, expectSingleResponse(t, client))
+		assert.NotContains(t, am.pidToSessionMap[4200].Requests, "req-retry", "request was not deregistered")
 	})
 }
 
@@ -347,23 +315,16 @@ func TestHandleSudoApprovalRequest_LocalSudoRegistersNothing(t *testing.T) {
 			Username:  "alice",
 			PID:       999999,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 		client, server := net.Pipe()
 
 		go am.handleSudoApprovalRequest(data, server)
 
 		resp := expectSingleResponse(t, client)
-		if !resp.Approved || resp.IsAlpconUser {
-			t.Errorf("local sudo response: got %+v, want approved non-Alpacon", resp)
-		}
-		if len(am.completionChannels) != 0 {
-			t.Errorf("completion channels left behind: %v", am.completionChannels)
-		}
-		if len(am.pidToSessionMap) != 0 {
-			t.Errorf("tracker entries left behind: %v", am.pidToSessionMap)
-		}
+		assert.Truef(t, resp.Approved, "local sudo must be approved: %+v", resp)
+		assert.Falsef(t, resp.IsAlpconUser, "local sudo is not an Alpacon user: %+v", resp)
+		assert.Empty(t, am.completionChannels, "completion channels left behind")
+		assert.Empty(t, am.pidToSessionMap, "tracker entries left behind")
 	})
 }
 
@@ -386,8 +347,6 @@ func TestRemovePIDCommandMapping_DeniesPendingRequests(t *testing.T) {
 			PID:       8888,
 			Reason:    "Session ended",
 		}
-		if resp := expectSingleResponse(t, client); resp != want {
-			t.Errorf("response: got %+v, want %+v", resp, want)
-		}
+		assert.Equal(t, want, expectSingleResponse(t, client))
 	})
 }
