@@ -209,7 +209,9 @@ func mkdirOpenAt(parent *os.File, name string) (*os.File, error) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	// Also for a directory that was already there: mkdir under a umask, or an
-	// earlier alpamon that made it 0755, would otherwise leave it open.
+	// earlier alpamon that made it 0755, would otherwise leave it open. Unlike
+	// writeFileAt, which keeps the mode an admin set on a file, since what
+	// code-server drops into these directories later is nobody else's to read.
 	if err := unix.Fchmod(fd, userDataDirMode); err != nil {
 		_ = unix.Close(fd)
 		return nil, &os.PathError{Op: "chmod", Path: path, Err: err}
