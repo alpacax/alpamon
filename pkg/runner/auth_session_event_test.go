@@ -15,6 +15,8 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSessionEventRequest_ParsesWithoutOptionalFields verifies that
@@ -310,13 +312,9 @@ func readSessionEventAck(t *testing.T, client net.Conn) SessionEventResponse {
 	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 1024)
 	n, err := client.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read ack: %v", err)
-	}
+	require.NoError(t, err, "failed to read ack")
 	var resp SessionEventResponse
-	if err := json.Unmarshal(buf[:n], &resp); err != nil {
-		t.Fatalf("invalid ack JSON %q: %v", buf[:n], err)
-	}
+	require.NoErrorf(t, json.Unmarshal(buf[:n], &resp), "invalid ack JSON %q", buf[:n])
 	return resp
 }
 
@@ -376,7 +374,7 @@ func TestHandleSessionEvent_SuppressedStillAcks(t *testing.T) {
 			Requests:  make(map[string]*SudoRequest),
 		})
 		am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-			t.Error("must not emit for tracked Alpacon session")
+			assert.Fail(t, "must not emit for tracked Alpacon session")
 		}
 
 		server, client := net.Pipe()
@@ -384,9 +382,7 @@ func TestHandleSessionEvent_SuppressedStillAcks(t *testing.T) {
 		go am.handleSessionEvent(raw, server)
 
 		resp := readSessionEventAck(t, client)
-		if !resp.Received {
-			t.Errorf("suppressed events must still ack true, got %+v", resp)
-		}
+		assert.Truef(t, resp.Received, "suppressed events must still ack true, got %+v", resp)
 		// Settle every goroutine: a wrong emit has no chance left to fire.
 		synctest.Wait()
 	})
@@ -415,26 +411,21 @@ func TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted(t *testing.T) {
 		// First event acquires the only slot and blocks inside emitFn.
 		server1, client1 := net.Pipe()
 		go am.handleSessionEvent(raw, server1)
-		if resp := readSessionEventAck(t, client1); !resp.Received {
-			t.Fatalf("first event must ack true, got %+v", resp)
-		}
-		select {
-		case <-entered:
-		case <-time.After(2 * time.Second):
-			t.Fatal("first emit never started")
-		}
+		resp1 := readSessionEventAck(t, client1)
+		require.Truef(t, resp1.Received, "first event must ack true, got %+v", resp1)
+		// No wall-clock guard: an emit that never starts makes this receive unsatisfiable, and the bubble says so.
+		<-entered
 
 		// Second event finds the slot full: it must still ack but not emit.
 		server2, client2 := net.Pipe()
 		go am.handleSessionEvent(raw, server2)
-		if resp := readSessionEventAck(t, client2); !resp.Received {
-			t.Fatalf("dropped event must still ack true, got %+v", resp)
-		}
+		resp2 := readSessionEventAck(t, client2)
+		require.Truef(t, resp2.Received, "dropped event must still ack true, got %+v", resp2)
 		// Settle every goroutine: an empty channel now means the drop, not a slow emit.
 		synctest.Wait()
 		select {
 		case <-entered:
-			t.Error("second event exceeded the concurrency limit and must be dropped")
+			assert.Fail(t, "second event exceeded the concurrency limit and must be dropped")
 		default:
 		}
 	})
@@ -446,7 +437,7 @@ func TestHandleSessionEvent_FlagOffDoesNotEmit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		am := newTestAuthManager()
 		am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-			t.Error("must not emit while detect_local_access is off")
+			assert.Fail(t, "must not emit while detect_local_access is off")
 		}
 
 		server, client := net.Pipe()
@@ -454,9 +445,7 @@ func TestHandleSessionEvent_FlagOffDoesNotEmit(t *testing.T) {
 		go am.handleSessionEvent(raw, server)
 
 		resp := readSessionEventAck(t, client)
-		if !resp.Received {
-			t.Errorf("flag-off events must still ack true, got %+v", resp)
-		}
+		assert.Truef(t, resp.Received, "flag-off events must still ack true, got %+v", resp)
 		synctest.Wait()
 	})
 }
