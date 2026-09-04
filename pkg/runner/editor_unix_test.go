@@ -772,6 +772,35 @@ func TestSetupUserDataDirKeepsTheTreeToItsUser(t *testing.T) {
 	}
 }
 
+// TestSetupUserDataDirKeepsAnOlderFileMode covers the other half of the upgrade
+// path: a config.yaml left 0644 by an earlier install keeps that mode, since an
+// admin who tightened the file is the one writeFileAt carries the mode over for.
+// What keeps it out of other accounts is the 0700 directory around it, so the
+// test pins both halves together—the file mode alone would read as an exposure.
+func TestSetupUserDataDirKeepsAnOlderFileMode(t *testing.T) {
+	homeDir := t.TempDir()
+	cfg := GetCodeServerConfig()
+
+	stale := filepath.Join(homeDir, cfg.UserDataDirName)
+	require.NoError(t, os.MkdirAll(stale, 0755))
+	staleConfig := filepath.Join(stale, userDataConfigFile)
+	require.NoError(t, os.WriteFile(staleConfig, nil, 0644))
+	require.NoError(t, os.Chmod(staleConfig, 0644))
+
+	userDataDir, err := setupUserDataDir(t.Context(), homeDir, "", "")
+	require.NoError(t, err)
+
+	info, err := os.Stat(filepath.Join(userDataDir, userDataConfigFile))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(),
+		"a mode an admin set on the file survives the rewrite")
+
+	dirInfo, err := os.Stat(userDataDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), dirInfo.Mode().Perm(),
+		"the directory is what keeps the carried-over file to its user")
+}
+
 // TestSetupUserDataDirSweepsStaleTempFiles: a process killed between the temp
 // create and the rename leaves the temp behind, and nothing else collects it.
 // The sweep is bounded by age and by name so that neither a write in flight in
