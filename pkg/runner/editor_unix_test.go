@@ -407,12 +407,10 @@ func TestWriteFileAtReplacesInPlaceFile(t *testing.T) {
 	assert.ElementsMatch(t, []string{"f", "witness"}, names, "the temp file must not outlive the write")
 }
 
-// TestWriteFileAtKeepsTheModeItReplaces pins the mode across a replacement. The
-// renamed file arrives with the temp file's mode, so the old one has to be
-// carried over or a tightened settings.json widens again on the next start.
-// The mode and the umask are chosen to disagree: O_CREAT applies the mode as
-// mode &^ umask, so a carry-over resting on that call alone narrows the file
-// instead of preserving it, and a mode no common umask touches hides that.
+// TestWriteFileAtKeepsTheModeItReplaces: the renamed file arrives with the temp
+// file's mode, so a tightened settings.json widens again on the next start
+// unless the old mode is carried over. The mode and the umask are chosen to
+// disagree, since a carry-over resting on O_CREAT alone narrows instead.
 func TestWriteFileAtKeepsTheModeItReplaces(t *testing.T) {
 	previous := unix.Umask(0077)
 	t.Cleanup(func() { unix.Umask(previous) })
@@ -702,9 +700,12 @@ func TestSetupUserDataDirRefusesAMissingHome(t *testing.T) {
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "a missing home directory must not be created here")
 }
 
-// TestSetupUserDataDirUnderConcurrentSessions covers the case the temp+rename
-// replacement exists for: one user opening two editor sessions sets the
-// directory up twice at once, and neither may see a half-written settings.json.
+// TestSetupUserDataDirUnderConcurrentSessions: one user opening two editor
+// sessions sets the directory up twice at once, so every step has to tolerate a
+// peer mid-flight—the mkdir that finds the directory there, the sweep that must
+// leave a peer's temp alone, the rename onto a name someone else just claimed.
+// What a reader sees mid-swap is TestWriteFileAtReplacesInPlaceFile's, since the
+// read below runs only after every session has finished.
 func TestSetupUserDataDirUnderConcurrentSessions(t *testing.T) {
 	homeDir := t.TempDir()
 
@@ -729,7 +730,7 @@ func TestSetupUserDataDirUnderConcurrentSessions(t *testing.T) {
 
 	var settings map[string]any
 	require.NoError(t, json.Unmarshal(data, &settings),
-		"every reader must find one of the two complete files, never a partial one")
+		"no session may leave the settings file behind half-written")
 }
 
 // TestSetupUserDataDirSweepsStaleTempFiles: a process killed between the temp

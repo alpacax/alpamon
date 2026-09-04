@@ -19,20 +19,15 @@ import (
 )
 
 // The user owns the home directory, so any path under it can be swapped for a
-// symlink between a check and the use of the checked path. Every operation
-// below the home directory therefore resolves one path component at a time
-// against a held directory fd with O_NOFOLLOW, which leaves no window to
-// redirect root's writes or chowns elsewhere. The home directory itself is
-// opened by full path, and every name handed to these helpers must be a single
-// component: O_NOFOLLOW guards only the last one, so a separator inside a name
-// would let the components before it be followed.
+// symlink between a check and the use of the checked path. Everything below it
+// is resolved one component at a time against a held directory fd, and every
+// name handed to these helpers must be a single component: O_NOFOLLOW guards
+// only the last one.
 
 const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
-// The home directory's own entry sits in a directory the user does not own, so
-// nothing there is theirs to swap and following a link is safe. Admins do point
-// home directories at another filesystem that way, and refusing them would turn
-// a supported layout into an editor that will not start.
+// The home directory's own entry sits in a directory the user does not own, and
+// admins do point home directories at another filesystem by symlink.
 const homeDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
 
 // For an entry of unknown type, so that stat and chown act on the descriptor
@@ -44,20 +39,17 @@ const entryFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CL
 // strings in the root agent and put the first cancellation check after all of it.
 const readdirBatch = 512
 
-// The walk holds one directory fd per level, and the tree below the user data
-// dir is whatever the user puts there. alpamon.service sets no LimitNOFILE, so
-// the systemd default applies to the whole agent: a deep enough chain would
-// starve the WebSocket connection and the FTP sessions of descriptors. Nothing
-// code-server writes comes close to this depth.
+// The walk holds one directory fd per level, and alpamon.service sets no
+// LimitNOFILE, so a chain the user nested deep enough would starve the WebSocket
+// connection and the FTP sessions. Nothing code-server writes is near this.
 const maxChownDepth = 64
 
-// A temp file only outlives writeFileAt when the process dies between the
-// create and the rename, and the age cut keeps a sweep away from one another
-// session is filling right now.
+// A temp file only outlives writeFileAt if the process dies between the create
+// and the rename, so the cut keeps a sweep off one another session is filling.
 const staleTempAge = time.Hour
 
 // A temp file is named for the file it will become, so a sweep can tell one
-// apart from whatever else the user keeps in the directory.
+// from whatever else the user keeps in the directory.
 const tempSuffix = ".tmp"
 
 func tempPrefix(name string) string { return "." + name + "." }
@@ -207,9 +199,8 @@ func mkdirOpenAt(parent *os.File, name string) (*os.File, error) {
 }
 
 // sweepStaleTemps removes the temp files a writeFileAt of name left behind by
-// dying before its rename. Nothing else collects them, and the directory
-// belongs to the user, so they would sit there for the life of the account.
-// A failure here is not worth refusing to start the editor over.
+// dying before its rename. Nothing else collects them, and failing here is not
+// worth refusing to start the editor.
 func sweepStaleTemps(ctx context.Context, parent *os.File, name string) {
 	dirfd := int(parent.Fd())
 	prefix, cutoff := tempPrefix(name), time.Now().Add(-staleTempAge)
@@ -237,18 +228,15 @@ func sweepStaleTemps(ctx context.Context, parent *os.File, name string) {
 	}
 }
 
-// writeFileAt replaces name under parent, refusing to write through a symlink.
-// The bytes land in a sibling temp file that renameat swaps into place, so a
-// concurrent reader—a running code-server watches settings.json—gets the old
-// file or the new one, never the empty window an O_TRUNC write opens.
+// writeFileAt replaces name under parent through a sibling temp file and
+// renameat, so a running code-server watching settings.json reads the old file
+// or the new one, never the empty window an O_TRUNC write opens.
 func writeFileAt(parent *os.File, name string, data []byte) error {
 	dirfd := int(parent.Fd())
 	path := filepath.Join(parent.Name(), name)
 
-	// renameat replaces a symlink at name rather than following it, which is
-	// safe but silent, so a planted link is reported here instead. The report is
-	// all this is: the rename stays inside the tree whatever appears after the
-	// check, and stat creates nothing, so a failure below leaves no file behind.
+	// renameat replaces a symlink at name rather than following it, so this only
+	// turns that silence into an error; nothing below depends on it still holding.
 	mode := uint32(0644)
 	var st unix.Stat_t
 	switch err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); {
@@ -258,14 +246,12 @@ func writeFileAt(parent *os.File, name string, data []byte) error {
 	case st.Mode&unix.S_IFMT == unix.S_IFLNK:
 		return &os.PathError{Op: "open", Path: path, Err: unix.ELOOP}
 	case st.Mode&unix.S_IFMT == unix.S_IFREG:
-		// A replacement takes its mode from this call rather than from the file
-		// it lands on, so carry the old one over: an admin who tightened
-		// settings.json keeps that on the next start.
+		// An admin who tightened settings.json keeps that on the next start.
 		mode = uint32(st.Mode) & 0777
 	}
 
-	// Two editor sessions for one user set the directory up concurrently, so the
-	// temp name has to be unique per call, not per process.
+	// Two sessions for one user set the directory up at once, so the temp name
+	// has to be unique per call, not per process.
 	tmp := tempPrefix(name) + strconv.FormatUint(rand.Uint64(), 36) + tempSuffix
 	tmpPath := filepath.Join(parent.Name(), tmp)
 	fd, err := unix.Openat(dirfd, tmp,
@@ -274,8 +260,7 @@ func writeFileAt(parent *os.File, name string, data []byte) error {
 		return &os.PathError{Op: "open", Path: tmpPath, Err: err}
 	}
 	f := os.NewFile(uintptr(fd), tmpPath)
-	// O_CREAT applies the mode as mode &^ umask, which would narrow the mode
-	// carried over above; fchmod is not subject to the umask.
+	// O_CREAT applies mode &^ umask, which would narrow what was carried over.
 	if err := unix.Fchmod(fd, mode); err != nil {
 		_ = f.Close()
 		_ = unix.Unlinkat(dirfd, tmp, 0)
