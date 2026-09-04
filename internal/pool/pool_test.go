@@ -179,15 +179,13 @@ func TestPoolShutdown(t *testing.T) {
 
 		var completed atomic.Int32
 
-		// Submit several jobs
-		for range 5 {
-			if err := pool.Submit(context.Background(), func() error {
+		for i := range 5 {
+			err := pool.Submit(context.Background(), func() error {
 				time.Sleep(50 * time.Millisecond)
 				completed.Add(1)
 				return nil
-			}); err != nil {
-				t.Errorf("failed to submit job: %v", err)
-			}
+			})
+			require.NoErrorf(t, err, "failed to submit job %d", i)
 		}
 
 		require.NoError(t, pool.Shutdown(1*time.Second), "shutdown failed")
