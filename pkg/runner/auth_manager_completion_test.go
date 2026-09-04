@@ -3,7 +3,8 @@ package runner
 import (
 	"testing"
 	"testing/synctest"
-	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // registerCompletionChannel mirrors what handleSudoApprovalRequest does inside
@@ -39,7 +40,7 @@ func TestNewCompletionChannel_SurvivesSignalBeforeReceive(t *testing.T) {
 func TestSignalCompletion_DoesNotBlockWhenAlreadySignaled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		am := newTestAuthManager()
-		registerCompletionChannel(am, "req-1")
+		ch := registerCompletionChannel(am, "req-1")
 		am.signalCompletion("req-1")
 
 		returned := make(chan struct{})
@@ -48,10 +49,15 @@ func TestSignalCompletion_DoesNotBlockWhenAlreadySignaled(t *testing.T) {
 			close(returned)
 		}()
 
+		// Draining releases a send that did block, so a regression fails on the assertion below instead of as a bubble deadlock.
+		defer func() { <-ch }()
+
+		// Wait returns once every goroutine in the bubble is blocked, so a send still waiting for a receiver is visible here.
+		synctest.Wait()
 		select {
 		case <-returned:
-		case <-time.After(2 * time.Second):
-			t.Fatal("signalCompletion blocked on a full buffer")
+		default:
+			assert.Fail(t, "signalCompletion blocked on a full buffer")
 		}
 	})
 }
