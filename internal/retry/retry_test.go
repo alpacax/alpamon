@@ -77,7 +77,8 @@ func TestRetry_ContextCancellation(t *testing.T) {
 		})
 
 		require.ErrorIs(t, err, context.Canceled)
-		assert.GreaterOrEqual(t, calls, 1, "expected at least 1 call")
+		// The cancel always lands after exactly one call; a ">=" would also pass for a loop that kept retrying past it.
+		assert.Equal(t, 1, calls, "the cancel lands on the first backoff, so exactly one call")
 	})
 }
 
