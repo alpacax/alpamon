@@ -186,7 +186,7 @@ The Go toolchain the `go` directive in `go.mod` names is required. `GOPATH/bin` 
 
 ### Generate Ent schema code
 
-The `go:generate` directive in `pkg/db/ent/generate.go` runs `go tool entc`, the codegen program registered as a `tool` directive in `go.mod`, which excludes the unused Atlas SQL dialects from the binary. It resolves its schema and target paths relative to `pkg/db/ent`, so always run it through `go generate` as shown below rather than calling `go tool entc` from another directory. Do not invoke the ent CLI directly—it regenerates the migrate package and pulls the Atlas dialects back in.
+The `go:generate` directive in `pkg/db/ent/generate.go` runs `go tool entc`, the codegen program registered as a `tool` directive in `go.mod`, with `pkg/db/ent` as the working directory. That is what makes the generator's relative schema and target paths resolve, so always run it through `go generate` as shown below rather than calling `go tool entc` from another directory. The generator drops the unused Atlas SQL dialects from the binary; do not invoke the ent CLI directly, which regenerates the migrate package and pulls them back in.
 
 Building the codegen tool links `ariga.io/atlas`, so it stays in `go.mod` as an indirect dependency. It never reaches the binary: `cmd/alpamon` does not import it.
 
