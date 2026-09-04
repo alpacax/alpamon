@@ -1,5 +1,7 @@
-//go:build ignore
-
+// Command entc generates the ent client for pkg/db/ent. The go:generate
+// directive in pkg/db/ent/generate.go runs it with that directory as the
+// working directory, which is what makes the relative paths below resolve;
+// run from anywhere else it writes the generated client into the wrong tree.
 package main
 
 import (

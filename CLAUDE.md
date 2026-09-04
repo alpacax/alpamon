@@ -16,11 +16,15 @@ Alpamon is a lightweight Go-based server agent for Alpacon—the infrastructure 
 
 ### Code generation
 ```bash
-# Generate Ent schema code (required before building). Runs pkg/db/ent/entc.go,
-# which excludes the unused Atlas SQL dialects. Do not invoke the ent CLI directly—
-# it regenerates the migrate package and pulls the Atlas dialects back in.
+# Generate Ent schema code (required before building). `go generate` runs
+# `go tool entc` with pkg/db/ent as the working directory, which is what makes
+# the generator's relative schema and target paths resolve—always invoke it as
+# shown. The generator drops the unused Atlas SQL dialects; do not invoke the
+# ent CLI directly, which regenerates the migrate package and pulls them back in.
 go generate ./pkg/db/ent
 ```
+
+Building the codegen tool links `ariga.io/atlas`, so it stays in `go.mod` as an indirect dependency—do not remove it. It never reaches the binary: `cmd/alpamon` does not import it.
 
 ### Database schema changes (development only)
 ```bash
@@ -42,11 +46,9 @@ atlas migrate diff <migration_name> \
 # Build the main binary
 go build -v ./cmd/alpamon
 
-# Install dependencies. Drop stale generated ent output first: it's
-# gitignored, so `go generate` never deletes leftovers (e.g. a `migrate/`
-# directory from before entc.go disabled gen.Migrate). A stale tree makes
-# `go mod tidy` add Atlas deps locally that a clean CI checkout removes,
-# failing the verify-tidy job ("tidy on my machine, red in CI").
+# Install dependencies. Drop stale generated ent output first: it's gitignored,
+# so `go generate` never deletes leftovers (e.g. a `migrate/` directory from
+# before the codegen tool disabled gen.Migrate).
 git clean -fdx pkg/db/ent && go generate ./pkg/db/ent
 go mod tidy
 ```
