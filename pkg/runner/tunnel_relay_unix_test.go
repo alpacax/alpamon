@@ -6,6 +6,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -46,19 +47,24 @@ func TestStartTunnelRelayClosedSession(t *testing.T) {
 	assert.Nil(t, client.daemonCmd)
 }
 
+// The dial here fails synchronously: the socket was never created and ctx is already
+// cancelled. A live dial is a syscall, which the bubble does not count as blocked, so
+// this test must not grow one.
 func TestWaitForDaemonReadyClosedSession(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	client := &TunnelClient{
-		sessionID:    "session123",
-		ctx:          ctx,
-		daemonSocket: filepath.Join(t.TempDir(), "never-created.sock"),
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		client := &TunnelClient{
+			sessionID:    "session123",
+			ctx:          ctx,
+			daemonSocket: filepath.Join(t.TempDir(), "never-created.sock"),
+		}
 
-	// Returns on cancellation instead of polling for the full 5s deadline.
-	start := time.Now()
-	err := client.waitForDaemonReady()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "closed while waiting for daemon socket")
-	assert.Less(t, time.Since(start), time.Second)
+		// Returns on cancellation instead of polling for the full 5s deadline.
+		start := time.Now()
+		err := client.waitForDaemonReady()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "closed while waiting for daemon socket")
+		assert.Zero(t, time.Since(start))
+	})
 }

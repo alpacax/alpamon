@@ -4,8 +4,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Batching contract: newlines don't emit; output emits on the size threshold, a flush tick, or final flush.
@@ -226,40 +230,29 @@ func TestChunkWriter_StreamsAllWithBoundedCapture(t *testing.T) {
 // The flusher goroutine emits sub-threshold buffered output within the
 // interval, so slow line-rate commands still stream without waiting for close.
 func TestChunkWriter_FlusherEmitsBufferedOutput(t *testing.T) {
-	var mu sync.Mutex
-	var chunks []string
-	cw := newChunkWriter(func(content string) {
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		var chunks []string
+		cw := newChunkWriter(func(content string) {
+			mu.Lock()
+			defer mu.Unlock()
+			chunks = append(chunks, content)
+		})
+
+		cw.start(5 * time.Millisecond)
+		defer cw.close()
+
+		_, err := cw.Write([]byte("partial"))
+		require.NoError(t, err, "write")
+
+		time.Sleep(5 * time.Millisecond)
+		synctest.Wait()
+
 		mu.Lock()
 		defer mu.Unlock()
-		chunks = append(chunks, content)
+		require.NotEmpty(t, chunks, "flusher did not emit buffered output")
+		assert.Equal(t, "partial", chunks[0])
 	})
-
-	cw.start(5 * time.Millisecond)
-	defer cw.close()
-
-	if _, err := cw.Write([]byte("partial")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		mu.Lock()
-		n := len(chunks)
-		mu.Unlock()
-		if n > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("flusher did not emit buffered output within deadline")
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if chunks[0] != "partial" {
-		t.Errorf("flusher emitted %q, want %q", chunks[0], "partial")
-	}
 }
 
 // A multi-byte rune straddling the 4KB cut must not be split—a split chunk is invalid UTF-8.

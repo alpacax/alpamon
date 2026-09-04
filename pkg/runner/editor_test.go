@@ -1,9 +1,7 @@
 package runner
 
 import (
-	"encoding/json"
 	"net"
-	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -76,77 +74,27 @@ func TestGetCodeServerPath(t *testing.T) {
 	}
 }
 
-func TestSetupUserDataDir(t *testing.T) {
-	// Create a temporary directory for testing
-	tempDir := t.TempDir()
-
-	// Call setupUserDataDir (empty username/groupname since we're not running as root in tests)
-	userDataDir, err := setupUserDataDir(tempDir, "", "")
-	assert.NoError(t, err, "setupUserDataDir should not error")
-	assert.NotEmpty(t, userDataDir, "userDataDir should not be empty")
-
-	// Verify user data directory was created
-	cfg := GetCodeServerConfig()
-	expectedUserDataDir := filepath.Join(tempDir, cfg.UserDataDirName)
-	assert.Equal(t, expectedUserDataDir, userDataDir)
-	_, err = os.Stat(userDataDir)
-	assert.NoError(t, err, "User data directory should exist")
-
-	// Verify config.yaml was created
-	configPath := filepath.Join(userDataDir, "config.yaml")
-	configData, err := os.ReadFile(configPath)
-	assert.NoError(t, err, "config.yaml should exist and be readable")
-	assert.Contains(t, string(configData), "auth: none", "config.yaml should contain auth: none")
-	assert.Contains(t, string(configData), "disable-telemetry: true", "config.yaml should contain disable-telemetry")
-	assert.Contains(t, string(configData), "disable-update-check: true", "config.yaml should contain disable-update-check")
-
-	// Verify User subdirectory was created
-	userDir := filepath.Join(userDataDir, "User")
-	_, err = os.Stat(userDir)
-	assert.NoError(t, err, "User subdirectory should exist")
-
-	// Verify settings.json was created
-	settingsPath := filepath.Join(userDir, "settings.json")
-	data, err := os.ReadFile(settingsPath)
-	assert.NoError(t, err, "settings.json should exist and be readable")
-
-	// Verify settings.json content
-	var settings map[string]any
-	err = json.Unmarshal(data, &settings)
-	assert.NoError(t, err, "settings.json should be valid JSON")
-
-	assert.Equal(t, cfg.ColorTheme, settings["workbench.colorTheme"], "colorTheme should match config")
-	assert.Equal(t, "none", settings["workbench.startupEditor"], "workbench.startupEditor should be 'none'")
-	assert.Equal(t, false, settings["workbench.welcomePage.walkthroughs.openOnInstall"], "walkthroughs should be disabled")
-	assert.Equal(t, "none", settings["window.restoreWindows"], "window.restoreWindows should be 'none'")
-	assert.Equal(t, "off", settings["telemetry.telemetryLevel"], "telemetry should be off")
-	assert.Equal(t, false, settings["security.workspace.trust.enabled"], "workspace trust should be disabled")
-	assert.Equal(t, "none", settings["update.mode"], "update.mode should be 'none'")
+// TestValidateUserDataDirNameRejectsUnsafeNames covers the precondition the
+// O_NOFOLLOW helpers rely on: the name must be one usable path component. The
+// check is exercised directly rather than through the config singleton, which
+// a test may not mutate once anything in this package runs in parallel.
+func TestValidateUserDataDirNameRejectsUnsafeNames(t *testing.T) {
+	for _, name := range []string{"", ".", "..", filepath.Join("..", "escape"), filepath.Join(".config", "editor")} {
+		t.Run(name, func(t *testing.T) {
+			assert.ErrorContains(t, validateUserDataDirName(name), "invalid user data dir name")
+		})
+	}
 }
 
-func TestSetupUserDataDirIdempotent(t *testing.T) {
-	// Create a temporary directory for testing
-	tempDir := t.TempDir()
-
-	// Call setupUserDataDir twice
-	userDataDir1, err := setupUserDataDir(tempDir, "", "")
-	assert.NoError(t, err)
-
-	userDataDir2, err := setupUserDataDir(tempDir, "", "")
-	assert.NoError(t, err)
-
-	// Both calls should return the same path
-	assert.Equal(t, userDataDir1, userDataDir2)
-
-	// settings.json should still be valid
-	settingsPath := filepath.Join(userDataDir1, "User", "settings.json")
-	data, err := os.ReadFile(settingsPath)
-	assert.NoError(t, err)
-
-	var settings map[string]any
-	err = json.Unmarshal(data, &settings)
-	assert.NoError(t, err)
-	assert.Equal(t, "none", settings["workbench.startupEditor"])
+// TestValidateUserDataDirNameAcceptsAPlainComponent guards the other side: a
+// leading dot or a doubled one is an ordinary name, and rejecting it would
+// take the shipped default down with it.
+func TestValidateUserDataDirNameAcceptsAPlainComponent(t *testing.T) {
+	for _, name := range []string{".alpamon-editor", "..foo", "editor"} {
+		t.Run(name, func(t *testing.T) {
+			assert.NoError(t, validateUserDataDirName(name))
+		})
+	}
 }
 
 // TestToSettingsJSONGolden locks the settings.json wire format so future

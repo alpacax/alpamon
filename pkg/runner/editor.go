@@ -63,6 +63,14 @@ const (
 	codeServerStopGrace         = 10 * time.Second
 )
 
+// Layout of the user-data-dir that the platform-specific setupUserDataFiles
+// writes; ToArgs points code-server at the config file.
+const (
+	userDataConfigFile   = "config.yaml"
+	userDataUserDir      = "User"
+	userDataSettingsFile = "settings.json"
+)
+
 // defaultConfig is the singleton configuration instance.
 var defaultConfig = &CodeServerConfig{
 	// Timeouts
@@ -163,7 +171,7 @@ func (c *CodeServerConfig) ToExtensionGalleryEnv() string {
 // ToArgs generates command line arguments for code-server.
 func (c *CodeServerConfig) ToArgs(port int, userDataDir string) []string {
 	return []string{
-		"--config", filepath.Join(userDataDir, "config.yaml"),
+		"--config", filepath.Join(userDataDir, userDataConfigFile),
 		"--user-data-dir", userDataDir,
 		"--bind-addr", net.JoinHostPort(loopbackHost, strconv.Itoa(port)),
 		"--idle-timeout-seconds", fmt.Sprintf("%d", int(c.IdleTimeout.Seconds())),
@@ -336,7 +344,7 @@ func (m *CodeServerManager) doStart() error {
 	m.mu.Unlock()
 
 	// Setup user data directory with settings (no lock needed)
-	userDataDir, err := setupUserDataDir(m.homeDir, m.username, m.groupname)
+	userDataDir, err := setupUserDataDir(m.ctx, m.homeDir, m.username, m.groupname)
 	if err != nil {
 		return fmt.Errorf("failed to setup user data dir: %w", err)
 	}
@@ -602,38 +610,42 @@ func getCodeServerEnv(homeDir string, includeXDG bool) []string {
 	return GetCodeServerConfig().ToEnv(homeDir, includeXDG)
 }
 
+// validateUserDataDirName rejects a name setupUserDataFiles could not guard.
+// That helper opens the name with O_NOFOLLOW, which covers only the last path
+// component: IsLocal rejects "" and anything absolute or escaping, the Base
+// comparison rejects an embedded separator, and "." would still resolve to the
+// home directory itself.
+func validateUserDataDirName(name string) error {
+	if !filepath.IsLocal(name) || name != filepath.Base(name) || name == "." {
+		return fmt.Errorf("invalid user data dir name %q", name)
+	}
+	return nil
+}
+
 // setupUserDataDir creates the user-data-dir with config.yaml and settings.json for code-server.
 // If running as root on Linux, ownership of created files is changed to the specified user.
-func setupUserDataDir(homeDir, username, groupname string) (string, error) {
+func setupUserDataDir(ctx context.Context, homeDir, username, groupname string) (string, error) {
 	cfg := GetCodeServerConfig()
+
+	if err := validateUserDataDirName(cfg.UserDataDirName); err != nil {
+		return "", err
+	}
 	userDataDir := filepath.Join(homeDir, cfg.UserDataDirName)
-	userDir := filepath.Join(userDataDir, "User")
 
-	// Create directories
-	if err := os.MkdirAll(userDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create user data dir: %w", err)
-	}
-
-	// Create config.yaml for code-server daemon settings
-	configPath := filepath.Join(userDataDir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte(cfg.ToConfigYAML()), 0644); err != nil {
-		return "", fmt.Errorf("failed to write config.yaml: %w", err)
-	}
-
-	// Create settings.json for VS Code editor settings
-	settingsPath := filepath.Join(userDir, "settings.json")
-	data, err := cfg.ToSettingsJSON()
+	settingsData, err := cfg.ToSettingsJSON()
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
-		return "", fmt.Errorf("failed to write settings.json: %w", err)
+	// Create the directories with config.yaml (code-server daemon settings)
+	// and User/settings.json (VS Code editor settings).
+	if err := setupUserDataFiles(ctx, homeDir, cfg.UserDataDirName, []byte(cfg.ToConfigYAML()), settingsData); err != nil {
+		return "", fmt.Errorf("failed to set up user data dir: %w", err)
 	}
 
 	// Change ownership if running as root (so demoted user can modify their config)
 	if os.Getuid() == 0 && runtime.GOOS != "darwin" {
-		if err := chownUserDataDir(userDataDir, username, groupname); err != nil {
+		if err := chownUserDataDir(ctx, userDataDir, username, groupname); err != nil {
 			log.Warn().Err(err).Msg("Failed to change ownership of user data dir.")
 		}
 	}
@@ -643,7 +655,7 @@ func setupUserDataDir(homeDir, username, groupname string) (string, error) {
 }
 
 // chownUserDataDir changes ownership of the user data directory and its contents.
-func chownUserDataDir(userDataDir, username, groupname string) error {
+func chownUserDataDir(ctx context.Context, userDataDir, username, groupname string) error {
 	usr, err := user.Lookup(username)
 	if err != nil {
 		return fmt.Errorf("user %s not found: %w", username, err)
@@ -669,11 +681,5 @@ func chownUserDataDir(userDataDir, username, groupname string) error {
 		return fmt.Errorf("invalid gid: %w", err)
 	}
 
-	// Recursively change ownership
-	return filepath.Walk(userDataDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		return os.Chown(path, uid, gid)
-	})
+	return chownTreeNoFollow(ctx, userDataDir, uid, gid)
 }

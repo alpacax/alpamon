@@ -4,9 +4,12 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // MockSystemInfoManager is a mock implementation of SystemInfoManager for testing
@@ -56,31 +59,26 @@ func TestInfoHandler_Commands(t *testing.T) {
 }
 
 func TestInfoHandler_Ping(t *testing.T) {
-	handler := NewInfoHandler(nil)
-	ctx := context.Background()
-	args := &common.CommandArgs{}
+	synctest.Test(t, func(t *testing.T) {
+		handler := NewInfoHandler(nil)
+		ctx := context.Background()
+		args := &common.CommandArgs{}
 
-	before := time.Now().Add(-1 * time.Second) // Allow 1 second tolerance before
-	exitCode, output, err := handler.Execute(ctx, common.Ping.String(), args)
-	after := time.Now().Add(1 * time.Second) // Allow 1 second tolerance after
+		exitCode, output, err := handler.Execute(ctx, common.Ping.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
+		require.NoError(t, err)
+		assert.Equal(t, 0, exitCode)
 
-	// Verify output is RFC3339 timestamp
-	parsedTime, parseErr := time.Parse(time.RFC3339, output)
-	if parseErr != nil {
-		t.Errorf("output is not valid RFC3339 timestamp: %v", parseErr)
-	}
+		parsedTime, parseErr := time.Parse(time.RFC3339, output)
+		require.NoError(t, parseErr, "output is not valid RFC3339 timestamp")
 
-	// Verify timestamp is within expected range (with tolerance for RFC3339 second precision)
-	if parsedTime.Before(before) || parsedTime.After(after) {
-		t.Errorf("timestamp %v not within expected range [%v, %v]", parsedTime, before, after)
-	}
+		// RFC3339 keeps whole seconds, so an exact compare needs a clock with no
+		// sub-second part. Asserting that beats trusting it: a change to either end
+		// then fails with the reason instead of as a puzzling timestamp mismatch.
+		now := time.Now()
+		require.Equal(t, now.Truncate(time.Second), now, "the bubble's clock must start on a whole second")
+		assert.True(t, parsedTime.Equal(now), "timestamp %v is not the current time %v", parsedTime, now)
+	})
 }
 
 func TestInfoHandler_Help(t *testing.T) {

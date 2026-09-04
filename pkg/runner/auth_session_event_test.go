@@ -9,11 +9,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newSessionEventPipe closes both ends on cleanup because handleSessionEvent
@@ -321,13 +324,9 @@ func readSessionEventAck(t *testing.T, client net.Conn) SessionEventResponse {
 	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 1024)
 	n, err := client.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read ack: %v", err)
-	}
+	require.NoError(t, err, "failed to read ack")
 	var resp SessionEventResponse
-	if err := json.Unmarshal(buf[:n], &resp); err != nil {
-		t.Fatalf("invalid ack JSON %q: %v", buf[:n], err)
-	}
+	require.NoErrorf(t, json.Unmarshal(buf[:n], &resp), "invalid ack JSON %q", buf[:n])
 	return resp
 }
 
@@ -379,25 +378,26 @@ func TestHandleSessionEvent_MalformedJSONAcksFalse(t *testing.T) {
 // TestHandleSessionEvent_SuppressedStillAcks verifies Alpacon-originated
 // sessions are acked but not emitted.
 func TestHandleSessionEvent_SuppressedStillAcks(t *testing.T) {
-	am := newTestAuthManager()
-	am.detectLocalAccess = true
-	am.AddPIDSessionMapping(5555, &SessionInfo{
-		SessionID: "sess-1",
-		Requests:  make(map[string]*SudoRequest),
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		am.detectLocalAccess = true
+		am.AddPIDSessionMapping(5555, &SessionInfo{
+			SessionID: "sess-1",
+			Requests:  make(map[string]*SudoRequest),
+		})
+		am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
+			assert.Fail(t, "must not emit for tracked Alpacon session")
+		}
+
+		server, client := newSessionEventPipe(t)
+		raw := []byte(`{"type":"session_event","username":"alice","service":"su","pid":424242,"ppid":5555}`)
+		go am.handleSessionEvent(raw, server)
+
+		resp := readSessionEventAck(t, client)
+		assert.Truef(t, resp.Received, "suppressed events must still ack true, got %+v", resp)
+		// Settle every goroutine: a wrong emit has no chance left to fire.
+		synctest.Wait()
 	})
-	am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-		t.Error("must not emit for tracked Alpacon session")
-	}
-
-	server, client := newSessionEventPipe(t)
-	raw := []byte(`{"type":"session_event","username":"alice","service":"su","pid":424242,"ppid":5555}`)
-	go am.handleSessionEvent(raw, server)
-
-	resp := readSessionEventAck(t, client)
-	if !resp.Received {
-		t.Errorf("suppressed events must still ack true, got %+v", resp)
-	}
-	time.Sleep(100 * time.Millisecond) // give a wrong emit a chance to fire
 }
 
 // TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted verifies the
@@ -405,62 +405,59 @@ func TestHandleSessionEvent_SuppressedStillAcks(t *testing.T) {
 // session_event is still acked but its emission is dropped instead of
 // spawning an unbounded goroutine.
 func TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted(t *testing.T) {
-	am := newTestAuthManager()
-	am.detectLocalAccess = true
-	am.emitSem = make(chan struct{}, 1) // force a single emit slot
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		am.detectLocalAccess = true
+		am.emitSem = make(chan struct{}, 1) // force a single emit slot
 
-	entered := make(chan struct{}, 2)
-	release := make(chan struct{})
-	am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-		entered <- struct{}{}
-		<-release // hold the slot until the test releases it
-	}
-	defer close(release)
+		entered := make(chan struct{}, 2)
+		release := make(chan struct{})
+		am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
+			entered <- struct{}{}
+			<-release // hold the slot until the test releases it
+		}
+		defer close(release)
 
-	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
+		raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
 
-	// First event acquires the only slot and blocks inside emitFn.
-	server1, client1 := newSessionEventPipe(t)
-	go am.handleSessionEvent(raw, server1)
-	if resp := readSessionEventAck(t, client1); !resp.Received {
-		t.Fatalf("first event must ack true, got %+v", resp)
-	}
-	select {
-	case <-entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("first emit never started")
-	}
+		server1, client1 := newSessionEventPipe(t)
+		go am.handleSessionEvent(raw, server1)
+		resp1 := readSessionEventAck(t, client1)
+		require.Truef(t, resp1.Received, "first event must ack true, got %+v", resp1)
+		// No wall-clock guard: an emit that never starts makes this receive unsatisfiable, and the bubble says so.
+		<-entered
 
-	// Second event finds the slot full: it must still ack but not emit.
-	server2, client2 := newSessionEventPipe(t)
-	go am.handleSessionEvent(raw, server2)
-	if resp := readSessionEventAck(t, client2); !resp.Received {
-		t.Fatalf("dropped event must still ack true, got %+v", resp)
-	}
-	select {
-	case <-entered:
-		t.Error("second event exceeded the concurrency limit and must be dropped")
-	case <-time.After(100 * time.Millisecond):
-	}
+		server2, client2 := newSessionEventPipe(t)
+		go am.handleSessionEvent(raw, server2)
+		resp2 := readSessionEventAck(t, client2)
+		require.Truef(t, resp2.Received, "dropped event must still ack true, got %+v", resp2)
+		// Settle every goroutine: an empty channel now means the drop, not a slow emit.
+		synctest.Wait()
+		select {
+		case <-entered:
+			assert.Fail(t, "second event exceeded the concurrency limit and must be dropped")
+		default:
+		}
+	})
 }
 
 // TestHandleSessionEvent_FlagOffDoesNotEmit verifies the policy gate:
 // detection default-off means ack-only behavior.
 func TestHandleSessionEvent_FlagOffDoesNotEmit(t *testing.T) {
-	am := newTestAuthManager()
-	am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-		t.Error("must not emit while detect_local_access is off")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
+			assert.Fail(t, "must not emit while detect_local_access is off")
+		}
 
-	server, client := newSessionEventPipe(t)
-	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
-	go am.handleSessionEvent(raw, server)
+		server, client := newSessionEventPipe(t)
+		raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
+		go am.handleSessionEvent(raw, server)
 
-	resp := readSessionEventAck(t, client)
-	if !resp.Received {
-		t.Errorf("flag-off events must still ack true, got %+v", resp)
-	}
-	time.Sleep(100 * time.Millisecond)
+		resp := readSessionEventAck(t, client)
+		assert.Truef(t, resp.Received, "flag-off events must still ack true, got %+v", resp)
+		synctest.Wait()
+	})
 }
 
 // newEmitTestAuthManager wires an AuthManager whose session points at the

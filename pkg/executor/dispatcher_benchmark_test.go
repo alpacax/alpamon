@@ -2,21 +2,21 @@ package executor
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/stretchr/testify/require"
 )
 
-// BenchmarkRegistry_Get measures registry lookup performance
 func BenchmarkRegistry_Get(b *testing.B) {
 	registry := NewRegistry()
 
-	// Register a mock handler
 	handler := &MockHandler{
 		name:     "test",
 		commands: []string{"cmd1", "cmd2", "cmd3"},
 	}
-	_ = registry.Register(handler)
+	require.NoError(b, registry.Register(handler), "register handler")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -24,17 +24,38 @@ func BenchmarkRegistry_Get(b *testing.B) {
 	}
 }
 
-// BenchmarkRegistry_ListCommands measures command listing performance
+// BenchmarkRegistry_GetManyHandlers measures lookup against a realistic map, which
+// BenchmarkRegistry_Get's single entry cannot show. Keys are built up front so the
+// timed loop holds the lookup alone and the two numbers stay comparable.
+func BenchmarkRegistry_GetManyHandlers(b *testing.B) {
+	const handlers = 100
+
+	registry := NewRegistry()
+	keys := make([]string, handlers)
+	for i := range handlers {
+		name := strconv.Itoa(i)
+		keys[i] = "cmd" + name
+		require.NoErrorf(b, registry.Register(&MockHandler{
+			name:     "handler" + name,
+			commands: []string{keys[i]},
+		}), "register handler %d", i)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = registry.Get(keys[i%handlers])
+	}
+}
+
 func BenchmarkRegistry_ListCommands(b *testing.B) {
 	registry := NewRegistry()
 
-	// Register multiple handlers
 	for i := range 10 {
 		handler := &MockHandler{
 			name:     "handler" + string(rune('A'+i)),
 			commands: []string{"cmd" + string(rune('A'+i))},
 		}
-		_ = registry.Register(handler)
+		require.NoError(b, registry.Register(handler), "register handler")
 	}
 
 	b.ResetTimer()
@@ -43,7 +64,6 @@ func BenchmarkRegistry_ListCommands(b *testing.B) {
 	}
 }
 
-// BenchmarkRegistry_IsCommandRegistered measures registration check performance
 func BenchmarkRegistry_IsCommandRegistered(b *testing.B) {
 	registry := NewRegistry()
 
@@ -51,7 +71,7 @@ func BenchmarkRegistry_IsCommandRegistered(b *testing.B) {
 		name:     "test",
 		commands: []string{"cmd1", "cmd2", "cmd3"},
 	}
-	_ = registry.Register(handler)
+	require.NoError(b, registry.Register(handler), "register handler")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -59,7 +79,6 @@ func BenchmarkRegistry_IsCommandRegistered(b *testing.B) {
 	}
 }
 
-// BenchmarkRegistry_ConcurrentGet measures concurrent lookup performance
 func BenchmarkRegistry_ConcurrentGet(b *testing.B) {
 	registry := NewRegistry()
 
@@ -67,7 +86,7 @@ func BenchmarkRegistry_ConcurrentGet(b *testing.B) {
 		name:     "test",
 		commands: []string{"cmd1", "cmd2", "cmd3"},
 	}
-	_ = registry.Register(handler)
+	require.NoError(b, registry.Register(handler), "register handler")
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -99,7 +118,6 @@ func (h *MockHandlerWithExecute) Validate(cmd string, args *common.CommandArgs) 
 	return nil
 }
 
-// BenchmarkHandler_Execute measures basic handler execution overhead
 func BenchmarkHandler_Execute(b *testing.B) {
 	handler := &MockHandlerWithExecute{
 		name:     "test",
