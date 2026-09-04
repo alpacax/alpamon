@@ -62,5 +62,11 @@ jobs:
       # govulncheck has no per-ID exclusion. If this fires on an advisory with
       # no fix released, unblock with a `continue-on-error: true` naming the
       # advisory and a tracking issue, and revert it when the fix lands.
+      #
+      # Scoped to what ships to customer machines rather than `./...`. The
+      # codegen tool under `tools/` links Atlas and HCL and is never part of
+      # the binary, so an advisory there would hard-fail every PR in the repo
+      # over code no customer runs. Add a new top-level directory to this list
+      # when one appears.
       - name: Run govulncheck
-        run: govulncheck ./...
+        run: govulncheck ./cmd/... ./pkg/... ./internal/...
