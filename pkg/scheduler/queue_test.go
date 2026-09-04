@@ -51,8 +51,7 @@ func TestPostChunk_BlocksUntilSpaceFrees(t *testing.T) {
 			close(done)
 		}()
 
-		// Wait returns once postChunk parks on its poll timer, proving it
-		// reached the backpressure loop rather than merely not finishing yet.
+		// Wait returns once postChunk parks on its poll timer, proving it reached the backpressure loop.
 		synctest.Wait()
 		select {
 		case <-done:

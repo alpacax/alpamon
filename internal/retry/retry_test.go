@@ -96,8 +96,7 @@ func TestRetry_MaxElapsedTime(t *testing.T) {
 		})
 
 		require.Error(t, err, "expected error after max elapsed time")
-		// The bubble's clock is exact, so the stop lands on MaxElapsedTime itself.
-		// A ">=" here would also pass for a retry loop that overran it.
+		// The bubble's clock is exact, so a ">=" would also pass for a loop that overran MaxElapsedTime.
 		assert.Equal(t, 50*time.Millisecond, time.Since(start), "the give-up must land on MaxElapsedTime")
 	})
 }
@@ -113,19 +112,16 @@ func TestNextBackOff_CappedAtMax(t *testing.T) {
 		intervals[i] = b.NextBackOff()
 	}
 
-	// First should be InitialInterval
 	if intervals[0] != 100*time.Millisecond {
 		t.Fatalf("first interval = %v, want 100ms", intervals[0])
 	}
 
-	// All should be <= MaxInterval
 	for i, d := range intervals {
 		if d > 500*time.Millisecond {
 			t.Fatalf("interval[%d] = %v exceeds max 500ms", i, d)
 		}
 	}
 
-	// Last ones should be capped at MaxInterval
 	if intervals[5] != 500*time.Millisecond {
 		t.Fatalf("interval[5] = %v, want 500ms (capped)", intervals[5])
 	}

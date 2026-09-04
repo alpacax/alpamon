@@ -9,11 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// BenchmarkRegistry_Get measures registry lookup performance
 func BenchmarkRegistry_Get(b *testing.B) {
 	registry := NewRegistry()
 
-	// Register a mock handler
 	handler := &MockHandler{
 		name:     "test",
 		commands: []string{"cmd1", "cmd2", "cmd3"},
@@ -26,10 +24,9 @@ func BenchmarkRegistry_Get(b *testing.B) {
 	}
 }
 
-// BenchmarkRegistry_GetManyHandlers measures lookup once the command map holds
-// a realistic number of handlers, which BenchmarkRegistry_Get's single entry
-// cannot show. Keys are built up front so the timed loop holds the lookup alone and
-// the two numbers stay comparable.
+// BenchmarkRegistry_GetManyHandlers measures lookup against a realistic map, which
+// BenchmarkRegistry_Get's single entry cannot show. Keys are built up front so the
+// timed loop holds the lookup alone and the two numbers stay comparable.
 func BenchmarkRegistry_GetManyHandlers(b *testing.B) {
 	const handlers = 100
 
@@ -50,11 +47,9 @@ func BenchmarkRegistry_GetManyHandlers(b *testing.B) {
 	}
 }
 
-// BenchmarkRegistry_ListCommands measures command listing performance
 func BenchmarkRegistry_ListCommands(b *testing.B) {
 	registry := NewRegistry()
 
-	// Register multiple handlers
 	for i := range 10 {
 		handler := &MockHandler{
 			name:     "handler" + string(rune('A'+i)),
@@ -69,7 +64,6 @@ func BenchmarkRegistry_ListCommands(b *testing.B) {
 	}
 }
 
-// BenchmarkRegistry_IsCommandRegistered measures registration check performance
 func BenchmarkRegistry_IsCommandRegistered(b *testing.B) {
 	registry := NewRegistry()
 
@@ -85,7 +79,6 @@ func BenchmarkRegistry_IsCommandRegistered(b *testing.B) {
 	}
 }
 
-// BenchmarkRegistry_ConcurrentGet measures concurrent lookup performance
 func BenchmarkRegistry_ConcurrentGet(b *testing.B) {
 	registry := NewRegistry()
 
@@ -125,7 +118,6 @@ func (h *MockHandlerWithExecute) Validate(cmd string, args *common.CommandArgs) 
 	return nil
 }
 
-// BenchmarkHandler_Execute measures basic handler execution overhead
 func BenchmarkHandler_Execute(b *testing.B) {
 	handler := &MockHandlerWithExecute{
 		name:     "test",

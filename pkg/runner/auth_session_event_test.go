@@ -408,7 +408,6 @@ func TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted(t *testing.T) {
 
 		raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
 
-		// First event acquires the only slot and blocks inside emitFn.
 		server1, client1 := net.Pipe()
 		go am.handleSessionEvent(raw, server1)
 		resp1 := readSessionEventAck(t, client1)
@@ -416,7 +415,6 @@ func TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted(t *testing.T) {
 		// No wall-clock guard: an emit that never starts makes this receive unsatisfiable, and the bubble says so.
 		<-entered
 
-		// Second event finds the slot full: it must still ack but not emit.
 		server2, client2 := net.Pipe()
 		go am.handleSessionEvent(raw, server2)
 		resp2 := readSessionEventAck(t, client2)

@@ -22,7 +22,6 @@ func TestPoolBasic(t *testing.T) {
 		var counter atomic.Int32
 		var wg sync.WaitGroup
 
-		// Submit 10 jobs
 		for i := range 10 {
 			wg.Add(1)
 			err := pool.Submit(context.Background(), func() error {
@@ -35,9 +34,7 @@ func TestPoolBasic(t *testing.T) {
 			require.NoErrorf(t, err, "failed to submit job %d", i)
 		}
 
-		// Wait for every job to return, not merely to start: the Done above is
-		// deferred, so a worker that never finishes one leaves this Wait
-		// unsatisfiable and the bubble reports it as a deadlock.
+		// Done is deferred, so a worker that never finishes a job leaves this Wait unsatisfiable and the bubble calls it a deadlock.
 		wg.Wait()
 
 		assert.Equal(t, int32(10), counter.Load(), "expected 10 jobs to complete")
@@ -46,20 +43,16 @@ func TestPoolBasic(t *testing.T) {
 
 func TestPoolQueueFull(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// Small queue size to test overflow
-		// Queue size = 1, Workers = 1
 		pool := NewPool(1, 1)
 		defer func() {
-		// Deferred: a require below would otherwise exit with the worker still parked here, and the bubble would report that leak instead of the failure.
-		defer close(blocker)
 			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
 		}()
 
-		// Use a channel to control task execution
 		started := make(chan struct{})
 		blocker := make(chan struct{})
+		// Deferred: a require below would otherwise exit with the worker still parked here, and the bubble would report that leak instead of the failure.
+		defer close(blocker)
 
-		// Block the worker - this job will be picked up by the worker immediately
 		err := pool.Submit(context.Background(), func() error {
 			close(started)
 			<-blocker // Wait until we signal
@@ -67,19 +60,14 @@ func TestPoolQueueFull(t *testing.T) {
 		})
 		require.NoError(t, err, "failed to submit blocking task")
 
-		// Once this returns, the worker has taken the job off the queue and the queue
-		// is empty again. Nothing here needs a fake clock; the bubble is what bounds
-		// the wait, reporting a worker that never starts as a deadlock rather than
-		// hanging until the package timeout.
+		// The bubble bounds this: a worker that never starts is reported as a deadlock, not a hang.
 		<-started
 
-		// Fill the queue (capacity is 1)
 		err = pool.Submit(context.Background(), func() error {
 			return nil
 		})
 		require.NoError(t, err, "failed to submit to queue")
 
-		// This should fail immediately (worker is blocked, queue is full)
 		err = pool.Submit(context.Background(), func() error {
 			return nil
 		})
@@ -147,12 +135,10 @@ func TestPoolPanicRecovery(t *testing.T) {
 		var completed atomic.Int32
 		done := make(chan struct{})
 
-		// Submit job that panics
 		require.NoError(t, pool.Submit(context.Background(), func() error {
 			panic("test panic")
 		}), "failed to submit panic job")
 
-		// Submit normal job after panic
 		err := pool.Submit(context.Background(), func() error {
 			completed.Add(1)
 			close(done)
@@ -160,8 +146,7 @@ func TestPoolPanicRecovery(t *testing.T) {
 		})
 		require.NoError(t, err, "failed to submit job after panic")
 
-		// A worker lost to the panic never reaches this job, and the bubble
-		// settles instead of burning five real seconds waiting for the guard.
+		// A worker lost to the panic never reaches this job; the guard costs no real time on the bubble's clock.
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
@@ -189,16 +174,13 @@ func TestPoolShutdown(t *testing.T) {
 
 		require.NoError(t, pool.Shutdown(1*time.Second), "shutdown failed")
 
-		// All jobs should have completed
 		assert.Equal(t, int32(5), completed.Load(), "not all jobs completed")
 
-		// New submissions should fail
 		assert.Error(t, pool.Submit(context.Background(), func() error { return nil }),
 			"expected error when submitting to shut down pool")
 	})
 }
 
-// Benchmark comparison
 func BenchmarkPoolSubmit(b *testing.B) {
 	pool := NewPool(10, 50000)
 	ctx := context.Background()

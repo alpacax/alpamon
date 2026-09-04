@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestContextManagerCreation verifies context manager initialization
 func TestContextManagerCreation(t *testing.T) {
 	cm := NewContextManager()
 	require.NotNil(t, cm, "NewContextManager returned nil")
@@ -20,12 +19,10 @@ func TestContextManagerCreation(t *testing.T) {
 	assert.NoError(t, cm.Root().Err(), "root context should not be cancelled")
 }
 
-// TestContextCancellation verifies that shutdown cancels all child contexts
 func TestContextCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cm := NewContextManager()
 
-		// Create multiple child contexts
 		ctx1, cancel1 := cm.NewContext(0)
 		defer cancel1()
 
@@ -35,10 +32,9 @@ func TestContextCancellation(t *testing.T) {
 		ctx3, cancel3 := cm.NewContext(0)
 		defer cancel3()
 
-		// Shutdown the manager
 		cm.Shutdown()
 
-		// All contexts should be cancelled
+		// Cancellation reaches the children before Shutdown returns, so nothing has to wait here.
 		for i, ctx := range []context.Context{ctx1, ctx2, ctx3} {
 			assert.ErrorIsf(t, ctx.Err(), context.Canceled, "context %d not cancelled after shutdown", i+1)
 		}
@@ -65,14 +61,11 @@ func TestShutdownCancelsChildren(t *testing.T) {
 	assert.ErrorIs(t, child.Err(), context.Canceled, "child after Shutdown")
 }
 
-// TestChildCleanup verifies child context cleanup on parent shutdown.
 func TestChildCleanup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cm := NewContextManager()
 
-		// Each child blocks purely on cancellation with no self-exit timer, so the
-		// goroutines drain only if Shutdown actually cancels them; otherwise the
-		// outer guard below fires and the test fails.
+		// No child has a self-exit timer, so these drain only if Shutdown really cancels them.
 		var registered sync.WaitGroup
 		registered.Add(20)
 
@@ -89,20 +82,17 @@ func TestChildCleanup(t *testing.T) {
 		// Shutdown proves nothing about children the manager has not seen yet.
 		registered.Wait()
 
-		// Shutdown manager - should cancel all child contexts
 		cm.Shutdown()
 
 		wg.Wait()
 	})
 }
 
-// TestContextTimeout verifies timeout context creation
 func TestContextTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cm := NewContextManager()
 		defer cm.Shutdown()
 
-		// Create context with timeout
 		ctx, cancel := cm.NewContext(50 * time.Millisecond)
 		defer cancel()
 
@@ -114,7 +104,6 @@ func TestContextTimeout(t *testing.T) {
 	})
 }
 
-// TestContextDeadline verifies deadline context creation
 func TestContextDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cm := NewContextManager()
@@ -131,13 +120,11 @@ func TestContextDeadline(t *testing.T) {
 	})
 }
 
-// TestContextNoTimeout verifies context without timeout
 func TestContextNoTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cm := NewContextManager()
 		defer cm.Shutdown()
 
-		// Create context without timeout (0 duration)
 		ctx, cancel := cm.NewContext(0)
 		defer cancel()
 
@@ -145,13 +132,11 @@ func TestContextNoTimeout(t *testing.T) {
 		synctest.Wait()
 		assert.NoError(t, ctx.Err(), "context should not be cancelled without explicit cancellation")
 
-		// Manual cancellation should work
 		cancel()
 		assert.ErrorIs(t, ctx.Err(), context.Canceled, "context not cancelled after explicit cancel")
 	})
 }
 
-// TestConcurrentContextCreation verifies thread-safe context creation
 func TestConcurrentContextCreation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cm := NewContextManager()
@@ -159,30 +144,25 @@ func TestConcurrentContextCreation(t *testing.T) {
 
 		done := make(chan bool)
 
-		// Create contexts concurrently
 		for i := range 100 {
 			go func(id int) {
 				ctx, cancel := cm.NewContext(time.Duration(id) * time.Millisecond)
 				defer cancel()
 
-				// Do some work
 				select {
 				case <-ctx.Done():
-					// Timeout expected for non-zero durations
 				case <-time.After(200 * time.Millisecond):
-					// Maximum wait
 				}
 
 				done <- true
 			}(i)
 		}
 
-		// Wait for all goroutines
+		// A goroutine that never reports leaves this receive unsatisfiable, and the bubble names it.
 		for range 100 {
 			<-done
 		}
 
-		// Context manager should still be functional
 		ctx, cancel := cm.NewContext(0)
 		cancel()
 		assert.ErrorIs(t, ctx.Err(), context.Canceled, "context manager not functional after concurrent operations")
@@ -206,14 +186,12 @@ func TestRapidCreateCancel(t *testing.T) {
 	}
 }
 
-// TestConcurrentOperations verifies thread safety under concurrent access.
 func TestConcurrentOperations(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cm := NewContextManager()
 
 		var wg sync.WaitGroup
 
-		// Concurrent context creation
 		for i := range 50 {
 			wg.Add(1)
 			go func(id int) {
@@ -229,28 +207,22 @@ func TestConcurrentOperations(t *testing.T) {
 			}(i)
 		}
 
-		// Wait for all operations
 		wg.Wait()
 
-		// Manager must remain functional after the concurrent churn.
 		ctx, cancel := cm.NewContext(0)
 		cancel()
 		assert.ErrorIs(t, ctx.Err(), context.Canceled, "context manager not functional after concurrent operations")
 
-		// Shutdown
 		cm.Shutdown()
 	})
 }
 
-// TestShutdownIdempotency verifies that Shutdown can be called multiple times
 func TestShutdownIdempotency(t *testing.T) {
 	cm := NewContextManager()
 
-	// Create a context
 	ctx, cancel := cm.NewContext(0)
 	defer cancel()
 
-	// Shutdown multiple times
 	cm.Shutdown()
 	cm.Shutdown() // Should not panic
 	cm.Shutdown() // Should not panic

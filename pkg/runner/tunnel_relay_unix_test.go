@@ -47,9 +47,9 @@ func TestStartTunnelRelayClosedSession(t *testing.T) {
 	assert.Nil(t, client.daemonCmd)
 }
 
-// The dial inside waitForDaemonReady fails synchronously here: the socket was never
-// created and ctx is already cancelled. A live dial is a real syscall, which the bubble
-// does not count as blocked, so this test must not grow one.
+// The dial here fails synchronously: the socket was never created and ctx is already
+// cancelled. A live dial is a syscall, which the bubble does not count as blocked, so
+// this test must not grow one.
 func TestWaitForDaemonReadyClosedSession(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

@@ -129,11 +129,9 @@ func TestDetect_ContextCancelled(t *testing.T) {
 }
 
 func TestDetect_ContextDeadlineRespectedBetweenProbes(t *testing.T) {
-	// Each fake probe sleeps 30ms against a 50ms deadline, so the in-loop
-	// ctx.Err check must end the walk during the second probe. The returned
-	// error cannot show that on its own: the post-loop ctx.Err check in Detect
-	// reports DeadlineExceeded whether or not the in-loop one survives. The
-	// third provider going unprobed is what distinguishes them.
+	// Two 30ms probes against a 50ms deadline. The returned error proves nothing here:
+	// Detect's post-loop ctx.Err check reports DeadlineExceeded either way. The third
+	// provider going unprobed is what shows the in-loop check survived.
 	synctest.Test(t, func(t *testing.T) {
 		newSlow := func() *fakeProvider {
 			return &fakeProvider{name: ProviderAWS, probeOK: false, probeDelay: 30 * time.Millisecond}

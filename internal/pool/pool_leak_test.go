@@ -12,18 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPool_NoGoroutineLeak verifies that goroutines are properly cleaned up after normal operations.
-// Shutdown joins every worker via the pool's internal WaitGroup (pool.go), so a nil return proves
-// no worker goroutine was left running—no runtime.NumGoroutine() tolerance needed.
+// TestPool_NoGoroutineLeak leans on Shutdown joining every worker through the pool's
+// own WaitGroup, so a nil return is the proof—no runtime.NumGoroutine() tolerance needed.
 func TestPool_NoGoroutineLeak(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// Use larger queue size to avoid queue full errors
 		pool := NewPool(5, 200)
 		ctx := context.Background()
 
 		var wg sync.WaitGroup
 
-		// Submit 100 jobs
 		for range 100 {
 			wg.Add(1)
 			err := pool.Submit(ctx, func() error {
@@ -38,21 +35,18 @@ func TestPool_NoGoroutineLeak(t *testing.T) {
 			}
 		}
 
-		// Wait for all jobs to complete
 		wg.Wait()
 
-		// Shutdown pool
 		assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
 	})
-		defer func() {
-			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
-		}()
 }
 
-// TestPool_NoLeakAfterPanic verifies goroutines are cleaned up after panic recovery
 func TestPool_NoLeakAfterPanic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pool := NewPool(3, 20)
+		defer func() {
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		}()
 		ctx := context.Background()
 
 		var completed atomic.Int32
@@ -64,7 +58,6 @@ func TestPool_NoLeakAfterPanic(t *testing.T) {
 			}), "failed to submit panic job %d", i)
 		}
 
-		// Submit normal jobs after panics
 		for range 10 {
 			wg.Add(1)
 			if err := pool.Submit(ctx, func() error {
@@ -76,22 +69,18 @@ func TestPool_NoLeakAfterPanic(t *testing.T) {
 			}
 		}
 
-		// The queue is FIFO, so every normal job finishing proves the panicking
-		// ones were already drained by workers that survived them. A worker lost to
-		// a panic leaves this Wait unsatisfiable, which the bubble reports as a
-		// deadlock rather than hanging until the package timeout.
+		// The queue is FIFO, so every normal job finishing proves workers survived the
+		// panicking ones; a worker that did not leaves this Wait unsatisfiable.
 		wg.Wait()
 
 		assert.NotZero(t, completed.Load(), "no normal jobs completed after panics - workers may have died")
 	})
 }
 
-// TestPool_NoLeakAfterContextCancel verifies goroutines are cleaned up after context cancellation
 func TestPool_NoLeakAfterContextCancel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pool := NewPool(5, 100)
 
-		// Submit some jobs with cancelable context
 		ctx, cancel := context.WithCancel(context.Background())
 
 		started := make(chan struct{})
@@ -110,39 +99,31 @@ func TestPool_NoLeakAfterContextCancel(t *testing.T) {
 			}
 		}
 
-		// Cancel context while jobs are running
 		<-started
 		cancel()
 
-		// Wait for running jobs to complete
 		wg.Wait()
 
-		// Try to submit more jobs with cancelled context
-		// Note: Pool may or may not check context before submission depending on implementation
-		defer func() {
-			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
-		}()
+		// The pool is free to check the context or not, so this only records what it did.
 		err := pool.Submit(ctx, func() error {
 			return nil
-		}), "failed to submit the blocking job")
-		// Just log the result - this tests if the pool handles cancelled context
+		})
 		if err != nil {
 			t.Logf("submit to cancelled context returned: %v", err)
 		}
 
-		// Shutdown pool
 		assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
 	})
 }
 
-// TestPool_NoLeakQueueFull verifies goroutines are cleaned up when queue is full
 func TestPool_NoLeakQueueFull(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// Small pool and queue to trigger queue full
 		pool := NewPool(1, 2)
+		defer func() {
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		}()
 		ctx := context.Background()
 
-		// Block the worker
 		started := make(chan struct{})
 		blocker := make(chan struct{})
 		// Deferred: a require below would otherwise exit with the worker still parked here, and the bubble would report that leak instead of the failure.
@@ -151,27 +132,22 @@ func TestPool_NoLeakQueueFull(t *testing.T) {
 			close(started)
 			<-blocker
 			return nil
-		})
+		}), "failed to submit the blocking job")
 
-		// Wait for the worker to pick up the blocking job. Nothing here needs a fake
-		// clock; the bubble is what bounds the wait, reporting a worker that never
-		// starts as a deadlock rather than hanging until the package timeout.
+		// The bubble bounds this: a worker that never starts is reported as a deadlock, not a hang.
 		<-started
 
 		// Both must land, or the submit below would never reach a full queue.
 		require.NoError(t, pool.Submit(ctx, func() error { return nil }))
 		require.NoError(t, pool.Submit(ctx, func() error { return nil }))
 
-		// This should fail - queue full
 		err := pool.Submit(ctx, func() error { return nil })
 		assert.Error(t, err, "expected queue full error")
 	})
 }
 
-// TestPool_NoLeakRapidShutdown verifies goroutines are cleaned up on rapid shutdown
 func TestPool_NoLeakRapidShutdown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// Create and shutdown multiple pools rapidly
 		for i := range 10 {
 			// A closure per pool so the shutdown is deferred; a failed submit would otherwise leave this pool's workers running.
 			func() {

@@ -257,9 +257,7 @@ func TestSystemHandler_Restart_Default(t *testing.T) {
 		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
 		ctx := context.Background()
 
-		args := &common.CommandArgs{
-			// No target - should default to alpamon
-		}
+		args := &common.CommandArgs{}
 
 		exitCode, output, err := handler.Execute(ctx, common.Restart.String(), args)
 
