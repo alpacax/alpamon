@@ -661,6 +661,9 @@ func TestEachNameStopsMidDirectory(t *testing.T) {
 // per level, which the agent shares with the WebSocket connection and the FTP
 // sessions. It stops rather than fails, since readdir order decides whether the
 // deep subtree comes before or after the settings.json that has to change hands.
+// The witness one level down is what tells "stopped at the limit" from "never
+// descended at all": handing User/settings.json to the demoted user is the
+// reason the walk descends, and the deepest entry alone cannot say it happened.
 func TestChownUserDataDirStopsDescendingAtTheLimit(t *testing.T) {
 	root := t.TempDir()
 
@@ -673,14 +676,20 @@ func TestChownUserDataDirStopsDescendingAtTheLimit(t *testing.T) {
 	sibling := filepath.Join(root, userDataSettingsFile)
 	require.NoError(t, os.WriteFile(sibling, nil, 0600))
 
+	nested := filepath.Join(root, "deep", userDataSettingsFile)
+	require.NoError(t, os.WriteFile(nested, nil, 0600))
+
 	username, groupname := movableOwnership(t, sibling)
 	beforeSibling := fileOwner(t, sibling)
+	beforeNested := fileOwner(t, nested)
 	beforeDeepest := fileOwner(t, deepest)
 
 	require.NoError(t, chownUserDataDir(t.Context(), root, username, groupname))
 
 	assert.NotEqual(t, beforeSibling, fileOwner(t, sibling),
 		"a subtree too deep to enter must not cost the files beside it their owner")
+	assert.NotEqual(t, beforeNested, fileOwner(t, nested),
+		"the walk must re-own what it descends into, which is why it descends")
 	assert.Equal(t, beforeDeepest, fileOwner(t, deepest),
 		"the walk must not descend past the descriptor budget")
 }
