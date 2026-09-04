@@ -21,26 +21,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// restart, quit, reboot, shutdown and the post-self-update restart all hand the
-// pool a job that sleeps delayedActionDelay before acting, and Shutdown cannot
-// interrupt a sleeping job. The drain wait therefore has to outlast that delay,
-// which requireDrainOutlastsDelay makes executable rather than a promise in a
-// comment. Inside a synctest bubble neither span costs real time.
+// The delayed actions hand the pool a job that sleeps delayedActionDelay, and
+// Shutdown cannot interrupt a sleeping job. Neither span costs real time in a bubble.
 const poolDrainWait = 5 * time.Second
 
-// requireDrainOutlastsDelay fails with the reason rather than as a bare shutdown
-// timeout if delayedActionDelay ever grows past the budget these tests drain on.
-func requireDrainOutlastsDelay(t *testing.T) {
-	t.Helper()
-	require.Greater(t, poolDrainWait, delayedActionDelay,
-		"a job sleeping delayedActionDelay cannot drain inside poolDrainWait")
-}
+// drainBudgetOutlastsDelay fails the build ("constant -1 overflows uint") when the
+// drain stops outlasting the delay. A runtime check would fire with the pool already
+// running, and the bubble would bury it under the resulting deadlock.
+const drainBudgetOutlastsDelay = uint(poolDrainWait - delayedActionDelay - 1)
 
-// drainThen returns a deferred teardown that waits the scheduled job out and only
-// then checks it landed, because a fire-and-forget action has not run when the
-// handler returns. Shutdown closes the job queue, so it must run exactly once,
-// which is why the check rides on the drain instead of being a second call.
+// drainThen waits the scheduled job out before checking it landed, because a
+// fire-and-forget action has not run when the handler returns. Shutdown closes the
+// job queue, so the check rides on the drain rather than being a second call.
+//
+// Register it after the context manager's own Shutdown so LIFO drains the pool first.
+// The other order cancels poolCtx with the job still sleeping, and holds today only
+// because time.Sleep ignores the context and so does MockCommandExecutor.
 func drainThen(t *testing.T, p *pool.Pool, check func()) func() {
+	t.Helper()
 	return func() {
 		require.NoError(t, p.Shutdown(poolDrainWait))
 		check()
