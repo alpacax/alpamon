@@ -315,17 +315,21 @@ func TestChownUserDataDirDoesNotFollowSymlinks(t *testing.T) {
 
 	link := filepath.Join(userDataDir, "x")
 	require.NoError(t, os.Symlink(target, link))
-
-	// Ownership the kernel will really move the link to. Asking for the ids the
-	// link already carries would let the assertion below pass with no lchown
-	// having happened at all.
-	username, groupname := movableOwnership(t, link)
 	beforeLink := fileOwner(t, link)
+
+	// A witness with one name only, so the assertions above cannot pass by the
+	// walk having re-owned nothing at all.
+	ordinary := filepath.Join(userDataDir, "ordinary")
+	require.NoError(t, os.WriteFile(ordinary, nil, 0600))
+	username, groupname := movableOwnership(t, ordinary)
+	beforeOrdinary := fileOwner(t, ordinary)
 
 	require.NoError(t, chownUserDataDir(userDataDir, username, groupname))
 
-	assert.Equal(t, beforeTarget, fileOwner(t, target), "symlink target must keep its owner")
-	assert.NotEqual(t, beforeLink, fileOwner(t, link), "the link itself is chowned")
+	assert.Equal(t, beforeTarget, fileOwner(t, target), "a symlink target must keep its owner")
+	assert.Equal(t, beforeLink, fileOwner(t, link), "the link itself is not the walk's to re-own either")
+	assert.NotEqual(t, beforeOrdinary, fileOwner(t, ordinary),
+		"the walk must still re-own the files this tree is the only name for")
 }
 
 // fileOwner reads both ids, since a non-root process can only ever move the
@@ -580,6 +584,33 @@ func TestChownUserDataDirSkipsHardLinkedFiles(t *testing.T) {
 
 	assert.Equal(t, beforeOutside, fileOwner(t, outside),
 		"an inode that answers to another name outside the tree must keep its owner")
+	assert.NotEqual(t, beforeOrdinary, fileOwner(t, ordinary),
+		"the walk must still re-own the files this tree is the only name for")
+}
+
+// TestChownUserDataDirSkipsHardLinkedNonRegularFiles: link() does not care what
+// type the inode is, and the kernel only refuses a source the caller does not
+// own once fs.protected_hardlinks is set, which is not its own default. A
+// socket or FIFO reached that way is the one worth planting, since handing it
+// over lets the user chmod it and talk to whatever listens.
+func TestChownUserDataDirSkipsHardLinkedNonRegularFiles(t *testing.T) {
+	userDataDir := t.TempDir()
+
+	outside := filepath.Join(t.TempDir(), "victim.fifo")
+	require.NoError(t, unix.Mkfifo(outside, 0600))
+	require.NoError(t, os.Link(outside, filepath.Join(userDataDir, "planted")))
+
+	ordinary := filepath.Join(userDataDir, "ordinary")
+	require.NoError(t, os.WriteFile(ordinary, nil, 0600))
+
+	username, groupname := movableOwnership(t, outside)
+	beforeOutside := fileOwner(t, outside)
+	beforeOrdinary := fileOwner(t, ordinary)
+
+	require.NoError(t, chownUserDataDir(userDataDir, username, groupname))
+
+	assert.Equal(t, beforeOutside, fileOwner(t, outside),
+		"a non-regular inode that answers to another name outside the tree must keep its owner")
 	assert.NotEqual(t, beforeOrdinary, fileOwner(t, ordinary),
 		"the walk must still re-own the files this tree is the only name for")
 }

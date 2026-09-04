@@ -34,6 +34,11 @@ const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLO
 // a supported layout into an editor that will not start.
 const homeDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
 
+// For an entry of unknown type, so that stat and chown act on the descriptor
+// rather than on a name the user can rename something else onto in between.
+// O_RDONLY on a FIFO would wait for a writer; O_NOFOLLOW makes a symlink ELOOP.
+const entryFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
+
 // The walk holds one directory fd per level, and the tree below the user data
 // dir is whatever the user puts there. alpamon.service sets no LimitNOFILE, so
 // the systemd default applies to the whole agent: a deep enough chain would
@@ -82,8 +87,9 @@ func setupUserDataFiles(homeDir, dirName string, configData, settingsData []byte
 	return writeFileAt(userDir, userDataSettingsFile, settingsData)
 }
 
-// chownTreeNoFollow recursively changes ownership under root without ever
-// following a symlink: links themselves are re-owned, their targets untouched.
+// chownTreeNoFollow re-owns the tree under root, holding every entry open before
+// acting on it. What it cannot open that way—symlinks, sockets—it leaves alone
+// rather than reaching by name.
 func chownTreeNoFollow(root string, uid, gid int) error {
 	dir, err := openDir(root, dirFlags)
 	if err != nil {
@@ -108,29 +114,36 @@ func chownChildren(dir *os.File, uid, gid, depth int) error {
 	}
 	dirfd := int(dir.Fd())
 	for _, name := range names {
-		// Stat before the chown, not after: AT_SYMLINK_NOFOLLOW speaks only for
-		// symlinks, and a hard link is not a link to a file but a second name
-		// for the same inode, one the user can plant pointing anywhere they can
-		// read. Handing that inode away is exactly what this walk must not do.
-		var st unix.Stat_t
-		if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return &os.PathError{Op: "stat", Path: filepath.Join(dir.Name(), name), Err: err}
-		}
-		if st.Mode&unix.S_IFMT == unix.S_IFREG && st.Nlink > 1 {
-			continue
-		}
-		if err := unix.Fchownat(dirfd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return &os.PathError{Op: "lchown", Path: filepath.Join(dir.Name(), name), Err: err}
-		}
-		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
-			continue
-		}
 		path := filepath.Join(dir.Name(), name)
-		childFd, err := unix.Openat(dirfd, name, dirFlags, 0)
+		// An open that fails skips the entry, not the walk: ELOOP is a symlink,
+		// ENXIO a socket, ENOENT one a live code-server just removed, and none
+		// is worth leaving the settings.json elsewhere in the tree root-owned.
+		fd, err := unix.Openat(dirfd, name, entryFlags, 0)
 		if err != nil {
-			return &os.PathError{Op: "open", Path: path, Err: err}
+			continue
 		}
-		child := os.NewFile(uintptr(childFd), path)
+		var st unix.Stat_t
+		if err := unix.Fstat(fd, &st); err != nil {
+			_ = unix.Close(fd)
+			return &os.PathError{Op: "stat", Path: path, Err: err}
+		}
+		isDir := st.Mode&unix.S_IFMT == unix.S_IFDIR
+		// A hard link is a second name for one inode, and the user can plant one
+		// over anything link() lets them reach. Directories always carry a second
+		// name in ".", so the count means this only for the other types.
+		if !isDir && st.Nlink > 1 {
+			_ = unix.Close(fd)
+			continue
+		}
+		if err := unix.Fchown(fd, uid, gid); err != nil {
+			_ = unix.Close(fd)
+			return &os.PathError{Op: "chown", Path: path, Err: err}
+		}
+		if !isDir {
+			_ = unix.Close(fd)
+			continue
+		}
+		child := os.NewFile(uintptr(fd), path)
 		err = chownChildren(child, uid, gid, depth-1)
 		_ = child.Close()
 		if err != nil {
@@ -181,13 +194,9 @@ func sweepStaleTemps(parent *os.File, name string) {
 		if !strings.HasPrefix(entry, prefix) || !strings.HasSuffix(entry, tempSuffix) {
 			continue
 		}
-		// Stat through an fd rather than the name, so the age that decides the
-		// unlink is read off the very entry the name resolved to. O_NONBLOCK
-		// because the temp name is predictable and mkfifo needs no privilege:
-		// a FIFO parked here would hold this open until a writer arrived, and
-		// the IsRegular check that rejects it comes after the open.
-		fd, err := unix.Openat(dirfd, entry,
-			unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		// Through an fd, so the age that decides the unlink is read off the entry
+		// the name resolved to and not off whatever replaced it since.
+		fd, err := unix.Openat(dirfd, entry, entryFlags, 0)
 		if err != nil {
 			continue
 		}
