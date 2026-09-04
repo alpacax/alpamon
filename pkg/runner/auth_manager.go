@@ -627,7 +627,8 @@ func logSudoResponseWriteError(err error, requestID string) {
 
 // HandleSudoApprovalResponse answers and closes the request it takes, the way
 // finalizeRequest does for the paths alpamon answers itself; handleSudoRequest
-// closes again once the released waiter returns, which is harmless.
+// closes again once the released waiter returns, which is harmless. Every exit
+// releases the waiter, because the take leaves nobody else able to.
 func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse) error {
 	log.Info().Str("request_id", response.RequestID).Bool("approved", response.Approved).Msg("Processing sudo_approval response")
 
@@ -642,18 +643,20 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 		return fmt.Errorf("no pending sudo_approval request found for request_id: %s", response.RequestID)
 	}
 
+	// The take has no owner left to answer it, so every exit from here has to release
+	// the waiter—including an early return added later between the take and the write.
+	defer am.signalCompletion(response.RequestID)
+
 	responseJSON, err := json.Marshal(response)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to marshal sudo_approval_response")
 		return err
 	}
 
-	// The request is already deregistered, so nobody else can reclaim this
-	// connection, and the waiter has to be released whether the write landed or not.
+	// The request is already deregistered, so nobody else can reclaim this connection.
 	_ = sudoRequest.Connection.SetWriteDeadline(time.Now().Add(authSocketWriteTimeout))
 	_, err = sudoRequest.Connection.Write(responseJSON)
 	_ = sudoRequest.Connection.Close()
-	am.signalCompletion(response.RequestID)
 	if err != nil {
 		logSudoResponseWriteError(err, response.RequestID)
 		return err
