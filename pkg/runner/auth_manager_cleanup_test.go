@@ -3,13 +3,17 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -318,7 +322,9 @@ func TestHandleSudoApprovalRequest_LocalSudoRegistersNothing(t *testing.T) {
 		require.NoError(t, err)
 		client, server := net.Pipe()
 
-		go am.handleSudoApprovalRequest(data, server)
+		go am.handleSudoRequest(server) // Driven through the owner, since that is what closes now.
+		_, err = client.Write(data)
+		require.NoError(t, err)
 
 		resp := expectSingleResponse(t, client)
 		assert.Truef(t, resp.Approved, "local sudo must be approved: %+v", resp)
@@ -349,4 +355,435 @@ func TestRemovePIDCommandMapping_DeniesPendingRequests(t *testing.T) {
 		}
 		assert.Equal(t, want, expectSingleResponse(t, client))
 	})
+}
+
+type closeTrackingConn struct {
+	net.Conn
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *closeTrackingConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return c.Conn.Close()
+}
+
+func (c *closeTrackingConn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+func TestHandleSudoRequest_ClosesConnectionWhenReadFails(t *testing.T) {
+	am := newTestAuthManager()
+	client, server := net.Pipe()
+	conn := &closeTrackingConn{Conn: server}
+	require.NoError(t, client.Close()) // Makes the handler's first Read fail.
+
+	am.handleSudoRequest(conn)
+
+	assert.True(t, conn.isClosed(), "connection was left open after the read failed")
+}
+
+func TestHandleSudoRequest_ClosesConnectionOnEveryPath(t *testing.T) {
+	// Every payload here leaves handleSudoRequest by a different return, and each
+	// of those returns gave up its own Close call to the deferred one.
+	tests := []struct {
+		name         string
+		payload      string
+		wantResponse bool
+	}{
+		{name: "malformed JSON", payload: "{"},
+		{name: "missing type", payload: `{"username":"alice"}`},
+		{name: "unknown type", payload: `{"type":"nope"}`},
+		{name: "check_user with a malformed body", payload: `{"type":"check_user","pid":"not-an-int"}`, wantResponse: true},
+		{name: "check_user with no session", payload: `{"type":"check_user","username":"alice","pid":4242,"ppid":1}`, wantResponse: true},
+		{name: "sudo_approval with a malformed body", payload: `{"type":"sudo_approval","pid":"not-an-int"}`, wantResponse: true},
+		{name: "session_event with no username", payload: `{"type":"session_event","service":"sshd","pid":4242}`, wantResponse: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			am := newTestAuthManager()
+			client, server := net.Pipe()
+			conn := &closeTrackingConn{Conn: server}
+
+			done := make(chan struct{})
+			go func() {
+				am.handleSudoRequest(conn)
+				close(done)
+			}()
+
+			_, err := client.Write([]byte(tt.payload))
+			require.NoError(t, err)
+
+			// Without this a regression hangs until the suite-wide panic instead of failing here.
+			_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+			data, err := io.ReadAll(client)
+			require.NoError(t, err, "the PAM side never saw EOF, so the handler left the connection open")
+			if tt.wantResponse {
+				assert.NotEmpty(t, data, "the handler closed without answering, so PAM has to time out instead of failing open")
+			} else {
+				assert.Empty(t, data)
+			}
+
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("handleSudoRequest did not return")
+			}
+			assert.True(t, conn.isClosed(), "connection was left open")
+			_ = client.Close()
+		})
+	}
+}
+
+// readErrConn fails every Read while leaving Write to the real connection, so a
+// test can watch what the handler answers on the read-failure path.
+type readErrConn struct{ *closeTrackingConn }
+
+func (readErrConn) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+type panicOnReadConn struct{ *closeTrackingConn }
+
+func (panicOnReadConn) Read([]byte) (int, error) { panic("read exploded") }
+
+func TestHandleSudoRequest_AnswersBeforeClosingWhenReadFails(t *testing.T) {
+	am := newTestAuthManager()
+	client, server := net.Pipe()
+	conn := readErrConn{&closeTrackingConn{Conn: server}}
+
+	done := make(chan struct{})
+	go func() {
+		am.handleSudoRequest(conn)
+		close(done)
+	}()
+
+	// Without this a regression hangs until the suite-wide panic instead of failing here.
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	data, err := io.ReadAll(client)
+	require.NoError(t, err, "the PAM side never saw EOF, so the handler left the connection open")
+
+	var resp IsAlpconResponse
+	require.NoError(t, json.Unmarshal(data, &resp), "a request that cannot be read still has to be answered, or PAM waits out its own timeout")
+	assert.False(t, resp.IsAlpconUser, "an unreadable request must not be answered as an Alpacon session")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleSudoRequest did not return")
+	}
+	assert.True(t, conn.isClosed(), "connection was left open after the read failed")
+	_ = client.Close()
+}
+
+func TestHandleSudoRequest_ClosesConnectionOnPanic(t *testing.T) {
+	am := newTestAuthManager()
+	client, server := net.Pipe()
+	conn := panicOnReadConn{&closeTrackingConn{Conn: server}}
+
+	am.handleSudoRequest(conn) // The handler's recover is what keeps the panic from failing this test.
+
+	// Nothing is asserted about what PAM reads, unlike the read-error twin above:
+	// recover runs wherever the panic landed, possibly after a response already went
+	// out, so answering from there risks a second one. The close is the answer here.
+	assert.True(t, conn.isClosed(), "a panicking handler left the descriptor open")
+	_ = client.Close()
+}
+
+// blockingWriteConn parks the first Write until release is closed, holding a
+// response in flight while the test drives the waiter out.
+type blockingWriteConn struct {
+	net.Conn
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingWriteConn) Write(b []byte) (int, error) {
+	c.once.Do(func() {
+		close(c.entered)
+		<-c.release
+	})
+	return c.Conn.Write(b)
+}
+
+type readResult struct {
+	resp SudoApprovalResponse
+	err  error
+}
+
+// readResponseAsync decodes the one response the connection carries, on its own
+// goroutine: a handover test has to keep reading while it drives the waiter out,
+// and net.Pipe gives the taker's write nowhere to land otherwise.
+func readResponseAsync(client net.Conn) <-chan readResult {
+	results := make(chan readResult, 1)
+	go func() {
+		_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var resp SudoApprovalResponse
+		err := json.NewDecoder(client).Decode(&resp)
+		results <- readResult{resp: resp, err: err}
+	}()
+
+	return results
+}
+
+// TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse pins the handover the
+// deferred close depends on. HandleSudoApprovalResponse deregisters the request
+// before it writes, so a shutdown landing in that window finds nothing pending and
+// the waiter must still not close on a response already going out.
+func TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse(t *testing.T) {
+	// Registration happens before the post, so a served request is one that can be taken.
+	registered := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(registered)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	am := newTestAuthManager()
+	ctx, cancel := context.WithCancel(context.Background())
+	am.ctx = ctx
+	am.session = &scheduler.Session{BaseURL: srv.URL, Client: http.DefaultClient}
+	am.pidToSessionMap[4200] = &SessionInfo{
+		Kind:      TrackerKindWebsh,
+		SessionID: "sess-shutdown",
+		PID:       4200,
+		Requests:  make(map[string]*SudoRequest),
+	}
+
+	data, err := json.Marshal(SudoApprovalRequest{
+		RequestID: "req-shutdown",
+		Type:      "sudo_approval",
+		Username:  "alice",
+		PID:       424242,
+		PPID:      4200,
+		Command:   "sudo reboot",
+	})
+	require.NoError(t, err)
+
+	client, server := net.Pipe()
+	tracked := &closeTrackingConn{Conn: server}
+	conn := &blockingWriteConn{
+		Conn:    tracked,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	go am.handleSudoRequest(conn)
+	_, err = client.Write(data)
+	require.NoError(t, err)
+
+	results := readResponseAsync(client)
+
+	select {
+	case <-registered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the server")
+	}
+
+	go func() {
+		_ = am.HandleSudoApprovalResponse(SudoApprovalResponse{
+			RequestID: "req-shutdown",
+			Type:      "sudo_approval_response",
+			Username:  "alice",
+			Approved:  true,
+		})
+	}()
+
+	select {
+	case <-conn.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the response write never started")
+	}
+
+	cancel()
+	// A cheap check that fails on this line rather than on the decode below. It can
+	// still pass without entering the window—a waiter that has not reached its close
+	// yet looks the same as one correctly parked—so neither tightening nor lengthening
+	// this sleep strengthens the test. What carries it is the decode at the end: the
+	// response arriving whole is the property, and that assertion is unconditional.
+	time.Sleep(100 * time.Millisecond)
+	assert.False(t, tracked.isClosed(), "the waiter closed a connection whose response was still going out")
+	close(conn.release)
+
+	got := <-results
+	require.NoError(t, got.err, "the approved response never reached the PAM client")
+	assert.True(t, got.resp.Approved, "response: got %+v", got.resp)
+}
+
+// TestDenyPendingRequests_StalledPeerDoesNotDelayTheRest pins what
+// authSocketHandoverTimeout claims: a waiter's handover bound has to outlive one
+// bounded write, not a whole batch of them. A peer that stopped reading holds up
+// its own request only, so the next request's waiter is released well inside its
+// bound instead of returning and closing a connection the deny loop has yet to
+// reach.
+func TestDenyPendingRequests_StalledPeerDoesNotDelayTheRest(t *testing.T) {
+	am := newTestAuthManager()
+
+	stalledClient, stalledServer := net.Pipe()
+	defer func() { _ = stalledClient.Close() }()
+	stalled := &blockingWriteConn{
+		Conn:    stalledServer,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	go func() { _, _ = io.Copy(io.Discard, client) }()
+
+	stalledDone := registerCompletionChannel(am, "req-stalled")
+	nextDone := registerCompletionChannel(am, "req-next")
+
+	pending := []*SudoRequest{
+		{Connection: stalled, Request: SudoApprovalRequest{RequestID: "req-stalled", Username: "alice"}},
+		{Connection: server, Request: SudoApprovalRequest{RequestID: "req-next", Username: "bob"}},
+	}
+	go am.denyPendingRequests(pending, "Session ended")
+
+	select {
+	case <-stalled.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stalled request's write never started")
+	}
+
+	select {
+	case <-nextDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second request's waiter was held behind the stalled peer's write")
+	}
+
+	// Let the stalled write through so the batch finishes on its own rather than on
+	// the write deadline.
+	go func() { _, _ = io.Copy(io.Discard, stalledClient) }()
+	close(stalled.release)
+
+	select {
+	case <-stalledDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stalled request never signaled once its write went through")
+	}
+}
+
+// panicOnWriteConn blows up where a denied response is written, the one place in
+// denyPendingRequests' goroutine that touches a peer it does not control.
+type panicOnWriteConn struct{ net.Conn }
+
+func (panicOnWriteConn) Write([]byte) (int, error) { panic("write exploded") }
+
+// TestDenyPendingRequests_SignalsWhenAnsweringPanics pins the ordering the
+// goroutine's recover would otherwise break: the recover keeps a panicking write
+// from taking the agent down, but a signal placed after the work is skipped along
+// with it, and the waiter then parks the full authSocketHandoverTimeout before
+// closing. Failing open after six seconds is worse than failing open at once, so
+// the bound this asserts within is deliberately well short of it.
+func TestDenyPendingRequests_SignalsWhenAnsweringPanics(t *testing.T) {
+	am := newTestAuthManager()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	done := registerCompletionChannel(am, "req-panic")
+	pending := []*SudoRequest{
+		{Connection: panicOnWriteConn{server}, Request: SudoApprovalRequest{RequestID: "req-panic", Username: "alice"}},
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		am.denyPendingRequests(pending, "Session ended")
+		close(returned)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a panicking write left the waiter unsignaled, so it holds the connection until its handover bound expires")
+	}
+
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("denyPendingRequests never returned after the panic")
+	}
+}
+
+// TestHandleSudoApprovalRequest_RetryFailureWaitsForTakenResponse covers the
+// widest of the three finalizeRequest call sites: a session teardown can take the
+// request across the whole retry span, so the retry-failure path reaches its
+// finalize with nothing left to take and must still not close on the teardown's
+// in-flight write.
+func TestHandleSudoApprovalRequest_RetryFailureWaitsForTakenResponse(t *testing.T) {
+	// 5xx keeps the waiter inside its retry span, where the teardown can take the
+	// request out from under it.
+	var once sync.Once
+	posted := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		once.Do(func() { close(posted) })
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	am := newTestAuthManager()
+	ctx, cancel := context.WithCancel(context.Background())
+	am.ctx = ctx
+	am.session = &scheduler.Session{BaseURL: srv.URL, Client: http.DefaultClient}
+	am.pidToSessionMap[4200] = &SessionInfo{
+		Kind:      TrackerKindWebsh,
+		SessionID: "sess-retry-taken",
+		PID:       4200,
+		Requests:  make(map[string]*SudoRequest),
+	}
+
+	data, err := json.Marshal(SudoApprovalRequest{
+		RequestID: "req-retry-taken",
+		Type:      "sudo_approval",
+		Username:  "alice",
+		PID:       424242,
+		PPID:      4200,
+		Command:   "sudo reboot",
+	})
+	require.NoError(t, err)
+
+	client, server := net.Pipe()
+	tracked := &closeTrackingConn{Conn: server}
+	conn := &blockingWriteConn{
+		Conn:    tracked,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	go am.handleSudoRequest(conn)
+	_, err = client.Write(data)
+	require.NoError(t, err)
+
+	results := readResponseAsync(client)
+
+	select {
+	case <-posted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the server, so it was never registered")
+	}
+
+	go am.RemovePIDSessionMapping(4200)
+
+	select {
+	case <-conn.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the teardown's response write never started")
+	}
+
+	cancel() // Ends the retry span, so the waiter reaches its finalize.
+
+	// A cheap check that fails on this line rather than on the decode below. It can
+	// pass without entering the window—a waiter that has not reached its close yet
+	// looks the same. What carries this test is the decode: the response arriving
+	// whole is the property, and that assertion is unconditional.
+	time.Sleep(100 * time.Millisecond)
+	assert.False(t, tracked.isClosed(), "the waiter closed a connection whose response was still going out")
+	close(conn.release)
+
+	got := <-results
+	require.NoError(t, got.err, "the teardown's response never reached the PAM client")
+	assert.Equal(t, "Session ended", got.resp.Reason, "response: %+v", got.resp)
 }
