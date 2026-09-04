@@ -676,3 +676,36 @@ func TestSetupUserDataDirSweepsStaleTempFiles(t *testing.T) {
 	assert.FileExists(t, inFlight, "a temp file another session is still filling must be left alone")
 	assert.FileExists(t, unrelated, "the sweep must take only names writeFileAt could have made")
 }
+
+// TestSetupUserDataDirSurvivesAFifoNamedLikeATemp: the temp name is predictable
+// and mkfifo needs no privilege, so the user can park a FIFO where the sweep
+// will open it. An O_RDONLY open of a FIFO waits for a writer, and no signal
+// reaches that wait, so a setup without O_NONBLOCK strands a goroutine inside
+// the root agent on every editor start for that user.
+func TestSetupUserDataDirSurvivesAFifoNamedLikeATemp(t *testing.T) {
+	homeDir := t.TempDir()
+	userDataDir, err := setupUserDataDir(homeDir, "", "")
+	require.NoError(t, err)
+
+	fifo := filepath.Join(userDataDir, tempPrefix(userDataConfigFile)+"fifo"+tempSuffix)
+	require.NoError(t, unix.Mkfifo(fifo, 0600))
+	aged := time.Now().Add(-2 * staleTempAge)
+	require.NoError(t, os.Chtimes(fifo, aged, aged))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := setupUserDataDir(homeDir, "", "")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("setupUserDataDir blocked opening the FIFO")
+	}
+
+	info, err := os.Lstat(fifo)
+	require.NoError(t, err)
+	assert.Equal(t, os.ModeNamedPipe, info.Mode()&os.ModeType, "the sweep must unlink only regular files")
+}

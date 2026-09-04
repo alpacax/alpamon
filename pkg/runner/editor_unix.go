@@ -182,8 +182,12 @@ func sweepStaleTemps(parent *os.File, name string) {
 			continue
 		}
 		// Stat through an fd rather than the name, so the age that decides the
-		// unlink is read off the very entry the name resolved to.
-		fd, err := unix.Openat(dirfd, entry, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		// unlink is read off the very entry the name resolved to. O_NONBLOCK
+		// because the temp name is predictable and mkfifo needs no privilege:
+		// a FIFO parked here would hold this open until a writer arrived, and
+		// the IsRegular check that rejects it comes after the open.
+		fd, err := unix.Openat(dirfd, entry,
+			unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
 			continue
 		}
