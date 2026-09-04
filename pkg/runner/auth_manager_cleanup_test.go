@@ -607,10 +607,11 @@ func TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse(t *testing.T) {
 	}
 
 	cancel()
-	// Long enough for the waiter to close, if it is going to. The assertion is what
-	// keeps the wait from going vacuous: on a loaded box the waiter may not have
-	// reached its close yet, and a pass that never entered the window looks the same
-	// as one that held it.
+	// A cheap check that fails on this line rather than on the decode below. It can
+	// still pass without entering the window—a waiter that has not reached its close
+	// yet looks the same as one correctly parked—so neither tightening nor lengthening
+	// this sleep strengthens the test. What carries it is the decode at the end: the
+	// response arriving whole is the property, and that assertion is unconditional.
 	time.Sleep(100 * time.Millisecond)
 	assert.False(t, tracked.isClosed(), "the waiter closed a connection whose response was still going out")
 	close(conn.release)
