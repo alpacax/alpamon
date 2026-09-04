@@ -678,37 +678,35 @@ func TestSystemHandler_Update(t *testing.T) {
 }
 
 func TestSystemHandler_Uninstall(t *testing.T) {
-	mockExec := common.NewMockCommandExecutor(t)
-	mockWS := &MockWSClient{}
-	ctxManager := agent.NewContextManager()
-	workerPool := pool.NewPool(2, 10)
-	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
-	defer ctxManager.Shutdown()
+	synctest.Test(t, func(t *testing.T) {
+		mockExec := common.NewMockCommandExecutor(t)
+		mockWS := &MockWSClient{}
+		ctxManager := agent.NewContextManager()
+		workerPool := pool.NewPool(2, 10)
+		defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+		defer ctxManager.Shutdown()
 
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
-	ctx := context.Background()
+		handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+		ctx := context.Background()
 
-	// Neutralize the deferred-uninstall timer and drain its goroutine before
-	// the test returns: a leaked executeUninstall reads utils.PlatformLike
-	// after the test ends and races with SetPlatformLike in later tests.
-	handler.uninstallDelay = 0
-	done := make(chan struct{})
-	handler.uninstallDone = done
+		// A leaked executeUninstall reads utils.PlatformLike after the test ends and
+		// races with SetPlatformLike in later ones, so drain its goroutine here.
+		handler.uninstallDelay = 0
+		done := make(chan struct{})
+		handler.uninstallDone = done
 
-	args := &common.CommandArgs{}
+		args := &common.CommandArgs{}
 
-	exitCode, output, err := handler.Execute(ctx, common.ByeBye.String(), args)
+		exitCode, output, err := handler.Execute(ctx, common.ByeBye.String(), args)
 
-	require.NoError(t, err)
-	assert.Equal(t, 0, exitCode)
-	assert.Contains(t, output, "uninstall")
+		require.NoError(t, err)
+		assert.Equal(t, 0, exitCode)
+		assert.Contains(t, output, "uninstall")
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("uninstall goroutine did not finish")
-	}
-	assert.True(t, mockWS.ShutDownCalled, "the agent must shut itself down once the uninstall is scheduled")
+		// No wall-clock guard: with a nil apiSession this path takes no network, file or process wait, so the bubble can bound it.
+		<-done
+		assert.True(t, mockWS.ShutDownCalled, "the agent must shut itself down once the uninstall is scheduled")
+	})
 }
 
 // TestSystemHandler_UnregisterFromConsole_CallsDelete verifies that byebye
