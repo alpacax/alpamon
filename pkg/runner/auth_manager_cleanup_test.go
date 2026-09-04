@@ -507,6 +507,9 @@ func TestHandleSudoRequest_ClosesConnectionOnPanic(t *testing.T) {
 
 	am.handleSudoRequest(conn) // The handler's recover is what keeps the panic from failing this test.
 
+	// Nothing is asserted about what PAM reads, unlike the read-error twin above:
+	// recover runs wherever the panic landed, possibly after a response already went
+	// out, so answering from there risks a second one. The close is the answer here.
 	assert.True(t, conn.isClosed(), "a panicking handler left the descriptor open")
 	_ = client.Close()
 }
