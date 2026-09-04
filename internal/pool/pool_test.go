@@ -5,201 +5,182 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPoolBasic(t *testing.T) {
-	pool := NewPool(3, 10)
-	defer func() {
-		if err := pool.Shutdown(5 * time.Second); err != nil {
-			t.Errorf("shutdown failed: %v", err)
+	synctest.Test(t, func(t *testing.T) {
+		pool := NewPool(3, 10)
+		defer func() {
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		}()
+
+		var counter atomic.Int32
+		var wg sync.WaitGroup
+
+		for i := range 10 {
+			wg.Add(1)
+			err := pool.Submit(context.Background(), func() error {
+				defer wg.Done()
+				counter.Add(1)
+				// Hold the worker so the jobs overlap.
+				time.Sleep(10 * time.Millisecond)
+				return nil
+			})
+			require.NoErrorf(t, err, "failed to submit job %d", i)
 		}
-	}()
 
-	var counter atomic.Int32
-	var wg sync.WaitGroup
+		// Done is deferred, so a worker that never finishes a job leaves this Wait unsatisfiable and the bubble calls it a deadlock.
+		wg.Wait()
 
-	// Submit 10 jobs
-	for i := range 10 {
-		wg.Add(1)
-		err := pool.Submit(context.Background(), func() error {
-			counter.Add(1)
-			wg.Done()
-			time.Sleep(10 * time.Millisecond)
-			return nil
-		})
-		if err != nil {
-			t.Errorf("failed to submit job %d: %v", i, err)
-			wg.Done()
-		}
-	}
-
-	// Wait for all jobs to complete
-	wg.Wait()
-
-	if counter.Load() != 10 {
-		t.Errorf("expected 10 jobs to complete, got %d", counter.Load())
-	}
+		assert.Equal(t, int32(10), counter.Load(), "expected 10 jobs to complete")
+	})
 }
 
 func TestPoolQueueFull(t *testing.T) {
-	// Small queue size to test overflow
-	// Queue size = 1, Workers = 1
-	pool := NewPool(1, 1)
-	defer func() {
-		if err := pool.Shutdown(5 * time.Second); err != nil {
-			t.Errorf("shutdown failed: %v", err)
-		}
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		pool := NewPool(1, 1)
+		defer func() {
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		}()
 
-	// Use a channel to control task execution
-	blocker := make(chan struct{})
+		started := make(chan struct{})
+		blocker := make(chan struct{})
+		// Deferred: a require below would otherwise exit with the worker still parked here, and the bubble would report that leak instead of the failure.
+		defer close(blocker)
 
-	// Block the worker - this job will be picked up by the worker immediately
-	err := pool.Submit(context.Background(), func() error {
-		<-blocker // Wait until we signal
-		return nil
+		err := pool.Submit(context.Background(), func() error {
+			close(started)
+			<-blocker // Wait until we signal
+			return nil
+		})
+		require.NoError(t, err, "failed to submit blocking task")
+
+		// The bubble bounds this: a worker that never starts is reported as a deadlock, not a hang.
+		<-started
+
+		err = pool.Submit(context.Background(), func() error {
+			return nil
+		})
+		require.NoError(t, err, "failed to submit to queue")
+
+		err = pool.Submit(context.Background(), func() error {
+			return nil
+		})
+
+		assert.EqualError(t, err, "job queue is full")
 	})
-	if err != nil {
-		t.Fatalf("failed to submit blocking task: %v", err)
-	}
-
-	// Give worker time to pick up the first job
-	time.Sleep(10 * time.Millisecond)
-
-	// Fill the queue (capacity is 1)
-	err = pool.Submit(context.Background(), func() error {
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("failed to submit to queue: %v", err)
-	}
-
-	// This should fail immediately (worker is blocked, queue is full)
-	err = pool.Submit(context.Background(), func() error {
-		return nil
-	})
-
-	if err == nil || err.Error() != "job queue is full" {
-		t.Errorf("expected queue full error, got: %v", err)
-	}
-
-	// Unblock the worker to allow shutdown
-	close(blocker)
 }
 
-func TestPoolConcurrency(t *testing.T) {
-	maxWorkers := 3
-	pool := NewPool(maxWorkers, 100)
-	defer func() {
-		if err := pool.Shutdown(5 * time.Second); err != nil {
-			t.Errorf("shutdown failed: %v", err)
-		}
-	}()
+// TestPool_SaturatesWithoutExceedingWorkers pins that the pool runs exactly as many
+// jobs at once as it has workers—never more, and never fewer once the queue can fill them.
+func TestPool_SaturatesWithoutExceedingWorkers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			maxWorkers = 10
+			taskCount  = 50
+		)
 
-	var concurrent atomic.Int32
-	var maxConcurrent atomic.Int32
+		pool := NewPool(maxWorkers, taskCount)
+		defer func() {
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		}()
 
-	// Submit many jobs
-	for range 50 {
-		if err := pool.Submit(context.Background(), func() error {
-			current := concurrent.Add(1)
-			defer concurrent.Add(-1)
+		var maxConcurrent int
+		var current int
+		var mu sync.Mutex
 
-			// Track max concurrent
-			for {
-				observed := maxConcurrent.Load()
-				if current <= observed || maxConcurrent.CompareAndSwap(observed, current) {
-					break
+		var wg sync.WaitGroup
+		for i := range taskCount {
+			wg.Add(1)
+			err := pool.Submit(context.Background(), func() error {
+				defer wg.Done()
+
+				mu.Lock()
+				current++
+				if current > maxConcurrent {
+					maxConcurrent = current
 				}
-			}
+				mu.Unlock()
 
-			time.Sleep(10 * time.Millisecond)
-			return nil
-		}); err != nil {
-			t.Errorf("failed to submit job: %v", err)
+				// Hold the worker so the jobs actually overlap.
+				time.Sleep(20 * time.Millisecond)
+
+				mu.Lock()
+				current--
+				mu.Unlock()
+
+				return nil
+			})
+			require.NoErrorf(t, err, "failed to submit job %d", i)
 		}
-	}
 
-	// Wait a bit for jobs to run
-	time.Sleep(200 * time.Millisecond)
+		wg.Wait()
 
-	// Max concurrent should not exceed worker count
-	if int(maxConcurrent.Load()) > maxWorkers {
-		t.Errorf("exceeded max concurrency: got %d, want <= %d", maxConcurrent.Load(), maxWorkers)
-	}
+		assert.Equal(t, maxWorkers, maxConcurrent, "the pool must saturate its workers, and never exceed them")
+	})
 }
 
 func TestPoolPanicRecovery(t *testing.T) {
-	pool := NewPool(2, 10)
-	defer func() {
-		if err := pool.Shutdown(5 * time.Second); err != nil {
-			t.Errorf("shutdown failed: %v", err)
+	synctest.Test(t, func(t *testing.T) {
+		pool := NewPool(2, 10)
+		defer func() {
+			assert.NoError(t, pool.Shutdown(5*time.Second), "shutdown failed")
+		}()
+
+		var completed atomic.Int32
+		done := make(chan struct{})
+
+		require.NoError(t, pool.Submit(context.Background(), func() error {
+			panic("test panic")
+		}), "failed to submit panic job")
+
+		err := pool.Submit(context.Background(), func() error {
+			completed.Add(1)
+			close(done)
+			return nil
+		})
+		require.NoError(t, err, "failed to submit job after panic")
+
+		// A worker lost to the panic never reaches this job; the guard costs no real time on the bubble's clock.
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("normal job did not complete after panic")
 		}
-	}()
 
-	var completed atomic.Int32
-
-	// Submit job that panics
-	if err := pool.Submit(context.Background(), func() error {
-		panic("test panic")
-	}); err != nil {
-		t.Errorf("failed to submit panic job: %v", err)
-	}
-
-	// Submit normal job after panic
-	err := pool.Submit(context.Background(), func() error {
-		completed.Add(1)
-		return nil
+		assert.Equal(t, int32(1), completed.Load())
 	})
-
-	if err != nil {
-		t.Errorf("failed to submit job after panic: %v", err)
-	}
-
-	// Wait for job completion
-	time.Sleep(100 * time.Millisecond)
-
-	if completed.Load() != 1 {
-		t.Error("normal job did not complete after panic")
-	}
 }
 
 func TestPoolShutdown(t *testing.T) {
-	pool := NewPool(2, 10)
+	synctest.Test(t, func(t *testing.T) {
+		pool := NewPool(2, 10)
 
-	var completed atomic.Int32
+		var completed atomic.Int32
 
-	// Submit several jobs
-	for range 5 {
-		if err := pool.Submit(context.Background(), func() error {
-			time.Sleep(50 * time.Millisecond)
-			completed.Add(1)
-			return nil
-		}); err != nil {
-			t.Errorf("failed to submit job: %v", err)
+		for i := range 5 {
+			err := pool.Submit(context.Background(), func() error {
+				time.Sleep(50 * time.Millisecond)
+				completed.Add(1)
+				return nil
+			})
+			require.NoErrorf(t, err, "failed to submit job %d", i)
 		}
-	}
 
-	// Shutdown with timeout
-	err := pool.Shutdown(1 * time.Second)
-	if err != nil {
-		t.Fatalf("shutdown failed: %v", err)
-	}
+		require.NoError(t, pool.Shutdown(1*time.Second), "shutdown failed")
 
-	// All jobs should have completed
-	if completed.Load() != 5 {
-		t.Errorf("not all jobs completed: got %d, want 5", completed.Load())
-	}
+		assert.Equal(t, int32(5), completed.Load(), "not all jobs completed")
 
-	// New submissions should fail
-	err = pool.Submit(context.Background(), func() error { return nil })
-	if err == nil {
-		t.Error("expected error when submitting to shut down pool")
-	}
+		assert.Error(t, pool.Submit(context.Background(), func() error { return nil }),
+			"expected error when submitting to shut down pool")
+	})
 }
 
-// Benchmark comparison
 func BenchmarkPoolSubmit(b *testing.B) {
 	pool := NewPool(10, 50000)
 	ctx := context.Background()

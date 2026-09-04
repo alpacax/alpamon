@@ -4,7 +4,10 @@ import (
 	"encoding/binary"
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // runHandle invokes ls.handleConnection in a goroutine and signals when it
@@ -29,27 +32,30 @@ func waitDone(t *testing.T, done <-chan struct{}, msg string) {
 }
 
 func TestHandleConnection_OversizedFrameClosesConnection(t *testing.T) {
-	server, client := net.Pipe()
-	defer func() { _ = client.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		server, client := net.Pipe()
+		defer func() { _ = client.Close() }()
 
-	ls := &LogServer{}
-	done := runHandle(ls, server)
+		ls := &LogServer{}
+		done := runHandle(ls, server)
 
-	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], MaxFrameSize+1)
-	if _, err := client.Write(hdr[:]); err != nil {
-		t.Fatalf("write header: %v", err)
-	}
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], MaxFrameSize+1)
+		_, err := client.Write(hdr[:])
+		require.NoError(t, err, "write header")
 
-	waitDone(t, done, "handleConnection did not return on oversized frame")
+		waitDone(t, done, "handleConnection did not return on oversized frame")
+	})
 }
 
 func TestHandleConnection_ExitsOnClientClose(t *testing.T) {
-	server, client := net.Pipe()
+	synctest.Test(t, func(t *testing.T) {
+		server, client := net.Pipe()
 
-	ls := &LogServer{}
-	done := runHandle(ls, server)
+		ls := &LogServer{}
+		done := runHandle(ls, server)
 
-	_ = client.Close()
-	waitDone(t, done, "handleConnection did not return after client close")
+		_ = client.Close()
+		waitDone(t, done, "handleConnection did not return after client close")
+	})
 }

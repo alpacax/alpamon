@@ -32,6 +32,17 @@ const unregisterURL = "/api/servers/servers/-/unregister/"
 // of "fixing" this to 10*time.Second, which would balloon the deadline by ~1e9.
 const unregisterTimeoutSeconds = 10
 
+// delayedActionDelay is how long restart, quit, reboot, shutdown and the
+// post-self-update restart wait before acting, so the response reaches the
+// console first. Pool.Shutdown cannot interrupt a job sleeping this out, so any
+// drain budget must outlast it.
+const delayedActionDelay = 1 * time.Second
+
+// Fails the build ("constant -N overflows uint") when delayedActionDelay stops
+// matching the "1 second" the four messages below spell out. Blank so the unused
+// linter reads it as the compile-time assertion it is.
+const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
+
 // SystemHandler handles system-level commands like restart, reboot, shutdown, upgrade
 type SystemHandler struct {
 	*common.BaseHandler
@@ -509,7 +520,7 @@ func (h *SystemHandler) selfUpdate(ctx context.Context, latestVersion string) (i
 		return 1, fmt.Sprintf("Self-update failed: %v", err), err
 	}
 
-	if err := h.scheduleDelayedAction(1*time.Second, func(_ context.Context) {
+	if err := h.scheduleDelayedAction(delayedActionDelay, func(_ context.Context) {
 		h.wsClient.Restart()
 	}); err != nil {
 		// The update landed but no restart will fire, so drop the latch SelfUpdate
@@ -559,7 +570,7 @@ func (h *SystemHandler) handleRestart(args *common.CommandArgs) (int, string, er
 		return 0, "Collector will be restarted.", nil
 	}
 
-	if err := h.scheduleDelayedAction(1*time.Second, func(_ context.Context) {
+	if err := h.scheduleDelayedAction(delayedActionDelay, func(_ context.Context) {
 		h.wsClient.Restart()
 	}); err != nil {
 		log.Error().Err(err).Msg("Failed to submit restart task to pool")
@@ -570,7 +581,7 @@ func (h *SystemHandler) handleRestart(args *common.CommandArgs) (int, string, er
 // handleQuit handles the quit command.
 // See scheduleDelayedAction for the fire-and-forget pattern.
 func (h *SystemHandler) handleQuit() (int, string, error) {
-	if err := h.scheduleDelayedAction(1*time.Second, func(_ context.Context) {
+	if err := h.scheduleDelayedAction(delayedActionDelay, func(_ context.Context) {
 		h.wsClient.ShutDown()
 	}); err != nil {
 		log.Error().Err(err).Msg("Failed to submit quit task to pool")
@@ -710,7 +721,7 @@ func (h *SystemHandler) executeUninstall() {
 func (h *SystemHandler) handleReboot() (int, string, error) {
 	log.Info().Msg("Reboot request received.")
 
-	if err := h.scheduleDelayedAction(1*time.Second, func(ctx context.Context) {
+	if err := h.scheduleDelayedAction(delayedActionDelay, func(ctx context.Context) {
 		_, _, _ = h.Executor.RunAsUser(ctx, "root", "reboot")
 	}); err != nil {
 		log.Error().Err(err).Msg("Failed to submit reboot task to pool")
@@ -723,7 +734,7 @@ func (h *SystemHandler) handleReboot() (int, string, error) {
 func (h *SystemHandler) handleShutdown() (int, string, error) {
 	log.Info().Msg("Shutdown request received.")
 
-	if err := h.scheduleDelayedAction(1*time.Second, func(ctx context.Context) {
+	if err := h.scheduleDelayedAction(delayedActionDelay, func(ctx context.Context) {
 		_, _, _ = h.Executor.RunAsUser(ctx, "root", "shutdown", "now")
 	}); err != nil {
 		log.Error().Err(err).Msg("Failed to submit shutdown task to pool")
