@@ -344,7 +344,7 @@ func (m *CodeServerManager) doStart() error {
 	m.mu.Unlock()
 
 	// Setup user data directory with settings (no lock needed)
-	userDataDir, err := setupUserDataDir(m.homeDir, m.username, m.groupname)
+	userDataDir, err := setupUserDataDir(m.ctx, m.homeDir, m.username, m.groupname)
 	if err != nil {
 		return fmt.Errorf("failed to setup user data dir: %w", err)
 	}
@@ -624,7 +624,7 @@ func validateUserDataDirName(name string) error {
 
 // setupUserDataDir creates the user-data-dir with config.yaml and settings.json for code-server.
 // If running as root on Linux, ownership of created files is changed to the specified user.
-func setupUserDataDir(homeDir, username, groupname string) (string, error) {
+func setupUserDataDir(ctx context.Context, homeDir, username, groupname string) (string, error) {
 	cfg := GetCodeServerConfig()
 
 	if err := validateUserDataDirName(cfg.UserDataDirName); err != nil {
@@ -639,13 +639,13 @@ func setupUserDataDir(homeDir, username, groupname string) (string, error) {
 
 	// Create the directories with config.yaml (code-server daemon settings)
 	// and User/settings.json (VS Code editor settings).
-	if err := setupUserDataFiles(homeDir, cfg.UserDataDirName, []byte(cfg.ToConfigYAML()), settingsData); err != nil {
+	if err := setupUserDataFiles(ctx, homeDir, cfg.UserDataDirName, []byte(cfg.ToConfigYAML()), settingsData); err != nil {
 		return "", fmt.Errorf("failed to set up user data dir: %w", err)
 	}
 
 	// Change ownership if running as root (so demoted user can modify their config)
 	if os.Getuid() == 0 && runtime.GOOS != "darwin" {
-		if err := chownUserDataDir(userDataDir, username, groupname); err != nil {
+		if err := chownUserDataDir(ctx, userDataDir, username, groupname); err != nil {
 			log.Warn().Err(err).Msg("Failed to change ownership of user data dir.")
 		}
 	}
@@ -655,7 +655,7 @@ func setupUserDataDir(homeDir, username, groupname string) (string, error) {
 }
 
 // chownUserDataDir changes ownership of the user data directory and its contents.
-func chownUserDataDir(userDataDir, username, groupname string) error {
+func chownUserDataDir(ctx context.Context, userDataDir, username, groupname string) error {
 	usr, err := user.Lookup(username)
 	if err != nil {
 		return fmt.Errorf("user %s not found: %w", username, err)
@@ -681,5 +681,5 @@ func chownUserDataDir(userDataDir, username, groupname string) error {
 		return fmt.Errorf("invalid gid: %w", err)
 	}
 
-	return chownTreeNoFollow(userDataDir, uid, gid)
+	return chownTreeNoFollow(ctx, userDataDir, uid, gid)
 }

@@ -4,7 +4,9 @@ package runner
 
 import (
 	"cmp"
+	"context"
 	"errors"
+	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -38,6 +40,10 @@ const homeDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
 // O_RDONLY on a FIFO would wait for a writer; O_NOFOLLOW makes a symlink ELOOP.
 const entryFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
 
+// Reading a user-controlled directory whole would materialize millions of
+// strings in the root agent and put the first cancellation check after all of it.
+const readdirBatch = 512
+
 // The walk holds one directory fd per level, and the tree below the user data
 // dir is whatever the user puts there. alpamon.service sets no LimitNOFILE, so
 // the systemd default applies to the whole agent: a deep enough chain would
@@ -58,7 +64,7 @@ func tempPrefix(name string) string { return "." + name + "." }
 
 // setupUserDataFiles creates dirName/User under homeDir and writes config.yaml
 // and User/settings.json, refusing to traverse or write through symlinks.
-func setupUserDataFiles(homeDir, dirName string, configData, settingsData []byte) error {
+func setupUserDataFiles(ctx context.Context, homeDir, dirName string, configData, settingsData []byte) error {
 	home, err := openDir(homeDir, homeDirFlags)
 	if err != nil {
 		return err
@@ -77,8 +83,8 @@ func setupUserDataFiles(homeDir, dirName string, configData, settingsData []byte
 	}
 	defer func() { _ = userDir.Close() }()
 
-	sweepStaleTemps(dataDir, userDataConfigFile)
-	sweepStaleTemps(userDir, userDataSettingsFile)
+	sweepStaleTemps(ctx, dataDir, userDataConfigFile)
+	sweepStaleTemps(ctx, userDir, userDataSettingsFile)
 
 	if err := writeFileAt(dataDir, userDataConfigFile, configData); err != nil {
 		return err
@@ -86,36 +92,61 @@ func setupUserDataFiles(homeDir, dirName string, configData, settingsData []byte
 	return writeFileAt(userDir, userDataSettingsFile, settingsData)
 }
 
+// eachName calls fn for every entry in dir, a batch at a time, and stops as soon
+// as ctx is done: closing the editor session has to end a walk over a directory
+// the user made as wide as they liked.
+func eachName(ctx context.Context, dir *os.File, fn func(name string) error) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		names, err := dir.Readdirnames(readdirBatch)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := fn(name); err != nil {
+				return err
+			}
+		}
+	}
+}
+
 // chownTreeNoFollow re-owns the tree under root, holding every entry open before
 // acting on it. What it cannot open that way—symlinks, sockets—it leaves alone
 // rather than reaching by name.
-func chownTreeNoFollow(root string, uid, gid int) error {
+func chownTreeNoFollow(ctx context.Context, root string, uid, gid int) error {
 	dir, err := openDir(root, dirFlags)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = dir.Close() }()
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := dir.Chown(uid, gid); err != nil {
 		return err
 	}
-	return chownChildren(dir, uid, gid, maxChownDepth)
+	return chownChildren(ctx, dir, uid, gid, maxChownDepth)
 }
 
-func chownChildren(dir *os.File, uid, gid, depth int) error {
-	names, err := dir.Readdirnames(-1)
-	if err != nil {
-		return err
-	}
+func chownChildren(ctx context.Context, dir *os.File, uid, gid, depth int) error {
 	dirfd := int(dir.Fd())
-	for _, name := range names {
+	return eachName(ctx, dir, func(name string) error {
 		path := filepath.Join(dir.Name(), name)
 		// An open that fails skips the entry, not the walk: ELOOP is a symlink,
 		// ENXIO a socket, ENOENT one a live code-server just removed, and none
 		// is worth leaving the settings.json elsewhere in the tree root-owned.
 		fd, err := unix.Openat(dirfd, name, entryFlags, 0)
 		if err != nil {
-			continue
+			return nil
 		}
 		var st unix.Stat_t
 		if err := unix.Fstat(fd, &st); err != nil {
@@ -128,7 +159,7 @@ func chownChildren(dir *os.File, uid, gid, depth int) error {
 		// name in ".", so the count means this only for the other types.
 		if !isDir && st.Nlink > 1 {
 			_ = unix.Close(fd)
-			continue
+			return nil
 		}
 		if err := unix.Fchown(fd, uid, gid); err != nil {
 			_ = unix.Close(fd)
@@ -142,16 +173,13 @@ func chownChildren(dir *os.File, uid, gid, depth int) error {
 				log.Warn().Msgf("Not descending past %d levels at %s; ownership below it is left as it is.", maxChownDepth, path)
 			}
 			_ = unix.Close(fd)
-			continue
+			return nil
 		}
 		child := os.NewFile(uintptr(fd), path)
-		err = chownChildren(child, uid, gid, depth-1)
+		err = chownChildren(ctx, child, uid, gid, depth-1)
 		_ = child.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+		return err
+	})
 }
 
 // openDir opens path as a directory fd. Under dirFlags the final component must
@@ -182,32 +210,30 @@ func mkdirOpenAt(parent *os.File, name string) (*os.File, error) {
 // dying before its rename. Nothing else collects them, and the directory
 // belongs to the user, so they would sit there for the life of the account.
 // A failure here is not worth refusing to start the editor over.
-func sweepStaleTemps(parent *os.File, name string) {
-	names, err := parent.Readdirnames(-1)
-	if err != nil {
-		log.Debug().Err(err).Msgf("Failed to list %s while sweeping temp files.", parent.Name())
-		return
-	}
-
+func sweepStaleTemps(ctx context.Context, parent *os.File, name string) {
 	dirfd := int(parent.Fd())
 	prefix, cutoff := tempPrefix(name), time.Now().Add(-staleTempAge)
-	for _, entry := range names {
+	err := eachName(ctx, parent, func(entry string) error {
 		if !strings.HasPrefix(entry, prefix) || !strings.HasSuffix(entry, tempSuffix) {
-			continue
+			return nil
 		}
 		// Through an fd, so the age that decides the unlink is read off the entry
 		// the name resolved to and not off whatever replaced it since.
 		fd, err := unix.Openat(dirfd, entry, entryFlags, 0)
 		if err != nil {
-			continue
+			return nil
 		}
 		f := os.NewFile(uintptr(fd), entry)
 		info, err := f.Stat()
 		_ = f.Close()
 		if err != nil || !info.Mode().IsRegular() || info.ModTime().After(cutoff) {
-			continue
+			return nil
 		}
 		_ = unix.Unlinkat(dirfd, entry, 0)
+		return nil
+	})
+	if err != nil {
+		log.Debug().Err(err).Msgf("Stopped sweeping temp files under %s.", parent.Name())
 	}
 }
 

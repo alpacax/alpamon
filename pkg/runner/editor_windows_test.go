@@ -13,9 +13,9 @@ import (
 // a junction-safe implementation goes red here rather than quietly writing
 // through whatever the path resolves to.
 func TestUserDataDirIsUnsupportedOnWindows(t *testing.T) {
-	assert.ErrorIs(t, setupUserDataFiles(t.TempDir(), "d", nil, nil), errUserDataDirUnsupported)
-	assert.ErrorIs(t, chownTreeNoFollow(t.TempDir(), 0, 0), errUserDataDirUnsupported)
+	assert.ErrorIs(t, setupUserDataFiles(t.Context(), t.TempDir(), "d", nil, nil), errUserDataDirUnsupported)
+	assert.ErrorIs(t, chownTreeNoFollow(t.Context(), t.TempDir(), 0, 0), errUserDataDirUnsupported)
 
-	_, err := setupUserDataDir(t.TempDir(), "", "")
+	_, err := setupUserDataDir(t.Context(), t.TempDir(), "", "")
 	assert.ErrorIs(t, err, errUserDataDirUnsupported)
 }

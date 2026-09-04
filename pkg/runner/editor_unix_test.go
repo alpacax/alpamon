@@ -251,7 +251,7 @@ func TestSetupUserDataDirRefusesSymlinkedFiles(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0755))
 			require.NoError(t, os.Symlink(target, link))
 
-			_, err := setupUserDataDir(homeDir, "", "")
+			_, err := setupUserDataDir(t.Context(), homeDir, "", "")
 			assert.Error(t, err)
 
 			data, err := os.ReadFile(target)
@@ -272,7 +272,7 @@ func TestSetupUserDataDirRefusesSymlinkedDirs(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0755))
 			require.NoError(t, os.Symlink(target, link))
 
-			_, err := setupUserDataDir(homeDir, "", "")
+			_, err := setupUserDataDir(t.Context(), homeDir, "", "")
 			assert.Error(t, err)
 
 			entries, err := os.ReadDir(target)
@@ -290,7 +290,7 @@ func TestSetupUserDataDirFollowsASymlinkedHome(t *testing.T) {
 	homeDir := filepath.Join(t.TempDir(), "home")
 	require.NoError(t, os.Symlink(target, homeDir))
 
-	userDataDir, err := setupUserDataDir(homeDir, "", "")
+	userDataDir, err := setupUserDataDir(t.Context(), homeDir, "", "")
 	require.NoError(t, err)
 
 	cfg := GetCodeServerConfig()
@@ -324,7 +324,7 @@ func TestChownUserDataDirDoesNotFollowSymlinks(t *testing.T) {
 	username, groupname := movableOwnership(t, ordinary)
 	beforeOrdinary := fileOwner(t, ordinary)
 
-	require.NoError(t, chownUserDataDir(userDataDir, username, groupname))
+	require.NoError(t, chownUserDataDir(t.Context(), userDataDir, username, groupname))
 
 	assert.Equal(t, beforeTarget, fileOwner(t, target), "a symlink target must keep its owner")
 	assert.Equal(t, beforeLink, fileOwner(t, link), "the link itself is not the walk's to re-own either")
@@ -492,7 +492,7 @@ func TestSetupUserDataDir(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Call setupUserDataDir (empty username/groupname since we're not running as root in tests)
-	userDataDir, err := setupUserDataDir(tempDir, "", "")
+	userDataDir, err := setupUserDataDir(t.Context(), tempDir, "", "")
 	assert.NoError(t, err, "setupUserDataDir should not error")
 	assert.NotEmpty(t, userDataDir, "userDataDir should not be empty")
 
@@ -540,10 +540,10 @@ func TestSetupUserDataDirIdempotent(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Call setupUserDataDir twice
-	userDataDir1, err := setupUserDataDir(tempDir, "", "")
+	userDataDir1, err := setupUserDataDir(t.Context(), tempDir, "", "")
 	assert.NoError(t, err)
 
-	userDataDir2, err := setupUserDataDir(tempDir, "", "")
+	userDataDir2, err := setupUserDataDir(t.Context(), tempDir, "", "")
 	assert.NoError(t, err)
 
 	// Both calls should return the same path
@@ -580,7 +580,7 @@ func TestChownUserDataDirSkipsHardLinkedFiles(t *testing.T) {
 	beforeOutside := fileOwner(t, outside)
 	beforeOrdinary := fileOwner(t, ordinary)
 
-	require.NoError(t, chownUserDataDir(userDataDir, username, groupname))
+	require.NoError(t, chownUserDataDir(t.Context(), userDataDir, username, groupname))
 
 	assert.Equal(t, beforeOutside, fileOwner(t, outside),
 		"an inode that answers to another name outside the tree must keep its owner")
@@ -607,12 +607,56 @@ func TestChownUserDataDirSkipsHardLinkedNonRegularFiles(t *testing.T) {
 	beforeOutside := fileOwner(t, outside)
 	beforeOrdinary := fileOwner(t, ordinary)
 
-	require.NoError(t, chownUserDataDir(userDataDir, username, groupname))
+	require.NoError(t, chownUserDataDir(t.Context(), userDataDir, username, groupname))
 
 	assert.Equal(t, beforeOutside, fileOwner(t, outside),
 		"a non-regular inode that answers to another name outside the tree must keep its owner")
 	assert.NotEqual(t, beforeOrdinary, fileOwner(t, ordinary),
 		"the walk must still re-own the files this tree is the only name for")
+}
+
+// TestChownUserDataDirStopsOnACancelledContext pins the narrow half: a walk
+// handed a context that is already done re-owns nothing and says why. That the
+// walk also stops once it is under way is TestEachNameStopsMidDirectory.
+func TestChownUserDataDirStopsOnACancelledContext(t *testing.T) {
+	userDataDir := t.TempDir()
+	entry := filepath.Join(userDataDir, "f")
+	require.NoError(t, os.WriteFile(entry, nil, 0600))
+
+	username, groupname := movableOwnership(t, entry)
+	beforeDir, beforeEntry := fileOwner(t, userDataDir), fileOwner(t, entry)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	assert.ErrorIs(t, chownUserDataDir(ctx, userDataDir, username, groupname), context.Canceled)
+	assert.Equal(t, beforeDir, fileOwner(t, userDataDir), "the root of the tree is re-owned before any entry is")
+	assert.Equal(t, beforeEntry, fileOwner(t, entry), "a cancelled walk must re-own nothing at all")
+}
+
+// TestEachNameStopsMidDirectory: a cancel that registered only before the first
+// read would still let one closed session chown its way through a directory of
+// any width, leaving another such walk behind on every open and close.
+func TestEachNameStopsMidDirectory(t *testing.T) {
+	dir := t.TempDir()
+	for i := range readdirBatch + 1 {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, strconv.Itoa(i)), nil, 0600))
+	}
+
+	parent, err := openDir(dir, dirFlags)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parent.Close() })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	seen := 0
+	err = eachName(ctx, parent, func(string) error {
+		seen++
+		cancel()
+		return nil
+	})
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 1, seen, "the cancel must land before the next entry, not at the next batch")
 }
 
 // TestChownUserDataDirStopsDescendingAtTheLimit: the walk holds one directory fd
@@ -635,7 +679,7 @@ func TestChownUserDataDirStopsDescendingAtTheLimit(t *testing.T) {
 	beforeSibling := fileOwner(t, sibling)
 	beforeDeepest := fileOwner(t, deepest)
 
-	require.NoError(t, chownUserDataDir(root, username, groupname))
+	require.NoError(t, chownUserDataDir(t.Context(), root, username, groupname))
 
 	assert.NotEqual(t, beforeSibling, fileOwner(t, sibling),
 		"a subtree too deep to enter must not cost the files beside it their owner")
@@ -651,7 +695,7 @@ func TestChownUserDataDirStopsDescendingAtTheLimit(t *testing.T) {
 func TestSetupUserDataDirRefusesAMissingHome(t *testing.T) {
 	homeDir := filepath.Join(t.TempDir(), "absent")
 
-	_, err := setupUserDataDir(homeDir, "", "")
+	_, err := setupUserDataDir(t.Context(), homeDir, "", "")
 
 	assert.ErrorIs(t, err, os.ErrNotExist)
 	_, statErr := os.Stat(homeDir)
@@ -670,7 +714,7 @@ func TestSetupUserDataDirUnderConcurrentSessions(t *testing.T) {
 	for range sessions {
 		go func() {
 			<-start
-			_, err := setupUserDataDir(homeDir, "", "")
+			_, err := setupUserDataDir(t.Context(), homeDir, "", "")
 			errs <- err
 		}()
 	}
@@ -694,7 +738,7 @@ func TestSetupUserDataDirUnderConcurrentSessions(t *testing.T) {
 // another session nor an unrelated dot file is taken with it.
 func TestSetupUserDataDirSweepsStaleTempFiles(t *testing.T) {
 	homeDir := t.TempDir()
-	userDataDir, err := setupUserDataDir(homeDir, "", "")
+	userDataDir, err := setupUserDataDir(t.Context(), homeDir, "", "")
 	require.NoError(t, err)
 
 	aged := time.Now().Add(-2 * staleTempAge)
@@ -709,7 +753,7 @@ func TestSetupUserDataDirSweepsStaleTempFiles(t *testing.T) {
 	inFlight := filepath.Join(userDataDir, tempPrefix(userDataConfigFile)+"inflight"+tempSuffix)
 	require.NoError(t, os.WriteFile(inFlight, nil, 0600))
 
-	_, err = setupUserDataDir(homeDir, "", "")
+	_, err = setupUserDataDir(t.Context(), homeDir, "", "")
 	require.NoError(t, err)
 
 	_, err = os.Stat(abandoned)
@@ -725,7 +769,7 @@ func TestSetupUserDataDirSweepsStaleTempFiles(t *testing.T) {
 // the root agent on every editor start for that user.
 func TestSetupUserDataDirSurvivesAFifoNamedLikeATemp(t *testing.T) {
 	homeDir := t.TempDir()
-	userDataDir, err := setupUserDataDir(homeDir, "", "")
+	userDataDir, err := setupUserDataDir(t.Context(), homeDir, "", "")
 	require.NoError(t, err)
 
 	fifo := filepath.Join(userDataDir, tempPrefix(userDataConfigFile)+"fifo"+tempSuffix)
@@ -735,7 +779,7 @@ func TestSetupUserDataDirSurvivesAFifoNamedLikeATemp(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := setupUserDataDir(homeDir, "", "")
+		_, err := setupUserDataDir(t.Context(), homeDir, "", "")
 		done <- err
 	}()
 

@@ -2,7 +2,10 @@
 
 package runner
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
 
 // Editor tunnels are rejected on Windows before they reach this code
 // (editorTunnelSupported, pkg/executor/handlers/tunnel/tunnel.go), so neither
@@ -16,10 +19,10 @@ import "errors"
 
 var errUserDataDirUnsupported = errors.New("code-server user data dir is not implemented on Windows")
 
-func setupUserDataFiles(homeDir, dirName string, configData, settingsData []byte) error {
+func setupUserDataFiles(ctx context.Context, homeDir, dirName string, configData, settingsData []byte) error {
 	return errUserDataDirUnsupported
 }
 
-func chownTreeNoFollow(root string, uid, gid int) error {
+func chownTreeNoFollow(ctx context.Context, root string, uid, gid int) error {
 	return errUserDataDirUnsupported
 }
