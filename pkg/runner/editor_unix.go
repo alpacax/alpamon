@@ -52,6 +52,14 @@ const staleTempAge = time.Hour
 // from whatever else the user keeps in the directory.
 const tempSuffix = ".tmp"
 
+// code-server fills the user data dir on the user's behalf, and what lands
+// there is theirs alone: User/History holds snapshots of every file they edit
+// and User/globalStorage holds extension state. Nothing needs group or other.
+const (
+	userDataDirMode  = 0700
+	userDataFileMode = 0600
+)
+
 func tempPrefix(name string) string { return "." + name + "." }
 
 // setupUserDataFiles creates dirName/User under homeDir and writes config.yaml
@@ -188,12 +196,18 @@ func openDir(path string, flags int) (*os.File, error) {
 // regular file squatting on the name fails the open (ELOOP or ENOTDIR).
 func mkdirOpenAt(parent *os.File, name string) (*os.File, error) {
 	path := filepath.Join(parent.Name(), name)
-	if err := unix.Mkdirat(int(parent.Fd()), name, 0755); err != nil && !errors.Is(err, unix.EEXIST) {
+	if err := unix.Mkdirat(int(parent.Fd()), name, userDataDirMode); err != nil && !errors.Is(err, unix.EEXIST) {
 		return nil, &os.PathError{Op: "mkdir", Path: path, Err: err}
 	}
 	fd, err := unix.Openat(int(parent.Fd()), name, dirFlags, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	// Also for a directory that was already there: mkdir under a umask, or an
+	// earlier alpamon that made it 0755, would otherwise leave it open.
+	if err := unix.Fchmod(fd, userDataDirMode); err != nil {
+		_ = unix.Close(fd)
+		return nil, &os.PathError{Op: "chmod", Path: path, Err: err}
 	}
 	return os.NewFile(uintptr(fd), path), nil
 }
@@ -237,7 +251,7 @@ func writeFileAt(parent *os.File, name string, data []byte) error {
 
 	// renameat replaces a symlink at name rather than following it, so this only
 	// turns that silence into an error; nothing below depends on it still holding.
-	mode := uint32(0644)
+	mode := uint32(userDataFileMode)
 	var st unix.Stat_t
 	switch err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); {
 	case err == unix.ENOENT:

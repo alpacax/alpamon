@@ -733,6 +733,33 @@ func TestSetupUserDataDirUnderConcurrentSessions(t *testing.T) {
 		"no session may leave the settings file behind half-written")
 }
 
+// TestSetupUserDataDirKeepsTheTreeToItsUser: code-server fills this directory on
+// the user's behalf, and User/History ends up holding a snapshot of every file
+// they open. Through a 0755 directory any other local account reads all of it.
+func TestSetupUserDataDirKeepsTheTreeToItsUser(t *testing.T) {
+	homeDir := t.TempDir()
+	cfg := GetCodeServerConfig()
+
+	// An install from before this ran left the tree group- and world-readable,
+	// so creating it is not the only case that has to come out right.
+	stale := filepath.Join(homeDir, cfg.UserDataDirName)
+	require.NoError(t, os.MkdirAll(filepath.Join(stale, userDataUserDir), 0755))
+
+	userDataDir, err := setupUserDataDir(t.Context(), homeDir, "", "")
+	require.NoError(t, err)
+
+	for path, want := range map[string]os.FileMode{
+		userDataDir: userDataDirMode,
+		filepath.Join(userDataDir, userDataUserDir):                       userDataDirMode,
+		filepath.Join(userDataDir, userDataConfigFile):                    userDataFileMode,
+		filepath.Join(userDataDir, userDataUserDir, userDataSettingsFile): userDataFileMode,
+	} {
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, want, info.Mode().Perm(), path)
+	}
+}
+
 // TestSetupUserDataDirSweepsStaleTempFiles: a process killed between the temp
 // create and the rename leaves the temp behind, and nothing else collects it.
 // The sweep is bounded by age and by name so that neither a write in flight in
