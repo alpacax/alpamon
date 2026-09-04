@@ -615,22 +615,32 @@ func TestChownUserDataDirSkipsHardLinkedNonRegularFiles(t *testing.T) {
 		"the walk must still re-own the files this tree is the only name for")
 }
 
-// TestChownUserDataDirRefusesADeepTree: the walk holds one directory fd per
-// level, and the agent shares its descriptors with the WebSocket connection
-// and the FTP sessions, so a tree the user nested deep enough would take those
-// down with it rather than merely failing the chown.
-func TestChownUserDataDirRefusesADeepTree(t *testing.T) {
+// TestChownUserDataDirStopsDescendingAtTheLimit: the walk holds one directory fd
+// per level, which the agent shares with the WebSocket connection and the FTP
+// sessions. It stops rather than fails, since readdir order decides whether the
+// deep subtree comes before or after the settings.json that has to change hands.
+func TestChownUserDataDirStopsDescendingAtTheLimit(t *testing.T) {
 	root := t.TempDir()
-	deep := root
+
+	deepest := filepath.Join(root, "deep")
 	for range maxChownDepth + 1 {
-		deep = filepath.Join(deep, "d")
+		deepest = filepath.Join(deepest, "d")
 	}
-	require.NoError(t, os.MkdirAll(deep, 0755))
+	require.NoError(t, os.MkdirAll(deepest, 0755))
 
-	current, err := user.Current()
-	require.NoError(t, err)
+	sibling := filepath.Join(root, userDataSettingsFile)
+	require.NoError(t, os.WriteFile(sibling, nil, 0600))
 
-	assert.ErrorContains(t, chownUserDataDir(root, current.Username, ""), "nests deeper than")
+	username, groupname := movableOwnership(t, sibling)
+	beforeSibling := fileOwner(t, sibling)
+	beforeDeepest := fileOwner(t, deepest)
+
+	require.NoError(t, chownUserDataDir(root, username, groupname))
+
+	assert.NotEqual(t, beforeSibling, fileOwner(t, sibling),
+		"a subtree too deep to enter must not cost the files beside it their owner")
+	assert.Equal(t, beforeDeepest, fileOwner(t, deepest),
+		"the walk must not descend past the descriptor budget")
 }
 
 // TestSetupUserDataDirRefusesAMissingHome pins the behavior for an account

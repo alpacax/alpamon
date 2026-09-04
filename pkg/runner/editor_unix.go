@@ -5,7 +5,6 @@ package runner
 import (
 	"cmp"
 	"errors"
-	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -104,10 +103,6 @@ func chownTreeNoFollow(root string, uid, gid int) error {
 }
 
 func chownChildren(dir *os.File, uid, gid, depth int) error {
-	if depth <= 0 {
-		return fmt.Errorf("user data dir nests deeper than %d levels at %s", maxChownDepth, dir.Name())
-	}
-
 	names, err := dir.Readdirnames(-1)
 	if err != nil {
 		return err
@@ -139,7 +134,13 @@ func chownChildren(dir *os.File, uid, gid, depth int) error {
 			_ = unix.Close(fd)
 			return &os.PathError{Op: "chown", Path: path, Err: err}
 		}
-		if !isDir {
+		// Skip the subtree, not the walk: the files this run wrote have to change
+		// hands whatever the user parked beside them, and readdir order decides
+		// which the walk meets first.
+		if !isDir || depth <= 0 {
+			if isDir {
+				log.Warn().Msgf("Not descending past %d levels at %s; ownership below it is left as it is.", maxChownDepth, path)
+			}
 			_ = unix.Close(fd)
 			continue
 		}
