@@ -673,3 +673,92 @@ func TestDenyPendingRequests_StalledPeerDoesNotDelayTheRest(t *testing.T) {
 		t.Fatal("the stalled request never signaled once its write went through")
 	}
 }
+
+// TestHandleSudoApprovalRequest_RetryFailureWaitsForTakenResponse covers the
+// widest of the three finalizeRequest call sites: a session teardown can take the
+// request across the whole retry span, so the retry-failure path reaches its
+// finalize with nothing left to take and must still not close on the teardown's
+// in-flight write.
+func TestHandleSudoApprovalRequest_RetryFailureWaitsForTakenResponse(t *testing.T) {
+	// 5xx keeps the waiter inside its retry span, where the teardown can take the
+	// request out from under it.
+	var once sync.Once
+	posted := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		once.Do(func() { close(posted) })
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	am := newTestAuthManager()
+	ctx, cancel := context.WithCancel(context.Background())
+	am.ctx = ctx
+	am.session = &scheduler.Session{BaseURL: srv.URL, Client: http.DefaultClient}
+	am.pidToSessionMap[4200] = &SessionInfo{
+		Kind:      TrackerKindWebsh,
+		SessionID: "sess-retry-taken",
+		PID:       4200,
+		Requests:  make(map[string]*SudoRequest),
+	}
+
+	data, err := json.Marshal(SudoApprovalRequest{
+		RequestID: "req-retry-taken",
+		Type:      "sudo_approval",
+		Username:  "alice",
+		PID:       424242,
+		PPID:      4200,
+		Command:   "sudo reboot",
+	})
+	require.NoError(t, err)
+
+	client, server := net.Pipe()
+	tracked := &closeTrackingConn{Conn: server}
+	conn := &blockingWriteConn{
+		Conn:    tracked,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	go am.handleSudoRequest(conn)
+	_, err = client.Write(data)
+	require.NoError(t, err)
+
+	type readResult struct {
+		resp SudoApprovalResponse
+		err  error
+	}
+	results := make(chan readResult, 1)
+	go func() {
+		_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var resp SudoApprovalResponse
+		err := json.NewDecoder(client).Decode(&resp)
+		results <- readResult{resp: resp, err: err}
+	}()
+
+	select {
+	case <-posted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the server, so it was never registered")
+	}
+
+	go am.RemovePIDSessionMapping(4200)
+
+	select {
+	case <-conn.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the teardown's response write never started")
+	}
+
+	cancel() // Ends the retry span, so the waiter reaches its finalize.
+
+	// A cheap check that fails on this line rather than on the decode below. It can
+	// pass without entering the window—a waiter that has not reached its close yet
+	// looks the same. What carries this test is the decode: the response arriving
+	// whole is the property, and that assertion is unconditional.
+	time.Sleep(100 * time.Millisecond)
+	assert.False(t, tracked.isClosed(), "the waiter closed a connection whose response was still going out")
+	close(conn.release)
+
+	got := <-results
+	require.NoError(t, got.err, "the teardown's response never reached the PAM client")
+	assert.Equal(t, "Session ended", got.resp.Reason, "response: %+v", got.resp)
+}
