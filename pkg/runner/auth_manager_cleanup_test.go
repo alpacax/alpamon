@@ -688,6 +688,48 @@ func TestDenyPendingRequests_StalledPeerDoesNotDelayTheRest(t *testing.T) {
 	}
 }
 
+// panicOnWriteConn blows up where a denied response is written, the one place in
+// denyPendingRequests' goroutine that touches a peer it does not control.
+type panicOnWriteConn struct{ net.Conn }
+
+func (panicOnWriteConn) Write([]byte) (int, error) { panic("write exploded") }
+
+// TestDenyPendingRequests_SignalsWhenAnsweringPanics pins the ordering the
+// goroutine's recover would otherwise break: the recover keeps a panicking write
+// from taking the agent down, but a signal placed after the work is skipped along
+// with it, and the waiter then parks the full authSocketHandoverTimeout before
+// closing. Failing open after six seconds is worse than failing open at once, so
+// the bound this asserts within is deliberately well short of it.
+func TestDenyPendingRequests_SignalsWhenAnsweringPanics(t *testing.T) {
+	am := newTestAuthManager()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	done := registerCompletionChannel(am, "req-panic")
+	pending := []*SudoRequest{
+		{Connection: panicOnWriteConn{server}, Request: SudoApprovalRequest{RequestID: "req-panic", Username: "alice"}},
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		am.denyPendingRequests(pending, "Session ended")
+		close(returned)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a panicking write left the waiter unsignaled, so it holds the connection until its handover bound expires")
+	}
+
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("denyPendingRequests never returned after the panic")
+	}
+}
+
 // TestHandleSudoApprovalRequest_RetryFailureWaitsForTakenResponse covers the
 // widest of the three finalizeRequest call sites: a session teardown can take the
 // request across the whole retry span, so the retry-failure path reaches its
