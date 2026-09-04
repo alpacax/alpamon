@@ -757,11 +757,14 @@ func TestSetupUserDataDirKeepsTheTreeToItsUser(t *testing.T) {
 	userDataDir, err := setupUserDataDir(t.Context(), homeDir, "", "")
 	require.NoError(t, err)
 
+	// Literals, not userDataDirMode and userDataFileMode: an expectation read
+	// from the constants the implementation reads moves with them, and widening
+	// them back to 0755 and 0644 would keep this green.
 	for path, want := range map[string]os.FileMode{
-		userDataDir: userDataDirMode,
-		filepath.Join(userDataDir, userDataUserDir):                       userDataDirMode,
-		filepath.Join(userDataDir, userDataConfigFile):                    userDataFileMode,
-		filepath.Join(userDataDir, userDataUserDir, userDataSettingsFile): userDataFileMode,
+		userDataDir: 0700,
+		filepath.Join(userDataDir, userDataUserDir):                       0700,
+		filepath.Join(userDataDir, userDataConfigFile):                    0600,
+		filepath.Join(userDataDir, userDataUserDir, userDataSettingsFile): 0600,
 	} {
 		info, err := os.Stat(path)
 		require.NoError(t, err)
