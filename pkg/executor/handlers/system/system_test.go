@@ -25,10 +25,11 @@ import (
 // Shutdown cannot interrupt a sleeping job. Neither span costs real time in a bubble.
 const poolDrainWait = 5 * time.Second
 
-// drainBudgetOutlastsDelay fails the build ("constant -1 overflows uint") when the
-// drain stops outlasting the delay. A runtime check would fire with the pool already
-// running, and the bubble would bury it under the resulting deadlock.
-const drainBudgetOutlastsDelay = uint(poolDrainWait - delayedActionDelay - 1)
+// Fails the build ("constant -1 overflows uint") when the drain stops outlasting the
+// delay. A runtime check would fire with the pool already running, and the bubble
+// would bury it under the resulting deadlock. Blank so the unused linter reads it as
+// the compile-time assertion it is.
+const _ = uint(poolDrainWait - delayedActionDelay - 1)
 
 // drainThen waits the scheduled job out before checking it landed, because a
 // fire-and-forget action has not run when the handler returns. Shutdown closes the

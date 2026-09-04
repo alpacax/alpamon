@@ -38,9 +38,10 @@ const unregisterTimeoutSeconds = 10
 // drain budget must outlast it.
 const delayedActionDelay = 1 * time.Second
 
-// noticeSpellsOutDelay fails the build ("constant -N overflows uint") when the
-// constant stops matching the "1 second" the four messages below spell out.
-const noticeSpellsOutDelay = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
+// Fails the build ("constant -N overflows uint") when delayedActionDelay stops
+// matching the "1 second" the four messages below spell out. Blank so the unused
+// linter reads it as the compile-time assertion it is.
+const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
 
 // SystemHandler handles system-level commands like restart, reboot, shutdown, upgrade
 type SystemHandler struct {
