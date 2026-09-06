@@ -313,23 +313,51 @@ func (pc *PtyClient) writeToWebsocket(ctx context.Context, cancel context.Cancel
 		case <-ctx.Done():
 			return
 		case msg := <-pc.ptyToWs:
-			conn := pc.getConn()
-			err := conn.WriteMessage(websocket.BinaryMessage, msg)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, sessionCloseCode) {
-					log.Debug().Msg("Websh channel closed by peer.")
-					cancel()
-					return
-				}
-
-				if !pc.waitForRecovery(ctx, conn, recoveryChan) {
-					return
-				}
+			if !pc.writeMsgWithRecovery(ctx, cancel, recoveryChan, msg) {
+				return
 			}
 		}
+	}
+}
+
+// writeMsgWithRecovery writes msg to the current connection and, after a
+// successful recovery, retries the same msg on the new connection instead of
+// falling through to the next channel read—otherwise the chunk whose write
+// failed is silently dropped. It keeps retrying across further recoveries
+// (the new connection can fail too) until msg is written or recovery reports
+// the session has ended. Returns false when the caller should stop.
+//
+// Retrying the same msg cannot produce a duplicate message at the peer, even
+// though the underlying net.Conn.Write behind WriteMessage can fail after
+// writing some or all of a frame's bytes: WriteMessage writes one complete
+// WebSocket frame, and a peer's WebSocket reader only ever hands a message up
+// to the terminal once it has read a complete, well-formed frame. An error
+// here means that frame did not fully reach the peer as written, so at worst
+// the peer's reader sees a truncated frame; that ends its Read with an error
+// and tears the connection down—the same failure this loop is already
+// reacting to—without ever surfacing a message. So the retry on the new
+// connection is the first complete delivery of msg, not a duplicate.
+func (pc *PtyClient) writeMsgWithRecovery(ctx context.Context, cancel context.CancelFunc, recoveryChan chan struct{}, msg []byte) bool {
+	for {
+		conn := pc.getConn()
+		err := conn.WriteMessage(websocket.BinaryMessage, msg)
+		if err == nil {
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, sessionCloseCode) {
+			log.Debug().Msg("Websh channel closed by peer.")
+			cancel()
+			return false
+		}
+
+		if !pc.waitForRecovery(ctx, conn, recoveryChan) {
+			return false
+		}
+		// Recovery succeeded: loop back and retry msg on the new connection
+		// before reading the next one off pc.ptyToWs.
 	}
 }
 
