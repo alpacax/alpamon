@@ -327,11 +327,16 @@ func (pc *PtyClient) writeToWebsocket(ctx context.Context, cancel context.Cancel
 // (the new connection can fail too) until msg is written or recovery reports
 // the session has ended. Returns false when the caller should stop.
 //
-// Retrying the same msg cannot double-send it: gorilla's WriteMessage
-// serializes the whole frame before issuing a single net.Conn.Write for it,
-// so for the message-sized writes done here an error means nothing reached
-// the peer—there is no partial-write case that would let a retry duplicate
-// bytes already on the wire.
+// Retrying the same msg cannot produce a duplicate message at the peer, even
+// though the underlying net.Conn.Write behind WriteMessage can fail after
+// writing some or all of a frame's bytes: WriteMessage writes one complete
+// WebSocket frame, and a peer's WebSocket reader only ever hands a message up
+// to the terminal once it has read a complete, well-formed frame. An error
+// here means that frame did not fully reach the peer as written, so at worst
+// the peer's reader sees a truncated frame; that ends its Read with an error
+// and tears the connection down—the same failure this loop is already
+// reacting to—without ever surfacing a message. So the retry on the new
+// connection is the first complete delivery of msg, not a duplicate.
 func (pc *PtyClient) writeMsgWithRecovery(ctx context.Context, cancel context.CancelFunc, recoveryChan chan struct{}, msg []byte) bool {
 	for {
 		conn := pc.getConn()

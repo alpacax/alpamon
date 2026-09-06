@@ -58,17 +58,9 @@ func TestPtyRecovery_ResendsFailedWriteAfterRecovery(t *testing.T) {
 
 	pc.ptyToWs <- []byte("chunk-B") // next chunk, must follow chunk-A, not replace it
 
-	deadline := time.After(5 * time.Second)
-	for {
-		if len(s.receivedMessages()) >= 2 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("did not observe both chunks on the recovered connection; got %d", len(s.receivedMessages()))
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
+	require.Eventually(t, func() bool {
+		return len(s.receivedMessages()) >= 2
+	}, 5*time.Second, 20*time.Millisecond, "did not observe both chunks on the recovered connection")
 
 	msgs := s.receivedMessages()
 	require.Len(t, msgs, 2, "chunk-A must be resent exactly once, not dropped or duplicated")
@@ -80,10 +72,13 @@ func TestPtyRecovery_ResendsFailedWriteAfterRecovery(t *testing.T) {
 // retry: when recovery itself cannot succeed, writeToWebsocket must still
 // exit rather than loop forever waiting to resend.
 func TestPtyRecovery_FailedRecoveryEndsWriteLoop(t *testing.T) {
-	// A recovery endpoint that hands back a URL failing validateWebSocketURL's
-	// host check makes recovery() fail permanently (retry.Permanent, no
-	// backoff retries), so the failure is deterministic and immediate instead
-	// of waiting out maxRecoveryTimeout.
+	// recovery() builds the reconnect URL by concatenating
+	// GlobalSettings.ServerURL with resp.websocket_url, so a relative
+	// websocket_url is what the real server sends. Returning one with an
+	// invalid percent-escape makes the concatenated URL fail url.Parse inside
+	// validateWebSocketURL—recovery() wraps that in retry.Permanent, so it
+	// fails deterministically on the first attempt instead of dialing
+	// anything or waiting out maxRecoveryTimeout's backoff retries.
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/pty", func(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +86,7 @@ func TestPtyRecovery_FailedRecoveryEndsWriteLoop(t *testing.T) {
 	})
 	mux.HandleFunc(reconnectPtyWebsocketURL, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"websocket_url": "http://unexpected-host.invalid/ws/pty"}`))
+		_, _ = w.Write([]byte(`{"websocket_url": "/ws/pty%zz"}`))
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
