@@ -122,6 +122,13 @@ jobs:
             runner: ubuntu-24.04-arm
 
     steps:
+      - name: Drop the retired bullseye-security source (Debian 11 only)
+        if: matrix.distro == 'debian-11'
+        run: |
+          # Debian 11 (bullseye) left LTS on 2026-08-31 and its security pool is being retired from the CDN while the index still lists the files, so drop the source before updating — the build only needs the main suite for git/curl/gcc/libc6-dev/ca-certificates.
+          sed -i '/bullseye-security/d' /etc/apt/sources.list 2>/dev/null || true
+          sed -i '/bullseye-security/d' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+
       - name: Install dependencies (Debian/Ubuntu)
         if: matrix.pkg_manager == 'apt-get'
         run: |
