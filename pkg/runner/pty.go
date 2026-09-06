@@ -52,7 +52,11 @@ type PtyClient struct {
 }
 
 const (
-	maxRecoveryTimeout       = 1 * time.Minute
+	// maxRecoveryTimeout bounds how long a single recovery attempt is allowed to keep
+	// retrying before the session gives up and ends the shell. Short network
+	// interruptions and upstream restarts commonly last longer than a minute, so the
+	// budget is generous enough to outlive them.
+	maxRecoveryTimeout       = 5 * time.Minute
 	reconnectPtyWebsocketURL = "/api/websh/pty-channels/"
 	bufferSize               = 8192
 
