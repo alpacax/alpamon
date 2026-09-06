@@ -313,23 +313,46 @@ func (pc *PtyClient) writeToWebsocket(ctx context.Context, cancel context.Cancel
 		case <-ctx.Done():
 			return
 		case msg := <-pc.ptyToWs:
-			conn := pc.getConn()
-			err := conn.WriteMessage(websocket.BinaryMessage, msg)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, sessionCloseCode) {
-					log.Debug().Msg("Websh channel closed by peer.")
-					cancel()
-					return
-				}
-
-				if !pc.waitForRecovery(ctx, conn, recoveryChan) {
-					return
-				}
+			if !pc.writeMsgWithRecovery(ctx, cancel, recoveryChan, msg) {
+				return
 			}
 		}
+	}
+}
+
+// writeMsgWithRecovery writes msg to the current connection and, after a
+// successful recovery, retries the same msg on the new connection instead of
+// falling through to the next channel read—otherwise the chunk whose write
+// failed is silently dropped. It keeps retrying across further recoveries
+// (the new connection can fail too) until msg is written or recovery reports
+// the session has ended. Returns false when the caller should stop.
+//
+// Retrying the same msg cannot double-send it: gorilla's WriteMessage
+// serializes the whole frame before issuing a single net.Conn.Write for it,
+// so for the message-sized writes done here an error means nothing reached
+// the peer—there is no partial-write case that would let a retry duplicate
+// bytes already on the wire.
+func (pc *PtyClient) writeMsgWithRecovery(ctx context.Context, cancel context.CancelFunc, recoveryChan chan struct{}, msg []byte) bool {
+	for {
+		conn := pc.getConn()
+		err := conn.WriteMessage(websocket.BinaryMessage, msg)
+		if err == nil {
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, sessionCloseCode) {
+			log.Debug().Msg("Websh channel closed by peer.")
+			cancel()
+			return false
+		}
+
+		if !pc.waitForRecovery(ctx, conn, recoveryChan) {
+			return false
+		}
+		// Recovery succeeded: loop back and retry msg on the new connection
+		// before reading the next one off pc.ptyToWs.
 	}
 }
 

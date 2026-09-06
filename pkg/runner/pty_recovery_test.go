@@ -27,6 +27,7 @@ type wshServer struct {
 	mu            sync.Mutex
 	conns         []*websocket.Conn
 	recoveryPosts atomic.Int32
+	received      [][]byte // binary messages read off every accepted conn, in receipt order
 }
 
 func newWshServer(t *testing.T) *wshServer {
@@ -43,6 +44,7 @@ func newWshServer(t *testing.T) *wshServer {
 		s.mu.Lock()
 		s.conns = append(s.conns, c)
 		s.mu.Unlock()
+		s.recordReads(c)
 	})
 	mux.HandleFunc(reconnectPtyWebsocketURL, func(w http.ResponseWriter, r *http.Request) {
 		s.recoveryPosts.Add(1)
@@ -62,6 +64,31 @@ func newWshServer(t *testing.T) *wshServer {
 
 func (s *wshServer) wsURL() string {
 	return strings.Replace(s.ts.URL, "http", "ws", 1) + "/ws/pty"
+}
+
+// recordReads appends every binary message read off c to s.received, in the
+// order it arrives, until the read side errors (peer close or killConn).
+func (s *wshServer) recordReads(c *websocket.Conn) {
+	go func() {
+		for {
+			_, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			s.mu.Lock()
+			s.received = append(s.received, append([]byte(nil), msg...))
+			s.mu.Unlock()
+		}
+	}()
+}
+
+// receivedMessages returns a snapshot of s.received.
+func (s *wshServer) receivedMessages() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][]byte, len(s.received))
+	copy(out, s.received)
+	return out
 }
 
 // killConn abruptly closes the n-th (0-based) server-side connection, simulating a network drop without a close handshake.
