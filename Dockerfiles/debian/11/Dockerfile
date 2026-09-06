@@ -18,9 +18,9 @@ RUN go build -o alpamon ./cmd/alpamon/main.go
 
 FROM debian:11
 
-# Debian 11 (bullseye) left LTS on 2026-08-31 and its security pool is being retired from the CDN while the index still lists the files, so drop the source before updating — this stage only needs ca-certificates from main.
-RUN (sed -i '/bullseye-security/d' /etc/apt/sources.list 2>/dev/null || true) && \
-    (sed -i '/bullseye-security/d' /etc/apt/sources.list.d/*.sources 2>/dev/null || true) && \
+# Debian 11 (bullseye) left LTS on 2026-08-31 and bullseye-security's CDN pool is being retired. Point it at snapshot.debian.org instead of dropping it, since a main-only source can conflict with packages the base image already carries at a security-updated version.
+RUN (sed -i 's|^deb .*bullseye-security.*|deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260901T000000Z bullseye-security main|' /etc/apt/sources.list 2>/dev/null || true) && \
+    (sed -i 's|^deb .*bullseye-security.*|deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260901T000000Z bullseye-security main|' /etc/apt/sources.list.d/*.sources 2>/dev/null || true) && \
     apt-get update -o Acquire::Retries=3 && apt-get install -y -o Acquire::Retries=3 --no-install-recommends ca-certificates
 
 WORKDIR /usr/local/alpamon
