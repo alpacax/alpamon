@@ -8,7 +8,7 @@ Installed on each managed server, Alpamon establishes an outbound-only connectio
 
 | Platform | Minimum version | Arch |
 | --- | --- | --- |
-| Linux | Ubuntu 18.04+, Debian 11+, RHEL / Rocky / AlmaLinux 8+, Oracle Linux 8+, Amazon Linux 2 / 2023, Fedora (current or previous) | amd64, arm64 |
+| Linux | Ubuntu 18.04+, Debian 11+, RHEL / Rocky / AlmaLinux 8+, Oracle Linux 8+, Amazon Linux 2 / 2023, Fedora (current or previous), Raspberry Pi OS (64-bit) | amd64, arm64 |
 | Linux (best-effort) | openSUSE Leap 15+, SLES 15+ | amd64, arm64 |
 | macOS | 11 (Big Sur) or later | amd64, arm64 (Apple Silicon) |
 | Windows | Windows 10 (1803+) / Windows 11, Windows Server 2019 or later | amd64 |
