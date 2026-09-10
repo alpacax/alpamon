@@ -213,8 +213,18 @@ func runAgent(ready chan<- struct{}) {
 			return
 		case <-wsClient.CollectorRestartChan:
 			log.Info().Msg("Collector restart command received. Restarting Collector...")
-			metricCollector.Stop()
-			metricCollector = collector.InitCollector(session, client, ctxManager)
+			// Initialize the replacement before touching the running one: a
+			// bad config (e.g. a check type this build does not know about)
+			// must not leave the agent without a collector.
+			newCollector := collector.InitCollector(session, client, ctxManager)
+			if newCollector == nil {
+				log.Error().Msg("Failed to reinitialize collector with the new config. Keeping the previous collector running.")
+				continue
+			}
+			if metricCollector != nil {
+				metricCollector.Stop()
+			}
+			metricCollector = newCollector
 			metricCollector.Start()
 		}
 	}

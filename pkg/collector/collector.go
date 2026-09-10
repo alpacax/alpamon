@@ -118,6 +118,7 @@ func NewCollector(args collectorArgs, ctxManager *agent.ContextManager) (*Collec
 }
 
 func (c *Collector) initTasks(args collectorArgs) error {
+	skipped := 0
 	for _, entry := range args.conf {
 		checkArgs := base.CheckArgs{
 			Type:     entry.Type,
@@ -129,10 +130,21 @@ func (c *Collector) initTasks(args collectorArgs) error {
 
 		metricCheck, err := args.checkFactory.CreateCheck(&checkArgs)
 		if err != nil {
-			return err
+			// A server config can name a check type this build does not
+			// know about (e.g. an older binary talking to a newer
+			// console). Skip it and keep the rest of the collector
+			// running instead of failing the whole thing.
+			log.Warn().Err(err).Msgf("Skipping unknown check type %q in collector config.", entry.Type)
+			skipped++
+			continue
 		}
 		c.scheduler.AddTask(metricCheck)
 	}
+
+	if len(args.conf) > 0 && skipped == len(args.conf) {
+		return fmt.Errorf("no usable checks: all %d configured check type(s) are unknown to this agent", len(args.conf))
+	}
+
 	return nil
 }
 
