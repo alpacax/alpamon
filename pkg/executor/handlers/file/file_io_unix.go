@@ -61,7 +61,7 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 func firstMissingAncestor(dir string) (missing string, ok bool) {
 	cur := dir
 	for {
-		if _, err := os.Stat(cur); err == nil {
+		if _, err := os.Lstat(cur); err == nil {
 			return missing, missing != ""
 		} else if !os.IsNotExist(err) {
 			return "", false
