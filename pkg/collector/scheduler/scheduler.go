@@ -85,17 +85,6 @@ func (s *Scheduler) Stop() {
 	close(s.taskQueue)
 }
 
-// TaskCount reports how many tasks are currently scheduled.
-func (s *Scheduler) TaskCount() int {
-	count := 0
-	s.tasks.Range(func(_, _ any) bool {
-		count++
-		return true
-	})
-
-	return count
-}
-
 func (s *Scheduler) dispatcher(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()

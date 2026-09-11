@@ -71,9 +71,9 @@ func TestInitTasks_SkipsUnknownCheckType(t *testing.T) {
 		checkFactory: factory,
 	}
 
-	err := c.initTasks(args)
+	scheduled, err := c.initTasks(args)
 	require.NoError(t, err)
-	assert.Equal(t, 2, c.scheduler.TaskCount())
+	assert.Equal(t, 2, scheduled)
 }
 
 func TestInitTasks_AllUnknownReturnsError(t *testing.T) {
@@ -88,19 +88,19 @@ func TestInitTasks_AllUnknownReturnsError(t *testing.T) {
 		checkFactory: factory,
 	}
 
-	err := c.initTasks(args)
+	scheduled, err := c.initTasks(args)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "no usable checks")
-	assert.Equal(t, 0, c.scheduler.TaskCount())
+	assert.Equal(t, 0, scheduled)
 }
 
 func TestInitTasks_EmptyConfigIsNotAnError(t *testing.T) {
 	c := newTestCollector()
 	factory := &stubCheckFactory{known: map[base.CheckType]bool{}}
 
-	err := c.initTasks(collectorArgs{conf: nil, checkFactory: factory})
+	scheduled, err := c.initTasks(collectorArgs{conf: nil, checkFactory: factory})
 	require.NoError(t, err)
-	assert.Equal(t, 0, c.scheduler.TaskCount())
+	assert.Equal(t, 0, scheduled)
 }
 
 // Ensure the real factory used in production also exposes the "unknown

@@ -109,15 +109,19 @@ func NewCollector(args collectorArgs, ctxManager *agent.ContextManager) (*Collec
 		ctxManager:  ctxManager,
 	}
 
-	err = metricCollector.initTasks(args)
+	scheduled, err := metricCollector.initTasks(args)
 	if err != nil {
 		return nil, err
 	}
+	log.Debug().Msgf("Collector scheduled %d check(s).", scheduled)
 
 	return metricCollector, nil
 }
 
-func (c *Collector) initTasks(args collectorArgs) error {
+// initTasks schedules one task per usable entry in args.conf and returns how
+// many were scheduled.
+func (c *Collector) initTasks(args collectorArgs) (int, error) {
+	scheduled := 0
 	skipped := 0
 	for _, entry := range args.conf {
 		checkArgs := base.CheckArgs{
@@ -130,22 +134,24 @@ func (c *Collector) initTasks(args collectorArgs) error {
 
 		metricCheck, err := args.checkFactory.CreateCheck(&checkArgs)
 		if err != nil {
-			// A server config can name a check type this build does not
-			// know about (e.g. an older binary talking to a newer
-			// console). Skip it and keep the rest of the collector
-			// running instead of failing the whole thing.
-			log.Warn().Err(err).Msgf("Skipping unknown check type %q in collector config.", entry.Type)
+			// CreateCheck can fail for any reason a factory implementation
+			// defines. An unrecognized check type is the common case (e.g.
+			// an older binary talking to a newer console), but not the only
+			// one. Skip the entry and keep building the rest of the
+			// collector instead of failing outright.
+			log.Warn().Err(err).Msgf("Failed to create check %q; skipping it.", entry.Type)
 			skipped++
 			continue
 		}
 		c.scheduler.AddTask(metricCheck)
+		scheduled++
 	}
 
 	if len(args.conf) > 0 && skipped == len(args.conf) {
-		return fmt.Errorf("no usable checks: all %d configured check type(s) are unknown to this agent", len(args.conf))
+		return scheduled, fmt.Errorf("no usable checks: all %d configured check(s) failed to initialize", len(args.conf))
 	}
 
-	return nil
+	return scheduled, nil
 }
 
 func (c *Collector) Start() {
