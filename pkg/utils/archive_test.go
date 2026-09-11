@@ -1160,6 +1160,56 @@ func TestUnzip_DirectoryEntryWithoutModeKeepsTheDefault(t *testing.T) {
 	assert.Equal(t, "hi", string(content))
 }
 
+func TestUnzip_FileEntryWithoutModeKeepsTheDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	for _, tc := range []struct {
+		name    string
+		creator uint16
+	}{
+		{"Unix", zipCreatorUnix},
+		{"MacOSX", zipCreatorMacOSX},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := zip.NewWriter(&buf)
+			// No SetMode: preserve zero external attributes from a Unix creator.
+			zw, err := w.CreateHeader(&zip.FileHeader{
+				Name:           "file.txt",
+				CreatorVersion: tc.creator << 8,
+			})
+			require.NoError(t, err)
+			_, err = zw.Write([]byte("hi"))
+			require.NoError(t, err)
+			require.NoError(t, w.Close())
+			r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+			require.NoError(t, err)
+			require.Zero(t, r.File[0].Mode().Perm())
+
+			dir := t.TempDir()
+			out := filepath.Join(dir, "out")
+			require.NoError(t, UnzipReader(r, out))
+
+			// os.Create uses 0666, subject to the process's umask, just like
+			// extraction of a file from an archive with no Unix mode.
+			ref, err := os.Create(filepath.Join(dir, "ref"))
+			require.NoError(t, err)
+			want, err := ref.Stat()
+			require.NoError(t, ref.Close())
+			require.NoError(t, err)
+			path := filepath.Join(out, "file.txt")
+			fi, err := os.Stat(path)
+			require.NoError(t, err)
+			assert.Equal(t, want.Mode().Perm(), fi.Mode().Perm())
+			content, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, "hi", string(content))
+		})
+	}
+}
+
 func TestUnzipReader_ExtractsAnInMemoryArchive(t *testing.T) {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)

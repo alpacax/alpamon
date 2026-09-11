@@ -755,7 +755,13 @@ func extractFile(f *zip.File, fpath string) error {
 	// Perm only: extraction runs as root on a normal install, so setuid, setgid
 	// or sticky off an entry would land on a root-owned file. newZipEntry drops
 	// the same bits on the way in.
-	outFile, err := createFile(fpath, f.Mode().Perm())
+	mode := f.Mode().Perm()
+	if creator := f.CreatorVersion >> 8; mode == 0 && (creator == zipCreatorUnix || creator == zipCreatorMacOSX) {
+		// As with directories, zero means no mode was carried. Use the same
+		// default archive/zip gives files without Unix modes; umask still applies.
+		mode = 0666
+	}
+	outFile, err := createFile(fpath, mode)
 	if err != nil {
 		return err
 	}
