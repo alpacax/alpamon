@@ -223,8 +223,9 @@ func TestDial_SurvivesAProxyWithoutAReasonPhrase(t *testing.T) {
 
 	proxyURL, err := url.Parse("http://" + listener.Addr().String())
 	require.NoError(t, err)
+	var tracker closeTrackingDialer
 	cfg := testConfig("wss://backhaul.example.com/ws/")
-	cfg.Dialer = DefaultDialer()
+	cfg.Dialer = tracker.dialer()
 	cfg.Dialer.Proxy = func(*http.Request) (*url.URL, error) { return proxyURL, nil }
 
 	conn, _, err := Dial(t.Context(), cfg)
@@ -232,4 +233,11 @@ func TestDial_SurvivesAProxyWithoutAReasonPhrase(t *testing.T) {
 	assert.Nil(t, conn)
 	require.Error(t, err, "a malformed proxy response must not take the process down")
 	assert.ErrorContains(t, err, "proxy")
+	// The panic unwinds past gorilla's own cleanup, and finish only clears
+	// deadlines, so the socket is closed here only because proxy.go closes it
+	// on the line before the one that panics. Nothing in this package would
+	// notice if that stopped being true, and a Run that keeps retrying would
+	// leak an fd per attempt.
+	assert.True(t, tracker.allClosed(),
+		"the socket the proxy dial opened must be closed before the panic is turned into an error")
 }
