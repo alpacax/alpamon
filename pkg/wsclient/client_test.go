@@ -354,6 +354,37 @@ func (c setDeadlineRefusingConn) SetDeadline(t time.Time) error {
 	return errors.New("this conn does not do deadlines")
 }
 
+// deadlineDelayingConn turns the window inside the abort wrapper into a
+// certainty. On the first deadline the handshake installs it calls Shutdown
+// and waits for the abort's own deadline to reach this socket before passing
+// the handshake deadline down. A wrapper that reads the abort flag and
+// forwards the deadline as two steps therefore always overwrites the abort
+// here; a wrapper that does both under one lock never can, because the abort
+// cannot land while this call is inside it, and the wait falls through to its
+// bound instead.
+type deadlineDelayingConn struct {
+	net.Conn
+	shutdown func()
+	first    sync.Once
+	once     sync.Once
+	aborted  chan struct{}
+}
+
+func (c *deadlineDelayingConn) SetDeadline(t time.Time) error {
+	if !t.IsZero() && t.Before(time.Now()) {
+		c.once.Do(func() { close(c.aborted) })
+		return c.Conn.SetDeadline(t)
+	}
+	c.first.Do(func() {
+		c.shutdown()
+		select {
+		case <-c.aborted:
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
+	return c.Conn.SetDeadline(t)
+}
+
 // writeFailingConn passes the handshake, then fails every write once
 // failWrites is set, which is what a connection whose send side has died
 // while its receive side is still delivering looks like.
@@ -670,6 +701,57 @@ func TestClient_AbortSurvivesTheHandshakeDeadline(t *testing.T) {
 	require.NoError(t, recv(t, result, "Run to return"))
 	assert.Less(t, time.Since(start), handshakeTimeout,
 		"the abort must hold, not be overwritten by the handshake deadline")
+}
+
+// TestClient_AbortSurvivesADeadlineAlreadyInFlight covers the same overwrite
+// one step further in. The wrapper lets the handshake deadline through only
+// while no abort has landed, so reading that answer and installing the
+// deadline have to be one step: an abort that lands between them has already
+// pushed the socket into the past, and the handshake deadline puts it back
+// where it was. Nothing notices, because the dial then ends the way it would
+// have anyway, a whole HandshakeTimeout later.
+func TestClient_AbortSurvivesADeadlineAlreadyInFlight(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, 8)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- conn // never answer the upgrade
+		}
+	}()
+
+	const handshakeTimeout = 2 * time.Second
+	var c *Client
+	cfg := testConfig("ws://" + listener.Addr().String() + "/ws/")
+	cfg.Dialer = &websocket.Dialer{HandshakeTimeout: handshakeTimeout}
+	var nd net.Dialer
+	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := nd.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &deadlineDelayingConn{
+			Conn:     conn,
+			shutdown: func() { c.Shutdown() },
+			aborted:  make(chan struct{}),
+		}, nil
+	}
+	c, err = New(cfg)
+	require.NoError(t, err)
+	result := make(chan error, 1)
+	go func() { result <- c.Run(t.Context(), discard) }()
+	stalled := recv(t, accepted, "the connection the client opened")
+	t.Cleanup(func() { _ = stalled.Close() })
+
+	start := time.Now()
+	require.NoError(t, recv(t, result, "Run to return"))
+	assert.Less(t, time.Since(start), handshakeTimeout/2,
+		"the abort must stand, not be undone by a handshake deadline already on its way")
 }
 
 // TestClient_GivesUpAConnectionWhoseDeadlineWontArm covers a

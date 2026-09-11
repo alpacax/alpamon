@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -115,30 +114,14 @@ func unofferedExtension(values []string, compression bool) (string, bool) {
 // in a pod is the whole termination grace period.
 func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, func()) {
 	dialer := *d
-
-	var (
-		mu       sync.Mutex
-		opened   []net.Conn
-		aborted  atomic.Bool
-		finished bool
-	)
-	track := func(c net.Conn) net.Conn {
-		wrapped := abortableConn{Conn: c, aborted: &aborted}
-		mu.Lock()
-		defer mu.Unlock()
-		if aborted.Load() {
-			_ = forceAbort(wrapped) // it closes what refuses the deadline; nothing left to do
-		}
-		opened = append(opened, wrapped)
-		return wrapped
-	}
+	state := &abortState{}
 	wrap := func(dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
 		return func(ctx context.Context, network, addr string) (net.Conn, error) {
 			c, err := dial(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
-			return track(c), nil
+			return state.track(c), nil
 		}
 	}
 
@@ -158,33 +141,79 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 		dialer.NetDialTLSContext = wrap(dialer.NetDialTLSContext)
 	}
 
-	stop := context.AfterFunc(ctx, func() {
-		mu.Lock()
-		defer mu.Unlock()
-		if finished {
-			return
-		}
-		aborted.Store(true)
-		for _, c := range opened {
-			_ = forceAbort(c)
-		}
-	})
-
+	stop := context.AfterFunc(ctx, state.abort)
 	return &dialer, func() {
 		stop()
-		mu.Lock()
-		defer mu.Unlock()
-		finished = true
-		if !aborted.Load() {
-			return
-		}
-		aborted.Store(false)
-		// The abort can land on a handshake that had already finished. Clear
-		// it so a connection handed back to a caller is still usable; one
-		// that is on its way out is closed by the caller either way.
-		for _, c := range opened {
-			_ = c.SetDeadline(time.Time{})
-		}
+		state.finish()
+	}
+}
+
+// abortState is what one dial's sockets share. Every field is read and
+// written under mu, and so is every deadline that reaches a socket through
+// abortableConn, which is the point: an abort and a deadline on its way down
+// both end in a SetDeadline on the same socket, and whichever lands second
+// decides how long the dial waits. Holding mu across the call keeps the
+// abort's deadline from being the first of the two.
+//
+// opened holds the sockets as the dial hook returned them, not the wrappers,
+// so nothing below re-enters abortableConn and deadlocks on mu.
+type abortState struct {
+	mu       sync.Mutex
+	opened   []net.Conn
+	aborted  bool
+	finished bool
+}
+
+// track takes ownership of a freshly opened socket and returns it wrapped.
+func (s *abortState) track(c net.Conn) net.Conn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.aborted {
+		_ = forceAbort(c) // it closes what refuses the deadline; nothing left to do
+	}
+	s.opened = append(s.opened, c)
+	return abortableConn{Conn: c, state: s}
+}
+
+// abort unblocks every socket the dial has opened, and every socket it opens
+// from here on.
+func (s *abortState) abort() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished {
+		return
+	}
+	s.aborted = true
+	for _, c := range s.opened {
+		_ = forceAbort(c)
+	}
+}
+
+// setDeadline installs t on c, unless the dial has been aborted, in which
+// case the abort's deadline is the one that stands.
+func (s *abortState) setDeadline(c net.Conn, t time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.aborted {
+		return forceAbort(c)
+	}
+	return c.SetDeadline(t)
+}
+
+// finish ends the dial and lifts an abort that landed on it.
+func (s *abortState) finish() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.finished = true
+	if !s.aborted {
+		return
+	}
+	s.aborted = false
+	// The abort can land on a handshake that had already finished. Clear it
+	// so a connection handed back to a caller is still usable; one that is on
+	// its way out is closed by the caller either way.
+	for _, c := range s.opened {
+		_ = c.SetDeadline(time.Time{})
 	}
 }
 
@@ -194,14 +223,11 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 // quietly overwritten and the dial would run to its handshake timeout.
 type abortableConn struct {
 	net.Conn
-	aborted *atomic.Bool
+	state *abortState
 }
 
 func (c abortableConn) SetDeadline(t time.Time) error {
-	if c.aborted.Load() {
-		return forceAbort(c.Conn)
-	}
-	return c.Conn.SetDeadline(t)
+	return c.state.setDeadline(c.Conn, t)
 }
 
 // forceAbort unblocks a dial on c. A deadline in the past is the ordinary
