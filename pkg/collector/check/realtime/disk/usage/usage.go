@@ -18,6 +18,13 @@ import (
 // touching the filesystem.
 var dataDirFunc = utils.DataDir
 
+// listPartitions retrieves the host's mounted partitions. It is a
+// package-level var, like dataDirFunc, so tests can inject a fixture
+// partition list instead of depending on the real host/container mounts,
+// which vary by environment (e.g. a container's root is commonly an
+// overlay mount that isPhysicalDevice/IsVirtualFileSystem filter out).
+var listPartitions = disk.Partitions
+
 type Check struct {
 	base.BaseCheck
 }
@@ -158,7 +165,7 @@ func normalizeSeparators(p string) string {
 }
 
 func (c *Check) collectDiskPartitions() ([]disk.PartitionStat, error) {
-	partitions, err := disk.Partitions(true)
+	partitions, err := listPartitions(true)
 	if err != nil {
 		return nil, err
 	}

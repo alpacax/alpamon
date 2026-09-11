@@ -3,6 +3,7 @@ package diskusage
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -78,28 +79,50 @@ func (suite *DiskUsageCheckSuite) TestSaveDiskUsage() {
 	assert.NoError(suite.T(), err, "Failed to save disk usage.")
 }
 
-// TestParseDiskUsageFlagsAgentVolume points dataDirFunc at the root mount,
-// which every partition list collected on a live host contains, and checks
-// that parseDiskUsage flags exactly the entry backing it.
+// TestParseDiskUsageFlagsAgentVolume injects a fixture partition list (via
+// listPartitions) and a fixture data directory (via dataDirFunc) instead of
+// relying on the real host/container mounts. Real mounts are not usable
+// here: CI runners commonly present "/" as a container overlay that
+// isPhysicalDevice/IsVirtualFileSystem filter out, which made this
+// environment-dependent (it failed on every Linux CI platform while passing
+// locally). The mountpoints below still have to be real, existing
+// directories, since parseDiskUsage calls disk.Usage(mountpoint), a real
+// stat syscall; "/" and a t.TempDir() both satisfy that on any host.
 func (suite *DiskUsageCheckSuite) TestParseDiskUsageFlagsAgentVolume() {
+	nestedMountpoint := suite.T().TempDir()
+
+	fixturePartitions := []disk.PartitionStat{
+		{Device: "/dev/sda1", Mountpoint: "/", Fstype: "ext4"},
+		{Device: "/dev/sdb1", Mountpoint: nestedMountpoint, Fstype: "ext4"},
+	}
+
+	originalListPartitions := listPartitions
+	defer func() { listPartitions = originalListPartitions }()
+	listPartitions = func(all bool) ([]disk.PartitionStat, error) {
+		return fixturePartitions, nil
+	}
+
+	originalDataDirFunc := dataDirFunc
+	defer func() { dataDirFunc = originalDataDirFunc }()
+	dataDirFunc = func() string { return filepath.Join(nestedMountpoint, "alpamon") }
+
 	partitions, err := suite.check.collectDiskPartitions()
 	suite.Require().NoError(err, "Failed to get disk partitions.")
-	suite.Require().NotEmpty(partitions, "Disk partitions should not be empty")
-
-	original := dataDirFunc
-	defer func() { dataDirFunc = original }()
-	dataDirFunc = func() string { return "/" }
+	suite.Require().Len(partitions, 2, "both fixture partitions should survive the virtual/physical filters")
 
 	data := suite.check.parseDiskUsage(partitions)
-	suite.Require().NotEmpty(data)
+	suite.Require().Len(data, 2)
 
 	flagged := 0
+	var flaggedDevice string
 	for _, entry := range data {
 		if entry.AgentVolume {
 			flagged++
+			flaggedDevice = entry.Device
 		}
 	}
 	assert.Equal(suite.T(), 1, flagged, "exactly one entry should be flagged as the agent volume")
+	assert.Equal(suite.T(), "/dev/sdb1", flaggedDevice, "the entry backing the nested mountpoint should be flagged, not the root entry")
 }
 
 func TestDiskUsageCheckSuite(t *testing.T) {
