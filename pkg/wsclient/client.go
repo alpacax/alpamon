@@ -107,6 +107,11 @@ func New(cfg Config) (*Client, error) {
 // Run returns nil after Shutdown, ctx.Err() once ctx is done, and h's error
 // when h stopped it. The connection is closed before Run returns. A Client
 // runs once: a second call returns ErrAlreadyRunning.
+//
+// It returns that promptly as far as the caller's own code lets it. h, the
+// three hooks and the dialer's dial hook all run on Run's goroutine, so one
+// that blocks holds Run there; a dial hook is the one to watch, because it
+// can be waiting on a socket that does not exist yet and so cannot be freed.
 func (c *Client) Run(ctx context.Context, h Handler) error {
 	if !c.started.CompareAndSwap(false, true) {
 		return ErrAlreadyRunning

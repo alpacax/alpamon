@@ -130,6 +130,14 @@ func TestResolve_Rejects(t *testing.T) {
 		"Host with a line break": {func(c *Config) { c.Header = http.Header{"Host": {"good.example\r\nX: 1"}} }, "header Host cannot be sent"},
 		"Host with a space":      {func(c *Config) { c.Header = http.Header{"Host": {"bad host"}} }, "header Host cannot be sent"},
 		"Host with a path":       {func(c *Config) { c.Header = http.Header{"Host": {"host/path"}} }, "header Host cannot be sent"},
+		// net/http drops a field name outside the HTTP token grammar and
+		// rewrites a line break in a value, both without a word, so a header
+		// the caller counted on would go missing or arrive changed and every
+		// handshake that needed it would be refused.
+		"header name with a space":                  {func(c *Config) { c.Header = http.Header{"Bad Name": {"v"}} }, "header Bad Name cannot be sent"},
+		"header name with a colon":                  {func(c *Config) { c.Header = http.Header{"Bad:Name": {"v"}} }, "header Bad:Name cannot be sent"},
+		"header name net/http sends from elsewhere": {func(c *Config) { c.Header = http.Header{"Content-Length": {"7"}} }, "header Content-Length cannot be sent"},
+		"header value with a line break":            {func(c *Config) { c.Header = http.Header{"X-Trace": {"good\r\nX-Injected: 1"}} }, "header X-Trace has a value with a line break"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := validConfig()
@@ -185,6 +193,21 @@ func TestResolve_AcceptsASendableHost(t *testing.T) {
 			cfg.Header = http.Header{"Host": {host}}
 			_, err := cfg.resolve()
 			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestResolve_AcceptsASendableHeader keeps the header check to what net/http
+// really refuses to write. The token grammar is wider than it looks, and a
+// name this rejected would be a header the caller cannot send at all.
+func TestResolve_AcceptsASendableHeader(t *testing.T) {
+	for _, name := range []string{"X-Trace-Id", "x-lowercase", "X_Underscore", "X.Dot", "Cookie", "If-None-Match"} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Header = http.Header{name: {"value"}}
+			s, err := cfg.resolve()
+			require.NoError(t, err)
+			assert.Equal(t, "value", s.header.Get(name))
 		})
 	}
 }

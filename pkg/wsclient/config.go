@@ -66,13 +66,20 @@ type Config struct {
 	Header http.Header
 
 	// Dialer opens the connection. Nil means DefaultDialer(). A non-nil
-	// dialer is used as given except for three things. A zero
+	// dialer is used as given except for four things. A zero
 	// HandshakeTimeout becomes DefaultHandshakeTimeout, because
 	// gorilla/websocket stops watching the context once the socket is up and
 	// an unbounded handshake would hang with no signal at all; a negative one
 	// is rejected. TLSClientConfig and Subprotocols are copied, so that later
 	// edits to them cannot change how a running client verifies certificates
 	// or negotiates. Start from DefaultDialer() to keep its proxy settings.
+	//
+	// The fourth is the dial hooks, which are wrapped so that Shutdown and a
+	// done context can free a socket the handshake is still waiting on. A
+	// hook has to return that socket first: NetDialContext is handed a
+	// context that ends with the client's, but NetDial takes none and is
+	// adapted to the wrapper, so nothing can interrupt it before it returns.
+	// Prefer NetDialContext, and give a NetDial a timeout of its own.
 	Dialer *websocket.Dialer
 
 	// ReadLimit is the largest inbound message accepted, in bytes: its
@@ -234,6 +241,33 @@ func (c Config) resolveDial() (dialSettings, error) {
 	// time, where a Client would retry the same doomed handshake forever.
 	if _, ok := header["Sec-Websocket-Protocol"]; ok && len(dialer.Subprotocols) > 0 {
 		return dialSettings{}, errors.New("wsclient: set the subprotocol in Dialer.Subprotocols or in Header, not both")
+	}
+
+	// net/http serializes the header, and it answers a field it cannot write
+	// by leaving it out rather than by failing: a name outside the HTTP token
+	// grammar is dropped, and a CR or LF in a value is replaced by a space.
+	// Header promises the caller that what it carries is sent, and a header
+	// that goes missing or arrives rewritten is a handshake the server may
+	// refuse on every attempt, with a Client retrying it forever and nothing
+	// in the config to point at. Ask that same writer, one field at a time,
+	// and treat what it will not write as the config error it is.
+	for name, values := range header {
+		if name == "Host" {
+			continue // sent as the request's Host, and probed as one below
+		}
+		for _, v := range values {
+			if strings.ContainsAny(v, "\r\n") {
+				return dialSettings{}, fmt.Errorf("wsclient: header %s has a value with a line break, which net/http rewrites rather than sends", name)
+			}
+		}
+		probe := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/"}, Host: "probe.invalid", Header: http.Header{name: {"probe"}}}
+		var written strings.Builder
+		if err := probe.Write(&written); err != nil {
+			return dialSettings{}, fmt.Errorf("wsclient: header %s cannot be sent: %w", name, err)
+		}
+		if !strings.Contains(written.String(), "\r\n"+name+": probe\r\n") {
+			return dialSettings{}, fmt.Errorf("wsclient: header %s cannot be sent: net/http does not write that field name", name)
+		}
 	}
 
 	// gorilla sends a Host entry as the request's Host, so ask net/http, the
