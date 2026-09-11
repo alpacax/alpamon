@@ -123,6 +123,13 @@ func TestResolve_Rejects(t *testing.T) {
 		"reserved header, lowercase": {func(c *Config) { c.Header = http.Header{"sec-websocket-key": {"x"}} }, "Sec-Websocket-Key is set by the websocket handshake"},
 		// net/http cannot punycode this Host, so it would fail every dial.
 		"unsendable Host": {func(c *Config) { c.Header = http.Header{"Host": {"é.xn--!"}} }, "header Host cannot be sent"},
+		// These three punycode fine and then lose to net/http's header check,
+		// which drops the whole Host rather than refusing it. A handshake with
+		// no Host is one a server answers with 400, so a Client that took them
+		// would retry a config error for as long as it ran.
+		"Host with a line break": {func(c *Config) { c.Header = http.Header{"Host": {"good.example\r\nX: 1"}} }, "header Host cannot be sent"},
+		"Host with a space":      {func(c *Config) { c.Header = http.Header{"Host": {"bad host"}} }, "header Host cannot be sent"},
+		"Host with a path":       {func(c *Config) { c.Header = http.Header{"Host": {"host/path"}} }, "header Host cannot be sent"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := validConfig()
@@ -165,11 +172,14 @@ func TestResolve_AllowsASubprotocolInOnePlace(t *testing.T) {
 }
 
 // TestResolve_AcceptsASendableHost keeps the Host check to what net/http
-// really refuses: an internationalized name it can punycode, a port, and a
-// value with a line break in it, which net/http neutralizes rather than
-// refuses, all dial fine.
+// can really send: an internationalized name it punycodes, a port, an
+// address already in its ASCII form, and an IPv6 literal with a zone it
+// strips on the way out all dial fine, and none of them may be refused here.
 func TestResolve_AcceptsASendableHost(t *testing.T) {
-	for _, host := range []string{"backhaul.example.com", "bücher.example", "bücher.example:8443", "good.example\r\nX: 1"} {
+	for _, host := range []string{
+		"backhaul.example.com", "bücher.example", "bücher.example:8443",
+		"xn--bcher-kva.example", "[::1]:8443", "[fe80::1%25en0]:443",
+	} {
 		t.Run(host, func(t *testing.T) {
 			cfg := validConfig()
 			cfg.Header = http.Header{"Host": {host}}

@@ -236,12 +236,21 @@ func (c Config) resolveDial() (dialSettings, error) {
 		return dialSettings{}, errors.New("wsclient: set the subprotocol in Dialer.Subprotocols or in Header, not both")
 	}
 
-	// gorilla sends a Host entry as the request's Host, and net/http refuses
-	// to write one it cannot punycode, which would fail every dial and have a
-	// Client retry a config error forever. Ask that same writer now.
+	// gorilla sends a Host entry as the request's Host, so ask net/http, the
+	// writer that will have to serialize it, whether it can. A Host it cannot
+	// punycode fails the write outright; one it can punycode but will not put
+	// in a header, such as a value carrying a space, a slash or a line break,
+	// it drops in silence, and the handshake then goes out with an empty Host
+	// that all but any server answers with 400. Either way every dial fails
+	// and a Client retries a config error forever.
+	//
+	// WriteProxy, not Write, because they differ in exactly that second case:
+	// Write zeroes the field, while WriteProxy reports it. Nothing here is
+	// proxied, and the two serialize a request with no URL scheme the same
+	// way; WriteProxy is used only because it is the one that answers.
 	if vs := header["Host"]; len(vs) > 0 && vs[0] != "" {
 		probe := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/"}, Host: vs[0], Header: http.Header{}}
-		if err := probe.Write(io.Discard); err != nil {
+		if err := probe.WriteProxy(io.Discard); err != nil {
 			return dialSettings{}, fmt.Errorf("wsclient: header Host cannot be sent: %w", err)
 		}
 	}
