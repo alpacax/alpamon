@@ -1176,8 +1176,8 @@ func TestUnzip_FileEntryWithoutModeKeepsTheDefault(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			w := zip.NewWriter(&buf)
-			// No SetMode: preserve the zero external attributes archive/zip
-			// leaves for a creator it does not decode a mode from.
+			// No SetMode: zero external attributes read back as mode 0 whether
+			// archive/zip reads a Unix mode for the creator or decodes nothing.
 			zw, err := w.CreateHeader(&zip.FileHeader{
 				Name:           "file.txt",
 				CreatorVersion: tc.creator << 8,
