@@ -327,7 +327,10 @@ func normalizeURL(raw string) (string, error) {
 	if u.User != nil {
 		return "", errors.New("wsclient: URL must not carry credentials; use ID and Key")
 	}
-	if u.Host == "" {
+	// Hostname too, not just Host: url.Parse reads "wss://:443" as the
+	// authority ":443", which is non-empty but names no destination, and
+	// every dial would fail on it.
+	if u.Host == "" || u.Hostname() == "" {
 		return "", errors.New("wsclient: URL has no host")
 	}
 	return u.String(), nil

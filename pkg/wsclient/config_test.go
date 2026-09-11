@@ -42,6 +42,7 @@ func TestNormalizeURL_Rejects(t *testing.T) {
 		{"ftp://example.com/", `scheme "ftp"`},
 		{"example.com/ws/", `scheme ""`},
 		{"wss:///ws/", "no host"},
+		{"wss://:443/ws/", "no host"}, // url.Parse reads ":443" as a non-empty authority
 		{"wss://user:pass@example.com/ws/", "must not carry credentials"},
 		{"wss://exa mple.com/ws/", "invalid URL"},
 	} {

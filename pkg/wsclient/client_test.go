@@ -1371,6 +1371,13 @@ func TestClient_PacesRedialsAfterAnUnprovenConnection(t *testing.T) {
 		require.Error(t, recv(t, h.disconnects, "the close the server sent"))
 		r := recv(t, h.retries, "the wait before the redial")
 		assert.Equal(t, want, r.delay, "an unproven connection must back off, and keep doubling")
+		// OnRetry fires before the wait, so this measures the wait itself.
+		// Asserting only on the reported delay would pass for a loop that
+		// announced a wait and then redialed immediately.
+		reported, upgrades := time.Now(), srv.upgrades.Load()
+		require.Eventually(t, func() bool { return srv.upgrades.Load() > upgrades },
+			waitFor, time.Millisecond, "the redial never came")
+		assert.GreaterOrEqual(t, time.Since(reported), want*9/10, "the redial must wait out the delay it reported")
 	}
 	assert.Less(t, srv.upgrades.Load(), int32(10), "a paced loop cannot have run away")
 }
@@ -1426,6 +1433,9 @@ func TestClient_PacesARedialAfterAFailedWrite(t *testing.T) {
 	r := recv(t, h.retries, "the wait before the redial")
 	assert.Equal(t, 1, r.attempt)
 	assert.Equal(t, cfg.MinBackoff, r.delay, "a failed write must be paced like any other failure")
+	reported := time.Now()
+	recv(t, srv.accepted, "the redial")
+	assert.GreaterOrEqual(t, time.Since(reported), cfg.MinBackoff*9/10, "the redial must wait out the delay it reported")
 }
 
 // TestClient_AFrameDoesNotProveAConnection is the regression for the rule

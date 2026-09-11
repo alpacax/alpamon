@@ -59,9 +59,12 @@ type Client struct {
 	// SetReadDeadline happens while it is held.
 	mu   sync.Mutex
 	conn *websocket.Conn
-	// reconnectPending asks Run to replace conn; reconnectCause is what
-	// OnDisconnect then reports: nil for Reconnect, the write error for a
-	// connection a failed write abandoned. Both reset whenever conn changes.
+	// reconnectPending asks Run to replace conn; reconnectCause says why:
+	// nil for Reconnect, the write error for a connection a failed write
+	// abandoned. The cause is reported only when the read ended on the
+	// wakeup this request sent; a peer's own close or error reaches the read
+	// first and outranks it, which is what wokenOnPurpose decides. Both
+	// reset whenever conn changes.
 	reconnectPending bool
 	reconnectCause   error
 
