@@ -77,6 +77,18 @@ func firstMissingAncestor(dir string) string {
 	}
 }
 
+// removeAsRequester unlinks path under the requesting user's own permissions instead of the
+// agent's (root), so a symlink swapped into a path component after the caller's Lstat check
+// cannot redirect a root-privileged unlink. Run errors are swallowed: rm -f already reports
+// success on a missing target, and there is no recovery available from a demoted rm failing.
+// context.WithoutCancel is deliberate--context cancellation is one of the ways this cleanup
+// path is reached, and the removal must still run even after ctx is done.
+func removeAsRequester(ctx context.Context, path string, sysProcAttr *syscall.SysProcAttr) {
+	cmd := exec.CommandContext(context.WithoutCancel(ctx), "rm", "-f", path)
+	cmd.SysProcAttr = sysProcAttr
+	_ = cmd.Run()
+}
+
 // dirTreeIsAllDirs reports whether root and everything under it are plain directories,
 // so removing it cannot discard a file a concurrent writer placed there.
 func dirTreeIsAllDirs(root string) bool {
@@ -150,11 +162,11 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	if runErr != nil {
 		// erc.err alone does not prove tee opened path: a tee that cannot open a pre-existing
 		// file still drains stdin to EOF and exits nonzero, so a source read failure can arrive
-		// with the target untouched. Only remove it when this call created it--the same target
-		// the demoted rm -f in the script above would have covered had tee itself failed.
+		// with the target untouched. Only remove it when this call created it, and--same as the
+		// rm -f in the script above--under the requester's own permissions, not root's.
 		if erc.err != nil && createdTarget {
 			if fi, statErr := os.Lstat(path); statErr == nil && !fi.IsDir() {
-				_ = os.Remove(path)
+				removeAsRequester(ctx, path, sysProcAttr)
 			}
 		}
 		if createdRoot != "" && dirTreeIsAllDirs(createdRoot) {

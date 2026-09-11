@@ -99,6 +99,17 @@ func TestWriteFileAs_TeePath_KeepsUnwritableTargetOnSourceReadFailure(t *testing
 	assert.Equal(t, "ORIGINAL", string(got))
 }
 
+func TestWriteFileAs_TeePath_RemovesFreshTargetOnSourceReadFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+
+	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("boom")), &syscall.SysProcAttr{})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "boom")
+	_, statErr := os.Stat(path)
+	assert.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
 func TestFirstMissingAncestor(t *testing.T) {
 	dir := t.TempDir()
 	existing := filepath.Join(dir, "existing")
