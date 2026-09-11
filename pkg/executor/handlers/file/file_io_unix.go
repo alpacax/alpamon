@@ -125,8 +125,10 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	// the removal runs inside this same demoted shell, under the requester's real permissions,
 	// not later in Go as the agent (root)--which would otherwise let a symlink swapped into a
 	// path component redirect a root-privileged unlink.
+	_, targetStatErr := os.Lstat(path)
+	createdTarget := os.IsNotExist(targetStatErr)
 	script := fmt.Sprintf("mkdir -p %s && tee %s > /dev/null", utils.Quote(parentDir), utils.Quote(path))
-	if _, err := os.Lstat(path); os.IsNotExist(err) {
+	if createdTarget {
 		script = fmt.Sprintf("mkdir -p %s && { tee %s > /dev/null || { rm -f %s; exit 1; }; }",
 			utils.Quote(parentDir), utils.Quote(path), utils.Quote(path))
 	}
@@ -146,10 +148,11 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	// goroutine's error on a clean exit, and the process's own exit error otherwise. The
 	// fallback after this block guards that invariant instead of relying on it silently.
 	if runErr != nil {
-		if erc.err != nil {
-			// tee already opened (and truncated) path before the source read failed, so the
-			// original content is already gone; a target tee never reached is instead
-			// protected by omitting the rm -f clause above.
+		// erc.err alone does not prove tee opened path: a tee that cannot open a pre-existing
+		// file still drains stdin to EOF and exits nonzero, so a source read failure can arrive
+		// with the target untouched. Only remove it when this call created it--the same target
+		// the demoted rm -f in the script above would have covered had tee itself failed.
+		if erc.err != nil && createdTarget {
 			if fi, statErr := os.Lstat(path); statErr == nil && !fi.IsDir() {
 				_ = os.Remove(path)
 			}

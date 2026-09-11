@@ -85,6 +85,20 @@ func TestWriteFileAs_TeePath_KeepsUnwritableTargetOnTeeFailure(t *testing.T) {
 	assert.Equal(t, "ORIGINAL", string(got))
 }
 
+func TestWriteFileAs_TeePath_KeepsUnwritableTargetOnSourceReadFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write through file mode restrictions")
+	}
+	path := filepath.Join(t.TempDir(), "precious.conf")
+	require.NoError(t, os.WriteFile(path, []byte("ORIGINAL"), 0444))
+
+	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("connection reset")), &syscall.SysProcAttr{})
+	require.Error(t, err)
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, "ORIGINAL", string(got))
+}
+
 func TestFirstMissingAncestor(t *testing.T) {
 	dir := t.TempDir()
 	existing := filepath.Join(dir, "existing")
