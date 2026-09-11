@@ -127,7 +127,7 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 		mu.Lock()
 		defer mu.Unlock()
 		if aborted.Load() {
-			forceAbort(wrapped)
+			_ = forceAbort(wrapped) // it closes what refuses the deadline; nothing left to do
 		}
 		opened = append(opened, wrapped)
 		return wrapped
@@ -166,7 +166,7 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 		}
 		aborted.Store(true)
 		for _, c := range opened {
-			forceAbort(c)
+			_ = forceAbort(c)
 		}
 	})
 
