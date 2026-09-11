@@ -103,7 +103,11 @@ func TestWriteFileAs_DemotedPath_CreatesParentsAsUser(t *testing.T) {
 	// Only the demoted user should own the newly created parents.
 	const uid, gid = 65534, 65534
 	dir := t.TempDir()
-	require.NoError(t, os.Chmod(filepath.Dir(dir), 0755))
+	parent := filepath.Dir(dir)
+	parentInfo, err := os.Stat(parent)
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(parent, 0755))
+	t.Cleanup(func() { require.NoError(t, os.Chmod(parent, parentInfo.Mode().Perm())) })
 	require.NoError(t, os.Chown(dir, uid, gid))
 	attr := &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid}}
 	path := filepath.Join(dir, "nested", "deep", "out.bin")
