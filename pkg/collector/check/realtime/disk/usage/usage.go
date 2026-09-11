@@ -12,6 +12,12 @@ import (
 	"github.com/shirou/gopsutil/v4/disk"
 )
 
+// dataDirFunc resolves the directory holding alpamon's own data (the SQLite
+// metrics DB and agent state). It is a package-level var rather than a direct
+// utils.DataDir() call so tests can point it at a fixture path without
+// touching the filesystem.
+var dataDirFunc = utils.DataDir
+
 type Check struct {
 	base.BaseCheck
 }
@@ -69,6 +75,13 @@ func (c *Check) collectAndSaveDiskUsage(ctx context.Context) (base.MetricData, e
 func (c *Check) parseDiskUsage(partitions []disk.PartitionStat) []base.CheckResult {
 	var data []base.CheckResult
 	seen := make(map[string]bool)
+
+	// Resolve the device that owns alpamon's data directory before
+	// deduplicating by device: the mountpoint that matches may not be the
+	// first mountpoint seen for that device, so the owning device has to be
+	// computed from the full partition list, not from the entry being built.
+	agentVolumeDevice := findAgentVolumeDevice(partitions, dataDirFunc())
+
 	for _, partition := range partitions {
 		if seen[partition.Device] {
 			continue
@@ -78,17 +91,70 @@ func (c *Check) parseDiskUsage(partitions []disk.PartitionStat) []base.CheckResu
 		usage, err := c.collectDiskUsage(partition.Mountpoint)
 		if err == nil {
 			data = append(data, base.CheckResult{
-				Timestamp: time.Now(),
-				Device:    partition.Device,
-				Usage:     usage.UsedPercent,
-				Total:     usage.Total,
-				Free:      usage.Free,
-				Used:      usage.Used,
+				Timestamp:   time.Now(),
+				Device:      partition.Device,
+				Usage:       usage.UsedPercent,
+				Total:       usage.Total,
+				Free:        usage.Free,
+				Used:        usage.Used,
+				AgentVolume: agentVolumeDevice != "" && partition.Device == agentVolumeDevice,
 			})
 		}
 	}
 
 	return data
+}
+
+// findAgentVolumeDevice returns the device backing the partition whose
+// mountpoint is the longest path-prefix match of dataDir, i.e. the volume
+// alpamon's own data lives on. It returns "" when no partition mountpoint
+// contains dataDir.
+func findAgentVolumeDevice(partitions []disk.PartitionStat, dataDir string) string {
+	var device string
+	bestLen := -1
+	for _, partition := range partitions {
+		if !mountpointOwns(partition.Mountpoint, dataDir) {
+			continue
+		}
+		if l := len(partition.Mountpoint); l > bestLen {
+			bestLen = l
+			device = partition.Device
+		}
+	}
+
+	return device
+}
+
+// mountpointOwns reports whether mountpoint is a path-boundary-respecting
+// prefix of dir, e.g. "/var" matches "/var/lib/alpamon" but not
+// "/variable/alpamon". Separators are normalized rather than routed through
+// path/filepath, since gopsutil reports native paths per OS ("/var" on
+// Unix, "C:\" on Windows) and this lets a single implementation, and a
+// single test file, cover both without a build tag.
+func mountpointOwns(mountpoint, dir string) bool {
+	if mountpoint == "" || dir == "" {
+		return false
+	}
+
+	m := normalizeSeparators(mountpoint)
+	d := normalizeSeparators(dir)
+	if m == d {
+		return true
+	}
+	if m == "/" {
+		return strings.HasPrefix(d, "/")
+	}
+
+	return strings.HasPrefix(d, m+"/")
+}
+
+func normalizeSeparators(p string) string {
+	p = strings.ReplaceAll(p, `\`, "/")
+	if len(p) > 1 {
+		p = strings.TrimRight(p, "/")
+	}
+
+	return p
 }
 
 func (c *Check) collectDiskPartitions() ([]disk.PartitionStat, error) {
