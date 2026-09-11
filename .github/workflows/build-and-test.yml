@@ -157,6 +157,35 @@ jobs:
             printf '%s\n' "$deps" | sed 's/^/  /'
           done
 
+  # pkg/wsclient holds one connection open across reconnects with a read
+  # loop, callers writing from their own goroutines, and a watcher that
+  # interrupts a parked read. That ownership model is the whole point of the
+  # package, and getting it wrong is what issue #452 is about in pkg/runner.
+  # The suite below runs without the race detector on every platform, so a
+  # race reintroduced here would pass it.
+  #
+  # Cheap enough to be worth its own job: no cgo of its own, no database and
+  # no generated code, so it needs neither a distro container nor the ent
+  # codegen step. `cache: false` for the same reason as leaf-guard, so this
+  # job cannot claim the shared setup-go cache key for a near-empty cache.
+  race-wsclient:
+    name: Race detector (pkg/wsclient)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Twice over: a race that needs an unlucky interleaving does not always
+      # show up on the first scheduling.
+      - name: Run tests under the race detector
+        run: go test -race -count=2 ./pkg/wsclient
+
   # Renamed from `build-and-test` so the flat aggregator at the bottom of this
   # file can take that id: a job id and the aggregate check name cannot be the
   # same string, and the aggregate is the one that has to be `build-and-test`.
@@ -414,6 +443,7 @@ jobs:
     needs:
       - verify-tidy
       - leaf-guard
+      - race-wsclient
       - build-and-test-linux
       - build-and-test-windows
       - build-and-test-macos
