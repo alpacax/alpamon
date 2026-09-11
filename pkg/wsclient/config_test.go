@@ -120,6 +120,8 @@ func TestResolve_Rejects(t *testing.T) {
 		"min above the default max":  {func(c *Config) { c.MinBackoff = 2 * DefaultMaxBackoff }, "exceeds MaxBackoff"},
 		"reserved header":            {func(c *Config) { c.Header = http.Header{"Upgrade": {"h2c"}} }, "Upgrade is set by the websocket handshake"},
 		"reserved header, lowercase": {func(c *Config) { c.Header = http.Header{"sec-websocket-key": {"x"}} }, "Sec-Websocket-Key is set by the websocket handshake"},
+		// net/http cannot punycode this Host, so it would fail every dial.
+		"unsendable Host": {func(c *Config) { c.Header = http.Header{"Host": {"é.xn--!"}} }, "header Host cannot be sent"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := validConfig()
@@ -155,6 +157,21 @@ func TestResolve_AllowsASubprotocolInOnePlace(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := validConfig()
 			set(&cfg)
+			_, err := cfg.resolve()
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestResolve_AcceptsASendableHost keeps the Host check to what net/http
+// really refuses: an internationalized name it can punycode, a port, and a
+// value with a line break in it, which net/http neutralizes rather than
+// refuses, all dial fine.
+func TestResolve_AcceptsASendableHost(t *testing.T) {
+	for _, host := range []string{"backhaul.example.com", "bücher.example", "bücher.example:8443", "good.example\r\nX: 1"} {
+		t.Run(host, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Header = http.Header{"Host": {host}}
 			_, err := cfg.resolve()
 			assert.NoError(t, err)
 		})

@@ -3,6 +3,7 @@ package wsclient
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"slices"
@@ -22,11 +23,11 @@ const (
 	// connection is treated as dead. The Alpacon backhaul pings well inside it.
 	DefaultReadTimeout = 35 * time.Minute
 
-	// DefaultWriteTimeout bounds each write, so a stalled peer cannot hold up
-	// every other writer.
+	// DefaultWriteTimeout bounds each WriteMessage or WriteJSON call, so a
+	// stalled peer cannot hold up every other writer.
 	DefaultWriteTimeout = 10 * time.Second
 
-	// DefaultReadLimit is the largest inbound frame accepted, in bytes.
+	// DefaultReadLimit is the largest inbound message accepted, in bytes.
 	DefaultReadLimit = 10 << 20
 
 	// DefaultMinBackoff and DefaultMaxBackoff bound the reconnect schedule.
@@ -74,14 +75,17 @@ type Config struct {
 	// or negotiates. Start from DefaultDialer() to keep its proxy settings.
 	Dialer *websocket.Dialer
 
-	// ReadLimit is the largest inbound frame accepted, in bytes. Zero means
-	// DefaultReadLimit; a negative value removes the limit.
+	// ReadLimit is the largest inbound message accepted, in bytes: its
+	// frames' payloads summed as they arrive, before any decompression. Zero
+	// means DefaultReadLimit; a negative value removes the limit.
 	ReadLimit int64
 
 	// ReadTimeout is re-armed before every read. Zero means DefaultReadTimeout.
 	ReadTimeout time.Duration
 
-	// WriteTimeout bounds every write. Zero means DefaultWriteTimeout.
+	// WriteTimeout bounds each WriteMessage and WriteJSON call. Control frames
+	// the client sends itself, pongs and close frames, have a short fixed
+	// bound of their own. Zero means DefaultWriteTimeout.
 	WriteTimeout time.Duration
 
 	// MinBackoff and MaxBackoff bound the wait between reconnect attempts.
@@ -230,6 +234,16 @@ func (c Config) resolveDial() (dialSettings, error) {
 	// time, where a Client would retry the same doomed handshake forever.
 	if _, ok := header["Sec-Websocket-Protocol"]; ok && len(dialer.Subprotocols) > 0 {
 		return dialSettings{}, errors.New("wsclient: set the subprotocol in Dialer.Subprotocols or in Header, not both")
+	}
+
+	// gorilla sends a Host entry as the request's Host, and net/http refuses
+	// to write one it cannot punycode, which would fail every dial and have a
+	// Client retry a config error forever. Ask that same writer now.
+	if vs := header["Host"]; len(vs) > 0 && vs[0] != "" {
+		probe := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/"}, Host: vs[0], Header: http.Header{}}
+		if err := probe.Write(io.Discard); err != nil {
+			return dialSettings{}, fmt.Errorf("wsclient: header Host cannot be sent: %w", err)
+		}
 	}
 
 	return dialSettings{url: u, header: header, dialer: dialer, readLimit: readLimit}, nil

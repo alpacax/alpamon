@@ -34,7 +34,7 @@ jobs:
   # transport and nothing else. The day it imports pkg/config, pkg/utils,
   # internal/* or anything that drags in creack/pty or the systemd probes,
   # every importer has to compile the host agent just to open a socket, which
-  # is how alpamon-dhcp-plugin ended up pinned to v1.3.0 for over a year. No
+  # is what keeps alpamon-dhcp-plugin on a pre-/v2 alpamon today. No
   # linter here enforces an import boundary (there is no .golangci.yml, so no
   # depguard), so this job is the only thing holding the line.
   #

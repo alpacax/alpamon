@@ -38,15 +38,15 @@ var (
 	ErrAlreadyRunning = errors.New("wsclient: Run has already been called")
 )
 
-// Handler receives each inbound frame. It runs on the Run goroutine, so the
-// next frame is not read until it returns: hand long work to another
+// Handler receives each inbound message. It runs on the Run goroutine, so
+// the next message is not read until it returns: hand long work to another
 // goroutine. ctx is done once Run starts stopping. A non-nil error stops Run,
 // which returns it; call Shutdown for an ordinary stop.
 type Handler func(ctx context.Context, messageType int, payload []byte) error
 
 // Client keeps one WebSocket connection up: it dials, reconnects with
 // jittered backoff whenever the connection drops, and hands every inbound
-// frame to a Handler.
+// message to a Handler.
 //
 // The Client owns its connection. Run is the only goroutine that reads it,
 // writes are serialized, and Reconnect and Shutdown only signal the read
@@ -87,7 +87,7 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// Run dials, then feeds every inbound frame to h until Shutdown is called,
+// Run dials, then feeds every inbound message to h until Shutdown is called,
 // ctx is done, or h returns an error, reconnecting whenever the connection
 // drops. It keeps trying for as long as it runs; OnRetry reports every wait,
 // so a caller that wants to give up can call Shutdown.
@@ -96,9 +96,10 @@ func New(cfg Config) (*Client, error) {
 // connection short of MinBackoff is followed by the same jittered wait a
 // failed dial gets, whether the dial was refused, the peer hung up, or a
 // write failed. Only a connection that lasted at least MinBackoff, or a close
-// the caller asked for through Reconnect or Shutdown, redials at once and
-// restarts the schedule. Without that, a peer that accepts the handshake and
-// drops it can drive a redial loop across a whole fleet.
+// the caller asked for through Reconnect, redials at once and restarts the
+// schedule; Shutdown and a done ctx end Run instead. Without that, a peer
+// that accepts the handshake and drops it can drive a redial loop across a
+// whole fleet.
 //
 // Run returns nil after Shutdown, ctx.Err() once ctx is done, and h's error
 // when h stopped it. The connection is closed before Run returns. A Client
@@ -303,10 +304,17 @@ type disconnect struct {
 // returns h's error when h stopped it, and nil otherwise.
 func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (disconnect, error) {
 	opened := time.Now()
-	// A connection that lasted as long as the shortest backoff has shown the
-	// endpoint is worth redialing at once. Counting frames instead would let
-	// a peer that sends one byte and hangs up reset the schedule every time.
-	proven := func() bool { return time.Since(opened) >= c.s.minBackoff }
+	// end takes conn out of service and says how it ended. A connection that
+	// lasted as long as the shortest backoff has shown the endpoint is worth
+	// redialing at once; counting frames instead would let a peer that sends
+	// one byte and hangs up reset the schedule every time. The proof is taken
+	// before release, because the close drain and OnDisconnect run inside it,
+	// and time spent there is not time the connection was up.
+	end := func(cause error) disconnect {
+		ended := disconnect{proven: time.Since(opened) >= c.s.minBackoff, cause: cause}
+		c.release(conn, cause)
+		return ended
+	}
 
 	// gorilla/websocket answers ping frames inside ReadMessage without
 	// touching the read deadline, so a peer whose keepalive is a ping rather
@@ -317,17 +325,23 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (di
 		if err := c.rearm(ctx, conn); err != nil {
 			return err
 		}
-		// A pong that cannot go out means the connection is already failing,
-		// and the read that follows will say so; ending the read here would
-		// only lose that reason.
-		_ = conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(closeTimeout))
-		return nil
+		// A pong the socket refused has failed the write side for good, as a
+		// failed data frame does, and nothing else would notice: each ping
+		// keeps the read deadline moving, so the connection would stay up
+		// without being able to send. Fail the read, as gorilla's own ping
+		// handler does. A pong that only timed out waiting for the write lock
+		// behind a data frame is temporary and skipped; that frame's own
+		// deadline decides the connection.
+		err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(closeTimeout))
+		if err == nil || errors.Is(err, websocket.ErrCloseSent) || temporary(err) {
+			return nil
+		}
+		return fmt.Errorf("wsclient: answering a ping: %w", err)
 	})
 
 	for {
 		if cause, ending := c.armRead(ctx, conn); ending {
-			c.release(conn, cause)
-			return disconnect{proven: proven(), cause: cause}, nil
+			return end(cause), nil
 		}
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -340,19 +354,16 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (di
 			if ending && wokenOnPurpose(err) {
 				err = cause
 			}
-			c.release(conn, err)
-			return disconnect{proven: proven(), cause: err}, nil
+			return end(err), nil
 		}
 		if err := h(ctx, messageType, payload); err != nil {
 			// A handler that honors its context reports the cancellation that
 			// is already stopping Run. That is not a failure of its own, and
 			// Run must still return nil for a Shutdown.
 			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
-				c.release(conn, nil)
-				return disconnect{proven: proven()}, nil
+				return end(nil), nil
 			}
-			c.release(conn, err)
-			return disconnect{proven: proven(), cause: err}, err
+			return end(err), err
 		}
 	}
 }
@@ -405,6 +416,15 @@ func freeRead(conn *websocket.Conn) {
 	if err := conn.UnderlyingConn().SetReadDeadline(aLongTimeAgo); err != nil {
 		_ = conn.Close()
 	}
+}
+
+// temporary reports what gorilla/websocket marks as passing: its own timeout
+// waiting for the write lock is temporary, while a write that failed on the
+// socket is stored as fatal and is not. A locally declared interface, not
+// net.Error, because that interface's Temporary method is deprecated.
+func temporary(err error) bool {
+	var t interface{ Temporary() bool }
+	return errors.As(err, &t) && t.Temporary()
 }
 
 // wokenOnPurpose reports whether a failed read is one this package caused

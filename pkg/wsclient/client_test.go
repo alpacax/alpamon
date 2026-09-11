@@ -43,7 +43,7 @@ type backhaulServer struct {
 type serverConn struct {
 	conn      *websocket.Conn
 	header    http.Header
-	frames    atomic.Int64 // every frame read, including those received was too full to keep
+	frames    atomic.Int64 // every message read, including those dropped because received was full
 	received  chan []byte  // the first frames read; never blocks the server's reads
 	closeCode chan int
 }
@@ -352,6 +352,21 @@ func (c setDeadlineRefusingConn) SetDeadline(t time.Time) error {
 		return c.Conn.SetDeadline(t)
 	}
 	return errors.New("this conn does not do deadlines")
+}
+
+// writeFailingConn passes the handshake, then fails every write once
+// failWrites is set, which is what a connection whose send side has died
+// while its receive side is still delivering looks like.
+type writeFailingConn struct {
+	net.Conn
+	failWrites *atomic.Bool
+}
+
+func (c writeFailingConn) Write(p []byte) (int, error) {
+	if c.failWrites.Load() {
+		return 0, errors.New("broken pipe")
+	}
+	return c.Conn.Write(p)
 }
 
 // undeadlinedConn ignores deadlines, so a test can hold a handshake open
@@ -828,6 +843,64 @@ func TestClient_AbortClosesAConnThatRefusesTheAbortDeadline(t *testing.T) {
 	require.NoError(t, recv(t, result, "Run to return"))
 	assert.Less(t, time.Since(start), handshakeTimeout/2,
 		"a refused abort deadline must close the socket rather than wait out the handshake")
+}
+
+// TestClient_GivesUpAConnectionThatCannotAnswerAPing covers a connection
+// whose send side has died while pings keep arriving. Each ping re-arms the
+// read deadline, so ReadTimeout never fires; if the failed pong were
+// ignored, the connection would stay up for good without being able to send
+// a byte. The failed pong has to end it.
+func TestClient_GivesUpAConnectionThatCannotAnswerAPing(t *testing.T) {
+	srv := newBackhaulServer(t)
+	h := newHooks()
+	var failWrites atomic.Bool
+	cfg := testConfig(srv.url)
+	cfg.ReadTimeout = 30 * time.Second // the connection must end on the pong, long before this
+	cfg.Dialer = DefaultDialer()
+	var nd net.Dialer
+	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := nd.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return writeFailingConn{Conn: conn, failWrites: &failWrites}, nil
+	}
+	h.install(&cfg)
+	startClient(t, t.Context(), cfg, discard)
+	recv(t, h.connects, "the connect")
+	sc := recv(t, srv.accepted, "the connection")
+
+	failWrites.Store(true)
+	require.NoError(t, sc.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)))
+
+	assert.ErrorContains(t, recv(t, h.disconnects, "the disconnect"), "answering a ping")
+}
+
+// TestClient_UptimeExcludesTheTimeSpentClosing pins when the proof is taken.
+// Releasing a connection runs the close drain and the caller's OnDisconnect,
+// and neither is time the connection was up. Measured after them, a peer that
+// hangs up at once looks proven whenever cleanup outlasts MinBackoff, and its
+// redials skip the backoff entirely.
+func TestClient_UptimeExcludesTheTimeSpentClosing(t *testing.T) {
+	srv := newBackhaulServer(t)
+	srv.closeOnAccept.Store(true)
+	h := newHooks()
+	cfg := testConfig(srv.url)
+	cfg.MinBackoff = 100 * time.Millisecond
+	cfg.MaxBackoff = time.Minute
+	cfg.Rand = func() float64 { return 0 }
+	h.install(&cfg)
+	onDisconnect := cfg.OnDisconnect
+	cfg.OnDisconnect = func(err error) {
+		time.Sleep(2 * cfg.MinBackoff) // a slow hook, longer than MinBackoff
+		onDisconnect(err)
+	}
+	startClient(t, t.Context(), cfg, discard)
+
+	recv(t, h.connects, "a connect")
+	require.Error(t, recv(t, h.disconnects, "the close the server sent"))
+	r := recv(t, h.retries, "the wait a connection that lasted no time at all should get")
+	assert.Equal(t, cfg.MinBackoff, r.delay)
 }
 
 // TestClient_ShutdownIsIdempotent is the regression for issue #452's third
