@@ -131,12 +131,8 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	}
 	parentDir := filepath.Dir(path)
 	createdRoot := firstMissingAncestor(parentDir)
-	// Only a target this call creates may be removed on failure: mkdir -p exits 0 on an
-	// existing parent, so a tee that fails to open a pre-existing file leaves it untouched,
-	// and removing it would delete something the caller never created. When we do remove it,
-	// the removal runs inside this same demoted shell, under the requester's real permissions,
-	// not later in Go as the agent (root)--which would otherwise let a symlink swapped into a
-	// path component redirect a root-privileged unlink.
+	// Only a target this call created may be removed on failure, and only under the
+	// requester's own permissions, never as root--see removeAsRequester and the script's own rm -f.
 	_, targetStatErr := os.Lstat(path)
 	createdTarget := os.IsNotExist(targetStatErr)
 	script := fmt.Sprintf("mkdir -p %s && tee %s > /dev/null", utils.Quote(parentDir), utils.Quote(path))
