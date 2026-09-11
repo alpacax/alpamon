@@ -75,6 +75,20 @@ func firstMissingAncestor(dir string) (missing string, ok bool) {
 	}
 }
 
+// dirTreeIsAllDirs reports whether root and everything under it are plain directories,
+// so removing it cannot discard a file a concurrent writer placed there.
+func dirTreeIsAllDirs(root string) bool {
+	safe := true
+	_ = filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			safe = false
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return safe
+}
+
 // writeFileAs streams src to a file, demoting via tee when sysProcAttr is set. Caller owns src.
 // path is sanitized by callers via utils.SanitizePath, which rejects null bytes,
 // UNC/device prefixes, and literal ".." after cleaning.
@@ -122,7 +136,7 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		if fi, statErr := os.Lstat(path); statErr == nil && !fi.IsDir() {
 			_ = os.Remove(path) // lgtm[go/path-injection]
 		}
-		if tracksCreation {
+		if tracksCreation && dirTreeIsAllDirs(createdRoot) {
 			_ = os.RemoveAll(createdRoot) // lgtm[go/path-injection]
 		}
 		var details []string

@@ -64,6 +64,15 @@ func TestWriteFileAs_TeePath_SurfacesTeeFailureAfterMkdirSucceeds(t *testing.T) 
 	assert.DirExists(t, path)
 }
 
+func TestDirTreeIsAllDirs(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "nested"), 0755))
+	assert.True(t, dirTreeIsAllDirs(dir))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "nested", "out.bin"), []byte("x"), 0644))
+	assert.False(t, dirTreeIsAllDirs(dir))
+}
+
 func TestWriteFileAs_TeePath_RemovesDirsItCreatedOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "new", "nested", "out.bin")
