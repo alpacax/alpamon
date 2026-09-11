@@ -70,6 +70,20 @@ func TestWriteFileAs_TeePath_SurfacesTeeFailureAfterMkdirSucceeds(t *testing.T) 
 	assert.DirExists(t, path)
 }
 
+func TestWriteFileAs_TeePath_KeepsUnwritableTargetOnTeeFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write through file mode restrictions")
+	}
+	path := filepath.Join(t.TempDir(), "precious.conf")
+	require.NoError(t, os.WriteFile(path, []byte("ORIGINAL"), 0444))
+
+	err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{})
+	require.Error(t, err)
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, "ORIGINAL", string(got))
+}
+
 func TestDirTreeIsAllDirs(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "nested"), 0755))

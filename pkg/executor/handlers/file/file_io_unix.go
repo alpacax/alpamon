@@ -119,6 +119,11 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	}
 	parentDir := filepath.Dir(path)
 	createdRoot := firstMissingAncestor(parentDir)
+	// Only a target this call creates may be removed on failure: mkdir -p exits 0 on an
+	// existing parent, so a tee that fails to open a pre-existing file leaves it untouched,
+	// and removing it would delete something the caller never created.
+	_, targetStatErr := os.Lstat(path)
+	createdTarget := os.IsNotExist(targetStatErr)
 	// Create parents as the requesting user to preserve filesystem permissions.
 	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf(
 		"mkdir -p %s && tee %s > /dev/null",
@@ -137,8 +142,10 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	// erc.err is only ever non-nil alongside a non-nil runErr: cmd.Wait returns the stdin-copy
 	// goroutine's error on a clean exit, and the process's own exit error otherwise.
 	if runErr != nil {
-		if fi, statErr := os.Lstat(path); statErr == nil && !fi.IsDir() {
-			_ = os.Remove(path)
+		if createdTarget {
+			if fi, statErr := os.Lstat(path); statErr == nil && !fi.IsDir() {
+				_ = os.Remove(path)
+			}
 		}
 		if createdRoot != "" && dirTreeIsAllDirs(createdRoot) {
 			_ = os.RemoveAll(createdRoot)
