@@ -248,7 +248,7 @@ func (c *Client) Reconnect() {
 	}
 	c.reconnectPending = true
 	c.reconnectCause = nil
-	_ = c.conn.SetReadDeadline(aLongTimeAgo)
+	freeRead(c.conn)
 }
 
 // Shutdown makes Run close the connection and return. It does not wait; Done
@@ -353,7 +353,13 @@ func (c *Client) armRead(ctx context.Context, conn *websocket.Conn) (cause error
 	if cause, ending := c.closeRequestLocked(ctx); ending {
 		return cause, true
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(c.s.readTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(c.s.readTimeout)); err != nil {
+		// A caller-supplied net.Conn may refuse a deadline. Entering the
+		// read anyway would park it with no timeout, and the interrupts
+		// that free a parked read set the same deadline, so nothing could
+		// end it. Give the connection up instead.
+		return fmt.Errorf("wsclient: arming the read deadline: %w", err), true
+	}
 	return nil, false
 }
 
@@ -368,6 +374,16 @@ func (c *Client) rearm(ctx context.Context, conn *websocket.Conn) {
 		return
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(c.s.readTimeout))
+}
+
+// freeRead unblocks a read parked on conn. Pushing the deadline into the
+// past is the ordinary way, but a caller-supplied net.Conn may refuse a
+// deadline, and then closing the socket is the only thing left that ends the
+// read. Both are safe to call while another goroutine is reading.
+func freeRead(conn *websocket.Conn) {
+	if err := conn.SetReadDeadline(aLongTimeAgo); err != nil {
+		_ = conn.Close()
+	}
 }
 
 // closeRequest reports whether the live connection is ending, and the cause
@@ -410,7 +426,7 @@ func (c *Client) abandon(conn *websocket.Conn, cause error) {
 	}
 	c.reconnectPending = true
 	c.reconnectCause = cause
-	_ = conn.SetReadDeadline(aLongTimeAgo)
+	freeRead(conn)
 }
 
 // interrupt frees a read parked on the live connection. It holds mu, so it
@@ -420,7 +436,7 @@ func (c *Client) interrupt() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn != nil {
-		_ = c.conn.SetReadDeadline(aLongTimeAgo)
+		freeRead(c.conn)
 	}
 }
 

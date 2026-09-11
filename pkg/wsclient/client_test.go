@@ -267,6 +267,34 @@ func readDeadlineProofDialer() *websocket.Dialer {
 	return d
 }
 
+// deadlineRefusingConn accepts a fixed number of read deadlines and then
+// refuses every one, the way a caller-supplied net.Conn that does not
+// implement deadlines behaves.
+type deadlineRefusingConn struct {
+	net.Conn
+	allow *atomic.Int32
+}
+
+func (c deadlineRefusingConn) SetReadDeadline(t time.Time) error {
+	if c.allow.Add(-1) >= 0 {
+		return c.Conn.SetReadDeadline(t)
+	}
+	return errors.New("this conn does not do deadlines")
+}
+
+func deadlineRefusingDialer(allow *atomic.Int32) *websocket.Dialer {
+	d := DefaultDialer()
+	var nd net.Dialer
+	d.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := nd.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return deadlineRefusingConn{Conn: conn, allow: allow}, nil
+	}
+	return d
+}
+
 // undeadlinedConn ignores deadlines, so a test can hold a handshake open
 // past the point where the client would otherwise abort it.
 type undeadlinedConn struct{ net.Conn }
@@ -567,6 +595,48 @@ func TestClient_AbortSurvivesTheHandshakeDeadline(t *testing.T) {
 	require.NoError(t, recv(t, result, "Run to return"))
 	assert.Less(t, time.Since(start), handshakeTimeout,
 		"the abort must hold, not be overwritten by the handshake deadline")
+}
+
+// TestClient_GivesUpAConnectionWhoseDeadlineWontArm covers a
+// caller-supplied conn that refuses a read deadline. Reading anyway would
+// park with no timeout, and every way of freeing a parked read sets that
+// same deadline, so Run and Done would block for good.
+func TestClient_GivesUpAConnectionWhoseDeadlineWontArm(t *testing.T) {
+	srv := newBackhaulServer(t)
+	h := newHooks()
+	var allow atomic.Int32 // refuse from the very first arm
+	cfg := testConfig(srv.url)
+	cfg.Dialer = deadlineRefusingDialer(&allow)
+	h.install(&cfg)
+	startClient(t, t.Context(), cfg, discard)
+
+	recv(t, h.connects, "the connect")
+	recv(t, srv.accepted, "the connection")
+	assert.ErrorContains(t, recv(t, h.disconnects, "the disconnect"), "arming the read deadline")
+	recv(t, srv.accepted, "the redial, rather than a read that could never end")
+}
+
+// TestClient_ShutdownClosesAConnThatWontTakeADeadline covers the same
+// refusal arriving later: the read is already parked on a deadline that was
+// accepted once, and the interrupt that should free it is refused. Closing
+// the socket is the only thing left that ends the read.
+func TestClient_ShutdownClosesAConnThatWontTakeADeadline(t *testing.T) {
+	srv := newBackhaulServer(t)
+	h := newHooks()
+	var allow atomic.Int32
+	allow.Store(1) // the first arm succeeds, every interrupt after it fails
+	cfg := testConfig(srv.url)
+	cfg.ReadTimeout = 30 * time.Second // far past the test's patience
+	cfg.Dialer = deadlineRefusingDialer(&allow)
+	h.install(&cfg)
+	c, result := startClient(t, t.Context(), cfg, discard)
+	recv(t, h.connects, "the connect")
+	recv(t, srv.accepted, "the connection")
+	time.Sleep(50 * time.Millisecond) // let the read park
+
+	c.Shutdown()
+
+	require.NoError(t, recv(t, result, "Run to return"))
 }
 
 // TestClient_ShutdownIsIdempotent is the regression for issue #452's third

@@ -194,7 +194,7 @@ func TestResolve_HeaderDefaults(t *testing.T) {
 
 func TestResolve_DoesNotAliasCallerState(t *testing.T) {
 	extra := http.Header{"X-Trace": {"a"}}
-	dialer := &websocket.Dialer{HandshakeTimeout: time.Second}
+	dialer := &websocket.Dialer{HandshakeTimeout: time.Second, Subprotocols: []string{"alpacon.v1"}}
 	cfg := validConfig()
 	cfg.Header = extra
 	cfg.Dialer = dialer
@@ -205,10 +205,12 @@ func TestResolve_DoesNotAliasCallerState(t *testing.T) {
 	extra["X-Trace"][0] = "changed"
 	extra.Set("X-Late", "late")
 	dialer.HandshakeTimeout = time.Hour
+	dialer.Subprotocols[0] = "changed"
 
 	assert.Equal(t, "a", s.header.Get("X-Trace"), "the caller's header slices must be copied")
 	assert.Empty(t, s.header.Get("X-Late"))
 	assert.Equal(t, time.Second, s.dialer.HandshakeTimeout, "a running client must not see later edits to the caller's dialer")
+	assert.Equal(t, []string{"alpacon.v1"}, s.dialer.Subprotocols, "the shallow copy shares this slice's array, so it has to be cloned")
 }
 
 // TestResolve_BoundsACallerDialersHandshake covers the obvious thing to

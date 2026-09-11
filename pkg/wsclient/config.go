@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -198,6 +199,9 @@ func (c Config) resolveDial() (dialSettings, error) {
 	if dialer.HandshakeTimeout == 0 {
 		dialer.HandshakeTimeout = DefaultHandshakeTimeout
 	}
+	// The shallow copy shares this slice's backing array with the caller, so
+	// an edit to an entry after New would change later handshakes.
+	dialer.Subprotocols = slices.Clone(dialer.Subprotocols)
 	if dialer.TLSClientConfig != nil {
 		// Shared, this is the one field whose later mutation would change
 		// how an already-running client verifies certificates: gorilla reads
