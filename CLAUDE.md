@@ -137,7 +137,7 @@ Commands from the Alpacon console flow through:
 
 **WebSocket transport (`pkg/wsclient/`)**
 - Leaf package for modules outside this repo (alpamon-kube): dial with the `id`/`key` header, jittered reconnect backoff, read timeout, reconnect
-- May import only the standard library, gorilla/websocket, `pkg/tunnel` and `pkg/version`; the `leaf-guard` job in `build-and-test.yml` enforces this
+- May import only the standard library, gorilla/websocket, `pkg/tunnel` and `pkg/version`; the `leaf-guard` job in `.github/workflows/build-and-test.yml` enforces this
 - Nothing in alpamon calls it yet; `pkg/runner` keeps its own client
 
 **Configuration (`pkg/config/`)**

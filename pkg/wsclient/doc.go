@@ -20,8 +20,8 @@
 // goroutine that reads, writes are serialized, and Shutdown and Reconnect
 // only signal the read loop, so gorilla/websocket's rule of one concurrent
 // reader and one concurrent writer holds by construction. A caller that needs
-// a connection of its own, to wrap in tunnel.WebSocketConn for smux say, uses
-// Dial and takes on that responsibility itself.
+// a connection of its own, for example to wrap in tunnel.WebSocketConn for
+// smux, uses Dial and takes on that responsibility itself.
 //
 // # Dependencies
 //

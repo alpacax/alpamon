@@ -66,22 +66,42 @@ func (s dialSettings) dial(ctx context.Context) (conn *websocket.Conn, resp *htt
 		return nil, resp, err
 	}
 
-	// gorilla/websocket switches decompression on for any server that answers
-	// with permessage-deflate, including one that was never offered it, and a
-	// read limit counts the compressed bytes. Together that turns a small
-	// frame into an unbounded allocation, so refuse the connection instead.
-	// Values, not Get: gorilla reads every Sec-WebSocket-Extensions header
-	// it was sent, so a server that puts an empty one first and
-	// permessage-deflate second would walk straight past a check on the
-	// first value alone.
-	if extensions := resp.Header.Values("Sec-WebSocket-Extensions"); len(extensions) > 0 && !s.dialer.EnableCompression {
+	// A client must fail the connection when the server answers with an
+	// extension it never offered (RFC 6455, section 9.1), and here it matters
+	// beyond form: gorilla/websocket switches decompression on for any
+	// permessage-deflate answer, offered or not, and a read limit counts the
+	// compressed bytes, so a small frame could inflate without bound.
+	// Values, not Get, because gorilla reads every Sec-WebSocket-Extensions
+	// header, so a server that hid the real one behind an empty first header
+	// would pass a check on the first value alone.
+	if name, ok := unofferedExtension(resp.Header.Values("Sec-WebSocket-Extensions"), s.dialer.EnableCompression); ok {
 		_ = conn.Close()
-		return nil, resp, fmt.Errorf("wsclient: server negotiated %q, an extension this client did not offer",
-			strings.Join(extensions, ", "))
+		return nil, resp, fmt.Errorf("wsclient: server negotiated %q, an extension this client did not offer", name)
 	}
 
 	conn.SetReadLimit(s.readLimit)
 	return conn, resp, nil
+}
+
+// unofferedExtension returns the first extension named in the server's
+// answer that this client did not offer. The only extension gorilla/websocket
+// ever offers is permessage-deflate, and only with EnableCompression. Anything
+// this parser cannot place is reported rather than skipped, so a header it
+// reads differently from gorilla fails closed.
+func unofferedExtension(values []string, compression bool) (string, bool) {
+	for _, value := range values {
+		for _, extension := range strings.Split(value, ",") {
+			name, _, _ := strings.Cut(extension, ";")
+			name = strings.TrimSpace(name)
+			switch {
+			case name == "":
+			case compression && strings.EqualFold(name, "permessage-deflate"):
+			default:
+				return name, true
+			}
+		}
+	}
+	return "", false
 }
 
 // abortable copies d with its dial hooks wrapped so that every socket they
@@ -90,9 +110,9 @@ func (s dialSettings) dial(ctx context.Context) (conn *websocket.Conn, resp *htt
 //
 // gorilla/websocket stops watching ctx as soon as the socket is up: the HTTP
 // upgrade exchange, and a proxy CONNECT before it, are bounded only by
-// HandshakeTimeout, which a caller-supplied dialer may leave at zero. Without
-// this a Shutdown waits on a peer that has stopped answering, which for an
-// agent in a pod means waiting out the termination grace period.
+// HandshakeTimeout. Without this a Shutdown would wait that timeout out on a
+// peer that has stopped answering, 30 seconds by default, which for an agent
+// in a pod is the whole termination grace period.
 func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, func()) {
 	dialer := *d
 
@@ -107,7 +127,7 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 		mu.Lock()
 		defer mu.Unlock()
 		if aborted.Load() {
-			_ = wrapped.SetDeadline(aLongTimeAgo)
+			forceAbort(wrapped)
 		}
 		opened = append(opened, wrapped)
 		return wrapped
@@ -146,7 +166,7 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 		}
 		aborted.Store(true)
 		for _, c := range opened {
-			_ = c.SetDeadline(aLongTimeAgo)
+			forceAbort(c)
 		}
 	})
 
@@ -179,7 +199,18 @@ type abortableConn struct {
 
 func (c abortableConn) SetDeadline(t time.Time) error {
 	if c.aborted.Load() {
-		return c.Conn.SetDeadline(aLongTimeAgo)
+		return forceAbort(c.Conn)
 	}
 	return c.Conn.SetDeadline(t)
+}
+
+// forceAbort unblocks a dial on c. A deadline in the past is the ordinary
+// way, but a caller-supplied net.Conn may refuse deadlines, and then closing
+// it is what is left.
+func forceAbort(c net.Conn) error {
+	if err := c.SetDeadline(aLongTimeAgo); err != nil {
+		_ = c.Close()
+		return err
+	}
+	return nil
 }

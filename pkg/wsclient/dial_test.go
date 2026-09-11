@@ -140,6 +140,31 @@ func TestDial_RefusesAnExtensionItNeverOffered(t *testing.T) {
 	}
 }
 
+func TestUnofferedExtension(t *testing.T) {
+	const deflate = "permessage-deflate; server_no_context_takeover; client_no_context_takeover"
+	for _, tc := range []struct {
+		name        string
+		values      []string
+		compression bool
+		want        string
+	}{
+		{name: "no header"},
+		{name: "an empty header", values: []string{""}},
+		{name: "deflate, not offered", values: []string{deflate}, want: "permessage-deflate"},
+		{name: "deflate, offered", values: []string{deflate}, compression: true},
+		{name: "deflate in another case, offered", values: []string{"PerMessage-Deflate"}, compression: true},
+		{name: "an unknown extension, with compression on", values: []string{"x-evil"}, compression: true, want: "x-evil"},
+		{name: "an unknown one after deflate", values: []string{deflate + ", x-evil"}, compression: true, want: "x-evil"},
+		{name: "deflate hidden behind an empty header", values: []string{"", deflate}, want: "permessage-deflate"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found := unofferedExtension(tc.values, tc.compression)
+			assert.Equal(t, tc.want != "", found)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 // TestDial_KeepsTheCredentialOutOfTheResponse covers the request that
 // http.ReadResponse hangs off the response it returns. Dial invites callers
 // to inspect that response, and the request carries the Authorization

@@ -65,12 +65,13 @@ type Config struct {
 	Header http.Header
 
 	// Dialer opens the connection. Nil means DefaultDialer(). A non-nil
-	// dialer is used as given except for two things: a zero HandshakeTimeout
-	// becomes DefaultHandshakeTimeout, because gorilla/websocket stops
-	// watching the context once the socket is up and an unbounded handshake
-	// would hang with no signal at all, and TLSClientConfig is cloned so
-	// that later edits to it cannot change how a running client verifies
-	// certificates. Start from DefaultDialer() to keep its proxy settings.
+	// dialer is used as given except for three things. A zero
+	// HandshakeTimeout becomes DefaultHandshakeTimeout, because
+	// gorilla/websocket stops watching the context once the socket is up and
+	// an unbounded handshake would hang with no signal at all; a negative one
+	// is rejected. TLSClientConfig and Subprotocols are copied, so that later
+	// edits to them cannot change how a running client verifies certificates
+	// or negotiates. Start from DefaultDialer() to keep its proxy settings.
 	Dialer *websocket.Dialer
 
 	// ReadLimit is the largest inbound frame accepted, in bytes. Zero means
@@ -197,7 +198,12 @@ func (c Config) resolveDial() (dialSettings, error) {
 		copied := *c.Dialer
 		dialer = &copied
 	}
-	if dialer.HandshakeTimeout == 0 {
+	switch {
+	case dialer.HandshakeTimeout < 0:
+		// gorilla would hand this to context.WithTimeout, which expires at
+		// once: every dial fails, and a Client retries a config error forever.
+		return dialSettings{}, fmt.Errorf("wsclient: Dialer.HandshakeTimeout must not be negative, got %s", dialer.HandshakeTimeout)
+	case dialer.HandshakeTimeout == 0:
 		dialer.HandshakeTimeout = DefaultHandshakeTimeout
 	}
 	// The shallow copy shares this slice's backing array with the caller, so

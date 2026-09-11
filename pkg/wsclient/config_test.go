@@ -261,6 +261,17 @@ func TestDefaults_AreTheValuesTheyClaim(t *testing.T) {
 	assert.Equal(t, 60*time.Second, DefaultMaxBackoff)
 }
 
+func TestResolve_RejectsANegativeHandshakeTimeout(t *testing.T) {
+	cfg := validConfig()
+	cfg.Dialer = &websocket.Dialer{HandshakeTimeout: -time.Second}
+
+	_, err := cfg.resolve()
+
+	// Passed through, gorilla's context.WithTimeout would expire at once and
+	// a Client would retry a config error forever.
+	assert.ErrorContains(t, err, "HandshakeTimeout must not be negative")
+}
+
 func TestNew_RejectsAnInvalidConfig(t *testing.T) {
 	c, err := New(Config{})
 	assert.Nil(t, c, "New must not hand back a half-built client")

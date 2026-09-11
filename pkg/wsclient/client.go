@@ -213,11 +213,20 @@ func (c *Client) WriteMessage(messageType int, data []byte) error {
 	if conn == nil {
 		return ErrNotConnected
 	}
-	// gorilla/websocket keeps the write deadline in a plain field that the
-	// next write reads, so setting it is only safe under writeMu.
-	if err := conn.SetWriteDeadline(time.Now().Add(c.s.writeTimeout)); err != nil {
-		return fmt.Errorf("wsclient: setting the write deadline: %w", err)
+	deadline := time.Now().Add(c.s.writeTimeout)
+	// gorilla/websocket applies the write deadline to the socket before each
+	// frame but drops the error, so a net.Conn that refuses write deadlines
+	// would get writes with no bound at all. Ask the socket directly, and give
+	// up a connection that cannot enforce WriteTimeout. The probe is safe from
+	// here: net.Conn methods may be called concurrently.
+	if err := conn.UnderlyingConn().SetWriteDeadline(deadline); err != nil {
+		err = fmt.Errorf("wsclient: arming the write deadline: %w", err)
+		c.abandon(conn, err)
+		return err
 	}
+	// gorilla keeps the deadline in a plain field that it re-applies per
+	// frame; the field is only safe to set under writeMu. It never errors.
+	_ = conn.SetWriteDeadline(deadline)
 	if err := conn.WriteMessage(messageType, data); err != nil {
 		// gorilla/websocket fails every later write once one has failed, so
 		// this connection can no longer send. Replace it now rather than
@@ -303,7 +312,11 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (di
 	// touching the read deadline, so a peer whose keepalive is a ping rather
 	// than a data frame would hit ReadTimeout while talking to us.
 	conn.SetPingHandler(func(appData string) error {
-		c.rearm(ctx, conn)
+		// A conn that stops taking the deadline cannot keep the keepalive
+		// contract; failing the read gives it up the way armRead would.
+		if err := c.rearm(ctx, conn); err != nil {
+			return err
+		}
 		// A pong that cannot go out means the connection is already failing,
 		// and the read that follows will say so; ending the read here would
 		// only lose that reason.
@@ -368,13 +381,16 @@ func (c *Client) armRead(ctx context.Context, conn *websocket.Conn) (cause error
 // keepalive that ReadMessage handled without returning. It takes mu for the
 // same reason armRead does: re-arming over a pending request would park the
 // read for another ReadTimeout and lose the wakeup.
-func (c *Client) rearm(ctx context.Context, conn *websocket.Conn) {
+func (c *Client) rearm(ctx context.Context, conn *websocket.Conn) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ending := c.closeRequestLocked(ctx); ending || c.conn != conn {
-		return
+		return nil
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(c.s.readTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(c.s.readTimeout)); err != nil {
+		return fmt.Errorf("wsclient: re-arming the read deadline: %w", err)
+	}
+	return nil
 }
 
 // freeRead unblocks a read parked on conn from a goroutine other than the

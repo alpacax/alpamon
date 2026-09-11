@@ -43,7 +43,7 @@ type backhaulServer struct {
 type serverConn struct {
 	conn      *websocket.Conn
 	header    http.Header
-	frames    atomic.Int64 // every frame read, including any received had no room for
+	frames    atomic.Int64 // every frame read, including those received was too full to keep
 	received  chan []byte  // the first frames read; never blocks the server's reads
 	closeCode chan int
 }
@@ -269,10 +269,12 @@ func readDeadlineProofDialer() *websocket.Dialer {
 
 // deadlineRefusingConn accepts a fixed number of read deadlines and then
 // refuses every one, the way a caller-supplied net.Conn that does not
-// implement deadlines behaves.
+// implement deadlines behaves. It also counts reads, so a test can tell when
+// the read loop has actually entered one.
 type deadlineRefusingConn struct {
 	net.Conn
 	allow *atomic.Int32
+	reads *atomic.Int64
 }
 
 func (c deadlineRefusingConn) SetReadDeadline(t time.Time) error {
@@ -282,7 +284,12 @@ func (c deadlineRefusingConn) SetReadDeadline(t time.Time) error {
 	return errors.New("this conn does not do deadlines")
 }
 
-func deadlineRefusingDialer(allow *atomic.Int32) *websocket.Dialer {
+func (c deadlineRefusingConn) Read(p []byte) (int, error) {
+	c.reads.Add(1)
+	return c.Conn.Read(p)
+}
+
+func deadlineRefusingDialer(allow *atomic.Int32, reads *atomic.Int64) *websocket.Dialer {
 	d := DefaultDialer()
 	var nd net.Dialer
 	d.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -290,9 +297,61 @@ func deadlineRefusingDialer(allow *atomic.Int32) *websocket.Dialer {
 		if err != nil {
 			return nil, err
 		}
-		return deadlineRefusingConn{Conn: conn, allow: allow}, nil
+		return deadlineRefusingConn{Conn: conn, allow: allow, reads: reads}, nil
 	}
 	return d
+}
+
+// parkOnARefusingConn starts a client whose conn accepts exactly one read
+// deadline, and returns once Run is inside a read armed with it. From there,
+// every interrupt is refused, so only freeRead's close fallback can end the
+// read. Waiting on a read-entry signal rather than a fixed sleep is what
+// makes that certain: on a slow runner a request could otherwise land before
+// the read and be handled by armRead, and the test would pass without ever
+// reaching the fallback.
+func parkOnARefusingConn(t *testing.T, srv *backhaulServer, cfg Config, h *hooks) (*Client, <-chan error) {
+	t.Helper()
+	var allow atomic.Int32
+	allow.Store(1)
+	var reads, readsAtConnect atomic.Int64
+	cfg.Dialer = deadlineRefusingDialer(&allow, &reads)
+	h.install(&cfg)
+	onConnect := cfg.OnConnect
+	cfg.OnConnect = func() {
+		readsAtConnect.Store(reads.Load()) // the handshake's reads, before the loop's first
+		onConnect()
+	}
+
+	c, result := startClient(t, t.Context(), cfg, discard)
+	recv(t, h.connects, "the first connect")
+	recv(t, srv.accepted, "the first connection")
+	require.Eventually(t, func() bool { return reads.Load() > readsAtConnect.Load() },
+		waitFor, time.Millisecond, "Run never entered its read")
+	return c, result
+}
+
+// writeDeadlineRefusingConn refuses every write deadline. gorilla applies
+// the write deadline to the socket per frame and drops the error, so without
+// a probe of its own the client would write to it with no bound at all.
+type writeDeadlineRefusingConn struct{ net.Conn }
+
+func (writeDeadlineRefusingConn) SetWriteDeadline(time.Time) error {
+	return errors.New("this conn does not do write deadlines")
+}
+
+// setDeadlineRefusingConn accepts a fixed number of SetDeadline calls and
+// then refuses every one, which is how a dial abort meets a caller-supplied
+// conn that only half implements deadlines.
+type setDeadlineRefusingConn struct {
+	net.Conn
+	allow *atomic.Int32
+}
+
+func (c setDeadlineRefusingConn) SetDeadline(t time.Time) error {
+	if c.allow.Add(-1) >= 0 {
+		return c.Conn.SetDeadline(t)
+	}
+	return errors.New("this conn does not do deadlines")
 }
 
 // undeadlinedConn ignores deadlines, so a test can hold a handshake open
@@ -518,8 +577,9 @@ func TestClient_ContextCancelFreesAParkedRead(t *testing.T) {
 // TestClient_ShutdownAbortsAStalledHandshake covers a peer that completes the
 // TCP connect and then never answers the upgrade. gorilla/websocket stops
 // watching the context at that point, so only HandshakeTimeout would end the
-// wait, and this dialer has none: without an abort of its own the client
-// would hang here forever, and a pod would be killed mid-shutdown.
+// wait. This dialer sets none, which resolve turns into the 30-second
+// default: without an abort of its own, Shutdown would wait all of that out,
+// which is a pod's whole termination grace period.
 func TestClient_ShutdownAbortsAStalledHandshake(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -536,7 +596,7 @@ func TestClient_ShutdownAbortsAStalledHandshake(t *testing.T) {
 	}()
 
 	cfg := testConfig("ws://" + listener.Addr().String() + "/ws/")
-	cfg.Dialer = &websocket.Dialer{} // no HandshakeTimeout, so nothing else can end the wait
+	cfg.Dialer = &websocket.Dialer{} // defaults to a 30s handshake timeout, far past the test's patience
 	c, result := startClient(t, t.Context(), cfg, discard)
 	stalled := recv(t, accepted, "the connection the client opened")
 	t.Cleanup(func() { _ = stalled.Close() })
@@ -605,8 +665,9 @@ func TestClient_GivesUpAConnectionWhoseDeadlineWontArm(t *testing.T) {
 	srv := newBackhaulServer(t)
 	h := newHooks()
 	var allow atomic.Int32 // refuse from the very first arm
+	var reads atomic.Int64
 	cfg := testConfig(srv.url)
-	cfg.Dialer = deadlineRefusingDialer(&allow)
+	cfg.Dialer = deadlineRefusingDialer(&allow, &reads)
 	h.install(&cfg)
 	startClient(t, t.Context(), cfg, discard)
 
@@ -623,16 +684,9 @@ func TestClient_GivesUpAConnectionWhoseDeadlineWontArm(t *testing.T) {
 func TestClient_ShutdownClosesAConnThatWontTakeADeadline(t *testing.T) {
 	srv := newBackhaulServer(t)
 	h := newHooks()
-	var allow atomic.Int32
-	allow.Store(1) // the first arm succeeds, every interrupt after it fails
 	cfg := testConfig(srv.url)
 	cfg.ReadTimeout = 30 * time.Second // far past the test's patience
-	cfg.Dialer = deadlineRefusingDialer(&allow)
-	h.install(&cfg)
-	c, result := startClient(t, t.Context(), cfg, discard)
-	recv(t, h.connects, "the connect")
-	recv(t, srv.accepted, "the connection")
-	time.Sleep(50 * time.Millisecond) // let the read park
+	c, result := parkOnARefusingConn(t, srv, cfg, h)
 
 	c.Shutdown()
 
@@ -649,18 +703,11 @@ func TestClient_ShutdownClosesAConnThatWontTakeADeadline(t *testing.T) {
 func TestClient_ReconnectOnAConnThatWontTakeADeadlineIsStillARequest(t *testing.T) {
 	srv := newBackhaulServer(t)
 	h := newHooks()
-	var allow atomic.Int32
-	allow.Store(1) // the first arm succeeds, every interrupt after it fails
 	cfg := testConfig(srv.url)
 	cfg.ReadTimeout = 30 * time.Second
 	cfg.MinBackoff = time.Hour // any paced wait would outlast the test
 	cfg.MaxBackoff = time.Hour
-	cfg.Dialer = deadlineRefusingDialer(&allow)
-	h.install(&cfg)
-	c, _ := startClient(t, t.Context(), cfg, discard)
-	recv(t, h.connects, "the first connect")
-	recv(t, srv.accepted, "the first connection")
-	time.Sleep(50 * time.Millisecond) // let the read park
+	c, _ := parkOnARefusingConn(t, srv, cfg, h)
 
 	c.Reconnect()
 
@@ -677,12 +724,110 @@ func TestClient_DrainGivesUpOnAConnThatWontTakeADeadline(t *testing.T) {
 	srv := newBackhaulServer(t)
 	srv.stallNext.Store(true) // accepts, then never answers the close frame
 	var allow atomic.Int32    // refuse every read deadline
+	var reads atomic.Int64
 	cfg := testConfig(srv.url)
-	cfg.Dialer = deadlineRefusingDialer(&allow)
+	cfg.Dialer = deadlineRefusingDialer(&allow, &reads)
 	startClient(t, t.Context(), cfg, discard)
 
 	recv(t, srv.accepted, "the connection whose deadline will not arm")
 	recv(t, srv.accepted, "the redial, which a drain stuck on a silent peer never reaches")
+}
+
+// TestClient_GivesUpAConnectionThatWontTakeAWriteDeadline covers the write
+// side. gorilla drops the error from setting a write deadline on the socket,
+// so a conn that refuses one would take writes with no bound: a stalled peer
+// would then hold the write lock, and every writer behind it, for good.
+func TestClient_GivesUpAConnectionThatWontTakeAWriteDeadline(t *testing.T) {
+	srv := newBackhaulServer(t)
+	h := newHooks()
+	cfg := testConfig(srv.url)
+	cfg.Dialer = DefaultDialer()
+	var nd net.Dialer
+	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := nd.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return writeDeadlineRefusingConn{conn}, nil
+	}
+	h.install(&cfg)
+	c, _ := startClient(t, t.Context(), cfg, discard)
+	recv(t, h.connects, "the connect")
+	recv(t, srv.accepted, "the connection")
+
+	err := c.WriteJSON(map[string]string{"query": "ping"})
+
+	assert.ErrorContains(t, err, "arming the write deadline")
+	assert.ErrorIs(t, recv(t, h.disconnects, "the disconnect"), err, "a conn that cannot bound its writes is given up")
+	recv(t, srv.accepted, "the redial")
+}
+
+// TestClient_GivesUpAConnectionWhosePingReArmIsRefused covers the keepalive
+// path. A ping re-arms the read deadline from inside ReadMessage; when the
+// conn starts refusing, the deadline stops moving and a peer that pings on
+// schedule would still be cut off at ReadTimeout. Failing the read instead
+// gives the connection up the way armRead does.
+func TestClient_GivesUpAConnectionWhosePingReArmIsRefused(t *testing.T) {
+	srv := newBackhaulServer(t)
+	h := newHooks()
+	var allow atomic.Int32
+	allow.Store(1) // the loop's own arm succeeds; the ping's re-arm is refused
+	var reads atomic.Int64
+	cfg := testConfig(srv.url)
+	cfg.ReadTimeout = 30 * time.Second // the read must end on the refusal, not on this
+	cfg.Dialer = deadlineRefusingDialer(&allow, &reads)
+	h.install(&cfg)
+	startClient(t, t.Context(), cfg, discard)
+	recv(t, h.connects, "the connect")
+	sc := recv(t, srv.accepted, "the connection")
+
+	require.NoError(t, sc.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)))
+
+	assert.ErrorContains(t, recv(t, h.disconnects, "the disconnect"), "re-arming the read deadline")
+}
+
+// TestClient_AbortClosesAConnThatRefusesTheAbortDeadline covers the dial
+// abort meeting a conn that accepted the handshake deadline and then refuses
+// the one that would end it. Setting the deadline alone would leave the
+// handshake waiting out HandshakeTimeout after Shutdown.
+func TestClient_AbortClosesAConnThatRefusesTheAbortDeadline(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, 8)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- conn // never answer the upgrade
+		}
+	}()
+
+	const handshakeTimeout = 3 * time.Second
+	var allow atomic.Int32
+	allow.Store(1) // gorilla's own handshake deadline is accepted; the abort's is refused
+	cfg := testConfig("ws://" + listener.Addr().String() + "/ws/")
+	cfg.Dialer = &websocket.Dialer{HandshakeTimeout: handshakeTimeout}
+	var nd net.Dialer
+	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := nd.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return setDeadlineRefusingConn{Conn: conn, allow: &allow}, nil
+	}
+	c, result := startClient(t, t.Context(), cfg, discard)
+	stalled := recv(t, accepted, "the connection the client opened")
+	t.Cleanup(func() { _ = stalled.Close() })
+
+	start := time.Now()
+	c.Shutdown()
+
+	require.NoError(t, recv(t, result, "Run to return"))
+	assert.Less(t, time.Since(start), handshakeTimeout/2,
+		"a refused abort deadline must close the socket rather than wait out the handshake")
 }
 
 // TestClient_ShutdownIsIdempotent is the regression for issue #452's third
@@ -1098,7 +1243,7 @@ func TestClient_RetriesARejectedHandshakeThenConnects(t *testing.T) {
 	srv.reject.Store(2)
 	h := newHooks()
 	cfg := testConfig(srv.url)
-	cfg.Rand = func() float64 { return 0 } // factor 0.5, so the first waits clamp to MinBackoff
+	cfg.Rand = func() float64 { return 0 } // factor 1.0, so each wait is the base and the first is MinBackoff
 	h.install(&cfg)
 	delivered := make(chan struct{}, 1)
 	startClient(t, t.Context(), cfg, func(context.Context, int, []byte) error {
