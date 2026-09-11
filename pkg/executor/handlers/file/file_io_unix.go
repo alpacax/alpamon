@@ -92,9 +92,12 @@ func dirTreeIsAllDirs(root string) bool {
 }
 
 // writeFileAs streams src to a file, demoting via tee when sysProcAttr is set. Caller owns src.
-// path is sanitized by callers via utils.SanitizePath, which rejects null bytes,
-// UNC/device prefixes, and literal ".." after cleaning.
+// path must already be absolute: callers sanitize it via utils.SanitizePath, which rejects
+// null bytes, UNC/device prefixes, and literal ".." after cleaning.
 func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("invalid argument: path must be absolute: %s", path)
+	}
 	// No-op for the absolute path SanitizePath produces; it is the sanitizer shape CodeQL recognizes.
 	path = filepath.Clean("/" + path)
 	if sysProcAttr == nil {

@@ -36,6 +36,12 @@ func TestWriteFileAs_TeePath_CreatesParentDir(t *testing.T) {
 	}
 }
 
+func TestWriteFileAs_RejectsNonAbsolutePath(t *testing.T) {
+	err := writeFileAs(t.Context(), "relative/x", strings.NewReader("payload"), nil)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "absolute")
+}
+
 func TestWriteFileAs_TeePath_RejectsUnwritableParent(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can write through directory mode restrictions")
