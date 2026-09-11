@@ -88,25 +88,24 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	cmd.Stderr = errW
 	runErr := cmd.Run()
 
-	if runErr != nil || erc.err != nil {
+	// erc.err is only ever non-nil alongside a non-nil runErr: cmd.Wait returns the stdin-copy
+	// goroutine's error on a clean exit, and the process's own exit error otherwise.
+	if runErr != nil {
 		// lgtm[go/path-injection]: path sanitized via SanitizePath, which
 		// rejects null bytes, UNC/device prefixes, and literal ".." after
 		// cleaning. Wire input is admin-authenticated.
 		_ = os.Remove(path) // lgtm[go/path-injection]
-		if runErr != nil {
-			var details []string
-			if msg := strings.TrimSpace(errW.buf.String()); msg != "" {
-				details = append(details, msg)
-			}
-			if erc.err != nil && erc.err != runErr {
-				details = append(details, erc.err.Error())
-			}
-			if len(details) > 0 {
-				return fmt.Errorf("%w: %s", runErr, strings.Join(details, "; "))
-			}
-			return runErr
+		var details []string
+		if msg := strings.TrimSpace(errW.buf.String()); msg != "" {
+			details = append(details, msg)
 		}
-		return fmt.Errorf("failed to read source: %w", erc.err)
+		if erc.err != nil && erc.err != runErr {
+			details = append(details, erc.err.Error())
+		}
+		if len(details) > 0 {
+			return fmt.Errorf("%w: %s", runErr, strings.Join(details, "; "))
+		}
+		return runErr
 	}
 	return nil
 }
