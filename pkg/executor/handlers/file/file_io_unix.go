@@ -121,14 +121,17 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	createdRoot := firstMissingAncestor(parentDir)
 	// Only a target this call creates may be removed on failure: mkdir -p exits 0 on an
 	// existing parent, so a tee that fails to open a pre-existing file leaves it untouched,
-	// and removing it would delete something the caller never created.
-	_, targetStatErr := os.Lstat(path)
-	createdTarget := os.IsNotExist(targetStatErr)
+	// and removing it would delete something the caller never created. When we do remove it,
+	// the removal runs inside this same demoted shell, under the requester's real permissions,
+	// not later in Go as the agent (root)--which would otherwise let a symlink swapped into a
+	// path component redirect a root-privileged unlink.
+	script := fmt.Sprintf("mkdir -p %s && tee %s > /dev/null", utils.Quote(parentDir), utils.Quote(path))
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		script = fmt.Sprintf("mkdir -p %s && { tee %s > /dev/null || { rm -f %s; exit 1; }; }",
+			utils.Quote(parentDir), utils.Quote(path), utils.Quote(path))
+	}
 	// Create parents as the requesting user to preserve filesystem permissions.
-	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf(
-		"mkdir -p %s && tee %s > /dev/null",
-		utils.Quote(parentDir), utils.Quote(path),
-	))
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
 	cmd.SysProcAttr = sysProcAttr
 	// Wrap src to preserve its read error even if a subsequent broken-pipe write
 	// overwrites it before cmd.Wait collects the goroutine result.
@@ -142,7 +145,10 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	// erc.err is only ever non-nil alongside a non-nil runErr: cmd.Wait returns the stdin-copy
 	// goroutine's error on a clean exit, and the process's own exit error otherwise.
 	if runErr != nil {
-		if createdTarget {
+		if erc.err != nil {
+			// tee already opened (and truncated) path before the source read failed, so the
+			// original content is already gone; a target tee never reached is instead
+			// protected by omitting the rm -f clause above.
 			if fi, statErr := os.Lstat(path); statErr == nil && !fi.IsDir() {
 				_ = os.Remove(path)
 			}
