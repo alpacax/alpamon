@@ -112,6 +112,12 @@ func TestRun_ShutdownDuringBackoffReturnsAtOnce(t *testing.T) {
 // samples the very first wait, which is the one that matters after a fleet-
 // wide drop, and which a factor range starting below 1.0 would collapse onto
 // the floor for half the fleet.
+//
+// It reads that wait off the second retry rather than the first, because
+// OnRetry announces a wait before serving it: the clock when attempt 2 is
+// announced is exactly how long attempt 1's wait ran. Sampling the delay
+// attempt 1 reports would be the obvious spelling and a weaker test, proving
+// only what was announced rather than what the client waited.
 func TestRun_JitterDesynchronizesClients(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const clients = 50

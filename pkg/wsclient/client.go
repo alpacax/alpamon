@@ -188,7 +188,13 @@ func (c *Client) sleep(ctx context.Context, d time.Duration) bool {
 	defer timer.Stop()
 	select {
 	case <-timer.C:
-		return true
+		// A stop that arrives as the timer fires leaves both cases ready,
+		// and a select picks among ready cases at random, so the timer wins
+		// half of those. Ask again rather than send Run off to dial on an
+		// answer that was already there: that dial is a connect to the
+		// backhaul, and a call into a caller's own dial hook, made after the
+		// caller asked the client to stop.
+		return !c.stopping(ctx)
 	case <-ctx.Done():
 		return false
 	case <-c.shutdown:

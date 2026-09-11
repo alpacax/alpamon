@@ -2,8 +2,10 @@ package wsclient
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha1"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -192,6 +194,42 @@ func TestDial_KeepsTheCredentialOutOfARejectedResponse(t *testing.T) {
 	require.NotNil(t, resp)
 	require.NotNil(t, resp.Request)
 	assert.Empty(t, resp.Request.Header.Get("Authorization"))
+}
+
+// TestDial_HandsTheProxyAnHTTPScheme covers what DefaultDialer's
+// http.ProxyFromEnvironment has to be given. That resolver matches
+// HTTP_PROXY and HTTPS_PROXY on the request's scheme and answers nil for
+// anything else, so a ws or wss scheme reaching it would turn every
+// environment proxy off in silence, which is the sort of thing found in
+// production rather than in a test. What keeps it from happening belongs to
+// gorilla, not to this package: it rewrites the scheme before building the
+// request it hands to Dialer.Proxy. Pin it, because nothing here would
+// notice it changing.
+func TestDial_HandsTheProxyAnHTTPScheme(t *testing.T) {
+	for _, tc := range []struct{ url, want string }{
+		{"ws://backhaul.example.com/ws/", "http"},
+		{"wss://backhaul.example.com/ws/", "https"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			var seen string
+			cfg := testConfig(tc.url)
+			cfg.Dialer = DefaultDialer()
+			cfg.Dialer.Proxy = func(r *http.Request) (*url.URL, error) {
+				seen = r.URL.Scheme
+				return nil, nil
+			}
+			// gorilla consults Proxy before it dials, so the socket is never
+			// needed and the name never has to resolve.
+			cfg.Dialer.NetDialContext = func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("the scheme the proxy saw is the whole test")
+			}
+
+			_, _, err := Dial(t.Context(), cfg)
+
+			require.Error(t, err)
+			assert.Equal(t, tc.want, seen, "http.ProxyFromEnvironment matches on this and nothing else")
+		})
+	}
 }
 
 // TestDial_SurvivesAProxyWithoutAReasonPhrase covers gorilla/websocket
