@@ -319,11 +319,12 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (di
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
 			cause, ending := c.closeRequest(ctx)
-			// Freeing a read produces a timeout and nothing else, so any
-			// other error is the connection's own ending, even if a request
-			// happened to be pending: report that rather than the request.
-			var timeout net.Error
-			if ending && errors.As(err, &timeout) && timeout.Timeout() {
+			// Freeing a read produces a timeout, or net.ErrClosed when the
+			// socket refused the deadline and freeRead closed it instead. Any
+			// other error is the connection's own ending, a peer's close
+			// frame among them, even if a request happened to be pending:
+			// report that rather than the request.
+			if ending && wokenOnPurpose(err) {
 				err = cause
 			}
 			c.release(conn, err)
@@ -376,14 +377,25 @@ func (c *Client) rearm(ctx context.Context, conn *websocket.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(c.s.readTimeout))
 }
 
-// freeRead unblocks a read parked on conn. Pushing the deadline into the
-// past is the ordinary way, but a caller-supplied net.Conn may refuse a
-// deadline, and then closing the socket is the only thing left that ends the
-// read. Both are safe to call while another goroutine is reading.
+// freeRead unblocks a read parked on conn from a goroutine other than the
+// reader. It works on the underlying net.Conn: gorilla/websocket counts its
+// own SetReadDeadline among the read methods that only one goroutine may
+// call, while net.Conn promises that any of its methods may be called
+// concurrently. Pushing the deadline into the past is the ordinary way, but a
+// caller-supplied net.Conn may refuse a deadline, and then closing the socket
+// is the only thing left that ends the read; gorilla's Close is safe to call
+// concurrently too.
 func freeRead(conn *websocket.Conn) {
-	if err := conn.SetReadDeadline(aLongTimeAgo); err != nil {
+	if err := conn.UnderlyingConn().SetReadDeadline(aLongTimeAgo); err != nil {
 		_ = conn.Close()
 	}
+}
+
+// wokenOnPurpose reports whether a failed read is one this package caused
+// to free it, as opposed to one the connection failed on by itself.
+func wokenOnPurpose(err error) bool {
+	var timeout net.Error
+	return (errors.As(err, &timeout) && timeout.Timeout()) || errors.Is(err, net.ErrClosed)
 }
 
 // closeRequest reports whether the live connection is ending, and the cause
@@ -468,8 +480,10 @@ func closeConn(conn *websocket.Conn) {
 	err := conn.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		time.Now().Add(closeTimeout))
-	if err == nil {
-		_ = conn.SetReadDeadline(time.Now().Add(drainTimeout))
+	// Only drain when the drain can be bounded: a conn that refuses the
+	// deadline would leave NextReader waiting on a silent peer forever, and
+	// Close, which is what actually matters, would never be reached.
+	if err == nil && conn.SetReadDeadline(time.Now().Add(drainTimeout)) == nil {
 		for {
 			if _, _, err := conn.NextReader(); err != nil {
 				break

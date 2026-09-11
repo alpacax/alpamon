@@ -637,6 +637,52 @@ func TestClient_ShutdownClosesAConnThatWontTakeADeadline(t *testing.T) {
 	c.Shutdown()
 
 	require.NoError(t, recv(t, result, "Run to return"))
+	assert.NoError(t, recv(t, h.disconnects, "the disconnect"),
+		"closing the socket to free the read is still the close Shutdown asked for")
+}
+
+// TestClient_ReconnectOnAConnThatWontTakeADeadlineIsStillARequest pins the
+// cause when freeRead has to close the socket. The read then fails with
+// net.ErrClosed rather than a timeout, and reporting that as the ending
+// would turn the caller's Reconnect into a failure: a wait of MinBackoff,
+// here an hour, where an immediate redial was asked for.
+func TestClient_ReconnectOnAConnThatWontTakeADeadlineIsStillARequest(t *testing.T) {
+	srv := newBackhaulServer(t)
+	h := newHooks()
+	var allow atomic.Int32
+	allow.Store(1) // the first arm succeeds, every interrupt after it fails
+	cfg := testConfig(srv.url)
+	cfg.ReadTimeout = 30 * time.Second
+	cfg.MinBackoff = time.Hour // any paced wait would outlast the test
+	cfg.MaxBackoff = time.Hour
+	cfg.Dialer = deadlineRefusingDialer(&allow)
+	h.install(&cfg)
+	c, _ := startClient(t, t.Context(), cfg, discard)
+	recv(t, h.connects, "the first connect")
+	recv(t, srv.accepted, "the first connection")
+	time.Sleep(50 * time.Millisecond) // let the read park
+
+	c.Reconnect()
+
+	assert.NoError(t, recv(t, h.disconnects, "the disconnect"), "a Reconnect is a request however the read was freed")
+	recv(t, h.connects, "the immediate redial")
+}
+
+// TestClient_DrainGivesUpOnAConnThatWontTakeADeadline covers the close
+// handshake on the same kind of conn. The drain waits for the peer's reply
+// under a deadline; if the conn refuses that deadline and the peer never
+// replies, the drain would wait forever, and Close, which comes after it,
+// would never run.
+func TestClient_DrainGivesUpOnAConnThatWontTakeADeadline(t *testing.T) {
+	srv := newBackhaulServer(t)
+	srv.stallNext.Store(true) // accepts, then never answers the close frame
+	var allow atomic.Int32    // refuse every read deadline
+	cfg := testConfig(srv.url)
+	cfg.Dialer = deadlineRefusingDialer(&allow)
+	startClient(t, t.Context(), cfg, discard)
+
+	recv(t, srv.accepted, "the connection whose deadline will not arm")
+	recv(t, srv.accepted, "the redial, which a drain stuck on a silent peer never reaches")
 }
 
 // TestClient_ShutdownIsIdempotent is the regression for issue #452's third

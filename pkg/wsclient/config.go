@@ -84,8 +84,9 @@ type Config struct {
 	WriteTimeout time.Duration
 
 	// MinBackoff and MaxBackoff bound the wait between reconnect attempts.
-	// Each wait is the doubling base times a random factor in [0.5, 1.5),
-	// clamped to this range. Zero means DefaultMinBackoff and DefaultMaxBackoff.
+	// Each wait is the doubling base times a random factor in [1.0, 1.5),
+	// clamped to this range, so MinBackoff is a true floor. Zero means
+	// DefaultMinBackoff and DefaultMaxBackoff.
 	MinBackoff time.Duration
 	MaxBackoff time.Duration
 
