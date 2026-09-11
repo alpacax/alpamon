@@ -1,0 +1,148 @@
+package wsclient
+
+import (
+	"context"
+	"errors"
+	"net"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// These tests time the reconnect schedule under synctest's fake clock. That
+// only works because no socket is involved: the dialer fails in-process, so
+// the one thing Run ever blocks on is its backoff timer, which the bubble
+// counts as blocked and fast-forwards.
+
+var errRefused = errors.New("connection refused")
+
+// refusingConfig returns a config whose every dial fails at once, without
+// touching the network. Proxy stays nil so no dial step reads the environment.
+func refusingConfig() Config {
+	cfg := validConfig()
+	cfg.Dialer = &websocket.Dialer{
+		NetDialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errRefused
+		},
+	}
+	return cfg
+}
+
+// TestRun_BackoffScheduleUnderAFakeClock checks both the waits Run reports and
+// when each retry actually happens. With the draw pinned to 0 (factor 0.5)
+// the base doubles 1s, 2s, 4s, 8s, 8s, 8s and each wait is half of it,
+// clamped up to the 1s floor.
+func TestRun_BackoffScheduleUnderAFakeClock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		start := time.Now()
+
+		var attempts []int
+		var waits, at []time.Duration
+		cfg := refusingConfig()
+		cfg.MinBackoff = time.Second
+		cfg.MaxBackoff = 8 * time.Second
+		cfg.Rand = func() float64 { return 0 }
+		cfg.OnRetry = func(attempt int, delay time.Duration, err error) {
+			assert.ErrorIs(t, err, errRefused)
+			attempts = append(attempts, attempt)
+			waits = append(waits, delay)
+			at = append(at, time.Since(start))
+			if attempt == 6 {
+				cancel() // lands before Run waits out the sixth delay
+			}
+		}
+		c, err := New(cfg)
+		require.NoError(t, err)
+
+		require.ErrorIs(t, c.Run(ctx, discard), context.Canceled)
+
+		assert.Equal(t, []int{1, 2, 3, 4, 5, 6}, attempts)
+		assert.Equal(t, []time.Duration{
+			time.Second, // 0.5s raw, clamped up to the floor
+			time.Second,
+			2 * time.Second,
+			4 * time.Second,
+			4 * time.Second, // the base is capped at 8s from here on
+			4 * time.Second,
+		}, waits)
+		// Each retry fires exactly when the previous wait ends: the bubble's
+		// clock is exact, so these would catch a wait that ran long or short.
+		assert.Equal(t, []time.Duration{
+			0,
+			time.Second,
+			2 * time.Second,
+			4 * time.Second,
+			8 * time.Second,
+			12 * time.Second,
+		}, at)
+		assert.Equal(t, 12*time.Second, time.Since(start), "cancelling during a retry must not wait out its delay")
+	})
+}
+
+func TestRun_ShutdownDuringBackoffReturnsAtOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		retried := make(chan struct{}, 1)
+		cfg := refusingConfig()
+		cfg.MinBackoff = time.Minute
+		cfg.MaxBackoff = time.Hour
+		cfg.OnRetry = func(int, time.Duration, error) { retried <- struct{}{} }
+		c, err := New(cfg)
+		require.NoError(t, err)
+
+		start := time.Now()
+		result := make(chan error, 1)
+		go func() { result <- c.Run(t.Context(), discard) }()
+
+		<-retried
+		synctest.Wait() // Run is now parked on its first backoff timer
+		c.Shutdown()
+
+		require.NoError(t, <-result)
+		assert.Zero(t, time.Since(start), "Shutdown must cut the backoff wait short, not wait out the minute")
+	})
+}
+
+// TestRun_JitterDesynchronizesClients is the point of the jitter: clients that
+// lose the backhaul at the same instant must not retry in lockstep. It samples
+// the third attempt, after two draws, because the first wait clamps half of all
+// draws to the same 1s floor and would understate the spread.
+func TestRun_JitterDesynchronizesClients(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const clients = 50
+		thirdAttempt := make(chan time.Duration, clients)
+		start := time.Now()
+		ctx, cancel := context.WithCancel(t.Context())
+
+		for range clients {
+			cfg := refusingConfig()
+			cfg.MinBackoff = time.Second
+			cfg.MaxBackoff = time.Minute
+			cfg.OnRetry = func(attempt int, _ time.Duration, _ error) {
+				if attempt == 3 {
+					thirdAttempt <- time.Since(start)
+				}
+			}
+			c, err := New(cfg)
+			require.NoError(t, err)
+			go func() { _ = c.Run(ctx, discard) }()
+		}
+
+		seen := map[time.Duration]bool{}
+		earliest, latest := time.Duration(1<<63-1), time.Duration(0)
+		for range clients {
+			d := <-thirdAttempt
+			seen[d] = true
+			earliest, latest = min(earliest, d), max(latest, d)
+		}
+		cancel()
+		synctest.Wait()
+
+		assert.Greater(t, len(seen), clients*9/10, "clients should retry at distinct instants")
+		assert.GreaterOrEqual(t, latest-earliest, time.Second, "the retries should spread across the jitter window")
+	})
+}
