@@ -66,7 +66,8 @@ func TestWriteFileAs_TeePath_SurfacesTeeFailureAfterMkdirSucceeds(t *testing.T) 
 
 	err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{})
 	require.Error(t, err)
-	assert.ErrorContains(t, err, "directory")
+	// tee's "Is a directory" message is locale-dependent; the path it names is not.
+	assert.ErrorContains(t, err, path)
 	assert.DirExists(t, path)
 }
 
