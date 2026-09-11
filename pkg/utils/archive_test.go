@@ -1194,12 +1194,11 @@ func TestUnzip_FileEntryWithoutModeKeepsTheDefault(t *testing.T) {
 			out := filepath.Join(dir, "out")
 			require.NoError(t, UnzipReader(r, out))
 
-			// os.Create uses 0666, subject to the process's umask, just like
-			// extraction of a file from an archive with no Unix mode.
-			ref, err := os.Create(filepath.Join(dir, "ref"))
-			require.NoError(t, err)
-			want, err := ref.Stat()
-			require.NoError(t, ref.Close())
+			// A file written at 0666 goes through the same umask as extraction,
+			// so it is the reference, not a literal 0644.
+			ref := filepath.Join(dir, "ref")
+			require.NoError(t, os.WriteFile(ref, nil, 0666))
+			want, err := os.Stat(ref)
 			require.NoError(t, err)
 			path := filepath.Join(out, "file.txt")
 			fi, err := os.Stat(path)
