@@ -30,8 +30,8 @@ const (
 
 	// zipCreatorUnix and zipCreatorMacOSX are the creator halves of a zip
 	// header's CreatorVersion under which archive/zip reads a Unix mode out of
-	// ExternalAttrs; SetMode writes the first. Every other creator gets a mode
-	// derived from FAT attributes instead.
+	// ExternalAttrs; SetMode writes the first. FAT, NTFS and VFAT creators get a
+	// mode derived from FAT attributes instead; every other creator gets none.
 	zipCreatorUnix   = 3
 	zipCreatorMacOSX = 19
 
@@ -755,7 +755,14 @@ func extractFile(f *zip.File, fpath string) error {
 	// Perm only: extraction runs as root on a normal install, so setuid, setgid
 	// or sticky off an entry would land on a root-owned file. newZipEntry drops
 	// the same bits on the way in.
-	outFile, err := createFile(fpath, f.Mode().Perm())
+	mode := f.Mode().Perm()
+	if mode == 0 {
+		// Zero is an entry that carried no mode: a Unix header left empty, or
+		// a creator archive/zip does not decode. Use the 0666 it gives a FAT
+		// entry; umask still applies.
+		mode = 0666
+	}
+	outFile, err := createFile(fpath, mode)
 	if err != nil {
 		return err
 	}
