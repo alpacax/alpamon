@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -391,11 +392,12 @@ func (c *deadlineDelayingConn) SetDeadline(t time.Time) error {
 type writeFailingConn struct {
 	net.Conn
 	failWrites *atomic.Bool
+	err        error
 }
 
 func (c writeFailingConn) Write(p []byte) (int, error) {
 	if c.failWrites.Load() {
-		return 0, errors.New("broken pipe")
+		return 0, c.err
 	}
 	return c.Conn.Write(p)
 }
@@ -932,30 +934,65 @@ func TestClient_AbortClosesAConnThatRefusesTheAbortDeadline(t *testing.T) {
 // read deadline, so ReadTimeout never fires; if the failed pong were
 // ignored, the connection would stay up for good without being able to send
 // a byte. The failed pong has to end it.
+//
+// Both shapes a dead send side comes in, because the handler keeps the
+// connection for a write error that reports itself as temporary and the two
+// differ in exactly that: a broken pipe says nothing about being temporary,
+// while an expired write deadline says it is. Gorilla is what makes the
+// second one end the connection anyway, by running every socket write error
+// through hideTempErr, which rewrites a temporary net.Error into one that is
+// not. Nothing in this package would notice if that stopped being true, and
+// the case that would then hang is the deadline, not the pipe.
 func TestClient_GivesUpAConnectionThatCannotAnswerAPing(t *testing.T) {
-	srv := newBackhaulServer(t)
-	h := newHooks()
-	var failWrites atomic.Bool
-	cfg := testConfig(srv.url)
-	cfg.ReadTimeout = 30 * time.Second // the connection must end on the pong, long before this
-	cfg.Dialer = DefaultDialer()
-	var nd net.Dialer
-	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		conn, err := nd.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		return writeFailingConn{Conn: conn, failWrites: &failWrites}, nil
+	for name, writeErr := range map[string]error{
+		"a write error that is not temporary": errors.New("broken pipe"),
+		"a write error that is temporary":     &net.OpError{Op: "write", Err: os.ErrDeadlineExceeded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newBackhaulServer(t)
+			h := newHooks()
+			var failWrites atomic.Bool
+			cfg := testConfig(srv.url)
+			cfg.ReadTimeout = 30 * time.Second // the connection must end on the pong, long before this
+			cfg.Dialer = DefaultDialer()
+			var nd net.Dialer
+			cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := nd.DialContext(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+				return writeFailingConn{Conn: conn, failWrites: &failWrites, err: writeErr}, nil
+			}
+			h.install(&cfg)
+			startClient(t, t.Context(), cfg, discard)
+			recv(t, h.connects, "the connect")
+			sc := recv(t, srv.accepted, "the connection")
+
+			failWrites.Store(true)
+			require.NoError(t, sc.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)))
+
+			assert.ErrorContains(t, recv(t, h.disconnects, "the disconnect"), "answering a ping")
+		})
 	}
-	h.install(&cfg)
-	startClient(t, t.Context(), cfg, discard)
-	recv(t, h.connects, "the connect")
-	sc := recv(t, srv.accepted, "the connection")
+}
 
-	failWrites.Store(true)
-	require.NoError(t, sc.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)))
+// TestTemporary_ReadsGorillasOwnWriteErrors pins the other half of the ping
+// handler's decision, the half the test above cannot reach: a pong that only
+// waited out gorilla's writer lock must be skipped, not treated as a dead
+// send side. Gorilla answers both the expired deadline and the lock it never
+// won with the same errWriteTimeout, so a deadline already past produces the
+// value the contended path would.
+func TestTemporary_ReadsGorillasOwnWriteErrors(t *testing.T) {
+	srv := newBackhaulServer(t)
+	conn, _, err := Dial(t.Context(), testConfig(srv.url))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
 
-	assert.ErrorContains(t, recv(t, h.disconnects, "the disconnect"), "answering a ping")
+	lockWait := conn.WriteControl(websocket.PongMessage, nil, time.Now().Add(-time.Second))
+
+	require.Error(t, lockWait)
+	assert.True(t, temporary(lockWait),
+		"a pong that only lost the race for the writer lock leaves the connection usable")
 }
 
 // TestClient_UptimeExcludesTheTimeSpentClosing pins when the proof is taken.
