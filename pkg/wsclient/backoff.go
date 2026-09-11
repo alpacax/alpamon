@@ -22,9 +22,15 @@ type backoff struct {
 }
 
 // next returns the next wait: the doubling base multiplied by a factor in
-// [0.5, 1.5), clamped to [initial, max]. Without the random factor every
-// agent reconnecting after the same event, such as a backhaul restart,
-// would retry in lockstep.
+// [1.0, 1.5), clamped to [initial, max]. Without the random factor every
+// agent reconnecting after the same event, such as a backhaul restart, would
+// retry in lockstep.
+//
+// The factor starts at 1.0 rather than 0.5, which is where internal/retry
+// starts it, because the clamp to initial would otherwise swallow the whole
+// lower half: at the first attempt the base is initial, so every draw below
+// 1.0 returns exactly initial and half of a fleet retries on the same tick.
+// Spreading upward keeps initial a real floor and the distribution intact.
 func (b *backoff) next() time.Duration {
 	switch {
 	case b.current == 0:
@@ -43,7 +49,7 @@ func (b *backoff) next() time.Duration {
 	// Clamp in float64 before converting: a factor near 1.5 on a large max
 	// would overflow time.Duration, and !(x < max) also catches a NaN from
 	// a caller-supplied source.
-	jittered := float64(b.current) * (0.5 + randFn())
+	jittered := float64(b.current) * (1.0 + 0.5*randFn())
 	if !(jittered < float64(b.max)) {
 		return b.max
 	}

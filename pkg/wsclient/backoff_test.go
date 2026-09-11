@@ -13,7 +13,7 @@ import (
 // schedule. Keep the two in step.
 
 // TestBackoff_BaseDoublingReachesCeiling pins the draw to a non-neutral
-// factor (0.5x) and asserts on the internal base apart from the returned
+// factor (1.25x) and asserts on the internal base apart from the returned
 // value. At the neutral factor (1.0x) an implementation that feeds the
 // jittered value back into the base produces the same numbers as a correct
 // one, so only a non-neutral factor tells them apart.
@@ -21,7 +21,7 @@ func TestBackoff_BaseDoublingReachesCeiling(t *testing.T) {
 	b := &backoff{
 		initial: 100 * time.Millisecond,
 		max:     500 * time.Millisecond,
-		rand:    func() float64 { return 0 }, // factor 0.5, the low edge
+		rand:    func() float64 { return 0.5 }, // factor 1.25
 	}
 
 	returned := make([]time.Duration, 6)
@@ -41,12 +41,12 @@ func TestBackoff_BaseDoublingReachesCeiling(t *testing.T) {
 	}, base, "the base must keep doubling to the ceiling whatever the jitter draws")
 
 	assert.Equal(t, []time.Duration{
-		100 * time.Millisecond, // 50ms raw, clamped up to the floor
-		100 * time.Millisecond,
-		200 * time.Millisecond,
+		125 * time.Millisecond,
 		250 * time.Millisecond,
-		250 * time.Millisecond,
-		250 * time.Millisecond,
+		500 * time.Millisecond, // 1.25x of 400ms, clamped down to the ceiling
+		500 * time.Millisecond,
+		500 * time.Millisecond,
+		500 * time.Millisecond,
 	}, returned)
 }
 
@@ -86,7 +86,7 @@ func TestBackoff_ExtremeDrawsClamp(t *testing.T) {
 		max:     500 * time.Millisecond,
 		rand:    func() float64 { return 0 },
 	}
-	assert.Equal(t, 100*time.Millisecond, low.next(), "0.5x of the initial wait clamps up to the floor")
+	assert.Equal(t, 100*time.Millisecond, low.next(), "the lowest draw returns the base itself, the floor")
 
 	high := &backoff{
 		initial: 100 * time.Millisecond,
@@ -145,7 +145,7 @@ func TestBackoff_ResetRestartsTheSequence(t *testing.T) {
 	b := &backoff{
 		initial: 100 * time.Millisecond,
 		max:     500 * time.Millisecond,
-		rand:    func() float64 { return 0.5 }, // factor 1.0, isolates reset from jitter
+		rand:    func() float64 { return 0 }, // factor 1.0, isolates reset from jitter
 	}
 
 	for range 4 {

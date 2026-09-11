@@ -33,9 +33,9 @@ func refusingConfig() Config {
 }
 
 // TestRun_BackoffScheduleUnderAFakeClock checks both the waits Run reports and
-// when each retry actually happens. With the draw pinned to 0 (factor 0.5)
-// the base doubles 1s, 2s, 4s, 8s, 8s, 8s and each wait is half of it,
-// clamped up to the 1s floor.
+// when each retry actually happens. With the draw pinned to 0 the factor is
+// 1.0, so each wait is the base itself: 1s, 2s, 4s, then 8s from the ceiling
+// on.
 func TestRun_BackoffScheduleUnderAFakeClock(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
@@ -63,24 +63,24 @@ func TestRun_BackoffScheduleUnderAFakeClock(t *testing.T) {
 
 		assert.Equal(t, []int{1, 2, 3, 4, 5, 6}, attempts)
 		assert.Equal(t, []time.Duration{
-			time.Second, // 0.5s raw, clamped up to the floor
 			time.Second,
 			2 * time.Second,
 			4 * time.Second,
-			4 * time.Second, // the base is capped at 8s from here on
-			4 * time.Second,
+			8 * time.Second, // the base is capped at 8s from here on
+			8 * time.Second,
+			8 * time.Second,
 		}, waits)
 		// Each retry fires exactly when the previous wait ends: the bubble's
 		// clock is exact, so these would catch a wait that ran long or short.
 		assert.Equal(t, []time.Duration{
 			0,
 			time.Second,
-			2 * time.Second,
-			4 * time.Second,
-			8 * time.Second,
-			12 * time.Second,
+			3 * time.Second,
+			7 * time.Second,
+			15 * time.Second,
+			23 * time.Second,
 		}, at)
-		assert.Equal(t, 12*time.Second, time.Since(start), "cancelling during a retry must not wait out its delay")
+		assert.Equal(t, 23*time.Second, time.Since(start), "cancelling during a retry must not wait out its delay")
 	})
 }
 
@@ -107,14 +107,15 @@ func TestRun_ShutdownDuringBackoffReturnsAtOnce(t *testing.T) {
 	})
 }
 
-// TestRun_JitterDesynchronizesClients is the point of the jitter: clients that
-// lose the backhaul at the same instant must not retry in lockstep. It samples
-// the third attempt, after two draws, because the first wait clamps half of all
-// draws to the same 1s floor and would understate the spread.
+// TestRun_JitterDesynchronizesClients is the point of the jitter: clients
+// that lose the backhaul at the same instant must not retry in lockstep. It
+// samples the very first wait, which is the one that matters after a fleet-
+// wide drop, and which a factor range starting below 1.0 would collapse onto
+// the floor for half the fleet.
 func TestRun_JitterDesynchronizesClients(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const clients = 50
-		thirdAttempt := make(chan time.Duration, clients)
+		firstRetry := make(chan time.Duration, clients)
 		start := time.Now()
 		ctx, cancel := context.WithCancel(t.Context())
 
@@ -123,8 +124,8 @@ func TestRun_JitterDesynchronizesClients(t *testing.T) {
 			cfg.MinBackoff = time.Second
 			cfg.MaxBackoff = time.Minute
 			cfg.OnRetry = func(attempt int, _ time.Duration, _ error) {
-				if attempt == 3 {
-					thirdAttempt <- time.Since(start)
+				if attempt == 2 {
+					firstRetry <- time.Since(start)
 				}
 			}
 			c, err := New(cfg)
@@ -135,14 +136,14 @@ func TestRun_JitterDesynchronizesClients(t *testing.T) {
 		seen := map[time.Duration]bool{}
 		earliest, latest := time.Duration(1<<63-1), time.Duration(0)
 		for range clients {
-			d := <-thirdAttempt
+			d := <-firstRetry
 			seen[d] = true
 			earliest, latest = min(earliest, d), max(latest, d)
 		}
 		cancel()
-		synctest.Wait()
 
 		assert.Greater(t, len(seen), clients*9/10, "clients should retry at distinct instants")
-		assert.GreaterOrEqual(t, latest-earliest, time.Second, "the retries should spread across the jitter window")
+		assert.GreaterOrEqual(t, earliest, time.Second, "no wait may undercut MinBackoff")
+		assert.GreaterOrEqual(t, latest-earliest, 300*time.Millisecond, "the first retries should spread across the jitter window")
 	})
 }

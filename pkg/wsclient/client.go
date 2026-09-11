@@ -13,9 +13,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// closeTimeout bounds each step of closing a connection: sending the close
-// frame, and waiting for the peer's reply to it.
-const closeTimeout = 5 * time.Second
+const (
+	// closeTimeout bounds sending the close frame and each control write.
+	closeTimeout = 5 * time.Second
+
+	// drainTimeout bounds waiting for the peer's reply to our close frame.
+	// It is short because the wait is politeness, not correctness: a peer
+	// that is draining or already gone is exactly the one that will not
+	// answer, and every reconnect would otherwise stall for closeTimeout.
+	drainTimeout = 1 * time.Second
+)
 
 // aLongTimeAgo is a read deadline already in the past. Setting it frees a
 // parked read at once, whatever the clock says.
@@ -85,12 +92,13 @@ func New(cfg Config) (*Client, error) {
 // drops. It keeps trying for as long as it runs; OnRetry reports every wait,
 // so a caller that wants to give up can call Shutdown.
 //
-// The backoff paces attempts, not just failed dials. A connection that ends
-// before it proved itself is followed by the same jittered wait a failed dial
-// gets. A connection proves itself by carrying an inbound frame or by staying
-// up for MinBackoff, and one that does restarts the schedule, as does a
-// reconnect the caller asked for. Without that, a peer that accepts the
-// handshake and closes at once would be redialed in a tight loop.
+// The backoff paces attempts, not just failed dials. Anything that ends a
+// connection short of MinBackoff is followed by the same jittered wait a
+// failed dial gets, whether the dial was refused, the peer hung up, or a
+// write failed. Only a connection that lasted at least MinBackoff, or a close
+// the caller asked for through Reconnect or Shutdown, redials at once and
+// restarts the schedule. Without that, a peer that accepts the handshake and
+// drops it can drive a redial loop across a whole fleet.
 //
 // Run returns nil after Shutdown, ctx.Err() once ctx is done, and h's error
 // when h stopped it. The connection is closed before Run returns. A Client
@@ -158,7 +166,10 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 		if handlerErr != nil {
 			return handlerErr
 		}
-		if ended.requested || ended.proven {
+		// A close with no failure behind it is one the caller asked for, and
+		// it redials at once. Everything else is a failure, and only a
+		// connection that lasted earns the same treatment.
+		if ended.cause == nil || ended.proven {
 			b.reset()
 			attempt, wait, cause = 0, false, nil
 			continue
@@ -205,7 +216,7 @@ func (c *Client) WriteMessage(messageType int, data []byte) error {
 	// gorilla/websocket keeps the write deadline in a plain field that the
 	// next write reads, so setting it is only safe under writeMu.
 	if err := conn.SetWriteDeadline(time.Now().Add(c.s.writeTimeout)); err != nil {
-		return err
+		return fmt.Errorf("wsclient: setting the write deadline: %w", err)
 	}
 	if err := conn.WriteMessage(messageType, data); err != nil {
 		// gorilla/websocket fails every later write once one has failed, so
@@ -221,7 +232,7 @@ func (c *Client) WriteMessage(messageType int, data []byte) error {
 func (c *Client) WriteJSON(v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
-		return err
+		return fmt.Errorf("wsclient: encoding the message: %w", err)
 	}
 	return c.WriteMessage(websocket.TextMessage, data)
 }
@@ -275,48 +286,56 @@ func (c *Client) install(ctx context.Context, conn *websocket.Conn) bool {
 // disconnect says how a connection ended, which is what decides whether Run
 // redials at once or waits out a backoff first.
 type disconnect struct {
-	requested bool  // Shutdown, Reconnect or the Run context asked for it
-	proven    bool  // it carried a frame, or stayed up for MinBackoff
-	cause     error // what ended it; nil when the client closed a healthy connection
+	proven bool  // it stayed up for at least MinBackoff
+	cause  error // what ended it; nil only when the caller asked for the close
 }
 
 // serve reads conn into h until the connection ends, and releases it. It
 // returns h's error when h stopped it, and nil otherwise.
 func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (disconnect, error) {
 	opened := time.Now()
-	frames := 0
-	// A connection that carried traffic, or lasted as long as the shortest
-	// backoff, has shown the endpoint is worth redialing at once.
-	proven := func() bool { return frames > 0 || time.Since(opened) >= c.s.minBackoff }
+	// A connection that lasted as long as the shortest backoff has shown the
+	// endpoint is worth redialing at once. Counting frames instead would let
+	// a peer that sends one byte and hangs up reset the schedule every time.
+	proven := func() bool { return time.Since(opened) >= c.s.minBackoff }
+
+	// gorilla/websocket answers ping frames inside ReadMessage without
+	// touching the read deadline, so a peer whose keepalive is a ping rather
+	// than a data frame would hit ReadTimeout while talking to us.
+	conn.SetPingHandler(func(appData string) error {
+		c.rearm(ctx, conn)
+		// A pong that cannot go out means the connection is already failing,
+		// and the read that follows will say so; ending the read here would
+		// only lose that reason.
+		_ = conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(closeTimeout))
+		return nil
+	})
 
 	for {
-		if cause, requested := c.armRead(ctx, conn); requested {
+		if cause, ending := c.armRead(ctx, conn); ending {
 			c.release(conn, cause)
-			return disconnect{requested: true, proven: proven(), cause: cause}, nil
+			return disconnect{proven: proven(), cause: cause}, nil
 		}
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
-			cause, requested := c.closeRequest(ctx)
+			cause, ending := c.closeRequest(ctx)
 			// Freeing a read produces a timeout and nothing else, so any
 			// other error is the connection's own ending, even if a request
 			// happened to be pending: report that rather than the request.
 			var timeout net.Error
-			if requested && errors.As(err, &timeout) && timeout.Timeout() {
+			if ending && errors.As(err, &timeout) && timeout.Timeout() {
 				err = cause
-			} else {
-				requested = false
 			}
 			c.release(conn, err)
-			return disconnect{requested: requested, proven: proven(), cause: err}, nil
+			return disconnect{proven: proven(), cause: err}, nil
 		}
-		frames++
 		if err := h(ctx, messageType, payload); err != nil {
 			// A handler that honors its context reports the cancellation that
 			// is already stopping Run. That is not a failure of its own, and
 			// Run must still return nil for a Shutdown.
 			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
 				c.release(conn, nil)
-				return disconnect{requested: true, proven: proven()}, nil
+				return disconnect{proven: proven()}, nil
 			}
 			c.release(conn, err)
 			return disconnect{proven: proven(), cause: err}, err
@@ -324,29 +343,45 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (di
 	}
 }
 
-// armRead re-arms conn's read deadline, unless a close has been requested,
-// in which case it reports that and the cause instead. Checking and arming
-// under one lock is what keeps a request from landing between the two and
-// being overwritten by a fresh ReadTimeout.
-func (c *Client) armRead(ctx context.Context, conn *websocket.Conn) (cause error, requested bool) {
+// armRead re-arms conn's read deadline, unless the connection is already
+// ending, in which case it reports that and the cause instead. Checking and
+// arming under one lock is what keeps a request from landing between the two
+// and being overwritten by a fresh ReadTimeout.
+func (c *Client) armRead(ctx context.Context, conn *websocket.Conn) (cause error, ending bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if cause, requested := c.closeRequestLocked(ctx); requested {
+	if cause, ending := c.closeRequestLocked(ctx); ending {
 		return cause, true
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(c.s.readTimeout))
 	return nil, false
 }
 
-// closeRequest reports whether the live connection is ending on request
-// rather than on a failed read, and the cause OnDisconnect should report.
-func (c *Client) closeRequest(ctx context.Context) (cause error, requested bool) {
+// rearm pushes the read deadline out again from the read goroutine, for a
+// keepalive that ReadMessage handled without returning. It takes mu for the
+// same reason armRead does: re-arming over a pending request would park the
+// read for another ReadTimeout and lose the wakeup.
+func (c *Client) rearm(ctx context.Context, conn *websocket.Conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ending := c.closeRequestLocked(ctx); ending || c.conn != conn {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(c.s.readTimeout))
+}
+
+// closeRequest reports whether the live connection is ending, and the cause
+// OnDisconnect should report for it.
+func (c *Client) closeRequest(ctx context.Context) (cause error, ending bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.closeRequestLocked(ctx)
 }
 
-func (c *Client) closeRequestLocked(ctx context.Context) (cause error, requested bool) {
+// closeRequestLocked reports whether the connection is ending. A nil cause
+// means the caller asked for the close; a non-nil one means something failed,
+// which is what tells Run to pace the redial.
+func (c *Client) closeRequestLocked(ctx context.Context) (cause error, ending bool) {
 	if c.reconnectPending {
 		return c.reconnectCause, true
 	}
@@ -403,20 +438,22 @@ func (c *Client) release(conn *websocket.Conn, cause error) {
 	c.s.onDisconnect(cause)
 }
 
-// closeConn sends a close frame, waits for the peer's reply only when that
+// closeConn sends a close frame, waits briefly for the peer's reply when that
 // frame went out, and closes the socket regardless, so a broken connection
 // cannot leak its fd. Only the goroutine that was reading conn calls it, so
 // the drain is never a second concurrent reader.
 //
-// After a failed read, including one freed early by Reconnect or Shutdown,
-// gorilla/websocket returns the stored error to every later read, so the
-// drain ends at once. The peer still receives the close frame.
+// After a read that already failed, gorilla/websocket returns the stored
+// error to every later read and the drain ends at once. When the close was
+// noticed between reads the connection is still healthy, so the drain waits
+// on the peer, which is why it is bounded by the short drainTimeout rather
+// than by closeTimeout.
 func closeConn(conn *websocket.Conn) {
 	err := conn.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		time.Now().Add(closeTimeout))
 	if err == nil {
-		_ = conn.SetReadDeadline(time.Now().Add(closeTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(drainTimeout))
 		for {
 			if _, _, err := conn.NextReader(); err != nil {
 				break

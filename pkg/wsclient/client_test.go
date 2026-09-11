@@ -28,13 +28,14 @@ const waitFor = 5 * time.Second
 // backhaulServer is a websocket test double for the Alpacon backhaul. Every
 // connection it accepts is handed to the test over accepted.
 type backhaulServer struct {
-	url           string
-	accepted      chan *serverConn
-	upgrades      atomic.Int32
-	reject        atomic.Int32 // answer this many upgrades with 503 first
-	closeOnAccept atomic.Bool  // accept the upgrade, then close straight away
-	stallNext     atomic.Bool  // never read the next connection, so the client's writes back up
-	done          chan struct{}
+	url            string
+	accepted       chan *serverConn
+	upgrades       atomic.Int32
+	reject         atomic.Int32 // answer this many upgrades with 503 first
+	closeOnAccept  atomic.Bool  // accept the upgrade, then close straight away
+	frameThenClose atomic.Bool  // send one data frame, then close
+	stallNext      atomic.Bool  // never read the next connection, so the client's writes back up
+	done           chan struct{}
 }
 
 // serverConn is the server's end of one accepted connection. The test may
@@ -78,6 +79,13 @@ func newBackhaulServer(t *testing.T) *backhaulServer {
 			return nil
 		})
 		s.accepted <- sc
+		if s.frameThenClose.Load() {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte("hi"))
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseGoingAway, "bye"),
+				time.Now().Add(time.Second))
+			return
+		}
 		if s.closeOnAccept.Load() {
 			_ = conn.WriteControl(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "at capacity"),
@@ -137,7 +145,9 @@ func newHooks() *hooks {
 func (h *hooks) install(cfg *Config) {
 	cfg.OnConnect = func() { h.connects <- struct{}{} }
 	cfg.OnDisconnect = func(err error) { h.disconnects <- err }
-	cfg.OnRetry = func(attempt int, delay time.Duration, err error) { h.retries <- retryEvent{attempt, delay, err} }
+	cfg.OnRetry = func(attempt int, delay time.Duration, err error) {
+		h.retries <- retryEvent{attempt: attempt, delay: delay, err: err}
+	}
 }
 
 // recv waits for one value from ch, failing the test if none arrives.
@@ -508,6 +518,57 @@ func TestClient_ShutdownAbortsAStalledHandshake(t *testing.T) {
 	require.NoError(t, recv(t, result, "Run to return"))
 }
 
+// TestClient_AbortSurvivesTheHandshakeDeadline covers the window the plain
+// abort misses. When the dialer has a handshake timeout, gorilla sets its own
+// deadline on the socket after the dial hook returns, outside this package's
+// wrapper: an abort that landed in between would be silently overwritten and
+// the dial would run to that timeout instead of ending at once.
+func TestClient_AbortSurvivesTheHandshakeDeadline(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, 8)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- conn // never answer the upgrade
+		}
+	}()
+
+	const handshakeTimeout = 2 * time.Second
+	var c *Client
+	ready := make(chan struct{})
+	cfg := testConfig("ws://" + listener.Addr().String() + "/ws/")
+	cfg.Dialer = &websocket.Dialer{HandshakeTimeout: handshakeTimeout}
+	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		<-ready
+		var nd net.Dialer
+		conn, err := nd.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		// Abort while the socket is already open but before it is handed
+		// back, which is exactly the window gorilla's own deadline lands in.
+		c.Shutdown()
+		<-ctx.Done()
+		time.Sleep(50 * time.Millisecond) // let the abort reach the socket
+		return conn, nil
+	}
+	c, err = New(cfg)
+	require.NoError(t, err)
+	result := make(chan error, 1)
+	go func() { result <- c.Run(t.Context(), discard) }()
+	close(ready)
+
+	start := time.Now()
+	require.NoError(t, recv(t, result, "Run to return"))
+	assert.Less(t, time.Since(start), handshakeTimeout,
+		"the abort must hold, not be overwritten by the handshake deadline")
+}
+
 // TestClient_ShutdownIsIdempotent is the regression for issue #452's third
 // item: pkg/runner's ShutDown closes a channel and panics the second time.
 func TestClient_ShutdownIsIdempotent(t *testing.T) {
@@ -794,6 +855,35 @@ func TestClient_ShutdownFromTheHandler(t *testing.T) {
 	assert.Equal(t, websocket.CloseNormalClosure, recv(t, sc.closeCode, "the close frame"))
 }
 
+// TestClient_ReconnectIsNotHeldUpByASilentPeer bounds the close handshake.
+// When the close is noticed between reads, the connection is still healthy,
+// so the drain really does wait on the peer, and the peer least likely to
+// answer is the draining backhaul that asked for the reconnect. Waiting the
+// full close timeout there would black out every agent in the fleet for it.
+func TestClient_ReconnectIsNotHeldUpByASilentPeer(t *testing.T) {
+	srv := newBackhaulServer(t)
+	srv.stallNext.Store(true) // accepts, then neither reads nor answers the close
+	h := newHooks()
+	cfg := testConfig(srv.url)
+	h.install(&cfg)
+	var c *Client
+	ready := make(chan struct{})
+	c, _ = startClient(t, t.Context(), cfg, func(context.Context, int, []byte) error {
+		<-ready
+		c.Reconnect()
+		return nil
+	})
+	close(ready)
+	recv(t, h.connects, "the first connect")
+	first := recv(t, srv.accepted, "the stalled connection")
+	first.push(t, websocket.TextMessage, `{"query":"reconnect"}`)
+
+	start := time.Now()
+	recv(t, h.connects, "the reconnect")
+	assert.Less(t, time.Since(start), 3*time.Second,
+		"the drain must give up on a peer that never answers the close frame")
+}
+
 func TestClient_ReconnectWithoutAConnectionDoesNothing(t *testing.T) {
 	c, err := New(validConfig())
 	require.NoError(t, err)
@@ -843,6 +933,35 @@ func TestClient_ReadTimeoutTriggersAReconnect(t *testing.T) {
 	recv(t, srv.accepted, "the connection dialed after the timeout")
 }
 
+// TestClient_PingFramesKeepTheConnectionAlive covers a peer whose keepalive
+// is an RFC 6455 ping rather than a data frame. gorilla answers pings inside
+// ReadMessage without returning, so the read deadline is only re-armed once
+// a read completes: without a ping handler of our own, a peer that pings
+// steadily still gets dropped at ReadTimeout.
+func TestClient_PingFramesKeepTheConnectionAlive(t *testing.T) {
+	srv := newBackhaulServer(t)
+	h := newHooks()
+	cfg := testConfig(srv.url)
+	cfg.ReadTimeout = 150 * time.Millisecond
+	h.install(&cfg)
+	c, _ := startClient(t, t.Context(), cfg, discard)
+	recv(t, h.connects, "the connect")
+	sc := recv(t, srv.accepted, "the connection")
+
+	// Pings spanning well over two read timeouts, and no data frame at all.
+	for deadline := time.Now().Add(400 * time.Millisecond); time.Now().Before(deadline); {
+		require.NoError(t, sc.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)))
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	select {
+	case err := <-h.disconnects:
+		assert.Fail(t, "a peer that keeps pinging must not hit the read timeout", "disconnected with %v", err)
+	default:
+	}
+	assert.True(t, c.Connected())
+}
+
 func TestClient_ReadLimitDropsAnOversizedFrame(t *testing.T) {
 	srv := newBackhaulServer(t)
 	h := newHooks()
@@ -880,11 +999,12 @@ func TestClient_RetriesARejectedHandshakeThenConnects(t *testing.T) {
 	recv(t, h.connects, "the connect after the rejections")
 	sc := recv(t, srv.accepted, "the connection")
 
-	// A connection that carries a frame has proved itself, which resets the
-	// schedule: after the next drop, counting and waiting both start over
-	// instead of continuing from where they stopped.
-	sc.push(t, websocket.TextMessage, "proof")
-	recv(t, delivered, "the frame that proves the connection")
+	// A connection that lasts at least MinBackoff has proved itself, which
+	// resets the schedule: after the next drop, counting and waiting both
+	// start over instead of continuing from where they stopped.
+	sc.push(t, websocket.TextMessage, "traffic")
+	recv(t, delivered, "the frame")
+	time.Sleep(cfg.MinBackoff + 10*time.Millisecond) // age it past the proof window
 	srv.reject.Store(1)
 	require.NoError(t, sc.conn.UnderlyingConn().Close())
 	require.Error(t, recv(t, h.disconnects, "the drop"))
@@ -907,7 +1027,7 @@ func TestClient_PacesRedialsAfterAnUnprovenConnection(t *testing.T) {
 	cfg := testConfig(srv.url)
 	cfg.MinBackoff = 200 * time.Millisecond
 	cfg.MaxBackoff = time.Minute
-	cfg.Rand = func() float64 { return 0.5 } // factor 1.0, so waits are the base
+	cfg.Rand = func() float64 { return 0 } // factor 1.0, so waits are the base
 	h.install(&cfg)
 	startClient(t, t.Context(), cfg, discard)
 
@@ -922,25 +1042,20 @@ func TestClient_PacesRedialsAfterAnUnprovenConnection(t *testing.T) {
 }
 
 // TestClient_RedialsAtOnceAfterAProvenConnection keeps the other half of the
-// rule honest: pacing must not slow down recovery for a connection that was
+// rule honest: pacing must not slow recovery for a connection that was
 // working, which is every ordinary drop.
 func TestClient_RedialsAtOnceAfterAProvenConnection(t *testing.T) {
 	srv := newBackhaulServer(t)
 	h := newHooks()
 	cfg := testConfig(srv.url)
-	cfg.MinBackoff = time.Hour // any wait at all would hang the test
-	cfg.MaxBackoff = time.Hour
+	cfg.MinBackoff = 50 * time.Millisecond
+	cfg.MaxBackoff = 50 * time.Millisecond
 	h.install(&cfg)
-	delivered := make(chan struct{}, 1)
-	startClient(t, t.Context(), cfg, func(context.Context, int, []byte) error {
-		delivered <- struct{}{}
-		return nil
-	})
+	startClient(t, t.Context(), cfg, discard)
 	recv(t, h.connects, "the first connect")
 	first := recv(t, srv.accepted, "the first connection")
-	first.push(t, websocket.TextMessage, "proof")
-	recv(t, delivered, "the frame that proves the connection")
 
+	time.Sleep(cfg.MinBackoff + 20*time.Millisecond) // age it past the proof window
 	require.NoError(t, first.conn.UnderlyingConn().Close())
 
 	require.Error(t, recv(t, h.disconnects, "the drop"))
@@ -952,11 +1067,65 @@ func TestClient_RedialsAtOnceAfterAProvenConnection(t *testing.T) {
 	}
 }
 
+// TestClient_PacesARedialAfterAFailedWrite is the regression for a write
+// failure jumping the queue. A failed write asks for the connection to be
+// replaced, the same as Reconnect does, but it is a failure: routing it
+// through the caller-requested path reset the backoff and redialed with no
+// wait at all, which is a storm against a backhaul whose write side is sick.
+func TestClient_PacesARedialAfterAFailedWrite(t *testing.T) {
+	srv := newBackhaulServer(t)
+	srv.stallNext.Store(true)
+	h := newHooks()
+	cfg := testConfig(srv.url)
+	cfg.WriteTimeout = 100 * time.Millisecond
+	cfg.MinBackoff = 300 * time.Millisecond
+	cfg.MaxBackoff = time.Minute
+	cfg.Rand = func() float64 { return 0 } // factor 1.0, so the wait is the base
+	h.install(&cfg)
+	c, _ := startClient(t, t.Context(), cfg, discard)
+	recv(t, h.connects, "the first connect")
+	recv(t, srv.accepted, "the stalled connection")
+
+	require.Error(t, c.WriteMessage(websocket.BinaryMessage, make([]byte, 64<<20)))
+
+	require.Error(t, recv(t, h.disconnects, "the disconnect"))
+	r := recv(t, h.retries, "the wait before the redial")
+	assert.Equal(t, 1, r.attempt)
+	assert.Equal(t, cfg.MinBackoff, r.delay, "a failed write must be paced like any other failure")
+}
+
+// TestClient_AFrameDoesNotProveAConnection is the regression for the rule
+// that decides pacing. Counting frames as proof let a peer send one byte,
+// hang up, and have the backoff reset every round: a redial loop bounded by
+// nothing.
+func TestClient_AFrameDoesNotProveAConnection(t *testing.T) {
+	srv := newBackhaulServer(t)
+	srv.frameThenClose.Store(true)
+	h := newHooks()
+	cfg := testConfig(srv.url)
+	cfg.MinBackoff = 200 * time.Millisecond
+	cfg.MaxBackoff = time.Minute
+	cfg.Rand = func() float64 { return 0 }
+	h.install(&cfg)
+	delivered := make(chan struct{}, 8)
+	startClient(t, t.Context(), cfg, func(context.Context, int, []byte) error {
+		delivered <- struct{}{}
+		return nil
+	})
+
+	recv(t, h.connects, "the connect")
+	recv(t, delivered, "the one frame the peer sends before hanging up")
+	require.Error(t, recv(t, h.disconnects, "the close that follows it"))
+	r := recv(t, h.retries, "the wait before the redial")
+	assert.Equal(t, cfg.MinBackoff, r.delay, "a frame on a short-lived connection is not proof")
+	assert.Less(t, srv.upgrades.Load(), int32(10), "a paced loop cannot have run away")
+}
+
 // TestClient_ConcurrentWritesDuringReconnect keeps writers busy across a
 // forced reconnect, so writes land on the old connection, in the gap, and on
 // the new one. gorilla/websocket panics on two concurrent writers and a
-// write racing the close corrupts frames, so passing without -race already
-// shows writes are serialized; under -race it also covers the conn field.
+// write racing the close corrupts frames, so this catches a lost write
+// mutex without the race detector, which is what this repository's CI runs.
 func TestClient_ConcurrentWritesDuringReconnect(t *testing.T) {
 	const writers = 8
 	srv := newBackhaulServer(t)

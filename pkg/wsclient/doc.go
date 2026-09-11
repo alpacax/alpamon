@@ -6,10 +6,10 @@
 // A Client dials with the Authorization header the backhaul expects
 // (id="...", key="..."), re-arms a read timeout before every read, and
 // reconnects whenever the connection drops. Exponential backoff with jitter
-// paces the attempts, including a redial after a connection that ended
-// before it proved itself, so a peer that accepts the handshake and closes
-// at once cannot draw a tight loop out of a fleet of agents. Everything it
-// needs arrives through Config; nothing here reads
+// paces the attempts, including the redial after a connection that lasted
+// less than MinBackoff, so a peer that accepts the handshake and drops it
+// cannot draw a tight loop out of a fleet of agents. Everything it needs
+// arrives through Config; nothing here reads
 // alpamon's global settings. It reports connects, drops and retries through
 // the hooks on Config instead of logging, so the caller decides where those
 // go.
