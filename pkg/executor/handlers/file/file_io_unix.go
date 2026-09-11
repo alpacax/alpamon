@@ -56,20 +56,21 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 	return rc, st.Size(), nil
 }
 
-// firstMissingAncestor returns the highest ancestor of dir that mkdir -p would create.
-// ok is false when dir exists or its state is unknown, so callers never remove a directory they didn't create.
-func firstMissingAncestor(dir string) (missing string, ok bool) {
+// firstMissingAncestor returns the highest ancestor of dir that mkdir -p would create,
+// or "" when dir exists or its state is unknown, so callers never remove a directory they didn't create.
+func firstMissingAncestor(dir string) string {
+	missing := ""
 	cur := dir
 	for {
 		if _, err := os.Lstat(cur); err == nil {
-			return missing, missing != ""
+			return missing
 		} else if !os.IsNotExist(err) {
-			return "", false
+			return ""
 		}
 		missing = cur
 		parent := filepath.Dir(cur)
 		if parent == cur {
-			return missing, true
+			return missing
 		}
 		cur = parent
 	}
@@ -113,7 +114,7 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		return err
 	}
 	parentDir := filepath.Dir(path)
-	createdRoot, tracksCreation := firstMissingAncestor(parentDir)
+	createdRoot := firstMissingAncestor(parentDir)
 	// Create parents as the requesting user to preserve filesystem permissions.
 	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf(
 		"mkdir -p %s && tee %s > /dev/null",
@@ -135,7 +136,7 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		if fi, statErr := os.Lstat(path); statErr == nil && !fi.IsDir() {
 			_ = os.Remove(path)
 		}
-		if tracksCreation && dirTreeIsAllDirs(createdRoot) {
+		if createdRoot != "" && dirTreeIsAllDirs(createdRoot) {
 			_ = os.RemoveAll(createdRoot)
 		}
 		var details []string
