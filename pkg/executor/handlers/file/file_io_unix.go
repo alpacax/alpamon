@@ -143,7 +143,8 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	runErr := cmd.Run()
 
 	// erc.err is only ever non-nil alongside a non-nil runErr: cmd.Wait returns the stdin-copy
-	// goroutine's error on a clean exit, and the process's own exit error otherwise.
+	// goroutine's error on a clean exit, and the process's own exit error otherwise. The
+	// fallback after this block guards that invariant instead of relying on it silently.
 	if runErr != nil {
 		if erc.err != nil {
 			// tee already opened (and truncated) path before the source read failed, so the
@@ -167,6 +168,9 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 			return fmt.Errorf("%w: %s", runErr, strings.Join(details, "; "))
 		}
 		return runErr
+	}
+	if erc.err != nil {
+		return fmt.Errorf("failed to read source: %w", erc.err)
 	}
 	return nil
 }
