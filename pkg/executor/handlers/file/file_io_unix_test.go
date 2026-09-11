@@ -61,6 +61,7 @@ func TestWriteFileAs_TeePath_SurfacesTeeFailureAfterMkdirSucceeds(t *testing.T) 
 	err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{})
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "directory")
+	assert.DirExists(t, path)
 }
 
 func TestWriteFileAs_TeePath_RemovesDirsItCreatedOnFailure(t *testing.T) {

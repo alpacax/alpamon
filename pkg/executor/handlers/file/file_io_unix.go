@@ -119,7 +119,9 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		// lgtm[go/path-injection]: path sanitized via SanitizePath, which
 		// rejects null bytes, UNC/device prefixes, and literal ".." after
 		// cleaning. Wire input is admin-authenticated.
-		_ = os.Remove(path) // lgtm[go/path-injection]
+		if fi, statErr := os.Lstat(path); statErr == nil && !fi.IsDir() {
+			_ = os.Remove(path) // lgtm[go/path-injection]
+		}
 		if tracksCreation {
 			_ = os.RemoveAll(createdRoot) // lgtm[go/path-injection]
 		}
