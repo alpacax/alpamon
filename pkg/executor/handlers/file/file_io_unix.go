@@ -56,6 +56,25 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 	return rc, st.Size(), nil
 }
 
+// firstMissingAncestor returns the highest ancestor of dir that mkdir -p would create.
+// ok is false when dir exists or its state is unknown, so callers never remove a directory they didn't create.
+func firstMissingAncestor(dir string) (missing string, ok bool) {
+	cur := dir
+	for {
+		if _, err := os.Stat(cur); err == nil {
+			return missing, missing != ""
+		} else if !os.IsNotExist(err) {
+			return "", false
+		}
+		missing = cur
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return missing, true
+		}
+		cur = parent
+	}
+}
+
 // writeFileAs streams src to a file, demoting via tee when sysProcAttr is set. Caller owns src.
 // path is sanitized by callers via utils.SanitizePath, which rejects null bytes,
 // UNC/device prefixes, and literal ".." after cleaning.
@@ -77,7 +96,13 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		}
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("tee %s > /dev/null", utils.Quote(path)))
+	parentDir := filepath.Dir(path)
+	createdRoot, tracksCreation := firstMissingAncestor(parentDir)
+	// Create parents as the requesting user to preserve filesystem permissions.
+	cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf(
+		"mkdir -p %s && tee %s > /dev/null",
+		utils.Quote(parentDir), utils.Quote(path),
+	))
 	cmd.SysProcAttr = sysProcAttr
 	// Wrap src to preserve its read error even if a subsequent broken-pipe write
 	// overwrites it before cmd.Wait collects the goroutine result.
@@ -95,6 +120,9 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		// rejects null bytes, UNC/device prefixes, and literal ".." after
 		// cleaning. Wire input is admin-authenticated.
 		_ = os.Remove(path) // lgtm[go/path-injection]
+		if tracksCreation {
+			_ = os.RemoveAll(createdRoot) // lgtm[go/path-injection]
+		}
 		var details []string
 		if msg := strings.TrimSpace(errW.buf.String()); msg != "" {
 			details = append(details, msg)
