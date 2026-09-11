@@ -29,6 +29,163 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
+  # pkg/wsclient is imported by alpacax/alpamon-kube, a separate module that
+  # pins an alpamon tag, and its whole value is that it is a leaf: WebSocket
+  # transport and nothing else. The day it imports pkg/config, pkg/utils,
+  # internal/* or anything that drags in creack/pty or the systemd probes,
+  # every importer has to compile the host agent just to open a socket, which
+  # is what keeps alpamon-dhcp-plugin on a pre-/v2 alpamon today. No
+  # linter here enforces an import boundary (there is no .golangci.yml, so no
+  # depguard), so this job is the only thing holding the line.
+  #
+  # It deliberately skips ./.github/actions/setup-go-generate. The ent package
+  # is gitignored and loading pkg/wsclient must not need it; if this job ever
+  # fails for want of generated code, the package has grown a dependency it
+  # should not have, and red is the right answer.
+  #
+  # To run it yourself, save the step's script to a file and run it with
+  # `PKG=... ALLOWED='...' bash that-file`. It needs nothing but Go. Do not
+  # paste it into an interactive shell: `set -e` and `exit 1` would take the
+  # shell down with it.
+  leaf-guard:
+    name: Verify pkg/wsclient stays a leaf
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          # This job downloads almost nothing, and setup-go's cache key is the
+          # same one the ubuntu jobs using setup-go-generate compute. Saving
+          # from here would claim that key for a near-empty cache and leave the
+          # jobs that need it with nothing to restore.
+          cache: false
+
+      - name: Check the dependency graph
+        env:
+          PKG: github.com/alpacax/alpamon/v2/pkg/wsclient
+          # The only packages pkg/wsclient may reach outside the standard
+          # library. pkg/tunnel and pkg/version are leaves themselves.
+          ALLOWED: >-
+            github.com/alpacax/alpamon/v2/pkg/wsclient
+            github.com/alpacax/alpamon/v2/pkg/tunnel
+            github.com/alpacax/alpamon/v2/pkg/version
+            github.com/gorilla/websocket
+        run: |
+          set -euo pipefail
+
+          # Plain string comparison rather than a regex. `if unexpected=$(grep
+          # -vE "$ALLOWED" ...)` would read grep's exit 2, which is what a
+          # mistyped pattern gives, the same as exit 1, and let the guard pass
+          # on a package that had already drifted.
+          allowed() {
+            local candidate="$1" entry
+            for entry in $ALLOWED; do
+              if [ "$entry" = "$candidate" ]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          # go list resolves build constraints for one target at a time, so a
+          # file tagged //go:build windows could import anything and a Linux
+          # runner would never see it. Cover every target .goreleaser.yaml
+          # ships, which build with CGO off, plus the cgo-on pass that matches
+          # how this repo's own Linux jobs build.
+          for target in linux/amd64/1 linux/amd64/0 linux/arm64/0 darwin/amd64/0 darwin/arm64/0 windows/amd64/0; do
+            IFS=/ read -r goos goarch cgo <<<"$target"
+
+            # {{if .Module}} prints only packages that come from a module,
+            # which leaves out the standard library, including the
+            # GOROOT-vendored vendor/golang.org/x/... packages crypto/tls and
+            # net/http pull in. Those print as empty lines, which sed drops.
+            # -deps skips test-only imports on purpose: tests may use testify,
+            # and no importer compiles them, so do not add -test.
+            deps="$(GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="$cgo" \
+              go list -deps -f '{{if .Module}}{{.ImportPath}}{{end}}' "$PKG" | sed '/^$/d')"
+
+            # Unquoted on purpose: one dependency per word.
+            # shellcheck disable=SC2086
+            set -- $deps
+
+            # A package that no longer resolves would leave nothing to check,
+            # and every test below would pass on an empty list.
+            self=no
+            for dep in "$@"; do
+              if [ "$dep" = "$PKG" ]; then
+                self=yes
+              fi
+            done
+            if [ "$self" = no ]; then
+              echo "::error::$PKG is missing from its own dependency list on $target, so this guard would have passed without checking anything"
+              printf '%s\n' "$deps"
+              exit 1
+            fi
+
+            coupling=
+            unexpected=
+            for dep in "$@"; do
+              case "$dep" in
+                *pty*|*systemd*) coupling="$coupling  $dep"$'\n' ;;
+              esac
+              if ! allowed "$dep"; then
+                unexpected="$unexpected  $dep"$'\n'
+              fi
+            done
+
+            # Checked before the allowlist, which would refuse these too:
+            # naming the two couplings that made a separate alpamon-kube
+            # necessary says more than a generic message about whichever
+            # transitive import happened to bring them in.
+            if [ -n "$coupling" ]; then
+              echo "::error file=pkg/wsclient/doc.go::on $target, pkg/wsclient's dependency graph reaches pty or systemd code:"
+              printf '%s' "$coupling"
+              exit 1
+            fi
+            if [ -n "$unexpected" ]; then
+              echo "::error file=pkg/wsclient/doc.go::pkg/wsclient must stay a leaf, but on $target its dependency graph reaches:"
+              printf '%s' "$unexpected"
+              echo "Allowed: $ALLOWED, and the standard library."
+              exit 1
+            fi
+
+            echo "pkg/wsclient on $target:"
+            printf '%s\n' "$deps" | sed 's/^/  /'
+          done
+
+  # pkg/wsclient holds one connection open across reconnects with a read
+  # loop, callers writing from their own goroutines, and a watcher that
+  # interrupts a parked read. That ownership model is the whole point of the
+  # package, and getting it wrong is what issue #452 is about in pkg/runner.
+  # The suite below runs without the race detector on every platform, so a
+  # race reintroduced here would pass it.
+  #
+  # Cheap enough to be worth its own job: no cgo of its own, no database and
+  # no generated code, so it needs neither a distro container nor the ent
+  # codegen step. `cache: false` for the same reason as leaf-guard, so this
+  # job cannot claim the shared setup-go cache key for a near-empty cache.
+  race-wsclient:
+    name: Race detector (pkg/wsclient)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Twice over: a race that needs an unlucky interleaving does not always
+      # show up on the first scheduling.
+      - name: Run tests under the race detector
+        run: go test -race -count=2 ./pkg/wsclient
+
   # Renamed from `build-and-test` so the flat aggregator at the bottom of this
   # file can take that id: a job id and the aggregate check name cannot be the
   # same string, and the aggregate is the one that has to be `build-and-test`.
@@ -285,6 +442,8 @@ jobs:
   build-and-test:
     needs:
       - verify-tidy
+      - leaf-guard
+      - race-wsclient
       - build-and-test-linux
       - build-and-test-windows
       - build-and-test-macos
