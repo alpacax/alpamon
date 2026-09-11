@@ -137,7 +137,10 @@ func findAgentVolumeDevice(partitions []disk.PartitionStat, dataDir string) stri
 // "/variable/alpamon". Separators are normalized rather than routed through
 // path/filepath, since gopsutil reports native paths per OS ("/var" on
 // Unix, "C:\" on Windows) and this lets a single implementation, and a
-// single test file, cover both without a build tag.
+// single test file, cover both without a build tag. Windows volume paths
+// are case-insensitive (a "C:\" mountpoint owns "c:\ProgramData\..." just
+// as much as "C:\ProgramData\..."), so a drive-letter path folds case
+// before comparing; POSIX paths, which are case-sensitive, are left alone.
 func mountpointOwns(mountpoint, dir string) bool {
 	if mountpoint == "" || dir == "" {
 		return false
@@ -145,6 +148,10 @@ func mountpointOwns(mountpoint, dir string) bool {
 
 	m := normalizeSeparators(mountpoint)
 	d := normalizeSeparators(dir)
+	if hasDriveLetter(m) || hasDriveLetter(d) {
+		m = strings.ToUpper(m)
+		d = strings.ToUpper(d)
+	}
 	if m == d {
 		return true
 	}
@@ -162,6 +169,17 @@ func normalizeSeparators(p string) string {
 	}
 
 	return p
+}
+
+// hasDriveLetter reports whether p starts with a Windows drive letter
+// ("C:", "d:", ...) once separators are normalized to "/".
+func hasDriveLetter(p string) bool {
+	if len(p) < 2 || p[1] != ':' {
+		return false
+	}
+	c := p[0]
+
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 func (c *Check) collectDiskPartitions() ([]disk.PartitionStat, error) {

@@ -144,6 +144,8 @@ func TestMountpointOwns(t *testing.T) {
 		{"windows drive root", `C:\`, `C:\ProgramData\alpamon\data`, true},
 		{"windows nested directory", `C:\ProgramData`, `C:\ProgramData\alpamon\data`, true},
 		{"windows different drive", `D:\`, `C:\ProgramData\alpamon\data`, false},
+		{"windows paths are case-insensitive", `C:\`, `c:\ProgramData\alpamon\data`, true},
+		{"windows nested directory is case-insensitive", `c:\ProgramData`, `C:\ProgramData\alpamon\data`, true},
 		{"empty mountpoint", "", "/var/lib/alpamon", false},
 		{"empty dir", "/var", "", false},
 	}
@@ -186,36 +188,46 @@ func TestFindAgentVolumeDevice(t *testing.T) {
 		}
 		assert.Equal(t, "D:", findAgentVolumeDevice(partitions, `D:\Data\alpamon`))
 		assert.Equal(t, "C:", findAgentVolumeDevice(partitions, `C:\ProgramData\alpamon\data`))
+		assert.Equal(t, "C:", findAgentVolumeDevice(partitions, `c:\ProgramData\alpamon\data`), "drive letters are case-insensitive")
 	})
 }
 
-// TestAgentVolumeSurvivesDeviceDedup proves the flag lands on the emitted
-// entry even when the owning mountpoint is not the first one seen for its
-// device: parseDiskUsage keeps only the first mountpoint per device, so the
-// flag has to be resolved by device identity, not by which mountpoint
-// matched.
-func TestAgentVolumeSurvivesDeviceDedup(t *testing.T) {
-	partitions := []disk.PartitionStat{
-		{Device: "/dev/sda1", Mountpoint: "/data"},
-		{Device: "/dev/sda1", Mountpoint: "/data/nested/alpamon"},
+// TestParseDiskUsageAgentVolumeSurvivesDeviceDedup proves, by calling the
+// real parseDiskUsage rather than reproducing its dedup loop, that the flag
+// lands on the emitted entry even when the owning mountpoint is not the
+// first one seen for its device: parseDiskUsage keeps only the first
+// mountpoint per device, so the flag has to be resolved by device identity,
+// not by which mountpoint matched. Both fixture mountpoints have to be real,
+// existing directories since parseDiskUsage calls disk.Usage on them.
+func (suite *DiskUsageCheckSuite) TestParseDiskUsageAgentVolumeSurvivesDeviceDedup() {
+	firstSeenMountpoint := suite.T().TempDir()
+	nestedMountpoint := filepath.Join(firstSeenMountpoint, "nested", "alpamon")
+	suite.Require().NoError(os.MkdirAll(nestedMountpoint, 0o755))
+
+	fixturePartitions := []disk.PartitionStat{
+		{Device: "/dev/sda1", Mountpoint: firstSeenMountpoint, Fstype: "ext4"},
+		{Device: "/dev/sda1", Mountpoint: nestedMountpoint, Fstype: "ext4"},
 	}
 
-	agentVolumeDevice := findAgentVolumeDevice(partitions, "/data/nested/alpamon/state")
-	assert.Equal(t, "/dev/sda1", agentVolumeDevice)
-
-	// Reproduce parseDiskUsage's device dedup: only the first-seen
-	// mountpoint per device becomes an entry.
-	seen := make(map[string]bool)
-	var flaggedMountpoint string
-	for _, partition := range partitions {
-		if seen[partition.Device] {
-			continue
-		}
-		seen[partition.Device] = true
-		if agentVolumeDevice != "" && partition.Device == agentVolumeDevice {
-			flaggedMountpoint = partition.Mountpoint
-		}
+	originalListPartitions := listPartitions
+	defer func() { listPartitions = originalListPartitions }()
+	listPartitions = func(all bool) ([]disk.PartitionStat, error) {
+		return fixturePartitions, nil
 	}
 
-	assert.Equal(t, "/data", flaggedMountpoint, "the flag must land on the first-seen (emitted) mountpoint of the owning device")
+	originalDataDirFunc := dataDirFunc
+	defer func() { dataDirFunc = originalDataDirFunc }()
+	dataDirFunc = func() string { return filepath.Join(nestedMountpoint, "state") }
+
+	partitions, err := suite.check.collectDiskPartitions()
+	suite.Require().NoError(err)
+	suite.Require().Len(partitions, 2, "both fixture mountpoints of the same device should survive the filters")
+
+	data := suite.check.parseDiskUsage(partitions)
+	// parseDiskUsage keeps only the first-seen mountpoint per device, so a
+	// single device produces a single entry even though two mountpoints of
+	// it were collected.
+	suite.Require().Len(data, 1)
+	assert.Equal(suite.T(), "/dev/sda1", data[0].Device)
+	assert.True(suite.T(), data[0].AgentVolume, "the flag must land on the emitted (first-seen) entry of the device that owns the data directory, even though the matching mountpoint was seen second")
 }
