@@ -84,6 +84,46 @@ func TestWriteFileAs_TeePath_KeepsUnwritableTargetOnTeeFailure(t *testing.T) {
 	assert.Equal(t, "ORIGINAL", string(got))
 }
 
+func TestFirstMissingAncestor(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "existing")
+	require.NoError(t, os.Mkdir(existing, 0755))
+
+	danglingParent := filepath.Join(dir, "dangling")
+	require.NoError(t, os.Symlink(filepath.Join(dir, "nonexistent-target"), danglingParent))
+
+	nonDirParent := filepath.Join(dir, "not-a-dir")
+	require.NoError(t, os.WriteFile(nonDirParent, []byte("x"), 0644))
+
+	tests := []struct {
+		name string
+		dir  string
+		want string
+	}{
+		{"existing directory", existing, ""},
+		{"missing chain", filepath.Join(dir, "a", "b", "c"), filepath.Join(dir, "a")},
+		{"dangling symlink parent", filepath.Join(danglingParent, "child"), filepath.Join(danglingParent, "child")},
+		// Lstat through a non-directory component fails with ENOTDIR, not ENOENT--the same
+		// "state is unknown" branch a permission-denied stat takes, so this reports "" too.
+		{"non-directory parent", filepath.Join(nonDirParent, "child"), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, firstMissingAncestor(tt.dir))
+		})
+	}
+
+	t.Run("stat error", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses permission checks")
+		}
+		blocked := filepath.Join(dir, "blocked")
+		require.NoError(t, os.Mkdir(blocked, 0000))
+		t.Cleanup(func() { require.NoError(t, os.Chmod(blocked, 0700)) })
+		assert.Equal(t, "", firstMissingAncestor(filepath.Join(blocked, "child")))
+	})
+}
+
 func TestDirTreeIsAllDirs(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "nested"), 0755))
