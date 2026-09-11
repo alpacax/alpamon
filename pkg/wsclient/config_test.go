@@ -1,6 +1,7 @@
 package wsclient
 
 import (
+	"crypto/tls"
 	"net/http"
 	"testing"
 	"time"
@@ -25,9 +26,11 @@ func TestNormalizeURL(t *testing.T) {
 		{"ws://127.0.0.1:8081/ws/", "ws://127.0.0.1:8081/ws/"},
 		{"wss://example.com/ws/", "wss://example.com/ws/"},
 	} {
-		got, err := normalizeURL(tc.in)
-		require.NoError(t, err, tc.in)
-		assert.Equal(t, tc.want, got, tc.in)
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := normalizeURL(tc.in)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
 	}
 }
 
@@ -42,8 +45,10 @@ func TestNormalizeURL_Rejects(t *testing.T) {
 		{"wss://user:pass@example.com/ws/", "must not carry credentials"},
 		{"wss://exa mple.com/ws/", "invalid URL"},
 	} {
-		_, err := normalizeURL(tc.in)
-		assert.ErrorContains(t, err, tc.wantErr, tc.in)
+		t.Run(tc.in, func(t *testing.T) {
+			_, err := normalizeURL(tc.in)
+			assert.ErrorContains(t, err, tc.wantErr)
+		})
 	}
 }
 
@@ -140,16 +145,20 @@ func TestResolve_RejectsASubprotocolSetTwice(t *testing.T) {
 }
 
 func TestResolve_AllowsASubprotocolInOnePlace(t *testing.T) {
-	cfg := validConfig()
-	cfg.Header = http.Header{"Sec-WebSocket-Protocol": {"alpacon.v1"}}
-	_, err := cfg.resolve()
-	require.NoError(t, err)
-
-	cfg = validConfig()
-	cfg.Dialer = DefaultDialer()
-	cfg.Dialer.Subprotocols = []string{"alpacon.v1"}
-	_, err = cfg.resolve()
-	assert.NoError(t, err)
+	for name, set := range map[string]func(*Config){
+		"in Header": func(c *Config) { c.Header = http.Header{"Sec-WebSocket-Protocol": {"alpacon.v1"}} },
+		"in Dialer": func(c *Config) {
+			c.Dialer = DefaultDialer()
+			c.Dialer.Subprotocols = []string{"alpacon.v1"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfig()
+			set(&cfg)
+			_, err := cfg.resolve()
+			assert.NoError(t, err)
+		})
+	}
 }
 
 func TestResolve_Header(t *testing.T) {
@@ -200,6 +209,60 @@ func TestResolve_DoesNotAliasCallerState(t *testing.T) {
 	assert.Equal(t, "a", s.header.Get("X-Trace"), "the caller's header slices must be copied")
 	assert.Empty(t, s.header.Get("X-Late"))
 	assert.Equal(t, time.Second, s.dialer.HandshakeTimeout, "a running client must not see later edits to the caller's dialer")
+}
+
+// TestResolve_BoundsACallerDialersHandshake covers the obvious thing to
+// write, &websocket.Dialer{}: gorilla stops watching the context once the
+// socket is up, so a zero handshake timeout leaves a peer that accepts TCP
+// and never answers able to wedge the client with no signal at all.
+func TestResolve_BoundsACallerDialersHandshake(t *testing.T) {
+	cfg := validConfig()
+	cfg.Dialer = &websocket.Dialer{}
+
+	s, err := cfg.resolve()
+	require.NoError(t, err)
+	assert.Equal(t, DefaultHandshakeTimeout, s.dialer.HandshakeTimeout)
+
+	cfg.Dialer = &websocket.Dialer{HandshakeTimeout: time.Second}
+	s, err = cfg.resolve()
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, s.dialer.HandshakeTimeout, "an explicit timeout is left alone")
+}
+
+// TestResolve_ClonesTheTLSConfig matters because gorilla reads
+// TLSClientConfig again on every dial: a caller that shares one tls.Config
+// with something else and later sets InsecureSkipVerify on it would
+// otherwise turn off certificate verification for the next reconnect.
+func TestResolve_ClonesTheTLSConfig(t *testing.T) {
+	shared := &tls.Config{MinVersion: tls.VersionTLS13}
+	cfg := validConfig()
+	cfg.Dialer = &websocket.Dialer{TLSClientConfig: shared}
+
+	s, err := cfg.resolve()
+	require.NoError(t, err)
+
+	shared.InsecureSkipVerify = true
+
+	assert.False(t, s.dialer.TLSClientConfig.InsecureSkipVerify,
+		"a running client must not start skipping verification because the caller edited its tls.Config")
+}
+
+// TestDefaults_AreTheValuesTheyClaim pins the constants themselves. Asserting
+// that the resolver assigns DefaultReadTimeout only proves the wiring; a typo
+// in the constant would ship green.
+func TestDefaults_AreTheValuesTheyClaim(t *testing.T) {
+	assert.Equal(t, 30*time.Second, DefaultHandshakeTimeout)
+	assert.Equal(t, 35*time.Minute, DefaultReadTimeout)
+	assert.Equal(t, 10*time.Second, DefaultWriteTimeout)
+	assert.Equal(t, int64(10<<20), int64(DefaultReadLimit))
+	assert.Equal(t, 5*time.Second, DefaultMinBackoff)
+	assert.Equal(t, 60*time.Second, DefaultMaxBackoff)
+}
+
+func TestNew_RejectsAnInvalidConfig(t *testing.T) {
+	c, err := New(Config{})
+	assert.Nil(t, c, "New must not hand back a half-built client")
+	assert.ErrorContains(t, err, "URL is required")
 }
 
 func TestDefaultDialer_ReturnsAFreshDialer(t *testing.T) {

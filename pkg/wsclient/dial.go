@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,9 +21,11 @@ import (
 // Dial uses URL, ID, Key, Origin, UserAgent, Header, Dialer and ReadLimit
 // from cfg, and ignores the timeout, backoff and hook fields. When the server
 // rejects the handshake, the error wraps websocket.ErrBadHandshake and the
-// response is returned alongside it.
+// response is returned alongside it, with the Authorization header stripped
+// from the request hanging off it so that logging the response cannot spill
+// the credential.
 func Dial(ctx context.Context, cfg Config) (*websocket.Conn, *http.Response, error) {
-	s, err := cfg.dialSettings()
+	s, err := cfg.resolveDial()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -46,6 +50,13 @@ func (s dialSettings) dial(ctx context.Context) (conn *websocket.Conn, resp *htt
 	}()
 
 	conn, resp, err = dialer.DialContext(ctx, s.url, s.header)
+	// http.ReadResponse hangs the request off the response, and that request
+	// carries the Authorization header. Callers are invited to inspect the
+	// response, and one logged struct would put the agent's long-lived key
+	// wherever those logs go.
+	if resp != nil && resp.Request != nil {
+		resp.Request.Header.Del("Authorization")
+	}
 	if err != nil {
 		if resp != nil {
 			// gorilla/websocket reports every rejected handshake as the same
@@ -59,9 +70,14 @@ func (s dialSettings) dial(ctx context.Context) (conn *websocket.Conn, resp *htt
 	// with permessage-deflate, including one that was never offered it, and a
 	// read limit counts the compressed bytes. Together that turns a small
 	// frame into an unbounded allocation, so refuse the connection instead.
-	if extensions := resp.Header.Get("Sec-WebSocket-Extensions"); extensions != "" && !s.dialer.EnableCompression {
+	// Values, not Get: gorilla reads every Sec-WebSocket-Extensions header
+	// it was sent, so a server that puts an empty one first and
+	// permessage-deflate second would walk straight past a check on the
+	// first value alone.
+	if extensions := resp.Header.Values("Sec-WebSocket-Extensions"); len(extensions) > 0 && !s.dialer.EnableCompression {
 		_ = conn.Close()
-		return nil, resp, fmt.Errorf("wsclient: server negotiated %q, an extension this client did not offer", extensions)
+		return nil, resp, fmt.Errorf("wsclient: server negotiated %q, an extension this client did not offer",
+			strings.Join(extensions, ", "))
 	}
 
 	conn.SetReadLimit(s.readLimit)
@@ -83,17 +99,18 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 	var (
 		mu       sync.Mutex
 		opened   []net.Conn
-		aborted  bool
+		aborted  atomic.Bool
 		finished bool
 	)
 	track := func(c net.Conn) net.Conn {
+		wrapped := abortableConn{Conn: c, aborted: &aborted}
 		mu.Lock()
 		defer mu.Unlock()
-		if aborted {
-			_ = c.SetDeadline(aLongTimeAgo)
+		if aborted.Load() {
+			_ = wrapped.SetDeadline(aLongTimeAgo)
 		}
-		opened = append(opened, c)
-		return c
+		opened = append(opened, wrapped)
+		return wrapped
 	}
 	wrap := func(dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
 		return func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -127,7 +144,7 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 		if finished {
 			return
 		}
-		aborted = true
+		aborted.Store(true)
 		for _, c := range opened {
 			_ = c.SetDeadline(aLongTimeAgo)
 		}
@@ -138,9 +155,10 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 		mu.Lock()
 		defer mu.Unlock()
 		finished = true
-		if !aborted {
+		if !aborted.Load() {
 			return
 		}
+		aborted.Store(false)
 		// The abort can land on a handshake that had already finished. Clear
 		// it so a connection handed back to a caller is still usable; one
 		// that is on its way out is closed by the caller either way.
@@ -148,4 +166,20 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 			_ = c.SetDeadline(time.Time{})
 		}
 	}
+}
+
+// abortableConn keeps an aborted dial aborted. gorilla/websocket sets its own
+// handshake deadline on whatever the dial hook returned, outside this
+// package's wrapper, so without this an abort landing in that window would be
+// quietly overwritten and the dial would run to its handshake timeout.
+type abortableConn struct {
+	net.Conn
+	aborted *atomic.Bool
+}
+
+func (c abortableConn) SetDeadline(t time.Time) error {
+	if c.aborted.Load() {
+		return c.Conn.SetDeadline(aLongTimeAgo)
+	}
+	return c.Conn.SetDeadline(t)
 }

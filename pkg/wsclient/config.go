@@ -38,6 +38,13 @@ const (
 type Config struct {
 	// URL is the full endpoint, e.g. wss://backhaul.example.com/ws/servers/backhaul/.
 	// http and https are accepted and mapped to ws and wss.
+	//
+	// It must come from trusted configuration. The credential below is sent
+	// to whatever host it names, and nothing here pins that host, so a URL
+	// taken from a server response or from user input hands the agent's key
+	// to that host. A ws:// or http:// URL sends the credential in the
+	// clear, which is for a local endpoint or a mesh that supplies its own
+	// transport security, never the open internet.
 	URL string
 
 	// ID and Key are sent as Authorization: id="<ID>", key="<Key>".
@@ -57,8 +64,12 @@ type Config struct {
 	Header http.Header
 
 	// Dialer opens the connection. Nil means DefaultDialer(). A non-nil
-	// dialer is used as given, so start from DefaultDialer() to keep its
-	// handshake timeout and proxy settings.
+	// dialer is used as given except for two things: a zero HandshakeTimeout
+	// becomes DefaultHandshakeTimeout, because gorilla/websocket stops
+	// watching the context once the socket is up and an unbounded handshake
+	// would hang with no signal at all, and TLSClientConfig is cloned so
+	// that later edits to it cannot change how a running client verifies
+	// certificates. Start from DefaultDialer() to keep its proxy settings.
 	Dialer *websocket.Dialer
 
 	// ReadLimit is the largest inbound frame accepted, in bytes. Zero means
@@ -142,7 +153,7 @@ type settings struct {
 	onRetry      func(int, time.Duration, error)
 }
 
-func (c Config) dialSettings() (dialSettings, error) {
+func (c Config) resolveDial() (dialSettings, error) {
 	u, err := normalizeURL(c.URL)
 	if err != nil {
 		return dialSettings{}, err
@@ -178,8 +189,22 @@ func (c Config) dialSettings() (dialSettings, error) {
 	if c.Dialer == nil {
 		dialer = DefaultDialer()
 	} else {
-		copied := *c.Dialer // later edits to the caller's dialer must not reach a running client
+		// A copy, so later edits to the caller's own dialer value cannot
+		// reach a running client. The copy is shallow, so the reference
+		// fields it shares are handled below.
+		copied := *c.Dialer
 		dialer = &copied
+	}
+	if dialer.HandshakeTimeout == 0 {
+		dialer.HandshakeTimeout = DefaultHandshakeTimeout
+	}
+	if dialer.TLSClientConfig != nil {
+		// Shared, this is the one field whose later mutation would change
+		// how an already-running client verifies certificates: gorilla reads
+		// it again on every dial, so a caller flipping InsecureSkipVerify on
+		// a tls.Config it also uses elsewhere would silently disable
+		// verification on the next reconnect.
+		dialer.TLSClientConfig = dialer.TLSClientConfig.Clone()
 	}
 
 	readLimit := c.ReadLimit
@@ -200,7 +225,7 @@ func (c Config) dialSettings() (dialSettings, error) {
 }
 
 func (c Config) resolve() (settings, error) {
-	ds, err := c.dialSettings()
+	ds, err := c.resolveDial()
 	if err != nil {
 		return settings{}, err
 	}
