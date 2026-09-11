@@ -3,6 +3,7 @@ package diskusage
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
 	"github.com/google/uuid"
+	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
@@ -77,6 +79,155 @@ func (suite *DiskUsageCheckSuite) TestSaveDiskUsage() {
 	assert.NoError(suite.T(), err, "Failed to save disk usage.")
 }
 
+// TestParseDiskUsageFlagsAgentVolume injects a fixture partition list (via
+// listPartitions) and a fixture data directory (via dataDirFunc) instead of
+// relying on the real host/container mounts. Real mounts are not usable
+// here: CI runners commonly present "/" as a container overlay that
+// isPhysicalDevice/IsVirtualFileSystem filter out, which made this
+// environment-dependent (it failed on every Linux CI platform while passing
+// locally). The mountpoints below still have to be real, existing
+// directories, since parseDiskUsage calls disk.Usage(mountpoint), a real
+// stat syscall; "/" and a t.TempDir() both satisfy that on any host.
+func (suite *DiskUsageCheckSuite) TestParseDiskUsageFlagsAgentVolume() {
+	nestedMountpoint := suite.T().TempDir()
+
+	fixturePartitions := []disk.PartitionStat{
+		{Device: "/dev/sda1", Mountpoint: "/", Fstype: "ext4"},
+		{Device: "/dev/sdb1", Mountpoint: nestedMountpoint, Fstype: "ext4"},
+	}
+
+	originalListPartitions := listPartitions
+	defer func() { listPartitions = originalListPartitions }()
+	listPartitions = func(all bool) ([]disk.PartitionStat, error) {
+		return fixturePartitions, nil
+	}
+
+	originalDataDirFunc := dataDirFunc
+	defer func() { dataDirFunc = originalDataDirFunc }()
+	dataDirFunc = func() string { return filepath.Join(nestedMountpoint, "alpamon") }
+
+	partitions, err := suite.check.collectDiskPartitions()
+	suite.Require().NoError(err, "Failed to get disk partitions.")
+	suite.Require().Len(partitions, 2, "both fixture partitions should survive the virtual/physical filters")
+
+	data := suite.check.parseDiskUsage(partitions)
+	suite.Require().Len(data, 2)
+
+	flagged := 0
+	var flaggedDevice string
+	for _, entry := range data {
+		if entry.AgentVolume {
+			flagged++
+			flaggedDevice = entry.Device
+		}
+	}
+	assert.Equal(suite.T(), 1, flagged, "exactly one entry should be flagged as the agent volume")
+	assert.Equal(suite.T(), "/dev/sdb1", flaggedDevice, "the entry backing the nested mountpoint should be flagged, not the root entry")
+}
+
 func TestDiskUsageCheckSuite(t *testing.T) {
 	suite.Run(t, new(DiskUsageCheckSuite))
+}
+
+func TestMountpointOwns(t *testing.T) {
+	tests := []struct {
+		name       string
+		mountpoint string
+		dir        string
+		want       bool
+	}{
+		{"root owns everything under it", "/", "/var/lib/alpamon", true},
+		{"exact match", "/var/lib/alpamon", "/var/lib/alpamon", true},
+		{"nested boundary respected", "/var", "/var/lib/alpamon", true},
+		{"prefix without path boundary is rejected", "/var", "/variable/alpamon", false},
+		{"disjoint tree", "/mnt/data", "/var/lib/alpamon", false},
+		{"windows drive root", `C:\`, `C:\ProgramData\alpamon\data`, true},
+		{"windows nested directory", `C:\ProgramData`, `C:\ProgramData\alpamon\data`, true},
+		{"windows different drive", `D:\`, `C:\ProgramData\alpamon\data`, false},
+		{"windows paths are case-insensitive", `C:\`, `c:\ProgramData\alpamon\data`, true},
+		{"windows nested directory is case-insensitive", `c:\ProgramData`, `C:\ProgramData\alpamon\data`, true},
+		{"empty mountpoint", "", "/var/lib/alpamon", false},
+		{"empty dir", "/var", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, mountpointOwns(tt.mountpoint, tt.dir))
+		})
+	}
+}
+
+func TestFindAgentVolumeDevice(t *testing.T) {
+	t.Run("picks the longest matching mountpoint regardless of list order", func(t *testing.T) {
+		partitions := []disk.PartitionStat{
+			{Device: "/dev/sda1", Mountpoint: "/"},
+			{Device: "/dev/sdb1", Mountpoint: "/var/lib"},
+			{Device: "/dev/sdc1", Mountpoint: "/var"},
+		}
+		assert.Equal(t, "/dev/sdb1", findAgentVolumeDevice(partitions, "/var/lib/alpamon"))
+
+		reordered := []disk.PartitionStat{
+			{Device: "/dev/sdb1", Mountpoint: "/var/lib"},
+			{Device: "/dev/sdc1", Mountpoint: "/var"},
+			{Device: "/dev/sda1", Mountpoint: "/"},
+		}
+		assert.Equal(t, "/dev/sdb1", findAgentVolumeDevice(reordered, "/var/lib/alpamon"))
+	})
+
+	t.Run("no match returns empty device", func(t *testing.T) {
+		partitions := []disk.PartitionStat{
+			{Device: "/dev/sdc1", Mountpoint: "/var"},
+		}
+		assert.Empty(t, findAgentVolumeDevice(partitions, "/opt/alpamon"))
+	})
+
+	t.Run("windows-style paths", func(t *testing.T) {
+		partitions := []disk.PartitionStat{
+			{Device: "C:", Mountpoint: `C:\`},
+			{Device: "D:", Mountpoint: `D:\Data`},
+		}
+		assert.Equal(t, "D:", findAgentVolumeDevice(partitions, `D:\Data\alpamon`))
+		assert.Equal(t, "C:", findAgentVolumeDevice(partitions, `C:\ProgramData\alpamon\data`))
+		assert.Equal(t, "C:", findAgentVolumeDevice(partitions, `c:\ProgramData\alpamon\data`), "drive letters are case-insensitive")
+	})
+}
+
+// TestParseDiskUsageAgentVolumeSurvivesDeviceDedup proves, by calling the
+// real parseDiskUsage rather than reproducing its dedup loop, that the flag
+// lands on the emitted entry even when the owning mountpoint is not the
+// first one seen for its device: parseDiskUsage keeps only the first
+// mountpoint per device, so the flag has to be resolved by device identity,
+// not by which mountpoint matched. Both fixture mountpoints have to be real,
+// existing directories since parseDiskUsage calls disk.Usage on them.
+func (suite *DiskUsageCheckSuite) TestParseDiskUsageAgentVolumeSurvivesDeviceDedup() {
+	firstSeenMountpoint := suite.T().TempDir()
+	nestedMountpoint := filepath.Join(firstSeenMountpoint, "nested", "alpamon")
+	suite.Require().NoError(os.MkdirAll(nestedMountpoint, 0o755))
+
+	fixturePartitions := []disk.PartitionStat{
+		{Device: "/dev/sda1", Mountpoint: firstSeenMountpoint, Fstype: "ext4"},
+		{Device: "/dev/sda1", Mountpoint: nestedMountpoint, Fstype: "ext4"},
+	}
+
+	originalListPartitions := listPartitions
+	defer func() { listPartitions = originalListPartitions }()
+	listPartitions = func(all bool) ([]disk.PartitionStat, error) {
+		return fixturePartitions, nil
+	}
+
+	originalDataDirFunc := dataDirFunc
+	defer func() { dataDirFunc = originalDataDirFunc }()
+	dataDirFunc = func() string { return filepath.Join(nestedMountpoint, "state") }
+
+	partitions, err := suite.check.collectDiskPartitions()
+	suite.Require().NoError(err)
+	suite.Require().Len(partitions, 2, "both fixture mountpoints of the same device should survive the filters")
+
+	data := suite.check.parseDiskUsage(partitions)
+	// parseDiskUsage keeps only the first-seen mountpoint per device, so a
+	// single device produces a single entry even though two mountpoints of
+	// it were collected.
+	suite.Require().Len(data, 1)
+	assert.Equal(suite.T(), "/dev/sda1", data[0].Device)
+	assert.True(suite.T(), data[0].AgentVolume, "the flag must land on the emitted (first-seen) entry of the device that owns the data directory, even though the matching mountpoint was seen second")
 }

@@ -12,6 +12,19 @@ import (
 	"github.com/shirou/gopsutil/v4/disk"
 )
 
+// dataDirFunc resolves the directory holding alpamon's own data (the SQLite
+// metrics DB and agent state). It is a package-level var rather than a direct
+// utils.DataDir() call so tests can point it at a fixture path without
+// touching the filesystem.
+var dataDirFunc = utils.DataDir
+
+// listPartitions retrieves the host's mounted partitions. It is a
+// package-level var, like dataDirFunc, so tests can inject a fixture
+// partition list instead of depending on the real host/container mounts,
+// which vary by environment (e.g. a container's root is commonly an
+// overlay mount that isPhysicalDevice/IsVirtualFileSystem filter out).
+var listPartitions = disk.Partitions
+
 type Check struct {
 	base.BaseCheck
 }
@@ -69,6 +82,13 @@ func (c *Check) collectAndSaveDiskUsage(ctx context.Context) (base.MetricData, e
 func (c *Check) parseDiskUsage(partitions []disk.PartitionStat) []base.CheckResult {
 	var data []base.CheckResult
 	seen := make(map[string]bool)
+
+	// Resolve the device that owns alpamon's data directory before
+	// deduplicating by device: the mountpoint that matches may not be the
+	// first mountpoint seen for that device, so the owning device has to be
+	// computed from the full partition list, not from the entry being built.
+	agentVolumeDevice := findAgentVolumeDevice(partitions, dataDirFunc())
+
 	for _, partition := range partitions {
 		if seen[partition.Device] {
 			continue
@@ -78,12 +98,13 @@ func (c *Check) parseDiskUsage(partitions []disk.PartitionStat) []base.CheckResu
 		usage, err := c.collectDiskUsage(partition.Mountpoint)
 		if err == nil {
 			data = append(data, base.CheckResult{
-				Timestamp: time.Now(),
-				Device:    partition.Device,
-				Usage:     usage.UsedPercent,
-				Total:     usage.Total,
-				Free:      usage.Free,
-				Used:      usage.Used,
+				Timestamp:   time.Now(),
+				Device:      partition.Device,
+				Usage:       usage.UsedPercent,
+				Total:       usage.Total,
+				Free:        usage.Free,
+				Used:        usage.Used,
+				AgentVolume: agentVolumeDevice != "" && partition.Device == agentVolumeDevice,
 			})
 		}
 	}
@@ -91,8 +112,78 @@ func (c *Check) parseDiskUsage(partitions []disk.PartitionStat) []base.CheckResu
 	return data
 }
 
+// findAgentVolumeDevice returns the device backing the partition whose
+// mountpoint is the longest path-prefix match of dataDir, i.e. the volume
+// alpamon's own data lives on. It returns "" when no partition mountpoint
+// contains dataDir.
+func findAgentVolumeDevice(partitions []disk.PartitionStat, dataDir string) string {
+	var device string
+	bestLen := -1
+	for _, partition := range partitions {
+		if !mountpointOwns(partition.Mountpoint, dataDir) {
+			continue
+		}
+		if l := len(partition.Mountpoint); l > bestLen {
+			bestLen = l
+			device = partition.Device
+		}
+	}
+
+	return device
+}
+
+// mountpointOwns reports whether mountpoint is a path-boundary-respecting
+// prefix of dir, e.g. "/var" matches "/var/lib/alpamon" but not
+// "/variable/alpamon". Separators are normalized rather than routed through
+// path/filepath, since gopsutil reports native paths per OS ("/var" on
+// Unix, "C:\" on Windows) and this lets a single implementation, and a
+// single test file, cover both without a build tag. Windows volume paths
+// are case-insensitive (a "C:\" mountpoint owns "c:\ProgramData\..." just
+// as much as "C:\ProgramData\..."), so a drive-letter path folds case
+// before comparing; POSIX paths, which are case-sensitive, are left alone.
+func mountpointOwns(mountpoint, dir string) bool {
+	if mountpoint == "" || dir == "" {
+		return false
+	}
+
+	m := normalizeSeparators(mountpoint)
+	d := normalizeSeparators(dir)
+	if hasDriveLetter(m) || hasDriveLetter(d) {
+		m = strings.ToUpper(m)
+		d = strings.ToUpper(d)
+	}
+	if m == d {
+		return true
+	}
+	if m == "/" {
+		return strings.HasPrefix(d, "/")
+	}
+
+	return strings.HasPrefix(d, m+"/")
+}
+
+func normalizeSeparators(p string) string {
+	p = strings.ReplaceAll(p, `\`, "/")
+	if len(p) > 1 {
+		p = strings.TrimRight(p, "/")
+	}
+
+	return p
+}
+
+// hasDriveLetter reports whether p starts with a Windows drive letter
+// ("C:", "d:", ...) once separators are normalized to "/".
+func hasDriveLetter(p string) bool {
+	if len(p) < 2 || p[1] != ':' {
+		return false
+	}
+	c := p[0]
+
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
 func (c *Check) collectDiskPartitions() ([]disk.PartitionStat, error) {
-	partitions, err := disk.Partitions(true)
+	partitions, err := listPartitions(true)
 	if err != nil {
 		return nil, err
 	}
