@@ -17,7 +17,7 @@ import (
 
 func TestWriteFileAs_TeePath_CreatesParentDir(t *testing.T) {
 	for _, dir := range []string{"nested/deep", "space and 'quote'/$literal;name"} {
-		t.Run(dir, func(t *testing.T) {
+		t.Run(strings.ReplaceAll(dir, "/", "_"), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), dir, "out 'file'.bin")
 			// Select the subprocess branch without changing credentials or requiring root.
 			err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{})

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +81,7 @@ func firstMissingAncestor(dir string) string {
 // so removing it cannot discard a file a concurrent writer placed there.
 func dirTreeIsAllDirs(root string) bool {
 	safe := true
-	_ = filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			safe = false
 			return filepath.SkipAll
