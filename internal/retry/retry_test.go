@@ -93,30 +93,51 @@ func TestRetry_MaxElapsedTime(t *testing.T) {
 	})
 }
 
-// TestNextBackOff_BaseDoublingReachesCeiling pins Rand to always return 0.5,
-// which yields a jitter factor of exactly 1.0 (no-op), so the underlying
-// doubling sequence is observable directly: 100ms, 200ms, 400ms, capped at
-// 500ms from there on. This is what "the doubling of the base interval is
-// unaffected by the random draw" buys: the ceiling is still reached exactly
-// on schedule even though real draws jitter the returned value.
+// TestNextBackOff_BaseDoublingReachesCeiling pins Rand to a non-neutral
+// factor (0.5x, the low edge) and asserts on the internal base
+// (b.currentInterval) directly, not just the jittered return value. That
+// distinction matters: at the neutral factor (1.0x) a broken implementation
+// that feeds the *returned*, jittered value back into the base as next
+// call's starting point would produce the same sequence as a correct one
+// that keeps the base pure, so a neutral-factor test cannot tell them apart.
+// At 0.5x the two diverge starting at the second call (200ms base vs. 100ms
+// jittered return), which is what actually exercises "the doubling of the
+// base interval is unaffected by the random draw".
 func TestNextBackOff_BaseDoublingReachesCeiling(t *testing.T) {
 	b := &ExponentialBackoff{
 		InitialInterval: 100 * time.Millisecond,
 		MaxInterval:     500 * time.Millisecond,
-		Rand:            func() float64 { return 0.5 },
+		Rand:            func() float64 { return 0 }, // factor 0.5, the low edge
 	}
 
-	intervals := make([]time.Duration, 6)
-	for i := range intervals {
-		intervals[i] = b.NextBackOff()
+	returned := make([]time.Duration, 6)
+	base := make([]time.Duration, 6)
+	for i := range returned {
+		returned[i] = b.NextBackOff()
+		base[i] = b.currentInterval
 	}
 
-	assert.Equal(t, 100*time.Millisecond, intervals[0])
-	assert.Equal(t, 200*time.Millisecond, intervals[1])
-	assert.Equal(t, 400*time.Millisecond, intervals[2])
-	assert.Equal(t, 500*time.Millisecond, intervals[3], "capped at max from here on")
-	assert.Equal(t, 500*time.Millisecond, intervals[4])
-	assert.Equal(t, 500*time.Millisecond, intervals[5])
+	// The base doubles on its own schedule regardless of the 0.5x factor
+	// applied to what's returned.
+	assert.Equal(t, []time.Duration{
+		100 * time.Millisecond,
+		200 * time.Millisecond,
+		400 * time.Millisecond,
+		500 * time.Millisecond, // capped at max from here on
+		500 * time.Millisecond,
+		500 * time.Millisecond,
+	}, base, "base interval must keep doubling to the ceiling independent of jitter")
+
+	// The returned value is base * 0.5, clamped up to InitialInterval where
+	// that would otherwise undercut it.
+	assert.Equal(t, []time.Duration{
+		100 * time.Millisecond, // 50ms raw, clamped up to the 100ms floor
+		100 * time.Millisecond, // 100ms raw, at the floor
+		200 * time.Millisecond,
+		250 * time.Millisecond,
+		250 * time.Millisecond,
+		250 * time.Millisecond,
+	}, returned)
 }
 
 // TestNextBackOff_JitterBounds draws many samples across the whole

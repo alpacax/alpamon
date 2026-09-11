@@ -42,10 +42,10 @@ type ExponentialBackoff struct {
 // MaxInterval].
 //
 // The doubling sequence itself is unaffected by the random draw, so it
-// keeps climbing to MaxInterval call over call regardless of how any single
-// draw landed. Without jitter, every agent reconnecting after the same
-// event (e.g. a shared backhaul server restart) retries on the exact same
-// schedule; the random factor spreads that out.
+// keeps climbing to MaxInterval from call to call regardless of how any
+// single draw landed. Without jitter, every agent reconnecting after the
+// same event (e.g. a shared backhaul server restart) retries on the exact
+// same schedule; the random factor spreads that out.
 func (b *ExponentialBackoff) NextBackOff() time.Duration {
 	if b.currentInterval == 0 {
 		b.currentInterval = b.InitialInterval
