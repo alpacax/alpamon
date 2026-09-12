@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func queueSize() int {
@@ -27,6 +28,31 @@ func drainOne(t *testing.T) {
 func fill(n int) {
 	for range n {
 		Rqueue.Post("/other", nil, 10, time.Time{})
+	}
+}
+
+func TestPriorityQueue_GetReleasesOnlyRemovedEntry(t *testing.T) {
+	queue := newPriorityQueue(3)
+	headers := Headers{"X-Test": "value"}
+	entries := []PriorityEntry{
+		{priority: 3, url: "/c", data: make([]byte, 4096), headers: &headers},
+		{priority: 1, url: "/a", data: make([]byte, 4096), headers: &headers},
+		{priority: 2, url: "/b", data: make([]byte, 4096), headers: &headers},
+	}
+	for _, e := range entries {
+		require.NoError(t, queue.Offer(e))
+	}
+
+	vacated := len(queue.h) - 1
+	got, err := queue.Get()
+	require.NoError(t, err)
+	assert.Equal(t, "/a", got.url)
+
+	assert.Len(t, queue.h, 2)
+	assert.Equal(t, PriorityEntry{}, queue.h[:cap(queue.h)][vacated])
+	for _, remaining := range queue.h {
+		assert.NotEqual(t, PriorityEntry{}, remaining)
+		assert.Len(t, remaining.data, 4096)
 	}
 }
 
