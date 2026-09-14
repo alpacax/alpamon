@@ -70,9 +70,17 @@ type Config struct {
 	// HandshakeTimeout becomes DefaultHandshakeTimeout, because
 	// gorilla/websocket stops watching the context once the socket is up and
 	// an unbounded handshake would hang with no signal at all; a negative one
-	// is rejected. TLSClientConfig and Subprotocols are copied, so that later
-	// edits to them cannot change how a running client verifies certificates
-	// or negotiates. Start from DefaultDialer() to keep its proxy settings.
+	// is rejected. TLSClientConfig and Subprotocols are copied, so that a
+	// later edit to the tls.Config's own fields, InsecureSkipVerify above
+	// all, cannot change how a running client verifies certificates, and a
+	// later edit to the subprotocol list cannot change what it negotiates.
+	// That copy is one level deep: RootCAs, ClientCAs, Certificates and the
+	// verification callbacks are pointers the caller keeps a hold of, so
+	// adding a certificate to a pool still reaches the next reconnect. That
+	// is left as it is on purpose, since snapshotting a pool would quietly
+	// stop a caller who rotates trust through one, but it means those are
+	// edits to a running client rather than to a copy of its config. Start
+	// from DefaultDialer() to keep its proxy settings.
 	//
 	// The fourth is the dial hooks, which are wrapped so that Shutdown and a
 	// done context can free a socket the handshake is still waiting on. A
@@ -225,7 +233,10 @@ func (c Config) resolveDial() (dialSettings, error) {
 		// how an already-running client verifies certificates: gorilla reads
 		// it again on every dial, so a caller flipping InsecureSkipVerify on
 		// a tls.Config it also uses elsewhere would silently disable
-		// verification on the next reconnect.
+		// verification on the next reconnect. Clone settles the fields it
+		// holds itself and no more: the cert pools, the certificate slice
+		// and the verify callbacks are pointers it copies as pointers, and
+		// what they reach stays the caller's. Dialer says so.
 		dialer.TLSClientConfig = dialer.TLSClientConfig.Clone()
 	}
 

@@ -36,6 +36,7 @@ type backhaulServer struct {
 	closeOnAccept  atomic.Bool  // accept the upgrade, then close straight away
 	frameThenClose atomic.Bool  // send one data frame, then close
 	stallNext      atomic.Bool  // never read the next connection, so the client's writes back up
+	floodFrames    atomic.Bool  // never answer a close, and keep sending data frames while it is drained
 	done           chan struct{}
 }
 
@@ -86,6 +87,17 @@ func newBackhaulServer(t *testing.T) *backhaulServer {
 				websocket.FormatCloseMessage(websocket.CloseGoingAway, "bye"),
 				time.Now().Add(time.Second))
 			return
+		}
+		if s.floodFrames.Load() {
+			// No reply to the close frame, so nothing but the drain's own
+			// bound can end it, and a frame ready on every read so that the
+			// drain never blocks on one.
+			conn.SetCloseHandler(func(int, string) error { return nil })
+			for {
+				if err := conn.WriteMessage(websocket.TextMessage, []byte("still here")); err != nil {
+					return
+				}
+			}
 		}
 		if s.closeOnAccept.Load() {
 			_ = conn.WriteControl(websocket.CloseMessage,
@@ -1056,6 +1068,51 @@ func TestClient_ABackoffWaitPrefersAStopToItsTimer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClient_TheCloseDrainEndsOnAPeerThatKeepsTalking covers the bound on
+// the drain. It runs only for a connection still healthy when the close was
+// decided, which is why the test parks Run inside the handler first: an
+// interrupted read leaves gorilla a stored error that every later read
+// returns, and the drain would end on that instead. Healthy, the drain waits
+// on the peer's answer to the close frame, and a peer that answers nothing
+// while still sending data hands NextReader a complete message on every
+// turn, so the loop never blocks and never meets a timeout that only a
+// blocked read would reach. What ends it is that the read deadline is
+// absolute rather than per-read: once the instant passes, the next read off
+// the socket fails whether or not the peer is mid-sentence. Without that,
+// Run would sit here for as long as the peer cared to talk.
+func TestClient_TheCloseDrainEndsOnAPeerThatKeepsTalking(t *testing.T) {
+	srv := newBackhaulServer(t)
+	srv.floodFrames.Store(true)
+	h := newHooks()
+	cfg := testConfig(srv.url)
+	h.install(&cfg)
+
+	parked, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	handler := func(context.Context, int, []byte) error {
+		once.Do(func() {
+			close(parked)
+			<-release
+		})
+		return nil
+	}
+	c, result := startClient(t, t.Context(), cfg, handler)
+	recv(t, h.connects, "the connect")
+	recv(t, srv.accepted, "the connection")
+	recv(t, parked, "Run to reach the handler, where no read is in flight")
+
+	start := time.Now()
+	c.Shutdown()
+	close(release) // armRead now sees the request without a read having failed
+
+	require.NoError(t, recv(t, result, "Run to return"))
+	elapsed := time.Since(start)
+	assert.GreaterOrEqual(t, elapsed, drainTimeout,
+		"the drain has to have run at all, or this proves nothing about its bound")
+	assert.Less(t, elapsed, 3*drainTimeout,
+		"the drain must end on its own deadline, not on the peer running out of things to say")
 }
 
 // TestClient_ShutdownIsIdempotent is the regression for issue #452's third
