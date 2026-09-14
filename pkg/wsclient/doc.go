@@ -9,10 +9,9 @@
 // paces the attempts, including the redial after a connection that lasted
 // less than MinBackoff, so a peer that accepts the handshake and drops it
 // cannot draw a tight loop out of a fleet of agents. Everything it needs
-// arrives through Config; nothing here reads
-// alpamon's global settings. It reports connects, drops and retries through
-// the hooks on Config instead of logging, so the caller decides where those
-// go.
+// arrives through Config; nothing here reads alpamon's global settings. It
+// reports connects, drops and retries through the hooks on Config instead of
+// logging, so the caller decides where those go.
 //
 // # Ownership
 //
@@ -29,4 +28,9 @@
 // and alpamon's pkg/tunnel and pkg/version, and nothing else. The leaf-guard
 // job in .github/workflows/build-and-test.yml fails the build if its
 // dependency graph reaches any other package.
+//
+// That list is the ceiling, not an inventory. What ships imports pkg/version,
+// for the default User-Agent, and gorilla/websocket; pkg/tunnel is allowed
+// for the caller in Ownership above, who wraps what Dial returns, and is not
+// reached from here.
 package wsclient

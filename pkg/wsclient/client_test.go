@@ -215,6 +215,30 @@ func startClient(t *testing.T, ctx context.Context, cfg Config, h Handler) (*Cli
 	return c, result
 }
 
+// silentUpgrades starts a listener that completes the TCP connect and then
+// never answers the upgrade, which is the peer gorilla/websocket stops
+// watching the context for: from there only HandshakeTimeout would end the
+// wait. It returns the address to dial and the connections it took, which a
+// test keeps a hold of so the socket stays open and the handshake stays
+// stalled.
+func silentUpgrades(t *testing.T) (addr string, accepted <-chan net.Conn) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	taken := make(chan net.Conn, 8)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			taken <- conn
+		}
+	}()
+	return listener.Addr().String(), taken
+}
+
 // closeTrackingDialer records whether the socket under each connection it
 // opens was closed, which is how a leaked fd shows up in a test.
 type closeTrackingDialer struct {
@@ -647,21 +671,9 @@ func TestClient_ContextCancelFreesAParkedRead(t *testing.T) {
 // default: without an abort of its own, Shutdown would wait all of that out,
 // which is a pod's whole termination grace period.
 func TestClient_ShutdownAbortsAStalledHandshake(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	accepted := make(chan net.Conn, 8)
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			accepted <- conn // never answer the upgrade
-		}
-	}()
+	addr, accepted := silentUpgrades(t)
 
-	cfg := testConfig("ws://" + listener.Addr().String() + "/ws/")
+	cfg := testConfig("ws://" + addr + "/ws/")
 	cfg.Dialer = &websocket.Dialer{} // defaults to a 30s handshake timeout, far past the test's patience
 	c, result := startClient(t, t.Context(), cfg, discard)
 	stalled := recv(t, accepted, "the connection the client opened")
@@ -678,24 +690,12 @@ func TestClient_ShutdownAbortsAStalledHandshake(t *testing.T) {
 // wrapper: an abort that landed in between would be silently overwritten and
 // the dial would run to that timeout instead of ending at once.
 func TestClient_AbortSurvivesTheHandshakeDeadline(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	accepted := make(chan net.Conn, 8)
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			accepted <- conn // never answer the upgrade
-		}
-	}()
+	addr, _ := silentUpgrades(t) // this one never needs the sockets, only a peer that will not answer
 
 	const handshakeTimeout = 2 * time.Second
 	var c *Client
 	ready := make(chan struct{})
-	cfg := testConfig("ws://" + listener.Addr().String() + "/ws/")
+	cfg := testConfig("ws://" + addr + "/ws/")
 	cfg.Dialer = &websocket.Dialer{HandshakeTimeout: handshakeTimeout}
 	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		<-ready
@@ -711,7 +711,7 @@ func TestClient_AbortSurvivesTheHandshakeDeadline(t *testing.T) {
 		time.Sleep(50 * time.Millisecond) // let the abort reach the socket
 		return conn, nil
 	}
-	c, err = New(cfg)
+	c, err := New(cfg)
 	require.NoError(t, err)
 	result := make(chan error, 1)
 	go func() { result <- c.Run(t.Context(), discard) }()
@@ -731,23 +731,11 @@ func TestClient_AbortSurvivesTheHandshakeDeadline(t *testing.T) {
 // where it was. Nothing notices, because the dial then ends the way it would
 // have anyway, a whole HandshakeTimeout later.
 func TestClient_AbortSurvivesADeadlineAlreadyInFlight(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	accepted := make(chan net.Conn, 8)
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			accepted <- conn // never answer the upgrade
-		}
-	}()
+	addr, accepted := silentUpgrades(t)
 
 	const handshakeTimeout = 2 * time.Second
 	var c *Client
-	cfg := testConfig("ws://" + listener.Addr().String() + "/ws/")
+	cfg := testConfig("ws://" + addr + "/ws/")
 	cfg.Dialer = &websocket.Dialer{HandshakeTimeout: handshakeTimeout}
 	var nd net.Dialer
 	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -761,7 +749,7 @@ func TestClient_AbortSurvivesADeadlineAlreadyInFlight(t *testing.T) {
 			aborted:  make(chan struct{}),
 		}, nil
 	}
-	c, err = New(cfg)
+	c, err := New(cfg)
 	require.NoError(t, err)
 	result := make(chan error, 1)
 	go func() { result <- c.Run(t.Context(), discard) }()
@@ -908,24 +896,12 @@ func TestClient_GivesUpAConnectionWhosePingReArmIsRefused(t *testing.T) {
 // the one that would end it. Setting the deadline alone would leave the
 // handshake waiting out HandshakeTimeout after Shutdown.
 func TestClient_AbortClosesAConnThatRefusesTheAbortDeadline(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	accepted := make(chan net.Conn, 8)
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			accepted <- conn // never answer the upgrade
-		}
-	}()
+	addr, accepted := silentUpgrades(t)
 
 	const handshakeTimeout = 3 * time.Second
 	var allow atomic.Int32
 	allow.Store(1) // gorilla's own handshake deadline is accepted; the abort's is refused
-	cfg := testConfig("ws://" + listener.Addr().String() + "/ws/")
+	cfg := testConfig("ws://" + addr + "/ws/")
 	cfg.Dialer = &websocket.Dialer{HandshakeTimeout: handshakeTimeout}
 	var nd net.Dialer
 	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -1479,64 +1455,42 @@ func TestClient_ReadTimeoutTriggersAReconnect(t *testing.T) {
 	recv(t, srv.accepted, "the connection dialed after the timeout")
 }
 
-// TestClient_PingFramesKeepTheConnectionAlive covers a peer whose keepalive
-// is an RFC 6455 ping rather than a data frame. gorilla answers pings inside
-// ReadMessage without returning, so the read deadline is only re-armed once
-// a read completes: without a ping handler of our own, a peer that pings
-// steadily still gets dropped at ReadTimeout.
-func TestClient_PingFramesKeepTheConnectionAlive(t *testing.T) {
-	srv := newBackhaulServer(t)
-	h := newHooks()
-	cfg := testConfig(srv.url)
-	cfg.ReadTimeout = 150 * time.Millisecond
-	h.install(&cfg)
-	c, _ := startClient(t, t.Context(), cfg, discard)
-	recv(t, h.connects, "the connect")
-	sc := recv(t, srv.accepted, "the connection")
+// TestClient_ControlFramesKeepTheConnectionAlive covers a peer whose
+// keepalive is a control frame rather than a data frame, in both shapes RFC
+// 6455 allows: a ping, and an unsolicited pong sent as a one-way heartbeat
+// (section 5.5.3). gorilla hands each to its handler from inside ReadMessage
+// and reads on, so neither frame completes a read and neither re-arms the
+// deadline on its own. Without handlers of our own, a peer beating either
+// way talks steadily and is still cut at ReadTimeout.
+func TestClient_ControlFramesKeepTheConnectionAlive(t *testing.T) {
+	for name, frame := range map[string]int{
+		"ping":             websocket.PingMessage,
+		"unsolicited pong": websocket.PongMessage,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newBackhaulServer(t)
+			h := newHooks()
+			cfg := testConfig(srv.url)
+			cfg.ReadTimeout = 150 * time.Millisecond
+			h.install(&cfg)
+			c, _ := startClient(t, t.Context(), cfg, discard)
+			recv(t, h.connects, "the connect")
+			sc := recv(t, srv.accepted, "the connection")
 
-	// Pings spanning well over two read timeouts, and no data frame at all.
-	for deadline := time.Now().Add(400 * time.Millisecond); time.Now().Before(deadline); {
-		require.NoError(t, sc.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)))
-		time.Sleep(50 * time.Millisecond)
+			// Spanning well over two read timeouts, and no data frame at all.
+			for deadline := time.Now().Add(400 * time.Millisecond); time.Now().Before(deadline); {
+				require.NoError(t, sc.conn.WriteControl(frame, nil, time.Now().Add(time.Second)))
+				time.Sleep(50 * time.Millisecond)
+			}
+
+			select {
+			case err := <-h.disconnects:
+				assert.Fail(t, "a peer beating with "+name+" frames must not hit the read timeout", "disconnected with %v", err)
+			default:
+			}
+			assert.True(t, c.Connected())
+		})
 	}
-
-	select {
-	case err := <-h.disconnects:
-		assert.Fail(t, "a peer that keeps pinging must not hit the read timeout", "disconnected with %v", err)
-	default:
-	}
-	assert.True(t, c.Connected())
-}
-
-// TestClient_PongFramesKeepTheConnectionAlive covers the other keepalive RFC
-// 6455 allows: an unsolicited pong, section 5.5.3, which a peer may send as a
-// one-way heartbeat without anyone having pinged it. gorilla hands it to the
-// pong handler from inside ReadMessage and reads on, the same as a ping, so
-// the frame never completes a read and nothing re-arms the deadline on its
-// own. Without a pong handler of our own, a peer beating this way talks
-// steadily and is still cut at ReadTimeout.
-func TestClient_PongFramesKeepTheConnectionAlive(t *testing.T) {
-	srv := newBackhaulServer(t)
-	h := newHooks()
-	cfg := testConfig(srv.url)
-	cfg.ReadTimeout = 150 * time.Millisecond
-	h.install(&cfg)
-	c, _ := startClient(t, t.Context(), cfg, discard)
-	recv(t, h.connects, "the connect")
-	sc := recv(t, srv.accepted, "the connection")
-
-	// Pongs spanning well over two read timeouts, and no data frame at all.
-	for deadline := time.Now().Add(400 * time.Millisecond); time.Now().Before(deadline); {
-		require.NoError(t, sc.conn.WriteControl(websocket.PongMessage, nil, time.Now().Add(time.Second)))
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	select {
-	case err := <-h.disconnects:
-		assert.Fail(t, "a peer whose heartbeat is an unsolicited pong must not hit the read timeout", "disconnected with %v", err)
-	default:
-	}
-	assert.True(t, c.Connected())
 }
 
 func TestClient_ReadLimitDropsAnOversizedFrame(t *testing.T) {
