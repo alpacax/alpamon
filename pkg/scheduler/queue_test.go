@@ -51,7 +51,6 @@ func TestPriorityQueue_GetReleasesOnlyRemovedEntry(t *testing.T) {
 	assert.Len(t, queue.h, 2)
 	assert.Equal(t, PriorityEntry{}, queue.h[:cap(queue.h)][vacated])
 	for _, remaining := range queue.h {
-		assert.NotEqual(t, PriorityEntry{}, remaining)
 		assert.Len(t, remaining.data, 4096)
 	}
 }
