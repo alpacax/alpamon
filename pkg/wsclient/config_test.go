@@ -3,6 +3,8 @@ package wsclient
 import (
 	"crypto/tls"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -194,6 +196,31 @@ func TestResolve_AcceptsASendableHost(t *testing.T) {
 			_, err := cfg.resolve()
 			assert.NoError(t, err)
 		})
+	}
+}
+
+// TestResolve_RefusesTheHeaderValueBytesNetHTTPRewrites pins the split the
+// value half of the header check rests on. net/http never refuses a header
+// value: swept over all 256 byte values it rewrites exactly two, CR and LF,
+// each to a space, and writes every other one as given, NUL included. So
+// there are only those two to catch, and a byte let through is one the
+// caller asked for and got, not one that went missing. Should that ever
+// widen, it fails here rather than in a handshake nobody can account for.
+func TestResolve_RefusesTheHeaderValueBytesNetHTTPRewrites(t *testing.T) {
+	for b := range 256 {
+		value := string([]byte{'a', byte(b), 'b'})
+		probe := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/"},
+			Host: "h.example", Header: http.Header{"X-Custom": {value}}}
+		var written strings.Builder
+		require.NoError(t, probe.Write(&written), "byte %#x: net/http does not refuse header values", b)
+		rewritten := !strings.Contains(written.String(), "X-Custom: "+value+"\r\n")
+
+		cfg := validConfig()
+		cfg.Header = http.Header{"X-Custom": {value}}
+		_, err := cfg.resolve()
+
+		assert.Equal(t, rewritten, err != nil,
+			"byte %#x: resolve must refuse exactly the values net/http will not send as given", b)
 	}
 }
 

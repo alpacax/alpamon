@@ -133,6 +133,12 @@ type retryEvent struct {
 	attempt int
 	delay   time.Duration
 	err     error
+	// at is when OnRetry announced the wait, which is the instant Run starts
+	// the timer for it. A test that stamps the clock itself, after receiving
+	// this off the channel, starts measuring somewhere inside the wait and
+	// reads back less than the client waited: on a loaded runner that
+	// difference is the whole margin such an assertion has.
+	at time.Time
 }
 
 func newHooks() *hooks {
@@ -147,7 +153,7 @@ func (h *hooks) install(cfg *Config) {
 	cfg.OnConnect = func() { h.connects <- struct{}{} }
 	cfg.OnDisconnect = func(err error) { h.disconnects <- err }
 	cfg.OnRetry = func(attempt int, delay time.Duration, err error) {
-		h.retries <- retryEvent{attempt: attempt, delay: delay, err: err}
+		h.retries <- retryEvent{attempt: attempt, delay: delay, err: err, at: time.Now()}
 	}
 }
 
@@ -1520,13 +1526,16 @@ func TestClient_PacesRedialsAfterAnUnprovenConnection(t *testing.T) {
 		require.Error(t, recv(t, h.disconnects, "the close the server sent"))
 		r := recv(t, h.retries, "the wait before the redial")
 		assert.Equal(t, want, r.delay, "an unproven connection must back off, and keep doubling")
-		// OnRetry fires before the wait, so this measures the wait itself.
-		// Asserting only on the reported delay would pass for a loop that
-		// announced a wait and then redialed immediately.
-		reported, upgrades := time.Now(), srv.upgrades.Load()
+		// OnRetry fires before the wait, so measuring from r.at measures the
+		// wait itself. Asserting only on the reported delay would pass for a
+		// loop that announced a wait and then redialed immediately. The bound
+		// is the delay exactly, not a fraction of it: a timer fires after at
+		// least its duration, and r.at is stamped before that timer starts,
+		// so no slack is owed to the measurement.
+		upgrades := srv.upgrades.Load()
 		require.Eventually(t, func() bool { return srv.upgrades.Load() > upgrades },
 			waitFor, time.Millisecond, "the redial never came")
-		assert.GreaterOrEqual(t, time.Since(reported), want*9/10, "the redial must wait out the delay it reported")
+		assert.GreaterOrEqual(t, time.Since(r.at), want, "the redial must wait out the delay it reported")
 	}
 	assert.Less(t, srv.upgrades.Load(), int32(10), "a paced loop cannot have run away")
 }
@@ -1538,8 +1547,12 @@ func TestClient_RedialsAtOnceAfterAProvenConnection(t *testing.T) {
 	srv := newBackhaulServer(t)
 	h := newHooks()
 	cfg := testConfig(srv.url)
-	cfg.MinBackoff = 50 * time.Millisecond
-	cfg.MaxBackoff = 50 * time.Millisecond
+	// Wide enough that a wait and no wait cannot be confused: a regression
+	// that paced this redial takes at least MinBackoff, and the bound below
+	// leaves half of that for a loaded runner. MinBackoff is also the proof
+	// window, so the sleep that earns the proof costs the same.
+	cfg.MinBackoff = 500 * time.Millisecond
+	cfg.MaxBackoff = 500 * time.Millisecond
 	h.install(&cfg)
 	startClient(t, t.Context(), cfg, discard)
 	recv(t, h.connects, "the first connect")
@@ -1549,7 +1562,13 @@ func TestClient_RedialsAtOnceAfterAProvenConnection(t *testing.T) {
 	require.NoError(t, first.conn.UnderlyingConn().Close())
 
 	require.Error(t, recv(t, h.disconnects, "the drop"))
+	dropped := time.Now()
 	recv(t, h.connects, "the immediate redial")
+	// An absent OnRetry is not the same as no wait. Nothing obliges a paced
+	// redial to announce itself, and a plain sleep on this path would keep
+	// every other assertion here happy.
+	assert.Less(t, time.Since(dropped), cfg.MinBackoff/2,
+		"a proven connection must be redialed at once, not merely without an OnRetry")
 	select {
 	case r := <-h.retries:
 		assert.Fail(t, "a proven connection must be redialed without waiting", "waited %s", r.delay)
@@ -1582,9 +1601,8 @@ func TestClient_PacesARedialAfterAFailedWrite(t *testing.T) {
 	r := recv(t, h.retries, "the wait before the redial")
 	assert.Equal(t, 1, r.attempt)
 	assert.Equal(t, cfg.MinBackoff, r.delay, "a failed write must be paced like any other failure")
-	reported := time.Now()
 	recv(t, srv.accepted, "the redial")
-	assert.GreaterOrEqual(t, time.Since(reported), cfg.MinBackoff*9/10, "the redial must wait out the delay it reported")
+	assert.GreaterOrEqual(t, time.Since(r.at), cfg.MinBackoff, "the redial must wait out the delay it reported")
 }
 
 // TestClient_AFrameDoesNotProveAConnection is the regression for the rule
