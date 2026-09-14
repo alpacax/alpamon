@@ -142,8 +142,7 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 	b := &backoff{initial: c.s.minBackoff, max: c.s.maxBackoff, rand: c.s.rand}
 	var (
 		attempt int   // attempts since the last connection that worked
-		wait    bool  // whether the next attempt waits out a backoff first
-		cause   error // what made it wait
+		cause   error // what ended the last attempt; non-nil means pace the next
 	)
 	for {
 		// Checked before the wait as well as before the dial, so a Shutdown
@@ -151,7 +150,7 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 		if c.stopping(runCtx) {
 			return ctx.Err()
 		}
-		if wait {
+		if cause != nil {
 			attempt++
 			delay := b.next()
 			c.s.onRetry(attempt, delay, cause)
@@ -162,7 +161,7 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 
 		conn, _, err := c.s.dial(runCtx)
 		if err != nil {
-			wait, cause = true, err
+			cause = err
 			continue
 		}
 		if !c.install(runCtx, conn) {
@@ -180,10 +179,10 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 		// connection that lasted earns the same treatment.
 		if ended.cause == nil || ended.proven {
 			b.reset()
-			attempt, wait, cause = 0, false, nil
+			attempt, cause = 0, nil
 			continue
 		}
-		wait, cause = true, ended.cause
+		cause = ended.cause
 	}
 }
 
