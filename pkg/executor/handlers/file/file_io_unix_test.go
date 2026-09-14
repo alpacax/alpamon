@@ -99,6 +99,19 @@ func TestWriteFileAs_TeePath_KeepsUnwritableTargetOnSourceReadFailure(t *testing
 	assert.Equal(t, "ORIGINAL", string(got))
 }
 
+func TestWriteFileAs_TeePath_LeavesTruncatedPreexistingTargetOnSourceReadFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.bin")
+	require.NoError(t, os.WriteFile(path, []byte("ORIGINAL"), 0644))
+
+	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("boom")), &syscall.SysProcAttr{})
+	require.Error(t, err)
+	// tee opened and truncated it before the read failed, so the old content is gone either
+	// way; what matters is that createdTarget stays false and the file itself is not unlinked.
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Empty(t, string(got))
+}
+
 func TestWriteFileAs_TeePath_RemovesFreshTargetOnSourceReadFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
