@@ -165,6 +165,7 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 				removeAsRequester(ctx, path, sysProcAttr)
 			}
 		}
+		// Unlike removeAsRequester above, this runs as root; dirTreeIsAllDirs limits the damage to empty directories.
 		if createdRoot != "" && dirTreeIsAllDirs(createdRoot) {
 			_ = os.RemoveAll(createdRoot)
 		}
