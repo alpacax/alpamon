@@ -53,6 +53,14 @@ func TestPriorityQueue_GetReleasesOnlyRemovedEntry(t *testing.T) {
 	for _, remaining := range queue.h {
 		assert.Len(t, remaining.data, 4096)
 	}
+
+	got, err = queue.Get()
+	require.NoError(t, err)
+	assert.Equal(t, "/b", got.url)
+
+	got, err = queue.Get()
+	require.NoError(t, err)
+	assert.Equal(t, "/c", got.url)
 }
 
 func TestPostChunk_EnqueuesBelowHighWater(t *testing.T) {
