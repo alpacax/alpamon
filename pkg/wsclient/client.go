@@ -353,6 +353,13 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (di
 		return fmt.Errorf("wsclient: answering a ping: %w", err)
 	})
 
+	// An unsolicited pong is a heartbeat too, and RFC 6455 section 5.5.3
+	// says so. gorilla/websocket hands it to this handler from inside
+	// ReadMessage and reads on, exactly as it does a ping, so without one a
+	// peer that beats this way would be talking steadily and still be cut at
+	// ReadTimeout. Nothing to answer, only the deadline to move.
+	conn.SetPongHandler(func(string) error { return c.rearm(ctx, conn) })
+
 	for {
 		if cause, ending := c.armRead(ctx, conn); ending {
 			return end(cause), nil

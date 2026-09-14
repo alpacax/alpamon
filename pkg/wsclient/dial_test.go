@@ -154,7 +154,11 @@ func TestUnofferedExtension(t *testing.T) {
 		{name: "an empty header", values: []string{""}},
 		{name: "deflate, not offered", values: []string{deflate}, want: "permessage-deflate"},
 		{name: "deflate, offered", values: []string{deflate}, compression: true},
-		{name: "deflate in another case, offered", values: []string{"PerMessage-Deflate"}, compression: true},
+		// gorilla compares the token against the lowercase literal without
+		// folding case, so it would leave decompression off for this one.
+		// Taking it would mean a connection whose first compressed frame
+		// gorilla refuses as a reserved bit it was not expecting.
+		{name: "deflate in another case, offered", values: []string{"PerMessage-Deflate"}, compression: true, want: "PerMessage-Deflate"},
 		{name: "an unknown extension, with compression on", values: []string{"x-evil"}, compression: true, want: "x-evil"},
 		{name: "an unknown one after deflate", values: []string{deflate + ", x-evil"}, compression: true, want: "x-evil"},
 		{name: "deflate hidden behind an empty header", values: []string{"", deflate}, want: "permessage-deflate"},

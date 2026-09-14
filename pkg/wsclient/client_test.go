@@ -1508,6 +1508,37 @@ func TestClient_PingFramesKeepTheConnectionAlive(t *testing.T) {
 	assert.True(t, c.Connected())
 }
 
+// TestClient_PongFramesKeepTheConnectionAlive covers the other keepalive RFC
+// 6455 allows: an unsolicited pong, section 5.5.3, which a peer may send as a
+// one-way heartbeat without anyone having pinged it. gorilla hands it to the
+// pong handler from inside ReadMessage and reads on, the same as a ping, so
+// the frame never completes a read and nothing re-arms the deadline on its
+// own. Without a pong handler of our own, a peer beating this way talks
+// steadily and is still cut at ReadTimeout.
+func TestClient_PongFramesKeepTheConnectionAlive(t *testing.T) {
+	srv := newBackhaulServer(t)
+	h := newHooks()
+	cfg := testConfig(srv.url)
+	cfg.ReadTimeout = 150 * time.Millisecond
+	h.install(&cfg)
+	c, _ := startClient(t, t.Context(), cfg, discard)
+	recv(t, h.connects, "the connect")
+	sc := recv(t, srv.accepted, "the connection")
+
+	// Pongs spanning well over two read timeouts, and no data frame at all.
+	for deadline := time.Now().Add(400 * time.Millisecond); time.Now().Before(deadline); {
+		require.NoError(t, sc.conn.WriteControl(websocket.PongMessage, nil, time.Now().Add(time.Second)))
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	select {
+	case err := <-h.disconnects:
+		assert.Fail(t, "a peer whose heartbeat is an unsolicited pong must not hit the read timeout", "disconnected with %v", err)
+	default:
+	}
+	assert.True(t, c.Connected())
+}
+
 func TestClient_ReadLimitDropsAnOversizedFrame(t *testing.T) {
 	srv := newBackhaulServer(t)
 	h := newHooks()

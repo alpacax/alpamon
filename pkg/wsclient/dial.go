@@ -87,6 +87,13 @@ func (s dialSettings) dial(ctx context.Context) (conn *websocket.Conn, resp *htt
 // ever offers is permessage-deflate, and only with EnableCompression. Anything
 // this parser cannot place is reported rather than skipped, so a header it
 // reads differently from gorilla fails closed.
+//
+// Which is why the name is matched exactly rather than case-insensitively.
+// gorilla compares the parsed token against the lowercase literal and does
+// not fold case, so it leaves decompression off for a "PerMessage-Deflate"
+// answer. Accepting one here would hand back a connection whose first
+// compressed frame gorilla rejects as a reserved bit it was not expecting,
+// and the reconnect after it would meet the same server again.
 func unofferedExtension(values []string, compression bool) (string, bool) {
 	for _, value := range values {
 		for _, extension := range strings.Split(value, ",") {
@@ -94,7 +101,7 @@ func unofferedExtension(values []string, compression bool) (string, bool) {
 			name = strings.TrimSpace(name)
 			switch {
 			case name == "":
-			case compression && strings.EqualFold(name, "permessage-deflate"):
+			case compression && name == "permessage-deflate":
 			default:
 				return name, true
 			}
