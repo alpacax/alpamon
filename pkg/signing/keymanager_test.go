@@ -23,6 +23,7 @@ func TestResolveAuthEnv(t *testing.T) {
 		// A workspace URL, which is what alpamon.conf actually carries.
 		{"https://alpacax.dev.alpacon.io", "dev"},
 		{"https://Alpacax.DEV.alpacon.io/", "dev"},
+		{"https://alpacax.dev.alpacon.io.", "dev"},
 		{"https://alpacax.alpacon.io", ""},
 		{"https://us.alpacon.io", ""},
 		{"https://kr.alpacon.io", ""},

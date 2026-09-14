@@ -34,7 +34,8 @@ func ResolveAuthEnv(serverURL string) string {
 	if err != nil {
 		return ""
 	}
-	host := strings.ToLower(u.Hostname())
+	// A trailing-dot FQDN keeps its dot in Hostname(); it names the same host.
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	if host == devDomain || strings.HasSuffix(host, "."+devDomain) {
 		return "dev"
 	}
