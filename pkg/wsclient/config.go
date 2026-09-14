@@ -111,8 +111,16 @@ type Config struct {
 
 	// MinBackoff and MaxBackoff bound the wait between reconnect attempts.
 	// Each wait is the doubling base times a random factor in [1.0, 1.5),
-	// clamped to this range, so MinBackoff is a true floor. Zero means
-	// DefaultMinBackoff and DefaultMaxBackoff.
+	// clamped to this range. Zero means DefaultMinBackoff and
+	// DefaultMaxBackoff.
+	//
+	// The two ends are not symmetric. MinBackoff is a floor that waits
+	// actually sit on, while MaxBackoff is one they approach: the base stops
+	// at two thirds of it so the jitter still has somewhere to go, which is
+	// what keeps a fleet that has been retrying for a while from redialing
+	// on a single tick. A settled schedule lands in [2/3 MaxBackoff,
+	// MaxBackoff), not on MaxBackoff itself. Setting the two equal asks for
+	// a fixed wait and gets one.
 	MinBackoff time.Duration
 	MaxBackoff time.Duration
 

@@ -43,8 +43,10 @@ type Client struct {
 	// a SetReadDeadline on the socket, except on the path where a
 	// caller-supplied conn refuses one and freeRead closes it instead: a
 	// slow Close on such a conn holds every other method here behind it.
-	// Moving that fallback out from under mu is not an option, since it is
-	// the lock that keeps a request from being lost to a re-arm.
+	// The call stays under the lock because everything else that touches
+	// conn does, and taking one caller out of that would mean re-deriving
+	// every interleaving here for a bound that only a caller's own conn
+	// can breach.
 	mu   sync.Mutex
 	conn *websocket.Conn
 	// reconnectPending asks Run to replace conn; reconnectCause says why:
