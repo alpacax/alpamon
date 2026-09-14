@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1089,6 +1090,87 @@ func TestClient_TheCloseDrainEndsOnAPeerThatKeepsTalking(t *testing.T) {
 		"the drain has to have run at all, or this proves nothing about its bound")
 	assert.Less(t, elapsed, 3*drainTimeout,
 		"the drain must end on its own deadline, not on the peer running out of things to say")
+}
+
+// liveInPackage returns the stack of every goroutine currently sitting in
+// this package's production code. It matches on the source file rather than
+// the package name so that the test's own goroutines, which live in files
+// ending _test.go, are not counted as leaks.
+func liveInPackage() []string {
+	buf := make([]byte, 1<<20)
+	for {
+		if n := runtime.Stack(buf, true); n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	var live []string
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		for _, file := range []string{"/wsclient/client.go:", "/wsclient/dial.go:", "/wsclient/config.go:", "/wsclient/backoff.go:"} {
+			if strings.Contains(g, file) {
+				live = append(live, g)
+				break
+			}
+		}
+	}
+	return live
+}
+
+// TestClient_LeavesNoGoroutineBehind covers what the ownership model is worth
+// if it only holds once. Run starts a watcher, every dial registers a context
+// callback that fires on its own goroutine, and a reconnect does both again,
+// so a client that is started, dropped, reconnected and shut down in a loop
+// is where an unjoined goroutine or an unstopped callback would pile up.
+//
+// The assertion is that nothing is left sitting in this package's own files,
+// which is stricter than counting goroutines: a runtime or net/http worker
+// started lazily on the first connection would move that count and is not a
+// leak, while one goroutine of ours parked in a read is.
+func TestClient_LeavesNoGoroutineBehind(t *testing.T) {
+	srv := newBackhaulServer(t)
+
+	// Both ways a client stops, because the watcher leaves by a different
+	// case for each and a regression that drops one would sit forever on the
+	// other.
+	for i := range 20 {
+		byShutdown := i%2 == 0
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		h := newHooks()
+		cfg := testConfig(srv.url)
+		h.install(&cfg)
+		c, result := startClient(t, ctx, cfg, discard)
+
+		recv(t, h.connects, "the connect")
+		sc := recv(t, srv.accepted, "the connection")
+		require.NoError(t, c.WriteJSON(map[string]string{"query": "ping"}))
+
+		// A drop the client did not ask for, so the dial path runs twice per
+		// round and the second one has a backoff wait in front of it.
+		require.NoError(t, sc.conn.UnderlyingConn().Close())
+		require.Error(t, recv(t, h.disconnects, "the drop"))
+		recv(t, h.connects, "the reconnect")
+		recv(t, srv.accepted, "the replacement connection")
+
+		if byShutdown {
+			c.Shutdown()
+			require.NoError(t, recv(t, result, "Run to return"))
+		} else {
+			cancel()
+			require.ErrorIs(t, recv(t, result, "Run to return"), context.Canceled)
+		}
+	}
+
+	// Run returning and its goroutines being off the scheduler are not the
+	// same instant, so give them a moment rather than sampling on the edge.
+	var live []string
+	require.Eventually(t, func() bool {
+		live = liveInPackage()
+		return len(live) == 0
+	}, waitFor, 10*time.Millisecond,
+		"goroutines still in wsclient after 20 full lifecycles:\n%s", strings.Join(live, "\n\n"))
 }
 
 // TestClient_ShutdownIsIdempotent is the regression for issue #452's third
