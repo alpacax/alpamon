@@ -360,12 +360,12 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (di
 	conn.SetPongHandler(func(string) error { return c.rearm(ctx, conn) })
 
 	for {
-		if cause, ending := c.armRead(ctx, conn); ending {
+		if ending, cause := c.armRead(ctx, conn); ending {
 			return end(cause), nil
 		}
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
-			cause, ending := c.closeRequest(ctx)
+			ending, cause := c.closeRequest(ctx)
 			// Freeing a read produces a timeout, or net.ErrClosed when the
 			// socket refused the deadline and freeRead closed it instead. Any
 			// other error is the connection's own ending, a peer's close
@@ -392,20 +392,20 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (di
 // ending, in which case it reports that and the cause instead. Checking and
 // arming under one lock is what keeps a request from landing between the two
 // and being overwritten by a fresh ReadTimeout.
-func (c *Client) armRead(ctx context.Context, conn *websocket.Conn) (cause error, ending bool) {
+func (c *Client) armRead(ctx context.Context, conn *websocket.Conn) (ending bool, cause error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if cause, ending := c.closeRequestLocked(ctx); ending {
-		return cause, true
+	if ending, cause := c.closeRequestLocked(ctx); ending {
+		return true, cause
 	}
 	if err := conn.SetReadDeadline(time.Now().Add(c.s.readTimeout)); err != nil {
 		// A caller-supplied net.Conn may refuse a deadline. Entering the
 		// read anyway would park it with no timeout, and the interrupts
 		// that free a parked read set the same deadline, so nothing could
 		// end it. Give the connection up instead.
-		return fmt.Errorf("wsclient: arming the read deadline: %w", err), true
+		return true, fmt.Errorf("wsclient: arming the read deadline: %w", err)
 	}
-	return nil, false
+	return false, nil
 }
 
 // rearm pushes the read deadline out again from the read goroutine, for a
@@ -415,7 +415,7 @@ func (c *Client) armRead(ctx context.Context, conn *websocket.Conn) (cause error
 func (c *Client) rearm(ctx context.Context, conn *websocket.Conn) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ending := c.closeRequestLocked(ctx); ending || c.conn != conn {
+	if ending, _ := c.closeRequestLocked(ctx); ending || c.conn != conn {
 		return nil
 	}
 	if err := conn.SetReadDeadline(time.Now().Add(c.s.readTimeout)); err != nil {
@@ -456,7 +456,7 @@ func wokenOnPurpose(err error) bool {
 
 // closeRequest reports whether the live connection is ending, and the cause
 // OnDisconnect should report for it.
-func (c *Client) closeRequest(ctx context.Context) (cause error, ending bool) {
+func (c *Client) closeRequest(ctx context.Context) (ending bool, cause error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.closeRequestLocked(ctx)
@@ -465,11 +465,11 @@ func (c *Client) closeRequest(ctx context.Context) (cause error, ending bool) {
 // closeRequestLocked reports whether the connection is ending. A nil cause
 // means the caller asked for the close; a non-nil one means something failed,
 // which is what tells Run to pace the redial.
-func (c *Client) closeRequestLocked(ctx context.Context) (cause error, ending bool) {
+func (c *Client) closeRequestLocked(ctx context.Context) (ending bool, cause error) {
 	if c.reconnectPending {
-		return c.reconnectCause, true
+		return true, c.reconnectCause
 	}
-	return nil, c.stopping(ctx)
+	return c.stopping(ctx), nil
 }
 
 // stopping reports whether Run should wind down. It reads the shutdown

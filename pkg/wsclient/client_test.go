@@ -240,6 +240,23 @@ func silentUpgrades(t *testing.T) (addr string, accepted <-chan net.Conn) {
 	return listener.Addr().String(), taken
 }
 
+// wrapDials replaces d's dial hook with one that hands every socket it opens
+// to wrap. Opening the socket is the same work at every site below, so each
+// double says only what it puts around the conn. Two dial hooks in this file
+// do not go through here, and deliberately: one waits on the test before and
+// after the dial, the other dials on a context of its own.
+func wrapDials(d *websocket.Dialer, wrap func(net.Conn) net.Conn) *websocket.Dialer {
+	var nd net.Dialer
+	d.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := nd.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return wrap(conn), nil
+	}
+	return d
+}
+
 // closeTrackingDialer records whether the socket under each connection it
 // opens was closed, which is how a leaked fd shows up in a test.
 type closeTrackingDialer struct {
@@ -248,20 +265,13 @@ type closeTrackingDialer struct {
 }
 
 func (d *closeTrackingDialer) dialer() *websocket.Dialer {
-	ws := DefaultDialer()
-	var nd net.Dialer
-	ws.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		conn, err := nd.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
+	return wrapDials(DefaultDialer(), func(conn net.Conn) net.Conn {
 		flag := &atomic.Bool{}
 		d.mu.Lock()
 		d.closed = append(d.closed, flag)
 		d.mu.Unlock()
-		return closeTrackingConn{Conn: conn, closed: flag}, nil
-	}
-	return ws
+		return closeTrackingConn{Conn: conn, closed: flag}
+	})
 }
 
 func (d *closeTrackingDialer) allClosed() bool {
@@ -295,20 +305,13 @@ func (readDeadlineProofConn) SetReadDeadline(time.Time) error { return nil }
 // Only the first connection is made deadline-proof: a later one has to stay
 // interruptible, or Shutdown could never free the read loop parked on it.
 func readDeadlineProofDialer() *websocket.Dialer {
-	d := DefaultDialer()
-	var nd net.Dialer
 	var used atomic.Bool
-	d.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		conn, err := nd.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
+	return wrapDials(DefaultDialer(), func(conn net.Conn) net.Conn {
 		if used.CompareAndSwap(false, true) {
-			return readDeadlineProofConn{conn}, nil
+			return readDeadlineProofConn{conn}
 		}
-		return conn, nil
-	}
-	return d
+		return conn
+	})
 }
 
 // deadlineRefusingConn accepts a fixed number of read deadlines and then
@@ -334,16 +337,9 @@ func (c deadlineRefusingConn) Read(p []byte) (int, error) {
 }
 
 func deadlineRefusingDialer(allow *atomic.Int32, reads *atomic.Int64) *websocket.Dialer {
-	d := DefaultDialer()
-	var nd net.Dialer
-	d.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		conn, err := nd.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		return deadlineRefusingConn{Conn: conn, allow: allow, reads: reads}, nil
-	}
-	return d
+	return wrapDials(DefaultDialer(), func(conn net.Conn) net.Conn {
+		return deadlineRefusingConn{Conn: conn, allow: allow, reads: reads}
+	})
 }
 
 // parkOnARefusingConn starts a client whose conn accepts exactly one read
@@ -464,16 +460,9 @@ func (c countingConn) Read(p []byte) (int, error) {
 }
 
 func countingDialer(reads *atomic.Int64) *websocket.Dialer {
-	d := DefaultDialer()
-	var nd net.Dialer
-	d.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		conn, err := nd.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		return countingConn{Conn: conn, reads: reads}, nil
-	}
-	return d
+	return wrapDials(DefaultDialer(), func(conn net.Conn) net.Conn {
+		return countingConn{Conn: conn, reads: reads}
+	})
 }
 
 // parkedClient starts a client and returns once Run is inside a read on its
@@ -737,19 +726,13 @@ func TestClient_AbortSurvivesADeadlineAlreadyInFlight(t *testing.T) {
 	const handshakeTimeout = 2 * time.Second
 	var c *Client
 	cfg := testConfig("ws://" + addr + "/ws/")
-	cfg.Dialer = &websocket.Dialer{HandshakeTimeout: handshakeTimeout}
-	var nd net.Dialer
-	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		conn, err := nd.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
+	cfg.Dialer = wrapDials(&websocket.Dialer{HandshakeTimeout: handshakeTimeout}, func(conn net.Conn) net.Conn {
 		return &deadlineDelayingConn{
 			Conn:     conn,
 			shutdown: func() { c.Shutdown() },
 			aborted:  make(chan struct{}),
-		}, nil
-	}
+		}
+	})
 	c, err := New(cfg)
 	require.NoError(t, err)
 	result := make(chan error, 1)
@@ -847,15 +830,9 @@ func TestClient_GivesUpAConnectionThatWontTakeAWriteDeadline(t *testing.T) {
 	srv := newBackhaulServer(t)
 	h := newHooks()
 	cfg := testConfig(srv.url)
-	cfg.Dialer = DefaultDialer()
-	var nd net.Dialer
-	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		conn, err := nd.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		return writeDeadlineRefusingConn{conn}, nil
-	}
+	cfg.Dialer = wrapDials(DefaultDialer(), func(conn net.Conn) net.Conn {
+		return writeDeadlineRefusingConn{conn}
+	})
 	h.install(&cfg)
 	c, _ := startClient(t, t.Context(), cfg, discard)
 	recv(t, h.connects, "the connect")
@@ -903,15 +880,9 @@ func TestClient_AbortClosesAConnThatRefusesTheAbortDeadline(t *testing.T) {
 	var allow atomic.Int32
 	allow.Store(1) // gorilla's own handshake deadline is accepted; the abort's is refused
 	cfg := testConfig("ws://" + addr + "/ws/")
-	cfg.Dialer = &websocket.Dialer{HandshakeTimeout: handshakeTimeout}
-	var nd net.Dialer
-	cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		conn, err := nd.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		return setDeadlineRefusingConn{Conn: conn, allow: &allow}, nil
-	}
+	cfg.Dialer = wrapDials(&websocket.Dialer{HandshakeTimeout: handshakeTimeout}, func(conn net.Conn) net.Conn {
+		return setDeadlineRefusingConn{Conn: conn, allow: &allow}
+	})
 	c, result := startClient(t, t.Context(), cfg, discard)
 	stalled := recv(t, accepted, "the connection the client opened")
 	t.Cleanup(func() { _ = stalled.Close() })
@@ -949,15 +920,9 @@ func TestClient_GivesUpAConnectionThatCannotAnswerAPing(t *testing.T) {
 			var failWrites atomic.Bool
 			cfg := testConfig(srv.url)
 			cfg.ReadTimeout = 30 * time.Second // the connection must end on the pong, long before this
-			cfg.Dialer = DefaultDialer()
-			var nd net.Dialer
-			cfg.Dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				conn, err := nd.DialContext(ctx, network, addr)
-				if err != nil {
-					return nil, err
-				}
-				return writeFailingConn{Conn: conn, failWrites: &failWrites, err: writeErr}, nil
-			}
+			cfg.Dialer = wrapDials(DefaultDialer(), func(conn net.Conn) net.Conn {
+				return writeFailingConn{Conn: conn, failWrites: &failWrites, err: writeErr}
+			})
 			h.install(&cfg)
 			startClient(t, t.Context(), cfg, discard)
 			recv(t, h.connects, "the connect")

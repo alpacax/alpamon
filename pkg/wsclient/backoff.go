@@ -53,10 +53,7 @@ func (b *backoff) next() time.Duration {
 	if !(jittered < float64(b.max)) {
 		return b.max
 	}
-	if d := time.Duration(jittered); d > b.initial {
-		return d
-	}
-	return b.initial
+	return max(time.Duration(jittered), b.initial)
 }
 
 // reset restarts the schedule at initial, after a connection succeeds.
