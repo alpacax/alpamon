@@ -113,6 +113,14 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, h Handler) (di
 			// other error is the connection's own ending, a peer's close
 			// frame among them, even if a request happened to be pending:
 			// report that rather than the request.
+			//
+			// An organic ReadTimeout wears the same shape as a freed read, so
+			// a write that fails in the window between the read returning and
+			// this line takes the credit for a disconnect the timeout caused.
+			// Only the reported cause is wrong: both are failures, so the
+			// pacing is the same either way. Telling them apart would need
+			// the free to carry a token the read could compare, and that is
+			// not worth a generation counter on every read.
 			if ending && wokenOnPurpose(err) {
 				err = cause
 			}
@@ -264,10 +272,10 @@ func (c *Client) release(conn *websocket.Conn, cause error) {
 	c.s.onDisconnect(cause)
 }
 
-// closeConn sends a close frame, waits briefly for the peer's reply when that
-// frame went out, and closes the socket regardless, so a broken connection
-// cannot leak its fd. Only the goroutine that was reading conn calls it, so
-// the drain is never a second concurrent reader.
+// closeConn closes the socket whatever else fails, so a broken connection
+// cannot leak its fd, and sends a close frame and waits briefly for the
+// peer's reply first when it can. Only the goroutine that was reading conn
+// calls it, so the drain is never a second concurrent reader.
 //
 // After a read that already failed, gorilla/websocket returns the stored
 // error to every later read and the drain ends at once. When the close was

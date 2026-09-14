@@ -171,7 +171,8 @@ type abortState struct {
 	finished bool
 }
 
-// track takes ownership of a freshly opened socket and returns it wrapped.
+// track records a socket the dial hook just opened, aborting it on the spot
+// if the abort already went past.
 func (s *abortState) track(c net.Conn) net.Conn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -196,8 +197,8 @@ func (s *abortState) abort() {
 	}
 }
 
-// setDeadline installs t on c, unless the dial has been aborted, in which
-// case the abort's deadline is the one that stands.
+// setDeadline installs t on c under the same lock the abort takes, so a
+// deadline already on its way down cannot land after an abort and undo it.
 func (s *abortState) setDeadline(c net.Conn, t time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

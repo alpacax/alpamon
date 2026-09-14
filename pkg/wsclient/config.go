@@ -93,6 +93,12 @@ type Config struct {
 	// ReadLimit is the largest inbound message accepted, in bytes: its
 	// frames' payloads summed as they arrive, before any decompression. Zero
 	// means DefaultReadLimit; a negative value removes the limit.
+	//
+	// It bounds memory only while compression is off, which is the default:
+	// gorilla/websocket counts the compressed bytes against the limit and
+	// then reads the decompressed stream whole, so a caller who sets
+	// EnableCompression on their own Dialer is bounding the frame, not the
+	// allocation it expands into. Nothing here can bound the second.
 	ReadLimit int64
 
 	// ReadTimeout is re-armed before every read. Zero means DefaultReadTimeout.
@@ -111,7 +117,9 @@ type Config struct {
 	MaxBackoff time.Duration
 
 	// Rand returns the value in [0, 1) the jitter factor is drawn from. Nil
-	// means math/rand/v2. Tests pin it for a deterministic schedule.
+	// means math/rand/v2. It is here for a caller that wants its own
+	// reconnect timing to be reproducible in its own tests, which a module
+	// outside this repository cannot arrange any other way.
 	Rand func() float64
 
 	// OnConnect runs after every successful dial. OnDisconnect runs once for

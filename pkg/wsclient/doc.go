@@ -32,5 +32,19 @@
 // That list is the ceiling, not an inventory. What ships imports pkg/version,
 // for the default User-Agent, and gorilla/websocket; pkg/tunnel is allowed
 // for the caller in Ownership above, who wraps what Dial returns, and is not
-// reached from here.
+// reached from here. The list is repeated in the job's own ALLOWED variable,
+// and the job is the one that decides.
+//
+// # Relation to pkg/runner
+//
+// pkg/runner still carries WebSocket clients of its own, and the same numbers
+// are written out in both places: the 35-minute read timeout, the 5s and 60s
+// reconnect bounds, the Authorization format, and a close-frame-then-drain-
+// then-close sequence. The schedules have already drifted, with internal/retry
+// drawing its jitter factor from [0.5, 1.5) and this package from [1.0, 1.5).
+//
+// They are meant to converge here rather than be kept in step by hand:
+// pkg/runner may import this package, and issue #452, which this package
+// avoids by construction and pkg/runner still has, is the reason to. Until
+// that lands, a change to either one is a change both copies need.
 package wsclient

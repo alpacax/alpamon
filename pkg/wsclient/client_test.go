@@ -984,9 +984,8 @@ func TestClient_UptimeExcludesTheTimeSpentClosing(t *testing.T) {
 
 // TestClient_ABackoffWaitPrefersAStopToItsTimer covers the tie the wait can
 // end in. A Shutdown or a done ctx that arrives as the backoff timer fires
-// leaves two of the select's cases ready at once, and a select picks among
-// those at random, so the timer carried it half the time and Run went on to
-// dial. That dial is a connect to the backhaul and a call into a caller's
+// leaves two of the select's cases ready at once, so the timer carried it
+// half the time and Run went on to dial. That dial is a connect to the backhaul and a call into a caller's
 // own dial hook, both made after the caller asked the client to stop, and
 // the loop cannot catch it: its own check runs before the wait, not after.
 func TestClient_ABackoffWaitPrefersAStopToItsTimer(t *testing.T) {

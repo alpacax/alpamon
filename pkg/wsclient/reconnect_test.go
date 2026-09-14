@@ -35,7 +35,7 @@ func refusingConfig() Config {
 // TestRun_BackoffScheduleUnderAFakeClock checks both the waits Run reports and
 // when each retry actually happens. With the draw pinned to 0 the factor is
 // 1.0, so each wait is the base itself: 1s, 2s, 4s, then 8s from the ceiling
-// on.
+// on, the ceiling being two thirds of the 12s max.
 func TestRun_BackoffScheduleUnderAFakeClock(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
@@ -45,7 +45,7 @@ func TestRun_BackoffScheduleUnderAFakeClock(t *testing.T) {
 		var waits, at []time.Duration
 		cfg := refusingConfig()
 		cfg.MinBackoff = time.Second
-		cfg.MaxBackoff = 8 * time.Second
+		cfg.MaxBackoff = 12 * time.Second
 		cfg.Rand = func() float64 { return 0 }
 		cfg.OnRetry = func(attempt int, delay time.Duration, err error) {
 			assert.ErrorIs(t, err, errRefused)
@@ -66,7 +66,7 @@ func TestRun_BackoffScheduleUnderAFakeClock(t *testing.T) {
 			time.Second,
 			2 * time.Second,
 			4 * time.Second,
-			8 * time.Second, // the base is capped at 8s from here on
+			8 * time.Second, // the base holds at 8s, two thirds of max, from here on
 			8 * time.Second,
 			8 * time.Second,
 		}, waits)

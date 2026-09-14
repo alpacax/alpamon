@@ -32,15 +32,19 @@ type Handler func(ctx context.Context, messageType int, payload []byte) error
 // jittered backoff whenever the connection drops, and hands every inbound
 // message to a Handler.
 //
-// The Client owns its connection. Run is the only goroutine that reads it,
-// writes are serialized, and Reconnect and Shutdown only signal the read
-// loop, so gorilla/websocket's one-reader, one-writer rule holds without the
-// caller's help. All methods are safe for concurrent use.
+// All methods are safe for concurrent use, and the connection is never
+// exposed, so a caller cannot break gorilla/websocket's one-reader,
+// one-writer rule by accident. The Ownership section of the package doc
+// says how that is arranged; conn.go holds the arrangement.
 type Client struct {
 	s settings
 
-	// mu guards conn and the pending-reconnect pair. Nothing slower than
-	// SetReadDeadline happens while it is held.
+	// mu guards conn and the pending-reconnect pair. What runs under it is
+	// a SetReadDeadline on the socket, except on the path where a
+	// caller-supplied conn refuses one and freeRead closes it instead: a
+	// slow Close on such a conn holds every other method here behind it.
+	// Moving that fallback out from under mu is not an option, since it is
+	// the lock that keeps a request from being lost to a re-arm.
 	mu   sync.Mutex
 	conn *websocket.Conn
 	// reconnectPending asks Run to replace conn; reconnectCause says why:
@@ -170,18 +174,17 @@ func (c *Client) Run(ctx context.Context, h Handler) error {
 	}
 }
 
-// sleep waits out d, and reports false if Run should stop instead.
+// sleep waits out d, or reports false as soon as Run should stop instead.
 func (c *Client) sleep(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
 		// A stop that arrives as the timer fires leaves both cases ready,
-		// and a select picks among ready cases at random, so the timer wins
-		// half of those. Ask again rather than send Run off to dial on an
-		// answer that was already there: that dial is a connect to the
-		// backhaul, and a call into a caller's own dial hook, made after the
-		// caller asked the client to stop.
+		// and the timer carries half of those draws. Ask again rather than
+		// send Run off on an answer that was already there: that dial is a
+		// connect to the backhaul, and a call into a caller's own dial hook,
+		// made after the caller asked the client to stop.
 		return !c.stopping(ctx)
 	case <-ctx.Done():
 		return false

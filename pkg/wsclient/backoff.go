@@ -31,12 +31,26 @@ type backoff struct {
 // lower half: at the first attempt the base is initial, so every draw below
 // 1.0 returns exactly initial and half of a fleet retries on the same tick.
 // Spreading upward keeps initial a real floor and the distribution intact.
+//
+// Spreading upward is also why the base stops short of max rather than at
+// it. A base of max would put every draw at or above max, the clamp would
+// return max for all of them, and the schedule would go flat exactly where
+// the jitter matters most: a fleet that has been retrying long enough to
+// reach the ceiling is a fleet already in step. The base stops at two thirds
+// of max instead, which is the largest one whose whole window still fits
+// underneath, so the ceiling is a spread over [2/3 max, max) rather than a
+// single instant. A configuration with initial equal to max has no room for
+// any of this and gets that one value, which is what it asked for.
 func (b *backoff) next() time.Duration {
+	ceiling := b.max / 3 * 2 // divide first: b.max*2 can overflow
+	if ceiling < b.initial {
+		ceiling = b.initial
+	}
 	switch {
 	case b.current == 0:
 		b.current = b.initial
-	case b.current > b.max/2: // doubling would pass max, or overflow
-		b.current = b.max
+	case b.current > ceiling/2: // doubling would pass the ceiling, or overflow
+		b.current = ceiling
 	default:
 		b.current *= 2
 	}
@@ -56,7 +70,8 @@ func (b *backoff) next() time.Duration {
 	return max(time.Duration(jittered), b.initial)
 }
 
-// reset restarts the schedule at initial, after a connection succeeds.
+// reset is called for a connection that worked, so the next failure starts
+// the schedule over rather than resuming where the last outage left it.
 func (b *backoff) reset() {
 	b.current = 0
 }

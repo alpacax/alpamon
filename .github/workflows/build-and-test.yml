@@ -68,7 +68,9 @@ jobs:
         env:
           PKG: github.com/alpacax/alpamon/v2/pkg/wsclient
           # The only packages pkg/wsclient may reach outside the standard
-          # library. pkg/tunnel and pkg/version are leaves themselves.
+          # library. pkg/tunnel and pkg/version are leaves themselves. The
+          # same list is written in prose in pkg/wsclient/doc.go, which says
+          # that this variable is the one that decides; update both together.
           ALLOWED: >-
             github.com/alpacax/alpamon/v2/pkg/wsclient
             github.com/alpacax/alpamon/v2/pkg/tunnel
@@ -147,7 +149,7 @@ jobs:
               exit 1
             fi
             if [ -n "$unexpected" ]; then
-              echo "::error file=pkg/wsclient/doc.go::pkg/wsclient must stay a leaf, but on $target its dependency graph reaches:"
+              echo "::error file=pkg/wsclient/doc.go::pkg/wsclient must stay a leaf, but on $target its dependency graph reaches the following. If this is intended, widen ALLOWED in this job and the list in doc.go together:"
               printf '%s' "$unexpected"
               echo "Allowed: $ALLOWED, and the standard library."
               exit 1
