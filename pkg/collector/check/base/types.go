@@ -93,6 +93,7 @@ type CheckResult struct {
 	Total         uint64    `json:"total,omitempty"`
 	Free          uint64    `json:"free,omitempty"`
 	Used          uint64    `json:"used,omitempty"`
+	AgentVolume   bool      `json:"agent_volume,omitempty"`
 	WriteBps      *float64  `json:"write_bps,omitempty"`
 	ReadBps       *float64  `json:"read_bps,omitempty"`
 	InputPps      *float64  `json:"input_pps,omitempty"`

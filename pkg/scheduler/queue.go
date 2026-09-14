@@ -49,6 +49,8 @@ func (h *priorityHeap) Pop() any {
 	old := *h
 	n := len(old)
 	item := old[n-1]
+	// Clear the backing-array slot so processed request data can be reclaimed.
+	old[n-1] = PriorityEntry{}
 	*h = old[:n-1]
 	return item
 }

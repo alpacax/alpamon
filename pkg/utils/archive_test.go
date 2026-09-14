@@ -1160,6 +1160,57 @@ func TestUnzip_DirectoryEntryWithoutModeKeepsTheDefault(t *testing.T) {
 	assert.Equal(t, "hi", string(content))
 }
 
+func TestUnzip_FileEntryWithoutModeKeepsTheDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-specific behavior")
+	}
+
+	for _, tc := range []struct {
+		name    string
+		creator uint16
+	}{
+		{"Unix", zipCreatorUnix},
+		{"MacOSX", zipCreatorMacOSX},
+		{"OpenVMS", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := zip.NewWriter(&buf)
+			// No SetMode: zero external attributes read back as mode 0 whether
+			// archive/zip reads a Unix mode for the creator or decodes nothing.
+			zw, err := w.CreateHeader(&zip.FileHeader{
+				Name:           "file.txt",
+				CreatorVersion: tc.creator << 8,
+			})
+			require.NoError(t, err)
+			_, err = zw.Write([]byte("hi"))
+			require.NoError(t, err)
+			require.NoError(t, w.Close())
+			r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+			require.NoError(t, err)
+			require.Zero(t, r.File[0].Mode().Perm())
+
+			dir := t.TempDir()
+			out := filepath.Join(dir, "out")
+			require.NoError(t, UnzipReader(r, out))
+
+			// A file written at 0666 goes through the same umask as extraction,
+			// so it is the reference, not a literal 0644.
+			ref := filepath.Join(dir, "ref")
+			require.NoError(t, os.WriteFile(ref, nil, 0666))
+			want, err := os.Stat(ref)
+			require.NoError(t, err)
+			path := filepath.Join(out, "file.txt")
+			fi, err := os.Stat(path)
+			require.NoError(t, err)
+			assert.Equal(t, want.Mode().Perm(), fi.Mode().Perm())
+			content, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, "hi", string(content))
+		})
+	}
+}
+
 func TestUnzipReader_ExtractsAnInMemoryArchive(t *testing.T) {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
