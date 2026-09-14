@@ -21,26 +21,27 @@ type backoff struct {
 	current time.Duration
 }
 
-// next returns the next wait: the doubling base multiplied by a factor in
-// [1.0, 1.5), clamped to [initial, max]. Without the random factor every
+// next returns the next wait, drawn uniformly from the doubling base up to
+// half again as much, and clamped to [initial, max]. Without the draw every
 // agent reconnecting after the same event, such as a backhaul restart, would
 // retry in lockstep.
 //
-// The factor starts at 1.0 rather than 0.5, which is where internal/retry
-// starts it, because the clamp to initial would otherwise swallow the whole
-// lower half: at the first attempt the base is initial, so every draw below
-// 1.0 returns exactly initial and half of a fleet retries on the same tick.
-// Spreading upward keeps initial a real floor and the distribution intact.
+// The window opens upward from the base rather than around it, which is
+// where internal/retry puts it, because a window reaching below the base
+// would be swallowed by the clamp at the first attempt: the base is initial
+// there, so every draw under it returns exactly initial and half a fleet
+// retries on the same tick. Opening upward keeps initial a real floor and
+// the spread intact.
 //
-// Spreading upward is also why the base stops short of max rather than at
-// it. A base of max would put every draw at or above max, the clamp would
-// return max for all of them, and the schedule would go flat exactly where
-// the jitter matters most: a fleet that has been retrying long enough to
-// reach the ceiling is a fleet already in step. The base stops at two thirds
-// of max instead, which is the largest one whose whole window still fits
-// underneath, so the ceiling is a spread over [2/3 max, max) rather than a
-// single instant. A configuration with initial equal to max has no room for
-// any of this and gets that one value, which is what it asked for.
+// Opening upward is also why the base stops short of max rather than at it.
+// A base of max would put the whole window at or above max and the schedule
+// would go flat exactly where the spread matters most: a fleet that has been
+// retrying long enough to reach the ceiling is a fleet already in step. The
+// base stops at two thirds of max instead, the largest one whose whole
+// window still fits underneath, so the ceiling is a spread over [2/3 max,
+// max) rather than a single instant. A configuration with initial equal to
+// max has no room for any of this and gets that one value, which is what it
+// asked for.
 func (b *backoff) next() time.Duration {
 	ceiling := b.max / 3 * 2 // divide first: b.max*2 can overflow
 	if ceiling < b.initial {
@@ -60,10 +61,19 @@ func (b *backoff) next() time.Duration {
 		randFn = rand.Float64
 	}
 
-	// Clamp in float64 before converting: a factor near 1.5 on a large max
-	// would overflow time.Duration, and !(x < max) also catches a NaN from
-	// a caller-supplied source.
-	jittered := float64(b.current) * (1.0 + 0.5*randFn())
+	// Draw across the window the base actually has rather than multiplying
+	// past max and clamping back. They agree wherever the whole window fits,
+	// and where it does not they do not: initial is the one base the ceiling
+	// cannot lower, so a MinBackoff above two thirds of MaxBackoff leaves
+	// most of the multiplied draws sitting on max itself. Measured at
+	// initial 50s and max 60s, that is 60% of them.
+	top := b.max
+	if b.current <= b.max-b.current/2 { // else half again would pass max
+		top = b.current + b.current/2
+	}
+	// In float64 before converting: the sum can pass time.Duration on a
+	// large max, and !(x < max) also catches a NaN from a caller's source.
+	jittered := float64(b.current) + float64(top-b.current)*randFn()
 	if !(jittered < float64(b.max)) {
 		return b.max
 	}

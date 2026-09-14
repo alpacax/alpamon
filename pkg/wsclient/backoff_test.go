@@ -124,6 +124,28 @@ func TestBackoff_JittersAtTheCeiling(t *testing.T) {
 	assert.Greater(t, len(seen), 45, "waits at the ceiling must not collapse onto one value")
 }
 
+// TestBackoff_JittersWithAFloorNearTheCeiling covers the one base the two
+// thirds rule cannot lower. initial is the floor, so a MinBackoff set above
+// two thirds of MaxBackoff leaves the base sitting there with less room than
+// a window of half again needs. Multiplying past max and clamping back put
+// 60% of those draws on max itself, at initial 50s and max 60s; drawing
+// across the room that is actually there keeps them apart.
+func TestBackoff_JittersWithAFloorNearTheCeiling(t *testing.T) {
+	b := &backoff{initial: 50 * time.Second, max: time.Minute}
+	for range 3 {
+		b.next() // the base is pinned at initial from the first call on
+	}
+
+	seen := map[time.Duration]bool{}
+	for range 200 {
+		d := b.next()
+		assert.GreaterOrEqual(t, d, 50*time.Second, "MinBackoff is still the floor")
+		assert.Less(t, d, time.Minute, "and MaxBackoff still the bound")
+		seen[d] = true
+	}
+	assert.Greater(t, len(seen), 190, "a floor this close to the ceiling still has room to spread across")
+}
+
 // TestBackoff_HostileDrawsClamp covers a caller-supplied source that breaks
 // its [0, 1) contract. The clamp has to hold for these too, since a wait of
 // zero or less would turn the reconnect loop into a busy loop.
