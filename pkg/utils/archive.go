@@ -403,9 +403,8 @@ func UnzipReader(r *zip.Reader, destDir string) error {
 	var links []deferredEntry
 	var dirs []deferredEntry
 	for _, f := range r.File {
-		// The rejection below quotes the name, but an OS error raised further
-		// in embeds the raw path where %q cannot reach it, and it travels to
-		// the console as the command result.
+		// A decodable control character is refused here; an undecodable byte
+		// deliberately passes and is handled by EscapeControlBytes on display.
 		if hasControlBytes(f.Name) {
 			return fmt.Errorf("illegal file path in zip: %q", f.Name)
 		}
@@ -544,9 +543,10 @@ func recheckLinks(root string, links []deferredEntry) (rejected, left error) {
 	return rejected, left
 }
 
-// hasControlBytes reports whether s carries a byte a terminal would act on.
+// hasControlBytes reports whether s decodes to a character a terminal acts
+// on. An undecodable byte is not one; see EscapeControlBytes.
 func hasControlBytes(s string) bool {
-	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
+	return strings.ContainsFunc(s, isTerminalControl)
 }
 
 // isTerminalControl reports whether r is a character a terminal acts on: a C0
@@ -659,8 +659,7 @@ func extractSymlink(f *zip.File, root, fpath string) error {
 	}
 
 	target := string(body)
-	// The same route the entry-name check closes: a failure past this point
-	// wraps the OS error, which embeds the raw target where %q cannot reach.
+	// Same check as the entry name, for a link target.
 	if hasControlBytes(target) {
 		return fmt.Errorf("illegal link target in zip: %q -> %q", f.Name, target)
 	}
