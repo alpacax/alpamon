@@ -660,7 +660,6 @@ func extractSymlink(f *zip.File, root, fpath string) error {
 	}
 
 	target := string(body)
-	// Same check as the entry name, for a link target.
 	if hasControlBytes(target) {
 		return fmt.Errorf("illegal link target in zip: %q -> %q", f.Name, target)
 	}
