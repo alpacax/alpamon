@@ -15,6 +15,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFileHandler_Validate(t *testing.T) {
@@ -518,6 +519,22 @@ func TestFileHandler_Execute_Rm(t *testing.T) {
 	}
 }
 
+// TestFileHandler_Execute_EscapesTheResult uses rm, which echoes the path back raw.
+func TestFileHandler_Execute_EscapesTheResult(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("handleRm refuses on Windows before it names the path")
+	}
+	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+
+	exitCode, output, err := handler.Execute(context.Background(), "rm",
+		&common.CommandArgs{Path: "/tmp/evil\x9b[2J.sh"})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Contains(t, output, `/tmp/evil\x9b[2J.sh`)
+	assert.NotContains(t, output, "\x9b")
+}
+
 func TestUploadSummary(t *testing.T) {
 	skip := func(path, reason string) utils.SkippedEntry {
 		return utils.SkippedEntry{Path: path, Reason: errors.New(reason)}
@@ -539,18 +556,10 @@ func TestUploadSummary(t *testing.T) {
 			want:  "Successfully uploaded 3 file(s).",
 		},
 		{
-			name:    "a skipped path is named with its cause",
+			name:    "a skipped path replaces the success count with its cause",
 			count:   2,
 			skipped: report(skip("/home/u/secret.txt", "permission denied")),
 			want:    "Uploaded the archive, skipping 1 path(s): /home/u/secret.txt: permission denied",
-		},
-		{
-			// count is every path the user asked for, skipped ones included, so
-			// a summary that still named it would contradict the list.
-			name:    "a requested path that was skipped is not counted as uploaded",
-			count:   1,
-			skipped: report(skip("/home/u/locked", "permission denied")),
-			want:    "Uploaded the archive, skipping 1 path(s): /home/u/locked: permission denied",
 		},
 		{
 			name:  "the tail collapses into a count",
@@ -566,9 +575,7 @@ func TestUploadSummary(t *testing.T) {
 				"/a: permission denied; /b: permission denied; /c: permission denied; and 2 more",
 		},
 		{
-			// The archive worker bounds the list it sends so its status message
-			// cannot outgrow the capped buffer it rides. The total still has to
-			// be the real one, or the summary understates what was left out.
+			// The worker caps the list it sends but not the count.
 			name:  "a bounded list still reports the true total",
 			count: 1,
 			skipped: utils.SkippedReport{
