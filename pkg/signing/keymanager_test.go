@@ -24,6 +24,7 @@ func TestResolveAuthEnv(t *testing.T) {
 		{"https://alpacax.dev.alpacon.io", "dev"},
 		{"https://Alpacax.DEV.alpacon.io/", "dev"},
 		{"https://alpacax.dev.alpacon.io.", "dev"},
+		{"https://dev.alpacon.io.", "dev"},
 		{"https://alpacax.alpacon.io", ""},
 		{"https://us.alpacon.io", ""},
 		{"https://kr.alpacon.io", ""},
