@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -546,6 +547,36 @@ func recheckLinks(root string, links []deferredEntry) (rejected, left error) {
 // hasControlBytes reports whether s carries a byte a terminal would act on.
 func hasControlBytes(s string) bool {
 	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
+}
+
+// isTerminalControl reports whether r is a character a terminal acts on: a C0
+// control, DEL, or a C1 control.
+func isTerminalControl(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+}
+
+// EscapeControlBytes renders every C0/C1 control byte and DEL as \xNN and
+// leaves the rest alone. An undecodable byte is judged by its raw value.
+func EscapeControlBytes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			r = rune(s[i])
+		}
+		if !isTerminalControl(r) {
+			b.WriteString(s[i : i+size])
+			i += size
+			continue
+		}
+		for _, c := range []byte(s[i : i+size]) {
+			_, _ = fmt.Fprintf(&b, "\\x%02x", c)
+		}
+		i += size
+	}
+
+	return b.String()
 }
 
 // createFile opens path for writing, made or truncated, and where the host

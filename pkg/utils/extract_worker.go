@@ -38,7 +38,9 @@ func RunExtractWorker(srcPath, destDir string, status io.Writer) int {
 	// discarded, which would leave the source behind on every extraction.
 	_ = src.Close()
 	if err != nil {
-		_, _ = fmt.Fprintln(status, err.Error())
+		// An OS error embeds the raw path where the %q around it never
+		// reaches, so the escape lands on the whole text.
+		_, _ = fmt.Fprintln(status, EscapeControlBytes(err.Error()))
 		return 1
 	}
 

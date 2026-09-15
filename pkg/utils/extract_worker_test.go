@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -91,4 +92,22 @@ func TestRunExtractWorker_RejectsZipSlip(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(dir, "escaped.txt"))
 	// A refused archive is not cleaned up; the operator can still inspect it.
 	assert.FileExists(t, zipPath)
+}
+
+func TestRunExtractWorker_StatusCarriesNoRawControlByte(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "esc.zip")
+	// Past NAME_MAX everywhere, so every platform raises a real *os.PathError.
+	name := strings.Repeat("a", 300) + "\x9b[2J.txt"
+	writeEntryZip(t, zipPath, []zipEntry{{name: name, body: "x"}})
+
+	dest := filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(dest, 0755))
+	var status bytes.Buffer
+
+	code := RunExtractWorker(zipPath, dest, &status)
+
+	assert.Equal(t, 1, code)
+	assert.NotContains(t, status.String(), "\x9b")
+	assert.Contains(t, status.String(), `\x9b`)
 }

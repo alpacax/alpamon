@@ -451,6 +451,9 @@ func TestUnzip_RejectionMessageEscapesControlBytes(t *testing.T) {
 	assert.NotContains(t, err.Error(), "\x1b")
 }
 
+// legacyEncodedName is 日本語.txt in Shift-JIS; its lead bytes sit in the C1 range.
+const legacyEncodedName = "\x93\xfa\x96\x7b\x8c\xea.txt"
+
 func TestUnzip_ControlBytesInEntryNameAreRejected(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "esc.zip")
@@ -1265,4 +1268,40 @@ func TestIsEmptyDir(t *testing.T) {
 
 	_, err = isEmptyDir(filepath.Join(dir, "missing"))
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestEscapeControlBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want string
+	}{
+		{"a C0 escape is spelled out", "a\x1b[2Jb", `a\x1b[2Jb`},
+		{"DEL is spelled out", "a\x7fb", `a\x7fb`},
+		{"a raw C1 CSI is spelled out, which no refusal can do for it", "a\x9bb", `a\x9bb`},
+		{"a properly encoded U+009B is spelled out byte by byte", "a\xc2\x9bb", `a\xc2\x9bb`},
+		// Only the display is escaped; extraction still writes the raw name.
+		{"a Shift-JIS lead byte in the C1 range is spelled out too", legacyEncodedName, "\\x93\xfa\\x96{\\x8c\xea.txt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, EscapeControlBytes(tt.s))
+		})
+	}
+}
+
+func TestEscapeControlBytes_LeavesTheRestAlone(t *testing.T) {
+	names := []struct{ name, s string }{
+		{"plain ASCII", "hello.txt"},
+		{"an empty string", ""},
+		{"valid multi-byte UTF-8, so an error stays readable", "한글 😀.txt"},
+		{"a continuation byte inside valid UTF-8, not a C1 control", "가"},
+		{"an undecodable byte past the C1 range", "caf\xe9.txt"},
+		{"its own output, since that is plain ASCII", `a\x9bb`},
+	}
+	for _, tt := range names {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.s, EscapeControlBytes(tt.s))
+		})
+	}
 }
