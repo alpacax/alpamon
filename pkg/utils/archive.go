@@ -550,8 +550,10 @@ func hasControlBytes(s string) bool {
 	return strings.ContainsFunc(s, unicode.IsControl)
 }
 
+const hexDigits = "0123456789abcdef"
+
 // EscapeControlBytes renders every C0/C1 control byte and DEL as \xNN and
-// leaves the rest alone. An undecodable byte is judged by its raw value.
+// leaves the rest alone. A raw byte hasControlBytes lets through is escaped here.
 func EscapeControlBytes(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -565,8 +567,12 @@ func EscapeControlBytes(s string) string {
 			i += size
 			continue
 		}
+		// fmt.Fprintf would pass &b as an io.Writer, which moves the Builder to
+		// the heap on every call, escaped bytes or not.
 		for _, c := range []byte(s[i : i+size]) {
-			_, _ = fmt.Fprintf(&b, "\\x%02x", c)
+			b.WriteString(`\x`)
+			b.WriteByte(hexDigits[c>>4])
+			b.WriteByte(hexDigits[c&0x0f])
 		}
 		i += size
 	}
