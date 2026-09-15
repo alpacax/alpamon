@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -543,16 +544,10 @@ func recheckLinks(root string, links []deferredEntry) (rejected, left error) {
 	return rejected, left
 }
 
-// hasControlBytes reports whether s decodes to a character a terminal acts
-// on. An undecodable byte is not one; see EscapeControlBytes.
+// hasControlBytes reports whether s decodes to a C0, DEL, or C1 control rune.
+// An undecodable byte is not one; see EscapeControlBytes.
 func hasControlBytes(s string) bool {
-	return strings.ContainsFunc(s, isTerminalControl)
-}
-
-// isTerminalControl reports whether r is a character a terminal acts on: a C0
-// control, DEL, or a C1 control.
-func isTerminalControl(r rune) bool {
-	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+	return strings.ContainsFunc(s, unicode.IsControl)
 }
 
 // EscapeControlBytes renders every C0/C1 control byte and DEL as \xNN and
@@ -565,7 +560,7 @@ func EscapeControlBytes(s string) string {
 		if r == utf8.RuneError && size == 1 {
 			r = rune(s[i])
 		}
-		if !isTerminalControl(r) {
+		if !unicode.IsControl(r) {
 			b.WriteString(s[i : i+size])
 			i += size
 			continue
