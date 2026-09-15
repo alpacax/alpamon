@@ -72,8 +72,14 @@ func NewFileHandler(cmdExecutor common.CommandExecutor, apiSession common.APISes
 	return h
 }
 
-// Execute runs the file transfer command
+// Execute runs the file transfer command. A result quotes neither the path
+// nor the error it carries, so one escape here covers every return.
 func (h *FileHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+	code, message, err := h.execute(ctx, cmd, args)
+	return code, utils.EscapeControlBytes(message), err
+}
+
+func (h *FileHandler) execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
 	ctx, cancel := common.WithHandlerTimeout(ctx, common.FileTimeout)
 	defer cancel()
 
@@ -620,7 +626,8 @@ func (h *FileHandler) statFileTransfer(code int, transferType transferType, mess
 
 	payload := &commandStat{
 		Success: isSuccess,
-		Message: message,
+		// Execute escapes on its way out, but this reads the raw result.
+		Message: utils.EscapeControlBytes(message),
 		Type:    transferType,
 	}
 	scheduler.Rqueue.Post(statURL, payload, 10, time.Time{})

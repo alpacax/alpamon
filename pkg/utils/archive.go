@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -402,9 +404,8 @@ func UnzipReader(r *zip.Reader, destDir string) error {
 	var links []deferredEntry
 	var dirs []deferredEntry
 	for _, f := range r.File {
-		// The rejection below quotes the name, but an OS error raised further
-		// in embeds the raw path where %q cannot reach it, and it travels to
-		// the console as the command result.
+		// A decodable control character is refused here; an undecodable byte
+		// deliberately passes and is handled by EscapeControlBytes on display.
 		if hasControlBytes(f.Name) {
 			return fmt.Errorf("illegal file path in zip: %q", f.Name)
 		}
@@ -543,9 +544,40 @@ func recheckLinks(root string, links []deferredEntry) (rejected, left error) {
 	return rejected, left
 }
 
-// hasControlBytes reports whether s carries a byte a terminal would act on.
+// hasControlBytes reports whether s decodes to a C0, DEL, or C1 control rune.
+// An undecodable byte is not one; see EscapeControlBytes.
 func hasControlBytes(s string) bool {
-	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
+	return strings.ContainsFunc(s, unicode.IsControl)
+}
+
+const hexDigits = "0123456789abcdef"
+
+// EscapeControlBytes renders every C0/C1 control byte and DEL as \xNN and
+// leaves the rest alone. A raw byte hasControlBytes lets through is escaped here.
+func EscapeControlBytes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			r = rune(s[i])
+		}
+		if !unicode.IsControl(r) {
+			b.WriteString(s[i : i+size])
+			i += size
+			continue
+		}
+		// fmt.Fprintf would pass &b as an io.Writer, which moves the Builder to
+		// the heap on every call, escaped bytes or not.
+		for _, c := range []byte(s[i : i+size]) {
+			b.WriteString(`\x`)
+			b.WriteByte(hexDigits[c>>4])
+			b.WriteByte(hexDigits[c&0x0f])
+		}
+		i += size
+	}
+
+	return b.String()
 }
 
 // createFile opens path for writing, made or truncated, and where the host
@@ -628,8 +660,6 @@ func extractSymlink(f *zip.File, root, fpath string) error {
 	}
 
 	target := string(body)
-	// The same route the entry-name check closes: a failure past this point
-	// wraps the OS error, which embeds the raw target where %q cannot reach.
 	if hasControlBytes(target) {
 		return fmt.Errorf("illegal link target in zip: %q -> %q", f.Name, target)
 	}
