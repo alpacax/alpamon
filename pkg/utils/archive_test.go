@@ -477,7 +477,7 @@ func TestUnzip_ControlBytesInEntryNameAreRejected(t *testing.T) {
 			zipPath, out := newZipFixture(t, []zipEntry{{name: "d" + tt.byte + "[2J/x.txt", body: "x"}})
 
 			err := Unzip(zipPath, out)
-			assert.ErrorContains(t, err, "illegal file path in zip")
+			require.ErrorContains(t, err, "illegal file path in zip")
 			assert.NotContains(t, err.Error(), tt.byte)
 		})
 	}
@@ -491,7 +491,7 @@ func TestUnzip_ControlBytesInLinkTargetAreRejected(t *testing.T) {
 			zipPath, out := newZipFixture(t, []zipEntry{{name: "lnk", body: tt.byte + "[2Jx", isLink: true}})
 
 			err := Unzip(zipPath, out)
-			assert.ErrorContains(t, err, "illegal link target in zip")
+			require.ErrorContains(t, err, "illegal link target in zip")
 			assert.NotContains(t, err.Error(), tt.byte)
 		})
 	}
