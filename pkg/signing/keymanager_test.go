@@ -20,8 +20,17 @@ func TestResolveAuthEnv(t *testing.T) {
 	}{
 		{"https://dev.alpacon.io", "dev"},
 		{"https://dev.alpacon.io/", "dev"},
+		// A workspace URL, which is what alpamon.conf actually carries.
+		{"https://alpacax.dev.alpacon.io", "dev"},
+		{"https://Alpacax.DEV.alpacon.io/", "dev"},
+		{"https://alpacax.dev.alpacon.io.", "dev"},
+		{"https://dev.alpacon.io.", "dev"},
+		{"https://alpacax.alpacon.io", ""},
 		{"https://us.alpacon.io", ""},
 		{"https://kr.alpacon.io", ""},
+		// Only a real subdomain counts, not a name that happens to contain it.
+		{"https://notdev.alpacon.io", ""},
+		{"https://dev.alpacon.io.example.com", ""},
 		{"https://dev.example.com", ""},
 		{"http://localhost:8000", ""},
 		{"invalid-url", ""},
@@ -241,6 +250,9 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 	assert.Equal(t, int32(2), fetchCount.Load())
 }
 
+// The AI server's public-key endpoint reads `env`; a name it does not know is
+// ignored and the prod key comes back, which is exactly the mismatch a dev
+// agent must not end up with.
 func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	pub, _ := testKey(t)
 
@@ -259,12 +271,12 @@ func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	require.NoError(t, err)
 	q := lastQuery.Load()
 	require.NotNil(t, q)
-	assert.Equal(t, "dev", q.Get("auth_env"))
+	assert.Equal(t, "dev", q.Get("env"))
 
 	km2 := NewKeyManager(server.URL, 3600, "", server.Client())
 	_, err = km2.GetPublicKey()
 	require.NoError(t, err)
 	q = lastQuery.Load()
 	require.NotNil(t, q)
-	assert.NotContains(t, *q, "auth_env")
+	assert.NotContains(t, *q, "env")
 }

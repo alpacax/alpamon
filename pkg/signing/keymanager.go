@@ -17,10 +17,15 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// devDomain is the dev workspace domain. Every workspace has its own
+// subdomain, so an agent's configured URL is <workspace>.dev.alpacon.io, never
+// the bare domain.
+const devDomain = "dev.alpacon.io"
+
 // ResolveAuthEnv determines the auth environment from the alpacon server URL.
-// dev.alpacon.io → "dev", everything else → "" (prod default).
-// This lets alpamon derive its environment from trusted local config rather
-// than trusting the key_id provided by the relay (alpacon-server).
+// dev.alpacon.io and any subdomain of it → "dev", everything else → "" (prod
+// default). This lets alpamon derive its environment from trusted local config
+// rather than trusting the key_id provided by the relay (alpacon-server).
 //
 // NOTE: When adding new environments (e.g. staging), add a corresponding
 // hostname check below and update TestResolveAuthEnv.
@@ -29,7 +34,9 @@ func ResolveAuthEnv(serverURL string) string {
 	if err != nil {
 		return ""
 	}
-	if strings.EqualFold(u.Hostname(), "dev.alpacon.io") {
+	// A trailing-dot FQDN keeps its dot in Hostname(); it names the same host.
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == devDomain || strings.HasSuffix(host, "."+devDomain) {
 		return "dev"
 	}
 	return ""
@@ -209,11 +216,13 @@ func (m *KeyManager) fetchKey() error {
 
 // fetchKeyLocked performs the actual HTTP fetch. Must be called with refreshMu held.
 // When authEnv is set, it scopes the request to that environment so alpamon
-// only receives keys valid for its own environment.
+// only receives keys valid for its own environment. The parameter is `env`,
+// which is what the AI server's public-key endpoint reads; a name it does not
+// know is ignored and answers with the prod key.
 func (m *KeyManager) fetchKeyLocked() error {
 	fetchURL := m.aiBaseURL + "/api/commands/public-key/"
 	if m.authEnv != "" {
-		fetchURL += "?auth_env=" + url.QueryEscape(m.authEnv)
+		fetchURL += "?env=" + url.QueryEscape(m.authEnv)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
