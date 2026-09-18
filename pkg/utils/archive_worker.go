@@ -143,7 +143,7 @@ func RunArchiveWorker(in io.Reader, dst io.Writer, status io.Writer) int {
 			resp.Skipped = append(resp.Skipped, reported)
 		}
 		if err != nil {
-			resp.Error = err.Error()
+			resp.Error = EscapeControlBytes(err.Error())
 		}
 	}
 

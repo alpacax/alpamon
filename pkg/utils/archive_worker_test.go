@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -133,4 +134,27 @@ func TestEncodeArchiveStatus_StaysParseableWhateverItCarries(t *testing.T) {
 	assert.Equal(t, 500, got.SkippedTotal)
 	assert.NotEmpty(t, got.Error, "the reason for the failure must survive")
 	assert.True(t, utf8.ValidString(got.Error), "a truncated error must stay readable")
+}
+
+// failWriter carries a raw control byte that a real *PathError would lose.
+type failWriter struct{}
+
+func (failWriter) Write(_ []byte) (int, error) {
+	return 0, fmt.Errorf("write failed: %s", "\x9b[2J")
+}
+
+func TestRunArchiveWorker_StatusCarriesNoRawControlByte(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "a.txt")
+	require.NoError(t, os.WriteFile(srcPath, []byte("aaa"), 0644))
+
+	body, err := json.Marshal(ArchiveRequest{Paths: []string{srcPath}})
+	require.NoError(t, err)
+	var status bytes.Buffer
+
+	code := RunArchiveWorker(bytes.NewReader(body), failWriter{}, &status)
+
+	require.Equal(t, 1, code)
+	assert.NotContains(t, status.String(), "\x9b")
+	assert.Contains(t, status.String(), `\x9b`)
 }

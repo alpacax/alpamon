@@ -17,8 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// writeZip builds a zip at path with one entry per name/content pair. A nil
-// map produces an empty zip.
 // requireZip builds the archive and requires that nothing was left out of it,
 // so a test that does not care about skipping still fails if an entry silently
 // goes missing.
@@ -337,6 +335,17 @@ func writeEntryZip(t *testing.T, path string, entries []zipEntry) {
 	require.NoError(t, f.Close())
 }
 
+// newZipFixture returns the zip path and an already-created output directory.
+func newZipFixture(t *testing.T, entries []zipEntry) (zipPath, out string) {
+	t.Helper()
+	dir := t.TempDir()
+	zipPath = filepath.Join(dir, "esc.zip")
+	writeEntryZip(t, zipPath, entries)
+	out = filepath.Join(dir, "out")
+	require.NoError(t, os.MkdirAll(out, 0755))
+	return zipPath, out
+}
+
 func TestUnzip_MissingDestinationDirectoryIsCreated(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "plain.zip")
@@ -451,34 +460,77 @@ func TestUnzip_RejectionMessageEscapesControlBytes(t *testing.T) {
 	assert.NotContains(t, err.Error(), "\x1b")
 }
 
+// controlByteIntroducers omits a raw 0x9b, which decodes to nothing.
+var controlByteIntroducers = []struct{ name, byte string }{
+	{"C0 ESC", "\x1b"},
+	{"encoded C1 CSI", "\xc2\x9b"},
+}
+
+// legacyEncodedName is 日本語.txt in Shift-JIS; its lead bytes sit in the C1 range.
+const legacyEncodedName = "\x93\xfa\x96\x7b\x8c\xea.txt"
+
 func TestUnzip_ControlBytesInEntryNameAreRejected(t *testing.T) {
-	dir := t.TempDir()
-	zipPath := filepath.Join(dir, "esc.zip")
 	// An OS error embeds the raw path where %q cannot reach it, so a name
 	// carrying control bytes must not get far enough to raise one.
-	writeEntryZip(t, zipPath, []zipEntry{{name: "d\x1b[2J/x.txt", body: "x"}})
+	for _, tt := range controlByteIntroducers {
+		t.Run(tt.name, func(t *testing.T) {
+			zipPath, out := newZipFixture(t, []zipEntry{{name: "d" + tt.byte + "[2J/x.txt", body: "x"}})
 
-	out := filepath.Join(dir, "out")
-	require.NoError(t, os.MkdirAll(out, 0755))
-
-	err := Unzip(zipPath, out)
-	assert.ErrorContains(t, err, "illegal file path in zip")
-	assert.NotContains(t, err.Error(), "\x1b")
+			err := Unzip(zipPath, out)
+			require.ErrorContains(t, err, "illegal file path in zip")
+			assert.NotContains(t, err.Error(), tt.byte)
+		})
+	}
 }
 
 func TestUnzip_ControlBytesInLinkTargetAreRejected(t *testing.T) {
-	dir := t.TempDir()
-	zipPath := filepath.Join(dir, "esc.zip")
 	// The same route the entry-name check closes: a failure past the checks
 	// wraps the OS error, which embeds the raw target where %q cannot reach.
-	writeEntryZip(t, zipPath, []zipEntry{{name: "lnk", body: "\x1b[2Jx", isLink: true}})
+	for _, tt := range controlByteIntroducers {
+		t.Run(tt.name, func(t *testing.T) {
+			zipPath, out := newZipFixture(t, []zipEntry{{name: "lnk", body: tt.byte + "[2Jx", isLink: true}})
 
-	out := filepath.Join(dir, "out")
-	require.NoError(t, os.MkdirAll(out, 0755))
+			err := Unzip(zipPath, out)
+			require.ErrorContains(t, err, "illegal link target in zip")
+			assert.NotContains(t, err.Error(), tt.byte)
+		})
+	}
+}
 
-	err := Unzip(zipPath, out)
-	assert.ErrorContains(t, err, "illegal link target in zip")
-	assert.NotContains(t, err.Error(), "\x1b")
+func TestUnzip_LegacyEncodedEntryNameIsExtracted(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		// APFS and NTFS refuse a name that is not valid UTF-8, so none is used here.
+		t.Skip("only a filesystem that accepts arbitrary bytes can hold this name")
+	}
+	zipPath, out := newZipFixture(t, []zipEntry{{name: legacyEncodedName, body: "x"}})
+
+	require.NoError(t, Unzip(zipPath, out))
+	content, err := os.ReadFile(filepath.Join(out, legacyEncodedName))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(content))
+}
+
+func TestUnzip_LegacyEncodedLinkTargetIsRestored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows makes no symlink here")
+	}
+	// A link target is an opaque byte string, so this holds on APFS and NTFS too.
+	zipPath, out := newZipFixture(t, []zipEntry{{name: "lnk", body: legacyEncodedName, isLink: true}})
+
+	require.NoError(t, Unzip(zipPath, out))
+	target, err := os.Readlink(filepath.Join(out, "lnk"))
+	require.NoError(t, err)
+	assert.Equal(t, legacyEncodedName, target)
+}
+
+func TestUnzip_ValidUTF8NameIsExtracted(t *testing.T) {
+	const name = "한글 😀.txt"
+	zipPath, out := newZipFixture(t, []zipEntry{{name: name, body: "x"}})
+
+	require.NoError(t, Unzip(zipPath, out))
+	content, err := os.ReadFile(filepath.Join(out, name))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(content))
 }
 
 func TestUnzip_EntryWrittenUnderAFileIsRejected(t *testing.T) {
@@ -1265,4 +1317,83 @@ func TestIsEmptyDir(t *testing.T) {
 
 	_, err = isEmptyDir(filepath.Join(dir, "missing"))
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestHasControlBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"ESC is a control byte", "\x1b", true},
+		{"DEL is a control byte", "\x7f", true},
+		{"plain ASCII carries nothing", "hello.txt", false},
+		{"an empty name carries nothing", "", false},
+		{"properly UTF-8 encoded U+009B (C1 CSI) is a control byte", "\xc2\x9b", true},
+		{"properly UTF-8 encoded U+0080 is the low end of the C1 range", "\xc2\x80", true},
+		{"properly UTF-8 encoded U+009F is the high end of the C1 range", "\xc2\x9f", true},
+		{"properly UTF-8 encoded U+00A0 (NBSP, just past the C1 range) is not a control byte", "\xc2\xa0", false},
+		{"Korean 가 is valid multi-byte UTF-8, not a control byte", "가", false},
+		{"emoji 😀 is valid multi-byte UTF-8, not a control byte", "😀", false},
+		{"an actual, validly encoded U+FFFD replacement character is not a control byte", "�", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, hasControlBytes(tt.s))
+		})
+	}
+}
+
+// TestHasControlBytes_UndecodableByteIsNotOne covers bytes a legacy encoding also spells.
+func TestHasControlBytes_UndecodableByteIsNotOne(t *testing.T) {
+	names := []struct{ name, s string }{
+		{"a raw 0x9b, the C1 CSI spelled as one byte", "\x9b"},
+		{"a raw 0x80, the low end of the same range", "\x80"},
+		{"Shift-JIS 日本語.txt, whose lead bytes sit in that range", legacyEncodedName},
+		{"CP949 갂.txt, whose lead byte sits in it too", "\x81\x41.txt"},
+		{"Latin-1 café.txt", "caf\xe9.txt"},
+		{"a truncated 한", "\xed\x95"},
+		{"a truncated 😀", "\xf0\x9f"},
+	}
+	for _, tt := range names {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.False(t, hasControlBytes(tt.s))
+		})
+	}
+}
+
+func TestEscapeControlBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want string
+	}{
+		{"a C0 escape is spelled out", "a\x1b[2Jb", `a\x1b[2Jb`},
+		{"DEL is spelled out", "a\x7fb", `a\x7fb`},
+		{"a raw C1 CSI is spelled out, which no refusal can do for it", "a\x9bb", `a\x9bb`},
+		{"a properly encoded U+009B is spelled out byte by byte", "a\xc2\x9bb", `a\xc2\x9bb`},
+		// Only the display is escaped; extraction still writes the raw name.
+		{"a Shift-JIS lead byte in the C1 range is spelled out too", legacyEncodedName, "\\x93\xfa\\x96{\\x8c\xea.txt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, EscapeControlBytes(tt.s))
+		})
+	}
+}
+
+func TestEscapeControlBytes_LeavesTheRestAlone(t *testing.T) {
+	names := []struct{ name, s string }{
+		{"plain ASCII", "hello.txt"},
+		{"an empty string", ""},
+		{"valid multi-byte UTF-8, so an error stays readable", "한글 😀.txt"},
+		{"a continuation byte inside valid UTF-8, not a C1 control", "가"},
+		{"an undecodable byte past the C1 range", "caf\xe9.txt"},
+		{"its own output, since that is plain ASCII", `a\x9bb`},
+	}
+	for _, tt := range names {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.s, EscapeControlBytes(tt.s))
+		})
+	}
 }
