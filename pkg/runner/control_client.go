@@ -2,14 +2,12 @@ package runner
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/internal/retry"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/gorilla/websocket"
@@ -28,6 +26,10 @@ type ControlClient struct {
 	requestHeader http.Header
 	mu            sync.Mutex
 	connected     bool
+
+	// connectBackoff outlives a single Connect call: the escalation after
+	// repeated rejections is only visible across reconnects.
+	connectBackoff *authBackoff
 }
 
 // NewControlClient creates a new ControlClient
@@ -39,7 +41,8 @@ func NewControlClient() *ControlClient {
 	}
 
 	return &ControlClient{
-		requestHeader: headers,
+		requestHeader:  headers,
+		connectBackoff: newAuthBackoff(controlMinConnectInterval, controlMaxConnectInterval),
 	}
 }
 
@@ -50,7 +53,9 @@ func (cc *ControlClient) GetWSPath() string {
 
 // RunForever maintains the control WebSocket connection and handles messages
 func (cc *ControlClient) RunForever(ctx context.Context) {
-	cc.Connect()
+	if err := cc.Connect(ctx); err != nil {
+		return
+	}
 
 	for {
 		select {
@@ -58,20 +63,27 @@ func (cc *ControlClient) RunForever(ctx context.Context) {
 			cc.Close()
 			return
 		default:
-			if cc.Conn == nil {
-				cc.Connect()
+			conn := cc.conn()
+			if conn == nil {
+				if err := cc.Connect(ctx); err != nil {
+					return
+				}
 				continue
 			}
 
-			err := cc.Conn.SetReadDeadline(time.Now().Add(controlReadTimeout))
+			err := conn.SetReadDeadline(time.Now().Add(controlReadTimeout))
 			if err != nil {
-				cc.CloseAndReconnect(ctx)
+				if err = cc.CloseAndReconnect(ctx); err != nil {
+					return
+				}
 				continue
 			}
 
-			_, message, err := cc.Conn.ReadMessage()
+			_, message, err := conn.ReadMessage()
 			if err != nil {
-				cc.CloseAndReconnect(ctx)
+				if err = cc.CloseAndReconnect(ctx); err != nil {
+					return
+				}
 				continue
 			}
 
@@ -80,25 +92,23 @@ func (cc *ControlClient) RunForever(ctx context.Context) {
 	}
 }
 
-// Connect establishes WebSocket connection to control endpoint
-func (cc *ControlClient) Connect() {
+// conn returns the current connection, or nil when there is none.
+func (cc *ControlClient) conn() *websocket.Conn {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	return cc.Conn
+}
+
+// Connect dials until the connection is established, and returns an error
+// only when ctx ends first. Repeated rejections slow it down rather than
+// stop it; see connectForever.
+func (cc *ControlClient) Connect(ctx context.Context) error {
 	wsPath := cc.GetWSPath()
 	log.Info().Msgf("Connecting to control websocket at %s...", wsPath)
 
-	b := &retry.ExponentialBackoff{
-		InitialInterval: controlMinConnectInterval,
-		MaxInterval:     controlMaxConnectInterval,
-	}
-
-	_ = retry.Retry(context.Background(), b, func() error {
-		dialer := websocket.Dialer{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
-			},
-		}
-		conn, _, err := dialer.Dial(wsPath, cc.requestHeader)
+	return connectForever(ctx, cc.connectBackoff, wsPath, func() error {
+		conn, err := dialWebsocket(wsPath, cc.requestHeader)
 		if err != nil {
-			log.Debug().Err(err).Msgf("Failed to connect to control endpoint %s, retrying...", wsPath)
 			return err
 		}
 
@@ -113,12 +123,12 @@ func (cc *ControlClient) Connect() {
 }
 
 // CloseAndReconnect closes current connection and reconnects
-func (cc *ControlClient) CloseAndReconnect(ctx context.Context) {
+func (cc *ControlClient) CloseAndReconnect(ctx context.Context) error {
 	if ctx.Err() != nil {
-		return
+		return ctx.Err()
 	}
 	cc.Close()
-	cc.Connect()
+	return cc.Connect(ctx)
 }
 
 // Close cleanly closes the WebSocket connection
