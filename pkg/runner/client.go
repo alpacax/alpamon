@@ -2,18 +2,15 @@ package runner
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"sync/atomic"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/internal/protocol"
-	"github.com/alpacax/alpamon/v2/internal/retry"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
@@ -28,7 +25,6 @@ const (
 	minConnectInterval    = 5 * time.Second
 	maxConnectInterval    = 60 * time.Second
 	ConnectionReadTimeout = 35 * time.Minute
-	maxRetryTimeout       = 3 * 24 * time.Hour
 
 	eventCommandAckURL    = "/api/events/commands/%s/ack/"
 	eventCommandFinURL    = "/api/events/commands/%s/fin/"
@@ -49,6 +45,10 @@ type WebsocketClient struct {
 	keyManager           *signing.KeyManager
 	signingMode          string
 	serverID             string
+
+	// connectBackoff outlives a single Connect call: the escalation after
+	// repeated rejections is only visible across reconnects.
+	connectBackoff *authBackoff
 
 	// onAuthenticated holds a callback invoked from RunForever after the
 	// first successful ReadMessage on each new connection. Used by the
@@ -79,6 +79,7 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		ctxManager:           ctxManager,
 		signingMode:          config.GlobalSettings.SigningMode,
 		serverID:             config.GlobalSettings.ID,
+		connectBackoff:       newAuthBackoff(minConnectInterval, maxConnectInterval),
 	}
 
 	// Local environments (localhost) have no AI signing server, so enforce
@@ -122,7 +123,9 @@ func (wc *WebsocketClient) SetOnAuthenticated(fn func()) {
 }
 
 func (wc *WebsocketClient) RunForever(ctx context.Context) {
-	wc.Connect()
+	if err := wc.Connect(ctx); err != nil {
+		return
+	}
 	// authenticatedThisConn flips true after the first successful read on
 	// the current connection. Cleared by CloseAndReconnect so the next
 	// connection has to re-prove itself before onAuthenticated fires.
@@ -135,13 +138,17 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 		default:
 			err := wc.Conn.SetReadDeadline(time.Now().Add(ConnectionReadTimeout))
 			if err != nil {
-				wc.CloseAndReconnect(ctx)
+				if err = wc.CloseAndReconnect(ctx); err != nil {
+					return
+				}
 				authenticatedThisConn = false
 				continue
 			}
 			_, message, err := wc.ReadMessage()
 			if err != nil {
-				wc.CloseAndReconnect(ctx)
+				if err = wc.CloseAndReconnect(ctx); err != nil {
+					return
+				}
 				authenticatedThisConn = false
 				continue
 			}
@@ -183,26 +190,15 @@ func (wc *WebsocketClient) ReadMessage() (messageType int, message []byte, err e
 	return messageType, message, nil
 }
 
-func (wc *WebsocketClient) Connect() {
+// Connect dials until the connection is established, and returns an error
+// only when ctx ends first. Repeated rejections slow it down rather than
+// stop it; see connectForever.
+func (wc *WebsocketClient) Connect(ctx context.Context) error {
 	log.Info().Msgf("Connecting to websocket at %s...", config.GlobalSettings.WSPath)
 
-	ctx, cancel := context.WithTimeout(context.Background(), maxRetryTimeout)
-	defer cancel()
-
-	b := &retry.ExponentialBackoff{
-		InitialInterval: minConnectInterval,
-		MaxInterval:     maxConnectInterval,
-	}
-
-	err := retry.Retry(ctx, b, func() error {
-		dialer := websocket.Dialer{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
-			},
-		}
-		conn, _, err := dialer.Dial(config.GlobalSettings.WSPath, wc.requestHeader)
+	return connectForever(ctx, wc.connectBackoff, config.GlobalSettings.WSPath, func() error {
+		conn, err := dialWebsocket(ctx, config.GlobalSettings.WSPath, wc.requestHeader)
 		if err != nil {
-			log.Debug().Err(err).Msgf("Failed to connect to %s, retrying...", config.GlobalSettings.WSPath)
 			return err
 		}
 
@@ -210,18 +206,14 @@ func (wc *WebsocketClient) Connect() {
 		log.Debug().Msg("Backhaul connection established.")
 		return nil
 	})
-	if err != nil {
-		os.Exit(1)
-		return
-	}
 }
 
-func (wc *WebsocketClient) CloseAndReconnect(ctx context.Context) {
+func (wc *WebsocketClient) CloseAndReconnect(ctx context.Context) error {
 	if ctx.Err() != nil {
-		return
+		return ctx.Err()
 	}
 	wc.Close()
-	wc.Connect()
+	return wc.Connect(ctx)
 }
 
 // Cleanly close the websocket connection by sending a close message, waiting for

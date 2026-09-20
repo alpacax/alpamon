@@ -263,20 +263,16 @@ func (c *Client) setReadLimit() {
 // inbound frame through HandleMessage until ctx is cancelled or the
 // remote sends “quit“.
 //
-// Cancellation caveat: “ctx“ interrupts the read loop and post-connect
-// reconnect (CloseAndReconnect honours ctx), but the *initial*
-// WsClient.Connect call below uses its own internal retry timeout and
-// does not honour ctx. A caller cancelling during the very first
-// connect attempt should expect the call to return only after that
-// attempt completes (or the underlying connect times out). This
-// matches the existing runner.WebsocketClient.Connect semantics in
-// alpamon and is preserved here for behavioural compatibility.
+// Connecting has no deadline of its own: it retries until it succeeds or
+// ctx ends, which is also the only way the calls below return an error.
 func (c *Client) RunForever(ctx context.Context) {
 	if c.WsClient == nil {
 		log.Error().Msg("Cannot run: WsClient is nil")
 		return
 	}
-	c.WsClient.Connect()
+	if err := c.WsClient.Connect(ctx); err != nil {
+		return
+	}
 	c.setReadLimit()
 
 	for {
@@ -287,13 +283,17 @@ func (c *Client) RunForever(ctx context.Context) {
 			err := c.WsClient.Conn.SetReadDeadline(time.Now().Add(runner.ConnectionReadTimeout))
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to set read deadline, reconnecting")
-				c.WsClient.CloseAndReconnect(ctx)
+				if err = c.WsClient.CloseAndReconnect(ctx); err != nil {
+					return
+				}
 				c.setReadLimit()
 				continue
 			}
 			_, message, err := c.WsClient.ReadMessage()
 			if err != nil {
-				c.WsClient.CloseAndReconnect(ctx)
+				if err = c.WsClient.CloseAndReconnect(ctx); err != nil {
+					return
+				}
 				c.setReadLimit()
 				continue
 			}
