@@ -240,7 +240,7 @@ func TestDialWebsocket_SurfacesHandshakeStatus(t *testing.T) {
 			}))
 			defer server.Close()
 
-			conn, err := dialWebsocket(wsURL(server.URL), nil)
+			conn, err := dialWebsocket(t.Context(), wsURL(server.URL), nil)
 			require.Error(t, err)
 			assert.Nil(t, conn)
 			require.ErrorIs(t, err, websocket.ErrBadHandshake)
@@ -258,13 +258,25 @@ func TestDialWebsocket_SurfacesHandshakeStatus(t *testing.T) {
 		url := wsURL(server.URL)
 		server.Close()
 
-		conn, err := dialWebsocket(url, nil)
+		conn, err := dialWebsocket(t.Context(), url, nil)
 		require.Error(t, err)
 		assert.Nil(t, conn)
 
 		var handshake *handshakeError
 		assert.False(t, errors.As(err, &handshake), "a server that never answered has no status to report")
 		assert.False(t, isAuthRejection(err))
+	})
+
+	t.Run("a cancelled context stops the dial", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		defer server.Close()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		conn, err := dialWebsocket(ctx, wsURL(server.URL), nil)
+		require.ErrorIs(t, err, context.Canceled, "the dial does not observe the caller's context")
+		assert.Nil(t, conn)
 	})
 }
 

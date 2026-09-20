@@ -197,7 +197,7 @@ func (wc *WebsocketClient) Connect(ctx context.Context) error {
 	log.Info().Msgf("Connecting to websocket at %s...", config.GlobalSettings.WSPath)
 
 	return connectForever(ctx, wc.connectBackoff, config.GlobalSettings.WSPath, func() error {
-		conn, err := dialWebsocket(config.GlobalSettings.WSPath, wc.requestHeader)
+		conn, err := dialWebsocket(ctx, config.GlobalSettings.WSPath, wc.requestHeader)
 		if err != nil {
 			return err
 		}

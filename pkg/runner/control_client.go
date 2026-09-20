@@ -107,7 +107,7 @@ func (cc *ControlClient) Connect(ctx context.Context) error {
 	log.Info().Msgf("Connecting to control websocket at %s...", wsPath)
 
 	return connectForever(ctx, cc.connectBackoff, wsPath, func() error {
-		conn, err := dialWebsocket(wsPath, cc.requestHeader)
+		conn, err := dialWebsocket(ctx, wsPath, cc.requestHeader)
 		if err != nil {
 			return err
 		}

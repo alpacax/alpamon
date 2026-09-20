@@ -17,15 +17,15 @@ import (
 
 const (
 	// authRejectionThreshold is how many connection attempts must be
-	// rejected in a row, and authRejectionSpan how long that streak must
-	// have been running, before the agent slows down to
-	// authRejectedInterval. Both conditions have to hold: the count alone
-	// would fire on a burst of quick retries during a restart, and the span
-	// alone on a single rejection followed by half an hour of something
-	// else. With the ordinary 5s-to-60s backoff the span is the binding
-	// one, which is the intent - the question is whether the server has
-	// been refusing the credentials for a while, not how many packets that
-	// took.
+	// rejected with no successful connection in between, and
+	// authRejectionSpan how long that streak must have been running, before
+	// the agent slows down to authRejectedInterval. Both conditions have to
+	// hold: the count alone would fire on a burst of quick retries during a
+	// restart, and the span alone on a single rejection followed by half an
+	// hour of something else. With the ordinary 5s-to-60s backoff the span
+	// is the binding one, which is the intent - the question is whether the
+	// server has been refusing the credentials for a while, not how many
+	// packets that took.
 	authRejectionThreshold = 5
 	authRejectionSpan      = 30 * time.Minute
 
@@ -35,6 +35,12 @@ const (
 	// one event spread themselves over 30 to 90 minutes instead of arriving
 	// together.
 	authRejectedInterval = 1 * time.Hour
+
+	// handshakeTimeout bounds the HTTP upgrade exchange, which the dial
+	// context no longer covers once the socket is up. It is gorilla's own
+	// default for websocket.DefaultDialer; a server that needs longer than
+	// this to answer an upgrade is not one worth waiting on.
+	handshakeTimeout = 45 * time.Second
 )
 
 // handshakeError carries the HTTP status a rejected WebSocket handshake came
@@ -77,14 +83,20 @@ func isAuthRejection(err error) bool {
 // refused credential from an unreachable server. Only the status is kept:
 // the response also carries the request, and with it the Authorization
 // header, which has no business travelling with an error.
-func dialWebsocket(url string, header http.Header) (*websocket.Conn, error) {
+//
+// ctx bounds the TCP and TLS phases. gorilla/websocket stops watching it
+// once the socket is up, so HandshakeTimeout bounds the HTTP upgrade
+// exchange after that; without one, a peer that accepts the connection and
+// then says nothing parks this call, and with it a shutdown, indefinitely.
+func dialWebsocket(ctx context.Context, url string, header http.Header) (*websocket.Conn, error) {
 	dialer := websocket.Dialer{
+		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
 	}
 
-	conn, resp, err := dialer.Dial(url, header)
+	conn, resp, err := dialer.DialContext(ctx, url, header)
 	if err != nil {
 		if resp == nil {
 			return nil, err
@@ -198,7 +210,10 @@ func connectForever(ctx context.Context, a *authBackoff, endpoint string, dial f
 
 		wait, escalated := a.next(err)
 		if escalated {
-			log.Warn().Msgf("The server has rejected this agent's credentials on %d consecutive attempts to connect to %s, over the last %s. Reconnecting about once an hour from now on.",
+			// Not "consecutive attempts": next deliberately keeps the
+			// streak across transport errors and 5xx, so attempts that
+			// failed for another reason may sit between these rejections.
+			log.Warn().Msgf("The server has rejected this agent's credentials %d times while connecting to %s, over the last %s, with no connection accepted in between. Reconnecting about once an hour from now on.",
 				a.count, endpoint, a.span)
 		} else {
 			log.Debug().Err(err).Msgf("Failed to connect to %s, retrying in %s...", endpoint, wait.Round(time.Second))
