@@ -82,17 +82,19 @@ func TestStop_ReturnsAfterDispatcherWasParkedInASend(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := NewScheduler()
 		check := newFakeCheck("blocking", time.Millisecond)
+		check2 := newFakeCheck("blocking2", time.Millisecond)
 		s.AddTask(check)
+		s.AddTask(check2)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		s.Start(ctx, 1)
 
-		// Let the single worker pick up the first run and block inside Execute,
-		// then let the dispatcher tick again and park trying to hand over the
-		// next run to the now-busy worker.
-		time.Sleep(2500 * time.Millisecond)
+		// Both tasks are due on the same tick. The single worker picks up
+		// one and blocks inside Execute, so the dispatcher parks trying to
+		// hand the other one to the now-busy worker on that same tick.
+		time.Sleep(1500 * time.Millisecond)
 		synctest.Wait()
 
 		// Call Stop while the dispatcher is still parked in that send and the
@@ -114,8 +116,10 @@ func TestStop_ReturnsAfterDispatcherWasParkedInASend(t *testing.T) {
 		default:
 		}
 
-		// Unblock the busy worker so Stop's wg.Wait can observe it finish.
+		// Close both: iteration order is unspecified, so either task may be the
+		// busy one, and Stop's wait needs it to finish.
 		close(check.block)
+		close(check2.block)
 		<-done
 	})
 }
