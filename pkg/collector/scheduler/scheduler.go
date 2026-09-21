@@ -67,25 +67,22 @@ func (s *Scheduler) AddTask(check base.CheckStrategy) {
 		attempt: 0,
 	}
 	task := &ScheduledTask{
-		check:        check,
-		nextRun:      time.Now().Add(interval),
-		retryStatus:  retryStatus,
-		retryPending: false,
-		interval:     interval,
+		check:       check,
+		nextRun:     time.Now().Add(interval),
+		retryStatus: retryStatus,
+		interval:    interval,
 	}
 	s.tasks.Store(check.GetName(), task)
 }
 
-// Start must run on the caller's goroutine: it adds to the WaitGroup here, so
-// calling it with go lets Stop reach wg.Wait before the count goes up.
+// Start must run on the caller's goroutine: it registers the goroutines with
+// the WaitGroup here, so calling it with go lets Stop reach wg.Wait first.
 func (s *Scheduler) Start(ctx context.Context, workerCount int) {
 	for range workerCount {
-		s.wg.Add(1)
-		go s.worker(ctx)
+		s.wg.Go(func() { s.worker(ctx) })
 	}
 
-	s.wg.Add(1)
-	go s.dispatcher(ctx)
+	s.wg.Go(func() { s.dispatcher(ctx) })
 }
 
 // Stop never closes taskQueue: the dispatcher is its only sender.
@@ -95,8 +92,6 @@ func (s *Scheduler) Stop() {
 }
 
 func (s *Scheduler) dispatcher(ctx context.Context) {
-	defer s.wg.Done()
-
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -152,6 +147,8 @@ func (s *Scheduler) dispatcher(ctx context.Context) {
 	}
 }
 
+// send pre-checks the stop signals because select picks randomly among ready
+// cases, so a free worker would otherwise win the race half the time.
 func (s *Scheduler) send(ctx context.Context, task *ScheduledTask) bool {
 	select {
 	case <-ctx.Done():
@@ -172,8 +169,6 @@ func (s *Scheduler) send(ctx context.Context, task *ScheduledTask) bool {
 }
 
 func (s *Scheduler) worker(ctx context.Context) {
-	defer s.wg.Done()
-
 	for {
 		select {
 		case <-ctx.Done():

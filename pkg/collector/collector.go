@@ -163,20 +163,17 @@ func (c *Collector) Start() {
 
 	c.scheduler.Start(c.ctx, c.buffer.Capacity)
 
+	ctx := c.ctx // read here, so no worker goroutine touches c.ctx itself
 	for range c.buffer.Capacity {
-		c.wg.Add(1)
-		go c.successQueueWorker(c.ctx)
+		c.wg.Go(func() { c.successQueueWorker(ctx) })
 	}
 
-	c.wg.Add(1)
-	go c.failureQueueWorker(c.ctx)
+	c.wg.Go(func() { c.failureQueueWorker(ctx) })
 
 	go c.handleErrors()
 }
 
 func (c *Collector) successQueueWorker(ctx context.Context) {
-	defer c.wg.Done()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -197,8 +194,6 @@ func (c *Collector) successQueueWorker(ctx context.Context) {
 }
 
 func (c *Collector) failureQueueWorker(ctx context.Context) {
-	defer c.wg.Done()
-
 	retryTicker := time.NewTicker(5 * time.Second)
 	defer retryTicker.Stop()
 
