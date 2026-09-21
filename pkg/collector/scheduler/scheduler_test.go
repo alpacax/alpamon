@@ -26,7 +26,6 @@ type fakeCheck struct {
 
 	mu         sync.Mutex
 	calls      int
-	callTimes  []time.Time
 	current    int
 	maxCurrent int
 }
@@ -38,7 +37,6 @@ func newFakeCheck(name string, interval time.Duration) *fakeCheck {
 func (f *fakeCheck) Execute(ctx context.Context) error {
 	f.mu.Lock()
 	f.calls++
-	f.callTimes = append(f.callTimes, time.Now())
 	f.current++
 	if f.current > f.maxCurrent {
 		f.maxCurrent = f.current
@@ -76,25 +74,6 @@ func (f *fakeCheck) maxConcurrent() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.maxCurrent
-}
-
-// One worker yields one call per tick, so a tick with more than one call
-// proves the periodic and the retry dispatch both fired on it.
-func (f *fakeCheck) callsAtSameTimestamp() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	counts := make(map[time.Time]int, len(f.callTimes))
-	for _, ts := range f.callTimes {
-		counts[ts]++
-	}
-	extra := 0
-	for _, n := range counts {
-		if n > 1 {
-			extra += n - 1
-		}
-	}
-	return extra
 }
 
 var _ base.CheckStrategy = (*fakeCheck)(nil)

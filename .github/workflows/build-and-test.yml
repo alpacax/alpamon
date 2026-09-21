@@ -159,29 +159,24 @@ jobs:
             printf '%s\n' "$deps" | sed 's/^/  /'
           done
 
-  # pkg/wsclient holds one connection open across reconnects with a read
-  # loop, callers writing from their own goroutines, and a watcher that
-  # interrupts a parked read. That ownership model is the whole point of the
-  # package, and getting it wrong is what issue #452 is about in pkg/runner.
-  # The suite below runs without the race detector on every platform, so a
-  # race reintroduced here would pass it.
-  #
-  # Cheap enough to be worth its own job: no cgo of its own, no database and
-  # no generated code, so it needs neither a distro container nor the ent
-  # codegen step. `cache: false` for the same reason as leaf-guard, so this
-  # job cannot claim the shared setup-go cache key for a near-empty cache.
-  race-wsclient:
-    name: Race detector (pkg/wsclient)
+  # Both packages here hand one piece of state to several goroutines, which
+  # the suite below cannot check: it runs without the race detector on every
+  # platform. pkg/wsclient holds one connection open across reconnects with a
+  # read loop, callers writing from their own goroutines, and a watcher that
+  # interrupts a parked read—the ownership model issue #452 is about in
+  # pkg/runner. pkg/collector/scheduler shares each task between a dispatcher
+  # and its workers, which is issue #453.
+  race:
+    name: Race detector
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
         uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: false
+      # pkg/collector/scheduler reaches ent through the check interface, so
+      # this job needs codegen even though pkg/wsclient alone would not.
+      - name: Set up Go and generate ent code
+        uses: ./.github/actions/setup-go-generate
 
       # Twice over: a race that needs an unlucky interleaving does not always
       # show up on the first scheduling.
@@ -445,7 +440,7 @@ jobs:
     needs:
       - verify-tidy
       - leaf-guard
-      - race-wsclient
+      - race
       - build-and-test-linux
       - build-and-test-windows
       - build-and-test-macos
