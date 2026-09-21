@@ -201,6 +201,12 @@ func (s *Scheduler) executeTask(ctx context.Context, task *ScheduledTask) {
 
 	err := task.check.Execute(ctx)
 	if err != nil {
+		// Shutting down: the task is discarded either way, so neither the log
+		// nor the retry bookkeeping can reach anyone.
+		if ctx.Err() != nil {
+			return
+		}
+
 		log.Error().Err(err).Msgf("failed to execute check: %v", err)
 
 		task.mu.Lock()

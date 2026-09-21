@@ -311,6 +311,47 @@ func TestStop_ReturnsFalseWithinBudgetWhenACheckNeverReturns(t *testing.T) {
 	})
 }
 
+func TestExecuteTask_CanceledErrorDoesNotBumpRetryAttemptWhenCtxIsDone(t *testing.T) {
+	s := NewScheduler()
+
+	check := &stubCheck{name: "canceled", err: context.Canceled}
+	task := &ScheduledTask{check: check}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s.executeTask(ctx, task)
+
+	assert.Equal(t, 0, task.retryStatus.attempt, "context.Canceled while ctx is done must not bump the retry attempt")
+	assert.False(t, task.retryPending, "context.Canceled while ctx is done must not mark a retry pending")
+}
+
+func TestExecuteTask_NonCanceledErrorBumpsRetryAttempt(t *testing.T) {
+	s := NewScheduler()
+
+	check := &stubCheck{name: "erroring", err: errTest}
+	task := &ScheduledTask{check: check}
+
+	s.executeTask(context.Background(), task)
+
+	assert.Equal(t, 1, task.retryStatus.attempt, "a non-cancellation error must bump the retry attempt")
+	assert.True(t, task.retryPending, "a non-cancellation error must mark a retry pending")
+}
+
+// stubCheck is a base.CheckStrategy whose Execute always returns err.
+type stubCheck struct {
+	name string
+	err  error
+}
+
+func (c *stubCheck) Execute(_ context.Context) error { return c.err }
+func (c *stubCheck) GetInterval() time.Duration      { return time.Second }
+func (c *stubCheck) GetName() string                 { return c.name }
+func (c *stubCheck) GetBuffer() *base.CheckBuffer    { return nil }
+func (c *stubCheck) GetClient() *ent.Client          { return nil }
+
+var _ base.CheckStrategy = (*stubCheck)(nil)
+
 func TestScheduler_ZeroWorkersDoesNotPanicOnStop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := NewScheduler()
