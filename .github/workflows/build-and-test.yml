@@ -32,21 +32,18 @@ jobs:
   # pkg/wsclient is imported by alpacax/alpamon-kube, a separate module that
   # pins an alpamon tag, and its whole value is that it is a leaf: WebSocket
   # transport and nothing else. The day it imports pkg/config, pkg/utils,
-  # internal/* or anything that drags in creack/pty or the systemd probes,
-  # every importer has to compile the host agent just to open a socket, which
-  # is what keeps alpamon-dhcp-plugin on a pre-/v2 alpamon today. No
-  # linter here enforces an import boundary (there is no .golangci.yml, so no
-  # depguard), so this job is the only thing holding the line.
+  # internal/* or anything that drags in creack/pty or the systemd probes, every
+  # importer has to compile the host agent just to open a socket. Nothing else
+  # holds the line: there is no .golangci.yml here, so no depguard either.
   #
   # It deliberately skips ./.github/actions/setup-go-generate. The ent package
-  # is gitignored and loading pkg/wsclient must not need it; if this job ever
-  # fails for want of generated code, the package has grown a dependency it
-  # should not have, and red is the right answer.
+  # is gitignored and loading pkg/wsclient must not need it; a failure here for
+  # want of generated code means the package grew a dependency it should not
+  # have.
   #
   # To run it yourself, save the step's script to a file and run it with
-  # `PKG=... ALLOWED='...' bash that-file`. It needs nothing but Go. Do not
-  # paste it into an interactive shell: `set -e` and `exit 1` would take the
-  # shell down with it.
+  # `PKG=... ALLOWED='...' bash that-file`. Not in an interactive shell: `set
+  # -e` and `exit 1` would take the shell down with it.
   leaf-guard:
     name: Verify pkg/wsclient stays a leaf
     runs-on: ubuntu-latest
@@ -58,19 +55,18 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          # This job downloads almost nothing, and setup-go's cache key is the
-          # same one the ubuntu jobs using setup-go-generate compute. Saving
-          # from here would claim that key for a near-empty cache and leave the
+          # setup-go's cache key here is the one the ubuntu jobs using
+          # setup-go-generate compute, and this job downloads almost nothing.
+          # Saving would claim that key for a near-empty cache and leave the
           # jobs that need it with nothing to restore.
           cache: false
 
       - name: Check the dependency graph
         env:
           PKG: github.com/alpacax/alpamon/v2/pkg/wsclient
-          # The only packages pkg/wsclient may reach outside the standard
-          # library. pkg/tunnel and pkg/version are leaves themselves. The
-          # same list is written in prose in pkg/wsclient/doc.go, which says
-          # that this variable is the one that decides; update both together.
+          # The same list is written in prose in pkg/wsclient/doc.go, which says
+          # this variable is the one that decides; update both together.
+          # pkg/tunnel and pkg/version are leaves themselves.
           ALLOWED: >-
             github.com/alpacax/alpamon/v2/pkg/wsclient
             github.com/alpacax/alpamon/v2/pkg/tunnel
@@ -159,13 +155,11 @@ jobs:
             printf '%s\n' "$deps" | sed 's/^/  /'
           done
 
-  # Both packages here hand one piece of state to several goroutines, which
-  # the suite below cannot check: it runs without the race detector on every
-  # platform. pkg/wsclient holds one connection open across reconnects with a
-  # read loop, callers writing from their own goroutines, and a watcher that
-  # interrupts a parked read—the ownership model issue #452 is about in
-  # pkg/runner. pkg/collector/scheduler shares each task between a dispatcher
-  # and its workers, which is issue #453.
+  # The suite below runs without the race detector on every platform, so the
+  # state these two packages share between goroutines goes unchecked there.
+  # pkg/wsclient hands one connection to a read loop, to callers writing from
+  # their own goroutines, and to a watcher that interrupts a parked read;
+  # pkg/collector/scheduler shares each task between its dispatcher and workers.
   race:
     name: Race detector
     runs-on: ubuntu-latest
@@ -332,14 +326,10 @@ jobs:
         run: go build -v .
         working-directory: ./cmd/alpamon
 
-      # Parse install.ps1 under both Windows PowerShell 5.1 and
-      # PowerShell 7.x to catch future syntax-compatibility drift.
-      # This is a parse-only regression guard, not a behavior test:
-      # the install.ps1 PS-7.x fix gates ServicePointManager assignments
-      # on $PSVersionTable.PSEdition (only the Desktop edition takes the
-      # legacy shim), which both shells parse cleanly. Actual fix
-      # behavior is verified manually on hosts with degraded OS TLS
-      # (see docs/windows.md > PowerShell compatibility).
+      # A parse-only regression guard, not a behavior test: install.ps1 has to
+      # stay parsable under both Windows PowerShell 5.1 and PowerShell 7.x.
+      # Actual behavior is verified by hand on hosts with degraded OS TLS (see
+      # docs/windows.md > PowerShell compatibility).
       - name: Parse install.ps1 under Windows PowerShell 5.1
         shell: powershell
         run: |
@@ -422,11 +412,11 @@ jobs:
         run: go test -v ./... -p 1
 
   # The aggregate check. Every job above is matrixed or platform-specific, so
-  # each reports under a name that carries its distro—nineteen strings that
-  # change whenever the matrix does. A name that moves cannot be a required
-  # status check: a ruleset naming one that stops reporting leaves the pull
-  # request pending forever rather than red. This job is the one flat,
-  # stable string the matrix can be gated on.
+  # each reports under a name carrying its distro, and those names change
+  # whenever the matrix does. A name that moves cannot be a required status
+  # check: a ruleset naming one that stops reporting leaves the pull request
+  # pending forever rather than red. This job is the one flat, stable string the
+  # matrix can be gated on.
   #
   # No `name:`, so the context is the job id: `build-and-test`, matching the
   # other Go repositories.
