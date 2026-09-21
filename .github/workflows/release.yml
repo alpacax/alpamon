@@ -188,7 +188,16 @@ jobs:
             container: rockylinux/rockylinux:9
             arch: amd64
             install_cmd: dnf install -y
-    container: ${{ matrix.container }}
+          # Proves zypper still resolves the rpm's EL dependency names (zip, sqlite, nftables|iptables) on SUSE.
+          - pkg_type: rpm
+            container: opensuse/leap:15.6
+            arch: amd64
+            install_cmd: zypper --non-interactive install --allow-unsigned-rpm
+    # PATH is pinned because the runner rebuilds each exec PATH from the container config, and the Leap image alone defines none.
+    container:
+      image: ${{ matrix.container }}
+      env:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     steps:
       - name: Set package name
         run: |
@@ -214,7 +223,11 @@ jobs:
         run: ${{ matrix.install_cmd }} ./${{ env.PKG_NAME }}
 
       - name: Smoke test
-        run: alpamon --help
+        run: |
+          alpamon --help
+          test -x /usr/bin/alpamon
+          # nfpm packages the unit to the literal /lib path: a real directory on Leap, a usrmerge symlink elsewhere.
+          test -f /lib/systemd/system/alpamon.service
 
   windows-smoke-test:
     # Windows archives are cross-compiled on the Ubuntu runner (see

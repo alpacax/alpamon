@@ -2,6 +2,10 @@
 
 Support is best-effort. Alpamon detects openSUSE and SLES, runs `zypper` for its own package operations, and starts cleanly, but the console still composes `yum` for some server-driven operations (see Known limitations below).
 
+## CI coverage
+
+CI exercises SUSE on amd64 only. It builds Alpamon from source and runs the test suite on openSUSE Leap 15, and it installs the released rpm with `zypper` on Leap 15.6, checking that the binary and the systemd unit land where the package declares them. SLES and arm64 are in the support table but never tested, so a regression on either reaches users before it reaches us.
+
 ## Why the platform reads as rhel
 
 openSUSE and SLES report `platform=rhel` to Alpacon. The three things the server gates on that value—rpm packaging, the `wheel` sudo group, and shadow-utils account tooling—behave identically on both families. The real distribution name is preserved separately in the OS information, and the agent runs `zypper` locally regardless of what it reports.
