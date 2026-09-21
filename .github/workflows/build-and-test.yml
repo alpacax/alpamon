@@ -33,8 +33,9 @@ jobs:
   # pins an alpamon tag, and its whole value is that it is a leaf: WebSocket
   # transport and nothing else. The day it imports pkg/config, pkg/utils,
   # internal/* or anything that drags in creack/pty or the systemd probes, every
-  # importer has to compile the host agent just to open a socket. Nothing else
-  # holds the line: there is no .golangci.yml here, so no depguard either.
+  # importer has to compile the host agent just to open a socket, which is what
+  # keeps alpamon-dhcp-plugin on a pre-/v2 alpamon today. Nothing else holds the
+  # line: there is no .golangci.yml here, so no depguard either.
   #
   # It deliberately skips ./.github/actions/setup-go-generate. The ent package
   # is gitignored and loading pkg/wsclient must not need it; a failure here for
@@ -156,10 +157,11 @@ jobs:
           done
 
   # The suite below runs without the race detector on every platform, so the
-  # state these two packages share between goroutines goes unchecked there.
+  # state these packages share between goroutines goes unchecked there.
   # pkg/wsclient hands one connection to a read loop, to callers writing from
-  # their own goroutines, and to a watcher that interrupts a parked read;
-  # pkg/collector/scheduler shares each task between its dispatcher and workers.
+  # their own goroutines, and to a watcher that interrupts a parked read; the
+  # collector packages share tasks, metric queues and shutdown WaitGroups
+  # between a dispatcher, its workers and Stop.
   race:
     name: Race detector
     runs-on: ubuntu-latest
