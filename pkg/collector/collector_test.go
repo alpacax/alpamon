@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -232,26 +234,33 @@ func TestCollector_StopIsSafeToCallTwice(t *testing.T) {
 	})
 }
 
-// recordingTransporter is a transport that always succeeds and counts how
-// many metrics it was handed.
+// recordingTransporter is a transport that always succeeds and keeps the
+// name of every metric it was handed, so a test can compare what arrived
+// with what was queued rather than trusting a count that a duplicate and a
+// loss would cancel out of.
 type recordingTransporter struct {
 	mu   sync.Mutex
-	sent int
+	sent []string
 }
 
-func (f *recordingTransporter) Send(_ base.MetricData) error {
+func (f *recordingTransporter) Send(metric base.MetricData) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sent++
+	for _, result := range metric.Data {
+		f.sent = append(f.sent, result.Name)
+	}
 
 	return nil
 }
 
-func (f *recordingTransporter) calls() int {
+func (f *recordingTransporter) received() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	return f.sent
+	names := slices.Clone(f.sent)
+	slices.Sort(names)
+
+	return names
 }
 
 // hangingTransporter blocks in Send until release is closed, standing in for
@@ -280,11 +289,26 @@ func (f *hangingTransporter) calls() int {
 	return f.attempts
 }
 
-func testMetric() base.MetricData {
+// testMetric gives each metric a name of its own, which is what lets a test
+// say which queue a metric came from and whether it arrived exactly once.
+func testMetric(name string) base.MetricData {
 	return base.MetricData{
 		Type: base.CPU,
-		Data: []base.CheckResult{{Timestamp: time.Now(), Usage: 1}},
+		Data: []base.CheckResult{{Timestamp: time.Now(), Name: name, Usage: 1}},
 	}
+}
+
+// queueMetrics puts count metrics named "<prefix>-1" and upwards on queue
+// and returns those names.
+func queueMetrics(queue chan<- base.MetricData, prefix string, count int) []string {
+	names := make([]string, 0, count)
+	for i := 1; i <= count; i++ {
+		name := fmt.Sprintf("%s-%d", prefix, i)
+		queue <- testMetric(name)
+		names = append(names, name)
+	}
+
+	return names
 }
 
 // captureLogs redirects the global logger into a buffer for the duration of
@@ -314,16 +338,13 @@ func TestStop_FlushesPendingMetrics(t *testing.T) {
 	transport := &recordingTransporter{}
 	c.transporter = transport
 
-	for range 3 {
-		c.buffer.SuccessQueue <- testMetric()
-	}
-	for range 2 {
-		c.buffer.FailureQueue <- testMetric()
-	}
+	queued := queueMetrics(c.buffer.SuccessQueue, "success", 3)
+	queued = append(queued, queueMetrics(c.buffer.FailureQueue, "failure", 2)...)
+	slices.Sort(queued)
 
 	c.Stop()
 
-	assert.Equal(t, 5, transport.calls(), "both queues are flushed, not just the success queue")
+	assert.Equal(t, queued, transport.received(), "both queues are flushed, each metric exactly once")
 	assert.Contains(t, logs.String(), "flushed 5 pending metric(s) on stop, dropped 0")
 	c.flushWG.Wait()
 }
@@ -351,9 +372,7 @@ func TestStop_BoundsTheFlushWhenSendsHang(t *testing.T) {
 		transport := &hangingTransporter{release: make(chan struct{})}
 		c.transporter = transport
 
-		for range 4 {
-			c.buffer.SuccessQueue <- testMetric()
-		}
+		queueMetrics(c.buffer.SuccessQueue, "success", 4)
 
 		start := time.Now()
 		c.Stop()
@@ -388,16 +407,13 @@ func TestStop_FlushesWhatTheQueueWorkersLeaveBehind(t *testing.T) {
 
 	c.Start()
 
-	for range 5 {
-		c.buffer.FailureQueue <- testMetric()
-	}
-	for range 5 {
-		c.buffer.SuccessQueue <- testMetric()
-	}
+	queued := queueMetrics(c.buffer.FailureQueue, "failure", 5)
+	queued = append(queued, queueMetrics(c.buffer.SuccessQueue, "success", 5)...)
+	slices.Sort(queued)
 
 	c.Stop()
 
 	require.Error(t, c.ctx.Err(), "the collector's context is already cancelled when the flush runs")
-	assert.Equal(t, 10, transport.calls(), "nothing queued at shutdown is dropped while the server is answering")
+	assert.Equal(t, queued, transport.received(), "nothing queued at shutdown is dropped or sent twice while the server is answering")
 	c.flushWG.Wait()
 }

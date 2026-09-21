@@ -303,9 +303,14 @@ func (c *Collector) Stop() {
 // send is still running; that send ends on the transport's own timeout and
 // is counted as dropped whatever it goes on to do.
 //
-// Callers must have stopped every other reader and writer of the queues
-// first. flushPending takes from them without blocking and does not guard
-// against a concurrent receive.
+// Stop is what establishes the preconditions, and they are not equally
+// strong on both sides. Readers: the queue workers are gone by then, since
+// Stop cancels the context and waits on wg, so the drain has the queues to
+// itself. Writers: Start launches the scheduler outside wg and
+// Scheduler.Stop does not wait for it, so a check that is still running can
+// publish after the drain has gone past. That metric is dropped exactly as
+// it is dropped today, and #453 is what makes the scheduler joinable; this
+// drain covers it for free once that lands.
 func (c *Collector) flushPending(ctx context.Context) (sent int, dropped int) {
 	pending := append(drainQueue(c.buffer.SuccessQueue), drainQueue(c.buffer.FailureQueue)...)
 	if len(pending) == 0 {
@@ -345,7 +350,7 @@ func (c *Collector) flushPending(ctx context.Context) (sent int, dropped int) {
 
 // drainQueue takes everything queue holds right now, without blocking and
 // without waiting for more.
-func drainQueue(queue chan base.MetricData) []base.MetricData {
+func drainQueue(queue <-chan base.MetricData) []base.MetricData {
 	var drained []base.MetricData
 	for {
 		select {
