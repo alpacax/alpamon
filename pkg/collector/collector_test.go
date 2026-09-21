@@ -370,10 +370,16 @@ func TestStop_BoundsTheFlushWhenSendsHang(t *testing.T) {
 	})
 }
 
-// The same path with the real workers running: the success queue is drained
-// by them, the failure queue is not, since failureQueueWorker looks at it
-// once every five seconds. Either way every metric is sent exactly once, by
-// a worker or by the flush.
+// The same path with the real workers running.
+//
+// Stop cancels the collector's context before it drains, and the cancel is
+// what ends the workers and leaves metrics behind in the first place. The
+// flush still reaches the server from there, because Transporter.Send takes
+// no context: the cancel stops the collector, not the transport.
+//
+// The success queue is drained by the workers, the failure queue is not,
+// since failureQueueWorker looks at it once every five seconds. Either way
+// every metric is sent exactly once, by a worker or by the flush.
 func TestStop_FlushesWhatTheQueueWorkersLeaveBehind(t *testing.T) {
 	c := newTestCollector()
 	c.ctxManager = agent.NewContextManager()
@@ -391,6 +397,7 @@ func TestStop_FlushesWhatTheQueueWorkersLeaveBehind(t *testing.T) {
 
 	c.Stop()
 
+	require.Error(t, c.ctx.Err(), "the collector's context is already cancelled when the flush runs")
 	assert.Equal(t, 10, transport.calls(), "nothing queued at shutdown is dropped while the server is answering")
 	c.flushWG.Wait()
 }
