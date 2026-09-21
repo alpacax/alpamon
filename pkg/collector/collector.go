@@ -298,10 +298,14 @@ func (c *Collector) Stop() {
 // is usually a queue whose sends were already failing, and one line per
 // metric would repeat a single fact.
 //
-// The wait is bounded by ctx. A send already in flight when the bound
-// expires cannot be interrupted, so flushPending can return while one last
-// send is still running; that send ends on the transport's own timeout and
-// is counted as dropped whatever it goes on to do.
+// ctx bounds the wait, not the sends. Transporter.Send carries no context
+// and sets its own request timeout, so the bound is read between metrics:
+// flushPending returns the moment ctx expires, and the send that was in
+// flight keeps running until the transport gives up on it. Stop therefore
+// returns within flushTimeout, while the goroutine behind it can outlive
+// Stop by one transport timeout and no more, since the next iteration sees
+// ctx and stops. The metric that send was carrying is counted as dropped
+// whatever it goes on to do.
 //
 // Stop is what establishes the preconditions, and they are not equally
 // strong on both sides. Readers: the queue workers are gone by then, since
