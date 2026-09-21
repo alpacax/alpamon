@@ -34,6 +34,7 @@ type Collector struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	ctxManager  *agent.ContextManager
+	stopOnce    sync.Once
 }
 
 type collectConf struct {
@@ -160,7 +161,7 @@ func (c *Collector) Start() {
 	// Use context from global ContextManager instead of creating local context
 	c.ctx, c.cancel = c.ctxManager.NewContext(0) // 0 means no timeout
 
-	go c.scheduler.Start(c.ctx, c.buffer.Capacity)
+	c.scheduler.Start(c.ctx, c.buffer.Capacity)
 
 	for range c.buffer.Capacity {
 		c.wg.Add(1)
@@ -187,7 +188,9 @@ func (c *Collector) successQueueWorker(ctx context.Context) {
 
 			err := c.transporter.Send(metric)
 			if err != nil {
-				c.buffer.FailureQueue <- metric
+				if pubErr := c.buffer.PublishFailure(ctx, metric); pubErr != nil {
+					return
+				}
 			}
 		}
 	}
@@ -251,14 +254,16 @@ func (c *Collector) handleErrors() {
 }
 
 func (c *Collector) Stop() {
-	if c.cancel != nil {
-		c.cancel()
-	}
+	c.stopOnce.Do(func() {
+		if c.cancel != nil {
+			c.cancel()
+		}
 
-	c.scheduler.Stop()
-	c.wg.Wait()
+		c.scheduler.Stop()
+		c.wg.Wait()
 
-	close(c.buffer.SuccessQueue)
-	close(c.buffer.FailureQueue)
-	close(c.errorChan)
+		close(c.buffer.SuccessQueue)
+		close(c.buffer.FailureQueue)
+		close(c.errorChan)
+	})
 }

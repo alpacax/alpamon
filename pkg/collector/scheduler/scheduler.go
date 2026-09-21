@@ -21,14 +21,18 @@ type Scheduler struct {
 	retryConf RetryConf
 	taskQueue chan *ScheduledTask
 	stopChan  chan struct{}
+	wg        sync.WaitGroup
+	stopOnce  sync.Once
 }
 
 type ScheduledTask struct {
-	check       base.CheckStrategy
-	nextRun     time.Time
-	retryStatus RetryStatus
-	isSuccess   bool
-	interval    time.Duration
+	check        base.CheckStrategy
+	interval     time.Duration
+	mu           sync.Mutex
+	nextRun      time.Time
+	retryStatus  RetryStatus
+	retryPending bool
+	running      bool
 }
 
 type RetryConf struct {
@@ -63,29 +67,36 @@ func (s *Scheduler) AddTask(check base.CheckStrategy) {
 		attempt: 0,
 	}
 	task := &ScheduledTask{
-		check:       check,
-		nextRun:     time.Now().Add(interval),
-		retryStatus: retryStatus,
-		isSuccess:   true,
-		interval:    interval,
+		check:        check,
+		nextRun:      time.Now().Add(interval),
+		retryStatus:  retryStatus,
+		retryPending: false,
+		interval:     interval,
 	}
 	s.tasks.Store(check.GetName(), task)
 }
 
+// Start must run on the caller's goroutine: it adds to the WaitGroup here, so
+// calling it with go lets Stop reach wg.Wait before the count goes up.
 func (s *Scheduler) Start(ctx context.Context, workerCount int) {
 	for range workerCount {
+		s.wg.Add(1)
 		go s.worker(ctx)
 	}
 
+	s.wg.Add(1)
 	go s.dispatcher(ctx)
 }
 
+// Stop never closes taskQueue: the dispatcher is its only sender.
 func (s *Scheduler) Stop() {
-	close(s.stopChan)
-	close(s.taskQueue)
+	s.stopOnce.Do(func() { close(s.stopChan) })
+	s.wg.Wait()
 }
 
 func (s *Scheduler) dispatcher(ctx context.Context) {
+	defer s.wg.Done()
+
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -97,62 +108,127 @@ func (s *Scheduler) dispatcher(ctx context.Context) {
 			return
 		case <-ticker.C:
 			now := time.Now()
+			stopped := false
 			s.tasks.Range(func(key, value any) bool {
 				task, ok := value.(*ScheduledTask)
 				if !ok {
 					return true
 				}
 
-				if now.After(task.nextRun) {
-					task.nextRun = now.Add(task.interval)
-					s.taskQueue <- task
+				task.mu.Lock()
+				if task.running {
+					task.mu.Unlock()
+					return true
 				}
 
-				if task.isRetryRequired(now) {
-					s.taskQueue <- task
+				due := now.After(task.nextRun)
+				if due {
+					task.nextRun = now.Add(task.interval)
+				}
+				retryRequired := task.isRetryRequired(now)
+
+				if !due && !retryRequired {
+					task.mu.Unlock()
+					return true
+				}
+
+				task.running = true
+				task.mu.Unlock()
+
+				if !s.send(ctx, task) {
+					task.mu.Lock()
+					task.running = false
+					task.mu.Unlock()
+					stopped = true
+					return false
 				}
 
 				return true
 			})
+			if stopped {
+				return
+			}
 		}
 	}
 }
 
+func (s *Scheduler) send(ctx context.Context, task *ScheduledTask) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-s.stopChan:
+		return false
+	default:
+	}
+
+	select {
+	case s.taskQueue <- task:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-s.stopChan:
+		return false
+	}
+}
+
 func (s *Scheduler) worker(ctx context.Context) {
-	for task := range s.taskQueue {
+	defer s.wg.Done()
+
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		default:
+		case <-s.stopChan:
+			return
+		case task := <-s.taskQueue:
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.stopChan:
+				return
+			default:
+			}
 			s.executeTask(ctx, task)
 		}
 	}
 }
 
 func (s *Scheduler) executeTask(ctx context.Context, task *ScheduledTask) {
+	defer func() {
+		task.mu.Lock()
+		task.running = false
+		task.mu.Unlock()
+	}()
+
 	err := task.check.Execute(ctx)
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to execute check: %v", err)
 
+		task.mu.Lock()
 		if task.retryStatus.attempt < s.retryConf.MaxRetries {
 			now := time.Now()
 			backoff := time.Duration(math.Pow(2, float64(task.retryStatus.attempt))) * time.Second
 
-			task.isSuccess = false
+			task.retryPending = true
 			task.retryStatus.due = now.Add(backoff)
 			task.retryStatus.expiry = now.Add(s.retryConf.MaxRetryTime)
 			task.retryStatus.attempt++
+		} else {
+			task.retryPending = false
 		}
+		task.mu.Unlock()
 	} else {
-		task.isSuccess = true
+		task.mu.Lock()
+		task.retryPending = false
 		task.retryStatus.attempt = 0
+		task.mu.Unlock()
 	}
 }
 
+// isRetryRequired reads guarded fields; call only with st.mu held.
 func (st *ScheduledTask) isRetryRequired(now time.Time) bool {
-	isRetryTask := !st.isSuccess
 	isDue := now.After(st.retryStatus.due)
 	isExpire := now.After(st.retryStatus.expiry)
 
-	return isRetryTask && isDue && !isExpire
+	return st.retryPending && isDue && !isExpire
 }

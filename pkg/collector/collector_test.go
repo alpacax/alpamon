@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/collector/scheduler"
@@ -110,4 +111,63 @@ func TestDefaultCheckFactory_ReturnsErrorForUnknownType(t *testing.T) {
 	factory := &check.DefaultCheckFactory{}
 	_, err := factory.CreateCheck(&base.CheckArgs{Type: base.CheckType("not-a-real-check")})
 	assert.Error(t, err)
+}
+
+// failingTransporter always fails Send, forcing successQueueWorker onto its
+// PublishFailure path.
+type failingTransporter struct{}
+
+func (failingTransporter) Send(_ base.MetricData) error {
+	return assert.AnError
+}
+
+func TestSuccessQueueWorker_ReturnsWhenFailureQueueIsFullAndCtxIsCancelled(t *testing.T) {
+	buffer := base.NewCheckBuffer(0)
+	c := &Collector{
+		transporter: failingTransporter{},
+		buffer:      buffer,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.wg.Add(1)
+		c.successQueueWorker(ctx)
+	}()
+
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		buffer.SuccessQueue <- base.MetricData{Type: base.CPU}
+	}()
+
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("worker never received the metric off SuccessQueue")
+	}
+
+	// Send failed, so the worker is now parked trying to publish onto a
+	// FailureQueue nothing drains; it must not block forever once ctx is
+	// cancelled.
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("successQueueWorker did not return after ctx was cancelled while the failure queue was full")
+	}
+}
+
+func TestCollector_StopIsSafeToCallTwice(t *testing.T) {
+	c := newTestCollector()
+	c.ctxManager = agent.NewContextManager()
+	c.errorChan = make(chan error, 10)
+	c.Start()
+
+	require.NotPanics(t, func() {
+		c.Stop()
+		c.Stop()
+	})
 }

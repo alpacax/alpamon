@@ -33,10 +33,7 @@ func (c *Check) Execute(ctx context.Context) error {
 		return nil
 	}
 
-	buffer := c.GetBuffer()
-	buffer.SuccessQueue <- metric
-
-	return nil
+	return c.PublishSuccess(ctx, metric)
 }
 
 func (c *Check) queryDiskIO(ctx context.Context) (base.MetricData, error) {
