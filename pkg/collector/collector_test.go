@@ -133,7 +133,6 @@ func TestSuccessQueueWorker_ReturnsWhenFailureQueueIsFullAndCtxIsCancelled(t *te
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		c.wg.Add(1)
 		c.successQueueWorker(ctx)
 	}()
 
