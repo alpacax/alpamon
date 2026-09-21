@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/rs/zerolog/log"
 )
@@ -85,10 +86,13 @@ func (s *Scheduler) Start(ctx context.Context, workerCount int) {
 	s.wg.Go(func() { s.dispatcher(ctx) })
 }
 
-// Stop never closes taskQueue: the dispatcher is its only sender.
-func (s *Scheduler) Stop() {
+// Stop never closes taskQueue: the dispatcher is its only sender. The join is
+// bounded so a context-unaware check cannot hang shutdown forever; on expiry
+// it returns false and leaves that goroutine running.
+func (s *Scheduler) Stop() bool {
 	s.stopOnce.Do(func() { close(s.stopChan) })
-	s.wg.Wait()
+
+	return agent.WaitWithTimeout(&s.wg, agent.ShutdownWaitBudget)
 }
 
 func (s *Scheduler) dispatcher(ctx context.Context) {

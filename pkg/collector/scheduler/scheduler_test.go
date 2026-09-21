@@ -265,9 +265,8 @@ func TestStop_ReturnsWhenAWorkerIsParkedPublishingToAFullQueue(t *testing.T) {
 		time.Sleep(1100 * time.Millisecond)
 		synctest.Wait()
 
-		// Cancel so PublishSuccess observes ctx.Done instead of blocking
-		// forever on the full queue; before PublishSuccess became
-		// context-aware, this is exactly the state that hung Stop forever.
+		// Cancel so PublishSuccess takes ctx.Done instead of blocking on the full
+		// queue—the state that hung Stop before it became context-aware.
 		cancel()
 
 		done := make(chan struct{})
@@ -281,6 +280,34 @@ func TestStop_ReturnsWhenAWorkerIsParkedPublishingToAFullQueue(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("Stop did not return while a worker was parked publishing to a full queue")
 		}
+	})
+}
+
+func TestStop_ReturnsFalseWithinBudgetWhenACheckNeverReturns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := NewScheduler()
+		// check.block is never closed and ctx is never cancelled, so Execute
+		// blocks forever like a context-unaware syscall would.
+		check := newFakeCheck("hanging", time.Millisecond)
+		s.AddTask(check)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		s.Start(ctx, 1)
+
+		time.Sleep(1100 * time.Millisecond)
+		synctest.Wait()
+
+		var stopped bool
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			stopped = s.Stop()
+		}()
+
+		<-done
+		assert.False(t, stopped, "Stop should report false when the bounded wait expires")
 	})
 }
 

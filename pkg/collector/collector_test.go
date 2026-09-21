@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/agent"
@@ -158,6 +159,60 @@ func TestSuccessQueueWorker_ReturnsWhenFailureQueueIsFullAndCtxIsCancelled(t *te
 	case <-time.After(time.Second):
 		t.Fatal("successQueueWorker did not return after ctx was cancelled while the failure queue was full")
 	}
+}
+
+func assertSuccessQueueOpen(t *testing.T, c *Collector) {
+	t.Helper()
+	select {
+	case _, ok := <-c.buffer.SuccessQueue:
+		assert.True(t, ok, "SuccessQueue must never be closed by Stop")
+	default:
+	}
+}
+
+func TestCollector_Stop_NeverClosesSuccessQueueWhenGoroutinesJoin(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newTestCollector()
+		c.ctxManager = agent.NewContextManager()
+		c.errorChan = make(chan error, 10)
+		c.ctx, c.cancel = c.ctxManager.NewContext(0)
+
+		done := make(chan struct{})
+		c.wg.Go(func() {
+			<-c.ctx.Done()
+			close(done)
+		})
+
+		require.NotPanics(t, func() {
+			c.Stop()
+		})
+		<-done
+
+		assertSuccessQueueOpen(t, c)
+	})
+}
+
+func TestCollector_Stop_NeverClosesSuccessQueueWhenWaitExpires(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newTestCollector()
+		c.ctxManager = agent.NewContextManager()
+		c.errorChan = make(chan error, 10)
+		c.ctx, c.cancel = c.ctxManager.NewContext(0)
+
+		// Ignores ctx and never returns, like a goroutine stuck in a
+		// context-unaware syscall.
+		hang := make(chan struct{})
+		c.wg.Go(func() { <-hang })
+
+		require.NotPanics(t, func() {
+			c.Stop()
+		})
+
+		assertSuccessQueueOpen(t, c)
+
+		// Unblock the leaked worker so the bubble has nothing left waiting.
+		close(hang)
+	})
 }
 
 func TestCollector_StopIsSafeToCallTwice(t *testing.T) {
