@@ -269,10 +269,10 @@ func (c *Client) configWorker(ctx context.Context) {
 }
 
 func (c *Client) setReadLimit() {
-	if c.WsClient == nil || c.WsClient.Conn == nil {
+	if c.WsClient == nil {
 		return
 	}
-	c.WsClient.Conn.SetReadLimit(MaxMessageSize)
+	c.WsClient.SetReadLimit(MaxMessageSize)
 }
 
 // RunForever maintains the WebSocket connection and dispatches every
@@ -296,7 +296,7 @@ func (c *Client) RunForever(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			err := c.WsClient.Conn.SetReadDeadline(time.Now().Add(runner.ConnectionReadTimeout))
+			err := c.WsClient.SetReadDeadline(time.Now().Add(runner.ConnectionReadTimeout))
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to set read deadline, reconnecting")
 				if err = c.WsClient.CloseAndReconnect(ctx); err != nil {

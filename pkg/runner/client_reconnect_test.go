@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -39,4 +40,19 @@ func TestCommandRequestHandler_EmptyMessageSkipsParsingWithoutLogging(t *testing
 
 	assert.Equal(t, outcomeContinue, outcome)
 	assert.Empty(t, logs.String(), "an empty message should return before ParseMessage ever logs")
+}
+
+func TestCloseAndReconnect_DoesNotReconnectAfterContextCancel(t *testing.T) {
+	// gracefulShutdown cancels the root context before it calls Close.
+	s := newCloseReplyServer(t)
+	conn, _ := dialTracked(t, s.url)
+	wc := &WebsocketClient{Conn: conn}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := wc.CloseAndReconnect(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Same(t, conn, wc.getConn(), "CloseAndReconnect dialled a new connection after the context was cancelled")
 }

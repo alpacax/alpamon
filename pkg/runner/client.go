@@ -43,7 +43,11 @@ const (
 )
 
 type WebsocketClient struct {
-	Conn                 *websocket.Conn
+	Conn *websocket.Conn
+	// mu guards Conn: Connect writes it from the read loop; Close reads it on shutdown.
+	// Conn stays exported for outside readers; inside this package use the accessors.
+	mu sync.Mutex
+
 	requestHeader        http.Header
 	apiSession           *scheduler.Session
 	RestartChan          chan struct{}
@@ -136,6 +140,41 @@ func (wc *WebsocketClient) SetOnAuthenticated(fn func()) {
 	wc.onAuthenticated.Store(&fn)
 }
 
+func (wc *WebsocketClient) getConn() *websocket.Conn {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	return wc.Conn
+}
+
+// swapConn returns the replaced conn; the caller must close it.
+func (wc *WebsocketClient) swapConn(conn *websocket.Conn) *websocket.Conn {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	old := wc.Conn
+	wc.Conn = conn
+	return old
+}
+
+// SetReadLimit caps one inbound frame. A new connection starts uncapped, so
+// callers reapply it after every reconnect.
+func (wc *WebsocketClient) SetReadLimit(limit int64) {
+	conn := wc.getConn()
+	if conn == nil {
+		return
+	}
+	conn.SetReadLimit(limit)
+}
+
+// SetReadDeadline arms the read timeout for the current connection. It reports
+// net.ErrClosed when there is no connection to arm.
+func (wc *WebsocketClient) SetReadDeadline(t time.Time) error {
+	conn := wc.getConn()
+	if conn == nil {
+		return net.ErrClosed
+	}
+	return conn.SetReadDeadline(t)
+}
+
 func (wc *WebsocketClient) RunForever(ctx context.Context) {
 	if err := wc.Connect(ctx); err != nil {
 		return
@@ -150,15 +189,15 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			err := wc.Conn.SetReadDeadline(time.Now().Add(ConnectionReadTimeout))
-			if err != nil {
+			conn := wc.getConn()
+			if err := conn.SetReadDeadline(time.Now().Add(ConnectionReadTimeout)); err != nil {
 				if err = wc.CloseAndReconnect(ctx); err != nil {
 					return
 				}
 				authenticatedThisConn = false
 				continue
 			}
-			_, message, err := wc.ReadMessage()
+			_, message, err := conn.ReadMessage()
 			if err != nil {
 				if err = wc.CloseAndReconnect(ctx); err != nil {
 					return
@@ -201,12 +240,11 @@ func (wc *WebsocketClient) SendPongResponse() error {
 }
 
 func (wc *WebsocketClient) ReadMessage() (messageType int, message []byte, err error) {
-	messageType, message, err = wc.Conn.ReadMessage()
-	if err != nil {
-		return 0, nil, err
+	conn := wc.getConn()
+	if conn == nil {
+		return 0, nil, net.ErrClosed
 	}
-
-	return messageType, message, nil
+	return conn.ReadMessage()
 }
 
 // Connect dials until the connection is established, and returns an error
@@ -221,26 +259,41 @@ func (wc *WebsocketClient) Connect(ctx context.Context) error {
 			return err
 		}
 
-		wc.Conn = conn
+		if old := wc.swapConn(conn); old != nil {
+			// Already closed on the reconnect path; net.ErrClosed is the expected answer there.
+			if err := old.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				log.Debug().Err(err).Msg("Failed to close the connection Connect replaced.")
+			}
+		}
 		log.Debug().Msg("Backhaul connection established.")
 		return nil
 	})
 }
 
+// CloseAndReconnect drains the peer's close reply, so it reads the socket:
+// call it only from the goroutine that owns the reads.
 func (wc *WebsocketClient) CloseAndReconnect(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	wc.Close()
+	wc.closeAndDrain()
 	return wc.Connect(ctx)
 }
 
-// Cleanly close the websocket connection by sending a close message, waiting for
-// the peer's reply when that frame went out, and closing the connection either way.
-// Do not close quitChan, as the purpose here is to disconnect the WebSocket,
-// not to terminate RunForever.
+// Close sends a close frame and closes the connection. It does not drain the
+// peer's reply: only the read loop may read, and Close runs outside it.
 func (wc *WebsocketClient) Close() {
-	conn := wc.Conn // Connect() may swap wc.Conn from the RunForever goroutine mid-close; every step below must act on the one connection we started with.
+	wc.closeConn(false)
+}
+
+// closeAndDrain also waits for the peer's close reply. Only CloseAndReconnect
+// calls it, because only the read loop owns the reads.
+func (wc *WebsocketClient) closeAndDrain() {
+	wc.closeConn(true)
+}
+
+func (wc *WebsocketClient) closeConn(drain bool) {
+	conn := wc.getConn()
 	if conn == nil {
 		return
 	}
@@ -252,7 +305,7 @@ func (wc *WebsocketClient) Close() {
 	)
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to write close message to websocket.")
-	} else {
+	} else if drain {
 		drainCloseReply(conn)
 	}
 
@@ -373,8 +426,11 @@ func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome 
 }
 
 func (wc *WebsocketClient) WriteJSON(data any) error {
-	err := wc.Conn.WriteJSON(data)
-	if err != nil {
+	conn := wc.getConn()
+	if conn == nil {
+		return net.ErrClosed
+	}
+	if err := conn.WriteJSON(data); err != nil {
 		log.Debug().Err(err).Msgf("Failed to write json data to websocket.")
 		return err
 	}
