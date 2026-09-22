@@ -161,7 +161,9 @@ jobs:
   # pkg/wsclient hands one connection to a read loop, to callers writing from
   # their own goroutines, and to a watcher that interrupts a parked read; the
   # collector packages share tasks, metric queues and shutdown WaitGroups
-  # between a dispatcher, its workers and Stop.
+  # between a dispatcher, its workers and Stop. pkg/runner and pkg/pluginclient
+  # hand one WebsocketClient connection to a read loop and to callers on other
+  # goroutines.
   race:
     name: Race detector
     runs-on: ubuntu-latest
@@ -177,7 +179,7 @@ jobs:
       # Twice over: a race that needs an unlucky interleaving does not always
       # show up on the first scheduling.
       - name: Run tests under the race detector
-        run: go test -race -count=2 ./pkg/wsclient ./pkg/collector/scheduler ./pkg/collector ./pkg/collector/check/base ./pkg/agent
+        run: go test -race -count=2 ./pkg/wsclient ./pkg/collector/scheduler ./pkg/collector ./pkg/collector/check/base ./pkg/agent ./pkg/runner ./pkg/pluginclient
 
   # Renamed from `build-and-test` so the flat aggregator at the bottom of this
   # file can take that id: a job id and the aggregate check name cannot be the
