@@ -188,12 +188,14 @@ jobs:
             container: rockylinux/rockylinux:9
             arch: amd64
             install_cmd: dnf install -y
-          # Proves zypper still resolves the rpm's EL dependency names (zip, sqlite, nftables|iptables) on SUSE.
+          # Proves zypper resolves the rpm's EL dependency names on SUSE.
           - pkg_type: rpm
             container: opensuse/leap:15.6
             arch: amd64
             install_cmd: zypper --non-interactive install --allow-unsigned-rpm
-    # PATH is pinned because the runner rebuilds each exec PATH from the container config, and the Leap image alone defines none.
+    # Pinned so a later step that prepends to PATH keeps /usr/bin: the runner
+    # then rebuilds PATH from the container's Config.Env, which neither the
+    # Leap nor the Rocky image sets.
     container:
       image: ${{ matrix.container }}
       env:
