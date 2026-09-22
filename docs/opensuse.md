@@ -4,7 +4,7 @@ Support is best-effort. Alpamon detects openSUSE and SLES, runs `zypper` for its
 
 ## CI coverage
 
-CI exercises SUSE on amd64 only. It builds Alpamon from source and runs the test suite on openSUSE Leap 15, and it installs the released rpm with `zypper` on Leap 15.6, checking that the binary and the systemd unit land where the package declares them. SLES and arm64 are in the support table but never tested, so a regression on either reaches users before it reaches us.
+CI exercises SUSE on amd64 only. It builds Alpamon from source and runs the test suite on openSUSE Leap 15.6, and it installs the released rpm with `zypper` on Leap 15.6 and 16.0, checking that the binary and the systemd unit land where the package declares them. SLES and arm64 are in the support table but never tested, so a regression on either reaches users before it reaches us.
 
 ## Why the platform reads as rhel
 

@@ -193,6 +193,10 @@ jobs:
             container: opensuse/leap:15.6
             arch: amd64
             install_cmd: zypper --non-interactive install --allow-unsigned-rpm
+          - pkg_type: rpm
+            container: opensuse/leap:16.0
+            arch: amd64
+            install_cmd: zypper --non-interactive install --allow-unsigned-rpm
     # Pinned so a later step that prepends to PATH keeps /usr/bin: the runner
     # then rebuilds PATH from the container's Config.Env, which neither the
     # Leap nor the Rocky image sets.
