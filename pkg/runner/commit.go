@@ -584,6 +584,13 @@ func getNetworkInterfaces() ([]Interface, error) {
 		return []Interface{}, err
 	}
 
+	return buildInterfaces(ifaces), nil
+}
+
+// buildInterfaces maps the interfaces the operating system reports onto the
+// ones the agent reports, leaving out the virtual ones and any that carry no
+// hardware address.
+func buildInterfaces(ifaces []net.Interface) []Interface {
 	interfaces := []Interface{}
 	for _, iface := range ifaces {
 		mac := iface.HardwareAddr.String()
@@ -598,14 +605,33 @@ func getNetworkInterfaces() ([]Interface, error) {
 		interfaces = append(interfaces, Interface{
 			Name:      iface.Name,
 			Flags:     getFlags(iface),
-			MTU:       iface.MTU,
+			MTU:       reportedMTU(iface.MTU),
 			Mac:       mac,
 			Type:      0, // TODO
 			LinkSpeed: 0, // TODO
 		})
 	}
 
-	return interfaces, nil
+	return interfaces
+}
+
+// reportedMTU returns the MTU to report, or nil when there is none to report.
+// net.Interface holds -1 for an adapter whose MTU the operating system does not
+// give, which happens on Windows. That is the standard library saying it does
+// not know, not a measurement, so the agent leaves the field unset instead of
+// reporting a negative number as though it had been measured. The whole
+// interface list is reported in one payload, so one such adapter would
+// otherwise put every interface in that payload at risk wherever the MTU is
+// read as a non-negative quantity.
+//
+// The interface itself is still reported: an unknown MTU is no reason to leave
+// a NIC out of the inventory.
+func reportedMTU(mtu int) *int {
+	if mtu <= 0 {
+		return nil
+	}
+
+	return &mtu
 }
 
 func getNetworkAddresses() ([]Address, error) {

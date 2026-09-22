@@ -2,13 +2,16 @@ package runner
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetLoadAverage(t *testing.T) {
@@ -138,8 +141,86 @@ func TestGetNetworkInterfaces(t *testing.T) {
 	for _, iface := range networkInterfaces {
 		assert.NotEmpty(t, iface.Name, "Interface name should not be empty.")
 		assert.NotEmpty(t, iface.Mac, "MAC address should not be empty.")
-		assert.True(t, iface.MTU > 0, "MTU should be greater than 0.")
+		if iface.MTU != nil {
+			assert.Positive(t, *iface.MTU, "A reported MTU should be greater than 0.")
+		}
 	}
+}
+
+func TestBuildInterfacesReportsUnknownMTUAsUnset(t *testing.T) {
+	mac, err := net.ParseMAC("02:00:00:00:00:01")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		mtu       int
+		wantUnset bool
+	}{
+		{"a known MTU is reported as it is", 1500, false},
+		{"a jumbo MTU is reported as it is", 9000, false},
+		{"an MTU the operating system did not report is unset", -1, true},
+		{"a zero MTU is unset", 0, true},
+	}
+
+	ifaces := make([]net.Interface, 0, len(tests))
+	for i, tt := range tests {
+		ifaces = append(ifaces, net.Interface{
+			Index:        i + 1,
+			Name:         fmt.Sprintf("eth%d", i),
+			MTU:          tt.mtu,
+			HardwareAddr: mac,
+			Flags:        net.FlagUp,
+		})
+	}
+
+	got := buildInterfaces(ifaces)
+	require.Len(t, got, len(tests), "an unknown MTU must not drop the interface itself")
+
+	payload, err := json.Marshal(got)
+	require.NoError(t, err)
+
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(payload, &rows))
+	require.Len(t, rows, len(tests))
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, fmt.Sprintf("eth%d", i), got[i].Name)
+
+			if tt.wantUnset {
+				assert.Nil(t, got[i].MTU)
+				assert.NotContains(t, rows[i], "mtu", "an unset MTU must not reach the payload")
+
+				return
+			}
+
+			require.NotNil(t, got[i].MTU)
+			assert.Equal(t, tt.mtu, *got[i].MTU)
+			assert.Equal(t, float64(tt.mtu), rows[i]["mtu"])
+		})
+	}
+}
+
+// The sync comparison runs over the value GetComparableData returns, so the MTU
+// has to be compared by what it points at and not by which pointer it is.
+func TestInterfaceComparisonFollowsTheMTUValue(t *testing.T) {
+	mtu, sameMTU, otherMTU := 1500, 1500, 9000
+	iface := Interface{Name: "eth0", Mac: "02:00:00:00:00:01", MTU: &mtu}
+
+	same := iface
+	same.MTU = &sameMTU
+	assert.True(t, cmp.Equal(iface.GetComparableData(), same.GetComparableData()),
+		"the same MTU held in two pointers should compare equal")
+
+	other := iface
+	other.MTU = &otherMTU
+	assert.False(t, cmp.Equal(iface.GetComparableData(), other.GetComparableData()),
+		"a different MTU should compare unequal")
+
+	unset := iface
+	unset.MTU = nil
+	assert.False(t, cmp.Equal(iface.GetComparableData(), unset.GetComparableData()),
+		"an unset MTU should compare unequal to a reported one")
 }
 
 func TestGetNetworkAddresses(t *testing.T) {
