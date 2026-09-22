@@ -230,10 +230,11 @@ jobs:
 
       - name: Smoke test
         run: |
-          alpamon --help
-          test -x /usr/bin/alpamon
-          # nfpm packages the unit to the literal /lib path: a real directory on Leap, a usrmerge symlink elsewhere.
-          test -f /lib/systemd/system/alpamon.service
+          set -x
+          /usr/bin/alpamon --help
+          # Leap 15's systemd searches both directories; usrmerged hosts
+          # have only one.
+          test -f /usr/lib/systemd/system/alpamon.service || test -f /lib/systemd/system/alpamon.service
 
   windows-smoke-test:
     # Windows archives are cross-compiled on the Ubuntu runner (see
