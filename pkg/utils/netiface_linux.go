@@ -20,23 +20,22 @@ const virtualNetPath = "/devices/virtual/net/"
 // nothing to say about.
 var platformVirtualIfacePrefixes []string
 
-// configuredVirtualDevTypes are the sysfs device types of the virtual link
-// kinds the agent reports unasked. They are the links an operator configures
-// for the host to use, rather than the ones a container runtime or a tunnel
-// creates for itself.
-var configuredVirtualDevTypes = map[string]bool{
-	"bridge": true,
-	"bond":   true,
-	"vlan":   true,
-	"vxlan":  true,
-}
-
-// configuredVirtualMarkerDirs are directories sysfs creates under an interface
-// whose kind carries settings of its own. They stand in for the device type on
-// a kernel that records none for that kind.
-var configuredVirtualMarkerDirs = []string{
-	"bridge",
-	"bonding",
+// excludedVirtualDevTypes are the sysfs device types of the virtual link kinds
+// the agent leaves out: the ones a container runtime or a tunnel creates one of
+// per container or per connection. Every other kind is reported, named or not,
+// so a kind this list has never heard of is reported rather than dropped.
+//
+// Not every kernel records a device type for these. veth and macvlan record
+// none on some kernels and are caught below by the device they are stacked on;
+// dummy and ifb record none and no other marker distinguishes them, so there
+// they are reported.
+var excludedVirtualDevTypes = map[string]bool{
+	"veth":    true,
+	"macvlan": true,
+	"ipvlan":  true,
+	"tun":     true,
+	"dummy":   true,
+	"ifb":     true,
 }
 
 // interfaceKind reads the link kind of an interface from sysfs.
@@ -57,8 +56,7 @@ func interfaceKind(name string) ifaceKind {
 
 	// An interface backed by hardware carries a device symlink to the bus
 	// device that drives it, and sysfs files it under that device rather than
-	// under the virtual tree. Either answer is taken as hardware: leaving out a
-	// hardware interface is the error the configuration cannot undo.
+	// under the virtual tree.
 	if _, err := os.Lstat(filepath.Join(dir, "device")); err == nil {
 		return kindHardware
 	}
@@ -68,23 +66,28 @@ func interfaceKind(name string) ifaceKind {
 		return kindHardware
 	}
 
+	// The kind the kernel names, where it names one. A vlan is stacked on
+	// another interface the way a macvlan child is, so the device type is read
+	// before anything is made of that.
 	if devType := sysfsDevType(dir); devType != "" {
-		if configuredVirtualDevTypes[devType] {
-			return kindConfiguredVirtual
+		if excludedVirtualDevTypes[devType] {
+			return kindExcludedVirtual
 		}
 
-		// A kind the kernel names and this list does not hold, such as a
-		// macvlan or an ipvlan child, is reported only when the include list
-		// asks for it. Deciding on the device type rather than on how the
-		// interface is wired gives the same answer whether or not the running
-		// kernel records one for that kind.
 		return kindVirtual
 	}
 
-	for _, marker := range configuredVirtualMarkerDirs {
-		if info, err := os.Stat(filepath.Join(dir, marker)); err == nil && info.IsDir() {
-			return kindConfiguredVirtual
-		}
+	// A tun or tap device, whose kind the kernel records nowhere else.
+	if _, err := os.Lstat(filepath.Join(dir, "tun_flags")); err == nil {
+		return kindExcludedVirtual
+	}
+
+	// An interface stacked on another one, with no device type to say which
+	// kind it is: one half of a veth pair points at its peer, and a macvlan or
+	// ipvlan child at the interface it was created on. A bridge, a bond, a team
+	// or a dummy interface points at itself and is reported.
+	if index, link, ok := sysfsLink(dir); ok && index != link {
+		return kindExcludedVirtual
 	}
 
 	return kindVirtual
@@ -105,4 +108,25 @@ func sysfsDevType(dir string) string {
 	}
 
 	return ""
+}
+
+// sysfsLink returns an interface's own index and the index of the interface it
+// is stacked on, which are the same number for an interface that stands on its
+// own. The last return is false when sysfs gives neither.
+func sysfsLink(dir string) (index string, link string, ok bool) {
+	index = sysfsValue(dir, "ifindex")
+	link = sysfsValue(dir, "iflink")
+
+	return index, link, index != "" && link != ""
+}
+
+// sysfsValue returns the trimmed contents of one sysfs attribute, or an empty
+// string when it cannot be read.
+func sysfsValue(dir string, name string) string {
+	value, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(value))
 }

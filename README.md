@@ -139,18 +139,25 @@ debug = false
 
 ### Interface reporting
 
-Alpamon reports the interfaces backed by hardware, together with the virtual links an operator configures on the host: bridges, bonds, VLANs and VXLANs. Every other virtual interface, such as one half of a veth pair, a macvlan or ipvlan child, or a tun, tap or dummy device, is left out of both the reported interface list and the traffic counters. Loopback is never reported.
+Alpamon reports the interfaces of the machine it runs on: the ones backed by hardware, and the virtual links configured on top of them, such as bridges, bonds, VLANs, VXLANs, teams, VRF masters and Open vSwitch bridges. It leaves out the kinds a running system creates one of per container or per connection: one half of a veth pair, a macvlan or ipvlan child, and a tun or tap device. A kind the kernel does not name is reported rather than left out.
 
-Name the ones to report anyway, by exact name or by glob:
+Two interfaces are never reported, and `include_virtual` cannot add them:
+
+- loopback;
+- an interface with no hardware address, such as a WireGuard, OpenVPN tun or PPP link. The reported interface is identified by its hardware address, so a link without one cannot be reported at all.
+
+Name the virtual interfaces to report anyway, by exact name or by glob:
 
 ```ini
 [interface]
 include_virtual = br0, veth*
 ```
 
-On Linux the kind of a link is read from sysfs. macOS and Windows expose none, so there the interface name decides instead.
+`include_virtual = *` reports every interface that has a hardware address and is not loopback, which is the setting to apply before upgrading if the interfaces reported for a machine should not change.
 
-A machine whose interfaces are all virtual, such as one running inside a container, reports none of them until this setting names one.
+A machine that has only interfaces of the kinds above, such as one running inside a container, reports them rather than reporting none, and logs that it did so once per run.
+
+On Linux the kind of a link is read from sysfs. macOS and Windows expose none, so there the interface name decides instead.
 
 ## Service management
 

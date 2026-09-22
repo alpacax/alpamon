@@ -90,17 +90,46 @@ func TestReportableInterface(t *testing.T) {
 	}
 }
 
-func TestReportableInterfaceReadsTheConfiguredIncludeList(t *testing.T) {
+func TestReportableInterfacesReadsTheConfiguredIncludeList(t *testing.T) {
 	previous := config.GlobalSettings
 	t.Cleanup(func() { config.GlobalSettings = previous })
 
+	listed := []Iface{
+		{Name: hardwareTestIface, Mac: testMAC},
+		{Name: virtualTestIface, Mac: testMAC},
+	}
+
 	config.GlobalSettings.IncludeVirtualInterfaces = nil
-	assert.False(t, ReportableInterface(virtualTestIface, testMAC, false),
-		"with an empty include list a virtual interface is left out")
+	assert.Equal(t, map[string]bool{hardwareTestIface: true}, ReportableInterfaces(listed),
+		"with an empty include list an interface of an excluded kind is left out")
 
 	config.GlobalSettings.IncludeVirtualInterfaces = []string{virtualTestIface}
-	assert.True(t, ReportableInterface(virtualTestIface, testMAC, false),
-		"an interface the include list names is reported")
+	assert.Equal(t, map[string]bool{hardwareTestIface: true, virtualTestIface: true},
+		ReportableInterfaces(listed), "an interface the include list names is reported")
+}
+
+// The rule that keeps a report from being empty applies to whatever the machine
+// has, not only to the kinds one platform can name.
+func TestReportableInterfacesNeverReportsNothing(t *testing.T) {
+	reported := reportableInterfaces([]Iface{
+		{Name: virtualTestIface, Mac: testMAC},
+		{Name: "loopbackreportcheck0", Mac: testMAC, Loopback: true},
+		{Name: "addresslessreportcheck0"},
+	}, nil)
+
+	assert.Equal(t, map[string]bool{virtualTestIface: true}, reported,
+		"with nothing else to report, an interface of an excluded kind is reported, "+
+			"and loopback and an interface with no hardware address still are not")
+}
+
+func TestReportableInterfacesReportsNothingWhenThereIsNothingToReport(t *testing.T) {
+	reported := reportableInterfaces([]Iface{
+		{Name: "loopbackreportcheck0", Mac: testMAC, Loopback: true},
+		{Name: "addresslessreportcheck0"},
+	}, nil)
+
+	assert.Empty(t, reported,
+		"loopback and an interface with no hardware address are not reported to fill an empty report")
 }
 
 func TestMatchesInterfacePattern(t *testing.T) {

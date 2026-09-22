@@ -69,10 +69,7 @@ func (suite *NetCheckSuite) TestCollectInterfaces() {
 	interfaces, err := suite.collectCheck.collectInterfaces()
 	assert.NoError(suite.T(), err, "Failed to get interfaces.")
 
-	// The result is not asserted to hold anything: traffic is collected for the
-	// interfaces the agent reports, and on a machine whose every interface is
-	// virtual, one running inside a container for instance, there are none
-	// until the configuration names one.
+	assert.NotEmpty(suite.T(), interfaces, "Interfaces should not be empty")
 	for name, iface := range interfaces {
 		assert.Equal(suite.T(), name, iface.Name, "Interfaces should be keyed by name")
 	}
@@ -82,6 +79,7 @@ func (suite *NetCheckSuite) TestSaveTraffic() {
 	ioCounters, interfaces, err := suite.collectCheck.collectTraffic()
 	assert.NoError(suite.T(), err, "Failed to get traffic.")
 	assert.NotEmpty(suite.T(), ioCounters, "Network IO should not be empty")
+	assert.NotEmpty(suite.T(), interfaces, "Interfaces should not be empty")
 
 	data := suite.collectCheck.parseTraffic(ioCounters, interfaces)
 

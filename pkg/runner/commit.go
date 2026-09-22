@@ -588,17 +588,19 @@ func getNetworkInterfaces() ([]Interface, error) {
 }
 
 // buildInterfaces maps the interfaces the operating system reports onto the
-// ones the agent reports. utils.ReportableInterface decides which those are,
+// ones the agent reports. utils.ReportableInterfaces decides which those are,
 // and the traffic collector asks it the same question, so the inventory and
 // the traffic counters cover the same interfaces.
 func buildInterfaces(ifaces []net.Interface) []Interface {
+	reported := utils.ReportableInterfaces(listedInterfaces(ifaces))
+
 	interfaces := []Interface{}
 	for _, iface := range ifaces {
-		mac := iface.HardwareAddr.String()
-		if !utils.ReportableInterface(iface.Name, mac, iface.Flags&net.FlagLoopback != 0) {
+		if !reported[iface.Name] {
 			continue
 		}
 
+		mac := iface.HardwareAddr.String()
 		interfaces = append(interfaces, Interface{
 			Name:      iface.Name,
 			Flags:     getFlags(iface),
@@ -610,6 +612,22 @@ func buildInterfaces(ifaces []net.Interface) []Interface {
 	}
 
 	return interfaces
+}
+
+// listedInterfaces adapts what the standard library lists to what the report
+// predicate reads. The whole listing is handed over at once, because the
+// predicate's last rule is about the machine rather than about one interface.
+func listedInterfaces(ifaces []net.Interface) []utils.Iface {
+	listed := make([]utils.Iface, 0, len(ifaces))
+	for _, iface := range ifaces {
+		listed = append(listed, utils.Iface{
+			Name:     iface.Name,
+			Mac:      iface.HardwareAddr.String(),
+			Loopback: iface.Flags&net.FlagLoopback != 0,
+		})
+	}
+
+	return listed
 }
 
 // reportedMTU returns the MTU to report, or nil when there is none to report.
@@ -637,10 +655,11 @@ func getNetworkAddresses() ([]Address, error) {
 		return nil, err
 	}
 
+	reported := utils.ReportableInterfaces(listedInterfaces(ifaces))
+
 	addresses := []Address{}
 	for _, iface := range ifaces {
-		if !utils.ReportableInterface(iface.Name, iface.HardwareAddr.String(),
-			iface.Flags&net.FlagLoopback != 0) {
+		if !reported[iface.Name] {
 			continue
 		}
 

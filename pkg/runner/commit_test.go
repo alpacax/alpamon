@@ -140,9 +140,10 @@ func TestGetNetworkInterfaces(t *testing.T) {
 	networkInterfaces, err := getNetworkInterfaces()
 	assert.NoError(t, err, "Failed to get network interfaces")
 
-	// The list is not asserted to hold anything: on a machine whose every
-	// interface is virtual, one running inside a container for instance, the
-	// agent reports none of them until the configuration names one.
+	// Every machine has at least one interface carrying a hardware address, and
+	// a machine that has only interfaces of the kinds the agent leaves out, one
+	// running inside a container for instance, reports those rather than none.
+	assert.NotEmpty(t, networkInterfaces, "Network interfaces should not be empty.")
 	for _, iface := range networkInterfaces {
 		assert.NotEmpty(t, iface.Name, "Interface name should not be empty.")
 		assert.NotEmpty(t, iface.Mac, "MAC address should not be empty.")
@@ -285,8 +286,7 @@ func TestGetNetworkAddresses(t *testing.T) {
 	addresses, err := getNetworkAddresses()
 	assert.NoError(t, err, "Failed to get network addresses")
 
-	// As in TestGetNetworkInterfaces, an empty list is a legitimate answer on a
-	// machine that has only virtual interfaces.
+	assert.NotEmpty(t, addresses, "Network addresses should not be empty.")
 	for _, addr := range addresses {
 		assert.NotEmpty(t, addr.Address, "Address should not be empty.")
 		assert.NotEmpty(t, addr.Broadcast, "Broadcast address should not be empty.")
