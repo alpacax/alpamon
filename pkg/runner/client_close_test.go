@@ -143,5 +143,5 @@ func TestWebsocketClientClose_IsRaceFreeAgainstTheReadLoop(t *testing.T) {
 	go func() { defer wg.Done(); wc.Close() }()
 	wg.Wait()
 
-	assert.Same(t, second, wc.getConn(), "swapConn is the only writer left, so the conn must be second")
+	assert.Same(t, second, wc.conn(), "swapConn is the only writer left, so the conn must be second")
 }

@@ -61,7 +61,7 @@ func TestCloseAndReconnect_DoesNotReconnectAfterContextCancel(t *testing.T) {
 	err := wc.CloseAndReconnect(ctx)
 
 	require.ErrorIs(t, err, context.Canceled)
-	assert.Same(t, conn, wc.getConn(), "CloseAndReconnect dialled a new connection after the context was cancelled")
+	assert.Same(t, conn, wc.conn(), "CloseAndReconnect dialled a new connection after the context was cancelled")
 }
 
 func TestCloseAndReconnectOnRequest_FirstRequestIsNotDelayed(t *testing.T) {
