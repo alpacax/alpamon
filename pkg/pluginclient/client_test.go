@@ -6,7 +6,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHandleMessage_RejectsEmptyAndOversized(t *testing.T) {
@@ -139,4 +141,43 @@ func TestEnqueueConfigUpdate_LastWriteWins(t *testing.T) {
 	default:
 		t.Fatal("configUpdateCh empty; expected last enqueued ID to remain")
 	}
+}
+
+func TestHandleMessage_ReconnectAsksTheLoopInsteadOfActing(t *testing.T) {
+	// The loop reapplies the read limit after a reconnect, so only the loop may reconnect.
+	// A zero WebsocketClient is enough: the reconnect case no longer touches it.
+	c := &Client{PluginName: "alpamon-test-plugin", WsClient: &runner.WebsocketClient{}}
+	msg, err := json.Marshal(map[string]string{"query": "reconnect"})
+	require.NoError(t, err)
+
+	outcome := c.handleMessage(context.Background(), msg)
+
+	assert.Equal(t, outcomeReconnect, outcome)
+}
+
+func TestHandleMessage_ReconnectWithoutWsClientDoesNotAskForReconnect(t *testing.T) {
+	// The nil guard sits ahead of the query switch; that contract does not change.
+	c := &Client{PluginName: "alpamon-test-plugin"}
+	msg, err := json.Marshal(map[string]string{"query": "reconnect"})
+	require.NoError(t, err)
+
+	outcome := c.handleMessage(context.Background(), msg)
+
+	assert.Equal(t, outcomeContinue, outcome)
+}
+
+func TestHandleMessage_QuitDoesNotAskForReconnect(t *testing.T) {
+	c := &Client{
+		PluginName: "alpamon-test-plugin",
+		WsClient: &runner.WebsocketClient{
+			ShutDownChan: make(chan struct{}),
+			RestartChan:  make(chan struct{}),
+		},
+	}
+	msg, err := json.Marshal(map[string]string{"query": "quit"})
+	require.NoError(t, err)
+
+	outcome := c.handleMessage(context.Background(), msg)
+
+	assert.Equal(t, outcomeContinue, outcome)
 }
