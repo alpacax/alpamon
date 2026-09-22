@@ -34,6 +34,7 @@ type Collector struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	ctxManager  *agent.ContextManager
+	stopOnce    sync.Once
 }
 
 type collectConf struct {
@@ -160,42 +161,35 @@ func (c *Collector) Start() {
 	// Use context from global ContextManager instead of creating local context
 	c.ctx, c.cancel = c.ctxManager.NewContext(0) // 0 means no timeout
 
-	go c.scheduler.Start(c.ctx, c.buffer.Capacity)
+	c.scheduler.Start(c.ctx, c.buffer.Capacity)
 
+	ctx := c.ctx // read here, so no worker goroutine touches c.ctx itself
 	for range c.buffer.Capacity {
-		c.wg.Add(1)
-		go c.successQueueWorker(c.ctx)
+		c.wg.Go(func() { c.successQueueWorker(ctx) })
 	}
 
-	c.wg.Add(1)
-	go c.failureQueueWorker(c.ctx)
+	c.wg.Go(func() { c.failureQueueWorker(ctx) })
 
 	go c.handleErrors()
 }
 
 func (c *Collector) successQueueWorker(ctx context.Context) {
-	defer c.wg.Done()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case metric, ok := <-c.buffer.SuccessQueue:
-			if !ok {
-				return
-			}
-
+		case metric := <-c.buffer.SuccessQueue:
 			err := c.transporter.Send(metric)
 			if err != nil {
-				c.buffer.FailureQueue <- metric
+				if pubErr := c.buffer.PublishFailure(ctx, metric); pubErr != nil {
+					return
+				}
 			}
 		}
 	}
 }
 
 func (c *Collector) failureQueueWorker(ctx context.Context) {
-	defer c.wg.Done()
-
 	retryTicker := time.NewTicker(5 * time.Second)
 	defer retryTicker.Stop()
 
@@ -211,10 +205,7 @@ func (c *Collector) failureQueueWorker(ctx context.Context) {
 
 func (c *Collector) retryFailedMetrics(ctx context.Context) {
 	select {
-	case metric, ok := <-c.buffer.FailureQueue:
-		if !ok {
-			return
-		}
+	case metric := <-c.buffer.FailureQueue:
 		err := c.retryWithBackoff(ctx, metric)
 		if err != nil {
 			log.Error().Err(err).Msgf("Failed to check metric: %s.", metric.Type)
@@ -250,15 +241,23 @@ func (c *Collector) handleErrors() {
 	}
 }
 
+// Stop never closes the metric queues—a check still running past the
+// bounded wait could still publish, racing a send against a closed channel.
 func (c *Collector) Stop() {
-	if c.cancel != nil {
-		c.cancel()
-	}
+	c.stopOnce.Do(func() {
+		if c.cancel != nil {
+			c.cancel()
+		}
 
-	c.scheduler.Stop()
-	c.wg.Wait()
+		if !c.scheduler.Stop() {
+			log.Warn().Msgf("scheduler did not join within %s", agent.ShutdownWaitBudget)
+		}
+		if !agent.WaitWithTimeout(&c.wg, agent.ShutdownWaitBudget) {
+			log.Warn().Msgf("collector goroutines did not join within %s", agent.ShutdownWaitBudget)
+		}
 
-	close(c.buffer.SuccessQueue)
-	close(c.buffer.FailureQueue)
-	close(c.errorChan)
+		// errorChan has no sender anywhere, so no straggler can race this
+		// close, and handleErrors leaks on every restart without it.
+		close(c.errorChan)
+	})
 }

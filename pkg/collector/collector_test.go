@@ -3,8 +3,10 @@ package collector
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/collector/scheduler"
@@ -110,4 +112,116 @@ func TestDefaultCheckFactory_ReturnsErrorForUnknownType(t *testing.T) {
 	factory := &check.DefaultCheckFactory{}
 	_, err := factory.CreateCheck(&base.CheckArgs{Type: base.CheckType("not-a-real-check")})
 	assert.Error(t, err)
+}
+
+// failingTransporter always fails Send, forcing successQueueWorker onto its
+// PublishFailure path.
+type failingTransporter struct{}
+
+func (failingTransporter) Send(_ base.MetricData) error {
+	return assert.AnError
+}
+
+func TestSuccessQueueWorker_ReturnsWhenFailureQueueIsFullAndCtxIsCancelled(t *testing.T) {
+	buffer := base.NewCheckBuffer(0)
+	c := &Collector{
+		transporter: failingTransporter{},
+		buffer:      buffer,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.successQueueWorker(ctx)
+	}()
+
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		buffer.SuccessQueue <- base.MetricData{Type: base.CPU}
+	}()
+
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("worker never received the metric off SuccessQueue")
+	}
+
+	// Send failed, so the worker is now parked trying to publish onto a
+	// FailureQueue nothing drains; it must not block forever once ctx is
+	// cancelled.
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("successQueueWorker did not return after ctx was cancelled while the failure queue was full")
+	}
+}
+
+func assertSuccessQueueOpen(t *testing.T, c *Collector) {
+	t.Helper()
+	select {
+	case _, ok := <-c.buffer.SuccessQueue:
+		assert.True(t, ok, "SuccessQueue must never be closed by Stop")
+	default:
+	}
+}
+
+func TestCollector_Stop_NeverClosesSuccessQueueWhenGoroutinesJoin(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newTestCollector()
+		c.ctxManager = agent.NewContextManager()
+		c.errorChan = make(chan error, 10)
+		c.ctx, c.cancel = c.ctxManager.NewContext(0)
+
+		done := make(chan struct{})
+		c.wg.Go(func() {
+			<-c.ctx.Done()
+			close(done)
+		})
+
+		require.NotPanics(t, func() {
+			c.Stop()
+		})
+		<-done
+
+		assertSuccessQueueOpen(t, c)
+	})
+}
+
+func TestCollector_Stop_NeverClosesSuccessQueueWhenWaitExpires(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newTestCollector()
+		c.ctxManager = agent.NewContextManager()
+		c.errorChan = make(chan error, 10)
+		c.ctx, c.cancel = c.ctxManager.NewContext(0)
+
+		// Ignores ctx and never returns, like a goroutine stuck in a
+		// context-unaware syscall.
+		hang := make(chan struct{})
+		c.wg.Go(func() { <-hang })
+
+		require.NotPanics(t, func() {
+			c.Stop()
+		})
+
+		assertSuccessQueueOpen(t, c)
+
+		// Unblock the leaked worker so the bubble has nothing left waiting.
+		close(hang)
+	})
+}
+
+func TestCollector_StopIsSafeToCallTwice(t *testing.T) {
+	c := newTestCollector()
+	c.ctxManager = agent.NewContextManager()
+	c.errorChan = make(chan error, 10)
+	c.Start()
+
+	require.NotPanics(t, func() {
+		c.Stop()
+		c.Stop()
+	})
 }
