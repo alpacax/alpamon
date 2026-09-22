@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -65,7 +67,8 @@ func TestWebsocketClientClose_ClosesConnAfterWriteControlFailure(t *testing.T) {
 	require.Equal(t, deadlines, tracked.readDeadlines.Load(), "Close() waited for a close reply the peer can never send, because the close frame never went out")
 }
 
-func TestWebsocketClientClose_DrainsReplyAfterSuccessfulHandshake(t *testing.T) {
+func TestWebsocketClientClose_DoesNotDrainBecauseTheReadLoopOwnsReads(t *testing.T) {
+	// gorilla allows one reader; Close() can run while the loop is inside ReadMessage.
 	s := newCloseReplyServer(t)
 	conn, tracked := dialTracked(t, s.url)
 
@@ -74,9 +77,26 @@ func TestWebsocketClientClose_DrainsReplyAfterSuccessfulHandshake(t *testing.T) 
 	deadlines := tracked.readDeadlines.Load()
 	wc.Close()
 
+	// Close() does not wait for the peer, so give the server goroutine a moment to process the frame it already received.
+	require.Eventually(t, func() bool {
+		return s.closeCode.Load() == int32(websocket.CloseNormalClosure)
+	}, time.Second, time.Millisecond, "the peer did not receive a normal-closure close frame")
+	assert.Equal(t, deadlines, tracked.readDeadlines.Load(), "Close() drained the reply even though it does not own the reads")
+	assert.True(t, tracked.closed.Load(), "Close() did not close the websocket connection")
+}
+
+func TestWebsocketClientCloseAndDrain_DrainsReplyAfterSuccessfulHandshake(t *testing.T) {
+	s := newCloseReplyServer(t)
+	conn, tracked := dialTracked(t, s.url)
+
+	wc := &WebsocketClient{Conn: conn}
+
+	deadlines := tracked.readDeadlines.Load()
+	wc.closeAndDrain()
+
 	require.Equal(t, int32(websocket.CloseNormalClosure), s.closeCode.Load(), "the peer did not receive a normal-closure close frame")
-	require.Greater(t, tracked.readDeadlines.Load(), deadlines, "Close() skipped the drain even though the close frame went out")
-	require.True(t, tracked.closed.Load(), "Close() did not close the websocket connection after a successful handshake")
+	assert.Greater(t, tracked.readDeadlines.Load(), deadlines, "closeAndDrain() skipped the drain even though the close frame went out")
+	assert.True(t, tracked.closed.Load(), "closeAndDrain() did not close the websocket connection")
 }
 
 func TestWebsocketClientClose_IsSafeToCallTwice(t *testing.T) {
@@ -99,10 +119,29 @@ func TestWebsocketClientClose_ClosesTheConnItStartedWith(t *testing.T) {
 	t.Cleanup(func() { _ = second.Close() })
 
 	wc := &WebsocketClient{Conn: first}
-	firstTracked.onWrite = func() { wc.Conn = second }
+	firstTracked.onWrite = func() { wc.swapConn(second) }
 
 	wc.Close()
 
 	require.True(t, firstTracked.closed.Load(), "Close() left the connection it started with open")
 	require.False(t, secondTracked.closed.Load(), "Close() closed the connection Connect() had just swapped in")
+}
+
+func TestWebsocketClientClose_IsRaceFreeAgainstTheReadLoop(t *testing.T) {
+	// The loop writes conn through Connect while another goroutine reads it in Close; the real
+	// guard against a broken mu is the race detector (run with -race), not this assertion alone.
+	s := newCloseReplyServer(t)
+	first, _ := dialTracked(t, s.url)
+	second, _ := dialTracked(t, s.url)
+	t.Cleanup(func() { _ = second.Close() })
+
+	wc := &WebsocketClient{Conn: first}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); wc.swapConn(second) }()
+	go func() { defer wg.Done(); wc.Close() }()
+	wg.Wait()
+
+	assert.Same(t, second, wc.conn(), "swapConn is the only writer left, so the conn must be second")
 }

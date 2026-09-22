@@ -31,22 +31,14 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// MaxMessageSize is the maximum allowed WebSocket message size (10 MiB)
-// enforced both at the gorilla connection layer (SetReadLimit) and as a
-// secondary guard inside the handler.
-const MaxMessageSize = 10 * 1024 * 1024
+// handlerOutcome carries what the handler wants done with the connection.
+// Only RunForever acts on it, because it reapplies the read limit afterwards.
+type handlerOutcome int
 
-// validQueries is the whitelist of WS command query types the shared
-// dispatcher knows about. Anything else is rejected with a log line
-// and no side effect.
-var validQueries = map[string]bool{
-	"ping":           true,
-	"config_updated": true,
-	"reconfigure":    true,
-	"quit":           true,
-	"reconnect":      true,
-	"restart":        true,
-}
+const (
+	outcomeContinue handlerOutcome = iota
+	outcomeReconnect
+)
 
 // command is the lean frame the shared dispatcher decodes — Query plus
 // Reason. The plugin-private “reconfigure“ payload carries additional
@@ -95,6 +87,23 @@ type Client struct {
 	configWorkerStarted sync.Once
 }
 
+// MaxMessageSize is the maximum allowed WebSocket message size (10 MiB)
+// enforced both at the gorilla connection layer (SetReadLimit) and as a
+// secondary guard inside the handler.
+const MaxMessageSize = 10 * 1024 * 1024
+
+// validQueries is the whitelist of WS command query types the shared
+// dispatcher knows about. Anything else is rejected with a log line
+// and no side effect.
+var validQueries = map[string]bool{
+	"ping":           true,
+	"config_updated": true,
+	"reconfigure":    true,
+	"quit":           true,
+	"reconnect":      true,
+	"restart":        true,
+}
+
 // New wires a Client with the standard configreceiver.Receiver around
 // the supplied Applier. “onReconfigure“ may be nil if the plugin
 // does not (or no longer) supports the legacy push path.
@@ -113,17 +122,17 @@ func New(
 	}
 }
 
-// HandleMessage runs the shared dispatch for one inbound frame. It
+// handleMessage runs the shared dispatch for one inbound frame. It
 // never panics for arbitrary inputs — the readers above feed it
 // whatever the WebSocket produces.
-func (c *Client) HandleMessage(ctx context.Context, message []byte) {
+func (c *Client) handleMessage(ctx context.Context, message []byte) handlerOutcome {
 	if len(message) == 0 {
-		return
+		return outcomeContinue
 	}
 
 	if len(message) > MaxMessageSize {
 		log.Warn().Int("size", len(message)).Msg("Message too large, rejected")
-		return
+		return outcomeContinue
 	}
 
 	var cmd command
@@ -143,12 +152,12 @@ func (c *Client) HandleMessage(ctx context.Context, message []byte) {
 			Int("messageSize", len(message)).
 			Str("messagePreview", string(message[:previewLen])+ellipsis).
 			Msg("Failed to unmarshal command")
-		return
+		return outcomeContinue
 	}
 
 	if !validQueries[cmd.Query] {
 		log.Warn().Str("query", cmd.Query).Msg("Invalid query type")
-		return
+		return outcomeContinue
 	}
 
 	switch cmd.Query {
@@ -156,32 +165,32 @@ func (c *Client) HandleMessage(ctx context.Context, message []byte) {
 		var payload configUpdatedPayload
 		if err := json.Unmarshal(message, &payload); err != nil {
 			log.Error().Err(err).Msg("Bad config_updated payload")
-			return
+			return outcomeContinue
 		}
 		if payload.PluginConfigID == "" {
 			log.Error().Msg("config_updated event missing plugin_config_id")
-			return
+			return outcomeContinue
 		}
 		if c.Receiver == nil {
 			log.Warn().Msg("Cannot process config_updated: Receiver is nil")
-			return
+			return outcomeContinue
 		}
 		c.enqueueConfigUpdate(ctx, payload.PluginConfigID)
-		return
+		return outcomeContinue
 
 	case "reconfigure":
 		if c.OnReconfigure == nil {
 			log.Debug().Msg("Legacy reconfigure received but no handler wired; ignoring")
-			return
+			return outcomeContinue
 		}
 		c.OnReconfigure(message)
-		return
+		return outcomeContinue
 	}
 
 	// Remaining cases all require WsClient.
 	if c.WsClient == nil {
 		log.Warn().Str("query", cmd.Query).Msg("Cannot process command: WsClient is nil")
-		return
+		return outcomeContinue
 	}
 
 	switch cmd.Query {
@@ -194,13 +203,14 @@ func (c *Client) HandleMessage(ctx context.Context, message []byte) {
 		c.WsClient.ShutDown()
 	case "reconnect":
 		log.Debug().Msgf("Reconnect requested for reason: %s.", cmd.Reason)
-		c.WsClient.Close()
+		return outcomeReconnect
 	case "restart":
 		log.Info().Msgf("%s will restart in 1 second.", c.PluginName)
 		time.AfterFunc(1*time.Second, func() {
 			c.WsClient.Restart()
 		})
 	}
+	return outcomeContinue
 }
 
 // enqueueConfigUpdate hands a fresh “plugin_config_id“ to the
@@ -252,15 +262,8 @@ func (c *Client) configWorker(ctx context.Context) {
 	}
 }
 
-func (c *Client) setReadLimit() {
-	if c.WsClient == nil || c.WsClient.Conn == nil {
-		return
-	}
-	c.WsClient.Conn.SetReadLimit(MaxMessageSize)
-}
-
 // RunForever maintains the WebSocket connection and dispatches every
-// inbound frame through HandleMessage until ctx is cancelled or the
+// inbound frame through handleMessage until ctx is cancelled or the
 // remote sends “quit“.
 //
 // Connecting has no deadline of its own: it retries until it succeeds or
@@ -273,20 +276,20 @@ func (c *Client) RunForever(ctx context.Context) {
 	if err := c.WsClient.Connect(ctx); err != nil {
 		return
 	}
-	c.setReadLimit()
+	c.WsClient.SetReadLimit(MaxMessageSize)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			err := c.WsClient.Conn.SetReadDeadline(time.Now().Add(runner.ConnectionReadTimeout))
+			err := c.WsClient.SetReadDeadline(time.Now().Add(runner.ConnectionReadTimeout))
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to set read deadline, reconnecting")
 				if err = c.WsClient.CloseAndReconnect(ctx); err != nil {
 					return
 				}
-				c.setReadLimit()
+				c.WsClient.SetReadLimit(MaxMessageSize)
 				continue
 			}
 			_, message, err := c.WsClient.ReadMessage()
@@ -294,10 +297,15 @@ func (c *Client) RunForever(ctx context.Context) {
 				if err = c.WsClient.CloseAndReconnect(ctx); err != nil {
 					return
 				}
-				c.setReadLimit()
+				c.WsClient.SetReadLimit(MaxMessageSize)
 				continue
 			}
-			c.HandleMessage(ctx, message)
+			if c.handleMessage(ctx, message) == outcomeReconnect {
+				if err = c.WsClient.CloseAndReconnectOnRequest(ctx); err != nil {
+					return
+				}
+				c.WsClient.SetReadLimit(MaxMessageSize)
+			}
 		}
 	}
 }

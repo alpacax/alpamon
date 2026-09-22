@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,19 +22,27 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const (
-	minConnectInterval    = 5 * time.Second
-	maxConnectInterval    = 60 * time.Second
-	ConnectionReadTimeout = 35 * time.Minute
+// handlerOutcome carries what a message handler wants done with the connection.
+// Only the read loop acts on it; the handler never closes or replaces the connection.
+type handlerOutcome int
 
-	eventCommandAckURL    = "/api/events/commands/%s/ack/"
-	eventCommandFinURL    = "/api/events/commands/%s/fin/"
-	eventCommandRejectURL = "/api/events/commands/%s/reject/"
-	eventCommandChunkURL  = "/api/events/commands/%s/chunk/"
+const (
+	outcomeContinue handlerOutcome = iota
+	outcomeReconnect
 )
 
 type WebsocketClient struct {
-	Conn                 *websocket.Conn
+	// mu guards Conn: Connect writes it from the read loop; Close reads it on shutdown.
+	mu sync.Mutex
+	// Conn stays exported for outside readers; inside this package use the accessors.
+	//
+	// Deprecated: use SetReadDeadline, ReadMessage and WriteJSON.
+	Conn *websocket.Conn
+
+	// lastPeerReconnect is owned by the read loop goroutine alone: one read
+	// loop per client, so it needs no lock.
+	lastPeerReconnect time.Time
+
 	requestHeader        http.Header
 	apiSession           *scheduler.Session
 	RestartChan          chan struct{}
@@ -60,7 +69,27 @@ type WebsocketClient struct {
 	// Stored as an atomic.Pointer so concurrent SetOnAuthenticated calls
 	// from outside the RunForever goroutine race-safely with Connect.
 	onAuthenticated atomic.Pointer[func()]
+
+	// terminalOnce lets only the first of ShutDown and Restart through: root.go
+	// waits on both channels in one select, so closing both picks at random.
+	terminalOnce sync.Once
 }
+
+const (
+	minConnectInterval    = 5 * time.Second
+	maxConnectInterval    = 60 * time.Second
+	ConnectionReadTimeout = 35 * time.Minute
+
+	eventCommandAckURL    = "/api/events/commands/%s/ack/"
+	eventCommandFinURL    = "/api/events/commands/%s/fin/"
+	eventCommandRejectURL = "/api/events/commands/%s/reject/"
+	eventCommandChunkURL  = "/api/events/commands/%s/chunk/"
+)
+
+// peerReconnectMinInterval paces peer-requested reconnects: the console can
+// ask for one in a loop, and connectForever only paces failed dials. A var,
+// not a const, so tests can shrink it instead of running at real pacing.
+var peerReconnectMinInterval = 5 * time.Second
 
 func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextManager, workerPool *pool.Pool) *WebsocketClient {
 	headers := http.Header{
@@ -122,6 +151,41 @@ func (wc *WebsocketClient) SetOnAuthenticated(fn func()) {
 	wc.onAuthenticated.Store(&fn)
 }
 
+func (wc *WebsocketClient) conn() *websocket.Conn {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	return wc.Conn
+}
+
+// swapConn returns the replaced conn; the caller must close it.
+func (wc *WebsocketClient) swapConn(conn *websocket.Conn) *websocket.Conn {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	old := wc.Conn
+	wc.Conn = conn
+	return old
+}
+
+// SetReadLimit caps one inbound frame. A new connection starts uncapped, so
+// callers reapply it after every reconnect.
+func (wc *WebsocketClient) SetReadLimit(limit int64) {
+	conn := wc.conn()
+	if conn == nil {
+		return
+	}
+	conn.SetReadLimit(limit)
+}
+
+// SetReadDeadline arms the read timeout for the current connection. It reports
+// net.ErrClosed when there is no connection to arm.
+func (wc *WebsocketClient) SetReadDeadline(t time.Time) error {
+	conn := wc.conn()
+	if conn == nil {
+		return net.ErrClosed
+	}
+	return conn.SetReadDeadline(t)
+}
+
 func (wc *WebsocketClient) RunForever(ctx context.Context) {
 	if err := wc.Connect(ctx); err != nil {
 		return
@@ -136,15 +200,15 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			err := wc.Conn.SetReadDeadline(time.Now().Add(ConnectionReadTimeout))
-			if err != nil {
+			conn := wc.conn()
+			if err := conn.SetReadDeadline(time.Now().Add(ConnectionReadTimeout)); err != nil {
 				if err = wc.CloseAndReconnect(ctx); err != nil {
 					return
 				}
 				authenticatedThisConn = false
 				continue
 			}
-			_, message, err := wc.ReadMessage()
+			_, message, err := conn.ReadMessage()
 			if err != nil {
 				if err = wc.CloseAndReconnect(ctx); err != nil {
 					return
@@ -158,7 +222,12 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 					(*cb)()
 				}
 			}
-			wc.CommandRequestHandler(message)
+			if wc.commandRequestHandler(message) == outcomeReconnect {
+				if err := wc.CloseAndReconnectOnRequest(ctx); err != nil {
+					return
+				}
+				authenticatedThisConn = false
+			}
 		}
 	}
 }
@@ -181,13 +250,14 @@ func (wc *WebsocketClient) SendPongResponse() error {
 	return wc.WriteJSON(pongResponse)
 }
 
+// ReadMessage reads the next frame on the current connection. It reports
+// net.ErrClosed when there is no connection to read.
 func (wc *WebsocketClient) ReadMessage() (messageType int, message []byte, err error) {
-	messageType, message, err = wc.Conn.ReadMessage()
-	if err != nil {
-		return 0, nil, err
+	conn := wc.conn()
+	if conn == nil {
+		return 0, nil, net.ErrClosed
 	}
-
-	return messageType, message, nil
+	return conn.ReadMessage()
 }
 
 // Connect dials until the connection is established, and returns an error
@@ -202,26 +272,60 @@ func (wc *WebsocketClient) Connect(ctx context.Context) error {
 			return err
 		}
 
-		wc.Conn = conn
+		if old := wc.swapConn(conn); old != nil {
+			// Already closed on the reconnect path; net.ErrClosed is the expected answer there.
+			if err := old.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				log.Debug().Err(err).Msg("Failed to close the connection Connect replaced.")
+			}
+		}
 		log.Debug().Msg("Backhaul connection established.")
 		return nil
 	})
 }
 
+// CloseAndReconnect drains the peer's close reply, so it reads the socket:
+// call it only from the goroutine that owns the reads.
 func (wc *WebsocketClient) CloseAndReconnect(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	wc.Close()
+	wc.closeAndDrain()
 	return wc.Connect(ctx)
 }
 
-// Cleanly close the websocket connection by sending a close message, waiting for
-// the peer's reply when that frame went out, and closing the connection either way.
-// Do not close quitChan, as the purpose here is to disconnect the WebSocket,
-// not to terminate RunForever.
+// CloseAndReconnectOnRequest paces a peer-requested reconnect, so a console
+// repeating the reconnect query cannot drive an unbounded dial loop.
+// Call it only from the read loop: it calls CloseAndReconnect, which owns the reads.
+func (wc *WebsocketClient) CloseAndReconnectOnRequest(ctx context.Context) error {
+	// A zero lastPeerReconnect makes wait negative, so the first request never pauses.
+	if wait := peerReconnectMinInterval - time.Since(wc.lastPeerReconnect); wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	wc.lastPeerReconnect = time.Now()
+	return wc.CloseAndReconnect(ctx)
+}
+
+// Close sends a close frame and closes the connection. It does not drain the
+// peer's reply: only the read loop may read, and Close runs outside it.
 func (wc *WebsocketClient) Close() {
-	conn := wc.Conn // Connect() may swap wc.Conn from the RunForever goroutine mid-close; every step below must act on the one connection we started with.
+	wc.closeConn(false)
+}
+
+// closeAndDrain also waits for the peer's close reply, so it reads the socket:
+// call it only from the goroutine that owns the reads.
+func (wc *WebsocketClient) closeAndDrain() {
+	wc.closeConn(true)
+}
+
+func (wc *WebsocketClient) closeConn(drain bool) {
+	conn := wc.conn()
 	if conn == nil {
 		return
 	}
@@ -233,7 +337,7 @@ func (wc *WebsocketClient) Close() {
 	)
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to write close message to websocket.")
-	} else {
+	} else if drain {
 		drainCloseReply(conn)
 	}
 
@@ -253,11 +357,11 @@ func drainCloseReply(conn *websocket.Conn) {
 }
 
 func (wc *WebsocketClient) ShutDown() {
-	close(wc.ShutDownChan)
+	wc.terminalOnce.Do(func() { close(wc.ShutDownChan) })
 }
 
 func (wc *WebsocketClient) Restart() {
-	close(wc.RestartChan)
+	wc.terminalOnce.Do(func() { close(wc.RestartChan) })
 }
 
 func (wc *WebsocketClient) RestartCollector() {
@@ -268,15 +372,15 @@ func (wc *WebsocketClient) RestartCollector() {
 	}
 }
 
-func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
+func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome {
 	if len(message) == 0 {
-		return
+		return outcomeContinue
 	}
 
 	msg, err := protocol.ParseMessage(message)
 	if err != nil {
 		log.Warn().Err(err).Msgf("Inappropriate message: %s.", string(message))
-		return
+		return outcomeContinue
 	}
 
 	switch msg.Query {
@@ -288,7 +392,7 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 	case protocol.MessageTypeCommand:
 		if msg.Command == nil {
 			log.Warn().Msg("Command message without command data")
-			return
+			return outcomeContinue
 		}
 
 		// Verify signature before ACK
@@ -306,7 +410,7 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 					Msg("Command signature verification failed.")
 			}
 			wc.rejectCommand(msg.Command.ID, err.Error())
-			return
+			return outcomeContinue
 		}
 
 		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandAckURL, msg.Command.ID),
@@ -318,7 +422,7 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 		data, err := msg.Command.ParseCommandData()
 		if err != nil {
 			log.Warn().Err(err).Msgf("Failed to parse command data: %s.", string(message))
-			return
+			return outcomeContinue
 		}
 
 		// Use modular handler system
@@ -339,15 +443,22 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 		wc.ShutDown()
 	case protocol.MessageTypeReconnect:
 		log.Debug().Msgf("Reconnect requested for reason: %s.", msg.Reason)
-		wc.Close()
+		return outcomeReconnect
 	default:
 		log.Warn().Msgf("Not implemented query: %s.", msg.Query)
 	}
+
+	return outcomeContinue
 }
 
+// WriteJSON writes data as a JSON frame on the current connection. It reports
+// net.ErrClosed when there is no connection to write.
 func (wc *WebsocketClient) WriteJSON(data any) error {
-	err := wc.Conn.WriteJSON(data)
-	if err != nil {
+	conn := wc.conn()
+	if conn == nil {
+		return net.ErrClosed
+	}
+	if err := conn.WriteJSON(data); err != nil {
 		log.Debug().Err(err).Msgf("Failed to write json data to websocket.")
 		return err
 	}

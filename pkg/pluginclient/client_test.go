@@ -5,17 +5,20 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/testutil"
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHandleMessage_RejectsEmptyAndOversized(t *testing.T) {
 	c := &Client{}
 
 	for _, size := range []int{0, MaxMessageSize + 1} {
-		assert.NotPanics(t, func() {
-			c.HandleMessage(context.Background(), make([]byte, size))
-		})
+		assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), make([]byte, size)))
 	}
 }
 
@@ -26,9 +29,7 @@ func TestHandleMessage_RejectsUnknownQuery(t *testing.T) {
 	}
 	for _, q := range []string{"", "SELECT * FROM users", "rm -rf /", "../../etc/passwd"} {
 		msg, _ := json.Marshal(map[string]string{"query": q})
-		assert.NotPanics(t, func() {
-			c.HandleMessage(context.Background(), msg)
-		})
+		assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 	}
 	assert.False(t, called, "OnReconfigure must not fire for unknown queries")
 }
@@ -36,9 +37,7 @@ func TestHandleMessage_RejectsUnknownQuery(t *testing.T) {
 func TestHandleMessage_RejectsMalformedJSON(t *testing.T) {
 	c := &Client{}
 	for _, payload := range [][]byte{[]byte("{not json"), []byte(`{"query": 42}`)} {
-		assert.NotPanics(t, func() {
-			c.HandleMessage(context.Background(), payload)
-		})
+		assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), payload))
 	}
 }
 
@@ -48,9 +47,7 @@ func TestHandleMessage_ConfigUpdated_RejectsMissingID(t *testing.T) {
 		"query":            "config_updated",
 		"plugin_config_id": "",
 	})
-	assert.NotPanics(t, func() {
-		c.HandleMessage(context.Background(), msg)
-	})
+	assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 }
 
 func TestHandleMessage_ConfigUpdated_RejectsWhenReceiverNil(t *testing.T) {
@@ -59,9 +56,7 @@ func TestHandleMessage_ConfigUpdated_RejectsWhenReceiverNil(t *testing.T) {
 		"query":            "config_updated",
 		"plugin_config_id": "abc-123",
 	})
-	assert.NotPanics(t, func() {
-		c.HandleMessage(context.Background(), msg)
-	})
+	assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 }
 
 func TestHandleMessage_LegacyReconfigure_InvokesCallback(t *testing.T) {
@@ -80,7 +75,7 @@ func TestHandleMessage_LegacyReconfigure_InvokesCallback(t *testing.T) {
 		"query":  "reconfigure",
 		"config": map[string]string{"dhcpd.conf": "subnet 10.0.0.0 netmask 255.0.0.0 {}"},
 	})
-	c.HandleMessage(context.Background(), msg)
+	assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -90,18 +85,14 @@ func TestHandleMessage_LegacyReconfigure_InvokesCallback(t *testing.T) {
 func TestHandleMessage_LegacyReconfigure_NoopWithoutCallback(t *testing.T) {
 	c := &Client{} // OnReconfigure nil
 	msg, _ := json.Marshal(map[string]string{"query": "reconfigure"})
-	assert.NotPanics(t, func() {
-		c.HandleMessage(context.Background(), msg)
-	})
+	assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 }
 
 func TestHandleMessage_PingQuitReconnectRestart_NoopWithoutWsClient(t *testing.T) {
 	c := &Client{PluginName: "alpamon-test-plugin"}
 	for _, q := range []string{"ping", "quit", "reconnect", "restart"} {
 		msg, _ := json.Marshal(map[string]string{"query": q})
-		assert.NotPanics(t, func() {
-			c.HandleMessage(context.Background(), msg)
-		})
+		assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 	}
 }
 
@@ -139,4 +130,64 @@ func TestEnqueueConfigUpdate_LastWriteWins(t *testing.T) {
 	default:
 		t.Fatal("configUpdateCh empty; expected last enqueued ID to remain")
 	}
+}
+
+func TestHandleMessage_ReconnectAsksTheLoopInsteadOfActing(t *testing.T) {
+	// The loop reapplies the read limit after a reconnect, so only the loop may reconnect.
+	// A zero WebsocketClient is enough: the reconnect case no longer touches it.
+	c := &Client{PluginName: "alpamon-test-plugin", WsClient: &runner.WebsocketClient{}}
+	msg, err := json.Marshal(map[string]string{"query": "reconnect"})
+	require.NoError(t, err)
+
+	outcome := c.handleMessage(context.Background(), msg)
+
+	assert.Equal(t, outcomeReconnect, outcome)
+}
+
+func TestHandleMessage_QuitDoesNotAskForReconnect(t *testing.T) {
+	c := &Client{
+		PluginName: "alpamon-test-plugin",
+		WsClient: &runner.WebsocketClient{
+			ShutDownChan: make(chan struct{}),
+			RestartChan:  make(chan struct{}),
+		},
+	}
+	msg, err := json.Marshal(map[string]string{"query": "quit"})
+	require.NoError(t, err)
+
+	outcome := c.handleMessage(context.Background(), msg)
+
+	assert.Equal(t, outcomeContinue, outcome)
+}
+
+// TestRunForever_TakesThePacedPathOnRepeatedPeerReconnectRequests checks only
+// that the loop takes the paced path: the runner package's own test already
+// measures the pacing interval, and runner.peerReconnectMinInterval is
+// unexported so this package cannot shrink it to check the interval cheaply.
+func TestRunForever_TakesThePacedPathOnRepeatedPeerReconnectRequests(t *testing.T) {
+	s := testutil.NewReconnectPeerServer(t)
+	origWSPath := config.GlobalSettings.WSPath
+	config.GlobalSettings.WSPath = s.URL
+	t.Cleanup(func() { config.GlobalSettings.WSPath = origWSPath })
+
+	c := &Client{WsClient: runner.NewWebsocketClient(nil, nil, nil)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.RunForever(ctx)
+	}()
+
+	require.Eventually(t, func() bool {
+		return len(s.Connections()) >= 2
+	}, 15*time.Second, 20*time.Millisecond, "the read loop did not reconnect at least twice")
+
+	assert.Never(t, func() bool {
+		return len(s.Connections()) >= 3
+	}, time.Second, 10*time.Millisecond, "a third connection arrived before the pacing interval, so the loop skipped the paced wait")
+
+	cancel()
+	<-done
 }
