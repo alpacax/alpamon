@@ -188,7 +188,22 @@ jobs:
             container: rockylinux/rockylinux:9
             arch: amd64
             install_cmd: dnf install -y
-    container: ${{ matrix.container }}
+          # Proves zypper resolves the rpm's EL dependency names on SUSE.
+          - pkg_type: rpm
+            container: opensuse/leap:15.6
+            arch: amd64
+            install_cmd: zypper --non-interactive install --allow-unsigned-rpm
+          - pkg_type: rpm
+            container: opensuse/leap:16.0
+            arch: amd64
+            install_cmd: zypper --non-interactive install --allow-unsigned-rpm
+    # Pinned so a later step that prepends to PATH keeps /usr/bin: the runner
+    # then rebuilds PATH from the container's Config.Env, which neither the
+    # Leap nor the Rocky image sets.
+    container:
+      image: ${{ matrix.container }}
+      env:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     steps:
       - name: Set package name
         run: |
@@ -214,7 +229,12 @@ jobs:
         run: ${{ matrix.install_cmd }} ./${{ env.PKG_NAME }}
 
       - name: Smoke test
-        run: alpamon --help
+        run: |
+          set -x
+          /usr/bin/alpamon --help
+          # Leap 15's systemd searches both directories; usrmerged hosts
+          # have only one.
+          test -f /usr/lib/systemd/system/alpamon.service || test -f /lib/systemd/system/alpamon.service
 
   windows-smoke-test:
     # Windows archives are cross-compiled on the Ubuntu runner (see
