@@ -40,21 +40,13 @@ var (
 		"/dev":  true,
 	}
 	virtualMountPointPattern = regexp.MustCompile("^/(sys|proc|run|dev/|System|Volumes/Recovery|private/var/vm)")
-	virtualInterfaceFlags    = map[string]bool{
-		"flagloopback":     true,
-		"flagpointtopoint": true,
-	}
-	loopFileSystemPrefix = "/dev/loop"
-	virtaulDiskPattern   = regexp.MustCompile(`^(loop|ram|fd|sr|zram)\d*$`)
-	nvmeDiskPattern      = regexp.MustCompile(`^(nvme\d+n\d+)(p\d+)?$`)
-	scsiDiskPattern      = regexp.MustCompile(`^([a-z]+)(\d+)?$`)
-	mmcDiskPattern       = regexp.MustCompile(`^(mmcblk\d+)(p\d+)?$`)
-	lvmDiskPattern       = regexp.MustCompile(`^(dm-\d+)$`)
-	macDiskPattern       = regexp.MustCompile(`^(disk\d+)(s\d+)?$`)
-	// Matched by prefix and nothing more, so an entry must not also be a prefix
-	// of a physical interface name. systemd predictable names such as enp0s3 and
-	// enp0s31f6 belong to physical NICs on PCI bus 0, so no enp prefix goes here.
-	VirtualIfacePattern = regexp.MustCompile(`^(lo|docker|veth|br-|virbr|vmnet|tap|tun|wg|zt|tailscale|cni|utun|awdl|llw|bridge|anpi|ap|Loopback|isatap|Teredo|6to4)`)
+	loopFileSystemPrefix     = "/dev/loop"
+	virtaulDiskPattern       = regexp.MustCompile(`^(loop|ram|fd|sr|zram)\d*$`)
+	nvmeDiskPattern          = regexp.MustCompile(`^(nvme\d+n\d+)(p\d+)?$`)
+	scsiDiskPattern          = regexp.MustCompile(`^([a-z]+)(\d+)?$`)
+	mmcDiskPattern           = regexp.MustCompile(`^(mmcblk\d+)(p\d+)?$`)
+	lvmDiskPattern           = regexp.MustCompile(`^(dm-\d+)$`)
+	macDiskPattern           = regexp.MustCompile(`^(disk\d+)(s\d+)?$`)
 )
 
 func CalculateNetworkBps(current net.IOCountersStat, last net.IOCountersStat, interval time.Duration) (inputBps float64, outputBps float64) {
@@ -168,33 +160,4 @@ func GetDiskBaseName(name string) string {
 	}
 
 	return name
-}
-
-func FilterVirtualInterface(ifaces net.InterfaceStatList) map[string]net.InterfaceStat {
-	interfaces := make(map[string]net.InterfaceStat)
-	for _, iface := range ifaces {
-		if iface.HardwareAddr == "" {
-			continue
-		}
-
-		if VirtualIfacePattern.MatchString(iface.Name) {
-			continue
-		}
-
-		isVirtualFlag := false
-		for _, flag := range iface.Flags {
-			if virtualInterfaceFlags[strings.ToLower(flag)] {
-				isVirtualFlag = true
-				break
-			}
-		}
-
-		if isVirtualFlag {
-			continue
-		}
-
-		interfaces[iface.Name] = iface
-	}
-
-	return interfaces
 }

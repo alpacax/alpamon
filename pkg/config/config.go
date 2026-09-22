@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -234,6 +235,14 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 		log.Debug().Msg("No download size limit configured (unlimited).")
 	}
 
+	// Virtual interfaces are left out of what the agent reports unless they are
+	// named here. An empty list reports none of them.
+	settings.IncludeVirtualInterfaces = validInterfacePatterns(config.Interface.IncludeVirtual)
+	if len(settings.IncludeVirtualInterfaces) > 0 {
+		log.Debug().Msgf("Reporting virtual interfaces matching: %s",
+			strings.Join(settings.IncludeVirtualInterfaces, ", "))
+	}
+
 	// Validate pool settings are reasonable
 	if settings.PoolMaxWorkers > MaxReasonableWorkers {
 		log.Warn().Msgf("Pool max workers (%d) seems very high, consider reducing it", settings.PoolMaxWorkers)
@@ -246,6 +255,29 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 	}
 
 	return valid, settings
+}
+
+// validInterfacePatterns returns the usable interface include patterns,
+// dropping the ones that are empty or malformed. An unusable pattern is
+// reported and skipped rather than refused: it would otherwise stop the agent
+// from starting over a setting that can only widen what it reports.
+func validInterfacePatterns(patterns []string) []string {
+	valid := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+
+		if _, err := path.Match(pattern, "interface"); err != nil {
+			log.Warn().Err(err).Msgf("Ignoring malformed interface include pattern %q.", pattern)
+			continue
+		}
+
+		valid = append(valid, pattern)
+	}
+
+	return valid
 }
 
 func Files(name string) []string {

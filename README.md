@@ -137,6 +137,21 @@ verify = true
 debug = false
 ```
 
+### Interface reporting
+
+Alpamon reports the interfaces backed by hardware, together with the virtual links an operator configures on the host: bridges, bonds, VLANs and VXLANs. Every other virtual interface, such as one half of a veth pair, a macvlan or ipvlan child, or a tun, tap or dummy device, is left out of both the reported interface list and the traffic counters. Loopback is never reported.
+
+Name the ones to report anyway, by exact name or by glob:
+
+```ini
+[interface]
+include_virtual = br0, veth*
+```
+
+On Linux the kind of a link is read from sysfs. macOS and Windows expose none, so there the interface name decides instead.
+
+A machine whose interfaces are all virtual, such as one running inside a container, reports none of them until this setting names one.
+
 ## Service management
 
 ### Linux (systemd)

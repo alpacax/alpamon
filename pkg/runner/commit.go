@@ -588,17 +588,14 @@ func getNetworkInterfaces() ([]Interface, error) {
 }
 
 // buildInterfaces maps the interfaces the operating system reports onto the
-// ones the agent reports, leaving out the virtual ones and any that carry no
-// hardware address.
+// ones the agent reports. utils.ReportableInterface decides which those are,
+// and the traffic collector asks it the same question, so the inventory and
+// the traffic counters cover the same interfaces.
 func buildInterfaces(ifaces []net.Interface) []Interface {
 	interfaces := []Interface{}
 	for _, iface := range ifaces {
 		mac := iface.HardwareAddr.String()
-		if mac == "" {
-			continue
-		}
-
-		if utils.VirtualIfacePattern.MatchString(iface.Name) {
+		if !utils.ReportableInterface(iface.Name, mac, iface.Flags&net.FlagLoopback != 0) {
 			continue
 		}
 
@@ -642,12 +639,8 @@ func getNetworkAddresses() ([]Address, error) {
 
 	addresses := []Address{}
 	for _, iface := range ifaces {
-		mac := iface.HardwareAddr.String()
-		if mac == "" {
-			continue
-		}
-
-		if utils.VirtualIfacePattern.MatchString(iface.Name) {
+		if !utils.ReportableInterface(iface.Name, iface.HardwareAddr.String(),
+			iface.Flags&net.FlagLoopback != 0) {
 			continue
 		}
 

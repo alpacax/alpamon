@@ -10,8 +10,11 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	gopsutilnet "github.com/shirou/gopsutil/v4/net"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
 func TestGetLoadAverage(t *testing.T) {
@@ -137,7 +140,9 @@ func TestGetNetworkInterfaces(t *testing.T) {
 	networkInterfaces, err := getNetworkInterfaces()
 	assert.NoError(t, err, "Failed to get network interfaces")
 
-	assert.NotEmpty(t, networkInterfaces, "Network interfaces should not be empty.")
+	// The list is not asserted to hold anything: on a machine whose every
+	// interface is virtual, one running inside a container for instance, the
+	// agent reports none of them until the configuration names one.
 	for _, iface := range networkInterfaces {
 		assert.NotEmpty(t, iface.Name, "Interface name should not be empty.")
 		assert.NotEmpty(t, iface.Mac, "MAC address should not be empty.")
@@ -166,7 +171,7 @@ func TestBuildInterfacesReportsUnknownMTUAsUnset(t *testing.T) {
 	for i, tt := range tests {
 		ifaces = append(ifaces, net.Interface{
 			Index:        i + 1,
-			Name:         fmt.Sprintf("eth%d", i),
+			Name:         fmt.Sprintf("mtucheck%d", i),
 			MTU:          tt.mtu,
 			HardwareAddr: mac,
 			Flags:        net.FlagUp,
@@ -185,7 +190,7 @@ func TestBuildInterfacesReportsUnknownMTUAsUnset(t *testing.T) {
 
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, fmt.Sprintf("eth%d", i), got[i].Name)
+			assert.Equal(t, fmt.Sprintf("mtucheck%d", i), got[i].Name)
 
 			if tt.wantUnset {
 				assert.Nil(t, got[i].MTU)
@@ -199,6 +204,59 @@ func TestBuildInterfacesReportsUnknownMTUAsUnset(t *testing.T) {
 			assert.Equal(t, float64(tt.mtu), rows[i]["mtu"])
 		})
 	}
+}
+
+// The inventory and the traffic collector classify interfaces with the same
+// predicate, so the interfaces the agent lists and the ones it counts traffic
+// for cannot be different sets.
+func TestReportedInterfacesMatchTheTrafficFilter(t *testing.T) {
+	mac, err := net.ParseMAC("02:00:00:00:00:01")
+	require.NoError(t, err)
+
+	// Names no machine carries: a real name would be classified by the link
+	// kinds of whichever machine runs the test, and both sides would then agree
+	// on an answer this test did not choose.
+	ifaces := []net.Interface{
+		{Index: 1, Name: "nicsetcheck0", MTU: 1500, HardwareAddr: mac, Flags: net.FlagUp},
+		{Index: 2, Name: "vethsetcheck0", MTU: 1500, HardwareAddr: mac, Flags: net.FlagUp},
+		{Index: 3, Name: "losetcheck0", MTU: 65536, HardwareAddr: mac, Flags: net.FlagUp | net.FlagLoopback},
+		{Index: 4, Name: "addresslesssetcheck0", MTU: 1500, Flags: net.FlagUp},
+	}
+
+	// What the traffic collector is handed for the same interfaces.
+	stats := make(gopsutilnet.InterfaceStatList, 0, len(ifaces))
+	for _, iface := range ifaces {
+		flags := []string{"up"}
+		if iface.Flags&net.FlagLoopback != 0 {
+			flags = append(flags, "loopback")
+		}
+
+		stats = append(stats, gopsutilnet.InterfaceStat{
+			Index:        iface.Index,
+			Name:         iface.Name,
+			MTU:          iface.MTU,
+			HardwareAddr: iface.HardwareAddr.String(),
+			Flags:        flags,
+		})
+	}
+
+	inventory := []string{}
+	for _, iface := range buildInterfaces(ifaces) {
+		inventory = append(inventory, iface.Name)
+	}
+
+	traffic := []string{}
+	for name := range utils.FilterVirtualInterface(stats) {
+		traffic = append(traffic, name)
+	}
+
+	slices.Sort(inventory)
+	slices.Sort(traffic)
+
+	assert.Equal(t, []string{"nicsetcheck0"}, inventory,
+		"a virtual interface, loopback and an interface with no hardware address are all left out")
+	assert.Equal(t, inventory, traffic,
+		"the inventory and the traffic counters cover the same interfaces")
 }
 
 // The sync comparison runs over the value GetComparableData returns, so the MTU
@@ -227,7 +285,8 @@ func TestGetNetworkAddresses(t *testing.T) {
 	addresses, err := getNetworkAddresses()
 	assert.NoError(t, err, "Failed to get network addresses")
 
-	assert.NotEmpty(t, addresses, "Network addresses should not be empty.")
+	// As in TestGetNetworkInterfaces, an empty list is a legitimate answer on a
+	// machine that has only virtual interfaces.
 	for _, addr := range addresses {
 		assert.NotEmpty(t, addr.Address, "Address should not be empty.")
 		assert.NotEmpty(t, addr.Broadcast, "Broadcast address should not be empty.")
