@@ -35,6 +35,7 @@ type WebsocketClient struct {
 	// mu guards Conn: Connect writes it from the read loop; Close reads it on shutdown.
 	mu sync.Mutex
 	// Conn stays exported for outside readers; inside this package use the accessors.
+	//
 	// Deprecated: use SetReadDeadline, ReadMessage and WriteJSON.
 	Conn *websocket.Conn
 
