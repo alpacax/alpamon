@@ -15,6 +15,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/collector/check"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/collector/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/collector/transporter"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -289,6 +290,28 @@ func (f *hangingTransporter) calls() int {
 	return f.attempts
 }
 
+// rejectingTransporter always fails Send with transporter.ErrRejected,
+// standing in for a server that refuses every payload with a 400.
+type rejectingTransporter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *rejectingTransporter) Send(_ base.MetricData) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+
+	return transporter.ErrRejected
+}
+
+func (f *rejectingTransporter) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.calls
+}
+
 // testMetric gives each metric a name of its own, which is what lets a test
 // say which queue a metric came from and whether it arrived exactly once.
 func testMetric(name string) base.MetricData {
@@ -416,4 +439,37 @@ func TestStop_FlushesWhatTheQueueWorkersLeaveBehind(t *testing.T) {
 	require.Error(t, c.ctx.Err(), "the collector's context is already cancelled when the flush runs")
 	assert.Equal(t, queued, transport.received(), "nothing queued at shutdown is dropped or sent twice while the server is answering")
 	c.flushWG.Wait()
+}
+
+// A metric the server has already refused with a 400 is not a delivery.
+// transporter.ErrRejected is a distinct non-nil error precisely so the flush
+// does not count it as sent alongside the ones that actually reached the
+// server.
+func TestStop_CountsARejectedMetricAsDroppedNotSent(t *testing.T) {
+	logs := captureLogs(t)
+
+	c := newTestCollector()
+	c.transporter = &rejectingTransporter{}
+
+	queueMetrics(c.buffer.SuccessQueue, "rejected", 3)
+
+	c.Stop()
+
+	assert.Contains(t, logs.String(), "flushed 0 pending metric(s) on stop, dropped 3")
+	c.flushWG.Wait()
+}
+
+// A rejection stops the retry loop the same way success does: the server
+// has already refused this metric once and would refuse it again, so
+// retrying it is exactly the request that got the 400 in the first place.
+func TestRetryWithBackoff_DoesNotRetryARejectedMetric(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		transport := &rejectingTransporter{}
+		c := &Collector{transporter: transport}
+
+		err := c.retryWithBackoff(context.Background(), testMetric("rejected"))
+
+		require.NoError(t, err, "a rejection is handled like success, not treated as a failed attempt")
+		assert.Equal(t, 1, transport.callCount(), "the rejected metric is sent once and not retried")
+	})
 }

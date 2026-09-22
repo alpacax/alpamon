@@ -69,7 +69,7 @@ func TestSend_LogsARejectedPayloadAndDoesNotRetryIt(t *testing.T) {
 
 	err := transporter.Send(testMetric())
 
-	require.NoError(t, err, "a 400 is not an error the caller should retry")
+	require.ErrorIs(t, err, ErrRejected, "a 400 is not an error a caller should retry, but it is not a delivery either")
 	assert.Equal(t, int64(1), requests.Load(), "the metric is sent once and not again")
 
 	logged := logs.String()
@@ -84,7 +84,7 @@ func TestSend_KeepsTheRejectionBodyAndCredentialsOutOfTheLog(t *testing.T) {
 	logs := captureLogs(t)
 	transporter, _ := newTestTransporter(t, http.StatusBadRequest, "payload-echoed-back")
 
-	require.NoError(t, transporter.Send(testMetric()))
+	require.ErrorIs(t, transporter.Send(testMetric()), ErrRejected)
 
 	logged := logs.String()
 	assert.NotContains(t, logged, "payload-echoed-back")

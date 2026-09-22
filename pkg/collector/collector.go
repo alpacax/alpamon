@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -193,8 +194,12 @@ func (c *Collector) successQueueWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case metric := <-c.buffer.SuccessQueue:
+			// ErrRejected means the server has already refused this metric
+			// and would refuse it again, so it is handled like success here:
+			// left off the retry queue. flushPending is what still needs to
+			// tell the two apart, off Send's return value directly.
 			err := c.transporter.Send(metric)
-			if err != nil {
+			if err != nil && !errors.Is(err, transporter.ErrRejected) {
 				if pubErr := c.buffer.PublishFailure(ctx, metric); pubErr != nil {
 					return
 				}
@@ -236,8 +241,11 @@ func (c *Collector) retryWithBackoff(ctx context.Context, metric base.MetricData
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(time.Duration(1<<retryCount) * delay):
+			// ErrRejected stops the retry loop the same way success does:
+			// the server has already refused this metric and would refuse
+			// it again.
 			err := c.transporter.Send(metric)
-			if err != nil {
+			if err != nil && !errors.Is(err, transporter.ErrRejected) {
 				retryCount++
 				continue
 			}
@@ -341,6 +349,10 @@ func (c *Collector) flushPending(ctx context.Context) (sent int, dropped int) {
 			default:
 			}
 
+			// err == nil is a true delivery here, not just "do not retry":
+			// transporter.ErrRejected is a distinct non-nil error, so a
+			// metric the server rejected with 400 counts as dropped below,
+			// the same as one a timeout or a dead connection took down.
 			if err := c.transporter.Send(metric); err == nil {
 				flushed.Add(1)
 			}
