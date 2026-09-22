@@ -35,6 +35,11 @@ import (
 // Only RunForever acts on it, because it reapplies the read limit afterwards.
 type handlerOutcome int
 
+const (
+	outcomeContinue handlerOutcome = iota
+	outcomeReconnect
+)
+
 // command is the lean frame the shared dispatcher decodes — Query plus
 // Reason. The plugin-private “reconfigure“ payload carries additional
 // fields (Config map[string]string) that each plugin re-decodes from
@@ -86,11 +91,6 @@ type Client struct {
 // enforced both at the gorilla connection layer (SetReadLimit) and as a
 // secondary guard inside the handler.
 const MaxMessageSize = 10 * 1024 * 1024
-
-const (
-	outcomeContinue handlerOutcome = iota
-	outcomeReconnect
-)
 
 // validQueries is the whitelist of WS command query types the shared
 // dispatcher knows about. Anything else is rejected with a log line
@@ -262,13 +262,6 @@ func (c *Client) configWorker(ctx context.Context) {
 	}
 }
 
-func (c *Client) setReadLimit() {
-	if c.WsClient == nil {
-		return
-	}
-	c.WsClient.SetReadLimit(MaxMessageSize)
-}
-
 // RunForever maintains the WebSocket connection and dispatches every
 // inbound frame through handleMessage until ctx is cancelled or the
 // remote sends “quit“.
@@ -283,7 +276,7 @@ func (c *Client) RunForever(ctx context.Context) {
 	if err := c.WsClient.Connect(ctx); err != nil {
 		return
 	}
-	c.setReadLimit()
+	c.WsClient.SetReadLimit(MaxMessageSize)
 
 	for {
 		select {
@@ -296,7 +289,7 @@ func (c *Client) RunForever(ctx context.Context) {
 				if err = c.WsClient.CloseAndReconnect(ctx); err != nil {
 					return
 				}
-				c.setReadLimit()
+				c.WsClient.SetReadLimit(MaxMessageSize)
 				continue
 			}
 			_, message, err := c.WsClient.ReadMessage()
@@ -304,14 +297,14 @@ func (c *Client) RunForever(ctx context.Context) {
 				if err = c.WsClient.CloseAndReconnect(ctx); err != nil {
 					return
 				}
-				c.setReadLimit()
+				c.WsClient.SetReadLimit(MaxMessageSize)
 				continue
 			}
 			if c.handleMessage(ctx, message) == outcomeReconnect {
 				if err = c.WsClient.CloseAndReconnectOnRequest(ctx); err != nil {
 					return
 				}
-				c.setReadLimit()
+				c.WsClient.SetReadLimit(MaxMessageSize)
 			}
 		}
 	}
