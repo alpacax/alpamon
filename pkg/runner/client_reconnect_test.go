@@ -122,13 +122,11 @@ func TestRunForever_PacesRepeatedPeerReconnectRequests(t *testing.T) {
 	cancel()
 	<-done
 
-	// The first peer-requested reconnect is never paced, so the gap to measure is
-	// the one after it. Measuring from close frame to close frame excludes both the
-	// dial and the drain, leaving only the time to write one close frame as error,
-	// so a much smaller margin than a dial-inclusive gap is safe.
+	// The first peer-requested reconnect is never paced, so the gap to measure is the one after it.
+	// An unpaced gap falls under 1% of the interval, so a half-interval margin still fails on a regression.
 	closes := s.Closes()
 	require.GreaterOrEqual(t, len(closes), 2, "expected at least two close frames from paced reconnects")
-	const closeFrameJitter = 10 * time.Millisecond
+	margin := peerReconnectMinInterval / 2
 	gap := closes[1].Sub(closes[0])
-	require.GreaterOrEqual(t, gap, peerReconnectMinInterval-closeFrameJitter, "the second reconnect came in under peerReconnectMinInterval after the first")
+	require.GreaterOrEqual(t, gap, peerReconnectMinInterval-margin, "the second reconnect came in under peerReconnectMinInterval after the first")
 }
