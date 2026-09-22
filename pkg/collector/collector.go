@@ -307,14 +307,19 @@ func (c *Collector) Stop() {
 // ctx and stops. The metric that send was carrying is counted as dropped
 // whatever it goes on to do.
 //
-// Stop is what establishes the preconditions, and they are not equally
-// strong on both sides. Readers: the queue workers are gone by then, since
-// Stop cancels the context and waits on wg, so the drain has the queues to
-// itself. Writers: Start launches the scheduler outside wg and
-// Scheduler.Stop does not wait for it, so a check that is still running can
-// publish after the drain has gone past. That metric is dropped exactly as
-// it is dropped today, and #453 is what makes the scheduler joinable; this
-// drain covers it for free once that lands.
+// Stop is what establishes the preconditions, and neither one is a hard
+// guarantee: both are bounded by ShutdownWaitBudget, not joined
+// unconditionally. Readers: Stop's own wait on wg can expire with a worker
+// still running, and that worker can still be receiving from the same
+// queue the drain is reading. Writers: Scheduler.Stop joins the scheduler's
+// goroutines within the same budget, so a check that has not returned
+// within it can still publish after the drain has gone past. Either way a
+// straggler races the drain for individual metrics, not the channel, so
+// nothing panics and nothing is double-counted—a metric they were both
+// about to take simply goes to whichever gets there first, and a check that
+// publishes after the drain has gone past is dropped exactly as it is
+// dropped today. Ordinarily both waits join well within their budget, so
+// the drain has the queues to itself.
 func (c *Collector) flushPending(ctx context.Context) (sent int, dropped int) {
 	pending := append(drainQueue(c.buffer.SuccessQueue), drainQueue(c.buffer.FailureQueue)...)
 	if len(pending) == 0 {
