@@ -33,6 +33,15 @@ const (
 	eventCommandChunkURL  = "/api/events/commands/%s/chunk/"
 )
 
+// handlerOutcome carries what a message handler wants done with the connection.
+// Only the read loop acts on it; the handler never touches the socket itself.
+type handlerOutcome int
+
+const (
+	outcomeContinue handlerOutcome = iota
+	outcomeReconnect
+)
+
 type WebsocketClient struct {
 	Conn                 *websocket.Conn
 	requestHeader        http.Header
@@ -163,7 +172,12 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 					(*cb)()
 				}
 			}
-			wc.CommandRequestHandler(message)
+			if wc.commandRequestHandler(message) == outcomeReconnect {
+				if err := wc.CloseAndReconnect(ctx); err != nil {
+					return
+				}
+				authenticatedThisConn = false
+			}
 		}
 	}
 }
@@ -273,15 +287,21 @@ func (wc *WebsocketClient) RestartCollector() {
 	}
 }
 
+// CommandRequestHandler is kept for external callers, but a reconnect request
+// is silently dropped here: only commandRequestHandler's caller acts on it.
 func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
+	_ = wc.commandRequestHandler(message)
+}
+
+func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome {
 	if len(message) == 0 {
-		return
+		return outcomeContinue
 	}
 
 	msg, err := protocol.ParseMessage(message)
 	if err != nil {
 		log.Warn().Err(err).Msgf("Inappropriate message: %s.", string(message))
-		return
+		return outcomeContinue
 	}
 
 	switch msg.Query {
@@ -293,7 +313,7 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 	case protocol.MessageTypeCommand:
 		if msg.Command == nil {
 			log.Warn().Msg("Command message without command data")
-			return
+			return outcomeContinue
 		}
 
 		// Verify signature before ACK
@@ -311,7 +331,7 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 					Msg("Command signature verification failed.")
 			}
 			wc.rejectCommand(msg.Command.ID, err.Error())
-			return
+			return outcomeContinue
 		}
 
 		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandAckURL, msg.Command.ID),
@@ -323,7 +343,7 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 		data, err := msg.Command.ParseCommandData()
 		if err != nil {
 			log.Warn().Err(err).Msgf("Failed to parse command data: %s.", string(message))
-			return
+			return outcomeContinue
 		}
 
 		// Use modular handler system
@@ -344,10 +364,12 @@ func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
 		wc.ShutDown()
 	case protocol.MessageTypeReconnect:
 		log.Debug().Msgf("Reconnect requested for reason: %s.", msg.Reason)
-		wc.Close()
+		return outcomeReconnect
 	default:
 		log.Warn().Msgf("Not implemented query: %s.", msg.Query)
 	}
+
+	return outcomeContinue
 }
 
 func (wc *WebsocketClient) WriteJSON(data any) error {
