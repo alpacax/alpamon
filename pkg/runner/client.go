@@ -33,6 +33,11 @@ const (
 	eventCommandChunkURL  = "/api/events/commands/%s/chunk/"
 )
 
+// peerReconnectMinInterval paces peer-requested reconnects: the console can
+// ask for one in a loop, and connectForever only paces failed dials. A var,
+// not a const, so tests can shrink it instead of running at real pacing.
+var peerReconnectMinInterval = 5 * time.Second
+
 // handlerOutcome carries what a message handler wants done with the connection.
 // Only the read loop acts on it; the handler never touches the socket itself.
 type handlerOutcome int
@@ -47,6 +52,10 @@ type WebsocketClient struct {
 	// mu guards Conn: Connect writes it from the read loop; Close reads it on shutdown.
 	// Conn stays exported for outside readers; inside this package use the accessors.
 	mu sync.Mutex
+
+	// lastPeerReconnect is owned by the read loop goroutine alone: one read
+	// loop per client, so it needs no lock.
+	lastPeerReconnect time.Time
 
 	requestHeader        http.Header
 	apiSession           *scheduler.Session
@@ -212,7 +221,7 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 				}
 			}
 			if wc.commandRequestHandler(message) == outcomeReconnect {
-				if err := wc.CloseAndReconnect(ctx); err != nil {
+				if err := wc.CloseAndReconnectOnRequest(ctx); err != nil {
 					return
 				}
 				authenticatedThisConn = false
@@ -278,6 +287,25 @@ func (wc *WebsocketClient) CloseAndReconnect(ctx context.Context) error {
 	}
 	wc.closeAndDrain()
 	return wc.Connect(ctx)
+}
+
+// CloseAndReconnectOnRequest paces a peer-requested reconnect so a
+// malfunctioning or compromised console cannot drive an unbounded dial loop.
+// Call it only from the read loop: it calls CloseAndReconnect, which owns the reads.
+func (wc *WebsocketClient) CloseAndReconnectOnRequest(ctx context.Context) error {
+	// A zero lastPeerReconnect makes wait negative, so the first request never pauses.
+	if wait := peerReconnectMinInterval - time.Since(wc.lastPeerReconnect); wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	wc.lastPeerReconnect = time.Now()
+	return wc.CloseAndReconnect(ctx)
 }
 
 // Close sends a close frame and closes the connection. It does not drain the

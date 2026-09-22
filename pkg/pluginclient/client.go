@@ -314,7 +314,7 @@ func (c *Client) RunForever(ctx context.Context) {
 				continue
 			}
 			if c.handleMessage(ctx, message) == outcomeReconnect {
-				if err = c.WsClient.CloseAndReconnect(ctx); err != nil {
+				if err = c.WsClient.CloseAndReconnectOnRequest(ctx); err != nil {
 					return
 				}
 				c.setReadLimit()
