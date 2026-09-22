@@ -2,6 +2,8 @@ package utils
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestVirtualIfacePattern(t *testing.T) {
@@ -42,14 +44,20 @@ func TestVirtualIfacePattern(t *testing.T) {
 		{"en1", "en1", false},
 		{"wlan", "wlan0", false},
 		{"ens", "ens192", false},
+		// Physical NICs whose predictable names start with enp, including the
+		// onboard and hypervisor-default cards sitting on PCI bus 0
+		{"enp onboard", "enp0s31f6", false},
+		{"enp slot 3", "enp0s3", false},
+		{"enp slot 8", "enp0s8", false},
+		{"enp slot 25", "enp0s25", false},
+		{"enp bus 1", "enp1s0", false},
+		{"eno onboard", "eno1", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := VirtualIfacePattern.MatchString(tt.iface)
-			if got != tt.virtual {
-				t.Errorf("VirtualIfacePattern.MatchString(%q) = %v, want %v", tt.iface, got, tt.virtual)
-			}
+			assert.Equal(t, tt.virtual, VirtualIfacePattern.MatchString(tt.iface),
+				"VirtualIfacePattern.MatchString(%q)", tt.iface)
 		})
 	}
 }
