@@ -128,7 +128,7 @@ type Interface struct {
 	Mac       string `json:"mac"`
 	Type      int    `json:"type"`
 	Flags     int    `json:"flags"`
-	MTU       int    `json:"mtu"`
+	MTU       *int   `json:"mtu,omitempty"` // nil when the operating system reported no MTU; see reportedMTU
 	LinkSpeed int    `json:"link_speed"`
 }
 
