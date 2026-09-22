@@ -368,12 +368,6 @@ func (wc *WebsocketClient) RestartCollector() {
 	}
 }
 
-// CommandRequestHandler is kept for external callers, but a reconnect request
-// is silently dropped here: only commandRequestHandler's caller acts on it.
-func (wc *WebsocketClient) CommandRequestHandler(message []byte) {
-	_ = wc.commandRequestHandler(message)
-}
-
 func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome {
 	if len(message) == 0 {
 		return outcomeContinue
