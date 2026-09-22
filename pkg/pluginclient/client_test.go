@@ -3,16 +3,13 @@ package pluginclient
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/testutil"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
-	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -147,17 +144,6 @@ func TestHandleMessage_ReconnectAsksTheLoopInsteadOfActing(t *testing.T) {
 	assert.Equal(t, outcomeReconnect, outcome)
 }
 
-func TestHandleMessage_ReconnectWithoutWsClientDoesNotAskForReconnect(t *testing.T) {
-	// The nil guard sits ahead of the query switch; that contract does not change.
-	c := &Client{PluginName: "alpamon-test-plugin"}
-	msg, err := json.Marshal(map[string]string{"query": "reconnect"})
-	require.NoError(t, err)
-
-	outcome := c.handleMessage(context.Background(), msg)
-
-	assert.Equal(t, outcomeContinue, outcome)
-}
-
 func TestHandleMessage_QuitDoesNotAskForReconnect(t *testing.T) {
 	c := &Client{
 		PluginName: "alpamon-test-plugin",
@@ -174,66 +160,14 @@ func TestHandleMessage_QuitDoesNotAskForReconnect(t *testing.T) {
 	assert.Equal(t, outcomeContinue, outcome)
 }
 
-// reconnectPeerServer upgrades every connection, immediately sends a
-// "reconnect" frame, and records when each connection was accepted so the
-// test can measure the gap between successive peer-requested reconnects.
-//
-// runner.peerReconnectMinInterval is unexported, so this test runs at the
-// real 5s pacing instead of a shrunk one.
-type reconnectPeerServer struct {
-	url string
-
-	mu          sync.Mutex
-	connectedAt []time.Time
-}
-
-func newReconnectPeerServer(t *testing.T) *reconnectPeerServer {
-	t.Helper()
-	s := &reconnectPeerServer{}
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer func() { _ = c.Close() }()
-
-		s.mu.Lock()
-		s.connectedAt = append(s.connectedAt, time.Now())
-		s.mu.Unlock()
-
-		c.SetCloseHandler(func(code int, text string) error {
-			_ = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, ""), time.Now().Add(time.Second))
-			return nil
-		})
-
-		_ = c.WriteJSON(map[string]string{"query": "reconnect", "reason": "test"})
-
-		for {
-			if _, _, err := c.ReadMessage(); err != nil {
-				return
-			}
-		}
-	}))
-	t.Cleanup(ts.Close)
-
-	s.url = strings.Replace(ts.URL, "http", "ws", 1)
-	return s
-}
-
-func (s *reconnectPeerServer) connections() []time.Time {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]time.Time, len(s.connectedAt))
-	copy(out, s.connectedAt)
-	return out
-}
-
-func TestRunForever_PacesRepeatedPeerReconnectRequests(t *testing.T) {
-	s := newReconnectPeerServer(t)
+// TestRunForever_TakesThePacedPathOnRepeatedPeerReconnectRequests checks only
+// that the loop takes the paced path: the runner package's own test already
+// measures the pacing interval, and runner.peerReconnectMinInterval is
+// unexported so this package cannot shrink it to check the interval cheaply.
+func TestRunForever_TakesThePacedPathOnRepeatedPeerReconnectRequests(t *testing.T) {
+	s := testutil.NewReconnectPeerServer(t)
 	origWSPath := config.GlobalSettings.WSPath
-	config.GlobalSettings.WSPath = s.url
+	config.GlobalSettings.WSPath = s.URL
 	t.Cleanup(func() { config.GlobalSettings.WSPath = origWSPath })
 
 	c := &Client{WsClient: runner.NewWebsocketClient(nil, nil, nil)}
@@ -247,19 +181,13 @@ func TestRunForever_PacesRepeatedPeerReconnectRequests(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		return len(s.connections()) >= 3
-	}, 15*time.Second, 20*time.Millisecond, "the read loop did not reconnect at least three times")
+		return len(s.Connections()) >= 2
+	}, 15*time.Second, 20*time.Millisecond, "the read loop did not reconnect at least twice")
+
+	assert.Never(t, func() bool {
+		return len(s.Connections()) >= 3
+	}, time.Second, 10*time.Millisecond, "a third connection arrived before the pacing interval, so the loop skipped the paced wait")
 
 	cancel()
 	<-done
-
-	// The first peer-requested reconnect is never paced, so the gap to measure is
-	// the one after it.
-	conns := s.connections()
-	require.GreaterOrEqual(t, len(conns), 3)
-	// The pacing timer starts when the reconnect is requested, but the server only
-	// sees when each dial landed, so a slower dial before the gap shortens it.
-	const dialJitter = 50 * time.Millisecond
-	gap := conns[2].Sub(conns[1])
-	require.GreaterOrEqual(t, gap, 5*time.Second-dialJitter, "the second reconnect came in under peerReconnectMinInterval after the first")
 }

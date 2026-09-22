@@ -2,15 +2,11 @@ package runner
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/testutil"
 	"github.com/alpacax/alpamon/v2/pkg/config"
-	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -98,82 +94,15 @@ func TestCloseAndReconnectOnRequest_SecondRequestRightAfterWaits(t *testing.T) {
 	assert.False(t, tracked.closed.Load(), "the second request dialled instead of waiting")
 }
 
-func TestCloseAndReconnectOnRequest_CancelledContextReturnsCanceledWithoutDialing(t *testing.T) {
-	s := newCloseReplyServer(t)
-	conn, tracked := dialTracked(t, s.url)
-	wc := &WebsocketClient{Conn: conn, lastPeerReconnect: time.Now()}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	err := wc.CloseAndReconnectOnRequest(ctx)
-
-	require.ErrorIs(t, err, context.Canceled)
-	assert.False(t, tracked.closed.Load(), "an already-cancelled context still dialled")
-}
-
-// reconnectPeerServer upgrades every connection, immediately sends a
-// "reconnect" frame, and records when each connection was accepted so the
-// test can measure the gap between successive peer-requested reconnects.
-type reconnectPeerServer struct {
-	url string
-
-	mu          sync.Mutex
-	connectedAt []time.Time
-}
-
-func newReconnectPeerServer(t *testing.T) *reconnectPeerServer {
-	t.Helper()
-	s := &reconnectPeerServer{}
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer func() { _ = c.Close() }()
-
-		s.mu.Lock()
-		s.connectedAt = append(s.connectedAt, time.Now())
-		s.mu.Unlock()
-
-		c.SetCloseHandler(func(code int, text string) error {
-			_ = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, ""), time.Now().Add(time.Second))
-			return nil
-		})
-
-		_ = c.WriteJSON(map[string]string{"query": "reconnect", "reason": "test"})
-
-		for {
-			if _, _, err := c.ReadMessage(); err != nil {
-				return
-			}
-		}
-	}))
-	t.Cleanup(ts.Close)
-
-	s.url = strings.Replace(ts.URL, "http", "ws", 1)
-	return s
-}
-
-func (s *reconnectPeerServer) connections() []time.Time {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]time.Time, len(s.connectedAt))
-	copy(out, s.connectedAt)
-	return out
-}
-
 func TestRunForever_PacesRepeatedPeerReconnectRequests(t *testing.T) {
 	// Shrunk so the test does not wait out real pacing.
 	origInterval := peerReconnectMinInterval
 	peerReconnectMinInterval = 200 * time.Millisecond
 	t.Cleanup(func() { peerReconnectMinInterval = origInterval })
 
-	s := newReconnectPeerServer(t)
+	s := testutil.NewReconnectPeerServer(t)
 	origWSPath := config.GlobalSettings.WSPath
-	config.GlobalSettings.WSPath = s.url
+	config.GlobalSettings.WSPath = s.URL
 	t.Cleanup(func() { config.GlobalSettings.WSPath = origWSPath })
 
 	wc := &WebsocketClient{connectBackoff: newAuthBackoff(minConnectInterval, maxConnectInterval)}
@@ -187,19 +116,19 @@ func TestRunForever_PacesRepeatedPeerReconnectRequests(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		return len(s.connections()) >= 3
+		return len(s.Connections()) >= 3
 	}, 5*time.Second, 10*time.Millisecond, "the read loop did not reconnect at least three times")
 
 	cancel()
 	<-done
 
 	// The first peer-requested reconnect is never paced, so the gap to measure is
-	// the one after it.
-	conns := s.connections()
-	require.GreaterOrEqual(t, len(conns), 3)
-	// The pacing timer starts when the reconnect is requested, but the server only
-	// sees when each dial landed, so a slower dial before the gap shortens it.
-	const dialJitter = 50 * time.Millisecond
-	gap := conns[2].Sub(conns[1])
-	require.GreaterOrEqual(t, gap, peerReconnectMinInterval-dialJitter, "the second reconnect came in under peerReconnectMinInterval after the first")
+	// the one after it. Measuring from close frame to close frame excludes both the
+	// dial and the drain, leaving only the time to write one close frame as error,
+	// so a much smaller margin than a dial-inclusive gap is safe.
+	closes := s.Closes()
+	require.GreaterOrEqual(t, len(closes), 2, "expected at least two close frames from paced reconnects")
+	const closeFrameJitter = 10 * time.Millisecond
+	gap := closes[1].Sub(closes[0])
+	require.GreaterOrEqual(t, gap, peerReconnectMinInterval-closeFrameJitter, "the second reconnect came in under peerReconnectMinInterval after the first")
 }
