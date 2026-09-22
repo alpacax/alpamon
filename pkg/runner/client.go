@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -60,6 +61,10 @@ type WebsocketClient struct {
 	// Stored as an atomic.Pointer so concurrent SetOnAuthenticated calls
 	// from outside the RunForever goroutine race-safely with Connect.
 	onAuthenticated atomic.Pointer[func()]
+
+	// terminalOnce lets only the first of ShutDown and Restart through: root.go
+	// waits on both channels in one select, so closing both picks at random.
+	terminalOnce sync.Once
 }
 
 func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextManager, workerPool *pool.Pool) *WebsocketClient {
@@ -253,11 +258,11 @@ func drainCloseReply(conn *websocket.Conn) {
 }
 
 func (wc *WebsocketClient) ShutDown() {
-	close(wc.ShutDownChan)
+	wc.terminalOnce.Do(func() { close(wc.ShutDownChan) })
 }
 
 func (wc *WebsocketClient) Restart() {
-	close(wc.RestartChan)
+	wc.terminalOnce.Do(func() { close(wc.RestartChan) })
 }
 
 func (wc *WebsocketClient) RestartCollector() {
