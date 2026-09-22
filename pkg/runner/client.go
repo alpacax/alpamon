@@ -22,30 +22,9 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const (
-	minConnectInterval    = 5 * time.Second
-	maxConnectInterval    = 60 * time.Second
-	ConnectionReadTimeout = 35 * time.Minute
-
-	eventCommandAckURL    = "/api/events/commands/%s/ack/"
-	eventCommandFinURL    = "/api/events/commands/%s/fin/"
-	eventCommandRejectURL = "/api/events/commands/%s/reject/"
-	eventCommandChunkURL  = "/api/events/commands/%s/chunk/"
-)
-
-// peerReconnectMinInterval paces peer-requested reconnects: the console can
-// ask for one in a loop, and connectForever only paces failed dials. A var,
-// not a const, so tests can shrink it instead of running at real pacing.
-var peerReconnectMinInterval = 5 * time.Second
-
 // handlerOutcome carries what a message handler wants done with the connection.
 // Only the read loop acts on it; the handler never touches the socket itself.
 type handlerOutcome int
-
-const (
-	outcomeContinue handlerOutcome = iota
-	outcomeReconnect
-)
 
 type WebsocketClient struct {
 	Conn *websocket.Conn
@@ -88,6 +67,27 @@ type WebsocketClient struct {
 	// waits on both channels in one select, so closing both picks at random.
 	terminalOnce sync.Once
 }
+
+const (
+	minConnectInterval    = 5 * time.Second
+	maxConnectInterval    = 60 * time.Second
+	ConnectionReadTimeout = 35 * time.Minute
+
+	eventCommandAckURL    = "/api/events/commands/%s/ack/"
+	eventCommandFinURL    = "/api/events/commands/%s/fin/"
+	eventCommandRejectURL = "/api/events/commands/%s/reject/"
+	eventCommandChunkURL  = "/api/events/commands/%s/chunk/"
+)
+
+const (
+	outcomeContinue handlerOutcome = iota
+	outcomeReconnect
+)
+
+// peerReconnectMinInterval paces peer-requested reconnects: the console can
+// ask for one in a loop, and connectForever only paces failed dials. A var,
+// not a const, so tests can shrink it instead of running at real pacing.
+var peerReconnectMinInterval = 5 * time.Second
 
 func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextManager, workerPool *pool.Pool) *WebsocketClient {
 	headers := http.Header{

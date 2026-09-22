@@ -31,31 +31,9 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// MaxMessageSize is the maximum allowed WebSocket message size (10 MiB)
-// enforced both at the gorilla connection layer (SetReadLimit) and as a
-// secondary guard inside the handler.
-const MaxMessageSize = 10 * 1024 * 1024
-
-// validQueries is the whitelist of WS command query types the shared
-// dispatcher knows about. Anything else is rejected with a log line
-// and no side effect.
-var validQueries = map[string]bool{
-	"ping":           true,
-	"config_updated": true,
-	"reconfigure":    true,
-	"quit":           true,
-	"reconnect":      true,
-	"restart":        true,
-}
-
 // handlerOutcome carries what the handler wants done with the connection.
 // Only RunForever acts on it, because it reapplies the read limit afterwards.
 type handlerOutcome int
-
-const (
-	outcomeContinue handlerOutcome = iota
-	outcomeReconnect
-)
 
 // command is the lean frame the shared dispatcher decodes — Query plus
 // Reason. The plugin-private “reconfigure“ payload carries additional
@@ -104,6 +82,28 @@ type Client struct {
 	configWorkerStarted sync.Once
 }
 
+// MaxMessageSize is the maximum allowed WebSocket message size (10 MiB)
+// enforced both at the gorilla connection layer (SetReadLimit) and as a
+// secondary guard inside the handler.
+const MaxMessageSize = 10 * 1024 * 1024
+
+const (
+	outcomeContinue handlerOutcome = iota
+	outcomeReconnect
+)
+
+// validQueries is the whitelist of WS command query types the shared
+// dispatcher knows about. Anything else is rejected with a log line
+// and no side effect.
+var validQueries = map[string]bool{
+	"ping":           true,
+	"config_updated": true,
+	"reconfigure":    true,
+	"quit":           true,
+	"reconnect":      true,
+	"restart":        true,
+}
+
 // New wires a Client with the standard configreceiver.Receiver around
 // the supplied Applier. “onReconfigure“ may be nil if the plugin
 // does not (or no longer) supports the legacy push path.
@@ -120,12 +120,6 @@ func New(
 		PluginName:    pluginName,
 		OnReconfigure: onReconfigure,
 	}
-}
-
-// HandleMessage is kept for external callers, but a reconnect request is
-// silently dropped here: only handleMessage's caller acts on it.
-func (c *Client) HandleMessage(ctx context.Context, message []byte) {
-	_ = c.handleMessage(ctx, message)
 }
 
 // handleMessage runs the shared dispatch for one inbound frame. It

@@ -21,9 +21,7 @@ func TestHandleMessage_RejectsEmptyAndOversized(t *testing.T) {
 	c := &Client{}
 
 	for _, size := range []int{0, MaxMessageSize + 1} {
-		assert.NotPanics(t, func() {
-			c.HandleMessage(context.Background(), make([]byte, size))
-		})
+		assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), make([]byte, size)))
 	}
 }
 
@@ -34,9 +32,7 @@ func TestHandleMessage_RejectsUnknownQuery(t *testing.T) {
 	}
 	for _, q := range []string{"", "SELECT * FROM users", "rm -rf /", "../../etc/passwd"} {
 		msg, _ := json.Marshal(map[string]string{"query": q})
-		assert.NotPanics(t, func() {
-			c.HandleMessage(context.Background(), msg)
-		})
+		assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 	}
 	assert.False(t, called, "OnReconfigure must not fire for unknown queries")
 }
@@ -44,9 +40,7 @@ func TestHandleMessage_RejectsUnknownQuery(t *testing.T) {
 func TestHandleMessage_RejectsMalformedJSON(t *testing.T) {
 	c := &Client{}
 	for _, payload := range [][]byte{[]byte("{not json"), []byte(`{"query": 42}`)} {
-		assert.NotPanics(t, func() {
-			c.HandleMessage(context.Background(), payload)
-		})
+		assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), payload))
 	}
 }
 
@@ -56,9 +50,7 @@ func TestHandleMessage_ConfigUpdated_RejectsMissingID(t *testing.T) {
 		"query":            "config_updated",
 		"plugin_config_id": "",
 	})
-	assert.NotPanics(t, func() {
-		c.HandleMessage(context.Background(), msg)
-	})
+	assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 }
 
 func TestHandleMessage_ConfigUpdated_RejectsWhenReceiverNil(t *testing.T) {
@@ -67,9 +59,7 @@ func TestHandleMessage_ConfigUpdated_RejectsWhenReceiverNil(t *testing.T) {
 		"query":            "config_updated",
 		"plugin_config_id": "abc-123",
 	})
-	assert.NotPanics(t, func() {
-		c.HandleMessage(context.Background(), msg)
-	})
+	assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 }
 
 func TestHandleMessage_LegacyReconfigure_InvokesCallback(t *testing.T) {
@@ -88,7 +78,7 @@ func TestHandleMessage_LegacyReconfigure_InvokesCallback(t *testing.T) {
 		"query":  "reconfigure",
 		"config": map[string]string{"dhcpd.conf": "subnet 10.0.0.0 netmask 255.0.0.0 {}"},
 	})
-	c.HandleMessage(context.Background(), msg)
+	assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -98,18 +88,14 @@ func TestHandleMessage_LegacyReconfigure_InvokesCallback(t *testing.T) {
 func TestHandleMessage_LegacyReconfigure_NoopWithoutCallback(t *testing.T) {
 	c := &Client{} // OnReconfigure nil
 	msg, _ := json.Marshal(map[string]string{"query": "reconfigure"})
-	assert.NotPanics(t, func() {
-		c.HandleMessage(context.Background(), msg)
-	})
+	assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 }
 
 func TestHandleMessage_PingQuitReconnectRestart_NoopWithoutWsClient(t *testing.T) {
 	c := &Client{PluginName: "alpamon-test-plugin"}
 	for _, q := range []string{"ping", "quit", "reconnect", "restart"} {
 		msg, _ := json.Marshal(map[string]string{"query": q})
-		assert.NotPanics(t, func() {
-			c.HandleMessage(context.Background(), msg)
-		})
+		assert.Equal(t, outcomeContinue, c.handleMessage(context.Background(), msg))
 	}
 }
 
