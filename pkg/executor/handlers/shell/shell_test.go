@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -423,4 +424,48 @@ func TestShellHandler_MultiWordCommand(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, output, "total")
+}
+
+func TestExecuteWithOperators_GivenExpiredDeadline_WhenChainRuns_ThenReportsTimeout(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockExec.SetResult("echo a", 0, "a", nil)
+	mockExec.SetResult("echo b", 0, "b", nil)
+	handler := NewShellHandler(mockExec)
+
+	parentCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	args := &common.CommandArgs{
+		Command: "echo a && echo b",
+		AllowSh: false,
+	}
+
+	exitCode, output, err := handler.Execute(parentCtx, common.ShellCmd.String(), args)
+
+	require.NoError(t, err)
+	assert.Equal(t, common.TimeoutExitCode, exitCode)
+	assert.Equal(t, 1, strings.Count(output, "Command timed out after"))
+	assert.Empty(t, mockExec.GetExecutedCommands())
+}
+
+func TestExecuteWithOperators_GivenCancelledParent_WhenChainRuns_ThenStopsWithoutTimeoutBanner(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockExec.SetResult("echo a", 0, "a", nil)
+	mockExec.SetResult("echo b", 0, "b", nil)
+	handler := NewShellHandler(mockExec)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	args := &common.CommandArgs{
+		Command: "echo a ; echo b",
+		AllowSh: false,
+	}
+
+	exitCode, output, err := handler.Execute(parentCtx, common.ShellCmd.String(), args)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, strings.Count(output, "timed out"))
+	assert.NotEqual(t, common.TimeoutExitCode, exitCode)
+	assert.Empty(t, mockExec.GetExecutedCommands())
 }

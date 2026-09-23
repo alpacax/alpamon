@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"os"
 	"time"
 )
@@ -69,9 +70,9 @@ type CommandArgs struct {
 	// version lookup. Empty means no proxy (existing behavior).
 	PackageProxy string
 
-	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks.
-	// Sequencing is the caller's responsibility.
-	ChunkCallback func(content string)
+	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks with
+	// the ctx live at emit time. Sequencing is the caller's responsibility.
+	ChunkCallback func(ctx context.Context, content string)
 
 	// Firewall operations
 	Keys         []string

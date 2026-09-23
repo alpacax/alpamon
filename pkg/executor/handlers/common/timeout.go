@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -42,5 +43,26 @@ func IsTimeout(ctx context.Context) bool {
 
 // TimeoutError returns a standard timeout response (exit 124 + message).
 func TimeoutError(timeout time.Duration) (int, string, error) {
-	return TimeoutExitCode, fmt.Sprintf("Command timed out after %s", timeout.Truncate(time.Second)), context.DeadlineExceeded
+	return TimeoutExitCode, FormatTimeoutBanner(timeout), context.DeadlineExceeded
+}
+
+// timeoutBannerPrefix is the fixed portion of FormatTimeoutBanner's output,
+// used by StripTimeoutBanner to recognize and remove one.
+const timeoutBannerPrefix = "Command timed out after "
+
+// FormatTimeoutBanner is the single source of truth for the timeout banner text.
+func FormatTimeoutBanner(elapsed time.Duration) string {
+	return fmt.Sprintf("%s%s", timeoutBannerPrefix, elapsed.Truncate(time.Second))
+}
+
+// StripTimeoutBanner removes a trailing banner appended by FormatTimeoutBanner
+// (and its "\n\n" separator, when present), so a caller can replace it with its own.
+func StripTimeoutBanner(out string) string {
+	if idx := strings.LastIndex(out, "\n\n"+timeoutBannerPrefix); idx >= 0 {
+		return out[:idx]
+	}
+	if strings.HasPrefix(out, timeoutBannerPrefix) {
+		return ""
+	}
+	return out
 }

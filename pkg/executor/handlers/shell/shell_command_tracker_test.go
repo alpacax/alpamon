@@ -28,7 +28,7 @@ func (r *hookRecordingExecutor) ExecWithStreamingHook(
 	env map[string]string,
 	timeout time.Duration,
 	pidHook func(pid int),
-	chunkCallback func(content string),
+	chunkCallback func(ctx context.Context, content string),
 ) (int, string, error) {
 	r.mu.Lock()
 	r.called = true

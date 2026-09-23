@@ -16,7 +16,7 @@ func TestShellHandler_StreamingForwardsCallback(t *testing.T) {
 	var captured []string
 	args := &common.CommandArgs{
 		Command:       "echo hi",
-		ChunkCallback: func(content string) { captured = append(captured, content) },
+		ChunkCallback: func(_ context.Context, content string) { captured = append(captured, content) },
 	}
 
 	if _, _, err := handler.Execute(ctx, common.ShellCmd.String(), args); err != nil {
@@ -44,7 +44,7 @@ func TestShellHandler_StreamingAcrossOperators(t *testing.T) {
 	}
 	var seq int
 	var captured []chunk
-	callback := func(content string) {
+	callback := func(_ context.Context, content string) {
 		captured = append(captured, chunk{seq: seq, content: content})
 		seq++
 	}
@@ -85,7 +85,7 @@ func TestShellHandler_StreamingOperatorsReturnAuditResult(t *testing.T) {
 
 	args := &common.CommandArgs{
 		Command:       "cmd1 && cmd2",
-		ChunkCallback: func(content string) {},
+		ChunkCallback: func(_ context.Context, content string) {},
 	}
 
 	_, result, err := handler.Execute(ctx, common.ShellCmd.String(), args)

@@ -25,6 +25,10 @@ const (
 	chunkBackpressurePoll = 10 * time.Millisecond
 	// chunkBackpressureMaxWait caps the throttle per chunk so sustained overload can't freeze a command.
 	chunkBackpressureMaxWait = 2 * time.Second
+
+	// chunkDeliveryGrace is added to a chunk's ctx deadline to get its expiry:
+	// enough for last-second output, short enough to drop stale chunks.
+	chunkDeliveryGrace = 5 * time.Minute
 )
 
 var errQueueFull = errors.New("queue is full")
@@ -98,6 +102,10 @@ func newRequestQueue() {
 }
 
 func (rq *RequestQueue) request(method, url string, data any, priority int, due time.Time, headers Headers) {
+	rq.requestWithExpiry(method, url, data, priority, due, time.Time{}, headers)
+}
+
+func (rq *RequestQueue) requestWithExpiry(method, url string, data any, priority int, due, expiry time.Time, headers Headers) {
 	// time.Time{}: 0001-01-01 00:00:00 +0000 UTC
 	if due.IsZero() {
 		due = time.Now()
@@ -115,8 +123,8 @@ func (rq *RequestQueue) request(method, url string, data any, priority int, due 
 		data:     data,
 		headers:  h,
 		due:      due,
-		// expiry:
-		retry: RetryLimit,
+		expiry:   expiry,
+		retry:    RetryLimit,
 	}
 
 	rq.cond.L.Lock()
@@ -158,13 +166,20 @@ func (rq *RequestQueue) PostChunk(ctx context.Context, url string, data any, pri
 
 func (rq *RequestQueue) postChunk(ctx context.Context, url string, data any, priority, highWater int, poll, maxWait time.Duration) {
 	start := time.Now()
+
+	var expiry time.Time
+	if deadline, ok := ctx.Deadline(); ok {
+		expiry = deadline.Add(chunkDeliveryGrace)
+	}
+
 	for {
 		rq.cond.L.Lock()
 		size := rq.queue.Size()
 		rq.cond.L.Unlock()
 
 		if size < highWater {
-			rq.Post(url, data, priority, time.Time{})
+			// No ctx.Err() check: a timed-out command's final flush arrives past its deadline, and expiry bounds delivery instead.
+			rq.requestWithExpiry(http.MethodPost, url, data, priority, time.Time{}, expiry, nil)
 			return
 		}
 		if ctx.Err() != nil || time.Since(start) >= maxWait {
