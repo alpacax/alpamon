@@ -17,6 +17,13 @@ type Settings struct {
 	EditorIdleTimeout  int   // Editor idle timeout in minutes (0 = no timeout)
 	MaxDownloadBytes   int64 // Cap for URL download payloads in bytes (0 = unlimited)
 
+	// Virtual interfaces to report anyway, as exact names or globs (empty =
+	// report only what the filters below report)
+	IncludeVirtualInterfaces []string
+	// Leave the kinds that carry no traffic report out of the interface
+	// inventory as well (false = the inventory reports what it always has)
+	ExcludeVirtualFromInventory bool
+
 	// Command signature verification (hardcoded, not configurable via INI)
 	AIServerURL    string // AI server URL for public key fetch
 	SigningMode    string // "monitor" (warn only) or "enforce" (reject unsigned)
@@ -43,4 +50,8 @@ type Config struct {
 	File struct {
 		MaxDownloadBytes int64 `ini:"max_download_bytes"`
 	} `ini:"file"`
+	Interface struct {
+		IncludeVirtual              []string `ini:"include_virtual" delim:","`
+		ExcludeVirtualFromInventory bool     `ini:"exclude_virtual_from_inventory"`
+	} `ini:"interface"`
 }

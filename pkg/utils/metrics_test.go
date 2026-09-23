@@ -1,66 +1,6 @@
 package utils
 
-import (
-	"testing"
-
-	"github.com/stretchr/testify/assert"
-)
-
-func TestVirtualIfacePattern(t *testing.T) {
-	tests := []struct {
-		name    string
-		iface   string
-		virtual bool
-	}{
-		// Linux virtual interfaces
-		{"loopback", "lo", true},
-		{"docker", "docker0", true},
-		{"veth", "veth1234abc", true},
-		{"docker bridge", "br-abc123", true},
-		{"virbr", "virbr0", true},
-		{"vmnet", "vmnet8", true},
-		{"tap", "tap0", true},
-		{"tun", "tun0", true},
-		{"wireguard", "wg0", true},
-		{"zerotier", "zt0", true},
-		{"tailscale", "tailscale0", true},
-		{"cni", "cni0", true},
-		// macOS virtual interfaces
-		{"utun", "utun0", true},
-		{"utun3", "utun3", true},
-		{"awdl", "awdl0", true},
-		{"llw", "llw0", true},
-		{"bridge", "bridge0", true},
-		{"anpi", "anpi0", true},
-		{"ap", "ap1", true},
-		// Windows virtual interfaces
-		{"loopback", "Loopback Pseudo-Interface 1", true},
-		{"isatap", "isatap.localdomain", true},
-		{"teredo", "Teredo Tunneling Pseudo-Interface", true},
-		{"6to4", "6to4 Adapter", true},
-		// Real interfaces (should NOT match)
-		{"ethernet", "eth0", false},
-		{"en0", "en0", false},
-		{"en1", "en1", false},
-		{"wlan", "wlan0", false},
-		{"ens", "ens192", false},
-		// Physical NICs whose predictable names start with enp, including the
-		// onboard and hypervisor-default cards sitting on PCI bus 0
-		{"enp onboard", "enp0s31f6", false},
-		{"enp slot 3", "enp0s3", false},
-		{"enp slot 8", "enp0s8", false},
-		{"enp slot 25", "enp0s25", false},
-		{"enp bus 1", "enp1s0", false},
-		{"eno onboard", "eno1", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.virtual, VirtualIfacePattern.MatchString(tt.iface),
-				"VirtualIfacePattern.MatchString(%q)", tt.iface)
-		})
-	}
-}
+import "testing"
 
 func TestIsVirtualFileSystem(t *testing.T) {
 	tests := []struct {

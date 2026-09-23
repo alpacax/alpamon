@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -234,6 +235,27 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 		log.Debug().Msg("No download size limit configured (unlimited).")
 	}
 
+	// Interfaces of the kinds a system creates one of per container or per
+	// connection carry no traffic report; the include list names the ones to
+	// report anyway.
+	settings.IncludeVirtualInterfaces = validInterfacePatterns(config.Interface.IncludeVirtual)
+	if len(settings.IncludeVirtualInterfaces) > 0 {
+		log.Debug().Msgf("Reporting virtual interfaces matching: %s",
+			strings.Join(settings.IncludeVirtualInterfaces, ", "))
+	}
+
+	// Off by default: the interface inventory reports what it always has, which
+	// is what keeps this agent safe to run against an older server.
+	settings.ExcludeVirtualFromInventory = config.Interface.ExcludeVirtualFromInventory
+	if settings.ExcludeVirtualFromInventory {
+		log.Warn().Msg(
+			"Virtual interfaces are excluded from the interface inventory. " +
+				"A server that deletes an interface it stops being told about " +
+				"deletes its history with it, so use this only against a server " +
+				"that keeps removed interfaces.",
+		)
+	}
+
 	// Validate pool settings are reasonable
 	if settings.PoolMaxWorkers > MaxReasonableWorkers {
 		log.Warn().Msgf("Pool max workers (%d) seems very high, consider reducing it", settings.PoolMaxWorkers)
@@ -246,6 +268,29 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 	}
 
 	return valid, settings
+}
+
+// validInterfacePatterns returns the usable interface include patterns,
+// dropping the ones that are empty or malformed. An unusable pattern is
+// reported and skipped rather than refused: it would otherwise stop the agent
+// from starting over a setting that can only widen what it reports.
+func validInterfacePatterns(patterns []string) []string {
+	valid := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+
+		if _, err := path.Match(pattern, "interface"); err != nil {
+			log.Warn().Err(err).Msgf("Ignoring malformed interface include pattern %q.", pattern)
+			continue
+		}
+
+		valid = append(valid, pattern)
+	}
+
+	return valid
 }
 
 func Files(name string) []string {

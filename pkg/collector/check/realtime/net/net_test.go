@@ -68,7 +68,11 @@ func (suite *NetCheckSuite) TestCollectIOCounters() {
 func (suite *NetCheckSuite) TestCollectInterfaces() {
 	interfaces, err := suite.collectCheck.collectInterfaces()
 	assert.NoError(suite.T(), err, "Failed to get interfaces.")
+
 	assert.NotEmpty(suite.T(), interfaces, "Interfaces should not be empty")
+	for name, iface := range interfaces {
+		assert.Equal(suite.T(), name, iface.Name, "Interfaces should be keyed by name")
+	}
 }
 
 func (suite *NetCheckSuite) TestSaveTraffic() {

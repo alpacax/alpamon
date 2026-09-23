@@ -588,20 +588,19 @@ func getNetworkInterfaces() ([]Interface, error) {
 }
 
 // buildInterfaces maps the interfaces the operating system reports onto the
-// ones the agent reports, leaving out the virtual ones and any that carry no
-// hardware address.
+// ones the agent reports. utils.InventoryInterfaces decides which those are,
+// and the traffic collector asks utils for the subset of them it reports
+// traffic for, so neither can cover an interface the other does not know.
 func buildInterfaces(ifaces []net.Interface) []Interface {
+	reported := utils.InventoryInterfaces(listedInterfaces(ifaces))
+
 	interfaces := []Interface{}
 	for _, iface := range ifaces {
+		if !reported[iface.Name] {
+			continue
+		}
+
 		mac := iface.HardwareAddr.String()
-		if mac == "" {
-			continue
-		}
-
-		if utils.VirtualIfacePattern.MatchString(iface.Name) {
-			continue
-		}
-
 		interfaces = append(interfaces, Interface{
 			Name:      iface.Name,
 			Flags:     getFlags(iface),
@@ -613,6 +612,23 @@ func buildInterfaces(ifaces []net.Interface) []Interface {
 	}
 
 	return interfaces
+}
+
+// listedInterfaces adapts what the standard library lists to what the report
+// predicates read. The whole listing is handed over at once, because the rule
+// that keeps traffic reporting from covering nothing is about the machine
+// rather than about one interface.
+func listedInterfaces(ifaces []net.Interface) []utils.Iface {
+	listed := make([]utils.Iface, 0, len(ifaces))
+	for _, iface := range ifaces {
+		listed = append(listed, utils.Iface{
+			Name:     iface.Name,
+			Mac:      iface.HardwareAddr.String(),
+			Loopback: iface.Flags&net.FlagLoopback != 0,
+		})
+	}
+
+	return listed
 }
 
 // reportedMTU returns the MTU to report, or nil when there is none to report.
@@ -640,14 +656,11 @@ func getNetworkAddresses() ([]Address, error) {
 		return nil, err
 	}
 
+	reported := utils.InventoryInterfaces(listedInterfaces(ifaces))
+
 	addresses := []Address{}
 	for _, iface := range ifaces {
-		mac := iface.HardwareAddr.String()
-		if mac == "" {
-			continue
-		}
-
-		if utils.VirtualIfacePattern.MatchString(iface.Name) {
+		if !reported[iface.Name] {
 			continue
 		}
 

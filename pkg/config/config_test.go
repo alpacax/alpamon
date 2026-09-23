@@ -3,6 +3,9 @@ package config
 import (
 	"os"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func intPtr(v int) *int {
@@ -127,4 +130,56 @@ func TestMaxDownloadBytesConfigured(t *testing.T) {
 	if settings.MaxDownloadBytes != 1024*1024*100 {
 		t.Errorf("Expected MaxDownloadBytes to be %d, got %d", 1024*1024*100, settings.MaxDownloadBytes)
 	}
+}
+
+func TestIncludeVirtualInterfacesDefault(t *testing.T) {
+	config := Config{}
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
+
+	assert.Empty(t, settings.IncludeVirtualInterfaces,
+		"no virtual interface is reported unless the configuration names one")
+}
+
+func TestIncludeVirtualInterfacesDropsUnusablePatterns(t *testing.T) {
+	config := Config{}
+	config.Interface.IncludeVirtual = []string{" br0 ", "", "veth*", "[unclosed"}
+
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
+
+	assert.Equal(t, []string{"br0", "veth*"}, settings.IncludeVirtualInterfaces,
+		"surrounding space is trimmed, and empty and malformed patterns are dropped")
+}
+
+func TestIncludeVirtualInterfacesFromINI(t *testing.T) {
+	content := `[server]
+url = http://test.com
+id = testid
+key = testkey
+
+[interface]
+include_virtual = br0, veth*, docker0
+exclude_virtual_from_inventory = true
+`
+
+	tmpfile, err := os.CreateTemp("", "alpamon-test-*.conf")
+	require.NoError(t, err)
+	defer func() { _ = os.Remove(tmpfile.Name()) }()
+
+	_, err = tmpfile.Write([]byte(content))
+	require.NoError(t, err)
+	require.NoError(t, tmpfile.Close())
+
+	settings := LoadConfig([]string{tmpfile.Name()}, "/ws/test/", "/ws/control/")
+
+	assert.Equal(t, []string{"br0", "veth*", "docker0"}, settings.IncludeVirtualInterfaces,
+		"the list is read as comma-separated names and globs")
+	assert.True(t, settings.ExcludeVirtualFromInventory)
+}
+
+func TestExcludeVirtualFromInventoryDefault(t *testing.T) {
+	config := Config{}
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
+
+	assert.False(t, settings.ExcludeVirtualFromInventory,
+		"the interface inventory reports what it always has unless the setting asks otherwise")
 }
