@@ -205,22 +205,112 @@ func TestReportableInterfaceByLinkKind(t *testing.T) {
 	}
 }
 
-// A machine can have nothing but interfaces of the kinds that are left out. Its
-// report is the interfaces it has, never an empty one, which on the receiving
-// side reads as the machine having lost them.
-func TestReportableInterfacesOnAMachineWithOnlyExcludedKinds(t *testing.T) {
+// The interfaces of a machine as the operating system would list them, for the
+// fixture tree above.
+func listedFixtures(fixtures []ifaceFixture) []Iface {
+	listed := make([]Iface, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		listed = append(listed, Iface{Name: fixture.name, Mac: testMAC})
+	}
+
+	return listed
+}
+
+// The link kind decides what carries traffic. It does not decide what the
+// inventory holds, which is the same set of interfaces it was before any kind
+// was read, so upgrading an agent takes nothing out of an inventory already
+// reporting it.
+func TestInventoryHoldsWhatItAlwaysHasWhateverTheKind(t *testing.T) {
+	fixtures := []ifaceFixture{
+		{name: "eth0", hardware: true},
+		{name: "br0", devType: "bridge"},
+		{name: "bond0", devType: "bond"},
+		{name: "eth0.100", devType: "vlan", stacked: true},
+		{name: "dummy0"},
+		// Kinds that carry no traffic report, under names the inventory filter
+		// does not claim.
+		{name: "eth1", stacked: true},
+		{name: "cali1a2b3c4d5e6", stacked: true},
+		{name: "macvlan0", devType: "macvlan"},
+		{name: "ipvlan0", devType: "ipvlan"},
+		// Kinds that carry no traffic report, under names the inventory filter
+		// has always left out.
+		{name: "veth9f2a1c", stacked: true},
+		{name: "tap0", tunFlags: true},
+	}
+	useSysClassNet(t, writeSysClassNet(t, fixtures))
+
+	listed := listedFixtures(fixtures)
+
+	assert.Equal(t, byNameInterfaces(listed, nil), inventoryInterfaces(listed, nil, false),
+		"the inventory is what the name pattern reports, whatever sysfs says about the kinds")
+
+	inventory := inventoryInterfaces(listed, nil, false)
+	for _, name := range []string{"eth0", "br0", "bond0", "eth0.100", "dummy0",
+		"eth1", "cali1a2b3c4d5e6", "macvlan0", "ipvlan0"} {
+		assert.True(t, inventory[name], "the inventory holds %q", name)
+	}
+	for _, name := range []string{"veth9f2a1c", "tap0"} {
+		assert.False(t, inventory[name], "the inventory has never held %q", name)
+	}
+
+	traffic := trafficInterfaces(listed, nil, false)
+	for _, name := range []string{"eth0", "br0", "bond0", "eth0.100", "dummy0"} {
+		assert.True(t, traffic[name], "traffic is reported for %q", name)
+	}
+	for _, name := range []string{"eth1", "cali1a2b3c4d5e6", "macvlan0", "ipvlan0"} {
+		assert.False(t, traffic[name],
+			"%q keeps its inventory row and carries no traffic report", name)
+	}
+
+	for name := range traffic {
+		assert.True(t, inventory[name], "traffic is reported for %q, which the inventory does not hold", name)
+	}
+}
+
+// The setting an operator turns on once the other side keeps a removed
+// interface. It narrows the inventory to what carries traffic.
+func TestExcludeVirtualFromInventory(t *testing.T) {
+	fixtures := []ifaceFixture{
+		{name: "eth0", hardware: true},
+		{name: "br0", devType: "bridge"},
+		{name: "eth1", stacked: true},
+		{name: "macvlan0", devType: "macvlan"},
+	}
+	useSysClassNet(t, writeSysClassNet(t, fixtures))
+
+	listed := listedFixtures(fixtures)
+
+	assert.Equal(t, map[string]bool{"eth0": true, "br0": true},
+		inventoryInterfaces(listed, nil, true),
+		"the kinds that carry no traffic report are out of the inventory too")
+	assert.Equal(t, trafficInterfaces(listed, nil, true), inventoryInterfaces(listed, nil, true),
+		"and the two sets are then the same")
+
+	assert.Equal(t, map[string]bool{"eth0": true, "br0": true, "eth1": true, "macvlan0": true},
+		inventoryInterfaces(listed, nil, false),
+		"with the setting off the inventory holds them")
+}
+
+// A machine can have nothing but interfaces of the kinds that carry no traffic
+// report: one running inside a container has a single veth half and nothing
+// else. Reporting traffic for none of them would read as a machine that
+// carries no traffic at all.
+func TestTrafficInterfacesOnAMachineWithOnlyExcludedKinds(t *testing.T) {
 	useSysClassNet(t, writeSysClassNet(t, []ifaceFixture{
 		{name: "eth0", stacked: true},
 		{name: "lo"},
 	}))
 
-	reported := reportableInterfaces([]Iface{
+	listed := []Iface{
 		{Name: "eth0", Mac: testMAC},
 		{Name: "lo", Mac: "00:00:00:00:00:00", Loopback: true},
-	}, nil)
+	}
 
-	assert.Equal(t, map[string]bool{"eth0": true}, reported,
-		"the interface is reported although its kind is one that is left out, and loopback still is not")
+	assert.Equal(t, map[string]bool{"eth0": true}, inventoryInterfaces(listed, nil, false),
+		"the inventory holds the interface, as it always has")
+	assert.Equal(t, map[string]bool{"eth0": true}, trafficInterfaces(listed, nil, false),
+		"and traffic is reported for it although its kind is one that is left out")
 }
 
 func TestReportableInterfaceLeavesOutLoopbackWhateverItsKind(t *testing.T) {

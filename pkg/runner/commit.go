@@ -588,11 +588,11 @@ func getNetworkInterfaces() ([]Interface, error) {
 }
 
 // buildInterfaces maps the interfaces the operating system reports onto the
-// ones the agent reports. utils.ReportableInterfaces decides which those are,
-// and the traffic collector asks it the same question, so the inventory and
-// the traffic counters cover the same interfaces.
+// ones the agent reports. utils.InventoryInterfaces decides which those are,
+// and the traffic collector asks utils for the subset of them it reports
+// traffic for, so neither can cover an interface the other does not know.
 func buildInterfaces(ifaces []net.Interface) []Interface {
-	reported := utils.ReportableInterfaces(listedInterfaces(ifaces))
+	reported := utils.InventoryInterfaces(listedInterfaces(ifaces))
 
 	interfaces := []Interface{}
 	for _, iface := range ifaces {
@@ -615,8 +615,9 @@ func buildInterfaces(ifaces []net.Interface) []Interface {
 }
 
 // listedInterfaces adapts what the standard library lists to what the report
-// predicate reads. The whole listing is handed over at once, because the
-// predicate's last rule is about the machine rather than about one interface.
+// predicates read. The whole listing is handed over at once, because the rule
+// that keeps traffic reporting from covering nothing is about the machine
+// rather than about one interface.
 func listedInterfaces(ifaces []net.Interface) []utils.Iface {
 	listed := make([]utils.Iface, 0, len(ifaces))
 	for _, iface := range ifaces {
@@ -655,7 +656,7 @@ func getNetworkAddresses() ([]Address, error) {
 		return nil, err
 	}
 
-	reported := utils.ReportableInterfaces(listedInterfaces(ifaces))
+	reported := utils.InventoryInterfaces(listedInterfaces(ifaces))
 
 	addresses := []Address{}
 	for _, iface := range ifaces {

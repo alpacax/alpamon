@@ -158,6 +158,7 @@ key = testkey
 
 [interface]
 include_virtual = br0, veth*, docker0
+exclude_virtual_from_inventory = true
 `
 
 	tmpfile, err := os.CreateTemp("", "alpamon-test-*.conf")
@@ -172,4 +173,13 @@ include_virtual = br0, veth*, docker0
 
 	assert.Equal(t, []string{"br0", "veth*", "docker0"}, settings.IncludeVirtualInterfaces,
 		"the list is read as comma-separated names and globs")
+	assert.True(t, settings.ExcludeVirtualFromInventory)
+}
+
+func TestExcludeVirtualFromInventoryDefault(t *testing.T) {
+	config := Config{}
+	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
+
+	assert.False(t, settings.ExcludeVirtualFromInventory,
+		"the interface inventory reports what it always has unless the setting asks otherwise")
 }

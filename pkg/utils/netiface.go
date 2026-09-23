@@ -2,6 +2,7 @@ package utils
 
 import (
 	"path"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -13,26 +14,29 @@ import (
 
 // Interface reporting.
 //
-// The agent reports the interfaces of the machine it runs on: the ones backed
-// by hardware, and the virtual links configured on top of them. What it leaves
-// out is the handful of kinds a running system mints one of per container or
-// per tunnel, which say nothing about the machine and arrive in numbers.
+// The agent reports two things about a machine's network interfaces: which
+// interfaces it has, and how much traffic each of them carries. The two are
+// reported to different ends and are filtered differently.
 //
-// An interface is classified by its link kind wherever the platform exposes
-// one, and by its name only where it does not. A name carries very little: the
-// naming schemes container runtimes use are theirs to change, so a prefix list
-// written against them both misses names it has never seen and, as soon as one
-// entry is also the start of a hardware name, claims interfaces that are real.
+// The interface list is an inventory. An interface that drops out of it is
+// read on the other side as an interface the machine no longer has, and what
+// the other side then does with the rows it holds is not this agent's to
+// decide. So the inventory filter is the one the agent has always applied, a
+// list of name prefixes, and nothing here narrows it: an agent that upgrades
+// reports the interfaces it reported yesterday.
 //
-// Both ways of being wrong are not equal. An interface the agent reports and
-// should not is a row too many, which a setting can take away. An interface it
-// stops reporting is read on the other side as an interface that has gone, so
-// the kinds left out are named one by one and anything unrecognised is
-// reported. For the same reason a report is never empty: see
-// ReportableInterfaces.
+// Traffic is a measurement, and an interface that stops sending samples simply
+// stops charting. That is where the kinds a running system creates one of per
+// container or per connection are left out: a veth half, a macvlan or ipvlan
+// child, a tun or tap device. Their inventory rows stay where they are.
 //
-// Every caller goes through ReportableInterfaces, so the set of interfaces in
-// the inventory and the set the traffic counters cover cannot drift apart.
+// An operator who knows the other side keeps a removed interface can narrow
+// the inventory the same way with exclude_virtual_from_inventory. That setting
+// is the only one here that depends on what the other side does.
+//
+// Where a kind is read at all is per platform: Linux reads it from sysfs,
+// macOS and Windows expose none and fall back to the name prefixes, so on
+// those platforms traffic covers exactly the interfaces the inventory does.
 
 // ifaceKind is what the platform's detector could establish about an interface.
 type ifaceKind int
@@ -43,14 +47,23 @@ const (
 	kindUnknown ifaceKind = iota
 	// kindHardware means the interface is backed by a hardware device.
 	kindHardware
-	// kindVirtual means the interface is virtual and of a kind the agent
-	// reports, which is every kind not named as one it leaves out.
+	// kindVirtual means the interface is virtual and of a kind that is
+	// reported, which is every kind not named as one that is left out.
 	kindVirtual
 	// kindExcludedVirtual means the interface is virtual and of one of the
-	// kinds the agent leaves out, so it is reported only when the include list
+	// kinds that are left out, so it is reported only when the include list
 	// names it.
 	kindExcludedVirtual
 )
+
+// virtualIfacePattern is the inventory filter, and it is frozen. It is the
+// pattern the agent has always applied, and narrowing it would take interfaces
+// out of an inventory that has been reporting them.
+//
+// Matched by prefix and nothing more, so an entry must not also be a prefix
+// of a physical interface name. systemd predictable names such as enp0s3 and
+// enp0s31f6 belong to physical NICs on PCI bus 0, so no enp prefix goes here.
+var virtualIfacePattern = regexp.MustCompile(`^(lo|docker|veth|br-|virbr|vmnet|tap|tun|wg|zt|tailscale|cni|utun|awdl|llw|bridge|anpi|ap|Loopback|isatap|Teredo|6to4)`)
 
 // commonVirtualIfacePrefixes names the interfaces that are virtual under the
 // same names on every platform the agent builds for. Entries are matched as
@@ -58,9 +71,9 @@ const (
 // hardware interface name. Platform-specific names belong in the
 // platformVirtualIfacePrefixes of the platform that uses them.
 //
-// This list decides only where no link kind is available. On a platform that
-// reports one, it is the fallback for an interface the platform has nothing to
-// say about.
+// This is the fallback for the kind, not the inventory filter above, and the
+// two are deliberately separate: this one is consulted only where no link kind
+// is available, and it is free to change as the kinds it stands in for do.
 var commonVirtualIfacePrefixes = []string{
 	"docker",
 	"veth",
@@ -78,10 +91,11 @@ var commonVirtualIfacePrefixes = []string{
 // loopbackFlag is how the flag sets this package is handed spell loopback.
 const loopbackFlag = "loopback"
 
-// emptyReportOnce keeps the fallback below to one log line per run.
-var emptyReportOnce sync.Once
+// emptyTrafficOnce keeps the fallback in byKindInterfaces to one log line per
+// run.
+var emptyTrafficOnce sync.Once
 
-// Iface is what the report predicate reads from an interface. Each caller
+// Iface is what the report predicates read from an interface. Each caller
 // adapts its own interface type to it: Mac is the hardware address, empty when
 // the interface has none, and Loopback is the loopback flag as the caller's own
 // flag representation gives it.
@@ -91,17 +105,77 @@ type Iface struct {
 	Loopback bool
 }
 
-// ReportableInterfaces returns the names of the interfaces to report, out of
-// everything the operating system listed. It takes the whole listing rather
-// than one interface at a time because of the last rule it applies: a machine
-// whose every interface is of a kind the agent leaves out reports those
-// interfaces anyway.
-func ReportableInterfaces(ifaces []Iface) map[string]bool {
-	return reportableInterfaces(ifaces, config.GlobalSettings.IncludeVirtualInterfaces)
+// InventoryInterfaces returns the names of the interfaces to report as the
+// machine's own, out of everything the operating system listed.
+func InventoryInterfaces(ifaces []Iface) map[string]bool {
+	return inventoryInterfaces(ifaces, config.GlobalSettings.IncludeVirtualInterfaces,
+		config.GlobalSettings.ExcludeVirtualFromInventory)
 }
 
-// reportableInterfaces is ReportableInterfaces with the include list passed in.
-func reportableInterfaces(ifaces []Iface, include []string) map[string]bool {
+// TrafficInterfaces returns the names of the interfaces to report traffic for.
+// It is what the inventory reports, less the kinds that are left out, so no
+// traffic is ever reported for an interface the inventory does not carry.
+func TrafficInterfaces(ifaces []Iface) map[string]bool {
+	return trafficInterfaces(ifaces, config.GlobalSettings.IncludeVirtualInterfaces,
+		config.GlobalSettings.ExcludeVirtualFromInventory)
+}
+
+// inventoryInterfaces is InventoryInterfaces with the configuration passed in.
+func inventoryInterfaces(ifaces []Iface, include []string, byKind bool) map[string]bool {
+	if byKind {
+		return byKindInterfaces(ifaces, include)
+	}
+
+	return byNameInterfaces(ifaces, include)
+}
+
+// trafficInterfaces is TrafficInterfaces with the configuration passed in.
+func trafficInterfaces(ifaces []Iface, include []string, byKind bool) map[string]bool {
+	if byKind {
+		// The inventory already leaves out the kinds that are left out here,
+		// and traffic covers what the inventory holds.
+		return byKindInterfaces(ifaces, include)
+	}
+
+	inventory := byNameInterfaces(ifaces, include)
+
+	listed := make([]Iface, 0, len(inventory))
+	for _, iface := range ifaces {
+		if inventory[iface.Name] {
+			listed = append(listed, iface)
+		}
+	}
+
+	return byKindInterfaces(listed, include)
+}
+
+// byNameInterfaces returns the interfaces the name pattern reports. An
+// interface with no hardware address is left out, since the report identifies
+// an interface by it; the include list names the interfaces to report despite
+// the pattern, and cannot name loopback.
+func byNameInterfaces(ifaces []Iface, include []string) map[string]bool {
+	reported := make(map[string]bool, len(ifaces))
+	for _, iface := range ifaces {
+		if iface.Mac == "" {
+			continue
+		}
+
+		switch {
+		case !virtualIfacePattern.MatchString(iface.Name):
+			reported[iface.Name] = true
+		case !iface.Loopback && matchesInterfacePattern(include, iface.Name):
+			reported[iface.Name] = true
+		}
+	}
+
+	return reported
+}
+
+// byKindInterfaces returns the interfaces whose link kind is one that is
+// reported. It takes a whole listing rather than one interface at a time
+// because of the last rule it applies: where that would leave nothing at all,
+// the interfaces it left out are reported after all.
+func byKindInterfaces(ifaces []Iface, include []string) map[string]bool {
 	reported := make(map[string]bool, len(ifaces))
 	excluded := []string{}
 
@@ -122,15 +196,15 @@ func reportableInterfaces(ifaces []Iface, include []string) map[string]bool {
 		return reported
 	}
 
-	// Nothing is left to report. A machine can legitimately have only
-	// interfaces of the kinds this package leaves out—one running inside a
-	// container has a single veth half and nothing else—and an empty report is
-	// not a smaller report: it is read on the other side as every interface of
-	// this machine having gone away. Reporting them is the lesser error, and
-	// the include list can still narrow what is reported.
-	emptyReportOnce.Do(func() {
-		log.Warn().Msgf("Every interface of this machine is of a kind that is not reported; "+
-			"reporting %s so the report is not empty.", strings.Join(excluded, ", "))
+	// A machine can legitimately have only interfaces of the kinds this
+	// package leaves out: one running inside a container has a single veth
+	// half and nothing else. Reporting nothing for it would read as a machine
+	// with no traffic at all rather than as a machine whose traffic is carried
+	// on a kind that is usually noise, so the kinds are reported after all.
+	emptyTrafficOnce.Do(func() {
+		log.Warn().Msgf("Every interface of this machine is of a kind that is usually left out of "+
+			"traffic reporting; reporting %s so that no traffic is reported for none of them.",
+			strings.Join(excluded, ", "))
 	})
 
 	for _, name := range excluded {
@@ -140,8 +214,8 @@ func reportableInterfaces(ifaces []Iface, include []string) map[string]bool {
 	return reported
 }
 
-// reportableInterface reports whether an interface belongs in what the agent
-// reports, leaving aside the rule that a report is never empty.
+// reportableInterface reports whether an interface's link kind is one that is
+// reported, leaving aside the rule that the set is never empty.
 func reportableInterface(name, mac string, loopback bool, include []string) bool {
 	// Loopback is not an interface of the machine's, and an interface with no
 	// hardware address has nothing to identify it by. Neither is recoverable
@@ -158,7 +232,7 @@ func reportableInterface(name, mac string, loopback bool, include []string) bool
 }
 
 // isExcludedVirtual reports whether an interface is virtual and of one of the
-// kinds the agent leaves out unless the configuration asks for it.
+// kinds that are left out unless the configuration asks for them.
 func isExcludedVirtual(name string) bool {
 	switch interfaceKind(name) {
 	case kindHardware, kindVirtual:
@@ -209,7 +283,7 @@ func matchesInterfacePattern(patterns []string, name string) bool {
 	return false
 }
 
-// FilterVirtualInterface returns the interfaces the agent reports, keyed by
+// FilterVirtualInterface returns the interfaces to report traffic for, keyed by
 // name.
 func FilterVirtualInterface(ifaces net.InterfaceStatList) map[string]net.InterfaceStat {
 	listed := make([]Iface, 0, len(ifaces))
@@ -221,7 +295,7 @@ func FilterVirtualInterface(ifaces net.InterfaceStatList) map[string]net.Interfa
 		})
 	}
 
-	reported := ReportableInterfaces(listed)
+	reported := TrafficInterfaces(listed)
 
 	interfaces := make(map[string]net.InterfaceStat, len(reported))
 	for _, iface := range ifaces {

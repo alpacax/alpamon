@@ -235,12 +235,25 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 		log.Debug().Msg("No download size limit configured (unlimited).")
 	}
 
-	// Virtual interfaces are left out of what the agent reports unless they are
-	// named here. An empty list reports none of them.
+	// Interfaces of the kinds a system creates one of per container or per
+	// connection carry no traffic report; the include list names the ones to
+	// report anyway.
 	settings.IncludeVirtualInterfaces = validInterfacePatterns(config.Interface.IncludeVirtual)
 	if len(settings.IncludeVirtualInterfaces) > 0 {
 		log.Debug().Msgf("Reporting virtual interfaces matching: %s",
 			strings.Join(settings.IncludeVirtualInterfaces, ", "))
+	}
+
+	// Off by default: the interface inventory reports what it always has, which
+	// is what keeps this agent safe to run against an older server.
+	settings.ExcludeVirtualFromInventory = config.Interface.ExcludeVirtualFromInventory
+	if settings.ExcludeVirtualFromInventory {
+		log.Warn().Msg(
+			"Virtual interfaces are excluded from the interface inventory. " +
+				"A server that deletes an interface it stops being told about " +
+				"deletes its history with it, so use this only against a server " +
+				"that keeps removed interfaces.",
+		)
 	}
 
 	// Validate pool settings are reasonable

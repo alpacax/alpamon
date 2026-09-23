@@ -139,25 +139,33 @@ debug = false
 
 ### Interface reporting
 
-Alpamon reports the interfaces of the machine it runs on: the ones backed by hardware, and the virtual links configured on top of them, such as bridges, bonds, VLANs, VXLANs, teams, VRF masters and Open vSwitch bridges. It leaves out the kinds a running system creates one of per container or per connection: one half of a veth pair, a macvlan or ipvlan child, and a tun or tap device. A kind the kernel does not name is reported rather than left out.
+Alpamon reports two things about a machine's interfaces: which interfaces it has, and how much traffic each of them carries.
 
-Two interfaces are never reported, and `include_virtual` cannot add them:
+**The interface list is unchanged.** It reports the interfaces it has always reported, and an agent that upgrades takes nothing out of it.
 
-- loopback;
-- an interface with no hardware address, such as a WireGuard, OpenVPN tun or PPP link. The reported interface is identified by its hardware address, so a link without one cannot be reported at all.
+**Traffic is reported for the interfaces that say something about the machine.** The kinds a running system creates one of per container or per connection carry no traffic samples: one half of a veth pair, a macvlan or ipvlan child, and a tun or tap device. They keep their place in the interface list; only their charts go away. A kind the kernel does not name is reported rather than left out, so bridges, bonds, VLANs, VXLANs, teams, VRF masters and Open vSwitch bridges all keep reporting traffic.
 
-Name the virtual interfaces to report anyway, by exact name or by glob:
+Name the ones to report anyway, by exact name or by glob:
 
 ```ini
 [interface]
-include_virtual = br0, veth*
+include_virtual = veth0, cali*
 ```
 
-`include_virtual = *` reports every interface that has a hardware address and is not loopback, which is the setting to apply before upgrading if the interfaces reported for a machine should not change.
+Two interfaces are never reported either way, and `include_virtual` cannot add them: loopback, and an interface with no hardware address such as a WireGuard, OpenVPN tun or PPP link, which the report has no way to identify.
 
-A machine that has only interfaces of the kinds above, such as one running inside a container, reports them rather than reporting none, and logs that it did so once per run.
+A machine that has only interfaces of those kinds, such as one running inside a container, reports traffic for them rather than for nothing at all, and logs that it did so once per run.
 
-On Linux the kind of a link is read from sysfs. macOS and Windows expose none, so there the interface name decides instead.
+To leave the same kinds out of the interface list as well:
+
+```ini
+[interface]
+exclude_virtual_from_inventory = true
+```
+
+Off by default, and the one setting here whose safety depends on the server. Turn it on only against a server that keeps an interface it stops being told about; a server that deletes it deletes that interface's traffic history with it.
+
+On Linux the kind of a link is read from sysfs. macOS and Windows expose none, so there traffic covers exactly the interfaces the interface list holds.
 
 ## Service management
 

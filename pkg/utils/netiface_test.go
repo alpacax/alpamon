@@ -90,7 +90,89 @@ func TestReportableInterface(t *testing.T) {
 	}
 }
 
-func TestReportableInterfacesReadsTheConfiguredIncludeList(t *testing.T) {
+func TestInventoryInterfacesReportsWhatTheNamePatternReports(t *testing.T) {
+	tests := []struct {
+		name     string
+		iface    string
+		reported bool
+	}{
+		// The inventory filter is the one the agent has always applied. These
+		// cases are what it reported before the link kind was read at all, and
+		// none of them may change.
+		{"ethernet", "eth0", true},
+		{"predictable onboard", "enp0s31f6", true},
+		{"predictable slot", "enp0s3", true},
+		{"onboard", "eno1", true},
+		{"ens", "ens192", true},
+		{"wlan", "wlan0", true},
+		{"darwin ethernet", "en0", true},
+		{"host bridge", "br0", true},
+		{"bond", "bond0", true},
+		{"vlan", "eth0.100", true},
+		{"loopback", "lo", false},
+		{"docker", "docker0", false},
+		{"veth", "veth1234abc", false},
+		{"container bridge", "br-abc123", false},
+		{"virbr", "virbr0", false},
+		{"vmnet", "vmnet8", false},
+		{"tap", "tap0", false},
+		{"tun", "tun0", false},
+		{"wireguard", "wg0", false},
+		{"zerotier", "zt0", false},
+		{"tailscale", "tailscale0", false},
+		{"cni", "cni0", false},
+		{"utun", "utun0", false},
+		{"awdl", "awdl0", false},
+		{"llw", "llw0", false},
+		{"darwin bridge", "bridge0", false},
+		{"anpi", "anpi0", false},
+		{"ap", "ap1", false},
+		{"windows loopback", "Loopback Pseudo-Interface 1", false},
+		{"isatap", "isatap.localdomain", false},
+		{"teredo", "Teredo Tunneling Pseudo-Interface", false},
+		{"6to4", "6to4 Adapter", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reported := byNameInterfaces([]Iface{{Name: tt.iface, Mac: testMAC}}, nil)
+			assert.Equal(t, tt.reported, reported[tt.iface], "the inventory reports %q", tt.iface)
+		})
+	}
+}
+
+func TestInventoryInterfacesAndTheIncludeList(t *testing.T) {
+	listed := []Iface{
+		{Name: "docker0", Mac: testMAC},
+		{Name: "lo", Mac: testMAC, Loopback: true},
+		{Name: "addresslessreportcheck0"},
+	}
+
+	assert.Empty(t, byNameInterfaces(listed, nil),
+		"the name pattern leaves out all three")
+
+	assert.Equal(t, map[string]bool{"docker0": true}, byNameInterfaces(listed, []string{"docker0"}),
+		"the include list reports an interface the pattern leaves out")
+
+	assert.Empty(t, byNameInterfaces(listed, []string{"lo", "addresslessreportcheck0"}),
+		"the include list reports neither loopback nor an interface with no hardware address")
+}
+
+// With the setting off, which is how it ships, the inventory is what the name
+// pattern reports and the link kind changes nothing about it.
+func TestInventoryInterfacesFollowTheSetting(t *testing.T) {
+	listed := []Iface{
+		{Name: hardwareTestIface, Mac: testMAC},
+		{Name: virtualTestIface, Mac: testMAC},
+	}
+
+	assert.Equal(t, byNameInterfaces(listed, nil), inventoryInterfaces(listed, nil, false),
+		"with the setting off the inventory is what the name pattern reports")
+	assert.Equal(t, byKindInterfaces(listed, nil), inventoryInterfaces(listed, nil, true),
+		"with the setting on the inventory is what the link kind reports")
+}
+
+func TestInterfacesReadTheConfiguredSettings(t *testing.T) {
 	previous := config.GlobalSettings
 	t.Cleanup(func() { config.GlobalSettings = previous })
 
@@ -100,18 +182,38 @@ func TestReportableInterfacesReadsTheConfiguredIncludeList(t *testing.T) {
 	}
 
 	config.GlobalSettings.IncludeVirtualInterfaces = nil
-	assert.Equal(t, map[string]bool{hardwareTestIface: true}, ReportableInterfaces(listed),
-		"with an empty include list an interface of an excluded kind is left out")
+	config.GlobalSettings.ExcludeVirtualFromInventory = false
+	assert.Equal(t, map[string]bool{hardwareTestIface: true}, InventoryInterfaces(listed))
+	assert.Equal(t, map[string]bool{hardwareTestIface: true}, TrafficInterfaces(listed))
 
 	config.GlobalSettings.IncludeVirtualInterfaces = []string{virtualTestIface}
 	assert.Equal(t, map[string]bool{hardwareTestIface: true, virtualTestIface: true},
-		ReportableInterfaces(listed), "an interface the include list names is reported")
+		InventoryInterfaces(listed), "an interface the include list names is in the inventory")
+	assert.Equal(t, map[string]bool{hardwareTestIface: true, virtualTestIface: true},
+		TrafficInterfaces(listed), "and it carries traffic too")
 }
 
-// The rule that keeps a report from being empty applies to whatever the machine
-// has, not only to the kinds one platform can name.
-func TestReportableInterfacesNeverReportsNothing(t *testing.T) {
-	reported := reportableInterfaces([]Iface{
+// Traffic is reported for what the inventory holds and nothing else, so an
+// interface the inventory leaves out cannot come back through the kind rules.
+func TestTrafficInterfacesStayWithinTheInventory(t *testing.T) {
+	listed := []Iface{
+		{Name: hardwareTestIface, Mac: testMAC},
+		{Name: "docker0", Mac: testMAC},
+		{Name: "lo", Mac: testMAC, Loopback: true},
+	}
+
+	inventory := inventoryInterfaces(listed, nil, false)
+	traffic := trafficInterfaces(listed, nil, false)
+
+	assert.Equal(t, map[string]bool{hardwareTestIface: true}, inventory)
+	for name := range traffic {
+		assert.True(t, inventory[name], "traffic is reported for %q, which the inventory does not hold", name)
+	}
+}
+
+// The kind rules never leave a machine reporting traffic for nothing at all.
+func TestByKindInterfacesNeverReportsNothing(t *testing.T) {
+	reported := byKindInterfaces([]Iface{
 		{Name: virtualTestIface, Mac: testMAC},
 		{Name: "loopbackreportcheck0", Mac: testMAC, Loopback: true},
 		{Name: "addresslessreportcheck0"},
@@ -122,14 +224,14 @@ func TestReportableInterfacesNeverReportsNothing(t *testing.T) {
 			"and loopback and an interface with no hardware address still are not")
 }
 
-func TestReportableInterfacesReportsNothingWhenThereIsNothingToReport(t *testing.T) {
-	reported := reportableInterfaces([]Iface{
+func TestByKindInterfacesReportsNothingWhenThereIsNothingToReport(t *testing.T) {
+	reported := byKindInterfaces([]Iface{
 		{Name: "loopbackreportcheck0", Mac: testMAC, Loopback: true},
 		{Name: "addresslessreportcheck0"},
 	}, nil)
 
 	assert.Empty(t, reported,
-		"loopback and an interface with no hardware address are not reported to fill an empty report")
+		"loopback and an interface with no hardware address are not reported to fill an empty set")
 }
 
 func TestMatchesInterfacePattern(t *testing.T) {
@@ -197,6 +299,8 @@ func TestHasVirtualIfacePrefix(t *testing.T) {
 	}
 }
 
+// FilterVirtualInterface is the traffic side, so it reports what the inventory
+// holds less the kinds that are left out.
 func TestFilterVirtualInterface(t *testing.T) {
 	ifaces := net.InterfaceStatList{
 		{Name: hardwareTestIface, HardwareAddr: testMAC, Flags: []string{"up", "broadcast", "multicast"}},

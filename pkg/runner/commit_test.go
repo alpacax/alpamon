@@ -207,10 +207,10 @@ func TestBuildInterfacesReportsUnknownMTUAsUnset(t *testing.T) {
 	}
 }
 
-// The inventory and the traffic collector classify interfaces with the same
-// predicate, so the interfaces the agent lists and the ones it counts traffic
-// for cannot be different sets.
-func TestReportedInterfacesMatchTheTrafficFilter(t *testing.T) {
+// The inventory and the traffic collector are filtered in one place, so the
+// interfaces the agent counts traffic for are always interfaces it has also
+// reported as the machine's own.
+func TestTrafficInterfacesStayWithinTheReportedInterfaces(t *testing.T) {
 	mac, err := net.ParseMAC("02:00:00:00:00:01")
 	require.NoError(t, err)
 
@@ -256,8 +256,8 @@ func TestReportedInterfacesMatchTheTrafficFilter(t *testing.T) {
 
 	assert.Equal(t, []string{"nicsetcheck0"}, inventory,
 		"a virtual interface, loopback and an interface with no hardware address are all left out")
-	assert.Equal(t, inventory, traffic,
-		"the inventory and the traffic counters cover the same interfaces")
+	assert.Subset(t, inventory, traffic,
+		"traffic is reported only for interfaces the agent also reports")
 }
 
 // The sync comparison runs over the value GetComparableData returns, so the MTU
