@@ -13,6 +13,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// chunkDeliveryGrace is added to a chunk's ctx deadline to get its expiry:
+// enough for last-second output, short enough to drop stale chunks.
+const chunkDeliveryGrace = 5 * time.Minute
+
 // CommandDispatcher interface to avoid circular import with executor package
 type CommandDispatcher interface {
 	Execute(ctx context.Context, command string, args *common.CommandArgs) (int, string, error)
@@ -60,10 +64,14 @@ func (cr *CommandRunner) newChunkCallback() func(ctx context.Context, content st
 		// panics; a reused seq would collide server-side on (command, seq).
 		s := seq
 		seq++
+		var expiry time.Time
+		if deadline, ok := ctx.Deadline(); ok {
+			expiry = deadline.Add(chunkDeliveryGrace)
+		}
 		scheduler.Rqueue.PostChunk(ctx, chunkURL, &protocol.CommandChunk{
 			Seq:     s,
 			Content: content,
-		}, 10)
+		}, 10, expiry)
 	}
 }
 

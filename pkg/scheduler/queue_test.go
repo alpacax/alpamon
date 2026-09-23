@@ -68,14 +68,14 @@ func TestPriorityQueue_GetReleasesOnlyRemovedEntry(t *testing.T) {
 	assert.Equal(t, "/c", got.url)
 }
 
-func TestPostChunk_GivenCtxWithNoDeadline_WhenBelowHighWater_ThenEnqueuedWithZeroExpiry(t *testing.T) {
+func TestPostChunk_GivenZeroExpiry_WhenBelowHighWater_ThenEnqueuedWithZeroExpiry(t *testing.T) {
 	newRequestQueue()
 
-	Rqueue.postChunk(context.Background(), "/chunk", nil, 10, 5, time.Millisecond, time.Second)
+	Rqueue.postChunk(context.Background(), "/chunk", nil, 10, time.Time{}, 5, time.Millisecond, time.Second)
 
 	assert.Equal(t, 1, queueSize(), "expected chunk enqueued")
 	entry := getOne(t)
-	assert.True(t, entry.expiry.IsZero(), "no ctx deadline means no expiry should be stamped")
+	assert.True(t, entry.expiry.IsZero(), "expiry should pass through unchanged when the caller gives none")
 }
 
 func TestPostChunk_BlocksUntilSpaceFrees(t *testing.T) {
@@ -85,7 +85,7 @@ func TestPostChunk_BlocksUntilSpaceFrees(t *testing.T) {
 
 		done := make(chan struct{})
 		go func() {
-			Rqueue.postChunk(context.Background(), "/chunk", nil, 10, 3, time.Millisecond, time.Second)
+			Rqueue.postChunk(context.Background(), "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, time.Second)
 			close(done)
 		}()
 
@@ -114,7 +114,7 @@ func TestPostChunk_DropsAfterMaxWait(t *testing.T) {
 		fill(3)
 
 		start := time.Now()
-		Rqueue.postChunk(context.Background(), "/chunk", nil, 10, 3, time.Millisecond, 30*time.Millisecond)
+		Rqueue.postChunk(context.Background(), "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, 30*time.Millisecond)
 
 		assert.Equal(t, 30*time.Millisecond, time.Since(start), "expected to wait exactly maxWait before dropping")
 		assert.Equal(t, 3, queueSize(), "chunk should be dropped under sustained pressure")
@@ -128,42 +128,39 @@ func TestPostChunk_DropsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	Rqueue.postChunk(ctx, "/chunk", nil, 10, 3, time.Millisecond, time.Second)
+	Rqueue.postChunk(ctx, "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, time.Second)
 
 	assert.Equal(t, 3, queueSize(), "cancelled chunk should be dropped")
 }
 
-// A chunk's expiry is derived from its ctx's deadline, so a reporter stops
-// delivering it chunkDeliveryGrace after the command that produced it was killed.
+// A chunk's expiry is given by the caller (derived from the ctx's deadline
+// there), so postChunk just stamps whatever it is given onto the entry.
 
-func TestPostChunk_GivenCtxWithDeadline_WhenEnqueued_ThenExpiryIsDeadlinePlusGrace(t *testing.T) {
+func TestPostChunk_GivenExpiry_WhenEnqueued_ThenEntryCarriesThatExpiryUnchanged(t *testing.T) {
 	newRequestQueue()
 
-	deadline := time.Now().Add(10 * time.Second)
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
-	defer cancel()
+	expiry := time.Now().Add(15 * time.Minute)
 
-	Rqueue.postChunk(ctx, "/chunk", nil, 10, 5, time.Millisecond, time.Second)
+	Rqueue.postChunk(context.Background(), "/chunk", nil, 10, expiry, 5, time.Millisecond, time.Second)
 
 	entry := getOne(t)
-	assert.WithinDuration(t, deadline.Add(chunkDeliveryGrace), entry.expiry, time.Second,
-		"chunk expiry should be the ctx deadline plus the delivery grace window")
+	assert.Equal(t, expiry, entry.expiry, "expiry should be stamped onto the entry exactly as given")
 }
 
-func TestPostChunk_GivenCtxAlreadyPastDeadline_WhenQueueHasRoom_ThenChunkStillEnqueuedWithGraceExpiry(t *testing.T) {
+func TestPostChunk_GivenCtxAlreadyPastDeadline_WhenQueueHasRoom_ThenChunkStillEnqueuedWithGivenExpiry(t *testing.T) {
 	newRequestQueue()
 
 	deadline := time.Now().Add(-time.Minute)
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	require.Error(t, ctx.Err(), "test setup: ctx must already be expired")
+	expiry := deadline.Add(5 * time.Minute)
 
-	Rqueue.postChunk(ctx, "/chunk", nil, 10, 5, time.Millisecond, time.Second)
+	Rqueue.postChunk(ctx, "/chunk", nil, 10, expiry, 5, time.Millisecond, time.Second)
 
 	require.Equal(t, 1, queueSize(), "the fast path must enqueue regardless of ctx.Err(); expiry, not ctx, bounds delivery")
 	entry := getOne(t)
-	assert.WithinDuration(t, deadline.Add(chunkDeliveryGrace), entry.expiry, time.Second,
-		"expiry should still be the deadline plus the delivery grace window")
+	assert.Equal(t, expiry, entry.expiry, "expiry should be stamped onto the entry exactly as given")
 }
 
 func TestPost_GivenNonChunkEntry_WhenEnqueued_ThenExpiryStaysZero(t *testing.T) {
