@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"os"
 	"time"
 )
@@ -72,9 +73,9 @@ type CommandArgs struct {
 	// no target version, which keeps the legacy "latest" upgrade path.
 	Upgrade *UpgradeTarget
 
-	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks.
-	// Sequencing is the caller's responsibility.
-	ChunkCallback func(content string)
+	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks with
+	// the ctx live at emit time. Sequencing is the caller's responsibility.
+	ChunkCallback func(ctx context.Context, content string)
 
 	// Firewall operations
 	Keys         []string

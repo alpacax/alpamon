@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
@@ -81,14 +82,16 @@ type chunkWriter struct {
 	mu       sync.Mutex
 	buf      bytes.Buffer
 	capture  *capBuffer
-	callback func(content string)
+	ctx      context.Context
+	callback func(ctx context.Context, content string)
 
 	done chan struct{}
 	wg   sync.WaitGroup
 }
 
-func newChunkWriter(callback func(content string)) *chunkWriter {
-	return &chunkWriter{callback: callback, capture: newCapBuffer()}
+// newChunkWriter holds Execute's deadline-bearing ctx so the final flush carries it too.
+func newChunkWriter(ctx context.Context, callback func(ctx context.Context, content string)) *chunkWriter {
+	return &chunkWriter{ctx: ctx, callback: callback, capture: newCapBuffer()}
 }
 
 // start launches the periodic flusher so sub-threshold output still streams within interval.
@@ -168,7 +171,7 @@ func (w *chunkWriter) emit(content string) {
 			log.Error().Interface("panic", r).Msg("ChunkCallback panicked")
 		}
 	}()
-	w.callback(content)
+	w.callback(w.ctx, content)
 }
 
 // runeSafeCut returns a cut length <= limit that never ends mid-rune, so a rune
@@ -238,7 +241,7 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 
 	var cw *chunkWriter
 	if opts.ChunkCallback != nil {
-		cw = newChunkWriter(opts.ChunkCallback)
+		cw = newChunkWriter(ctx, opts.ChunkCallback)
 	}
 
 	// Set up privilege demotion if username specified
@@ -293,8 +296,7 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	result := string(output)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			elapsed := time.Since(start).Truncate(time.Second)
-			msg := fmt.Sprintf("Command timed out after %s", elapsed)
+			msg := common.FormatTimeoutBanner(time.Since(start))
 			// Skip the separator when there's no output so the banner has no leading newlines.
 			if result == "" {
 				return 124, msg, err
@@ -416,9 +418,9 @@ type CommandOptions struct {
 	// child execs sudo. Panics are recovered and logged.
 	PIDHook func(pid int)
 
-	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks.
-	// Sequencing is the caller's responsibility.
-	ChunkCallback func(content string)
+	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks with
+	// the ctx live at emit time. Sequencing is the caller's responsibility.
+	ChunkCallback func(ctx context.Context, content string)
 }
 
 // buildEnv constructs the environment for a command. It starts from the
@@ -581,7 +583,7 @@ func (e *Executor) ExecWithHook(ctx context.Context, args []string, username, gr
 }
 
 // ExecWithStreamingHook combines PIDHook and ChunkCallback. Either may be nil.
-func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error) {
+func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	return e.Execute(ctx, CommandOptions{
 		Args:          args,
 		Username:      username,
@@ -596,7 +598,7 @@ func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, use
 // ExecFileWithStreamingHook is ExecWithStreamingHook for a digest-verified
 // entrypoint: file is inherited by the child and args names it by its
 // descriptor path, so the verified object is the one that runs.
-func (e *Executor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error) {
+func (e *Executor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	return e.Execute(ctx, CommandOptions{
 		Args:          args,
 		ExecFile:      file,

@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -160,49 +161,92 @@ func (h *ShellHandler) handleExecFile(ctx context.Context, args *common.CommandA
 // executeWithOperators handles shell operators (&&, ||, ;). Per-segment output
 // (already capped under streaming) is accumulated; under streaming the total is
 // capped again so the fin audit copy stays bounded across segments.
-func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string, error) {
+func (h *ShellHandler) executeWithOperators(ctx context.Context, command, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	spl := strings.Fields(command)
 	var currentCmd []string
 	var results strings.Builder
 	var exitCode int
-	var result string
 	streaming := chunkCallback != nil
+	chainTimedOut := false
+
+	// One deadline for the whole chain: a per-segment timeout let `a && b && c` run three times the limit.
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 
 	appendResult := func(r string) {
 		results.WriteString(r)
 	}
-	finalResult := func() string {
-		if streaming {
-			return utils.TruncateMiddle(results.String(), utils.AuditOutputCap)
+	// finish appends the chain-level timeout banner exactly once, replacing
+	// any per-segment banner a killed segment's own executor already produced.
+	finish := func(code int) (int, string, error) {
+		if chainTimedOut {
+			code = common.TimeoutExitCode
+			_, banner, _ := common.TimeoutError(timeout)
+			if results.Len() > 0 {
+				appendResult("\n\n" + banner)
+			} else {
+				appendResult(banner)
+			}
 		}
-		return results.String()
+		out := results.String()
+		if streaming {
+			out = utils.TruncateMiddle(out, utils.AuditOutputCap)
+		}
+		return code, out, nil
+	}
+
+	var ranAny bool
+	runSegment := func(cmdArgs []string) (int, bool) {
+		if ctx.Err() != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				chainTimedOut = true
+				return common.TimeoutExitCode, false
+			}
+			// Parent cancellation, not a timeout: stop the chain but report
+			// the last segment's exit code rather than manufacturing 124.
+			if ranAny {
+				return exitCode, false
+			}
+			return 1, false
+		}
+		code, out := h.executeCommand(ctx, cmdArgs, username, groupname, env, timeout, commandID, chunkCallback)
+		if code == common.TimeoutExitCode && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			chainTimedOut = true
+			out = common.StripTimeoutBanner(out)
+		}
+		appendResult(out)
+		ranAny = true
+		return code, true
+	}
+
+	shouldStop := func(op string, code int, ran bool) bool {
+		if !ran {
+			return true
+		}
+		switch op {
+		case "&&":
+			return code != 0
+		case "||":
+			return code == 0
+		default: // ";"
+			return false
+		}
 	}
 
 	for _, arg := range spl {
 		switch arg {
-		case "&&":
-			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
-				appendResult(result)
-				if exitCode != 0 {
-					return exitCode, finalResult(), nil
-				}
-				currentCmd = nil
+		case "&&", "||", ";":
+			if len(currentCmd) == 0 {
+				continue
 			}
-		case "||":
-			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
-				appendResult(result)
-				if exitCode == 0 {
-					return exitCode, finalResult(), nil
-				}
-				currentCmd = nil
-			}
-		case ";":
-			if len(currentCmd) > 0 {
-				exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
-				appendResult(result)
-				currentCmd = nil
+			var ran bool
+			exitCode, ran = runSegment(currentCmd)
+			currentCmd = nil
+			if shouldStop(arg, exitCode, ran) {
+				return finish(exitCode)
 			}
 		default:
 			currentCmd = append(currentCmd, arg)
@@ -210,18 +254,17 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 	}
 
 	if len(currentCmd) > 0 {
-		exitCode, result = h.executeCommand(ctx, currentCmd, username, groupname, env, timeout, commandID, chunkCallback)
-		appendResult(result)
+		exitCode, _ = runSegment(currentCmd)
 	}
 
-	return exitCode, finalResult(), nil
+	return finish(exitCode)
 }
 
 // executeCommand registers the child pid with the PAM tracker when commandID
 // is set so sudo inside the command is authorized by command_id. Execute
 // folds startup errors into output, so the err return is intentionally
 // dropped here.
-func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(content string)) (int, string) {
+func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, chunkCallback func(ctx context.Context, content string)) (int, string) {
 	if len(cmdArgs) == 0 {
 		return 0, ""
 	}
