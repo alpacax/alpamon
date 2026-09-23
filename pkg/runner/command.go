@@ -13,6 +13,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// chunkDeliveryGrace is added to a chunk's ctx deadline to get its expiry:
+// enough for last-second output, short enough to drop stale chunks.
+const chunkDeliveryGrace = 5 * time.Minute
+
 // CommandDispatcher interface to avoid circular import with executor package
 type CommandDispatcher interface {
 	Execute(ctx context.Context, command string, args *common.CommandArgs) (int, string, error)
@@ -45,9 +49,9 @@ func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, 
 	}
 }
 
-// newChunkCallback returns the streaming callback for this command, or nil when
-// there is no command ID to stream against.
-func (cr *CommandRunner) newChunkCallback(ctx context.Context) func(content string) {
+// newChunkCallback returns nil when there is no command ID; it takes ctx per
+// call because capturing one here would lose the handler's deadline.
+func (cr *CommandRunner) newChunkCallback() func(ctx context.Context, content string) {
 	if cr.command.ID == "" {
 		return nil
 	}
@@ -55,15 +59,19 @@ func (cr *CommandRunner) newChunkCallback(ctx context.Context) func(content stri
 	chunkURL := fmt.Sprintf(eventCommandChunkURL, cr.command.ID)
 	// Runner owns seq so chunks across shell operators share one series.
 	var seq int
-	return func(content string) {
+	return func(ctx context.Context, content string) {
 		// Advance seq before Post so it stays monotonic even if Post
 		// panics; a reused seq would collide server-side on (command, seq).
 		s := seq
 		seq++
+		var expiry time.Time
+		if deadline, ok := ctx.Deadline(); ok {
+			expiry = deadline.Add(chunkDeliveryGrace)
+		}
 		scheduler.Rqueue.PostChunk(ctx, chunkURL, &protocol.CommandChunk{
 			Seq:     s,
 			Content: content,
-		}, 10)
+		}, 10, expiry)
 	}
 }
 
@@ -125,7 +133,7 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 			Groupname:     cr.command.Group,
 			Env:           cr.command.Env,
 			AllowSh:       cr.command.AllowSh,
-			ChunkCallback: cr.newChunkCallback(ctx),
+			ChunkCallback: cr.newChunkCallback(),
 		}
 	case "file":
 		// The structured payload in Data is the instruction; Line only renders

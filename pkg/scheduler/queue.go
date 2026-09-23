@@ -98,6 +98,10 @@ func newRequestQueue() {
 }
 
 func (rq *RequestQueue) request(method, url string, data any, priority int, due time.Time, headers Headers) {
+	rq.requestWithExpiry(method, url, data, priority, due, time.Time{}, headers)
+}
+
+func (rq *RequestQueue) requestWithExpiry(method, url string, data any, priority int, due, expiry time.Time, headers Headers) {
 	// time.Time{}: 0001-01-01 00:00:00 +0000 UTC
 	if due.IsZero() {
 		due = time.Now()
@@ -115,8 +119,8 @@ func (rq *RequestQueue) request(method, url string, data any, priority int, due 
 		data:     data,
 		headers:  h,
 		due:      due,
-		// expiry:
-		retry: RetryLimit,
+		expiry:   expiry,
+		retry:    RetryLimit,
 	}
 
 	rq.cond.L.Lock()
@@ -152,19 +156,22 @@ func (rq *RequestQueue) PostWithHeaders(url string, data any, priority int, due 
 }
 
 // PostChunk enqueues a chunk, throttling the command while the queue is full and dropping past ctx/maxWait.
-func (rq *RequestQueue) PostChunk(ctx context.Context, url string, data any, priority int) {
-	rq.postChunk(ctx, url, data, priority, chunkQueueHighWater, chunkBackpressurePoll, chunkBackpressureMaxWait)
+// expiry is the caller-computed point past which the chunk should be dropped rather than delivered.
+func (rq *RequestQueue) PostChunk(ctx context.Context, url string, data any, priority int, expiry time.Time) {
+	rq.postChunk(ctx, url, data, priority, expiry, chunkQueueHighWater, chunkBackpressurePoll, chunkBackpressureMaxWait)
 }
 
-func (rq *RequestQueue) postChunk(ctx context.Context, url string, data any, priority, highWater int, poll, maxWait time.Duration) {
+func (rq *RequestQueue) postChunk(ctx context.Context, url string, data any, priority int, expiry time.Time, highWater int, poll, maxWait time.Duration) {
 	start := time.Now()
+
 	for {
 		rq.cond.L.Lock()
 		size := rq.queue.Size()
 		rq.cond.L.Unlock()
 
 		if size < highWater {
-			rq.Post(url, data, priority, time.Time{})
+			// No ctx.Err() check: a timed-out command's final flush arrives past its deadline, and expiry bounds delivery instead.
+			rq.requestWithExpiry(http.MethodPost, url, data, priority, time.Time{}, expiry, nil)
 			return
 		}
 		if ctx.Err() != nil || time.Since(start) >= maxWait {
