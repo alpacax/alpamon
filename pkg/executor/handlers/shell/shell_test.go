@@ -227,26 +227,35 @@ func TestShellHandler_WithTimeout(t *testing.T) {
 	assert.Equal(t, 0, exitCode)
 }
 
-func TestShellHandler_DefaultTimeout(t *testing.T) {
+func TestShellHandler_GivenNoTimeout_WhenExecuted_ThenChainDeadlineIsThirtyMinutes(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockExec.SetResult("ls", 0, "output", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
+	var capturedCtx context.Context
 	args := &common.CommandArgs{
 		Command: "ls",
 		// Timeout not set - should default to 30 minutes
+		ChunkCallback: func(cbCtx context.Context, content string) {
+			capturedCtx = cbCtx
+		},
 	}
 
+	before := time.Now()
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode)
 
-	// Verify the default 30m timeout was passed to the executor
 	cmds := mockExec.GetExecutedCommands()
 	require.NotEmpty(t, cmds, "expected at least one executed command")
-	assert.Equal(t, 30*time.Minute, cmds[0].Timeout)
+	assert.Equal(t, time.Duration(0), cmds[0].Timeout)
+
+	require.NotNil(t, capturedCtx, "expected chunk callback to be invoked with a ctx")
+	deadline, ok := capturedCtx.Deadline()
+	require.True(t, ok, "expected the chain ctx to carry a deadline")
+	assert.WithinDuration(t, before.Add(30*time.Minute), deadline, 5*time.Second)
 }
 
 func TestShellHandler_Validate_Empty(t *testing.T) {
@@ -468,4 +477,65 @@ func TestExecuteWithOperators_GivenCancelledParent_WhenChainRuns_ThenStopsWithou
 	assert.Equal(t, 0, strings.Count(output, "timed out"))
 	assert.NotEqual(t, common.TimeoutExitCode, exitCode)
 	assert.Empty(t, mockExec.GetExecutedCommands())
+}
+
+// cancelAfterFirstExec wraps MockCommandExecutor and cancels the given
+// cancel func right after the first ExecWithStreamingHook call returns, so
+// tests can simulate the parent ctx being cancelled between segments.
+type cancelAfterFirstExec struct {
+	*common.MockCommandExecutor
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (c *cancelAfterFirstExec) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+	c.calls++
+	code, out, err := c.MockCommandExecutor.ExecWithStreamingHook(ctx, args, username, groupname, env, timeout, pidHook, chunkCallback)
+	c.cancel()
+	return code, out, err
+}
+
+func TestExecuteWithOperators_GivenParentCancelledMidChain_WhenTailSegmentSkipped_ThenReportsFailureAndNeverRunsIt(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockExec.SetResult("echo a", 0, "a", nil)
+	mockExec.SetResult("echo b", 0, "b", nil)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	wrapped := &cancelAfterFirstExec{MockCommandExecutor: mockExec, cancel: cancel}
+	handler := NewShellHandler(wrapped)
+
+	args := &common.CommandArgs{
+		Command: "echo a && echo b",
+		AllowSh: false,
+	}
+
+	exitCode, output, err := handler.Execute(parentCtx, common.ShellCmd.String(), args)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, 0, strings.Count(output, "timed out"))
+	assert.Equal(t, 1, wrapped.calls)
+}
+
+func TestExecuteWithOperators_GivenParentCancelledMidChain_WhenMidSegmentSkipped_ThenReportsFailureAndNeverRunsRemainder(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockExec.SetResult("echo a", 0, "a", nil)
+	mockExec.SetResult("echo b", 0, "b", nil)
+	mockExec.SetResult("echo c", 0, "c", nil)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	wrapped := &cancelAfterFirstExec{MockCommandExecutor: mockExec, cancel: cancel}
+	handler := NewShellHandler(wrapped)
+
+	args := &common.CommandArgs{
+		Command: "echo a && echo b && echo c",
+		AllowSh: false,
+	}
+
+	exitCode, output, err := handler.Execute(parentCtx, common.ShellCmd.String(), args)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, 0, strings.Count(output, "timed out"))
+	assert.Equal(t, 1, wrapped.calls)
 }

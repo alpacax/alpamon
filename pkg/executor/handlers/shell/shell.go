@@ -198,27 +198,24 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 		return code, out, nil
 	}
 
-	var ranAny bool
 	runSegment := func(cmdArgs []string) (int, bool) {
 		if ctx.Err() != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				chainTimedOut = true
 				return common.TimeoutExitCode, false
 			}
-			// Parent cancellation, not a timeout: stop the chain but report
-			// the last segment's exit code rather than manufacturing 124.
-			if ranAny {
-				return exitCode, false
-			}
+			// Parent cancellation, not a timeout: this segment never ran,
+			// so it failed like exec against a cancelled ctx would.
 			return 1, false
 		}
-		code, out := h.executeCommand(ctx, cmdArgs, username, groupname, env, timeout, commandID, chunkCallback)
+		// The chain ctx already carries the timeout as its deadline; a
+		// per-segment timeout here would wrap it again and reset the clock.
+		code, out := h.executeCommand(ctx, cmdArgs, username, groupname, env, 0, commandID, chunkCallback)
 		if code == common.TimeoutExitCode && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			chainTimedOut = true
 			out = common.StripTimeoutBanner(out)
 		}
 		appendResult(out)
-		ranAny = true
 		return code, true
 	}
 

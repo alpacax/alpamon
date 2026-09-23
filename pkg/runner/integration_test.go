@@ -3,6 +3,7 @@ package runner_test
 import (
 	"context"
 	"regexp"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -20,6 +21,10 @@ import (
 // A shell command's chunk stream used to outlive its own deadline because the
 // callback closed over a long-lived ctx; this drives the real pipeline end to end.
 func TestE2E_ShellCommandTimeout_ChunkStreamCarriesHandlerDeadlineAndDeliversFinalOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell loop; Windows routes allow_sh through PowerShell")
+	}
+
 	cleanup, contents := runner.StartFakeAlpacon(t)
 	defer cleanup()
 
@@ -63,7 +68,7 @@ func TestE2E_ShellCommandTimeout_ChunkStreamCarriesHandlerDeadlineAndDeliversFin
 	assert.Equal(t, common.TimeoutExitCode, exitCode, "command should be killed with the GNU timeout exit code")
 	assert.Contains(t, result, "timed out", "result should carry the timeout banner")
 
-	// 2. The ctx reaching the chunk callback carried the handler's own deadline,
+	// The ctx reaching the chunk callback carried the handler's own deadline,
 	// not a longer-lived one—the end-to-end proof that fails on the old code.
 	callbackMu.Lock()
 	gotDeadlines := append([]time.Time(nil), deadlines...)
