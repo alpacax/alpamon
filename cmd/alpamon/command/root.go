@@ -112,6 +112,12 @@ func runAgent(ready chan<- struct{}) {
 		os.Exit(utils.StartupExitCode(err))
 	}
 
+	// On Windows, keep the configuration and data directories writable by
+	// SYSTEM and Administrators only. No-op elsewhere.
+	if err := utils.SecureConfigDir(); err != nil {
+		log.Warn().Err(err).Msg("Failed to restrict the alpamon directory ACL.")
+	}
+
 	// Pid
 	pidFilePath, err := pidfile.WritePID(pidfile.FilePath(name))
 	if err != nil {
