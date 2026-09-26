@@ -10,7 +10,8 @@ import (
 )
 
 // readMarker opens the marker without following a reparse point and checks
-// the opened handle itself: a plain file owned by SYSTEM or Administrators.
+// the opened handle itself: a plain file owned by SYSTEM, Administrators
+// or this process's account.
 // It then reads from the same handle.
 func readMarker(path string) ([]byte, error) {
 	name, err := windows.UTF16PtrFromString(path)
@@ -41,7 +42,14 @@ func readMarker(path string) ([]byte, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, errors.New("upgrade marker is not owned by SYSTEM or Administrators")
+		return nil, errors.New("upgrade marker is not owned by SYSTEM, Administrators or the agent's account")
 	}
-	return io.ReadAll(io.LimitReader(f, maxMarkerSize))
+	data, err := io.ReadAll(io.LimitReader(f, maxMarkerSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxMarkerSize {
+		return nil, errors.New("upgrade marker is too large")
+	}
+	return data, nil
 }

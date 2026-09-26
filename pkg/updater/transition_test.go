@@ -274,13 +274,40 @@ func TestSystemdManager(t *testing.T) {
 		assert.NotContains(t, calls[1], "--collect")
 	})
 
+	t.Run("guard results", func(t *testing.T) {
+		useTempMarkerDir(t)
+		assert.Equal(t, GuardNotRun, readGuardResult("g1"))
+		require.NoError(t, os.WriteFile(guardResultPath(), []byte("g1 1\n"), 0600))
+		assert.Equal(t, GuardFailed, readGuardResult("g1"))
+		assert.Equal(t, GuardNotRun, readGuardResult("g2"), "another guard's result")
+	})
+
+	t.Run("wait that runs out", func(t *testing.T) {
+		useTempMarkerDir(t)
+		now := time.Now()
+		clock := now
+		m := &systemdManager{
+			run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+				if len(args) > 0 && args[0] == "is-active" {
+					return []byte("active\n"), nil
+				}
+				return nil, nil
+			},
+			sleep: func(d time.Duration) { clock = clock.Add(d) },
+			now:   func() time.Time { return clock },
+		}
+		assert.Equal(t, GuardRunning, m.DisarmGuard("g1"), "not reported as finished while still running")
+		assert.False(t, clock.Before(now.Add(guardWaitMax)))
+	})
+
 	t.Run("disarm stops the timer", func(t *testing.T) {
 		r := &fakeRunner{}
 		m := &systemdManager{run: r.run, sleep: func(time.Duration) {}}
 		m.DisarmGuard("")
 		assert.Empty(t, r.snapshot(), "no unit, nothing to stop")
+		useTempMarkerDir(t)
 		r.out, r.err = []byte("inactive\n"), errors.New("exit status 3")
-		assert.False(t, m.DisarmGuard("g1"))
+		assert.Equal(t, GuardNotRun, m.DisarmGuard("g1"))
 		assert.Equal(t, []string{"systemctl", "stop", "g1.timer"}, r.snapshot()[0], "only the timer is stopped")
 	})
 
@@ -305,7 +332,9 @@ func TestSystemdManager(t *testing.T) {
 			},
 			sleep: func(time.Duration) {},
 		}
-		assert.True(t, m.DisarmGuard("g1"), "a guard that ran reports as fired")
+		useTempMarkerDir(t)
+		require.NoError(t, os.WriteFile(guardResultPath(), []byte("g1 0\n"), 0600))
+		assert.Equal(t, GuardRestored, m.DisarmGuard("g1"), "the result file tells how it ended")
 		assert.Equal(t, 4, polls)
 		for _, c := range calls {
 			assert.NotEqual(t, []string{"systemctl", "stop", "g1.service"}, c, "a running guard is never stopped")
@@ -388,6 +417,7 @@ func TestGuardScript(t *testing.T) {
 		calls, err := os.ReadFile(log)
 		require.NoError(t, err)
 		assert.Equal(t, "restart alpamon\n", string(calls))
+		assert.Equal(t, GuardRestored, readGuardResult(p.GuardUnit), "the outcome outlives the unit")
 		_, err = os.Stat(MarkerPath())
 		assert.NoError(t, err, "the guard leaves the marker for the restored process to report")
 	})
@@ -449,7 +479,10 @@ func TestGuardScript(t *testing.T) {
 		script, err := guardScript(&PendingUpgrade{Method: MethodPackage, PackageManager: utils.PkgApt, PreviousPackageVersion: "2.4.0", GuardUnit: "g1"})
 		require.NoError(t, err)
 		m := shellQuote(MarkerPath())
-		assert.Equal(t, "if [ -f "+m+" ] && grep -qxF '  \"guard_unit\": \"g1\",' "+m+"; then 'apt-get' 'install' '-y' '--allow-downgrades' 'alpamon=2.4.0' && systemctl restart alpamon; fi", script)
+		res := shellQuote(guardResultPath())
+		assert.Equal(t, "if [ -f "+m+" ] && grep -qxF '  \"guard_unit\": \"g1\",' "+m+"; then "+
+			"if 'apt-get' 'install' '-y' '--allow-downgrades' 'alpamon=2.4.0'; then echo 'g1' 0 > "+res+"; systemctl restart alpamon; "+
+			"else echo 'g1' 1 > "+res+"; fi; fi", script)
 	})
 }
 
@@ -500,6 +533,19 @@ func TestLoadPending_DiscardsMarkersItDidNotWrite(t *testing.T) {
 			assert.ErrorIs(t, err, os.ErrNotExist, "an invalid marker is removed")
 		})
 	}
+
+	t.Run("oversized", func(t *testing.T) {
+		useTempMarkerDir(t)
+		p := valid(t)
+		require.NoError(t, WritePending(p))
+		data, err := os.ReadFile(MarkerPath())
+		require.NoError(t, err)
+		padded := append(data, []byte(strings.Repeat(" ", maxMarkerSize))...)
+		require.NoError(t, os.WriteFile(MarkerPath(), append(padded, []byte(`{"x":1}`)...), 0600))
+		got, err := LoadPending()
+		require.NoError(t, err)
+		assert.Nil(t, got, "data past the size limit is not ignored")
+	})
 
 	t.Run("trailing data", func(t *testing.T) {
 		useTempMarkerDir(t)

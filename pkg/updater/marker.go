@@ -211,11 +211,13 @@ func WritePending(p *PendingUpgrade) error {
 	return writeFileSynced(MarkerPath(), data, 0600)
 }
 
-// ClearPending removes the marker. Idempotent.
+// ClearPending removes the marker, and any guard result beside it.
+// Idempotent.
 func ClearPending() error {
 	if err := os.Remove(MarkerPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	_ = os.Remove(guardResultPath())
 	return nil
 }
 

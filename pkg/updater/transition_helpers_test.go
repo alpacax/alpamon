@@ -17,7 +17,7 @@ type fakeServiceManager struct {
 	disarmed   []string
 	restartErr error
 	guardErr   error
-	fired      bool // what DisarmGuard reports
+	state      GuardState // what DisarmGuard reports
 	// markersAtArm holds the marker on disk at each ArmGuard call.
 	markersAtArm []*PendingUpgrade
 }
@@ -50,11 +50,11 @@ func (f *fakeServiceManager) ArmGuard(unit string, d time.Duration, script strin
 	return nil
 }
 
-func (f *fakeServiceManager) DisarmGuard(unit string) bool {
+func (f *fakeServiceManager) DisarmGuard(unit string) GuardState {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.disarmed = append(f.disarmed, unit)
-	return f.fired
+	return f.state
 }
 
 func (f *fakeServiceManager) snapshot() (restarts []time.Duration, guards []fakeGuard, disarmed []string) {

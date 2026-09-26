@@ -35,5 +35,12 @@ func readMarker(path string) ([]byte, error) {
 	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
 		return nil, fmt.Errorf("upgrade marker is owned by uid %d", st.Uid)
 	}
-	return io.ReadAll(io.LimitReader(f, maxMarkerSize))
+	data, err := io.ReadAll(io.LimitReader(f, maxMarkerSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxMarkerSize {
+		return nil, errors.New("upgrade marker is too large")
+	}
+	return data, nil
 }

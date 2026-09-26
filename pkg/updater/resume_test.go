@@ -395,7 +395,7 @@ func TestResumePending_GuardAlreadyRolledBackThePackage(t *testing.T) {
 		f.marker.PackageManager = utils.PkgApt
 		f.marker.PreviousPackageVersion = "2.4.0"
 		require.NoError(t, WritePending(f.marker))
-		f.sm.fired = true
+		f.sm.state = GuardRestored
 
 		_, done := ResumePending(t.Context(), f.deps)
 		<-done
@@ -408,7 +408,7 @@ func TestResumePending_GuardAlreadyRolledBackThePackage(t *testing.T) {
 func TestResumePending_GuardFiredBeforeConfirmation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newResumeFixture(t, 5*time.Minute)
-		f.sm.fired = true
+		f.sm.state = GuardRestored
 		close(f.authed)
 
 		_, done := ResumePending(t.Context(), f.deps)
@@ -472,7 +472,7 @@ func TestResumePending_FailedRollbackCountsTheAttempt(t *testing.T) {
 func TestResumePending_GuardRunningAtConfirmationKeepsTheMarker(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newResumeFixture(t, 5*time.Minute)
-		f.sm.fired = true
+		f.sm.state = GuardRestored
 		close(f.authed)
 		_, done := ResumePending(t.Context(), f.deps)
 		<-done
@@ -483,5 +483,61 @@ func TestResumePending_GuardRunningAtConfirmationKeepsTheMarker(t *testing.T) {
 		assert.NotNil(t, marker, "never removed, so the restored version can report")
 		_, err = os.Stat(f.marker.RollbackPath)
 		assert.NoError(t, err, "the rollback copy is left to the guard")
+	})
+}
+
+func TestResumePending_GuardStillRunningDefersEverything(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, 5*time.Minute)
+		f.sm.state = GuardRunning
+		close(f.authed)
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+		marker, err := LoadPending()
+		require.NoError(t, err)
+		assert.NotNil(t, marker)
+		assert.Empty(t, f.poster.all())
+	})
+}
+
+func TestResumePending_FailedGuardDoesNotBlockConfirmation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, 5*time.Minute)
+		f.sm.state = GuardFailed
+		close(f.authed)
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+		assert.Equal(t, OutcomeSucceeded, f.poster.all()[0].Outcome)
+	})
+}
+
+func TestResumePending_RestoredProcessReportsAfterTheGuard(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, time.Minute)
+		f.sm.state = GuardRestored
+		f.deps.Running = "2.4.0"
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+		reports := f.poster.all()
+		require.Len(t, reports, 1)
+		assert.Equal(t, OutcomeRolledBack, reports[0].Outcome)
+	})
+}
+
+func TestResumePending_FailedRollbackWithoutServiceManagerRestarts(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, time.Minute)
+		usePackageManager(t, utils.PkgApt)
+		f.marker.Method = MethodPackage
+		f.marker.BinaryPath, f.marker.RollbackPath = "", ""
+		f.marker.PackageManager = utils.PkgApt
+		f.marker.PreviousPackageVersion = "2.4.0"
+		require.NoError(t, WritePending(f.marker))
+		f.runner.err = errors.New("E: not found")
+		f.deps.ServiceManager = noServiceManager{}
+
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+		assert.True(t, f.restarted.Load(), "with no guard, a restart retries the rollback")
 	})
 }

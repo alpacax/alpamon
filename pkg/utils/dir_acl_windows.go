@@ -78,7 +78,8 @@ func restrictDirACL(dir string) error {
 }
 
 // HandleOwnedByAdministrators reports whether the open file h is owned by
-// SYSTEM or the Administrators group.
+// SYSTEM, the Administrators group, or the account this process runs as (the
+// service runs as SYSTEM; an interactive run owns what it writes).
 func HandleOwnedByAdministrators(h windows.Handle) (bool, error) {
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
@@ -88,5 +89,12 @@ func HandleOwnedByAdministrators(h windows.Handle) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid), nil
+	if owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		return true, nil
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return false, err
+	}
+	return windows.EqualSid(owner, user.User.Sid), nil
 }

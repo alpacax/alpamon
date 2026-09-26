@@ -50,6 +50,12 @@ func (h *SystemHandler) handlePinnedUpgrade(ctx context.Context, target *common.
 
 	switch utils.PackageManager {
 	case utils.PkgApt, utils.PkgYum, utils.PkgZypper:
+		// One upgrade at a time: the latch the self-update also holds
+		// serializes the pending check, the marker and the install.
+		if !updater.AcquireUpgradeLatch() {
+			return 0, "Upgrade already in progress.", nil
+		}
+		defer updater.ReleaseSelfUpdateLatch()
 		// The package manager fetches from its own repositories, so the
 		// artifact pins do not apply; say so rather than imply they held.
 		if target.ArtifactURL != "" || target.ArtifactDigest != "" || target.ChecksumsURL != "" || target.SignatureURL != "" {
@@ -203,8 +209,11 @@ func (h *SystemHandler) undoPackageChange(ctx context.Context, marker *updater.P
 	}
 	// Stand the guard down first so the two never run the package manager
 	// at once; one that already started is waited out and left to finish.
-	if h.serviceManager.DisarmGuard(marker.GuardUnit) {
+	switch h.serviceManager.DisarmGuard(marker.GuardUnit) {
+	case updater.GuardRestored:
 		return output + "\nThe upgrade guard has already reinstalled the previous version."
+	case updater.GuardRunning:
+		return output + "\nThe upgrade guard is still reinstalling the previous version."
 	}
 	argv, err := updater.PackageRollbackCommand(utils.PackageManager, previous, installed)
 	if err == nil {
@@ -221,8 +230,14 @@ func (h *SystemHandler) undoPackageChange(ctx context.Context, marker *updater.P
 		return output + fmt.Sprintf("\nReinstalled the previous version %s.", previous)
 	}
 	log.Error().Err(err).Str("previous", previous).Msg("Could not reinstall the previous version; arming the upgrade guard to retry it.")
-	if rerr := updater.Rearm(marker, h.serviceManager, 0, h.now()); rerr != nil {
-		log.Error().Err(rerr).Msg("Failed to re-arm the upgrade guard.")
+	if rerr := updater.Rearm(marker, h.serviceManager, 0, h.now()); rerr != nil || marker.GuardUnit == "" {
+		// No guard covers the attempt now; restart so the next start finds
+		// the marker and settles it (a version other than the target and
+		// the previous one reports the attempt failed).
+		log.Error().Err(rerr).Msg("No upgrade guard is armed; restarting so the next start settles the attempt.")
+		if serr := h.serviceManager.ScheduleRestart(updater.RestartDelay); serr != nil {
+			_ = h.scheduleDelayedAction(delayedActionDelay, func(_ context.Context) { h.wsClient.Restart() })
+		}
 	}
 	return output + fmt.Sprintf("\nCould not reinstall the previous version %s; the upgrade guard retries it.", previous)
 }

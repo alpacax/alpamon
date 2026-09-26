@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -11,6 +12,43 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
+
+// GuardState is what DisarmGuard found out about a guard.
+type GuardState int
+
+const (
+	// GuardNotRun: the guard never acted; it is now disarmed.
+	GuardNotRun GuardState = iota
+	// GuardRestored: the guard restored the previous version and restarted
+	// the agent into it.
+	GuardRestored
+	// GuardFailed: the guard acted but its restore failed.
+	GuardFailed
+	// GuardRunning: the guard was still running when the wait ran out.
+	GuardRunning
+)
+
+// guardResultPath is where a guard that acted records "<unit> <exit code>".
+// A completed transient unit may already be collected, so this file, not the
+// unit, is what tells a later process that the guard ran.
+func guardResultPath() string { return MarkerPath() + ".guard" }
+
+// readGuardResult reports how the guard named unit ended, from its result
+// file; GuardNotRun when the file is absent or names another guard.
+func readGuardResult(unit string) GuardState {
+	data, err := os.ReadFile(guardResultPath())
+	if err != nil {
+		return GuardNotRun
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 2 || fields[0] != unit {
+		return GuardNotRun
+	}
+	if fields[1] == "0" {
+		return GuardRestored
+	}
+	return GuardFailed
+}
 
 // ErrNoServiceManager means the host has no service manager alpamon can ask
 // to restart it from outside its own process, or to run a guard later.
@@ -24,10 +62,10 @@ type ServiceManager interface {
 	ScheduleRestart(delay time.Duration) error
 	// ArmGuard runs script as root after delay under the given unit name.
 	ArmGuard(unit string, delay time.Duration, script string) error
-	// DisarmGuard cancels a guard armed earlier. If the guard has already
-	// started, it is left to finish, DisarmGuard waits for it, and fired is
-	// true: the guard has then restored the previous version itself.
-	DisarmGuard(unit string) (fired bool)
+	// DisarmGuard cancels a guard armed earlier. A guard that has already
+	// started is left to finish and waited for; the result says whether it
+	// ran and how it ended.
+	DisarmGuard(unit string) GuardState
 }
 
 // DefaultServiceManager returns systemd when it runs as PID 1, and otherwise a
@@ -43,7 +81,7 @@ type noServiceManager struct{}
 
 func (noServiceManager) ScheduleRestart(time.Duration) error          { return ErrNoServiceManager }
 func (noServiceManager) ArmGuard(string, time.Duration, string) error { return ErrNoServiceManager }
-func (noServiceManager) DisarmGuard(string) bool                      { return false }
+func (noServiceManager) DisarmGuard(string) GuardState                { return GuardNotRun }
 
 // commandRunner runs a program and returns its combined output.
 type commandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -60,6 +98,14 @@ const systemdCallTimeout = 30 * time.Second
 type systemdManager struct {
 	run   commandRunner
 	sleep func(time.Duration)
+	now   func() time.Time
+}
+
+func (m *systemdManager) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
 }
 
 func (m *systemdManager) ScheduleRestart(delay time.Duration) error {
@@ -75,9 +121,9 @@ func (m *systemdManager) ArmGuard(unit string, delay time.Duration, script strin
 // package reinstall is the slowest thing it does.
 const guardWaitMax = 30 * time.Minute
 
-func (m *systemdManager) DisarmGuard(unit string) bool {
+func (m *systemdManager) DisarmGuard(unit string) GuardState {
 	if unit == "" {
-		return false
+		return GuardNotRun
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), systemdCallTimeout)
 	defer cancel()
@@ -86,19 +132,23 @@ func (m *systemdManager) DisarmGuard(unit string) bool {
 	if out, err := m.run(ctx, "systemctl", "stop", unit+".timer"); err != nil {
 		log.Debug().Err(err).Str("unit", unit).Msgf("Could not stop the upgrade guard timer: %s", strings.TrimSpace(string(out)))
 	}
-	fired := false
-	for deadline := time.Now().Add(guardWaitMax); m.guardActive(unit) && time.Now().Before(deadline); {
-		if !fired {
-			log.Warn().Str("unit", unit).Msg("The upgrade guard is already running; waiting for it to finish.")
+	waited := false
+	for deadline := m.clock().Add(guardWaitMax); m.guardActive(unit); {
+		if !m.clock().Before(deadline) {
+			log.Error().Str("unit", unit).Msg("The upgrade guard is still running after the wait.")
+			return GuardRunning
 		}
-		fired = true
+		if !waited {
+			log.Warn().Str("unit", unit).Msg("The upgrade guard is already running; waiting for it to finish.")
+			waited = true
+		}
 		m.sleep(guardPollInterval)
 	}
 	// A fresh context: the wait above may have outlived the first one.
 	rctx, rcancel := context.WithTimeout(context.Background(), systemdCallTimeout)
 	defer rcancel()
 	_, _ = m.run(rctx, "systemctl", "reset-failed", unit+".timer", unit+".service")
-	return fired
+	return readGuardResult(unit)
 }
 
 const guardPollInterval = 2 * time.Second
@@ -163,16 +213,24 @@ func guardScript(p *PendingUpgrade) (string, error) {
 	// The exact "guard_unit" line MarshalIndent writes, so a unit name that
 	// appears in another field cannot match.
 	pending := fmt.Sprintf("[ -f %s ] && grep -qxF %s %s", marker, shellQuote(`  "guard_unit": "`+p.GuardUnit+`",`), marker)
+	// Record the outcome before restarting, so a later process knows the
+	// guard ran even after systemd has collected its unit.
+	result := shellQuote(guardResultPath())
+	unit := shellQuote(p.GuardUnit)
+	outcome := func(restore string) string {
+		return fmt.Sprintf("if %s; then echo %s 0 > %s; systemctl restart alpamon; else echo %s 1 > %s; fi",
+			restore, unit, result, unit, result)
+	}
 	switch p.Method {
 	case MethodBinary:
-		return fmt.Sprintf("if %s && [ -f %s ]; then mv -f %s %s && systemctl restart alpamon; fi",
-			pending, shellQuote(p.RollbackPath), shellQuote(p.RollbackPath), shellQuote(p.BinaryPath)), nil
+		return fmt.Sprintf("if %s && [ -f %s ]; then %s; fi",
+			pending, shellQuote(p.RollbackPath), outcome("mv -f "+shellQuote(p.RollbackPath)+" "+shellQuote(p.BinaryPath))), nil
 	case MethodPackage:
 		argv, err := PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion, p.ToVersion)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("if %s; then %s && systemctl restart alpamon; fi", pending, shellJoin(argv)), nil
+		return fmt.Sprintf("if %s; then %s; fi", pending, outcome(shellJoin(argv))), nil
 	}
 	return "", fmt.Errorf("unknown upgrade method %q", p.Method)
 }

@@ -73,6 +73,13 @@ func (o Options) baseURL() string {
 	return defaultReleaseBaseURL
 }
 
+// AcquireUpgradeLatch takes the latch SelfUpdate and PinnedSelfUpdate hold,
+// for another upgrade path that must not overlap them. It reports false when
+// an upgrade is already running.
+func AcquireUpgradeLatch() bool {
+	return selfUpdateInFlight.CompareAndSwap(false, true)
+}
+
 // ReleaseSelfUpdateLatch clears the latch SelfUpdate keeps set after a successful
 // run. Call it only when the expected post-update restart could not be triggered.
 func ReleaseSelfUpdateLatch() {

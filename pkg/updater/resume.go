@@ -118,9 +118,17 @@ func confirmHealth(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 	// Guard first: stopping its timer, or waiting out a guard that already
 	// started. One that ran has restored the previous version and will
 	// restart into it; the marker stays for that process to report.
-	if d.ServiceManager.DisarmGuard(p.GuardUnit) {
+	switch d.ServiceManager.DisarmGuard(p.GuardUnit) {
+	case GuardRestored:
 		log.Warn().Msg("The upgrade guard ran before the upgrade was confirmed; leaving the outcome to the restored version.")
 		return
+	case GuardRunning:
+		log.Warn().Msg("The upgrade guard is still running; the next start repeats the check.")
+		return
+	case GuardFailed:
+		// Its restore failed, so this version is still the one in place and
+		// has just proven healthy.
+		log.Warn().Msg("The upgrade guard ran but could not restore; confirming this version.")
 	}
 	if err := ClearPending(); err != nil {
 		log.Error().Err(err).Msg("Failed to clear the upgrade marker; the next start repeats the check.")
@@ -155,8 +163,12 @@ func rollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, reason strin
 	case MethodPackage:
 		// Stand the guard down while this reinstall runs, so the two never
 		// drive the package manager at once; it is re-armed if this fails.
-		if d.ServiceManager.DisarmGuard(p.GuardUnit) {
+		switch d.ServiceManager.DisarmGuard(p.GuardUnit) {
+		case GuardRestored:
 			log.Warn().Msg("The upgrade guard already rolled back; nothing left to do here.")
+			return
+		case GuardRunning:
+			log.Warn().Msg("The upgrade guard is still running; not starting a second reinstall.")
 			return
 		}
 		var argv []string
@@ -183,10 +195,11 @@ func rollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, reason strin
 			log.Error().Err(werr).Msg("Failed to record the rollback attempt.")
 		}
 		if p.Method == MethodPackage {
-			if aerr := armGuard(p, d.ServiceManager, 0, time.Now()); aerr != nil {
+			aerr := armGuard(p, d.ServiceManager, 0, time.Now())
+			if aerr != nil || p.GuardUnit == "" {
 				// No guard: restart instead, so the next start, still the
 				// failing version past its deadline, retries this rollback.
-				log.Error().Err(aerr).Msg("Failed to re-arm the upgrade guard; restarting to retry the rollback.")
+				log.Error().Err(aerr).Msg("No upgrade guard is armed; restarting to retry the rollback.")
 				p.GuardUnit = ""
 				if werr := WritePending(p); werr != nil {
 					log.Error().Err(werr).Msg("Failed to update the upgrade marker.")
@@ -213,7 +226,7 @@ const maxRollbackAttempts = 3
 // the version it runs.
 func giveUpRollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, err error) {
 	log.Error().Err(err).Int("attempts", p.RollbackAttempts).Msg("Giving up on rolling back the upgrade; staying on this version.")
-	if !clearForReport(p, d) {
+	if !clearForReport(p, d, false) {
 		return
 	}
 	sendReportWithRetry(ctx, d.Poster, Report{
@@ -238,7 +251,7 @@ func restart(d ResumeDeps) {
 // finishRollback runs in the restored previous version and reports the
 // rollback, whether this process's predecessor or the guard performed it.
 func finishRollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
-	if !clearForReport(p, d) {
+	if !clearForReport(p, d, true) {
 		return
 	}
 
@@ -265,7 +278,7 @@ func finishRollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 // finishUnexpected handles a process that is neither the version replaced
 // nor the target, such as after an operator installed another build.
 func finishUnexpected(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
-	if !clearForReport(p, d) {
+	if !clearForReport(p, d, false) {
 		return
 	}
 	sendReportWithRetry(ctx, d.Poster, Report{
@@ -281,12 +294,25 @@ func finishUnexpected(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 // clearForReport removes the marker, then the guard and the rollback copy.
 // When the marker cannot be removed it leaves all three and reports false,
 // so nothing is reported until a later start can finish the job.
-func clearForReport(p *PendingUpgrade, d ResumeDeps) bool {
+//
+// Guard first, so nothing it may still need is removed under it. A guard that
+// is still running always defers the cleanup; one that restored does so
+// unless this process is the version it restored (restored is true).
+func clearForReport(p *PendingUpgrade, d ResumeDeps, restored bool) bool {
+	switch d.ServiceManager.DisarmGuard(p.GuardUnit) {
+	case GuardRunning:
+		log.Warn().Msg("The upgrade guard is still running; leaving the attempt for the next start.")
+		return false
+	case GuardRestored:
+		if !restored {
+			log.Warn().Msg("The upgrade guard has restored the previous version; leaving the attempt to it.")
+			return false
+		}
+	}
 	if err := ClearPending(); err != nil {
 		log.Error().Err(err).Msg("Failed to clear the upgrade marker; leaving the attempt for the next start.")
 		return false
 	}
-	_ = d.ServiceManager.DisarmGuard(p.GuardUnit)
 	removeRollbackCopy(p)
 	return true
 }

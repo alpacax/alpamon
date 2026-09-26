@@ -52,9 +52,9 @@ func (f *fakeServiceManager) ArmGuard(unit string, _ time.Duration, _ string) er
 	return nil
 }
 
-func (f *fakeServiceManager) DisarmGuard(unit string) bool {
+func (f *fakeServiceManager) DisarmGuard(unit string) updater.GuardState {
 	f.disarmed = append(f.disarmed, unit)
-	return false
+	return updater.GuardNotRun
 }
 
 // markerCheckingExecutor records whether the intent marker existed when the

@@ -138,6 +138,7 @@ func armGuard(p *PendingUpgrade, sm ServiceManager, untilDeadline time.Duration,
 	if err := WritePending(p); err != nil {
 		return fmt.Errorf("write upgrade marker: %w", err)
 	}
+	_ = os.Remove(guardResultPath())
 
 	if err := sm.ArmGuard(p.GuardUnit, untilDeadline+guardMargin, script); err != nil {
 		if !errors.Is(err, ErrNoServiceManager) {
