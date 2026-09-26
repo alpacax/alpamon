@@ -189,6 +189,32 @@ func (a *authBackoff) longInterval() time.Duration {
 	return time.Duration(float64(a.interval) * (0.5 + a.rand()))
 }
 
+// keepaliveRedialJitter caps the random pause before the first redial after
+// a keepalive timeout. A network fault drops many agents' connections at the
+// same moment, and connectForever makes its first attempt at once, so
+// without the pause they would all redial together; the attempts after that
+// are already spread by the backoff's own jitter. A var, not a const, so
+// tests can shrink it.
+var keepaliveRedialJitter = 10 * time.Second
+
+// redialJitter returns a random wait from 0 up to keepaliveRedialJitter.
+func (a *authBackoff) redialJitter() time.Duration {
+	return time.Duration(a.rand() * float64(keepaliveRedialJitter))
+}
+
+// waitBeforeRedial sleeps for redialJitter, or until ctx ends.
+func (a *authBackoff) waitBeforeRedial(ctx context.Context) error {
+	timer := time.NewTimer(a.redialJitter())
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // connectForever calls dial until it succeeds or ctx ends, pacing attempts
 // with a. There is no overall deadline on purpose: the loop used to give up
 // after three days and exit, which only handed the same loop back to the
