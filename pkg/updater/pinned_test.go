@@ -2,11 +2,14 @@ package updater
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -60,6 +63,7 @@ func TestResolvePinned(t *testing.T) {
 		{"bad version", PinnedRequest{TargetVersion: "latest"}, "invalid version"},
 		{"bad digest", PinnedRequest{TargetVersion: "v2.5.0", ArtifactDigest: "abc"}, "not a SHA-256"},
 		{"no host", PinnedRequest{TargetVersion: "v2.5.0", SignatureURL: "https:///sums.sig"}, "invalid download URL"},
+		{"port without host", PinnedRequest{TargetVersion: "v2.5.0", ChecksumsURL: "https://:443/sums"}, "invalid download URL"},
 	}
 	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {
@@ -204,4 +208,30 @@ func TestPinnedSelfUpdate_SharesTheLatchWithSelfUpdate(t *testing.T) {
 
 	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0"}, Options{})
 	assert.ErrorIs(t, err, ErrSelfUpdateInProgress)
+}
+
+func TestPinnedClient_RefusesRedirectToPlainHTTP(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("payload"))
+	}))
+	t.Cleanup(target.Close)
+	// A TLS server that redirects to the plain-HTTP one.
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/sums", http.StatusFound)
+	}))
+	t.Cleanup(redirector.Close)
+
+	client := pinnedClient(5*time.Second, false)
+	client.Transport = redirector.Client().Transport
+
+	_, err := downloadBytes(context.Background(), client, redirector.URL+"/sums", 1024)
+	assert.ErrorContains(t, err, "must use https")
+
+	// The same redirect is followed when plain HTTP is allowed, which shows
+	// the refusal above comes from the scheme check.
+	allowed := pinnedClient(5*time.Second, true)
+	allowed.Transport = redirector.Client().Transport
+	got, err := downloadBytes(context.Background(), allowed, redirector.URL+"/sums", 1024)
+	require.NoError(t, err)
+	assert.Equal(t, "payload", string(got))
 }

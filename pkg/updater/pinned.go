@@ -2,6 +2,7 @@ package updater
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -97,21 +98,38 @@ func resolvePinned(req PinnedRequest, opts Options) (*pinnedSources, error) {
 
 func checkSourceURL(raw string, allowHTTP bool) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Hostname() == "" {
 		return fmt.Errorf("invalid download URL %q", raw)
 	}
+	return checkScheme(u, allowHTTP)
+}
+
+func checkScheme(u *url.URL, allowHTTP bool) error {
 	if u.Scheme == "https" || (allowHTTP && u.Scheme == "http") {
 		return nil
 	}
-	return fmt.Errorf("download URL %q must use https", raw)
+	return fmt.Errorf("download URL %q must use https", u.Redacted())
 }
 
-func downloadBytes(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
+// pinnedClient refuses a redirect that leaves https, so the scheme check on
+// the requested URL holds for the URL actually fetched.
+func pinnedClient(timeout time.Duration, allowHTTP bool) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return checkScheme(req.URL, allowHTTP)
+		},
+	}
+}
+
+func downloadBytes(ctx context.Context, client *http.Client, rawURL string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
@@ -147,14 +165,15 @@ func preparePinned(ctx context.Context, src *pinnedSources, opts Options, tempDi
 
 	archivePath := filepath.Join(tempDir, src.archiveName)
 	log.Debug().Str("url", src.artifactURL).Msg("Downloading pinned release archive.")
-	if err := downloadFile(ctx, src.artifactURL, archivePath); err != nil {
+	if err := downloadFileWith(ctx, pinnedClient(downloadTimeout, opts.allowHTTP), src.artifactURL, archivePath); err != nil {
 		return "", Classify(ClassDownloadFailed, fmt.Errorf("failed to download artifact: %w", err))
 	}
-	checksums, err := downloadBytes(ctx, src.checksumsURL, maxChecksumFileSize)
+	small := pinnedClient(30*time.Second, opts.allowHTTP)
+	checksums, err := downloadBytes(ctx, small, src.checksumsURL, maxChecksumFileSize)
 	if err != nil {
 		return "", Classify(ClassDownloadFailed, fmt.Errorf("failed to download checksums: %w", err))
 	}
-	signature, err := downloadBytes(ctx, src.signatureURL, maxSignatureSize)
+	signature, err := downloadBytes(ctx, small, src.signatureURL, maxSignatureSize)
 	if err != nil {
 		return "", Classify(ClassDownloadFailed, fmt.Errorf("failed to download checksums signature: %w", err))
 	}
@@ -194,11 +213,6 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 	if err != nil {
 		return Classify(ClassUnknown, err)
 	}
-	if err := ensureSelfRestartable(); err != nil {
-		return Classify(ClassUnknown, err)
-	}
-	CleanupStaleOld()
-
 	currentPath, err := currentBinaryPath(opts)
 	if err != nil {
 		return Classify(ClassUnknown, err)
@@ -215,6 +229,14 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 	if err != nil {
 		return err
 	}
+
+	// Only now, with a verified binary in hand, touch state outside the temp
+	// directory: on Windows the preflight may repair the service's recovery
+	// actions, and the cleanup removes the previous update's ".old" binary.
+	if err := ensureSelfRestartable(); err != nil {
+		return Classify(ClassUnknown, err)
+	}
+	CleanupStaleOld()
 
 	if err := replaceBinary(extractedPath, currentPath); err != nil {
 		return Classify(ClassSwapFailed, fmt.Errorf("failed to replace binary: %w", err))
