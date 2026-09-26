@@ -33,7 +33,8 @@ func TestSendReport(t *testing.T) {
 	}{
 		{"accepted", &fakePoster{status: http.StatusCreated}, true},
 		{"server predates the endpoint", &fakePoster{status: http.StatusNotFound}, true},
-		{"rejected as invalid", &fakePoster{status: http.StatusBadRequest}, true},
+		{"endpoint gone", &fakePoster{status: http.StatusGone}, true},
+		{"rejected as invalid", &fakePoster{status: http.StatusBadRequest}, false},
 		{"server error", &fakePoster{status: http.StatusBadGateway}, false},
 		{"network error", &fakePoster{err: errors.New("dial tcp: refused")}, false},
 	}

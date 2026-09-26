@@ -39,10 +39,11 @@ type Poster interface {
 	Post(url string, rawBody any, timeout time.Duration) ([]byte, int, error)
 }
 
-// SendReport posts r and reports whether the server accepted it. A report
-// without an attempt ID has nothing to attach to and is not sent. A 404 means
-// the server does not have the endpoint yet and counts as delivered, so the
-// caller does not retry against a server that will never accept it.
+// SendReport posts r and reports whether it is settled. A report without an
+// attempt ID has nothing to attach to and is not sent. A 404 or 410 means the
+// server does not have the endpoint and counts as settled, so the caller does
+// not retry against a server that will never accept it. Any other non-2xx
+// answer is a failure the caller may retry.
 func SendReport(p Poster, r Report) bool {
 	if p == nil || r.AttemptID == "" {
 		return true
@@ -52,12 +53,12 @@ func SendReport(p Poster, r Report) bool {
 	case err != nil:
 		log.Warn().Err(err).Str("attempt_id", r.AttemptID).Msg("Failed to send upgrade report.")
 		return false
-	case status == http.StatusNotFound:
+	case status == http.StatusNotFound || status == http.StatusGone:
 		log.Info().Str("attempt_id", r.AttemptID).Msg("Server does not accept upgrade reports yet; skipping.")
 		return true
 	case status < 200 || status >= 300:
 		log.Warn().Int("status_code", status).Str("attempt_id", r.AttemptID).Msg("Upgrade report was rejected.")
-		return status >= 400 && status < 500
+		return false
 	}
 	log.Info().Str("attempt_id", r.AttemptID).Str("outcome", string(r.Outcome)).Msg("Upgrade report sent.")
 	return true

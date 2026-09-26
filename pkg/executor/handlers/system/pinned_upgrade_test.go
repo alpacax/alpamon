@@ -308,3 +308,17 @@ func TestCompareVersions(t *testing.T) {
 	assert.Equal(t, 1, compareVersions("2.10.0", "2.9.9"))
 	assert.Equal(t, 0, compareVersions("v2.5.0", "2.5.0-1"))
 }
+
+func TestSystemHandler_PinnedUpgrade_PackageHostSaysPinsDoNotApply(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	h.exec.SetResult("apt-cache madison alpamon", 0, "", nil)
+
+	_, _, err := h.upgrade(t, &common.UpgradeTarget{
+		TargetVersion:  "2.5.0",
+		AttemptID:      "att-12",
+		ArtifactDigest: "sha256:" + strings.Repeat("a", 64),
+	})
+	require.Error(t, err)
+	r := h.lastReport(t)
+	assert.True(t, strings.HasPrefix(r.Detail, "digest not applicable on package-managed host; "), r.Detail)
+}

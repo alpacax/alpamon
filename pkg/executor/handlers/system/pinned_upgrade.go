@@ -49,6 +49,12 @@ func (h *SystemHandler) handlePinnedUpgrade(ctx context.Context, target *common.
 
 	switch utils.PackageManager {
 	case utils.PkgApt, utils.PkgYum, utils.PkgZypper:
+		// The package manager fetches from its own repositories, so the
+		// artifact pins do not apply; say so rather than imply they held.
+		if target.ArtifactURL != "" || target.ArtifactDigest != "" || target.ChecksumsURL != "" || target.SignatureURL != "" {
+			log.Info().Msg("Artifact URL and digest are ignored on a package-managed host; the repository signature is the trust chain.")
+			report.Detail = packageHostNote
+		}
 		return h.pinnedPackageUpgrade(ctx, report, packageProxy)
 	case utils.PkgBrew, utils.PkgNone:
 		return h.pinnedSelfUpdate(ctx, target, tag, report)
@@ -58,11 +64,19 @@ func (h *SystemHandler) handlePinnedUpgrade(ctx context.Context, target *common.
 	}
 }
 
+// packageHostNote goes into the report detail when the console sent artifact
+// pins to a host that installs through its package manager.
+const packageHostNote = "digest not applicable on package-managed host"
+
 // failPinned reports a failed attempt and returns the command result.
 func (h *SystemHandler) failPinned(report updater.Report, err error, output string) (int, string, error) {
 	report.Outcome = updater.OutcomeFailed
 	report.ErrorClass = updater.ClassOf(err)
-	report.Detail = err.Error()
+	if report.Detail != "" {
+		report.Detail += "; " + err.Error()
+	} else {
+		report.Detail = err.Error()
+	}
 	updater.SendReport(h.apiSession, report)
 
 	msg := fmt.Sprintf("Upgrade to %s failed (%s): %v", report.ToVersion, report.ErrorClass, err)
