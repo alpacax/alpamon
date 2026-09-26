@@ -164,7 +164,23 @@ func runAgent(ready chan<- struct{}) {
 	// marker, arm the watchdog and register the connect-success hook so
 	// the marker is cleared once we authenticate against the new
 	// workspace. See pkg/migrate for the full state machine.
-	wirePendingMigration(ctx, wsClient, settings)
+	var authHooks []func()
+	if hook := wirePendingMigration(ctx, wsClient, settings); hook != nil {
+		authHooks = append(authHooks, hook)
+	}
+
+	// Pinned upgrade: if the previous process left an intent marker, confirm
+	// this version's health or report the rollback that already happened.
+	if hook := wirePendingUpgrade(ctx, wsClient, session); hook != nil {
+		authHooks = append(authHooks, hook)
+	}
+	if len(authHooks) > 0 {
+		wsClient.SetOnAuthenticated(func() {
+			for _, hook := range authHooks {
+				hook()
+			}
+		})
+	}
 
 	// Initialize dispatcher system with callbacks
 	dispatcher, err := executor.InitDispatcher(
@@ -269,31 +285,31 @@ func gracefulShutdown(collector *collector.Collector, wsClient *runner.Websocket
 }
 
 // wirePendingMigration inspects the migration marker on startup. When a
-// migration is in flight, it registers a Confirm hook via
-// SetOnAuthenticated (which fires only after the first successful
-// ReadMessage on a fresh connection, i.e. genuine traffic from the target
-// workspace) and arms a watchdog that rolls back to the previous
-// workspace if the new one never accepts the agent.
+// migration is in flight, it returns a Confirm hook for SetOnAuthenticated
+// (which fires only after the first successful ReadMessage on a fresh
+// connection, i.e. genuine traffic from the target workspace) and arms a
+// watchdog that rolls back to the previous workspace if the new one never
+// accepts the agent. It returns nil when no migration is in flight.
 //
 // Confirm is guarded by sync.Once because SetOnAuthenticated fires on
 // every reconnect, not just the first; we want to clear the marker
 // exactly once.
-func wirePendingMigration(ctx context.Context, wsClient *runner.WebsocketClient, settings config.Settings) {
+func wirePendingMigration(ctx context.Context, wsClient *runner.WebsocketClient, settings config.Settings) func() {
 	// Migration relies on systemd-run for self-restart. On platforms
 	// without systemd (Windows, container, dev macOS) the watchdog has no
 	// way to recover the agent from a failed migration; refuse to arm it
 	// rather than leave the operator with a half-wired safety net.
 	if !utils.HasSystemd() {
-		return
+		return nil
 	}
 
 	state, err := migrate.LoadPending()
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to load migration marker; continuing without migration watchdog.")
-		return
+		return nil
 	}
 	if state == nil {
-		return
+		return nil
 	}
 
 	log.Info().
@@ -332,11 +348,31 @@ func wirePendingMigration(ctx context.Context, wsClient *runner.WebsocketClient,
 		wsClient.ShutDown()
 	})
 
-	wsClient.SetOnAuthenticated(func() {
+	return func() {
 		confirmOnce.Do(func() {
 			confirmed.Store(true)
 			cancelWatchdog()
 			migrate.Confirm(state)
 		})
+	}
+}
+
+// wirePendingUpgrade resumes a pinned upgrade the previous process left in
+// flight and returns the hook that tells its health check the console
+// connection is up, or nil when no upgrade is in flight.
+func wirePendingUpgrade(ctx context.Context, wsClient *runner.WebsocketClient, session *scheduler.Session) func() {
+	authenticated := make(chan struct{})
+	var once sync.Once
+	found, _ := updater.ResumePending(ctx, updater.ResumeDeps{
+		Running:        version.Version,
+		Authenticated:  authenticated,
+		PostStatus:     func() error { return runner.ReportUpgradeStatus(session) },
+		Poster:         session,
+		ServiceManager: updater.DefaultServiceManager(),
+		RequestRestart: wsClient.Restart,
 	})
+	if !found {
+		return nil
+	}
+	return func() { once.Do(func() { close(authenticated) }) }
 }

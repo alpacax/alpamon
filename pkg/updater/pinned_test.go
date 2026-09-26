@@ -78,6 +78,7 @@ type pinnedFixture struct {
 	release *fakeRelease
 	signer  *testSigner
 	current string
+	sm      *fakeServiceManager
 	opts    Options
 }
 
@@ -86,15 +87,18 @@ func newPinnedFixture(t *testing.T) *pinnedFixture {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Windows swap moves the running binary aside; covered by the replace tests")
 	}
+	useTempMarkerDir(t)
 	fr := newFakeRelease(t)
 	s := newTestSigner(t)
 	current := filepath.Join(t.TempDir(), "alpamon")
 	require.NoError(t, os.WriteFile(current, fakeBinary(t, "old"), 0755))
+	sm := &fakeServiceManager{}
 	return &pinnedFixture{
 		release: fr,
 		signer:  s,
 		current: current,
-		opts:    Options{BaseURL: fr.srv.URL, Keyring: s.keyring(t), allowHTTP: true, binaryPath: current},
+		sm:      sm,
+		opts:    Options{BaseURL: fr.srv.URL, Keyring: s.keyring(t), allowHTTP: true, binaryPath: current, ServiceManager: sm},
 	}
 }
 
@@ -110,11 +114,49 @@ func TestPinnedSelfUpdate_ReplacesBinaryAfterVerification(t *testing.T) {
 	newBin := fakeBinary(t, "new")
 	archive := f.release.publish(t, f.signer, "v2.5.0", newBin)
 
-	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0", ArtifactDigest: "sha256:" + sha256Hex(archive)}, f.opts)
+	req := PinnedRequest{
+		TargetVersion:  "v2.5.0",
+		ArtifactDigest: "sha256:" + sha256Hex(archive),
+		AttemptID:      "att-1",
+		FromVersion:    "2.4.0",
+		HealthGrace:    2 * time.Minute,
+	}
+	err := PinnedSelfUpdate(context.Background(), req, f.opts)
 	require.NoError(t, err)
 	t.Cleanup(ReleaseSelfUpdateLatch)
 
 	assert.Equal(t, string(newBin), f.currentContent(t))
+
+	rollback, err := os.ReadFile(f.current + ".rollback")
+	require.NoError(t, err, "the outgoing binary is kept until the new one proves healthy")
+	assert.Equal(t, string(fakeBinary(t, "old")), string(rollback))
+
+	marker, err := LoadPending()
+	require.NoError(t, err)
+	require.NotNil(t, marker, "the intent marker is written before the restart")
+	assert.Equal(t, "att-1", marker.AttemptID)
+	assert.Equal(t, "2.4.0", marker.FromVersion)
+	assert.Equal(t, "2.5.0", marker.ToVersion)
+	assert.Equal(t, MethodBinary, marker.Method)
+	assert.Equal(t, f.current, marker.BinaryPath)
+	assert.Equal(t, f.current+".rollback", marker.RollbackPath)
+	assert.Equal(t, marker.StartedAt.Add(RestartDelay+2*time.Minute), marker.Deadline)
+
+	restarts, guards, _ := f.sm.snapshot()
+	require.Len(t, guards, 1, "the guard is armed before the swap")
+	assert.Equal(t, marker.GuardUnit, guards[0].unit)
+	assert.Empty(t, restarts, "the caller schedules the restart, not the updater")
+}
+
+func TestPinnedSelfUpdate_RefusesWhileAnUpgradeIsPending(t *testing.T) {
+	f := newPinnedFixture(t)
+	f.release.publish(t, f.signer, "v2.5.0", fakeBinary(t, "new"))
+	require.NoError(t, WritePending(&PendingUpgrade{AttemptID: "earlier", ToVersion: "2.4.9"}))
+
+	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0"}, f.opts)
+	assert.ErrorIs(t, err, ErrUpgradePending)
+	assert.Zero(t, f.release.requests())
+	assert.Equal(t, string(fakeBinary(t, "old")), f.currentContent(t))
 }
 
 func TestPinnedSelfUpdate_RefusesWithoutKeysBeforeDownloading(t *testing.T) {
@@ -198,6 +240,13 @@ func TestPinnedSelfUpdate_FailuresLeaveBinaryUntouched(t *testing.T) {
 			assert.Equal(t, tt.class, ClassOf(err), err.Error())
 			assert.Equal(t, string(fakeBinary(t, "old")), f.currentContent(t))
 			assert.False(t, selfUpdateInFlight.Load())
+			marker, err := LoadPending()
+			require.NoError(t, err)
+			assert.Nil(t, marker, "nothing is recorded before verification passes")
+			_, err = os.Stat(f.current + ".rollback")
+			assert.ErrorIs(t, err, os.ErrNotExist)
+			_, guards, _ := f.sm.snapshot()
+			assert.Empty(t, guards)
 		})
 	}
 }

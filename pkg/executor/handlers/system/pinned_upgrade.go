@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/updater"
@@ -55,7 +56,7 @@ func (h *SystemHandler) handlePinnedUpgrade(ctx context.Context, target *common.
 			log.Info().Msg("Artifact URL and digest are ignored on a package-managed host; the repository signature is the trust chain.")
 			report.Detail = packageHostNote
 		}
-		return h.pinnedPackageUpgrade(ctx, report, packageProxy)
+		return h.pinnedPackageUpgrade(ctx, report, packageProxy, target.HealthGracePeriod)
 	case utils.PkgBrew, utils.PkgNone:
 		return h.pinnedSelfUpdate(ctx, target, tag, report)
 	default:
@@ -94,41 +95,92 @@ func (h *SystemHandler) pinnedSelfUpdate(ctx context.Context, target *common.Upg
 		ArtifactDigest: target.ArtifactDigest,
 		ChecksumsURL:   target.ChecksumsURL,
 		SignatureURL:   target.SignatureURL,
+		AttemptID:      target.AttemptID,
+		FromVersion:    report.FromVersion,
+		HealthGrace:    target.HealthGracePeriod,
 	}
-	if err := h.pinnedUpdateFn(ctx, req, updater.Options{}); err != nil {
+	if err := h.pinnedUpdateFn(ctx, req, updater.Options{ServiceManager: h.serviceManager}); err != nil {
 		if errors.Is(err, updater.ErrSelfUpdateInProgress) {
 			return 0, "Self-update already in progress.", nil
 		}
 		return h.failPinned(report, err, "")
 	}
+	return h.restartIntoUpgrade(tag, true)
+}
 
+// restartIntoUpgrade restarts the agent after a pinned swap. The service
+// manager does it from outside the process, so a new binary that cannot start
+// is not re-executed in place; the marker and guard are already in place, so
+// the attempt's outcome is reported by the process that comes up next.
+//
+// Without a service manager the restart falls back to the in-process one when
+// inProcessFallback is set. A package install does not set it: its own
+// maintainer scripts restart the agent on such hosts.
+func (h *SystemHandler) restartIntoUpgrade(tag string, inProcessFallback bool) (int, string, error) {
+	err := h.serviceManager.ScheduleRestart(updater.RestartDelay)
+	if err == nil {
+		return 0, fmt.Sprintf("Updated to %s. Restarting through the service manager in %s...", tag, updater.RestartDelay), nil
+	}
+	if errors.Is(err, updater.ErrNoServiceManager) && !inProcessFallback {
+		return 0, fmt.Sprintf("Updated to %s. The package scripts restart the agent.", tag), nil
+	}
+	log.Warn().Err(err).Msg("Service manager could not schedule the restart; restarting in process.")
 	if err := h.scheduleDelayedAction(delayedActionDelay, func(_ context.Context) {
 		h.wsClient.Restart()
 	}); err != nil {
 		updater.ReleaseSelfUpdateLatch()
-		return h.failPinned(report, updater.Classify(updater.ClassUnknown,
-			fmt.Errorf("updated to %s, but the restart could not be scheduled; restart alpamon manually: %w", tag, err)), "")
+		log.Error().Err(err).Msg("Failed to schedule the restart after a pinned upgrade. The upgrade guard restores the previous version if the agent is not restarted.")
+		return 1, fmt.Sprintf("Updated to %s, but the restart could not be scheduled: %v. Please restart alpamon manually.", tag, err), err
 	}
 	return 0, fmt.Sprintf("Updated to %s. Restarting...", tag), nil
 }
 
 // pinnedPackageUpgrade installs report.ToVersion through the package manager
-// and confirms it against the package database afterwards.
-func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater.Report, packageProxy string) (int, string, error) {
+// and confirms it against the package database afterwards. The intent marker
+// and guard are in place before the install, and roll back with a pinned
+// reinstall of the outgoing version.
+func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater.Report, packageProxy string, grace time.Duration) (int, string, error) {
 	target := report.ToVersion
 	env := packageProxyEnv(packageProxy)
 
+	previous := h.installedAlpamonVersion(ctx)
+	if previous == "" {
+		err := errors.New("the package database does not report an installed alpamon, so a rollback would be impossible")
+		return h.failPinned(report, updater.Classify(updater.ClassPackageManager, err), "")
+	}
+	marker := &updater.PendingUpgrade{
+		AttemptID:              report.AttemptID,
+		FromVersion:            report.FromVersion,
+		ToVersion:              target,
+		Method:                 updater.MethodPackage,
+		PackageManager:         utils.PackageManager,
+		PreviousPackageVersion: previous,
+	}
+	abort, err := updater.BeginTransition(marker, h.serviceManager, updater.ClampHealthGrace(grace), h.now())
+	if err != nil {
+		return h.failPinned(report, updater.Classify(updater.ClassUnknown, err), "")
+	}
+
 	output, err := h.installPinnedPackage(ctx, target, env)
 	if err != nil {
+		abort()
 		return h.failPinned(report, updater.Classify(updater.ClassPackageManager, err), output)
 	}
 
 	installed := h.installedAlpamonVersion(ctx)
 	if !packageVersionMatches(installed, target) {
+		abort()
 		err := fmt.Errorf("package database reports alpamon %q after installing %s", installed, target)
 		return h.failPinned(report, updater.Classify(updater.ClassPackageManager, err), output)
 	}
-	return 0, strings.TrimRight(output, "\n") + fmt.Sprintf("\n\nInstalled alpamon %s.", installed), nil
+
+	// The package's own upgrade restart runs minutes later and would cut the
+	// health check short; the service-manager restart below replaces it.
+	if hasSystemd() {
+		_, _, _ = h.Executor.RunAsUser(ctx, "root", "systemctl", "stop", "alpamon-restart.timer")
+	}
+	exitCode, msg, err := h.restartIntoUpgrade("v"+target, false)
+	return exitCode, strings.TrimRight(output, "\n") + fmt.Sprintf("\n\nInstalled alpamon %s. ", installed) + msg, err
 }
 
 // installPinnedPackage runs the version-pinned install for the host's package

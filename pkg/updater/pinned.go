@@ -28,6 +28,11 @@ type PinnedRequest struct {
 	ArtifactDigest string // SHA-256, bare hex or "sha256:"-prefixed; optional
 	ChecksumsURL   string
 	SignatureURL   string
+
+	// Recorded in the intent marker and the report.
+	AttemptID   string
+	FromVersion string
+	HealthGrace time.Duration // clamped by ClampHealthGrace
 }
 
 // NormalizeTag returns version as a "v"-prefixed release tag, or an error when
@@ -196,8 +201,10 @@ func preparePinned(ctx context.Context, src *pinnedSources, opts Options, tempDi
 // PinnedSelfUpdate replaces the running binary with the release the server
 // pinned. Unlike SelfUpdate it verifies a detached signature over the
 // checksums file against the compiled-in keyring before anything is written,
-// and refuses outright when that keyring is empty. Every error it returns
-// carries an ErrorClass.
+// and refuses outright when that keyring is empty. It then keeps the outgoing
+// binary as a rollback copy, writes the intent marker and arms the guard
+// before swapping. It does not restart: the caller schedules that. Every
+// error it returns carries an ErrorClass.
 func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) error {
 	if !selfUpdateInFlight.CompareAndSwap(false, true) {
 		return ErrSelfUpdateInProgress
@@ -213,6 +220,13 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 	if err != nil {
 		return Classify(ClassUnknown, err)
 	}
+	// Checked again when the marker is written; this only avoids a wasted download.
+	if pending, err := LoadPending(); err != nil {
+		return Classify(ClassUnknown, err)
+	} else if pending != nil {
+		return Classify(ClassUnknown, ErrUpgradePending)
+	}
+
 	currentPath, err := currentBinaryPath(opts)
 	if err != nil {
 		return Classify(ClassUnknown, err)
@@ -238,7 +252,30 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 	}
 	CleanupStaleOld()
 
+	sm := opts.ServiceManager
+	if sm == nil {
+		sm = DefaultServiceManager()
+	}
+	rollbackPath, err := stageRollbackCopy(currentPath)
+	if err != nil {
+		return Classify(ClassSwapFailed, err)
+	}
+	marker := &PendingUpgrade{
+		AttemptID:    req.AttemptID,
+		FromVersion:  strings.TrimPrefix(req.FromVersion, "v"),
+		ToVersion:    strings.TrimPrefix(src.tag, "v"),
+		Method:       MethodBinary,
+		BinaryPath:   currentPath,
+		RollbackPath: rollbackPath,
+	}
+	abort, err := BeginTransition(marker, sm, ClampHealthGrace(req.HealthGrace), time.Now())
+	if err != nil {
+		_ = os.Remove(rollbackPath)
+		return Classify(ClassUnknown, err)
+	}
+
 	if err := replaceBinary(extractedPath, currentPath); err != nil {
+		abort()
 		return Classify(ClassSwapFailed, fmt.Errorf("failed to replace binary: %w", err))
 	}
 

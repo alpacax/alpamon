@@ -209,6 +209,8 @@ Notes:
 | Local metrics DB | `%ProgramData%\alpamon\data\` | agent runtime |
 | Staged new binary (during upgrade) | `%ProgramFiles%\alpamon\alpamon.exe.new` | self-updater (renamed into place atomically) |
 | Previous binary (pending deletion) | `%ProgramFiles%\alpamon\alpamon.exe.old` | self-updater (cleaned up on next start, or scheduled for reboot-time removal) |
+| Rollback copy (pinned upgrade) | `%ProgramFiles%\alpamon\alpamon.exe.rollback` | pinned upgrade (removed once the new version confirms its health) |
+| Upgrade intent marker | `%ProgramData%\alpamon\data\upgrade.pending` | pinned upgrade (removed once the outcome is known) |
 
 `%ProgramFiles%` and `%ProgramData%` are read from the process
 environment at runtime, so the agent tolerates non-default locations

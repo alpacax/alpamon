@@ -56,6 +56,10 @@ type Options struct {
 	// Tests only; production leaves it nil. The legacy path ignores it.
 	Keyring *Keyring
 
+	// ServiceManager arms the pinned path's guard. Nil means
+	// DefaultServiceManager(). The legacy path ignores it.
+	ServiceManager ServiceManager
+
 	// Test seams for the pinned path: allowHTTP admits the plain-HTTP URLs an
 	// httptest server hands out, binaryPath replaces os.Executable.
 	allowHTTP  bool

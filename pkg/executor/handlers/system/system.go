@@ -54,6 +54,10 @@ type SystemHandler struct {
 	selfUpdateFn    updater.SelfUpdateFunc // defaults to updater.SelfUpdate; tests inject a fake
 	// pinnedUpdateFn defaults to updater.PinnedSelfUpdate; tests inject a fake.
 	pinnedUpdateFn func(ctx context.Context, req updater.PinnedRequest, opts updater.Options) error
+	// serviceManager restarts the agent from outside after a pinned upgrade
+	// and arms its guard; tests inject a fake.
+	serviceManager updater.ServiceManager
+	now            func() time.Time
 
 	// uninstallDelay defers executeUninstall so the byebye response is sent
 	// before the agent starts tearing itself down. Tests shorten it and use
@@ -92,6 +96,8 @@ func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClie
 		apiSession:      apiSession,
 		selfUpdateFn:    updater.SelfUpdate,
 		pinnedUpdateFn:  updater.PinnedSelfUpdate,
+		serviceManager:  updater.DefaultServiceManager(),
+		now:             time.Now,
 		uninstallDelay:  1 * time.Second,
 	}
 	return h
