@@ -52,7 +52,10 @@ func (f *fakeServiceManager) ArmGuard(unit string, _ time.Duration, _ string) er
 	return nil
 }
 
-func (f *fakeServiceManager) DisarmGuard(unit string) { f.disarmed = append(f.disarmed, unit) }
+func (f *fakeServiceManager) DisarmGuard(unit string) bool {
+	f.disarmed = append(f.disarmed, unit)
+	return false
+}
 
 // markerCheckingExecutor records whether the intent marker existed when the
 // package install ran.
@@ -76,6 +79,10 @@ func newPinnedHarness(t *testing.T, pkgManager string) *pinnedHarness {
 	t.Cleanup(ctxManager.Shutdown)
 
 	t.Cleanup(updater.OverrideMarkerDir(t.TempDir()))
+	// A release version: a marker only records release versions.
+	origVersion := version.Version
+	version.Version = "2.4.0"
+	t.Cleanup(func() { version.Version = origVersion })
 	origHasSystemd := hasSystemd
 	hasSystemd = func() bool { return true }
 	t.Cleanup(func() { hasSystemd = origHasSystemd })
@@ -291,6 +298,38 @@ func TestSystemHandler_PinnedUpgrade_ChangedPackageIsReinstalledOnFailure(t *tes
 	}
 }
 
+func TestSystemHandler_PinnedUpgrade_UndoAfterAFailedDowngradeOnYum(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgYum)
+	seq := &rpmSequence{MockCommandExecutor: h.exec, versions: []string{"2.6.0", "2.6.0", "2.5.0", "2.6.0"}}
+	h.handler.Executor = seq
+	h.exec.SetResult("yum downgrade -y alpamon-2.5.0", 1, "scriptlet failed", errors.New("exit status 1"))
+
+	exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
+	require.Error(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.True(t, h.ran("yum", "install", "-y", "alpamon-2.6.0"), "going back up is an install")
+	marker, err := updater.LoadPending()
+	require.NoError(t, err)
+	assert.Nil(t, marker)
+}
+
+// rpmSequence answers rpm -q from a queue.
+type rpmSequence struct {
+	*common.MockCommandExecutor
+	versions []string
+}
+
+func (e *rpmSequence) RunAsUser(ctx context.Context, username, name string, args ...string) (int, string, error) {
+	if name == "rpm" && len(e.versions) > 0 {
+		v := e.versions[0]
+		if len(e.versions) > 1 {
+			e.versions = e.versions[1:]
+		}
+		return 0, v, nil
+	}
+	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
+}
+
 func TestSystemHandler_PinnedUpgrade_NeedsTheInstalledVersionToRollBack(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
 	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 1, "", errors.New("not installed"))
@@ -306,7 +345,10 @@ func TestSystemHandler_PinnedUpgrade_NeedsTheInstalledVersionToRollBack(t *testi
 func TestSystemHandler_PinnedUpgrade_RefusesWhileAnUpgradeIsPending(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
 	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
-	require.NoError(t, updater.WritePending(&updater.PendingUpgrade{AttemptID: "earlier", ToVersion: "2.4.9", Deadline: time.Now().Add(time.Minute)}))
+	require.NoError(t, updater.WritePending(&updater.PendingUpgrade{
+		AttemptID: "earlier", FromVersion: "2.4.8", ToVersion: "2.4.9", Method: updater.MethodPackage,
+		PackageManager: utils.PkgApt, PreviousPackageVersion: "2.4.8", Deadline: time.Now().Add(time.Minute),
+	}))
 
 	exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
 	require.ErrorIs(t, err, updater.ErrUpgradePending)
@@ -329,6 +371,7 @@ func TestSystemHandler_PinnedUpgrade_PackageScriptsRestartWithoutServiceManager(
 
 func TestSystemHandler_PinnedUpgrade_AptWithoutTargetFails(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
 	h.exec.SetResult("apt-cache madison alpamon", 0, "   alpamon |    2.6.0 | https://packages.example Packages\n", nil)
 
 	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "v2.5.0", AttemptID: "att-2"})
@@ -343,7 +386,7 @@ func TestSystemHandler_PinnedUpgrade_AptWithoutTargetFails(t *testing.T) {
 	r := h.lastReport(t)
 	assert.Equal(t, updater.Report{
 		AttemptID:   "att-2",
-		FromVersion: "dev",
+		FromVersion: "2.4.0",
 		ToVersion:   "2.5.0",
 		Outcome:     updater.OutcomeFailed,
 		ErrorClass:  updater.ClassPackageManager,
@@ -365,6 +408,7 @@ func TestSystemHandler_PinnedUpgrade_PackageDatabaseDisagrees(t *testing.T) {
 
 func TestSystemHandler_PinnedUpgrade_InstallFailure(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
 	h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
 	h.exec.SetResult("apt-get install -y --allow-downgrades -o Acquire::Retries=3 alpamon=2.5.0", 100, "E: broken", errors.New("exit status 100"))
 
@@ -435,7 +479,7 @@ func TestSystemHandler_PinnedUpgrade_SelfUpdate(t *testing.T) {
 			ChecksumsURL:   target.ChecksumsURL,
 			SignatureURL:   target.SignatureURL,
 			AttemptID:      "att-8",
-			FromVersion:    "dev",
+			FromVersion:    "2.4.0",
 			HealthGrace:    4 * time.Minute,
 		}, got)
 		assert.Same(t, h.sm, gotOpts.ServiceManager, "the updater arms its guard with the handler's service manager")
@@ -521,9 +565,9 @@ func TestPackageVersionMatches(t *testing.T) {
 }
 
 func TestCompareVersions(t *testing.T) {
-	assert.Equal(t, -1, compareVersions("2.5.0", "2.6.0"))
-	assert.Equal(t, 1, compareVersions("2.10.0", "2.9.9"))
-	assert.Equal(t, 0, compareVersions("v2.5.0", "2.5.0-1"))
+	assert.Equal(t, -1, updater.CompareVersions("2.5.0", "2.6.0"))
+	assert.Equal(t, 1, updater.CompareVersions("2.10.0", "2.9.9"))
+	assert.Equal(t, 0, updater.CompareVersions("v2.5.0", "2.5.0-1"))
 }
 
 func TestSystemHandler_PinnedUpgrade_PackageHostSaysPinsDoNotApply(t *testing.T) {

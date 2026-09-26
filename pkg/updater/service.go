@@ -24,15 +24,17 @@ type ServiceManager interface {
 	ScheduleRestart(delay time.Duration) error
 	// ArmGuard runs script as root after delay under the given unit name.
 	ArmGuard(unit string, delay time.Duration, script string) error
-	// DisarmGuard cancels a guard armed earlier. Best-effort.
-	DisarmGuard(unit string)
+	// DisarmGuard cancels a guard armed earlier. If the guard has already
+	// started, it is left to finish, DisarmGuard waits for it, and fired is
+	// true: the guard has then restored the previous version itself.
+	DisarmGuard(unit string) (fired bool)
 }
 
 // DefaultServiceManager returns systemd when it runs as PID 1, and otherwise a
 // manager that reports ErrNoServiceManager for every call.
 func DefaultServiceManager() ServiceManager {
 	if utils.HasSystemd() {
-		return &systemdManager{run: runCombined}
+		return &systemdManager{run: runCombined, sleep: time.Sleep}
 	}
 	return noServiceManager{}
 }
@@ -41,7 +43,7 @@ type noServiceManager struct{}
 
 func (noServiceManager) ScheduleRestart(time.Duration) error          { return ErrNoServiceManager }
 func (noServiceManager) ArmGuard(string, time.Duration, string) error { return ErrNoServiceManager }
-func (noServiceManager) DisarmGuard(string)                           {}
+func (noServiceManager) DisarmGuard(string) bool                      { return false }
 
 // commandRunner runs a program and returns its combined output.
 type commandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -56,7 +58,8 @@ const systemdCallTimeout = 30 * time.Second
 // owned by PID 1, so they outlive the alpamon service cgroup they are about
 // to restart.
 type systemdManager struct {
-	run commandRunner
+	run   commandRunner
+	sleep func(time.Duration)
 }
 
 func (m *systemdManager) ScheduleRestart(delay time.Duration) error {
@@ -68,18 +71,47 @@ func (m *systemdManager) ArmGuard(unit string, delay time.Duration, script strin
 	return m.schedule(unit, delay, "/bin/sh", "-c", script)
 }
 
-func (m *systemdManager) DisarmGuard(unit string) {
+// guardWaitMax bounds how long DisarmGuard waits for a running guard; a
+// package reinstall is the slowest thing it does.
+const guardWaitMax = 30 * time.Minute
+
+func (m *systemdManager) DisarmGuard(unit string) bool {
 	if unit == "" {
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), systemdCallTimeout)
 	defer cancel()
-	// The service too: a guard that has already fired must not keep running
-	// next to whatever the caller does next.
-	if out, err := m.run(ctx, "systemctl", "stop", unit+".timer", unit+".service"); err != nil {
+	// Only the timer: stopping a guard that has started could kill a package
+	// transaction halfway. A running guard is waited out instead.
+	if out, err := m.run(ctx, "systemctl", "stop", unit+".timer"); err != nil {
 		log.Debug().Err(err).Str("unit", unit).Msgf("Could not stop the upgrade guard timer: %s", strings.TrimSpace(string(out)))
 	}
+	fired := false
+	for deadline := time.Now().Add(guardWaitMax); m.guardActive(unit) && time.Now().Before(deadline); {
+		if !fired {
+			log.Warn().Str("unit", unit).Msg("The upgrade guard is already running; waiting for it to finish.")
+		}
+		fired = true
+		m.sleep(guardPollInterval)
+	}
 	_, _ = m.run(ctx, "systemctl", "reset-failed", unit+".timer", unit+".service")
+	return fired
+}
+
+const guardPollInterval = 2 * time.Second
+
+func (m *systemdManager) guardActive(unit string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), systemdCallTimeout)
+	defer cancel()
+	out, err := m.run(ctx, "systemctl", "is-active", unit+".service")
+	if err != nil {
+		return false
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "active", "activating", "deactivating", "reloading":
+		return true
+	}
+	return false
 }
 
 func (m *systemdManager) schedule(unit string, delay time.Duration, command ...string) error {
@@ -134,7 +166,7 @@ func guardScript(p *PendingUpgrade) (string, error) {
 		return fmt.Sprintf("if %s && [ -f %s ]; then mv -f %s %s && systemctl restart alpamon; fi",
 			pending, shellQuote(p.RollbackPath), shellQuote(p.RollbackPath), shellQuote(p.BinaryPath)), nil
 	case MethodPackage:
-		argv, err := PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion)
+		argv, err := PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion, p.ToVersion)
 		if err != nil {
 			return "", err
 		}
@@ -143,16 +175,22 @@ func guardScript(p *PendingUpgrade) (string, error) {
 	return "", fmt.Errorf("unknown upgrade method %q", p.Method)
 }
 
-// PackageRollbackCommand is the pinned reinstall of the outgoing version.
-func PackageRollbackCommand(packageManager, previous string) ([]string, error) {
-	if previous == "" {
-		return nil, errors.New("previous package version is unknown")
+// PackageRollbackCommand is the pinned reinstall of the outgoing version
+// previous over current. apt and zypper take either direction with one
+// command; yum needs downgrade or install depending on which is newer.
+func PackageRollbackCommand(packageManager, previous, current string) ([]string, error) {
+	if !PackageVersionRe.MatchString(previous) {
+		return nil, fmt.Errorf("previous package version %q is not usable", previous)
 	}
 	switch packageManager {
 	case utils.PkgApt:
 		return []string{"apt-get", "install", "-y", "--allow-downgrades", "alpamon=" + previous}, nil
 	case utils.PkgYum:
-		return []string{"yum", "downgrade", "-y", "alpamon-" + previous}, nil
+		verb := "downgrade"
+		if CompareVersions(previous, current) > 0 {
+			verb = "install"
+		}
+		return []string{"yum", verb, "-y", "alpamon-" + previous}, nil
 	case utils.PkgZypper:
 		return []string{"zypper", "--non-interactive", "install", "--oldpackage", "alpamon=" + previous}, nil
 	}

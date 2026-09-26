@@ -64,7 +64,7 @@ func BeginTransition(p *PendingUpgrade, sm ServiceManager, settle, grace time.Du
 		}
 		log.Warn().Str("attempt_id", existing.AttemptID).Time("deadline", existing.Deadline).
 			Msg("Discarding an upgrade marker long past its deadline.")
-		sm.DisarmGuard(existing.GuardUnit)
+		_ = sm.DisarmGuard(existing.GuardUnit)
 		if err := ClearPending(); err != nil {
 			return nil, err
 		}
@@ -77,7 +77,7 @@ func BeginTransition(p *PendingUpgrade, sm ServiceManager, settle, grace time.Du
 	}
 
 	abort = func() {
-		sm.DisarmGuard(p.GuardUnit)
+		_ = sm.DisarmGuard(p.GuardUnit)
 		if err := ClearPending(); err != nil {
 			log.Warn().Err(err).Msg("Failed to clear the upgrade marker.")
 		}
@@ -101,7 +101,7 @@ func Rearm(p *PendingUpgrade, sm ServiceManager, grace time.Duration, now time.T
 		}
 		return err
 	}
-	sm.DisarmGuard(saved.GuardUnit)
+	_ = sm.DisarmGuard(saved.GuardUnit)
 	return nil
 }
 

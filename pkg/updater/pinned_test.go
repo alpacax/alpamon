@@ -92,6 +92,7 @@ func newPinnedFixture(t *testing.T) *pinnedFixture {
 	s := newTestSigner(t)
 	current := filepath.Join(t.TempDir(), "alpamon")
 	require.NoError(t, os.WriteFile(current, fakeBinary(t, "old"), 0755))
+	useBinaryPath(t, current)
 	sm := &fakeServiceManager{}
 	return &pinnedFixture{
 		release: fr,
@@ -151,7 +152,10 @@ func TestPinnedSelfUpdate_ReplacesBinaryAfterVerification(t *testing.T) {
 func TestPinnedSelfUpdate_RefusesWhileAnUpgradeIsPending(t *testing.T) {
 	f := newPinnedFixture(t)
 	f.release.publish(t, f.signer, "v2.5.0", fakeBinary(t, "new"))
-	require.NoError(t, WritePending(&PendingUpgrade{AttemptID: "earlier", ToVersion: "2.4.9", Deadline: time.Now().Add(time.Minute)}))
+	require.NoError(t, WritePending(&PendingUpgrade{
+		AttemptID: "earlier", FromVersion: "2.4.8", ToVersion: "2.4.9", Method: MethodBinary,
+		BinaryPath: f.current, RollbackPath: f.current + ".rollback", Deadline: time.Now().Add(time.Minute),
+	}))
 
 	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0"}, f.opts)
 	assert.ErrorIs(t, err, ErrUpgradePending)

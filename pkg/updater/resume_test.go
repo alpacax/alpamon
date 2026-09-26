@@ -64,7 +64,7 @@ func newResumeFixture(t *testing.T, grace time.Duration) *resumeFixture {
 		runner: &fakeRunner{},
 		authed: make(chan struct{}),
 	}
-	f.marker = binaryMarker(dir)
+	f.marker = binaryMarker(t, dir)
 	f.marker.GuardUnit = "alpamon-upgrade-guard-1"
 	f.marker.StartedAt = time.Now()
 	f.marker.Deadline = time.Now().Add(grace)
@@ -217,6 +217,7 @@ func TestResumePending_PackageRollback(t *testing.T) {
 		f := newResumeFixture(t, time.Minute)
 		f.marker.Method = MethodPackage
 		f.marker.BinaryPath, f.marker.RollbackPath = "", ""
+		usePackageManager(t, utils.PkgApt)
 		f.marker.PackageManager = utils.PkgApt
 		f.marker.PreviousPackageVersion = "2.4.0"
 		require.NoError(t, WritePending(f.marker))
@@ -236,6 +237,7 @@ func TestResumePending_FailedPackageRollbackRearmsTheGuard(t *testing.T) {
 		f := newResumeFixture(t, time.Minute)
 		f.marker.Method = MethodPackage
 		f.marker.BinaryPath, f.marker.RollbackPath = "", ""
+		usePackageManager(t, utils.PkgApt)
 		f.marker.PackageManager = utils.PkgApt
 		f.marker.PreviousPackageVersion = "2.4.0"
 		require.NoError(t, WritePending(f.marker))
@@ -360,4 +362,58 @@ func TestResumePending_UnreadableMarkerIsRemoved(t *testing.T) {
 	found, _ := ResumePending(context.Background(), ResumeDeps{})
 	assert.False(t, found)
 	assertGone(t, filepath.Join(dir, "upgrade.pending"))
+}
+
+func TestResumePending_PackageRollbackAfterAPinnedDowngrade(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, time.Minute)
+		usePackageManager(t, utils.PkgYum)
+		f.marker.Method = MethodPackage
+		f.marker.BinaryPath, f.marker.RollbackPath = "", ""
+		f.marker.PackageManager = utils.PkgYum
+		f.marker.FromVersion, f.marker.ToVersion = "2.6.0", "2.5.0"
+		f.marker.PreviousPackageVersion = "2.6.0"
+		require.NoError(t, WritePending(f.marker))
+		f.deps.Running = "2.5.0"
+
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+		assert.Equal(t, [][]string{{"yum", "install", "-y", "alpamon-2.6.0"}}, f.runner.snapshot(),
+			"going back up after a downgrade is an install, not a downgrade")
+	})
+}
+
+func TestResumePending_GuardAlreadyRolledBackThePackage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, time.Minute)
+		usePackageManager(t, utils.PkgApt)
+		f.marker.Method = MethodPackage
+		f.marker.BinaryPath, f.marker.RollbackPath = "", ""
+		f.marker.PackageManager = utils.PkgApt
+		f.marker.PreviousPackageVersion = "2.4.0"
+		require.NoError(t, WritePending(f.marker))
+		f.sm.fired = true
+
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+		assert.Empty(t, f.runner.snapshot(), "no second reinstall next to the guard's")
+		restarts, _, _ := f.sm.snapshot()
+		assert.Empty(t, restarts)
+	})
+}
+
+func TestResumePending_GuardFiredBeforeConfirmation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, 5*time.Minute)
+		f.sm.fired = true
+		close(f.authed)
+
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+
+		marker, err := LoadPending()
+		require.NoError(t, err)
+		require.NotNil(t, marker, "the marker is put back for the restored version to report")
+		assert.Empty(t, f.poster.all(), "success is not reported")
+	})
 }

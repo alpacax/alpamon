@@ -1,11 +1,14 @@
 package updater
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,11 +24,9 @@ func TestMarker_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got, "no marker means no upgrade in flight")
 
-	want := &PendingUpgrade{
-		AttemptID: "att", FromVersion: "2.4.0", ToVersion: "2.5.0", Method: MethodBinary,
-		BinaryPath: "/usr/bin/alpamon", RollbackPath: "/usr/bin/alpamon.rollback",
-		GuardUnit: "g", StartedAt: time.Unix(100, 0).UTC(), Deadline: time.Unix(400, 0).UTC(),
-	}
+	want := binaryMarker(t, t.TempDir())
+	want.GuardUnit = "alpamon-upgrade-guard-3"
+	want.StartedAt, want.Deadline = time.Unix(100, 0).UTC(), time.Unix(400, 0).UTC()
 	require.NoError(t, WritePending(want))
 	assert.Equal(t, filepath.Join(dir, "upgrade.pending"), MarkerPath())
 
@@ -54,7 +55,11 @@ func TestClampHealthGrace(t *testing.T) {
 	assert.Equal(t, 10*time.Minute, ClampHealthGrace(10*time.Minute))
 }
 
-func binaryMarker(dir string) *PendingUpgrade {
+// binaryMarker is a valid binary-method marker for a stand-in binary in dir,
+// which it makes the running binary for marker validation.
+func binaryMarker(t *testing.T, dir string) *PendingUpgrade {
+	t.Helper()
+	useBinaryPath(t, filepath.Join(dir, "alpamon"))
 	return &PendingUpgrade{
 		AttemptID: "att", FromVersion: "2.4.0", ToVersion: "2.5.0", Method: MethodBinary,
 		BinaryPath: filepath.Join(dir, "alpamon"), RollbackPath: filepath.Join(dir, "alpamon.rollback"),
@@ -65,7 +70,7 @@ func TestBeginTransition_WritesMarkerThenArmsGuard(t *testing.T) {
 	useTempMarkerDir(t)
 	sm := &fakeServiceManager{}
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	p := binaryMarker(t.TempDir())
+	p := binaryMarker(t, t.TempDir())
 
 	abort, err := BeginTransition(p, sm, 0, 3*time.Minute, now)
 	require.NoError(t, err)
@@ -88,10 +93,13 @@ func TestBeginTransition_WritesMarkerThenArmsGuard(t *testing.T) {
 
 func TestBeginTransition_RefusesWhileAnotherIsPending(t *testing.T) {
 	useTempMarkerDir(t)
-	require.NoError(t, WritePending(&PendingUpgrade{AttemptID: "earlier", ToVersion: "2.5.0", Deadline: time.Now().Add(time.Minute)}))
+	dir := t.TempDir()
+	earlier := binaryMarker(t, dir)
+	earlier.AttemptID, earlier.Deadline = "earlier", time.Now().Add(time.Minute)
+	require.NoError(t, WritePending(earlier))
 	sm := &fakeServiceManager{}
 
-	_, err := BeginTransition(binaryMarker(t.TempDir()), sm, 0, time.Minute, time.Now())
+	_, err := BeginTransition(binaryMarker(t, dir), sm, 0, time.Minute, time.Now())
 	assert.ErrorIs(t, err, ErrUpgradePending)
 	_, guards, _ := sm.snapshot()
 	assert.Empty(t, guards)
@@ -102,23 +110,26 @@ func TestBeginTransition_RefusesWhileAnotherIsPending(t *testing.T) {
 func TestBeginTransition_DiscardsAStaleMarker(t *testing.T) {
 	useTempMarkerDir(t)
 	now := time.Now()
-	require.NoError(t, WritePending(&PendingUpgrade{AttemptID: "abandoned", GuardUnit: "old-guard", Deadline: now.Add(-staleMarkerAge - time.Minute)}))
+	dir := t.TempDir()
+	abandoned := binaryMarker(t, dir)
+	abandoned.AttemptID, abandoned.GuardUnit, abandoned.Deadline = "abandoned", "alpamon-upgrade-guard-5", now.Add(-staleMarkerAge-time.Minute)
+	require.NoError(t, WritePending(abandoned))
 	sm := &fakeServiceManager{}
 
-	_, err := BeginTransition(binaryMarker(t.TempDir()), sm, 0, time.Minute, now)
+	_, err := BeginTransition(binaryMarker(t, dir), sm, 0, time.Minute, now)
 	require.NoError(t, err)
 	stored, err := LoadPending()
 	require.NoError(t, err)
 	assert.Equal(t, "att", stored.AttemptID)
 	_, _, disarmed := sm.snapshot()
-	assert.Equal(t, []string{"old-guard"}, disarmed)
+	assert.Equal(t, []string{"alpamon-upgrade-guard-5"}, disarmed)
 }
 
 func TestBeginTransition_SettleDelaysDeadlineAndGuard(t *testing.T) {
 	useTempMarkerDir(t)
 	sm := &fakeServiceManager{}
 	now := time.Now()
-	p := binaryMarker(t.TempDir())
+	p := binaryMarker(t, t.TempDir())
 
 	_, err := BeginTransition(p, sm, 30*time.Minute, 2*time.Minute, now)
 	require.NoError(t, err)
@@ -144,7 +155,7 @@ func TestBeginTransition_SettleDelaysDeadlineAndGuard(t *testing.T) {
 func TestRearm_FailureKeepsTheFirstGuardInCharge(t *testing.T) {
 	useTempMarkerDir(t)
 	sm := &fakeServiceManager{}
-	p := binaryMarker(t.TempDir())
+	p := binaryMarker(t, t.TempDir())
 	now := time.Now()
 	_, err := BeginTransition(p, sm, 30*time.Minute, time.Minute, now)
 	require.NoError(t, err)
@@ -165,7 +176,7 @@ func TestRearm_FailureKeepsTheFirstGuardInCharge(t *testing.T) {
 
 func TestBeginTransition_WithoutServiceManager(t *testing.T) {
 	useTempMarkerDir(t)
-	_, err := BeginTransition(binaryMarker(t.TempDir()), noServiceManager{}, 0, time.Minute, time.Now())
+	_, err := BeginTransition(binaryMarker(t, t.TempDir()), noServiceManager{}, 0, time.Minute, time.Now())
 	require.NoError(t, err)
 	stored, err := LoadPending()
 	require.NoError(t, err)
@@ -176,7 +187,7 @@ func TestBeginTransition_GuardFailureAborts(t *testing.T) {
 	useTempMarkerDir(t)
 	sm := &fakeServiceManager{guardErr: errors.New("systemd-run: boom")}
 
-	_, err := BeginTransition(binaryMarker(t.TempDir()), sm, 0, time.Minute, time.Now())
+	_, err := BeginTransition(binaryMarker(t, t.TempDir()), sm, 0, time.Minute, time.Now())
 	assert.ErrorContains(t, err, "arm upgrade guard")
 	stored, err := LoadPending()
 	require.NoError(t, err)
@@ -186,7 +197,7 @@ func TestBeginTransition_GuardFailureAborts(t *testing.T) {
 func TestBeginTransition_AbortUndoesEverything(t *testing.T) {
 	useTempMarkerDir(t)
 	dir := t.TempDir()
-	p := binaryMarker(dir)
+	p := binaryMarker(t, dir)
 	require.NoError(t, os.WriteFile(p.RollbackPath, []byte("old"), 0600))
 	sm := &fakeServiceManager{}
 
@@ -237,7 +248,7 @@ func TestRestoreBinary(t *testing.T) {
 func TestSystemdManager(t *testing.T) {
 	t.Run("restart and guard are transient timers", func(t *testing.T) {
 		r := &fakeRunner{}
-		m := &systemdManager{run: r.run}
+		m := &systemdManager{run: r.run, sleep: func(time.Duration) {}}
 		require.NoError(t, m.ScheduleRestart(5*time.Second))
 		require.NoError(t, m.ArmGuard("alpamon-upgrade-guard-1", 7*time.Minute, "echo hi"))
 
@@ -252,7 +263,7 @@ func TestSystemdManager(t *testing.T) {
 
 	t.Run("retries without --collect for old systemd", func(t *testing.T) {
 		r := &fakeRunner{err: errors.New("unrecognized option '--collect'")}
-		m := &systemdManager{run: r.run}
+		m := &systemdManager{run: r.run, sleep: func(time.Duration) {}}
 		assert.Error(t, m.ScheduleRestart(time.Second), "both attempts fail with the fake error")
 		calls := r.snapshot()
 		require.Len(t, calls, 2)
@@ -262,11 +273,36 @@ func TestSystemdManager(t *testing.T) {
 
 	t.Run("disarm stops the timer", func(t *testing.T) {
 		r := &fakeRunner{}
-		m := &systemdManager{run: r.run}
+		m := &systemdManager{run: r.run, sleep: func(time.Duration) {}}
 		m.DisarmGuard("")
 		assert.Empty(t, r.snapshot(), "no unit, nothing to stop")
-		m.DisarmGuard("g1")
-		assert.Equal(t, []string{"systemctl", "stop", "g1.timer", "g1.service"}, r.snapshot()[0])
+		r.err = errors.New("inactive") // is-active exits non-zero
+		assert.False(t, m.DisarmGuard("g1"))
+		assert.Equal(t, []string{"systemctl", "stop", "g1.timer"}, r.snapshot()[0], "only the timer is stopped")
+	})
+
+	t.Run("disarm waits for a guard that is already running", func(t *testing.T) {
+		polls := 0
+		var calls [][]string
+		m := &systemdManager{
+			run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				calls = append(calls, append([]string{name}, args...))
+				if len(args) > 0 && args[0] == "is-active" {
+					polls++
+					if polls <= 3 {
+						return []byte("active\n"), nil
+					}
+					return []byte("inactive\n"), errors.New("exit status 3")
+				}
+				return nil, nil
+			},
+			sleep: func(time.Duration) {},
+		}
+		assert.True(t, m.DisarmGuard("g1"), "a guard that ran reports as fired")
+		assert.Equal(t, 4, polls)
+		for _, c := range calls {
+			assert.NotEqual(t, []string{"systemctl", "stop", "g1.service"}, c, "a running guard is never stopped")
+		}
 	})
 }
 
@@ -282,14 +318,21 @@ func TestPackageRollbackCommand(t *testing.T) {
 		utils.PkgYum:    {"yum", "downgrade", "-y", "alpamon-2.4.0"},
 		utils.PkgZypper: {"zypper", "--non-interactive", "install", "--oldpackage", "alpamon=2.4.0"},
 	} {
-		got, err := PackageRollbackCommand(pm, "2.4.0")
+		got, err := PackageRollbackCommand(pm, "2.4.0", "2.5.0")
 		require.NoError(t, err)
 		assert.Equal(t, want, got)
 	}
-	_, err := PackageRollbackCommand(utils.PkgApt, "")
+	_, err := PackageRollbackCommand(utils.PkgApt, "", "2.5.0")
 	assert.Error(t, err)
-	_, err = PackageRollbackCommand(utils.PkgBrew, "2.4.0")
+	_, err = PackageRollbackCommand(utils.PkgApt, "-oAPT::x", "2.5.0")
+	assert.Error(t, err, "a version that could read as an option is refused")
+	_, err = PackageRollbackCommand(utils.PkgBrew, "2.4.0", "2.5.0")
 	assert.Error(t, err)
+
+	// After a pinned downgrade the version to go back to is the newer one.
+	got, err := PackageRollbackCommand(utils.PkgYum, "2.6.0", "2.5.0")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"yum", "install", "-y", "alpamon-2.6.0"}, got)
 }
 
 func TestShellQuote(t *testing.T) {
@@ -309,7 +352,7 @@ func TestGuardScript(t *testing.T) {
 	setup := func(t *testing.T) (p *PendingUpgrade, bin, log string, env []string) {
 		useTempMarkerDir(t)
 		dir := t.TempDir()
-		p = binaryMarker(dir)
+		p = binaryMarker(t, dir)
 		require.NoError(t, os.WriteFile(p.BinaryPath, []byte("new"), 0755))
 		require.NoError(t, os.WriteFile(p.RollbackPath, []byte("old"), 0755))
 		bin = filepath.Join(dir, "bin")
@@ -400,5 +443,87 @@ func TestGuardScript(t *testing.T) {
 		require.NoError(t, err)
 		m := shellQuote(MarkerPath())
 		assert.Equal(t, "if [ -f "+m+" ] && grep -qxF '  \"guard_unit\": \"g1\",' "+m+"; then 'apt-get' 'install' '-y' '--allow-downgrades' 'alpamon=2.4.0' && systemctl restart alpamon; fi", script)
+	})
+}
+
+func TestLoadPending_DiscardsMarkersItDidNotWrite(t *testing.T) {
+	valid := func(t *testing.T) *PendingUpgrade {
+		p := binaryMarker(t, t.TempDir())
+		p.GuardUnit = "alpamon-upgrade-guard-1"
+		return p
+	}
+	tests := []struct {
+		name   string
+		mutate func(p *PendingUpgrade)
+	}{
+		{"foreign binary path", func(p *PendingUpgrade) { p.BinaryPath = "/etc/shadow" }},
+		{"foreign rollback path", func(p *PendingUpgrade) { p.RollbackPath = "/tmp/evil" }},
+		{"foreign guard unit", func(p *PendingUpgrade) { p.GuardUnit = "sshd" }},
+		{"unknown method", func(p *PendingUpgrade) { p.Method = "script" }},
+		{"bad target version", func(p *PendingUpgrade) { p.ToVersion = "2.5.0; reboot" }},
+		{"bad previous version", func(p *PendingUpgrade) { p.FromVersion = "latest" }},
+		{"package fields on a binary marker", func(p *PendingUpgrade) { p.PreviousPackageVersion = "2.4.0" }},
+		{"foreign package manager", func(p *PendingUpgrade) {
+			p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
+			p.PackageManager, p.PreviousPackageVersion = "pacman", "2.4.0"
+		}},
+		{"option-shaped package version", func(p *PendingUpgrade) {
+			p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
+			p.PackageManager, p.PreviousPackageVersion = utils.PackageManager, "--config=/tmp/x"
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useTempMarkerDir(t)
+			p := valid(t)
+			tt.mutate(p)
+			assert.Error(t, WritePending(p), "the writer refuses it too")
+
+			data, err := json.MarshalIndent(p, "", "  ")
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(MarkerPath(), data, 0600))
+
+			got, err := LoadPending()
+			require.NoError(t, err)
+			assert.Nil(t, got)
+			_, err = os.Stat(MarkerPath())
+			assert.ErrorIs(t, err, os.ErrNotExist, "an invalid marker is removed")
+		})
+	}
+
+	t.Run("unknown field", func(t *testing.T) {
+		useTempMarkerDir(t)
+		p := valid(t)
+		require.NoError(t, WritePending(p))
+		data, err := os.ReadFile(MarkerPath())
+		require.NoError(t, err)
+		data = []byte(strings.Replace(string(data), "{", `{"script": "x",`, 1))
+		require.NoError(t, os.WriteFile(MarkerPath(), data, 0600))
+		got, err := LoadPending()
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	if runtime.GOOS != "windows" {
+		t.Run("writable by others", func(t *testing.T) {
+			useTempMarkerDir(t)
+			require.NoError(t, WritePending(valid(t)))
+			require.NoError(t, os.Chmod(MarkerPath(), 0o666))
+			got, err := LoadPending()
+			require.NoError(t, err)
+			assert.Nil(t, got)
+		})
+	}
+
+	t.Run("valid marker loads", func(t *testing.T) {
+		useTempMarkerDir(t)
+		p := valid(t)
+		require.NoError(t, WritePending(p))
+		got, err := LoadPending()
+		require.NoError(t, err)
+		assert.Equal(t, p, got)
+		entries, err := os.ReadDir(filepath.Dir(MarkerPath()))
+		require.NoError(t, err)
+		assert.Len(t, entries, 1, "no temp file is left behind")
 	})
 }

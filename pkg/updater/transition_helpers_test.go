@@ -2,6 +2,8 @@ package updater
 
 import (
 	"context"
+
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ type fakeServiceManager struct {
 	disarmed   []string
 	restartErr error
 	guardErr   error
+	fired      bool // what DisarmGuard reports
 	// markersAtArm holds the marker on disk at each ArmGuard call.
 	markersAtArm []*PendingUpgrade
 }
@@ -47,16 +50,33 @@ func (f *fakeServiceManager) ArmGuard(unit string, d time.Duration, script strin
 	return nil
 }
 
-func (f *fakeServiceManager) DisarmGuard(unit string) {
+func (f *fakeServiceManager) DisarmGuard(unit string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.disarmed = append(f.disarmed, unit)
+	return f.fired
 }
 
 func (f *fakeServiceManager) snapshot() (restarts []time.Duration, guards []fakeGuard, disarmed []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]time.Duration(nil), f.restarts...), append([]fakeGuard(nil), f.guards...), append([]string(nil), f.disarmed...)
+}
+
+// useBinaryPath makes path the running binary for marker validation.
+func useBinaryPath(t *testing.T, path string) {
+	t.Helper()
+	prev := binaryPathFn
+	binaryPathFn = func() (string, error) { return path, nil }
+	t.Cleanup(func() { binaryPathFn = prev })
+}
+
+// usePackageManager sets the host's package manager for this test.
+func usePackageManager(t *testing.T, pm string) {
+	t.Helper()
+	prev := utils.PackageManager
+	utils.SetPackageManager(pm)
+	t.Cleanup(func() { utils.SetPackageManager(prev) })
 }
 
 // useTempMarkerDir points the marker at a fresh directory for this test.

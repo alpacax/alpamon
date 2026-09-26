@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,10 +13,6 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/version"
 	"github.com/rs/zerolog/log"
 )
-
-// packageVersionRe bounds what a repository may hand back as a package
-// version before it is placed in an install argument.
-var packageVersionRe = regexp.MustCompile(`^[0-9A-Za-z.+~:-]+$`)
 
 // handlePinnedUpgrade installs exactly the release the server pinned. On a
 // package-managed host that is a version-pinned install through the package
@@ -144,8 +138,8 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 	env := packageProxyEnv(packageProxy)
 
 	previous := h.installedAlpamonVersion(ctx)
-	if previous == "" {
-		err := errors.New("the package database does not report an installed alpamon, so a rollback would be impossible")
+	if !updater.PackageVersionRe.MatchString(previous) {
+		err := fmt.Errorf("the package database does not report a usable installed alpamon version (%q), so a rollback would be impossible", previous)
 		return h.failPinned(report, updater.Classify(updater.ClassPackageManager, err), "")
 	}
 	marker := &updater.PendingUpgrade{
@@ -155,6 +149,7 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 		Method:                 updater.MethodPackage,
 		PackageManager:         utils.PackageManager,
 		PreviousPackageVersion: previous,
+		Note:                   report.Detail,
 	}
 	// The install is bounded by the command timeout; the deadline and the
 	// guard count from its end, and are re-armed once it has finished.
@@ -199,7 +194,7 @@ func (h *SystemHandler) undoPackageChange(ctx context.Context, installed, previo
 		abort()
 		return output
 	}
-	argv, err := updater.PackageRollbackCommand(utils.PackageManager, previous)
+	argv, err := updater.PackageRollbackCommand(utils.PackageManager, previous, installed)
 	if err == nil {
 		var code int
 		var out string
@@ -247,7 +242,7 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, target string,
 
 	case utils.PkgYum:
 		verb := "install"
-		if cur := h.installedAlpamonVersion(ctx); cur != "" && compareVersions(target, cur) < 0 {
+		if cur := h.installedAlpamonVersion(ctx); cur != "" && updater.CompareVersions(target, cur) < 0 {
 			verb = "downgrade"
 		}
 		code, out, err := run("yum", verb, "-y", "alpamon-"+target)
@@ -310,7 +305,7 @@ func pickDebVersion(madison, target string) string {
 			continue
 		}
 		v := strings.TrimSpace(fields[1])
-		if packageVersionRe.MatchString(v) && packageVersionMatches(v, target) {
+		if updater.PackageVersionRe.MatchString(v) && packageVersionMatches(v, target) {
 			return v
 		}
 	}
@@ -327,31 +322,4 @@ func packageVersionMatches(installed, target string) bool {
 		installed = installed[i+1:]
 	}
 	return installed == target || strings.HasPrefix(installed, target+"-")
-}
-
-// compareVersions orders two "X.Y.Z" versions numerically, ignoring any
-// pre-release or packaging suffix. It returns -1, 0 or 1.
-func compareVersions(a, b string) int {
-	pa, pb := versionParts(a), versionParts(b)
-	for i := range pa {
-		switch {
-		case pa[i] < pb[i]:
-			return -1
-		case pa[i] > pb[i]:
-			return 1
-		}
-	}
-	return 0
-}
-
-func versionParts(v string) [3]int {
-	var out [3]int
-	v = strings.TrimPrefix(v, "v")
-	if i := strings.IndexAny(v, "-+~"); i >= 0 {
-		v = v[:i]
-	}
-	for i, p := range strings.SplitN(v, ".", 3) {
-		out[i], _ = strconv.Atoi(p)
-	}
-	return out
 }

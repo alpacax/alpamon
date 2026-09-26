@@ -1,12 +1,15 @@
 package updater
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -67,11 +70,81 @@ type PendingUpgrade struct {
 	// Set by a process that rolled back, for the one that starts after it.
 	RollbackClass  ErrorClass `json:"rollback_class,omitempty"`
 	RollbackDetail string     `json:"rollback_detail,omitempty"`
+
+	// Note is carried into the final report's detail.
+	Note string `json:"note,omitempty"`
 }
 
-// LoadPending reads the marker; (nil, nil) means no upgrade is in flight.
+var (
+	guardUnitRe = regexp.MustCompile(`^alpamon-upgrade-guard-\d+$`)
+	// PackageVersionRe bounds a package version before it becomes an
+	// install argument or part of the guard script.
+	PackageVersionRe = regexp.MustCompile(`^[0-9][0-9A-Za-z.+~:-]*$`)
+)
+
+const maxMarkerTextLen = 512
+
+// binaryPathFn is the running binary's path, the only binary a marker may
+// name. A variable so tests can point it at a stand-in.
+var binaryPathFn = func() (string, error) { return currentBinaryPath(Options{}) }
+
+// validatePending checks every field the marker's readers act on, so a marker
+// that this agent did not write for this host is never acted on.
+func validatePending(p *PendingUpgrade) error {
+	for name, v := range map[string]string{"from_version": p.FromVersion, "to_version": p.ToVersion} {
+		if _, err := NormalizeTag(v); err != nil || strings.HasPrefix(v, " ") || strings.HasSuffix(v, " ") {
+			return fmt.Errorf("%s %q is not a release version", name, v)
+		}
+	}
+	if len(p.AttemptID) > maxMarkerTextLen || len(p.RollbackDetail) > 4*maxMarkerTextLen || len(p.Note) > maxMarkerTextLen {
+		return errors.New("text field too long")
+	}
+	if p.GuardUnit != "" && !guardUnitRe.MatchString(p.GuardUnit) {
+		return fmt.Errorf("guard unit %q is not an upgrade guard", p.GuardUnit)
+	}
+	switch p.RollbackClass {
+	case "", ClassHealthCheckFailed:
+	default:
+		return fmt.Errorf("unexpected rollback class %q", p.RollbackClass)
+	}
+
+	switch p.Method {
+	case MethodBinary:
+		current, err := binaryPathFn()
+		if err != nil {
+			return err
+		}
+		if p.BinaryPath != current {
+			return fmt.Errorf("binary path %q is not the running binary", p.BinaryPath)
+		}
+		if p.RollbackPath != current+rollbackSuffix {
+			return fmt.Errorf("rollback path %q is not beside the running binary", p.RollbackPath)
+		}
+		if p.PackageManager != "" || p.PreviousPackageVersion != "" {
+			return errors.New("binary marker carries package fields")
+		}
+	case MethodPackage:
+		if p.PackageManager != utils.PackageManager {
+			return fmt.Errorf("package manager %q is not this host's", p.PackageManager)
+		}
+		if !PackageVersionRe.MatchString(p.PreviousPackageVersion) {
+			return fmt.Errorf("previous package version %q is not a package version", p.PreviousPackageVersion)
+		}
+		if p.BinaryPath != "" || p.RollbackPath != "" {
+			return errors.New("package marker carries binary paths")
+		}
+	default:
+		return fmt.Errorf("unknown upgrade method %q", p.Method)
+	}
+	return nil
+}
+
+// LoadPending reads the marker; (nil, nil) means no upgrade is in flight. A
+// marker that fails validation, or that a non-administrative account owns, is
+// logged, removed and treated as absent.
 func LoadPending() (*PendingUpgrade, error) {
-	data, err := os.ReadFile(MarkerPath())
+	path := MarkerPath()
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -79,8 +152,23 @@ func LoadPending() (*PendingUpgrade, error) {
 		return nil, fmt.Errorf("read upgrade marker: %w", err)
 	}
 	var p PendingUpgrade
-	if err := json.Unmarshal(data, &p); err != nil {
-		return nil, fmt.Errorf("parse upgrade marker: %w", err)
+	err = checkMarkerOwner(path)
+	if err == nil {
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		if err = dec.Decode(&p); err != nil {
+			err = fmt.Errorf("parse: %w", err)
+		}
+	}
+	if err == nil {
+		err = validatePending(&p)
+	}
+	if err != nil {
+		log.Warn().Err(err).Str("path", path).Msg("Discarding an invalid upgrade marker.")
+		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("remove invalid upgrade marker: %w", rmErr)
+		}
+		return nil, nil
 	}
 	return &p, nil
 }
@@ -91,6 +179,9 @@ func WritePending(p *PendingUpgrade) error {
 	dir := filepath.Dir(MarkerPath())
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("ensure marker dir: %w", err)
+	}
+	if err := validatePending(p); err != nil {
+		return fmt.Errorf("refusing to write an invalid upgrade marker: %w", err)
 	}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
@@ -107,10 +198,18 @@ func ClearPending() error {
 	return nil
 }
 
+// writeFileSynced writes through a randomly named temp file created
+// exclusively in the target directory, so nothing placed there beforehand is
+// written through or renamed into place.
 func writeFileSynced(path string, content []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if err := f.Chmod(mode); err != nil && runtime.GOOS != "windows" {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	if _, err := f.Write(content); err != nil {

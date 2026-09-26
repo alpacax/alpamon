@@ -117,7 +117,15 @@ func confirmHealth(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 		log.Error().Err(err).Msg("Failed to clear the upgrade marker; keeping the guard and rollback copy.")
 		return
 	}
-	d.ServiceManager.DisarmGuard(p.GuardUnit)
+	if d.ServiceManager.DisarmGuard(p.GuardUnit) {
+		// The guard started before the marker went away and has restored the
+		// previous version; put the marker back for that process to report.
+		log.Warn().Msg("The upgrade guard ran before the upgrade was confirmed; leaving the outcome to the restored version.")
+		if err := WritePending(p); err != nil {
+			log.Error().Err(err).Msg("Failed to restore the upgrade marker.")
+		}
+		return
+	}
 	removeRollbackCopy(p)
 	log.Info().Str("attempt_id", p.AttemptID).Str("version", p.ToVersion).Msg("Upgrade confirmed healthy.")
 	sendReportWithRetry(ctx, d.Poster, Report{
@@ -125,6 +133,7 @@ func confirmHealth(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 		FromVersion: p.FromVersion,
 		ToVersion:   p.ToVersion,
 		Outcome:     OutcomeSucceeded,
+		Detail:      p.Note,
 	})
 }
 
@@ -146,9 +155,12 @@ func rollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, reason strin
 	case MethodPackage:
 		// Stand the guard down while this reinstall runs, so the two never
 		// drive the package manager at once; it is re-armed if this fails.
-		d.ServiceManager.DisarmGuard(p.GuardUnit)
+		if d.ServiceManager.DisarmGuard(p.GuardUnit) {
+			log.Warn().Msg("The upgrade guard already rolled back; nothing left to do here.")
+			return
+		}
 		var argv []string
-		if argv, err = PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion); err == nil {
+		if argv, err = PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion, p.ToVersion); err == nil {
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
 			var out []byte
 			out, err = d.runCommand(rctx, argv[0], argv[1:]...)
@@ -171,7 +183,7 @@ func rollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, reason strin
 	}
 
 	p.RollbackClass = ClassHealthCheckFailed
-	p.RollbackDetail = reason
+	p.RollbackDetail = truncate(reason, 4*maxMarkerTextLen)
 	if err := WritePending(p); err != nil {
 		log.Warn().Err(err).Msg("Failed to record the rollback reason in the upgrade marker.")
 	}
@@ -198,6 +210,9 @@ func finishRollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 	if class == "" {
 		class = ClassHealthCheckFailed
 		detail = "the upgraded agent did not confirm its health before the deadline, or never started; the previous version was restored"
+	}
+	if p.Note != "" {
+		detail = p.Note + "; " + detail
 	}
 	log.Warn().Str("attempt_id", p.AttemptID).Str("from", p.FromVersion).Str("to", p.ToVersion).
 		Msg("Upgrade was rolled back; running the previous version.")
@@ -235,9 +250,16 @@ func clearForReport(p *PendingUpgrade, d ResumeDeps) bool {
 		log.Error().Err(err).Msg("Failed to clear the upgrade marker; leaving the attempt for the next start.")
 		return false
 	}
-	d.ServiceManager.DisarmGuard(p.GuardUnit)
+	_ = d.ServiceManager.DisarmGuard(p.GuardUnit)
 	removeRollbackCopy(p)
 	return true
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 func sendReportWithRetry(ctx context.Context, p Poster, r Report) {
