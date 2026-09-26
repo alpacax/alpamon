@@ -3,6 +3,7 @@ package updater
 import (
 	"bufio"
 	"bytes"
+	"crypto"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -13,9 +14,12 @@ import (
 	"strings"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
 )
 
 const maxSignatureSize = 64 * 1024 // 64 KB
+
+var acceptedSignatureHashes = []crypto.Hash{crypto.SHA256, crypto.SHA384, crypto.SHA512}
 
 var sha256HexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -26,12 +30,20 @@ func verifySignedChecksums(keyring *Keyring, checksums, signature []byte) error 
 	if keyring.Len() == 0 {
 		return Classify(ClassSignatureInvalid, ErrNoTrustedKeys)
 	}
-	var err error
+	var sig io.Reader = bytes.NewReader(signature)
 	if bytes.HasPrefix(bytes.TrimSpace(signature), []byte("-----BEGIN PGP SIGNATURE-----")) {
-		_, err = openpgp.CheckArmoredDetachedSignature(keyring.entities, bytes.NewReader(checksums), bytes.NewReader(signature), nil)
-	} else {
-		_, err = openpgp.CheckDetachedSignature(keyring.entities, bytes.NewReader(checksums), bytes.NewReader(signature), nil)
+		block, err := armor.Decode(bytes.NewReader(signature))
+		if err != nil {
+			return Classify(ClassSignatureInvalid, fmt.Errorf("checksums signature is not valid armor: %w", err))
+		}
+		if block.Type != openpgp.SignatureType {
+			return Classify(ClassSignatureInvalid, fmt.Errorf("unexpected armor block %q for the checksums signature", block.Type))
+		}
+		sig = block.Body
 	}
+	// Only SHA-2 digests: the v1 API does not apply the configured hash
+	// rejections, so a SHA-1 signature would otherwise verify.
+	_, err := openpgp.CheckDetachedSignatureAndHash(keyring.entities, bytes.NewReader(checksums), sig, acceptedSignatureHashes, nil)
 	if err != nil {
 		return Classify(ClassSignatureInvalid, fmt.Errorf("checksums signature did not verify: %w", err))
 	}

@@ -2,6 +2,7 @@ package updater
 
 import (
 	"bytes"
+	"crypto"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,16 @@ func TestVerifySignedChecksums(t *testing.T) {
 	}
 
 	assert.ErrorIs(t, verifySignedChecksums(&Keyring{}, checksums, nil), ErrNoTrustedKeys)
+
+	// The signer picks SHA-256 for this key and refuses weaker digests, so
+	// the accepted set is narrowed instead to show it is enforced.
+	t.Run("digest outside the accepted set", func(t *testing.T) {
+		saved := acceptedSignatureHashes
+		acceptedSignatureHashes = []crypto.Hash{crypto.SHA384}
+		t.Cleanup(func() { acceptedSignatureHashes = saved })
+		err := verifySignedChecksums(kr, checksums, s.sign(t, checksums, true))
+		assert.Equal(t, ClassSignatureInvalid, ClassOf(err))
+	})
 }
 
 func TestLookupChecksum(t *testing.T) {
