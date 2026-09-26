@@ -29,7 +29,8 @@ type PinnedRequest struct {
 	ChecksumsURL   string
 	SignatureURL   string
 
-	// Recorded in the intent marker and the report.
+	// Recorded in the intent marker and the report. FromVersion, the running
+	// release, is required: the marker only records release versions.
 	AttemptID   string
 	FromVersion string
 	HealthGrace time.Duration // clamped by ClampHealthGrace
@@ -220,6 +221,9 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 	if err != nil {
 		return Classify(ClassUnknown, err)
 	}
+	if _, err := NormalizeTag(req.FromVersion); err != nil {
+		return Classify(ClassUnknown, fmt.Errorf("running version: %w", err))
+	}
 	currentPath, err := currentBinaryPath(opts)
 	if err != nil {
 		return Classify(ClassUnknown, err)
@@ -248,6 +252,11 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 	sm := opts.ServiceManager
 	if sm == nil {
 		sm = DefaultServiceManager()
+	}
+	// Before staging: the rollback copy of an attempt still in flight must
+	// not be overwritten.
+	if err := CheckNoPending(sm, time.Now()); err != nil {
+		return Classify(ClassUnknown, err)
 	}
 	rollbackPath, err := stageRollbackCopy(currentPath)
 	if err != nil {

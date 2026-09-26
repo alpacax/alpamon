@@ -115,7 +115,7 @@ func runAgent(ready chan<- struct{}) {
 	// On Windows, keep the configuration and data directories writable by
 	// SYSTEM and Administrators only. No-op elsewhere.
 	if err := utils.SecureConfigDir(); err != nil {
-		log.Warn().Err(err).Msg("Failed to restrict the alpamon directory ACL.")
+		log.Error().Err(err).Msg("Failed to restrict the alpamon directory ACL; pinned upgrades are disabled.")
 	}
 
 	// Pid

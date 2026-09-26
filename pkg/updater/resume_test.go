@@ -66,8 +66,11 @@ func newResumeFixture(t *testing.T, grace time.Duration) *resumeFixture {
 	}
 	f.marker = binaryMarker(t, dir)
 	f.marker.GuardUnit = "alpamon-upgrade-guard-1"
-	f.marker.StartedAt = time.Now()
 	f.marker.Deadline = time.Now().Add(grace)
+	f.marker.StartedAt = time.Now()
+	if !f.marker.Deadline.After(f.marker.StartedAt) {
+		f.marker.StartedAt = f.marker.Deadline.Add(-time.Minute)
+	}
 	require.NoError(t, os.WriteFile(f.marker.BinaryPath, []byte("new"), 0755))
 	require.NoError(t, os.WriteFile(f.marker.RollbackPath, []byte("old"), 0755))
 	require.NoError(t, WritePending(f.marker))
@@ -416,4 +419,16 @@ func TestResumePending_GuardFiredBeforeConfirmation(t *testing.T) {
 		require.NotNil(t, marker, "the marker is put back for the restored version to report")
 		assert.Empty(t, f.poster.all(), "success is not reported")
 	})
+}
+
+func TestResumePending_InsecureStateDirIsNotActedOn(t *testing.T) {
+	f := newResumeFixture(t, time.Minute)
+	prev := stateDirSecureFn
+	stateDirSecureFn = func() bool { return false }
+	t.Cleanup(func() { stateDirSecureFn = prev })
+
+	found, done := ResumePending(context.Background(), f.deps)
+	<-done
+	assert.False(t, found)
+	assert.Equal(t, "new", fileContent(t, f.marker.BinaryPath))
 }

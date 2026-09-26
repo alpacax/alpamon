@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,10 +36,17 @@ func init() {
 
 // OverrideMarkerDir points the marker at dir until the returned restore runs.
 // Tests only.
+// It also treats that directory as secured, standing in for the Windows ACL
+// step that tests do not run.
 func OverrideMarkerDir(dir string) (restore func()) {
 	prev := markerDirFn.Load()
+	prevSecure := stateDirSecureFn
 	markerDirFn.Store(func() string { return dir })
-	return func() { markerDirFn.Store(prev) }
+	stateDirSecureFn = func() bool { return true }
+	return func() {
+		markerDirFn.Store(prev)
+		stateDirSecureFn = prevSecure
+	}
 }
 
 // MarkerPath is where an in-flight pinned upgrade records its intent.
@@ -84,6 +92,10 @@ var (
 
 const maxMarkerTextLen = 512
 
+// maxMarkerSpan bounds deadline minus start: the longest package install
+// window, the restart delay and the longest grace, with room to spare.
+const maxMarkerSpan = 2 * time.Hour
+
 // binaryPathFn is the running binary's path, the only binary a marker may
 // name. A variable so tests can point it at a stand-in.
 var binaryPathFn = func() (string, error) { return currentBinaryPath(Options{}) }
@@ -98,6 +110,9 @@ func validatePending(p *PendingUpgrade) error {
 	}
 	if len(p.AttemptID) > maxMarkerTextLen || len(p.RollbackDetail) > 4*maxMarkerTextLen || len(p.Note) > maxMarkerTextLen {
 		return errors.New("text field too long")
+	}
+	if p.StartedAt.IsZero() || !p.Deadline.After(p.StartedAt) || p.Deadline.Sub(p.StartedAt) > maxMarkerSpan {
+		return fmt.Errorf("deadline %s does not follow start %s within %s", p.Deadline, p.StartedAt, maxMarkerSpan)
 	}
 	if p.GuardUnit != "" && !guardUnitRe.MatchString(p.GuardUnit) {
 		return fmt.Errorf("guard unit %q is not an upgrade guard", p.GuardUnit)
@@ -158,6 +173,8 @@ func LoadPending() (*PendingUpgrade, error) {
 		dec.DisallowUnknownFields()
 		if err = dec.Decode(&p); err != nil {
 			err = fmt.Errorf("parse: %w", err)
+		} else if _, extra := dec.Token(); extra != io.EOF {
+			err = errors.New("trailing data after the marker object")
 		}
 	}
 	if err == nil {

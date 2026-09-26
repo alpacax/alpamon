@@ -288,10 +288,21 @@ func TestSystemHandler_PinnedUpgrade_ChangedPackageIsReinstalledOnFailure(t *tes
 			require.NoError(t, err)
 			if tc.wantMarker {
 				require.NotNil(t, marker)
-				assert.Empty(t, h.sm.disarmed, "the guard stays armed")
+				require.Len(t, h.sm.guards, 2, "a fresh guard is armed to retry the reinstall")
+				assert.Equal(t, h.sm.guards[1], marker.GuardUnit)
+				require.NotEmpty(t, h.sm.disarmed, "the first guard stood down before the reinstall")
+				for _, u := range h.sm.disarmed {
+					assert.Equal(t, h.sm.guards[0], u, "the fresh guard stays armed")
+				}
 			} else {
 				assert.Nil(t, marker)
-				assert.Equal(t, h.sm.guards, h.sm.disarmed)
+				require.Len(t, h.sm.guards, 1)
+				for _, u := range h.sm.disarmed {
+					assert.Equal(t, h.sm.guards[0], u)
+				}
+				if len(tc.versions) > 2 {
+					assert.NotEmpty(t, h.sm.disarmed, "the guard stood down before the reinstall")
+				}
 			}
 			assert.Empty(t, h.sm.restarts)
 		})
@@ -342,12 +353,28 @@ func TestSystemHandler_PinnedUpgrade_NeedsTheInstalledVersionToRollBack(t *testi
 	assert.False(t, h.exec.Invoked("apt-get"))
 }
 
+func TestSystemHandler_PinnedUpgrade_PendingCheckedBeforeAlreadyAtTarget(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	require.NoError(t, updater.WritePending(&updater.PendingUpgrade{
+		AttemptID: "earlier", FromVersion: "2.3.0", ToVersion: "2.4.0", Method: updater.MethodPackage,
+		PackageManager: utils.PkgApt, PreviousPackageVersion: "2.3.0",
+		StartedAt: time.Now(), Deadline: time.Now().Add(time.Minute),
+	}))
+
+	// The harness runs 2.4.0, the pending attempt's target.
+	exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.4.0", AttemptID: "dup"})
+	require.ErrorIs(t, err, updater.ErrUpgradePending)
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, updater.OutcomeFailed, h.lastReport(t).Outcome)
+}
+
 func TestSystemHandler_PinnedUpgrade_RefusesWhileAnUpgradeIsPending(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
 	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
 	require.NoError(t, updater.WritePending(&updater.PendingUpgrade{
 		AttemptID: "earlier", FromVersion: "2.4.8", ToVersion: "2.4.9", Method: updater.MethodPackage,
-		PackageManager: utils.PkgApt, PreviousPackageVersion: "2.4.8", Deadline: time.Now().Add(time.Minute),
+		PackageManager: utils.PkgApt, PreviousPackageVersion: "2.4.8",
+		StartedAt: time.Now(), Deadline: time.Now().Add(time.Minute),
 	}))
 
 	exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})

@@ -2,7 +2,10 @@ package utils
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"sync/atomic"
 
 	"golang.org/x/sys/windows"
 )
@@ -15,14 +18,41 @@ const protectedDirSDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 // SecureConfigDir creates the alpamon directory under %ProgramData% (which
 // holds the configuration, data, log and run directories) and restricts its
 // ACL to SYSTEM and Administrators.
+//
+// The ACL is applied to the directory and to everything already inside it,
+// since an existing child keeps the ACEs it was created with.
 func SecureConfigDir() error {
 	dir := ConfigDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
-	return restrictDirACL(dir)
+	if err := restrictTreeACL(dir); err != nil {
+		return err
+	}
+	configDirSecured.Store(true)
+	return nil
 }
 
+var configDirSecured atomic.Bool
+
+// ConfigDirSecured reports whether SecureConfigDir has succeeded in this
+// process. Upgrade state is neither written nor acted on until it has.
+func ConfigDirSecured() bool { return configDirSecured.Load() }
+
+func restrictTreeACL(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		// Do not follow a link or junction out of the tree.
+		if d.Type()&fs.ModeSymlink != 0 || d.Type()&fs.ModeIrregular != 0 {
+			return fmt.Errorf("unexpected link %s in %s", path, root)
+		}
+		return restrictDirACL(path)
+	})
+}
+
+// restrictDirACL sets the protected DACL on one file or directory.
 func restrictDirACL(dir string) error {
 	sd, err := windows.SecurityDescriptorFromString(protectedDirSDDL)
 	if err != nil {

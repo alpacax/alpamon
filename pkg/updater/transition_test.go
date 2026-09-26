@@ -60,7 +60,9 @@ func TestClampHealthGrace(t *testing.T) {
 func binaryMarker(t *testing.T, dir string) *PendingUpgrade {
 	t.Helper()
 	useBinaryPath(t, filepath.Join(dir, "alpamon"))
+	now := time.Now()
 	return &PendingUpgrade{
+		StartedAt: now.UTC(), Deadline: now.UTC().Add(time.Minute),
 		AttemptID: "att", FromVersion: "2.4.0", ToVersion: "2.5.0", Method: MethodBinary,
 		BinaryPath: filepath.Join(dir, "alpamon"), RollbackPath: filepath.Join(dir, "alpamon.rollback"),
 	}
@@ -113,6 +115,7 @@ func TestBeginTransition_DiscardsAStaleMarker(t *testing.T) {
 	dir := t.TempDir()
 	abandoned := binaryMarker(t, dir)
 	abandoned.AttemptID, abandoned.GuardUnit, abandoned.Deadline = "abandoned", "alpamon-upgrade-guard-5", now.Add(-staleMarkerAge-time.Minute)
+	abandoned.StartedAt = abandoned.Deadline.Add(-time.Minute)
 	require.NoError(t, WritePending(abandoned))
 	sm := &fakeServiceManager{}
 
@@ -459,6 +462,9 @@ func TestLoadPending_DiscardsMarkersItDidNotWrite(t *testing.T) {
 		{"foreign binary path", func(p *PendingUpgrade) { p.BinaryPath = "/etc/shadow" }},
 		{"foreign rollback path", func(p *PendingUpgrade) { p.RollbackPath = "/tmp/evil" }},
 		{"foreign guard unit", func(p *PendingUpgrade) { p.GuardUnit = "sshd" }},
+		{"no start time", func(p *PendingUpgrade) { p.StartedAt = time.Time{} }},
+		{"deadline before start", func(p *PendingUpgrade) { p.Deadline = p.StartedAt.Add(-time.Second) }},
+		{"deadline too far out", func(p *PendingUpgrade) { p.Deadline = p.StartedAt.Add(maxMarkerSpan + time.Second) }},
 		{"unknown method", func(p *PendingUpgrade) { p.Method = "script" }},
 		{"bad target version", func(p *PendingUpgrade) { p.ToVersion = "2.5.0; reboot" }},
 		{"bad previous version", func(p *PendingUpgrade) { p.FromVersion = "latest" }},
@@ -490,6 +496,18 @@ func TestLoadPending_DiscardsMarkersItDidNotWrite(t *testing.T) {
 			assert.ErrorIs(t, err, os.ErrNotExist, "an invalid marker is removed")
 		})
 	}
+
+	t.Run("trailing data", func(t *testing.T) {
+		useTempMarkerDir(t)
+		p := valid(t)
+		require.NoError(t, WritePending(p))
+		data, err := os.ReadFile(MarkerPath())
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(MarkerPath(), append(data, []byte(`{"method":"binary"}`)...), 0600))
+		got, err := LoadPending()
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
 
 	t.Run("unknown field", func(t *testing.T) {
 		useTempMarkerDir(t)

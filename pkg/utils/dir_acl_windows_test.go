@@ -10,6 +10,26 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestRestrictTreeACL_CoversExistingChildren(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("needs an elevated token: the restricted ACL admits only SYSTEM and Administrators")
+	}
+	root := t.TempDir()
+	data := filepath.Join(root, "data")
+	require.NoError(t, os.Mkdir(data, 0o700))
+	// A pre-existing child with its own explicit ACE for local users.
+	users, err := windows.SecurityDescriptorFromString("D:(A;OICI;FA;;;BU)")
+	require.NoError(t, err)
+	dacl, _, err := users.DACL()
+	require.NoError(t, err)
+	require.NoError(t, windows.SetNamedSecurityInfo(data, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil))
+
+	require.NoError(t, restrictTreeACL(root))
+	sd, err := windows.GetNamedSecurityInfo(data, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	require.NoError(t, err)
+	assert.NotContains(t, sd.String(), ";;;BU)")
+}
+
 func TestRestrictDirACL(t *testing.T) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("needs an elevated token: the restricted ACL admits only SYSTEM and Administrators")

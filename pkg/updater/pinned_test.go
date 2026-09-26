@@ -154,10 +154,11 @@ func TestPinnedSelfUpdate_RefusesWhileAnUpgradeIsPending(t *testing.T) {
 	f.release.publish(t, f.signer, "v2.5.0", fakeBinary(t, "new"))
 	require.NoError(t, WritePending(&PendingUpgrade{
 		AttemptID: "earlier", FromVersion: "2.4.8", ToVersion: "2.4.9", Method: MethodBinary,
-		BinaryPath: f.current, RollbackPath: f.current + ".rollback", Deadline: time.Now().Add(time.Minute),
+		BinaryPath: f.current, RollbackPath: f.current + ".rollback",
+		StartedAt: time.Now(), Deadline: time.Now().Add(time.Minute),
 	}))
 
-	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0"}, f.opts)
+	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0"}, f.opts)
 	assert.ErrorIs(t, err, ErrUpgradePending)
 	assert.Equal(t, string(fakeBinary(t, "old")), f.currentContent(t))
 	_, err = os.Stat(f.current + ".rollback")
@@ -169,7 +170,7 @@ func TestPinnedSelfUpdate_RefusesWithoutKeysBeforeDownloading(t *testing.T) {
 	f.release.publish(t, f.signer, "v2.5.0", fakeBinary(t, "new"))
 	f.opts.Keyring = nil // falls back to the compiled bundle, empty in this build
 
-	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0"}, f.opts)
+	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0"}, f.opts)
 	assert.ErrorIs(t, err, ErrNoTrustedKeys)
 	assert.Equal(t, ClassSignatureInvalid, ClassOf(err))
 	assert.Zero(t, f.release.requests(), "nothing may be fetched without a key to verify it")
@@ -187,7 +188,7 @@ func TestPinnedSelfUpdate_FailuresLeaveBinaryUntouched(t *testing.T) {
 			name: "artifact missing",
 			mutate: func(t *testing.T, f *pinnedFixture, _ []byte) PinnedRequest {
 				delete(f.release.files, "/v2.5.0/"+archiveFilename("v2.5.0"))
-				return PinnedRequest{TargetVersion: "v2.5.0"}
+				return PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0"}
 			},
 			class: ClassDownloadFailed,
 		},
@@ -195,7 +196,7 @@ func TestPinnedSelfUpdate_FailuresLeaveBinaryUntouched(t *testing.T) {
 			name: "signature missing",
 			mutate: func(t *testing.T, f *pinnedFixture, _ []byte) PinnedRequest {
 				delete(f.release.files, "/v2.5.0/alpamon-2.5.0-checksums.sha256.sig")
-				return PinnedRequest{TargetVersion: "v2.5.0"}
+				return PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0"}
 			},
 			class: ClassDownloadFailed,
 		},
@@ -204,7 +205,7 @@ func TestPinnedSelfUpdate_FailuresLeaveBinaryUntouched(t *testing.T) {
 			mutate: func(t *testing.T, f *pinnedFixture, _ []byte) PinnedRequest {
 				sums := f.release.files["/v2.5.0/alpamon-2.5.0-checksums.sha256"]
 				f.release.put("/v2.5.0/alpamon-2.5.0-checksums.sha256.sig", newTestSigner(t).sign(t, sums, true))
-				return PinnedRequest{TargetVersion: "v2.5.0"}
+				return PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0"}
 			},
 			class: ClassSignatureInvalid,
 		},
@@ -212,14 +213,14 @@ func TestPinnedSelfUpdate_FailuresLeaveBinaryUntouched(t *testing.T) {
 			name: "artifact swapped after signing",
 			mutate: func(t *testing.T, f *pinnedFixture, _ []byte) PinnedRequest {
 				f.release.put("/v2.5.0/"+archiveFilename("v2.5.0"), createTestArchive(t, fakeBinary(t, "evil")))
-				return PinnedRequest{TargetVersion: "v2.5.0"}
+				return PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0"}
 			},
 			class: ClassDigestMismatch,
 		},
 		{
 			name: "pinned digest disagrees",
 			mutate: func(t *testing.T, f *pinnedFixture, _ []byte) PinnedRequest {
-				return PinnedRequest{TargetVersion: "v2.5.0", ArtifactDigest: strings.Repeat("e", 64)}
+				return PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0", ArtifactDigest: strings.Repeat("e", 64)}
 			},
 			class: ClassDigestMismatch,
 		},
@@ -229,7 +230,7 @@ func TestPinnedSelfUpdate_FailuresLeaveBinaryUntouched(t *testing.T) {
 				f2 := newFakeRelease(t)
 				f.release.files = f2.files
 				f.release.publish(t, f.signer, "v2.5.0", []byte("#!/bin/sh\n"))
-				return PinnedRequest{TargetVersion: "v2.5.0"}
+				return PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0"}
 			},
 			class: ClassUnknown,
 		},
@@ -260,7 +261,7 @@ func TestPinnedSelfUpdate_SharesTheLatchWithSelfUpdate(t *testing.T) {
 	require.True(t, selfUpdateInFlight.CompareAndSwap(false, true))
 	defer selfUpdateInFlight.Store(false)
 
-	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0"}, Options{})
+	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0"}, Options{})
 	assert.ErrorIs(t, err, ErrSelfUpdateInProgress)
 }
 
@@ -288,4 +289,29 @@ func TestPinnedClient_RefusesRedirectToPlainHTTP(t *testing.T) {
 	got, err := downloadBytes(context.Background(), allowed, redirector.URL+"/sums", 1024)
 	require.NoError(t, err)
 	assert.Equal(t, "payload", string(got))
+}
+
+func TestPinnedSelfUpdate_RequiresTheRunningVersion(t *testing.T) {
+	f := newPinnedFixture(t)
+	f.release.publish(t, f.signer, "v2.5.0", fakeBinary(t, "new"))
+	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0"}, f.opts)
+	assert.ErrorContains(t, err, "running version")
+	assert.Zero(t, f.release.requests(), "refused before any download")
+}
+
+func TestPinnedSelfUpdate_KeepsAPendingAttemptsRollbackCopy(t *testing.T) {
+	f := newPinnedFixture(t)
+	f.release.publish(t, f.signer, "v2.5.0", fakeBinary(t, "new"))
+	require.NoError(t, os.WriteFile(f.current+".rollback", []byte("pending attempt's copy"), 0755))
+	require.NoError(t, WritePending(&PendingUpgrade{
+		AttemptID: "earlier", FromVersion: "2.4.8", ToVersion: "2.4.9", Method: MethodBinary,
+		BinaryPath: f.current, RollbackPath: f.current + ".rollback",
+		StartedAt: time.Now(), Deadline: time.Now().Add(time.Minute),
+	}))
+
+	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0"}, f.opts)
+	require.ErrorIs(t, err, ErrUpgradePending)
+	got, err := os.ReadFile(f.current + ".rollback")
+	require.NoError(t, err)
+	assert.Equal(t, "pending attempt's copy", string(got))
 }

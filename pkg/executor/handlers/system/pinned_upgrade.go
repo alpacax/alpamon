@@ -33,6 +33,12 @@ func (h *SystemHandler) handlePinnedUpgrade(ctx context.Context, target *common.
 	}
 	report.ToVersion = strings.TrimPrefix(tag, "v")
 
+	// Before the already-at-target shortcut: a request for the version just
+	// installed must not claim success while that attempt is still pending.
+	if err := updater.CheckNoPending(h.serviceManager, h.now()); err != nil {
+		return h.failPinned(report, updater.Classify(updater.ClassUnknown, err), "")
+	}
+
 	if sameVersion(version.Version, tag) {
 		report.Outcome = updater.OutcomeSucceeded
 		report.Detail = "already running the target version"
@@ -164,7 +170,7 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 		err = fmt.Errorf("package database reports alpamon %q after installing %s", installed, target)
 	}
 	if err != nil {
-		output = h.undoPackageChange(ctx, installed, previous, env, abort, output)
+		output = h.undoPackageChange(ctx, marker, installed, env, abort, output)
 		return h.failPinned(report, updater.Classify(updater.ClassPackageManager, err), output)
 	}
 
@@ -189,10 +195,16 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 // (a failing maintainer script, an unexpected version), so the previous
 // version is reinstalled at once; if that fails too, the marker and guard
 // stay for the guard to retry and the restored agent to report.
-func (h *SystemHandler) undoPackageChange(ctx context.Context, installed, previous string, env map[string]string, abort func(), output string) string {
+func (h *SystemHandler) undoPackageChange(ctx context.Context, marker *updater.PendingUpgrade, installed string, env map[string]string, abort func(), output string) string {
+	previous := marker.PreviousPackageVersion
 	if installed == previous {
 		abort()
 		return output
+	}
+	// Stand the guard down first so the two never run the package manager
+	// at once; one that already started is waited out and left to finish.
+	if h.serviceManager.DisarmGuard(marker.GuardUnit) {
+		return output + "\nThe upgrade guard has already reinstalled the previous version."
 	}
 	argv, err := updater.PackageRollbackCommand(utils.PackageManager, previous, installed)
 	if err == nil {
@@ -208,7 +220,10 @@ func (h *SystemHandler) undoPackageChange(ctx context.Context, installed, previo
 		abort()
 		return output + fmt.Sprintf("\nReinstalled the previous version %s.", previous)
 	}
-	log.Error().Err(err).Str("previous", previous).Msg("Could not reinstall the previous version; leaving the upgrade guard armed.")
+	log.Error().Err(err).Str("previous", previous).Msg("Could not reinstall the previous version; arming the upgrade guard to retry it.")
+	if rerr := updater.Rearm(marker, h.serviceManager, 0, h.now()); rerr != nil {
+		log.Error().Err(rerr).Msg("Failed to re-arm the upgrade guard.")
+	}
 	return output + fmt.Sprintf("\nCould not reinstall the previous version %s; the upgrade guard retries it.", previous)
 }
 

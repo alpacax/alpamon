@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
@@ -44,6 +45,35 @@ func ClampHealthGrace(d time.Duration) time.Duration {
 // without this code, say) and would otherwise block every later upgrade.
 const staleMarkerAge = 1 * time.Hour
 
+// CheckNoPending returns ErrUpgradePending while another attempt is in
+// flight, and ErrStateDirInsecure when the directory holding the marker could
+// not be secured. A marker long past its deadline is discarded instead of
+// blocking.
+func CheckNoPending(sm ServiceManager, now time.Time) error {
+	if !stateDirSecureFn() {
+		return ErrStateDirInsecure
+	}
+	existing, err := LoadPending()
+	if err != nil || existing == nil {
+		return err
+	}
+	if now.Before(existing.Deadline.Add(staleMarkerAge)) {
+		return fmt.Errorf("%w (attempt %q to %s)", ErrUpgradePending, existing.AttemptID, existing.ToVersion)
+	}
+	log.Warn().Str("attempt_id", existing.AttemptID).Time("deadline", existing.Deadline).
+		Msg("Discarding an upgrade marker long past its deadline.")
+	_ = sm.DisarmGuard(existing.GuardUnit)
+	return ClearPending()
+}
+
+// ErrStateDirInsecure is returned when the agent could not restrict access
+// to the directory holding upgrade state, so none is written or acted on.
+var ErrStateDirInsecure = errors.New("the agent's data directory could not be secured; pinned upgrades are disabled")
+
+// stateDirSecureFn reports whether the data directory's access is restricted.
+// A variable so tests can stand in for the Windows ACL step.
+var stateDirSecureFn = utils.ConfigDirSecured
+
 // BeginTransition records p as the intent marker and arms its guard, both
 // before anything changes. settle is how long the change itself may take
 // before the restart (a package install; zero for a binary swap): the
@@ -54,20 +84,8 @@ const staleMarkerAge = 1 * time.Hour
 // A host with no service manager gets no guard; the new process's own health
 // check is then the only way back.
 func BeginTransition(p *PendingUpgrade, sm ServiceManager, settle, grace time.Duration, now time.Time) (abort func(), err error) {
-	existing, err := LoadPending()
-	if err != nil {
+	if err := CheckNoPending(sm, now); err != nil {
 		return nil, err
-	}
-	if existing != nil {
-		if now.Before(existing.Deadline.Add(staleMarkerAge)) {
-			return nil, fmt.Errorf("%w (attempt %q to %s)", ErrUpgradePending, existing.AttemptID, existing.ToVersion)
-		}
-		log.Warn().Str("attempt_id", existing.AttemptID).Time("deadline", existing.Deadline).
-			Msg("Discarding an upgrade marker long past its deadline.")
-		_ = sm.DisarmGuard(existing.GuardUnit)
-		if err := ClearPending(); err != nil {
-			return nil, err
-		}
 	}
 
 	p.StartedAt = now.UTC()

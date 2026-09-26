@@ -48,6 +48,11 @@ type ResumeDeps struct {
 // reporting.
 func ResumePending(ctx context.Context, d ResumeDeps) (found bool, done <-chan struct{}) {
 	finished := make(chan struct{})
+	if !stateDirSecureFn() {
+		log.Error().Msg("Not resuming a pinned upgrade: the data directory could not be secured.")
+		close(finished)
+		return false, finished
+	}
 	p, err := LoadPending()
 	if err != nil {
 		log.Warn().Err(err).Str("path", MarkerPath()).Msg("Unreadable upgrade marker; removing it.")
@@ -176,7 +181,14 @@ func rollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, reason strin
 		log.Error().Err(err).Msg("Rollback failed; leaving the marker for the upgrade guard.")
 		if p.Method == MethodPackage {
 			if aerr := armGuard(p, d.ServiceManager, 0, time.Now()); aerr != nil {
-				log.Error().Err(aerr).Msg("Failed to re-arm the upgrade guard.")
+				// No guard: restart instead, so the next start, still the
+				// failing version past its deadline, retries this rollback.
+				log.Error().Err(aerr).Msg("Failed to re-arm the upgrade guard; restarting to retry the rollback.")
+				p.GuardUnit = ""
+				if werr := WritePending(p); werr != nil {
+					log.Error().Err(werr).Msg("Failed to update the upgrade marker.")
+				}
+				restart(d)
 			}
 		}
 		return
