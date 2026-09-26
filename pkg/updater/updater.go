@@ -51,6 +51,15 @@ type SelfUpdateFunc func(ctx context.Context, latestVersion string, opts Options
 // Options configures the self-update behavior. Use defaults for production.
 type Options struct {
 	BaseURL string // Override release base URL (for testing)
+
+	// Keyring overrides the compiled-in release keyring for the pinned path.
+	// Tests only; production leaves it nil. The legacy path ignores it.
+	Keyring *Keyring
+
+	// Test seams for the pinned path: allowHTTP admits the plain-HTTP URLs an
+	// httptest server hands out, binaryPath replaces os.Executable.
+	allowHTTP  bool
+	binaryPath string
 }
 
 func (o Options) baseURL() string {
@@ -177,11 +186,14 @@ func checksumURL(baseURL, version string) string {
 }
 
 func downloadFile(ctx context.Context, url, destPath string) error {
+	return downloadFileWith(ctx, &http.Client{Timeout: downloadTimeout}, url, destPath)
+}
+
+func downloadFileWith(ctx context.Context, client *http.Client, url, destPath string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
-	client := &http.Client{Timeout: downloadTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)

@@ -80,10 +80,13 @@ type SystemInfoManager interface {
 	SyncSystemInfo(keys []string)
 }
 
-// APISession interface for API operations (file upload, server unregister)
+// APISession interface for API operations (file upload, server unregister,
+// upgrade reports). Timeouts are in seconds: the session multiplies them by
+// time.Second itself.
 type APISession interface {
 	MultipartRequest(url string, body io.Reader, contentType string, contentLength int64, timeout time.Duration) ([]byte, int, error)
 	Delete(url string, rawBody any, timeout time.Duration) ([]byte, int, error)
+	Post(url string, rawBody any, timeout time.Duration) ([]byte, int, error)
 }
 
 // VersionResolver provides version information for upgrade decisions.
