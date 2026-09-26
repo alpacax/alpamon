@@ -14,7 +14,15 @@ const (
 	ClassSwapFailed        ErrorClass = "swap_failed"
 	ClassHealthCheckFailed ErrorClass = "health_check_failed"
 	ClassPackageManager    ErrorClass = "package_manager"
-	ClassUnknown           ErrorClass = "unknown"
+
+	// ClassKeysUnavailable marks the refusal before any download when this
+	// build's compiled-in release key bundle is empty: this build carries no
+	// release signing keys, so a pinned upgrade cannot be verified. Distinct
+	// from ClassSignatureInvalid, which means a signature was checked and did
+	// not verify; here there was no key to check one against.
+	ClassKeysUnavailable ErrorClass = "keys_unavailable"
+
+	ClassUnknown ErrorClass = "unknown"
 )
 
 // ClassifiedError carries an ErrorClass alongside the underlying error.

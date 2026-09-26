@@ -165,8 +165,10 @@ func preparePinned(ctx context.Context, src *pinnedSources, opts Options, tempDi
 		}
 	}
 	// Refuse before downloading anything: without a key nothing can pass.
+	// This is ClassKeysUnavailable, not ClassSignatureInvalid: no signature
+	// was checked and failed, there was no key to check one against.
 	if keyring.Len() == 0 {
-		return "", Classify(ClassSignatureInvalid, ErrNoTrustedKeys)
+		return "", Classify(ClassKeysUnavailable, ErrNoTrustedKeys)
 	}
 
 	archivePath := filepath.Join(tempDir, src.archiveName)
