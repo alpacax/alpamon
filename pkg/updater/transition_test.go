@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -68,7 +67,7 @@ func TestBeginTransition_WritesMarkerThenArmsGuard(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	p := binaryMarker(t.TempDir())
 
-	abort, err := BeginTransition(p, sm, 3*time.Minute, now)
+	abort, err := BeginTransition(p, sm, 0, 3*time.Minute, now)
 	require.NoError(t, err)
 	require.NotNil(t, abort)
 
@@ -87,10 +86,10 @@ func TestBeginTransition_WritesMarkerThenArmsGuard(t *testing.T) {
 
 func TestBeginTransition_RefusesWhileAnotherIsPending(t *testing.T) {
 	useTempMarkerDir(t)
-	require.NoError(t, WritePending(&PendingUpgrade{AttemptID: "earlier", ToVersion: "2.5.0"}))
+	require.NoError(t, WritePending(&PendingUpgrade{AttemptID: "earlier", ToVersion: "2.5.0", Deadline: time.Now().Add(time.Minute)}))
 	sm := &fakeServiceManager{}
 
-	_, err := BeginTransition(binaryMarker(t.TempDir()), sm, time.Minute, time.Now())
+	_, err := BeginTransition(binaryMarker(t.TempDir()), sm, 0, time.Minute, time.Now())
 	assert.ErrorIs(t, err, ErrUpgradePending)
 	_, guards, _ := sm.snapshot()
 	assert.Empty(t, guards)
@@ -98,9 +97,51 @@ func TestBeginTransition_RefusesWhileAnotherIsPending(t *testing.T) {
 	assert.Equal(t, "earlier", stored.AttemptID, "the pending marker is left alone")
 }
 
+func TestBeginTransition_DiscardsAStaleMarker(t *testing.T) {
+	useTempMarkerDir(t)
+	now := time.Now()
+	require.NoError(t, WritePending(&PendingUpgrade{AttemptID: "abandoned", GuardUnit: "old-guard", Deadline: now.Add(-staleMarkerAge - time.Minute)}))
+	sm := &fakeServiceManager{}
+
+	_, err := BeginTransition(binaryMarker(t.TempDir()), sm, 0, time.Minute, now)
+	require.NoError(t, err)
+	stored, err := LoadPending()
+	require.NoError(t, err)
+	assert.Equal(t, "att", stored.AttemptID)
+	_, _, disarmed := sm.snapshot()
+	assert.Equal(t, []string{"old-guard"}, disarmed)
+}
+
+func TestBeginTransition_SettleDelaysDeadlineAndGuard(t *testing.T) {
+	useTempMarkerDir(t)
+	sm := &fakeServiceManager{}
+	now := time.Now()
+	p := binaryMarker(t.TempDir())
+
+	_, err := BeginTransition(p, sm, 30*time.Minute, 2*time.Minute, now)
+	require.NoError(t, err)
+	assert.Equal(t, now.UTC().Add(30*time.Minute+RestartDelay+2*time.Minute), p.Deadline)
+	_, guards, _ := sm.snapshot()
+	assert.Equal(t, 30*time.Minute+RestartDelay+2*time.Minute+guardMargin, guards[0].delay)
+
+	first := p.GuardUnit
+	later := now.Add(10 * time.Minute)
+	require.NoError(t, Rearm(p, sm, 2*time.Minute, later))
+	assert.Equal(t, later.UTC().Add(RestartDelay+2*time.Minute), p.Deadline)
+	assert.NotEqual(t, first, p.GuardUnit)
+	_, guards, disarmed := sm.snapshot()
+	require.Len(t, guards, 2)
+	assert.Equal(t, RestartDelay+2*time.Minute+guardMargin, guards[1].delay)
+	assert.Equal(t, []string{first}, disarmed, "the first guard is replaced")
+	stored, err := LoadPending()
+	require.NoError(t, err)
+	assert.Equal(t, p.GuardUnit, stored.GuardUnit)
+	assert.Equal(t, p.Deadline, stored.Deadline)
+}
+
 func TestBeginTransition_WithoutServiceManager(t *testing.T) {
 	useTempMarkerDir(t)
-	_, err := BeginTransition(binaryMarker(t.TempDir()), noServiceManager{}, time.Minute, time.Now())
+	_, err := BeginTransition(binaryMarker(t.TempDir()), noServiceManager{}, 0, time.Minute, time.Now())
 	require.NoError(t, err)
 	stored, err := LoadPending()
 	require.NoError(t, err)
@@ -111,7 +152,7 @@ func TestBeginTransition_GuardFailureAborts(t *testing.T) {
 	useTempMarkerDir(t)
 	sm := &fakeServiceManager{guardErr: errors.New("systemd-run: boom")}
 
-	_, err := BeginTransition(binaryMarker(t.TempDir()), sm, time.Minute, time.Now())
+	_, err := BeginTransition(binaryMarker(t.TempDir()), sm, 0, time.Minute, time.Now())
 	assert.ErrorContains(t, err, "arm upgrade guard")
 	stored, err := LoadPending()
 	require.NoError(t, err)
@@ -125,7 +166,7 @@ func TestBeginTransition_AbortUndoesEverything(t *testing.T) {
 	require.NoError(t, os.WriteFile(p.RollbackPath, []byte("old"), 0600))
 	sm := &fakeServiceManager{}
 
-	abort, err := BeginTransition(p, sm, time.Minute, time.Now())
+	abort, err := BeginTransition(p, sm, 0, time.Minute, time.Now())
 	require.NoError(t, err)
 	abort()
 
@@ -257,6 +298,7 @@ func TestGuardScript(t *testing.T) {
 
 	t.Run("marker present restores and restarts", func(t *testing.T) {
 		p, _, log, env := setup(t)
+		p.GuardUnit = "alpamon-upgrade-guard-7"
 		require.NoError(t, WritePending(p))
 		script, err := guardScript(p)
 		require.NoError(t, err)
@@ -274,6 +316,23 @@ func TestGuardScript(t *testing.T) {
 		assert.Equal(t, "restart alpamon\n", string(calls))
 		_, err = os.Stat(MarkerPath())
 		assert.NoError(t, err, "the guard leaves the marker for the restored process to report")
+	})
+
+	t.Run("marker armed for another guard is a no-op", func(t *testing.T) {
+		p, _, log, env := setup(t)
+		p.GuardUnit = "alpamon-upgrade-guard-8"
+		require.NoError(t, WritePending(p))
+		p.GuardUnit = "alpamon-upgrade-guard-7" // a stale guard from an earlier arming
+		script, err := guardScript(p)
+		require.NoError(t, err)
+
+		cmd := exec.Command(sh, "-c", script)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		assert.Equal(t, "new", fileContent(t, p.BinaryPath))
+		_, err = os.Stat(log)
+		assert.ErrorIs(t, err, os.ErrNotExist)
 	})
 
 	t.Run("marker cleared is a no-op", func(t *testing.T) {
@@ -295,8 +354,9 @@ func TestGuardScript(t *testing.T) {
 
 	t.Run("package guard reinstalls the previous version", func(t *testing.T) {
 		useTempMarkerDir(t)
-		script, err := guardScript(&PendingUpgrade{Method: MethodPackage, PackageManager: utils.PkgApt, PreviousPackageVersion: "2.4.0"})
+		script, err := guardScript(&PendingUpgrade{Method: MethodPackage, PackageManager: utils.PkgApt, PreviousPackageVersion: "2.4.0", GuardUnit: "g1"})
 		require.NoError(t, err)
-		assert.True(t, strings.HasPrefix(script, "if [ -f "+shellQuote(MarkerPath())+" ]; then 'apt-get' 'install' '-y' '--allow-downgrades' 'alpamon=2.4.0'; systemctl restart alpamon; fi"), script)
+		m := shellQuote(MarkerPath())
+		assert.Equal(t, "if [ -f "+m+" ] && grep -qF '\"g1\"' "+m+"; then 'apt-get' 'install' '-y' '--allow-downgrades' 'alpamon=2.4.0' && systemctl restart alpamon; fi", script)
 	})
 }

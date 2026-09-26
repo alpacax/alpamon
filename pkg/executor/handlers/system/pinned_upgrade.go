@@ -156,22 +156,26 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 		PackageManager:         utils.PackageManager,
 		PreviousPackageVersion: previous,
 	}
-	abort, err := updater.BeginTransition(marker, h.serviceManager, updater.ClampHealthGrace(grace), h.now())
+	// The install is bounded by the command timeout; the deadline and the
+	// guard count from its end, and are re-armed once it has finished.
+	abort, err := updater.BeginTransition(marker, h.serviceManager, common.UpgradeTimeout, updater.ClampHealthGrace(grace), h.now())
 	if err != nil {
 		return h.failPinned(report, updater.Classify(updater.ClassUnknown, err), "")
 	}
 
 	output, err := h.installPinnedPackage(ctx, target, env)
+	installed := h.installedAlpamonVersion(ctx)
+	if err == nil && !packageVersionMatches(installed, target) {
+		err = fmt.Errorf("package database reports alpamon %q after installing %s", installed, target)
+	}
 	if err != nil {
-		abort()
+		output = h.undoPackageChange(ctx, installed, previous, env, abort, output)
 		return h.failPinned(report, updater.Classify(updater.ClassPackageManager, err), output)
 	}
 
-	installed := h.installedAlpamonVersion(ctx)
-	if !packageVersionMatches(installed, target) {
-		abort()
-		err := fmt.Errorf("package database reports alpamon %q after installing %s", installed, target)
-		return h.failPinned(report, updater.Classify(updater.ClassPackageManager, err), output)
+	if err := updater.Rearm(marker, h.serviceManager, updater.ClampHealthGrace(grace), h.now()); err != nil {
+		// The first guard stays armed and still covers the attempt.
+		log.Warn().Err(err).Msg("Failed to re-arm the upgrade guard after the install.")
 	}
 
 	// The package's own upgrade restart runs minutes later and would cut the
@@ -181,6 +185,35 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 	}
 	exitCode, msg, err := h.restartIntoUpgrade("v"+target, false)
 	return exitCode, strings.TrimRight(output, "\n") + fmt.Sprintf("\n\nInstalled alpamon %s. ", installed) + msg, err
+}
+
+// undoPackageChange handles a failed pinned install. When the package
+// database still reports the previous version nothing changed, and the
+// marker and guard are simply removed. Otherwise the package did change
+// (a failing maintainer script, an unexpected version), so the previous
+// version is reinstalled at once; if that fails too, the marker and guard
+// stay for the guard to retry and the restored agent to report.
+func (h *SystemHandler) undoPackageChange(ctx context.Context, installed, previous string, env map[string]string, abort func(), output string) string {
+	if installed == previous {
+		abort()
+		return output
+	}
+	argv, err := updater.PackageRollbackCommand(utils.PackageManager, previous)
+	if err == nil {
+		var code int
+		var out string
+		code, out, err = h.Executor.Exec(ctx, argv, "root", "root", env, 0)
+		output = strings.TrimRight(output, "\n") + "\n\n" + out
+		if code != 0 && err == nil {
+			err = fmt.Errorf("exited %d", code)
+		}
+	}
+	if err == nil && h.installedAlpamonVersion(ctx) == previous {
+		abort()
+		return output + fmt.Sprintf("\nReinstalled the previous version %s.", previous)
+	}
+	log.Error().Err(err).Str("previous", previous).Msg("Could not reinstall the previous version; leaving the upgrade guard armed.")
+	return output + fmt.Sprintf("\nCould not reinstall the previous version %s; the upgrade guard retries it.", previous)
 }
 
 // installPinnedPackage runs the version-pinned install for the host's package

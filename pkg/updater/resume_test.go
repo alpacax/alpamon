@@ -225,8 +225,34 @@ func TestResumePending_PackageRollback(t *testing.T) {
 		<-done
 
 		assert.Equal(t, [][]string{{"apt-get", "install", "-y", "--allow-downgrades", "alpamon=2.4.0"}}, f.runner.snapshot())
-		restarts, _, _ := f.sm.snapshot()
+		restarts, _, disarmed := f.sm.snapshot()
 		assert.Len(t, restarts, 1)
+		assert.Equal(t, []string{"alpamon-upgrade-guard-1"}, disarmed, "the guard stands down while the reinstall runs")
+	})
+}
+
+func TestResumePending_FailedPackageRollbackRearmsTheGuard(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, time.Minute)
+		f.marker.Method = MethodPackage
+		f.marker.BinaryPath, f.marker.RollbackPath = "", ""
+		f.marker.PackageManager = utils.PkgApt
+		f.marker.PreviousPackageVersion = "2.4.0"
+		require.NoError(t, WritePending(f.marker))
+		f.runner.err = errors.New("E: Version '2.4.0' for 'alpamon' was not found")
+
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+
+		restarts, guards, disarmed := f.sm.snapshot()
+		assert.Empty(t, restarts)
+		assert.Equal(t, []string{"alpamon-upgrade-guard-1"}, disarmed)
+		require.Len(t, guards, 1, "a fresh guard retries the reinstall")
+		assert.Equal(t, guardMargin, guards[0].delay)
+		marker, err := LoadPending()
+		require.NoError(t, err)
+		require.NotNil(t, marker)
+		assert.Equal(t, guards[0].unit, marker.GuardUnit)
 	})
 }
 

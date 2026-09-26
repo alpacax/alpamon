@@ -268,7 +268,7 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 		BinaryPath:   currentPath,
 		RollbackPath: rollbackPath,
 	}
-	abort, err := BeginTransition(marker, sm, ClampHealthGrace(req.HealthGrace), time.Now())
+	abort, err := BeginTransition(marker, sm, 0, ClampHealthGrace(req.HealthGrace), time.Now())
 	if err != nil {
 		_ = os.Remove(rollbackPath)
 		return Classify(ClassUnknown, err)

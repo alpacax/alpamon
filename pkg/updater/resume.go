@@ -110,10 +110,11 @@ func confirmHealth(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 		}
 	}
 
-	d.ServiceManager.DisarmGuard(p.GuardUnit)
+	// Marker first: a guard already running checks for it before restoring.
 	if err := ClearPending(); err != nil {
 		log.Warn().Err(err).Msg("Failed to clear the upgrade marker.")
 	}
+	d.ServiceManager.DisarmGuard(p.GuardUnit)
 	removeRollbackCopy(p)
 	log.Info().Str("attempt_id", p.AttemptID).Str("version", p.ToVersion).Msg("Upgrade confirmed healthy.")
 	sendReportWithRetry(ctx, d.Poster, Report{
@@ -140,6 +141,9 @@ func rollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, reason strin
 	case MethodBinary:
 		err = restoreBinary(p.RollbackPath, p.BinaryPath)
 	case MethodPackage:
+		// Stand the guard down while this reinstall runs, so the two never
+		// drive the package manager at once; it is re-armed if this fails.
+		d.ServiceManager.DisarmGuard(p.GuardUnit)
 		var argv []string
 		if argv, err = PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion); err == nil {
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
@@ -155,6 +159,11 @@ func rollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, reason strin
 	}
 	if err != nil {
 		log.Error().Err(err).Msg("Rollback failed; leaving the marker for the upgrade guard.")
+		if p.Method == MethodPackage {
+			if aerr := armGuard(p, d.ServiceManager, 0, time.Now()); aerr != nil {
+				log.Error().Err(aerr).Msg("Failed to re-arm the upgrade guard.")
+			}
+		}
 		return
 	}
 

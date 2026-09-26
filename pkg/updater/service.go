@@ -119,18 +119,22 @@ func shellJoin(argv []string) string {
 // guardScript is what the guard runs if the deadline passes with the marker
 // still present. It only restores: the process that starts afterwards finds
 // the marker, sees it is the previous version, and reports the rollback.
+//
+// It acts only while the marker still names this guard's unit, so a guard
+// whose disarm failed never acts on a later arming or attempt.
 func guardScript(p *PendingUpgrade) (string, error) {
 	marker := shellQuote(MarkerPath())
+	pending := fmt.Sprintf("[ -f %s ] && grep -qF %s %s", marker, shellQuote(`"`+p.GuardUnit+`"`), marker)
 	switch p.Method {
 	case MethodBinary:
-		return fmt.Sprintf("if [ -f %s ] && [ -f %s ]; then mv -f %s %s && systemctl restart alpamon; fi",
-			marker, shellQuote(p.RollbackPath), shellQuote(p.RollbackPath), shellQuote(p.BinaryPath)), nil
+		return fmt.Sprintf("if %s && [ -f %s ]; then mv -f %s %s && systemctl restart alpamon; fi",
+			pending, shellQuote(p.RollbackPath), shellQuote(p.RollbackPath), shellQuote(p.BinaryPath)), nil
 	case MethodPackage:
 		argv, err := PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("if [ -f %s ]; then %s; systemctl restart alpamon; fi", marker, shellJoin(argv)), nil
+		return fmt.Sprintf("if %s; then %s && systemctl restart alpamon; fi", pending, shellJoin(argv)), nil
 	}
 	return "", fmt.Errorf("unknown upgrade method %q", p.Method)
 }
