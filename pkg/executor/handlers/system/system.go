@@ -54,6 +54,10 @@ type SystemHandler struct {
 	selfUpdateFn    updater.SelfUpdateFunc // defaults to updater.SelfUpdate; tests inject a fake
 	// pinnedUpdateFn defaults to updater.PinnedSelfUpdate; tests inject a fake.
 	pinnedUpdateFn func(ctx context.Context, req updater.PinnedRequest, opts updater.Options) error
+	// serviceManager restarts the agent from outside after a pinned upgrade
+	// and arms its guard; tests inject a fake.
+	serviceManager updater.ServiceManager
+	now            func() time.Time
 
 	// uninstallDelay defers executeUninstall so the byebye response is sent
 	// before the agent starts tearing itself down. Tests shorten it and use
@@ -92,6 +96,8 @@ func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClie
 		apiSession:      apiSession,
 		selfUpdateFn:    updater.SelfUpdate,
 		pinnedUpdateFn:  updater.PinnedSelfUpdate,
+		serviceManager:  updater.DefaultServiceManager(),
+		now:             time.Now,
 		uninstallDelay:  1 * time.Second,
 	}
 	return h
@@ -227,6 +233,24 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		packages = append(packages, "alpamon-pam")
 	}
 	pkgList := strings.Join(packages, " ")
+
+	// A package upgrade must not run in the middle of a pinned upgrade: take
+	// the upgrade latch, and refuse while a pinned attempt is still being
+	// confirmed. Self-updates take the latch themselves.
+	switch utils.PackageManager {
+	case utils.PkgApt, utils.PkgYum, utils.PkgZypper:
+		if !updater.AcquireUpgradeLatch() {
+			return 0, "Upgrade already in progress.", nil
+		}
+		defer updater.ReleaseSelfUpdateLatch()
+		if err := updater.CheckNoPending(h.serviceManager, h.now()); err != nil {
+			if errors.Is(err, updater.ErrUpgradePending) {
+				log.Warn().Err(err).Msg("Refusing a package upgrade while a pinned upgrade is pending.")
+				return 1, fmt.Sprintf("Upgrade refused: %v. Retry once it completes.", err), err
+			}
+			log.Warn().Err(err).Msg("Could not check for a pending pinned upgrade; continuing.")
+		}
+	}
 
 	var cmd string
 	// Set when the refresh was scoped to alpamon's own repo, which is what makes

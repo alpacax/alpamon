@@ -27,7 +27,48 @@ type pinnedHarness struct {
 	ws       *MockWSClient
 	versions *MockVersionResolver
 	api      *MockAPISession
+	sm       *fakeServiceManager
 	handler  *SystemHandler
+}
+
+// fakeServiceManager records what would have been scheduled.
+type fakeServiceManager struct {
+	restarts   []time.Duration
+	guards     []string
+	disarmed   []string
+	restartErr error
+}
+
+func (f *fakeServiceManager) ScheduleRestart(d time.Duration) error {
+	if f.restartErr != nil {
+		return f.restartErr
+	}
+	f.restarts = append(f.restarts, d)
+	return nil
+}
+
+func (f *fakeServiceManager) ArmGuard(unit string, _ time.Duration, _ string) error {
+	f.guards = append(f.guards, unit)
+	return nil
+}
+
+func (f *fakeServiceManager) DisarmGuard(unit string) updater.GuardState {
+	f.disarmed = append(f.disarmed, unit)
+	return updater.GuardNotRun
+}
+
+// markerCheckingExecutor records whether the intent marker existed when the
+// package install ran.
+type markerCheckingExecutor struct {
+	*common.MockCommandExecutor
+	markerAtInstall *updater.PendingUpgrade
+}
+
+func (e *markerCheckingExecutor) Exec(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
+	if len(args) > 1 && args[0] == "apt-get" && args[1] == "install" {
+		e.markerAtInstall, _ = updater.LoadPending()
+	}
+	return e.MockCommandExecutor.Exec(ctx, args, username, groupname, env, timeout)
 }
 
 func newPinnedHarness(t *testing.T, pkgManager string) *pinnedHarness {
@@ -37,13 +78,24 @@ func newPinnedHarness(t *testing.T, pkgManager string) *pinnedHarness {
 	t.Cleanup(func() { _ = workerPool.Shutdown(poolDrainWait) })
 	t.Cleanup(ctxManager.Shutdown)
 
+	t.Cleanup(updater.OverrideMarkerDir(t.TempDir()))
+	// A release version: a marker only records release versions.
+	origVersion := version.Version
+	version.Version = "2.4.0"
+	t.Cleanup(func() { version.Version = origVersion })
+	origHasSystemd := hasSystemd
+	hasSystemd = func() bool { return true }
+	t.Cleanup(func() { hasSystemd = origHasSystemd })
+
 	h := &pinnedHarness{
 		exec:     common.NewMockCommandExecutor(t),
 		ws:       &MockWSClient{},
 		versions: &MockVersionResolver{LatestVersion: "v9.9.9"},
 		api:      &MockAPISession{},
+		sm:       &fakeServiceManager{},
 	}
 	h.handler = NewSystemHandler(h.exec, h.ws, ctxManager, workerPool, h.versions, h.api)
+	h.handler.serviceManager = h.sm
 	h.handler.selfUpdateFn = func(context.Context, string, updater.Options) error {
 		t.Error("the legacy self-update must not run for a pinned target")
 		return nil
@@ -132,10 +184,221 @@ func TestSystemHandler_PinnedUpgrade_Apt(t *testing.T) {
 	assert.Zero(t, h.versions.LatestCalls, "a pinned upgrade does not ask for the latest release")
 	assert.True(t, h.ran("apt-get", "install", "-y", "--allow-downgrades", "-o", "Acquire::Retries=3", "alpamon=2.5.0"))
 	assert.Nil(t, findExecutedShell(h.exec), "the pinned install runs without a shell")
+
+	assert.True(t, h.ran("systemctl", "stop", "alpamon-restart.timer"), "the package's own delayed restart is replaced")
+	assert.Equal(t, []time.Duration{updater.RestartDelay}, h.sm.restarts, "restarted through the service manager")
+	assert.False(t, h.ws.RestartCalled, "not re-executed in process")
+	require.Len(t, h.sm.guards, 2, "armed before the install, re-armed after it")
+	assert.Equal(t, h.sm.guards[:1], h.sm.disarmed, "the first guard is replaced")
+	marker, err := updater.LoadPending()
+	require.NoError(t, err)
+	assert.Equal(t, h.sm.guards[1], marker.GuardUnit)
+	assert.Empty(t, h.api.posts(), "success is reported by the process that confirms its health")
+}
+
+func TestSystemHandler_PinnedUpgrade_MarkerAndGuardPrecedeTheInstall(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	exec := &markerCheckingExecutor{MockCommandExecutor: h.exec}
+	h.handler.Executor = exec
+	h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
+	// The mock answers every dpkg-query alike: the version before the install
+	// is what the rollback reinstalls.
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.5.0", nil)
+
+	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0", AttemptID: "att-9", HealthGracePeriod: 3 * time.Minute})
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode, output)
+
+	require.NotNil(t, exec.markerAtInstall, "the marker is on disk before the package changes")
+	m := exec.markerAtInstall
+	assert.Equal(t, "att-9", m.AttemptID)
+	assert.Equal(t, updater.MethodPackage, m.Method)
+	assert.Equal(t, utils.PkgApt, m.PackageManager)
+	assert.Equal(t, "2.5.0", m.PreviousPackageVersion)
+	assert.Equal(t, m.StartedAt.Add(common.UpgradeTimeout+updater.RestartDelay+3*time.Minute), m.Deadline,
+		"the deadline leaves room for the install itself")
+	assert.Equal(t, m.GuardUnit, h.sm.guards[0], "the guard is armed before the install")
+}
+
+func TestSystemHandler_PinnedUpgrade_FailureClearsMarkerAndGuard(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
+	h.exec.SetResult("apt-cache madison alpamon", 0, "", nil)
+
+	exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
+	require.Error(t, err)
+	assert.Equal(t, 1, exitCode)
+
+	marker, err := updater.LoadPending()
+	require.NoError(t, err)
+	assert.Nil(t, marker)
+	require.Len(t, h.sm.guards, 1)
+	assert.Equal(t, h.sm.guards, h.sm.disarmed)
+	assert.Empty(t, h.sm.restarts)
+}
+
+// sequencedExecutor answers dpkg-query from a queue, so a test can model the
+// package database before and after an install.
+type sequencedExecutor struct {
+	*common.MockCommandExecutor
+	versions []string
+}
+
+func (e *sequencedExecutor) RunAsUser(ctx context.Context, username, name string, args ...string) (int, string, error) {
+	if name == "dpkg-query" && len(e.versions) > 0 {
+		v := e.versions[0]
+		if len(e.versions) > 1 {
+			e.versions = e.versions[1:]
+		}
+		_, _, _ = e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
+		return 0, v, nil
+	}
+	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
+}
+
+func TestSystemHandler_PinnedUpgrade_ChangedPackageIsReinstalledOnFailure(t *testing.T) {
+	const rollback = "apt-get install -y --allow-downgrades alpamon=2.4.0"
+	for _, tc := range []struct {
+		name        string
+		versions    []string // before, after the install, after the reinstall
+		rollbackErr bool
+		wantMarker  bool
+	}{
+		{"unchanged package needs no reinstall", []string{"2.4.0", "2.4.0"}, false, false},
+		{"changed package is reinstalled", []string{"2.4.0", "2.5.0~rc1", "2.4.0"}, false, false},
+		{"failed reinstall is left to the guard", []string{"2.4.0", "2.5.0~rc1"}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPinnedHarness(t, utils.PkgApt)
+			h.handler.Executor = &sequencedExecutor{MockCommandExecutor: h.exec, versions: tc.versions}
+			h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
+			if tc.rollbackErr {
+				h.exec.SetResult(rollback, 100, "E: not found", errors.New("exit status 100"))
+			}
+
+			exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0", AttemptID: "att-11"})
+			require.Error(t, err)
+			assert.Equal(t, 1, exitCode)
+			assert.Equal(t, updater.ClassPackageManager, h.lastReport(t).ErrorClass)
+
+			reinstalled := h.ran("apt-get", "install", "-y", "--allow-downgrades", "alpamon=2.4.0")
+			assert.Equal(t, len(tc.versions) > 2 || tc.rollbackErr, reinstalled)
+
+			marker, err := updater.LoadPending()
+			require.NoError(t, err)
+			if tc.wantMarker {
+				require.NotNil(t, marker)
+				require.Len(t, h.sm.guards, 2, "a fresh guard is armed to retry the reinstall")
+				assert.Equal(t, h.sm.guards[1], marker.GuardUnit)
+				require.NotEmpty(t, h.sm.disarmed, "the first guard stood down before the reinstall")
+				for _, u := range h.sm.disarmed {
+					assert.Equal(t, h.sm.guards[0], u, "the fresh guard stays armed")
+				}
+			} else {
+				assert.Nil(t, marker)
+				require.Len(t, h.sm.guards, 1)
+				for _, u := range h.sm.disarmed {
+					assert.Equal(t, h.sm.guards[0], u)
+				}
+				if len(tc.versions) > 2 {
+					assert.NotEmpty(t, h.sm.disarmed, "the guard stood down before the reinstall")
+				}
+			}
+			assert.Empty(t, h.sm.restarts)
+		})
+	}
+}
+
+func TestSystemHandler_PinnedUpgrade_UndoAfterAFailedDowngradeOnYum(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgYum)
+	seq := &rpmSequence{MockCommandExecutor: h.exec, versions: []string{"2.6.0", "2.6.0", "2.5.0", "2.6.0"}}
+	h.handler.Executor = seq
+	h.exec.SetResult("yum downgrade -y alpamon-2.5.0", 1, "scriptlet failed", errors.New("exit status 1"))
+
+	exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
+	require.Error(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.True(t, h.ran("yum", "install", "-y", "alpamon-2.6.0"), "going back up is an install")
+	marker, err := updater.LoadPending()
+	require.NoError(t, err)
+	assert.Nil(t, marker)
+}
+
+// rpmSequence answers rpm -q from a queue.
+type rpmSequence struct {
+	*common.MockCommandExecutor
+	versions []string
+}
+
+func (e *rpmSequence) RunAsUser(ctx context.Context, username, name string, args ...string) (int, string, error) {
+	if name == "rpm" && len(e.versions) > 0 {
+		v := e.versions[0]
+		if len(e.versions) > 1 {
+			e.versions = e.versions[1:]
+		}
+		return 0, v, nil
+	}
+	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
+}
+
+func TestSystemHandler_PinnedUpgrade_NeedsTheInstalledVersionToRollBack(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 1, "", errors.New("not installed"))
+
+	exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0", AttemptID: "att-10"})
+	require.Error(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, updater.ClassPackageManager, h.lastReport(t).ErrorClass)
+	assert.Empty(t, h.sm.guards)
+	assert.False(t, h.exec.Invoked("apt-get"))
+}
+
+func TestSystemHandler_PinnedUpgrade_PendingCheckedBeforeAlreadyAtTarget(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	require.NoError(t, updater.WritePending(&updater.PendingUpgrade{
+		AttemptID: "earlier", FromVersion: "2.3.0", ToVersion: "2.4.0", Method: updater.MethodPackage,
+		PackageManager: utils.PkgApt, PreviousPackageVersion: "2.3.0",
+		StartedAt: time.Now(), Deadline: time.Now().Add(time.Minute),
+	}))
+
+	// The harness runs 2.4.0, the pending attempt's target.
+	exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.4.0", AttemptID: "dup"})
+	require.ErrorIs(t, err, updater.ErrUpgradePending)
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, updater.OutcomeFailed, h.lastReport(t).Outcome)
+}
+
+func TestSystemHandler_PinnedUpgrade_RefusesWhileAnUpgradeIsPending(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
+	require.NoError(t, updater.WritePending(&updater.PendingUpgrade{
+		AttemptID: "earlier", FromVersion: "2.4.8", ToVersion: "2.4.9", Method: updater.MethodPackage,
+		PackageManager: utils.PkgApt, PreviousPackageVersion: "2.4.8",
+		StartedAt: time.Now(), Deadline: time.Now().Add(time.Minute),
+	}))
+
+	exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
+	require.ErrorIs(t, err, updater.ErrUpgradePending)
+	assert.Equal(t, 1, exitCode)
+	assert.False(t, h.exec.Invoked("apt-get"))
+}
+
+func TestSystemHandler_PinnedUpgrade_PackageScriptsRestartWithoutServiceManager(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	h.sm.restartErr = updater.ErrNoServiceManager
+	h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.5.0", nil)
+
+	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "package scripts restart")
+	assert.False(t, h.ws.RestartCalled)
 }
 
 func TestSystemHandler_PinnedUpgrade_AptWithoutTargetFails(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
 	h.exec.SetResult("apt-cache madison alpamon", 0, "   alpamon |    2.6.0 | https://packages.example Packages\n", nil)
 
 	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "v2.5.0", AttemptID: "att-2"})
@@ -150,7 +413,7 @@ func TestSystemHandler_PinnedUpgrade_AptWithoutTargetFails(t *testing.T) {
 	r := h.lastReport(t)
 	assert.Equal(t, updater.Report{
 		AttemptID:   "att-2",
-		FromVersion: "dev",
+		FromVersion: "2.4.0",
 		ToVersion:   "2.5.0",
 		Outcome:     updater.OutcomeFailed,
 		ErrorClass:  updater.ClassPackageManager,
@@ -172,6 +435,7 @@ func TestSystemHandler_PinnedUpgrade_PackageDatabaseDisagrees(t *testing.T) {
 
 func TestSystemHandler_PinnedUpgrade_InstallFailure(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
 	h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
 	h.exec.SetResult("apt-get install -y --allow-downgrades -o Acquire::Retries=3 alpamon=2.5.0", 100, "E: broken", errors.New("exit status 100"))
 
@@ -217,16 +481,19 @@ func TestSystemHandler_PinnedUpgrade_SelfUpdate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newPinnedHarness(t, utils.PkgBrew)
 		var got updater.PinnedRequest
-		h.handler.pinnedUpdateFn = func(_ context.Context, req updater.PinnedRequest, _ updater.Options) error {
-			got = req
+		var gotOpts updater.Options
+		h.handler.pinnedUpdateFn = func(_ context.Context, req updater.PinnedRequest, opts updater.Options) error {
+			got, gotOpts = req, opts
 			return nil
 		}
 		target := &common.UpgradeTarget{
-			TargetVersion:  "2.5.0",
-			ArtifactURL:    "https://mirror.example/a.tar.gz",
-			ArtifactDigest: "sha256:" + strings.Repeat("a", 64),
-			ChecksumsURL:   "https://mirror.example/sums",
-			SignatureURL:   "https://mirror.example/sums.sig",
+			AttemptID:         "att-8",
+			HealthGracePeriod: 4 * time.Minute,
+			TargetVersion:     "2.5.0",
+			ArtifactURL:       "https://mirror.example/a.tar.gz",
+			ArtifactDigest:    "sha256:" + strings.Repeat("a", 64),
+			ChecksumsURL:      "https://mirror.example/sums",
+			SignatureURL:      "https://mirror.example/sums.sig",
 		}
 
 		exitCode, output, err := h.upgrade(t, target)
@@ -238,8 +505,29 @@ func TestSystemHandler_PinnedUpgrade_SelfUpdate(t *testing.T) {
 			ArtifactDigest: target.ArtifactDigest,
 			ChecksumsURL:   target.ChecksumsURL,
 			SignatureURL:   target.SignatureURL,
+			AttemptID:      "att-8",
+			FromVersion:    "2.4.0",
+			HealthGrace:    4 * time.Minute,
 		}, got)
+		assert.Same(t, h.sm, gotOpts.ServiceManager, "the updater arms its guard with the handler's service manager")
 		assert.Zero(t, h.versions.LatestCalls)
+
+		assert.Equal(t, []time.Duration{updater.RestartDelay}, h.sm.restarts)
+		time.Sleep(2 * delayedActionDelay)
+		synctest.Wait()
+		assert.False(t, h.ws.RestartCalled, "restarted from outside the process")
+	})
+}
+
+func TestSystemHandler_PinnedUpgrade_SelfUpdateRestartsInProcessWithoutServiceManager(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newPinnedHarness(t, utils.PkgBrew)
+		h.sm.restartErr = updater.ErrNoServiceManager
+		h.handler.pinnedUpdateFn = func(context.Context, updater.PinnedRequest, updater.Options) error { return nil }
+
+		exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
+		require.NoError(t, err)
+		assert.Equal(t, 0, exitCode)
 
 		time.Sleep(2 * delayedActionDelay)
 		synctest.Wait()
@@ -304,9 +592,9 @@ func TestPackageVersionMatches(t *testing.T) {
 }
 
 func TestCompareVersions(t *testing.T) {
-	assert.Equal(t, -1, compareVersions("2.5.0", "2.6.0"))
-	assert.Equal(t, 1, compareVersions("2.10.0", "2.9.9"))
-	assert.Equal(t, 0, compareVersions("v2.5.0", "2.5.0-1"))
+	assert.Equal(t, -1, updater.CompareVersions("2.5.0", "2.6.0"))
+	assert.Equal(t, 1, updater.CompareVersions("2.10.0", "2.9.9"))
+	assert.Equal(t, 0, updater.CompareVersions("v2.5.0", "2.5.0-1"))
 }
 
 func TestSystemHandler_PinnedUpgrade_PackageHostSaysPinsDoNotApply(t *testing.T) {
@@ -321,4 +609,33 @@ func TestSystemHandler_PinnedUpgrade_PackageHostSaysPinsDoNotApply(t *testing.T)
 	require.Error(t, err)
 	r := h.lastReport(t)
 	assert.True(t, strings.HasPrefix(r.Detail, "digest not applicable on package-managed host; "), r.Detail)
+}
+
+func TestSystemHandler_Upgrade_LegacyPackageUpgradeWaitsForPinnedAttempt(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	require.NoError(t, updater.WritePending(&updater.PendingUpgrade{
+		AttemptID: "pending", FromVersion: "2.3.0", ToVersion: "2.4.0", Method: updater.MethodPackage,
+		PackageManager: utils.PkgApt, PreviousPackageVersion: "2.3.0",
+		StartedAt: time.Now(), Deadline: time.Now().Add(time.Minute),
+	}))
+
+	exitCode, output, err := h.handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.ErrorIs(t, err, updater.ErrUpgradePending)
+	assert.Equal(t, 1, exitCode)
+	assert.Contains(t, output, "Upgrade refused")
+	assert.Nil(t, findExecutedShell(h.exec), "no package command runs")
+	require.True(t, updater.AcquireUpgradeLatch(), "the latch is released afterwards")
+	updater.ReleaseSelfUpdateLatch()
+}
+
+func TestSystemHandler_Upgrade_LegacyPackageUpgradeTakesTheLatch(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	require.True(t, updater.AcquireUpgradeLatch())
+	t.Cleanup(updater.ReleaseSelfUpdateLatch)
+
+	exitCode, output, err := h.handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Equal(t, "Upgrade already in progress.", output)
+	assert.Empty(t, h.exec.GetExecutedCommands())
 }

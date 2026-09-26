@@ -201,6 +201,20 @@ Get-Content "$env:ProgramData\alpamon\log\alpamon.log" -Wait -Tail 50
 
 Alpamon supports in-place self-update: from the Alpacon console, send an upgrade command, or run `alpamon upgrade` locally. The agent downloads the release archive from GitHub, verifies its SHA-256 checksum, validates the binary header, and swaps the running binary atomically. On Windows the running `.exe` is renamed to `alpamon.exe.old` first and cleaned up on next service start.
 
+### Pinned upgrades
+
+When the upgrade command names a `target_version`, the agent installs exactly that release and can undo it:
+
+- **Verification**: on hosts that replace their own binary, the checksums file must carry a detached OpenPGP signature from a key compiled into the binary, and the archive must match both the signed checksum and the digest the console pinned, before anything on disk changes. A build without the release key bundle (the `alpamon_release_keys` build tag) refuses pinned upgrades. On apt, yum and zypper hosts the release is a version-pinned package install, trusted through the repository signature; a repository without that version fails the upgrade.
+- **Intent marker**: before the swap the agent keeps the outgoing binary as `alpamon.rollback` beside the live one and writes `upgrade.pending` (JSON: attempt, from and to versions, deadline, guard unit) in the data directory (`/var/lib/alpamon` on Linux and macOS).
+- **Restart and health check**: under systemd the restart is a transient timer, not an in-process re-exec. The new process must reconnect to the console, report status and run the target version before the deadline (the payload's `health_grace_seconds`, 5 minutes by default); otherwise it restores the previous version and restarts into it.
+- **Guard**: under systemd a second transient timer, armed before the swap and firing two minutes after the deadline, restores the previous version if the marker still names that guard, which covers a build that cannot start at all. On package hosts the deadline counts from the end of the install, and a failed install that changed the package reinstalls the previous version at once.
+- **Report**: the outcome goes to `POST /api/servers/agent-upgrades/report/`.
+
+Without systemd (macOS, Windows, containers) there is no guard and the restart uses the existing mechanism: an in-process re-exec, or on Windows the service's recovery actions. The health check and self-rollback still run.
+
+Without a `target_version` none of this applies: the upgrade takes the unpinned path described at the start of this section, unchanged.
+
 ## Development
 
 ### Build from source

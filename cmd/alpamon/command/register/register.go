@@ -558,6 +558,10 @@ func writeConfigFile(resp *RegisterResponse) error {
 	if err != nil {
 		return err
 	}
+	// On Windows the directory's ACL is restricted before the key is written.
+	if err := utils.SecureConfigDir(); err != nil {
+		return err
+	}
 	// Atomic replace (temp + fsync + rename, creating the dir at 0700): the file
 	// is never left half-written, and any existing config (e.g. an empty file
 	// from systemd-tmpfiles, or a prior registration under --force) is replaced

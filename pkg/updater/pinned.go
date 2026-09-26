@@ -28,6 +28,12 @@ type PinnedRequest struct {
 	ArtifactDigest string // SHA-256, bare hex or "sha256:"-prefixed; optional
 	ChecksumsURL   string
 	SignatureURL   string
+
+	// Recorded in the intent marker and the report. FromVersion, the running
+	// release, is required: the marker only records release versions.
+	AttemptID   string
+	FromVersion string
+	HealthGrace time.Duration // clamped by ClampHealthGrace
 }
 
 // NormalizeTag returns version as a "v"-prefixed release tag, or an error when
@@ -196,8 +202,10 @@ func preparePinned(ctx context.Context, src *pinnedSources, opts Options, tempDi
 // PinnedSelfUpdate replaces the running binary with the release the server
 // pinned. Unlike SelfUpdate it verifies a detached signature over the
 // checksums file against the compiled-in keyring before anything is written,
-// and refuses outright when that keyring is empty. Every error it returns
-// carries an ErrorClass.
+// and refuses outright when that keyring is empty. It then keeps the outgoing
+// binary as a rollback copy, writes the intent marker and arms the guard
+// before swapping. It does not restart: the caller schedules that. Every
+// error it returns carries an ErrorClass.
 func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) error {
 	if !selfUpdateInFlight.CompareAndSwap(false, true) {
 		return ErrSelfUpdateInProgress
@@ -212,6 +220,9 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 	src, err := resolvePinned(req, opts)
 	if err != nil {
 		return Classify(ClassUnknown, err)
+	}
+	if _, err := NormalizeTag(req.FromVersion); err != nil {
+		return Classify(ClassUnknown, fmt.Errorf("running version: %w", err))
 	}
 	currentPath, err := currentBinaryPath(opts)
 	if err != nil {
@@ -238,7 +249,44 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 	}
 	CleanupStaleOld()
 
+	sm := opts.ServiceManager
+	if sm == nil {
+		sm = DefaultServiceManager()
+	}
+	// Before staging: the rollback copy of an attempt still in flight must
+	// not be overwritten.
+	if err := CheckNoPending(sm, time.Now()); err != nil {
+		return Classify(ClassUnknown, err)
+	}
+	rollbackPath, err := stageRollbackCopy(currentPath)
+	if err != nil {
+		return Classify(ClassSwapFailed, err)
+	}
+	marker := &PendingUpgrade{
+		AttemptID:    req.AttemptID,
+		FromVersion:  strings.TrimPrefix(req.FromVersion, "v"),
+		ToVersion:    strings.TrimPrefix(src.tag, "v"),
+		Method:       MethodBinary,
+		BinaryPath:   currentPath,
+		RollbackPath: rollbackPath,
+	}
+	abort, err := BeginTransition(marker, sm, 0, ClampHealthGrace(req.HealthGrace), time.Now())
+	if err != nil {
+		_ = os.Remove(rollbackPath)
+		return Classify(ClassUnknown, err)
+	}
+
 	if err := replaceBinary(extractedPath, currentPath); err != nil {
+		// A failed swap normally leaves the old binary in place. When it does
+		// not (a Windows swap whose own rollback failed), put the kept copy
+		// back; if even that fails, keep the marker, guard and copy for recovery.
+		if _, statErr := os.Stat(currentPath); statErr != nil {
+			if cpErr := copyFileSynced(rollbackPath, currentPath, 0755); cpErr != nil {
+				log.Error().Err(cpErr).Str("rollback", rollbackPath).Msg("No binary is in place after a failed swap; leaving the rollback copy and the upgrade guard.")
+				return Classify(ClassSwapFailed, fmt.Errorf("failed to replace binary: %w", err))
+			}
+		}
+		abort()
 		return Classify(ClassSwapFailed, fmt.Errorf("failed to replace binary: %w", err))
 	}
 

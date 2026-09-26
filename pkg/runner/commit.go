@@ -798,3 +798,22 @@ func getPartitions() ([]Partition, error) {
 	})
 	return partitionList, nil
 }
+
+// ReportUpgradeStatus posts an "upgraded" event synchronously, so a pinned
+// upgrade's health check learns whether the console accepts this agent's
+// reports. Any non-2xx answer is an error.
+func ReportUpgradeStatus(session *scheduler.Session) error {
+	body := map[string]string{
+		"reporter":    "alpamon",
+		"record":      "upgraded",
+		"description": fmt.Sprintf("Upgraded to version %s.", version.Version),
+	}
+	_, status, err := session.Post(eventURL, body, 10)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("status report returned %d", status)
+	}
+	return nil
+}

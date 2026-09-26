@@ -56,6 +56,10 @@ type Options struct {
 	// Tests only; production leaves it nil. The legacy path ignores it.
 	Keyring *Keyring
 
+	// ServiceManager arms the pinned path's guard. Nil means
+	// DefaultServiceManager(). The legacy path ignores it.
+	ServiceManager ServiceManager
+
 	// Test seams for the pinned path: allowHTTP admits the plain-HTTP URLs an
 	// httptest server hands out, binaryPath replaces os.Executable.
 	allowHTTP  bool
@@ -67,6 +71,13 @@ func (o Options) baseURL() string {
 		return o.BaseURL
 	}
 	return defaultReleaseBaseURL
+}
+
+// AcquireUpgradeLatch takes the latch SelfUpdate and PinnedSelfUpdate hold,
+// for another upgrade path that must not overlap them. It reports false when
+// an upgrade is already running.
+func AcquireUpgradeLatch() bool {
+	return selfUpdateInFlight.CompareAndSwap(false, true)
 }
 
 // ReleaseSelfUpdateLatch clears the latch SelfUpdate keeps set after a successful

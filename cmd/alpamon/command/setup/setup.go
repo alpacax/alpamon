@@ -116,6 +116,9 @@ func writeConfig() error {
 	if err != nil {
 		return fmt.Errorf("failed to create config directory: %v", err)
 	}
+	if err := utils.SecureConfigDir(); err != nil {
+		return fmt.Errorf("failed to secure config directory: %v", err)
+	}
 
 	targetFile, err := os.Create(configTarget)
 	if err != nil {
