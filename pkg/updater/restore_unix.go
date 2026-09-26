@@ -13,6 +13,5 @@ func restoreBinary(rollbackPath, currentPath string) error {
 	if err := os.Rename(rollbackPath, currentPath); err != nil {
 		return err
 	}
-	syncDir(filepath.Dir(currentPath))
-	return nil
+	return syncDir(filepath.Dir(currentPath))
 }

@@ -80,6 +80,8 @@ func TestBeginTransition_WritesMarkerThenArmsGuard(t *testing.T) {
 	_, guards, _ := sm.snapshot()
 	require.Len(t, guards, 1)
 	assert.Equal(t, stored.GuardUnit, guards[0].unit)
+	require.NotNil(t, sm.markersAtArm[0], "the marker is on disk when the guard is armed")
+	assert.Equal(t, guards[0].unit, sm.markersAtArm[0].GuardUnit)
 	assert.Equal(t, RestartDelay+3*time.Minute+guardMargin, guards[0].delay, "the guard fires after the deadline")
 	assert.Contains(t, guards[0].script, shellQuote(MarkerPath()))
 }
@@ -137,6 +139,28 @@ func TestBeginTransition_SettleDelaysDeadlineAndGuard(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, p.GuardUnit, stored.GuardUnit)
 	assert.Equal(t, p.Deadline, stored.Deadline)
+}
+
+func TestRearm_FailureKeepsTheFirstGuardInCharge(t *testing.T) {
+	useTempMarkerDir(t)
+	sm := &fakeServiceManager{}
+	p := binaryMarker(t.TempDir())
+	now := time.Now()
+	_, err := BeginTransition(p, sm, 30*time.Minute, time.Minute, now)
+	require.NoError(t, err)
+	first, firstDeadline := p.GuardUnit, p.Deadline
+
+	sm.guardErr = errors.New("systemd-run: boom")
+	require.Error(t, Rearm(p, sm, time.Minute, now.Add(time.Minute)))
+
+	stored, err := LoadPending()
+	require.NoError(t, err)
+	require.NotNil(t, stored, "the marker survives")
+	assert.Equal(t, first, stored.GuardUnit, "and still names the guard that is armed")
+	assert.Equal(t, firstDeadline, stored.Deadline)
+	assert.Equal(t, first, p.GuardUnit)
+	_, _, disarmed := sm.snapshot()
+	assert.Empty(t, disarmed)
 }
 
 func TestBeginTransition_WithoutServiceManager(t *testing.T) {
@@ -242,7 +266,7 @@ func TestSystemdManager(t *testing.T) {
 		m.DisarmGuard("")
 		assert.Empty(t, r.snapshot(), "no unit, nothing to stop")
 		m.DisarmGuard("g1")
-		assert.Equal(t, []string{"systemctl", "stop", "g1.timer"}, r.snapshot()[0])
+		assert.Equal(t, []string{"systemctl", "stop", "g1.timer", "g1.service"}, r.snapshot()[0])
 	})
 }
 
@@ -335,6 +359,24 @@ func TestGuardScript(t *testing.T) {
 		assert.ErrorIs(t, err, os.ErrNotExist)
 	})
 
+	t.Run("unit name in another field does not match", func(t *testing.T) {
+		p, _, log, env := setup(t)
+		p.GuardUnit = "alpamon-upgrade-guard-8"
+		p.AttemptID = `"guard_unit": "alpamon-upgrade-guard-7"`
+		require.NoError(t, WritePending(p))
+		p.GuardUnit = "alpamon-upgrade-guard-7"
+		script, err := guardScript(p)
+		require.NoError(t, err)
+
+		cmd := exec.Command(sh, "-c", script)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		assert.Equal(t, "new", fileContent(t, p.BinaryPath))
+		_, err = os.Stat(log)
+		assert.ErrorIs(t, err, os.ErrNotExist)
+	})
+
 	t.Run("marker cleared is a no-op", func(t *testing.T) {
 		p, _, log, env := setup(t)
 		script, err := guardScript(p)
@@ -357,6 +399,6 @@ func TestGuardScript(t *testing.T) {
 		script, err := guardScript(&PendingUpgrade{Method: MethodPackage, PackageManager: utils.PkgApt, PreviousPackageVersion: "2.4.0", GuardUnit: "g1"})
 		require.NoError(t, err)
 		m := shellQuote(MarkerPath())
-		assert.Equal(t, "if [ -f "+m+" ] && grep -qF '\"g1\"' "+m+"; then 'apt-get' 'install' '-y' '--allow-downgrades' 'alpamon=2.4.0' && systemctl restart alpamon; fi", script)
+		assert.Equal(t, "if [ -f "+m+" ] && grep -qxF '  \"guard_unit\": \"g1\",' "+m+"; then 'apt-get' 'install' '-y' '--allow-downgrades' 'alpamon=2.4.0' && systemctl restart alpamon; fi", script)
 	})
 }

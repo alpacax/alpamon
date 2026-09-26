@@ -220,13 +220,6 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 	if err != nil {
 		return Classify(ClassUnknown, err)
 	}
-	// Checked again when the marker is written; this only avoids a wasted download.
-	if pending, err := LoadPending(); err != nil {
-		return Classify(ClassUnknown, err)
-	} else if pending != nil {
-		return Classify(ClassUnknown, ErrUpgradePending)
-	}
-
 	currentPath, err := currentBinaryPath(opts)
 	if err != nil {
 		return Classify(ClassUnknown, err)
@@ -275,6 +268,15 @@ func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) erro
 	}
 
 	if err := replaceBinary(extractedPath, currentPath); err != nil {
+		// A failed swap normally leaves the old binary in place. When it does
+		// not (a Windows swap whose own rollback failed), put the kept copy
+		// back; if even that fails, keep the marker, guard and copy for recovery.
+		if _, statErr := os.Stat(currentPath); statErr != nil {
+			if cpErr := copyFileSynced(rollbackPath, currentPath, 0755); cpErr != nil {
+				log.Error().Err(cpErr).Str("rollback", rollbackPath).Msg("No binary is in place after a failed swap; leaving the rollback copy and the upgrade guard.")
+				return Classify(ClassSwapFailed, fmt.Errorf("failed to replace binary: %w", err))
+			}
+		}
 		abort()
 		return Classify(ClassSwapFailed, fmt.Errorf("failed to replace binary: %w", err))
 	}

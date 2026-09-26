@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -130,21 +131,26 @@ func writeFileSynced(path string, content []byte, mode os.FileMode) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	syncDir(filepath.Dir(path))
-	return nil
+	return syncDir(filepath.Dir(path))
 }
 
 // syncDir persists the latest rename in dir. Windows cannot fsync a
-// directory; the rename is still durable there once MoveFileEx returns.
-func syncDir(dir string) {
+// directory, so there the error is only logged; elsewhere it is returned,
+// since a rename that is not durable can lose the marker in a crash.
+func syncDir(dir string) error {
 	d, err := os.Open(dir)
-	if err != nil {
-		return
+	if err == nil {
+		err = d.Sync()
+		_ = d.Close()
 	}
-	defer func() { _ = d.Close() }()
-	if err := d.Sync(); err != nil {
+	if err != nil && runtime.GOOS == "windows" {
 		log.Debug().Err(err).Str("dir", dir).Msg("Directory fsync not supported; continuing.")
+		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("fsync %s: %w", dir, err)
+	}
+	return nil
 }
 
 // copyFileSynced copies src to dst and fsyncs dst before returning.
@@ -160,6 +166,5 @@ func copyFileSynced(src, dst string, perm os.FileMode) error {
 	if err := f.Sync(); err != nil {
 		return err
 	}
-	syncDir(filepath.Dir(dst))
-	return nil
+	return syncDir(filepath.Dir(dst))
 }

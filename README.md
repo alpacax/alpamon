@@ -213,7 +213,7 @@ When the upgrade command names a `target_version`, the agent installs exactly th
 
 Without systemd (macOS, Windows, containers) there is no guard and the restart uses the existing mechanism: an in-process re-exec, or on Windows the service's recovery actions. The health check and self-rollback still run.
 
-Without a `target_version` the upgrade behaves as described above.
+Without a `target_version` none of this applies: the upgrade takes the unpinned path described at the start of this section, unchanged.
 
 ## Development
 

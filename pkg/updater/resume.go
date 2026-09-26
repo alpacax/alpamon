@@ -111,8 +111,11 @@ func confirmHealth(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 	}
 
 	// Marker first: a guard already running checks for it before restoring.
+	// If it cannot be removed, keep the guard and the rollback copy; the next
+	// start repeats the check.
 	if err := ClearPending(); err != nil {
-		log.Warn().Err(err).Msg("Failed to clear the upgrade marker.")
+		log.Error().Err(err).Msg("Failed to clear the upgrade marker; keeping the guard and rollback copy.")
+		return
 	}
 	d.ServiceManager.DisarmGuard(p.GuardUnit)
 	removeRollbackCopy(p)
@@ -187,10 +190,8 @@ func restart(d ResumeDeps) {
 // finishRollback runs in the restored previous version and reports the
 // rollback, whether this process's predecessor or the guard performed it.
 func finishRollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
-	d.ServiceManager.DisarmGuard(p.GuardUnit)
-	removeRollbackCopy(p)
-	if err := ClearPending(); err != nil {
-		log.Warn().Err(err).Msg("Failed to clear the upgrade marker.")
+	if !clearForReport(p, d) {
+		return
 	}
 
 	class, detail := p.RollbackClass, p.RollbackDetail
@@ -213,10 +214,8 @@ func finishRollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 // finishUnexpected handles a process that is neither the version replaced
 // nor the target, such as after an operator installed another build.
 func finishUnexpected(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
-	d.ServiceManager.DisarmGuard(p.GuardUnit)
-	removeRollbackCopy(p)
-	if err := ClearPending(); err != nil {
-		log.Warn().Err(err).Msg("Failed to clear the upgrade marker.")
+	if !clearForReport(p, d) {
+		return
 	}
 	sendReportWithRetry(ctx, d.Poster, Report{
 		AttemptID:   p.AttemptID,
@@ -226,6 +225,19 @@ func finishUnexpected(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 		ErrorClass:  ClassUnknown,
 		Detail:      fmt.Sprintf("agent started as version %s, neither the replaced nor the target version", d.Running),
 	})
+}
+
+// clearForReport removes the marker, then the guard and the rollback copy.
+// When the marker cannot be removed it leaves all three and reports false,
+// so nothing is reported until a later start can finish the job.
+func clearForReport(p *PendingUpgrade, d ResumeDeps) bool {
+	if err := ClearPending(); err != nil {
+		log.Error().Err(err).Msg("Failed to clear the upgrade marker; leaving the attempt for the next start.")
+		return false
+	}
+	d.ServiceManager.DisarmGuard(p.GuardUnit)
+	removeRollbackCopy(p)
+	return true
 }
 
 func sendReportWithRetry(ctx context.Context, p Poster, r Report) {

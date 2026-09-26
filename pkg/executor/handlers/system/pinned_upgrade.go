@@ -174,7 +174,8 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 	}
 
 	if err := updater.Rearm(marker, h.serviceManager, updater.ClampHealthGrace(grace), h.now()); err != nil {
-		// The first guard stays armed and still covers the attempt.
+		// Rearm put the marker back as it was, so the first guard, still
+		// scheduled, keeps covering the attempt.
 		log.Warn().Err(err).Msg("Failed to re-arm the upgrade guard after the install.")
 	}
 

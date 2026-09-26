@@ -15,6 +15,8 @@ type fakeServiceManager struct {
 	disarmed   []string
 	restartErr error
 	guardErr   error
+	// markersAtArm holds the marker on disk at each ArmGuard call.
+	markersAtArm []*PendingUpgrade
 }
 
 type fakeGuard struct {
@@ -36,6 +38,8 @@ func (f *fakeServiceManager) ScheduleRestart(d time.Duration) error {
 func (f *fakeServiceManager) ArmGuard(unit string, d time.Duration, script string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	m, _ := LoadPending()
+	f.markersAtArm = append(f.markersAtArm, m)
 	if f.guardErr != nil {
 		return f.guardErr
 	}

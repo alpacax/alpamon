@@ -74,7 +74,9 @@ func (m *systemdManager) DisarmGuard(unit string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), systemdCallTimeout)
 	defer cancel()
-	if out, err := m.run(ctx, "systemctl", "stop", unit+".timer"); err != nil {
+	// The service too: a guard that has already fired must not keep running
+	// next to whatever the caller does next.
+	if out, err := m.run(ctx, "systemctl", "stop", unit+".timer", unit+".service"); err != nil {
 		log.Debug().Err(err).Str("unit", unit).Msgf("Could not stop the upgrade guard timer: %s", strings.TrimSpace(string(out)))
 	}
 	_, _ = m.run(ctx, "systemctl", "reset-failed", unit+".timer", unit+".service")
@@ -124,7 +126,9 @@ func shellJoin(argv []string) string {
 // whose disarm failed never acts on a later arming or attempt.
 func guardScript(p *PendingUpgrade) (string, error) {
 	marker := shellQuote(MarkerPath())
-	pending := fmt.Sprintf("[ -f %s ] && grep -qF %s %s", marker, shellQuote(`"`+p.GuardUnit+`"`), marker)
+	// The exact "guard_unit" line MarshalIndent writes, so a unit name that
+	// appears in another field cannot match.
+	pending := fmt.Sprintf("[ -f %s ] && grep -qxF %s %s", marker, shellQuote(`  "guard_unit": "`+p.GuardUnit+`",`), marker)
 	switch p.Method {
 	case MethodBinary:
 		return fmt.Sprintf("if %s && [ -f %s ]; then mv -f %s %s && systemctl restart alpamon; fi",

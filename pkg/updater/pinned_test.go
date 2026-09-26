@@ -151,12 +151,13 @@ func TestPinnedSelfUpdate_ReplacesBinaryAfterVerification(t *testing.T) {
 func TestPinnedSelfUpdate_RefusesWhileAnUpgradeIsPending(t *testing.T) {
 	f := newPinnedFixture(t)
 	f.release.publish(t, f.signer, "v2.5.0", fakeBinary(t, "new"))
-	require.NoError(t, WritePending(&PendingUpgrade{AttemptID: "earlier", ToVersion: "2.4.9"}))
+	require.NoError(t, WritePending(&PendingUpgrade{AttemptID: "earlier", ToVersion: "2.4.9", Deadline: time.Now().Add(time.Minute)}))
 
 	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0"}, f.opts)
 	assert.ErrorIs(t, err, ErrUpgradePending)
-	assert.Zero(t, f.release.requests())
 	assert.Equal(t, string(fakeBinary(t, "old")), f.currentContent(t))
+	_, err = os.Stat(f.current + ".rollback")
+	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestPinnedSelfUpdate_RefusesWithoutKeysBeforeDownloading(t *testing.T) {

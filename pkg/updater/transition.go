@@ -72,6 +72,7 @@ func BeginTransition(p *PendingUpgrade, sm ServiceManager, settle, grace time.Du
 
 	p.StartedAt = now.UTC()
 	if err := armGuard(p, sm, settle+RestartDelay+grace, now); err != nil {
+		_ = ClearPending()
 		return nil, err
 	}
 
@@ -88,19 +89,27 @@ func BeginTransition(p *PendingUpgrade, sm ServiceManager, settle, grace time.Du
 // Rearm restarts the clock once a slow change (a package install) is done:
 // the deadline becomes grace from now and the guard is replaced by one that
 // fires guardMargin after it.
+//
+// If the new guard cannot be armed, the marker is put back as it was, so the
+// first guard, which is still scheduled, keeps covering the attempt.
 func Rearm(p *PendingUpgrade, sm ServiceManager, grace time.Duration, now time.Time) error {
-	previous := p.GuardUnit
+	saved := *p
 	if err := armGuard(p, sm, RestartDelay+grace, now); err != nil {
+		*p = saved
+		if werr := WritePending(p); werr != nil {
+			return errors.Join(err, fmt.Errorf("restore upgrade marker: %w", werr))
+		}
 		return err
 	}
-	sm.DisarmGuard(previous)
+	sm.DisarmGuard(saved.GuardUnit)
 	return nil
 }
 
 // armGuard sets p's deadline to now+untilDeadline, names a fresh guard unit,
 // writes the marker and then arms the guard. The guard acts only on a marker
 // that names its own unit, so a guard left over from an earlier arming never
-// acts on this one.
+// acts on this one. On failure the marker is left as written; the caller
+// decides whether to clear or restore it.
 func armGuard(p *PendingUpgrade, sm ServiceManager, untilDeadline time.Duration, now time.Time) error {
 	p.Deadline = now.UTC().Add(untilDeadline)
 	p.GuardUnit = fmt.Sprintf("alpamon-upgrade-guard-%d", now.UnixNano())
@@ -114,13 +123,11 @@ func armGuard(p *PendingUpgrade, sm ServiceManager, untilDeadline time.Duration,
 
 	if err := sm.ArmGuard(p.GuardUnit, untilDeadline+guardMargin, script); err != nil {
 		if !errors.Is(err, ErrNoServiceManager) {
-			_ = ClearPending()
 			return fmt.Errorf("arm upgrade guard: %w", err)
 		}
 		log.Warn().Msg("No service manager to arm an upgrade guard; relying on the new version's own health check.")
 		p.GuardUnit = ""
 		if err := WritePending(p); err != nil {
-			_ = ClearPending()
 			return fmt.Errorf("write upgrade marker: %w", err)
 		}
 	}
