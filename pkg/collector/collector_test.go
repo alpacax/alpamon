@@ -1,7 +1,12 @@
 package collector
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -10,7 +15,10 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/collector/check"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/collector/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/collector/transporter"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -54,6 +62,7 @@ func newTestCollector() *Collector {
 	return &Collector{
 		scheduler: scheduler.NewScheduler(),
 		buffer:    base.NewCheckBuffer(10),
+		errorChan: make(chan error, 10),
 	}
 }
 
@@ -223,5 +232,244 @@ func TestCollector_StopIsSafeToCallTwice(t *testing.T) {
 	require.NotPanics(t, func() {
 		c.Stop()
 		c.Stop()
+	})
+}
+
+// recordingTransporter is a transport that always succeeds and keeps the
+// name of every metric it was handed, so a test can compare what arrived
+// with what was queued rather than trusting a count that a duplicate and a
+// loss would cancel out of.
+type recordingTransporter struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (f *recordingTransporter) Send(metric base.MetricData) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, result := range metric.Data {
+		f.sent = append(f.sent, result.Name)
+	}
+
+	return nil
+}
+
+func (f *recordingTransporter) received() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	names := slices.Clone(f.sent)
+	slices.Sort(names)
+
+	return names
+}
+
+// hangingTransporter blocks in Send until release is closed, standing in for
+// a server that accepts the connection and then says nothing.
+type hangingTransporter struct {
+	release chan struct{}
+
+	mu       sync.Mutex
+	attempts int
+}
+
+func (f *hangingTransporter) Send(_ base.MetricData) error {
+	f.mu.Lock()
+	f.attempts++
+	f.mu.Unlock()
+
+	<-f.release
+
+	return errors.New("transport gave up")
+}
+
+func (f *hangingTransporter) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.attempts
+}
+
+// rejectingTransporter always fails Send with transporter.ErrRejected,
+// standing in for a server that refuses every payload with a 400.
+type rejectingTransporter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *rejectingTransporter) Send(_ base.MetricData) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+
+	return transporter.ErrRejected
+}
+
+func (f *rejectingTransporter) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.calls
+}
+
+// testMetric gives each metric a name of its own, which is what lets a test
+// say which queue a metric came from and whether it arrived exactly once.
+func testMetric(name string) base.MetricData {
+	return base.MetricData{
+		Type: base.CPU,
+		Data: []base.CheckResult{{Timestamp: time.Now(), Name: name, Usage: 1}},
+	}
+}
+
+// queueMetrics puts count metrics named "<prefix>-1" and upwards on queue
+// and returns those names.
+func queueMetrics(queue chan<- base.MetricData, prefix string, count int) []string {
+	names := make([]string, 0, count)
+	for i := 1; i <= count; i++ {
+		name := fmt.Sprintf("%s-%d", prefix, i)
+		queue <- testMetric(name)
+		names = append(names, name)
+	}
+
+	return names
+}
+
+// captureLogs redirects the global logger into a buffer for the duration of
+// the test, so a test can assert on what was logged and how often.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	previousLogger, previousLevel := log.Logger, zerolog.GlobalLevel()
+	t.Cleanup(func() {
+		log.Logger = previousLogger
+		zerolog.SetGlobalLevel(previousLevel)
+	})
+
+	var buf bytes.Buffer
+	log.Logger = zerolog.New(&buf)
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+
+	return &buf
+}
+
+// A restart asked for by the console runs through Stop, and the metrics from
+// the last tick are usually still queued when it does. They get one attempt.
+func TestStop_FlushesPendingMetrics(t *testing.T) {
+	logs := captureLogs(t)
+
+	c := newTestCollector()
+	transport := &recordingTransporter{}
+	c.transporter = transport
+
+	queued := queueMetrics(c.buffer.SuccessQueue, "success", 3)
+	queued = append(queued, queueMetrics(c.buffer.FailureQueue, "failure", 2)...)
+	slices.Sort(queued)
+
+	c.Stop()
+
+	assert.Equal(t, queued, transport.received(), "both queues are flushed, each metric exactly once")
+	assert.Contains(t, logs.String(), "flushed 5 pending metric(s) on stop, dropped 0")
+	c.flushWG.Wait()
+}
+
+// Nothing is queued, so there is nothing to say.
+func TestStop_LogsNothingWithEmptyQueues(t *testing.T) {
+	logs := captureLogs(t)
+
+	c := newTestCollector()
+	c.transporter = &recordingTransporter{}
+
+	c.Stop()
+
+	assert.NotContains(t, logs.String(), "pending metric(s) on stop")
+}
+
+// The usual reason for a queue to still hold metrics at shutdown is that the
+// server stopped answering, so the flush must not hold the restart open for
+// as long as the transport is willing to wait.
+func TestStop_BoundsTheFlushWhenSendsHang(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := captureLogs(t)
+
+		c := newTestCollector()
+		transport := &hangingTransporter{release: make(chan struct{})}
+		c.transporter = transport
+
+		queueMetrics(c.buffer.SuccessQueue, "success", 4)
+
+		start := time.Now()
+		c.Stop()
+		elapsed := time.Since(start)
+
+		assert.Equal(t, flushTimeout, elapsed, "Stop waits for the bound and not for the transport")
+		assert.Contains(t, logs.String(), "flushed 0 pending metric(s) on stop, dropped 4")
+
+		// The send that was still in flight when the bound expired is the
+		// only work left, and it ends when the transport returns.
+		close(transport.release)
+		c.flushWG.Wait()
+		assert.Equal(t, 1, transport.calls(), "the flush stops at the send it was in, not at the end of the queue")
+	})
+}
+
+// The same path with the real workers running.
+//
+// Stop cancels the collector's context before it drains, and the cancel is
+// what ends the workers and leaves metrics behind in the first place. The
+// flush still reaches the server from there, because Transporter.Send takes
+// no context: the cancel stops the collector, not the transport.
+//
+// The success queue is drained by the workers, the failure queue is not,
+// since failureQueueWorker looks at it once every five seconds. Either way
+// every metric is sent exactly once, by a worker or by the flush.
+func TestStop_FlushesWhatTheQueueWorkersLeaveBehind(t *testing.T) {
+	c := newTestCollector()
+	c.ctxManager = agent.NewContextManager()
+	transport := &recordingTransporter{}
+	c.transporter = transport
+
+	c.Start()
+
+	queued := queueMetrics(c.buffer.FailureQueue, "failure", 5)
+	queued = append(queued, queueMetrics(c.buffer.SuccessQueue, "success", 5)...)
+	slices.Sort(queued)
+
+	c.Stop()
+
+	require.Error(t, c.ctx.Err(), "the collector's context is already cancelled when the flush runs")
+	assert.Equal(t, queued, transport.received(), "nothing queued at shutdown is dropped or sent twice while the server is answering")
+	c.flushWG.Wait()
+}
+
+// A metric the server has already refused with a 400 is not a delivery.
+// transporter.ErrRejected is a distinct non-nil error precisely so the flush
+// does not count it as sent alongside the ones that actually reached the
+// server.
+func TestStop_CountsARejectedMetricAsDroppedNotSent(t *testing.T) {
+	logs := captureLogs(t)
+
+	c := newTestCollector()
+	c.transporter = &rejectingTransporter{}
+
+	queueMetrics(c.buffer.SuccessQueue, "rejected", 3)
+
+	c.Stop()
+
+	assert.Contains(t, logs.String(), "flushed 0 pending metric(s) on stop, dropped 3")
+	c.flushWG.Wait()
+}
+
+// A rejection stops the retry loop the same way success does: the server
+// has already refused this metric once and would refuse it again, so
+// retrying it is exactly the request that got the 400 in the first place.
+func TestRetryWithBackoff_DoesNotRetryARejectedMetric(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		transport := &rejectingTransporter{}
+		c := &Collector{transporter: transport}
+
+		err := c.retryWithBackoff(context.Background(), testMetric("rejected"))
+
+		require.NoError(t, err, "a rejection is handled like success, not treated as a failed attempt")
+		assert.Equal(t, 1, transport.callCount(), "the rejected metric is sent once and not retried")
 	})
 }

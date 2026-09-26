@@ -3,9 +3,11 @@ package collector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/agent"
@@ -23,6 +25,13 @@ const (
 	confURL       = "/api/metrics/config/"
 	maxRetryCount = 5
 	delay         = 1 * time.Second
+
+	// flushTimeout bounds how long Stop waits for the metrics still queued
+	// when it is called. A planned restart should not throw away the last
+	// tick, but a queue that is not empty at shutdown usually means the
+	// server is unreachable, so the wait has to end by itself rather than
+	// hold the restart open behind a network that is not coming back.
+	flushTimeout = 2 * time.Second
 )
 
 type Collector struct {
@@ -31,10 +40,16 @@ type Collector struct {
 	buffer      *base.CheckBuffer
 	errorChan   chan error
 	wg          sync.WaitGroup
-	ctx         context.Context
-	cancel      context.CancelFunc
-	ctxManager  *agent.ContextManager
-	stopOnce    sync.Once
+	// flushWG covers the goroutine flushPending leaves running when its
+	// bound expires while a send is still in flight. Nothing in the agent
+	// waits on it, because not waiting is the point of the bound; it is
+	// here so that goroutine is accounted for and a test can show it ends
+	// when the transport returns rather than leaking.
+	flushWG    sync.WaitGroup
+	ctx        context.Context
+	cancel     context.CancelFunc
+	ctxManager *agent.ContextManager
+	stopOnce   sync.Once
 }
 
 type collectConf struct {
@@ -179,8 +194,12 @@ func (c *Collector) successQueueWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case metric := <-c.buffer.SuccessQueue:
+			// ErrRejected means the server has already refused this metric
+			// and would refuse it again, so it is handled like success here:
+			// left off the retry queue. flushPending is what still needs to
+			// tell the two apart, off Send's return value directly.
 			err := c.transporter.Send(metric)
-			if err != nil {
+			if err != nil && !errors.Is(err, transporter.ErrRejected) {
 				if pubErr := c.buffer.PublishFailure(ctx, metric); pubErr != nil {
 					return
 				}
@@ -222,8 +241,11 @@ func (c *Collector) retryWithBackoff(ctx context.Context, metric base.MetricData
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(time.Duration(1<<retryCount) * delay):
+			// ErrRejected stops the retry loop the same way success does:
+			// the server has already refused this metric and would refuse
+			// it again.
 			err := c.transporter.Send(metric)
-			if err != nil {
+			if err != nil && !errors.Is(err, transporter.ErrRejected) {
 				retryCount++
 				continue
 			}
@@ -256,8 +278,110 @@ func (c *Collector) Stop() {
 			log.Warn().Msgf("collector goroutines did not join within %s", agent.ShutdownWaitBudget)
 		}
 
+		// A fresh context: the collector's own is already cancelled above, and
+		// the flush is the one piece of work that has to outlive the cancel.
+		ctx, cancel := context.WithTimeout(context.Background(), flushTimeout)
+		defer cancel()
+
+		sent, dropped := c.flushPending(ctx)
+		if sent+dropped > 0 {
+			log.Info().Msgf("Collector flushed %d pending metric(s) on stop, dropped %d.", sent, dropped)
+		}
+
 		// errorChan has no sender anywhere, so no straggler can race this
 		// close, and handleErrors leaks on every restart without it.
 		close(c.errorChan)
 	})
+}
+
+// flushPending empties both queues and attempts each metric once, with no
+// backoff and no second attempt, and reports how many reached the server and
+// how many did not.
+//
+// This is the last thing that happens to a metric that was still queued when
+// the collector stopped. Nothing is written back to a queue and nothing is
+// persisted, so a metric that does not go out here is gone; the hourly and
+// daily rollups computed from the local database are what remains of it.
+// Failures are not logged one by one: a queue that is not empty at shutdown
+// is usually a queue whose sends were already failing, and one line per
+// metric would repeat a single fact.
+//
+// ctx bounds the wait, not the sends. Transporter.Send carries no context
+// and sets its own request timeout, so the bound is read between metrics:
+// flushPending returns the moment ctx expires, and the send that was in
+// flight keeps running until the transport gives up on it. Stop therefore
+// returns within flushTimeout, while the goroutine behind it can outlive
+// Stop by one transport timeout and no more, since the next iteration sees
+// ctx and stops. The metric that send was carrying is counted as dropped
+// whatever it goes on to do.
+//
+// Stop is what establishes the preconditions, and neither one is a hard
+// guarantee: both are bounded by ShutdownWaitBudget, not joined
+// unconditionally. Readers: Stop's own wait on wg can expire with a worker
+// still running, and that worker can still be receiving from the same
+// queue the drain is reading. Writers: Scheduler.Stop joins the scheduler's
+// goroutines within the same budget, so a check that has not returned
+// within it can still publish after the drain has gone past. Either way a
+// straggler races the drain for individual metrics, not the channel, so
+// nothing panics and nothing is double-counted—a metric they were both
+// about to take simply goes to whichever gets there first, and a check that
+// publishes after the drain has gone past is dropped exactly as it is
+// dropped today. Ordinarily both waits join well within their budget, so
+// the drain has the queues to itself.
+func (c *Collector) flushPending(ctx context.Context) (sent int, dropped int) {
+	pending := append(drainQueue(c.buffer.SuccessQueue), drainQueue(c.buffer.FailureQueue)...)
+	if len(pending) == 0 {
+		return 0, 0
+	}
+
+	var flushed atomic.Int64
+	done := make(chan struct{})
+
+	c.flushWG.Add(1)
+	go func() {
+		defer c.flushWG.Done()
+		defer close(done)
+
+		for _, metric := range pending {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			// err == nil is a true delivery here, not just "do not retry":
+			// transporter.ErrRejected is a distinct non-nil error, so a
+			// metric the server rejected with 400 counts as dropped below,
+			// the same as one a timeout or a dead connection took down.
+			if err := c.transporter.Send(metric); err == nil {
+				flushed.Add(1)
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+
+	sent = int(flushed.Load())
+
+	return sent, len(pending) - sent
+}
+
+// drainQueue takes everything queue holds right now, without blocking and
+// without waiting for more.
+func drainQueue(queue <-chan base.MetricData) []base.MetricData {
+	var drained []base.MetricData
+	for {
+		select {
+		case metric, ok := <-queue:
+			if !ok {
+				return drained
+			}
+			drained = append(drained, metric)
+		default:
+			return drained
+		}
+	}
 }
