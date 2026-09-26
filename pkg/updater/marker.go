@@ -168,7 +168,7 @@ func validatePending(p *PendingUpgrade) error {
 func LoadPending() (*PendingUpgrade, error) {
 	path := MarkerPath()
 	var p PendingUpgrade
-	data, err := readMarker(path)
+	data, err := readStateFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}

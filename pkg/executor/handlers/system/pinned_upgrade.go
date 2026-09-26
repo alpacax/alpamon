@@ -50,8 +50,8 @@ func (h *SystemHandler) handlePinnedUpgrade(ctx context.Context, target *common.
 
 	switch utils.PackageManager {
 	case utils.PkgApt, utils.PkgYum, utils.PkgZypper:
-		// One upgrade at a time: the latch the self-update also holds
-		// serializes the pending check, the marker and the install.
+		// One upgrade at a time: the latch that self-updates and the unpinned
+		// package upgrade also take serializes the marker and the install.
 		if !updater.AcquireUpgradeLatch() {
 			return 0, "Upgrade already in progress.", nil
 		}

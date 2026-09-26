@@ -610,3 +610,32 @@ func TestSystemHandler_PinnedUpgrade_PackageHostSaysPinsDoNotApply(t *testing.T)
 	r := h.lastReport(t)
 	assert.True(t, strings.HasPrefix(r.Detail, "digest not applicable on package-managed host; "), r.Detail)
 }
+
+func TestSystemHandler_Upgrade_LegacyPackageUpgradeWaitsForPinnedAttempt(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	require.NoError(t, updater.WritePending(&updater.PendingUpgrade{
+		AttemptID: "pending", FromVersion: "2.3.0", ToVersion: "2.4.0", Method: updater.MethodPackage,
+		PackageManager: utils.PkgApt, PreviousPackageVersion: "2.3.0",
+		StartedAt: time.Now(), Deadline: time.Now().Add(time.Minute),
+	}))
+
+	exitCode, output, err := h.handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.ErrorIs(t, err, updater.ErrUpgradePending)
+	assert.Equal(t, 1, exitCode)
+	assert.Contains(t, output, "Upgrade refused")
+	assert.Nil(t, findExecutedShell(h.exec), "no package command runs")
+	require.True(t, updater.AcquireUpgradeLatch(), "the latch is released afterwards")
+	updater.ReleaseSelfUpdateLatch()
+}
+
+func TestSystemHandler_Upgrade_LegacyPackageUpgradeTakesTheLatch(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	require.True(t, updater.AcquireUpgradeLatch())
+	t.Cleanup(updater.ReleaseSelfUpdateLatch)
+
+	exitCode, output, err := h.handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Equal(t, "Upgrade already in progress.", output)
+	assert.Empty(t, h.exec.GetExecutedCommands())
+}

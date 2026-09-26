@@ -35,9 +35,14 @@ func guardResultPath() string { return MarkerPath() + ".guard" }
 
 // readGuardResult reports how the guard named unit ended, from its result
 // file; GuardNotRun when the file is absent or names another guard.
+// It goes through the same checks as the marker: one handle, no links, a
+// regular file with the expected owner, bounded size.
 func readGuardResult(unit string) GuardState {
-	data, err := os.ReadFile(guardResultPath())
+	data, err := readStateFile(guardResultPath())
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Warn().Err(err).Msg("Ignoring an unusable upgrade guard result.")
+		}
 		return GuardNotRun
 	}
 	fields := strings.Fields(string(data))

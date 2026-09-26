@@ -30,8 +30,25 @@ func TestRestrictTreeACL_CoversExistingChildren(t *testing.T) {
 	assert.NotContains(t, sd.String(), ";;;BU)")
 }
 
+// enablePrivilege enables name on the process token, failing the test when it
+// cannot.
+func enablePrivilege(t *testing.T, name string) {
+	t.Helper()
+	var token windows.Token
+	require.NoError(t, windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token))
+	defer func() { _ = token.Close() }()
+	var luid windows.LUID
+	require.NoError(t, windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &luid))
+	privs := windows.Tokenprivileges{
+		PrivilegeCount: 1,
+		Privileges:     [1]windows.LUIDAndAttributes{{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}},
+	}
+	require.NoError(t, windows.AdjustTokenPrivileges(token, false, &privs, 0, nil, nil), "enable %s", name)
+}
+
 // TestRestrictTreeACL_TakesOwnership pre-creates an entry owned by a
 // non-administrative principal and checks the step takes ownership back.
+// It runs on every elevated token and skips only on an unelevated one.
 func TestRestrictTreeACL_TakesOwnership(t *testing.T) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("needs an elevated token")
@@ -41,11 +58,11 @@ func TestRestrictTreeACL_TakesOwnership(t *testing.T) {
 	require.NoError(t, os.Mkdir(child, 0o700))
 	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
 	require.NoError(t, err)
-	// Assigning an arbitrary owner needs the restore privilege; skip if the
-	// runner's token cannot do it.
-	if err := windows.SetNamedSecurityInfo(child, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, users, nil, nil, nil); err != nil {
-		t.Skipf("cannot pre-create an entry owned by Users here: %v", err)
-	}
+	// Giving an entry an owner the caller is not needs the restore
+	// privilege, which an elevated token holds but has disabled.
+	enablePrivilege(t, "SeRestorePrivilege")
+	require.NoError(t, windows.SetNamedSecurityInfo(child, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, users, nil, nil, nil),
+		"pre-create an entry owned by Users")
 
 	require.NoError(t, restrictTreeACL(root))
 	sd, err := windows.GetNamedSecurityInfo(child, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)

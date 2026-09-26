@@ -234,6 +234,24 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	}
 	pkgList := strings.Join(packages, " ")
 
+	// A package upgrade must not run in the middle of a pinned upgrade: take
+	// the upgrade latch, and refuse while a pinned attempt is still being
+	// confirmed. Self-updates take the latch themselves.
+	switch utils.PackageManager {
+	case utils.PkgApt, utils.PkgYum, utils.PkgZypper:
+		if !updater.AcquireUpgradeLatch() {
+			return 0, "Upgrade already in progress.", nil
+		}
+		defer updater.ReleaseSelfUpdateLatch()
+		if err := updater.CheckNoPending(h.serviceManager, h.now()); err != nil {
+			if errors.Is(err, updater.ErrUpgradePending) {
+				log.Warn().Err(err).Msg("Refusing a package upgrade while a pinned upgrade is pending.")
+				return 1, fmt.Sprintf("Upgrade refused: %v. Retry once it completes.", err), err
+			}
+			log.Warn().Err(err).Msg("Could not check for a pending pinned upgrade; continuing.")
+		}
+	}
+
 	var cmd string
 	// Set when the refresh was scoped to alpamon's own repo, which is what makes
 	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
