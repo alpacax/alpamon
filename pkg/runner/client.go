@@ -32,12 +32,17 @@ const (
 )
 
 type WebsocketClient struct {
-	// mu guards Conn: Connect writes it from the read loop; Close reads it on shutdown.
+	// mu guards Conn and keepalive: Connect writes them from the read loop; Close reads Conn on shutdown.
 	mu sync.Mutex
 	// Conn stays exported for outside readers; inside this package use the accessors.
 	//
 	// Deprecated: use SetReadDeadline, ReadMessage and WriteJSON.
 	Conn *websocket.Conn
+	// keepalive belongs to Conn and is replaced with it. Nil for a Conn that Connect did not install.
+	keepalive *connKeepalive
+
+	// dial opens a connection; nil means dialWebsocket. Tests swap in a dialer that wraps the socket.
+	dial func(ctx context.Context, url string, header http.Header) (*websocket.Conn, error)
 
 	// lastPeerReconnect is owned by the read loop goroutine alone: one read
 	// loop per client, so it needs no lock.
@@ -85,6 +90,49 @@ const (
 	eventCommandRejectURL = "/api/events/commands/%s/reject/"
 	eventCommandChunkURL  = "/api/events/commands/%s/chunk/"
 )
+
+// Keepalive timings. keepaliveInterval is how often the agent pings the
+// current connection; keepaliveTimeout is how long it waits for any frame,
+// pongs included, once the peer has answered a ping. Vars, not consts, so
+// tests can shrink them instead of waiting out real minutes.
+var (
+	keepaliveInterval = 30 * time.Second
+	keepaliveTimeout  = 120 * time.Second
+)
+
+// keepaliveWriteWait bounds one ping write, including the wait for a
+// WriteJSON that holds the writer.
+const keepaliveWriteWait = 10 * time.Second
+
+// connKeepalive is the keepalive state of one connection. Each connection
+// gets its own, so a pong on a replaced connection can never shorten the
+// deadline of the one that replaced it.
+type connKeepalive struct {
+	// pongSeen flips once the peer answers a ping. Until then the read loop
+	// keeps ConnectionReadTimeout, so a peer that never answers pings is
+	// treated exactly as before keepalive existed.
+	pongSeen atomic.Bool
+}
+
+// readTimeout is the deadline the read loop arms before each read.
+func (k *connKeepalive) readTimeout() time.Duration {
+	if k != nil && k.pongSeen.Load() {
+		return keepaliveTimeout
+	}
+	return ConnectionReadTimeout
+}
+
+// expired reports whether a read failed because a peer that has answered
+// pings went quiet for keepaliveTimeout. Once a pong has arrived the pong
+// handler keeps the deadline at keepaliveTimeout, so any read timeout from
+// then on is this one.
+func (k *connKeepalive) expired(err error) bool {
+	if k == nil || !k.pongSeen.Load() {
+		return false
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
 
 // peerReconnectMinInterval paces peer-requested reconnects: the console can
 // ask for one in a loop, and connectForever only paces failed dials. A var,
@@ -157,12 +205,26 @@ func (wc *WebsocketClient) conn() *websocket.Conn {
 	return wc.Conn
 }
 
+// connState returns the current connection with its keepalive state.
+func (wc *WebsocketClient) connState() (*websocket.Conn, *connKeepalive) {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	return wc.Conn, wc.keepalive
+}
+
 // swapConn returns the replaced conn; the caller must close it.
 func (wc *WebsocketClient) swapConn(conn *websocket.Conn) *websocket.Conn {
+	return wc.installConn(conn, nil)
+}
+
+// installConn makes conn current together with its keepalive state and
+// returns the replaced conn; the caller must close it.
+func (wc *WebsocketClient) installConn(conn *websocket.Conn, ka *connKeepalive) *websocket.Conn {
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 	old := wc.Conn
 	wc.Conn = conn
+	wc.keepalive = ka
 	return old
 }
 
@@ -200,8 +262,8 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			conn := wc.conn()
-			if err := conn.SetReadDeadline(time.Now().Add(ConnectionReadTimeout)); err != nil {
+			conn, ka := wc.connState()
+			if err := conn.SetReadDeadline(time.Now().Add(ka.readTimeout())); err != nil {
 				if err = wc.CloseAndReconnect(ctx); err != nil {
 					return
 				}
@@ -210,7 +272,12 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 			}
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				if err = wc.CloseAndReconnect(ctx); err != nil {
+				if ka.expired(err) {
+					err = wc.reconnectAfterSilence(ctx, conn)
+				} else {
+					err = wc.CloseAndReconnect(ctx)
+				}
+				if err != nil {
 					return
 				}
 				authenticatedThisConn = false
@@ -266,21 +333,77 @@ func (wc *WebsocketClient) ReadMessage() (messageType int, message []byte, err e
 func (wc *WebsocketClient) Connect(ctx context.Context) error {
 	log.Info().Msgf("Connecting to websocket at %s...", config.GlobalSettings.WSPath)
 
+	dial := wc.dial
+	if dial == nil {
+		dial = dialWebsocket
+	}
+
 	return connectForever(ctx, wc.connectBackoff, config.GlobalSettings.WSPath, func() error {
-		conn, err := dialWebsocket(ctx, config.GlobalSettings.WSPath, wc.requestHeader)
+		conn, err := dial(ctx, config.GlobalSettings.WSPath, wc.requestHeader)
 		if err != nil {
 			return err
 		}
 
-		if old := wc.swapConn(conn); old != nil {
+		ka := &connKeepalive{}
+		// The pong handler runs inside ReadMessage, on the read loop, so it may arm the read deadline.
+		conn.SetPongHandler(func(string) error {
+			ka.pongSeen.Store(true)
+			return conn.SetReadDeadline(time.Now().Add(keepaliveTimeout))
+		})
+
+		if old := wc.installConn(conn, ka); old != nil {
 			// Already closed on the reconnect path; net.ErrClosed is the expected answer there.
 			if err := old.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 				log.Debug().Err(err).Msg("Failed to close the connection Connect replaced.")
 			}
 		}
+		go wc.sendPings(ctx, conn, keepaliveInterval)
 		log.Debug().Msg("Backhaul connection established.")
 		return nil
 	})
+}
+
+// sendPings pings conn every interval until conn stops being the current
+// connection or ctx ends. A failed ping, such as a write that timed out
+// behind a long WriteJSON, needs no handling here: the pong it did not earn
+// lets the read deadline expire, and the read loop owns reconnecting.
+// WriteControl is safe to call alongside WriteJSON.
+func (wc *WebsocketClient) sendPings(ctx context.Context, conn *websocket.Conn, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		if wc.conn() != conn {
+			return
+		}
+		_ = conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(keepaliveWriteWait))
+	}
+}
+
+// reconnectAfterSilence drops a connection whose peer stopped answering and
+// dials a new one. It sends no close frame: on a link that fails in one
+// direction only, the frame could still reach Alpacon and read as the agent
+// closing on purpose. Call it only from the read loop.
+func (wc *WebsocketClient) reconnectAfterSilence(ctx context.Context, conn *websocket.Conn) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	log.Warn().Msg("No response from Alpacon for 2 minutes; reconnecting.")
+
+	if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		log.Debug().Err(err).Msg("Failed to close the unresponsive websocket connection.")
+	}
+
+	if err := wc.connectBackoff.waitBeforeRedial(ctx); err != nil {
+		return err
+	}
+	return wc.Connect(ctx)
 }
 
 // CloseAndReconnect drains the peer's close reply, so it reads the socket:
@@ -348,6 +471,8 @@ func (wc *WebsocketClient) closeConn(drain bool) {
 }
 
 func drainCloseReply(conn *websocket.Conn) {
+	// A pong arriving now must not stretch the drain to keepaliveTimeout.
+	conn.SetPongHandler(nil)
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // the peer only answers a close frame that actually went out
 	for {
 		if _, _, err := conn.NextReader(); err != nil {
