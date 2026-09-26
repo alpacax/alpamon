@@ -71,9 +71,11 @@ type MockVersionResolver struct {
 	PamVersion          string
 	InvalidatePamCalled bool
 	GotProxy            string
+	LatestCalls         int
 }
 
 func (m *MockVersionResolver) GetLatestVersion(proxyURL string) string {
+	m.LatestCalls++
 	m.GotProxy = proxyURL
 	return m.LatestVersion
 }
@@ -97,6 +99,31 @@ type MockAPISession struct {
 	DeleteCalls      []string
 	DeleteStatusCode int
 	DeleteErr        error
+	PostCalls        []mockPost
+	PostStatusCode   int
+	PostErr          error
+}
+
+type mockPost struct {
+	URL  string
+	Body any
+}
+
+func (m *MockAPISession) Post(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.PostCalls = append(m.PostCalls, mockPost{URL: url, Body: rawBody})
+	statusCode := m.PostStatusCode
+	if statusCode == 0 {
+		statusCode = 201
+	}
+	return nil, statusCode, m.PostErr
+}
+
+func (m *MockAPISession) posts() []mockPost {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]mockPost(nil), m.PostCalls...)
 }
 
 // MultipartRequest exists only to satisfy the APISession interface; SystemHandler

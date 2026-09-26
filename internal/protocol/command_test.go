@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"testing"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/stretchr/testify/assert"
@@ -128,4 +129,52 @@ func TestParseCommandData_BatchRuleDPortsAsStrings(t *testing.T) {
 	assert.Equal(t, []int{80, 443}, args.Rules[0].DPorts)
 	assert.Equal(t, []int{80}, args.Rules[1].DPorts)
 	assert.Equal(t, []int{80, 443}, args.Rules[2].DPorts)
+}
+
+// TestParseCommandData_PinnedUpgrade maps every pinned upgrade field.
+func TestParseCommandData_PinnedUpgrade(t *testing.T) {
+	cmd := &Command{Shell: "internal", Line: "upgrade", Data: `{
+		"target_version": "2.5.0",
+		"artifact_url": "https://example.com/a.tar.gz",
+		"artifact_digest": "sha256:abc",
+		"checksums_url": "https://example.com/sums",
+		"signature_url": "https://example.com/sums.sig",
+		"attempt_id": "att-1",
+		"health_grace_seconds": 120,
+		"package_proxy": "http://proxy.internal:3128"
+	}`}
+
+	parsed, err := cmd.ParseCommandData()
+	require.NoError(t, err)
+	args := parsed.ToArgs()
+	require.NotNil(t, args.Upgrade)
+	assert.Equal(t, common.UpgradeTarget{
+		TargetVersion:     "2.5.0",
+		ArtifactURL:       "https://example.com/a.tar.gz",
+		ArtifactDigest:    "sha256:abc",
+		ChecksumsURL:      "https://example.com/sums",
+		SignatureURL:      "https://example.com/sums.sig",
+		AttemptID:         "att-1",
+		HealthGracePeriod: 120 * time.Second,
+	}, *args.Upgrade)
+	assert.Equal(t, "http://proxy.internal:3128", args.PackageProxy)
+}
+
+// TestParseCommandData_NoTargetKeepsLegacyUpgrade pins backward compatibility:
+// without target_version there is no pinned target, even when other pinned
+// fields are present, so the handler takes the legacy path.
+func TestParseCommandData_NoTargetKeepsLegacyUpgrade(t *testing.T) {
+	for name, data := range map[string]string{
+		"empty data":            "",
+		"older server":          `{"package_proxy": "http://proxy.internal:3128"}`,
+		"fields without target": `{"attempt_id": "att-1", "artifact_url": "https://example.com/a.tar.gz"}`,
+		"empty target":          `{"target_version": ""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cmd := &Command{Shell: "internal", Line: "upgrade", Data: data}
+			parsed, err := cmd.ParseCommandData()
+			require.NoError(t, err)
+			assert.Nil(t, parsed.ToArgs().Upgrade)
+		})
+	}
 }

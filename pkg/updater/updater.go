@@ -51,6 +51,15 @@ type SelfUpdateFunc func(ctx context.Context, latestVersion string, opts Options
 // Options configures the self-update behavior. Use defaults for production.
 type Options struct {
 	BaseURL string // Override release base URL (for testing)
+
+	// Keyring overrides the compiled-in release keyring for the pinned path.
+	// Tests only; production leaves it nil. The legacy path ignores it.
+	Keyring *Keyring
+
+	// Test seams for the pinned path: allowHTTP admits the plain-HTTP URLs an
+	// httptest server hands out, binaryPath replaces os.Executable.
+	allowHTTP  bool
+	binaryPath string
 }
 
 func (o Options) baseURL() string {

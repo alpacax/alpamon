@@ -68,6 +68,9 @@ type CommandArgs struct {
 	// applied only to the package-manager upgrade shell and the GitHub
 	// version lookup. Empty means no proxy (existing behavior).
 	PackageProxy string
+	// Upgrade is the server-pinned upgrade target. Nil when the payload has
+	// no target version, which keeps the legacy "latest" upgrade path.
+	Upgrade *UpgradeTarget
 
 	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks.
 	// Sequencing is the caller's responsibility.
@@ -110,6 +113,18 @@ type CommandArgs struct {
 	// UFW specific
 	Direction string // UFW direction: in, out
 	Interface string // UFW interface name
+}
+
+// UpgradeTarget pins an upgrade to one release. Only TargetVersion is
+// required; the handler derives every other field it needs when absent.
+type UpgradeTarget struct {
+	TargetVersion     string
+	ArtifactURL       string
+	ArtifactDigest    string
+	ChecksumsURL      string
+	SignatureURL      string
+	AttemptID         string
+	HealthGracePeriod time.Duration
 }
 
 // File represents a file transfer operation

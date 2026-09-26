@@ -52,6 +52,8 @@ type SystemHandler struct {
 	versionResolver common.VersionResolver
 	apiSession      common.APISession
 	selfUpdateFn    updater.SelfUpdateFunc // defaults to updater.SelfUpdate; tests inject a fake
+	// pinnedUpdateFn defaults to updater.PinnedSelfUpdate; tests inject a fake.
+	pinnedUpdateFn func(ctx context.Context, req updater.PinnedRequest, opts updater.Options) error
 
 	// uninstallDelay defers executeUninstall so the byebye response is sent
 	// before the agent starts tearing itself down. Tests shorten it and use
@@ -89,6 +91,7 @@ func NewSystemHandler(cmdExecutor common.CommandExecutor, wsClient common.WSClie
 		versionResolver: versionResolver,
 		apiSession:      apiSession,
 		selfUpdateFn:    updater.SelfUpdate,
+		pinnedUpdateFn:  updater.PinnedSelfUpdate,
 		uninstallDelay:  1 * time.Second,
 	}
 	return h
@@ -178,6 +181,11 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	var packageProxy string
 	if args != nil {
 		packageProxy = sanitizePackageProxy(args.PackageProxy)
+		// A target version switches to the pinned path; without one the
+		// legacy path below runs exactly as it did before pinning existed.
+		if args.Upgrade != nil {
+			return h.handlePinnedUpgrade(ctx, args.Upgrade, packageProxy)
+		}
 	}
 
 	latestVersion := h.versionResolver.GetLatestVersion(packageProxy)

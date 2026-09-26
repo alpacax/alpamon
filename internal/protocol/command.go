@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 )
@@ -110,6 +111,17 @@ type CommandData struct {
 	// GitHub version lookup only. Older servers omit it, which keeps the
 	// existing behavior.
 	PackageProxy string `json:"package_proxy,omitempty"`
+
+	// Pinned upgrade fields, all optional. A payload with a target_version
+	// pins the upgrade to that release; one without it (every older server)
+	// keeps the existing "latest" behavior and ignores the rest.
+	TargetVersion      string `json:"target_version,omitempty"`
+	ArtifactURL        string `json:"artifact_url,omitempty"`
+	ArtifactDigest     string `json:"artifact_digest,omitempty"`
+	ChecksumsURL       string `json:"checksums_url,omitempty"`
+	SignatureURL       string `json:"signature_url,omitempty"`
+	AttemptID          string `json:"attempt_id,omitempty"`
+	HealthGraceSeconds int    `json:"health_grace_seconds,omitempty"`
 }
 
 // ParseCommandData parses the Data field of a Command into CommandData
@@ -201,6 +213,18 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 
 		// Upgrade specific
 		PackageProxy: c.PackageProxy,
+	}
+
+	if c.TargetVersion != "" {
+		args.Upgrade = &common.UpgradeTarget{
+			TargetVersion:     c.TargetVersion,
+			ArtifactURL:       c.ArtifactURL,
+			ArtifactDigest:    c.ArtifactDigest,
+			ChecksumsURL:      c.ChecksumsURL,
+			SignatureURL:      c.SignatureURL,
+			AttemptID:         c.AttemptID,
+			HealthGracePeriod: time.Duration(c.HealthGraceSeconds) * time.Second,
+		}
 	}
 
 	// Convert Files if present
