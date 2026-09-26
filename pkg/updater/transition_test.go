@@ -279,7 +279,7 @@ func TestSystemdManager(t *testing.T) {
 		m := &systemdManager{run: r.run, sleep: func(time.Duration) {}}
 		m.DisarmGuard("")
 		assert.Empty(t, r.snapshot(), "no unit, nothing to stop")
-		r.err = errors.New("inactive") // is-active exits non-zero
+		r.out, r.err = []byte("inactive\n"), errors.New("exit status 3")
 		assert.False(t, m.DisarmGuard("g1"))
 		assert.Equal(t, []string{"systemctl", "stop", "g1.timer"}, r.snapshot()[0], "only the timer is stopped")
 	})
@@ -292,7 +292,11 @@ func TestSystemdManager(t *testing.T) {
 				calls = append(calls, append([]string{name}, args...))
 				if len(args) > 0 && args[0] == "is-active" {
 					polls++
-					if polls <= 3 {
+					switch polls {
+					case 1:
+						// Queued: is-active exits non-zero but the guard is running.
+						return []byte("activating\n"), errors.New("exit status 3")
+					case 2, 3:
 						return []byte("active\n"), nil
 					}
 					return []byte("inactive\n"), errors.New("exit status 3")
@@ -523,6 +527,19 @@ func TestLoadPending_DiscardsMarkersItDidNotWrite(t *testing.T) {
 	})
 
 	if runtime.GOOS != "windows" {
+		t.Run("symlink", func(t *testing.T) {
+			useTempMarkerDir(t)
+			p := valid(t)
+			real := filepath.Join(t.TempDir(), "elsewhere")
+			data, err := json.MarshalIndent(p, "", "  ")
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(real, data, 0600))
+			require.NoError(t, os.Symlink(real, MarkerPath()))
+			got, err := LoadPending()
+			require.NoError(t, err)
+			assert.Nil(t, got, "a symlinked marker is not followed")
+		})
+
 		t.Run("writable by others", func(t *testing.T) {
 			useTempMarkerDir(t)
 			require.NoError(t, WritePending(valid(t)))

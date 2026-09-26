@@ -94,7 +94,10 @@ func (m *systemdManager) DisarmGuard(unit string) bool {
 		fired = true
 		m.sleep(guardPollInterval)
 	}
-	_, _ = m.run(ctx, "systemctl", "reset-failed", unit+".timer", unit+".service")
+	// A fresh context: the wait above may have outlived the first one.
+	rctx, rcancel := context.WithTimeout(context.Background(), systemdCallTimeout)
+	defer rcancel()
+	_, _ = m.run(rctx, "systemctl", "reset-failed", unit+".timer", unit+".service")
 	return fired
 }
 
@@ -103,10 +106,9 @@ const guardPollInterval = 2 * time.Second
 func (m *systemdManager) guardActive(unit string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), systemdCallTimeout)
 	defer cancel()
-	out, err := m.run(ctx, "systemctl", "is-active", unit+".service")
-	if err != nil {
-		return false
-	}
+	// is-active exits non-zero for every state but "active", including
+	// "activating", so the state is read from its output alone.
+	out, _ := m.run(ctx, "systemctl", "is-active", unit+".service")
 	switch strings.TrimSpace(string(out)) {
 	case "active", "activating", "deactivating", "reloading":
 		return true

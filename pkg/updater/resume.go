@@ -115,20 +115,15 @@ func confirmHealth(ctx context.Context, p *PendingUpgrade, d ResumeDeps) {
 		}
 	}
 
-	// Marker first: a guard already running checks for it before restoring.
-	// If it cannot be removed, keep the guard and the rollback copy; the next
-	// start repeats the check.
-	if err := ClearPending(); err != nil {
-		log.Error().Err(err).Msg("Failed to clear the upgrade marker; keeping the guard and rollback copy.")
+	// Guard first: stopping its timer, or waiting out a guard that already
+	// started. One that ran has restored the previous version and will
+	// restart into it; the marker stays for that process to report.
+	if d.ServiceManager.DisarmGuard(p.GuardUnit) {
+		log.Warn().Msg("The upgrade guard ran before the upgrade was confirmed; leaving the outcome to the restored version.")
 		return
 	}
-	if d.ServiceManager.DisarmGuard(p.GuardUnit) {
-		// The guard started before the marker went away and has restored the
-		// previous version; put the marker back for that process to report.
-		log.Warn().Msg("The upgrade guard ran before the upgrade was confirmed; leaving the outcome to the restored version.")
-		if err := WritePending(p); err != nil {
-			log.Error().Err(err).Msg("Failed to restore the upgrade marker.")
-		}
+	if err := ClearPending(); err != nil {
+		log.Error().Err(err).Msg("Failed to clear the upgrade marker; the next start repeats the check.")
 		return
 	}
 	removeRollbackCopy(p)
@@ -178,7 +173,15 @@ func rollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, reason strin
 		err = fmt.Errorf("unknown upgrade method %q", p.Method)
 	}
 	if err != nil {
-		log.Error().Err(err).Msg("Rollback failed; leaving the marker for the upgrade guard.")
+		p.RollbackAttempts++
+		if p.RollbackAttempts >= maxRollbackAttempts || time.Now().After(p.Deadline.Add(staleMarkerAge)) {
+			giveUpRollback(ctx, p, d, err)
+			return
+		}
+		log.Error().Err(err).Int("attempt", p.RollbackAttempts).Msg("Rollback failed; leaving the marker for the upgrade guard.")
+		if werr := WritePending(p); werr != nil {
+			log.Error().Err(werr).Msg("Failed to record the rollback attempt.")
+		}
 		if p.Method == MethodPackage {
 			if aerr := armGuard(p, d.ServiceManager, 0, time.Now()); aerr != nil {
 				// No guard: restart instead, so the next start, still the
@@ -200,6 +203,27 @@ func rollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, reason strin
 		log.Warn().Err(err).Msg("Failed to record the rollback reason in the upgrade marker.")
 	}
 	restart(d)
+}
+
+// maxRollbackAttempts bounds the in-process rollback retries.
+const maxRollbackAttempts = 3
+
+// giveUpRollback ends an attempt whose rollback keeps failing: it reports the
+// failure and removes the marker, so the agent stops retrying and stays on
+// the version it runs.
+func giveUpRollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, err error) {
+	log.Error().Err(err).Int("attempts", p.RollbackAttempts).Msg("Giving up on rolling back the upgrade; staying on this version.")
+	if !clearForReport(p, d) {
+		return
+	}
+	sendReportWithRetry(ctx, d.Poster, Report{
+		AttemptID:   p.AttemptID,
+		FromVersion: p.FromVersion,
+		ToVersion:   p.ToVersion,
+		Outcome:     OutcomeFailed,
+		ErrorClass:  ClassHealthCheckFailed,
+		Detail:      truncate(fmt.Sprintf("health check failed and the rollback failed %d times: %v", p.RollbackAttempts, err), 4*maxMarkerTextLen),
+	})
 }
 
 func restart(d ResumeDeps) {

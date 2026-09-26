@@ -18,7 +18,10 @@ func restoreBinary(rollbackPath, currentPath string) error {
 	}
 	if err := moveFileEx(rollbackPath, currentPath, windows.MOVEFILE_REPLACE_EXISTING); err != nil {
 		if rbErr := moveFileEx(oldPath, currentPath, windows.MOVEFILE_REPLACE_EXISTING); rbErr != nil {
-			return fmt.Errorf("failed to restore the previous binary (%v) and to put the current one back (%v)", err, rbErr)
+			// Last resort so a binary is always in place: copy, not move.
+			if cpErr := copyFile(oldPath, currentPath, 0o755); cpErr != nil {
+				return fmt.Errorf("failed to restore the previous binary (%v), to put the current one back (%v) and to copy it back (%v)", err, rbErr, cpErr)
+			}
 		}
 		return fmt.Errorf("failed to restore the previous binary: %w", err)
 	}

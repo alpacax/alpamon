@@ -30,6 +30,31 @@ func TestRestrictTreeACL_CoversExistingChildren(t *testing.T) {
 	assert.NotContains(t, sd.String(), ";;;BU)")
 }
 
+// TestRestrictTreeACL_TakesOwnership pre-creates an entry owned by a
+// non-administrative principal and checks the step takes ownership back.
+func TestRestrictTreeACL_TakesOwnership(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("needs an elevated token")
+	}
+	root := t.TempDir()
+	child := filepath.Join(root, "data")
+	require.NoError(t, os.Mkdir(child, 0o700))
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	require.NoError(t, err)
+	// Assigning an arbitrary owner needs the restore privilege; skip if the
+	// runner's token cannot do it.
+	if err := windows.SetNamedSecurityInfo(child, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, users, nil, nil, nil); err != nil {
+		t.Skipf("cannot pre-create an entry owned by Users here: %v", err)
+	}
+
+	require.NoError(t, restrictTreeACL(root))
+	sd, err := windows.GetNamedSecurityInfo(child, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	require.NoError(t, err)
+	owner, _, err := sd.Owner()
+	require.NoError(t, err)
+	assert.True(t, owner.IsWellKnown(windows.WinBuiltinAdministratorsSid), "owner is %s", owner)
+}
+
 func TestRestrictDirACL(t *testing.T) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("needs an elevated token: the restricted ACL admits only SYSTEM and Administrators")

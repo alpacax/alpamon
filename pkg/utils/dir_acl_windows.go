@@ -10,10 +10,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// protectedDirSDDL grants full control to SYSTEM and Administrators, inherited
+// protectedDirSDDL makes Administrators the owner and grants full control to
+// SYSTEM and Administrators, inherited
 // by every file and subdirectory, and blocks inheritance from %ProgramData%,
 // whose default ACL lets local users create files.
-const protectedDirSDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+const protectedDirSDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 
 // SecureConfigDir creates the alpamon directory under %ProgramData% (which
 // holds the configuration, data, log and run directories) and restricts its
@@ -62,18 +63,24 @@ func restrictDirACL(dir string) error {
 	if err != nil {
 		return fmt.Errorf("read directory ACL: %w", err)
 	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return fmt.Errorf("read directory owner: %w", err)
+	}
+	// The owner too: an owner can always rewrite the ACL, so whoever created
+	// an entry beforehand must not keep owning it.
 	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, dacl, nil); err != nil {
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, nil, dacl, nil); err != nil {
 		return fmt.Errorf("restrict ACL on %s: %w", dir, err)
 	}
 	return nil
 }
 
-// OwnedByAdministrators reports whether path is owned by SYSTEM or the
-// Administrators group.
-func OwnedByAdministrators(path string) (bool, error) {
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+// HandleOwnedByAdministrators reports whether the open file h is owned by
+// SYSTEM or the Administrators group.
+func HandleOwnedByAdministrators(h windows.Handle) (bool, error) {
+	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		return false, err
 	}

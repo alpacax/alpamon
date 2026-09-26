@@ -432,3 +432,56 @@ func TestResumePending_InsecureStateDirIsNotActedOn(t *testing.T) {
 	assert.False(t, found)
 	assert.Equal(t, "new", fileContent(t, f.marker.BinaryPath))
 }
+
+func TestResumePending_RollbackRetriesAreBounded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, time.Minute)
+		require.NoError(t, os.Remove(f.marker.RollbackPath)) // every restore fails
+		f.marker.RollbackAttempts = maxRollbackAttempts - 1
+		require.NoError(t, WritePending(f.marker))
+
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+
+		marker, err := LoadPending()
+		require.NoError(t, err)
+		assert.Nil(t, marker, "the attempt is closed")
+		reports := f.poster.all()
+		require.Len(t, reports, 1)
+		assert.Equal(t, OutcomeFailed, reports[0].Outcome)
+		assert.Equal(t, ClassHealthCheckFailed, reports[0].ErrorClass)
+		assert.Contains(t, reports[0].Detail, "rollback failed 3 times")
+		restarts, _, _ := f.sm.snapshot()
+		assert.Empty(t, restarts, "no further restart")
+	})
+}
+
+func TestResumePending_FailedRollbackCountsTheAttempt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, time.Minute)
+		require.NoError(t, os.Remove(f.marker.RollbackPath))
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+		marker, err := LoadPending()
+		require.NoError(t, err)
+		require.NotNil(t, marker)
+		assert.Equal(t, 1, marker.RollbackAttempts)
+	})
+}
+
+func TestResumePending_GuardRunningAtConfirmationKeepsTheMarker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, 5*time.Minute)
+		f.sm.fired = true
+		close(f.authed)
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+		_, _, disarmed := f.sm.snapshot()
+		assert.Equal(t, []string{"alpamon-upgrade-guard-1"}, disarmed)
+		marker, err := LoadPending()
+		require.NoError(t, err)
+		assert.NotNil(t, marker, "never removed, so the restored version can report")
+		_, err = os.Stat(f.marker.RollbackPath)
+		assert.NoError(t, err, "the rollback copy is left to the guard")
+	})
+}

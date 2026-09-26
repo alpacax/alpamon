@@ -78,6 +78,8 @@ type PendingUpgrade struct {
 	// Set by a process that rolled back, for the one that starts after it.
 	RollbackClass  ErrorClass `json:"rollback_class,omitempty"`
 	RollbackDetail string     `json:"rollback_detail,omitempty"`
+	// RollbackAttempts counts failed in-process rollbacks.
+	RollbackAttempts int `json:"rollback_attempts,omitempty"`
 
 	// Note is carried into the final report's detail.
 	Note string `json:"note,omitempty"`
@@ -91,6 +93,9 @@ var (
 )
 
 const maxMarkerTextLen = 512
+
+// maxMarkerSize bounds how much of a marker file is read.
+const maxMarkerSize = 64 * 1024
 
 // maxMarkerSpan bounds deadline minus start: the longest package install
 // window, the restart delay and the longest grace, with room to spare.
@@ -113,6 +118,9 @@ func validatePending(p *PendingUpgrade) error {
 	}
 	if p.StartedAt.IsZero() || !p.Deadline.After(p.StartedAt) || p.Deadline.Sub(p.StartedAt) > maxMarkerSpan {
 		return fmt.Errorf("deadline %s does not follow start %s within %s", p.Deadline, p.StartedAt, maxMarkerSpan)
+	}
+	if p.RollbackAttempts < 0 || p.RollbackAttempts > maxRollbackAttempts {
+		return fmt.Errorf("rollback attempts %d out of range", p.RollbackAttempts)
 	}
 	if p.GuardUnit != "" && !guardUnitRe.MatchString(p.GuardUnit) {
 		return fmt.Errorf("guard unit %q is not an upgrade guard", p.GuardUnit)
@@ -159,15 +167,11 @@ func validatePending(p *PendingUpgrade) error {
 // logged, removed and treated as absent.
 func LoadPending() (*PendingUpgrade, error) {
 	path := MarkerPath()
-	data, err := os.ReadFile(path)
+	var p PendingUpgrade
+	data, err := readMarker(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read upgrade marker: %w", err)
-	}
-	var p PendingUpgrade
-	err = checkMarkerOwner(path)
 	if err == nil {
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.DisallowUnknownFields()
