@@ -358,7 +358,7 @@ func TestSendPings_StopsOnceTheConnectionIsReplaced(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		wc.sendPings(context.Background(), first, time.Millisecond)
+		wc.sendPings(context.Background(), first, newConnKeepalive(), time.Millisecond)
 	}()
 
 	require.Eventually(t, func() bool { return pings.Load() >= 2 }, 5*time.Second, time.Millisecond,
@@ -370,6 +370,66 @@ func TestSendPings_StopsOnceTheConnectionIsReplaced(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("sendPings kept running for a connection that is no longer current")
 	}
+}
+
+func TestSendPings_StopsOnceTheConnectionIsClosed(t *testing.T) {
+	// Close leaves Conn in place and the context may outlive it, so neither of the other exits fires.
+	var pings atomic.Int32
+	url := newKeepaliveServer(t, func(_ int, c *websocket.Conn) {
+		c.SetPingHandler(func(string) error {
+			pings.Add(1)
+			return nil
+		})
+		_ = readUntilError(c)
+	})
+	conn, _ := dialTracked(t, url)
+
+	ka := newConnKeepalive()
+	wc := &WebsocketClient{}
+	wc.installConn(conn, ka)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wc.sendPings(context.Background(), conn, ka, time.Millisecond)
+	}()
+
+	require.Eventually(t, func() bool { return pings.Load() >= 2 }, 5*time.Second, time.Millisecond,
+		"the current connection was not pinged")
+
+	wc.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendPings kept running for a connection Close had closed")
+	}
+	assert.Same(t, conn, wc.conn(), "Close is expected to leave Conn in place")
+}
+
+func TestConnect_OutsideRunForeverDoesNotPing(t *testing.T) {
+	// pkg/pluginclient calls Connect from its own read loop, which does not act on a keepalive timeout.
+	shrinkKeepalive(t, time.Millisecond, 10*time.Millisecond, time.Millisecond)
+
+	var pings atomic.Int32
+	url := newKeepaliveServer(t, func(_ int, c *websocket.Conn) {
+		c.SetPingHandler(func(string) error {
+			pings.Add(1)
+			return nil
+		})
+		_ = readUntilError(c)
+	})
+	useWSPath(t, url)
+
+	wc := &WebsocketClient{connectBackoff: newAuthBackoff(minConnectInterval, maxConnectInterval)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, wc.Connect(ctx))
+	t.Cleanup(wc.Close)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, ka := wc.connState()
+	assert.Nil(t, ka, "Connect set up keepalive for a read loop that is not RunForever")
+	assert.Zero(t, pings.Load(), "Connect pinged a connection whose read loop is not RunForever")
 }
 
 func TestSendPings_KeepsGoingAfterAFailedPing(t *testing.T) {
@@ -384,7 +444,7 @@ func TestSendPings_KeepsGoingAfterAFailedPing(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		wc.sendPings(ctx, conn, time.Millisecond)
+		wc.sendPings(ctx, conn, newConnKeepalive(), time.Millisecond)
 	}()
 
 	// A failed ping is the read deadline's to act on, not a reason to stop pinging.
