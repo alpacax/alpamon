@@ -172,7 +172,7 @@ func TestPinnedSelfUpdate_RefusesWithoutKeysBeforeDownloading(t *testing.T) {
 
 	err := PinnedSelfUpdate(context.Background(), PinnedRequest{TargetVersion: "v2.5.0", FromVersion: "2.4.0"}, f.opts)
 	assert.ErrorIs(t, err, ErrNoTrustedKeys)
-	assert.Equal(t, ClassSignatureInvalid, ClassOf(err))
+	assert.Equal(t, ClassKeysUnavailable, ClassOf(err), "an empty key bundle is not a failed signature check")
 	assert.Zero(t, f.release.requests(), "nothing may be fetched without a key to verify it")
 	assert.Equal(t, string(fakeBinary(t, "old")), f.currentContent(t))
 	assert.False(t, selfUpdateInFlight.Load(), "a failed run releases the latch")
