@@ -513,6 +513,9 @@ func sendRegisterRequest(req RegisterRequest) (*RegisterResponse, error) {
 	}
 
 	if httpResp.StatusCode != http.StatusCreated {
+		if httpResp.StatusCode == http.StatusPaymentRequired {
+			return nil, errors.New(migrate.PlanLimitMessage(body, serverURL))
+		}
 		return nil, fmt.Errorf("registration failed (status %d): %s", httpResp.StatusCode, string(body))
 	}
 

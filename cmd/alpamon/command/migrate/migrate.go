@@ -371,6 +371,9 @@ func registerOnTarget(ctx context.Context) (*registerResponse, error) {
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
+		if resp.StatusCode == http.StatusPaymentRequired {
+			return nil, errors.New(migrate.PlanLimitMessage(respBody, newURL))
+		}
 		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	var r registerResponse

@@ -336,3 +336,129 @@ func TestStartWatchdog_StopsOnContextCancel(t *testing.T) {
 		assert.Zero(t, fired.Load(), "watchdog fired after ctx cancel")
 	})
 }
+
+func TestBillingPointer(t *testing.T) {
+	tests := []struct {
+		name         string
+		workspaceURL string
+		want         string
+	}{
+		{
+			name:         "managed console host renders a direct link",
+			workspaceURL: "https://acme.us1.alpacon.io",
+			want:         "https://alpacon.io/acme/settings/billing",
+		},
+		{
+			name:         "managed console host with trailing slash and path",
+			workspaceURL: "https://acme.eu1.alpacon.io/",
+			want:         "https://alpacon.io/acme/settings/billing",
+		},
+		{
+			name:         "self-hosted host renders words, not a URL",
+			workspaceURL: "https://alpacon.example.com",
+			want:         "Settings → Billing in your Alpacon console",
+		},
+		{
+			name:         "bare alpacon.io (no workspace label) renders words",
+			workspaceURL: "https://alpacon.io",
+			want:         "Settings → Billing in your Alpacon console",
+		},
+		{
+			name:         "unparsable URL renders words",
+			workspaceURL: "://not a url",
+			want:         "Settings → Billing in your Alpacon console",
+		},
+		{
+			name:         "empty URL renders words",
+			workspaceURL: "",
+			want:         "Settings → Billing in your Alpacon console",
+		},
+		{
+			name:         "plain HTTP on a managed host renders words, not a link",
+			workspaceURL: "http://acme.us1.alpacon.io",
+			want:         "Settings → Billing in your Alpacon console",
+		},
+		{
+			name:         "managed host with a non-default port renders words, not a link",
+			workspaceURL: "https://acme.us1.alpacon.io:8443",
+			want:         "Settings → Billing in your Alpacon console",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, billingPointer(tt.workspaceURL))
+		})
+	}
+}
+
+func TestPlanLimitMessage(t *testing.T) {
+	const managedURL = "https://acme.us1.alpacon.io"
+	const managedRemedy = "plan limit reached: servers. If this host was registered before, delete the old server " +
+		"entry first, then retry; otherwise remove a server you no longer use, or upgrade. " +
+		"Upgrade: https://alpacon.io/acme/settings/billing. Talk to us: https://www.alpacax.com/alpacon/pricing"
+
+	tests := []struct {
+		name         string
+		body         string
+		workspaceURL string
+		want         string
+	}{
+		{
+			name:         "new envelope: gate plan, axis server, with next",
+			body:         `{"code":"server_limit_exceeded","gate":"plan","axis":"server","next":"/api/workspaces/workspaces/42/entitlements/"}`,
+			workspaceURL: managedURL,
+			want:         managedRemedy,
+		},
+		{
+			name:         "old-server gate-less body carries only code",
+			body:         `{"code":"server_limit_exceeded"}`,
+			workspaceURL: managedURL,
+			want:         managedRemedy,
+		},
+		{
+			name:         "self-hosted workspace renders words instead of a link",
+			body:         `{"code":"server_limit_exceeded","gate":"plan","axis":"server"}`,
+			workspaceURL: "https://alpacon.example.com",
+			want: "plan limit reached: servers. If this host was registered before, delete the old server entry " +
+				"first, then retry; otherwise remove a server you no longer use, or upgrade. " +
+				"Upgrade: Settings → Billing in your Alpacon console. Talk to us: https://www.alpacax.com/alpacon/pricing",
+		},
+		{
+			name:         "non-JSON body falls back to the generic line",
+			body:         `<html>upstream proxy refused the request</html>`,
+			workspaceURL: managedURL,
+			want: "plan limit reached. Upgrade: https://alpacon.io/acme/settings/billing. " +
+				"Talk to us: https://www.alpacax.com/alpacon/pricing",
+		},
+		{
+			name:         "empty body falls back to the generic line",
+			body:         ``,
+			workspaceURL: managedURL,
+			want: "plan limit reached. Upgrade: https://alpacon.io/acme/settings/billing. " +
+				"Talk to us: https://www.alpacax.com/alpacon/pricing",
+		},
+		{
+			name:         "feature lock (gate plan, no axis) falls back to the generic line",
+			body:         `{"code":"workspace_enterprise_plan_required","gate":"plan"}`,
+			workspaceURL: managedURL,
+			want: "plan limit reached. Upgrade: https://alpacon.io/acme/settings/billing. " +
+				"Talk to us: https://www.alpacax.com/alpacon/pricing",
+		},
+		{
+			name:         "unrecognized gate-less code falls back to the generic line",
+			body:         `{"code":"user_limit_exceeded"}`,
+			workspaceURL: managedURL,
+			want: "plan limit reached. Upgrade: https://alpacon.io/acme/settings/billing. " +
+				"Talk to us: https://www.alpacax.com/alpacon/pricing",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PlanLimitMessage([]byte(tt.body), tt.workspaceURL)
+			assert.Equal(t, tt.want, got)
+			if tt.body != "" {
+				assert.NotContains(t, got, tt.body, "rendered message must never echo the raw response body")
+			}
+		})
+	}
+}

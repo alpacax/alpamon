@@ -44,9 +44,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -512,4 +514,92 @@ func newHTTPClient(sslVerify bool, caCertPath string) (*http.Client, error) {
 		Timeout:   30 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: cfg},
 	}, nil
+}
+
+// pricingURL is the contact pointer offered alongside a plan-limit refusal.
+// It is not workspace-specific and carries Book a demo / Request a quote.
+const pricingURL = "https://www.alpacax.com/alpacon/pricing"
+
+// consoleHostPattern matches a managed Alpacon workspace host,
+// "<label>.<region>.alpacon.io" (e.g. "acme.us1.alpacon.io"). Anything else
+// (a self-hosted / on-prem URL) gets the words fallback instead of a link.
+var consoleHostPattern = regexp.MustCompile(`^([a-zA-Z0-9-]+)\.[a-zA-Z0-9-]+\.alpacon\.io$`)
+
+// billingPointer renders the console-billing pointer for workspaceURL (the
+// --url the caller registered against): a direct link when the URL is
+// exactly HTTPS, on the default port, with a host of the managed shape
+// "<label>.<region>.alpacon.io", or generic words for anything else
+// (self-hosted, plain HTTP, a non-default port, or an unparsable URL).
+// Rendering a link for those would guess wrong more often than the words
+// are unhelpful.
+func billingPointer(workspaceURL string) string {
+	const words = "Settings → Billing in your Alpacon console"
+
+	u, err := url.Parse(strings.TrimSpace(workspaceURL))
+	if err != nil || u.Scheme != "https" || u.Port() != "" || u.Hostname() == "" {
+		return words
+	}
+	if m := consoleHostPattern.FindStringSubmatch(u.Hostname()); m != nil {
+		return fmt.Sprintf("https://alpacon.io/%s/settings/billing", m[1])
+	}
+	return words
+}
+
+// planLimitBody is the plan-limit refusal envelope a server sends on a 402,
+// `{code, gate:"plan", axis, next?}`. It also unmarshals the gate-less
+// legacy shape, `{code}`, sent by a server that predates the envelope.
+//
+// `next`, when present, is a self-relative API path for reading the
+// workspace's entitlements (see the API reference), not a browsable URL —
+// it needs an authenticated API session to mean anything, so it is
+// intentionally left out of an operator-facing message: printing it would
+// look like a broken link.
+type planLimitBody struct {
+	Code string `json:"code"`
+	Gate string `json:"gate"`
+	Axis string `json:"axis"`
+}
+
+// PlanLimitMessage renders the operator-facing text for a 402 response from
+// POST /api/servers/servers/register/, used by both the `register` and
+// `migrate` subcommands (#502). That endpoint only ever refuses on the
+// server-count axis, in either the plan-limit envelope
+// (gate:"plan", axis:"server") or, from a server older than the envelope,
+// the gate-less legacy shape (`{code:"server_limit_exceeded"}` alone,
+// identified by `code`). Both render the same message, including a
+// workaround for a known gap: the endpoint always creates a server record,
+// so re-registering an existing host can be judged against the cap as if it
+// were a brand new server.
+//
+// Any other body (an envelope reporting a different axis or gate, neither
+// of which this endpoint sends today; unrecognized JSON; or non-JSON)
+// renders a generic line with the same upgrade and contact pointers rather
+// than guessing at an unfamiliar shape. The raw body is never included in
+// the rendered message. workspaceURL is the --url the caller registered
+// against; it is used only to build the console billing link, never sent
+// anywhere.
+func PlanLimitMessage(body []byte, workspaceURL string) string {
+	pointer := billingPointer(workspaceURL)
+
+	var parsed planLimitBody
+	serverLimit := false
+	if err := json.Unmarshal(body, &parsed); err == nil {
+		switch {
+		case parsed.Gate == "plan" && parsed.Axis == "server":
+			serverLimit = true
+		case parsed.Gate == "" && parsed.Code == "server_limit_exceeded":
+			// Gate-less legacy body from a server older than the plan-limit
+			// envelope: the code alone identifies the axis.
+			serverLimit = true
+		}
+	}
+
+	if serverLimit {
+		return fmt.Sprintf(
+			"plan limit reached: servers. If this host was registered before, delete the old server entry first, "+
+				"then retry; otherwise remove a server you no longer use, or upgrade. Upgrade: %s. Talk to us: %s",
+			pointer, pricingURL,
+		)
+	}
+	return fmt.Sprintf("plan limit reached. Upgrade: %s. Talk to us: %s", pointer, pricingURL)
 }
