@@ -44,9 +44,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -512,4 +514,79 @@ func newHTTPClient(sslVerify bool, caCertPath string) (*http.Client, error) {
 		Timeout:   30 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: cfg},
 	}, nil
+}
+
+// pricingURL is the contact pointer for a plan-limit refusal (paywall wave
+// §1.6). It is not workspace-specific and carries Book a demo / Request a
+// quote.
+const pricingURL = "https://www.alpacax.com/alpacon/pricing"
+
+// consoleHostPattern matches a managed Alpacon workspace host,
+// "<label>.<region>.alpacon.io" (e.g. "acme.us1.alpacon.io"). Anything else
+// (a self-hosted / on-prem URL) gets the words fallback instead of a link.
+var consoleHostPattern = regexp.MustCompile(`^([a-zA-Z0-9-]+)\.[a-zA-Z0-9-]+\.alpacon\.io$`)
+
+// billingPointer renders the §1.6 console-billing pointer for workspaceURL
+// (the --url the caller registered against): a direct link on a managed
+// "<label>.<region>.alpacon.io" host, or generic words for anything else
+// (self-hosted, malformed, or unparsable).
+func billingPointer(workspaceURL string) string {
+	const words = "Settings → Billing in your Alpacon console"
+
+	u, err := url.Parse(strings.TrimSpace(workspaceURL))
+	if err != nil || u.Hostname() == "" {
+		return words
+	}
+	if m := consoleHostPattern.FindStringSubmatch(u.Hostname()); m != nil {
+		return fmt.Sprintf("https://alpacon.io/%s/settings/billing", m[1])
+	}
+	return words
+}
+
+// planLimitBody is the plan-limit refusal envelope (paywall wave §1.1),
+// `{code, gate:"plan", axis, next?}`. It also unmarshals the gate-less
+// legacy shape, `{code}`, sent by a server that predates the envelope.
+type planLimitBody struct {
+	Code string `json:"code"`
+	Gate string `json:"gate"`
+	Axis string `json:"axis"`
+}
+
+// PlanLimitMessage renders the operator-facing text for a 402 response from
+// POST /api/servers/servers/register/, used by both the `register` and
+// `migrate` subcommands. It classifies body per the shared client rule
+// (paywall wave §1.3): the new envelope with gate:"plan" and axis:"server",
+// or the gate-less legacy `{code:"server_limit_exceeded"}` from an older
+// server, both render the same server-limit message (§1.6), including the
+// re-registration workaround for the known register-endpoint gap where a
+// re-registering host is judged against the cap because it always creates a
+// new record (design/28 §2, C9). Any other body — unrecognized JSON or
+// non-JSON — renders a generic line with the same upgrade and contact
+// pointers. The raw body is never included in the rendered message.
+// workspaceURL is the --url the caller registered against; it is used only
+// to build the console billing link, never sent anywhere.
+func PlanLimitMessage(body []byte, workspaceURL string) string {
+	pointer := billingPointer(workspaceURL)
+
+	var parsed planLimitBody
+	serverLimit := false
+	if err := json.Unmarshal(body, &parsed); err == nil {
+		switch {
+		case parsed.Gate == "plan" && parsed.Axis == "server":
+			serverLimit = true
+		case parsed.Gate == "" && parsed.Code == "server_limit_exceeded":
+			// Gate-less legacy body from a server older than the envelope
+			// (plan-v1.md §1.3 rule 2): the code alone identifies the axis.
+			serverLimit = true
+		}
+	}
+
+	if serverLimit {
+		return fmt.Sprintf(
+			"plan limit reached: servers. If this host was registered before, delete the old server entry first, "+
+				"then retry; otherwise remove a server you no longer use, or upgrade. Upgrade: %s. Talk to us: %s",
+			pointer, pricingURL,
+		)
+	}
+	return fmt.Sprintf("plan limit reached. Upgrade: %s. Talk to us: %s", pointer, pricingURL)
 }

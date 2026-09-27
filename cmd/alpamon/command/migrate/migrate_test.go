@@ -196,6 +196,81 @@ func TestRegisterOnTarget_SurfacesNon2xxStatus(t *testing.T) {
 	}
 }
 
+func TestRegisterOnTarget_PlanLimit(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantSubstrs []string
+		wantAbsent  []string
+	}{
+		{
+			name: "new envelope with gate, axis and next",
+			body: `{"code":"server_limit_exceeded","gate":"plan","axis":"server",` +
+				`"next":"/api/workspaces/workspaces/9/entitlements/","hint":"xyz123-should-not-leak"}`,
+			wantSubstrs: []string{
+				"plan limit reached: servers.",
+				"If this host was registered before, delete the old server entry first, then retry",
+				// httptest's URL is 127.0.0.1:<port>, never a managed
+				// "<label>.<region>.alpacon.io" host, so this exercises the
+				// self-hosted words fallback end to end.
+				"Upgrade: Settings → Billing in your Alpacon console.",
+				"Talk to us: https://www.alpacax.com/alpacon/pricing",
+			},
+			wantAbsent: []string{"xyz123-should-not-leak", "{", "\"code\""},
+		},
+		{
+			name: "old-server gate-less body (code only, no gate/axis/next)",
+			body: `{"code":"server_limit_exceeded"}`,
+			wantSubstrs: []string{
+				"plan limit reached: servers.",
+				"If this host was registered before, delete the old server entry first, then retry",
+			},
+			wantAbsent: []string{"{", "\"code\""},
+		},
+		{
+			name: "non-JSON body renders the generic fallback",
+			body: `<html>upstream says xyz123-should-not-leak</html>`,
+			wantSubstrs: []string{
+				"plan limit reached.",
+				"Upgrade: Settings → Billing in your Alpacon console.",
+				"Talk to us: https://www.alpacax.com/alpacon/pricing",
+			},
+			wantAbsent: []string{"xyz123-should-not-leak", "<html>"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusPaymentRequired)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			newURL = srv.URL
+			apiToken = "test-token"
+			serverName = "my-host"
+			platform = "debian"
+			sslVerify = false
+
+			_, err := registerOnTarget(t.Context())
+			if err == nil {
+				t.Fatalf("expected error on 402, got nil")
+			}
+			for _, s := range tt.wantSubstrs {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("error message %q: want substring %q", err.Error(), s)
+				}
+			}
+			for _, s := range tt.wantAbsent {
+				if strings.Contains(err.Error(), s) {
+					t.Errorf("error message %q must not contain raw-body fragment %q", err.Error(), s)
+				}
+			}
+		})
+	}
+}
+
 func TestCleanupTargetRegistration_CallsUnregisterEndpoint(t *testing.T) {
 	called := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
