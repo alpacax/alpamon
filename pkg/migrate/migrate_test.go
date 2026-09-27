@@ -373,6 +373,16 @@ func TestBillingPointer(t *testing.T) {
 			workspaceURL: "",
 			want:         "Settings → Billing in your Alpacon console",
 		},
+		{
+			name:         "plain HTTP on a managed host renders words, not a link",
+			workspaceURL: "http://acme.us1.alpacon.io",
+			want:         "Settings → Billing in your Alpacon console",
+		},
+		{
+			name:         "managed host with a non-default port renders words, not a link",
+			workspaceURL: "https://acme.us1.alpacon.io:8443",
+			want:         "Settings → Billing in your Alpacon console",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

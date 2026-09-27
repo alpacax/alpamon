@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStripGeneratedSuffix(t *testing.T) {
@@ -254,18 +256,12 @@ func TestRegisterOnTarget_PlanLimit(t *testing.T) {
 			sslVerify = false
 
 			_, err := registerOnTarget(t.Context())
-			if err == nil {
-				t.Fatalf("expected error on 402, got nil")
-			}
+			require.Error(t, err)
 			for _, s := range tt.wantSubstrs {
-				if !strings.Contains(err.Error(), s) {
-					t.Errorf("error message %q: want substring %q", err.Error(), s)
-				}
+				assert.Contains(t, err.Error(), s)
 			}
 			for _, s := range tt.wantAbsent {
-				if strings.Contains(err.Error(), s) {
-					t.Errorf("error message %q must not contain raw-body fragment %q", err.Error(), s)
-				}
+				assert.NotContains(t, err.Error(), s, "message must not echo the raw response body")
 			}
 		})
 	}
