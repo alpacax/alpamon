@@ -528,7 +528,7 @@ var consoleHostPattern = regexp.MustCompile(`^([a-zA-Z0-9-]+)\.[a-zA-Z0-9-]+\.al
 // billingPointer renders the console-billing pointer for workspaceURL (the
 // --url the caller registered against): a direct link when the URL is
 // exactly HTTPS, on the default port, with a host of the managed shape
-// "<label>.<region>.alpacon.io" — or generic words for anything else
+// "<label>.<region>.alpacon.io", or generic words for anything else
 // (self-hosted, plain HTTP, a non-default port, or an unparsable URL).
 // Rendering a link for those would guess wrong more often than the words
 // are unhelpful.
@@ -571,8 +571,8 @@ type planLimitBody struct {
 // so re-registering an existing host can be judged against the cap as if it
 // were a brand new server.
 //
-// Any other body — an envelope reporting a different axis or gate (neither
-// of which this endpoint sends today), unrecognized JSON, or non-JSON —
+// Any other body (an envelope reporting a different axis or gate, neither
+// of which this endpoint sends today; unrecognized JSON; or non-JSON)
 // renders a generic line with the same upgrade and contact pointers rather
 // than guessing at an unfamiliar shape. The raw body is never included in
 // the rendered message. workspaceURL is the --url the caller registered
