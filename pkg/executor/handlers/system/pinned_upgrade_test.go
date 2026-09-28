@@ -31,46 +31,6 @@ type pinnedHarness struct {
 	handler  *SystemHandler
 }
 
-// fakeServiceManager records what would have been scheduled.
-type fakeServiceManager struct {
-	restarts   []time.Duration
-	guards     []string
-	disarmed   []string
-	restartErr error
-}
-
-func (f *fakeServiceManager) ScheduleRestart(d time.Duration) error {
-	if f.restartErr != nil {
-		return f.restartErr
-	}
-	f.restarts = append(f.restarts, d)
-	return nil
-}
-
-func (f *fakeServiceManager) ArmGuard(unit string, _ time.Duration, _ string) error {
-	f.guards = append(f.guards, unit)
-	return nil
-}
-
-func (f *fakeServiceManager) DisarmGuard(unit string) updater.GuardState {
-	f.disarmed = append(f.disarmed, unit)
-	return updater.GuardNotRun
-}
-
-// markerCheckingExecutor records whether the intent marker existed when the
-// package install ran.
-type markerCheckingExecutor struct {
-	*common.MockCommandExecutor
-	markerAtInstall *updater.PendingUpgrade
-}
-
-func (e *markerCheckingExecutor) Exec(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
-	if len(args) > 1 && args[0] == "apt-get" && args[1] == "install" {
-		e.markerAtInstall, _ = updater.LoadPending()
-	}
-	return e.MockCommandExecutor.Exec(ctx, args, username, groupname, env, timeout)
-}
-
 func newPinnedHarness(t *testing.T, pkgManager string) *pinnedHarness {
 	t.Helper()
 	ctxManager := agent.NewContextManager()
@@ -132,6 +92,82 @@ func (h *pinnedHarness) lastReport(t *testing.T) updater.Report {
 	r, ok := last.Body.(updater.Report)
 	require.True(t, ok, "report body is %T", last.Body)
 	return r
+}
+
+// fakeServiceManager records what would have been scheduled.
+type fakeServiceManager struct {
+	restarts   []time.Duration
+	guards     []string
+	disarmed   []string
+	restartErr error
+}
+
+func (f *fakeServiceManager) ScheduleRestart(d time.Duration) error {
+	if f.restartErr != nil {
+		return f.restartErr
+	}
+	f.restarts = append(f.restarts, d)
+	return nil
+}
+
+func (f *fakeServiceManager) ArmGuard(unit string, _ time.Duration, _ string) error {
+	f.guards = append(f.guards, unit)
+	return nil
+}
+
+func (f *fakeServiceManager) DisarmGuard(unit string) updater.GuardState {
+	f.disarmed = append(f.disarmed, unit)
+	return updater.GuardNotRun
+}
+
+// markerCheckingExecutor records whether the intent marker existed when the
+// package install ran.
+type markerCheckingExecutor struct {
+	*common.MockCommandExecutor
+	markerAtInstall *updater.PendingUpgrade
+}
+
+func (e *markerCheckingExecutor) Exec(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
+	if len(args) > 1 && args[0] == "apt-get" && args[1] == "install" {
+		e.markerAtInstall, _ = updater.LoadPending()
+	}
+	return e.MockCommandExecutor.Exec(ctx, args, username, groupname, env, timeout)
+}
+
+// sequencedExecutor answers dpkg-query from a queue, so a test can model the
+// package database before and after an install.
+type sequencedExecutor struct {
+	*common.MockCommandExecutor
+	versions []string
+}
+
+func (e *sequencedExecutor) RunAsUser(ctx context.Context, username, name string, args ...string) (int, string, error) {
+	if name == "dpkg-query" && len(e.versions) > 0 {
+		v := e.versions[0]
+		if len(e.versions) > 1 {
+			e.versions = e.versions[1:]
+		}
+		_, _, _ = e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
+		return 0, v, nil
+	}
+	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
+}
+
+// rpmSequence answers rpm -q from a queue.
+type rpmSequence struct {
+	*common.MockCommandExecutor
+	versions []string
+}
+
+func (e *rpmSequence) RunAsUser(ctx context.Context, username, name string, args ...string) (int, string, error) {
+	if name == "rpm" && len(e.versions) > 0 {
+		v := e.versions[0]
+		if len(e.versions) > 1 {
+			e.versions = e.versions[1:]
+		}
+		return 0, v, nil
+	}
+	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
 }
 
 // TestSystemHandler_Upgrade_LegacyPathUnchanged pins the path every existing
@@ -259,25 +295,6 @@ func TestSystemHandler_PinnedUpgrade_FailureClearsMarkerAndGuard(t *testing.T) {
 	assert.Empty(t, h.sm.restarts)
 }
 
-// sequencedExecutor answers dpkg-query from a queue, so a test can model the
-// package database before and after an install.
-type sequencedExecutor struct {
-	*common.MockCommandExecutor
-	versions []string
-}
-
-func (e *sequencedExecutor) RunAsUser(ctx context.Context, username, name string, args ...string) (int, string, error) {
-	if name == "dpkg-query" && len(e.versions) > 0 {
-		v := e.versions[0]
-		if len(e.versions) > 1 {
-			e.versions = e.versions[1:]
-		}
-		_, _, _ = e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
-		return 0, v, nil
-	}
-	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
-}
-
 func TestSystemHandler_PinnedUpgrade_ChangedPackageIsReinstalledOnFailure(t *testing.T) {
 	const rollback = "apt-get install -y --allow-downgrades alpamon=2.4.0"
 	for _, tc := range []struct {
@@ -344,23 +361,6 @@ func TestSystemHandler_PinnedUpgrade_UndoAfterAFailedDowngradeOnYum(t *testing.T
 	marker, err := updater.LoadPending()
 	require.NoError(t, err)
 	assert.Nil(t, marker)
-}
-
-// rpmSequence answers rpm -q from a queue.
-type rpmSequence struct {
-	*common.MockCommandExecutor
-	versions []string
-}
-
-func (e *rpmSequence) RunAsUser(ctx context.Context, username, name string, args ...string) (int, string, error) {
-	if name == "rpm" && len(e.versions) > 0 {
-		v := e.versions[0]
-		if len(e.versions) > 1 {
-			e.versions = e.versions[1:]
-		}
-		return 0, v, nil
-	}
-	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
 }
 
 func TestSystemHandler_PinnedUpgrade_NeedsTheInstalledVersionToRollBack(t *testing.T) {

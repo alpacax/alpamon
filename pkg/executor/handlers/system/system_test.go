@@ -23,19 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMain points aptSourcesDir at an empty temp dir for the whole package
-// run, so apt-path tests never read the host's real /etc/apt/sources.list.d.
-func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "alpamon-apt-sources")
-	if err != nil {
-		panic(err)
-	}
-	aptSourcesDir = dir
-	code := m.Run()
-	_ = os.RemoveAll(dir)
-	os.Exit(code)
-}
-
 // The delayed actions hand the pool a job that sleeps delayedActionDelay, and
 // Shutdown cannot interrupt a sleeping job. Neither span costs real time in a bubble.
 const poolDrainWait = 5 * time.Second
@@ -45,21 +32,6 @@ const poolDrainWait = 5 * time.Second
 // would bury it under the resulting deadlock. Blank so the unused linter reads it as
 // the compile-time assertion it is.
 const _ = uint(poolDrainWait - delayedActionDelay - 1)
-
-// drainThen waits the scheduled job out before checking it landed, because a
-// fire-and-forget action has not run when the handler returns. Shutdown closes the
-// job queue, so the check rides on the drain rather than being a second call.
-//
-// Register it after the context manager's own Shutdown so LIFO drains the pool first.
-// The other order cancels poolCtx with the job still sleeping, and holds today only
-// because time.Sleep ignores the context and so does MockCommandExecutor.
-func drainThen(t *testing.T, p *pool.Pool, check func()) func() {
-	t.Helper()
-	return func() {
-		require.NoError(t, p.Shutdown(poolDrainWait))
-		check()
-	}
-}
 
 // MockWSClient is a mock implementation of WSClient for testing
 type MockWSClient struct {
@@ -89,6 +61,10 @@ type MockVersionResolver struct {
 	LatestCalls         int
 }
 
+func newMockVersionResolver() *MockVersionResolver {
+	return &MockVersionResolver{LatestVersion: "v0.0.0-test", PamVersion: ""}
+}
+
 func (m *MockVersionResolver) GetLatestVersion(proxyURL string) string {
 	m.LatestCalls++
 	m.GotProxy = proxyURL
@@ -103,10 +79,6 @@ func (m *MockVersionResolver) InvalidatePamCache() {
 	m.InvalidatePamCalled = true
 }
 
-func newMockVersionResolver() *MockVersionResolver {
-	return &MockVersionResolver{LatestVersion: "v0.0.0-test", PamVersion: ""}
-}
-
 // MockAPISession records Delete calls and returns a configurable response so
 // tests can verify the byebye unregister flow without hitting the network.
 type MockAPISession struct {
@@ -117,11 +89,6 @@ type MockAPISession struct {
 	PostCalls        []mockPost
 	PostStatusCode   int
 	PostErr          error
-}
-
-type mockPost struct {
-	URL  string
-	Body any
 }
 
 func (m *MockAPISession) Post(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
@@ -172,6 +139,11 @@ func (m *MockAPISession) lastDeleteURL() string {
 		return ""
 	}
 	return m.DeleteCalls[len(m.DeleteCalls)-1]
+}
+
+type mockPost struct {
+	URL  string
+	Body any
 }
 
 // Reports the zypper lock exit code for the first lockedRuns `zypper` commands,
@@ -225,6 +197,34 @@ func (e *versionSteppingExecutor) RunAsUser(ctx context.Context, username string
 		return 0, e.after, nil
 	}
 	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
+}
+
+// TestMain points aptSourcesDir at an empty temp dir for the whole package
+// run, so apt-path tests never read the host's real /etc/apt/sources.list.d.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "alpamon-apt-sources")
+	if err != nil {
+		panic(err)
+	}
+	aptSourcesDir = dir
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// drainThen waits the scheduled job out before checking it landed, because a
+// fire-and-forget action has not run when the handler returns. Shutdown closes the
+// job queue, so the check rides on the drain rather than being a second call.
+//
+// Register it after the context manager's own Shutdown so LIFO drains the pool first.
+// The other order cancels poolCtx with the job still sleeping, and holds today only
+// because time.Sleep ignores the context and so does MockCommandExecutor.
+func drainThen(t *testing.T, p *pool.Pool, check func()) func() {
+	t.Helper()
+	return func() {
+		require.NoError(t, p.Shutdown(poolDrainWait))
+		check()
+	}
 }
 
 func TestSystemHandler_Name(t *testing.T) {

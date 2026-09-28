@@ -45,6 +45,34 @@ const delayedActionDelay = 1 * time.Second
 // linter reads it as the compile-time assertion it is.
 const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
 
+// zypper behavior the other package managers do not share; per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
+const (
+	// The PackageCloud repository carrying alpamon, whatever alias the operator gave it.
+	alpamonRepoURL = "packagecloud.io/alpacax/alpamon"
+
+	// ZYPP_LOCKED: packagekit, an operator's session, or a console update racing
+	// the agent's own upgrade holds the libzypp lock. dnf waits for its lock and
+	// apt can be told to retry; zypper --non-interactive gives up at once.
+	zypperLockedExit   = 7
+	zypperLockAttempts = 3
+)
+
+// Var so tests do not sleep. Long enough for a short transaction elsewhere to finish, short enough to stay inside a console command's patience.
+var zypperLockRetryDelay = 15 * time.Second
+
+// aptSourcesDir is where apt reads source files from. Var so tests point it at a temp dir.
+var aptSourcesDir = "/etc/apt/sources.list.d"
+
+// Test seam: the uninstall scheduling it gates is linux-only, so without it the
+// path cannot be exercised from a darwin or windows test run.
+var hasSystemd = utils.HasSystemd
+
+// apt's false spellings for a deb822 "Enabled:" field; anything else, including
+// a missing field, counts as enabled.
+var deb822FalseValues = map[string]bool{
+	"no": true, "false": true, "without": true, "off": true, "disable": true, "0": true,
+}
+
 // SystemHandler handles system-level commands like restart, reboot, shutdown, upgrade
 type SystemHandler struct {
 	*common.BaseHandler
@@ -346,60 +374,6 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	return exitCode, output, err
 }
 
-// sameVersion reports whether two version strings name the same release,
-// ignoring a leading "v" on either side. The two sources disagree on the
-// prefix: the build-time injected version has it stripped, a GitHub release
-// tag keeps it.
-func sameVersion(a, b string) bool {
-	return strings.TrimPrefix(a, "v") == strings.TrimPrefix(b, "v")
-}
-
-// sanitizePackageProxy validates the payload-provided proxy URL once at
-// handleUpgrade entry. An invalid or unsupported value is treated as absent
-// for BOTH the version lookup and the package-manager shell environment, so
-// the two paths stay consistent (no half-applied proxy in the root shell).
-// The raw value is never logged because proxy URLs may embed credentials
-// (user:pass@); the scheme alone is safe to log.
-func sanitizePackageProxy(raw string) string {
-	if raw == "" {
-		return ""
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Hostname() == "" {
-		log.Warn().Msg("Invalid package proxy URL in upgrade payload; ignoring it.")
-		return ""
-	}
-	switch parsed.Scheme {
-	case "http", "https", "socks5", "socks5h":
-		return raw
-	default:
-		log.Warn().Str("scheme", parsed.Scheme).Msg("Unsupported package proxy scheme in upgrade payload; ignoring it.")
-		return ""
-	}
-}
-
-// zypper behavior the other package managers do not share; per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
-const (
-	// The PackageCloud repository carrying alpamon, whatever alias the operator gave it.
-	alpamonRepoURL = "packagecloud.io/alpacax/alpamon"
-
-	// ZYPP_LOCKED: packagekit, an operator's session, or a console update racing
-	// the agent's own upgrade holds the libzypp lock. dnf waits for its lock and
-	// apt can be told to retry; zypper --non-interactive gives up at once.
-	zypperLockedExit   = 7
-	zypperLockAttempts = 3
-)
-
-// Var so tests do not sleep. Long enough for a short transaction elsewhere to finish, short enough to stay inside a console command's patience.
-var zypperLockRetryDelay = 15 * time.Second
-
-// aptSourcesDir is where apt reads source files from. Var so tests point it at a temp dir.
-var aptSourcesDir = "/etc/apt/sources.list.d"
-
-// Test seam: the uninstall scheduling it gates is linux-only, so without it the
-// path cannot be exercised from a darwin or windows test run.
-var hasSystemd = utils.HasSystemd
-
 // The alias to scope the refresh to, or "" when none resolves. `lr --export -` is
 // parsed rather than the table form: it emits ini and needs no column splitting.
 func (h *SystemHandler) resolveZypperAlpamonRepo(ctx context.Context) string {
@@ -436,112 +410,6 @@ func (h *SystemHandler) resolveZypperAlpamonRepo(ctx context.Context) string {
 	return resolved()
 }
 
-// aptUpdateArgv builds the "apt-get update" argv, scoped to alpamonSource when
-// non-empty. The arg order is fixed: callers and tests key on it.
-func aptUpdateArgv(alpamonSource string) []string {
-	argv := []string{"apt-get", "update", "-y", "-o", "Acquire::Retries=3"}
-	if alpamonSource != "" {
-		argv = append(argv,
-			"-o", "Dir::Etc::sourcelist="+alpamonSource,
-			"-o", "Dir::Etc::sourceparts=-",
-			"-o", "APT::Get::List-Cleanup=0",
-		)
-	}
-	return argv
-}
-
-// resolveAptAlpamonSource returns the full path of the apt source file that
-// carries alpamon's enabled packagecloud repository, or "" when none resolves.
-func resolveAptAlpamonSource() string {
-	entries, err := os.ReadDir(aptSourcesDir)
-	if err != nil {
-		return ""
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() && (strings.HasSuffix(e.Name(), ".list") || strings.HasSuffix(e.Name(), ".sources")) {
-			names = append(names, e.Name())
-		}
-	}
-
-	for _, name := range names {
-		path := filepath.Join(aptSourcesDir, name)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		if strings.HasSuffix(name, ".sources") {
-			if hasEnabledAlpamonStanza(string(data)) {
-				return path
-			}
-			continue
-		}
-		for line := range strings.SplitSeq(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			if strings.Contains(line, alpamonRepoURL) {
-				return path
-			}
-		}
-	}
-	return ""
-}
-
-// apt's false spellings for a deb822 "Enabled:" field; anything else, including
-// a missing field, counts as enabled.
-var deb822FalseValues = map[string]bool{
-	"no": true, "false": true, "without": true, "off": true, "disable": true, "0": true,
-}
-
-func hasEnabledAlpamonStanza(data string) bool {
-	enabled, matched := true, false
-	resolved := func() bool { return matched && enabled }
-
-	for line := range strings.SplitSeq(data, "\n") {
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case trimmed == "":
-			if resolved() {
-				return true
-			}
-			enabled, matched = true, false
-		case strings.HasPrefix(trimmed, "#"):
-			continue
-		default:
-			if key, value, ok := strings.Cut(trimmed, ":"); ok && strings.EqualFold(strings.TrimSpace(key), "enabled") {
-				enabled = !deb822FalseValues[strings.ToLower(strings.TrimSpace(value))]
-			}
-			if strings.Contains(trimmed, alpamonRepoURL) {
-				matched = true
-			}
-		}
-	}
-	return resolved()
-}
-
-// appendStepFailure returns output with the failed step and its exit code appended,
-// since the package manager's own error text does not say which step produced it.
-func appendStepFailure(output, step string, code int, err error) string {
-	return strings.TrimRight(output, "\n") + "\n\n" + commandFailed(step, code, err).Error()
-}
-
-func retryWhileZypperLocked(ctx context.Context, run func() (int, string, error)) (int, string, error) {
-	for attempt := 1; ; attempt++ {
-		exitCode, output, err := run()
-		if exitCode != zypperLockedExit || utils.PackageManager != utils.PkgZypper || attempt >= zypperLockAttempts {
-			return exitCode, output, err
-		}
-		log.Info().Int("attempt", attempt).Msg("zypper is locked by another process; retrying.")
-		select {
-		case <-ctx.Done():
-			return exitCode, output, err
-		case <-time.After(zypperLockRetryDelay):
-		}
-	}
-}
-
 // version-release of each package rpm can report, skipping the rest.
 func (h *SystemHandler) installedRPMVersions(ctx context.Context, packages []string) map[string]string {
 	versions := make(map[string]string, len(packages))
@@ -569,82 +437,6 @@ func (h *SystemHandler) unmovedPackages(ctx context.Context, versionsBefore map[
 	}
 	slices.Sort(stale)
 	return stale
-}
-
-// The console shows an operator the exit code and the command output, and zypper's
-// own output does not say what the operator has to change. Measured on an
-// unregistered sles12sp5 container: `lr` exits 6 and `update alpamon` exits 104,
-// neither of them mentioning the missing subscription that caused both.
-func withZypperHint(exitCode int, output string) string {
-	if utils.PackageManager != utils.PkgZypper {
-		return output
-	}
-
-	var hint string
-	switch exitCode {
-	case 4:
-		hint = "A repository could not be refreshed. One unreachable repository fails the whole " +
-			"command, even when alpamon's own repository is fine: check `zypper lr --uri`."
-	case 6:
-		hint = "No repositories are defined. On SLES this usually means the host has no active " +
-			"subscription (`SUSEConnect --status`); alpamon's repository also has to be added with " +
-			"`zypper addrepo`, because the PackageCloud one-liner writes a yum repo file zypper never reads."
-	case zypperLockedExit:
-		hint = "Another process still holds the libzypp lock after several retries. Find it with " +
-			"`zypper ps`, and expect packagekit or an operator's own zypper session."
-	case 104:
-		hint = "No configured repository carries the package. Add alpamon's repository with " +
-			"`zypper addrepo`, and on SLES check that the subscription is active (`SUSEConnect --status`)."
-	case 106:
-		hint = "A repository was skipped because it failed to refresh, so the update may have missed " +
-			"packages: `zypper refresh` names the one that failed."
-	default:
-		return output
-	}
-	return strings.TrimRight(output, "\n") + "\n\n" + hint
-}
-
-// 102/103 follow a successful install; every other code stays a failure, and the
-// dropped error is the *exec.ExitError for the same code. 106 (some repos skipped)
-// is success only when alpamonRepoRefreshed says the repo we depend on was
-// refreshed on its own, so the skipped one cannot hide a missed update.
-func normalizeZypperExit(exitCode int, err error, alpamonRepoRefreshed bool) (int, error) {
-	if utils.PackageManager != utils.PkgZypper {
-		return exitCode, err
-	}
-	switch {
-	case exitCode == 102, exitCode == 103, exitCode == 106 && alpamonRepoRefreshed:
-		log.Info().Int("zypperExitCode", exitCode).Msg("zypper reported an informational exit code; treating the command as successful.")
-		return 0, nil
-	}
-	return exitCode, err
-}
-
-// packageProxyEnv builds the proxy environment for the package-manager shell
-// in closed-network deployments. It returns nil when no proxy is configured,
-// which keeps behavior identical to an env-less invocation. no_proxy excludes
-// the Alpacon server host, the IMDS endpoints (AWS IPv4/IPv6, GCP), and
-// localhost as a safeguard so
-// nothing spawned by the upgrade can route control-plane or metadata traffic
-// through the package proxy.
-func packageProxyEnv(proxyURL string) map[string]string {
-	if proxyURL == "" {
-		return nil
-	}
-
-	noProxy := "localhost,127.0.0.1,::1,169.254.169.254,fd00:ec2::254,metadata.google.internal"
-	if serverURL, err := url.Parse(config.GlobalSettings.ServerURL); err == nil && serverURL.Hostname() != "" {
-		noProxy += "," + serverURL.Hostname()
-	}
-
-	return map[string]string{
-		"http_proxy":  proxyURL,
-		"https_proxy": proxyURL,
-		"HTTP_PROXY":  proxyURL,
-		"HTTPS_PROXY": proxyURL,
-		"no_proxy":    noProxy,
-		"NO_PROXY":    noProxy,
-	}
 }
 
 // selfUpdate downloads and replaces the binary from GitHub Releases, then triggers restart.
@@ -915,4 +707,212 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	})
 	exitCode, err = normalizeZypperExit(exitCode, err, false)
 	return exitCode, withZypperHint(exitCode, output), err
+}
+
+// sameVersion reports whether two version strings name the same release,
+// ignoring a leading "v" on either side. The two sources disagree on the
+// prefix: the build-time injected version has it stripped, a GitHub release
+// tag keeps it.
+func sameVersion(a, b string) bool {
+	return strings.TrimPrefix(a, "v") == strings.TrimPrefix(b, "v")
+}
+
+// sanitizePackageProxy validates the payload-provided proxy URL once at
+// handleUpgrade entry. An invalid or unsupported value is treated as absent
+// for BOTH the version lookup and the package-manager shell environment, so
+// the two paths stay consistent (no half-applied proxy in the root shell).
+// The raw value is never logged because proxy URLs may embed credentials
+// (user:pass@); the scheme alone is safe to log.
+func sanitizePackageProxy(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() == "" {
+		log.Warn().Msg("Invalid package proxy URL in upgrade payload; ignoring it.")
+		return ""
+	}
+	switch parsed.Scheme {
+	case "http", "https", "socks5", "socks5h":
+		return raw
+	default:
+		log.Warn().Str("scheme", parsed.Scheme).Msg("Unsupported package proxy scheme in upgrade payload; ignoring it.")
+		return ""
+	}
+}
+
+// aptUpdateArgv builds the "apt-get update" argv, scoped to alpamonSource when
+// non-empty. The arg order is fixed: callers and tests key on it.
+func aptUpdateArgv(alpamonSource string) []string {
+	argv := []string{"apt-get", "update", "-y", "-o", "Acquire::Retries=3"}
+	if alpamonSource != "" {
+		argv = append(argv,
+			"-o", "Dir::Etc::sourcelist="+alpamonSource,
+			"-o", "Dir::Etc::sourceparts=-",
+			"-o", "APT::Get::List-Cleanup=0",
+		)
+	}
+	return argv
+}
+
+// resolveAptAlpamonSource returns the full path of the apt source file that
+// carries alpamon's enabled packagecloud repository, or "" when none resolves.
+func resolveAptAlpamonSource() string {
+	entries, err := os.ReadDir(aptSourcesDir)
+	if err != nil {
+		return ""
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && (strings.HasSuffix(e.Name(), ".list") || strings.HasSuffix(e.Name(), ".sources")) {
+			names = append(names, e.Name())
+		}
+	}
+
+	for _, name := range names {
+		path := filepath.Join(aptSourcesDir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if strings.HasSuffix(name, ".sources") {
+			if hasEnabledAlpamonStanza(string(data)) {
+				return path
+			}
+			continue
+		}
+		for line := range strings.SplitSeq(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if strings.Contains(line, alpamonRepoURL) {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
+func hasEnabledAlpamonStanza(data string) bool {
+	enabled, matched := true, false
+	resolved := func() bool { return matched && enabled }
+
+	for line := range strings.SplitSeq(data, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			if resolved() {
+				return true
+			}
+			enabled, matched = true, false
+		case strings.HasPrefix(trimmed, "#"):
+			continue
+		default:
+			if key, value, ok := strings.Cut(trimmed, ":"); ok && strings.EqualFold(strings.TrimSpace(key), "enabled") {
+				enabled = !deb822FalseValues[strings.ToLower(strings.TrimSpace(value))]
+			}
+			if strings.Contains(trimmed, alpamonRepoURL) {
+				matched = true
+			}
+		}
+	}
+	return resolved()
+}
+
+// appendStepFailure returns output with the failed step and its exit code appended,
+// since the package manager's own error text does not say which step produced it.
+func appendStepFailure(output, step string, code int, err error) string {
+	return strings.TrimRight(output, "\n") + "\n\n" + commandFailed(step, code, err).Error()
+}
+
+func retryWhileZypperLocked(ctx context.Context, run func() (int, string, error)) (int, string, error) {
+	for attempt := 1; ; attempt++ {
+		exitCode, output, err := run()
+		if exitCode != zypperLockedExit || utils.PackageManager != utils.PkgZypper || attempt >= zypperLockAttempts {
+			return exitCode, output, err
+		}
+		log.Info().Int("attempt", attempt).Msg("zypper is locked by another process; retrying.")
+		select {
+		case <-ctx.Done():
+			return exitCode, output, err
+		case <-time.After(zypperLockRetryDelay):
+		}
+	}
+}
+
+// The console shows an operator the exit code and the command output, and zypper's
+// own output does not say what the operator has to change. Measured on an
+// unregistered sles12sp5 container: `lr` exits 6 and `update alpamon` exits 104,
+// neither of them mentioning the missing subscription that caused both.
+func withZypperHint(exitCode int, output string) string {
+	if utils.PackageManager != utils.PkgZypper {
+		return output
+	}
+
+	var hint string
+	switch exitCode {
+	case 4:
+		hint = "A repository could not be refreshed. One unreachable repository fails the whole " +
+			"command, even when alpamon's own repository is fine: check `zypper lr --uri`."
+	case 6:
+		hint = "No repositories are defined. On SLES this usually means the host has no active " +
+			"subscription (`SUSEConnect --status`); alpamon's repository also has to be added with " +
+			"`zypper addrepo`, because the PackageCloud one-liner writes a yum repo file zypper never reads."
+	case zypperLockedExit:
+		hint = "Another process still holds the libzypp lock after several retries. Find it with " +
+			"`zypper ps`, and expect packagekit or an operator's own zypper session."
+	case 104:
+		hint = "No configured repository carries the package. Add alpamon's repository with " +
+			"`zypper addrepo`, and on SLES check that the subscription is active (`SUSEConnect --status`)."
+	case 106:
+		hint = "A repository was skipped because it failed to refresh, so the update may have missed " +
+			"packages: `zypper refresh` names the one that failed."
+	default:
+		return output
+	}
+	return strings.TrimRight(output, "\n") + "\n\n" + hint
+}
+
+// 102/103 follow a successful install; every other code stays a failure, and the
+// dropped error is the *exec.ExitError for the same code. 106 (some repos skipped)
+// is success only when alpamonRepoRefreshed says the repo we depend on was
+// refreshed on its own, so the skipped one cannot hide a missed update.
+func normalizeZypperExit(exitCode int, err error, alpamonRepoRefreshed bool) (int, error) {
+	if utils.PackageManager != utils.PkgZypper {
+		return exitCode, err
+	}
+	switch {
+	case exitCode == 102, exitCode == 103, exitCode == 106 && alpamonRepoRefreshed:
+		log.Info().Int("zypperExitCode", exitCode).Msg("zypper reported an informational exit code; treating the command as successful.")
+		return 0, nil
+	}
+	return exitCode, err
+}
+
+// packageProxyEnv builds the proxy environment for the package-manager shell
+// in closed-network deployments. It returns nil when no proxy is configured,
+// which keeps behavior identical to an env-less invocation. no_proxy excludes
+// the Alpacon server host, the IMDS endpoints (AWS IPv4/IPv6, GCP), and
+// localhost as a safeguard so
+// nothing spawned by the upgrade can route control-plane or metadata traffic
+// through the package proxy.
+func packageProxyEnv(proxyURL string) map[string]string {
+	if proxyURL == "" {
+		return nil
+	}
+
+	noProxy := "localhost,127.0.0.1,::1,169.254.169.254,fd00:ec2::254,metadata.google.internal"
+	if serverURL, err := url.Parse(config.GlobalSettings.ServerURL); err == nil && serverURL.Hostname() != "" {
+		noProxy += "," + serverURL.Hostname()
+	}
+
+	return map[string]string{
+		"http_proxy":  proxyURL,
+		"https_proxy": proxyURL,
+		"HTTP_PROXY":  proxyURL,
+		"HTTPS_PROXY": proxyURL,
+		"no_proxy":    noProxy,
+		"NO_PROXY":    noProxy,
+	}
 }

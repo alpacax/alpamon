@@ -14,6 +14,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// packageHostNote goes into the report detail when the console sent artifact
+// pins to a host that installs through its package manager.
+const packageHostNote = "digest not applicable on package-managed host"
+
 // handlePinnedUpgrade installs exactly the release the server pinned. On a
 // package-managed host that is a version-pinned install through the package
 // manager, whose repository signature is the trust chain; elsewhere it is the
@@ -70,10 +74,6 @@ func (h *SystemHandler) handlePinnedUpgrade(ctx context.Context, target *common.
 		return h.failPinned(report, updater.Classify(updater.ClassUnknown, err), "")
 	}
 }
-
-// packageHostNote goes into the report detail when the console sent artifact
-// pins to a host that installs through its package manager.
-const packageHostNote = "digest not applicable on package-managed host"
 
 // failPinned reports a failed attempt and returns the command result.
 func (h *SystemHandler) failPinned(report updater.Report, err error, output string) (int, string, error) {
@@ -301,13 +301,6 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, target string,
 	return "", fmt.Errorf("package manager %q has no pinned install", utils.PackageManager)
 }
 
-func commandFailed(what string, code int, err error) error {
-	if err != nil {
-		return fmt.Errorf("%s exited %d: %w", what, code, err)
-	}
-	return fmt.Errorf("%s exited %d", what, code)
-}
-
 // installedAlpamonVersion asks the package database for the installed
 // alpamon version, or "" when it cannot tell.
 func (h *SystemHandler) installedAlpamonVersion(ctx context.Context) string {
@@ -323,6 +316,13 @@ func (h *SystemHandler) installedAlpamonVersion(ctx context.Context) string {
 		return ""
 	}
 	return strings.TrimSpace(out)
+}
+
+func commandFailed(what string, code int, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s exited %d: %w", what, code, err)
+	}
+	return fmt.Errorf("%s exited %d", what, code)
 }
 
 // pickDebVersion returns the exact version string `apt-cache madison` lists
