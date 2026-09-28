@@ -331,9 +331,11 @@ func TestRunForever_WriteJSONAlongsideKeepalivePings(t *testing.T) {
 	require.Eventually(t, func() bool { return wc.conn() != nil }, 5*time.Second, time.Millisecond)
 
 	// Keep writing until a ping lands: a fixed batch can finish before the ticker first fires.
+	// Count from here, since pings start with the connection, before this loop.
+	pingsBefore := pings.Load()
 	deadline := time.Now().Add(5 * time.Second)
 	var sent int32
-	for sent < minMessages || pings.Load() == 0 {
+	for sent < minMessages || pings.Load() == pingsBefore {
 		require.True(t, time.Now().Before(deadline), "no ping went out while WriteJSON was writing")
 		require.NoError(t, wc.WriteJSON(map[string]int32{"seq": sent}))
 		sent++
