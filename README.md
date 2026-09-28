@@ -35,7 +35,7 @@ sudo yum install alpamon
 sudo alpamon register --url https://<workspace> --token <TOKEN>
 ```
 
-**openSUSE / SLES** (best-effort) — see [**docs/opensuse.md**](docs/opensuse.md) for the sudoers prerequisite and the `yum`-only server operations that still fail here.
+**openSUSE / SLES** (best-effort): see [**docs/opensuse.md**](docs/opensuse.md) for how sudo works there and the `yum`-only server operations that still fail here.
 ```bash
 sudo zypper addrepo -f 'https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch' alpamon
 sudo zypper --gpg-auto-import-keys refresh && sudo zypper install alpamon
