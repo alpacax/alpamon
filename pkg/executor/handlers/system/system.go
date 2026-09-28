@@ -451,7 +451,7 @@ func aptUpdateArgv(alpamonSource string) []string {
 }
 
 // resolveAptAlpamonSource returns the full path of the apt source file that
-// carries alpamon's packagecloud repository, or "" when none resolves.
+// carries alpamon's enabled packagecloud repository, or "" when none resolves.
 func resolveAptAlpamonSource() string {
 	entries, err := os.ReadDir(aptSourcesDir)
 	if err != nil {
@@ -470,6 +470,12 @@ func resolveAptAlpamonSource() string {
 		if err != nil {
 			continue
 		}
+		if strings.HasSuffix(name, ".sources") {
+			if deb822HasEnabledAlpamonStanza(string(data)) {
+				return path
+			}
+			continue
+		}
 		for line := range strings.SplitSeq(string(data), "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "#") {
@@ -481,6 +487,42 @@ func resolveAptAlpamonSource() string {
 		}
 	}
 	return ""
+}
+
+// apt's false spellings for a deb822 "Enabled:" field; anything else, including
+// a missing field, counts as enabled.
+var deb822FalseValues = map[string]bool{
+	"no": true, "false": true, "without": true, "off": true, "disable": true, "0": true,
+}
+
+// deb822HasEnabledAlpamonStanza reports whether data contains a deb822 stanza
+// that both references alpamonRepoURL and is enabled.
+// deb822HasEnabledAlpamonStanza reports whether a deb822 .sources file has a
+// stanza naming alpamon's repository that apt would not skip as disabled.
+func deb822HasEnabledAlpamonStanza(data string) bool {
+	enabled, matched := true, false
+	resolved := func() bool { return matched && enabled }
+
+	for line := range strings.SplitSeq(data, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			if resolved() {
+				return true
+			}
+			enabled, matched = true, false
+		case strings.HasPrefix(trimmed, "#"):
+			continue
+		default:
+			if key, value, ok := strings.Cut(trimmed, ":"); ok && strings.EqualFold(strings.TrimSpace(key), "enabled") {
+				enabled = !deb822FalseValues[strings.ToLower(strings.TrimSpace(value))]
+			}
+			if strings.Contains(trimmed, alpamonRepoURL) {
+				matched = true
+			}
+		}
+	}
+	return resolved()
 }
 
 // appendStepFailure returns output with the failed step and its exit code appended,

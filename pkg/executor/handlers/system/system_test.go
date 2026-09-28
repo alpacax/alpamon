@@ -1126,6 +1126,71 @@ func TestResolveAptAlpamonSource_MatchesDeb822SourcesFile(t *testing.T) {
 	assert.Equal(t, path, resolveAptAlpamonSource())
 }
 
+// TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored checks that a
+// deb822 stanza disabled via "Enabled: no" is not treated as apt's source,
+// since apt itself skips it.
+func TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"),
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, "", resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_EnabledStanzaAfterDisabledOneInSameFile checks
+// that a later, enabled alpamon stanza in the same file still resolves.
+func TestResolveAptAlpamonSource_EnabledStanzaAfterDisabledOneInSameFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alpacax_alpamon.sources")
+	content := "Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n" +
+		"\n" +
+		"Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: focal\nComponents: main\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, path, resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive checks that
+// "enabled: No" is still recognized as apt's false spelling for the field.
+func TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"),
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nenabled: No\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, "", resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState
+// checks that an unrelated enabled stanza in the same file does not make a
+// disabled alpamon stanza resolve, proving enabled state is tracked per stanza.
+func TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState(t *testing.T) {
+	dir := t.TempDir()
+	content := "Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n" +
+		"\n" +
+		"Types: deb\nURIs: http://dead.invalid.example/repo\nSuites: jammy\nComponents: main\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"), []byte(content), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, "", resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled
+// checks that a disabled .sources stanza does not shadow an active .list file.
+func TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"),
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n"), 0o644))
+	listPath := filepath.Join(dir, "alpacax_alpamon.list")
+	require.NoError(t, os.WriteFile(listPath,
+		[]byte("deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, listPath, resolveAptAlpamonSource())
+}
+
 // TestSystemHandler_Upgrade_ScopesAptUpdateToAlpamonSource checks that a broken
 // third-party source cannot fail the upgrade, as the zypper path already ensures.
 func TestSystemHandler_Upgrade_ScopesAptUpdateToAlpamonSource(t *testing.T) {
@@ -1145,7 +1210,7 @@ func TestSystemHandler_Upgrade_ScopesAptUpdateToAlpamonSource(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode)
 
-	var scopedUpdateAt, installAt int = -1, -1
+	var scopedUpdateAt, installAt = -1, -1
 	for i, c := range mockExec.GetExecutedCommands() {
 		joined := c.Name + " " + strings.Join(c.Args, " ")
 		if c.Name == "apt-get" && strings.Contains(joined, "update") {
