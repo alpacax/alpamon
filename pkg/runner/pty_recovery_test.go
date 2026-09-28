@@ -28,11 +28,19 @@ type wshServer struct {
 	conns         []*websocket.Conn
 	recoveryPosts atomic.Int32
 	received      [][]byte // binary messages read off every accepted conn, in receipt order
+	// handle, when set, serves each accepted conn, numbered from 0, in place of recordReads.
+	handle func(n int, c *websocket.Conn)
 }
 
 func newWshServer(t *testing.T) *wshServer {
 	t.Helper()
-	s := &wshServer{}
+	return newWshServerWith(t, nil)
+}
+
+// newWshServerWith is newWshServer with handle serving each accepted conn; nil keeps recordReads.
+func newWshServerWith(t *testing.T, handle func(n int, c *websocket.Conn)) *wshServer {
+	t.Helper()
+	s := &wshServer{handle: handle}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
 	mux := http.NewServeMux()
@@ -42,8 +50,13 @@ func newWshServer(t *testing.T) *wshServer {
 			return
 		}
 		s.mu.Lock()
+		n := len(s.conns)
 		s.conns = append(s.conns, c)
 		s.mu.Unlock()
+		if s.handle != nil {
+			s.handle(n, c)
+			return
+		}
 		s.recordReads(c)
 	})
 	mux.HandleFunc(reconnectPtyWebsocketURL, func(w http.ResponseWriter, r *http.Request) {

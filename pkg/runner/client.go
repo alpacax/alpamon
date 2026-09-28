@@ -371,11 +371,7 @@ func (wc *WebsocketClient) Connect(ctx context.Context) error {
 		var ka *connKeepalive
 		if wc.keepaliveEnabled {
 			ka = newConnKeepalive()
-			// The pong handler runs inside ReadMessage, on the read loop, so it may arm the read deadline.
-			conn.SetPongHandler(func(string) error {
-				ka.pongSeen.Store(true)
-				return conn.SetReadDeadline(time.Now().Add(keepaliveTimeout))
-			})
+			watchPongs(conn, ka)
 		}
 
 		if old := wc.installConn(conn, ka); old != nil {
@@ -393,11 +389,30 @@ func (wc *WebsocketClient) Connect(ctx context.Context) error {
 }
 
 // sendPings pings conn every interval until conn is closed, stops being the
-// current connection, or ctx ends. A failed ping, such as a write that timed out
-// behind a long WriteJSON, needs no handling here: the pong it did not earn
-// lets the read deadline expire, and the read loop owns reconnecting.
-// WriteControl is safe to call alongside WriteJSON.
+// current connection, or ctx ends.
 func (wc *WebsocketClient) sendPings(ctx context.Context, conn *websocket.Conn, ka *connKeepalive, interval time.Duration) {
+	pingConn(ctx, conn, ka, interval, wc.conn)
+}
+
+// watchPongs makes each pong on conn mark ka and push conn's read deadline
+// keepaliveTimeout out. Call it before conn reaches its reader: the handler
+// runs inside ReadMessage, on the read loop, so it may arm the read deadline.
+// It is bound to conn and ka, so a late pong on a replaced connection can
+// never move the deadline of the one that replaced it.
+func watchPongs(conn *websocket.Conn, ka *connKeepalive) {
+	conn.SetPongHandler(func(string) error {
+		ka.pongSeen.Store(true)
+		return conn.SetReadDeadline(time.Now().Add(keepaliveTimeout))
+	})
+}
+
+// pingConn pings conn every interval until ka is stopped, current no longer
+// returns conn, or ctx ends. A failed ping, such as a write that timed out
+// behind a long data write, needs no handling here: the pong it did not earn
+// lets the read deadline expire, and the read loop owns reconnecting.
+// WriteControl is safe to call alongside the connection's one data writer:
+// gorilla/websocket serializes control and data frames on the same lock.
+func pingConn(ctx context.Context, conn *websocket.Conn, ka *connKeepalive, interval time.Duration, current func() *websocket.Conn) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -410,7 +425,7 @@ func (wc *WebsocketClient) sendPings(ctx context.Context, conn *websocket.Conn, 
 		case <-ticker.C:
 		}
 
-		if wc.conn() != conn {
+		if current() != conn {
 			return
 		}
 		_ = conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(keepaliveWriteWait))
