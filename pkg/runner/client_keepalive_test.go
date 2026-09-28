@@ -301,7 +301,7 @@ func TestRunForever_WriteJSONAlongsideKeepalivePings(t *testing.T) {
 	// Run with -race: the keepalive goroutine's WriteControl, the pong
 	// handler on the read loop and WriteJSON all touch the same connection.
 	shrinkKeepalive(t, time.Millisecond, time.Second, 10*time.Millisecond)
-	const messages = 200
+	const minMessages = 200
 
 	var data, pings atomic.Int32
 	connected := make(chan struct{}, 1)
@@ -330,13 +330,20 @@ func TestRunForever_WriteJSONAlongsideKeepalivePings(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { return wc.conn() != nil }, 5*time.Second, time.Millisecond)
 
-	for i := range messages {
-		require.NoError(t, wc.WriteJSON(map[string]int{"seq": i}))
+	// Keep writing until a ping lands: a fixed batch can finish before the ticker first fires.
+	// Count from here, since pings start with the connection, before this loop.
+	pingsBefore := pings.Load()
+	deadline := time.Now().Add(5 * time.Second)
+	var sent int32
+	for sent < minMessages || pings.Load() == pingsBefore {
+		require.True(t, time.Now().Before(deadline),
+			"no ping went out while WriteJSON was writing (sent %d, pings %d)", sent, pings.Load()-pingsBefore)
+		require.NoError(t, wc.WriteJSON(map[string]int32{"seq": sent}))
+		sent++
 	}
 
-	require.Eventually(t, func() bool { return data.Load() == messages }, 5*time.Second, time.Millisecond,
+	require.Eventually(t, func() bool { return data.Load() == sent }, 5*time.Second, time.Millisecond,
 		"the server did not receive every JSON frame")
-	assert.Positive(t, pings.Load(), "no ping went out while WriteJSON was writing")
 
 	stop()
 }
