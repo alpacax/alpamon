@@ -94,7 +94,6 @@ func (h *pinnedHarness) lastReport(t *testing.T) updater.Report {
 	return r
 }
 
-// fakeServiceManager records what would have been scheduled.
 type fakeServiceManager struct {
 	restarts   []time.Duration
 	guards     []string
@@ -120,8 +119,6 @@ func (f *fakeServiceManager) DisarmGuard(unit string) updater.GuardState {
 	return updater.GuardNotRun
 }
 
-// markerCheckingExecutor records whether the intent marker existed when the
-// package install ran.
 type markerCheckingExecutor struct {
 	*common.MockCommandExecutor
 	markerAtInstall *updater.PendingUpgrade
@@ -153,7 +150,6 @@ func (e *sequencedExecutor) RunAsUser(ctx context.Context, username, name string
 	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
 }
 
-// rpmSequence answers rpm -q from a queue.
 type rpmSequence struct {
 	*common.MockCommandExecutor
 	versions []string

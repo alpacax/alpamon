@@ -33,7 +33,6 @@ const poolDrainWait = 5 * time.Second
 // the compile-time assertion it is.
 const _ = uint(poolDrainWait - delayedActionDelay - 1)
 
-// MockWSClient is a mock implementation of WSClient for testing
 type MockWSClient struct {
 	RestartCalled          bool
 	ShutDownCalled         bool
@@ -52,7 +51,6 @@ func (m *MockWSClient) RestartCollector() {
 	m.RestartCollectorCalled = true
 }
 
-// MockVersionResolver is a mock implementation of VersionResolver for testing
 type MockVersionResolver struct {
 	LatestVersion       string
 	PamVersion          string
@@ -79,8 +77,6 @@ func (m *MockVersionResolver) InvalidatePamCache() {
 	m.InvalidatePamCalled = true
 }
 
-// MockAPISession records Delete calls and returns a configurable response so
-// tests can verify the byebye unregister flow without hitting the network.
 type MockAPISession struct {
 	mu               sync.Mutex
 	DeleteCalls      []string
@@ -506,8 +502,6 @@ func TestSystemHandler_Upgrade_UpToDate(t *testing.T) {
 	assert.Contains(t, output, "up-to-date")
 }
 
-// findExecutedShell returns the last executed "sh" command from the mock, or
-// nil when no shell was spawned.
 func findExecutedShell(mockExec *common.MockCommandExecutor) *common.ExecutedCommand {
 	cmds := mockExec.GetExecutedCommands()
 	for i := len(cmds) - 1; i >= 0; i-- {
@@ -953,7 +947,6 @@ func setPackageManagerAndID(t *testing.T, pkgManager, platformID string) {
 	})
 }
 
-// setAptSourcesDir points aptSourcesDir at dir for the duration of the test.
 func setAptSourcesDir(t *testing.T, dir string) {
 	t.Helper()
 	orig := aptSourcesDir
@@ -1091,8 +1084,6 @@ func TestSystemHandler_Upgrade_ZypperRefreshFailureStopsTheUpgrade(t *testing.T)
 	}
 }
 
-// writeAptAlpamonSource points aptSourcesDir at a temp dir holding the alpamon
-// packagecloud source and an unrelated one.
 func writeAptAlpamonSource(t *testing.T) (dir, alpamonFile string) {
 	t.Helper()
 	dir = t.TempDir()
@@ -1138,8 +1129,6 @@ func TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored(t *testing.T) {
 	assert.Equal(t, "", resolveAptAlpamonSource())
 }
 
-// TestResolveAptAlpamonSource_EnabledStanzaAfterDisabledOneInSameFile checks
-// that a later, enabled alpamon stanza in the same file still resolves.
 func TestResolveAptAlpamonSource_EnabledStanzaAfterDisabledOneInSameFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "alpacax_alpamon.sources")
@@ -1163,9 +1152,6 @@ func TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive(t *testing.
 	assert.Equal(t, "", resolveAptAlpamonSource())
 }
 
-// TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState
-// checks that an unrelated enabled stanza in the same file does not make a
-// disabled alpamon stanza resolve, proving enabled state is tracked per stanza.
 func TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState(t *testing.T) {
 	dir := t.TempDir()
 	content := "Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n" +
@@ -1177,8 +1163,6 @@ func TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState(t 
 	assert.Equal(t, "", resolveAptAlpamonSource())
 }
 
-// TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled
-// checks that a disabled .sources stanza does not shadow an active .list file.
 func TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"),
@@ -1259,8 +1243,6 @@ func TestSystemHandler_Upgrade_AptUpdateFailureStopsTheUpgradeAndNamesTheStep(t 
 	}
 }
 
-// TestSystemHandler_Upgrade_AptInstallFailureNamesTheStep checks that an install
-// failure after a good update is reported as the install step's.
 func TestSystemHandler_Upgrade_AptInstallFailureNamesTheStep(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -1714,7 +1696,6 @@ func TestSystemHandler_Upgrade_ZypperRefreshFailureCarriesTheHint(t *testing.T) 
 	assert.Contains(t, output, "SUSEConnect --status")
 }
 
-// setVersion pins the build-time injected agent version for one test.
 func setVersion(t *testing.T, v string) {
 	t.Helper()
 	original := version.Version
