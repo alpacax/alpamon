@@ -471,7 +471,7 @@ func resolveAptAlpamonSource() string {
 			continue
 		}
 		if strings.HasSuffix(name, ".sources") {
-			if deb822HasEnabledAlpamonStanza(string(data)) {
+			if hasEnabledAlpamonStanza(string(data)) {
 				return path
 			}
 			continue
@@ -495,11 +495,7 @@ var deb822FalseValues = map[string]bool{
 	"no": true, "false": true, "without": true, "off": true, "disable": true, "0": true,
 }
 
-// deb822HasEnabledAlpamonStanza reports whether data contains a deb822 stanza
-// that both references alpamonRepoURL and is enabled.
-// deb822HasEnabledAlpamonStanza reports whether a deb822 .sources file has a
-// stanza naming alpamon's repository that apt would not skip as disabled.
-func deb822HasEnabledAlpamonStanza(data string) bool {
+func hasEnabledAlpamonStanza(data string) bool {
 	enabled, matched := true, false
 	resolved := func() bool { return matched && enabled }
 
