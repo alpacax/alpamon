@@ -30,7 +30,9 @@ import (
 )
 
 type PtyClient struct {
-	conn          *websocket.Conn
+	conn *websocket.Conn
+	// keepalive belongs to conn and is replaced with it, under recoveryMu. Nil for a conn installConn did not install.
+	keepalive     *connKeepalive
 	apiSession    *scheduler.Session
 	requestHeader http.Header
 	cmd           *exec.Cmd
@@ -87,7 +89,9 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, mana
 	}
 }
 
-func (pc *PtyClient) initializePtySession() error {
+// initializePtySession dials the Websh channel and starts the shell. ctx is the
+// session context: it bounds the channel's keepalive pings.
+func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 	sanitizedURL, err := validateWebSocketURL(pc.url)
 	if err != nil {
 		return err
@@ -98,10 +102,11 @@ func (pc *PtyClient) initializePtySession() error {
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
 	}
-	pc.conn, _, err = dialer.Dial(sanitizedURL, pc.requestHeader)
+	conn, _, err := dialer.Dial(sanitizedURL, pc.requestHeader)
 	if err != nil {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
+	pc.installConn(ctx, conn)
 
 	shell, args := resolveShell(pc.shell, loadValidShells())
 	pc.cmd = exec.Command(shell, args...)
@@ -146,14 +151,15 @@ func (pc *PtyClient) RunPtyBackground() {
 	log.Debug().Msg("Starting Websh session in background.")
 	defer pc.close()
 
-	err := pc.initializePtySession()
+	// Deferred after close, so it runs first: the keepalive pings stop before close tears the channel down.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := pc.initializePtySession(ctx)
 	if err != nil {
 		log.Error().Err(err).Str("sessionID", pc.sessionID).Str("username", pc.username).Msg("Failed to initialize PTY session.")
 		return
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	recoveryChan := make(chan struct{}, 1)
 
@@ -207,13 +213,41 @@ func (pc *PtyClient) getConn() *websocket.Conn {
 	return pc.conn
 }
 
-// swapConn returns the replaced conn; the caller must close it.
-func (pc *PtyClient) swapConn(conn *websocket.Conn) *websocket.Conn {
+// getConnState returns the current conn together with its keepalive state.
+func (pc *PtyClient) getConnState() (*websocket.Conn, *connKeepalive) {
 	pc.recoveryMu.Lock()
 	defer pc.recoveryMu.Unlock()
-	old := pc.conn
-	pc.conn = conn
+	return pc.conn, pc.keepalive
+}
+
+// installConn makes conn current with the control connection's liveness: a
+// ping every keepaliveInterval and, once the peer has answered one, a read
+// deadline of keepaliveTimeout that every pong and every received frame pushes
+// out. It stops the replaced conn's pings and returns that conn; the caller
+// must close it. ctx is the session context, not a recovery attempt's: the
+// pings must outlive the recovery that installed them.
+func (pc *PtyClient) installConn(ctx context.Context, conn *websocket.Conn) *websocket.Conn {
+	ka := newConnKeepalive()
+	watchPongs(conn, ka)
+
+	pc.recoveryMu.Lock()
+	old, oldKeepalive := pc.conn, pc.keepalive
+	pc.conn, pc.keepalive = conn, ka
+	pc.recoveryMu.Unlock()
+
+	oldKeepalive.stop()
+	go pingConn(ctx, conn, ka, keepaliveInterval, pc.getConn)
 	return old
+}
+
+// ptyReadDeadline is the deadline readFromWebsocket arms before each read.
+// Until the peer answers a ping there is none, as before keepalive existed, so
+// a peer that ignores pings never sees a silent shell dropped.
+func ptyReadDeadline(ka *connKeepalive) time.Time {
+	if ka != nil && ka.pongSeen.Load() {
+		return time.Now().Add(keepaliveTimeout)
+	}
+	return time.Time{}
 }
 
 // waitForRecovery requests a reconnect for the conn that errored—unless recovery already replaced it—and blocks until it completes; false means the session ended.
@@ -245,8 +279,12 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 		case <-ctx.Done():
 			return
 		default:
-			conn := pc.getConn()
-			_, msg, err := conn.ReadMessage()
+			conn, ka := pc.getConnState()
+			var msg []byte
+			err := conn.SetReadDeadline(ptyReadDeadline(ka))
+			if err == nil {
+				_, msg, err = conn.ReadMessage()
+			}
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -255,6 +293,10 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 					log.Debug().Msg("Websh channel closed by peer.")
 					cancel()
 					return
+				}
+				// A silent channel is recovered like any other read failure; the shell keeps running.
+				if ka.expired(err) {
+					log.Warn().Msg("No response on the Websh channel for 2 minutes; reconnecting.")
 				}
 
 				if !pc.waitForRecovery(ctx, conn, recoveryChan) {
@@ -429,7 +471,9 @@ func (pc *PtyClient) close() {
 		_ = pc.cmd.Wait()
 	}
 
-	if conn := pc.getConn(); conn != nil {
+	conn, ka := pc.getConnState()
+	ka.stop()
+	if conn != nil {
 		err := conn.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
@@ -452,7 +496,7 @@ func (pc *PtyClient) close() {
 // recovery reconnects the WebSocket while keeping the PTY session alive.
 func (pc *PtyClient) recovery(ctx context.Context) error {
 	// Derive from the session context so cancellation aborts the retry loop instead of blocking teardown for up to maxRecoveryTimeout.
-	ctx, cancel := context.WithTimeout(ctx, maxRecoveryTimeout)
+	retryCtx, cancel := context.WithTimeout(ctx, maxRecoveryTimeout)
 	defer cancel()
 
 	b := &retry.ExponentialBackoff{
@@ -460,7 +504,7 @@ func (pc *PtyClient) recovery(ctx context.Context) error {
 		MaxInterval:     30 * time.Second,
 	}
 
-	return retry.Retry(ctx, b, func() error {
+	return retry.Retry(retryCtx, b, func() error {
 		data := map[string]any{
 			"session": pc.sessionID,
 		}
@@ -500,7 +544,7 @@ func (pc *PtyClient) recovery(ctx context.Context) error {
 		}
 
 		// Close the replaced conn: its fd would leak otherwise, and a reader still blocked on a silently dead conn must be forced onto the new one.
-		if old := pc.swapConn(conn); old != nil {
+		if old := pc.installConn(ctx, conn); old != nil {
 			_ = old.Close()
 		}
 		log.Debug().Msg("Websh reconnected successfully.")
