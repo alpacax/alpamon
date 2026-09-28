@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -261,7 +263,14 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	var versionsBefore map[string]string
 	switch utils.PackageManager {
 	case utils.PkgApt:
-		cmd = fmt.Sprintf("apt-get update -y -o Acquire::Retries=3 && apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
+		// Scoped to alpamon's source and run apart from install: one broken repo
+		// elsewhere on the host must not block the upgrade, and a failure must name its step.
+		argv := aptUpdateArgv(resolveAptAlpamonSource())
+		code, out, rerr := h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
+		if code != 0 {
+			return code, appendStepFailure(out, "apt-get update", code, rerr), rerr
+		}
+		cmd = fmt.Sprintf("apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
 	case utils.PkgYum:
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
 	case utils.PkgZypper:
@@ -328,6 +337,9 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		}
 	}
 	output = withZypperHint(exitCode, output)
+	if utils.PackageManager == utils.PkgApt && exitCode != 0 {
+		output = appendStepFailure(output, "apt-get install", exitCode, err)
+	}
 	if exitCode == 0 && needPam {
 		h.versionResolver.InvalidatePamCache()
 	}
@@ -381,6 +393,9 @@ const (
 // Var so tests do not sleep. Long enough for a short transaction elsewhere to finish, short enough to stay inside a console command's patience.
 var zypperLockRetryDelay = 15 * time.Second
 
+// aptSourcesDir is where apt reads source files from. Var so tests point it at a temp dir.
+var aptSourcesDir = "/etc/apt/sources.list.d"
+
 // Test seam: the uninstall scheduling it gates is linux-only, so without it the
 // path cannot be exercised from a darwin or windows test run.
 var hasSystemd = utils.HasSystemd
@@ -419,6 +434,59 @@ func (h *SystemHandler) resolveZypperAlpamonRepo(ctx context.Context) string {
 		}
 	}
 	return resolved()
+}
+
+// aptUpdateArgv builds the "apt-get update" argv, scoped to alpamonSource when
+// non-empty. The arg order is fixed: callers and tests key on it.
+func aptUpdateArgv(alpamonSource string) []string {
+	argv := []string{"apt-get", "update", "-y", "-o", "Acquire::Retries=3"}
+	if alpamonSource != "" {
+		argv = append(argv,
+			"-o", "Dir::Etc::sourcelist="+alpamonSource,
+			"-o", "Dir::Etc::sourceparts=-",
+			"-o", "APT::Get::List-Cleanup=0",
+		)
+	}
+	return argv
+}
+
+// resolveAptAlpamonSource returns the full path of the apt source file that
+// carries alpamon's packagecloud repository, or "" when none resolves.
+func resolveAptAlpamonSource() string {
+	entries, err := os.ReadDir(aptSourcesDir)
+	if err != nil {
+		return ""
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && (strings.HasSuffix(e.Name(), ".list") || strings.HasSuffix(e.Name(), ".sources")) {
+			names = append(names, e.Name())
+		}
+	}
+
+	for _, name := range names {
+		path := filepath.Join(aptSourcesDir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for line := range strings.SplitSeq(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if strings.Contains(line, alpamonRepoURL) {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
+// appendStepFailure returns output with the failed step and its exit code appended,
+// since the package manager's own error text does not say which step produced it.
+func appendStepFailure(output, step string, code int, err error) string {
+	return strings.TrimRight(output, "\n") + "\n\n" + commandFailed(step, code, err).Error()
 }
 
 func retryWhileZypperLocked(ctx context.Context, run func() (int, string, error)) (int, string, error) {
@@ -789,8 +857,8 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 		// vendor changes a distribution upgrade needs. Leap/SLES must NOT use
 		// dup: it would jump to the next service pack.
 		//
-		// The refresh mirrors the apt branch's `apt-get update`; see handleUpgrade
-		// for why zypper cannot be relied on to refresh itself.
+		// Unlike handleUpgrade's alpamon-only refresh, this is a system-wide
+		// update, so it must refresh every source, not just alpamon's.
 		if utils.IsTumbleweed(utils.PlatformID) {
 			cmd = "zypper --non-interactive refresh && zypper --non-interactive dup"
 		} else {

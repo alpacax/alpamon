@@ -253,7 +253,7 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, target string,
 
 	switch utils.PackageManager {
 	case utils.PkgApt:
-		if code, out, err := run("apt-get", "update", "-y", "-o", "Acquire::Retries=3"); code != 0 {
+		if code, out, err := run(aptUpdateArgv(resolveAptAlpamonSource())...); code != 0 {
 			return out, commandFailed("apt-get update", code, err)
 		}
 		code, out, err := run("apt-cache", "madison", "alpamon")
