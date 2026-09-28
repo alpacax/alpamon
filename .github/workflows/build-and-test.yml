@@ -294,7 +294,7 @@ jobs:
           for attempt in 1 2 3; do
             yum install -y git curl gcc glibc-devel tar && exit 0
             [ "$attempt" -lt 3 ] || exit 1
-            yum clean metadata
+            yum clean metadata || true
             sleep $((attempt * 15))
           done
 
@@ -305,7 +305,7 @@ jobs:
           for attempt in 1 2 3; do
             dnf install -y --allowerasing git curl gcc glibc-devel tar && exit 0
             [ "$attempt" -lt 3 ] || exit 1
-            dnf clean metadata
+            dnf clean metadata || true
             sleep $((attempt * 15))
           done
 
@@ -317,7 +317,7 @@ jobs:
           for attempt in 1 2 3; do
             zypper --non-interactive install git curl gcc glibc-devel tar gzip && exit 0
             [ "$attempt" -lt 3 ] || exit 1
-            zypper --non-interactive clean --metadata
+            zypper --non-interactive clean --metadata || true
             sleep $((attempt * 15))
           done
 
