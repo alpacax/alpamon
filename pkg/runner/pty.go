@@ -6,7 +6,9 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -221,9 +223,8 @@ func (pc *PtyClient) getConnState() (*websocket.Conn, *connKeepalive) {
 }
 
 // installConn makes conn current with the control connection's liveness: a
-// ping every keepaliveInterval and, once the peer has answered one, a read
-// deadline of keepaliveTimeout that every pong and every received frame pushes
-// out. It stops the replaced conn's pings and returns that conn; the caller
+// ping every keepaliveInterval and a read deadline of keepaliveTimeout that
+// every pong and every received frame pushes out. It stops the replaced conn's pings and returns that conn; the caller
 // must close it. ctx is the session context, not a recovery attempt's: the
 // pings must outlive the recovery that installed them.
 func (pc *PtyClient) installConn(ctx context.Context, conn *websocket.Conn) *websocket.Conn {
@@ -241,13 +242,19 @@ func (pc *PtyClient) installConn(ctx context.Context, conn *websocket.Conn) *web
 }
 
 // ptyReadDeadline is the deadline readFromWebsocket arms before each read.
-// Until the peer answers a ping there is none, as before keepalive existed, so
-// a peer that ignores pings never sees a silent shell dropped.
-func ptyReadDeadline(ka *connKeepalive) time.Time {
-	if ka != nil && ka.pongSeen.Load() {
-		return time.Now().Add(keepaliveTimeout)
-	}
-	return time.Time{}
+// Unlike the control connection, it is armed from the dial on, not only after
+// the first pong: a path that goes silent right after a dial, as it often does
+// during recovery, must still be detected within keepaliveTimeout. Expiry only
+// enters recovery, so a peer that ignores pings but sends frames stays up, and
+// one that sends nothing at all is redialled rather than ending the shell.
+func ptyReadDeadline() time.Time {
+	return time.Now().Add(keepaliveTimeout)
+}
+
+// isTimeout reports whether err is a read that hit its deadline.
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // waitForRecovery requests a reconnect for the conn that errored—unless recovery already replaced it—and blocks until it completes; false means the session ended.
@@ -279,9 +286,9 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 		case <-ctx.Done():
 			return
 		default:
-			conn, ka := pc.getConnState()
+			conn := pc.getConn()
 			var msg []byte
-			err := conn.SetReadDeadline(ptyReadDeadline(ka))
+			err := conn.SetReadDeadline(ptyReadDeadline())
 			if err == nil {
 				_, msg, err = conn.ReadMessage()
 			}
@@ -295,7 +302,7 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 					return
 				}
 				// A silent channel is recovered like any other read failure; the shell keeps running.
-				if ka.expired(err) {
+				if isTimeout(err) {
 					log.Warn().Msg("No response on the Websh channel for 2 minutes; reconnecting.")
 				}
 
