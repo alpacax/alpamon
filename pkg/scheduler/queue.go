@@ -155,7 +155,7 @@ func (rq *RequestQueue) PostWithHeaders(url string, data any, priority int, due 
 	rq.request(http.MethodPost, url, data, priority, due, headers)
 }
 
-// PostChunk enqueues a chunk, throttling the command while the queue is full and dropping past ctx/maxWait.
+// PostChunk enqueues a chunk, throttling the command while the queue is full and dropping on ctx cancellation or past maxWait; a ctx deadline alone keeps polling.
 // expiry is the caller-computed point past which the chunk should be dropped rather than delivered.
 func (rq *RequestQueue) PostChunk(ctx context.Context, url string, data any, priority int, expiry time.Time) {
 	rq.postChunk(ctx, url, data, priority, expiry, chunkQueueHighWater, chunkBackpressurePoll, chunkBackpressureMaxWait)
@@ -174,12 +174,17 @@ func (rq *RequestQueue) postChunk(ctx context.Context, url string, data any, pri
 			rq.requestWithExpiry(http.MethodPost, url, data, priority, time.Time{}, expiry, nil)
 			return
 		}
-		if ctx.Err() != nil || time.Since(start) >= maxWait {
+		if errors.Is(ctx.Err(), context.Canceled) || time.Since(start) >= maxWait {
 			log.Warn().Str("url", url).Msg("Chunk dropped under sustained backpressure")
 			return
 		}
+		done := ctx.Done()
+		// Past its deadline Done() stays closed; selecting on it would busy-spin.
+		if ctx.Err() != nil {
+			done = nil
+		}
 		select {
-		case <-ctx.Done():
+		case <-done:
 		case <-time.After(poll):
 		}
 	}

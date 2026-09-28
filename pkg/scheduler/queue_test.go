@@ -133,6 +133,35 @@ func TestPostChunk_DropsOnContextCancel(t *testing.T) {
 	assert.Equal(t, 3, queueSize(), "cancelled chunk should be dropped")
 }
 
+func TestPostChunk_GivenDeadlineExceededCtx_WhenQueueDrainsBeforeMaxWait_ThenChunkStillEnqueued(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		newRequestQueue()
+		fill(3)
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer cancel()
+		time.Sleep(2 * time.Millisecond)
+		require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded, "test setup: ctx must already be past its deadline")
+
+		done := make(chan struct{})
+		go func() {
+			Rqueue.postChunk(ctx, "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, time.Second)
+			close(done)
+		}()
+
+		synctest.Wait()
+		drainOne(t) // drop below high-water, well before maxWait
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("postChunk did not return after space freed")
+		}
+
+		assert.Equal(t, 3, queueSize(), "chunk should have been enqueued once the queue drained")
+	})
+}
+
 // A chunk's expiry is given by the caller (derived from the ctx's deadline
 // there), so postChunk just stamps whatever it is given onto the entry.
 
