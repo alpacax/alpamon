@@ -33,6 +33,26 @@ func TestExecutor_TimeoutReturns124(t *testing.T) {
 	}
 }
 
+func TestExecute_GivenParentCtxCancelledMidRun_ThenExitCodeIsOneNotNegativeOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execs the POSIX sleep binary")
+	}
+	e := NewExecutor()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	exitCode, _, err := e.Execute(ctx, CommandOptions{
+		Args: []string{"sleep", "5"},
+	})
+
+	require.Error(t, err)
+	assert.Equal(t, 1, exitCode)
+}
+
 // A fast, normally-exiting command must still stream its output through the
 // unchanged callback shape: this behavior is unaffected by the ctx plumbing.
 func TestExecutor_NoTimeoutOnFastCommand(t *testing.T) {

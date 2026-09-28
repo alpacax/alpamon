@@ -303,6 +303,9 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 			}
 			return 124, result + "\n\n" + msg, err
 		}
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return 1, result, err // ExitCode() would report -1 for the signal kill
+		}
 		if errors.Is(err, exec.ErrWaitDelay) {
 			// Command itself succeeded; a descendant just held stdout/stderr open past WaitDelay, and runCommand already killed the tree.
 			return 0, result, nil

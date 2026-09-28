@@ -294,6 +294,29 @@ func TestIntegration_UnregisterHandler(t *testing.T) {
 	}
 }
 
+func TestE2E_ShellChain_GivenParentCtxCancelledMidSegment_ThenExitCodeOneAndLaterSegmentSkipped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execs the POSIX sleep binary")
+	}
+
+	handler := shell.NewShellHandler(NewExecutor())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	args := &common.CommandArgs{
+		Command: "sleep 5 && echo after",
+	}
+
+	exitCode, output, _ := handler.Execute(ctx, common.ShellCmd.String(), args)
+
+	assert.Equal(t, 1, exitCode)
+	assert.NotContains(t, output, "after")
+}
+
 // executeWithOperators used to give each `&&`/`||`/`;` segment its own fresh
 // timeout, letting a 3-segment chain run 3x the nominal timeout.
 func TestE2E_ShellOperatorChain_TimeoutCapsWholeChainNotEachSegment(t *testing.T) {
