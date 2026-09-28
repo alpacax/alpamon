@@ -336,7 +336,8 @@ func TestRunForever_WriteJSONAlongsideKeepalivePings(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var sent int32
 	for sent < minMessages || pings.Load() == pingsBefore {
-		require.True(t, time.Now().Before(deadline), "no ping went out while WriteJSON was writing")
+		require.True(t, time.Now().Before(deadline),
+			"no ping went out while WriteJSON was writing (sent %d, pings %d)", sent, pings.Load()-pingsBefore)
 		require.NoError(t, wc.WriteJSON(map[string]int32{"seq": sent}))
 		sent++
 	}
