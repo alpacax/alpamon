@@ -85,13 +85,13 @@ func TestReporter_GivenRetryAfterFailure_WhenBackoffCrossesExpiry_ThenResurrecte
 	newRequestQueue()
 
 	// due is far enough in the past that retry's backoff still leaves the requeued
-	// entry immediately due; expiry is a short window that elapses before the retry.
+	// entry immediately due.
 	entry := PriorityEntry{
 		method: http.MethodPost,
 		url:    "/chunk",
 		data:   json.RawMessage(`{}`),
 		due:    time.Now().Add(-10 * time.Second),
-		expiry: time.Now().Add(50 * time.Millisecond),
+		expiry: time.Now().Add(time.Minute),
 		retry:  RetryLimit,
 	}
 
@@ -102,7 +102,7 @@ func TestReporter_GivenRetryAfterFailure_WhenBackoffCrossesExpiry_ThenResurrecte
 	requeued := getOne(t)
 	require.False(t, requeued.due.After(time.Now()), "test setup: requeued entry must already be due")
 
-	time.Sleep(60 * time.Millisecond) // let the expiry window elapse, as real backoff wait would
+	requeued.expiry = time.Now().Add(-time.Millisecond) // stands in for the backoff wait outliving expiry
 	reporter.processEntry(requeued)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(hits), "retry/backoff must not resurrect a chunk past its expiry")

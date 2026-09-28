@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -296,6 +297,10 @@ func TestIntegration_UnregisterHandler(t *testing.T) {
 // executeWithOperators used to give each `&&`/`||`/`;` segment its own fresh
 // timeout, letting a 3-segment chain run 3x the nominal timeout.
 func TestE2E_ShellOperatorChain_TimeoutCapsWholeChainNotEachSegment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execs the POSIX sleep binary")
+	}
+
 	handler := shell.NewShellHandler(NewExecutor())
 
 	const timeout = 1500 * time.Millisecond
@@ -316,6 +321,10 @@ func TestE2E_ShellOperatorChain_TimeoutCapsWholeChainNotEachSegment(t *testing.T
 // when the chain times out, then the output carries exactly one banner whose
 // elapsed reflects the whole chain, not the killed segment's own local start.
 func TestE2E_ShellOperatorChain_TimeoutBannerReportsChainElapsedNotSegmentElapsed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execs the POSIX sleep binary")
+	}
+
 	handler := shell.NewShellHandler(NewExecutor())
 
 	const timeout = 2 * time.Second
@@ -336,6 +345,10 @@ func TestE2E_ShellOperatorChain_TimeoutBannerReportsChainElapsedNotSegmentElapse
 // under ";", when the chain times out, then the skipped second segment does
 // not leave the chain without any banner at all.
 func TestE2E_ShellOperatorChain_TimeoutBannerPresentEvenWhenNextSegmentSkipped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execs the POSIX sleep binary")
+	}
+
 	handler := shell.NewShellHandler(NewExecutor())
 
 	const timeout = 1 * time.Second

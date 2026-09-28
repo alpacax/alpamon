@@ -115,29 +115,34 @@ func TestNewChunkCallback_GivenTwoCallsWithDifferentCtxs_WhenCalled_ThenEachUses
 	callback := cr.newChunkCallback()
 	require.NotNil(t, callback)
 
-	// A canceled ctx with no deadline still enqueues with zero expiry, proving the
-	// per-call ctx reaches PostChunk rather than one captured once at construction.
-	canceledCtx, cancel1 := context.WithCancel(context.Background())
-	cancel1()
-	callback(canceledCtx, "first")
+	// One callback instance, called first with a stale ctx and then a live one:
+	// if the callback captured its first ctx instead of using each call's own,
+	// the live call would also be dropped and nothing would ever arrive.
+	staleCtx, cancel1 := context.WithDeadline(context.Background(), time.Now().Add(-6*time.Minute))
+	defer cancel1()
+	callback(staleCtx, "stale")
 
-	longCtx, cancel2 := context.WithTimeout(context.Background(), time.Minute)
+	liveCtx, cancel2 := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel2()
-	callback(longCtx, "second")
+	callback(liveCtx, "live")
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(*bodies) == 2
-	}, 2*time.Second, 10*time.Millisecond, "both chunks should reach the fake Alpacon server")
+		return len(*bodies) == 1
+	}, 2*time.Second, 10*time.Millisecond, "the live chunk should reach the fake Alpacon server")
+
+	require.Never(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(*bodies) > 1
+	}, 500*time.Millisecond, 20*time.Millisecond, "the stale chunk must never reach the server")
 
 	mu.Lock()
 	got := append([]capturedChunk(nil), (*bodies)...)
 	mu.Unlock()
-
-	contents := []string{got[0].content, got[1].content}
-	assert.ElementsMatch(t, []string{"first", "second"}, contents,
-		"each call's own content should have been posted independently of the other call's ctx")
+	require.Len(t, got, 1)
+	assert.Equal(t, "live", got[0].content, "the second call's own ctx must have been used, not the first call's")
 }
 
 func TestNewChunkCallback_GivenMultipleCalls_WhenCalled_ThenSeqAdvancesMonotonicallyAcrossCalls(t *testing.T) {

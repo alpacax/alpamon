@@ -46,8 +46,6 @@ func TimeoutError(timeout time.Duration) (int, string, error) {
 	return TimeoutExitCode, FormatTimeoutBanner(timeout), context.DeadlineExceeded
 }
 
-// timeoutBannerPrefix is the fixed portion of FormatTimeoutBanner's output,
-// used by StripTimeoutBanner to recognize and remove one.
 const timeoutBannerPrefix = "Command timed out after "
 
 // FormatTimeoutBanner is the single source of truth for the timeout banner text.
