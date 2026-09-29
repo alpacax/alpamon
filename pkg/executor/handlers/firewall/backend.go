@@ -29,8 +29,8 @@ type FirewallBackend interface {
 	// ListRules returns all rules in a chain
 	ListRules(ctx context.Context, chainName string) ([]common.FirewallRule, error)
 
-	// BatchApply applies multiple rules atomically
-	// Returns: applied count, failed rule descriptions, error
+	// BatchApply adds rules one at a time and keeps going after a failure; nothing is undone.
+	// Returns: applied count, failed rule descriptions, error (set when any rule failed)
 	BatchApply(ctx context.Context, chainName string, rules []common.FirewallRule) (applied int, failed []string, err error)
 
 	// ReorderChains reorders jump rules in INPUT chain

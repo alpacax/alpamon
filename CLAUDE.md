@@ -203,7 +203,7 @@ cpu := client.CPU.Create().SetUsage(usage).SetTimestamp(time.Now()).SaveX(ctx)
 
 **Platform compatibility**: Codebase includes platform-specific implementations (darwin, linux, and windows) for PTY and PID file operations.
 
-**Firewall operations**: Rules are written to a temp file and applied with the executor's `RunAsUser` as `nft -f <file>` and `iptables-restore <file>`.
+**Firewall restore**: Backups are written to a temporary file and restored with the executor's `RunAsUser` as `nft -f <file>` and `iptables-restore <file>`.
 
 **Database migrations**: Migration system uses direct SQL execution via Go's `database/sql` package. Migration files in `pkg/db/migration/` are pure SQLite SQL. The `RunMigration()` function tracks applied migrations in the `atlas_schema_revisions` table and executes unapplied migrations in transactions. No external tools required.
 
