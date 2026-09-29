@@ -683,14 +683,12 @@ func resolveAptAlpamonSource() string {
 	if err != nil {
 		return ""
 	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() && (strings.HasSuffix(e.Name(), ".list") || strings.HasSuffix(e.Name(), ".sources")) {
-			names = append(names, e.Name())
-		}
-	}
 
-	for _, name := range names {
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !(strings.HasSuffix(name, ".list") || strings.HasSuffix(name, ".sources")) {
+			continue
+		}
 		path := filepath.Join(aptSourcesDir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -702,17 +700,24 @@ func resolveAptAlpamonSource() string {
 			}
 			continue
 		}
-		for line := range strings.SplitSeq(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			if strings.Contains(line, alpamonRepoURL) {
-				return path
-			}
+		if hasActiveAlpamonLine(string(data)) {
+			return path
 		}
 	}
 	return ""
+}
+
+func hasActiveAlpamonLine(data string) bool {
+	for line := range strings.SplitSeq(data, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Contains(line, alpamonRepoURL) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasEnabledAlpamonStanza(data string) bool {
