@@ -116,8 +116,7 @@ The alpamon service must be running with the socket at `/var/run/alpamon/auth.so
 
 Alpamon reads the first file it finds in this order:
 
-- `/etc/alpamon/alpamon.conf` (Linux production)
-- `/Library/Application Support/alpamon/alpamon.conf` (macOS)
+- `/etc/alpamon/alpamon.conf` (Linux and macOS production)
 - `%ProgramData%\alpamon\alpamon.conf` (Windows)
 - `~/.alpamon.conf` (any platform, development)
 

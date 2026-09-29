@@ -331,7 +331,8 @@ func (s *IptablesBackend) parseIptablesSaveRuleLine(line string) *common.Firewal
 	return rule
 }
 
-// BatchApply applies multiple rules atomically
+// BatchApply adds rules one at a time with AddRule and keeps going after a failure.
+// Rules already added stay in place; failures are returned as descriptions plus a summary error.
 func (s *IptablesBackend) BatchApply(ctx context.Context, chainName string, rules []common.FirewallRule) (applied int, failed []string, err error) {
 	for i, rule := range rules {
 		ruleCopy := rule
