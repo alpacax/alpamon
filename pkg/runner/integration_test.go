@@ -43,11 +43,7 @@ func TestE2E_ShellCommandTimeout_ChunkStreamCarriesHandlerDeadlineAndDeliversFin
 		if dl, ok := ctx.Deadline(); ok {
 			deadlines = append(deadlines, dl)
 		}
-		if m := lineRE.FindStringSubmatch(content); m != nil {
-			if n, convErr := strconv.Atoi(m[1]); convErr == nil && n > maxSentLine {
-				maxSentLine = n
-			}
-		}
+		maxSentLine = max(maxSentLine, maxLineNumber(lineRE, content))
 		callbackMu.Unlock()
 		realCallback(ctx, content)
 	}
@@ -68,8 +64,7 @@ func TestE2E_ShellCommandTimeout_ChunkStreamCarriesHandlerDeadlineAndDeliversFin
 	assert.Equal(t, common.TimeoutExitCode, exitCode, "command should be killed with the GNU timeout exit code")
 	assert.Contains(t, result, "timed out", "result should carry the timeout banner")
 
-	// The ctx reaching the chunk callback carried the handler's own deadline,
-	// not a longer-lived one—the end-to-end proof that fails on the old code.
+	// The ctx reaching the chunk callback carried the handler's own deadline, not a longer-lived one.
 	callbackMu.Lock()
 	gotDeadlines := append([]time.Time(nil), deadlines...)
 	callbackMu.Unlock()
@@ -84,8 +79,8 @@ func TestE2E_ShellCommandTimeout_ChunkStreamCarriesHandlerDeadlineAndDeliversFin
 	gotMaxSentLine := maxSentLine
 	callbackMu.Unlock()
 
-	// result is the ground truth: the max line delivered over HTTP must be within a
-	// small allowance of the max line the command produced, or the final flush dropped.
+	// The max line delivered over HTTP must be within a small allowance of the max
+	// line handed to the callback, or the final flush was dropped.
 	require.Positive(t, gotMaxSentLine, "test setup: the command should have produced at least one line")
 
 	// Allowance of 2: the last line or two of output can still be in flight
@@ -95,13 +90,20 @@ func TestE2E_ShellCommandTimeout_ChunkStreamCarriesHandlerDeadlineAndDeliversFin
 	require.Eventually(t, func() bool {
 		maxLine = 0
 		for _, c := range contents() {
-			if m := lineRE.FindStringSubmatch(c); m != nil {
-				if n, convErr := strconv.Atoi(m[1]); convErr == nil && n > maxLine {
-					maxLine = n
-				}
-			}
+			maxLine = max(maxLine, maxLineNumber(lineRE, c))
 		}
 		return maxLine >= gotMaxSentLine-allowance
 	}, 2*time.Second, 10*time.Millisecond,
 		"delivered output should include lines produced close to the kill, proving the final flush wasn't lost")
+}
+
+// maxLineNumber returns the highest N among every line-N in content, since one chunk coalesces many lines.
+func maxLineNumber(lineRE *regexp.Regexp, content string) int {
+	highest := 0
+	for _, m := range lineRE.FindAllStringSubmatch(content, -1) {
+		if n, err := strconv.Atoi(m[1]); err == nil && n > highest {
+			highest = n
+		}
+	}
+	return highest
 }

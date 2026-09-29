@@ -14,7 +14,7 @@ func NewChunkCallback(cr *CommandRunner) func(ctx context.Context, content strin
 // StartFakeAlpacon exposes startFakeAlpacon; contents preserves delivery order.
 func StartFakeAlpacon(t *testing.T) (cleanup func(), contents func() []string) {
 	t.Helper()
-	_, cleanup, mu, bodies := startFakeAlpacon(t)
+	cleanup, mu, bodies := startFakeAlpacon(t)
 	contents = func() []string {
 		mu.Lock()
 		defer mu.Unlock()

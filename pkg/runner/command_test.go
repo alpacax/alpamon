@@ -20,7 +20,7 @@ import (
 
 // startFakeAlpacon stands in for Alpacon, wiring a real scheduler session and
 // reporters so PostChunk's delivery can be asserted from real HTTP requests.
-func startFakeAlpacon(t *testing.T) (*httptest.Server, func(), *sync.Mutex, *[]capturedChunk) {
+func startFakeAlpacon(t *testing.T) (func(), *sync.Mutex, *[]capturedChunk) {
 	t.Helper()
 
 	var (
@@ -57,7 +57,7 @@ func startFakeAlpacon(t *testing.T) (*httptest.Server, func(), *sync.Mutex, *[]c
 		server.Close()
 	}
 
-	return server, cleanup, &mu, &bodies
+	return cleanup, &mu, &bodies
 }
 
 type capturedChunk struct {
@@ -67,7 +67,7 @@ type capturedChunk struct {
 }
 
 func TestNewChunkCallback_GivenCtxWithExpiredDeadline_WhenCalled_ThenChunkIsDroppedNotDelivered(t *testing.T) {
-	_, cleanup, mu, bodies := startFakeAlpacon(t)
+	cleanup, mu, bodies := startFakeAlpacon(t)
 	defer cleanup()
 
 	cr := NewCommandRunner(nil, nil, protocol.Command{ID: "cmd-1"}, protocol.CommandData{}, nil)
@@ -107,8 +107,32 @@ func TestNewChunkCallback_GivenCtxWithExpiredDeadline_WhenCalled_ThenChunkIsDrop
 	assert.Equal(t, "live", got[0].content, "the expired chunk must never reach the server")
 }
 
+// The final flush of a timed-out command arrives just past its deadline, which is what the grace is for.
+func TestNewChunkCallback_GivenCtxDeadlineJustPassed_WhenCalled_ThenChunkIsDeliveredWithinGrace(t *testing.T) {
+	cleanup, mu, bodies := startFakeAlpacon(t)
+	defer cleanup()
+
+	cr := NewCommandRunner(nil, nil, protocol.Command{ID: "cmd-1"}, protocol.CommandData{}, nil)
+	callback := cr.newChunkCallback()
+	require.NotNil(t, callback, "a non-empty command ID should yield a callback")
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	callback(ctx, "final flush")
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(*bodies) == 1
+	}, 2*time.Second, 10*time.Millisecond, "a chunk inside the grace window should reach the fake Alpacon server")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "final flush", (*bodies)[0].content)
+}
+
 func TestNewChunkCallback_GivenTwoCallsWithDifferentCtxs_WhenCalled_ThenEachUsesItsOwnCtx(t *testing.T) {
-	_, cleanup, mu, bodies := startFakeAlpacon(t)
+	cleanup, mu, bodies := startFakeAlpacon(t)
 	defer cleanup()
 
 	cr := NewCommandRunner(nil, nil, protocol.Command{ID: "cmd-2"}, protocol.CommandData{}, nil)
@@ -146,7 +170,7 @@ func TestNewChunkCallback_GivenTwoCallsWithDifferentCtxs_WhenCalled_ThenEachUses
 }
 
 func TestNewChunkCallback_GivenMultipleCalls_WhenCalled_ThenSeqAdvancesMonotonicallyAcrossCalls(t *testing.T) {
-	_, cleanup, mu, bodies := startFakeAlpacon(t)
+	cleanup, mu, bodies := startFakeAlpacon(t)
 	defer cleanup()
 
 	cr := NewCommandRunner(nil, nil, protocol.Command{ID: "cmd-3"}, protocol.CommandData{}, nil)
