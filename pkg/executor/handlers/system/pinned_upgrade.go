@@ -14,12 +14,12 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// handlePinnedUpgrade installs exactly the release the server pinned. On a
-// package-managed host that is a version-pinned install through the package
-// manager, whose repository signature is the trust chain; elsewhere it is the
-// signature-verified self-update. There is no fallback between the two: a
-// repository without the target version fails rather than dropping to a
-// tarball.
+// packageHostNote goes into the report detail when the console sent artifact
+// pins to a host that installs through its package manager.
+const packageHostNote = "digest not applicable on package-managed host"
+
+// handlePinnedUpgrade installs exactly the pinned release: through the package manager on a package managed
+// host, else the signature-verified self-update. No fallback: a repo without the target fails, no tarball.
 func (h *SystemHandler) handlePinnedUpgrade(ctx context.Context, target *common.UpgradeTarget, packageProxy string) (int, string, error) {
 	report := updater.Report{
 		AttemptID:   target.AttemptID,
@@ -71,11 +71,6 @@ func (h *SystemHandler) handlePinnedUpgrade(ctx context.Context, target *common.
 	}
 }
 
-// packageHostNote goes into the report detail when the console sent artifact
-// pins to a host that installs through its package manager.
-const packageHostNote = "digest not applicable on package-managed host"
-
-// failPinned reports a failed attempt and returns the command result.
 func (h *SystemHandler) failPinned(report updater.Report, err error, output string) (int, string, error) {
 	report.Outcome = updater.OutcomeFailed
 	report.ErrorClass = updater.ClassOf(err)
@@ -114,14 +109,8 @@ func (h *SystemHandler) pinnedSelfUpdate(ctx context.Context, target *common.Upg
 	return h.restartIntoUpgrade(tag, true)
 }
 
-// restartIntoUpgrade restarts the agent after a pinned swap. The service
-// manager does it from outside the process, so a new binary that cannot start
-// is not re-executed in place; the marker and guard are already in place, so
-// the attempt's outcome is reported by the process that comes up next.
-//
-// Without a service manager the restart falls back to the in-process one when
-// inProcessFallback is set. A package install does not set it: its own
-// maintainer scripts restart the agent on such hosts.
+// restartIntoUpgrade restarts through the service manager so a binary that cannot start is not re-executed in
+// place. Without one it restarts in process only if inProcessFallback is set; package scripts restart it.
 func (h *SystemHandler) restartIntoUpgrade(tag string, inProcessFallback bool) (int, string, error) {
 	err := h.serviceManager.ScheduleRestart(updater.RestartDelay)
 	if err == nil {
@@ -141,10 +130,8 @@ func (h *SystemHandler) restartIntoUpgrade(tag string, inProcessFallback bool) (
 	return 0, fmt.Sprintf("Updated to %s. Restarting...", tag), nil
 }
 
-// pinnedPackageUpgrade installs report.ToVersion through the package manager
-// and confirms it against the package database afterwards. The intent marker
-// and guard are in place before the install, and roll back with a pinned
-// reinstall of the outgoing version.
+// pinnedPackageUpgrade installs report.ToVersion through the package manager and confirms it
+// against the package database afterward, rolling back with a pinned reinstall on failure.
 func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater.Report, packageProxy string, grace time.Duration) (int, string, error) {
 	target := report.ToVersion
 	env := packageProxyEnv(packageProxy)
@@ -195,12 +182,8 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 	return exitCode, strings.TrimRight(output, "\n") + fmt.Sprintf("\n\nInstalled alpamon %s. ", installed) + msg, err
 }
 
-// undoPackageChange handles a failed pinned install. When the package
-// database still reports the previous version nothing changed, and the
-// marker and guard are simply removed. Otherwise the package did change
-// (a failing maintainer script, an unexpected version), so the previous
-// version is reinstalled at once; if that fails too, the marker and guard
-// stay for the guard to retry and the restored agent to report.
+// undoPackageChange handles a failed pinned install: if the package database still reports the previous
+// version, nothing changed. Otherwise it reinstalls that version; if that fails, the marker and guard stay.
 func (h *SystemHandler) undoPackageChange(ctx context.Context, marker *updater.PendingUpgrade, installed string, env map[string]string, abort func(), output string) string {
 	previous := marker.PreviousPackageVersion
 	if installed == previous {
@@ -231,9 +214,8 @@ func (h *SystemHandler) undoPackageChange(ctx context.Context, marker *updater.P
 	}
 	log.Error().Err(err).Str("previous", previous).Msg("Could not reinstall the previous version; arming the upgrade guard to retry it.")
 	if rerr := updater.Rearm(marker, h.serviceManager, 0, h.now()); rerr != nil || marker.GuardUnit == "" {
-		// No guard covers the attempt now; restart so the next start finds
-		// the marker and settles it (a version other than the target and
-		// the previous one reports the attempt failed).
+		// No guard covers the attempt now; restart so the next start finds the intent marker and settles it.
+		// A version other than the target and the previous one reports the attempt as failed.
 		log.Error().Err(rerr).Msg("No upgrade guard is armed; restarting so the next start settles the attempt.")
 		if serr := h.serviceManager.ScheduleRestart(updater.RestartDelay); serr != nil {
 			_ = h.scheduleDelayedAction(delayedActionDelay, func(_ context.Context) { h.wsClient.Restart() })
@@ -253,7 +235,7 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, target string,
 
 	switch utils.PackageManager {
 	case utils.PkgApt:
-		if code, out, err := run("apt-get", "update", "-y", "-o", "Acquire::Retries=3"); code != 0 {
+		if code, out, err := run(aptUpdateArgv(resolveAptAlpamonSource())...); code != 0 {
 			return out, commandFailed("apt-get update", code, err)
 		}
 		code, out, err := run("apt-cache", "madison", "alpamon")
@@ -301,13 +283,6 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, target string,
 	return "", fmt.Errorf("package manager %q has no pinned install", utils.PackageManager)
 }
 
-func commandFailed(what string, code int, err error) error {
-	if err != nil {
-		return fmt.Errorf("%s exited %d: %w", what, code, err)
-	}
-	return fmt.Errorf("%s exited %d", what, code)
-}
-
 // installedAlpamonVersion asks the package database for the installed
 // alpamon version, or "" when it cannot tell.
 func (h *SystemHandler) installedAlpamonVersion(ctx context.Context) string {
@@ -325,9 +300,15 @@ func (h *SystemHandler) installedAlpamonVersion(ctx context.Context) string {
 	return strings.TrimSpace(out)
 }
 
-// pickDebVersion returns the exact version string `apt-cache madison` lists
-// for target: the bare version or one carrying a Debian revision, with or
-// without an epoch.
+func commandFailed(what string, code int, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s exited %d: %w", what, code, err)
+	}
+	return fmt.Errorf("%s exited %d", what, code)
+}
+
+// pickDebVersion returns the exact version string `apt-cache madison` lists for target: the bare
+// version, with or without a Debian revision and epoch.
 func pickDebVersion(madison, target string) string {
 	for line := range strings.SplitSeq(madison, "\n") {
 		fields := strings.Split(line, "|")

@@ -21,7 +21,7 @@ All platforms share the same second step: `alpamon register` writes the config, 
 
 ### Linux
 
-**Debian / Ubuntu**
+**Debian / Ubuntu**—see [**docs/debian.md**](docs/debian.md) for how agent upgrades scope the apt refresh to alpamon's own repository.
 ```bash
 curl -s https://packagecloud.io/install/repositories/alpacax/alpamon/script.deb.sh?any=true | sudo bash
 sudo apt-get install alpamon

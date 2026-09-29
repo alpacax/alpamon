@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -31,22 +33,6 @@ const poolDrainWait = 5 * time.Second
 // the compile-time assertion it is.
 const _ = uint(poolDrainWait - delayedActionDelay - 1)
 
-// drainThen waits the scheduled job out before checking it landed, because a
-// fire-and-forget action has not run when the handler returns. Shutdown closes the
-// job queue, so the check rides on the drain rather than being a second call.
-//
-// Register it after the context manager's own Shutdown so LIFO drains the pool first.
-// The other order cancels poolCtx with the job still sleeping, and holds today only
-// because time.Sleep ignores the context and so does MockCommandExecutor.
-func drainThen(t *testing.T, p *pool.Pool, check func()) func() {
-	t.Helper()
-	return func() {
-		require.NoError(t, p.Shutdown(poolDrainWait))
-		check()
-	}
-}
-
-// MockWSClient is a mock implementation of WSClient for testing
 type MockWSClient struct {
 	RestartCalled          bool
 	ShutDownCalled         bool
@@ -65,13 +51,16 @@ func (m *MockWSClient) RestartCollector() {
 	m.RestartCollectorCalled = true
 }
 
-// MockVersionResolver is a mock implementation of VersionResolver for testing
 type MockVersionResolver struct {
 	LatestVersion       string
 	PamVersion          string
 	InvalidatePamCalled bool
 	GotProxy            string
 	LatestCalls         int
+}
+
+func newMockVersionResolver() *MockVersionResolver {
+	return &MockVersionResolver{LatestVersion: "v0.0.0-test", PamVersion: ""}
 }
 
 func (m *MockVersionResolver) GetLatestVersion(proxyURL string) string {
@@ -88,12 +77,6 @@ func (m *MockVersionResolver) InvalidatePamCache() {
 	m.InvalidatePamCalled = true
 }
 
-func newMockVersionResolver() *MockVersionResolver {
-	return &MockVersionResolver{LatestVersion: "v0.0.0-test", PamVersion: ""}
-}
-
-// MockAPISession records Delete calls and returns a configurable response so
-// tests can verify the byebye unregister flow without hitting the network.
 type MockAPISession struct {
 	mu               sync.Mutex
 	DeleteCalls      []string
@@ -102,11 +85,6 @@ type MockAPISession struct {
 	PostCalls        []mockPost
 	PostStatusCode   int
 	PostErr          error
-}
-
-type mockPost struct {
-	URL  string
-	Body any
 }
 
 func (m *MockAPISession) Post(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
@@ -157,6 +135,11 @@ func (m *MockAPISession) lastDeleteURL() string {
 		return ""
 	}
 	return m.DeleteCalls[len(m.DeleteCalls)-1]
+}
+
+type mockPost struct {
+	URL  string
+	Body any
 }
 
 // Reports the zypper lock exit code for the first lockedRuns `zypper` commands,
@@ -210,6 +193,34 @@ func (e *versionSteppingExecutor) RunAsUser(ctx context.Context, username string
 		return 0, e.after, nil
 	}
 	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
+}
+
+// TestMain points aptSourcesDir at an empty temp dir for the whole package
+// run, so apt-path tests never read the host's real /etc/apt/sources.list.d.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "alpamon-apt-sources")
+	if err != nil {
+		panic(err)
+	}
+	aptSourcesDir = dir
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// drainThen waits the scheduled job out before checking it landed, because a
+// fire-and-forget action has not run when the handler returns. Shutdown closes the
+// job queue, so the check rides on the drain rather than being a second call.
+//
+// Register it after the context manager's own Shutdown so LIFO drains the pool first.
+// The other order cancels poolCtx with the job still sleeping, and holds today only
+// because time.Sleep ignores the context and so does MockCommandExecutor.
+func drainThen(t *testing.T, p *pool.Pool, check func()) func() {
+	t.Helper()
+	return func() {
+		require.NoError(t, p.Shutdown(poolDrainWait))
+		check()
+	}
 }
 
 func TestSystemHandler_Name(t *testing.T) {
@@ -491,12 +502,22 @@ func TestSystemHandler_Upgrade_UpToDate(t *testing.T) {
 	assert.Contains(t, output, "up-to-date")
 }
 
-// findExecutedShell returns the last executed "sh" command from the mock, or
-// nil when no shell was spawned.
 func findExecutedShell(mockExec *common.MockCommandExecutor) *common.ExecutedCommand {
 	cmds := mockExec.GetExecutedCommands()
 	for i := len(cmds) - 1; i >= 0; i-- {
 		if cmds[i].Name == "sh" {
+			return &cmds[i]
+		}
+	}
+	return nil
+}
+
+// findExecutedAptInstall is the apt counterpart to findExecutedShell: apt's
+// install runs as its own argv rather than through "sh -c".
+func findExecutedAptInstall(mockExec *common.MockCommandExecutor) *common.ExecutedCommand {
+	cmds := mockExec.GetExecutedCommands()
+	for i := len(cmds) - 1; i >= 0; i-- {
+		if cmds[i].Name == "apt-get" && len(cmds[i].Args) > 0 && cmds[i].Args[0] == "install" {
 			return &cmds[i]
 		}
 	}
@@ -535,21 +556,29 @@ func TestSystemHandler_Upgrade_PackageProxy(t *testing.T) {
 	assert.Equal(t, 0, exitCode)
 	assert.Equal(t, proxy, mockVersions.GotProxy, "the version lookup must use the proxy")
 
-	shell := findExecutedShell(mockExec)
-	require.NotNil(t, shell, "a package-manager shell must be spawned")
-	assert.Equal(t, "root", shell.User)
-	if assert.Len(t, shell.Args, 2) {
-		assert.Equal(t, "-c", shell.Args[0])
-		assert.Contains(t, shell.Args[1], "apt-get")
-	}
+	install := findExecutedAptInstall(mockExec)
+	require.NotNil(t, install, "an apt-get install must be spawned")
+	assert.Equal(t, "root", install.User)
 	for _, key := range []string{"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"} {
-		assert.Equal(t, proxy, shell.Env[key], "env %s", key)
+		assert.Equal(t, proxy, install.Env[key], "env %s", key)
 	}
 	for _, key := range []string{"no_proxy", "NO_PROXY"} {
-		noProxy := shell.Env[key]
+		noProxy := install.Env[key]
 		for _, excluded := range []string{"localhost", "127.0.0.1", "169.254.169.254", "fd00:ec2::254", "metadata.google.internal", "console.example.com"} {
 			assert.Contains(t, noProxy, excluded, "env %s must exclude it", key)
 		}
+	}
+
+	var updateCmd *common.ExecutedCommand
+	for _, c := range mockExec.GetExecutedCommands() {
+		if c.Name == "apt-get" && len(c.Args) > 0 && c.Args[0] == "update" {
+			updateCmd = &c
+			break
+		}
+	}
+	require.NotNil(t, updateCmd, "the apt-get update must be executed")
+	for _, key := range []string{"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"} {
+		assert.Equal(t, proxy, updateCmd.Env[key], "update env %s", key)
 	}
 }
 
@@ -577,9 +606,9 @@ func TestSystemHandler_Upgrade_NoPackageProxy(t *testing.T) {
 	assert.Equal(t, 0, exitCode)
 	assert.Empty(t, mockVersions.GotProxy, "the version lookup must go direct")
 
-	shell := findExecutedShell(mockExec)
-	require.NotNil(t, shell, "a package-manager shell must be spawned")
-	assert.Empty(t, shell.Env, "no env override without package_proxy")
+	install := findExecutedAptInstall(mockExec)
+	require.NotNil(t, install, "an apt-get install must be spawned")
+	assert.Empty(t, install.Env, "no env override without package_proxy")
 }
 
 // TestSystemHandler_Upgrade_InvalidPackageProxy verifies that an invalid
@@ -612,9 +641,9 @@ func TestSystemHandler_Upgrade_InvalidPackageProxy(t *testing.T) {
 			assert.Equal(t, 0, exitCode)
 			assert.Empty(t, mockVersions.GotProxy, "the version lookup must go direct")
 
-			shell := findExecutedShell(mockExec)
-			require.NotNil(t, shell, "a package-manager shell must be spawned")
-			assert.Empty(t, shell.Env, "no env override for invalid proxy %q", proxy)
+			install := findExecutedAptInstall(mockExec)
+			require.NotNil(t, install, "an apt-get install must be spawned")
+			assert.Empty(t, install.Env, "no env override for invalid proxy %q", proxy)
 		})
 	}
 }
@@ -642,11 +671,9 @@ func TestSystemHandler_Upgrade_VersionLookupFailureProceeds(t *testing.T) {
 	require.NoError(t, err, "a version lookup failure must be non-fatal")
 	assert.Equal(t, 0, exitCode)
 
-	shell := findExecutedShell(mockExec)
-	require.NotNil(t, shell, "the upgrade must proceed despite the lookup failure")
-	if assert.Len(t, shell.Args, 2) {
-		assert.Contains(t, shell.Args[1], "alpamon")
-	}
+	install := findExecutedAptInstall(mockExec)
+	require.NotNil(t, install, "the upgrade must proceed despite the lookup failure")
+	assert.Contains(t, install.Args, "alpamon")
 }
 
 // TestSystemHandler_Upgrade_VersionLookupFailureSelfUpdate pins the non-linux
@@ -926,6 +953,13 @@ func setPackageManagerAndID(t *testing.T, pkgManager, platformID string) {
 	})
 }
 
+func setAptSourcesDir(t *testing.T, dir string) {
+	t.Helper()
+	orig := aptSourcesDir
+	aptSourcesDir = dir
+	t.Cleanup(func() { aptSourcesDir = orig })
+}
+
 // openSUSE/SLES report platform_like=rhel but must run zypper locally, which is
 // why PackageManager is a separate axis.
 func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
@@ -1034,6 +1068,37 @@ func TestSystemHandler_Upgrade_ScopesZypperToAlpamonRepo(t *testing.T) {
 	}
 }
 
+// TestSystemHandler_Upgrade_ZypperDoesNotMatchAlpamonDevAsAPathPrefix checks that
+// an "alpamon-dev" repo, whose baseurl merely shares "alpamon" as a path prefix
+// with the real repo, does not win the scope over the actual alpamon repo.
+func TestSystemHandler_Upgrade_ZypperDoesNotMatchAlpamonDevAsAPathPrefix(t *testing.T) {
+	const devSection = "[alpamon-dev]\nenabled=1\nbaseurl=https://packagecloud.io/alpacax/alpamon-dev/rpm_any/rpm_any/$basearch\n"
+	const stableSection = "[alpamon]\nenabled=1\nbaseurl=https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch\n"
+
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+	mockExec.SetResult("zypper --non-interactive lr --export -", 0, devSection+"\n"+stableSection, nil)
+
+	_, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.NoError(t, err)
+
+	var refreshedStable bool
+	for _, c := range mockExec.GetExecutedCommands() {
+		if c.Name+" "+strings.Join(c.Args, " ") == "zypper --non-interactive refresh alpamon" {
+			refreshedStable = true
+		}
+	}
+	assert.True(t, refreshedStable, "expected the stable alpamon repo to be scoped, got %+v", mockExec.GetExecutedCommands())
+}
+
 // The refresh exists to keep a stale-metadata no-op from reporting success, so
 // its failure must stop the upgrade instead of falling through to the update.
 func TestSystemHandler_Upgrade_ZypperRefreshFailureStopsTheUpgrade(t *testing.T) {
@@ -1054,6 +1119,220 @@ func TestSystemHandler_Upgrade_ZypperRefreshFailureStopsTheUpgrade(t *testing.T)
 	for _, c := range mockExec.GetExecutedCommands() {
 		assert.NotContains(t, strings.Join(c.Args, " "), "update", "the update must not run after a failed refresh")
 	}
+}
+
+func writeAptAlpamonSource(t *testing.T) (dir, alpamonFile string) {
+	t.Helper()
+	dir = t.TempDir()
+	alpamonFile = filepath.Join(dir, "alpacax_alpamon.list")
+	require.NoError(t, os.WriteFile(alpamonFile, []byte("deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "other.list"), []byte("deb http://dead.invalid.example/repo jammy main\n"), 0o644))
+	setAptSourcesDir(t, dir)
+	return dir, alpamonFile
+}
+
+// TestResolveAptAlpamonSource_IgnoresCommentedOutSource checks that a commented-out
+// line does not count as alpamon's source, since apt ignores it too.
+func TestResolveAptAlpamonSource_IgnoresCommentedOutSource(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.list"),
+		[]byte("# deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Empty(t, resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_MatchesDeb822SourcesFile checks that a deb822 .sources
+// file, which uses "URIs:" instead of a "deb" line, still resolves.
+func TestResolveAptAlpamonSource_MatchesDeb822SourcesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alpacax_alpamon.sources")
+	require.NoError(t, os.WriteFile(path,
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, path, resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored checks that a
+// deb822 stanza disabled via "Enabled: no" is not treated as apt's source,
+// since apt itself skips it.
+func TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"),
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Empty(t, resolveAptAlpamonSource())
+}
+
+func TestResolveAptAlpamonSource_EnabledStanzaAfterDisabledOneInSameFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alpacax_alpamon.sources")
+	content := "Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n" +
+		"\n" +
+		"Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: focal\nComponents: main\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, path, resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive checks that
+// "enabled: No" is still recognized as apt's false spelling for the field.
+func TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"),
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nenabled: No\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Empty(t, resolveAptAlpamonSource())
+}
+
+func TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState(t *testing.T) {
+	dir := t.TempDir()
+	content := "Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n" +
+		"\n" +
+		"Types: deb\nURIs: http://dead.invalid.example/repo\nSuites: jammy\nComponents: main\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"), []byte(content), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Empty(t, resolveAptAlpamonSource())
+}
+
+func TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"),
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n"), 0o644))
+	listPath := filepath.Join(dir, "alpacax_alpamon.list")
+	require.NoError(t, os.WriteFile(listPath,
+		[]byte("deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, listPath, resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevAsAPathPrefix checks that
+// alpacax_alpamon-dev.list, which os.ReadDir sorts before alpacax_alpamon.list,
+// does not satisfy the alpamon repo match: "alpamon-dev" is a different repo
+// that merely shares "alpamon" as a prefix.
+func TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevAsAPathPrefix(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon-dev.list"),
+		[]byte("deb https://packagecloud.io/alpacax/alpamon-dev/ubuntu/ jammy main\n"), 0o644))
+	stablePath := filepath.Join(dir, "alpacax_alpamon.list")
+	require.NoError(t, os.WriteFile(stablePath,
+		[]byte("deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, stablePath, resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevStanzaAsAPathPrefix is the
+// deb822 equivalent of the .list case above.
+func TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevStanzaAsAPathPrefix(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon-dev.sources"),
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon-dev/ubuntu/\nSuites: jammy\nComponents: main\n"), 0o644))
+	stablePath := filepath.Join(dir, "alpacax_alpamon.sources")
+	require.NoError(t, os.WriteFile(stablePath,
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, stablePath, resolveAptAlpamonSource())
+}
+
+// TestSystemHandler_Upgrade_ScopesAptUpdateToAlpamonSource checks that a broken
+// third-party source cannot fail the upgrade, as the zypper path already ensures.
+func TestSystemHandler_Upgrade_ScopesAptUpdateToAlpamonSource(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgApt, "")
+	_, alpamonFile := writeAptAlpamonSource(t)
+
+	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+
+	scopedUpdateAt, installAt := -1, -1
+	for i, c := range mockExec.GetExecutedCommands() {
+		joined := c.Name + " " + strings.Join(c.Args, " ")
+		if c.Name == "apt-get" && strings.Contains(joined, "update") {
+			assert.Contains(t, joined, "Dir::Etc::sourcelist="+alpamonFile, "the update must scope to the alpamon source file")
+			assert.Contains(t, joined, "Dir::Etc::sourceparts=-", "the update must not also read sources.list.d")
+			assert.Contains(t, joined, "APT::Get::List-Cleanup=0", "cleanup must be disabled so unrelated lists are left alone")
+			scopedUpdateAt = i
+		}
+		assert.NotContains(t, joined, "apt-get update -y -o Acquire::Retries=3 &&", "an unscoped apt-get update must not run")
+		if strings.Contains(joined, "apt-get install --only-upgrade") && strings.Contains(joined, "alpamon") {
+			installAt = i
+		}
+	}
+	assert.GreaterOrEqual(t, scopedUpdateAt, 0, "a scoped apt-get update must run, got %+v", mockExec.GetExecutedCommands())
+	assert.GreaterOrEqual(t, installAt, 0, "an install must run, got %+v", mockExec.GetExecutedCommands())
+	assert.Less(t, scopedUpdateAt, installAt, "the install must run after the scoped update")
+}
+
+// TestSystemHandler_Upgrade_AptUpdateFailureStopsTheUpgradeAndNamesTheStep checks that
+// a failed update skips install and names its step: a bare "exit 100" does not.
+func TestSystemHandler_Upgrade_AptUpdateFailureStopsTheUpgradeAndNamesTheStep(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgApt, "")
+	_, alpamonFile := writeAptAlpamonSource(t)
+
+	const updateOutput = "E: The repository '...' does not have a Release file."
+	mockExec.SetResult("apt-get update -y -o Acquire::Retries=3 -o Dir::Etc::sourcelist="+alpamonFile+" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0",
+		100, updateOutput, errors.New("exit status 100"))
+
+	exitCode, output, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+
+	assert.Equal(t, 100, exitCode, "the update's exit code must survive")
+	assert.Contains(t, output, "apt-get update", "the failure must name the step that failed")
+	assert.Contains(t, output, "100", "the failure must name the exit code")
+	for _, c := range mockExec.GetExecutedCommands() {
+		joined := c.Name + " " + strings.Join(c.Args, " ")
+		assert.NotContains(t, joined, "apt-get install", "install must not run after a failed update")
+	}
+}
+
+func TestSystemHandler_Upgrade_AptInstallFailureNamesTheStep(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgApt, "")
+	writeAptAlpamonSource(t)
+
+	const installOutput = "E: Sub-process /usr/bin/dpkg returned an error code (1)"
+	mockExec.SetResult("apt-get install --only-upgrade alpamon -y -o Acquire::Retries=3",
+		100, installOutput, errors.New("exit status 100"))
+
+	exitCode, output, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+
+	assert.Equal(t, 100, exitCode, "the install's exit code must survive")
+	assert.Contains(t, output, installOutput, "the original dpkg failure must remain in the output")
+	assert.Contains(t, output, "apt-get install exited 100", "the failure must name the step and exit code")
+	assert.NotContains(t, output, "apt-get update exited", "a successful update must not be reported as a failure")
 }
 
 // A repo skipped elsewhere on the host cannot hide a missed alpamon update once
@@ -1484,7 +1763,6 @@ func TestSystemHandler_Upgrade_ZypperRefreshFailureCarriesTheHint(t *testing.T) 
 	assert.Contains(t, output, "SUSEConnect --status")
 }
 
-// setVersion pins the build-time injected agent version for one test.
 func setVersion(t *testing.T, v string) {
 	t.Helper()
 	original := version.Version
@@ -1561,10 +1839,9 @@ func TestSystemHandler_Upgrade_PamIsNotComparedToAlpamonRelease(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode)
 
-	shell := findExecutedShell(mockExec)
-	require.NotNil(t, shell, "an installed alpamon-pam must reach the package manager")
-	require.Len(t, shell.Args, 2)
-	assert.Contains(t, shell.Args[1], "--only-upgrade alpamon-pam -y",
+	install := findExecutedAptInstall(mockExec)
+	require.NotNil(t, install, "an installed alpamon-pam must reach the package manager")
+	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon-pam", "-y", "-o", "Acquire::Retries=3"}, install.Args,
 		"only alpamon-pam is behind; alpamon itself is already current")
 	assert.True(t, mockVersions.InvalidatePamCalled, "the cached pam version must be refreshed after the upgrade")
 }
