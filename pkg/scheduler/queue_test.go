@@ -164,7 +164,6 @@ func TestPostChunk_GivenDeadlineExceededCtx_WhenQueueDrainsBeforeMaxWait_ThenChu
 
 // A chunk's expiry is given by the caller (derived from the ctx's deadline
 // there), so postChunk just stamps whatever it is given onto the entry.
-
 func TestPostChunk_GivenExpiry_WhenEnqueued_ThenEntryCarriesThatExpiryUnchanged(t *testing.T) {
 	newRequestQueue()
 

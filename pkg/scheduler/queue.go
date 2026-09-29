@@ -155,8 +155,8 @@ func (rq *RequestQueue) PostWithHeaders(url string, data any, priority int, due 
 	rq.request(http.MethodPost, url, data, priority, due, headers)
 }
 
-// PostChunk enqueues a chunk, throttling the command while the queue is full and dropping on ctx cancellation or past maxWait; a ctx deadline alone keeps polling.
-// expiry is the caller-computed point past which the chunk should be dropped rather than delivered.
+// PostChunk enqueues a chunk to be dropped past expiry, throttling the command while the queue is full.
+// It drops the chunk on ctx cancellation or past maxWait; a ctx deadline alone keeps polling.
 func (rq *RequestQueue) PostChunk(ctx context.Context, url string, data any, priority int, expiry time.Time) {
 	rq.postChunk(ctx, url, data, priority, expiry, chunkQueueHighWater, chunkBackpressurePoll, chunkBackpressureMaxWait)
 }

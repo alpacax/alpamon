@@ -340,10 +340,9 @@ func TestE2E_ShellOperatorChain_TimeoutCapsWholeChainNotEachSegment(t *testing.T
 	assert.Less(t, elapsed, 2500*time.Millisecond, "the whole chain should be capped at ~one timeout, not restarted per segment")
 }
 
-// Given a chain whose second segment is killed mid-run by the chain deadline,
-// when the chain times out, then the output carries exactly one banner whose
-// elapsed reflects the whole chain, not the killed segment's own local start.
-func TestE2E_ShellOperatorChain_TimeoutBannerReportsChainElapsedNotSegmentElapsed(t *testing.T) {
+// Given a chain whose second segment is killed mid-run by the chain deadline, then the output
+// carries exactly one banner, naming the chain timeout rather than the segment's own elapsed.
+func TestE2E_ShellOperatorChain_TimeoutBannerReportsChainTimeoutNotSegmentElapsed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("execs the POSIX sleep binary")
 	}

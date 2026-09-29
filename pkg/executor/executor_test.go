@@ -53,8 +53,7 @@ func TestExecute_GivenParentCtxCancelledMidRun_ThenExitCodeIsOneNotNegativeOne(t
 	assert.Equal(t, 1, exitCode)
 }
 
-// A fast, normally-exiting command must still stream its output through the
-// unchanged callback shape: this behavior is unaffected by the ctx plumbing.
+// A fast, normally-exiting command must still stream its output through the callback.
 func TestExecutor_NoTimeoutOnFastCommand(t *testing.T) {
 	e := NewExecutor()
 	ctx := context.Background()
