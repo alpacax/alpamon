@@ -38,6 +38,16 @@ func TestStripTimeoutBanner(t *testing.T) {
 			want:   "",
 		},
 		{
+			name:   "GivenBannerTextFollowedByMoreOutput_WhenStripped_ThenOutputUnchanged",
+			output: "before\n\nCommand timed out after 2s\nafter",
+			want:   "before\n\nCommand timed out after 2s\nafter",
+		},
+		{
+			name:   "GivenOutputStartingWithBannerText_WhenStripped_ThenOutputUnchanged",
+			output: "Command timed out after 2s\nafter",
+			want:   "Command timed out after 2s\nafter",
+		},
+		{
 			name:   "GivenTwoBanners_WhenStripped_ThenOnlyTheLastOneRemoved",
 			output: "Command timed out after 1s\n\nmore output\n\nCommand timed out after 2s",
 			want:   "Command timed out after 1s\n\nmore output",

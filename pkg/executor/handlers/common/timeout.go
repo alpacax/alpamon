@@ -61,14 +61,15 @@ func AppendTimeoutBanner(out string, elapsed time.Duration) string {
 	return out + "\n\n" + formatTimeoutBanner(elapsed)
 }
 
-// StripTimeoutBanner removes a trailing banner appended by AppendTimeoutBanner
-// (and its "\n\n" separator, when present), so a caller can replace it with its own.
+// StripTimeoutBanner removes a trailing banner appended by AppendTimeoutBanner, so a caller can
+// replace it with its own. Banner-like text a command printed mid-output is left alone.
 func StripTimeoutBanner(out string) string {
-	if idx := strings.LastIndex(out, "\n\n"+timeoutBannerPrefix); idx >= 0 {
-		return out[:idx]
+	idx, banner := 0, out
+	if i := strings.LastIndex(out, "\n\n"+timeoutBannerPrefix); i >= 0 {
+		idx, banner = i, out[i+2:]
 	}
-	if strings.HasPrefix(out, timeoutBannerPrefix) {
-		return ""
+	if !strings.HasPrefix(banner, timeoutBannerPrefix) || strings.Contains(banner, "\n") {
+		return out
 	}
-	return out
+	return out[:idx]
 }
