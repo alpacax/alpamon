@@ -12,11 +12,23 @@ Alpamon is a lightweight Go-based server agent for Alpacon—the infrastructure 
 - **Sentence case**: Use sentence case for all headings, labels, and documentation (e.g., "Architecture overview" not "Architecture Overview"). Only capitalize the first word and proper nouns.
 - **Em-dashes**: No spaces around em-dashes (e.g., "word—word" not "word — word"). Use colons instead of em-dashes for itemized descriptions (e.g., "`shell/`: description").
 
-## Declaration order
+## Go conventions
+
+These adapt a few rules from the [Uber Go style guide](https://github.com/uber-go/guide/blob/master/style.md). golangci-lint's default linters already catch unchecked errors and unused code, so those are not repeated here.
+
+### Declaration order
 
 Order a Go file's top-level declarations the way the Uber Go style guide's "Function Grouping and Ordering" does: `const`, then `var`, then each `type` followed by its constructor (`NewXxx`/`newXxx`) and its methods, then plain functions. Within each group, keep a rough call order. Test files follow the same order; test functions and helpers are plain functions.
 
 Apply it to new files and to declarations you add. Reordering an existing file is its own commit, never mixed into a behavior change: a pure move hides the real diff from review. Prove such a commit moves lines without changing any, e.g. `diff <(git show HEAD:<file> | sort) <(sort <file>)` prints nothing.
+
+### Interfaces, parameters, errors and channels
+
+- Check at compile time that a type satisfies the interface it is written for: `var _ common.Handler = (*SystemHandler)(nil)`.
+- Optional, for readability only: a literal argument whose meaning the call site does not show (`0`, `true`, `""`) may carry its parameter name as a comment, e.g. `Exec(ctx, argv, "root", "root", env, 0 /* timeout */)`.
+- Take a duration as `time.Duration`. When a field or parameter has to be a plain number, put the unit in its name (`unregisterTimeoutSeconds`). Existing APIs that take seconds, such as the `Session` methods, change only in their own commit.
+- Handle an error once: log it or return it, not both. Logging and returning the same error prints one failure several times up the stack.
+- Give a channel a buffer of zero or one. A larger buffer needs a comment saying why that size is enough and what happens when it fills.
 
 ## Development commands
 
