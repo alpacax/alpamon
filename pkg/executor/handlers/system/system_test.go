@@ -1133,7 +1133,7 @@ func TestResolveAptAlpamonSource_IgnoresCommentedOutSource(t *testing.T) {
 		[]byte("# deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Equal(t, "", resolveAptAlpamonSource())
+	assert.Empty(t, resolveAptAlpamonSource())
 }
 
 // TestResolveAptAlpamonSource_MatchesDeb822SourcesFile checks that a deb822 .sources
@@ -1157,7 +1157,7 @@ func TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored(t *testing.T) {
 		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n"), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Equal(t, "", resolveAptAlpamonSource())
+	assert.Empty(t, resolveAptAlpamonSource())
 }
 
 func TestResolveAptAlpamonSource_EnabledStanzaAfterDisabledOneInSameFile(t *testing.T) {
@@ -1180,7 +1180,7 @@ func TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive(t *testing.
 		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nenabled: No\n"), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Equal(t, "", resolveAptAlpamonSource())
+	assert.Empty(t, resolveAptAlpamonSource())
 }
 
 func TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState(t *testing.T) {
@@ -1191,7 +1191,7 @@ func TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState(t 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"), []byte(content), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Equal(t, "", resolveAptAlpamonSource())
+	assert.Empty(t, resolveAptAlpamonSource())
 }
 
 func TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled(t *testing.T) {
@@ -1255,7 +1255,7 @@ func TestSystemHandler_Upgrade_ScopesAptUpdateToAlpamonSource(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode)
 
-	var scopedUpdateAt, installAt = -1, -1
+	scopedUpdateAt, installAt := -1, -1
 	for i, c := range mockExec.GetExecutedCommands() {
 		joined := c.Name + " " + strings.Join(c.Args, " ")
 		if c.Name == "apt-get" && strings.Contains(joined, "update") {
