@@ -70,9 +70,9 @@ Assert with [testify](https://github.com/stretchr/testify): `require` when a fai
 # Run from source
 go run ./cmd/alpamon
 
-# Configuration file locations (in order of precedence):
+# Configuration file locations (the first non-empty file wins; files are not merged):
+# - /etc/alpamon/alpamon.conf (production; platform config dir, see pkg/config/paths_*.go)
 # - ~/.alpamon.conf (development)
-# - /etc/alpamon/alpamon.conf (production)
 ```
 
 ### Docker testing
@@ -185,7 +185,7 @@ cpu := client.CPU.Create().SetUsage(usage).SetTimestamp(time.Now()).SaveX(ctx)
 ```
 
 ### Metric collection
-- Collectors implement `Check` interface with `Collect()` method
+- Collectors implement the `Check` interface with an `Execute(ctx)` method
 - Realtime: Direct system calls using gopsutil
 - Batch: Database aggregation queries for hourly/daily summaries
 
@@ -200,9 +200,9 @@ cpu := client.CPU.Create().SetUsage(usage).SetTimestamp(time.Now()).SaveX(ctx)
 
 **Testing constraints**: Tests run with `-p 1` (sequential execution) due to SQLite database file locking and system resource measurement conflicts.
 
-**Platform compatibility**: Codebase includes platform-specific implementations (darwin/linux) for PTY and PID file operations.
+**Platform compatibility**: Codebase includes platform-specific implementations (darwin, linux, and windows) for PTY and PID file operations.
 
-**Firewall operations**: Use executor's `RunWithInput` for piping rules via stdin to `nft -f -` and `iptables-restore` commands.
+**Firewall operations**: Rules are written to a temp file and applied with the executor's `RunAsUser` as `nft -f <file>` and `iptables-restore <file>`.
 
 **Database migrations**: Migration system uses direct SQL execution via Go's `database/sql` package. Migration files in `pkg/db/migration/` are pure SQLite SQL. The `RunMigration()` function tracks applied migrations in the `atlas_schema_revisions` table and executes unapplied migrations in transactions. No external tools required.
 
