@@ -71,7 +71,8 @@ Assert with [testify](https://github.com/stretchr/testify): `require` when a fai
 go run ./cmd/alpamon
 
 # Configuration file locations (the first non-empty file wins; files are not merged):
-# - /etc/alpamon/alpamon.conf (production; platform config dir, see pkg/config/paths_*.go)
+# - /etc/alpamon/alpamon.conf (Linux and macOS production, see pkg/config/paths_*.go)
+# - %ProgramData%\alpamon\alpamon.conf (Windows production)
 # - ~/.alpamon.conf (development)
 ```
 
