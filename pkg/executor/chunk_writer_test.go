@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +17,7 @@ import (
 
 func TestChunkWriter_BuffersUntilFlush(t *testing.T) {
 	var chunks []string
-	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
 	if _, err := cw.Write([]byte("line1\n")); err != nil {
 		t.Fatalf("write: %v", err)
@@ -36,7 +37,7 @@ func TestChunkWriter_BuffersUntilFlush(t *testing.T) {
 
 func TestChunkWriter_CoalescesMultipleWrites(t *testing.T) {
 	var chunks []string
-	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
 	for _, s := range []string{"a\n", "b\n", "c\n"} {
 		if _, err := cw.Write([]byte(s)); err != nil {
@@ -55,7 +56,7 @@ func TestChunkWriter_CoalescesMultipleWrites(t *testing.T) {
 
 func TestChunkWriter_PartialLineCarriedOver(t *testing.T) {
 	var chunks []string
-	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
 	if _, err := cw.Write([]byte("hello")); err != nil {
 		t.Fatalf("write: %v", err)
@@ -75,7 +76,7 @@ func TestChunkWriter_PartialLineCarriedOver(t *testing.T) {
 
 func TestChunkWriter_FlushEmitsRemainder(t *testing.T) {
 	var chunks []string
-	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
 	if _, err := cw.Write([]byte("no newline")); err != nil {
 		t.Fatalf("write: %v", err)
@@ -98,7 +99,7 @@ func TestChunkWriter_FlushEmitsRemainder(t *testing.T) {
 
 func TestChunkWriter_ThresholdTriggersEmissionWithoutNewline(t *testing.T) {
 	var chunks []string
-	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
 	big := strings.Repeat("x", chunkSizeThreshold+10)
 	if _, err := cw.Write([]byte(big)); err != nil {
@@ -121,7 +122,7 @@ func TestChunkWriter_ThresholdTriggersEmissionWithoutNewline(t *testing.T) {
 
 func TestChunkWriter_RecoversFromCallbackPanic(t *testing.T) {
 	var calls int
-	cw := newChunkWriter(func(content string) {
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) {
 		calls++
 		if calls == 1 {
 			panic("boom")
@@ -155,7 +156,7 @@ func chunkSizes(chunks []string) []int {
 }
 
 func TestChunkWriter_WriteReturnsFullLength(t *testing.T) {
-	cw := newChunkWriter(func(content string) {})
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) {})
 
 	in := []byte("partial")
 	n, err := cw.Write(in)
@@ -172,7 +173,7 @@ func TestChunkWriter_WriteReturnsFullLength(t *testing.T) {
 // ends in a newline.
 func TestChunkWriter_OversizedBufferSplitsAtThreshold(t *testing.T) {
 	var chunks []string
-	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
 	tail := strings.Repeat("a", chunkSizeThreshold-100)
 	if _, err := cw.Write([]byte(tail)); err != nil {
@@ -205,7 +206,7 @@ func TestChunkWriter_OversizedBufferSplitsAtThreshold(t *testing.T) {
 // Regression: chunks stream every byte while the audit capture stays bounded.
 func TestChunkWriter_StreamsAllWithBoundedCapture(t *testing.T) {
 	emitted := 0
-	cw := newChunkWriter(func(content string) { emitted += len(content) })
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { emitted += len(content) })
 
 	block := strings.Repeat("z", 256*1024)
 	const writes = 6
@@ -233,7 +234,7 @@ func TestChunkWriter_FlusherEmitsBufferedOutput(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var mu sync.Mutex
 		var chunks []string
-		cw := newChunkWriter(func(content string) {
+		cw := newChunkWriter(context.Background(), func(_ context.Context, content string) {
 			mu.Lock()
 			defer mu.Unlock()
 			chunks = append(chunks, content)
@@ -258,7 +259,7 @@ func TestChunkWriter_FlusherEmitsBufferedOutput(t *testing.T) {
 // A multi-byte rune straddling the 4KB cut must not be split—a split chunk is invalid UTF-8.
 func TestChunkWriter_DoesNotSplitRuneAtThreshold(t *testing.T) {
 	var chunks []string
-	cw := newChunkWriter(func(content string) { chunks = append(chunks, content) })
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
 	// '가' (3 bytes) starts at chunkSizeThreshold-2 so its 3rd byte lands past the
 	// cut; trailing 'b's keep buf over threshold so the Write loop emits before flush.

@@ -114,22 +114,30 @@ func (m *MockCommandExecutor) ExecWithHook(ctx context.Context, args []string, u
 }
 
 // ExecWithStreamingHook mirrors ExecWithHook and emits the full output as one chunk.
-func (m *MockCommandExecutor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error) {
+func (m *MockCommandExecutor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	if pidHook != nil {
 		pid := int(mockSyntheticPIDBase + mockSyntheticPID.Add(1))
 		pidHook(pid)
 	}
 	exitCode, output, err := m.Exec(ctx, args, username, groupname, env, timeout)
-	if chunkCallback != nil && output != "" {
-		chunkCallback(output)
-	}
+	emitMockChunk(ctx, timeout, chunkCallback, output)
 	return exitCode, output, err
+}
+
+// emitMockChunk hands output to chunkCallback under a ctx bounded by timeout, as CommandExecutor does.
+func emitMockChunk(ctx context.Context, timeout time.Duration, chunkCallback func(ctx context.Context, content string), output string) {
+	if chunkCallback == nil || output == "" {
+		return
+	}
+	hookCtx, cancel := WithHandlerTimeout(ctx, timeout)
+	defer cancel()
+	chunkCallback(hookCtx, output)
 }
 
 // ExecFileWithStreamingHook mirrors ExecWithStreamingHook and additionally
 // records the inherited descriptor, so tests can assert that the object handed
 // to the child is the one the verifier opened.
-func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error) {
+func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	if len(args) == 0 {
 		return 0, "", nil
 	}
@@ -141,9 +149,7 @@ func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, fil
 		Name: args[0], Args: args[1:], User: username, Env: env, Timeout: timeout, File: file,
 	})
 	exitCode, output, err := m.lookupResult(args[0], args[1:]...)
-	if chunkCallback != nil && output != "" {
-		chunkCallback(output)
-	}
+	emitMockChunk(ctx, timeout, chunkCallback, output)
 	return exitCode, output, err
 }
 

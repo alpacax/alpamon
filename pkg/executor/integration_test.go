@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +11,9 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/shell"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // IntegrationMockHandler is a more complete mock handler for integration testing
@@ -287,4 +292,97 @@ func TestIntegration_UnregisterHandler(t *testing.T) {
 	if registry.IsCommandRegistered("remove_cmd") {
 		t.Error("command should not be registered after unregister")
 	}
+}
+
+func TestE2E_ShellChain_GivenParentCtxCancelledMidSegment_ThenExitCodeOneAndLaterSegmentSkipped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execs the POSIX sleep binary")
+	}
+
+	handler := shell.NewShellHandler(NewExecutor())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	args := &common.CommandArgs{
+		Command: "sleep 5 && echo after",
+	}
+
+	exitCode, output, _ := handler.Execute(ctx, common.ShellCmd.String(), args)
+
+	assert.Equal(t, 1, exitCode)
+	assert.NotContains(t, output, "after")
+}
+
+// executeWithOperators used to give each `&&`/`||`/`;` segment its own fresh
+// timeout, letting a 3-segment chain run 3x the nominal timeout.
+func TestE2E_ShellOperatorChain_TimeoutCapsWholeChainNotEachSegment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execs the POSIX sleep binary")
+	}
+
+	handler := shell.NewShellHandler(NewExecutor())
+
+	const timeout = 1500 * time.Millisecond
+	args := &common.CommandArgs{
+		Command: "sleep 1 && sleep 1 && sleep 1",
+		Timeout: timeout,
+	}
+
+	start := time.Now()
+	exitCode, _, _ := handler.Execute(context.Background(), common.ShellCmd.String(), args)
+	elapsed := time.Since(start)
+
+	assert.Equal(t, common.TimeoutExitCode, exitCode, "chain should be killed at the chain's own deadline")
+	assert.Less(t, elapsed, 2500*time.Millisecond, "the whole chain should be capped at ~one timeout, not restarted per segment")
+}
+
+// Given a chain whose second segment is killed mid-run by the chain deadline, then the output
+// carries exactly one banner, naming the chain timeout rather than the segment's own elapsed.
+func TestE2E_ShellOperatorChain_TimeoutBannerReportsChainTimeoutNotSegmentElapsed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execs the POSIX sleep binary")
+	}
+
+	handler := shell.NewShellHandler(NewExecutor())
+
+	const timeout = 2 * time.Second
+	args := &common.CommandArgs{
+		Command: "sleep 1 && sleep 5",
+		Timeout: timeout,
+	}
+
+	exitCode, output, _ := handler.Execute(context.Background(), common.ShellCmd.String(), args)
+
+	require.Equal(t, common.TimeoutExitCode, exitCode)
+	assert.Equal(t, 1, strings.Count(output, "Command timed out after"), "exactly one timeout banner, output: %q", output)
+	assert.Contains(t, output, "Command timed out after 2s")
+	assert.NotContains(t, output, "Command timed out after 1s")
+}
+
+// Given a chain whose first segment consumes the whole deadline via timeout
+// under ";", when the chain times out, then the skipped second segment does
+// not leave the chain without any banner at all.
+func TestE2E_ShellOperatorChain_TimeoutBannerPresentEvenWhenNextSegmentSkipped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execs the POSIX sleep binary")
+	}
+
+	handler := shell.NewShellHandler(NewExecutor())
+
+	const timeout = 1 * time.Second
+	args := &common.CommandArgs{
+		Command: "sleep 3 ; echo done",
+		Timeout: timeout,
+	}
+
+	exitCode, output, _ := handler.Execute(context.Background(), common.ShellCmd.String(), args)
+
+	require.Equal(t, common.TimeoutExitCode, exitCode)
+	assert.Equal(t, 1, strings.Count(output, "Command timed out after"), "exactly one timeout banner, output: %q", output)
+	assert.Contains(t, output, "Command timed out after 1s")
+	assert.NotContains(t, output, "done")
 }

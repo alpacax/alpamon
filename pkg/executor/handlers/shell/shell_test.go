@@ -3,11 +3,15 @@ package shell
 import (
 	"context"
 	"errors"
+	"regexp"
 	"runtime"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -226,26 +230,35 @@ func TestShellHandler_WithTimeout(t *testing.T) {
 	assert.Equal(t, 0, exitCode)
 }
 
-func TestShellHandler_DefaultTimeout(t *testing.T) {
+func TestShellHandler_GivenNoTimeout_WhenExecuted_ThenChainDeadlineIsThirtyMinutes(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockExec.SetResult("ls", 0, "output", nil)
 	handler := NewShellHandler(mockExec)
 	ctx := context.Background()
 
+	var capturedCtx context.Context
 	args := &common.CommandArgs{
 		Command: "ls",
 		// Timeout not set - should default to 30 minutes
+		ChunkCallback: func(cbCtx context.Context, content string) {
+			capturedCtx = cbCtx
+		},
 	}
 
+	before := time.Now()
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
 
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode)
 
-	// Verify the default 30m timeout was passed to the executor
 	cmds := mockExec.GetExecutedCommands()
 	require.NotEmpty(t, cmds, "expected at least one executed command")
-	assert.Equal(t, 30*time.Minute, cmds[0].Timeout)
+	assert.Equal(t, time.Duration(0), cmds[0].Timeout)
+
+	require.NotNil(t, capturedCtx, "expected chunk callback to be invoked with a ctx")
+	deadline, ok := capturedCtx.Deadline()
+	require.True(t, ok, "expected the chain ctx to carry a deadline")
+	assert.WithinDuration(t, before.Add(30*time.Minute), deadline, 5*time.Second)
 }
 
 func TestShellHandler_Validate_Empty(t *testing.T) {
@@ -423,4 +436,154 @@ func TestShellHandler_MultiWordCommand(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode)
 	assert.Contains(t, output, "total")
+}
+
+func TestExecuteWithOperators_GivenExpiredDeadline_WhenChainRuns_ThenReportsTimeout(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockExec.SetResult("echo a", 0, "a", nil)
+	mockExec.SetResult("echo b", 0, "b", nil)
+	handler := NewShellHandler(mockExec)
+
+	parentCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	args := &common.CommandArgs{
+		Command: "echo a && echo b",
+		AllowSh: false,
+	}
+
+	exitCode, output, err := handler.Execute(parentCtx, common.ShellCmd.String(), args)
+
+	require.NoError(t, err)
+	assert.Equal(t, common.TimeoutExitCode, exitCode)
+	assert.Equal(t, 1, strings.Count(output, "Command timed out after"))
+	assert.Empty(t, mockExec.GetExecutedCommands())
+}
+
+func TestExecuteWithOperators_GivenCancelledParent_WhenChainRuns_ThenStopsWithoutTimeoutBanner(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockExec.SetResult("echo a", 0, "a", nil)
+	mockExec.SetResult("echo b", 0, "b", nil)
+	handler := NewShellHandler(mockExec)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	args := &common.CommandArgs{
+		Command: "echo a ; echo b",
+		AllowSh: false,
+	}
+
+	exitCode, output, err := handler.Execute(parentCtx, common.ShellCmd.String(), args)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, strings.Count(output, "timed out"))
+	assert.NotEqual(t, common.TimeoutExitCode, exitCode)
+	assert.Empty(t, mockExec.GetExecutedCommands())
+}
+
+// cancelAfterFirstExec wraps MockCommandExecutor and cancels the given
+// cancel func right after the first ExecWithStreamingHook call returns, so
+// tests can simulate the parent ctx being cancelled between segments.
+type cancelAfterFirstExec struct {
+	*common.MockCommandExecutor
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterFirstExec) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+	code, out, err := c.MockCommandExecutor.ExecWithStreamingHook(ctx, args, username, groupname, env, timeout, pidHook, chunkCallback)
+	c.cancel()
+	return code, out, err
+}
+
+// The tail case exits through the check after the loop, the mid case through the in-loop check.
+func TestExecuteWithOperators_GivenParentCancelledMidChain_WhenNextSegmentSkipped_ThenReportsFailureAndNeverRunsRemainder(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{name: "tail segment", command: "echo a && echo b"},
+		{name: "mid segment", command: "echo a && echo b && echo c"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExec := common.NewMockCommandExecutor(t)
+			mockExec.SetResult("echo a", 0, "a", nil)
+			mockExec.SetResult("echo b", 0, "b", nil)
+			mockExec.SetResult("echo c", 0, "c", nil)
+
+			parentCtx, cancel := context.WithCancel(context.Background())
+			handler := NewShellHandler(&cancelAfterFirstExec{MockCommandExecutor: mockExec, cancel: cancel})
+
+			args := &common.CommandArgs{
+				Command: tt.command,
+				AllowSh: false,
+			}
+
+			exitCode, output, err := handler.Execute(parentCtx, common.ShellCmd.String(), args)
+
+			require.NoError(t, err)
+			assert.Equal(t, 1, exitCode)
+			assert.Equal(t, 0, strings.Count(output, "timed out"))
+			assert.Len(t, mockExec.GetExecutedCommands(), 1)
+		})
+	}
+}
+
+// blockUntilChainDeadline stands in for a segment the chain deadline kills: it waits for ctx to end,
+// then reports what a killed segment reports, including its own banner.
+type blockUntilChainDeadline struct {
+	*common.MockCommandExecutor
+}
+
+func (b *blockUntilChainDeadline) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+	<-ctx.Done()
+	return b.MockCommandExecutor.ExecWithStreamingHook(ctx, args, username, groupname, env, timeout, pidHook, chunkCallback)
+}
+
+func TestExecuteWithOperators_GivenStreamingOutputOverAuditCap_WhenChainTimesOut_ThenOneChainBannerSurvivesTruncation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mockExec := common.NewMockCommandExecutor(t)
+		killed := strings.Repeat("x", utils.AuditOutputCap+1024)
+		mockExec.SetResult("cmd1", common.TimeoutExitCode, common.AppendTimeoutBanner(killed, time.Second), nil)
+		mockExec.SetResult("cmd2", 0, "output2", nil)
+		handler := NewShellHandler(&blockUntilChainDeadline{MockCommandExecutor: mockExec})
+
+		args := &common.CommandArgs{
+			Command:       "cmd1 || cmd2",
+			Timeout:       30 * time.Second,
+			ChunkCallback: func(ctx context.Context, content string) {},
+		}
+
+		exitCode, output, err := handler.Execute(context.Background(), common.ShellCmd.String(), args)
+
+		require.NoError(t, err)
+		assert.Equal(t, common.TimeoutExitCode, exitCode)
+		assert.Equal(t, 1, strings.Count(output, "Command timed out after"), "the segment's banner must be replaced, not kept")
+		assert.True(t, strings.HasSuffix(output, "\n\nCommand timed out after 30s"), "the chain banner must end the truncated output")
+		marker := regexp.MustCompile(`\n\.\.\. \[\d+ bytes truncated\] \.\.\.\n`).FindString(output)
+		require.NotEmpty(t, marker, "output over the cap must be truncated")
+		assert.Equal(t, utils.AuditOutputCap, len(output)-len(marker), "the banner must fit inside the cap, not ride past it")
+		assert.Len(t, mockExec.GetExecutedCommands(), 1, "|| must not run cmd2 once the chain deadline passed")
+	})
+}
+
+func TestExecuteWithOperators_GivenSegmentExits124ByItself_WhenChainDeadlineLive_ThenTreatedAsOrdinaryFailure(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockExec.SetResult("cmd1", common.TimeoutExitCode, "own output", nil)
+	mockExec.SetResult("cmd2", 0, "output2", nil)
+	handler := NewShellHandler(mockExec)
+
+	args := &common.CommandArgs{
+		Command: "cmd1 || cmd2",
+	}
+
+	exitCode, output, err := handler.Execute(context.Background(), common.ShellCmd.String(), args)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode, "|| must run cmd2 after cmd1's own 124")
+	assert.Contains(t, output, "own output")
+	assert.Contains(t, output, "output2")
+	assert.NotContains(t, output, "timed out")
+	assert.Len(t, mockExec.GetExecutedCommands(), 2)
 }

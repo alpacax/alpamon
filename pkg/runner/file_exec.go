@@ -237,6 +237,6 @@ func (cr *CommandRunner) prepareFileCommand(ctx context.Context) (*common.Comman
 		Env:           cr.command.Env,
 		VerifiedFile:  file,
 		ExecArgs:      execArgs,
-		ChunkCallback: cr.newChunkCallback(ctx),
+		ChunkCallback: cr.newChunkCallback(),
 	}, nil
 }

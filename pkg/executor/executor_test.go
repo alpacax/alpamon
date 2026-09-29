@@ -8,6 +8,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExecutor_TimeoutReturns124(t *testing.T) {
@@ -30,21 +33,66 @@ func TestExecutor_TimeoutReturns124(t *testing.T) {
 	}
 }
 
+func TestExecute_GivenParentCtxCancelledMidRun_ThenExitCodeIsOneNotNegativeOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execs the POSIX sleep binary")
+	}
+	e := NewExecutor()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	exitCode, _, err := e.Execute(ctx, CommandOptions{
+		Args: []string{"sleep", "5"},
+	})
+
+	require.Error(t, err)
+	assert.Equal(t, 1, exitCode)
+}
+
+// A fast, normally-exiting command must still stream its output through the callback.
 func TestExecutor_NoTimeoutOnFastCommand(t *testing.T) {
 	e := NewExecutor()
 	ctx := context.Background()
 
+	var captured string
 	exitCode, _, err := e.Execute(ctx, CommandOptions{
 		Args:    []string{"echo", "hello"},
 		Timeout: 5 * time.Second,
+		ChunkCallback: func(ctx context.Context, content string) {
+			captured += content
+		},
 	})
 
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, captured, "hello")
+}
+
+// Regression: ChunkCallback's ctx must be Execute's own deadline-bearing ctx (the timeout
+// child it creates), not the caller's ctx, so a queued chunk gets a matching expiry.
+func TestExecute_GivenTimeoutOption_WhenChunkEmitted_ThenCallbackCtxCarriesThatDeadline(t *testing.T) {
+	e := NewExecutor()
+	outerCtx := context.Background()
+
+	var gotCtx context.Context
+	_, _, err := e.Execute(outerCtx, CommandOptions{
+		Args:    []string{"echo", "hi"},
+		Timeout: 5 * time.Second,
+		ChunkCallback: func(ctx context.Context, content string) {
+			gotCtx = ctx
+		},
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, gotCtx, "ChunkCallback should have been invoked")
+	_, outerHasDeadline := outerCtx.Deadline()
+	require.False(t, outerHasDeadline, "test setup: outer ctx must not itself carry a deadline")
+	_, hasDeadline := gotCtx.Deadline()
+	assert.True(t, hasDeadline, "callback ctx should carry Execute's own timeout, not the deadline-less outer ctx")
 }
 
 func TestExecutor_ExecWithStreamingHook_StreamsChunks(t *testing.T) {
@@ -57,7 +105,7 @@ func TestExecutor_ExecWithStreamingHook_StreamsChunks(t *testing.T) {
 
 	var mu sync.Mutex
 	var chunks []string
-	callback := func(content string) {
+	callback := func(_ context.Context, content string) {
 		mu.Lock()
 		defer mu.Unlock()
 		chunks = append(chunks, content)
@@ -119,7 +167,7 @@ func TestExecutor_StreamingTimeoutBannerHasNoLeadingNewlines(t *testing.T) {
 		context.Background(),
 		[]string{"/bin/sh", "-c", "sleep 5"},
 		"", "", nil, 500*time.Millisecond,
-		nil, func(content string) {},
+		nil, func(_ context.Context, content string) {},
 	)
 	if err == nil {
 		t.Fatal("expected timeout error")

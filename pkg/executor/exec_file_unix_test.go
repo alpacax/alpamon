@@ -107,7 +107,7 @@ func TestExecFileWithStreamingHook_StreamsChunks(t *testing.T) {
 	var streamed strings.Builder
 	_, output, err := e.ExecFileWithStreamingHook(
 		context.Background(), file, verifiedFileArgv(t, "/bin/sh"), "", "", nil, 30*time.Second, nil,
-		func(content string) { streamed.WriteString(content) },
+		func(_ context.Context, content string) { streamed.WriteString(content) },
 	)
 
 	require.NoError(t, err)

@@ -52,10 +52,10 @@ type CommandExecutor interface {
 	// behaves identically to Exec.
 	ExecWithHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int)) (int, string, error)
 
-	// ExecWithStreamingHook is like ExecWithHook with a chunkCallback that
-	// receives streamed stdout/stderr chunks. Sequencing is the caller's
-	// responsibility.
-	ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error)
+	// ExecWithStreamingHook is like ExecWithHook plus a chunkCallback receiving
+	// streamed stdout/stderr chunks with the command's own deadline-bearing ctx;
+	// sequencing is the caller's responsibility.
+	ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error)
 
 	// ExecFileWithStreamingHook is ExecWithStreamingHook for a digest-verified
 	// entrypoint. file is handed to the child as an inherited descriptor at
@@ -64,7 +64,7 @@ type CommandExecutor interface {
 	// bytes that run. args is passed through literally: no environment
 	// expansion, and no shell to split words or honor operators. The caller
 	// retains ownership of file and closes it once this returns.
-	ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(content string)) (int, string, error)
+	ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error)
 }
 
 // WSClient interface for WebSocket client operations
