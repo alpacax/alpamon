@@ -254,6 +254,9 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	}
 
 	var cmd string
+	// Set on the apt path only: apt's install needs no shell operator, so it runs
+	// as an argv directly instead of through "sh -c cmd" like yum and zypper.
+	var installArgv []string
 	// Set when the refresh was scoped to alpamon's own repo, which is what makes
 	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
 	var alpamonRepoRefreshed bool
@@ -269,7 +272,8 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		if code != 0 {
 			return code, appendStepFailure(out, "apt-get update", code, rerr), rerr
 		}
-		cmd = fmt.Sprintf("apt-get install --only-upgrade %s -y -o Acquire::Retries=3", pkgList)
+		installArgv = append([]string{"apt-get", "install", "--only-upgrade"}, packages...)
+		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3")
 	case utils.PkgYum:
 		cmd = fmt.Sprintf("yum update -y %s", pkgList)
 	case utils.PkgZypper:
@@ -304,9 +308,13 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 
 	log.Debug().Msgf("Upgrading %s...", pkgList)
 	// The proxy environment (nil without a package proxy) applies to the
-	// spawned package-manager shell only, never to the agent process.
+	// spawned package-manager process only, never to the agent process.
+	argv := installArgv
+	if argv == nil {
+		argv = []string{"sh", "-c", cmd}
+	}
 	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
-		return h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageProxyEnv(packageProxy), 0)
+		return h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
 	})
 	exitCode, err = normalizeZypperExit(exitCode, err, alpamonRepoRefreshed)
 	// Reported, not failed: a repository that has not published the new build yet

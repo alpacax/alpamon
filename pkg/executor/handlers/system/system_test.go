@@ -512,6 +512,18 @@ func findExecutedShell(mockExec *common.MockCommandExecutor) *common.ExecutedCom
 	return nil
 }
 
+// findExecutedAptInstall is the apt counterpart to findExecutedShell: apt's
+// install runs as its own argv rather than through "sh -c".
+func findExecutedAptInstall(mockExec *common.MockCommandExecutor) *common.ExecutedCommand {
+	cmds := mockExec.GetExecutedCommands()
+	for i := len(cmds) - 1; i >= 0; i-- {
+		if cmds[i].Name == "apt-get" && len(cmds[i].Args) > 0 && cmds[i].Args[0] == "install" {
+			return &cmds[i]
+		}
+	}
+	return nil
+}
+
 // TestSystemHandler_Upgrade_PackageProxy verifies that a package_proxy in the
 // upgrade payload reaches both the version lookup and the environment of the
 // spawned package-manager shell, and that no_proxy shields the Alpacon server
@@ -544,18 +556,14 @@ func TestSystemHandler_Upgrade_PackageProxy(t *testing.T) {
 	assert.Equal(t, 0, exitCode)
 	assert.Equal(t, proxy, mockVersions.GotProxy, "the version lookup must use the proxy")
 
-	shell := findExecutedShell(mockExec)
-	require.NotNil(t, shell, "a package-manager shell must be spawned")
-	assert.Equal(t, "root", shell.User)
-	if assert.Len(t, shell.Args, 2) {
-		assert.Equal(t, "-c", shell.Args[0])
-		assert.Contains(t, shell.Args[1], "apt-get")
-	}
+	install := findExecutedAptInstall(mockExec)
+	require.NotNil(t, install, "an apt-get install must be spawned")
+	assert.Equal(t, "root", install.User)
 	for _, key := range []string{"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"} {
-		assert.Equal(t, proxy, shell.Env[key], "env %s", key)
+		assert.Equal(t, proxy, install.Env[key], "env %s", key)
 	}
 	for _, key := range []string{"no_proxy", "NO_PROXY"} {
-		noProxy := shell.Env[key]
+		noProxy := install.Env[key]
 		for _, excluded := range []string{"localhost", "127.0.0.1", "169.254.169.254", "fd00:ec2::254", "metadata.google.internal", "console.example.com"} {
 			assert.Contains(t, noProxy, excluded, "env %s must exclude it", key)
 		}
@@ -598,9 +606,9 @@ func TestSystemHandler_Upgrade_NoPackageProxy(t *testing.T) {
 	assert.Equal(t, 0, exitCode)
 	assert.Empty(t, mockVersions.GotProxy, "the version lookup must go direct")
 
-	shell := findExecutedShell(mockExec)
-	require.NotNil(t, shell, "a package-manager shell must be spawned")
-	assert.Empty(t, shell.Env, "no env override without package_proxy")
+	install := findExecutedAptInstall(mockExec)
+	require.NotNil(t, install, "an apt-get install must be spawned")
+	assert.Empty(t, install.Env, "no env override without package_proxy")
 }
 
 // TestSystemHandler_Upgrade_InvalidPackageProxy verifies that an invalid
@@ -633,9 +641,9 @@ func TestSystemHandler_Upgrade_InvalidPackageProxy(t *testing.T) {
 			assert.Equal(t, 0, exitCode)
 			assert.Empty(t, mockVersions.GotProxy, "the version lookup must go direct")
 
-			shell := findExecutedShell(mockExec)
-			require.NotNil(t, shell, "a package-manager shell must be spawned")
-			assert.Empty(t, shell.Env, "no env override for invalid proxy %q", proxy)
+			install := findExecutedAptInstall(mockExec)
+			require.NotNil(t, install, "an apt-get install must be spawned")
+			assert.Empty(t, install.Env, "no env override for invalid proxy %q", proxy)
 		})
 	}
 }
@@ -663,11 +671,9 @@ func TestSystemHandler_Upgrade_VersionLookupFailureProceeds(t *testing.T) {
 	require.NoError(t, err, "a version lookup failure must be non-fatal")
 	assert.Equal(t, 0, exitCode)
 
-	shell := findExecutedShell(mockExec)
-	require.NotNil(t, shell, "the upgrade must proceed despite the lookup failure")
-	if assert.Len(t, shell.Args, 2) {
-		assert.Contains(t, shell.Args[1], "alpamon")
-	}
+	install := findExecutedAptInstall(mockExec)
+	require.NotNil(t, install, "the upgrade must proceed despite the lookup failure")
+	assert.Contains(t, install.Args, "alpamon")
 }
 
 // TestSystemHandler_Upgrade_VersionLookupFailureSelfUpdate pins the non-linux
@@ -1318,7 +1324,7 @@ func TestSystemHandler_Upgrade_AptInstallFailureNamesTheStep(t *testing.T) {
 	writeAptAlpamonSource(t)
 
 	const installOutput = "E: Sub-process /usr/bin/dpkg returned an error code (1)"
-	mockExec.SetResult("sh -c apt-get install --only-upgrade alpamon -y -o Acquire::Retries=3",
+	mockExec.SetResult("apt-get install --only-upgrade alpamon -y -o Acquire::Retries=3",
 		100, installOutput, errors.New("exit status 100"))
 
 	exitCode, output, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
@@ -1833,10 +1839,9 @@ func TestSystemHandler_Upgrade_PamIsNotComparedToAlpamonRelease(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode)
 
-	shell := findExecutedShell(mockExec)
-	require.NotNil(t, shell, "an installed alpamon-pam must reach the package manager")
-	require.Len(t, shell.Args, 2)
-	assert.Contains(t, shell.Args[1], "--only-upgrade alpamon-pam -y",
+	install := findExecutedAptInstall(mockExec)
+	require.NotNil(t, install, "an installed alpamon-pam must reach the package manager")
+	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon-pam", "-y", "-o", "Acquire::Retries=3"}, install.Args,
 		"only alpamon-pam is behind; alpamon itself is already current")
 	assert.True(t, mockVersions.InvalidatePamCalled, "the cached pam version must be refreshed after the upgrade")
 }

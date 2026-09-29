@@ -181,9 +181,8 @@ func TestSystemHandler_Upgrade_LegacyPathUnchanged(t *testing.T) {
 	require.Len(t, commands, 2, "the update and install run as separate commands")
 	assert.Equal(t, []string{"update", "-y", "-o", "Acquire::Retries=3"}, commands[0].Args)
 	assert.Equal(t, "apt-get", commands[0].Name)
-	shell := findExecutedShell(h.exec)
-	require.NotNil(t, shell)
-	assert.Equal(t, []string{"-c", "apt-get install --only-upgrade alpamon -y -o Acquire::Retries=3"}, shell.Args)
+	assert.Equal(t, "apt-get", commands[1].Name)
+	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon", "-y", "-o", "Acquire::Retries=3"}, commands[1].Args)
 	assert.Empty(t, h.api.posts(), "the legacy path sends no upgrade report")
 }
 
