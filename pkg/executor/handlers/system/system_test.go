@@ -1062,6 +1062,37 @@ func TestSystemHandler_Upgrade_ScopesZypperToAlpamonRepo(t *testing.T) {
 	}
 }
 
+// TestSystemHandler_Upgrade_ZypperDoesNotMatchAlpamonDevAsAPathPrefix checks that
+// an "alpamon-dev" repo, whose baseurl merely shares "alpamon" as a path prefix
+// with the real repo, does not win the scope over the actual alpamon repo.
+func TestSystemHandler_Upgrade_ZypperDoesNotMatchAlpamonDevAsAPathPrefix(t *testing.T) {
+	const devSection = "[alpamon-dev]\nenabled=1\nbaseurl=https://packagecloud.io/alpacax/alpamon-dev/rpm_any/rpm_any/$basearch\n"
+	const stableSection = "[alpamon]\nenabled=1\nbaseurl=https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch\n"
+
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+	mockExec.SetResult("zypper --non-interactive lr --export -", 0, devSection+"\n"+stableSection, nil)
+
+	_, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.NoError(t, err)
+
+	var refreshedStable bool
+	for _, c := range mockExec.GetExecutedCommands() {
+		if c.Name+" "+strings.Join(c.Args, " ") == "zypper --non-interactive refresh alpamon" {
+			refreshedStable = true
+		}
+	}
+	assert.True(t, refreshedStable, "expected the stable alpamon repo to be scoped, got %+v", mockExec.GetExecutedCommands())
+}
+
 // The refresh exists to keep a stale-metadata no-op from reporting success, so
 // its failure must stop the upgrade instead of falling through to the update.
 func TestSystemHandler_Upgrade_ZypperRefreshFailureStopsTheUpgrade(t *testing.T) {
@@ -1173,6 +1204,36 @@ func TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled(t 
 	setAptSourcesDir(t, dir)
 
 	assert.Equal(t, listPath, resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevAsAPathPrefix checks that
+// alpacax_alpamon-dev.list, which os.ReadDir sorts before alpacax_alpamon.list,
+// does not satisfy the alpamon repo match: "alpamon-dev" is a different repo
+// that merely shares "alpamon" as a prefix.
+func TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevAsAPathPrefix(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon-dev.list"),
+		[]byte("deb https://packagecloud.io/alpacax/alpamon-dev/ubuntu/ jammy main\n"), 0o644))
+	stablePath := filepath.Join(dir, "alpacax_alpamon.list")
+	require.NoError(t, os.WriteFile(stablePath,
+		[]byte("deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, stablePath, resolveAptAlpamonSource())
+}
+
+// TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevStanzaAsAPathPrefix is the
+// deb822 equivalent of the .list case above.
+func TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevStanzaAsAPathPrefix(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon-dev.sources"),
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon-dev/ubuntu/\nSuites: jammy\nComponents: main\n"), 0o644))
+	stablePath := filepath.Join(dir, "alpacax_alpamon.sources")
+	require.NoError(t, os.WriteFile(stablePath,
+		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\n"), 0o644))
+	setAptSourcesDir(t, dir)
+
+	assert.Equal(t, stablePath, resolveAptAlpamonSource())
 }
 
 // TestSystemHandler_Upgrade_ScopesAptUpdateToAlpamonSource checks that a broken

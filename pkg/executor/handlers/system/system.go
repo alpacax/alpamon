@@ -40,7 +40,9 @@ const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionD
 // zypper behavior the other package managers do not share; per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
 const (
 	// The PackageCloud repository carrying alpamon, whatever alias the operator gave it.
-	alpamonRepoURL = "packagecloud.io/alpacax/alpamon"
+	// The trailing slash keeps alpamon-dev and alpamon-latest from matching;
+	// packagecloud always puts a path segment after the repo name.
+	alpamonRepoURL = "packagecloud.io/alpacax/alpamon/"
 
 	// ZYPP_LOCKED: packagekit, an operator session, or a racing console update holds the libzypp lock.
 	// dnf waits for its lock and apt can be told to retry; zypper --non-interactive gives up at once.
