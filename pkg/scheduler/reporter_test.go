@@ -102,6 +102,8 @@ func TestReporter_GivenRetryAfterFailure_WhenBackoffCrossesExpiry_ThenResurrecte
 	requeued := getOne(t)
 	require.False(t, requeued.due.After(time.Now()), "test setup: requeued entry must already be due")
 
+	assert.Equal(t, entry.expiry, requeued.expiry, "requeue must carry the original expiry")
+
 	requeued.expiry = time.Now().Add(-time.Millisecond) // stands in for the backoff wait outliving expiry
 	reporter.processEntry(requeued)
 
