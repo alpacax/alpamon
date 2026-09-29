@@ -681,6 +681,7 @@ func aptUpdateArgv(alpamonSource string) []string {
 func resolveAptAlpamonSource() string {
 	entries, err := os.ReadDir(aptSourcesDir)
 	if err != nil {
+		log.Debug().Err(err).Msg("Could not list apt source files; refreshing without a scope.")
 		return ""
 	}
 
@@ -694,16 +695,18 @@ func resolveAptAlpamonSource() string {
 		if err != nil {
 			continue
 		}
+		var matched bool
 		if strings.HasSuffix(name, ".sources") {
-			if hasEnabledAlpamonStanza(string(data)) {
-				return path
-			}
-			continue
+			matched = hasEnabledAlpamonStanza(string(data))
+		} else {
+			matched = hasActiveAlpamonLine(string(data))
 		}
-		if hasActiveAlpamonLine(string(data)) {
+		if matched {
+			log.Debug().Str("path", path).Msg("Scoping the apt refresh to the alpamon source.")
 			return path
 		}
 	}
+	log.Debug().Msg("Could not resolve the alpamon apt source; refreshing without a scope.")
 	return ""
 }
 
