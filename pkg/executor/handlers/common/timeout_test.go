@@ -8,7 +8,7 @@ import (
 )
 
 func TestFormatTimeoutBanner_GivenSubSecondRemainder_WhenFormatted_ThenTruncatesToWholeSeconds(t *testing.T) {
-	assert.Equal(t, "Command timed out after 2s", FormatTimeoutBanner(2700*time.Millisecond))
+	assert.Equal(t, "Command timed out after 2s", formatTimeoutBanner(2700*time.Millisecond))
 }
 
 func TestStripTimeoutBanner(t *testing.T) {
@@ -47,6 +47,34 @@ func TestStripTimeoutBanner(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, StripTimeoutBanner(tt.output))
+		})
+	}
+}
+
+func TestAppendTimeoutBanner(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			name:   "GivenOutput_WhenAppended_ThenBannerFollowsSeparator",
+			output: "some output",
+			want:   "some output\n\nCommand timed out after 2s",
+		},
+		{
+			name:   "GivenEmptyOutput_WhenAppended_ThenBannerHasNoLeadingNewlines",
+			output: "",
+			want:   "Command timed out after 2s",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AppendTimeoutBanner(tt.output, 2*time.Second)
+
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.output, StripTimeoutBanner(got), "Strip must undo Append")
 		})
 	}
 }

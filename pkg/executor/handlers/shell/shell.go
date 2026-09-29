@@ -2,7 +2,6 @@ package shell
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -170,28 +169,17 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 	chainTimedOut := false
 
 	// One deadline for the whole chain: a per-segment timeout let `a && b && c` run three times the limit.
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
+	ctx, cancel := common.WithHandlerTimeout(ctx, timeout)
+	defer cancel()
 
-	appendResult := func(r string) {
-		results.WriteString(r)
-	}
-	// finish appends the chain-level timeout banner exactly once, replacing
-	// any per-segment banner a killed segment's own executor already produced.
+	// finish appends the single chain-level timeout banner; runSegment has
+	// already stripped the banner of each segment the chain deadline killed.
 	finish := func(code int) (int, string, error) {
+		out := results.String()
 		if chainTimedOut {
 			code = common.TimeoutExitCode
-			_, banner, _ := common.TimeoutError(timeout)
-			if results.Len() > 0 {
-				appendResult("\n\n" + banner)
-			} else {
-				appendResult(banner)
-			}
+			out = common.AppendTimeoutBanner(out, timeout)
 		}
-		out := results.String()
 		if streaming {
 			out = utils.TruncateMiddle(out, utils.AuditOutputCap)
 		}
@@ -200,7 +188,7 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 
 	runSegment := func(cmdArgs []string) (int, bool) {
 		if ctx.Err() != nil {
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if common.IsTimeout(ctx) {
 				chainTimedOut = true
 				return common.TimeoutExitCode, false
 			}
@@ -211,11 +199,11 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 		// The chain ctx already carries the timeout as its deadline; a
 		// per-segment timeout here would wrap it again and reset the clock.
 		code, out := h.executeCommand(ctx, cmdArgs, username, groupname, env, 0, commandID, chunkCallback)
-		if code == common.TimeoutExitCode && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if code == common.TimeoutExitCode && common.IsTimeout(ctx) {
 			chainTimedOut = true
 			out = common.StripTimeoutBanner(out)
 		}
-		appendResult(out)
+		results.WriteString(out)
 		return code, true
 	}
 

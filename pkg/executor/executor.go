@@ -89,7 +89,8 @@ type chunkWriter struct {
 	wg   sync.WaitGroup
 }
 
-// newChunkWriter holds Execute's deadline-bearing ctx so the final flush carries it too.
+// newChunkWriter holds Execute's deadline-bearing ctx so the ticker and the final flush carry it.
+// The writer lives for one Execute call, so the stored ctx never outlives that call.
 func newChunkWriter(ctx context.Context, callback func(ctx context.Context, content string)) *chunkWriter {
 	return &chunkWriter{ctx: ctx, callback: callback, capture: newCapBuffer()}
 }
@@ -295,13 +296,8 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	exitCode := 0
 	result := string(output)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			msg := common.FormatTimeoutBanner(time.Since(start))
-			// Skip the separator when there's no output so the banner has no leading newlines.
-			if result == "" {
-				return 124, msg, err
-			}
-			return 124, result + "\n\n" + msg, err
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return 124, common.AppendTimeoutBanner(result, time.Since(start)), err
 		}
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return 1, result, err // ExitCode() would report -1 for the signal kill

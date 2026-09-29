@@ -2,7 +2,7 @@ package common
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"strings"
 	"time"
 )
@@ -38,22 +38,30 @@ func WithHandlerTimeout(ctx context.Context, timeout time.Duration) (context.Con
 
 // IsTimeout returns true if the context error indicates a deadline exceeded.
 func IsTimeout(ctx context.Context) bool {
-	return ctx.Err() == context.DeadlineExceeded
+	return errors.Is(ctx.Err(), context.DeadlineExceeded)
 }
 
 // TimeoutError returns a standard timeout response (exit 124 + message).
 func TimeoutError(timeout time.Duration) (int, string, error) {
-	return TimeoutExitCode, FormatTimeoutBanner(timeout), context.DeadlineExceeded
+	return TimeoutExitCode, formatTimeoutBanner(timeout), context.DeadlineExceeded
 }
 
 const timeoutBannerPrefix = "Command timed out after "
 
-// FormatTimeoutBanner is the single source of truth for the timeout banner text.
-func FormatTimeoutBanner(elapsed time.Duration) string {
-	return fmt.Sprintf("%s%s", timeoutBannerPrefix, elapsed.Truncate(time.Second))
+// formatTimeoutBanner is the single source of truth for the timeout banner text.
+func formatTimeoutBanner(elapsed time.Duration) string {
+	return timeoutBannerPrefix + elapsed.Truncate(time.Second).String()
 }
 
-// StripTimeoutBanner removes a trailing banner appended by FormatTimeoutBanner
+// AppendTimeoutBanner appends the banner to out, with no "\n\n" separator when out is empty.
+func AppendTimeoutBanner(out string, elapsed time.Duration) string {
+	if out == "" {
+		return formatTimeoutBanner(elapsed)
+	}
+	return out + "\n\n" + formatTimeoutBanner(elapsed)
+}
+
+// StripTimeoutBanner removes a trailing banner appended by AppendTimeoutBanner
 // (and its "\n\n" separator, when present), so a caller can replace it with its own.
 func StripTimeoutBanner(out string) string {
 	if idx := strings.LastIndex(out, "\n\n"+timeoutBannerPrefix); idx >= 0 {

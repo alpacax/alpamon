@@ -120,21 +120,18 @@ func (m *MockCommandExecutor) ExecWithStreamingHook(ctx context.Context, args []
 		pidHook(pid)
 	}
 	exitCode, output, err := m.Exec(ctx, args, username, groupname, env, timeout)
-	if chunkCallback != nil && output != "" {
-		hookCtx, cancel := withMockTimeout(ctx, timeout)
-		defer cancel()
-		chunkCallback(hookCtx, output)
-	}
+	emitMockChunk(ctx, timeout, chunkCallback, output)
 	return exitCode, output, err
 }
 
-// withMockTimeout mirrors CommandExecutor's contract of a deadline-bearing
-// chunkCallback ctx, so mock tests exercise the real ctx shape.
-func withMockTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if timeout <= 0 {
-		return ctx, func() {}
+// emitMockChunk hands output to chunkCallback under a ctx bounded by timeout, as CommandExecutor does.
+func emitMockChunk(ctx context.Context, timeout time.Duration, chunkCallback func(ctx context.Context, content string), output string) {
+	if chunkCallback == nil || output == "" {
+		return
 	}
-	return context.WithTimeout(ctx, timeout)
+	hookCtx, cancel := WithHandlerTimeout(ctx, timeout)
+	defer cancel()
+	chunkCallback(hookCtx, output)
 }
 
 // ExecFileWithStreamingHook mirrors ExecWithStreamingHook and additionally
@@ -152,11 +149,7 @@ func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, fil
 		Name: args[0], Args: args[1:], User: username, Env: env, Timeout: timeout, File: file,
 	})
 	exitCode, output, err := m.lookupResult(args[0], args[1:]...)
-	if chunkCallback != nil && output != "" {
-		hookCtx, cancel := withMockTimeout(ctx, timeout)
-		defer cancel()
-		chunkCallback(hookCtx, output)
-	}
+	emitMockChunk(ctx, timeout, chunkCallback, output)
 	return exitCode, output, err
 }
 
