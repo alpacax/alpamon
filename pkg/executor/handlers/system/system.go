@@ -29,7 +29,7 @@ const unregisterURL = "/api/servers/servers/-/unregister/"
 // Not a Duration: Session methods multiply by time.Second, so 10*time.Second would be about 1e9 times too long.
 const unregisterTimeoutSeconds = 10
 
-// delayedActionDelay lets restart, quit, reboot and shutdown send their response before acting.
+// delayedActionDelay lets restart, quit, reboot, shutdown and the post-self-update restart send their response before acting.
 // Pool.Shutdown cannot interrupt a sleeping job, so any drain budget must outlast this delay.
 const delayedActionDelay = 1 * time.Second
 
