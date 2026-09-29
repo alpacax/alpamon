@@ -12,6 +12,12 @@ Alpamon is a lightweight Go-based server agent for Alpacon—the infrastructure 
 - **Sentence case**: Use sentence case for all headings, labels, and documentation (e.g., "Architecture overview" not "Architecture Overview"). Only capitalize the first word and proper nouns.
 - **Em-dashes**: No spaces around em-dashes (e.g., "word—word" not "word — word"). Use colons instead of em-dashes for itemized descriptions (e.g., "`shell/`: description").
 
+## Declaration order
+
+Order a Go file's top-level declarations the way the Uber Go style guide's "Function Grouping and Ordering" does: `const`, then `var`, then each `type` followed by its constructor (`NewXxx`/`newXxx`) and its methods, then plain functions. Within each group, keep a rough call order. Test files follow the same order; test functions and helpers are plain functions.
+
+Apply it to new files and to declarations you add. Reordering an existing file is its own commit, never mixed into a behavior change: a pure move hides the real diff from review. Prove such a commit moves lines without changing any, e.g. `diff <(git show HEAD:<file> | sort) <(sort <file>)` prints nothing.
+
 ## Development commands
 
 ### Code generation
