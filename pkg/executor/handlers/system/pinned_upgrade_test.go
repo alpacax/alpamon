@@ -3,6 +3,8 @@ package system
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -247,6 +249,46 @@ func TestSystemHandler_PinnedUpgrade_ScopesAptUpdateToAlpamonSource(t *testing.T
 		"-o", "Dir::Etc::sourceparts=-",
 		"-o", "APT::Get::List-Cleanup=0"),
 		"the update must scope to the alpamon source file, got %+v", h.exec.GetExecutedCommands())
+}
+
+// A pinned target may sit on another channel than the running build, so every channel source is refreshed.
+func TestSystemHandler_PinnedUpgrade_AptRefreshesEveryChannelSource(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	dir := t.TempDir()
+	repos := []string{"alpamon", "alpamon-dev", "alpamon-latest"}
+	for _, repo := range repos {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_"+repo+".list"),
+			[]byte("deb https://packagecloud.io/alpacax/"+repo+"/ubuntu/ jammy main\n"), 0o644))
+	}
+	setAptSourcesDir(t, dir)
+	h.exec.SetResult("apt-cache madison alpamon", 0, " alpamon | 2.5.0-rc1 | https://packagecloud.io/alpacax/alpamon-latest/ubuntu jammy/main amd64 Packages\n", nil)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.5.0-rc1", nil)
+
+	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0-rc1", AttemptID: "att-1"})
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode, output)
+
+	for _, repo := range repos {
+		assert.True(t, h.ran("apt-get", "update", "-y", "-o", "Acquire::Retries=3",
+			"-o", "Dir::Etc::sourcelist="+filepath.Join(dir, "alpacax_"+repo+".list"),
+			"-o", "Dir::Etc::sourceparts=-",
+			"-o", "APT::Get::List-Cleanup=0"),
+			"the %s source must be refreshed, got %+v", repo, h.exec.GetExecutedCommands())
+	}
+}
+
+func TestSystemHandler_PinnedUpgrade_ZypperRefreshesEveryChannelRepo(t *testing.T) {
+	const export = "[alpamon]\nenabled=1\nbaseurl=https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch\n\n" +
+		"[alpamon-latest]\nenabled=1\nbaseurl=https://packagecloud.io/alpacax/alpamon-latest/rpm_any/rpm_any/$basearch\n"
+	h := newPinnedHarness(t, utils.PkgZypper)
+	h.exec.SetResult("zypper --non-interactive lr --export -", 0, export, nil)
+	h.exec.SetResult("rpm -q --qf %{VERSION} alpamon", 0, "2.5.0-rc1", nil)
+
+	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0-rc1"})
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode, output)
+	assert.True(t, h.ran("zypper", "--non-interactive", "refresh", "alpamon", "alpamon-latest"),
+		"the refresh must cover every channel repo, got %+v", h.exec.GetExecutedCommands())
 }
 
 func TestSystemHandler_PinnedUpgrade_MarkerAndGuardPrecedeTheInstall(t *testing.T) {

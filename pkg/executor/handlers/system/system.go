@@ -37,13 +37,16 @@ const delayedActionDelay = 1 * time.Second
 // Blank so the unused linter reads it as the compile-time assertion it is.
 const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
 
+// The PackageCloud repositories release.yml publishes the stable, rc and dev channels to, whatever alias the operator gave them.
+// The trailing slash keeps one from matching another as a prefix; packagecloud always puts a path segment after the repo name.
+var alpamonRepoURLs = []string{
+	"packagecloud.io/alpacax/alpamon/",
+	"packagecloud.io/alpacax/alpamon-latest/",
+	"packagecloud.io/alpacax/alpamon-dev/",
+}
+
 // zypper behavior the other package managers do not share; per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
 const (
-	// The PackageCloud repository carrying alpamon, whatever alias the operator gave it.
-	// The trailing slash keeps alpamon-dev and alpamon-latest from matching;
-	// packagecloud always puts a path segment after the repo name.
-	alpamonRepoURL = "packagecloud.io/alpacax/alpamon/"
-
 	// ZYPP_LOCKED: packagekit, an operator session, or a racing console update holds the libzypp lock.
 	// dnf waits for its lock and apt can be told to retry; zypper --non-interactive gives up at once.
 	zypperLockedExit   = 7
@@ -267,10 +270,11 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	case utils.PkgApt:
 		// Scoped to alpamon's source and run apart from install: one broken repo
 		// elsewhere on the host must not block the upgrade, and a failure must name its step.
-		argv := aptUpdateArgv(resolveAptAlpamonSource())
-		code, out, rerr := h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
-		if code != 0 {
-			return code, appendStepFailure(out, "apt-get update", code, rerr), rerr
+		for _, argv := range aptUpdateArgvs() {
+			code, out, rerr := h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
+			if code != 0 {
+				return code, appendStepFailure(out, "apt-get update", code, rerr), rerr
+			}
 		}
 		installArgv = append([]string{"apt-get", "install", "--only-upgrade"}, packages...)
 		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3")
@@ -280,8 +284,8 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		// Refresh runs as its own command: chaining it with `&&` lets one unreachable repo exit 4 so update
 		// never runs, hiding the failing step. `update -r` loads only that repo, so it cannot resolve distro deps.
 		refresh := []string{"zypper", "--non-interactive", "refresh"}
-		if alias := h.resolveZypperAlpamonRepo(ctx); alias != "" {
-			refresh = append(refresh, alias)
+		if aliases := h.resolveZypperAlpamonRepos(ctx); len(aliases) > 0 {
+			refresh = append(refresh, aliases...)
 			alpamonRepoRefreshed = true
 		}
 		code, out, rerr := retryWhileZypperLocked(ctx, func() (int, string, error) {
@@ -346,40 +350,43 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	return exitCode, output, err
 }
 
-// The alias to scope the refresh to, or "" when none resolves. `lr --export -` is
-// parsed rather than the table form: it emits ini and needs no column splitting.
-func (h *SystemHandler) resolveZypperAlpamonRepo(ctx context.Context) string {
+// The aliases of every enabled alpamon channel repo to scope the refresh to, or nil when none resolves.
+// `lr --export -` is parsed rather than the table form: it emits ini and needs no column splitting.
+func (h *SystemHandler) resolveZypperAlpamonRepos(ctx context.Context) []string {
 	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "zypper", "--non-interactive", "lr", "--export", "-")
 	if err != nil || exitCode != 0 {
 		log.Debug().Int("exitCode", exitCode).Msg("Could not list zypper repositories; upgrading without a repo scope.")
-		return ""
+		return nil
 	}
 
+	var aliases []string
 	var alias string
 	enabled, matched := true, false
-	resolved := func() string {
+	flush := func() {
 		if matched && enabled {
-			return alias
+			aliases = append(aliases, alias)
 		}
-		return ""
 	}
 
 	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]"):
-			if got := resolved(); got != "" {
-				return got
-			}
+			flush()
 			alias = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
 			enabled, matched = true, false
 		case strings.HasPrefix(line, "enabled="):
 			enabled = strings.TrimPrefix(line, "enabled=") == "1"
-		case strings.Contains(line, alpamonRepoURL):
+		case containsAlpamonRepo(line):
 			matched = true
 		}
 	}
-	return resolved()
+	flush()
+	return aliases
+}
+
+func containsAlpamonRepo(s string) bool {
+	return slices.ContainsFunc(alpamonRepoURLs, func(r string) bool { return strings.Contains(s, r) })
 }
 
 // version-release of each package rpm can report, skipping the rest.
@@ -684,15 +691,30 @@ func aptUpdateArgv(alpamonSource string) []string {
 	return argv
 }
 
-// resolveAptAlpamonSource returns the full path of the apt source file that
-// carries alpamon's enabled packagecloud repository, or "" when none resolves.
-func resolveAptAlpamonSource() string {
+// aptUpdateArgvs returns one "apt-get update" per alpamon source, or a single unscoped one when none resolves.
+// Running them in turn is safe because List-Cleanup=0 keeps each run from pruning the lists the others fetched.
+func aptUpdateArgvs() [][]string {
+	sources := resolveAptAlpamonSources()
+	if len(sources) == 0 {
+		return [][]string{aptUpdateArgv("")}
+	}
+	argvs := make([][]string, 0, len(sources))
+	for _, s := range sources {
+		argvs = append(argvs, aptUpdateArgv(s))
+	}
+	return argvs
+}
+
+// resolveAptAlpamonSources returns the full path of every apt source file that carries an enabled
+// alpamon channel repository, or nil when none resolves.
+func resolveAptAlpamonSources() []string {
 	entries, err := os.ReadDir(aptSourcesDir)
 	if err != nil {
 		log.Debug().Err(err).Msg("Could not list apt source files; refreshing without a scope.")
-		return ""
+		return nil
 	}
 
+	var paths []string
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".list") && !strings.HasSuffix(name, ".sources") {
@@ -711,11 +733,13 @@ func resolveAptAlpamonSource() string {
 		}
 		if matched {
 			log.Debug().Str("path", path).Msg("Scoping the apt refresh to the alpamon source.")
-			return path
+			paths = append(paths, path)
 		}
 	}
-	log.Debug().Msg("Could not resolve the alpamon apt source; refreshing without a scope.")
-	return ""
+	if len(paths) == 0 {
+		log.Debug().Msg("Could not resolve the alpamon apt source; refreshing without a scope.")
+	}
+	return paths
 }
 
 func hasActiveAlpamonLine(data string) bool {
@@ -724,7 +748,7 @@ func hasActiveAlpamonLine(data string) bool {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if strings.Contains(line, alpamonRepoURL) {
+		if containsAlpamonRepo(line) {
 			return true
 		}
 	}
@@ -749,7 +773,7 @@ func hasEnabledAlpamonStanza(data string) bool {
 			if key, value, ok := strings.Cut(trimmed, ":"); ok && strings.EqualFold(strings.TrimSpace(key), "enabled") {
 				enabled = !deb822FalseValues[strings.ToLower(strings.TrimSpace(value))]
 			}
-			if strings.Contains(trimmed, alpamonRepoURL) {
+			if containsAlpamonRepo(trimmed) {
 				matched = true
 			}
 		}

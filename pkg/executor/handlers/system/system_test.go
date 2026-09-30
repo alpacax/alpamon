@@ -1068,35 +1068,51 @@ func TestSystemHandler_Upgrade_ScopesZypperToAlpamonRepo(t *testing.T) {
 	}
 }
 
-// TestSystemHandler_Upgrade_ZypperDoesNotMatchAlpamonDevAsAPathPrefix checks that
-// an "alpamon-dev" repo, whose baseurl merely shares "alpamon" as a path prefix
-// with the real repo, does not win the scope over the actual alpamon repo.
-func TestSystemHandler_Upgrade_ZypperDoesNotMatchAlpamonDevAsAPathPrefix(t *testing.T) {
-	const devSection = "[alpamon-dev]\nenabled=1\nbaseurl=https://packagecloud.io/alpacax/alpamon-dev/rpm_any/rpm_any/$basearch\n"
-	const stableSection = "[alpamon]\nenabled=1\nbaseurl=https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch\n"
-
-	mockExec := common.NewMockCommandExecutor(t)
-	mockWS := &MockWSClient{}
-	ctxManager := agent.NewContextManager()
-	workerPool := pool.NewPool(2, 10)
-	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
-	defer ctxManager.Shutdown()
-
-	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
-	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
-	setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
-	mockExec.SetResult("zypper --non-interactive lr --export -", 0, devSection+"\n"+stableSection, nil)
-
-	_, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-	require.NoError(t, err)
-
-	var refreshedStable bool
-	for _, c := range mockExec.GetExecutedCommands() {
-		if c.Name+" "+strings.Join(c.Args, " ") == "zypper --non-interactive refresh alpamon" {
-			refreshedStable = true
-		}
+// Every enabled channel repo is refreshed in one command, whatever the running build's channel.
+func TestSystemHandler_Upgrade_ZypperRefreshesEveryEnabledChannel(t *testing.T) {
+	section := func(alias, repo, enabled string) string {
+		return "[" + alias + "]\nenabled=" + enabled + "\nbaseurl=https://packagecloud.io/alpacax/" + repo + "/rpm_any/rpm_any/$basearch\n\n"
 	}
-	assert.True(t, refreshedStable, "expected the stable alpamon repo to be scoped, got %+v", mockExec.GetExecutedCommands())
+
+	tests := []struct {
+		name       string
+		repoExport string
+		wantAlias  string
+	}{
+		{"dev-only host", section("alpamon-dev", "alpamon-dev", "1"), "alpamon-dev"},
+		{"rc-only host", section("alpamon-latest", "alpamon-latest", "1"), "alpamon-latest"},
+		{"all three in listing order", section("dev", "alpamon-dev", "1") + section("stable", "alpamon", "1") + section("rc", "alpamon-latest", "1"), "dev stable rc"},
+		{"disabled channel is skipped", section("alpamon-dev", "alpamon-dev", "0") + section("alpamon", "alpamon", "1"), "alpamon"},
+		{"unrelated repo sharing the prefix is skipped", section("kube", "alpamon-kube", "1") + section("alpamon", "alpamon", "1"), "alpamon"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExec := common.NewMockCommandExecutor(t)
+			mockWS := &MockWSClient{}
+			ctxManager := agent.NewContextManager()
+			workerPool := pool.NewPool(2, 10)
+			defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+			defer ctxManager.Shutdown()
+
+			mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+			setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
+			mockExec.SetResult("zypper --non-interactive lr --export -", 0, tt.repoExport, nil)
+
+			_, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+			require.NoError(t, err)
+
+			const refresh = "zypper --non-interactive refresh"
+			var refreshes []string
+			for _, c := range mockExec.GetExecutedCommands() {
+				if line := c.Name + " " + strings.Join(c.Args, " "); strings.HasPrefix(line, refresh) {
+					refreshes = append(refreshes, line)
+				}
+			}
+			assert.Equal(t, []string{refresh + " " + tt.wantAlias}, refreshes)
+		})
+	}
 }
 
 // The refresh exists to keep a stale-metadata no-op from reporting success, so
@@ -1139,7 +1155,7 @@ func TestResolveAptAlpamonSource_IgnoresCommentedOutSource(t *testing.T) {
 		[]byte("# deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Empty(t, resolveAptAlpamonSource())
+	assert.Empty(t, resolveAptAlpamonSources())
 }
 
 // TestResolveAptAlpamonSource_MatchesDeb822SourcesFile checks that a deb822 .sources
@@ -1151,7 +1167,7 @@ func TestResolveAptAlpamonSource_MatchesDeb822SourcesFile(t *testing.T) {
 		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\n"), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Equal(t, path, resolveAptAlpamonSource())
+	assert.Equal(t, []string{path}, resolveAptAlpamonSources())
 }
 
 // TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored checks that a
@@ -1163,7 +1179,7 @@ func TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored(t *testing.T) {
 		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n"), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Empty(t, resolveAptAlpamonSource())
+	assert.Empty(t, resolveAptAlpamonSources())
 }
 
 func TestResolveAptAlpamonSource_EnabledStanzaAfterDisabledOneInSameFile(t *testing.T) {
@@ -1175,7 +1191,7 @@ func TestResolveAptAlpamonSource_EnabledStanzaAfterDisabledOneInSameFile(t *test
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Equal(t, path, resolveAptAlpamonSource())
+	assert.Equal(t, []string{path}, resolveAptAlpamonSources())
 }
 
 // TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive checks that
@@ -1186,7 +1202,7 @@ func TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive(t *testing.
 		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nenabled: No\n"), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Empty(t, resolveAptAlpamonSource())
+	assert.Empty(t, resolveAptAlpamonSources())
 }
 
 func TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState(t *testing.T) {
@@ -1197,7 +1213,7 @@ func TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState(t 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"), []byte(content), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Empty(t, resolveAptAlpamonSource())
+	assert.Empty(t, resolveAptAlpamonSources())
 }
 
 func TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled(t *testing.T) {
@@ -1209,37 +1225,96 @@ func TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled(t 
 		[]byte("deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
 	setAptSourcesDir(t, dir)
 
-	assert.Equal(t, listPath, resolveAptAlpamonSource())
+	assert.Equal(t, []string{listPath}, resolveAptAlpamonSources())
 }
 
-// TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevAsAPathPrefix checks that
-// alpacax_alpamon-dev.list, which os.ReadDir sorts before alpacax_alpamon.list,
-// does not satisfy the alpamon repo match: "alpamon-dev" is a different repo
-// that merely shares "alpamon" as a prefix.
-func TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevAsAPathPrefix(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon-dev.list"),
-		[]byte("deb https://packagecloud.io/alpacax/alpamon-dev/ubuntu/ jammy main\n"), 0o644))
-	stablePath := filepath.Join(dir, "alpacax_alpamon.list")
-	require.NoError(t, os.WriteFile(stablePath,
-		[]byte("deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
-	setAptSourcesDir(t, dir)
+// Every enabled channel source resolves in both formats, in os.ReadDir order, and nothing else does.
+func TestResolveAptAlpamonSources_ReturnsEveryEnabledChannelSource(t *testing.T) {
+	listLine := func(repo string) string {
+		return "deb https://packagecloud.io/alpacax/" + repo + "/ubuntu/ jammy main\n"
+	}
+	stanza := func(repo string) string {
+		return "Types: deb\nURIs: https://packagecloud.io/alpacax/" + repo + "/ubuntu/\nSuites: jammy\nComponents: main\n"
+	}
+	disabledStanza := func(repo string) string { return stanza(repo) + "Enabled: no\n" }
 
-	assert.Equal(t, stablePath, resolveAptAlpamonSource())
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  []string
+	}{
+		{"dev-only list", map[string]string{"alpacax_alpamon-dev.list": listLine("alpamon-dev")}, []string{"alpacax_alpamon-dev.list"}},
+		{"rc-only sources", map[string]string{"alpacax_alpamon-latest.sources": stanza("alpamon-latest")}, []string{"alpacax_alpamon-latest.sources"}},
+		{"all three channels", map[string]string{
+			"alpacax_alpamon.list":        listLine("alpamon"),
+			"alpacax_alpamon-dev.list":    listLine("alpamon-dev"),
+			"alpacax_alpamon-latest.list": listLine("alpamon-latest"),
+		}, []string{"alpacax_alpamon-dev.list", "alpacax_alpamon-latest.list", "alpacax_alpamon.list"}},
+		{"disabled channel stanza is skipped", map[string]string{
+			"alpacax_alpamon-dev.sources": disabledStanza("alpamon-dev"),
+			"alpacax_alpamon.sources":     stanza("alpamon"),
+		}, []string{"alpacax_alpamon.sources"}},
+		{"unrelated repo sharing the prefix is skipped", map[string]string{
+			"alpacax_alpamon-kube.list": listLine("alpamon-kube"),
+			"alpacax_alpamon.list":      listLine("alpamon"),
+		}, []string{"alpacax_alpamon.list"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, content := range tt.files {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+			}
+			setAptSourcesDir(t, dir)
+			want := make([]string, 0, len(tt.want))
+			for _, name := range tt.want {
+				want = append(want, filepath.Join(dir, name))
+			}
+
+			assert.Equal(t, want, resolveAptAlpamonSources())
+		})
+	}
 }
 
-// TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevStanzaAsAPathPrefix is the
-// deb822 equivalent of the .list case above.
-func TestResolveAptAlpamonSource_DoesNotMatchAlpamonDevStanzaAsAPathPrefix(t *testing.T) {
+// A host running an rc build that also carries stable must refresh both before the install,
+// or a release promoted to stable stays invisible behind a stale list.
+func TestSystemHandler_Upgrade_AptRefreshesEveryChannelBeforeInstall(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	setVersion(t, "2.6.0-rc1")
+	mockVersions := &MockVersionResolver{LatestVersion: "v2.6.0", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgApt, "")
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon-dev.sources"),
-		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon-dev/ubuntu/\nSuites: jammy\nComponents: main\n"), 0o644))
-	stablePath := filepath.Join(dir, "alpacax_alpamon.sources")
-	require.NoError(t, os.WriteFile(stablePath,
-		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\n"), 0o644))
+	for _, repo := range []string{"alpamon", "alpamon-latest"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_"+repo+".list"),
+			[]byte("deb https://packagecloud.io/alpacax/"+repo+"/ubuntu/ jammy main\n"), 0o644))
+	}
 	setAptSourcesDir(t, dir)
 
-	assert.Equal(t, stablePath, resolveAptAlpamonSource())
+	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+
+	var steps []string
+	for _, c := range mockExec.GetExecutedCommands() {
+		if c.Name != "apt-get" {
+			continue
+		}
+		joined := strings.Join(c.Args, " ")
+		if src, ok := strings.CutPrefix(joined, "update -y -o Acquire::Retries=3 -o Dir::Etc::sourcelist="); ok {
+			steps = append(steps, "update "+filepath.Base(strings.Fields(src)[0]))
+		} else {
+			steps = append(steps, strings.Fields(joined)[0])
+		}
+	}
+	assert.Equal(t, []string{"update alpacax_alpamon-latest.list", "update alpacax_alpamon.list", "install"}, steps)
 }
 
 // TestSystemHandler_Upgrade_ScopesAptUpdateToAlpamonSource checks that a broken
