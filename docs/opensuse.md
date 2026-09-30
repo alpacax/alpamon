@@ -8,7 +8,7 @@ CI exercises SUSE on amd64 only. It builds Alpamon from source and runs the test
 
 ## Why the platform reads as rhel
 
-openSUSE and SLES report `platform=rhel` to Alpacon. Two things the server gates on that value—rpm packaging and shadow-utils account tooling—behave identically on both families; the `yum` commands it composes do not (see Known limitations below). The real distribution name is preserved separately in the OS information, and the agent runs `zypper` locally regardless of what it reports.
+openSUSE and SLES report `platform=rhel` to Alpacon. Of the things the server gates on that value, rpm packaging and shadow-utils account tooling behave identically on both families. The `wheel` group it adds admin accounts to in some workspaces grants nothing on SUSE by default (see Alpacon accounts below), and the `yum` commands it composes fail (see Known limitations below). The real distribution name is preserved separately in the OS information, and the agent runs `zypper` locally regardless of what it reports.
 
 ## Installation
 
@@ -32,7 +32,7 @@ Leap keeps that file at `/etc/sudoers`; Tumbleweed ships it as `/usr/etc/sudoers
 
 Accounts Alpacon provisions get `sudo` from `alpamon-pam` 1.1.5 or later, not from `wheel`. Its `/etc/sudoers.d/alpacon` lets `alpacon` group members pass the sudoers check, and its `Defaults:%alpacon !targetpw` line has them authenticate as themselves, so SUSE's `targetpw` default does not reach them; the Alpacon server then decides each invocation. Installing the package (see PAM module below) is the whole prerequisite—Alpacon accounts need no other sudoers change.
 
-A host may still have Alpacon accounts in `wheel`, added by an Alpacon server that put admin accounts there. Don't count on that membership in either direction. The server re-sends an account's supplementary group list when the account or its IAM group memberships change, and the agent replaces the list with what it receives, so the membership is gone wherever such an update succeeded and remains wherever it failed or never ran. Where it remains and a `%wheel` drop-in is installed, the account also matches a rule `alpamon-pam` does not manage. Alpacon creates accounts without a password, so without `alpamon-pam` that rule runs a command for the account only if it is `NOPASSWD` or someone has since given the account a password.
+A host may have Alpacon accounts in `wheel`. The Alpacon server adds an admin account to it when it creates the account in a workspace with **Use sudo with MFA** turned off or on a deployment without Auth0, and earlier server releases did so in every workspace. Don't count on that membership in either direction. The server re-sends an account's supplementary group list when the account or its IAM group memberships change, and the agent replaces the list with what it receives, so the membership is gone wherever such an update succeeded and remains wherever it failed or never ran. Where it remains and a `%wheel` drop-in is installed, the account also matches a rule `alpamon-pam` does not manage. Alpacon creates accounts without a password, so without `alpamon-pam` that rule runs a command for the account only if it is `NOPASSWD` or someone has since given the account a password.
 
 Alpacon writes `(alpacon)` into the comment field of the accounts it manages, so this lists the ones still in `wheel`:
 
