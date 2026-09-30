@@ -37,7 +37,7 @@ const delayedActionDelay = 1 * time.Second
 // Blank so the unused linter reads it as the compile-time assertion it is.
 const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
 
-// The PackageCloud repositories .github/workflows/release.yml publishes the stable, rc and dev channels to, whatever alias the operator gave them.
+// alpamonRepoURLs are the PackageCloud repositories .github/workflows/release.yml publishes the stable, rc and dev channels to, whatever alias the operator gave them.
 // The trailing slash keeps one from matching another as a prefix; packagecloud always puts a path segment after the repo name.
 var alpamonRepoURLs = []string{
 	"packagecloud.io/alpacax/alpamon/",
@@ -350,7 +350,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	return exitCode, output, err
 }
 
-// The aliases of every enabled alpamon channel repo to scope the refresh to, or nil when none resolves.
+// resolveZypperAlpamonRepos returns the aliases of every enabled alpamon channel repo to scope the refresh to, or nil when none resolves.
 // `lr --export -` is parsed rather than the table form: it emits ini and needs no column splitting.
 func (h *SystemHandler) resolveZypperAlpamonRepos(ctx context.Context) []string {
 	exitCode, output, err := h.Executor.RunAsUser(ctx, "root", "zypper", "--non-interactive", "lr", "--export", "-")
