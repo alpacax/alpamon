@@ -37,7 +37,7 @@ const delayedActionDelay = 1 * time.Second
 // Blank so the unused linter reads it as the compile-time assertion it is.
 const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
 
-// The PackageCloud repositories release.yml publishes the stable, rc and dev channels to, whatever alias the operator gave them.
+// The PackageCloud repositories .github/workflows/release.yml publishes the stable, rc and dev channels to, whatever alias the operator gave them.
 // The trailing slash keeps one from matching another as a prefix; packagecloud always puts a path segment after the repo name.
 var alpamonRepoURLs = []string{
 	"packagecloud.io/alpacax/alpamon/",
@@ -744,10 +744,7 @@ func resolveAptAlpamonSources() []string {
 
 func hasActiveAlpamonLine(data string) bool {
 	for line := range strings.SplitSeq(data, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
+		line, _, _ = strings.Cut(line, "#") // one-line format: apt reads everything after # as a comment
 		if containsAlpamonRepo(line) {
 			return true
 		}

@@ -1258,6 +1258,10 @@ func TestResolveAptAlpamonSources_ReturnsEveryEnabledChannelSource(t *testing.T)
 			"alpacax_alpamon-kube.list": listLine("alpamon-kube"),
 			"alpacax_alpamon.list":      listLine("alpamon"),
 		}, []string{"alpacax_alpamon.list"}},
+		{"channel named only in an inline comment is skipped", map[string]string{
+			"mirror.list":          "deb https://mirror.example.com/ubuntu/ jammy main # was packagecloud.io/alpacax/alpamon-dev/\n",
+			"alpacax_alpamon.list": listLine("alpamon"),
+		}, []string{"alpacax_alpamon.list"}},
 	}
 
 	for _, tt := range tests {
