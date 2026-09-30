@@ -1068,7 +1068,8 @@ func TestSystemHandler_Upgrade_ScopesZypperToAlpamonRepo(t *testing.T) {
 	}
 }
 
-// Every enabled channel repo is refreshed in one command, whatever the running build's channel.
+// TestSystemHandler_Upgrade_ZypperRefreshesEveryEnabledChannel checks that every enabled channel repo is refreshed
+// in one command, whatever the running build's channel.
 func TestSystemHandler_Upgrade_ZypperRefreshesEveryEnabledChannel(t *testing.T) {
 	section := func(alias, repo, enabled string) string {
 		return "[" + alias + "]\nenabled=" + enabled + "\nbaseurl=https://packagecloud.io/alpacax/" + repo + "/rpm_any/rpm_any/$basearch\n\n"
@@ -1228,7 +1229,8 @@ func TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled(t 
 	assert.Equal(t, []string{listPath}, resolveAptAlpamonSources())
 }
 
-// Every enabled channel source resolves in both formats, in os.ReadDir order, and nothing else does.
+// TestResolveAptAlpamonSources_ReturnsEveryEnabledChannelSource checks that every enabled channel source resolves
+// in both formats, in os.ReadDir order, and nothing else does.
 func TestResolveAptAlpamonSources_ReturnsEveryEnabledChannelSource(t *testing.T) {
 	listLine := func(repo string) string {
 		return "deb https://packagecloud.io/alpacax/" + repo + "/ubuntu/ jammy main\n"
@@ -1281,8 +1283,8 @@ func TestResolveAptAlpamonSources_ReturnsEveryEnabledChannelSource(t *testing.T)
 	}
 }
 
-// A host running an rc build that also carries stable must refresh both before the install,
-// or a release promoted to stable stays invisible behind a stale list.
+// TestSystemHandler_Upgrade_AptRefreshesEveryChannelBeforeInstall checks that a host running an rc build that also
+// carries stable refreshes both before the install; otherwise a release promoted to stable hides behind a stale list.
 func TestSystemHandler_Upgrade_AptRefreshesEveryChannelBeforeInstall(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}

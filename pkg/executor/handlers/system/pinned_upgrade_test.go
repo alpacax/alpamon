@@ -251,7 +251,8 @@ func TestSystemHandler_PinnedUpgrade_ScopesAptUpdateToAlpamonSource(t *testing.T
 		"the update must scope to the alpamon source file, got %+v", h.exec.GetExecutedCommands())
 }
 
-// A pinned target may sit on another channel than the running build, so every channel source is refreshed.
+// TestSystemHandler_PinnedUpgrade_AptRefreshesEveryChannelSource checks that every channel source is refreshed,
+// since a pinned target may sit on another channel than the running build.
 func TestSystemHandler_PinnedUpgrade_AptRefreshesEveryChannelSource(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
 	dir := t.TempDir()
