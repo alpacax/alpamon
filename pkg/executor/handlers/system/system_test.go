@@ -539,8 +539,7 @@ func findLastExecuted(mockExec *common.MockCommandExecutor, name string) *common
 	return nil
 }
 
-// findExecutedAptInstall is findLastExecuted narrowed to apt's install, which runs as its own argv
-// rather than through "sh -c".
+// findExecutedAptInstall is findLastExecuted narrowed to apt-get install, past the per-source updates.
 func findExecutedAptInstall(mockExec *common.MockCommandExecutor) *common.ExecutedCommand {
 	cmds := mockExec.GetExecutedCommands()
 	for i := len(cmds) - 1; i >= 0; i-- {
@@ -1023,6 +1022,7 @@ func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
 	// refresh must survive refactors.
 	assert.GreaterOrEqual(t, refreshedAt, 0, "a zypper refresh command must run, got %+v", mockExec.GetExecutedCommands())
 	assert.LessOrEqual(t, refreshedAt, updatedAt, "the update must be preceded by a refresh, got %+v", mockExec.GetExecutedCommands())
+	assert.Nil(t, findLastExecuted(mockExec, "sh"), "the zypper update must not go through a shell")
 }
 
 // One unreachable repo anywhere on the host exits an unscoped refresh 4, so the
@@ -1085,7 +1085,7 @@ func TestSystemHandler_Upgrade_ScopesZypperToAlpamonRepo(t *testing.T) {
 					refreshed = true
 				// `update -r <alias>` would load only that repo and fail to
 				// resolve dependencies from the distribution repos.
-				case "sh -c zypper --non-interactive update alpamon":
+				case "zypper --non-interactive update alpamon":
 					updated = true
 				}
 			}
@@ -1477,7 +1477,7 @@ func TestSystemHandler_Upgrade_ZypperSkippedRepoDependsOnScope(t *testing.T) {
 			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
 			setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
 			mockExec.SetResult("zypper --non-interactive lr --export -", 0, tt.repoExport, nil)
-			mockExec.SetResult("sh -c zypper --non-interactive update alpamon", 106, "", errors.New("exit status 106"))
+			mockExec.SetResult("zypper --non-interactive update alpamon", 106, "", errors.New("exit status 106"))
 
 			exitCode, _, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
 			assert.Equal(t, tt.want, exitCode)
@@ -1547,7 +1547,7 @@ func TestSystemHandler_Upgrade_ZypperRebootNeededIsSuccess(t *testing.T) {
 	setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
 
 	mockExec.SetResult(
-		"sh -c zypper --non-interactive refresh && zypper --non-interactive update alpamon alpamon-pam",
+		"zypper --non-interactive update alpamon alpamon-pam",
 		102, "", errors.New("exit status 102"),
 	)
 

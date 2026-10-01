@@ -229,7 +229,6 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	if needPam {
 		packages = append(packages, "alpamon-pam")
 	}
-	pkgList := strings.Join(packages, " ")
 
 	// A package upgrade must not run in the middle of a pinned upgrade: take the upgrade latch and
 	// refuse while a pinned attempt is still pending. Self updates take the latch themselves.
@@ -248,9 +247,6 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		}
 	}
 
-	var cmd string
-	// Set on the apt and yum paths: their install needs no shell operator, so it runs
-	// as an argv directly instead of through "sh -c cmd" like zypper.
 	var installArgv []string
 	// Set when the refresh was scoped to alpamon's own repo, which is what makes
 	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
@@ -286,7 +282,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		if code != 0 {
 			return code, withZypperHint(code, out), rerr
 		}
-		cmd = fmt.Sprintf("zypper --non-interactive update %s", pkgList)
+		installArgv = append([]string{"zypper", "--non-interactive", "update"}, packages...)
 		versionsBefore = h.installedRPMVersions(ctx, packages)
 	case utils.PkgBrew, utils.PkgNone:
 		// darwin and windows have no package channel for alpamon, so the binary replaces itself. needAlpamon is
@@ -302,15 +298,11 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		return 1, fmt.Sprintf("Platform '%s' (package manager %q) not supported.", utils.PlatformLike, utils.PackageManager), nil
 	}
 
-	log.Debug().Msgf("Upgrading %s...", pkgList)
+	log.Debug().Msgf("Upgrading %s...", strings.Join(packages, " "))
 	// The proxy environment (nil without a package proxy) applies to the
 	// spawned package-manager process only, never to the agent process.
-	argv := installArgv
-	if argv == nil {
-		argv = []string{"sh", "-c", cmd}
-	}
 	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
-		return h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
+		return h.Executor.Exec(ctx, installArgv, "root", "root", packageProxyEnv(packageProxy), 0)
 	})
 	exitCode, err = normalizeZypperExit(exitCode, err, alpamonRepoRefreshed)
 	// Reported, not failed: a repository that has not published the new build yet
