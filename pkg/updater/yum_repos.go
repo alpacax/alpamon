@@ -18,7 +18,7 @@ var (
 		"packagecloud.io/alpacax/alpamon-dev/",
 	}
 
-	// YumReposDirs are the directories dnf 4 and dnf 5 read repo files from by default.
+	// YumReposDirs is the union of the directories dnf 4 and dnf 5 read repo files from by default.
 	// It is a var so tests can point it at a temp dir.
 	YumReposDirs = []string{"/etc/yum.repos.d", "/etc/yum/repos.d", "/etc/distro.repos.d", "/usr/share/dnf5/repos.d"}
 
@@ -66,20 +66,16 @@ func yumSkipUnavailableSetopts() []string {
 		}
 	}
 
-	var setopts []string
-	resolved := false
+	// A glob, not one option per repo: dnf5 exits 2 on a setopt naming an id it does not load,
+	// such as a file outside its reposdir or a section name holding $releasever.
+	setopts := []string{"--setopt=*.skip_if_unavailable=True"}
 	for _, r := range repos {
-		if !r.enabled {
-			continue
+		if r.enabled && r.alpamon {
+			setopts = append(setopts, "--setopt="+r.id+".skip_if_unavailable=False")
 		}
-		skip := "True"
-		if r.alpamon {
-			skip, resolved = "False", true
-		}
-		setopts = append(setopts, "--setopt="+r.id+".skip_if_unavailable="+skip)
 	}
-	if !resolved {
-		log.Debug().Msg("Could not resolve the alpamon yum repo; upgrading without repo options.")
+	if len(setopts) == 1 {
+		log.Debug().Msg("Could not resolve the alpamon yum repo; running yum without repo options.")
 		return nil
 	}
 	log.Debug().Strs("setopts", setopts).Msg("Skipping unavailable yum repos other than alpamon's.")
@@ -91,8 +87,10 @@ func parseYumRepos(data string) []yumRepo {
 	var key string
 	for line := range strings.SplitSeq(data, "\n") {
 		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
 		switch {
-		case line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";"):
 		case strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]"):
 			repos = append(repos, yumRepo{id: strings.TrimSpace(line[1 : len(line)-1]), enabled: true})
 			key = ""

@@ -711,8 +711,8 @@ func TestSystemHandler_PinnedUpgrade_YumSkipsUnavailableReposOtherThanAlpamons(t
 	_, _, _ = h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
 
 	assert.True(t, h.ran("yum",
+		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
-		"--setopt=docker-ce-stable.skip_if_unavailable=True",
 		"install", "-y", "alpamon-2.5.0"), "the pinned install must skip every repo but alpamon's, got %+v", h.exec.GetExecutedCommands())
 }

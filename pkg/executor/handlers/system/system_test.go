@@ -2000,10 +2000,9 @@ func TestSystemHandler_Upgrade_YumSkipsUnavailableReposOtherThanAlpamons(t *test
 	yum := findLastExecuted(mockExec, "yum")
 	require.NotNil(t, yum, "the upgrade must run yum as its own argv, got %+v", mockExec.GetExecutedCommands())
 	assert.Equal(t, []string{
+		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
-		"--setopt=docker-ce-stable.skip_if_unavailable=True",
-		"--setopt=baseos.skip_if_unavailable=True",
 		"update", "-y", "alpamon",
 	}, yum.Args)
 	assert.Nil(t, findLastExecuted(mockExec, "sh"), "the yum upgrade must not go through a shell")
@@ -2023,9 +2022,9 @@ func TestSystemHandler_Upgrade_YumKeepsEveryChannelRepoStrict(t *testing.T) {
 	yum := findLastExecuted(mockExec, "yum")
 	require.NotNil(t, yum, "the upgrade must run yum as its own argv, got %+v", mockExec.GetExecutedCommands())
 	assert.Equal(t, []string{
+		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon-dev.skip_if_unavailable=False",
 		"--setopt=alpacax_alpamon-latest.skip_if_unavailable=False",
-		"--setopt=docker-ce-stable.skip_if_unavailable=True",
 		"update", "-y", "alpamon",
 	}, yum.Args)
 }

@@ -64,17 +64,32 @@ func writeYumRepos(t *testing.T, files map[string]string) {
 }
 
 func TestYumSkipUnavailableSetopts_ReadsEnabledLikeYum(t *testing.T) {
+	const url = "\nbaseurl=https://packagecloud.io/alpacax/alpamon/el/9/$basearch\n"
 	writeYumRepos(t, map[string]string{
-		"alpacax_alpamon.repo": yumAlpamonRepoFile,
-		"extra.repo": "; a comment\n[off-no]\nenabled = No\n\n[off-false]\nenabled=false\n\n" +
-			"[on-yes]\nenabled = Yes\n\n[on-true]\nenabled=True\n",
+		"alpacax_alpamon.repo": "; a comment\n[off-no]" + url + "enabled = No\n\n[off-false]" + url + "enabled=false\n\n" +
+			"[on-yes]" + url + "enabled = Yes\n\n[on-true]" + url + "enabled=True\n\n[on-default]" + url,
 	})
 
 	assert.Equal(t, []string{
+		"--setopt=*.skip_if_unavailable=True",
+		"--setopt=on-yes.skip_if_unavailable=False",
+		"--setopt=on-true.skip_if_unavailable=False",
+		"--setopt=on-default.skip_if_unavailable=False",
+	}, yumSkipUnavailableSetopts())
+}
+
+// TestYumSkipUnavailableSetopts_NamesNoThirdPartyRepo pins the glob: dnf5 exits 2 on a setopt naming an id it does not load.
+func TestYumSkipUnavailableSetopts_NamesNoThirdPartyRepo(t *testing.T) {
+	writeYumRepos(t, map[string]string{
+		"alpacax_alpamon.repo": yumAlpamonRepoFile,
+		"docker-ce.repo":       yumThirdPartyRepoFile,
+		"vars.repo":            "[var-$releasever]\nbaseurl=https://example.com/$releasever/\n",
+	})
+
+	assert.Equal(t, []string{
+		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
-		"--setopt=on-yes.skip_if_unavailable=True",
-		"--setopt=on-true.skip_if_unavailable=True",
 	}, yumSkipUnavailableSetopts())
 }
 
@@ -88,9 +103,9 @@ func TestYumSkipUnavailableSetopts_MatchesAlpamonOnlyInPackageLocations(t *testi
 	})
 
 	assert.Equal(t, []string{
+		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
-		"--setopt=mirror.skip_if_unavailable=True",
 	}, yumSkipUnavailableSetopts())
 }
 
@@ -102,22 +117,22 @@ func TestYumSkipUnavailableSetopts_MatchesAlpamonOnAContinuedBaseurlLine(t *test
 	})
 
 	assert.Equal(t, []string{
+		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
-		"--setopt=docker-ce-stable.skip_if_unavailable=True",
 	}, yumSkipUnavailableSetopts())
 }
 
 func TestYumSkipUnavailableSetopts_ReadsEveryReposDir(t *testing.T) {
 	etc, distro := t.TempDir(), t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(etc, "alpacax_alpamon.repo"), []byte(yumAlpamonRepoFile), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(distro, "fedora.repo"), []byte("[fedora]\nmetalink=https://mirrors.fedoraproject.org/metalink\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(etc, "fedora.repo"), []byte("[fedora]\nmetalink=https://mirrors.fedoraproject.org/metalink\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(distro, "alpacax_alpamon.repo"), []byte(yumAlpamonRepoFile), 0o644))
 	setYumReposDirs(t, etc, filepath.Join(t.TempDir(), "missing"), distro)
 
 	got := yumSkipUnavailableSetopts()
 
 	assert.Equal(t, []string{
+		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
-		"--setopt=fedora.skip_if_unavailable=True",
 	}, got)
 }
