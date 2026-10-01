@@ -9,11 +9,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/stretchr/testify/require"
 )
 
 // failingReader emits payload on first Read, then returns err on the next call.
@@ -38,17 +38,11 @@ func TestWriteFileAs_DirectPath_Success(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.bin")
 	payload := []byte("hello world")
 
-	if err := writeFileAs(context.Background(), path, bytes.NewReader(payload), nil); err != nil {
-		t.Fatalf("writeFileAs: %v", err)
-	}
+	require.NoError(t, writeFileAs(context.Background(), path, bytes.NewReader(payload), nil), "writeFileAs")
 
 	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("content mismatch: got %q want %q", got, payload)
-	}
+	require.NoError(t, err, "ReadFile")
+	require.Equal(t, payload, got, "content mismatch")
 }
 
 // TestWriteFileAs_DirectPath_RemovesPartialOnReadError verifies the cleanup branch:
@@ -62,25 +56,19 @@ func TestWriteFileAs_DirectPath_RemovesPartialOnReadError(t *testing.T) {
 	}
 
 	err := writeFileAs(context.Background(), path, src, nil)
-	if err == nil {
-		t.Fatal("expected writeFileAs to return error")
-	}
+	require.Error(t, err, "expected writeFileAs to return error")
 
-	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Fatalf("expected partial file removed, stat err = %v", statErr)
-	}
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr), "expected partial file removed, stat err = %v", statErr)
 }
 
 // TestWriteFileAs_DirectPath_CreatesParentDir verifies MkdirAll runs before OpenFile.
 func TestWriteFileAs_DirectPath_CreatesParentDir(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "deep", "out.bin")
 
-	if err := writeFileAs(context.Background(), path, bytes.NewReader([]byte("ok")), nil); err != nil {
-		t.Fatalf("writeFileAs: %v", err)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected file at %s, got %v", path, err)
-	}
+	require.NoError(t, writeFileAs(context.Background(), path, bytes.NewReader([]byte("ok")), nil), "writeFileAs")
+	_, err := os.Stat(path)
+	require.NoError(t, err, "expected file at %s", path)
 }
 
 // closeSpy wraps a Reader and records whether Close was called.
@@ -106,15 +94,11 @@ func TestLimitedReadCloser_UnderLimit(t *testing.T) {
 
 	buf := make([]byte, 32)
 	n, err := lr.Read(buf)
-	if err != nil && err != io.EOF {
-		t.Fatalf("unexpected error: %v", err)
+	if err != nil {
+		require.Equal(t, io.EOF, err)
 	}
-	if n != len(data) {
-		t.Fatalf("got %d bytes, want %d", n, len(data))
-	}
-	if spy.closed {
-		t.Fatal("Close must not be called under limit")
-	}
+	require.Equal(t, len(data), n, "bytes read")
+	require.False(t, spy.closed, "Close must not be called under limit")
 }
 
 // TestLimitedReadCloser_OverLimit verifies an error is returned and Close is called.
@@ -123,15 +107,9 @@ func TestLimitedReadCloser_OverLimit(t *testing.T) {
 	lr, spy := newLimitedRC(bytes.Repeat([]byte("x"), 20), limit)
 
 	_, err := lr.Read(make([]byte, 32))
-	if err == nil {
-		t.Fatal("expected error for over-limit read")
-	}
-	if !strings.Contains(err.Error(), "download too large") {
-		t.Fatalf("unexpected error message: %v", err)
-	}
-	if !spy.closed {
-		t.Fatal("Close must be called on over-limit")
-	}
+	require.Error(t, err, "expected error for over-limit read")
+	require.ErrorContains(t, err, "download too large")
+	require.True(t, spy.closed, "Close must be called on over-limit")
 }
 
 // TestLimitedReadCloser_OvershootAtMostOneByte verifies that io.LimitReader(rc, limit+1)
@@ -149,9 +127,7 @@ func TestLimitedReadCloser_OvershootAtMostOneByte(t *testing.T) {
 			break
 		}
 	}
-	if int64(total) > limit+1 {
-		t.Fatalf("overshoot: read %d bytes, limit=%d (max limit+1=%d)", total, limit, limit+1)
-	}
+	require.LessOrEqual(t, int64(total), limit+1, "overshoot: limit=%d", limit)
 }
 
 // TestFetchFromURL_ContentLengthExceedsLimit verifies the upfront Content-Length check.
@@ -170,9 +146,7 @@ func TestFetchFromURL_ContentLengthExceedsLimit(t *testing.T) {
 	rc, err := h.fetchFromURL(context.Background(), srv.URL)
 	if err == nil {
 		_ = rc.Close()
-		t.Fatal("expected error when Content-Length exceeds limit")
 	}
-	if !strings.Contains(err.Error(), "download too large") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.Error(t, err, "expected error when Content-Length exceeds limit")
+	require.ErrorContains(t, err, "download too large")
 }

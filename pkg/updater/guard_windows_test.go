@@ -2,11 +2,12 @@ package updater
 
 import (
 	"errors"
-	"slices"
 	"testing"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/svcdef"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
@@ -38,9 +39,7 @@ func TestFirstActionRestarts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := firstActionRestarts(tt.actions); got != tt.want {
-				t.Errorf("firstActionRestarts() = %v, want %v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, firstActionRestarts(tt.actions), "firstActionRestarts()")
 		})
 	}
 }
@@ -60,9 +59,7 @@ func TestDescribeActions(t *testing.T) {
 		"none after 0s",
 		"unknown(99) after 0s",
 	}
-	if !slices.Equal(got, want) {
-		t.Errorf("describeActions() = %v, want %v", got, want)
-	}
+	assert.Equal(t, want, got, "describeActions()")
 }
 
 var restartDefaults = []mgr.RecoveryAction{{Type: mgr.ServiceRestart}}
@@ -156,23 +153,15 @@ func TestEnsureRecoveryRestart(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := tt.fake
 			err := ensureRecoveryRestart(&f)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ensureRecoveryRestart() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if f.setCalled != tt.wantSet {
-				t.Errorf("SetRecoveryActions called = %v, want %v", f.setCalled, tt.wantSet)
-			}
+			require.Equal(t, tt.wantErr, err != nil, "ensureRecoveryRestart() error = %v", err)
+			assert.Equal(t, tt.wantSet, f.setCalled, "SetRecoveryActions called")
 			if !tt.wantSet {
 				return
 			}
 			// A heal must write register's defaults verbatim—the guard's actual output.
 			// Without this, a regression to NoAction or a dropped Delay passes every case.
-			if want := svcdef.DefaultRecoveryActions(); !slices.Equal(f.setActions, want) {
-				t.Errorf("SetRecoveryActions actions = %v, want %v", f.setActions, want)
-			}
-			if f.setReset != svcdef.RecoveryResetSeconds {
-				t.Errorf("SetRecoveryActions reset = %d, want %d", f.setReset, svcdef.RecoveryResetSeconds)
-			}
+			assert.Equal(t, svcdef.DefaultRecoveryActions(), f.setActions, "SetRecoveryActions actions")
+			assert.Equal(t, uint32(svcdef.RecoveryResetSeconds), f.setReset, "SetRecoveryActions reset")
 		})
 	}
 }

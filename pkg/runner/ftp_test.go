@@ -22,6 +22,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/logger"
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/require"
 )
 
 func newTestFtpClient(home string) *FtpClient {
@@ -106,17 +107,11 @@ func TestParsePath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := fc.parsePath(tc.path)
 			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("parsePath(%q) expected error, got %q", tc.path, got)
-				}
+				require.Error(t, err, "parsePath(%q) expected error, got %q", tc.path, got)
 				return
 			}
-			if err != nil {
-				t.Fatalf("parsePath(%q) unexpected error: %v", tc.path, err)
-			}
-			if got != tc.want {
-				t.Fatalf("parsePath(%q) = %q, want %q", tc.path, got, tc.want)
-			}
+			require.NoError(t, err, "parsePath(%q) unexpected error", tc.path)
+			require.Equal(t, tc.want, got, "parsePath(%q)", tc.path)
 		})
 	}
 }
@@ -133,15 +128,9 @@ func TestParsePath_ResultIsClean(t *testing.T) {
 
 	for _, p := range paths {
 		got, err := fc.parsePath(p)
-		if err != nil {
-			t.Fatalf("parsePath(%q) unexpected error: %v", p, err)
-		}
-		if got != filepath.Clean(got) {
-			t.Fatalf("parsePath(%q) = %q is not clean (clean = %q)", p, got, filepath.Clean(got))
-		}
-		if !filepath.IsAbs(got) {
-			t.Fatalf("parsePath(%q) = %q is not absolute", p, got)
-		}
+		require.NoError(t, err, "parsePath(%q) unexpected error", p)
+		require.Equal(t, filepath.Clean(got), got, "parsePath(%q) is not clean", p)
+		require.True(t, filepath.IsAbs(got), "parsePath(%q) = %q is not absolute", p, got)
 	}
 }
 
@@ -152,21 +141,13 @@ func TestParsePath_CwdChangesResolution(t *testing.T) {
 	fc.workingDirectory = "/var/log"
 
 	got, err := fc.parsePath("app.log")
-	if err != nil {
-		t.Fatalf("parsePath unexpected error: %v", err)
-	}
-	if got != "/var/log/app.log" {
-		t.Fatalf("parsePath(\"app.log\") with cwd=/var/log = %q, want /var/log/app.log", got)
-	}
+	require.NoError(t, err, "parsePath unexpected error")
+	require.Equal(t, "/var/log/app.log", got, "parsePath(\"app.log\") with cwd=/var/log")
 
 	// Tilde should expand to working directory
 	got, err = fc.parsePath("~/file")
-	if err != nil {
-		t.Fatalf("parsePath unexpected error: %v", err)
-	}
-	if got != "/var/log/file" {
-		t.Fatalf("parsePath(\"~/file\") with cwd=/var/log = %q, want /var/log/file", got)
-	}
+	require.NoError(t, err, "parsePath unexpected error")
+	require.Equal(t, "/var/log/file", got, "parsePath(\"~/file\") with cwd=/var/log")
 }
 
 func TestValidateWebSocketURL(t *testing.T) {
@@ -226,11 +207,10 @@ func TestValidateWebSocketURL(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := validateWebSocketURL(tc.url)
-			if tc.wantErr && err == nil {
-				t.Fatalf("validateWebSocketURL(%q) expected error", tc.url)
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("validateWebSocketURL(%q) unexpected error: %v", tc.url, err)
+			if tc.wantErr {
+				require.Error(t, err, "validateWebSocketURL(%q) expected error", tc.url)
+			} else {
+				require.NoError(t, err, "validateWebSocketURL(%q) unexpected error", tc.url)
 			}
 		})
 	}
@@ -242,9 +222,7 @@ func TestValidateWebSocketURL_InvalidServerURL(t *testing.T) {
 	config.GlobalSettings.ServerURL = "://invalid"
 
 	_, err := validateWebSocketURL("wss://whatever.com/ws")
-	if err == nil {
-		t.Fatal("expected error for invalid server URL")
-	}
+	require.Error(t, err, "expected error for invalid server URL")
 }
 
 func TestValidateWebSocketURL_ServerWithExplicitPort(t *testing.T) {
@@ -279,11 +257,10 @@ func TestValidateWebSocketURL_ServerWithExplicitPort(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := validateWebSocketURL(tc.url)
-			if tc.wantErr && err == nil {
-				t.Fatalf("validateWebSocketURL(%q) expected error", tc.url)
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("validateWebSocketURL(%q) unexpected error: %v", tc.url, err)
+			if tc.wantErr {
+				require.Error(t, err, "validateWebSocketURL(%q) expected error", tc.url)
+			} else {
+				require.NoError(t, err, "validateWebSocketURL(%q) unexpected error", tc.url)
 			}
 		})
 	}
@@ -307,8 +284,8 @@ func newWiredFtpClient(t *testing.T) (*FtpClient, *websocket.Conn, func()) {
 	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		srv.Close()
-		t.Fatalf("failed to dial test server: %v", err)
 	}
+	require.NoError(t, err, "failed to dial test server")
 
 	var serverConn *websocket.Conn
 	select {
@@ -365,12 +342,8 @@ func TestFtpReadLoopStaysResponsiveDuringLongCommand(t *testing.T) {
 	defer cancel()
 
 	msg, err := json.Marshal(FtpContent{Command: Pwd})
-	if err != nil {
-		t.Fatalf("failed to marshal command: %v", err)
-	}
-	if err := serverConn.WriteMessage(websocket.TextMessage, msg); err != nil {
-		t.Fatalf("failed to send command: %v", err)
-	}
+	require.NoError(t, err, "failed to marshal command")
+	require.NoError(t, serverConn.WriteMessage(websocket.TextMessage, msg), "failed to send command")
 
 	select {
 	case <-blocked:
@@ -437,40 +410,25 @@ func TestFtpCommandsAreSerializedInOrder(t *testing.T) {
 			Command: Mkd,
 			Data:    FtpData{Path: filepath.Join(base, name)},
 		})
-		if err != nil {
-			t.Fatalf("failed to marshal command: %v", err)
-		}
-		if err := serverConn.WriteMessage(websocket.TextMessage, msg); err != nil {
-			t.Fatalf("failed to send command: %v", err)
-		}
+		require.NoError(t, err, "failed to marshal command")
+		require.NoError(t, serverConn.WriteMessage(websocket.TextMessage, msg), "failed to send command")
 	}
 
 	_ = serverConn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	for i := range names {
 		_, raw, err := serverConn.ReadMessage()
-		if err != nil {
-			t.Fatalf("failed to read response %d: %v", i, err)
-		}
+		require.NoError(t, err, "failed to read response %d", i)
 		var result FtpResult
-		if err := json.Unmarshal(raw, &result); err != nil {
-			t.Fatalf("failed to unmarshal response %d: %v", i, err)
-		}
-		if result.Command != Mkd {
-			t.Fatalf("response %d: expected command %q, got %q", i, Mkd, result.Command)
-		}
-		if !result.Success {
-			t.Fatalf("response %d: mkd failed: %+v", i, result.Data)
-		}
+		require.NoError(t, json.Unmarshal(raw, &result), "failed to unmarshal response %d", i)
+		require.Equal(t, Mkd, result.Command, "response %d: expected command %q", i, Mkd)
+		require.True(t, result.Success, "response %d: mkd failed: %+v", i, result.Data)
 		// The ith response must be for the ith requested directory; identical
 		// commands would let out-of-order responses slip past this loop otherwise.
-		if want := filepath.Join(base, names[i]); !strings.Contains(result.Data.Message, want) {
-			t.Fatalf("response %d out of order: want path %q in message, got %q", i, want, result.Data.Message)
-		}
+		require.Contains(t, result.Data.Message, filepath.Join(base, names[i]), "response %d out of order", i)
 	}
 
 	for _, name := range names {
-		if _, err := os.Stat(filepath.Join(base, name)); err != nil {
-			t.Fatalf("expected directory %q to exist: %v", name, err)
-		}
+		_, err := os.Stat(filepath.Join(base, name))
+		require.NoError(t, err, "expected directory %q to exist", name)
 	}
 }

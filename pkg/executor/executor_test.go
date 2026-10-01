@@ -22,15 +22,9 @@ func TestExecutor_TimeoutReturns124(t *testing.T) {
 		Timeout: 500 * time.Millisecond,
 	})
 
-	if exitCode != 124 {
-		t.Errorf("expected exit code 124, got %d", exitCode)
-	}
-	if !strings.Contains(output, "Command timed out after") {
-		t.Errorf("expected timeout message in output, got %q", output)
-	}
-	if err == nil {
-		t.Error("expected non-nil error on timeout")
-	}
+	assert.Equal(t, 124, exitCode, "expected exit code 124")
+	assert.Contains(t, output, "Command timed out after", "expected timeout message in output")
+	assert.Error(t, err, "expected non-nil error on timeout")
 }
 
 func TestExecute_GivenParentCtxCancelledMidRun_ThenExitCodeIsOneNotNegativeOne(t *testing.T) {
@@ -116,27 +110,18 @@ func TestExecutor_ExecWithStreamingHook_StreamsChunks(t *testing.T) {
 		[]string{"/bin/sh", "-c", "printf 'line1\\nline2\\nline3\\n'"},
 		"", "", nil, 5*time.Second, nil, callback,
 	)
-	if err != nil {
-		t.Fatalf("ExecWithStreamingHook: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("exit code: got %d, want 0", exitCode)
-	}
+	require.NoError(t, err, "ExecWithStreamingHook")
+	assert.Equal(t, 0, exitCode, "exit code")
 
 	mu.Lock()
 	defer mu.Unlock()
 
-	if len(chunks) == 0 {
-		t.Fatal("expected at least one chunk")
-	}
+	require.NotEmpty(t, chunks, "expected at least one chunk")
 	assembled := strings.Join(chunks, "")
-	if !strings.Contains(assembled, "line1") || !strings.Contains(assembled, "line3") {
-		t.Errorf("unexpected chunks: %q", assembled)
-	}
+	assert.Contains(t, assembled, "line1", "unexpected chunks")
+	assert.Contains(t, assembled, "line3", "unexpected chunks")
 	// The streaming path returns a capped audit copy so fin carries output even if chunks drop.
-	if output != assembled {
-		t.Errorf("captured output should match streamed chunks: got %q, want %q", output, assembled)
-	}
+	assert.Equal(t, assembled, output, "captured output should match streamed chunks")
 }
 
 func TestExecutor_StartFailureSurfacesErrorInResult(t *testing.T) {
@@ -147,15 +132,9 @@ func TestExecutor_StartFailureSurfacesErrorInResult(t *testing.T) {
 		Args:    []string{missing},
 		Timeout: 5 * time.Second,
 	})
-	if err == nil {
-		t.Fatal("expected error for missing binary")
-	}
-	if exitCode == 0 {
-		t.Errorf("expected non-zero exit, got %d", exitCode)
-	}
-	if !strings.Contains(result, missing) && !strings.Contains(result, "no such file") {
-		t.Errorf("result should carry start-failure diagnostic, got %q", result)
-	}
+	require.Error(t, err, "expected error for missing binary")
+	assert.NotEqual(t, 0, exitCode, "expected non-zero exit")
+	assert.True(t, strings.Contains(result, missing) || strings.Contains(result, "no such file"), "result should carry start-failure diagnostic, got %q", result)
 }
 
 func TestExecutor_StreamingTimeoutBannerHasNoLeadingNewlines(t *testing.T) {
@@ -169,18 +148,10 @@ func TestExecutor_StreamingTimeoutBannerHasNoLeadingNewlines(t *testing.T) {
 		"", "", nil, 500*time.Millisecond,
 		nil, func(_ context.Context, content string) {},
 	)
-	if err == nil {
-		t.Fatal("expected timeout error")
-	}
-	if exitCode != 124 {
-		t.Errorf("expected 124, got %d", exitCode)
-	}
-	if strings.HasPrefix(result, "\n") {
-		t.Errorf("streaming timeout banner should not have leading newline: %q", result)
-	}
-	if !strings.HasPrefix(result, "Command timed out after") {
-		t.Errorf("unexpected banner: %q", result)
-	}
+	require.Error(t, err, "expected timeout error")
+	assert.Equal(t, 124, exitCode)
+	assert.False(t, strings.HasPrefix(result, "\n"), "streaming timeout banner should not have leading newline: %q", result)
+	assert.True(t, strings.HasPrefix(result, "Command timed out after"), "unexpected banner: %q", result)
 }
 
 func TestExecutor_PlainExecuteWithoutCallback(t *testing.T) {
@@ -193,15 +164,9 @@ func TestExecutor_PlainExecuteWithoutCallback(t *testing.T) {
 		Args:    []string{"/bin/sh", "-c", "printf 'hello\\n'"},
 		Timeout: 5 * time.Second,
 	})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("exit code: got %d, want 0", exitCode)
-	}
-	if !strings.Contains(output, "hello") {
-		t.Errorf("output: got %q", output)
-	}
+	require.NoError(t, err, "Execute")
+	assert.Equal(t, 0, exitCode, "exit code")
+	assert.Contains(t, output, "hello")
 }
 
 // TestExecutor_BuildEnvSetsUserIdentity verifies the environment is populated
@@ -210,26 +175,16 @@ func TestExecutor_BuildEnvSetsUserIdentity(t *testing.T) {
 	e := NewExecutor()
 
 	usr, err := user.Current()
-	if err != nil {
-		t.Fatalf("failed to get current user: %v", err)
-	}
+	require.NoError(t, err, "failed to get current user")
 
 	// Empty username resolves to the current user (Alpamon is not root in tests).
 	env := e.buildEnv("", nil)
 
-	if env["HOME"] != usr.HomeDir {
-		t.Errorf("expected HOME=%q, got %q", usr.HomeDir, env["HOME"])
-	}
-	if env["USER"] != usr.Username {
-		t.Errorf("expected USER=%q, got %q", usr.Username, env["USER"])
-	}
-	if env["LOGNAME"] != usr.Username {
-		t.Errorf("expected LOGNAME=%q, got %q", usr.Username, env["LOGNAME"])
-	}
+	assert.Equal(t, usr.HomeDir, env["HOME"], "HOME")
+	assert.Equal(t, usr.Username, env["USER"], "USER")
+	assert.Equal(t, usr.Username, env["LOGNAME"], "LOGNAME")
 	for _, key := range []string{"PATH", "SHELL", "TERM", "LANG"} {
-		if env[key] == "" {
-			t.Errorf("expected default env %q to be set", key)
-		}
+		assert.NotEmpty(t, env[key], "expected default env %q to be set", key)
 	}
 }
 
@@ -243,12 +198,8 @@ func TestExecutor_BuildEnvOverridePrecedence(t *testing.T) {
 		"FOO":  "bar",
 	})
 
-	if env["HOME"] != "/custom/home" {
-		t.Errorf("expected override HOME=/custom/home, got %q", env["HOME"])
-	}
-	if env["FOO"] != "bar" {
-		t.Errorf("expected FOO=bar, got %q", env["FOO"])
-	}
+	assert.Equal(t, "/custom/home", env["HOME"], "expected override HOME")
+	assert.Equal(t, "bar", env["FOO"], "expected FOO")
 }
 
 // TestExecutor_ExpandArgsUsesBuiltEnv locks in the behavior that argument
@@ -260,10 +211,6 @@ func TestExecutor_ExpandArgsUsesBuiltEnv(t *testing.T) {
 	env := e.buildEnv("", nil)
 	args := e.expandArgs([]string{"echo", "$HOME", "${USER}"}, env)
 
-	if args[1] != env["HOME"] {
-		t.Errorf("expected $HOME expanded to %q, got %q", env["HOME"], args[1])
-	}
-	if args[2] != env["USER"] {
-		t.Errorf("expected ${USER} expanded to %q, got %q", env["USER"], args[2])
-	}
+	assert.Equal(t, env["HOME"], args[1], "expected $HOME expanded")
+	assert.Equal(t, env["USER"], args[2], "expected ${USER} expanded")
 }

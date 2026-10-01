@@ -222,9 +222,7 @@ func TestTunnelHandler_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := handler.Validate(tt.cmd, tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
+			assert.Equal(t, tt.wantErr, err != nil, "Validate() error = %v", err)
 		})
 	}
 }
@@ -233,9 +231,7 @@ func TestTunnelHandler_Commands(t *testing.T) {
 	handler := NewTunnelHandler(common.NewMockCommandExecutor(t))
 
 	commands := handler.Commands()
-	if len(commands) != 2 {
-		t.Errorf("Commands() returned %d commands, want 2", len(commands))
-	}
+	assert.Len(t, commands, 2, "Commands() command count")
 
 	expectedCmds := map[string]bool{
 		"opentunnel":  false,
@@ -243,16 +239,13 @@ func TestTunnelHandler_Commands(t *testing.T) {
 	}
 
 	for _, cmd := range commands {
-		if _, ok := expectedCmds[cmd]; ok {
+		_, ok := expectedCmds[cmd]
+		if assert.True(t, ok, "Unexpected command: %s", cmd) {
 			expectedCmds[cmd] = true
-		} else {
-			t.Errorf("Unexpected command: %s", cmd)
 		}
 	}
 
 	for cmd, found := range expectedCmds {
-		if !found {
-			t.Errorf("Expected command not found: %s", cmd)
-		}
+		assert.True(t, found, "Expected command not found: %s", cmd)
 	}
 }

@@ -1,6 +1,10 @@
 package shell
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestUnwrapNestedPowerShell(t *testing.T) {
 	tests := []struct {
@@ -152,19 +156,13 @@ func TestUnwrapNestedPowerShell(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, ok := unwrapNestedPowerShell(tt.command)
-			if ok != tt.wantOk {
-				t.Fatalf("unwrapNestedPowerShell(%q) ok = %v, want %v", tt.command, ok, tt.wantOk)
-			}
+			require.Equal(t, tt.wantOk, ok, "unwrapNestedPowerShell(%q) ok", tt.command)
 			if !ok {
 				return
 			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("unwrapNestedPowerShell(%q) = %#v, want %#v", tt.command, got, tt.want)
-			}
+			require.Len(t, got, len(tt.want), "unwrapNestedPowerShell(%q) = %#v, want %#v", tt.command, got, tt.want)
 			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Fatalf("unwrapNestedPowerShell(%q)[%d] = %q, want %q", tt.command, i, got[i], tt.want[i])
-				}
+				require.Equal(t, tt.want[i], got[i], "unwrapNestedPowerShell(%q)[%d]", tt.command, i)
 			}
 		})
 	}

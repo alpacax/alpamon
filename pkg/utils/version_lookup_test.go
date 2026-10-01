@@ -3,6 +3,9 @@ package utils
 import (
 	"net/http"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestNewVersionLookupClient_NoProxy pins the default: without a proxy URL the
@@ -10,9 +13,7 @@ import (
 // process-level proxy environment when present.
 func TestNewVersionLookupClient_NoProxy(t *testing.T) {
 	client := NewVersionLookupClient("")
-	if client.Transport != nil {
-		t.Errorf("expected default transport (nil), got %T", client.Transport)
-	}
+	assert.True(t, client.Transport == nil, "expected default transport (nil), got %T", client.Transport)
 }
 
 // TestNewVersionLookupClient_WithProxy verifies a per-request transport is
@@ -21,19 +22,13 @@ func TestNewVersionLookupClient_WithProxy(t *testing.T) {
 	client := NewVersionLookupClient("http://proxy.internal:3128")
 
 	transport, ok := client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("expected *http.Transport, got %T", client.Transport)
-	}
+	require.True(t, ok, "expected *http.Transport, got %T", client.Transport)
 	req, err := http.NewRequest("GET", "https://api.github.com/repos/alpacax/alpamon/releases/latest", nil)
-	if err != nil {
-		t.Fatalf("failed to build request: %v", err)
-	}
+	require.NoError(t, err, "failed to build request")
 	proxy, err := transport.Proxy(req)
-	if err != nil {
-		t.Fatalf("proxy func returned error: %v", err)
-	}
-	if proxy == nil || proxy.String() != "http://proxy.internal:3128" {
-		t.Errorf("expected proxy http://proxy.internal:3128, got %v", proxy)
+	require.NoError(t, err, "proxy func returned error")
+	if assert.NotNil(t, proxy, "expected proxy http://proxy.internal:3128") {
+		assert.Equal(t, "http://proxy.internal:3128", proxy.String())
 	}
 }
 
@@ -42,8 +37,6 @@ func TestNewVersionLookupClient_WithProxy(t *testing.T) {
 func TestNewVersionLookupClient_InvalidProxy(t *testing.T) {
 	for _, invalid := range []string{"http://[::1", "not a url"} {
 		client := NewVersionLookupClient(invalid)
-		if client.Transport != nil {
-			t.Errorf("proxy %q: expected fallback to default transport (nil), got %T", invalid, client.Transport)
-		}
+		assert.True(t, client.Transport == nil, "proxy %q: expected fallback to default transport (nil), got %T", invalid, client.Transport)
 	}
 }

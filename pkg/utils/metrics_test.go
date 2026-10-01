@@ -1,6 +1,10 @@
 package utils
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 func TestIsVirtualFileSystem(t *testing.T) {
 	tests := []struct {
@@ -36,10 +40,7 @@ func TestIsVirtualFileSystem(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := IsVirtualFileSystem(tt.device, tt.fstype, tt.mountPoint)
-			if got != tt.virtual {
-				t.Errorf("IsVirtualFileSystem(%q, %q, %q) = %v, want %v",
-					tt.device, tt.fstype, tt.mountPoint, got, tt.virtual)
-			}
+			assert.Equal(t, tt.virtual, got, "IsVirtualFileSystem(%q, %q, %q)", tt.device, tt.fstype, tt.mountPoint)
 		})
 	}
 }
@@ -61,9 +62,7 @@ func TestIsVirtualDisk(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := IsVirtualDisk(tt.disk)
-			if got != tt.virtual {
-				t.Errorf("IsVirtualDisk(%q) = %v, want %v", tt.disk, got, tt.virtual)
-			}
+			assert.Equal(t, tt.virtual, got, "IsVirtualDisk(%q)", tt.disk)
 		})
 	}
 }
@@ -88,9 +87,7 @@ func TestGetDiskBaseName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := GetDiskBaseName(tt.disk)
-			if got != tt.baseName {
-				t.Errorf("GetDiskBaseName(%q) = %q, want %q", tt.disk, got, tt.baseName)
-			}
+			assert.Equal(t, tt.baseName, got, "GetDiskBaseName(%q)", tt.disk)
 		})
 	}
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestFirewallHandler_Execute(t *testing.T) {
@@ -135,15 +136,11 @@ func TestFirewallHandler_Execute(t *testing.T) {
 
 			exitCode, output, err := handler.Execute(ctx, tt.cmd, tt.args)
 
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Execute() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if exitCode != tt.wantCode {
-				t.Errorf("Execute() exitCode = %v, want %v", exitCode, tt.wantCode)
-			}
+			assert.Equal(t, tt.wantErr, err != nil, "Execute() error = %v", err)
+			assert.Equal(t, tt.wantCode, exitCode)
 			// Since these are placeholders, we expect some output for successful operations
-			if exitCode == 0 && output == "" && !tt.wantErr {
-				t.Error("Execute() returned success but no output")
+			if exitCode == 0 && !tt.wantErr {
+				assert.NotEmpty(t, output, "Execute() returned success but no output")
 			}
 		})
 	}
@@ -271,9 +268,7 @@ func TestFirewallHandler_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := handler.Validate(tt.cmd, tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
+			assert.Equal(t, tt.wantErr, err != nil, "Validate() error = %v", err)
 		})
 	}
 }
@@ -291,15 +286,9 @@ func TestFirewallHandler_BatchOperation(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, "firewall", args)
 
-	if err != nil {
-		t.Errorf("Execute() unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("Execute() exitCode = %v, want 0", exitCode)
-	}
-	if output == "" {
-		t.Error("Execute() returned no output")
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.NotEmpty(t, output, "Execute() returned no output")
 
 	// Test with multiple rules
 	args = &common.CommandArgs{
@@ -319,15 +308,9 @@ func TestFirewallHandler_BatchOperation(t *testing.T) {
 
 	exitCode, output, err = handler.Execute(ctx, "firewall", args)
 
-	if err != nil {
-		t.Errorf("Execute() unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("Execute() exitCode = %v, want 0", exitCode)
-	}
-	if output == "" {
-		t.Error("Execute() returned no output")
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.NotEmpty(t, output, "Execute() returned no output")
 }
 
 // SLES 12 and Leap 42 ship SuSEfirewall2 rather than firewalld. It owns the
@@ -343,13 +326,7 @@ func TestFirewallDetector_SuSEfirewall2DisablesManagement(t *testing.T) {
 
 	result := NewFirewallDetector(mockExec).Detect(context.Background())
 
-	if result.HighLevel != HighLevelSuSEfirewall2 {
-		t.Errorf("expected %q, got %q", HighLevelSuSEfirewall2, result.HighLevel)
-	}
-	if !result.Disabled {
-		t.Error("an active high-level firewall must disable Alpacon firewall management")
-	}
-	if result.Backend != BackendNone {
-		t.Errorf("expected no backend, got %q", result.Backend)
-	}
+	assert.Equal(t, HighLevelSuSEfirewall2, result.HighLevel)
+	assert.True(t, result.Disabled, "an active high-level firewall must disable Alpacon firewall management")
+	assert.Equal(t, BackendNone, result.Backend, "expected no backend")
 }

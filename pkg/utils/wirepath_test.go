@@ -3,6 +3,8 @@ package utils
 import (
 	"runtime"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestWirePathRoundtripUnix(t *testing.T) {
@@ -12,12 +14,8 @@ func TestWirePathRoundtripUnix(t *testing.T) {
 
 	cases := []string{"/home/foo", "/tmp/a/b", "/"}
 	for _, p := range cases {
-		if got := ToWirePath(p); got != p {
-			t.Errorf("ToWirePath(%q) = %q, want %q (no-op on Unix)", p, got, p)
-		}
-		if got := FromWirePath(p); got != p {
-			t.Errorf("FromWirePath(%q) = %q, want %q (no-op on Unix)", p, got, p)
-		}
+		assert.Equal(t, p, ToWirePath(p), "ToWirePath(%q) (no-op on Unix)", p)
+		assert.Equal(t, p, FromWirePath(p), "FromWirePath(%q) (no-op on Unix)", p)
 	}
 }
 
@@ -35,21 +33,13 @@ func TestWirePathRoundtripWindows(t *testing.T) {
 		{`C:\`, "/C:/"},
 	}
 	for _, tc := range cases {
-		if got := ToWirePath(tc.native); got != tc.wire {
-			t.Errorf("ToWirePath(%q) = %q, want %q", tc.native, got, tc.wire)
-		}
-		if got := FromWirePath(tc.wire); got != tc.native {
-			t.Errorf("FromWirePath(%q) = %q, want %q", tc.wire, got, tc.native)
-		}
+		assert.Equal(t, tc.wire, ToWirePath(tc.native), "ToWirePath(%q)", tc.native)
+		assert.Equal(t, tc.native, FromWirePath(tc.wire), "FromWirePath(%q)", tc.wire)
 	}
 
 	// FromWirePath should also accept already-native input
-	if got := FromWirePath(`C:\Users\foo`); got != `C:\Users\foo` {
-		t.Errorf("FromWirePath(native) should pass through, got %q", got)
-	}
+	assert.Equal(t, `C:\Users\foo`, FromWirePath(`C:\Users\foo`), "FromWirePath(native) should pass through")
 
 	// Bare "/C:" (breadcrumb click on drive letter) normalizes to drive root
-	if got := FromWirePath("/C:"); got != `C:\` {
-		t.Errorf("FromWirePath(\"/C:\") = %q, want C:\\", got)
-	}
+	assert.Equal(t, `C:\`, FromWirePath("/C:"), "FromWirePath(\"/C:\")")
 }

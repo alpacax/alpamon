@@ -83,36 +83,24 @@ func TestIntegration_RegistryWithHandlers(t *testing.T) {
 	}
 
 	// Register handlers
-	if err := registry.Register(handler1); err != nil {
-		t.Fatalf("failed to register handler1: %v", err)
-	}
-	if err := registry.Register(handler2); err != nil {
-		t.Fatalf("failed to register handler2: %v", err)
-	}
+	err := registry.Register(handler1)
+	require.NoError(t, err, "failed to register handler1")
+	err = registry.Register(handler2)
+	require.NoError(t, err, "failed to register handler2")
 
 	// Verify all commands are accessible
 	for _, cmd := range []string{"cmd1", "cmd2", "cmd3", "cmd4"} {
-		if !registry.IsCommandRegistered(cmd) {
-			t.Errorf("command %q should be registered", cmd)
-		}
+		assert.True(t, registry.IsCommandRegistered(cmd), "command %q should be registered", cmd)
 	}
 
 	// Get handlers and verify names
 	h1, err := registry.Get("cmd1")
-	if err != nil {
-		t.Fatalf("failed to get handler for cmd1: %v", err)
-	}
-	if h1.Name() != "handler1" {
-		t.Errorf("expected handler1, got %q", h1.Name())
-	}
+	require.NoError(t, err, "failed to get handler for cmd1")
+	assert.Equal(t, "handler1", h1.Name())
 
 	h2, err := registry.Get("cmd3")
-	if err != nil {
-		t.Fatalf("failed to get handler for cmd3: %v", err)
-	}
-	if h2.Name() != "handler2" {
-		t.Errorf("expected handler2, got %q", h2.Name())
-	}
+	require.NoError(t, err, "failed to get handler for cmd3")
+	assert.Equal(t, "handler2", h2.Name())
 }
 
 // TestIntegration_HandlerExecution tests handler execution through registry
@@ -127,37 +115,24 @@ func TestIntegration_HandlerExecution(t *testing.T) {
 
 	// Get handler and execute
 	h, err := registry.Get("test_cmd")
-	if err != nil {
-		t.Fatalf("failed to get handler: %v", err)
-	}
+	require.NoError(t, err, "failed to get handler")
 
 	ctx := context.Background()
 	args := &common.CommandArgs{}
 
 	// Validate first
-	if err := h.Validate("test_cmd", args); err != nil {
-		t.Fatalf("validation failed: %v", err)
-	}
+	err = h.Validate("test_cmd", args)
+	require.NoError(t, err, "validation failed")
 
 	// Execute
 	exitCode, output, err := h.Execute(ctx, "test_cmd", args)
-	if err != nil {
-		t.Fatalf("execution failed: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if output == "" {
-		t.Error("expected non-empty output")
-	}
+	require.NoError(t, err, "execution failed")
+	assert.Equal(t, 0, exitCode, "expected exit code 0")
+	assert.NotEmpty(t, output, "expected non-empty output")
 
 	// Verify counts
-	if handler.GetExecuteCount() != 1 {
-		t.Errorf("expected execute count 1, got %d", handler.GetExecuteCount())
-	}
-	if handler.GetValidateCount() != 1 {
-		t.Errorf("expected validate count 1, got %d", handler.GetValidateCount())
-	}
+	assert.Equal(t, 1, handler.GetExecuteCount(), "expected execute count 1")
+	assert.Equal(t, 1, handler.GetValidateCount(), "expected validate count 1")
 }
 
 // TestIntegration_ContextCancellation tests that context cancellation is propagated
@@ -182,12 +157,8 @@ func TestIntegration_ContextCancellation(t *testing.T) {
 	// Execute - should timeout
 	exitCode, _, err := h.Execute(ctx, "slow_cmd", args)
 
-	if err == nil {
-		t.Error("expected context cancellation error")
-	}
-	if exitCode != 1 {
-		t.Errorf("expected exit code 1 on cancellation, got %d", exitCode)
-	}
+	assert.Error(t, err, "expected context cancellation error")
+	assert.Equal(t, 1, exitCode, "expected exit code 1 on cancellation")
 }
 
 // TestIntegration_ConcurrentExecution tests concurrent handler execution
@@ -216,9 +187,7 @@ func TestIntegration_ConcurrentExecution(t *testing.T) {
 
 	wg.Wait()
 
-	if handler.GetExecuteCount() != concurrency {
-		t.Errorf("expected %d executions, got %d", concurrency, handler.GetExecuteCount())
-	}
+	assert.Equal(t, concurrency, handler.GetExecuteCount(), "expected %d executions", concurrency)
 }
 
 // TestIntegration_PoolWithRegistry tests pool integration with registry
@@ -263,9 +232,7 @@ func TestIntegration_PoolWithRegistry(t *testing.T) {
 	wg.Wait()
 
 	// Allow for some tasks to fail due to pool dynamics
-	if handler.GetExecuteCount() < taskCount/2 {
-		t.Errorf("expected at least %d executions, got %d", taskCount/2, handler.GetExecuteCount())
-	}
+	assert.GreaterOrEqual(t, handler.GetExecuteCount(), taskCount/2, "expected at least %d executions", taskCount/2)
 }
 
 // TestIntegration_UnregisterHandler tests handler unregistration
@@ -279,19 +246,14 @@ func TestIntegration_UnregisterHandler(t *testing.T) {
 	_ = registry.Register(handler)
 
 	// Verify registered
-	if !registry.IsCommandRegistered("remove_cmd") {
-		t.Error("command should be registered")
-	}
+	assert.True(t, registry.IsCommandRegistered("remove_cmd"), "command should be registered")
 
 	// Unregister
-	if err := registry.Unregister("removable"); err != nil {
-		t.Fatalf("failed to unregister: %v", err)
-	}
+	err := registry.Unregister("removable")
+	require.NoError(t, err, "failed to unregister")
 
 	// Verify unregistered
-	if registry.IsCommandRegistered("remove_cmd") {
-		t.Error("command should not be registered after unregister")
-	}
+	assert.False(t, registry.IsCommandRegistered("remove_cmd"), "command should not be registered after unregister")
 }
 
 func TestE2E_ShellChain_GivenParentCtxCancelledMidSegment_ThenExitCodeOneAndLaterSegmentSkipped(t *testing.T) {

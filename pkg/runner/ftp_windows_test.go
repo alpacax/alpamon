@@ -10,10 +10,11 @@
 package runner
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/logger"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newTestFtpClient(home string) *FtpClient {
@@ -132,17 +133,11 @@ func TestParsePath_Windows(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := fc.parsePath(tc.path)
 			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("parsePath(%q) expected error, got %q", tc.path, got)
-				}
+				require.Error(t, err, "parsePath(%q) expected error, got %q", tc.path, got)
 				return
 			}
-			if err != nil {
-				t.Fatalf("parsePath(%q) unexpected error: %v", tc.path, err)
-			}
-			if got != tc.want {
-				t.Fatalf("parsePath(%q) = %q, want %q", tc.path, got, tc.want)
-			}
+			require.NoError(t, err, "parsePath(%q) unexpected error", tc.path)
+			require.Equal(t, tc.want, got, "parsePath(%q)", tc.path)
 		})
 	}
 }
@@ -151,12 +146,8 @@ func TestParsePath_Windows_NullByteErrorMessage(t *testing.T) {
 	fc := newTestFtpClient(`C:\Users\test`)
 
 	_, err := fc.parsePath("/C:/foo\x00.txt")
-	if err == nil {
-		t.Fatal("expected error for null-byte path")
-	}
-	if !strings.Contains(err.Error(), "null byte") {
-		t.Errorf("error %q does not mention null byte", err.Error())
-	}
+	require.Error(t, err, "expected error for null-byte path")
+	assert.ErrorContains(t, err, "null byte")
 }
 
 // TestNewFtpClient_Windows_EmptyHomeReturnsNil verifies that the
@@ -174,9 +165,7 @@ func TestNewFtpClient_Windows_EmptyHomeReturnsNil(t *testing.T) {
 	}
 
 	client := NewFtpClient(cfg)
-	if client != nil {
-		t.Fatalf("expected nil client for empty HomeDirectory, got %+v", client)
-	}
+	require.Nil(t, client, "expected nil client for empty HomeDirectory")
 }
 
 // TestNewFtpClient_Windows_NonEmptyHomeReturnsClient sanity-checks the
@@ -190,10 +179,6 @@ func TestNewFtpClient_Windows_NonEmptyHomeReturnsClient(t *testing.T) {
 	}
 
 	client := NewFtpClient(cfg)
-	if client == nil {
-		t.Fatal("expected non-nil client for valid HomeDirectory")
-	}
-	if client.homeDirectory != `C:\Users\test` {
-		t.Errorf("homeDirectory = %q, want %q", client.homeDirectory, `C:\Users\test`)
-	}
+	require.NotNil(t, client, "expected non-nil client for valid HomeDirectory")
+	assert.Equal(t, `C:\Users\test`, client.homeDirectory)
 }

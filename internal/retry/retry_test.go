@@ -233,9 +233,7 @@ func TestRetry_ImmediateSuccess(t *testing.T) {
 		return nil
 	})
 
-	if err != nil {
-		t.Fatalf("expected nil, got %v", err)
-	}
+	require.NoError(t, err)
 }
 
 func TestPermanentError_Unwrap(t *testing.T) {
@@ -243,10 +241,6 @@ func TestPermanentError_Unwrap(t *testing.T) {
 	pe := Permanent(inner)
 
 	var permanent *PermanentError
-	if !errors.As(pe, &permanent) {
-		t.Fatal("expected errors.As to match PermanentError")
-	}
-	if !errors.Is(pe, inner) {
-		t.Fatal("expected errors.Is to find inner error")
-	}
+	require.ErrorAs(t, pe, &permanent, "expected errors.As to match PermanentError")
+	require.ErrorIs(t, pe, inner, "expected errors.Is to find inner error")
 }

@@ -2,7 +2,6 @@ package info
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -30,9 +29,7 @@ func (m *MockSystemInfoManager) SyncSystemInfo(keys []string) {
 
 func TestInfoHandler_Name(t *testing.T) {
 	handler := NewInfoHandler(nil)
-	if handler.Name() != common.Info.String() {
-		t.Errorf("expected name %q, got %q", common.Info.String(), handler.Name())
-	}
+	assert.Equal(t, common.Info.String(), handler.Name())
 }
 
 func TestInfoHandler_Commands(t *testing.T) {
@@ -46,16 +43,7 @@ func TestInfoHandler_Commands(t *testing.T) {
 		common.Sync.String(),
 	}
 
-	if len(commands) != len(expected) {
-		t.Errorf("expected %d commands, got %d", len(expected), len(commands))
-		return
-	}
-
-	for i, cmd := range commands {
-		if cmd != expected[i] {
-			t.Errorf("command %d: expected %q, got %q", i, expected[i], cmd)
-		}
-	}
+	assert.Equal(t, expected, commands)
 }
 
 func TestInfoHandler_Ping(t *testing.T) {
@@ -88,12 +76,8 @@ func TestInfoHandler_Help(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Help.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
 
 	// Verify help message contains expected sections
 	expectedSections := []string{
@@ -110,9 +94,7 @@ func TestInfoHandler_Help(t *testing.T) {
 	}
 
 	for _, section := range expectedSections {
-		if !strings.Contains(output, section) {
-			t.Errorf("help message missing section: %q", section)
-		}
+		assert.Contains(t, output, section, "help message missing section")
 	}
 
 	// Verify key commands are documented
@@ -126,9 +108,7 @@ func TestInfoHandler_Help(t *testing.T) {
 	}
 
 	for _, cmd := range expectedCommands {
-		if !strings.Contains(output, cmd) {
-			t.Errorf("help message missing command: %q", cmd)
-		}
+		assert.Contains(t, output, cmd, "help message missing command")
 	}
 }
 
@@ -140,18 +120,10 @@ func TestInfoHandler_Commit(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Commit.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "Committed") {
-		t.Errorf("expected output to contain 'Committed', got %q", output)
-	}
-	if !mockManager.CommitCalled {
-		t.Error("expected CommitSystemInfo to be called")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "Committed")
+	assert.True(t, mockManager.CommitCalled, "expected CommitSystemInfo to be called")
 }
 
 func TestInfoHandler_Commit_NilManager(t *testing.T) {
@@ -162,15 +134,9 @@ func TestInfoHandler_Commit_NilManager(t *testing.T) {
 	// Should not panic with nil manager
 	exitCode, output, err := handler.Execute(ctx, common.Commit.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "Committed") {
-		t.Errorf("expected output to contain 'Committed', got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "Committed")
 }
 
 func TestInfoHandler_Sync(t *testing.T) {
@@ -181,18 +147,10 @@ func TestInfoHandler_Sync(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Sync.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "Synchronized") {
-		t.Errorf("expected output to contain 'Synchronized', got %q", output)
-	}
-	if !mockManager.SyncCalled {
-		t.Error("expected SyncSystemInfo to be called")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "Synchronized")
+	assert.True(t, mockManager.SyncCalled, "expected SyncSystemInfo to be called")
 }
 
 func TestInfoHandler_Sync_WithKeys(t *testing.T) {
@@ -206,26 +164,11 @@ func TestInfoHandler_Sync_WithKeys(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, common.Sync.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "Synchronized") {
-		t.Errorf("expected output to contain 'Synchronized', got %q", output)
-	}
-	if !mockManager.SyncCalled {
-		t.Error("expected SyncSystemInfo to be called")
-	}
-	if len(mockManager.SyncKeys) != len(keys) {
-		t.Errorf("expected %d keys, got %d", len(keys), len(mockManager.SyncKeys))
-	}
-	for i, key := range keys {
-		if mockManager.SyncKeys[i] != key {
-			t.Errorf("key %d: expected %q, got %q", i, key, mockManager.SyncKeys[i])
-		}
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "Synchronized")
+	assert.True(t, mockManager.SyncCalled, "expected SyncSystemInfo to be called")
+	assert.Equal(t, keys, mockManager.SyncKeys)
 }
 
 func TestInfoHandler_Sync_NilManager(t *testing.T) {
@@ -238,15 +181,9 @@ func TestInfoHandler_Sync_NilManager(t *testing.T) {
 	// Should not panic with nil manager
 	exitCode, output, err := handler.Execute(ctx, common.Sync.String(), args)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(output, "Synchronized") {
-		t.Errorf("expected output to contain 'Synchronized', got %q", output)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Contains(t, output, "Synchronized")
 }
 
 func TestInfoHandler_UnknownCommand(t *testing.T) {
@@ -256,15 +193,9 @@ func TestInfoHandler_UnknownCommand(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, "unknown_command", args)
 
-	if err == nil {
-		t.Error("expected error for unknown command")
-	}
-	if exitCode != 1 {
-		t.Errorf("expected exit code 1, got %d", exitCode)
-	}
-	if !strings.Contains(err.Error(), "unknown info command") {
-		t.Errorf("error should mention 'unknown info command', got: %v", err)
-	}
+	assert.Error(t, err, "expected error for unknown command")
+	assert.Equal(t, 1, exitCode)
+	assert.ErrorContains(t, err, "unknown info command")
 }
 
 func TestInfoHandler_Validate(t *testing.T) {
@@ -285,9 +216,7 @@ func TestInfoHandler_Validate(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := handler.Validate(tc.cmd, tc.args)
-			if err != nil {
-				t.Errorf("unexpected validation error: %v", err)
-			}
+			assert.NoError(t, err, "unexpected validation error")
 		})
 	}
 }

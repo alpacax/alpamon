@@ -17,6 +17,8 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestFileHandler_parsePaths_Windows_OutsideHome verifies the fix for #311:
@@ -28,27 +30,15 @@ func TestFileHandler_parsePaths_Windows_OutsideHome(t *testing.T) {
 	homeDir := t.TempDir()
 	outsideDir := t.TempDir() // separate TempDir, not under homeDir
 	outsideFile := filepath.Join(outsideDir, "external.txt")
-	if err := os.WriteFile(outsideFile, []byte("data"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(outsideFile, []byte("data"), 0644))
 
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 	paths, bulk, recursive, err := handler.parsePaths(homeDir, []string{outsideFile})
-	if err != nil {
-		t.Fatalf("parsePaths returned error after guard removal: %v", err)
-	}
-	if bulk {
-		t.Errorf("bulk = true, want false for single path")
-	}
-	if recursive {
-		t.Errorf("recursive = true, want false for file")
-	}
-	if len(paths) != 1 {
-		t.Fatalf("got %d paths, want 1", len(paths))
-	}
-	if want := filepath.Clean(outsideFile); paths[0] != want {
-		t.Errorf("got path %q, want %q", paths[0], want)
-	}
+	require.NoError(t, err, "parsePaths returned error after guard removal")
+	assert.False(t, bulk, "bulk = true, want false for single path")
+	assert.False(t, recursive, "recursive = true, want false for file")
+	require.Len(t, paths, 1)
+	assert.Equal(t, filepath.Clean(outsideFile), paths[0], "path")
 }
 
 // TestFileHandler_parsePaths_Windows_InsideHome is the regression guard:
@@ -56,21 +46,13 @@ func TestFileHandler_parsePaths_Windows_OutsideHome(t *testing.T) {
 func TestFileHandler_parsePaths_Windows_InsideHome(t *testing.T) {
 	homeDir := t.TempDir()
 	insideFile := filepath.Join(homeDir, "inside.txt")
-	if err := os.WriteFile(insideFile, []byte("data"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(insideFile, []byte("data"), 0644))
 
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 	paths, bulk, _, err := handler.parsePaths(homeDir, []string{insideFile})
-	if err != nil {
-		t.Fatalf("parsePaths returned error: %v", err)
-	}
-	if bulk {
-		t.Errorf("bulk = true, want false")
-	}
-	if want := filepath.Clean(insideFile); paths[0] != want {
-		t.Errorf("got path %q, want %q", paths[0], want)
-	}
+	require.NoError(t, err, "parsePaths returned error")
+	assert.False(t, bulk, "bulk = true, want false")
+	assert.Equal(t, filepath.Clean(insideFile), paths[0], "path")
 }
 
 // TestFileHandler_parsePaths_Windows_Tilde verifies that the `~` shortcut
@@ -78,18 +60,12 @@ func TestFileHandler_parsePaths_Windows_InsideHome(t *testing.T) {
 func TestFileHandler_parsePaths_Windows_Tilde(t *testing.T) {
 	homeDir := t.TempDir()
 	target := filepath.Join(homeDir, "tilde.txt")
-	if err := os.WriteFile(target, []byte("data"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(target, []byte("data"), 0644))
 
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 	paths, _, _, err := handler.parsePaths(homeDir, []string{"~/tilde.txt"})
-	if err != nil {
-		t.Fatalf("parsePaths returned error: %v", err)
-	}
-	if want := filepath.Clean(target); paths[0] != want {
-		t.Errorf("got path %q, want %q", paths[0], want)
-	}
+	require.NoError(t, err, "parsePaths returned error")
+	assert.Equal(t, filepath.Clean(target), paths[0], "path")
 }
 
 // TestFileHandler_parsePaths_Windows_SystemRoot is the closest reproduction
@@ -109,12 +85,8 @@ func TestFileHandler_parsePaths_Windows_SystemRoot(t *testing.T) {
 	homeDir := t.TempDir()
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 	paths, _, _, err := handler.parsePaths(homeDir, []string{hostsPath})
-	if err != nil {
-		t.Fatalf("parsePaths failed for system path %q: %v", hostsPath, err)
-	}
-	if want := filepath.Clean(hostsPath); paths[0] != want {
-		t.Errorf("got path %q, want %q", paths[0], want)
-	}
+	require.NoError(t, err, "parsePaths failed for system path %q", hostsPath)
+	assert.Equal(t, filepath.Clean(hostsPath), paths[0], "path")
 }
 
 // TestFileHandler_parsePaths_Windows_RejectsUnsafeShapes is the security
@@ -145,9 +117,7 @@ func TestFileHandler_parsePaths_Windows_RejectsUnsafeShapes(t *testing.T) {
 	for _, tc := range rejected {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, _, err := handler.parsePaths(homeDir, []string{tc.path})
-			if err == nil {
-				t.Fatalf("parsePaths(%q) expected error, got nil", tc.path)
-			}
+			require.Error(t, err, "parsePaths(%q) expected error, got nil", tc.path)
 		})
 	}
 }
@@ -173,24 +143,16 @@ func TestFileHandler_fileDownload_Windows_OutsideHome(t *testing.T) {
 
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 	code, msg := handler.fileDownload(context.Background(), args, nil)
-	if code != 0 {
-		t.Fatalf("fileDownload returned code=%d msg=%q, want code=0", code, msg)
-	}
+	require.Equal(t, 0, code, "fileDownload returned msg=%q, want code=0", msg)
 
 	// The function mutates args.Path with the native, cleaned absolute form.
 	// Asserting on this guards against a SanitizePath regression that drops
 	// the drive letter and silently writes to a CWD-relative location.
-	if want := filepath.Clean(destPath); args.Path != want {
-		t.Errorf("args.Path = %q, want %q (native form after SanitizePath)", args.Path, want)
-	}
+	assert.Equal(t, filepath.Clean(destPath), args.Path, "args.Path (native form after SanitizePath)")
 
 	written, err := os.ReadFile(destPath)
-	if err != nil {
-		t.Fatalf("destination not written: %v", err)
-	}
-	if string(written) != "hello" {
-		t.Errorf("contents = %q, want %q", string(written), "hello")
-	}
+	require.NoError(t, err, "destination not written")
+	assert.Equal(t, "hello", string(written), "contents")
 }
 
 // TestFileHandler_fileDownload_Windows_RejectsUnsafeShapes guards the
@@ -220,9 +182,7 @@ func TestFileHandler_fileDownload_Windows_RejectsUnsafeShapes(t *testing.T) {
 				AllowOverwrite: true,
 			}
 			code, msg := handler.fileDownload(context.Background(), args, nil)
-			if code == 0 {
-				t.Fatalf("fileDownload(%q) expected non-zero code, got code=0 msg=%q", tc.path, msg)
-			}
+			require.NotEqual(t, 0, code, "fileDownload(%q) expected non-zero code, msg=%q", tc.path, msg)
 		})
 	}
 }

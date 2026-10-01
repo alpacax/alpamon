@@ -129,9 +129,7 @@ func newTestPtyClient(t *testing.T, s *wshServer) *PtyClient {
 	t.Helper()
 	dialer := websocket.Dialer{}
 	conn, _, err := dialer.Dial(s.wsURL(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	return &PtyClient{
 		conn:         conn,
@@ -216,9 +214,8 @@ func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 	s := newWshServer(t)
 
 	pc := newTestPtyClient(t, s)
-	// Safety net: an early t.Fatalf (waitRecovered / recoveryPosts) would skip the
-	// explicit close below, leaking a reader parked on the live conn and hanging
-	// later tests. close() is idempotent, so the intended mid-test close still stands.
+	// Safety net: an early failure (waitRecovered / recoveryPosts) would skip the explicit
+	// close below and leak a reader parked on the live conn. close() is idempotent.
 	defer pc.close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -240,9 +237,7 @@ func TestPtyRecovery_StormNoGoroutineLeak(t *testing.T) {
 		waitRecovered(t, done, cycle+1)
 	}
 
-	if got := s.recoveryPosts.Load(); got < cycles {
-		t.Fatalf("expected at least %d recovery posts, got %d", cycles, got)
-	}
+	require.GreaterOrEqual(t, s.recoveryPosts.Load(), int32(cycles), "expected at least %d recovery posts", cycles)
 
 	// close() unblocks the reader still parked on the live conn.
 	cancel()

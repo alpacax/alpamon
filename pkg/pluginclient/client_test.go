@@ -128,7 +128,7 @@ func TestEnqueueConfigUpdate_LastWriteWins(t *testing.T) {
 	case got := <-c.configUpdateCh:
 		assert.Equal(t, "id3", got, "expected last-write-wins to retain id3")
 	default:
-		t.Fatal("configUpdateCh empty; expected last enqueued ID to remain")
+		require.Fail(t, "configUpdateCh empty; expected last enqueued ID to remain")
 	}
 }
 

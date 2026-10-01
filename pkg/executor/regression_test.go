@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestRegression_AllHandlerTypes verifies all expected handler types are available
@@ -21,9 +23,7 @@ func TestRegression_AllHandlerTypes(t *testing.T) {
 	}
 
 	for _, handlerType := range expectedTypes {
-		if handlerType.String() == "" {
-			t.Errorf("handler type %v has empty string representation", handlerType)
-		}
+		assert.NotEmpty(t, handlerType.String(), "handler type %v has empty string representation", handlerType)
 	}
 }
 
@@ -73,9 +73,7 @@ func TestRegression_AllCommandTypes(t *testing.T) {
 	}
 
 	for _, cmd := range expectedCommands {
-		if cmd.String() == "" {
-			t.Errorf("command type %v has empty string representation", cmd)
-		}
+		assert.NotEmpty(t, cmd.String(), "command type %v has empty string representation", cmd)
 	}
 }
 
@@ -84,9 +82,7 @@ func TestRegression_RegistryOperations(t *testing.T) {
 	registry := NewRegistry()
 
 	// Test empty registry
-	if len(registry.List()) != 0 {
-		t.Error("new registry should be empty")
-	}
+	assert.Empty(t, registry.List(), "new registry should be empty")
 
 	// Test registration
 	handler := &MockHandler{
@@ -94,44 +90,30 @@ func TestRegression_RegistryOperations(t *testing.T) {
 		commands: []string{"cmd1", "cmd2"},
 	}
 
-	if err := registry.Register(handler); err != nil {
-		t.Fatalf("registration failed: %v", err)
-	}
+	err := registry.Register(handler)
+	require.NoError(t, err, "registration failed")
 
 	// Test listing
-	if len(registry.List()) != 1 {
-		t.Error("should have 1 handler after registration")
-	}
+	assert.Len(t, registry.List(), 1, "should have 1 handler after registration")
 
 	// Test command check
-	if !registry.IsCommandRegistered("cmd1") {
-		t.Error("cmd1 should be registered")
-	}
+	assert.True(t, registry.IsCommandRegistered("cmd1"), "cmd1 should be registered")
 
 	// Test get
 	h, err := registry.Get("cmd1")
-	if err != nil {
-		t.Fatalf("get failed: %v", err)
-	}
-	if h.Name() != "test" {
-		t.Errorf("expected handler name 'test', got '%s'", h.Name())
-	}
+	require.NoError(t, err, "get failed")
+	assert.Equal(t, "test", h.Name(), "expected handler name 'test'")
 
 	// Test unregister
-	if err := registry.Unregister("test"); err != nil {
-		t.Fatalf("unregister failed: %v", err)
-	}
+	err = registry.Unregister("test")
+	require.NoError(t, err, "unregister failed")
 
-	if registry.IsCommandRegistered("cmd1") {
-		t.Error("cmd1 should not be registered after unregister")
-	}
+	assert.False(t, registry.IsCommandRegistered("cmd1"), "cmd1 should not be registered after unregister")
 
 	// Test clear
 	_ = registry.Register(handler)
 	registry.Clear()
-	if len(registry.List()) != 0 {
-		t.Error("registry should be empty after clear")
-	}
+	assert.Empty(t, registry.List(), "registry should be empty after clear")
 }
 
 // TestRegression_CommandArgsFields verifies all CommandArgs fields exist
@@ -169,54 +151,22 @@ func TestRegression_CommandArgsFields(t *testing.T) {
 	}
 
 	// Verify all fields are accessible
-	if args.Username == "" {
-		t.Error("Username field not accessible")
-	}
-	if args.Groupname == "" {
-		t.Error("Groupname field not accessible")
-	}
-	if args.Shell == "" {
-		t.Error("Shell field not accessible")
-	}
-	if args.UID == 0 {
-		t.Error("UID field not accessible")
-	}
-	if args.GID == 0 {
-		t.Error("GID field not accessible")
-	}
-	if args.Command == "" {
-		t.Error("Command field not accessible")
-	}
-	if args.Env == nil {
-		t.Error("Env field not accessible")
-	}
-	if args.Timeout == 0 {
-		t.Error("Timeout field not accessible")
-	}
-	if args.Rules == nil {
-		t.Error("Rules field not accessible")
-	}
-	if args.Path == "" {
-		t.Error("Path field not accessible")
-	}
-	if args.URL == "" {
-		t.Error("URL field not accessible")
-	}
-	if args.SessionID == "" {
-		t.Error("SessionID field not accessible")
-	}
-	if args.Rows == 0 {
-		t.Error("Rows field not accessible")
-	}
-	if args.Cols == 0 {
-		t.Error("Cols field not accessible")
-	}
-	if args.Target == "" {
-		t.Error("Target field not accessible")
-	}
-	if len(args.Keys) == 0 {
-		t.Error("Keys field not accessible")
-	}
+	assert.NotEmpty(t, args.Username, "Username field not accessible")
+	assert.NotEmpty(t, args.Groupname, "Groupname field not accessible")
+	assert.NotEmpty(t, args.Shell, "Shell field not accessible")
+	assert.NotZero(t, args.UID, "UID field not accessible")
+	assert.NotZero(t, args.GID, "GID field not accessible")
+	assert.NotEmpty(t, args.Command, "Command field not accessible")
+	assert.NotNil(t, args.Env, "Env field not accessible")
+	assert.NotZero(t, args.Timeout, "Timeout field not accessible")
+	assert.NotNil(t, args.Rules, "Rules field not accessible")
+	assert.NotEmpty(t, args.Path, "Path field not accessible")
+	assert.NotEmpty(t, args.URL, "URL field not accessible")
+	assert.NotEmpty(t, args.SessionID, "SessionID field not accessible")
+	assert.NotZero(t, args.Rows, "Rows field not accessible")
+	assert.NotZero(t, args.Cols, "Cols field not accessible")
+	assert.NotEmpty(t, args.Target, "Target field not accessible")
+	assert.NotEmpty(t, args.Keys, "Keys field not accessible")
 }
 
 // TestRegression_HandlerInterface verifies Handler interface contract
@@ -229,14 +179,10 @@ func TestRegression_HandlerInterface(t *testing.T) {
 	}
 
 	// Name() should return non-empty string
-	if handler.Name() == "" {
-		t.Error("Name() should not return empty string")
-	}
+	assert.NotEmpty(t, handler.Name(), "Name() should not return empty string")
 
 	// Commands() should return non-empty slice
-	if len(handler.Commands()) == 0 {
-		t.Error("Commands() should not return empty slice")
-	}
+	assert.NotEmpty(t, handler.Commands(), "Commands() should not return empty slice")
 }
 
 // TestRegression_CommandExecutorInterface verifies CommandExecutor interface exists
@@ -249,9 +195,7 @@ func TestRegression_CommandExecutorInterface(t *testing.T) {
 	// Test all methods exist
 	mockExec.SetResult("test", 0, "output", nil)
 	cmds := mockExec.GetExecutedCommands()
-	if cmds == nil {
-		t.Error("GetExecutedCommands should not return nil")
-	}
+	assert.NotNil(t, cmds, "GetExecutedCommands should not return nil")
 }
 
 // TestRegression_FirewallRule verifies FirewallRule structure
@@ -272,40 +216,16 @@ func TestRegression_FirewallRule(t *testing.T) {
 		RuleID:      "rule-1",
 	}
 
-	if rule.ChainName == "" {
-		t.Error("ChainName field not accessible")
-	}
-	if rule.Method == "" {
-		t.Error("Method field not accessible")
-	}
-	if rule.Chain == "" {
-		t.Error("Chain field not accessible")
-	}
-	if rule.Protocol == "" {
-		t.Error("Protocol field not accessible")
-	}
-	if rule.PortStart == 0 {
-		t.Error("PortStart field not accessible")
-	}
-	if rule.PortEnd == 0 {
-		t.Error("PortEnd field not accessible")
-	}
-	if rule.Source == "" {
-		t.Error("Source field not accessible")
-	}
-	if rule.Destination == "" {
-		t.Error("Destination field not accessible")
-	}
-	if rule.Target == "" {
-		t.Error("Target field not accessible")
-	}
-	if rule.Description == "" {
-		t.Error("Description field not accessible")
-	}
-	if rule.RuleType == "" {
-		t.Error("RuleType field not accessible")
-	}
-	if rule.RuleID == "" {
-		t.Error("RuleID field not accessible")
-	}
+	assert.NotEmpty(t, rule.ChainName, "ChainName field not accessible")
+	assert.NotEmpty(t, rule.Method, "Method field not accessible")
+	assert.NotEmpty(t, rule.Chain, "Chain field not accessible")
+	assert.NotEmpty(t, rule.Protocol, "Protocol field not accessible")
+	assert.NotZero(t, rule.PortStart, "PortStart field not accessible")
+	assert.NotZero(t, rule.PortEnd, "PortEnd field not accessible")
+	assert.NotEmpty(t, rule.Source, "Source field not accessible")
+	assert.NotEmpty(t, rule.Destination, "Destination field not accessible")
+	assert.NotEmpty(t, rule.Target, "Target field not accessible")
+	assert.NotEmpty(t, rule.Description, "Description field not accessible")
+	assert.NotEmpty(t, rule.RuleType, "RuleType field not accessible")
+	assert.NotEmpty(t, rule.RuleID, "RuleID field not accessible")
 }

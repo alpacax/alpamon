@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func resetFtpWorkers(t *testing.T) {
@@ -26,21 +28,15 @@ func TestRegisterUnregisterFtpWorker(t *testing.T) {
 	cmdB := &exec.Cmd{}
 	_ = RegisterFtpWorker("s1", cmdA)
 
-	if got := ftpWorkerCount(); got != 1 {
-		t.Fatalf("expected 1 worker after register, got %d", got)
-	}
+	require.Equal(t, 1, ftpWorkerCount(), "expected 1 worker after register")
 
 	// Unregister with a different command must not drop the live entry.
 	UnregisterFtpWorker("s1", cmdB)
-	if got := ftpWorkerCount(); got != 1 {
-		t.Fatalf("expected worker to remain after mismatched unregister, got %d", got)
-	}
+	require.Equal(t, 1, ftpWorkerCount(), "expected worker to remain after mismatched unregister")
 
 	// Unregister with the matching command removes it.
 	UnregisterFtpWorker("s1", cmdA)
-	if got := ftpWorkerCount(); got != 0 {
-		t.Fatalf("expected 0 workers after matching unregister, got %d", got)
-	}
+	require.Equal(t, 0, ftpWorkerCount(), "expected 0 workers after matching unregister")
 }
 
 func TestCloseAllActiveFtpWorkersSafeWhenEmptyOrNil(t *testing.T) {
@@ -55,9 +51,7 @@ func TestCloseAllActiveFtpWorkersSafeWhenEmptyOrNil(t *testing.T) {
 	activeFtpWorkersMu.Unlock()
 
 	CloseAllActiveFtpWorkers()
-	if got := ftpWorkerCount(); got != 0 {
-		t.Fatalf("expected registry cleared, got %d", got)
-	}
+	require.Equal(t, 0, ftpWorkerCount(), "expected registry cleared")
 }
 
 func TestCloseAllActiveFtpWorkersKillsWorker(t *testing.T) {
@@ -67,9 +61,7 @@ func TestCloseAllActiveFtpWorkersKillsWorker(t *testing.T) {
 	resetFtpWorkers(t)
 
 	cmd := exec.Command("sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("failed to start worker process: %v", err)
-	}
+	require.NoError(t, cmd.Start(), "failed to start worker process")
 
 	// Mirror handleOpenFTP: the spawner owns the single Wait call and closes
 	// done when the worker exits on its own.
@@ -91,9 +83,7 @@ func TestCloseAllActiveFtpWorkersKillsWorker(t *testing.T) {
 		t.Fatal("worker did not exit after CloseAllActiveFtpWorkers")
 	}
 
-	if got := ftpWorkerCount(); got != 0 {
-		t.Fatalf("expected registry cleared after CloseAll, got %d", got)
-	}
+	require.Equal(t, 0, ftpWorkerCount(), "expected registry cleared after CloseAll")
 }
 
 func TestRegisterFtpWorkerStopsStaleOnSameSession(t *testing.T) {
@@ -104,9 +94,7 @@ func TestRegisterFtpWorkerStopsStaleOnSameSession(t *testing.T) {
 
 	// First worker registered for the session.
 	cmdA := exec.Command("sleep", "30")
-	if err := cmdA.Start(); err != nil {
-		t.Fatalf("failed to start worker A: %v", err)
-	}
+	require.NoError(t, cmdA.Start(), "failed to start worker A")
 	doneA := RegisterFtpWorker("s1", cmdA)
 	stoppedA := make(chan struct{})
 	go func() {
@@ -118,9 +106,7 @@ func TestRegisterFtpWorkerStopsStaleOnSameSession(t *testing.T) {
 
 	// Re-registering the same session ID must stop the stale worker, not leak it.
 	cmdB := exec.Command("sleep", "30")
-	if err := cmdB.Start(); err != nil {
-		t.Fatalf("failed to start worker B: %v", err)
-	}
+	require.NoError(t, cmdB.Start(), "failed to start worker B")
 	doneB := RegisterFtpWorker("s1", cmdB)
 	stoppedB := make(chan struct{})
 	go func() {
@@ -138,9 +124,7 @@ func TestRegisterFtpWorkerStopsStaleOnSameSession(t *testing.T) {
 		t.Fatal("stale worker A was not stopped after same-session re-register")
 	}
 
-	if got := ftpWorkerCount(); got != 1 {
-		t.Fatalf("expected exactly 1 tracked worker after replace, got %d", got)
-	}
+	require.Equal(t, 1, ftpWorkerCount(), "expected exactly 1 tracked worker after replace")
 
 	CloseAllActiveFtpWorkers()
 	select {

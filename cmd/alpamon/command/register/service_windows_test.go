@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -51,9 +53,7 @@ func TestQuoteServicePath(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := quoteServicePath(tc.in)
-			if got != tc.want {
-				t.Fatalf("quoteServicePath(%q) = %q, want %q", tc.in, got, tc.want)
-			}
+			require.Equal(t, tc.want, got, "quoteServicePath(%q)", tc.in)
 		})
 	}
 }
@@ -72,7 +72,7 @@ func TestQuoteServicePath(t *testing.T) {
 // privileges (i.e. not running as Administrator). GitHub-hosted
 // windows-latest runners are admin so CI does exercise this path.
 // Connect failures other than ACCESS_DENIED (e.g. SCM/RPC issues) are
-// surfaced via t.Fatalf rather than silently skipped, so CI does not
+// surfaced via require.NoError rather than silently skipped, so CI does not
 // mask real regressions behind the elevation skip.
 func TestStartService_BinaryPathNotDoubleEncoded(t *testing.T) {
 	m, err := mgr.Connect()
@@ -81,7 +81,7 @@ func TestStartService_BinaryPathNotDoubleEncoded(t *testing.T) {
 		if errors.As(err, &errno) && errno == windows.ERROR_ACCESS_DENIED {
 			t.Skipf("requires Administrator + SCM access (mgr.Connect: %v)", err)
 		}
-		t.Fatalf("mgr.Connect failed: %v", err)
+		require.NoError(t, err, "mgr.Connect failed")
 	}
 	t.Cleanup(func() { _ = m.Disconnect() })
 
@@ -119,16 +119,15 @@ func TestStartService_BinaryPathNotDoubleEncoded(t *testing.T) {
 		if errors.As(err, &errno) && errno == windows.ERROR_ACCESS_DENIED {
 			t.Skipf("requires Administrator + SCM create access (CreateService: %v)", err)
 		}
-		t.Fatalf("CreateService: %v", err)
+		require.NoError(t, err, "CreateService")
 	}
 	t.Cleanup(func() {
 		_ = s.Delete()
 		_ = s.Close()
 	})
 
-	if err := normalizeServiceBinaryPath(s, serviceBinPath); err != nil {
-		t.Fatalf("normalizeServiceBinaryPath: %v", err)
-	}
+	err = normalizeServiceBinaryPath(s, serviceBinPath)
+	require.NoError(t, err, "normalizeServiceBinaryPath")
 
 	// Read the stored ImagePath directly from the registry — sc.exe
 	// qc and s.Config() both go back through the SCM API, which can
@@ -136,24 +135,13 @@ func TestStartService_BinaryPathNotDoubleEncoded(t *testing.T) {
 	// for what SCM will hand to CreateProcess at start time.
 	keyPath := `SYSTEM\CurrentControlSet\Services\` + svcName
 	k, err := registry.OpenKey(registry.LOCAL_MACHINE, keyPath, registry.QUERY_VALUE)
-	if err != nil {
-		t.Fatalf("open registry key %q: %v", keyPath, err)
-	}
+	require.NoError(t, err, "open registry key %q", keyPath)
 	defer func() { _ = k.Close() }()
 
 	imagePath, _, err := k.GetStringValue("ImagePath")
-	if err != nil {
-		t.Fatalf("read ImagePath value: %v", err)
-	}
+	require.NoError(t, err, "read ImagePath value")
 
-	if imagePath != serviceBinPath {
-		t.Errorf("ImagePath = %q (len %d), want %q (len %d)",
-			imagePath, len(imagePath), serviceBinPath, len(serviceBinPath))
-	}
-	if !strings.HasPrefix(imagePath, `"`) {
-		t.Errorf("ImagePath %q does not start with a literal quote", imagePath)
-	}
-	if strings.Contains(imagePath, `\"`) {
-		t.Errorf("ImagePath %q contains backslash-escaped quote — double-encoding regressed", imagePath)
-	}
+	assert.Equal(t, serviceBinPath, imagePath, "ImagePath")
+	assert.True(t, strings.HasPrefix(imagePath, `"`), "ImagePath %q does not start with a literal quote", imagePath)
+	assert.NotContains(t, imagePath, `\"`, "ImagePath contains backslash-escaped quote: double-encoding regressed")
 }

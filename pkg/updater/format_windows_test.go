@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // buildPEFixture writes a minimal PE layout that passes validateBinaryFormat.
@@ -27,9 +29,7 @@ func buildPEFixture(t *testing.T, machine uint16) string {
 	binary.LittleEndian.PutUint32(buf[peOffset:], peSignature)
 	binary.LittleEndian.PutUint16(buf[peOffset+4:], machine)
 
-	if err := os.WriteFile(path, buf, 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	require.NoError(t, os.WriteFile(path, buf, 0o644), "write fixture")
 	return path
 }
 
@@ -53,9 +53,7 @@ func TestValidatePE_Valid(t *testing.T) {
 		t.Skip("PE validation is Windows-only; the helper lives under _windows.go build tag")
 	}
 	path := buildPEFixture(t, currentArchMachine(t))
-	if err := validateBinaryFormat(path); err != nil {
-		t.Fatalf("expected valid PE to pass, got %v", err)
-	}
+	require.NoError(t, validateBinaryFormat(path), "expected valid PE to pass")
 }
 
 func TestValidatePE_BadMZ(t *testing.T) {
@@ -65,12 +63,8 @@ func TestValidatePE_BadMZ(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.exe")
 	// Two zero bytes at position 0 — not MZ.
-	if err := os.WriteFile(path, []byte{0, 0, 0, 0, 0, 0}, 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := validateBinaryFormat(path); err == nil {
-		t.Fatal("expected error for non-MZ file")
-	}
+	require.NoError(t, os.WriteFile(path, []byte{0, 0, 0, 0, 0, 0}, 0o644), "write")
+	require.Error(t, validateBinaryFormat(path), "expected error for non-MZ file")
 }
 
 func TestValidatePE_WrongMachine(t *testing.T) {
@@ -83,9 +77,7 @@ func TestValidatePE_WrongMachine(t *testing.T) {
 		wrong = peMachineAMD64
 	}
 	path := buildPEFixture(t, wrong)
-	if err := validateBinaryFormat(path); err == nil {
-		t.Fatal("expected machine-mismatch error")
-	}
+	require.Error(t, validateBinaryFormat(path), "expected machine-mismatch error")
 }
 
 func TestValidatePE_BadOffset(t *testing.T) {
@@ -98,10 +90,6 @@ func TestValidatePE_BadOffset(t *testing.T) {
 	buf := make([]byte, peHeaderOffset+4)
 	binary.LittleEndian.PutUint16(buf[0:], peDOSMagic)
 	binary.LittleEndian.PutUint32(buf[peHeaderOffset:], uint32(peMaxHeaderSeek+1))
-	if err := os.WriteFile(path, buf, 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := validateBinaryFormat(path); err == nil {
-		t.Fatal("expected error for out-of-range PE header offset")
-	}
+	require.NoError(t, os.WriteFile(path, buf, 0o644), "write")
+	require.Error(t, validateBinaryFormat(path), "expected error for out-of-range PE header offset")
 }

@@ -10,11 +10,8 @@ import (
 )
 
 func TestFileExists(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "test_file_exists_*")
-	require.NoError(t, err)
-	tmpPath := tmpFile.Name()
-	_ = tmpFile.Close()
-	defer func() { _ = os.Remove(tmpPath) }()
+	tmpPath := filepath.Join(t.TempDir(), "test_file_exists")
+	require.NoError(t, os.WriteFile(tmpPath, nil, 0600))
 
 	tests := []struct {
 		name string
@@ -56,21 +53,13 @@ func TestFileExists(t *testing.T) {
 }
 
 func TestCopyFile(t *testing.T) {
-	srcFile, err := os.CreateTemp("", "test_copy_src_*")
-	require.NoError(t, err)
-	srcPath := srcFile.Name()
-	defer func() { _ = os.Remove(srcPath) }()
-
+	srcPath := filepath.Join(t.TempDir(), "test_copy_src")
 	content := []byte("hello world")
-	_, err = srcFile.Write(content)
-	require.NoError(t, err)
-	_ = srcFile.Close()
-
+	require.NoError(t, os.WriteFile(srcPath, content, 0600))
 	require.NoError(t, os.Chmod(srcPath, 0644))
 
 	t.Run("basic copy", func(t *testing.T) {
 		dstPath := srcPath + "_copy"
-		defer func() { _ = os.Remove(dstPath) }()
 
 		require.NoError(t, CopyFile(srcPath, dstPath, true))
 
@@ -95,9 +84,7 @@ func TestCopyFile(t *testing.T) {
 }
 
 func TestCopyDir(t *testing.T) {
-	srcDir, err := os.MkdirTemp("", "test_copydir_src_*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(srcDir) }()
+	srcDir := t.TempDir()
 
 	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "file1.txt"), []byte("one"), 0644))
 	subDir := filepath.Join(srcDir, "subdir")
@@ -105,10 +92,7 @@ func TestCopyDir(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(subDir, "file2.txt"), []byte("two"), 0644))
 
 	t.Run("basic directory copy", func(t *testing.T) {
-		dstDir, err := os.MkdirTemp("", "test_copydir_dst_*")
-		require.NoError(t, err)
-		_ = os.RemoveAll(dstDir)
-		defer func() { _ = os.RemoveAll(dstDir) }()
+		dstDir := filepath.Join(t.TempDir(), "dst")
 
 		require.NoError(t, CopyDir(srcDir, dstDir, false))
 
@@ -127,9 +111,7 @@ func TestCopyDir(t *testing.T) {
 	})
 
 	t.Run("overwrite existing directory", func(t *testing.T) {
-		dstDir, err := os.MkdirTemp("", "test_copydir_overwrite_*")
-		require.NoError(t, err)
-		defer func() { _ = os.RemoveAll(dstDir) }()
+		dstDir := t.TempDir()
 
 		// Create existing content that should be replaced
 		require.NoError(t, os.WriteFile(filepath.Join(dstDir, "old.txt"), []byte("old"), 0644))
@@ -152,18 +134,20 @@ func TestCopyDir(t *testing.T) {
 }
 
 func TestGetCopyPath(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_getcopypath_*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	srcPath := filepath.Join(tmpDir, "file.txt")
-	require.NoError(t, os.WriteFile(srcPath, []byte("test"), 0644))
+	newSrc := func(t *testing.T) (string, string) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "file.txt")
+		require.NoError(t, os.WriteFile(src, []byte("test"), 0644))
+		return dir, src
+	}
 
 	t.Run("generates numbered copy", func(t *testing.T) {
+		tmpDir, srcPath := newSrc(t)
 		assert.Equal(t, filepath.Join(tmpDir, "file (1).txt"), GetCopyPath(srcPath, srcPath))
 	})
 
 	t.Run("skips existing numbered copies", func(t *testing.T) {
+		tmpDir, srcPath := newSrc(t)
 		copy1 := filepath.Join(tmpDir, "file (1).txt")
 		require.NoError(t, os.WriteFile(copy1, []byte("copy"), 0644))
 

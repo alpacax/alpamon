@@ -5,36 +5,29 @@ package executor
 import (
 	"context"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows"
 )
 
 func TestCommandCleanup_CancelTerminatesViaJobAssignment(t *testing.T) {
 	cmd := exec.Command("ping", "-n", "60", "127.0.0.1")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
-	if err != nil {
-		t.Fatalf("configureProcessTreeCleanup: %v", err)
-	}
+	require.NoError(t, err, "configureProcessTreeCleanup")
 	defer cleanup.close()
 
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("cmd.Start: %v", err)
-	}
+	err = cmd.Start()
+	require.NoError(t, err, "cmd.Start")
 	pid := uint32(cmd.Process.Pid)
 
-	if err := cleanup.afterStart(cmd); err != nil {
-		t.Fatalf("afterStart: %v", err)
-	}
-	if !cleanup.assigned {
-		t.Fatal("expected the process to be assigned to the job object")
-	}
+	err = cleanup.afterStart(cmd)
+	require.NoError(t, err, "afterStart")
+	require.True(t, cleanup.assigned, "expected the process to be assigned to the job object")
 
-	if err := cleanup.cancel(cmd); err != nil {
-		t.Fatalf("cancel: %v", err)
-	}
+	err = cleanup.cancel(cmd)
+	require.NoError(t, err, "cancel")
 	waitForCmd(t, cmd)
 	waitForWindowsPidGone(t, pid, "after cancel via job assignment")
 }
@@ -42,20 +35,16 @@ func TestCommandCleanup_CancelTerminatesViaJobAssignment(t *testing.T) {
 func TestCommandCleanup_CancelFallsBackToPIDTreeWithoutJobAssignment(t *testing.T) {
 	cmd := exec.Command("ping", "-n", "60", "127.0.0.1")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
-	if err != nil {
-		t.Fatalf("configureProcessTreeCleanup: %v", err)
-	}
+	require.NoError(t, err, "configureProcessTreeCleanup")
 	defer cleanup.close()
 
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("cmd.Start: %v", err)
-	}
+	err = cmd.Start()
+	require.NoError(t, err, "cmd.Start")
 	pid := uint32(cmd.Process.Pid)
 
 	// Skip afterStart so cancel has no job/handle and must fall back to the PID tree walk alone.
-	if err := cleanup.cancel(cmd); err != nil {
-		t.Fatalf("cancel: %v", err)
-	}
+	err = cleanup.cancel(cmd)
+	require.NoError(t, err, "cancel")
 	waitForCmd(t, cmd)
 	waitForWindowsPidGone(t, pid, "after cancel via PID-tree fallback")
 }
@@ -65,27 +54,20 @@ func TestCommandCleanup_CancelFallsBackToPIDTreeWithoutJobAssignment(t *testing.
 func TestCommandCleanup_CancelTerminatesMultiLevelTreeViaJob(t *testing.T) {
 	cmd := exec.Command("cmd", "/c", "ping", "-n", "60", "127.0.0.1")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
-	if err != nil {
-		t.Fatalf("configureProcessTreeCleanup: %v", err)
-	}
+	require.NoError(t, err, "configureProcessTreeCleanup")
 	defer cleanup.close()
 
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("cmd.Start: %v", err)
-	}
+	err = cmd.Start()
+	require.NoError(t, err, "cmd.Start")
 	rootPID := uint32(cmd.Process.Pid)
 
-	if err := cleanup.afterStart(cmd); err != nil {
-		t.Fatalf("afterStart: %v", err)
-	}
-	if !cleanup.assigned {
-		t.Fatal("expected the process to be assigned to the job object")
-	}
+	err = cleanup.afterStart(cmd)
+	require.NoError(t, err, "afterStart")
+	require.True(t, cleanup.assigned, "expected the process to be assigned to the job object")
 	childPID := waitForWindowsChild(t, rootPID)
 
-	if err := cleanup.cancel(cmd); err != nil {
-		t.Fatalf("cancel: %v", err)
-	}
+	err = cleanup.cancel(cmd)
+	require.NoError(t, err, "cancel")
 	waitForCmd(t, cmd)
 
 	waitForWindowsPidGone(t, rootPID, "root process after cancel")
@@ -96,26 +78,19 @@ func TestCommandCleanup_CancelTerminatesMultiLevelTreeViaJob(t *testing.T) {
 func TestCommandCleanup_AfterStartReCancelsWhenAlreadyCanceled(t *testing.T) {
 	cmd := exec.Command("ping", "-n", "60", "127.0.0.1")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
-	if err != nil {
-		t.Fatalf("configureProcessTreeCleanup: %v", err)
-	}
+	require.NoError(t, err, "configureProcessTreeCleanup")
 	defer cleanup.close()
 
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("cmd.Start: %v", err)
-	}
+	err = cmd.Start()
+	require.NoError(t, err, "cmd.Start")
 	pid := uint32(cmd.Process.Pid)
 
 	// cancel runs before afterStart records the pid/handle; afterStart's re-cancel must still leave nothing alive.
-	if err := cleanup.cancel(cmd); err != nil {
-		t.Fatalf("first cancel: %v", err)
-	}
-	if !cleanup.canceled {
-		t.Fatal("expected canceled to be set after cancel")
-	}
-	if err := cleanup.afterStart(cmd); err != nil {
-		t.Fatalf("afterStart: %v", err)
-	}
+	err = cleanup.cancel(cmd)
+	require.NoError(t, err, "first cancel")
+	require.True(t, cleanup.canceled, "expected canceled to be set after cancel")
+	err = cleanup.afterStart(cmd)
+	require.NoError(t, err, "afterStart")
 	waitForCmd(t, cmd)
 	waitForWindowsPidGone(t, pid, "after afterStart re-cancel")
 }
@@ -158,15 +133,9 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 				t.Fatal("executor did not return after timeout; likely blocked on an inherited pipe")
 			}
 
-			if res.exitCode != 124 {
-				t.Fatalf("exit code: got %d, want 124; err=%v output=%q", res.exitCode, res.err, res.output)
-			}
-			if res.err == nil {
-				t.Fatal("expected timeout error")
-			}
-			if !strings.Contains(res.output, "Command timed out after") {
-				t.Fatalf("expected timeout banner, got %q", res.output)
-			}
+			require.Equal(t, 124, res.exitCode, "err=%v output=%q", res.err, res.output)
+			require.Error(t, res.err, "expected timeout error")
+			require.Contains(t, res.output, "Command timed out after", "expected timeout banner")
 		})
 	}
 }
@@ -232,9 +201,7 @@ func waitForWindowsChild(t *testing.T, parent uint32) uint32 {
 	deadline := time.Now().Add(windowsPollDeadline)
 	for {
 		children, err := snapshotWindowsChildProcesses()
-		if err != nil {
-			t.Fatalf("snapshotWindowsChildProcesses: %v", err)
-		}
+		require.NoError(t, err, "snapshotWindowsChildProcesses")
 		if kids := children[parent]; len(kids) > 0 {
 			return kids[0]
 		}

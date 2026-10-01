@@ -8,6 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // awsTestMAC is the MAC the mock IMDS returns for the primary ENI.
@@ -116,9 +119,7 @@ func TestAWS_Fetch_HappyPath(t *testing.T) {
 
 	p := NewAWSWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
+	require.NoError(t, err)
 
 	checks := map[string]string{
 		"Provider":         ProviderAWS,
@@ -139,9 +140,7 @@ func TestAWS_Fetch_HappyPath(t *testing.T) {
 		"NetworkID":        meta.NetworkID,
 	}
 	for k, want := range checks {
-		if got[k] != want {
-			t.Errorf("%s = %q, want %q", k, got[k], want)
-		}
+		assert.Equal(t, want, got[k], k)
 	}
 }
 
@@ -150,9 +149,7 @@ func TestAWS_Probe_TokenSucceeds(t *testing.T) {
 	defer server.Close()
 
 	p := NewAWSWithBase(server.URL)
-	if !p.Probe(context.Background()) {
-		t.Error("Probe returned false on healthy IMDS")
-	}
+	assert.True(t, p.Probe(context.Background()), "Probe returned false on healthy IMDS")
 }
 
 func TestAWS_Probe_Token401(t *testing.T) {
@@ -160,9 +157,7 @@ func TestAWS_Probe_Token401(t *testing.T) {
 	defer server.Close()
 
 	p := NewAWSWithBase(server.URL)
-	if p.Probe(context.Background()) {
-		t.Error("Probe returned true despite token 401")
-	}
+	assert.False(t, p.Probe(context.Background()), "Probe returned true despite token 401")
 }
 
 func TestAWS_Probe_Unreachable(t *testing.T) {
@@ -171,9 +166,7 @@ func TestAWS_Probe_Unreachable(t *testing.T) {
 	p := NewAWSWithBase("http://127.0.0.1:1") // port 1 reserved → ECONNREFUSED fast
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	if p.Probe(ctx) {
-		t.Error("Probe returned true when nothing listening")
-	}
+	assert.False(t, p.Probe(ctx), "Probe returned true when nothing listening")
 }
 
 func TestAWS_Fetch_TokenFailure(t *testing.T) {
@@ -182,18 +175,12 @@ func TestAWS_Fetch_TokenFailure(t *testing.T) {
 
 	p := NewAWSWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err == nil {
-		t.Error("expected error when token fetch fails")
-	}
+	assert.Error(t, err, "expected error when token fetch fails")
 	// Contract: Fetch returns a non-nil *Metadata with Provider=aws on every
 	// failure path, matching GCPProvider/AzureProvider so callers can call
 	// .ToTags() without nil-guarding.
-	if meta == nil {
-		t.Fatal("expected non-nil meta even on token failure")
-	}
-	if meta.Provider != ProviderAWS {
-		t.Errorf("meta.Provider = %q, want %q", meta.Provider, ProviderAWS)
-	}
+	require.NotNil(t, meta, "expected non-nil meta even on token failure")
+	assert.Equal(t, ProviderAWS, meta.Provider)
 }
 
 func TestAWS_Fetch_DocumentError_StillReturnsProvider(t *testing.T) {
@@ -202,11 +189,9 @@ func TestAWS_Fetch_DocumentError_StillReturnsProvider(t *testing.T) {
 
 	p := NewAWSWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err == nil {
-		t.Error("expected document error to surface")
-	}
-	if meta == nil || meta.Provider != ProviderAWS {
-		t.Errorf("expected partial meta with Provider=aws, got %+v", meta)
+	assert.Error(t, err, "expected document error to surface")
+	if assert.NotNil(t, meta, "expected partial meta with Provider=aws") {
+		assert.Equal(t, ProviderAWS, meta.Provider, "expected partial meta with Provider=aws")
 	}
 }
 
@@ -227,11 +212,9 @@ func TestAWS_Fetch_EmptyInstanceID_ReturnsError(t *testing.T) {
 
 	p := NewAWSWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err == nil {
-		t.Error("expected error when instance_id is empty")
-	}
-	if meta == nil || meta.Provider != ProviderAWS {
-		t.Errorf("expected partial Metadata with Provider=aws, got %+v", meta)
+	assert.Error(t, err, "expected error when instance_id is empty")
+	if assert.NotNil(t, meta, "expected partial Metadata with Provider=aws") {
+		assert.Equal(t, ProviderAWS, meta.Provider, "expected partial Metadata with Provider=aws")
 	}
 }
 
@@ -241,9 +224,7 @@ func TestAWS_Fetch_DocumentParseError(t *testing.T) {
 
 	p := NewAWSWithBase(server.URL)
 	_, err := p.Fetch(context.Background())
-	if err == nil {
-		t.Error("expected parse error to surface")
-	}
+	assert.Error(t, err, "expected parse error to surface")
 }
 
 func TestAWS_Fetch_VPCMissing_StillPopulatesDocFields(t *testing.T) {
@@ -255,15 +236,9 @@ func TestAWS_Fetch_VPCMissing_StillPopulatesDocFields(t *testing.T) {
 
 	p := NewAWSWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if meta.InstanceID == "" {
-		t.Error("InstanceID should be populated even without vpc-id")
-	}
-	if meta.NetworkID != "" {
-		t.Errorf("NetworkID should be empty on 404, got %q", meta.NetworkID)
-	}
+	require.NoError(t, err)
+	assert.NotEmpty(t, meta.InstanceID, "InstanceID should be populated even without vpc-id")
+	assert.Empty(t, meta.NetworkID, "NetworkID should be empty on 404")
 }
 
 func TestAWS_Fetch_MACEmpty_NoVPCAttempt(t *testing.T) {
@@ -287,15 +262,9 @@ func TestAWS_Fetch_MACEmpty_NoVPCAttempt(t *testing.T) {
 
 	p := NewAWSWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if meta.NetworkID != "" {
-		t.Errorf("NetworkID should be empty when MAC is empty, got %q", meta.NetworkID)
-	}
-	if vpcHits.Load() != 0 {
-		t.Errorf("expected zero vpc-id hits when MAC empty, got %d", vpcHits.Load())
-	}
+	require.NoError(t, err)
+	assert.Empty(t, meta.NetworkID, "NetworkID should be empty when MAC is empty")
+	assert.Equal(t, int32(0), vpcHits.Load(), "expected zero vpc-id hits when MAC empty")
 }
 
 func TestAWS_Fetch_RespectsContextCancel(t *testing.T) {
@@ -310,7 +279,5 @@ func TestAWS_Fetch_RespectsContextCancel(t *testing.T) {
 	defer cancel()
 
 	_, err := p.Fetch(ctx)
-	if err == nil {
-		t.Error("expected ctx-deadline error")
-	}
+	assert.Error(t, err, "expected ctx-deadline error")
 }

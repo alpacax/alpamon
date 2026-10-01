@@ -11,11 +11,12 @@ import (
 	"context"
 	"errors"
 	"os/user"
-	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newTestGroupHandler builds a GroupHandler whose lookup reports absent by
@@ -43,9 +44,7 @@ func TestGroupHandler_AddGroup(t *testing.T) {
 
 	// Validate arguments
 	err := handler.Validate("addgroup", args)
-	if err != nil {
-		t.Fatalf("Validation failed: %v", err)
-	}
+	require.NoError(t, err, "Validation failed")
 
 	// Execute command (Note: This test is simplified, full implementation would use proper mocking)
 	// For now, just test validation and basic structure
@@ -95,9 +94,7 @@ func TestGroupHandler_AddGroup_InvalidArgs(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := handler.Validate("addgroup", tc.args)
-			if (err != nil) != tc.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
-			}
+			assert.Equal(t, tc.wantErr, err != nil, "Validate() error = %v", err)
 		})
 	}
 }
@@ -111,16 +108,12 @@ func TestGroupHandler_DelGroup(t *testing.T) {
 	}
 
 	err := handler.Validate("delgroup", args)
-	if err != nil {
-		t.Fatalf("Validation failed: %v", err)
-	}
+	require.NoError(t, err, "Validation failed")
 
 	// Test missing groupname
 	emptyArgs := &common.CommandArgs{}
 	err = handler.Validate("delgroup", emptyArgs)
-	if err == nil {
-		t.Error("Expected error for missing groupname, got nil")
-	}
+	assert.Error(t, err, "Expected error for missing groupname")
 }
 
 func TestGroupHandler_Commands(t *testing.T) {
@@ -129,23 +122,13 @@ func TestGroupHandler_Commands(t *testing.T) {
 	commands := handler.Commands()
 	expectedCommands := []string{"addgroup", "delgroup"}
 
-	if len(commands) != len(expectedCommands) {
-		t.Errorf("Expected %d commands, got %d", len(expectedCommands), len(commands))
-	}
-
-	for i, cmd := range expectedCommands {
-		if commands[i] != cmd {
-			t.Errorf("Expected command %s at index %d, got %s", cmd, i, commands[i])
-		}
-	}
+	assert.Equal(t, expectedCommands, commands)
 }
 
 func TestGroupHandler_Name(t *testing.T) {
 	handler := NewGroupHandler(nil, nil) // NewGroupHandler expects common.CommandExecutor, but for validation only, nil is fine
 
-	if handler.Name() != "group" {
-		t.Errorf("Expected handler name 'group', got '%s'", handler.Name())
-	}
+	assert.Equal(t, "group", handler.Name())
 }
 
 // TestGroupHandler_AddGroup_Execute exercises handleAddGroup end-to-end for the
@@ -173,12 +156,9 @@ func TestGroupHandler_AddGroup_Execute(t *testing.T) {
 
 			args := &common.CommandArgs{Groupname: "testgroup", GID: 1001}
 			exitCode, output, err := handler.Execute(context.Background(), "addgroup", args)
-			if err != nil || exitCode != 0 {
-				t.Fatalf("Execute() exitCode=%d err=%v output=%q", exitCode, err, output)
-			}
-			if !mock.Invoked(tt.createCmd) {
-				t.Errorf("expected %s to be invoked; got %+v", tt.createCmd, mock.GetExecutedCommands())
-			}
+			require.NoError(t, err, "Execute() exitCode=%d output=%q", exitCode, output)
+			require.Equal(t, 0, exitCode, "Execute() err=%v output=%q", err, output)
+			assert.True(t, mock.Invoked(tt.createCmd), "expected %s to be invoked; got %+v", tt.createCmd, mock.GetExecutedCommands())
 		})
 	}
 }
@@ -196,15 +176,10 @@ func TestGroupHandler_AddGroup_Idempotent(t *testing.T) {
 		handler.lookupGroup = common.ExistingGroupLookup("1001")
 
 		exitCode, output, err := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "testgroup", GID: 1001})
-		if err != nil || exitCode != 0 {
-			t.Fatalf("Execute() exitCode=%d err=%v output=%q", exitCode, err, output)
-		}
-		if mock.Invoked("/usr/sbin/addgroup") {
-			t.Error("addgroup must be skipped when the group already exists with matching gid")
-		}
-		if !strings.Contains(output, "already exists with GID 1001") {
-			t.Errorf("expected an 'already exists' message, got: %q", output)
-		}
+		require.NoError(t, err, "Execute() exitCode=%d output=%q", exitCode, output)
+		require.Equal(t, 0, exitCode, "Execute() err=%v output=%q", err, output)
+		assert.False(t, mock.Invoked("/usr/sbin/addgroup"), "addgroup must be skipped when the group already exists with matching gid")
+		assert.Contains(t, output, "already exists with GID 1001", "expected an 'already exists' message")
 	})
 
 	t.Run("exists with different gid -> conflict surfaced", func(t *testing.T) {
@@ -217,15 +192,10 @@ func TestGroupHandler_AddGroup_Idempotent(t *testing.T) {
 		handler.lookupGroup = common.ExistingGroupLookup("9999")
 
 		exitCode, output, _ := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "testgroup", GID: 1001})
-		if exitCode == 0 {
-			t.Fatalf("expected non-zero exit for gid conflict, got 0 (output=%q)", output)
-		}
-		if !strings.Contains(output, "already exists with gid 9999") || !strings.Contains(output, "requested gid 1001") {
-			t.Errorf("conflict message must name both gids, got: %q", output)
-		}
-		if mock.Invoked("/usr/sbin/addgroup") {
-			t.Error("addgroup must not run on a gid conflict")
-		}
+		require.NotEqual(t, 0, exitCode, "expected non-zero exit for gid conflict (output=%q)", output)
+		assert.Contains(t, output, "already exists with gid 9999", "conflict message must name both gids")
+		assert.Contains(t, output, "requested gid 1001", "conflict message must name both gids")
+		assert.False(t, mock.Invoked("/usr/sbin/addgroup"), "addgroup must not run on a gid conflict")
 	})
 
 	t.Run("lookup error -> fail loud, no create", func(t *testing.T) {
@@ -240,15 +210,9 @@ func TestGroupHandler_AddGroup_Idempotent(t *testing.T) {
 		}
 
 		exitCode, output, _ := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "testgroup", GID: 1001})
-		if exitCode == 0 {
-			t.Fatalf("expected non-zero exit when the lookup itself fails, got 0 (output=%q)", output)
-		}
-		if !strings.Contains(output, "unable to verify") {
-			t.Errorf("expected an 'unable to verify' message, got: %q", output)
-		}
-		if mock.Invoked("/usr/sbin/addgroup") {
-			t.Error("addgroup must not run when existence cannot be verified")
-		}
+		require.NotEqual(t, 0, exitCode, "expected non-zero exit when the lookup itself fails (output=%q)", output)
+		assert.Contains(t, output, "unable to verify", "expected an 'unable to verify' message")
+		assert.False(t, mock.Invoked("/usr/sbin/addgroup"), "addgroup must not run when existence cannot be verified")
 	})
 }
 
@@ -267,12 +231,8 @@ func TestGroupHandler_AddGroup_NumericNameGidCollisionSurfaced(t *testing.T) {
 	handler := newTestGroupHandler(mock) // AbsentGroupLookup: gate + reconcile both see the name as absent
 
 	exitCode, output, _ := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "1001", GID: 1001})
-	if exitCode == 0 {
-		t.Fatalf("a gid-in-use collision by a different group must be surfaced even when the requested name is numeric; got 0 (output=%q)", output)
-	}
-	if !strings.Contains(output, "GID '1001'") {
-		t.Errorf("expected the original gid-collision failure to surface, got: %q", output)
-	}
+	require.NotEqual(t, 0, exitCode, "a gid-in-use collision by a different group must be surfaced even when the requested name is numeric (output=%q)", output)
+	assert.Contains(t, output, "GID '1001'", "expected the original gid-collision failure to surface")
 }
 
 // TestGroupHandler_AddGroup_SecondaryNet verifies the create-time reconcile:
@@ -320,17 +280,14 @@ func TestGroupHandler_AddGroup_SecondaryNet(t *testing.T) {
 			}
 
 			exitCode, output, _ := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "testgroup", GID: 1001})
-			if !mock.Invoked("/usr/sbin/addgroup") {
-				t.Fatal("addgroup should have been attempted after an absent gate lookup")
+			require.True(t, mock.Invoked("/usr/sbin/addgroup"), "addgroup should have been attempted after an absent gate lookup")
+			if tt.wantExitZero {
+				require.Equal(t, 0, exitCode, "expected idempotent success (exit 0), output=%q", output)
+			} else {
+				require.NotEqual(t, 0, exitCode, "expected non-zero exit, output=%q", output)
 			}
-			if tt.wantExitZero && exitCode != 0 {
-				t.Fatalf("expected idempotent success (exit 0), got %d (output=%q)", exitCode, output)
-			}
-			if !tt.wantExitZero && exitCode == 0 {
-				t.Fatalf("expected non-zero exit, got 0 (output=%q)", output)
-			}
-			if tt.wantMsgPart != "" && !strings.Contains(output, tt.wantMsgPart) {
-				t.Errorf("expected output to contain %q, got: %q", tt.wantMsgPart, output)
+			if tt.wantMsgPart != "" {
+				assert.Contains(t, output, tt.wantMsgPart)
 			}
 		})
 	}

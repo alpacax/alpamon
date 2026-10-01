@@ -30,9 +30,7 @@ func TestValidateTargetAddr(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := validateTargetAddr(tc.targetAddr)
-			if got != tc.want {
-				t.Fatalf("validateTargetAddr(%q) = %v, want %v", tc.targetAddr, got, tc.want)
-			}
+			require.Equal(t, tc.want, got, "validateTargetAddr(%q)", tc.targetAddr)
 		})
 	}
 }

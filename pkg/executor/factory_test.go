@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestPlatformHandlers(t *testing.T) {
@@ -52,9 +53,7 @@ func TestPlatformHandlers(t *testing.T) {
 
 func assertHandlerCount(t *testing.T, handlers []common.Handler, expected int, names []string) {
 	t.Helper()
-	if len(handlers) != expected {
-		t.Errorf("platformHandlers() returned %d handlers %v, want %d", len(handlers), names, expected)
-	}
+	assert.Len(t, handlers, expected, "platformHandlers() returned handlers %v", names)
 }
 
 func assertHasHandler(t *testing.T, handlers []common.Handler, name string) {
@@ -64,14 +63,14 @@ func assertHasHandler(t *testing.T, handlers []common.Handler, name string) {
 			return
 		}
 	}
-	t.Errorf("platformHandlers() missing handler %q", name)
+	assert.Fail(t, "platformHandlers() missing handler", "%q", name)
 }
 
 func assertNoHandler(t *testing.T, handlers []common.Handler, name string) {
 	t.Helper()
 	for _, h := range handlers {
 		if h.Name() == name {
-			t.Errorf("platformHandlers() should not include handler %q on %s", name, runtime.GOOS)
+			assert.Fail(t, "platformHandlers() should not include handler", "%q on %s", name, runtime.GOOS)
 			return
 		}
 	}
