@@ -82,6 +82,7 @@ func yumSkipUnavailableSetopts() []string {
 		log.Debug().Msg("Could not resolve the alpamon yum repo; upgrading without repo options.")
 		return nil
 	}
+	log.Debug().Strs("setopts", setopts).Msg("Skipping unavailable yum repos other than alpamon's.")
 	return setopts
 }
 

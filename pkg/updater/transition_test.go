@@ -372,7 +372,7 @@ func TestPackageRollbackCommand(t *testing.T) {
 }
 
 // TestPackageRollbackCommand_YumSkipsUnavailableReposOtherThanAlpamons pins that the rollback gets the
-// upgrade's skip options: it reinstalls from the same repos, so one broken third-party repo fails it too.
+// upgrade's skip options, so a broken third-party repo cannot block the reinstall either.
 func TestPackageRollbackCommand_YumSkipsUnavailableReposOtherThanAlpamons(t *testing.T) {
 	writeYumRepos(t, map[string]string{
 		"alpacax_alpamon.repo": yumAlpamonRepoFile,
