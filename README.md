@@ -35,7 +35,7 @@ sudo yum install alpamon
 sudo alpamon register --url https://<workspace> --token <TOKEN>
 ```
 
-**openSUSE / SLES** (best-effort) — see [**docs/opensuse.md**](docs/opensuse.md) for the sudoers prerequisite and the `yum`-only server operations that still fail here.
+**openSUSE / SLES** (best-effort): see [**docs/opensuse.md**](docs/opensuse.md) for how sudo works there and the `yum`-only server operations that still fail here.
 ```bash
 sudo zypper addrepo -f 'https://packagecloud.io/alpacax/alpamon/rpm_any/rpm_any/$basearch' alpamon
 sudo zypper --gpg-auto-import-keys refresh && sudo zypper install alpamon
@@ -98,18 +98,11 @@ The optional `alpamon-pam` package provides PAM integration for Alpacon-managed 
 sudo apt-get install alpamon-pam
 # RHEL / CentOS
 sudo yum install alpamon-pam
-# openSUSE / SLES
+# openSUSE / SLES (1.1.5 or later, required there; see docs/opensuse.md)
 sudo zypper install alpamon-pam
 ```
 
-After install, add to `/etc/pam.d/sudo`:
-```
-auth [user_unknown=ignore auth_err=die success=done default=bad] pam_alpamon.so
-```
-And to `/etc/sudo.conf`:
-```
-Plugin approval_plugin alpacon_approval.so
-```
+The package's install script adds a `pam_alpamon.so` auth line to `/etc/pam.d/sudo` and `Plugin approval_plugin alpacon_approval.so` to `/etc/sudo.conf`, the plugin only where sudo is 1.9 or later. It prints a warning for any step it skips.
 The alpamon service must be running with the socket at `/var/run/alpamon/auth.sock`.
 
 ## Configuration

@@ -8,7 +8,7 @@ CI exercises SUSE on amd64 only. It builds Alpamon from source and runs the test
 
 ## Why the platform reads as rhel
 
-openSUSE and SLES report `platform=rhel` to Alpacon. The three things the server gates on that value—rpm packaging, the `wheel` sudo group, and shadow-utils account tooling—behave identically on both families. The real distribution name is preserved separately in the OS information, and the agent runs `zypper` locally regardless of what it reports.
+openSUSE and SLES report `platform=rhel` to Alpacon. Of the things the server gates on that value, rpm packaging and shadow-utils account tooling behave identically on both families; the rest do not (see Sudo and Known limitations below). The real distribution name is preserved separately in the OS information, and the agent runs `zypper` locally regardless of what it reports.
 
 ## Installation
 
@@ -22,11 +22,35 @@ sudo zypper install alpamon
 sudo alpamon register --url https://<workspace> --token <TOKEN>
 ```
 
-## Sudoers prerequisite
+## Sudo
 
-openSUSE ships its sudoers file with `Defaults targetpw` alongside `ALL ALL=(ALL) ALL`, so every user may already run any command—but only by typing root's password, not their own. Both `%wheel` lines in that file are commented out, so `wheel` membership grants nothing by itself. The drop-in below therefore does two things: it grants `%wheel` the rule, and it exempts `%wheel` from `targetpw` so Alpacon-managed admins authenticate as themselves.
+openSUSE ships its sudoers file with `Defaults targetpw` alongside `ALL ALL=(ALL) ALL`, so every user may already run any command—but only by typing root's password, not their own. Both `%wheel` lines in that file are commented out, so `wheel` membership grants nothing by itself.
 
-Leap keeps that file at `/etc/sudoers`; Tumbleweed ships it as `/usr/etc/sudoers` and has no `/etc/sudoers` at all. The drop-in path is the same on both, because either file ends with `@includedir /etc/sudoers.d`. Tumbleweed keeps `environment` and `login.defs` under `/usr/etc` for the same reason, which is why the agent reads system environment variables from both `/usr/etc/environment` and `/etc/environment`, the admin copy winning.
+Leap keeps that file at `/etc/sudoers`; Tumbleweed ships it as `/usr/etc/sudoers` and has no `/etc/sudoers` at all. Drop-ins go in the same place on both, because either file ends with `@includedir /etc/sudoers.d`. Tumbleweed keeps `environment` and `login.defs` under `/usr/etc` for the same reason, which is why the agent reads system environment variables from both `/usr/etc/environment` and `/etc/environment`, the admin copy winning.
+
+### Alpacon accounts
+
+Accounts Alpacon provisions get `sudo` from `alpamon-pam` (see PAM module below), not from `wheel`. The package's install script writes `/etc/sudoers.d/alpacon`, which lets `alpacon` group members pass the sudoers check and, with its `Defaults:%alpacon !targetpw` line, has them authenticate as themselves, so SUSE's `targetpw` default does not reach them. The same script adds `pam_alpamon.so` to `/etc/pam.d/sudo` and the approval plugin to `/etc/sudo.conf`, so installing the package is the whole prerequisite—Alpacon accounts need no other sudoers change.
+
+In a Websh or command session, the Alpacon server decides each invocation. Any other session, such as a local SSH login, never reaches the server: the agent refuses its `sudo` when the workspace's `block_local_sudo` policy is on, and otherwise leaves it to the account's ordinary sudo authentication.
+
+A host may have Alpacon accounts in `wheel`. The Alpacon server adds an admin account to it when it creates the account in a workspace with **Use sudo with MFA** turned off or on a deployment without Auth0, and earlier server releases did so in every workspace. A later group update may or may not have removed it, so don't count on that membership in either direction. Where it remains and a `%wheel` drop-in is installed, the account also matches a rule `alpamon-pam` does not manage. Alpacon creates accounts without a password, so without `alpamon-pam` that rule runs a command for the account only if it is `NOPASSWD` or someone has since given the account a password.
+
+Alpacon writes `(alpacon)` into the comment field of the accounts it manages, so this lists the ones still in `wheel`:
+
+```bash
+for u in $(getent group wheel | cut -d: -f4 | tr , ' '); do
+  getent passwd "$u" | grep -q '(alpacon)' && echo "$u"
+done
+```
+
+The comment field can be edited on the host, so treat the list as a starting point. Remove any you did not add yourself with `sudo gpasswd -d <user> wheel`.
+
+### Local accounts in wheel (optional)
+
+For an account you manage yourself—a break-glass admin, or the user an Ansible play connects as—a drop-in can grant `%wheel` the rule and exempt it from `targetpw`. Alpacon accounts don't need it, and installing it also puts any Alpacon account still in `wheel` under that rule, so run the check above first.
+
+Earlier Alpacon releases wrote this same file when a host was registered through the registration wizard's **openSUSE / SLES** option, by its install script or its install commands. If `/etc/sudoers.d/alpacon-wheel` already exists and holds the two lines below, it is this drop-in. Deleting it returns `wheel` to the stock state; before you do, make sure no account you manage, such as an Ansible connecting user, relies on it.
 
 Stage the drop-in under a name containing a dot, which sudo ignores when reading the include directory, so a typo cannot lock you out before `visudo -cf` has passed:
 
@@ -45,6 +69,8 @@ sudo rm -f /etc/sudoers.d/alpacon-wheel.stage
 ```bash
 sudo zypper install alpamon-pam
 ```
+
+Without it, Alpacon accounts fall under the stock `ALL ALL=(ALL) ALL` rule, which asks for root's password. Use 1.1.5 or later: earlier releases fail to install, break `sudo`, or leave `targetpw` in force here. The console's automatic install composes `yum` and fails on SUSE (see Known limitations), so install it with the command above.
 
 Configuration is the same as on other distributions; see the PAM section in the main README.
 
@@ -69,11 +95,11 @@ Unlike `apt-get` and `yum`, zypper reserves codes above 100 for informational st
 | 100, 101 | Patches available, none installed | failure |
 | 104 | No repository carries the requested package | failure |
 | 106 | A repository was skipped because it failed to refresh | success for an agent upgrade whose own repository refreshed, failure otherwise |
-
-Exit 4, 6, 7, 104, and a 106 that was not tolerated get a hint appended to the command output, because zypper's own message does not name what the operator has to change. An unregistered SLES host is the common case: `zypper lr` exits 6 and `zypper update alpamon` exits 104, neither mentioning the inactive subscription behind both. Check `SUSEConnect --status` there, and confirm alpamon's repository is present with `zypper lr --uri`. Exit 7 means the libzypp lock was still held after the retries; `zypper ps` names the holder.
 | 107 | Installed, but an rpm `%post` script failed | failure |
 
 100 and 101 come from `patch-check`, which the agent never runs, so they are anomalous here rather than informational. 104 means nothing was updated. 107 matters because `%post` is what registers the systemd units and the PAM session lines, so a package that unpacked with a failed script is not a working install.
+
+Exit 4, 6, 7, 104, and a 106 that was not tolerated get a hint appended to the command output, because zypper's own message does not name what the operator has to change. An unregistered SLES host is the common case: `zypper lr` exits 6 and `zypper update alpamon` exits 104, neither mentioning the inactive subscription behind both. Check `SUSEConnect --status` there, and confirm alpamon's repository is present with `zypper lr --uri`. Exit 7 means the libzypp lock was still held after the retries; `zypper ps` names the holder.
 
 ## Console update on Tumbleweed
 
@@ -91,9 +117,7 @@ SuSEfirewall2, which those releases use instead of firewalld, is detected as an 
 
 Because the host reports `rhel`, console-driven package operations that the server composes still emit `yum` commands and fail on a SUSE host: Alpacon plugin install/upgrade and the automatic `alpamon-pam` install. Install those manually with `zypper` until the server side is zypper-aware. The agent's own upgrade, uninstall, and system-update paths do use `zypper`.
 
-The console's registration instruction is one of those commands. The registration form offers no SUSE option, and its RHEL guide renders `yum install -y alpamon`, which fails here. Follow the zypper commands under Installation above instead.
-
-The `wheel` sudo group is granted but inert without the sudoers drop-in. For `rhel` the server adds Alpacon-managed admins to `wheel`, and that part succeeds on SUSE, but stock `/etc/sudoers` leaves both `%wheel` rules commented out, so membership alone authorizes nothing. Alpacon then shows the user as sudo-capable while the host refuses the command—the failure is silent, and nothing in the console reports it. The Sudoers prerequisite above is what closes the gap; skipping it leaves admins without sudo.
+Registration is not affected: the registration wizard's **openSUSE / SLES** option renders zypper commands like the ones under Installation above. On an Alpacon release that predates that option, its RHEL guide renders `yum install -y alpamon`, which fails here; use the commands under Installation instead.
 
 ## Already-registered hosts
 
