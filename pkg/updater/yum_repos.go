@@ -3,21 +3,12 @@ package updater
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/rs/zerolog/log"
 )
 
 var (
-	// alpamonRepoURLs are the PackageCloud repositories .github/workflows/release.yml publishes the stable, rc and dev channels to.
-	// The trailing slash keeps one from matching another as a prefix; packagecloud always puts a path segment after the repo name.
-	alpamonRepoURLs = []string{
-		"packagecloud.io/alpacax/alpamon/",
-		"packagecloud.io/alpacax/alpamon-latest/",
-		"packagecloud.io/alpacax/alpamon-dev/",
-	}
-
 	// YumReposDirs is the union of the directories dnf 4 and dnf 5 read repo files from by default.
 	// It is a var so tests can point it at a temp dir.
 	YumReposDirs = []string{"/etc/yum.repos.d", "/etc/yum/repos.d", "/etc/distro.repos.d", "/usr/share/dnf5/repos.d"}
@@ -31,11 +22,6 @@ var (
 type yumRepo struct {
 	id               string
 	enabled, alpamon bool
-}
-
-// ContainsAlpamonRepo reports whether s names any alpamon channel repo, whatever alias the operator gave it.
-func ContainsAlpamonRepo(s string) bool {
-	return slices.ContainsFunc(alpamonRepoURLs, func(r string) bool { return strings.Contains(s, r) })
 }
 
 // YumArgv returns the yum argv for verb -y args that lets every enabled repo but alpamon's be skipped
