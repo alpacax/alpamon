@@ -47,15 +47,20 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func setYumReposDirs(t *testing.T, dirs ...string) {
+	t.Helper()
+	orig := YumReposDirs
+	YumReposDirs = dirs
+	t.Cleanup(func() { YumReposDirs = orig })
+}
+
 func writeYumRepos(t *testing.T, files map[string]string) {
 	t.Helper()
 	dir := t.TempDir()
 	for name, body := range files {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644))
 	}
-	orig := YumReposDirs
-	YumReposDirs = []string{dir}
-	t.Cleanup(func() { YumReposDirs = orig })
+	setYumReposDirs(t, dir)
 }
 
 func TestYumSkipUnavailableSetopts_ReadsEnabledLikeYum(t *testing.T) {
@@ -106,9 +111,7 @@ func TestYumSkipUnavailableSetopts_ReadsEveryReposDir(t *testing.T) {
 	etc, distro := t.TempDir(), t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(etc, "alpacax_alpamon.repo"), []byte(yumAlpamonRepoFile), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(distro, "fedora.repo"), []byte("[fedora]\nmetalink=https://mirrors.fedoraproject.org/metalink\n"), 0o644))
-	orig := YumReposDirs
-	YumReposDirs = []string{etc, filepath.Join(t.TempDir(), "missing"), distro}
-	t.Cleanup(func() { YumReposDirs = orig })
+	setYumReposDirs(t, etc, filepath.Join(t.TempDir(), "missing"), distro)
 
 	got := yumSkipUnavailableSetopts()
 

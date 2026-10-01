@@ -224,7 +224,7 @@ func (e *versionSteppingExecutor) RunAsUser(ctx context.Context, username string
 // TestMain points aptSourcesDir and updater.YumReposDirs at an empty temp dir for the whole
 // package run, so tests never read the host's real apt sources or yum repos.
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "alpamon-apt-sources")
+	dir, err := os.MkdirTemp("", "alpamon-pkg-sources")
 	if err != nil {
 		panic(err)
 	}
@@ -1954,10 +1954,10 @@ func TestSystemHandler_Upgrade_PamIsNotComparedToAlpamonRelease(t *testing.T) {
 	assert.True(t, mockVersions.InvalidatePamCalled, "the cached pam version must be refreshed after the upgrade")
 }
 
-func setYumReposDir(t *testing.T, dir string) {
+func setYumReposDirs(t *testing.T, dirs ...string) {
 	t.Helper()
 	orig := updater.YumReposDirs
-	updater.YumReposDirs = []string{dir}
+	updater.YumReposDirs = dirs
 	t.Cleanup(func() { updater.YumReposDirs = orig })
 }
 
@@ -1967,7 +1967,7 @@ func writeYumRepos(t *testing.T, files map[string]string) {
 	for name, body := range files {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644))
 	}
-	setYumReposDir(t, dir)
+	setYumReposDirs(t, dir)
 }
 
 func runYumUpgrade(t *testing.T) *common.MockCommandExecutor {
@@ -2030,7 +2030,7 @@ func TestSystemHandler_Upgrade_YumKeepsEveryChannelRepoStrict(t *testing.T) {
 	}, yum.Args)
 }
 
-func TestSystemHandler_Upgrade_YumKeepsTodaysCommandWithoutAnAlpamonRepo(t *testing.T) {
+func TestSystemHandler_Upgrade_YumAddsNoSetoptsWithoutAnAlpamonRepo(t *testing.T) {
 	for name, files := range map[string]map[string]string{
 		"no alpamon repo":       {"docker-ce.repo": yumThirdPartyRepoFile},
 		"alpamon repo disabled": {"alpacax_alpamon.repo": strings.ReplaceAll(yumAlpamonRepoFile, "enabled=1", "enabled=0"), "docker-ce.repo": yumThirdPartyRepoFile},
@@ -2049,8 +2049,8 @@ func TestSystemHandler_Upgrade_YumKeepsTodaysCommandWithoutAnAlpamonRepo(t *test
 	}
 }
 
-func TestSystemHandler_Upgrade_YumKeepsTodaysCommandWhenTheReposDirIsMissing(t *testing.T) {
-	setYumReposDir(t, filepath.Join(t.TempDir(), "missing"))
+func TestSystemHandler_Upgrade_YumAddsNoSetoptsWhenTheReposDirIsMissing(t *testing.T) {
+	setYumReposDirs(t, filepath.Join(t.TempDir(), "missing"))
 
 	mockExec := runYumUpgrade(t)
 
