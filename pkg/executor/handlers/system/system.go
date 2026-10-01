@@ -37,7 +37,7 @@ const delayedActionDelay = 1 * time.Second
 // Blank so the unused linter reads it as the compile-time assertion it is.
 const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
 
-// alpamonRepoURLs are the PackageCloud repositories .github/workflows/release.yml publishes the stable, rc and dev channels to, whatever alias the operator gave them.
+// alpamonRepoURLs are the PackageCloud repositories .github/workflows/release.yml publishes the stable, rc and dev channels to.
 // The trailing slash keeps one from matching another as a prefix; packagecloud always puts a path segment after the repo name.
 var alpamonRepoURLs = []string{
 	"packagecloud.io/alpacax/alpamon/",
@@ -268,7 +268,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	var versionsBefore map[string]string
 	switch utils.PackageManager {
 	case utils.PkgApt:
-		// Scoped to alpamon's source and run apart from install: one broken repo
+		// One scoped update per alpamon channel source, apart from install: a broken repo
 		// elsewhere on the host must not block the upgrade, and a failure must name its step.
 		for _, argv := range aptUpdateArgvs() {
 			code, out, rerr := h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
