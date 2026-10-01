@@ -37,14 +37,6 @@ const delayedActionDelay = 1 * time.Second
 // Blank so the unused linter reads it as the compile-time assertion it is.
 const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
 
-// alpamonRepoURLs are the PackageCloud repositories .github/workflows/release.yml publishes the stable, rc and dev channels to.
-// The trailing slash keeps one from matching another as a prefix; packagecloud always puts a path segment after the repo name.
-var alpamonRepoURLs = []string{
-	"packagecloud.io/alpacax/alpamon/",
-	"packagecloud.io/alpacax/alpamon-latest/",
-	"packagecloud.io/alpacax/alpamon-dev/",
-}
-
 // zypper behavior the other package managers do not share; per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
 const (
 	// ZYPP_LOCKED: packagekit, an operator session, or a racing console update holds the libzypp lock.
@@ -257,8 +249,8 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	}
 
 	var cmd string
-	// Set on the apt path only: apt's install needs no shell operator, so it runs
-	// as an argv directly instead of through "sh -c cmd" like yum and zypper.
+	// Set on the apt and yum paths: their install needs no shell operator, so it runs
+	// as an argv directly instead of through "sh -c cmd" like zypper.
 	var installArgv []string
 	// Set when the refresh was scoped to alpamon's own repo, which is what makes
 	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
@@ -279,7 +271,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		installArgv = append([]string{"apt-get", "install", "--only-upgrade"}, packages...)
 		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3")
 	case utils.PkgYum:
-		cmd = fmt.Sprintf("yum update -y %s", pkgList)
+		installArgv = updater.YumArgv("update", packages...)
 	case utils.PkgZypper:
 		// Refresh runs as its own command: chaining it with `&&` lets one unreachable repo exit 4 so update
 		// never runs, hiding the failing step. `update -r` loads only that repo, so it cannot resolve distro deps.
@@ -377,16 +369,12 @@ func (h *SystemHandler) resolveZypperAlpamonRepos(ctx context.Context) []string 
 			enabled, matched = true, false
 		case strings.HasPrefix(line, "enabled="):
 			enabled = strings.TrimPrefix(line, "enabled=") == "1"
-		case containsAlpamonRepo(line):
+		case updater.ContainsAlpamonRepo(line):
 			matched = true
 		}
 	}
 	flush()
 	return aliases
-}
-
-func containsAlpamonRepo(s string) bool {
-	return slices.ContainsFunc(alpamonRepoURLs, func(r string) bool { return strings.Contains(s, r) })
 }
 
 // version-release of each package rpm can report, skipping the rest.
@@ -745,7 +733,7 @@ func resolveAptAlpamonSources() []string {
 func hasActiveAlpamonLine(data string) bool {
 	for line := range strings.SplitSeq(data, "\n") {
 		line, _, _ = strings.Cut(line, "#") // one-line format: apt reads everything after # as a comment
-		if containsAlpamonRepo(line) {
+		if updater.ContainsAlpamonRepo(line) {
 			return true
 		}
 	}
@@ -770,7 +758,7 @@ func hasEnabledAlpamonStanza(data string) bool {
 			if key, value, ok := strings.Cut(trimmed, ":"); ok && strings.EqualFold(strings.TrimSpace(key), "enabled") {
 				enabled = !deb822FalseValues[strings.ToLower(strings.TrimSpace(value))]
 			}
-			if containsAlpamonRepo(trimmed) {
+			if updater.ContainsAlpamonRepo(trimmed) {
 				matched = true
 			}
 		}

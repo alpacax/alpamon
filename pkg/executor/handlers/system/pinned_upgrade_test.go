@@ -219,7 +219,7 @@ func TestSystemHandler_PinnedUpgrade_Apt(t *testing.T) {
 
 	assert.Zero(t, h.versions.LatestCalls, "a pinned upgrade does not ask for the latest release")
 	assert.True(t, h.ran("apt-get", "install", "-y", "--allow-downgrades", "-o", "Acquire::Retries=3", "alpamon=2.5.0"))
-	assert.Nil(t, findExecutedShell(h.exec), "the pinned install runs without a shell")
+	assert.Nil(t, findLastExecuted(h.exec, "sh"), "the pinned install runs without a shell")
 
 	assert.True(t, h.ran("systemctl", "stop", "alpamon-restart.timer"), "the package's own delayed restart is replaced")
 	assert.Equal(t, []time.Duration{updater.RestartDelay}, h.sm.restarts, "restarted through the service manager")
@@ -683,7 +683,7 @@ func TestSystemHandler_Upgrade_LegacyPackageUpgradeWaitsForPinnedAttempt(t *test
 	require.ErrorIs(t, err, updater.ErrUpgradePending)
 	assert.Equal(t, 1, exitCode)
 	assert.Contains(t, output, "Upgrade refused")
-	assert.Nil(t, findExecutedShell(h.exec), "no package command runs")
+	assert.Nil(t, findLastExecuted(h.exec, "sh"), "no package command runs")
 	require.True(t, updater.AcquireUpgradeLatch(), "the latch is released afterwards")
 	updater.ReleaseSelfUpdateLatch()
 }
@@ -698,4 +698,21 @@ func TestSystemHandler_Upgrade_LegacyPackageUpgradeTakesTheLatch(t *testing.T) {
 	assert.Equal(t, 0, exitCode)
 	assert.Equal(t, "Upgrade already in progress.", output)
 	assert.Empty(t, h.exec.GetExecutedCommands())
+}
+
+func TestSystemHandler_PinnedUpgrade_YumSkipsUnavailableReposOtherThanAlpamons(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgYum)
+	writeYumRepos(t, map[string]string{
+		"alpacax_alpamon.repo": yumAlpamonRepoFile,
+		"docker-ce.repo":       yumThirdPartyRepoFile,
+	})
+	h.exec.SetResult("rpm -q --qf %{VERSION} alpamon", 0, "2.4.0", nil)
+
+	_, _, _ = h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
+
+	assert.True(t, h.ran("yum",
+		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
+		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
+		"--setopt=docker-ce-stable.skip_if_unavailable=True",
+		"install", "-y", "alpamon-2.5.0"), "the pinned install must skip every repo but alpamon's, got %+v", h.exec.GetExecutedCommands())
 }

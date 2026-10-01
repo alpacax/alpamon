@@ -255,7 +255,7 @@ func PackageRollbackCommand(packageManager, previous, current string) ([]string,
 		if CompareVersions(previous, current) > 0 {
 			verb = "install"
 		}
-		return []string{"yum", verb, "-y", "alpamon-" + previous}, nil
+		return YumArgv(verb, "alpamon-"+previous), nil
 	case utils.PkgZypper:
 		return []string{"zypper", "--non-interactive", "install", "--oldpackage", "alpamon=" + previous}, nil
 	}

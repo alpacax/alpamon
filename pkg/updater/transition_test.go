@@ -371,6 +371,24 @@ func TestPackageRollbackCommand(t *testing.T) {
 	assert.Equal(t, []string{"yum", "install", "-y", "alpamon-2.6.0"}, got)
 }
 
+// TestPackageRollbackCommand_YumSkipsUnavailableReposOtherThanAlpamons pins that the rollback gets the
+// upgrade's skip options: it reinstalls from the same repos, so one broken third-party repo fails it too.
+func TestPackageRollbackCommand_YumSkipsUnavailableReposOtherThanAlpamons(t *testing.T) {
+	writeYumRepos(t, map[string]string{
+		"alpacax_alpamon.repo": yumAlpamonRepoFile,
+		"docker-ce.repo":       yumThirdPartyRepoFile,
+	})
+
+	got, err := PackageRollbackCommand(utils.PkgYum, "2.4.0", "2.5.0")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"yum",
+		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
+		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
+		"--setopt=docker-ce-stable.skip_if_unavailable=True",
+		"downgrade", "-y", "alpamon-2.4.0"}, got)
+}
+
 func TestShellQuote(t *testing.T) {
 	assert.Equal(t, `'a b'`, shellQuote("a b"))
 	assert.Equal(t, `'it'\''s'`, shellQuote("it's"))
