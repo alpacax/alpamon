@@ -235,8 +235,10 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, target string,
 
 	switch utils.PackageManager {
 	case utils.PkgApt:
-		if code, out, err := run(aptUpdateArgv(resolveAptAlpamonSource())...); code != 0 {
-			return out, commandFailed("apt-get update", code, err)
+		for _, argv := range aptUpdateArgvs() {
+			if code, out, err := run(argv...); code != 0 {
+				return out, commandFailed("apt-get update", code, err)
+			}
 		}
 		code, out, err := run("apt-cache", "madison", "alpamon")
 		if code != 0 {
@@ -266,8 +268,8 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, target string,
 	case utils.PkgZypper:
 		refresh := []string{"zypper", "--non-interactive", "refresh"}
 		scoped := false
-		if alias := h.resolveZypperAlpamonRepo(ctx); alias != "" {
-			refresh = append(refresh, alias)
+		if aliases := h.resolveZypperAlpamonRepos(ctx); len(aliases) > 0 {
+			refresh = append(refresh, aliases...)
 			scoped = true
 		}
 		if code, out, err := run(refresh...); code != 0 {
