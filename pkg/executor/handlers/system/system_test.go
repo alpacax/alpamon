@@ -1148,9 +1148,9 @@ func writeAptAlpamonSource(t *testing.T) (dir, alpamonFile string) {
 	return dir, alpamonFile
 }
 
-// TestResolveAptAlpamonSource_IgnoresCommentedOutSource checks that a commented-out
+// TestResolveAptAlpamonSources_IgnoresCommentedOutSource checks that a commented-out
 // line does not count as alpamon's source, since apt ignores it too.
-func TestResolveAptAlpamonSource_IgnoresCommentedOutSource(t *testing.T) {
+func TestResolveAptAlpamonSources_IgnoresCommentedOutSource(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.list"),
 		[]byte("# deb https://packagecloud.io/alpacax/alpamon/ubuntu/ jammy main\n"), 0o644))
@@ -1159,9 +1159,9 @@ func TestResolveAptAlpamonSource_IgnoresCommentedOutSource(t *testing.T) {
 	assert.Empty(t, resolveAptAlpamonSources())
 }
 
-// TestResolveAptAlpamonSource_MatchesDeb822SourcesFile checks that a deb822 .sources
+// TestResolveAptAlpamonSources_MatchesDeb822SourcesFile checks that a deb822 .sources
 // file, which uses "URIs:" instead of a "deb" line, still resolves.
-func TestResolveAptAlpamonSource_MatchesDeb822SourcesFile(t *testing.T) {
+func TestResolveAptAlpamonSources_MatchesDeb822SourcesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "alpacax_alpamon.sources")
 	require.NoError(t, os.WriteFile(path,
@@ -1171,10 +1171,10 @@ func TestResolveAptAlpamonSource_MatchesDeb822SourcesFile(t *testing.T) {
 	assert.Equal(t, []string{path}, resolveAptAlpamonSources())
 }
 
-// TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored checks that a
+// TestResolveAptAlpamonSources_DisabledDeb822StanzaIsIgnored checks that a
 // deb822 stanza disabled via "Enabled: no" is not treated as apt's source,
 // since apt itself skips it.
-func TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored(t *testing.T) {
+func TestResolveAptAlpamonSources_DisabledDeb822StanzaIsIgnored(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"),
 		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n"), 0o644))
@@ -1183,7 +1183,7 @@ func TestResolveAptAlpamonSource_DisabledDeb822StanzaIsIgnored(t *testing.T) {
 	assert.Empty(t, resolveAptAlpamonSources())
 }
 
-func TestResolveAptAlpamonSource_EnabledStanzaAfterDisabledOneInSameFile(t *testing.T) {
+func TestResolveAptAlpamonSources_EnabledStanzaAfterDisabledOneInSameFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "alpacax_alpamon.sources")
 	content := "Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n" +
@@ -1195,9 +1195,9 @@ func TestResolveAptAlpamonSource_EnabledStanzaAfterDisabledOneInSameFile(t *test
 	assert.Equal(t, []string{path}, resolveAptAlpamonSources())
 }
 
-// TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive checks that
+// TestResolveAptAlpamonSources_Deb822EnabledFieldIsCaseInsensitive checks that
 // "enabled: No" is still recognized as apt's false spelling for the field.
-func TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive(t *testing.T) {
+func TestResolveAptAlpamonSources_Deb822EnabledFieldIsCaseInsensitive(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"),
 		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nenabled: No\n"), 0o644))
@@ -1206,7 +1206,7 @@ func TestResolveAptAlpamonSource_Deb822EnabledFieldIsCaseInsensitive(t *testing.
 	assert.Empty(t, resolveAptAlpamonSources())
 }
 
-func TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState(t *testing.T) {
+func TestResolveAptAlpamonSources_DisabledAlpamonStanzaDoesNotLeakEnabledState(t *testing.T) {
 	dir := t.TempDir()
 	content := "Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n" +
 		"\n" +
@@ -1217,7 +1217,7 @@ func TestResolveAptAlpamonSource_DisabledAlpamonStanzaDoesNotLeakEnabledState(t 
 	assert.Empty(t, resolveAptAlpamonSources())
 }
 
-func TestResolveAptAlpamonSource_FallsBackToListFileWhenSourcesFileIsDisabled(t *testing.T) {
+func TestResolveAptAlpamonSources_FallsBackToListFileWhenSourcesFileIsDisabled(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpacax_alpamon.sources"),
 		[]byte("Types: deb\nURIs: https://packagecloud.io/alpacax/alpamon/ubuntu/\nSuites: jammy\nComponents: main\nEnabled: no\n"), 0o644))
