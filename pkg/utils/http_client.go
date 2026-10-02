@@ -7,31 +7,72 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/rs/zerolog/log"
 )
 
-// NewHTTPClient creates an HTTP client with TLS configuration from global settings
+const (
+	// MaxIdleConnsPerHost covers the reporter threads plus collector workers posting to one host.
+	MaxIdleConnsPerHost = 16
+	IdleConnTimeout     = 90 * time.Second
+)
+
+type transportKey struct {
+	sslVerify bool
+	caCert    string
+}
+
+var (
+	transportMu     sync.Mutex
+	cachedKey       transportKey
+	cachedTransport *http.Transport
+)
+
+// NewHTTPClient returns a new client that shares one transport per (SSLVerify, CaCert) setting.
+// A transport whose CA file failed to load is not shared, so the next call retries the read.
 func NewHTTPClient() *http.Client {
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
+	key := transportKey{
+		sslVerify: config.GlobalSettings.SSLVerify,
+		caCert:    config.GlobalSettings.CaCert,
 	}
 
-	if config.GlobalSettings.CaCert != "" {
+	transportMu.Lock()
+	defer transportMu.Unlock()
+	if cachedTransport != nil && cachedKey == key {
+		return &http.Client{Transport: cachedTransport}
+	}
+	transport, ok := newTransport(key)
+	if ok {
+		cachedTransport, cachedKey = transport, key
+	}
+	return &http.Client{Transport: transport}
+}
+
+func newTransport(key transportKey) (*http.Transport, bool) {
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: !key.sslVerify,
+	}
+	ok := true
+
+	if key.caCert != "" {
 		caCertPool := x509.NewCertPool()
-		if caCert, err := os.ReadFile(config.GlobalSettings.CaCert); err == nil {
+		if caCert, err := os.ReadFile(key.caCert); err == nil {
 			caCertPool.AppendCertsFromPEM(caCert)
 			tlsConfig.RootCAs = caCertPool
 		} else {
 			log.Error().Err(err).Msg("Failed to read CA certificate.")
+			ok = false
 		}
 	}
 
-	return &http.Client{
-		Transport: &http.Transport{TLSClientConfig: tlsConfig},
-	}
+	return &http.Transport{
+		TLSClientConfig:     tlsConfig,
+		MaxIdleConnsPerHost: MaxIdleConnsPerHost,
+		IdleConnTimeout:     IdleConnTimeout,
+	}, ok
 }
 
 // putMaxResponseSize caps response bodies for Put. Read putMaxResponseSize+1
