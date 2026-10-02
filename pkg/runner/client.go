@@ -103,8 +103,8 @@ const (
 // pongs included, once the peer has answered a ping. Vars, not consts, so
 // tests can shrink them instead of waiting out real minutes.
 var (
-	keepaliveInterval = 30 * time.Second
-	keepaliveTimeout  = 120 * time.Second
+	keepaliveInterval = 15 * time.Second
+	keepaliveTimeout  = 45 * time.Second
 )
 
 // keepaliveWriteWait bounds one ping write, including the wait for a
@@ -139,10 +139,15 @@ func (k *connKeepalive) stop() {
 
 // readTimeout is the deadline the read loop arms before each read.
 func (k *connKeepalive) readTimeout() time.Duration {
+	return k.readTimeoutOr(ConnectionReadTimeout)
+}
+
+// readTimeoutOr is readTimeout with the caller's own fallback for a peer that has not answered a ping.
+func (k *connKeepalive) readTimeoutOr(fallback time.Duration) time.Duration {
 	if k != nil && k.pongSeen.Load() {
 		return keepaliveTimeout
 	}
-	return ConnectionReadTimeout
+	return fallback
 }
 
 // expired reports whether a read failed because a peer that has answered
@@ -440,7 +445,7 @@ func (wc *WebsocketClient) reconnectAfterSilence(ctx context.Context, conn *webs
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	log.Warn().Msg("No response from Alpacon for 2 minutes; reconnecting.")
+	log.Warn().Msgf("No response from Alpacon for %s; reconnecting.", keepaliveTimeout)
 
 	if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		log.Debug().Err(err).Msg("Failed to close the unresponsive websocket connection.")
