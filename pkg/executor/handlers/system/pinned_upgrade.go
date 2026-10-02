@@ -259,7 +259,7 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, target string,
 		if cur := h.installedAlpamonVersion(ctx); cur != "" && updater.CompareVersions(target, cur) < 0 {
 			verb = "downgrade"
 		}
-		code, out, err := run("yum", verb, "-y", "alpamon-"+target)
+		code, out, err := run(updater.YumArgv(verb, "alpamon-"+target)...)
 		if code != 0 {
 			return out, commandFailed("yum "+verb, code, err)
 		}

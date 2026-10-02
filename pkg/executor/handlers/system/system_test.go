@@ -33,6 +33,32 @@ const poolDrainWait = 5 * time.Second
 // the compile-time assertion it is.
 const _ = uint(poolDrainWait - delayedActionDelay - 1)
 
+// yumAlpamonRepoFile is the file the PackageCloud one-liner writes on an el9 host.
+const yumAlpamonRepoFile = `[alpacax_alpamon]
+name=alpacax_alpamon
+baseurl=https://packagecloud.io/alpacax/alpamon/el/9/$basearch
+repo_gpgcheck=1
+gpgcheck=0
+enabled=1
+
+[alpacax_alpamon-source]
+name=alpacax_alpamon-source
+baseurl=https://packagecloud.io/alpacax/alpamon/el/9/SRPMS
+enabled=1
+`
+
+const yumThirdPartyRepoFile = `# Docker CE
+[docker-ce-stable]
+name=Docker CE Stable
+baseurl=https://download.docker.com/linux/rhel/$releasever/$basearch/stable
+enabled=1
+
+[docker-ce-test]
+name=Docker CE Test
+baseurl=https://download.docker.com/linux/rhel/$releasever/$basearch/test
+enabled=0
+`
+
 type MockWSClient struct {
 	RestartCalled          bool
 	ShutDownCalled         bool
@@ -195,14 +221,15 @@ func (e *versionSteppingExecutor) RunAsUser(ctx context.Context, username string
 	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
 }
 
-// TestMain points aptSourcesDir at an empty temp dir for the whole package
-// run, so apt-path tests never read the host's real /etc/apt/sources.list.d.
+// TestMain points aptSourcesDir and updater.YumReposDirs at an empty temp dir for the whole
+// package run, so tests never read the host's real apt sources or yum repos.
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "alpamon-apt-sources")
+	dir, err := os.MkdirTemp("", "alpamon-pkg-sources")
 	if err != nil {
 		panic(err)
 	}
 	aptSourcesDir = dir
+	updater.YumReposDirs = []string{dir}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
@@ -502,18 +529,17 @@ func TestSystemHandler_Upgrade_UpToDate(t *testing.T) {
 	assert.Contains(t, output, "up-to-date")
 }
 
-func findExecutedShell(mockExec *common.MockCommandExecutor) *common.ExecutedCommand {
+func findLastExecuted(mockExec *common.MockCommandExecutor, name string) *common.ExecutedCommand {
 	cmds := mockExec.GetExecutedCommands()
 	for i := len(cmds) - 1; i >= 0; i-- {
-		if cmds[i].Name == "sh" {
+		if cmds[i].Name == name {
 			return &cmds[i]
 		}
 	}
 	return nil
 }
 
-// findExecutedAptInstall is the apt counterpart to findExecutedShell: apt's
-// install runs as its own argv rather than through "sh -c".
+// findExecutedAptInstall is findLastExecuted narrowed to apt-get install, past the per-source updates.
 func findExecutedAptInstall(mockExec *common.MockCommandExecutor) *common.ExecutedCommand {
 	cmds := mockExec.GetExecutedCommands()
 	for i := len(cmds) - 1; i >= 0; i-- {
@@ -996,6 +1022,7 @@ func TestSystemHandler_Upgrade_UsesZypper(t *testing.T) {
 	// refresh must survive refactors.
 	assert.GreaterOrEqual(t, refreshedAt, 0, "a zypper refresh command must run, got %+v", mockExec.GetExecutedCommands())
 	assert.LessOrEqual(t, refreshedAt, updatedAt, "the update must be preceded by a refresh, got %+v", mockExec.GetExecutedCommands())
+	assert.Nil(t, findLastExecuted(mockExec, "sh"), "the zypper update must not go through a shell")
 }
 
 // One unreachable repo anywhere on the host exits an unscoped refresh 4, so the
@@ -1058,7 +1085,7 @@ func TestSystemHandler_Upgrade_ScopesZypperToAlpamonRepo(t *testing.T) {
 					refreshed = true
 				// `update -r <alias>` would load only that repo and fail to
 				// resolve dependencies from the distribution repos.
-				case "sh -c zypper --non-interactive update alpamon":
+				case "zypper --non-interactive update alpamon":
 					updated = true
 				}
 			}
@@ -1450,7 +1477,7 @@ func TestSystemHandler_Upgrade_ZypperSkippedRepoDependsOnScope(t *testing.T) {
 			handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, mockVersions, nil)
 			setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
 			mockExec.SetResult("zypper --non-interactive lr --export -", 0, tt.repoExport, nil)
-			mockExec.SetResult("sh -c zypper --non-interactive update alpamon", 106, "", errors.New("exit status 106"))
+			mockExec.SetResult("zypper --non-interactive update alpamon", 106, "", errors.New("exit status 106"))
 
 			exitCode, _, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
 			assert.Equal(t, tt.want, exitCode)
@@ -1520,7 +1547,7 @@ func TestSystemHandler_Upgrade_ZypperRebootNeededIsSuccess(t *testing.T) {
 	setPackageManagerAndID(t, utils.PkgZypper, "opensuse-leap")
 
 	mockExec.SetResult(
-		"sh -c zypper --non-interactive refresh && zypper --non-interactive update alpamon alpamon-pam",
+		"zypper --non-interactive update alpamon alpamon-pam",
 		102, "", errors.New("exit status 102"),
 	)
 
@@ -1925,4 +1952,108 @@ func TestSystemHandler_Upgrade_PamIsNotComparedToAlpamonRelease(t *testing.T) {
 	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon-pam", "-y", "-o", "Acquire::Retries=3"}, install.Args,
 		"only alpamon-pam is behind; alpamon itself is already current")
 	assert.True(t, mockVersions.InvalidatePamCalled, "the cached pam version must be refreshed after the upgrade")
+}
+
+func setYumReposDirs(t *testing.T, dirs ...string) {
+	t.Helper()
+	orig := updater.YumReposDirs
+	updater.YumReposDirs = dirs
+	t.Cleanup(func() { updater.YumReposDirs = orig })
+}
+
+func writeYumRepos(t *testing.T, files map[string]string) {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644))
+	}
+	setYumReposDirs(t, dir)
+}
+
+func runYumUpgrade(t *testing.T) *common.MockCommandExecutor {
+	t.Helper()
+	mockExec := common.NewMockCommandExecutor(t)
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	t.Cleanup(func() { _ = workerPool.Shutdown(1 * time.Second) })
+	t.Cleanup(ctxManager.Shutdown)
+	mockVersions := &MockVersionResolver{LatestVersion: "v9.9.9", PamVersion: ""}
+	handler := NewSystemHandler(mockExec, &MockWSClient{}, ctxManager, workerPool, mockVersions, nil)
+	setPackageManagerAndID(t, utils.PkgYum, "rocky")
+
+	exitCode, _, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode)
+	return mockExec
+}
+
+func TestSystemHandler_Upgrade_YumSkipsUnavailableReposOtherThanAlpamons(t *testing.T) {
+	writeYumRepos(t, map[string]string{
+		"alpacax_alpamon.repo": yumAlpamonRepoFile,
+		"docker-ce.repo":       yumThirdPartyRepoFile,
+		"rocky.repo":           "[baseos]\nname=BaseOS\nmirrorlist=https://mirrors.rockylinux.org/mirrorlist?repo=BaseOS-$releasever\n",
+		"notes.txt":            "[not-a-repo]\nenabled=1\n",
+	})
+
+	mockExec := runYumUpgrade(t)
+
+	yum := findLastExecuted(mockExec, "yum")
+	require.NotNil(t, yum, "the upgrade must run yum as its own argv, got %+v", mockExec.GetExecutedCommands())
+	assert.Equal(t, []string{
+		"--setopt=*.skip_if_unavailable=True",
+		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
+		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
+		"update", "-y", "alpamon",
+	}, yum.Args)
+	assert.Nil(t, findLastExecuted(mockExec, "sh"), "the yum upgrade must not go through a shell")
+}
+
+// TestSystemHandler_Upgrade_YumKeepsEveryChannelRepoStrict checks that an rc or dev host's own repo stays strict;
+// a skip on it would turn that channel's outage into "Nothing to do." and a successful exit.
+func TestSystemHandler_Upgrade_YumKeepsEveryChannelRepoStrict(t *testing.T) {
+	writeYumRepos(t, map[string]string{
+		"alpacax_alpamon-latest.repo": "[alpacax_alpamon-latest]\nbaseurl=https://packagecloud.io/alpacax/alpamon-latest/el/9/$basearch\n",
+		"alpacax_alpamon-dev.repo":    "[alpacax_alpamon-dev]\nbaseurl=https://packagecloud.io/alpacax/alpamon-dev/el/9/$basearch\n",
+		"docker-ce.repo":              yumThirdPartyRepoFile,
+	})
+
+	mockExec := runYumUpgrade(t)
+
+	yum := findLastExecuted(mockExec, "yum")
+	require.NotNil(t, yum, "the upgrade must run yum as its own argv, got %+v", mockExec.GetExecutedCommands())
+	assert.Equal(t, []string{
+		"--setopt=*.skip_if_unavailable=True",
+		"--setopt=alpacax_alpamon-dev.skip_if_unavailable=False",
+		"--setopt=alpacax_alpamon-latest.skip_if_unavailable=False",
+		"update", "-y", "alpamon",
+	}, yum.Args)
+}
+
+func TestSystemHandler_Upgrade_YumAddsNoSetoptsWithoutAnAlpamonRepo(t *testing.T) {
+	for name, files := range map[string]map[string]string{
+		"no alpamon repo":       {"docker-ce.repo": yumThirdPartyRepoFile},
+		"alpamon repo disabled": {"alpacax_alpamon.repo": strings.ReplaceAll(yumAlpamonRepoFile, "enabled=1", "enabled=0"), "docker-ce.repo": yumThirdPartyRepoFile},
+		"alpamon url commented": {"alpacax_alpamon.repo": "[alpacax_alpamon]\n#baseurl=https://packagecloud.io/alpacax/alpamon/el/9/$basearch\n", "docker-ce.repo": yumThirdPartyRepoFile},
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeYumRepos(t, files)
+
+			mockExec := runYumUpgrade(t)
+
+			yum := findLastExecuted(mockExec, "yum")
+			require.NotNil(t, yum, "the upgrade must still run yum when no alpamon repo resolves, got %+v", mockExec.GetExecutedCommands())
+			assert.Equal(t, []string{"update", "-y", "alpamon"}, yum.Args,
+				"a skip on every repo would hide an outage of alpamon's own, so none may be set without it")
+		})
+	}
+}
+
+func TestSystemHandler_Upgrade_YumAddsNoSetoptsWhenTheReposDirIsMissing(t *testing.T) {
+	setYumReposDirs(t, filepath.Join(t.TempDir(), "missing"))
+
+	mockExec := runYumUpgrade(t)
+
+	yum := findLastExecuted(mockExec, "yum")
+	require.NotNil(t, yum, "an unreadable repos dir must not stop the upgrade, got %+v", mockExec.GetExecutedCommands())
+	assert.Equal(t, []string{"update", "-y", "alpamon"}, yum.Args)
 }

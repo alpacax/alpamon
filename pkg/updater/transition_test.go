@@ -371,6 +371,24 @@ func TestPackageRollbackCommand(t *testing.T) {
 	assert.Equal(t, []string{"yum", "install", "-y", "alpamon-2.6.0"}, got)
 }
 
+// TestPackageRollbackCommand_YumSkipsUnavailableReposOtherThanAlpamons pins that the rollback gets the
+// upgrade's skip options, so a broken third-party repo cannot block the reinstall either.
+func TestPackageRollbackCommand_YumSkipsUnavailableReposOtherThanAlpamons(t *testing.T) {
+	writeYumRepos(t, map[string]string{
+		"alpacax_alpamon.repo": yumAlpamonRepoFile,
+		"docker-ce.repo":       yumThirdPartyRepoFile,
+	})
+
+	got, err := PackageRollbackCommand(utils.PkgYum, "2.4.0", "2.5.0")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"yum",
+		"--setopt=*.skip_if_unavailable=True",
+		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
+		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
+		"downgrade", "-y", "alpamon-2.4.0"}, got)
+}
+
 func TestShellQuote(t *testing.T) {
 	assert.Equal(t, `'a b'`, shellQuote("a b"))
 	assert.Equal(t, `'it'\''s'`, shellQuote("it's"))
@@ -483,6 +501,31 @@ func TestGuardScript(t *testing.T) {
 		assert.Equal(t, "if [ -f "+m+" ] && grep -qxF '  \"guard_unit\": \"g1\",' "+m+"; then "+
 			"if 'apt-get' 'install' '-y' '--allow-downgrades' 'alpamon=2.4.0'; then echo 'g1' 0 > "+res+"; systemctl restart alpamon; "+
 			"else echo 'g1' 1 > "+res+"; fi; fi", script)
+	})
+
+	t.Run("yum guard passes the setopt glob to yum unexpanded", func(t *testing.T) {
+		p, bin, _, env := setup(t)
+		usePackageManager(t, utils.PkgYum)
+		p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
+		p.PackageManager, p.PreviousPackageVersion, p.GuardUnit = utils.PkgYum, "2.4.0", "alpamon-upgrade-guard-7"
+		require.NoError(t, WritePending(p))
+		writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile})
+		yumLog := filepath.Join(bin, "yum.log")
+		require.NoError(t, os.WriteFile(filepath.Join(bin, "yum"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+shellQuote(yumLog)+"\n"), 0755))
+		cwd := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(cwd, "--setopt=docker.skip_if_unavailable=True"), nil, 0644))
+		script, err := guardScript(p)
+		require.NoError(t, err)
+
+		cmd := exec.Command(sh, "-c", script)
+		cmd.Env, cmd.Dir = env, cwd
+		out, err := cmd.CombinedOutput()
+
+		require.NoError(t, err, string(out))
+		assert.Equal(t, "--setopt=*.skip_if_unavailable=True\n"+
+			"--setopt=alpacax_alpamon.skip_if_unavailable=False\n"+
+			"--setopt=alpacax_alpamon-source.skip_if_unavailable=False\n"+
+			"downgrade\n-y\nalpamon-2.4.0\n", fileContent(t, yumLog))
 	})
 }
 

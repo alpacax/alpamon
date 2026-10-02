@@ -37,14 +37,6 @@ const delayedActionDelay = 1 * time.Second
 // Blank so the unused linter reads it as the compile-time assertion it is.
 const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionDelay)
 
-// alpamonRepoURLs are the PackageCloud repositories .github/workflows/release.yml publishes the stable, rc and dev channels to.
-// The trailing slash keeps one from matching another as a prefix; packagecloud always puts a path segment after the repo name.
-var alpamonRepoURLs = []string{
-	"packagecloud.io/alpacax/alpamon/",
-	"packagecloud.io/alpacax/alpamon-latest/",
-	"packagecloud.io/alpacax/alpamon-dev/",
-}
-
 // zypper behavior the other package managers do not share; per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
 const (
 	// ZYPP_LOCKED: packagekit, an operator session, or a racing console update holds the libzypp lock.
@@ -237,7 +229,6 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	if needPam {
 		packages = append(packages, "alpamon-pam")
 	}
-	pkgList := strings.Join(packages, " ")
 
 	// A package upgrade must not run in the middle of a pinned upgrade: take the upgrade latch and
 	// refuse while a pinned attempt is still pending. Self updates take the latch themselves.
@@ -256,9 +247,6 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		}
 	}
 
-	var cmd string
-	// Set on the apt path only: apt's install needs no shell operator, so it runs
-	// as an argv directly instead of through "sh -c cmd" like yum and zypper.
 	var installArgv []string
 	// Set when the refresh was scoped to alpamon's own repo, which is what makes
 	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
@@ -279,7 +267,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		installArgv = append([]string{"apt-get", "install", "--only-upgrade"}, packages...)
 		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3")
 	case utils.PkgYum:
-		cmd = fmt.Sprintf("yum update -y %s", pkgList)
+		installArgv = updater.YumArgv("update", packages...)
 	case utils.PkgZypper:
 		// Refresh runs as its own command: chaining it with `&&` lets one unreachable repo exit 4 so update
 		// never runs, hiding the failing step. `update -r` loads only that repo, so it cannot resolve distro deps.
@@ -294,7 +282,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		if code != 0 {
 			return code, withZypperHint(code, out), rerr
 		}
-		cmd = fmt.Sprintf("zypper --non-interactive update %s", pkgList)
+		installArgv = append([]string{"zypper", "--non-interactive", "update"}, packages...)
 		versionsBefore = h.installedRPMVersions(ctx, packages)
 	case utils.PkgBrew, utils.PkgNone:
 		// darwin and windows have no package channel for alpamon, so the binary replaces itself. needAlpamon is
@@ -310,15 +298,11 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		return 1, fmt.Sprintf("Platform '%s' (package manager %q) not supported.", utils.PlatformLike, utils.PackageManager), nil
 	}
 
-	log.Debug().Msgf("Upgrading %s...", pkgList)
+	log.Debug().Msgf("Upgrading %s...", strings.Join(packages, " "))
 	// The proxy environment (nil without a package proxy) applies to the
 	// spawned package-manager process only, never to the agent process.
-	argv := installArgv
-	if argv == nil {
-		argv = []string{"sh", "-c", cmd}
-	}
 	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
-		return h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
+		return h.Executor.Exec(ctx, installArgv, "root", "root", packageProxyEnv(packageProxy), 0)
 	})
 	exitCode, err = normalizeZypperExit(exitCode, err, alpamonRepoRefreshed)
 	// Reported, not failed: a repository that has not published the new build yet
@@ -377,16 +361,12 @@ func (h *SystemHandler) resolveZypperAlpamonRepos(ctx context.Context) []string 
 			enabled, matched = true, false
 		case strings.HasPrefix(line, "enabled="):
 			enabled = strings.TrimPrefix(line, "enabled=") == "1"
-		case containsAlpamonRepo(line):
+		case updater.ContainsAlpamonRepo(line):
 			matched = true
 		}
 	}
 	flush()
 	return aliases
-}
-
-func containsAlpamonRepo(s string) bool {
-	return slices.ContainsFunc(alpamonRepoURLs, func(r string) bool { return strings.Contains(s, r) })
 }
 
 // version-release of each package rpm can report, skipping the rest.
@@ -745,7 +725,7 @@ func resolveAptAlpamonSources() []string {
 func hasActiveAlpamonLine(data string) bool {
 	for line := range strings.SplitSeq(data, "\n") {
 		line, _, _ = strings.Cut(line, "#") // one-line format: apt reads everything after # as a comment
-		if containsAlpamonRepo(line) {
+		if updater.ContainsAlpamonRepo(line) {
 			return true
 		}
 	}
@@ -770,7 +750,7 @@ func hasEnabledAlpamonStanza(data string) bool {
 			if key, value, ok := strings.Cut(trimmed, ":"); ok && strings.EqualFold(strings.TrimSpace(key), "enabled") {
 				enabled = !deb822FalseValues[strings.ToLower(strings.TrimSpace(value))]
 			}
-			if containsAlpamonRepo(trimmed) {
+			if updater.ContainsAlpamonRepo(trimmed) {
 				matched = true
 			}
 		}

@@ -28,7 +28,7 @@ sudo apt-get install alpamon
 sudo alpamon register --url https://<workspace> --token <TOKEN>
 ```
 
-**RHEL / Rocky / AlmaLinux / Fedora**
+**RHEL / Rocky / AlmaLinux / Fedora**—see [**docs/rhel.md**](docs/rhel.md) for how agent upgrades keep a broken third-party repository from failing the upgrade.
 ```bash
 curl -s https://packagecloud.io/install/repositories/alpacax/alpamon/script.rpm.sh?any=true | sudo bash
 sudo yum install alpamon
