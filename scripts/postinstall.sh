@@ -7,9 +7,11 @@ ALPAMON_LOG="/var/log/alpamon/alpamon.log"
 # Upper bound on how long a deferred restart waits for the agent's upgrade command,
 # matching the delay alpamon-restart.timer gives the systemd path.
 RESTART_WAIT_LIMIT=300
-# The agent posts a command's result from an in-memory queue that a restart drops. pkg/scheduler
-# retries a failed post 5 times, 1-16 s apart with a 5 s timeout, ending about 36 s after the first try.
+# A restart drops the agent's in-memory result queue, so the grace must outlast the retries
+# Reporter.query in pkg/scheduler gives a failed post of the command's result.
 RESTART_GRACE=60
+# Holds the token of the newest deferred restart; an older job that finds another token stands down.
+RESTART_TOKEN_FILE="/run/alpamon/restart.token"
 
 main() {
   check_root_permission
@@ -190,6 +192,8 @@ defer_alpamon_restart() {
   echo "Alpamon is running this upgrade itself; it will restart after the upgrade command exits."
   # set -m moves the job out of the command's process group, which the agent SIGKILLs on exit;
   # the log redirect keeps it off the output pipe the agent drains.
+  local token="$$.$(date +%s%N)"
+  echo "$token" > "$RESTART_TOKEN_FILE"
   set -m
   (
     waited=0
@@ -198,6 +202,11 @@ defer_alpamon_restart() {
       waited=$((waited + 1))
     done
     sleep "$RESTART_GRACE"
+    if [ "$(cat "$RESTART_TOKEN_FILE" 2>/dev/null)" != "$token" ]; then
+      echo "A later upgrade took over the deferred restart; leaving it to that one."
+      exit 0
+    fi
+    rm -f "$RESTART_TOKEN_FILE"
     restart_alpamon_process
   ) </dev/null >>"$ALPAMON_LOG" 2>&1 &
   set +m
