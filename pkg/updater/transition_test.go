@@ -719,3 +719,17 @@ func TestLoadPending_DiscardsMarkersItDidNotWrite(t *testing.T) {
 		assert.Len(t, entries, 1, "no temp file is left behind")
 	})
 }
+
+func TestRunPackageRollback_RunsNothingForAnUnusablePreviousVersion(t *testing.T) {
+	for _, pm := range []string{utils.PkgYum, utils.PkgApt} {
+		t.Run(pm, func(t *testing.T) {
+			yum := &fakeYum{results: []fakeYumResult{{0, "Complete!\n"}}}
+			p := &PendingUpgrade{PackageManager: pm, PreviousPackageVersion: "-oAPT::x"}
+
+			_, _, err := RunPackageRollback(yum.run, p, "2.5.0")
+
+			assert.ErrorContains(t, err, `previous package version "-oAPT::x" is not usable`)
+			assert.Empty(t, yum.argvs)
+		})
+	}
+}
