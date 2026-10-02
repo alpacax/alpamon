@@ -310,7 +310,7 @@ func TestHandleSessionEvent_MalformedJSONAcksFalse(t *testing.T) {
 	am := newTestAuthManager()
 	am.detectLocalAccess = true
 	am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-		t.Error("must not emit on malformed input")
+		assert.Fail(t, "must not emit on malformed input")
 	}
 
 	server, client := newSessionEventPipe(t)
