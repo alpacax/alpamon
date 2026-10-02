@@ -247,7 +247,15 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		}
 	}
 
+	// The proxy environment (nil without a package proxy) applies to the
+	// spawned package-manager process only, never to the agent process.
+	install := func(argv ...string) (int, string, error) {
+		return retryWhileZypperLocked(ctx, func() (int, string, error) {
+			return h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
+		})
+	}
 	var installArgv []string
+	runInstall := func() (int, string, error) { return install(installArgv...) }
 	// Set when the refresh was scoped to alpamon's own repo, which is what makes
 	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
 	var alpamonRepoRefreshed bool
@@ -267,7 +275,11 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		installArgv = append([]string{"apt-get", "install", "--only-upgrade"}, packages...)
 		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3")
 	case utils.PkgYum:
-		installArgv = updater.YumArgv("update", packages...)
+		// updater.RunYum builds its own argv, so installArgv stays unset.
+		runInstall = func() (int, string, error) {
+			code, out, _, err := updater.RunYum(install, nil, "update", packages...)
+			return code, out, err
+		}
 	case utils.PkgZypper:
 		// Refresh runs as its own command: chaining it with `&&` lets one unreachable repo exit 4 so update
 		// never runs, hiding the failing step. `update -r` loads only that repo, so it cannot resolve distro deps.
@@ -299,11 +311,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	}
 
 	log.Debug().Msgf("Upgrading %s...", strings.Join(packages, " "))
-	// The proxy environment (nil without a package proxy) applies to the
-	// spawned package-manager process only, never to the agent process.
-	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
-		return h.Executor.Exec(ctx, installArgv, "root", "root", packageProxyEnv(packageProxy), 0)
-	})
+	exitCode, output, err := runInstall()
 	exitCode, err = normalizeZypperExit(exitCode, err, alpamonRepoRefreshed)
 	// Reported, not failed: a repository that has not published the new build yet
 	// is routine, and the console already shows the version the agent reports.

@@ -69,6 +69,8 @@ type PendingUpgrade struct {
 	// MethodPackage: how to reinstall the outgoing version.
 	PackageManager         string `json:"package_manager,omitempty"`
 	PreviousPackageVersion string `json:"previous_package_version,omitempty"`
+	// DisabledYumRepos are the repos the yum install ran without, which the reinstall must skip too.
+	DisabledYumRepos []string `json:"disabled_yum_repos,omitempty"`
 
 	// GuardUnit names the scheduled guard, empty when none could be armed.
 	GuardUnit string    `json:"guard_unit,omitempty"`
@@ -90,6 +92,8 @@ var (
 	// PackageVersionRe bounds a package version before it becomes an
 	// install argument or part of the guard script.
 	PackageVersionRe = regexp.MustCompile(`^[0-9][0-9A-Za-z.+~:-]*$`)
+	// yumRepoIDRe is the character set yum 3 accepts in a repo id.
+	yumRepoIDRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
 )
 
 const maxMarkerTextLen = 512
@@ -143,7 +147,7 @@ func validatePending(p *PendingUpgrade) error {
 		if p.RollbackPath != current+rollbackSuffix {
 			return fmt.Errorf("rollback path %q is not beside the running binary", p.RollbackPath)
 		}
-		if p.PackageManager != "" || p.PreviousPackageVersion != "" {
+		if p.PackageManager != "" || p.PreviousPackageVersion != "" || len(p.DisabledYumRepos) > 0 {
 			return errors.New("binary marker carries package fields")
 		}
 	case MethodPackage:
@@ -155,6 +159,14 @@ func validatePending(p *PendingUpgrade) error {
 		}
 		if p.BinaryPath != "" || p.RollbackPath != "" {
 			return errors.New("package marker carries binary paths")
+		}
+		if len(p.DisabledYumRepos) > 0 && p.PackageManager != utils.PkgYum {
+			return fmt.Errorf("package manager %q disables no yum repos", p.PackageManager)
+		}
+		for _, id := range p.DisabledYumRepos {
+			if !yumRepoIDRe.MatchString(id) {
+				return fmt.Errorf("disabled yum repo %q is not a repo id", id)
+			}
 		}
 	default:
 		return fmt.Errorf("unknown upgrade method %q", p.Method)

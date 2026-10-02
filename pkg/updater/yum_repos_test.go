@@ -35,13 +35,16 @@ baseurl=https://download.docker.com/linux/rhel/$releasever/$basearch/test
 enabled=0
 `
 
-// TestMain points YumReposDirs at an empty temp dir, so no test reads the host's repo files.
+// TestMain points YumReposDirs at an empty temp dir and the yum binary and configs at none, so no test reads the host's.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "alpamon-yum-repos")
 	if err != nil {
 		panic(err)
 	}
 	YumReposDirs = []string{dir}
+	YumBinary = filepath.Join(dir, "missing-yum")
+	DnfConfFile = filepath.Join(dir, "missing-dnf.conf")
+	YumConfFile = filepath.Join(dir, "missing-yum.conf")
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
@@ -52,6 +55,22 @@ func setYumReposDirs(t *testing.T, dirs ...string) {
 	orig := YumReposDirs
 	YumReposDirs = dirs
 	t.Cleanup(func() { YumReposDirs = orig })
+}
+
+func setYumHost(t *testing.T, binary, dnfConf, yumConf string) {
+	t.Helper()
+	origBinary, origDnf, origYum := YumBinary, DnfConfFile, YumConfFile
+	YumBinary, DnfConfFile, YumConfFile = binary, dnfConf, yumConf
+	t.Cleanup(func() { YumBinary, DnfConfFile, YumConfFile = origBinary, origDnf, origYum })
+}
+
+// setDnfConf makes conf the main config of a dnf host: yum is a link to dnf.
+func setDnfConf(t *testing.T, conf string) {
+	t.Helper()
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "dnf-3"), "")
+	require.NoError(t, os.Symlink("dnf-3", filepath.Join(dir, "yum")))
+	setYumHost(t, filepath.Join(dir, "yum"), conf, filepath.Join(dir, "missing-yum.conf"))
 }
 
 func writeYumRepos(t *testing.T, files map[string]string) {
@@ -75,7 +94,7 @@ func TestYumSkipUnavailableSetopts_ReadsEnabledLikeYum(t *testing.T) {
 		"--setopt=on-yes.skip_if_unavailable=False",
 		"--setopt=on-true.skip_if_unavailable=False",
 		"--setopt=on-default.skip_if_unavailable=False",
-	}, yumSkipUnavailableSetopts())
+	}, yumSkipUnavailableSetopts(scanYumRepos()))
 }
 
 // TestYumSkipUnavailableSetopts_NamesNoThirdPartyRepo pins the glob: dnf5 exits 2 on a setopt naming an id it does not load.
@@ -90,7 +109,7 @@ func TestYumSkipUnavailableSetopts_NamesNoThirdPartyRepo(t *testing.T) {
 		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
-	}, yumSkipUnavailableSetopts())
+	}, yumSkipUnavailableSetopts(scanYumRepos()))
 }
 
 // TestYumSkipUnavailableSetopts_MatchesAlpamonOnlyInPackageLocations pins that a third-party repo merely
@@ -106,7 +125,7 @@ func TestYumSkipUnavailableSetopts_MatchesAlpamonOnlyInPackageLocations(t *testi
 		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
-	}, yumSkipUnavailableSetopts())
+	}, yumSkipUnavailableSetopts(scanYumRepos()))
 }
 
 func TestYumSkipUnavailableSetopts_MatchesAlpamonOnAContinuedBaseurlLine(t *testing.T) {
@@ -119,7 +138,7 @@ func TestYumSkipUnavailableSetopts_MatchesAlpamonOnAContinuedBaseurlLine(t *test
 	assert.Equal(t, []string{
 		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
-	}, yumSkipUnavailableSetopts())
+	}, yumSkipUnavailableSetopts(scanYumRepos()))
 }
 
 func TestYumSkipUnavailableSetopts_ReadsEveryReposDir(t *testing.T) {
@@ -128,11 +147,268 @@ func TestYumSkipUnavailableSetopts_ReadsEveryReposDir(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(distro, "alpacax_alpamon.repo"), []byte(yumAlpamonRepoFile), 0o644))
 	setYumReposDirs(t, etc, filepath.Join(t.TempDir(), "missing"), distro)
 
-	got := yumSkipUnavailableSetopts()
+	got := yumSkipUnavailableSetopts(scanYumRepos())
 
 	assert.Equal(t, []string{
 		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
 	}, got)
+}
+
+func writeTestFile(t *testing.T, path, body string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+}
+
+func TestYumSkipUnavailableSetopts_ReadsOnlyTheReposdirTheMainConfigSets(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "default", "alpacax_alpamon.repo"), yumAlpamonRepoFile)
+	writeTestFile(t, filepath.Join(root, "a", "alpacax_alpamon-dev.repo"), "[alpacax_alpamon-dev]\nbaseurl=https://packagecloud.io/alpacax/alpamon-dev/el/9/$basearch\n")
+	writeTestFile(t, filepath.Join(root, "b", "alpacax_alpamon-latest.repo"), "[alpacax_alpamon-latest]\nbaseurl=https://packagecloud.io/alpacax/alpamon-latest/el/9/$basearch\n")
+	conf := filepath.Join(root, "dnf.conf")
+	writeTestFile(t, conf, "[main]\ngpgcheck=1\n#reposdir=/nowhere\nreposdir = "+filepath.Join(root, "a")+", "+filepath.Join(root, "b")+"\n")
+	setYumReposDirs(t, filepath.Join(root, "default"))
+	setDnfConf(t, conf)
+
+	got := yumSkipUnavailableSetopts(scanYumRepos())
+
+	assert.Equal(t, []string{
+		"--setopt=*.skip_if_unavailable=True",
+		"--setopt=alpacax_alpamon-dev.skip_if_unavailable=False",
+		"--setopt=alpacax_alpamon-latest.skip_if_unavailable=False",
+	}, got, "reposdir replaces the default directories, as yum and dnf read it")
+}
+
+func TestYumReposDirs_FallsBackToTheDefaults(t *testing.T) {
+	root := t.TempDir()
+	for name, conf := range map[string]string{
+		"no reposdir":            "[main]\ngpgcheck=1\n",
+		"reposdir outside main":  "[main]\ngpgcheck=1\n\n[extra]\nreposdir=/nowhere\n",
+		"empty reposdir":         "[main]\nreposdir=\n",
+		"commented out reposdir": "[main]\n# reposdir=/nowhere\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "dnf.conf")
+			writeTestFile(t, path, conf)
+			setYumReposDirs(t, root)
+			setDnfConf(t, path)
+
+			assert.Equal(t, []string{root}, yumReposDirs())
+		})
+	}
+}
+
+func TestYumReposDirs_ReadsReposdirAsYumDoes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		conf string
+		want []string
+	}{
+		"continued on indented lines": {"[main]\nreposdir=/opt/a\n  /opt/b, /opt/c\ngpgcheck=1\n  /opt/not-a-reposdir\n", []string{"/opt/a", "/opt/b", "/opt/c"}},
+		"set twice":                   {"[main]\nreposdir=/opt/first\nreposdir=/opt/last\n", []string{"/opt/last"}},
+		"continued past a comment":    {"[main]\nreposdir=/opt/a\n# note\n  /opt/b\n", []string{"/opt/a", "/opt/b"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "dnf.conf")
+			writeTestFile(t, path, tc.conf)
+			setDnfConf(t, path)
+
+			assert.Equal(t, tc.want, yumReposDirs())
+		})
+	}
+}
+
+func TestYumReposDirs_ReadsTheConfigOfTheImplementationBehindYum(t *testing.T) {
+	for name, tc := range map[string]struct {
+		binary func(t *testing.T, dir string) string
+		want   []string
+	}{
+		"yum linked to dnf reads dnf.conf": {
+			binary: func(t *testing.T, dir string) string {
+				writeTestFile(t, filepath.Join(dir, "bin", "dnf5"), "")
+				require.NoError(t, os.Symlink("dnf5", filepath.Join(dir, "bin", "yum")))
+				return filepath.Join(dir, "bin", "yum")
+			},
+			want: []string{"/opt/dnf-repos"},
+		},
+		"yum 3 reads yum.conf even beside dnf.conf": {
+			binary: func(t *testing.T, dir string) string {
+				writeTestFile(t, filepath.Join(dir, "bin", "yum"), "#!/usr/bin/python\n")
+				return filepath.Join(dir, "bin", "yum")
+			},
+			want: []string{"/opt/yum-repos"},
+		},
+		"no yum binary reads dnf.conf": {
+			binary: func(t *testing.T, dir string) string { return filepath.Join(dir, "bin", "missing") },
+			want:   []string{"/opt/dnf-repos"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			dnfConf, yumConf := filepath.Join(dir, "dnf.conf"), filepath.Join(dir, "yum.conf")
+			writeTestFile(t, dnfConf, "[main]\nreposdir=/opt/dnf-repos\n")
+			writeTestFile(t, yumConf, "[main]\nreposdir=/opt/yum-repos\n")
+			setYumHost(t, tc.binary(t, dir), dnfConf, yumConf)
+
+			assert.Equal(t, tc.want, yumReposDirs())
+		})
+	}
+}
+
+// yumMirrorlistFailure is the tail of what yum 3 prints when a repo's mirrorlist cannot be reached.
+func yumMirrorlistFailure(id string) string {
+	return " One of the configured repositories failed (Unknown),\n and yum doesn't have enough cached data to continue.\n" +
+		"Cannot find a valid baseurl for repo: " + id + "/7/x86_64\n"
+}
+
+type fakeYum struct {
+	results []fakeYumResult
+	argvs   [][]string
+}
+
+type fakeYumResult struct {
+	code int
+	out  string
+}
+
+func (f *fakeYum) run(argv ...string) (int, string, error) {
+	f.argvs = append(f.argvs, argv)
+	r := f.results[min(len(f.argvs), len(f.results))-1]
+	return r.code, r.out, nil
+}
+
+const yumCentOSRepoFile = `[base]
+mirrorlist=http://mirrorlist.centos.org/?release=$releasever&arch=$basearch&repo=os
+[extras]
+mirrorlist=http://mirrorlist.centos.org/?release=$releasever&arch=$basearch&repo=extras
+`
+
+func TestRunYum_DisablesEachRepoWhoseMirrorlistFails(t *testing.T) {
+	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
+	yum := &fakeYum{results: []fakeYumResult{
+		{1, yumMirrorlistFailure("base")},
+		{1, yumMirrorlistFailure("extras")},
+		{0, "Updated:\n  alpamon.x86_64 0:9.9.9-1\n"},
+	}}
+
+	code, out, disabled, err := RunYum(yum.run, nil, "update", "alpamon")
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, code)
+	assert.Equal(t, []string{"base", "extras"}, disabled)
+	strict := []string{
+		"--setopt=*.skip_if_unavailable=True",
+		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
+		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
+	}
+	assert.Equal(t, [][]string{
+		append(append([]string{"yum"}, strict...), "update", "-y", "alpamon"),
+		append(append([]string{"yum"}, strict...), "--disablerepo=base", "update", "-y", "alpamon"),
+		append(append([]string{"yum"}, strict...), "--disablerepo=base", "--disablerepo=extras", "update", "-y", "alpamon"),
+	}, yum.argvs)
+	assert.Equal(t, "Updated:\n  alpamon.x86_64 0:9.9.9-1\n\nDisabled yum repos whose mirrorlist could not be reached: base, extras.", out)
+}
+
+func TestRunYum_DoesNotRetry(t *testing.T) {
+	for name, tc := range map[string]struct {
+		files  map[string]string
+		result fakeYumResult
+	}{
+		"after success": {
+			files:  map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile},
+			result: fakeYumResult{0, "Cannot find a valid baseurl for repo: base/7/x86_64\n"},
+		},
+		"when alpamon's own repo fails": {
+			files:  map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile},
+			result: fakeYumResult{1, yumMirrorlistFailure("alpacax_alpamon")},
+		},
+		"when alpamon's repo does not resolve": {
+			files:  map[string]string{"CentOS-Base.repo": yumCentOSRepoFile},
+			result: fakeYumResult{1, yumMirrorlistFailure("base")},
+		},
+		"for a repo no repo file defines": {
+			files:  map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile},
+			result: fakeYumResult{1, yumMirrorlistFailure("base")},
+		},
+		"for a disabled repo": {
+			files:  map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": "[base]\nenabled=0\n"},
+			result: fakeYumResult{1, yumMirrorlistFailure("base")},
+		},
+		"for a failure that names no repo": {
+			files:  map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile},
+			result: fakeYumResult{1, "Error: Nothing to do\n"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeYumRepos(t, tc.files)
+			yum := &fakeYum{results: []fakeYumResult{tc.result}}
+
+			code, out, disabled, err := RunYum(yum.run, nil, "update", "alpamon")
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.result.code, code)
+			assert.Equal(t, tc.result.out, out)
+			assert.Empty(t, disabled)
+			assert.Len(t, yum.argvs, 1)
+		})
+	}
+}
+
+// TestRunYum_StopsWhenADisabledRepoIsReportedAgain pins that the loop ends on repeated output instead of spinning.
+func TestRunYum_StopsWhenADisabledRepoIsReportedAgain(t *testing.T) {
+	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
+	yum := &fakeYum{results: []fakeYumResult{{1, yumMirrorlistFailure("base")}}}
+
+	code, out, _, _ := RunYum(yum.run, nil, "update", "alpamon")
+
+	assert.Equal(t, 1, code)
+	assert.Len(t, yum.argvs, 2)
+	assert.Contains(t, out, "Disabled yum repos whose mirrorlist could not be reached: base.")
+}
+
+// TestRunYum_StartsWithTheReposAnEarlierRunDisabled pins what the rollback relies on: it does not pay
+// again for a repo the install already found unreachable, and it reports every repo it ran without.
+func TestRunYum_StartsWithTheReposAnEarlierRunDisabled(t *testing.T) {
+	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
+	yum := &fakeYum{results: []fakeYumResult{{1, yumMirrorlistFailure("extras")}, {0, "Complete!\n"}}}
+
+	code, out, disabled, err := RunYum(yum.run, []string{"base"}, "downgrade", "alpamon-2.4.0")
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, code)
+	assert.Equal(t, []string{"base", "extras"}, disabled)
+	strict := []string{
+		"--setopt=*.skip_if_unavailable=True",
+		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
+		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
+	}
+	assert.Equal(t, [][]string{
+		append(append([]string{"yum"}, strict...), "--disablerepo=base", "downgrade", "-y", "alpamon-2.4.0"),
+		append(append([]string{"yum"}, strict...), "--disablerepo=base", "--disablerepo=extras", "downgrade", "-y", "alpamon-2.4.0"),
+	}, yum.argvs)
+	assert.Equal(t, "Complete!\n\nDisabled yum repos whose mirrorlist could not be reached: base, extras.", out)
+}
+
+func TestWithDisabledRepos_LeavesTheOptsItWasGivenUntouched(t *testing.T) {
+	opts := make([]string, 1, 4)
+	opts[0] = "--setopt=*.skip_if_unavailable=True"
+
+	first := withDisabledRepos(opts, []string{"base"})
+	withDisabledRepos(opts, []string{"extras"})
+
+	assert.Equal(t, []string{"--setopt=*.skip_if_unavailable=True", "--disablerepo=base"}, first)
+}
+
+func TestRunYum_LeavesTheCallersDisabledListUntouched(t *testing.T) {
+	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
+	yum := &fakeYum{results: []fakeYumResult{{1, yumMirrorlistFailure("extras")}, {0, "Complete!\n"}}}
+	prior := make([]string, 1, 4)
+	prior[0] = "base"
+
+	_, _, disabled, err := RunYum(yum.run, prior, "downgrade", "alpamon-2.4.0")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"base", "extras"}, disabled)
+	assert.Equal(t, []string{"base", ""}, prior[:2])
 }

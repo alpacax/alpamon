@@ -354,19 +354,19 @@ func TestPackageRollbackCommand(t *testing.T) {
 		utils.PkgYum:    {"yum", "downgrade", "-y", "alpamon-2.4.0"},
 		utils.PkgZypper: {"zypper", "--non-interactive", "install", "--oldpackage", "alpamon=2.4.0"},
 	} {
-		got, err := PackageRollbackCommand(pm, "2.4.0", "2.5.0")
+		got, err := PackageRollbackCommand(pm, "2.4.0", "2.5.0", nil)
 		require.NoError(t, err)
 		assert.Equal(t, want, got)
 	}
-	_, err := PackageRollbackCommand(utils.PkgApt, "", "2.5.0")
+	_, err := PackageRollbackCommand(utils.PkgApt, "", "2.5.0", nil)
 	assert.Error(t, err)
-	_, err = PackageRollbackCommand(utils.PkgApt, "-oAPT::x", "2.5.0")
+	_, err = PackageRollbackCommand(utils.PkgApt, "-oAPT::x", "2.5.0", nil)
 	assert.Error(t, err, "a version that could read as an option is refused")
-	_, err = PackageRollbackCommand(utils.PkgBrew, "2.4.0", "2.5.0")
+	_, err = PackageRollbackCommand(utils.PkgBrew, "2.4.0", "2.5.0", nil)
 	assert.Error(t, err)
 
 	// After a pinned downgrade the version to go back to is the newer one.
-	got, err := PackageRollbackCommand(utils.PkgYum, "2.6.0", "2.5.0")
+	got, err := PackageRollbackCommand(utils.PkgYum, "2.6.0", "2.5.0", nil)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"yum", "install", "-y", "alpamon-2.6.0"}, got)
 }
@@ -379,7 +379,7 @@ func TestPackageRollbackCommand_YumSkipsUnavailableReposOtherThanAlpamons(t *tes
 		"docker-ce.repo":       yumThirdPartyRepoFile,
 	})
 
-	got, err := PackageRollbackCommand(utils.PkgYum, "2.4.0", "2.5.0")
+	got, err := PackageRollbackCommand(utils.PkgYum, "2.4.0", "2.5.0", nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"yum",
@@ -387,6 +387,35 @@ func TestPackageRollbackCommand_YumSkipsUnavailableReposOtherThanAlpamons(t *tes
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
 		"downgrade", "-y", "alpamon-2.4.0"}, got)
+}
+
+// TestPackageRollbackCommand_YumDisablesTheReposTheInstallDisabled pins that the guard's and the resumed
+// reinstall run without the repos the install had to disable, which would otherwise stop them the same way.
+func TestPackageRollbackCommand_YumDisablesTheReposTheInstallDisabled(t *testing.T) {
+	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
+
+	got, err := PackageRollbackCommand(utils.PkgYum, "2.4.0", "2.5.0", []string{"base", "extras"})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"yum",
+		"--setopt=*.skip_if_unavailable=True",
+		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
+		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
+		"--disablerepo=base", "--disablerepo=extras",
+		"downgrade", "-y", "alpamon-2.4.0"}, got)
+}
+
+func TestGuardScript_YumDisablesTheReposTheInstallDisabled(t *testing.T) {
+	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
+	p := &PendingUpgrade{
+		Method: MethodPackage, PackageManager: utils.PkgYum, PreviousPackageVersion: "2.4.0", ToVersion: "2.5.0",
+		GuardUnit: "alpamon-upgrade-guard-1", DisabledYumRepos: []string{"base"},
+	}
+
+	script, err := guardScript(p)
+
+	require.NoError(t, err)
+	assert.Contains(t, script, "'--disablerepo=base' 'downgrade' '-y' 'alpamon-2.4.0'")
 }
 
 func TestShellQuote(t *testing.T) {
@@ -529,6 +558,39 @@ func TestGuardScript(t *testing.T) {
 	})
 }
 
+func yumPackageMarker(t *testing.T) *PendingUpgrade {
+	t.Helper()
+	usePackageManager(t, utils.PkgYum)
+	p := binaryMarker(t, t.TempDir())
+	p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
+	p.PackageManager, p.PreviousPackageVersion = utils.PkgYum, "2.4.0"
+	return p
+}
+
+func TestMarker_KeepsTheYumReposTheInstallDisabled(t *testing.T) {
+	useTempMarkerDir(t)
+	want := yumPackageMarker(t)
+	want.DisabledYumRepos = []string{"base", "epel-7_x86.64:a"}
+
+	require.NoError(t, WritePending(want))
+	got, err := LoadPending()
+
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestWritePending_RefusesADisabledYumRepoThatIsNotARepoID(t *testing.T) {
+	for _, id := range []string{"", "base' ; reboot", "base/7", "a b"} {
+		t.Run(id, func(t *testing.T) {
+			useTempMarkerDir(t)
+			p := yumPackageMarker(t)
+			p.DisabledYumRepos = []string{id}
+
+			assert.Error(t, WritePending(p))
+		})
+	}
+}
+
 func TestLoadPending_DiscardsMarkersItDidNotWrite(t *testing.T) {
 	valid := func(t *testing.T) *PendingUpgrade {
 		p := binaryMarker(t, t.TempDir())
@@ -552,6 +614,12 @@ func TestLoadPending_DiscardsMarkersItDidNotWrite(t *testing.T) {
 		{"foreign package manager", func(p *PendingUpgrade) {
 			p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
 			p.PackageManager, p.PreviousPackageVersion = "pacman", "2.4.0"
+		}},
+		{"disabled yum repos on a binary marker", func(p *PendingUpgrade) { p.DisabledYumRepos = []string{"base"} }},
+		{"disabled yum repos on another package manager", func(p *PendingUpgrade) {
+			p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
+			p.PackageManager, p.PreviousPackageVersion = utils.PackageManager, "2.4.0"
+			p.DisabledYumRepos = []string{"base"}
 		}},
 		{"option-shaped package version", func(p *PendingUpgrade) {
 			p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
@@ -650,4 +718,18 @@ func TestLoadPending_DiscardsMarkersItDidNotWrite(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, entries, 1, "no temp file is left behind")
 	})
+}
+
+func TestRunPackageRollback_RunsNothingForAnUnusablePreviousVersion(t *testing.T) {
+	for _, pm := range []string{utils.PkgYum, utils.PkgApt} {
+		t.Run(pm, func(t *testing.T) {
+			yum := &fakeYum{results: []fakeYumResult{{0, "Complete!\n"}}}
+			p := &PendingUpgrade{PackageManager: pm, PreviousPackageVersion: "-oAPT::x"}
+
+			_, _, err := RunPackageRollback(yum.run, p, "2.5.0")
+
+			assert.ErrorContains(t, err, `previous package version "-oAPT::x" is not usable`)
+			assert.Empty(t, yum.argvs)
+		})
+	}
 }

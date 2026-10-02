@@ -716,3 +716,59 @@ func TestSystemHandler_PinnedUpgrade_YumSkipsUnavailableReposOtherThanAlpamons(t
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
 		"install", "-y", "alpamon-2.5.0"), "the pinned install must skip every repo but alpamon's, got %+v", h.exec.GetExecutedCommands())
 }
+
+func TestSystemHandler_PinnedUpgrade_YumDisablesARepoWhoseMirrorlistFails(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgYum)
+	writeYumRepos(t, map[string]string{
+		"alpacax_alpamon.repo": yumAlpamonRepoFile,
+		"CentOS-Base.repo":     "[base]\nmirrorlist=http://mirrorlist.centos.org/?release=$releasever&repo=os\n",
+	})
+	h.exec.SetResult("rpm -q --qf %{VERSION} alpamon", 0, "2.4.0", nil)
+	strict := "--setopt=*.skip_if_unavailable=True --setopt=alpacax_alpamon.skip_if_unavailable=False --setopt=alpacax_alpamon-source.skip_if_unavailable=False"
+	h.exec.SetResult("yum "+strict+" install -y alpamon-2.5.0", 1, "Cannot find a valid baseurl for repo: base/7/x86_64\n", nil)
+
+	_, _, _ = h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
+
+	assert.True(t, h.ran("yum", append(strings.Fields(strict), "--disablerepo=base", "install", "-y", "alpamon-2.5.0")...),
+		"the pinned install must rerun with the unreachable repo disabled, got %+v", h.exec.GetExecutedCommands())
+}
+
+func TestSystemHandler_PinnedUpgrade_YumRecordsTheReposItDisabledForTheGuard(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgYum)
+	h.handler.Executor = &rpmSequence{MockCommandExecutor: h.exec, versions: []string{"2.4.0", "2.4.0", "2.5.0"}}
+	writeYumRepos(t, map[string]string{
+		"alpacax_alpamon.repo": yumAlpamonRepoFile,
+		"CentOS-Base.repo":     "[base]\nmirrorlist=http://mirrorlist.centos.org/?release=$releasever&repo=os\n",
+	})
+	strict := "--setopt=*.skip_if_unavailable=True --setopt=alpacax_alpamon.skip_if_unavailable=False --setopt=alpacax_alpamon-source.skip_if_unavailable=False"
+	h.exec.SetResult("yum "+strict+" install -y alpamon-2.5.0", 1, "Cannot find a valid baseurl for repo: base/7/x86_64\n", nil)
+
+	_, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
+
+	require.NoError(t, err)
+	marker, err := updater.LoadPending()
+	require.NoError(t, err)
+	require.NotNil(t, marker, "the marker stays for the health check")
+	assert.Equal(t, []string{"base"}, marker.DisabledYumRepos, "the re-armed guard must reinstall without the repo the install disabled")
+}
+
+func TestSystemHandler_PinnedUpgrade_YumUndoDisablesTheReposTheInstallDisabled(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgYum)
+	h.handler.Executor = &rpmSequence{MockCommandExecutor: h.exec, versions: []string{"2.4.0", "2.4.0", "2.6.0", "2.4.0"}}
+	writeYumRepos(t, map[string]string{
+		"alpacax_alpamon.repo": yumAlpamonRepoFile,
+		"CentOS-Base.repo":     "[base]\nmirrorlist=http://mirrorlist.centos.org/?release=$releasever&repo=os\n",
+	})
+	strict := "--setopt=*.skip_if_unavailable=True --setopt=alpacax_alpamon.skip_if_unavailable=False --setopt=alpacax_alpamon-source.skip_if_unavailable=False"
+	h.exec.SetResult("yum "+strict+" install -y alpamon-2.5.0", 1, "Cannot find a valid baseurl for repo: base/7/x86_64\n", nil)
+
+	exitCode, _, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0"})
+
+	require.Error(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.True(t, h.ran("yum", append(strings.Fields(strict), "--disablerepo=base", "downgrade", "-y", "alpamon-2.4.0")...),
+		"the reinstall must skip the repo the install disabled, got %+v", h.exec.GetExecutedCommands())
+	marker, err := updater.LoadPending()
+	require.NoError(t, err)
+	assert.Nil(t, marker, "the reinstall restored the previous version")
+}

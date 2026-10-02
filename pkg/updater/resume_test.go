@@ -235,6 +235,30 @@ func TestResumePending_PackageRollback(t *testing.T) {
 	})
 }
 
+func TestResumePending_YumPackageRollbackDisablesTheReposTheInstallDisabled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newResumeFixture(t, time.Minute)
+		f.marker.Method = MethodPackage
+		f.marker.BinaryPath, f.marker.RollbackPath = "", ""
+		usePackageManager(t, utils.PkgYum)
+		writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
+		f.marker.PackageManager = utils.PkgYum
+		f.marker.PreviousPackageVersion = "2.4.0"
+		f.marker.DisabledYumRepos = []string{"base"}
+		require.NoError(t, WritePending(f.marker))
+
+		_, done := ResumePending(t.Context(), f.deps)
+		<-done
+
+		assert.Equal(t, [][]string{{"yum",
+			"--setopt=*.skip_if_unavailable=True",
+			"--setopt=alpacax_alpamon.skip_if_unavailable=False",
+			"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
+			"--disablerepo=base",
+			"downgrade", "-y", "alpamon-2.4.0"}}, f.runner.snapshot())
+	})
+}
+
 func TestResumePending_FailedPackageRollbackRearmsTheGuard(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newResumeFixture(t, time.Minute)

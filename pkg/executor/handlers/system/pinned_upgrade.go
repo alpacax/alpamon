@@ -157,7 +157,7 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 		return h.failPinned(report, updater.Classify(updater.ClassUnknown, err), "")
 	}
 
-	output, err := h.installPinnedPackage(ctx, target, env)
+	output, err := h.installPinnedPackage(ctx, marker, env)
 	installed := h.installedAlpamonVersion(ctx)
 	if err == nil && !packageVersionMatches(installed, target) {
 		err = fmt.Errorf("package database reports alpamon %q after installing %s", installed, target)
@@ -198,15 +198,13 @@ func (h *SystemHandler) undoPackageChange(ctx context.Context, marker *updater.P
 	case updater.GuardRunning:
 		return output + "\nThe upgrade guard is still reinstalling the previous version."
 	}
-	argv, err := updater.PackageRollbackCommand(utils.PackageManager, previous, installed)
-	if err == nil {
-		var code int
-		var out string
-		code, out, err = h.Executor.Exec(ctx, argv, "root", "root", env, 0)
+	run := func(argv ...string) (int, string, error) { return h.Executor.Exec(ctx, argv, "root", "root", env, 0) }
+	code, out, err := updater.RunPackageRollback(run, marker, installed)
+	if out != "" {
 		output = strings.TrimRight(output, "\n") + "\n\n" + out
-		if code != 0 && err == nil {
-			err = fmt.Errorf("exited %d", code)
-		}
+	}
+	if code != 0 && err == nil {
+		err = fmt.Errorf("exited %d", code)
 	}
 	if err == nil && h.installedAlpamonVersion(ctx) == previous {
 		abort()
@@ -224,9 +222,10 @@ func (h *SystemHandler) undoPackageChange(ctx context.Context, marker *updater.P
 	return output + fmt.Sprintf("\nCould not reinstall the previous version %s; the upgrade guard retries it.", previous)
 }
 
-// installPinnedPackage runs the version-pinned install for the host's package
-// manager and returns its output. Arguments are passed without a shell.
-func (h *SystemHandler) installPinnedPackage(ctx context.Context, target string, env map[string]string) (string, error) {
+// installPinnedPackage runs the version-pinned install of marker.ToVersion for the host's package manager and
+// returns its output; on yum it records the repos it disabled on marker. Arguments are passed without a shell.
+func (h *SystemHandler) installPinnedPackage(ctx context.Context, marker *updater.PendingUpgrade, env map[string]string) (string, error) {
+	target := marker.ToVersion
 	run := func(args ...string) (int, string, error) {
 		return retryWhileZypperLocked(ctx, func() (int, string, error) {
 			return h.Executor.Exec(ctx, args, "root", "root", env, 0)
@@ -259,7 +258,8 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, target string,
 		if cur := h.installedAlpamonVersion(ctx); cur != "" && updater.CompareVersions(target, cur) < 0 {
 			verb = "downgrade"
 		}
-		code, out, err := run(updater.YumArgv(verb, "alpamon-"+target)...)
+		code, out, disabled, err := updater.RunYum(run, nil, verb, "alpamon-"+target)
+		marker.DisabledYumRepos = disabled
 		if code != 0 {
 			return out, commandFailed("yum "+verb, code, err)
 		}
