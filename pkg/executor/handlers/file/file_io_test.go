@@ -59,7 +59,7 @@ func TestWriteFileAs_DirectPath_RemovesPartialOnReadError(t *testing.T) {
 	require.Error(t, err, "expected writeFileAs to return error")
 
 	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr), "expected partial file removed, stat err = %v", statErr)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "expected partial file removed")
 }
 
 // TestWriteFileAs_DirectPath_CreatesParentDir verifies MkdirAll runs before OpenFile.
