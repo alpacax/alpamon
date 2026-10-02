@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"time"
 
@@ -90,6 +91,7 @@ func isAuthRejection(err error) bool {
 // then says nothing parks this call, and with it a shutdown, indefinitely.
 func dialWebsocket(ctx context.Context, url string, header http.Header) (*websocket.Conn, error) {
 	dialer := websocket.Dialer{
+		NetDialContext:   (&net.Dialer{Control: setTCPUserTimeout}).DialContext,
 		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
