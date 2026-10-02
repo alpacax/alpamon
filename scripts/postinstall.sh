@@ -108,8 +108,7 @@ setup_alpamon() {
     return 1  # Return non-zero to skip start_systemd_service
   fi
 
-  "$ALPAMON_BIN" setup
-  if [ $? -ne 0 ]; then
+  if ! "$ALPAMON_BIN" setup; then
     echo "Error: Alpamon setup command failed."
     exit 1
   fi
@@ -193,7 +192,8 @@ defer_alpamon_restart() {
   echo "Alpamon is running this upgrade itself; it will restart after the upgrade command exits."
   # set -m moves the job out of the command's process group, which the agent SIGKILLs on exit;
   # the log redirect keeps it off the output pipe the agent drains.
-  local token="$$.$(date +%s%N)"
+  local token
+  token="$$.$(date +%s%N)"
   echo "$token" > "$RESTART_TOKEN_FILE"
   set -m
   (
