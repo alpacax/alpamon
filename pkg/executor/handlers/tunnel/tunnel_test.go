@@ -231,21 +231,5 @@ func TestTunnelHandler_Commands(t *testing.T) {
 	handler := NewTunnelHandler(common.NewMockCommandExecutor(t))
 
 	commands := handler.Commands()
-	assert.Len(t, commands, 2, "Commands() command count")
-
-	expectedCmds := map[string]bool{
-		"opentunnel":  false,
-		"closetunnel": false,
-	}
-
-	for _, cmd := range commands {
-		_, ok := expectedCmds[cmd]
-		if assert.True(t, ok, "Unexpected command: %s", cmd) {
-			expectedCmds[cmd] = true
-		}
-	}
-
-	for cmd, found := range expectedCmds {
-		assert.True(t, found, "Expected command not found: %s", cmd)
-	}
+	assert.ElementsMatch(t, []string{"opentunnel", "closetunnel"}, commands)
 }

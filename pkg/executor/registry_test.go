@@ -112,8 +112,6 @@ func TestRegistry_List(t *testing.T) {
 	_ = registry.Register(handler2)
 
 	handlers := registry.List()
-	assert.Len(t, handlers, 2, "Expected 2 handlers")
-
 	assert.ElementsMatch(t, []string{"handler1", "handler2"}, handlers, "Not all handlers found in list")
 }
 
@@ -128,11 +126,7 @@ func TestRegistry_ListCommands(t *testing.T) {
 	_ = registry.Register(handler)
 
 	commands := registry.ListCommands()
-	assert.Len(t, commands, 3, "Expected 3 commands")
-
-	for _, expected := range []string{"cmd1", "cmd2", "cmd3"} {
-		assert.Contains(t, commands, expected, "Command %s not found in list", expected)
-	}
+	assert.ElementsMatch(t, []string{"cmd1", "cmd2", "cmd3"}, commands)
 }
 
 func TestRegistry_IsCommandRegistered(t *testing.T) {

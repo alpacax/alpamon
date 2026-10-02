@@ -24,17 +24,13 @@ func TestLoadEnvironmentFile(t *testing.T) {
 		"LANG":       "en_US.UTF-8",
 		"HTTP_PROXY": "http://proxy:3128",
 	}
-	assert.Len(t, env, len(want), "expected %d entries, got %v", len(want), env)
-	for key, value := range want {
-		assert.Equal(t, value, env[key], key)
-	}
+	assert.Equal(t, want, env)
 }
 
 func TestLoadEnvironmentFile_MissingFileIsANoOp(t *testing.T) {
 	env := map[string]string{"KEEP": "1"}
 	loadEnvironmentFile(filepath.Join(t.TempDir(), "absent"), env)
-	assert.Len(t, env, 1, "expected env untouched, got %v", env)
-	assert.Equal(t, "1", env["KEEP"], "expected env untouched, got %v", env)
+	assert.Equal(t, map[string]string{"KEEP": "1"}, env, "expected env untouched")
 }
 
 // Vendor defaults load first so an admin copy overrides them, which is what the

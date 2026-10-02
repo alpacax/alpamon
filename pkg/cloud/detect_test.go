@@ -219,5 +219,5 @@ func TestReadDMIHint_NonLinuxReturnsEmpty(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		t.Skip("skipping non-Linux path on Linux")
 	}
-	assert.Equal(t, "", readDMIHint(), "non-Linux readDMIHint should return empty")
+	assert.Empty(t, readDMIHint(), "non-Linux readDMIHint should return empty")
 }
