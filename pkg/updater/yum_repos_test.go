@@ -57,7 +57,6 @@ func setYumReposDirs(t *testing.T, dirs ...string) {
 	t.Cleanup(func() { YumReposDirs = orig })
 }
 
-// setYumHost points the yum binary and both main configs at the given paths.
 func setYumHost(t *testing.T, binary, dnfConf, yumConf string) {
 	t.Helper()
 	origBinary, origDnf, origYum := YumBinary, DnfConfFile, YumConfFile
@@ -263,7 +262,6 @@ func yumMirrorlistFailure(id string) string {
 		"Cannot find a valid baseurl for repo: " + id + "/7/x86_64\n"
 }
 
-// fakeYum answers each run with the next result and records the argv it was given.
 type fakeYum struct {
 	results []fakeYumResult
 	argvs   [][]string

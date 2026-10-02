@@ -81,7 +81,6 @@ func yumArgv(opts []string, verb string, args []string) []string {
 	return append(append(argv, verb, "-y"), args...)
 }
 
-// unreachableYumRepo returns the id of the repo yum 3 could not find a baseurl for, or "" when out names none.
 func unreachableYumRepo(out string) string {
 	if m := yumUnreachableRepoRe.FindStringSubmatch(out); m != nil {
 		return m[1]
@@ -134,7 +133,6 @@ func scanYumRepos() []yumRepo {
 	return repos
 }
 
-// yumReposDirs returns the reposdir set in the main config, or YumReposDirs when it sets none.
 func yumReposDirs() []string {
 	if data, err := os.ReadFile(yumMainConf()); err == nil {
 		if dirs := parseYumReposdir(string(data)); len(dirs) > 0 {

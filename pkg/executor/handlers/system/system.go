@@ -275,7 +275,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		installArgv = append([]string{"apt-get", "install", "--only-upgrade"}, packages...)
 		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3")
 	case utils.PkgYum:
-		// updater.RunYum builds the argv itself; it may rerun yum with a failing repo disabled.
+		// updater.RunYum builds its own argv, so installArgv stays unset.
 		runInstall = func() (int, string, error) {
 			code, out, _, err := updater.RunYum(install, nil, "update", packages...)
 			return code, out, err
