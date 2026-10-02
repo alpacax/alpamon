@@ -15,6 +15,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -120,15 +122,11 @@ func envelopeJSON(t *testing.T, files map[string]string, metadata map[string]any
 	rawMeta := map[string]json.RawMessage{}
 	for k, v := range metadata {
 		b, err := json.Marshal(v)
-		if err != nil {
-			t.Fatalf("marshal metadata[%q]: %v", k, err)
-		}
+		require.NoError(t, err, "marshal metadata[%q]", k)
 		rawMeta[k] = b
 	}
 	envBytes, err := json.Marshal(Envelope{Files: files, Metadata: rawMeta})
-	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
-	}
+	require.NoError(t, err, "marshal envelope")
 	return string(envBytes)
 }
 
@@ -140,22 +138,12 @@ func TestHandleSuccess(t *testing.T) {
 
 	r.Handle(context.Background(), pluginConfigID)
 
-	if len(applier.envelopes) != 1 {
-		t.Fatalf("expected 1 Apply call, got %d", len(applier.envelopes))
-	}
-	if got := applier.envelopes[0].Files["dhcpd.conf"]; got != dhcpdConf {
-		t.Errorf("expected dhcpd.conf body, got %q", got)
-	}
+	require.Len(t, applier.envelopes, 1, "expected 1 Apply call")
+	assert.Equal(t, dhcpdConf, applier.envelopes[0].Files["dhcpd.conf"], "expected dhcpd.conf body")
 	calls := fs.appliedCalls()
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 applied POST, got %d", len(calls))
-	}
-	if got := calls[0]["success"]; got != true {
-		t.Errorf("expected success=true, got %v", got)
-	}
-	if got := calls[0]["applied_hash"]; got != sha256hex(body) {
-		t.Errorf("applied_hash mismatch: %v", got)
-	}
+	require.Len(t, calls, 1, "expected 1 applied POST")
+	assert.Equal(t, true, calls[0]["success"], "expected success=true")
+	assert.Equal(t, sha256hex(body), calls[0]["applied_hash"], "applied_hash mismatch")
 }
 
 func TestHandleHashMismatchIsReported(t *testing.T) {
@@ -166,19 +154,11 @@ func TestHandleHashMismatchIsReported(t *testing.T) {
 
 	r.Handle(context.Background(), pluginConfigID)
 
-	if len(applier.envelopes) != 0 {
-		t.Fatalf("Applier must not be called on hash mismatch")
-	}
+	require.Empty(t, applier.envelopes, "Applier must not be called on hash mismatch")
 	calls := fs.appliedCalls()
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 applied POST, got %d", len(calls))
-	}
-	if got := calls[0]["success"]; got != false {
-		t.Errorf("expected success=false, got %v", got)
-	}
-	if got := calls[0]["error"]; got != "hash mismatch" {
-		t.Errorf("expected hash mismatch error, got %v", got)
-	}
+	require.Len(t, calls, 1, "expected 1 applied POST")
+	assert.Equal(t, false, calls[0]["success"], "expected success=false")
+	assert.Equal(t, "hash mismatch", calls[0]["error"], "expected hash mismatch error")
 }
 
 func TestHandleEnvelopeDecodeFailureIsReported(t *testing.T) {
@@ -189,20 +169,12 @@ func TestHandleEnvelopeDecodeFailureIsReported(t *testing.T) {
 
 	r.Handle(context.Background(), pluginConfigID)
 
-	if len(applier.envelopes) != 0 {
-		t.Fatal("Applier must not be called on envelope decode failure")
-	}
+	require.Empty(t, applier.envelopes, "Applier must not be called on envelope decode failure")
 	calls := fs.appliedCalls()
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 applied POST, got %d", len(calls))
-	}
-	if got := calls[0]["success"]; got != false {
-		t.Errorf("expected success=false, got %v", got)
-	}
+	require.Len(t, calls, 1, "expected 1 applied POST")
+	assert.Equal(t, false, calls[0]["success"], "expected success=false")
 	errMsg, _ := calls[0]["error"].(string)
-	if !strings.HasPrefix(errMsg, "envelope decode:") {
-		t.Errorf("expected envelope decode error prefix, got %q", errMsg)
-	}
+	assert.True(t, strings.HasPrefix(errMsg, "envelope decode:"), "expected envelope decode error prefix, got %q", errMsg)
 }
 
 func TestHandleApplierFailureIsReported(t *testing.T) {
@@ -213,19 +185,11 @@ func TestHandleApplierFailureIsReported(t *testing.T) {
 
 	r.Handle(context.Background(), pluginConfigID)
 
-	if len(applier.envelopes) != 1 {
-		t.Fatal("Applier should be called even when it returns an error")
-	}
+	require.Len(t, applier.envelopes, 1, "Applier should be called even when it returns an error")
 	calls := fs.appliedCalls()
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 applied POST, got %d", len(calls))
-	}
-	if got := calls[0]["success"]; got != false {
-		t.Errorf("expected success=false, got %v", got)
-	}
-	if got := calls[0]["error"]; got != "dhcpd verification failed" {
-		t.Errorf("expected applier's error string, got %v", got)
-	}
+	require.Len(t, calls, 1, "expected 1 applied POST")
+	assert.Equal(t, false, calls[0]["success"], "expected success=false")
+	assert.Equal(t, "dhcpd verification failed", calls[0]["error"], "expected applier's error string")
 }
 
 func TestHandleFetchFailureIsReported(t *testing.T) {
@@ -235,29 +199,20 @@ func TestHandleFetchFailureIsReported(t *testing.T) {
 
 	r.Handle(context.Background(), pluginConfigID)
 
-	if len(applier.envelopes) != 0 {
-		t.Fatal("Applier must not be called when fetch fails")
-	}
+	require.Empty(t, applier.envelopes, "Applier must not be called when fetch fails")
 	calls := fs.appliedCalls()
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 applied POST, got %d", len(calls))
-	}
-	if got := calls[0]["success"]; got != false {
-		t.Errorf("expected success=false, got %v", got)
-	}
+	require.Len(t, calls, 1, "expected 1 applied POST")
+	assert.Equal(t, false, calls[0]["success"], "expected success=false")
 	errMsg, _ := calls[0]["error"].(string)
-	if !strings.HasPrefix(errMsg, "fetch failed:") {
-		t.Errorf("expected fetch failure error prefix, got %q", errMsg)
-	}
+	assert.True(t, strings.HasPrefix(errMsg, "fetch failed:"), "expected fetch failure error prefix, got %q", errMsg)
 }
 
 // Sanity check the local sha256hex helper against the stdlib so any
 // drift between this and the server side is caught early.
 func TestSha256HexMatchesStdlib(t *testing.T) {
 	sum := sha256.Sum256([]byte(dhcpdConf))
-	if expected := hex.EncodeToString(sum[:]); sha256hex(dhcpdConf) != expected {
-		t.Fatalf("sha256hex drift")
-	}
+	expected := hex.EncodeToString(sum[:])
+	require.Equal(t, expected, sha256hex(dhcpdConf), "sha256hex drift")
 }
 
 func TestTruncateUTF8(t *testing.T) {
@@ -279,9 +234,7 @@ func TestTruncateUTF8(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := truncateUTF8(c.input, c.maxBytes)
-			if got != c.want {
-				t.Fatalf("truncateUTF8(%q, %d) = %q; want %q", c.input, c.maxBytes, got, c.want)
-			}
+			require.Equal(t, c.want, got, "truncateUTF8(%q, %d)", c.input, c.maxBytes)
 		})
 	}
 }
@@ -300,37 +253,21 @@ func TestReportErrorTruncates(t *testing.T) {
 
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	if len(fs.applied) != 1 {
-		t.Fatalf("expected 1 applied report, got %d", len(fs.applied))
-	}
+	require.Len(t, fs.applied, 1, "expected 1 applied report")
 	gotErr, _ := fs.applied[0]["error"].(string)
-	if !strings.HasSuffix(gotErr, "...(truncated)") {
-		t.Fatalf("error not marked truncated: %q", gotErr)
-	}
-	if len(gotErr) > maxReportedErrorBytes+len("...(truncated)") {
-		t.Fatalf("error too long: %d bytes", len(gotErr))
-	}
-	if !utf8.ValidString(gotErr) {
-		t.Fatalf("truncated error is not valid UTF-8: %q", gotErr)
-	}
+	require.True(t, strings.HasSuffix(gotErr, "...(truncated)"), "error not marked truncated: %q", gotErr)
+	require.LessOrEqual(t, len(gotErr), maxReportedErrorBytes+len("...(truncated)"), "error too long")
+	require.True(t, utf8.ValidString(gotErr), "truncated error is not valid UTF-8: %q", gotErr)
 }
 
 // TestApplyReportWireFormat locks the two applied-report bodies so the
 // map-to-struct change stays byte-identical to the prior map literals.
 func TestApplyReportWireFormat(t *testing.T) {
 	okBytes, err := json.Marshal(applySuccess{Success: true, AppliedHash: "abc123"})
-	if err != nil {
-		t.Fatalf("marshal applySuccess: %v", err)
-	}
-	if got, want := string(okBytes), `{"applied_hash":"abc123","success":true}`; got != want {
-		t.Fatalf("applySuccess = %s, want %s", got, want)
-	}
+	require.NoError(t, err, "marshal applySuccess")
+	require.Equal(t, `{"applied_hash":"abc123","success":true}`, string(okBytes), "applySuccess")
 
 	errBytes, err := json.Marshal(applyError{Success: false, Error: "boom"})
-	if err != nil {
-		t.Fatalf("marshal applyError: %v", err)
-	}
-	if got, want := string(errBytes), `{"error":"boom","success":false}`; got != want {
-		t.Fatalf("applyError = %s, want %s", got, want)
-	}
+	require.NoError(t, err, "marshal applyError")
+	require.Equal(t, `{"error":"boom","success":false}`, string(errBytes), "applyError")
 }

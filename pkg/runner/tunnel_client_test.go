@@ -70,9 +70,7 @@ func TestIsValidSessionID(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := IsValidSessionID(tc.sessionID)
-			if got != tc.want {
-				t.Fatalf("IsValidSessionID(%q) = %v, want %v", tc.sessionID, got, tc.want)
-			}
+			require.Equal(t, tc.want, got, "IsValidSessionID(%q)", tc.sessionID)
 		})
 	}
 }
@@ -93,9 +91,7 @@ func TestGetHTTPStatusForHealth(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := getHTTPStatusForHealth(tc.status)
-			if got != tc.want {
-				t.Fatalf("getHTTPStatusForHealth(%q) = %d, want %d", tc.status, got, tc.want)
-			}
+			require.Equal(t, tc.want, got, "getHTTPStatusForHealth(%q)", tc.status)
 		})
 	}
 }
@@ -105,30 +101,18 @@ func TestBuildHealthResponseBody(t *testing.T) {
 		body := buildHealthResponseBody("ready", "")
 
 		var decoded map[string]any
-		if err := json.Unmarshal([]byte(body), &decoded); err != nil {
-			t.Fatalf("buildHealthResponseBody returned invalid JSON: %v", err)
-		}
-		if decoded["status"] != "ready" {
-			t.Fatalf("status = %v, want ready", decoded["status"])
-		}
-		if _, exists := decoded["error"]; exists {
-			t.Fatalf("error field should be omitted when empty, got: %v", decoded["error"])
-		}
+		require.NoError(t, json.Unmarshal([]byte(body), &decoded), "buildHealthResponseBody returned invalid JSON")
+		require.Equal(t, "ready", decoded["status"])
+		require.NotContains(t, decoded, "error", "error field should be omitted when empty")
 	})
 
 	t.Run("includes error field when provided", func(t *testing.T) {
 		body := buildHealthResponseBody("error", "startup failed")
 
 		var decoded map[string]any
-		if err := json.Unmarshal([]byte(body), &decoded); err != nil {
-			t.Fatalf("buildHealthResponseBody returned invalid JSON: %v", err)
-		}
-		if decoded["status"] != "error" {
-			t.Fatalf("status = %v, want error", decoded["status"])
-		}
-		if decoded["error"] != "startup failed" {
-			t.Fatalf("error = %v, want startup failed", decoded["error"])
-		}
+		require.NoError(t, json.Unmarshal([]byte(body), &decoded), "buildHealthResponseBody returned invalid JSON")
+		require.Equal(t, "error", decoded["status"])
+		require.Equal(t, "startup failed", decoded["error"])
 	})
 }
 
@@ -152,12 +136,8 @@ func TestResolveTargetPort(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gotPort, err := tc.resolveTargetPort(tt.remotePort)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("resolveTargetPort(%q) error = %v, wantErr %v", tt.remotePort, err, tt.wantErr)
-			}
-			if gotPort != tt.wantPort {
-				t.Fatalf("resolveTargetPort(%q) = %d, want %d", tt.remotePort, gotPort, tt.wantPort)
-			}
+			require.Equal(t, tt.wantErr, err != nil, "resolveTargetPort(%q) error = %v", tt.remotePort, err)
+			require.Equal(t, tt.wantPort, gotPort, "resolveTargetPort(%q)", tt.remotePort)
 		})
 	}
 }
@@ -182,15 +162,9 @@ func TestCloseAllActiveTunnels(t *testing.T) {
 		remaining := len(activeTunnels)
 		activeTunnelsMu.RUnlock()
 
-		if remaining != 0 {
-			t.Fatalf("expected 0 active tunnels after CloseAll, got %d", remaining)
-		}
-		if ctx1.Err() == nil {
-			t.Fatalf("expected tc1 context to be cancelled")
-		}
-		if ctx2.Err() == nil {
-			t.Fatalf("expected tc2 context to be cancelled")
-		}
+		require.Equal(t, 0, remaining, "expected 0 active tunnels after CloseAll")
+		require.Error(t, ctx1.Err(), "expected tc1 context to be cancelled")
+		require.Error(t, ctx2.Err(), "expected tc2 context to be cancelled")
 	})
 
 	t.Run("safe on empty map", func(t *testing.T) {

@@ -382,9 +382,7 @@ func TestDetectCloudTags_NoProviderReturnsNil(t *testing.T) {
 	}
 	noCloudProbe = false
 
-	if got := detectCloudTags(context.Background()); got != nil {
-		t.Errorf("detectCloudTags(context.Background()) = %v, want nil", got)
-	}
+	assert.Nil(t, detectCloudTags(context.Background()))
 }
 
 func TestDetectCloudTags_HappyPathReturnsTags(t *testing.T) {
@@ -417,12 +415,8 @@ func TestDetectCloudTags_NoCloudProbeFlagSkipsDetection(t *testing.T) {
 	}
 	noCloudProbe = true
 
-	if got := detectCloudTags(context.Background()); got != nil {
-		t.Errorf("detectCloudTags(context.Background()) with --no-cloud-probe should return nil, got %v", got)
-	}
-	if called {
-		t.Error("detectCloud must not run when --no-cloud-probe is set")
-	}
+	assert.Nil(t, detectCloudTags(context.Background()), "with --no-cloud-probe should return nil")
+	assert.False(t, called, "detectCloud must not run when --no-cloud-probe is set")
 }
 
 func TestDetectCloudTags_NonGracefulErrorDoesNotFail(t *testing.T) {
@@ -434,9 +428,7 @@ func TestDetectCloudTags_NonGracefulErrorDoesNotFail(t *testing.T) {
 	}
 	noCloudProbe = false
 
-	if got := detectCloudTags(context.Background()); got != nil {
-		t.Errorf("detectCloudTags(context.Background()) should return nil on unexpected errors, got %v", got)
-	}
+	assert.Nil(t, detectCloudTags(context.Background()), "should return nil on unexpected errors")
 }
 
 func TestDetectCloudTags_PartialMetadataReturnsAvailableTags(t *testing.T) {
@@ -526,10 +518,6 @@ func TestBuildRegisterRequest_PlatformDetectionFailurePropagates(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	_, err := buildRegisterRequest(cmd)
-	if err == nil {
-		t.Fatal("expected buildRegisterRequest to fail when platform detection fails")
-	}
-	if !strings.Contains(err.Error(), "arch") {
-		t.Errorf("error must name the distribution, got %q", err)
-	}
+	require.Error(t, err, "expected buildRegisterRequest to fail when platform detection fails")
+	assert.ErrorContains(t, err, "arch", "error must name the distribution")
 }

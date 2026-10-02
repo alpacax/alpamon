@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestShellHandler_StreamingForwardsCallback(t *testing.T) {
@@ -19,13 +21,10 @@ func TestShellHandler_StreamingForwardsCallback(t *testing.T) {
 		ChunkCallback: func(_ context.Context, content string) { captured = append(captured, content) },
 	}
 
-	if _, _, err := handler.Execute(ctx, common.ShellCmd.String(), args); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	_, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
+	require.NoError(t, err, "Execute")
 
-	if len(captured) != 1 || captured[0] != "hi" {
-		t.Errorf("expected one chunk 'hi', got %v", captured)
-	}
+	assert.Equal(t, []string{"hi"}, captured, "expected one chunk 'hi'")
 }
 
 // Regression: the same callback must fire for every sub-command across
@@ -54,13 +53,10 @@ func TestShellHandler_StreamingAcrossOperators(t *testing.T) {
 		ChunkCallback: callback,
 	}
 
-	if _, _, err := handler.Execute(ctx, common.ShellCmd.String(), args); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	_, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
+	require.NoError(t, err, "Execute")
 
-	if len(captured) != 3 {
-		t.Fatalf("expected 3 chunks across operators, got %d (%v)", len(captured), captured)
-	}
+	require.Len(t, captured, 3, "expected 3 chunks across operators (%v)", captured)
 
 	expected := []chunk{
 		{seq: 0, content: "out1"},
@@ -68,9 +64,7 @@ func TestShellHandler_StreamingAcrossOperators(t *testing.T) {
 		{seq: 2, content: "out3"},
 	}
 	for i, c := range captured {
-		if c != expected[i] {
-			t.Errorf("chunk[%d]: got %+v, want %+v", i, c, expected[i])
-		}
+		assert.Equal(t, expected[i], c, "chunk[%d]", i)
 	}
 }
 
@@ -89,12 +83,8 @@ func TestShellHandler_StreamingOperatorsReturnAuditResult(t *testing.T) {
 	}
 
 	_, result, err := handler.Execute(ctx, common.ShellCmd.String(), args)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if result != "out1out2" {
-		t.Errorf("fin result should accumulate streamed segment output, got %q", result)
-	}
+	require.NoError(t, err, "Execute")
+	assert.Equal(t, "out1out2", result, "fin result should accumulate streamed segment output")
 }
 
 func TestShellHandler_NilChunkCallback(t *testing.T) {
@@ -109,13 +99,7 @@ func TestShellHandler_NilChunkCallback(t *testing.T) {
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("exit code: got %d, want 0", exitCode)
-	}
-	if output == "" {
-		t.Error("expected non-empty output")
-	}
+	require.NoError(t, err, "Execute")
+	assert.Equal(t, 0, exitCode, "exit code")
+	assert.NotEmpty(t, output, "expected non-empty output")
 }

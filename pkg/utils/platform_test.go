@@ -4,8 +4,10 @@ import (
 	"errors"
 	"os"
 	"runtime"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // applyPlatform writes package globals, so restore them and keep test ordering from leaking.
@@ -63,15 +65,9 @@ func TestResolvePlatform(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			like, pkgMgr, ok := ResolvePlatform(tt.goos, tt.raw)
-			if !ok {
-				t.Fatalf("ResolvePlatform(%q, %q) = not ok, want ok", tt.goos, tt.raw)
-			}
-			if like != tt.wantLike {
-				t.Errorf("platformLike = %q, want %q", like, tt.wantLike)
-			}
-			if pkgMgr != tt.wantPkgMgr {
-				t.Errorf("packageManager = %q, want %q", pkgMgr, tt.wantPkgMgr)
-			}
+			require.True(t, ok, "ResolvePlatform(%q, %q) = not ok, want ok", tt.goos, tt.raw)
+			assert.Equal(t, tt.wantLike, like, "platformLike")
+			assert.Equal(t, tt.wantPkgMgr, pkgMgr, "packageManager")
 		})
 	}
 }
@@ -87,12 +83,9 @@ func TestResolvePlatform_Unsupported(t *testing.T) {
 	} {
 		t.Run(raw, func(t *testing.T) {
 			like, pkgMgr, ok := ResolvePlatform("linux", raw)
-			if ok {
-				t.Fatalf("ResolvePlatform(linux, %q) = (%q, %q, ok), want not ok", raw, like, pkgMgr)
-			}
-			if like != "" || pkgMgr != "" {
-				t.Errorf("unsupported input must return empty values, got (%q, %q)", like, pkgMgr)
-			}
+			require.False(t, ok, "ResolvePlatform(linux, %q) = (%q, %q, ok), want not ok", raw, like, pkgMgr)
+			assert.Empty(t, like, "unsupported input must return empty values")
+			assert.Empty(t, pkgMgr, "unsupported input must return empty values")
 		})
 	}
 }
@@ -100,26 +93,16 @@ func TestResolvePlatform_Unsupported(t *testing.T) {
 // Asserted once here because register and migrate both send this value.
 func TestResolveRegistrationPlatform_SuseMapsToRhel(t *testing.T) {
 	got, err := ResolveRegistrationPlatform("linux", "opensuse-leap")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "rhel" {
-		t.Errorf("platform = %q, want rhel", got)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "rhel", got, "platform")
 }
 
 // A silent "debian" default is unrecoverable: the server persists it write-once with no admin edit path.
 func TestResolveRegistrationPlatform_UnsupportedReturnsError(t *testing.T) {
 	_, err := ResolveRegistrationPlatform("linux", "arch")
-	if err == nil {
-		t.Fatal("expected an error for an unclassifiable distribution")
-	}
-	if !strings.Contains(err.Error(), "arch") {
-		t.Errorf("error must name the distribution, got %q", err)
-	}
-	if !strings.Contains(err.Error(), "--platform") {
-		t.Errorf("error must tell the operator about the override, got %q", err)
-	}
+	require.Error(t, err, "expected an error for an unclassifiable distribution")
+	assert.ErrorContains(t, err, "arch", "error must name the distribution")
+	assert.ErrorContains(t, err, "--platform", "error must tell the operator about the override")
 }
 
 // --platform forwards verbatim to write-once Server.platform: all four values are server-side members, but "windows" on Linux would poison the record.
@@ -141,16 +124,11 @@ func TestValidateServerPlatform(t *testing.T) {
 	} {
 		t.Run(tt.goos+"/"+tt.p, func(t *testing.T) {
 			err := ValidateServerPlatform(tt.goos, tt.p)
-			if tt.ok && err != nil {
-				t.Fatalf("ValidateServerPlatform(%q, %q) = %v, want nil", tt.goos, tt.p, err)
-			}
-			if !tt.ok {
-				if err == nil {
-					t.Fatal("expected an error for a value invalid on this host")
-				}
-				if !strings.Contains(err.Error(), tt.p) {
-					t.Errorf("error must name the rejected value, got %q", err)
-				}
+			if tt.ok {
+				require.NoError(t, err, "ValidateServerPlatform(%q, %q)", tt.goos, tt.p)
+			} else {
+				require.Error(t, err, "expected an error for a value invalid on this host")
+				assert.ErrorContains(t, err, tt.p, "error must name the rejected value")
 			}
 		})
 	}
@@ -163,9 +141,7 @@ func TestInitPlatform_CIHost(t *testing.T) {
 	}
 	savePlatformGlobals(t)
 
-	if err := InitPlatform(); err != nil {
-		t.Fatalf("CI host not classified: %v", err)
-	}
+	require.NoError(t, InitPlatform(), "CI host not classified")
 	t.Logf("os=%s -> like=%s pkgManager=%s id=%q", runtime.GOOS, PlatformLike, PackageManager, PlatformID)
 }
 
@@ -185,9 +161,7 @@ func TestIsTumbleweed(t *testing.T) {
 		{"", false},
 	} {
 		t.Run(tt.id, func(t *testing.T) {
-			if got := IsTumbleweed(tt.id); got != tt.want {
-				t.Errorf("IsTumbleweed(%q) = %v, want %v", tt.id, got, tt.want)
-			}
+			assert.Equal(t, tt.want, IsTumbleweed(tt.id), "IsTumbleweed(%q)", tt.id)
 		})
 	}
 }
@@ -227,22 +201,15 @@ func TestResolveServerPlatform(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, warning, err := ResolveServerPlatform("linux", tt.explicit, tt.detect)
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("expected an error containing %q, got %v", tt.wantErr, err)
-				}
+				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("platform = %q, want %q", got, tt.want)
-			}
-			if tt.wantWarning == "" && warning != "" {
-				t.Errorf("expected no warning, got %q", warning)
-			}
-			if tt.wantWarning != "" && !strings.Contains(warning, tt.wantWarning) {
-				t.Errorf("warning must name the detected platform %q, got %q", tt.wantWarning, warning)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got, "platform")
+			if tt.wantWarning == "" {
+				assert.Empty(t, warning, "expected no warning")
+			} else {
+				assert.Contains(t, warning, tt.wantWarning, "warning must name the detected platform")
 			}
 		})
 	}
@@ -256,16 +223,11 @@ func TestApplyPlatform_UnsupportedWrapsSentinel(t *testing.T) {
 	SetPlatformID("untouched")
 
 	err := applyPlatform("linux", "gentoo")
-	if !errors.Is(err, ErrUnsupportedPlatform) {
-		t.Fatalf("error must wrap ErrUnsupportedPlatform, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "gentoo") {
-		t.Errorf("error must name the distribution, got %q", err)
-	}
-	if PlatformLike != "untouched" || PackageManager != "untouched" || PlatformID != "untouched" {
-		t.Errorf("a failed classification must leave the globals alone, got like=%q pkgManager=%q id=%q",
-			PlatformLike, PackageManager, PlatformID)
-	}
+	require.ErrorIs(t, err, ErrUnsupportedPlatform, "error must wrap ErrUnsupportedPlatform")
+	assert.ErrorContains(t, err, "gentoo", "error must name the distribution")
+	assert.Equal(t, "untouched", PlatformLike, "a failed classification must leave the globals alone")
+	assert.Equal(t, "untouched", PackageManager, "a failed classification must leave the globals alone")
+	assert.Equal(t, "untouched", PlatformID, "a failed classification must leave the globals alone")
 }
 
 // The three globals disagree on SUSE, so each has to land from its own source rather than be derived from another.
@@ -282,13 +244,10 @@ func TestApplyPlatform_SetsGlobals(t *testing.T) {
 		{"windows", "", "windows", PkgNone, ""},
 	} {
 		t.Run(tt.goos+"/"+tt.raw, func(t *testing.T) {
-			if err := applyPlatform(tt.goos, tt.raw); err != nil {
-				t.Fatalf("applyPlatform(%q, %q) = %v", tt.goos, tt.raw, err)
-			}
-			if PlatformLike != tt.like || PackageManager != tt.pkgManager || PlatformID != tt.id {
-				t.Errorf("got like=%q pkgManager=%q id=%q, want %q %q %q",
-					PlatformLike, PackageManager, PlatformID, tt.like, tt.pkgManager, tt.id)
-			}
+			require.NoError(t, applyPlatform(tt.goos, tt.raw), "applyPlatform(%q, %q)", tt.goos, tt.raw)
+			assert.Equal(t, tt.like, PlatformLike, "PlatformLike")
+			assert.Equal(t, tt.pkgManager, PackageManager, "PackageManager")
+			assert.Equal(t, tt.id, PlatformID, "PlatformID")
 		})
 	}
 }

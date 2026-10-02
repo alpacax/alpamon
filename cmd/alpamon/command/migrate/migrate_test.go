@@ -25,23 +25,15 @@ func TestStripGeneratedSuffix(t *testing.T) {
 		"mybox-deadbe-xyz789":          "mybox-deadbe-xyz789", // trailing non-hex blocks strip
 	}
 	for in, want := range cases {
-		if got := stripGeneratedSuffix(in); got != want {
-			t.Errorf("stripGeneratedSuffix(%q) = %q; want %q", in, got, want)
-		}
+		assert.Equal(t, want, stripGeneratedSuffix(in), "stripGeneratedSuffix(%q)", in)
 	}
 }
 
 func TestFetchCurrentName_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" {
-			t.Errorf("expected GET, got %s", r.Method)
-		}
-		if !strings.HasSuffix(r.URL.Path, "/api/servers/servers/srv-xyz/") {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		if got := r.Header.Get("Authorization"); !strings.Contains(got, `id="srv-xyz"`) {
-			t.Errorf("auth header missing id: %q", got)
-		}
+		assert.Equal(t, "GET", r.Method)
+		assert.True(t, strings.HasSuffix(r.URL.Path, "/api/servers/servers/srv-xyz/"), "unexpected path: %s", r.URL.Path)
+		assert.Contains(t, r.Header.Get("Authorization"), `id="srv-xyz"`, "auth header missing id")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"name": "production-web-deadbe",
 		})
@@ -54,12 +46,8 @@ func TestFetchCurrentName_HappyPath(t *testing.T) {
 	got, err := fetchCurrentName(t.Context(), &config.ServerConfig{
 		URL: srv.URL, ID: "srv-xyz", Key: "key-xyz",
 	})
-	if err != nil {
-		t.Fatalf("fetchCurrentName: %v", err)
-	}
-	if got != "production-web-deadbe" {
-		t.Fatalf("got %q", got)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "production-web-deadbe", got)
 }
 
 func TestFetchCurrentName_404SurfacesAsError(t *testing.T) {
@@ -75,12 +63,7 @@ func TestFetchCurrentName_404SurfacesAsError(t *testing.T) {
 	_, err := fetchCurrentName(t.Context(), &config.ServerConfig{
 		URL: srv.URL, ID: "srv-xyz", Key: "key-xyz",
 	})
-	if err == nil {
-		t.Fatalf("expected error on 404, got nil")
-	}
-	if !strings.Contains(err.Error(), "status 404") {
-		t.Fatalf("error should mention status, got: %v", err)
-	}
+	require.ErrorContains(t, err, "status 404", "error should mention status")
 }
 
 func TestNormalizeURL_TrailingSlashAndWhitespace(t *testing.T) {
@@ -90,26 +73,18 @@ func TestNormalizeURL_TrailingSlashAndWhitespace(t *testing.T) {
 		"https://a.example.com":   "https://a.example.com",
 	}
 	for in, want := range cases {
-		if got := normalizeURL(in); got != want {
-			t.Errorf("normalizeURL(%q) = %q; want %q", in, got, want)
-		}
+		assert.Equal(t, want, normalizeURL(in), "normalizeURL(%q)", in)
 	}
 }
 
 func TestNormalizeHostname_StripsFQDNDomain(t *testing.T) {
-	if got := normalizeHostname("host.example.com"); got != "host" {
-		t.Fatalf("got %q", got)
-	}
-	if got := normalizeHostname("plain"); got != "plain" {
-		t.Fatalf("got %q", got)
-	}
+	require.Equal(t, "host", normalizeHostname("host.example.com"))
+	require.Equal(t, "plain", normalizeHostname("plain"))
 }
 
 func TestBuildConfContent_IncludesAllFields(t *testing.T) {
 	out, err := buildConfContent("https://b.example.com", "srv-1", "key-1", true, "/etc/ssl/ca.pem")
-	if err != nil {
-		t.Fatalf("buildConfContent: %v", err)
-	}
+	require.NoError(t, err)
 	for _, want := range []string{
 		"url = https://b.example.com",
 		"id = srv-1",
@@ -118,40 +93,26 @@ func TestBuildConfContent_IncludesAllFields(t *testing.T) {
 		"ca_cert = /etc/ssl/ca.pem",
 		"debug = false",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("expected %q in conf output, got:\n%s", want, out)
-		}
+		assert.Contains(t, out, want, "expected %q in conf output", want)
 	}
 }
 
 func TestBuildConfContent_OmitsCACertWhenEmpty(t *testing.T) {
 	out, err := buildConfContent("https://b.example.com", "srv-1", "key-1", false, "")
-	if err != nil {
-		t.Fatalf("buildConfContent: %v", err)
-	}
-	if strings.Contains(out, "ca_cert") {
-		t.Fatalf("expected ca_cert to be omitted, got:\n%s", out)
-	}
-	if !strings.Contains(out, "verify = false") {
-		t.Fatalf("expected verify = false, got:\n%s", out)
-	}
+	require.NoError(t, err)
+	require.NotContains(t, out, "ca_cert", "expected ca_cert to be omitted")
+	require.Contains(t, out, "verify = false")
 }
 
 func TestRegisterOnTarget_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/servers/servers/register/" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, `token="`) {
-			t.Errorf("unexpected auth header: %q", got)
-		}
+		assert.Equal(t, "/api/servers/servers/register/", r.URL.Path)
+		got := r.Header.Get("Authorization")
+		assert.True(t, strings.HasPrefix(got, `token="`), "unexpected auth header: %q", got)
 		var req registerRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("decode req: %v", err)
-		}
-		if req.Name == "" || req.Platform == "" {
-			t.Errorf("bad request body: %+v", req)
-		}
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&req), "decode req")
+		assert.NotEmpty(t, req.Name, "bad request body: %+v", req)
+		assert.NotEmpty(t, req.Platform, "bad request body: %+v", req)
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(registerResponse{
 			ID: "srv-new", Key: "key-new", Name: req.Name,
@@ -168,12 +129,9 @@ func TestRegisterOnTarget_HappyPath(t *testing.T) {
 	caCert = ""
 
 	resp, err := registerOnTarget(t.Context())
-	if err != nil {
-		t.Fatalf("registerOnTarget: %v", err)
-	}
-	if resp.ID != "srv-new" || resp.Key != "key-new" {
-		t.Fatalf("unexpected response: %+v", resp)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "srv-new", resp.ID, "unexpected response: %+v", resp)
+	require.Equal(t, "key-new", resp.Key, "unexpected response: %+v", resp)
 }
 
 func TestRegisterOnTarget_SurfacesNon2xxStatus(t *testing.T) {
@@ -190,12 +148,7 @@ func TestRegisterOnTarget_SurfacesNon2xxStatus(t *testing.T) {
 	sslVerify = false
 
 	_, err := registerOnTarget(t.Context())
-	if err == nil {
-		t.Fatalf("expected error on 403, got nil")
-	}
-	if !strings.Contains(err.Error(), "status 403") {
-		t.Fatalf("error should mention status code, got: %v", err)
-	}
+	require.ErrorContains(t, err, "status 403", "error should mention status code")
 }
 
 func TestRegisterOnTarget_PlanLimit(t *testing.T) {
@@ -270,15 +223,9 @@ func TestRegisterOnTarget_PlanLimit(t *testing.T) {
 func TestCleanupTargetRegistration_CallsUnregisterEndpoint(t *testing.T) {
 	called := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "DELETE" {
-			t.Errorf("expected DELETE, got %s", r.Method)
-		}
-		if !strings.Contains(r.URL.Path, "/api/servers/servers/srv-xyz/unregister/") {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		if got := r.Header.Get("Authorization"); !strings.Contains(got, `id="srv-xyz"`) {
-			t.Errorf("auth header missing id: %q", got)
-		}
+		assert.Equal(t, "DELETE", r.Method)
+		assert.Contains(t, r.URL.Path, "/api/servers/servers/srv-xyz/unregister/")
+		assert.Contains(t, r.Header.Get("Authorization"), `id="srv-xyz"`, "auth header missing id")
 		w.WriteHeader(http.StatusNoContent)
 		select {
 		case called <- struct{}{}:
@@ -293,11 +240,7 @@ func TestCleanupTargetRegistration_CallsUnregisterEndpoint(t *testing.T) {
 
 	cleanupTargetRegistration("srv-xyz", "key-xyz")
 
-	select {
-	case <-called:
-	default:
-		t.Fatalf("expected unregister endpoint to be hit")
-	}
+	require.Len(t, called, 1, "expected unregister endpoint to be hit")
 }
 
 // A detection failure must name the distribution instead of defaulting the write-once platform value.
@@ -311,11 +254,9 @@ func TestResolvePlatform_DetectionFailurePropagates(t *testing.T) {
 		return "", errors.New("unrecognized Linux distribution \"arch\"")
 	}
 
-	if _, err := resolvePlatform(); err == nil {
-		t.Fatal("expected resolvePlatform to fail when platform detection fails")
-	} else if !strings.Contains(err.Error(), "arch") {
-		t.Errorf("error must name the distribution, got %q", err)
-	}
+	_, err := resolvePlatform()
+	require.Error(t, err, "expected resolvePlatform to fail when platform detection fails")
+	assert.ErrorContains(t, err, "arch", "error must name the distribution")
 }
 
 // The override and validation matrix is host-dependent and lives in utils.TestResolveServerPlatform.
@@ -328,10 +269,6 @@ func TestResolvePlatform_UsesDetectionSeam(t *testing.T) {
 	detectPlatformFn = func() (string, error) { return "rhel", nil }
 
 	got, err := resolvePlatform()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "rhel" {
-		t.Errorf("expected the detected platform, got %q", got)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "rhel", got, "expected the detected platform")
 }

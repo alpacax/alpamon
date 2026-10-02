@@ -9,6 +9,8 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/runnertest"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // hookRecordingExecutor wraps a MockCommandExecutor and records whether
@@ -66,21 +68,12 @@ func TestShellHandler_CommandID_RegistersAndUnregistersPID(t *testing.T) {
 	}
 
 	exit, _, err := handler.Execute(context.Background(), common.ShellCmd.String(), args)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exit != 0 {
-		t.Errorf("exit: got %d, want 0", exit)
-	}
-	if !rec.called {
-		t.Error("ExecWithStreamingHook was not invoked")
-	}
-	if !rec.hookSeen {
-		t.Error("shell handler must pass a non-nil hook when CommandID is set")
-	}
-	if _, ok := am.LookupPID(424242); ok {
-		t.Error("tracker entry should have been removed after execution")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, exit, "exit")
+	assert.True(t, rec.called, "ExecWithStreamingHook was not invoked")
+	assert.True(t, rec.hookSeen, "shell handler must pass a non-nil hook when CommandID is set")
+	_, ok := am.LookupPID(424242)
+	assert.False(t, ok, "tracker entry should have been removed after execution")
 }
 
 // TestShellHandler_NoCommandID_PassesNilHook verifies that shell invocations
@@ -98,13 +91,8 @@ func TestShellHandler_NoCommandID_PassesNilHook(t *testing.T) {
 		AllowSh:  true,
 	}
 
-	if _, _, err := handler.Execute(context.Background(), common.ShellCmd.String(), args); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !rec.called {
-		t.Error("ExecWithStreamingHook should still be the entry point")
-	}
-	if rec.hookSeen {
-		t.Error("shell handler must pass a nil hook when CommandID is empty")
-	}
+	_, _, err := handler.Execute(context.Background(), common.ShellCmd.String(), args)
+	require.NoError(t, err)
+	assert.True(t, rec.called, "ExecWithStreamingHook should still be the entry point")
+	assert.False(t, rec.hookSeen, "shell handler must pass a nil hook when CommandID is empty")
 }

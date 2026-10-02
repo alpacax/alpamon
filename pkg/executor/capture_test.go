@@ -3,17 +3,17 @@ package executor
 import (
 	"bytes"
 	"fmt"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCapBuffer_KeepsSmallStreamWhole(t *testing.T) {
 	c := newCapBuffer()
 	c.write([]byte("hello world"))
 
-	if got := string(c.bytes()); got != "hello world" {
-		t.Errorf("got %q, want %q", got, "hello world")
-	}
+	assert.Equal(t, "hello world", string(c.bytes()))
 }
 
 func TestCapBuffer_TruncatesMiddleKeepingEnds(t *testing.T) {
@@ -28,19 +28,11 @@ func TestCapBuffer_TruncatesMiddleKeepingEnds(t *testing.T) {
 
 	got := c.bytes()
 
-	if !bytes.HasPrefix(got, head) {
-		t.Errorf("output should keep the first %d bytes", captureHeadCap)
-	}
-	if !bytes.HasSuffix(got, tail) {
-		t.Errorf("output should keep the last %d bytes", captureTailCap)
-	}
-	if !strings.Contains(string(got), "100000 bytes truncated") {
-		t.Errorf("output should mark the dropped middle, got %q", truncatedMarkerOf(got))
-	}
+	assert.True(t, bytes.HasPrefix(got, head), "output should keep the first %d bytes", captureHeadCap)
+	assert.True(t, bytes.HasSuffix(got, tail), "output should keep the last %d bytes", captureTailCap)
+	assert.True(t, bytes.Contains(got, []byte("100000 bytes truncated")), "output should mark the dropped middle, got %q", truncatedMarkerOf(got))
 	// Bounded: head + tail + a short marker.
-	if len(got) > captureCap+64 {
-		t.Errorf("output size %d exceeds cap+marker", len(got))
-	}
+	assert.LessOrEqual(t, len(got), captureCap+64, "output size exceeds cap+marker")
 }
 
 func truncatedMarkerOf(b []byte) string {
@@ -48,7 +40,7 @@ func truncatedMarkerOf(b []byte) string {
 	if i < 0 {
 		return ""
 	}
-	return string(b[i : i+40])
+	return string(b[i:min(i+40, len(b))])
 }
 
 // Blocks exceed captureTailCap so in-write compaction fires; only the last tail bytes survive.
@@ -63,11 +55,8 @@ func TestCapBuffer_CompactsAcrossWrites(t *testing.T) {
 	}
 
 	got := c.bytes()
-	if len(got) > captureCap+64 {
-		t.Fatalf("output size %d exceeds cap+marker", len(got))
-	}
+	require.LessOrEqual(t, len(got), captureCap+64, "output size exceeds cap+marker")
 	dropped := total - captureCap
-	if want := fmt.Sprintf("%d bytes truncated", dropped); !strings.Contains(string(got), want) {
-		t.Fatalf("expected marker %q, got %q", want, truncatedMarkerOf(got))
-	}
+	want := fmt.Sprintf("%d bytes truncated", dropped)
+	require.True(t, bytes.Contains(got, []byte(want)), "expected marker %q, got %q", want, truncatedMarkerOf(got))
 }

@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type gcpMockOpts struct {
@@ -116,9 +119,7 @@ func TestGCP_Fetch_HappyPath(t *testing.T) {
 
 	p := NewGCPWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
+	require.NoError(t, err)
 
 	checks := map[string]string{
 		"Provider":         ProviderGCP,
@@ -139,9 +140,7 @@ func TestGCP_Fetch_HappyPath(t *testing.T) {
 		"AccountID":        meta.AccountID,
 	}
 	for k, want := range checks {
-		if got[k] != want {
-			t.Errorf("%s = %q, want %q", k, got[k], want)
-		}
+		assert.Equal(t, want, got[k], k)
 	}
 }
 
@@ -152,9 +151,7 @@ func TestGCP_Probe_SucceedsAgainstFlavorEnforcingServer(t *testing.T) {
 	defer server.Close()
 
 	p := NewGCPWithBase(server.URL)
-	if !p.Probe(context.Background()) {
-		t.Error("Probe should pass against a flavor-enforcing server when our client sends the header")
-	}
+	assert.True(t, p.Probe(context.Background()), "Probe should pass against a flavor-enforcing server when our client sends the header")
 }
 
 func TestGCP_Probe_FlavorEnforcementBreaksOnAWS(t *testing.T) {
@@ -165,9 +162,7 @@ func TestGCP_Probe_FlavorEnforcementBreaksOnAWS(t *testing.T) {
 	defer server.Close()
 
 	p := NewGCPWithBase(server.URL)
-	if p.Probe(context.Background()) {
-		t.Error("Probe should fail when server doesn't recognize GCP paths")
-	}
+	assert.False(t, p.Probe(context.Background()), "Probe should fail when server doesn't recognize GCP paths")
 }
 
 func TestZoneToRegion(t *testing.T) {
@@ -190,9 +185,7 @@ func TestZoneToRegion(t *testing.T) {
 		{"us-central1-ab", "us-central1-ab"},
 	}
 	for _, c := range cases {
-		if got := zoneToRegion(c.in); got != c.want {
-			t.Errorf("zoneToRegion(%q) = %q, want %q", c.in, got, c.want)
-		}
+		assert.Equal(t, c.want, zoneToRegion(c.in), "zoneToRegion(%q)", c.in)
 	}
 }
 
@@ -204,9 +197,7 @@ func TestGCP_Probe_RejectsResponseWithoutFlavorHeader(t *testing.T) {
 	defer server.Close()
 
 	p := NewGCPWithBase(server.URL)
-	if p.Probe(context.Background()) {
-		t.Error("Probe should fail when response is missing Metadata-Flavor: Google header")
-	}
+	assert.False(t, p.Probe(context.Background()), "Probe should fail when response is missing Metadata-Flavor: Google header")
 }
 
 func TestGCP_Fetch_ProjectIDFailure_OtherFieldsStillReturned(t *testing.T) {
@@ -215,15 +206,9 @@ func TestGCP_Fetch_ProjectIDFailure_OtherFieldsStillReturned(t *testing.T) {
 
 	p := NewGCPWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if meta.InstanceID == "" {
-		t.Error("InstanceID should be populated even when project-id 404s")
-	}
-	if meta.AccountID != "" {
-		t.Errorf("AccountID should be empty on project-id 404, got %q", meta.AccountID)
-	}
+	require.NoError(t, err)
+	assert.NotEmpty(t, meta.InstanceID, "InstanceID should be populated even when project-id 404s")
+	assert.Empty(t, meta.AccountID, "AccountID should be empty on project-id 404")
 }
 
 func TestGCP_Fetch_EmptyInstanceID_ReturnsError(t *testing.T) {
@@ -235,11 +220,9 @@ func TestGCP_Fetch_EmptyInstanceID_ReturnsError(t *testing.T) {
 
 	p := NewGCPWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err == nil {
-		t.Error("expected error when instance_id is empty/whitespace")
-	}
-	if meta == nil || meta.Provider != ProviderGCP {
-		t.Errorf("expected partial Metadata with Provider=gcp, got %+v", meta)
+	assert.Error(t, err, "expected error when instance_id is empty/whitespace")
+	if assert.NotNil(t, meta, "expected partial Metadata with Provider=gcp") {
+		assert.Equal(t, ProviderGCP, meta.Provider, "expected partial Metadata with Provider=gcp")
 	}
 }
 
@@ -249,9 +232,7 @@ func TestGCP_Fetch_InstanceIDFailureAbortsWithError(t *testing.T) {
 
 	p := NewGCPWithBase(server.URL)
 	_, err := p.Fetch(context.Background())
-	if err == nil {
-		t.Error("expected error when instance-id endpoint 500s")
-	}
+	assert.Error(t, err, "expected error when instance-id endpoint 500s")
 }
 
 func TestGCP_Fetch_ZoneEdgeCases(t *testing.T) {
@@ -271,15 +252,9 @@ func TestGCP_Fetch_ZoneEdgeCases(t *testing.T) {
 			defer server.Close()
 
 			meta, err := NewGCPWithBase(server.URL).Fetch(context.Background())
-			if err != nil {
-				t.Fatalf("Fetch: %v", err)
-			}
-			if meta.AvailabilityZone != tc.wantZone {
-				t.Errorf("zone = %q, want %q", meta.AvailabilityZone, tc.wantZone)
-			}
-			if meta.Region != tc.wantRegion {
-				t.Errorf("region = %q, want %q", meta.Region, tc.wantRegion)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantZone, meta.AvailabilityZone, "zone")
+			assert.Equal(t, tc.wantRegion, meta.Region, "region")
 		})
 	}
 }
@@ -294,7 +269,5 @@ func TestGCP_FlavorHeader_AlwaysSent(t *testing.T) {
 
 	p := NewGCPWithBase(server.URL)
 	_ = p.Probe(context.Background())
-	if got := seenHeader.Load(); got != gcpFlavorValue {
-		t.Errorf("Metadata-Flavor header = %q, want %q", got, gcpFlavorValue)
-	}
+	assert.Equal(t, gcpFlavorValue, seenHeader.Load(), "Metadata-Flavor header")
 }

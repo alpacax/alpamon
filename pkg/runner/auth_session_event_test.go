@@ -37,15 +37,11 @@ func TestSessionEventRequest_ParsesWithoutOptionalFields(t *testing.T) {
 	raw := `{"type":"session_event","username":"root","service":"login","pid":701,"ppid":700}`
 
 	var req SessionEventRequest
-	if err := json.Unmarshal([]byte(raw), &req); err != nil {
-		t.Fatalf("unmarshal failed: %v", err)
-	}
-	if req.Username != "root" || req.Service != "login" {
-		t.Errorf("unexpected fields: %+v", req)
-	}
-	if req.RHost != "" || req.TTY != "" {
-		t.Errorf("rhost/tty should default to empty, got %q %q", req.RHost, req.TTY)
-	}
+	require.NoError(t, json.Unmarshal([]byte(raw), &req), "unmarshal failed")
+	assert.Equal(t, "root", req.Username, "unexpected fields: %+v", req)
+	assert.Equal(t, "login", req.Service, "unexpected fields: %+v", req)
+	assert.Empty(t, req.RHost, "rhost/tty should default to empty")
+	assert.Empty(t, req.TTY, "rhost/tty should default to empty")
 }
 
 // TestResolveSessionEvent_UnknownSessionBuildsEvent verifies that a
@@ -64,20 +60,16 @@ func TestResolveSessionEvent_UnknownSessionBuildsEvent(t *testing.T) {
 	}
 
 	event, emit := am.resolveSessionEvent(req)
-	if !emit {
-		t.Fatal("expected emit=true for unknown session")
-	}
-	if event.Username != "alice" || event.Service != "sshd" ||
-		event.RHost != "203.0.113.5" || event.TTY != "pts/1" ||
-		event.PID != 712345 || event.PPID != 712340 {
-		t.Errorf("event fields not copied: %+v", event)
-	}
-	if event.Timestamp.IsZero() {
-		t.Error("Timestamp should be set")
-	}
-	if _, err := uuid.Parse(event.EventID); err != nil {
-		t.Errorf("EventID should be a uuid, got %q: %v", event.EventID, err)
-	}
+	require.True(t, emit, "expected emit=true for unknown session")
+	assert.Equal(t, "alice", event.Username, "event fields not copied: %+v", event)
+	assert.Equal(t, "sshd", event.Service, "event fields not copied: %+v", event)
+	assert.Equal(t, "203.0.113.5", event.RHost, "event fields not copied: %+v", event)
+	assert.Equal(t, "pts/1", event.TTY, "event fields not copied: %+v", event)
+	assert.Equal(t, 712345, event.PID, "event fields not copied: %+v", event)
+	assert.Equal(t, 712340, event.PPID, "event fields not copied: %+v", event)
+	assert.False(t, event.Timestamp.IsZero(), "Timestamp should be set")
+	_, err := uuid.Parse(event.EventID)
+	assert.NoError(t, err, "EventID should be a uuid, got %q", event.EventID)
 }
 
 // TestResolveSessionEvent_EventIDIsUnique verifies each resolved session
@@ -93,9 +85,7 @@ func TestResolveSessionEvent_EventIDIsUnique(t *testing.T) {
 	first, _ := am.resolveSessionEvent(req)
 	second, _ := am.resolveSessionEvent(req)
 
-	if first.EventID == second.EventID {
-		t.Errorf("expected distinct EventIDs, got %q twice", first.EventID)
-	}
+	assert.NotEqual(t, first.EventID, second.EventID, "expected distinct EventIDs")
 }
 
 // TestResolveSessionEvent_WebshSessionSuppressed verifies that a caller
@@ -111,9 +101,7 @@ func TestResolveSessionEvent_WebshSessionSuppressed(t *testing.T) {
 	req := SessionEventRequest{PID: 424242, PPID: 5555, Username: "alice", Service: "su"}
 
 	_, emit := am.resolveSessionEvent(req)
-	if emit {
-		t.Error("expected suppression for tracked Websh session")
-	}
+	assert.False(t, emit, "expected suppression for tracked Websh session")
 }
 
 // TestResolveSessionEvent_CommandSessionSuppressed verifies the same for
@@ -125,9 +113,7 @@ func TestResolveSessionEvent_CommandSessionSuppressed(t *testing.T) {
 	req := SessionEventRequest{PID: 424243, PPID: 6666, Username: "bob", Service: "su"}
 
 	_, emit := am.resolveSessionEvent(req)
-	if emit {
-		t.Error("expected suppression for tracked Command session")
-	}
+	assert.False(t, emit, "expected suppression for tracked Command session")
 }
 
 // fakeParents turns a pid->ppid table into the parentOf lookup ancestorPIDs
@@ -146,42 +132,27 @@ func TestAncestorPIDs_WalksChain(t *testing.T) {
 	got := ancestorPIDs(400, fakeParents(map[int]int{400: 300, 300: 200, 200: 100, 100: 1}))
 
 	want := []int{300, 200, 100}
-	if len(got) != len(want) {
-		t.Fatalf("chain: got %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("chain: got %v, want %v", got, want)
-		}
-	}
+	require.Equal(t, want, got, "chain")
 }
 
 // TestAncestorPIDs_StopsOnBrokenLink verifies a process reparented to init
 // (setsid, nohup with a double fork, systemd-run) ends the walk instead of
 // silently jumping to an unrelated tree.
 func TestAncestorPIDs_StopsOnBrokenLink(t *testing.T) {
-	if got := ancestorPIDs(400, fakeParents(map[int]int{400: 1})); len(got) != 0 {
-		t.Errorf("a process reparented to init has no usable ancestors, got %v", got)
-	}
-	if got := ancestorPIDs(400, fakeParents(map[int]int{})); len(got) != 0 {
-		t.Errorf("an unreadable parent must end the walk, got %v", got)
-	}
+	assert.Empty(t, ancestorPIDs(400, fakeParents(map[int]int{400: 1})), "a process reparented to init has no usable ancestors")
+	assert.Empty(t, ancestorPIDs(400, fakeParents(map[int]int{})), "an unreadable parent must end the walk")
 }
 
 // TestAncestorPIDs_BoundedAndLoopSafe verifies the walk cannot run away: a
 // self-parenting pid terminates, and a deep chain is capped.
 func TestAncestorPIDs_BoundedAndLoopSafe(t *testing.T) {
-	if got := ancestorPIDs(400, fakeParents(map[int]int{400: 400})); len(got) != 0 {
-		t.Errorf("a self-parenting pid must not be walked, got %v", got)
-	}
+	assert.Empty(t, ancestorPIDs(400, fakeParents(map[int]int{400: 400})), "a self-parenting pid must not be walked")
 
 	deep := make(map[int]int)
 	for pid := 100; pid < 200; pid++ {
 		deep[pid] = pid + 1
 	}
-	if got := ancestorPIDs(100, fakeParents(deep)); len(got) != maxSessionAncestorDepth {
-		t.Errorf("walk depth: got %d, want %d", len(got), maxSessionAncestorDepth)
-	}
+	assert.Len(t, ancestorPIDs(100, fakeParents(deep)), maxSessionAncestorDepth, "walk depth")
 }
 
 // TestLookupSessionAncestor_SudoUsePtyTopology pins the case the direct
@@ -208,9 +179,7 @@ func TestLookupSessionAncestor_SudoUsePtyTopology(t *testing.T) {
 	am.mu.RLock()
 	_, direct := am.lookupSessionLocked(monitorPID, true, monitorPID)
 	am.mu.RUnlock()
-	if direct {
-		t.Fatal("test topology is wrong: the direct lookup must miss")
-	}
+	require.False(t, direct, "test topology is wrong: the direct lookup must miss")
 
 	chain := ancestorPIDs(suPID, fakeParents(map[int]int{
 		suPID: monitorPID, monitorPID: sudoPID, sudoPID: webshLeaderPID, webshLeaderPID: 1,
@@ -219,12 +188,8 @@ func TestLookupSessionAncestor_SudoUsePtyTopology(t *testing.T) {
 	session, found := am.lookupSessionAncestorLocked(chain)
 	am.mu.RUnlock()
 
-	if !found {
-		t.Fatal("su under sudo use_pty must resolve to the Websh session via its ancestors")
-	}
-	if session.SessionID != "sess-1" {
-		t.Errorf("SessionID: got %q, want sess-1", session.SessionID)
-	}
+	require.True(t, found, "su under sudo use_pty must resolve to the Websh session via its ancestors")
+	assert.Equal(t, "sess-1", session.SessionID)
 }
 
 // TestLookupSessionAncestor_UntrackedChainEmits verifies the walk does not
@@ -243,9 +208,7 @@ func TestLookupSessionAncestor_UntrackedChainEmits(t *testing.T) {
 	_, found := am.lookupSessionAncestorLocked(chain)
 	am.mu.RUnlock()
 
-	if found {
-		t.Error("an untracked ancestor chain must not suppress the event")
-	}
+	assert.False(t, found, "an untracked ancestor chain must not suppress the event")
 }
 
 // TestResolveSessionEvent_TruncatesToServerLimits verifies each string is cut
@@ -262,9 +225,7 @@ func TestResolveSessionEvent_TruncatesToServerLimits(t *testing.T) {
 		PID:      712345,
 		PPID:     712340,
 	})
-	if !emit {
-		t.Fatal("expected emit=true for unknown session")
-	}
+	require.True(t, emit, "expected emit=true for unknown session")
 
 	for _, tc := range []struct {
 		field string
@@ -276,9 +237,7 @@ func TestResolveSessionEvent_TruncatesToServerLimits(t *testing.T) {
 		{"rhost", event.RHost, maxAccessEventRHostLen},
 		{"tty", event.TTY, maxAccessEventTTYLen},
 	} {
-		if len(tc.got) != tc.want {
-			t.Errorf("%s: got %d chars, want %d", tc.field, len(tc.got), tc.want)
-		}
+		assert.Len(t, tc.got, tc.want, "%s", tc.field)
 	}
 }
 
@@ -286,19 +245,13 @@ func TestResolveSessionEvent_TruncatesToServerLimits(t *testing.T) {
 // never split, which would put invalid UTF-8 on the wire.
 func TestTruncateRunes_CutsOnCodepointBoundary(t *testing.T) {
 	got, cut := truncateRunes("héllo", 2)
-	if !cut {
-		t.Fatal("expected cut=true")
-	}
-	if got != "hé" {
-		t.Errorf("got %q, want %q", got, "hé")
-	}
-	if !utf8.ValidString(got) {
-		t.Errorf("truncation produced invalid UTF-8: %q", got)
-	}
+	require.True(t, cut, "expected cut=true")
+	assert.Equal(t, "hé", got)
+	assert.True(t, utf8.ValidString(got), "truncation produced invalid UTF-8: %q", got)
 
-	if got, cut := truncateRunes("héllo", 5); cut || got != "héllo" {
-		t.Errorf("a string within the limit must pass through unchanged, got %q cut=%v", got, cut)
-	}
+	got, cut = truncateRunes("héllo", 5)
+	assert.False(t, cut, "a string within the limit must pass through unchanged")
+	assert.Equal(t, "héllo", got, "a string within the limit must pass through unchanged")
 }
 
 // TestResolveSessionEvent_ClampsNegativePPID verifies a malformed frame cannot
@@ -309,12 +262,8 @@ func TestResolveSessionEvent_ClampsNegativePPID(t *testing.T) {
 	event, emit := am.resolveSessionEvent(SessionEventRequest{
 		Username: "alice", Service: "sshd", PID: 712345, PPID: -1,
 	})
-	if !emit {
-		t.Fatal("expected emit=true for unknown session")
-	}
-	if event.PPID != 0 {
-		t.Errorf("PPID: got %d, want 0", event.PPID)
-	}
+	require.True(t, emit, "expected emit=true for unknown session")
+	assert.Equal(t, 0, event.PPID)
 }
 
 // readSessionEventAck reads and decodes the ack written to the client
@@ -343,15 +292,13 @@ func TestHandleSessionEvent_AcksAndEmits(t *testing.T) {
 	go am.handleSessionEvent(raw, server)
 
 	resp := readSessionEventAck(t, client)
-	if resp.Type != "session_event_response" || !resp.Received {
-		t.Errorf("unexpected ack: %+v", resp)
-	}
+	assert.Equal(t, "session_event_response", resp.Type, "unexpected ack: %+v", resp)
+	assert.True(t, resp.Received, "unexpected ack: %+v", resp)
 
 	select {
 	case ev := <-emitted:
-		if ev.Username != "alice" || ev.Service != "sshd" {
-			t.Errorf("unexpected event: %+v", ev)
-		}
+		assert.Equal(t, "alice", ev.Username, "unexpected event: %+v", ev)
+		assert.Equal(t, "sshd", ev.Service, "unexpected event: %+v", ev)
 	case <-time.After(2 * time.Second):
 		t.Fatal("event was not emitted")
 	}
@@ -363,16 +310,14 @@ func TestHandleSessionEvent_MalformedJSONAcksFalse(t *testing.T) {
 	am := newTestAuthManager()
 	am.detectLocalAccess = true
 	am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-		t.Error("must not emit on malformed input")
+		assert.Fail(t, "must not emit on malformed input")
 	}
 
 	server, client := newSessionEventPipe(t)
 	go am.handleSessionEvent([]byte(`{not-json`), server)
 
 	resp := readSessionEventAck(t, client)
-	if resp.Received {
-		t.Errorf("expected received=false for malformed input, got %+v", resp)
-	}
+	assert.False(t, resp.Received, "expected received=false for malformed input, got %+v", resp)
 }
 
 // TestHandleSessionEvent_SuppressedStillAcks verifies Alpacon-originated
@@ -482,9 +427,7 @@ func TestEmitAccessEvent_DropsOn404(t *testing.T) {
 
 	newEmitTestAuthManager(srv.URL).emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
 
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Errorf("404 must not be retried; got %d calls", got)
-	}
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "404 must not be retried")
 }
 
 // TestEmitAccessEvent_DropsOnRejection verifies a non-429 4xx is permanent:
@@ -499,9 +442,7 @@ func TestEmitAccessEvent_DropsOnRejection(t *testing.T) {
 
 	newEmitTestAuthManager(srv.URL).emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
 
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Errorf("a 4xx rejection must not be retried; got %d calls", got)
-	}
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "a 4xx rejection must not be retried")
 }
 
 // TestEmitAccessEvent_DropsOn429 verifies 429 is permanent: the server's
@@ -518,9 +459,7 @@ func TestEmitAccessEvent_DropsOn429(t *testing.T) {
 
 	newEmitTestAuthManager(srv.URL).emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
 
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Errorf("429 must not be retried; got %d calls", got)
-	}
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "429 must not be retried")
 }
 
 // TestEmitAccessEvent_404AfterSuccessIsReported verifies the 404 sunset: once
@@ -541,14 +480,10 @@ func TestEmitAccessEvent_404AfterSuccessIsReported(t *testing.T) {
 
 	am := newEmitTestAuthManager(srv.URL)
 	am.emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
-	if !am.accessEndpointSeen.Load() {
-		t.Fatal("a 2xx must latch the endpoint as deployed")
-	}
+	require.True(t, am.accessEndpointSeen.Load(), "a 2xx must latch the endpoint as deployed")
 
 	am.emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 2})
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Errorf("404 must not be retried; got %d calls", got)
-	}
+	assert.Equal(t, int32(2), atomic.LoadInt32(&calls), "404 must not be retried")
 }
 
 // TestUpdateDetectLocalAccess verifies the policy flag setter mirrors
@@ -556,17 +491,11 @@ func TestEmitAccessEvent_404AfterSuccessIsReported(t *testing.T) {
 func TestUpdateDetectLocalAccess(t *testing.T) {
 	am := newTestAuthManager()
 
-	if am.detectLocalAccess {
-		t.Fatal("detect_local_access must default to false")
-	}
+	require.False(t, am.detectLocalAccess, "detect_local_access must default to false")
 	am.UpdateDetectLocalAccess(true)
-	if !am.detectLocalAccess {
-		t.Error("expected detect_local_access=true after update")
-	}
+	assert.True(t, am.detectLocalAccess, "expected detect_local_access=true after update")
 	am.UpdateDetectLocalAccess(false)
-	if am.detectLocalAccess {
-		t.Error("expected detect_local_access=false after update")
-	}
+	assert.False(t, am.detectLocalAccess, "expected detect_local_access=false after update")
 }
 
 // TestAccessPolicy_ParsesDetectLocalAccess verifies the sync payload
@@ -575,13 +504,7 @@ func TestAccessPolicy_ParsesDetectLocalAccess(t *testing.T) {
 	raw := `{"block_local_sudo":false,"detect_local_access":true}`
 
 	var policy AccessPolicy
-	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
-		t.Fatalf("unmarshal failed: %v", err)
-	}
-	if !policy.DetectLocalAccess {
-		t.Error("expected DetectLocalAccess=true")
-	}
-	if policy.BlockLocalSudo {
-		t.Error("expected BlockLocalSudo=false")
-	}
+	require.NoError(t, json.Unmarshal([]byte(raw), &policy), "unmarshal failed")
+	assert.True(t, policy.DetectLocalAccess, "expected DetectLocalAccess=true")
+	assert.False(t, policy.BlockLocalSudo, "expected BlockLocalSudo=false")
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestTerminalHandler_Validate(t *testing.T) {
@@ -103,9 +104,7 @@ func TestTerminalHandler_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := handler.Validate(tt.cmd, tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
+			assert.Equal(t, tt.wantErr, err != nil, "Validate() error = %v", err)
 		})
 	}
 }
@@ -115,12 +114,8 @@ func TestTerminalHandler_Execute_UnknownCommand(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(context.TODO(), "unknown", &common.CommandArgs{})
 
-	if err == nil {
-		t.Error("Execute() expected error for unknown command")
-	}
-	if exitCode != 1 {
-		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
-	}
+	assert.Error(t, err, "Execute() expected error for unknown command")
+	assert.Equal(t, 1, exitCode)
 }
 
 func TestTerminalHandler_RefreshPTY_InvalidSession(t *testing.T) {
@@ -132,15 +127,9 @@ func TestTerminalHandler_RefreshPTY_InvalidSession(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(context.TODO(), "refreshpty", args)
 
-	if err != nil {
-		t.Errorf("Execute() unexpected error: %v", err)
-	}
-	if exitCode != 1 {
-		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
-	}
-	if output != "invalid session ID" {
-		t.Errorf("Execute() output = %v, want 'Invalid session ID'", output)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, "invalid session ID", output)
 }
 
 func TestTerminalHandler_ResizePTY_InvalidSession(t *testing.T) {
@@ -154,13 +143,7 @@ func TestTerminalHandler_ResizePTY_InvalidSession(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(context.TODO(), "resizepty", args)
 
-	if err != nil {
-		t.Errorf("Execute() unexpected error: %v", err)
-	}
-	if exitCode != 1 {
-		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
-	}
-	if output != "invalid session ID" {
-		t.Errorf("Execute() output = %v, want 'Invalid session ID'", output)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, "invalid session ID", output)
 }

@@ -6,6 +6,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDetectSystemd_Darwin(t *testing.T) {
@@ -13,9 +16,7 @@ func TestDetectSystemd_Darwin(t *testing.T) {
 		t.Skip("skipping darwin-specific test")
 	}
 	// On macOS, detectSystemd should always return false
-	if detectSystemd() {
-		t.Error("detectSystemd() should return false on darwin")
-	}
+	assert.False(t, detectSystemd(), "detectSystemd() should return false on darwin")
 }
 
 func TestEnsureDirectoriesWithRoot(t *testing.T) {
@@ -28,9 +29,7 @@ func TestEnsureDirectoriesWithRoot(t *testing.T) {
 	}
 	root := t.TempDir()
 
-	if err := ensureDirectoriesWithRoot(root); err != nil {
-		t.Fatalf("ensureDirectoriesWithRoot() error: %v", err)
-	}
+	require.NoError(t, ensureDirectoriesWithRoot(root), "ensureDirectoriesWithRoot() error")
 
 	for _, d := range getAlpamonDirs() {
 		rel := d.Path
@@ -40,16 +39,11 @@ func TestEnsureDirectoriesWithRoot(t *testing.T) {
 		rel = strings.TrimPrefix(rel, string(os.PathSeparator))
 		path := filepath.Join(root, rel)
 		info, err := os.Stat(path)
-		if err != nil {
-			t.Errorf("directory %s not created: %v", d.Path, err)
+		if !assert.NoError(t, err, "directory %s not created", d.Path) {
 			continue
 		}
-		if !info.IsDir() {
-			t.Errorf("%s is not a directory", d.Path)
-		}
-		if info.Mode().Perm() != d.Mode {
-			t.Errorf("%s permissions = %o, want %o", d.Path, info.Mode().Perm(), d.Mode)
-		}
+		assert.True(t, info.IsDir(), "%s is not a directory", d.Path)
+		assert.Equal(t, d.Mode, info.Mode().Perm(), "%s permissions", d.Path)
 	}
 }
 
@@ -60,12 +54,8 @@ func TestEnsureDirectoriesWithRoot_Idempotent(t *testing.T) {
 	root := t.TempDir()
 
 	// Call twice to verify idempotency
-	if err := ensureDirectoriesWithRoot(root); err != nil {
-		t.Fatalf("first call error: %v", err)
-	}
-	if err := ensureDirectoriesWithRoot(root); err != nil {
-		t.Fatalf("second call error: %v", err)
-	}
+	require.NoError(t, ensureDirectoriesWithRoot(root), "first call error")
+	require.NoError(t, ensureDirectoriesWithRoot(root), "second call error")
 
 	for _, d := range getAlpamonDirs() {
 		rel := d.Path
@@ -75,13 +65,10 @@ func TestEnsureDirectoriesWithRoot_Idempotent(t *testing.T) {
 		rel = strings.TrimPrefix(rel, string(os.PathSeparator))
 		path := filepath.Join(root, rel)
 		info, err := os.Stat(path)
-		if err != nil {
-			t.Errorf("directory %s not found after second call: %v", d.Path, err)
+		if !assert.NoError(t, err, "directory %s not found after second call", d.Path) {
 			continue
 		}
-		if info.Mode().Perm() != d.Mode {
-			t.Errorf("%s permissions = %o, want %o", d.Path, info.Mode().Perm(), d.Mode)
-		}
+		assert.Equal(t, d.Mode, info.Mode().Perm(), "%s permissions", d.Path)
 	}
 }
 
@@ -89,8 +76,6 @@ func TestGetAlpamonDirs_NoSystemDirectories(t *testing.T) {
 	// Verify that no directory is a bare system directory like /tmp
 	systemDirs := map[string]bool{"/tmp": true, "/var": true, "/etc": true, "/run": true}
 	for _, d := range getAlpamonDirs() {
-		if systemDirs[d.Path] {
-			t.Errorf("getAlpamonDirs() contains bare system directory %q: EnsureDirectories would chmod it", d.Path)
-		}
+		assert.False(t, systemDirs[d.Path], "getAlpamonDirs() contains bare system directory %q: EnsureDirectories would chmod it", d.Path)
 	}
 }

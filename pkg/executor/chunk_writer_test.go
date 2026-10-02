@@ -19,20 +19,14 @@ func TestChunkWriter_BuffersUntilFlush(t *testing.T) {
 	var chunks []string
 	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
-	if _, err := cw.Write([]byte("line1\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if _, err := cw.Write([]byte("line2\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if len(chunks) != 0 {
-		t.Fatalf("newlines must not emit; got %v", chunks)
-	}
+	_, err := cw.Write([]byte("line1\n"))
+	require.NoError(t, err, "write")
+	_, err = cw.Write([]byte("line2\n"))
+	require.NoError(t, err, "write")
+	require.Empty(t, chunks, "newlines must not emit")
 
 	cw.flush()
-	if len(chunks) != 1 || chunks[0] != "line1\nline2\n" {
-		t.Errorf("flush should coalesce buffered writes, got %v", chunks)
-	}
+	assert.Equal(t, []string{"line1\nline2\n"}, chunks, "flush should coalesce buffered writes")
 }
 
 func TestChunkWriter_CoalescesMultipleWrites(t *testing.T) {
@@ -40,61 +34,43 @@ func TestChunkWriter_CoalescesMultipleWrites(t *testing.T) {
 	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
 	for _, s := range []string{"a\n", "b\n", "c\n"} {
-		if _, err := cw.Write([]byte(s)); err != nil {
-			t.Fatalf("write: %v", err)
-		}
+		_, err := cw.Write([]byte(s))
+		require.NoError(t, err, "write")
 	}
-	if len(chunks) != 0 {
-		t.Fatalf("expected no chunks before flush, got %v", chunks)
-	}
+	require.Empty(t, chunks, "expected no chunks before flush")
 
 	cw.flush()
-	if len(chunks) != 1 || chunks[0] != "a\nb\nc\n" {
-		t.Errorf("flush should emit one coalesced chunk, got %v", chunks)
-	}
+	assert.Equal(t, []string{"a\nb\nc\n"}, chunks, "flush should emit one coalesced chunk")
 }
 
 func TestChunkWriter_PartialLineCarriedOver(t *testing.T) {
 	var chunks []string
 	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
-	if _, err := cw.Write([]byte("hello")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if _, err := cw.Write([]byte(" world\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if len(chunks) != 0 {
-		t.Fatalf("expected no chunks before flush, got %v", chunks)
-	}
+	_, err := cw.Write([]byte("hello"))
+	require.NoError(t, err, "write")
+	_, err = cw.Write([]byte(" world\n"))
+	require.NoError(t, err, "write")
+	require.Empty(t, chunks, "expected no chunks before flush")
 
 	cw.flush()
-	if len(chunks) != 1 || chunks[0] != "hello world\n" {
-		t.Errorf("expected concatenated line, got %v", chunks)
-	}
+	assert.Equal(t, []string{"hello world\n"}, chunks, "expected concatenated line")
 }
 
 func TestChunkWriter_FlushEmitsRemainder(t *testing.T) {
 	var chunks []string
 	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
-	if _, err := cw.Write([]byte("no newline")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if len(chunks) != 0 {
-		t.Fatalf("expected no chunks before flush, got %v", chunks)
-	}
+	_, err := cw.Write([]byte("no newline"))
+	require.NoError(t, err, "write")
+	require.Empty(t, chunks, "expected no chunks before flush")
 
 	cw.flush()
-	if len(chunks) != 1 || chunks[0] != "no newline" {
-		t.Errorf("flush should emit remainder, got %v", chunks)
-	}
+	assert.Equal(t, []string{"no newline"}, chunks, "flush should emit remainder")
 
 	// Second flush is a no-op.
 	cw.flush()
-	if len(chunks) != 1 {
-		t.Errorf("second flush should be no-op, got %v", chunks)
-	}
+	assert.Len(t, chunks, 1, "second flush should be no-op")
 }
 
 func TestChunkWriter_ThresholdTriggersEmissionWithoutNewline(t *testing.T) {
@@ -102,22 +78,15 @@ func TestChunkWriter_ThresholdTriggersEmissionWithoutNewline(t *testing.T) {
 	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
 	big := strings.Repeat("x", chunkSizeThreshold+10)
-	if _, err := cw.Write([]byte(big)); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	_, err := cw.Write([]byte(big))
+	require.NoError(t, err, "write")
 
 	// First 4KB emits; sub-threshold tail stays buffered until Flush.
-	if len(chunks) != 1 {
-		t.Fatalf("threshold should trigger one emission, got %d chunks", len(chunks))
-	}
-	if chunks[0] != strings.Repeat("x", chunkSizeThreshold) {
-		t.Errorf("emitted chunk should be exactly chunkSizeThreshold bytes")
-	}
+	require.Len(t, chunks, 1, "threshold should trigger one emission")
+	assert.Equal(t, strings.Repeat("x", chunkSizeThreshold), chunks[0], "emitted chunk should be exactly chunkSizeThreshold bytes")
 
 	cw.flush()
-	if len(chunks) != 2 || chunks[1] != strings.Repeat("x", 10) {
-		t.Errorf("flush should emit 10-byte tail, got %v", chunks)
-	}
+	assert.Equal(t, []string{strings.Repeat("x", chunkSizeThreshold), strings.Repeat("x", 10)}, chunks, "flush should emit 10-byte tail")
 }
 
 func TestChunkWriter_RecoversFromCallbackPanic(t *testing.T) {
@@ -131,20 +100,15 @@ func TestChunkWriter_RecoversFromCallbackPanic(t *testing.T) {
 
 	// Each threshold-sized write forces one emit; the first panics.
 	block := strings.Repeat("x", chunkSizeThreshold)
-	if _, err := cw.Write([]byte(block)); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if _, err := cw.Write([]byte(block)); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if _, err := cw.Write([]byte("tail")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	_, err := cw.Write([]byte(block))
+	require.NoError(t, err, "write")
+	_, err = cw.Write([]byte(block))
+	require.NoError(t, err, "write")
+	_, err = cw.Write([]byte("tail"))
+	require.NoError(t, err, "write")
 	cw.flush()
 
-	if calls != 3 {
-		t.Errorf("expected 3 callback invocations after recovery, got %d", calls)
-	}
+	assert.Equal(t, 3, calls, "expected 3 callback invocations after recovery")
 }
 
 func chunkSizes(chunks []string) []int {
@@ -160,12 +124,8 @@ func TestChunkWriter_WriteReturnsFullLength(t *testing.T) {
 
 	in := []byte("partial")
 	n, err := cw.Write(in)
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if n != len(in) {
-		t.Errorf("Write should return full length: got %d, want %d", n, len(in))
-	}
+	require.NoError(t, err, "write")
+	assert.Equal(t, len(in), n, "Write should return full length")
 }
 
 // Regression: a buffer crossing the threshold emits an exact threshold chunk
@@ -176,31 +136,20 @@ func TestChunkWriter_OversizedBufferSplitsAtThreshold(t *testing.T) {
 	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
 
 	tail := strings.Repeat("a", chunkSizeThreshold-100)
-	if _, err := cw.Write([]byte(tail)); err != nil {
-		t.Fatalf("write tail: %v", err)
-	}
-	if len(chunks) != 0 {
-		t.Fatalf("expected no chunks yet, got %d", len(chunks))
-	}
+	_, err := cw.Write([]byte(tail))
+	require.NoError(t, err, "write tail")
+	require.Empty(t, chunks, "expected no chunks yet")
 
-	if _, err := cw.Write([]byte(strings.Repeat("b", 199) + "\n")); err != nil {
-		t.Fatalf("write line end: %v", err)
-	}
+	_, err = cw.Write([]byte(strings.Repeat("b", 199) + "\n"))
+	require.NoError(t, err, "write line end")
 
-	if len(chunks) != 1 {
-		t.Fatalf("expected 1 threshold chunk before flush, got %d (%v)", len(chunks), chunkSizes(chunks))
-	}
-	if len(chunks[0]) != chunkSizeThreshold {
-		t.Errorf("chunk[0] size: got %d, want %d", len(chunks[0]), chunkSizeThreshold)
-	}
+	require.Len(t, chunks, 1, "expected 1 threshold chunk before flush, sizes %v", chunkSizes(chunks))
+	assert.Equal(t, chunkSizeThreshold, len(chunks[0]), "chunk[0] size")
 
 	cw.flush()
-	if len(chunks) != 2 || len(chunks[1]) != 100 {
-		t.Fatalf("flush should emit the 100-byte tail, got %v", chunkSizes(chunks))
-	}
-	if !strings.HasSuffix(chunks[1], "\n") {
-		t.Errorf("final chunk should retain trailing newline, got %q", chunks[1])
-	}
+	require.Len(t, chunks, 2, "flush should emit the 100-byte tail, sizes %v", chunkSizes(chunks))
+	require.Equal(t, 100, len(chunks[1]), "flush should emit the 100-byte tail")
+	assert.True(t, strings.HasSuffix(chunks[1], "\n"), "final chunk should retain trailing newline, got %q", chunks[1])
 }
 
 // Regression: chunks stream every byte while the audit capture stays bounded.
@@ -211,21 +160,14 @@ func TestChunkWriter_StreamsAllWithBoundedCapture(t *testing.T) {
 	block := strings.Repeat("z", 256*1024)
 	const writes = 6
 	for i := range writes {
-		if _, err := cw.Write([]byte(block)); err != nil {
-			t.Fatalf("write %d: %v", i, err)
-		}
+		_, err := cw.Write([]byte(block))
+		require.NoError(t, err, "write %d", i)
 	}
 	cw.flush()
 
-	if want := len(block) * writes; emitted != want {
-		t.Errorf("emitted bytes: got %d, want %d", emitted, want)
-	}
-	if cw.buf.Len() != 0 {
-		t.Errorf("emit buffer should be empty after flush, has %d bytes", cw.buf.Len())
-	}
-	if got := len(cw.captured()); got > captureCap+64 {
-		t.Errorf("capture size %d exceeds cap+marker", got)
-	}
+	assert.Equal(t, len(block)*writes, emitted, "emitted bytes")
+	assert.Zero(t, cw.buf.Len(), "emit buffer should be empty after flush")
+	assert.LessOrEqual(t, len(cw.captured()), captureCap+64, "capture size exceeds cap+marker")
 }
 
 // The flusher goroutine emits sub-threshold buffered output within the
@@ -264,17 +206,12 @@ func TestChunkWriter_DoesNotSplitRuneAtThreshold(t *testing.T) {
 	// '가' (3 bytes) starts at chunkSizeThreshold-2 so its 3rd byte lands past the
 	// cut; trailing 'b's keep buf over threshold so the Write loop emits before flush.
 	input := strings.Repeat("a", chunkSizeThreshold-2) + "가" + strings.Repeat("b", chunkSizeThreshold)
-	if _, err := cw.Write([]byte(input)); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	_, err := cw.Write([]byte(input))
+	require.NoError(t, err, "write")
 	cw.flush()
 
 	for i, c := range chunks {
-		if !utf8.ValidString(c) {
-			t.Errorf("chunk %d is not valid UTF-8—a rune was split at the boundary", i)
-		}
+		assert.True(t, utf8.ValidString(c), "chunk %d is not valid UTF-8—a rune was split at the boundary", i)
 	}
-	if got := strings.Join(chunks, ""); got != input {
-		t.Errorf("reassembled output mismatch: got %d bytes, want %d", len(got), len(input))
-	}
+	assert.Equal(t, input, strings.Join(chunks, ""), "reassembled output mismatch")
 }

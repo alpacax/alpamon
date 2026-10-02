@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,17 +18,11 @@ func TestPoolConfigDefaults(t *testing.T) {
 	config := Config{}
 	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
-	if settings.PoolMaxWorkers != DefaultPoolMaxWorkers {
-		t.Errorf("Expected default PoolMaxWorkers to be %d, got %d", DefaultPoolMaxWorkers, settings.PoolMaxWorkers)
-	}
+	assert.Equal(t, DefaultPoolMaxWorkers, settings.PoolMaxWorkers, "Expected default PoolMaxWorkers")
 
-	if settings.PoolQueueSize != DefaultPoolQueueSize {
-		t.Errorf("Expected default PoolQueueSize to be %d, got %d", DefaultPoolQueueSize, settings.PoolQueueSize)
-	}
+	assert.Equal(t, DefaultPoolQueueSize, settings.PoolQueueSize, "Expected default PoolQueueSize")
 
-	if settings.PoolDefaultTimeout != DefaultPoolDefaultTimeout {
-		t.Errorf("Expected default PoolDefaultTimeout to be %d, got %d", DefaultPoolDefaultTimeout, settings.PoolDefaultTimeout)
-	}
+	assert.Equal(t, DefaultPoolDefaultTimeout, settings.PoolDefaultTimeout, "Expected default PoolDefaultTimeout")
 }
 
 func TestPoolConfigCustomValues(t *testing.T) {
@@ -38,13 +33,9 @@ func TestPoolConfigCustomValues(t *testing.T) {
 
 	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
-	if settings.PoolMaxWorkers != 50 {
-		t.Errorf("Expected PoolMaxWorkers to be 50, got %d", settings.PoolMaxWorkers)
-	}
+	assert.Equal(t, 50, settings.PoolMaxWorkers, "Expected PoolMaxWorkers to be 50")
 
-	if settings.PoolQueueSize != 500 {
-		t.Errorf("Expected PoolQueueSize to be 500, got %d", settings.PoolQueueSize)
-	}
+	assert.Equal(t, 500, settings.PoolQueueSize, "Expected PoolQueueSize to be 500")
 }
 
 func TestPoolConfigFromINI(t *testing.T) {
@@ -59,38 +50,22 @@ max_workers = 30
 queue_size = 300
 `
 
-	tmpfile, err := os.CreateTemp("", "alpamon-test-*.conf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Remove(tmpfile.Name()) }()
-
-	if _, err := tmpfile.Write([]byte(content)); err != nil {
-		t.Fatal(err)
-	}
-	if err := tmpfile.Close(); err != nil {
-		t.Fatal(err)
-	}
+	confPath := filepath.Join(t.TempDir(), "alpamon-test.conf")
+	require.NoError(t, os.WriteFile(confPath, []byte(content), 0o600))
 
 	// Load the config
-	settings := LoadConfig([]string{tmpfile.Name()}, "/ws/test/", "/ws/control/")
+	settings := LoadConfig([]string{confPath}, "/ws/test/", "/ws/control/")
 
-	if settings.PoolMaxWorkers != 30 {
-		t.Errorf("Expected PoolMaxWorkers to be 30 from INI, got %d", settings.PoolMaxWorkers)
-	}
+	assert.Equal(t, 30, settings.PoolMaxWorkers, "Expected PoolMaxWorkers to be 30 from INI")
 
-	if settings.PoolQueueSize != 300 {
-		t.Errorf("Expected PoolQueueSize to be 300 from INI, got %d", settings.PoolQueueSize)
-	}
+	assert.Equal(t, 300, settings.PoolQueueSize, "Expected PoolQueueSize to be 300 from INI")
 }
 
 func TestEditorIdleTimeoutDefaults(t *testing.T) {
 	config := Config{}
 	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
-	if settings.EditorIdleTimeout != DefaultEditorIdleTimeout {
-		t.Errorf("Expected default EditorIdleTimeout to be %d, got %d", DefaultEditorIdleTimeout, settings.EditorIdleTimeout)
-	}
+	assert.Equal(t, DefaultEditorIdleTimeout, settings.EditorIdleTimeout, "Expected default EditorIdleTimeout")
 }
 
 func TestEditorIdleTimeoutZero(t *testing.T) {
@@ -98,9 +73,7 @@ func TestEditorIdleTimeoutZero(t *testing.T) {
 	config.Editor.IdleTimeout = intPtr(0)
 	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
-	if settings.EditorIdleTimeout != 0 {
-		t.Errorf("Expected EditorIdleTimeout to be 0, got %d", settings.EditorIdleTimeout)
-	}
+	assert.Equal(t, 0, settings.EditorIdleTimeout, "Expected EditorIdleTimeout to be 0")
 }
 
 func TestEditorIdleTimeoutCustom(t *testing.T) {
@@ -108,18 +81,14 @@ func TestEditorIdleTimeoutCustom(t *testing.T) {
 	config.Editor.IdleTimeout = intPtr(15)
 	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
-	if settings.EditorIdleTimeout != 15 {
-		t.Errorf("Expected EditorIdleTimeout to be 15, got %d", settings.EditorIdleTimeout)
-	}
+	assert.Equal(t, 15, settings.EditorIdleTimeout, "Expected EditorIdleTimeout to be 15")
 }
 
 func TestMaxDownloadBytesDefault(t *testing.T) {
 	config := Config{}
 	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
-	if settings.MaxDownloadBytes != 0 {
-		t.Errorf("Expected default MaxDownloadBytes to be 0 (unlimited), got %d", settings.MaxDownloadBytes)
-	}
+	assert.Equal(t, int64(0), settings.MaxDownloadBytes, "Expected default MaxDownloadBytes to be 0 (unlimited)")
 }
 
 func TestMaxDownloadBytesConfigured(t *testing.T) {
@@ -127,9 +96,7 @@ func TestMaxDownloadBytesConfigured(t *testing.T) {
 	config.File.MaxDownloadBytes = 1024 * 1024 * 100 // 100 MiB
 	_, settings := validateConfig(config, "/ws/test/", "/ws/control/")
 
-	if settings.MaxDownloadBytes != 1024*1024*100 {
-		t.Errorf("Expected MaxDownloadBytes to be %d, got %d", 1024*1024*100, settings.MaxDownloadBytes)
-	}
+	assert.Equal(t, int64(1024*1024*100), settings.MaxDownloadBytes, "Expected MaxDownloadBytes")
 }
 
 func TestIncludeVirtualInterfacesDefault(t *testing.T) {
@@ -161,15 +128,10 @@ include_virtual = br0, veth*, docker0
 exclude_virtual_from_inventory = true
 `
 
-	tmpfile, err := os.CreateTemp("", "alpamon-test-*.conf")
-	require.NoError(t, err)
-	defer func() { _ = os.Remove(tmpfile.Name()) }()
+	confPath := filepath.Join(t.TempDir(), "alpamon-test.conf")
+	require.NoError(t, os.WriteFile(confPath, []byte(content), 0o600))
 
-	_, err = tmpfile.Write([]byte(content))
-	require.NoError(t, err)
-	require.NoError(t, tmpfile.Close())
-
-	settings := LoadConfig([]string{tmpfile.Name()}, "/ws/test/", "/ws/control/")
+	settings := LoadConfig([]string{confPath}, "/ws/test/", "/ws/control/")
 
 	assert.Equal(t, []string{"br0", "veth*", "docker0"}, settings.IncludeVirtualInterfaces,
 		"the list is read as comma-separated names and globs")

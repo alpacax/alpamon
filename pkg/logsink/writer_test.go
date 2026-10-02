@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/logger"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var sockCounter atomic.Uint64
@@ -32,9 +34,7 @@ func shortSocketPath(t *testing.T) string {
 		base = "/tmp"
 	}
 	dir, err := os.MkdirTemp(base, "lsk")
-	if err != nil {
-		t.Fatalf("mkdtemp: %v", err)
-	}
+	require.NoError(t, err, "mkdtemp")
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, fmt.Sprintf("%d.s", sockCounter.Add(1)))
 }
@@ -47,9 +47,7 @@ func startTestServer(t *testing.T) (path string, frames <-chan []byte, stop func
 	path = shortSocketPath(t)
 
 	ln, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 
 	ch := make(chan []byte, 16)
 	var (
@@ -125,9 +123,7 @@ func zerologLine(t *testing.T, level, caller, msg string) []byte {
 		Caller:  caller,
 		Message: msg,
 	})
-	if err != nil {
-		t.Fatalf("marshal entry: %v", err)
-	}
+	require.NoError(t, err, "marshal entry")
 	return b
 }
 
@@ -146,7 +142,7 @@ func expectNoFrame(t *testing.T, frames <-chan []byte) {
 	t.Helper()
 	select {
 	case f := <-frames:
-		t.Fatalf("unexpected frame: %s", string(f))
+		require.Fail(t, "unexpected frame: "+string(f))
 	case <-time.After(150 * time.Millisecond):
 	}
 }
@@ -159,33 +155,17 @@ func TestWriter_ForwardsRecordWhenHandlerMatches(t *testing.T) {
 	defer func() { _ = w.Close() }()
 
 	n, err := w.Write(zerologLine(t, "error", "github.com/x/y/plugin.go:42", "boom"))
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if n == 0 {
-		t.Fatalf("expected non-zero return, got %d", n)
-	}
+	require.NoError(t, err, "write")
+	require.NotZero(t, n, "expected non-zero return")
 
 	body := recvFrame(t, frames)
 	var got logger.LogRecord
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatalf("unmarshal record: %v", err)
-	}
-	if got.Program != "myplugin" {
-		t.Errorf("Program = %q, want myplugin", got.Program)
-	}
-	if got.Level != 40 {
-		t.Errorf("Level = %d, want 40", got.Level)
-	}
-	if got.Lineno != 42 {
-		t.Errorf("Lineno = %d, want 42", got.Lineno)
-	}
-	if got.PID != 4242 {
-		t.Errorf("PID = %d, want 4242", got.PID)
-	}
-	if got.Msg != "boom" {
-		t.Errorf("Msg = %q, want boom", got.Msg)
-	}
+	require.NoError(t, json.Unmarshal(body, &got), "unmarshal record")
+	assert.Equal(t, "myplugin", got.Program)
+	assert.Equal(t, 40, got.Level)
+	assert.Equal(t, 42, got.Lineno)
+	assert.Equal(t, 4242, got.PID)
+	assert.Equal(t, "boom", got.Msg)
 }
 
 func TestWriter_FiltersUnlistedFile(t *testing.T) {
@@ -236,9 +216,8 @@ func TestWriter_SilentOnInvalidJSON(t *testing.T) {
 
 	garbage := []byte("not json")
 	n, err := w.Write(garbage)
-	if err != nil || n != len(garbage) {
-		t.Fatalf("Write(invalid) = (%d, %v), want (%d, nil)", n, err, len(garbage))
-	}
+	require.NoError(t, err, "Write(invalid)")
+	require.Equal(t, len(garbage), n, "Write(invalid) byte count")
 }
 
 func TestWriter_HandlersMapIsCopied(t *testing.T) {
@@ -289,20 +268,14 @@ func TestWriter_ReconnectsAfterServerRestart(t *testing.T) {
 	_, _ = w.Write(zerologLine(t, "error", "plugin.go:1", "after-restart"))
 	body := recvFrame(t, frames2)
 	var got logger.LogRecord
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got.Msg != "after-restart" {
-		t.Errorf("Msg = %q, want after-restart", got.Msg)
-	}
+	require.NoError(t, json.Unmarshal(body, &got), "unmarshal")
+	assert.Equal(t, "after-restart", got.Msg)
 }
 
 func TestWriter_FrameFormat(t *testing.T) {
 	path := shortSocketPath(t)
 	ln, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	defer func() { _ = ln.Close() }()
 
 	w := newTestWriter(path, "p", map[string]int{"plugin.go": 10})
@@ -324,22 +297,16 @@ func TestWriter_FrameFormat(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 
 	var hdr [4]byte
-	if _, err := io.ReadFull(conn, hdr[:]); err != nil {
-		t.Fatalf("read header: %v", err)
-	}
+	_, err = io.ReadFull(conn, hdr[:])
+	require.NoError(t, err, "read header")
 	length := binary.BigEndian.Uint32(hdr[:])
-	if length == 0 || length > logger.MaxFrameSize {
-		t.Fatalf("length out of range: %d", length)
-	}
+	require.NotZero(t, length, "length out of range")
+	require.LessOrEqual(t, length, uint32(logger.MaxFrameSize), "length out of range")
 	body := make([]byte, length)
-	if _, err := io.ReadFull(conn, body); err != nil {
-		t.Fatalf("read body: %v", err)
-	}
+	_, err = io.ReadFull(conn, body)
+	require.NoError(t, err, "read body")
 	var rec logger.LogRecord
-	if err := json.Unmarshal(body, &rec); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if rec.Lineno != 7 || rec.Msg != "hi" {
-		t.Errorf("unexpected record: %+v", rec)
-	}
+	require.NoError(t, json.Unmarshal(body, &rec), "unmarshal")
+	assert.Equal(t, 7, rec.Lineno, "unexpected record: %+v", rec)
+	assert.Equal(t, "hi", rec.Msg, "unexpected record: %+v", rec)
 }

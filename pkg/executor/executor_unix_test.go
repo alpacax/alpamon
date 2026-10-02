@@ -5,9 +5,11 @@ package executor
 import (
 	"context"
 	"os"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestExecutor_DoesNotInheritProcessEnv verifies that on Unix a command run
@@ -26,21 +28,11 @@ func TestExecutor_DoesNotInheritProcessEnv(t *testing.T) {
 		Args:    []string{"env"},
 		Timeout: 5 * time.Second,
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Fatalf("expected exit code 0, got %d", exitCode)
-	}
-	if strings.Contains(output, "ALPAMON_LEAK_CANARY") {
-		t.Errorf("process environment leaked into child:\n%s", output)
-	}
-	if !strings.Contains(output, "HOME=") {
-		t.Errorf("expected HOME to be set in child env, got:\n%s", output)
-	}
-	if !strings.Contains(output, "USER=") {
-		t.Errorf("expected USER to be set in child env, got:\n%s", output)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode)
+	assert.NotContains(t, output, "ALPAMON_LEAK_CANARY", "process environment leaked into child")
+	assert.Contains(t, output, "HOME=", "expected HOME to be set in child env")
+	assert.Contains(t, output, "USER=", "expected USER to be set in child env")
 }
 
 // TestExecutor_ExecEnvReachesShell verifies that caller-provided env overrides
@@ -60,16 +52,8 @@ func TestExecutor_ExecEnvReachesShell(t *testing.T) {
 	}
 
 	exitCode, output, err := e.Exec(ctx, []string{"sh", "-c", `printf '%s|%s' "$https_proxy" "$no_proxy"`}, "", "", env, 5*time.Second)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Fatalf("expected exit code 0, got %d", exitCode)
-	}
-	if output != "http://proxy.internal:3128|localhost,169.254.169.254" {
-		t.Errorf("env override did not reach the shell, got %q", output)
-	}
-	if got := os.Getenv("https_proxy"); got != preexisting {
-		t.Errorf("child env override leaked into the agent process: https_proxy=%q (was %q)", got, preexisting)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode)
+	assert.Equal(t, "http://proxy.internal:3128|localhost,169.254.169.254", output, "env override did not reach the shell")
+	assert.Equal(t, preexisting, os.Getenv("https_proxy"), "child env override leaked into the agent process")
 }

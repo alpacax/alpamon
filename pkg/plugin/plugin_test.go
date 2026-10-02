@@ -2,8 +2,9 @@ package plugin
 
 import (
 	"context"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func validPlugin() Plugin {
@@ -36,14 +37,10 @@ func TestValidate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.p.validate()
 			if tc.want == "" {
-				if err != nil {
-					t.Fatalf("expected nil error, got %v", err)
-				}
+				require.NoError(t, err)
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("expected error containing %q, got %v", tc.want, err)
-			}
+			require.ErrorContains(t, err, tc.want)
 		})
 	}
 }
@@ -51,12 +48,8 @@ func TestValidate(t *testing.T) {
 func TestNewRootCmdValid(t *testing.T) {
 	p := validPlugin()
 	cmd := NewRootCmd(&p)
-	if cmd == nil {
-		t.Fatal("NewRootCmd returned nil")
-	}
-	if cmd.Use != p.Name {
-		t.Fatalf("cmd.Use = %q, want %q", cmd.Use, p.Name)
-	}
+	require.NotNil(t, cmd, "NewRootCmd returned nil")
+	require.Equal(t, p.Name, cmd.Use)
 	// The shared `setup` subcommand must be wired up so plugins can run
 	// `<binary> setup` for first-time configuration.
 	var hasSetup bool
@@ -66,21 +59,16 @@ func TestNewRootCmdValid(t *testing.T) {
 			break
 		}
 	}
-	if !hasSetup {
-		t.Fatal("expected `setup` subcommand to be registered")
-	}
+	require.True(t, hasSetup, "expected `setup` subcommand to be registered")
 }
 
 func TestNewRootCmdPanicsOnInvalidPlugin(t *testing.T) {
 	defer func() {
 		r := recover()
-		if r == nil {
-			t.Fatal("expected NewRootCmd to panic on invalid Plugin")
-		}
+		require.NotNil(t, r, "expected NewRootCmd to panic on invalid Plugin")
 		err, ok := r.(error)
-		if !ok || !strings.Contains(err.Error(), "Name") {
-			t.Fatalf("expected error mentioning Name, got %v", r)
-		}
+		require.True(t, ok, "expected error, got %v", r)
+		require.ErrorContains(t, err, "Name")
 	}()
 	NewRootCmd(&Plugin{}) // missing required fields
 }
@@ -88,13 +76,10 @@ func TestNewRootCmdPanicsOnInvalidPlugin(t *testing.T) {
 func TestNewRootCmdPanicsOnNilPlugin(t *testing.T) {
 	defer func() {
 		r := recover()
-		if r == nil {
-			t.Fatal("expected NewRootCmd to panic on nil Plugin")
-		}
+		require.NotNil(t, r, "expected NewRootCmd to panic on nil Plugin")
 		s, ok := r.(string)
-		if !ok || !strings.Contains(s, "nil Plugin") {
-			t.Fatalf("expected panic message mentioning nil Plugin, got %v", r)
-		}
+		require.True(t, ok, "expected string panic, got %v", r)
+		require.Contains(t, s, "nil Plugin", "expected panic message mentioning nil Plugin")
 	}()
 	NewRootCmd(nil)
 }

@@ -4,85 +4,58 @@ package file
 
 import (
 	"context"
-	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestCmdReadCloser_NormalRead(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "f.txt")
-	if err := os.WriteFile(tmp, []byte("hello"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(tmp, []byte("hello"), 0644))
 	cmd := exec.Command("cat", tmp)
 	rc, err := newCmdReadCloser(cmd)
-	if err != nil {
-		t.Fatalf("new: %v", err)
-	}
+	require.NoError(t, err, "new")
 	got, err := io.ReadAll(rc)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(got) != "hello" {
-		t.Fatalf("got %q", got)
-	}
-	if err := rc.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, err, "read")
+	require.Equal(t, "hello", string(got))
+	require.NoError(t, rc.Close(), "close")
 }
 
 func TestCmdReadCloser_NonZeroExit(t *testing.T) {
 	cmd := exec.Command("cat", "/nonexistent/path/abcdef")
 	rc, err := newCmdReadCloser(cmd)
-	if err != nil {
-		t.Fatalf("new: %v", err)
-	}
+	require.NoError(t, err, "new")
 	_, _ = io.ReadAll(rc)
 	cerr := rc.Close()
-	if cerr == nil {
-		t.Fatal("expected non-nil close error")
-	}
-	if !strings.Contains(cerr.Error(), "No such file") && !strings.Contains(cerr.Error(), "cannot open") {
-		t.Fatalf("expected stderr in error, got %q", cerr.Error())
-	}
+	require.Error(t, cerr, "expected non-nil close error")
+	require.Regexp(t, "No such file|cannot open", cerr.Error(), "expected stderr in error")
 }
 
 func TestCmdReadCloser_DoubleCloseIdempotent(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "f.txt")
 	_ = os.WriteFile(tmp, []byte("x"), 0644)
 	rc, err := newCmdReadCloser(exec.Command("cat", tmp))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	_, _ = io.ReadAll(rc)
-	if err := rc.Close(); err != nil {
-		t.Fatalf("first close: %v", err)
-	}
-	if err := rc.Close(); err != nil {
-		t.Fatalf("second close: %v", err)
-	}
+	require.NoError(t, rc.Close(), "first close")
+	require.NoError(t, rc.Close(), "second close")
 }
 
 func TestCmdReadCloser_EarlyClose(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "big.bin")
-	if err := os.WriteFile(tmp, make([]byte, 4<<20), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(tmp, make([]byte, 4<<20), 0644))
 	rc, err := newCmdReadCloser(exec.Command("cat", tmp))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Safety net: the Read below can t.Fatalf, which would skip the explicit
-	// Close and leave the cat process unreaped (leaking os/exec's stderr-copy
-	// goroutine). Close() is idempotent, so the tested early Close still stands.
+	require.NoError(t, err)
+	// Safety net: a failed require below would skip the explicit Close and leak the unreaped cat
+	// process. Close() is idempotent, so the tested early Close still stands.
 	defer func() { _ = rc.Close() }()
 	buf := make([]byte, 16)
-	if _, err := rc.Read(buf); err != nil && !errors.Is(err, io.EOF) {
-		t.Fatalf("read: %v", err)
+	if _, err := rc.Read(buf); err != nil {
+		require.ErrorIs(t, err, io.EOF, "read")
 	}
 	// Close before EOF: Close() calls cmd.Wait(), which reaps the process and joins
 	// os/exec's stderr-copy goroutine, so nothing leaks. A regression (hang or unreaped
@@ -97,9 +70,7 @@ func TestCmdReadCloser_CtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, "cat") // no path → reads stdin → blocks
 	rc, err := newCmdReadCloser(cmd)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	cancel()
 	_, _ = io.ReadAll(rc)
 	if err := rc.Close(); err == nil {

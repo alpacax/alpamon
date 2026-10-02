@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type azureMockOpts struct {
@@ -77,9 +80,7 @@ func TestAzure_Fetch_HappyPath(t *testing.T) {
 
 	p := NewAzureWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
+	require.NoError(t, err)
 
 	checks := map[string]string{
 		"Provider":         ProviderAzure,
@@ -98,13 +99,9 @@ func TestAzure_Fetch_HappyPath(t *testing.T) {
 		"AccountID":        meta.AccountID,
 	}
 	for k, want := range checks {
-		if got[k] != want {
-			t.Errorf("%s = %q, want %q", k, got[k], want)
-		}
+		assert.Equal(t, want, got[k], k)
 	}
-	if meta.NetworkID != "" {
-		t.Errorf("NetworkID expected empty for Azure V1, got %q", meta.NetworkID)
-	}
+	assert.Empty(t, meta.NetworkID, "NetworkID expected empty for Azure V1")
 }
 
 func TestAzure_Fetch_ZoneEmpty(t *testing.T) {
@@ -112,12 +109,8 @@ func TestAzure_Fetch_ZoneEmpty(t *testing.T) {
 	defer server.Close()
 
 	meta, err := NewAzureWithBase(server.URL).Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if meta.AvailabilityZone != "" {
-		t.Errorf("AZ should be empty for zone-less VM, got %q", meta.AvailabilityZone)
-	}
+	require.NoError(t, err)
+	assert.Empty(t, meta.AvailabilityZone, "AZ should be empty for zone-less VM")
 }
 
 func TestAzure_HeaderEnforcedByServer(t *testing.T) {
@@ -126,9 +119,7 @@ func TestAzure_HeaderEnforcedByServer(t *testing.T) {
 	server := newAzureMockServer(t, azureMockOpts{requireHeader: true})
 	defer server.Close()
 
-	if !NewAzureWithBase(server.URL).Probe(context.Background()) {
-		t.Error("Probe failed: header not being sent?")
-	}
+	assert.True(t, NewAzureWithBase(server.URL).Probe(context.Background()), "Probe failed: header not being sent?")
 }
 
 func TestAzure_Fetch_ServerErrorReturnsPartial(t *testing.T) {
@@ -137,11 +128,9 @@ func TestAzure_Fetch_ServerErrorReturnsPartial(t *testing.T) {
 
 	p := NewAzureWithBase(server.URL)
 	meta, err := p.Fetch(context.Background())
-	if err == nil {
-		t.Error("expected error on 503")
-	}
-	if meta == nil || meta.Provider != ProviderAzure {
-		t.Errorf("expected partial Metadata with Provider=azure, got %+v", meta)
+	assert.Error(t, err, "expected error on 503")
+	if assert.NotNil(t, meta, "expected partial Metadata with Provider=azure") {
+		assert.Equal(t, ProviderAzure, meta.Provider, "expected partial Metadata with Provider=azure")
 	}
 }
 
@@ -153,11 +142,9 @@ func TestAzure_Fetch_EmptyVMID_ReturnsError(t *testing.T) {
 	defer server.Close()
 
 	meta, err := NewAzureWithBase(server.URL).Fetch(context.Background())
-	if err == nil {
-		t.Error("expected error when vmId is empty/whitespace")
-	}
-	if meta == nil || meta.Provider != ProviderAzure {
-		t.Errorf("expected partial Metadata with Provider=azure, got %+v", meta)
+	assert.Error(t, err, "expected error when vmId is empty/whitespace")
+	if assert.NotNil(t, meta, "expected partial Metadata with Provider=azure") {
+		assert.Equal(t, ProviderAzure, meta.Provider, "expected partial Metadata with Provider=azure")
 	}
 }
 
@@ -166,7 +153,5 @@ func TestAzure_Fetch_BadJSON(t *testing.T) {
 	defer server.Close()
 
 	_, err := NewAzureWithBase(server.URL).Fetch(context.Background())
-	if err == nil {
-		t.Error("expected parse error")
-	}
+	assert.Error(t, err, "expected parse error")
 }

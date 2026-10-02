@@ -118,9 +118,7 @@ func TestFileHandler_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := handler.Validate(tt.cmd, tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
+			assert.Equal(t, tt.wantErr, err != nil, "Validate() error = %v", err)
 		})
 	}
 }
@@ -131,12 +129,8 @@ func TestFileHandler_Execute_UnknownCommand(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, "unknown", &common.CommandArgs{})
 
-	if err == nil {
-		t.Error("Execute() expected error for unknown command")
-	}
-	if exitCode != 1 {
-		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
-	}
+	assert.Error(t, err, "Execute() expected error for unknown command")
+	assert.Equal(t, 1, exitCode)
 }
 
 func TestFileHandler_Execute_UploadNoPaths(t *testing.T) {
@@ -151,15 +145,9 @@ func TestFileHandler_Execute_UploadNoPaths(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, "upload", args)
 
-	if err != nil {
-		t.Errorf("Execute() unexpected error: %v", err)
-	}
-	if exitCode != 1 {
-		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
-	}
-	if output != "No paths provided" {
-		t.Errorf("Execute() output = %v, want 'No paths provided'", output)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, "No paths provided", output)
 }
 
 func TestFileHandler_Execute_DownloadUnknownType(t *testing.T) {
@@ -176,27 +164,17 @@ func TestFileHandler_Execute_DownloadUnknownType(t *testing.T) {
 
 	exitCode, output, err := handler.Execute(ctx, "download", args)
 
-	if err != nil {
-		t.Errorf("Execute() unexpected error: %v", err)
-	}
-	if exitCode != 1 {
-		t.Errorf("Execute() exitCode = %v, want 1", exitCode)
-	}
-	if output == "" {
-		t.Error("Execute() expected error message in output")
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.NotEmpty(t, output, "Execute() expected error message in output")
 }
 
 func TestFileExists(t *testing.T) {
 	// Test with non-existent file
-	if utils.FileExists("/nonexistent/path/file.txt") {
-		t.Error("FileExists() should return false for non-existent file")
-	}
+	assert.False(t, utils.FileExists("/nonexistent/path/file.txt"), "FileExists() should return false for non-existent file")
 
 	// Test with existing file (current file)
-	if !utils.FileExists("file_test.go") {
-		t.Error("FileExists() should return true for existing file")
-	}
+	assert.True(t, utils.FileExists("file_test.go"), "FileExists() should return true for existing file")
 }
 
 // TestFileUpload_UseBlob_OsFile_NoDoubleClose locks in the v2.1.6 regression
@@ -213,24 +191,16 @@ func TestFileUpload_UseBlob_OsFile_NoDoubleClose(t *testing.T) {
 	defer srv.Close()
 
 	tmpPath := filepath.Join(t.TempDir(), "blob.bin")
-	if err := os.WriteFile(tmpPath, []byte("hello"), 0o600); err != nil {
-		t.Fatalf("write temp: %v", err)
-	}
+	require.NoError(t, os.WriteFile(tmpPath, []byte("hello"), 0o600), "write temp")
 	f, err := os.Open(tmpPath)
-	if err != nil {
-		t.Fatalf("open temp: %v", err)
-	}
+	require.NoError(t, err, "open temp")
 
 	h := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 	args := &common.CommandArgs{UseBlob: true, Content: srv.URL}
 
 	code, err := h.fileUpload(args, f, 5, "blob.bin", false)
-	if err != nil {
-		t.Fatalf("fileUpload returned err=%v, want nil (regression of v2.1.6 double-close)", err)
-	}
-	if code != http.StatusOK {
-		t.Errorf("fileUpload code=%d, want %d", code, http.StatusOK)
-	}
+	require.NoError(t, err, "fileUpload want nil (regression of v2.1.6 double-close)")
+	assert.Equal(t, http.StatusOK, code, "fileUpload code")
 }
 
 // TestFileUpload_UseBlob_CloseErrorPropagates verifies the original intent
@@ -257,12 +227,8 @@ func TestFileUpload_UseBlob_CloseErrorPropagates(t *testing.T) {
 	args := &common.CommandArgs{UseBlob: true, Content: srv.URL}
 
 	_, err := h.fileUpload(args, er, 5, "blob.bin", false)
-	if !errors.Is(err, closeSentinel) {
-		t.Fatalf("fileUpload err=%v, want chain containing %v", err, closeSentinel)
-	}
-	if er.closeCnt != 1 {
-		t.Errorf("errReader.Close was called %d time(s), want exactly 1 (double-close regression)", er.closeCnt)
-	}
+	require.ErrorIs(t, err, closeSentinel, "fileUpload err want chain containing sentinel")
+	assert.Equal(t, 1, er.closeCnt, "errReader.Close call count, want exactly 1 (double-close regression)")
 }
 
 // TestFileUpload_UseBlob_PutErrorTakesPrecedence verifies the `err == nil &&`
@@ -286,12 +252,8 @@ func TestFileUpload_UseBlob_PutErrorTakesPrecedence(t *testing.T) {
 	args := &common.CommandArgs{UseBlob: true, Content: "http://127.0.0.1:0/blob"}
 
 	_, err := h.fileUpload(args, er, 5, "blob.bin", false)
-	if err == nil {
-		t.Fatal("fileUpload returned nil err, want PUT transport error")
-	}
-	if errors.Is(err, closeSentinel) {
-		t.Errorf("fileUpload returned close error %v; PUT transport error should take precedence", err)
-	}
+	require.Error(t, err, "fileUpload returned nil err, want PUT transport error")
+	assert.NotErrorIs(t, err, closeSentinel, "PUT transport error should take precedence over close error")
 }
 
 func TestFileHandler_parsePaths(t *testing.T) {
@@ -339,11 +301,9 @@ func TestFileHandler_parsePaths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, bulk, _, err := handler.parsePaths(tt.homeDirectory, tt.pathList)
 
-			if (err != nil) != tt.wantErr {
-				t.Errorf("parsePaths() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if err == nil && bulk != tt.wantBulk {
-				t.Errorf("parsePaths() bulk = %v, want %v", bulk, tt.wantBulk)
+			assert.Equal(t, tt.wantErr, err != nil, "parsePaths() error = %v", err)
+			if err == nil {
+				assert.Equal(t, tt.wantBulk, bulk, "parsePaths() bulk")
 			}
 		})
 	}
@@ -422,9 +382,7 @@ func TestIsStagePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isStagePath(tt.path); got != tt.want {
-				t.Errorf("isStagePath(%q) = %v, want %v", tt.path, got, tt.want)
-			}
+			assert.Equal(t, tt.want, isStagePath(tt.path), "isStagePath(%q)", tt.path)
 		})
 	}
 }
@@ -433,29 +391,19 @@ func TestIsStagePath(t *testing.T) {
 func TestRemoveStaged(t *testing.T) {
 	t.Run("existing file removed", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "staged.sh")
-		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o600); err != nil {
-			t.Fatalf("write temp: %v", err)
-		}
+		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"), 0o600), "write temp")
 
 		code, _ := removeStaged(path)
-		if code != 0 {
-			t.Errorf("removeStaged() code = %v, want 0", code)
-		}
-		if utils.FileExists(path) {
-			t.Error("removeStaged() left the file in place")
-		}
+		assert.Equal(t, 0, code, "removeStaged() code")
+		assert.False(t, utils.FileExists(path), "removeStaged() left the file in place")
 	})
 
 	t.Run("missing file treated as success", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "missing.sh")
 
 		code, message := removeStaged(path)
-		if code != 0 {
-			t.Errorf("removeStaged() code = %v, want 0", code)
-		}
-		if message == "" {
-			t.Error("removeStaged() expected a message for the missing-file case")
-		}
+		assert.Equal(t, 0, code, "removeStaged() code")
+		assert.NotEmpty(t, message, "removeStaged() expected a message for the missing-file case")
 	})
 }
 
@@ -474,12 +422,8 @@ func TestFileHandler_Execute_Rm(t *testing.T) {
 		args := &common.CommandArgs{Path: "/tmp/.alpacon-exec-deadbeefcafe.sh"}
 
 		exitCode, _, err := handler.Execute(ctx, "rm", args)
-		if err != nil {
-			t.Errorf("Execute() unexpected error: %v", err)
-		}
-		if exitCode != 0 {
-			t.Errorf("Execute() exitCode = %v, want 0", exitCode)
-		}
+		assert.NoError(t, err)
+		assert.Equal(t, 0, exitCode)
 	})
 
 	t.Run("refused on Windows", func(t *testing.T) {
@@ -487,15 +431,9 @@ func TestFileHandler_Execute_Rm(t *testing.T) {
 			t.Skip("Windows-only staging refusal")
 		}
 		exitCode, output, err := handler.Execute(ctx, "rm", &common.CommandArgs{Path: "/tmp/.alpacon-exec-deadbeefcafe.sh"})
-		if err != nil {
-			t.Errorf("Execute() unexpected error: %v", err)
-		}
-		if exitCode != 1 {
-			t.Errorf("Execute() exitCode = %v, want 1", exitCode)
-		}
-		if output == "" {
-			t.Error("Execute() expected a platform-refusal message")
-		}
+		assert.NoError(t, err)
+		assert.Equal(t, 1, exitCode)
+		assert.NotEmpty(t, output, "Execute() expected a platform-refusal message")
 	})
 
 	nonStagePaths := []string{
@@ -506,15 +444,9 @@ func TestFileHandler_Execute_Rm(t *testing.T) {
 	for _, path := range nonStagePaths {
 		t.Run("rejected: "+path, func(t *testing.T) {
 			exitCode, output, err := handler.Execute(ctx, "rm", &common.CommandArgs{Path: path})
-			if err != nil {
-				t.Errorf("Execute() unexpected error: %v", err)
-			}
-			if exitCode != 1 {
-				t.Errorf("Execute() exitCode = %v, want 1", exitCode)
-			}
-			if output == "" {
-				t.Error("Execute() expected a rejection message")
-			}
+			assert.NoError(t, err)
+			assert.Equal(t, 1, exitCode)
+			assert.NotEmpty(t, output, "Execute() expected a rejection message")
 		})
 	}
 }

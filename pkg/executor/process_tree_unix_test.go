@@ -15,71 +15,46 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 	t.Run("non_session_leader_sets_pgid", func(t *testing.T) {
 		cmd := &exec.Cmd{}
 		cleanup, err := configureProcessTreeCleanup(cmd, false)
-		if err != nil {
-			t.Fatalf("configureProcessTreeCleanup: %v", err)
-		}
-		if cmd.SysProcAttr == nil {
-			t.Fatal("SysProcAttr was not allocated")
-		}
-		if !cmd.SysProcAttr.Setpgid {
-			t.Error("Setpgid: got false, want true")
-		}
-		if cmd.SysProcAttr.Setsid {
-			t.Error("Setsid: got true, want false")
-		}
-		if !cleanup.leadsGroup {
-			t.Error("leadsGroup: got false, want true for setpgid(0,0)")
-		}
+		require.NoError(t, err, "configureProcessTreeCleanup")
+		require.NotNil(t, cmd.SysProcAttr, "SysProcAttr was not allocated")
+		assert.True(t, cmd.SysProcAttr.Setpgid, "Setpgid: got false, want true")
+		assert.False(t, cmd.SysProcAttr.Setsid, "Setsid: got true, want false")
+		assert.True(t, cleanup.leadsGroup, "leadsGroup: got false, want true for setpgid(0,0)")
 	})
 
 	t.Run("session_leader_sets_sid_not_pgid", func(t *testing.T) {
 		cmd := &exec.Cmd{}
 		cleanup, err := configureProcessTreeCleanup(cmd, true)
-		if err != nil {
-			t.Fatalf("configureProcessTreeCleanup: %v", err)
-		}
-		if !cmd.SysProcAttr.Setsid {
-			t.Error("Setsid: got false, want true")
-		}
-		if cmd.SysProcAttr.Setpgid {
-			t.Error("Setpgid: got true, want false (setpgid on a setsid session leader is EPERM, fails Start)")
-		}
-		if !cleanup.leadsGroup {
-			t.Error("leadsGroup: got false, want true for setsid")
-		}
+		require.NoError(t, err, "configureProcessTreeCleanup")
+		assert.True(t, cmd.SysProcAttr.Setsid, "Setsid: got false, want true")
+		assert.False(t, cmd.SysProcAttr.Setpgid, "Setpgid: got true, want false (setpgid on a setsid session leader is EPERM, fails Start)")
+		assert.True(t, cleanup.leadsGroup, "leadsGroup: got false, want true for setsid")
 	})
 
 	// A caller that already asked for setsid must not also get Setpgid forced on.
 	t.Run("preexisting_setsid_not_overridden", func(t *testing.T) {
 		cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{Setsid: true}}
 		cleanup, err := configureProcessTreeCleanup(cmd, false)
-		if err != nil {
-			t.Fatalf("configureProcessTreeCleanup: %v", err)
-		}
-		if cmd.SysProcAttr.Setpgid {
-			t.Error("Setpgid was forced on despite preexisting Setsid")
-		}
-		if !cleanup.leadsGroup {
-			t.Error("leadsGroup: got false, want true for preexisting setsid")
-		}
+		require.NoError(t, err, "configureProcessTreeCleanup")
+		assert.False(t, cmd.SysProcAttr.Setpgid, "Setpgid was forced on despite preexisting Setsid")
+		assert.True(t, cleanup.leadsGroup, "leadsGroup: got false, want true for preexisting setsid")
 	})
 
 	// Joining an existing group means PGID != PID, so afterStart must fall back to the getpgid guard.
 	t.Run("preexisting_pgid_is_not_own_group_leader", func(t *testing.T) {
 		cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{Setpgid: true, Pgid: 1234}}
 		cleanup, err := configureProcessTreeCleanup(cmd, false)
-		if err != nil {
-			t.Fatalf("configureProcessTreeCleanup: %v", err)
-		}
-		if cleanup.leadsGroup {
-			t.Error("leadsGroup: got true, want false for a child joining an existing group")
-		}
+		require.NoError(t, err, "configureProcessTreeCleanup")
+		assert.False(t, cleanup.leadsGroup, "leadsGroup: got true, want false for a child joining an existing group")
 	})
 
 	// The credential from utils.Demote is assigned before this runs; it must survive.
@@ -87,18 +62,10 @@ func TestConfigureProcessTreeCleanup_FlagMatrix(t *testing.T) {
 		cred := &syscall.Credential{Uid: 1000, Gid: 1000}
 		cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{Credential: cred}}
 		cleanup, err := configureProcessTreeCleanup(cmd, false)
-		if err != nil {
-			t.Fatalf("configureProcessTreeCleanup: %v", err)
-		}
-		if cmd.SysProcAttr.Credential != cred {
-			t.Error("Credential was clobbered by configureProcessTreeCleanup")
-		}
-		if !cmd.SysProcAttr.Setpgid {
-			t.Error("Setpgid was not set alongside the preserved credential")
-		}
-		if !cleanup.leadsGroup {
-			t.Error("leadsGroup: got false, want true alongside the preserved credential")
-		}
+		require.NoError(t, err, "configureProcessTreeCleanup")
+		assert.Same(t, cred, cmd.SysProcAttr.Credential, "Credential was clobbered by configureProcessTreeCleanup")
+		assert.True(t, cmd.SysProcAttr.Setpgid, "Setpgid was not set alongside the preserved credential")
+		assert.True(t, cleanup.leadsGroup, "leadsGroup: got false, want true alongside the preserved credential")
 	})
 }
 
@@ -110,12 +77,9 @@ func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := exec.Command("/bin/sh", "-c", bgChildScript("wait"), "sh", pidFile)
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
-	if err != nil {
-		t.Fatalf("configureProcessTreeCleanup: %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("cmd.Start: %v", err)
-	}
+	require.NoError(t, err, "configureProcessTreeCleanup")
+	err = cmd.Start()
+	require.NoError(t, err, "cmd.Start")
 	// Reap last—after afterStart, and even when an assertion below fails early.
 	t.Cleanup(func() { _ = cmd.Wait() })
 
@@ -123,26 +87,20 @@ func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
 	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 
 	// Cancel before the group is recorded: pgid is still 0, so only the leader is targeted.
-	if err := cleanup.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("cancel: %v", err)
+	err = cleanup.cancel(cmd)
+	if err != nil {
+		require.ErrorIs(t, err, os.ErrProcessDone, "cancel")
 	}
 	// Let the SIGKILL land before the redo: an unreaped-zombie leader is the state that used to defeat
 	// getpgid, and the redo must cope with it. The raced cancel reaches only the leader, so the grandchild
 	// must still be alive—otherwise the assertion below cannot tell a working redo from a no-op one.
-	if !waitForLeaderStopped(cmd.Process.Pid, 3*time.Second) {
-		t.Fatalf("leader %d still running after the raced cancel", cmd.Process.Pid)
-	}
-	if processGone(childPID) {
-		t.Fatalf("grandchild %d died with the raced cancel; the redo is not exercised", childPID)
-	}
+	require.True(t, waitForLeaderStopped(cmd.Process.Pid, 3*time.Second), "leader %d still running after the raced cancel", cmd.Process.Pid)
+	require.False(t, processGone(childPID), "grandchild %d died with the raced cancel; the redo is not exercised", childPID)
 
 	// Redo while the process is still unreaped, matching runCommand's afterStart-before-Wait order.
-	if err := cleanup.afterStart(cmd); err != nil {
-		t.Fatalf("afterStart redo surfaced %v, want nil after a raced cancel", err)
-	}
-	if !waitForProcessGone(childPID, 3*time.Second) {
-		t.Fatalf("grandchild %d survived the afterStart redo", childPID)
-	}
+	err = cleanup.afterStart(cmd)
+	require.NoError(t, err, "afterStart redo surfaced an error, want nil after a raced cancel")
+	require.True(t, waitForProcessGone(childPID, 3*time.Second), "grandchild %d survived the afterStart redo", childPID)
 }
 
 // afterStart swallows os.ErrProcessDone from its redo so Wait reports the real termination status instead
@@ -151,32 +109,26 @@ func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
 func TestCommandCleanup_AfterStartRedoSwallowsProcessDone(t *testing.T) {
 	cmd := exec.Command("/bin/sh", "-c", "exit 0")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
-	if err != nil {
-		t.Fatalf("configureProcessTreeCleanup: %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("cmd.Start: %v", err)
-	}
+	require.NoError(t, err, "configureProcessTreeCleanup")
+	err = cmd.Start()
+	require.NoError(t, err, "cmd.Start")
 	pid := cmd.Process.Pid
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("cmd.Wait: %v", err)
-	}
+	err = cmd.Wait()
+	require.NoError(t, err, "cmd.Wait")
 	// Reaped, so the group must be empty; skip rather than signal a group the OS already handed out.
 	if !errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
 		t.Skipf("pgid %d was reused, cannot exercise an already-gone group", pid)
 	}
 
 	cleanup.takeForCancel() // a cancel raced ahead, so afterStart redoes the kill
-	if err := cleanup.afterStart(cmd); err != nil {
-		t.Fatalf("afterStart: got %v, want nil for an already-gone group", err)
-	}
+	err = cleanup.afterStart(cmd)
+	require.NoError(t, err, "afterStart: want nil for an already-gone group")
 }
 
 func TestCommandCleanup_CancelNilProcessReturnsProcessDone(t *testing.T) {
 	var cleanup commandCleanup
-	if err := cleanup.cancel(&exec.Cmd{}); !errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("cancel: got %v, want os.ErrProcessDone", err)
-	}
+	err := cleanup.cancel(&exec.Cmd{})
+	require.ErrorIs(t, err, os.ErrProcessDone, "cancel")
 }
 
 // White-box counterpart to the Windows job-object test: configure -> Start -> cancel must SIGKILL
@@ -185,32 +137,25 @@ func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := exec.Command("/bin/sh", "-c", bgChildScript("wait"), "sh", pidFile)
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
-	if err != nil {
-		t.Fatalf("configureProcessTreeCleanup: %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("cmd.Start: %v", err)
-	}
+	require.NoError(t, err, "configureProcessTreeCleanup")
+	err = cmd.Start()
+	require.NoError(t, err, "cmd.Start")
 	// Kill and reap the leader even when an assertion below fails before cancel runs; the in-body
 	// cancel makes this a no-op on the happy path.
 	t.Cleanup(func() {
 		_ = cleanup.cancel(cmd)
 		_ = cmd.Wait()
 	})
-	if err := cleanup.afterStart(cmd); err != nil {
-		t.Fatalf("afterStart: %v", err)
-	}
+	err = cleanup.afterStart(cmd)
+	require.NoError(t, err, "afterStart")
 
 	childPID := readChildPID(t, pidFile)
 	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 
-	if err := cleanup.cancel(cmd); err != nil {
-		t.Fatalf("cancel: %v", err)
-	}
+	err = cleanup.cancel(cmd)
+	require.NoError(t, err, "cancel")
 
-	if !waitForProcessGone(childPID, 3*time.Second) {
-		t.Fatalf("grandchild %d survived the group kill", childPID)
-	}
+	require.True(t, waitForProcessGone(childPID, 3*time.Second), "grandchild %d survived the group kill", childPID)
 }
 
 // Black-box counterpart: a timed-out command whose backgrounded grandchild holds stdout open
@@ -256,23 +201,15 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 				t.Fatalf("executor did not return after timeout; leaked child pid %d", pid)
 			}
 
-			if res.exitCode != 124 {
-				t.Fatalf("exit code: got %d, want 124; err=%v output=%q", res.exitCode, res.err, res.output)
-			}
-			if res.err == nil {
-				t.Fatal("expected timeout error")
-			}
-			if !strings.Contains(res.output, "Command timed out after") {
-				t.Fatalf("expected timeout banner, got %q", res.output)
-			}
+			require.Equal(t, 124, res.exitCode, "err=%v output=%q", res.err, res.output)
+			require.Error(t, res.err, "expected timeout error")
+			require.Contains(t, res.output, "Command timed out after", "expected timeout banner")
 
 			pid := readChildPID(t, pidFile)
 			t.Cleanup(func() {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 			})
-			if !waitForProcessGone(pid, 3*time.Second) {
-				t.Fatalf("child process %d was still alive after executor timeout cleanup", pid)
-			}
+			require.True(t, waitForProcessGone(pid, 3*time.Second), "child process %d was still alive after executor timeout cleanup", pid)
 		})
 	}
 }
@@ -304,15 +241,11 @@ func TestExecutor_CleansDescendantWhenCommandExitsNonZero(t *testing.T) {
 		t.Fatalf("executor did not return; leaked child pid %d", pid)
 	}
 
-	if res.exitCode != 3 {
-		t.Fatalf("exit code: got %d, want 3; err=%v", res.exitCode, res.err)
-	}
+	require.Equal(t, 3, res.exitCode, "err=%v", res.err)
 
 	pid := readChildPID(t, pidFile)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	if !waitForProcessGone(pid, 3*time.Second) {
-		t.Fatalf("descendant %d survived after a non-zero command exit", pid)
-	}
+	require.True(t, waitForProcessGone(pid, 3*time.Second), "descendant %d survived after a non-zero command exit", pid)
 }
 
 // bgChildScript backgrounds a long sleeper and publishes its pid atomically: echo truncate-opens the
@@ -330,9 +263,7 @@ func readChildPID(t *testing.T, path string) int {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			pid, convErr := strconv.Atoi(strings.TrimSpace(string(data)))
-			if convErr != nil {
-				t.Fatalf("invalid pid file %q: %v", string(data), convErr)
-			}
+			require.NoError(t, convErr, "invalid pid file %q", string(data))
 			return pid
 		}
 		lastErr = err
