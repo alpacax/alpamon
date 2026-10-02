@@ -20,8 +20,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const keepaliveTimeoutLog = "No response from Alpacon for 2 minutes; reconnecting."
-
 // shrinkKeepalive swaps in short keepalive timings. Register it before
 // starting RunForever, so its cleanup runs after the loop has stopped.
 func shrinkKeepalive(t *testing.T, interval, timeout, jitter time.Duration) {
@@ -133,7 +131,7 @@ func dialRecording(conns chan<- *deadlineConn) func(context.Context, string, htt
 }
 
 func TestRunForever_RedialsAPeerThatStopsAnsweringPings(t *testing.T) {
-	// Production timings divided by 100, so the issue's 150 s bound becomes 1.5 s.
+	// Scaled-down timings; redialBound is keepaliveTimeout plus the redial jitter, with slack.
 	shrinkKeepalive(t, 300*time.Millisecond, 1200*time.Millisecond, 100*time.Millisecond)
 	const redialBound = 1500 * time.Millisecond
 
@@ -208,7 +206,7 @@ func TestRunForever_RedialsAPeerThatStopsAnsweringPings(t *testing.T) {
 	}
 
 	stop()
-	assert.Equal(t, 1, strings.Count(logs.String(), keepaliveTimeoutLog), "the keepalive timeout should be logged exactly once")
+	assert.Equal(t, 1, strings.Count(logs.String(), "No response from Alpacon for "+keepaliveTimeout.String()+"; reconnecting."), "the keepalive timeout should be logged exactly once")
 }
 
 func TestRunForever_KeepsAConnectionWhosePeerAnswersPings(t *testing.T) {

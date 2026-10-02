@@ -303,7 +303,7 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 				}
 				// A silent channel is recovered like any other read failure; the shell keeps running.
 				if isTimeout(err) {
-					log.Warn().Msg("No response on the Websh channel for 2 minutes; reconnecting.")
+					log.Warn().Msgf("No response on the Websh channel for %s; reconnecting.", keepaliveTimeout)
 				}
 
 				if !pc.waitForRecovery(ctx, conn, recoveryChan) {

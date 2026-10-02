@@ -3,7 +3,9 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -26,6 +28,9 @@ type ControlClient struct {
 	requestHeader http.Header
 	mu            sync.Mutex
 	connected     bool
+
+	// keepalive belongs to Conn and is replaced with it.
+	keepalive *connKeepalive
 
 	// connectBackoff outlives a single Connect call: the escalation after
 	// repeated rejections is only visible across reconnects.
@@ -63,7 +68,7 @@ func (cc *ControlClient) RunForever(ctx context.Context) {
 			cc.Close()
 			return
 		default:
-			conn := cc.conn()
+			conn, ka := cc.connState()
 			if conn == nil {
 				if err := cc.Connect(ctx); err != nil {
 					return
@@ -71,7 +76,7 @@ func (cc *ControlClient) RunForever(ctx context.Context) {
 				continue
 			}
 
-			err := conn.SetReadDeadline(time.Now().Add(controlReadTimeout))
+			err := conn.SetReadDeadline(time.Now().Add(ka.readTimeoutOr(controlReadTimeout)))
 			if err != nil {
 				if err = cc.CloseAndReconnect(ctx); err != nil {
 					return
@@ -81,7 +86,12 @@ func (cc *ControlClient) RunForever(ctx context.Context) {
 
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				if err = cc.CloseAndReconnect(ctx); err != nil {
+				if ka.expired(err) {
+					err = cc.reconnectAfterSilence(ctx, conn, ka)
+				} else {
+					err = cc.CloseAndReconnect(ctx)
+				}
+				if err != nil {
 					return
 				}
 				continue
@@ -99,6 +109,40 @@ func (cc *ControlClient) conn() *websocket.Conn {
 	return cc.Conn
 }
 
+// connState returns the current connection with its keepalive state.
+func (cc *ControlClient) connState() (*websocket.Conn, *connKeepalive) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	return cc.Conn, cc.keepalive
+}
+
+// reconnectAfterSilence drops a connection whose peer stopped answering and
+// dials a new one, sending no close frame (see WebsocketClient.reconnectAfterSilence).
+func (cc *ControlClient) reconnectAfterSilence(ctx context.Context, conn *websocket.Conn, ka *connKeepalive) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	log.Warn().Msgf("No response from Alpacon control websocket for %s; reconnecting.", keepaliveTimeout)
+
+	cc.mu.Lock()
+	if cc.Conn == conn {
+		cc.Conn = nil
+		cc.keepalive = nil
+		cc.connected = false
+	}
+	cc.mu.Unlock()
+
+	if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		log.Debug().Err(err).Msg("Failed to close the unresponsive control websocket connection.")
+	}
+	ka.stop()
+
+	if err := cc.connectBackoff.waitBeforeRedial(ctx); err != nil {
+		return err
+	}
+	return cc.Connect(ctx)
+}
+
 // Connect dials until the connection is established, and returns an error
 // only when ctx ends first. Repeated rejections slow it down rather than
 // stop it; see connectForever.
@@ -112,10 +156,16 @@ func (cc *ControlClient) Connect(ctx context.Context) error {
 			return err
 		}
 
+		ka := newConnKeepalive()
+		watchPongs(conn, ka)
+
 		cc.mu.Lock()
 		cc.Conn = conn
+		cc.keepalive = ka
 		cc.connected = true
 		cc.mu.Unlock()
+
+		go pingConn(ctx, conn, ka, keepaliveInterval, cc.conn)
 
 		log.Info().Msg("Control WebSocket connection established.")
 		return nil
@@ -141,6 +191,8 @@ func (cc *ControlClient) Close() {
 	}
 
 	cc.connected = false
+	cc.keepalive.stop()
+	cc.keepalive = nil
 
 	err := cc.Conn.WriteControl(
 		websocket.CloseMessage,
