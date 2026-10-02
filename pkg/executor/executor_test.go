@@ -211,6 +211,7 @@ func TestExecutor_ExpandArgsUsesBuiltEnv(t *testing.T) {
 	env := e.buildEnv("", nil)
 	args := e.expandArgs([]string{"echo", "$HOME", "${USER}"}, env)
 
+	require.Len(t, args, 3)
 	assert.Equal(t, env["HOME"], args[1], "expected $HOME expanded")
 	assert.Equal(t, env["USER"], args[2], "expected ${USER} expanded")
 }

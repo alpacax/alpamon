@@ -52,6 +52,7 @@ func TestFileHandler_parsePaths_Windows_InsideHome(t *testing.T) {
 	paths, bulk, _, err := handler.parsePaths(homeDir, []string{insideFile})
 	require.NoError(t, err, "parsePaths returned error")
 	assert.False(t, bulk, "bulk = true, want false")
+	require.Len(t, paths, 1)
 	assert.Equal(t, filepath.Clean(insideFile), paths[0], "path")
 }
 
@@ -65,6 +66,7 @@ func TestFileHandler_parsePaths_Windows_Tilde(t *testing.T) {
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 	paths, _, _, err := handler.parsePaths(homeDir, []string{"~/tilde.txt"})
 	require.NoError(t, err, "parsePaths returned error")
+	require.Len(t, paths, 1)
 	assert.Equal(t, filepath.Clean(target), paths[0], "path")
 }
 
@@ -86,6 +88,7 @@ func TestFileHandler_parsePaths_Windows_SystemRoot(t *testing.T) {
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 	paths, _, _, err := handler.parsePaths(homeDir, []string{hostsPath})
 	require.NoError(t, err, "parsePaths failed for system path %q", hostsPath)
+	require.Len(t, paths, 1)
 	assert.Equal(t, filepath.Clean(hostsPath), paths[0], "path")
 }
 

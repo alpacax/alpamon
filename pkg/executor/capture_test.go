@@ -40,7 +40,7 @@ func truncatedMarkerOf(b []byte) string {
 	if i < 0 {
 		return ""
 	}
-	return string(b[i : i+40])
+	return string(b[i:min(i+40, len(b))])
 }
 
 // Blocks exceed captureTailCap so in-write compaction fires; only the last tail bytes survive.
