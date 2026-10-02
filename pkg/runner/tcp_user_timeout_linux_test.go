@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestDialWebsocketBoundsUnacknowledgedSends(t *testing.T) {
+func TestDialWebsocket_BoundsUnacknowledgedSends(t *testing.T) {
 	// Given a WebSocket server
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -28,7 +27,7 @@ func TestDialWebsocketBoundsUnacknowledgedSends(t *testing.T) {
 	defer server.Close()
 
 	// When the agent dials it
-	conn, err := dialWebsocket(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	conn, err := dialWebsocket(t.Context(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 

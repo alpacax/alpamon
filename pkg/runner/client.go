@@ -115,9 +115,8 @@ const keepaliveWriteWait = 10 * time.Second
 // gets its own, so a pong on a replaced connection can never shorten the
 // deadline of the one that replaced it.
 type connKeepalive struct {
-	// pongSeen flips once the peer answers a ping. Until then the read loop
-	// keeps ConnectionReadTimeout, so a peer that never answers pings is
-	// treated exactly as before keepalive existed.
+	// pongSeen flips once the peer answers a ping. Until then the read loop keeps the caller's
+	// long fallback timeout, so a peer that never answers pings is treated as before keepalive.
 	pongSeen atomic.Bool
 
 	// closed ends the connection's ping goroutine once the connection is closed.

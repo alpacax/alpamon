@@ -10,6 +10,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func useControlWSPath(t *testing.T, url string) {
@@ -19,8 +20,8 @@ func useControlWSPath(t *testing.T, url string) {
 	t.Cleanup(func() { config.GlobalSettings.ControlWSPath = orig })
 }
 
-// startControlRunForever runs the control read loop and returns a stop that
-// cancels it, then waits for it to return.
+// startControlRunForever runs the control read loop and registers a cleanup
+// that cancels it, closes the client, and waits for the loop to return.
 func startControlRunForever(t *testing.T, cc *ControlClient) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -111,9 +112,10 @@ func TestControlRunForever_KeepsTheLongTimeoutForAPeerThatNeverAnswersPings(t *t
 
 	cc := &ControlClient{connectBackoff: newAuthBackoff(minConnectInterval, maxConnectInterval)}
 	startControlRunForever(t, cc)
+	require.Eventually(t, func() bool { return pings.Load() > 0 }, 3*time.Second, 10*time.Millisecond,
+		"the control client never pinged")
 
 	time.Sleep(5 * keepaliveTimeout)
 
 	assert.Equal(t, int32(1), connections.Load(), "the control client redialled although no ping was ever answered")
-	assert.Greater(t, pings.Load(), int32(0), "the control client never pinged")
 }

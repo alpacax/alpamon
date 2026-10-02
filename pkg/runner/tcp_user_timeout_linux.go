@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"sync"
 	"syscall"
 	"time"
 
@@ -8,9 +9,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// tcpUserTimeout caps unacknowledged sends; without it Linux waits out tcp_retries2 (~15 min at the default),
-// because pending data suppresses keepalive probes and the control read timeout is 35 minutes.
+// tcpUserTimeout caps unacknowledged sends, which Linux otherwise retries for tcp_retries2 (~15 min at the default).
+// Keepalive bounds reads only after the first pong; this also bounds the link before it and writes with no deadline.
 const tcpUserTimeout = 45 * time.Second
+
+var warnTCPUserTimeoutOnce sync.Once // the kernel's answer never changes, so one warning per process is enough
 
 // setTCPUserTimeout is a net.Dialer Control hook that caps how long sent data
 // may stay unacknowledged before the kernel aborts the connection.
@@ -23,7 +26,9 @@ func setTCPUserTimeout(_, _ string, c syscall.RawConn) error {
 	}
 	if sockErr != nil {
 		// A kernel without the option still gets the read deadlines, so it is no reason to refuse the dial.
-		log.Warn().Err(sockErr).Msg("Failed to set TCP_USER_TIMEOUT; a dead connection may take the kernel's retransmission limit to notice.")
+		warnTCPUserTimeoutOnce.Do(func() {
+			log.Warn().Err(sockErr).Msg("Failed to set TCP_USER_TIMEOUT; a dead connection may take the kernel's retransmission limit to notice.")
+		})
 	}
 	return nil
 }
