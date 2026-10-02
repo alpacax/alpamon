@@ -51,10 +51,12 @@ func (c *capBuffer) write(p []byte) {
 		return
 	}
 	c.tail = append(c.tail, p...)
-	// Compact lazily (grow to 2x, then drop the front) for amortized O(1).
+	// Compact lazily (grow to 2x, then drop the front) in place for amortized O(1).
 	if len(c.tail) > 2*captureTailCap {
-		c.dropTail(len(c.tail) - captureTailCap)
-		c.tail = append([]byte(nil), c.tail...)
+		n := len(c.tail) - captureTailCap
+		copy(c.tail, c.tail[n:])
+		c.tail = c.tail[:captureTailCap]
+		c.dropped += int64(n)
 	}
 }
 
@@ -164,9 +166,6 @@ func (w *chunkWriter) emit(content string) {
 	if w.callback == nil {
 		return
 	}
-	// Clone so a chunk sliced from a larger line/buffer doesn't pin the
-	// full backing array alive while queued downstream.
-	content = strings.Clone(content)
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error().Interface("panic", r).Msg("ChunkCallback panicked")
