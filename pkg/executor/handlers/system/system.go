@@ -267,7 +267,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		installArgv = append([]string{"apt-get", "install", "--only-upgrade"}, packages...)
 		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3")
 	case utils.PkgYum:
-		installArgv = updater.YumArgv("update", packages...)
+		// updater.RunYum builds the argv itself; it may rerun yum with a failing repo disabled.
 	case utils.PkgZypper:
 		// Refresh runs as its own command: chaining it with `&&` lets one unreachable repo exit 4 so update
 		// never runs, hiding the failing step. `update -r` loads only that repo, so it cannot resolve distro deps.
@@ -301,9 +301,19 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	log.Debug().Msgf("Upgrading %s...", strings.Join(packages, " "))
 	// The proxy environment (nil without a package proxy) applies to the
 	// spawned package-manager process only, never to the agent process.
-	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
-		return h.Executor.Exec(ctx, installArgv, "root", "root", packageProxyEnv(packageProxy), 0)
-	})
+	install := func(argv ...string) (int, string, error) {
+		return retryWhileZypperLocked(ctx, func() (int, string, error) {
+			return h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
+		})
+	}
+	var exitCode int
+	var output string
+	var err error
+	if utils.PackageManager == utils.PkgYum {
+		exitCode, output, err = updater.RunYum(install, "update", packages...)
+	} else {
+		exitCode, output, err = install(installArgv...)
+	}
 	exitCode, err = normalizeZypperExit(exitCode, err, alpamonRepoRefreshed)
 	// Reported, not failed: a repository that has not published the new build yet
 	// is routine, and the console already shows the version the agent reports.

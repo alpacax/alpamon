@@ -221,8 +221,8 @@ func (e *versionSteppingExecutor) RunAsUser(ctx context.Context, username string
 	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
 }
 
-// TestMain points aptSourcesDir and updater.YumReposDirs at an empty temp dir for the whole
-// package run, so tests never read the host's real apt sources or yum repos.
+// TestMain points aptSourcesDir, updater.YumReposDirs and updater.YumConfFiles at an empty temp dir for
+// the whole package run, so tests never read the host's real apt sources or yum config.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "alpamon-pkg-sources")
 	if err != nil {
@@ -230,6 +230,7 @@ func TestMain(m *testing.M) {
 	}
 	aptSourcesDir = dir
 	updater.YumReposDirs = []string{dir}
+	updater.YumConfFiles = []string{filepath.Join(dir, "missing.conf")}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
@@ -2046,6 +2047,31 @@ func TestSystemHandler_Upgrade_YumAddsNoSetoptsWithoutAnAlpamonRepo(t *testing.T
 				"a skip on every repo would hide an outage of alpamon's own, so none may be set without it")
 		})
 	}
+}
+
+func TestSystemHandler_Upgrade_YumDisablesARepoWhoseMirrorlistFails(t *testing.T) {
+	writeYumRepos(t, map[string]string{
+		"alpacax_alpamon.repo": yumAlpamonRepoFile,
+		"CentOS-Base.repo":     "[base]\nmirrorlist=http://mirrorlist.centos.org/?release=$releasever&repo=os\n",
+	})
+	mockExec := common.NewMockCommandExecutor(t)
+	strict := "--setopt=*.skip_if_unavailable=True --setopt=alpacax_alpamon.skip_if_unavailable=False --setopt=alpacax_alpamon-source.skip_if_unavailable=False"
+	mockExec.SetResult("yum "+strict+" update -y alpamon", 1, "Cannot find a valid baseurl for repo: base/7/x86_64\n", nil)
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	t.Cleanup(func() { _ = workerPool.Shutdown(1 * time.Second) })
+	t.Cleanup(ctxManager.Shutdown)
+	handler := NewSystemHandler(mockExec, &MockWSClient{}, ctxManager, workerPool, &MockVersionResolver{LatestVersion: "v9.9.9"}, nil)
+	setPackageManagerAndID(t, utils.PkgYum, "centos")
+
+	exitCode, output, err := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	yum := findLastExecuted(mockExec, "yum")
+	require.NotNil(t, yum, "the upgrade must run yum, got %+v", mockExec.GetExecutedCommands())
+	assert.Equal(t, append(strings.Fields(strict), "--disablerepo=base", "update", "-y", "alpamon"), yum.Args)
+	assert.Contains(t, output, "Disabled yum repos whose mirrorlist could not be reached: base.")
 }
 
 func TestSystemHandler_Upgrade_YumAddsNoSetoptsWhenTheReposDirIsMissing(t *testing.T) {

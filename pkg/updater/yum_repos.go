@@ -1,17 +1,31 @@
 package updater
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/rs/zerolog/log"
 )
 
 var (
-	// YumReposDirs is the union of the directories dnf 4 and dnf 5 read repo files from by default.
+	// YumReposDirs is the union of the directories dnf 4 and dnf 5 read repo files from by default;
+	// a reposdir in the main config replaces it.
 	// It is a var so tests can point it at a temp dir.
 	YumReposDirs = []string{"/etc/yum.repos.d", "/etc/yum/repos.d", "/etc/distro.repos.d", "/usr/share/dnf5/repos.d"}
+
+	// YumConfFiles are dnf's and yum 3's main configs; yum reads the first that exists, and a reposdir
+	// set in its [main] replaces YumReposDirs. It is a var so tests can point it at a temp file.
+	YumConfFiles = []string{"/etc/dnf/dnf.conf", "/etc/yum.conf"}
+
+	// yumUnreachableRepoRe matches yum 3 stopping at a repo whose mirrorlist fails, which skip_if_unavailable
+	// does not cover; yum prints the id followed by /$releasever/$basearch.
+	yumUnreachableRepoRe = regexp.MustCompile(`Cannot find a valid baseurl for repo: ([^/\s]+)`)
 
 	yumFalseValues = map[string]bool{"0": true, "no": true, "false": true, "off": true}
 
@@ -27,15 +41,70 @@ type yumRepo struct {
 // YumArgv returns the yum argv for verb -y args that lets every enabled repo but alpamon's be skipped
 // when it fails to load: yum and dnf load all enabled repos first, and one that fails fails the command.
 func YumArgv(verb string, args ...string) []string {
-	argv := append([]string{"yum"}, yumSkipUnavailableSetopts()...)
+	return yumArgv(yumSkipUnavailableSetopts(scanYumRepos()), verb, args)
+}
+
+// RunYum runs YumArgv(verb, args...) through run. When yum 3 stops at a repo whose mirrorlist fails, it disables
+// that repo and runs the command again, unless the repo is alpamon's or alpamon's repo did not resolve.
+func RunYum(run func(argv ...string) (int, string, error), verb string, args ...string) (int, string, error) {
+	repos := scanYumRepos()
+	opts := yumSkipUnavailableSetopts(repos)
+	var disabled []string
+	for {
+		code, out, err := run(yumArgv(opts, verb, args)...)
+		id := unreachableYumRepo(out)
+		if code == 0 || opts == nil || !skippableYumRepo(repos, id) || slices.Contains(disabled, id) {
+			if len(disabled) > 0 {
+				out = strings.TrimRight(out, "\n") + fmt.Sprintf("\n\nDisabled yum repos whose mirrorlist could not be reached: %s.", strings.Join(disabled, ", "))
+			}
+			return code, out, err
+		}
+		log.Warn().Str("repo", id).Msg("A yum repo's mirrorlist could not be reached; running yum again with it disabled.")
+		disabled = append(disabled, id)
+		opts = append(opts, "--disablerepo="+id)
+	}
+}
+
+func yumArgv(opts []string, verb string, args []string) []string {
+	argv := append([]string{"yum"}, opts...)
 	return append(append(argv, verb, "-y"), args...)
+}
+
+// unreachableYumRepo returns the id of the repo yum 3 could not find a baseurl for, or "" when out names none.
+func unreachableYumRepo(out string) string {
+	if m := yumUnreachableRepoRe.FindStringSubmatch(out); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+func skippableYumRepo(repos []yumRepo, id string) bool {
+	return slices.ContainsFunc(repos, func(r yumRepo) bool { return r.id == id && r.enabled && !r.alpamon })
 }
 
 // yumSkipUnavailableSetopts returns YumArgv's flags, or nil when alpamon's repo does not resolve:
 // skipping alpamon's own repo would turn its outage into "Nothing to do." and a successful exit.
-func yumSkipUnavailableSetopts() []string {
+func yumSkipUnavailableSetopts(repos []yumRepo) []string {
+	// A glob, not one option per repo: dnf5 exits 2 on a setopt naming an id it does not load,
+	// such as a file outside its reposdir or a section name holding $releasever.
+	var strict []string
+	for _, r := range repos {
+		if r.enabled && r.alpamon {
+			strict = append(strict, "--setopt="+r.id+".skip_if_unavailable=False")
+		}
+	}
+	if len(strict) == 0 {
+		log.Debug().Msg("Could not resolve the alpamon yum repo; running yum without repo options.")
+		return nil
+	}
+	setopts := append([]string{"--setopt=*.skip_if_unavailable=True"}, strict...)
+	log.Debug().Strs("setopts", setopts).Msg("Skipping unavailable yum repos other than alpamon's.")
+	return setopts
+}
+
+func scanYumRepos() []yumRepo {
 	var repos []yumRepo
-	for _, dir := range YumReposDirs {
+	for _, dir := range yumReposDirs() {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -51,21 +120,55 @@ func yumSkipUnavailableSetopts() []string {
 			repos = append(repos, parseYumRepos(string(data))...)
 		}
 	}
+	return repos
+}
 
-	// A glob, not one option per repo: dnf5 exits 2 on a setopt naming an id it does not load,
-	// such as a file outside its reposdir or a section name holding $releasever.
-	setopts := []string{"--setopt=*.skip_if_unavailable=True"}
-	for _, r := range repos {
-		if r.enabled && r.alpamon {
-			setopts = append(setopts, "--setopt="+r.id+".skip_if_unavailable=False")
+// yumReposDirs returns the reposdir set in the main config, or YumReposDirs when it sets none.
+func yumReposDirs() []string {
+	for _, path := range YumConfFiles {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err == nil {
+			if dirs := parseYumReposdir(string(data)); len(dirs) > 0 {
+				return dirs
+			}
+		}
+		break
+	}
+	return YumReposDirs
+}
+
+// parseYumReposdir returns the last reposdir in [main], split on commas and whitespace as yum's list options are.
+func parseYumReposdir(data string) []string {
+	var dirs []string
+	inMain, inReposdir := false, false
+	split := func(value string) []string {
+		return strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
+	}
+	for line := range strings.SplitSeq(data, "\n") {
+		// An indented line continues the previous key's list, as baseurl's does.
+		continued := line != strings.TrimLeft(line, " \t")
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if continued && inReposdir {
+			dirs = append(dirs, split(line)...)
+			continue
+		}
+		inReposdir = false
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			inMain = strings.TrimSpace(line[1:len(line)-1]) == "main"
+			continue
+		}
+		k, value, ok := strings.Cut(line, "=")
+		if inMain && ok && strings.ToLower(strings.TrimSpace(k)) == "reposdir" {
+			dirs, inReposdir = split(value), true
 		}
 	}
-	if len(setopts) == 1 {
-		log.Debug().Msg("Could not resolve the alpamon yum repo; running yum without repo options.")
-		return nil
-	}
-	log.Debug().Strs("setopts", setopts).Msg("Skipping unavailable yum repos other than alpamon's.")
-	return setopts
+	return dirs
 }
 
 func parseYumRepos(data string) []yumRepo {
