@@ -63,7 +63,6 @@ func TestFetchCurrentName_404SurfacesAsError(t *testing.T) {
 	_, err := fetchCurrentName(t.Context(), &config.ServerConfig{
 		URL: srv.URL, ID: "srv-xyz", Key: "key-xyz",
 	})
-	require.Error(t, err, "expected error on 404")
 	require.ErrorContains(t, err, "status 404", "error should mention status")
 }
 
@@ -149,7 +148,6 @@ func TestRegisterOnTarget_SurfacesNon2xxStatus(t *testing.T) {
 	sslVerify = false
 
 	_, err := registerOnTarget(t.Context())
-	require.Error(t, err, "expected error on 403")
 	require.ErrorContains(t, err, "status 403", "error should mention status code")
 }
 

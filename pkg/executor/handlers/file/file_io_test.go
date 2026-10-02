@@ -107,7 +107,6 @@ func TestLimitedReadCloser_OverLimit(t *testing.T) {
 	lr, spy := newLimitedRC(bytes.Repeat([]byte("x"), 20), limit)
 
 	_, err := lr.Read(make([]byte, 32))
-	require.Error(t, err, "expected error for over-limit read")
 	require.ErrorContains(t, err, "download too large")
 	require.True(t, spy.closed, "Close must be called on over-limit")
 }
@@ -147,6 +146,5 @@ func TestFetchFromURL_ContentLengthExceedsLimit(t *testing.T) {
 	if err == nil {
 		_ = rc.Close()
 	}
-	require.Error(t, err, "expected error when Content-Length exceeds limit")
 	require.ErrorContains(t, err, "download too large")
 }

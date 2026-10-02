@@ -40,7 +40,6 @@ func TestTerminalManager_Resize_InvalidSession(t *testing.T) {
 	m := NewTerminalManager()
 
 	err := m.Resize("nonexistent", 40, 120)
-	assert.Error(t, err, "Resize() expected error for invalid session")
 	assert.EqualError(t, err, "invalid session ID")
 }
 
@@ -48,7 +47,6 @@ func TestTerminalManager_Refresh_InvalidSession(t *testing.T) {
 	m := NewTerminalManager()
 
 	err := m.Refresh("nonexistent")
-	assert.Error(t, err, "Refresh() expected error for invalid session")
 	assert.EqualError(t, err, "invalid session ID")
 }
 

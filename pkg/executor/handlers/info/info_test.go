@@ -193,7 +193,6 @@ func TestInfoHandler_UnknownCommand(t *testing.T) {
 
 	exitCode, _, err := handler.Execute(ctx, "unknown_command", args)
 
-	assert.Error(t, err, "expected error for unknown command")
 	assert.Equal(t, 1, exitCode)
 	assert.ErrorContains(t, err, "unknown info command")
 }
