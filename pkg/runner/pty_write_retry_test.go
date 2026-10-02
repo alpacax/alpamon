@@ -38,8 +38,8 @@ func TestPtyRecovery_ResendsFailedWriteAfterRecovery(t *testing.T) {
 		conn:         conn,
 		apiSession:   &scheduler.Session{BaseURL: s.ts.URL, Client: s.ts.Client()},
 		sessionID:    "resend-test",
-		wsToPty:      make(chan []byte, bufferSize),
-		ptyToWs:      make(chan []byte, bufferSize),
+		wsToPty:      make(chan []byte, channelCapacity),
+		ptyToWs:      make(chan []byte, channelCapacity),
 		recoveryDone: make(chan struct{}),
 		manager:      NewTerminalManager(),
 	}
@@ -103,8 +103,8 @@ func TestPtyRecovery_FailedRecoveryEndsWriteLoop(t *testing.T) {
 		conn:         conn,
 		apiSession:   &scheduler.Session{BaseURL: ts.URL, Client: ts.Client()},
 		sessionID:    "failed-recovery-test",
-		wsToPty:      make(chan []byte, bufferSize),
-		ptyToWs:      make(chan []byte, bufferSize),
+		wsToPty:      make(chan []byte, channelCapacity),
+		ptyToWs:      make(chan []byte, channelCapacity),
 		recoveryDone: make(chan struct{}),
 		manager:      NewTerminalManager(),
 	}

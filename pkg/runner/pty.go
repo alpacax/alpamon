@@ -63,6 +63,7 @@ const (
 	maxRecoveryTimeout       = 5 * time.Minute
 	reconnectPtyWebsocketURL = "/api/websh/pty-channels/"
 	bufferSize               = 8192
+	channelCapacity          = 64
 
 	sessionCloseCode = 4000
 )
@@ -84,8 +85,8 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, mana
 		homeDirectory: data.HomeDirectory,
 		shell:         data.Shell,
 		sessionID:     data.SessionID,
-		wsToPty:       make(chan []byte, bufferSize),
-		ptyToWs:       make(chan []byte, bufferSize),
+		wsToPty:       make(chan []byte, channelCapacity),
+		ptyToWs:       make(chan []byte, channelCapacity),
 		recoveryDone:  make(chan struct{}),
 		manager:       manager,
 	}

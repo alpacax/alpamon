@@ -10,9 +10,9 @@ import (
 // WebSocketConn wraps a WebSocket connection to implement io.ReadWriteCloser.
 // This adapter is required for smux which expects io.ReadWriteCloser.
 type WebSocketConn struct {
-	conn       *websocket.Conn
-	readBuffer []byte
-	writeMu    sync.Mutex
+	conn    *websocket.Conn
+	reader  io.Reader
+	writeMu sync.Mutex
 }
 
 // NewWebSocketConn creates a new WebSocket to io.ReadWriteCloser adapter.
@@ -20,31 +20,27 @@ func NewWebSocketConn(conn *websocket.Conn) *WebSocketConn {
 	return &WebSocketConn{conn: conn}
 }
 
-// Read reads data from the WebSocket connection.
-// WebSocket messages that are larger than the provided buffer are buffered internally.
+// Read reads data from the current WebSocket message and moves to the next one at its end.
+// It is meant for a single reader goroutine, which is how smux uses it.
 func (w *WebSocketConn) Read(b []byte) (int, error) {
-	// Return previously buffered data first
-	if len(w.readBuffer) > 0 {
-		n := copy(b, w.readBuffer)
-		w.readBuffer = w.readBuffer[n:]
-		return n, nil
+	for {
+		if w.reader == nil {
+			_, r, err := w.conn.NextReader()
+			if err != nil {
+				return 0, err
+			}
+			w.reader = r
+		}
+		n, err := w.reader.Read(b)
+		if err == io.EOF {
+			w.reader = nil
+			if n > 0 {
+				return n, nil
+			}
+			continue
+		}
+		return n, err
 	}
-
-	// Read new message
-	_, msg, err := w.conn.ReadMessage()
-	if err != nil {
-		return 0, err
-	}
-
-	// Copy to buffer
-	n := copy(b, msg)
-
-	// Buffer remaining data if message was larger than buffer
-	if n < len(msg) {
-		w.readBuffer = msg[n:]
-	}
-
-	return n, nil
 }
 
 // Write writes data to the WebSocket connection as a binary message.
