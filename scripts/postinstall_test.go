@@ -142,7 +142,7 @@ func TestSelfUpgradeWithoutSystemdCreatesAMissingLogOwnerAndGroupReadableOnly(t 
 	require.NoError(t, run.startAgent(t).Wait())
 	require.NotEmpty(t, run.restarted(t, 15*time.Second))
 
-	// Then the log it wrote to has the 0640 mode register.go gives it
+	// Then the log it wrote to has the 0640 mode cmd/alpamon/command/register/service_linux.go gives it
 	info, err := os.Stat(logPath)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o640), info.Mode().Perm())
