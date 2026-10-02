@@ -95,7 +95,7 @@ func TestLimitedReadCloser_UnderLimit(t *testing.T) {
 	buf := make([]byte, 32)
 	n, err := lr.Read(buf)
 	if err != nil {
-		require.Equal(t, io.EOF, err)
+		require.Same(t, io.EOF, err, "unexpected error")
 	}
 	require.Equal(t, len(data), n, "bytes read")
 	require.False(t, spy.closed, "Close must not be called under limit")
