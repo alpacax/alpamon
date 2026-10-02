@@ -5,10 +5,10 @@ TEMPLATE_FILE="/etc/alpamon/alpamon.config.tmpl"
 SYSTEMD_AVAILABLE=true
 ALPAMON_LOG="/var/log/alpamon/alpamon.log"
 # Upper bound on how long a deferred restart waits for the agent's upgrade command,
-# matching the delay alpamon-restart.timer gives the systemd path.
+# matching the delay configs/alpamon-restart.timer gives the systemd path.
 RESTART_WAIT_LIMIT=300
 # A restart drops the agent's in-memory result queue, so the grace must outlast the retries
-# Reporter.query in pkg/scheduler gives a failed post of the command's result.
+# Reporter.query in pkg/scheduler/reporter.go gives a failed post of the command's result.
 RESTART_GRACE=60
 # Holds the token of the newest deferred restart; an older job that finds another token stands down.
 RESTART_TOKEN_FILE="/run/alpamon/restart.token"
@@ -115,7 +115,8 @@ setup_alpamon() {
   fi
 }
 
-# Creates the log with the 0640 mode register.go gives it; a redirect that creates it follows the umask.
+# Creates the log with the 0640 mode cmd/alpamon/command/register/service_linux.go gives it;
+# a redirect that creates it follows the umask.
 create_log_file() {
   if [ ! -e "$ALPAMON_LOG" ]; then
     touch "$ALPAMON_LOG"
@@ -274,7 +275,7 @@ is_upgrade() {
     return 1 # Initial installation
 }
 
-# postinstall_test.go sets POSTINSTALL_SOURCED and sources this file to drive single functions.
+# scripts/postinstall_test.go sets POSTINSTALL_SOURCED and sources this file to drive single functions.
 if [ -z "${POSTINSTALL_SOURCED-}" ]; then
   set -e # Exit on error
   main "$@"
