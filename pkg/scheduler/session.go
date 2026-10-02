@@ -45,7 +45,9 @@ func InitSession() *Session {
 
 	tlsConfig.InsecureSkipVerify = !config.GlobalSettings.SSLVerify
 	client.Transport = &http.Transport{
-		TLSClientConfig: tlsConfig,
+		TLSClientConfig:     tlsConfig,
+		MaxIdleConnsPerHost: utils.MaxIdleConnsPerHost,
+		IdleConnTimeout:     utils.IdleConnTimeout,
 	}
 	// Send the agent key only to the configured server, across redirects too.
 	if server, err := url.Parse(config.GlobalSettings.ServerURL); err == nil && server.Host != "" {
