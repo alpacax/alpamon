@@ -49,6 +49,7 @@ func YumArgv(disabled []string, verb string, args ...string) []string {
 // it disables that repo and runs the command again, unless the repo is alpamon's or alpamon's repo did not
 // resolve. It returns disabled with every repo it added.
 func RunYum(run func(argv ...string) (int, string, error), disabled []string, verb string, args ...string) (int, string, []string, error) {
+	disabled = slices.Clip(disabled)
 	repos := scanYumRepos()
 	setopts := yumSkipUnavailableSetopts(repos)
 	if setopts == nil {
@@ -70,6 +71,7 @@ func RunYum(run func(argv ...string) (int, string, error), disabled []string, ve
 }
 
 func withDisabledRepos(opts, disabled []string) []string {
+	opts = slices.Clip(opts)
 	for _, id := range disabled {
 		opts = append(opts, "--disablerepo="+id)
 	}

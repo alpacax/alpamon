@@ -389,3 +389,26 @@ func TestRunYum_StartsWithTheReposAnEarlierRunDisabled(t *testing.T) {
 	}, yum.argvs)
 	assert.Equal(t, "Complete!\n\nDisabled yum repos whose mirrorlist could not be reached: base, extras.", out)
 }
+
+func TestWithDisabledRepos_LeavesTheOptsItWasGivenUntouched(t *testing.T) {
+	opts := make([]string, 1, 4)
+	opts[0] = "--setopt=*.skip_if_unavailable=True"
+
+	first := withDisabledRepos(opts, []string{"base"})
+	withDisabledRepos(opts, []string{"extras"})
+
+	assert.Equal(t, []string{"--setopt=*.skip_if_unavailable=True", "--disablerepo=base"}, first)
+}
+
+func TestRunYum_LeavesTheCallersDisabledListUntouched(t *testing.T) {
+	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
+	yum := &fakeYum{results: []fakeYumResult{{1, yumMirrorlistFailure("extras")}, {0, "Complete!\n"}}}
+	prior := make([]string, 1, 4)
+	prior[0] = "base"
+
+	_, _, disabled, err := RunYum(yum.run, prior, "downgrade", "alpamon-2.4.0")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"base", "extras"}, disabled)
+	assert.Equal(t, []string{"base", ""}, prior[:2])
+}
