@@ -35,14 +35,16 @@ baseurl=https://download.docker.com/linux/rhel/$releasever/$basearch/test
 enabled=0
 `
 
-// TestMain points YumReposDirs at an empty temp dir and YumConfFiles at none, so no test reads the host's yum config.
+// TestMain points YumReposDirs at an empty temp dir and the yum binary and configs at none, so no test reads the host's.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "alpamon-yum-repos")
 	if err != nil {
 		panic(err)
 	}
 	YumReposDirs = []string{dir}
-	YumConfFiles = []string{filepath.Join(dir, "missing.conf")}
+	YumBinary = filepath.Join(dir, "missing-yum")
+	DnfConfFile = filepath.Join(dir, "missing-dnf.conf")
+	YumConfFile = filepath.Join(dir, "missing-yum.conf")
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
@@ -55,11 +57,21 @@ func setYumReposDirs(t *testing.T, dirs ...string) {
 	t.Cleanup(func() { YumReposDirs = orig })
 }
 
-func setYumConfFiles(t *testing.T, paths ...string) {
+// setYumHost points the yum binary and both main configs at the given paths.
+func setYumHost(t *testing.T, binary, dnfConf, yumConf string) {
 	t.Helper()
-	orig := YumConfFiles
-	YumConfFiles = paths
-	t.Cleanup(func() { YumConfFiles = orig })
+	origBinary, origDnf, origYum := YumBinary, DnfConfFile, YumConfFile
+	YumBinary, DnfConfFile, YumConfFile = binary, dnfConf, yumConf
+	t.Cleanup(func() { YumBinary, DnfConfFile, YumConfFile = origBinary, origDnf, origYum })
+}
+
+// setDnfConf makes conf the main config of a dnf host: yum is a link to dnf.
+func setDnfConf(t *testing.T, conf string) {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "dnf-3"), "")
+	require.NoError(t, os.Symlink("dnf-3", filepath.Join(dir, "yum")))
+	setYumHost(t, filepath.Join(dir, "yum"), conf, filepath.Join(dir, "missing-yum.conf"))
 }
 
 func writeYumRepos(t *testing.T, files map[string]string) {
@@ -159,7 +171,7 @@ func TestYumSkipUnavailableSetopts_ReadsOnlyTheReposdirTheMainConfigSets(t *test
 	conf := filepath.Join(root, "dnf.conf")
 	writeFile(t, conf, "[main]\ngpgcheck=1\n#reposdir=/nowhere\nreposdir = "+filepath.Join(root, "a")+", "+filepath.Join(root, "b")+"\n")
 	setYumReposDirs(t, filepath.Join(root, "default"))
-	setYumConfFiles(t, conf)
+	setDnfConf(t, conf)
 
 	got := yumSkipUnavailableSetopts(scanYumRepos())
 
@@ -182,7 +194,7 @@ func TestYumReposDirs_FallsBackToTheDefaults(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "dnf.conf")
 			writeFile(t, path, conf)
 			setYumReposDirs(t, root)
-			setYumConfFiles(t, path)
+			setDnfConf(t, path)
 
 			assert.Equal(t, []string{root}, yumReposDirs())
 		})
@@ -192,31 +204,46 @@ func TestYumReposDirs_FallsBackToTheDefaults(t *testing.T) {
 func TestYumReposDirs_ReadsAReposdirContinuedOnIndentedLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dnf.conf")
 	writeFile(t, path, "[main]\nreposdir=/opt/a\n  /opt/b, /opt/c\ngpgcheck=1\n  /opt/not-a-reposdir\n")
-	setYumConfFiles(t, path)
+	setDnfConf(t, path)
 
 	assert.Equal(t, []string{"/opt/a", "/opt/b", "/opt/c"}, yumReposDirs())
 }
 
-// TestYumReposDirs_ReadsYumConfWhenDnfConfIsMissing pins yum 3 (CentOS 7), which has no /etc/dnf.
-func TestYumReposDirs_ReadsYumConfWhenDnfConfIsMissing(t *testing.T) {
-	root := t.TempDir()
-	yumConf := filepath.Join(root, "yum.conf")
-	writeFile(t, yumConf, "[main]\nreposdir=/opt/repos\n")
-	setYumConfFiles(t, filepath.Join(root, "dnf", "dnf.conf"), yumConf)
+func TestYumReposDirs_ReadsTheConfigOfTheImplementationBehindYum(t *testing.T) {
+	for name, tc := range map[string]struct {
+		binary func(t *testing.T, dir string) string
+		want   []string
+	}{
+		"yum linked to dnf reads dnf.conf": {
+			binary: func(t *testing.T, dir string) string {
+				writeFile(t, filepath.Join(dir, "bin", "dnf5"), "")
+				require.NoError(t, os.Symlink("dnf5", filepath.Join(dir, "bin", "yum")))
+				return filepath.Join(dir, "bin", "yum")
+			},
+			want: []string{"/opt/dnf-repos"},
+		},
+		"yum 3 reads yum.conf even beside dnf.conf": {
+			binary: func(t *testing.T, dir string) string {
+				writeFile(t, filepath.Join(dir, "bin", "yum"), "#!/usr/bin/python\n")
+				return filepath.Join(dir, "bin", "yum")
+			},
+			want: []string{"/opt/yum-repos"},
+		},
+		"no yum binary reads dnf.conf": {
+			binary: func(t *testing.T, dir string) string { return filepath.Join(dir, "bin", "missing") },
+			want:   []string{"/opt/dnf-repos"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			dnfConf, yumConf := filepath.Join(dir, "dnf.conf"), filepath.Join(dir, "yum.conf")
+			writeFile(t, dnfConf, "[main]\nreposdir=/opt/dnf-repos\n")
+			writeFile(t, yumConf, "[main]\nreposdir=/opt/yum-repos\n")
+			setYumHost(t, tc.binary(t, dir), dnfConf, yumConf)
 
-	assert.Equal(t, []string{"/opt/repos"}, yumReposDirs())
-}
-
-// TestYumReposDirs_UsesOnlyTheFirstConfigThatExists pins that yum.conf is not read beside dnf.conf: dnf ignores it.
-func TestYumReposDirs_UsesOnlyTheFirstConfigThatExists(t *testing.T) {
-	root := t.TempDir()
-	dnfConf, yumConf := filepath.Join(root, "dnf.conf"), filepath.Join(root, "yum.conf")
-	writeFile(t, dnfConf, "[main]\ngpgcheck=1\n")
-	writeFile(t, yumConf, "[main]\nreposdir=/opt/repos\n")
-	setYumReposDirs(t, root)
-	setYumConfFiles(t, dnfConf, yumConf)
-
-	assert.Equal(t, []string{root}, yumReposDirs())
+			assert.Equal(t, tc.want, yumReposDirs())
+		})
+	}
 }
 
 // yumMirrorlistFailure is the tail of what yum 3 prints when a repo's mirrorlist cannot be reached.

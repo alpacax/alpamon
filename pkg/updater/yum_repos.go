@@ -1,9 +1,7 @@
 package updater
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,9 +17,11 @@ var (
 	// It is a var so tests can point it at a temp dir.
 	YumReposDirs = []string{"/etc/yum.repos.d", "/etc/yum/repos.d", "/etc/distro.repos.d", "/usr/share/dnf5/repos.d"}
 
-	// YumConfFiles are dnf's and yum 3's main configs; yum reads the first that exists, and a reposdir
-	// set in its [main] replaces YumReposDirs. It is a var so tests can point it at a temp file.
-	YumConfFiles = []string{"/etc/dnf/dnf.conf", "/etc/yum.conf"}
+	// YumBinary, DnfConfFile and YumConfFile locate the yum command and the main configs it may read;
+	// a reposdir set in that config's [main] replaces YumReposDirs. They are vars so tests can move them.
+	YumBinary   = "/usr/bin/yum"
+	DnfConfFile = "/etc/dnf/dnf.conf"
+	YumConfFile = "/etc/yum.conf"
 
 	// yumUnreachableRepoRe matches yum 3 stopping at a repo whose mirrorlist fails, which skip_if_unavailable
 	// does not cover; yum prints the id followed by /$releasever/$basearch.
@@ -125,19 +125,21 @@ func scanYumRepos() []yumRepo {
 
 // yumReposDirs returns the reposdir set in the main config, or YumReposDirs when it sets none.
 func yumReposDirs() []string {
-	for _, path := range YumConfFiles {
-		data, err := os.ReadFile(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
+	if data, err := os.ReadFile(yumMainConf()); err == nil {
+		if dirs := parseYumReposdir(string(data)); len(dirs) > 0 {
+			return dirs
 		}
-		if err == nil {
-			if dirs := parseYumReposdir(string(data)); len(dirs) > 0 {
-				return dirs
-			}
-		}
-		break
 	}
 	return YumReposDirs
+}
+
+// yumMainConf returns the main config the yum command reads: dnf.conf when yum is a link to dnf, else
+// yum.conf, which yum 3 keeps reading on CentOS 7 even with dnf installed beside it.
+func yumMainConf() string {
+	if target, err := filepath.EvalSymlinks(YumBinary); err == nil && !strings.HasPrefix(filepath.Base(target), "dnf") {
+		return YumConfFile
+	}
+	return DnfConfFile
 }
 
 // parseYumReposdir returns the last reposdir in [main], split on commas and whitespace as yum's list options are.
