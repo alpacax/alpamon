@@ -231,7 +231,7 @@ func guardScript(p *PendingUpgrade) (string, error) {
 		return fmt.Sprintf("if %s && [ -f %s ]; then %s; fi",
 			pending, shellQuote(p.RollbackPath), outcome("mv -f "+shellQuote(p.RollbackPath)+" "+shellQuote(p.BinaryPath))), nil
 	case MethodPackage:
-		argv, err := PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion, p.ToVersion)
+		argv, err := PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion, p.ToVersion, p.DisabledYumRepos)
 		if err != nil {
 			return "", err
 		}
@@ -242,8 +242,8 @@ func guardScript(p *PendingUpgrade) (string, error) {
 
 // PackageRollbackCommand is the pinned reinstall of the outgoing version
 // previous over current. apt and zypper take either direction with one
-// command; yum needs downgrade or install depending on which is newer.
-func PackageRollbackCommand(packageManager, previous, current string) ([]string, error) {
+// command; yum needs downgrade or install depending on which is newer, and runs without disabledYumRepos.
+func PackageRollbackCommand(packageManager, previous, current string, disabledYumRepos []string) ([]string, error) {
 	if !PackageVersionRe.MatchString(previous) {
 		return nil, fmt.Errorf("previous package version %q is not usable", previous)
 	}
@@ -251,13 +251,31 @@ func PackageRollbackCommand(packageManager, previous, current string) ([]string,
 	case utils.PkgApt:
 		return []string{"apt-get", "install", "-y", "--allow-downgrades", "alpamon=" + previous}, nil
 	case utils.PkgYum:
-		verb := "downgrade"
-		if CompareVersions(previous, current) > 0 {
-			verb = "install"
-		}
-		return YumArgv(verb, "alpamon-"+previous), nil
+		return YumArgv(disabledYumRepos, yumRollbackVerb(previous, current), "alpamon-"+previous), nil
 	case utils.PkgZypper:
 		return []string{"zypper", "--non-interactive", "install", "--oldpackage", "alpamon=" + previous}, nil
 	}
 	return nil, fmt.Errorf("package manager %q cannot roll back", packageManager)
+}
+
+func yumRollbackVerb(previous, current string) string {
+	if CompareVersions(previous, current) > 0 {
+		return "install"
+	}
+	return "downgrade"
+}
+
+// RunPackageRollback reinstalls p.PreviousPackageVersion over current through run. On yum it goes through
+// RunYum and records in p every repo it ran without, so the guard's reinstall skips them too.
+func RunPackageRollback(run func(argv ...string) (int, string, error), p *PendingUpgrade, current string) (int, string, error) {
+	argv, err := PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion, current, p.DisabledYumRepos)
+	if err != nil {
+		return 0, "", err
+	}
+	if p.PackageManager != utils.PkgYum {
+		return run(argv...)
+	}
+	code, out, disabled, err := RunYum(run, p.DisabledYumRepos, yumRollbackVerb(p.PreviousPackageVersion, current), "alpamon-"+p.PreviousPackageVersion)
+	p.DisabledYumRepos = disabled
+	return code, out, err
 }

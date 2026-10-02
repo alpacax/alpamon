@@ -172,7 +172,7 @@ func rollback(ctx context.Context, p *PendingUpgrade, d ResumeDeps, reason strin
 			return
 		}
 		var argv []string
-		if argv, err = PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion, p.ToVersion); err == nil {
+		if argv, err = PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion, p.ToVersion, p.DisabledYumRepos); err == nil {
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
 			var out []byte
 			out, err = d.runCommand(rctx, argv[0], argv[1:]...)

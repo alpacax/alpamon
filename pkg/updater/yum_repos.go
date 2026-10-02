@@ -40,29 +40,40 @@ type yumRepo struct {
 
 // YumArgv returns the yum argv for verb -y args that lets every enabled repo but alpamon's be skipped
 // when it fails to load: yum and dnf load all enabled repos first, and one that fails fails the command.
-func YumArgv(verb string, args ...string) []string {
-	return yumArgv(yumSkipUnavailableSetopts(scanYumRepos()), verb, args)
+// It passes --disablerepo for each repo in disabled, the list RunYum returns.
+func YumArgv(disabled []string, verb string, args ...string) []string {
+	return yumArgv(withDisabledRepos(yumSkipUnavailableSetopts(scanYumRepos()), disabled), verb, args)
 }
 
-// RunYum runs YumArgv(verb, args...) through run. When yum 3 stops at a repo whose mirrorlist fails, it disables
-// that repo and runs the command again, unless the repo is alpamon's or alpamon's repo did not resolve.
-func RunYum(run func(argv ...string) (int, string, error), verb string, args ...string) (int, string, error) {
+// RunYum runs YumArgv(disabled, verb, args...) through run. When yum 3 stops at a repo whose mirrorlist fails,
+// it disables that repo and runs the command again, unless the repo is alpamon's or alpamon's repo did not
+// resolve. It returns disabled with every repo it added.
+func RunYum(run func(argv ...string) (int, string, error), disabled []string, verb string, args ...string) (int, string, []string, error) {
 	repos := scanYumRepos()
-	opts := yumSkipUnavailableSetopts(repos)
-	var disabled []string
+	setopts := yumSkipUnavailableSetopts(repos)
+	if setopts == nil {
+		code, out, err := run(yumArgv(withDisabledRepos(nil, disabled), verb, args)...)
+		return code, out, disabled, err
+	}
 	for {
-		code, out, err := run(yumArgv(opts, verb, args)...)
+		code, out, err := run(yumArgv(withDisabledRepos(setopts, disabled), verb, args)...)
 		id := unreachableYumRepo(out)
-		if code == 0 || opts == nil || !skippableYumRepo(repos, id) || slices.Contains(disabled, id) {
+		if code == 0 || !skippableYumRepo(repos, id) || slices.Contains(disabled, id) {
 			if len(disabled) > 0 {
 				out = strings.TrimRight(out, "\n") + fmt.Sprintf("\n\nDisabled yum repos whose mirrorlist could not be reached: %s.", strings.Join(disabled, ", "))
 			}
-			return code, out, err
+			return code, out, disabled, err
 		}
 		log.Warn().Str("repo", id).Msg("A yum repo's mirrorlist could not be reached; running yum again with it disabled.")
 		disabled = append(disabled, id)
+	}
+}
+
+func withDisabledRepos(opts, disabled []string) []string {
+	for _, id := range disabled {
 		opts = append(opts, "--disablerepo="+id)
 	}
+	return opts
 }
 
 func yumArgv(opts []string, verb string, args []string) []string {

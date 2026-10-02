@@ -69,7 +69,7 @@ func setYumHost(t *testing.T, binary, dnfConf, yumConf string) {
 func setDnfConf(t *testing.T, conf string) {
 	t.Helper()
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "dnf-3"), "")
+	writeTestFile(t, filepath.Join(dir, "dnf-3"), "")
 	require.NoError(t, os.Symlink("dnf-3", filepath.Join(dir, "yum")))
 	setYumHost(t, filepath.Join(dir, "yum"), conf, filepath.Join(dir, "missing-yum.conf"))
 }
@@ -157,7 +157,7 @@ func TestYumSkipUnavailableSetopts_ReadsEveryReposDir(t *testing.T) {
 	}, got)
 }
 
-func writeFile(t *testing.T, path, body string) {
+func writeTestFile(t *testing.T, path, body string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
@@ -165,11 +165,11 @@ func writeFile(t *testing.T, path, body string) {
 
 func TestYumSkipUnavailableSetopts_ReadsOnlyTheReposdirTheMainConfigSets(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "default", "alpacax_alpamon.repo"), yumAlpamonRepoFile)
-	writeFile(t, filepath.Join(root, "a", "alpacax_alpamon-dev.repo"), "[alpacax_alpamon-dev]\nbaseurl=https://packagecloud.io/alpacax/alpamon-dev/el/9/$basearch\n")
-	writeFile(t, filepath.Join(root, "b", "alpacax_alpamon-latest.repo"), "[alpacax_alpamon-latest]\nbaseurl=https://packagecloud.io/alpacax/alpamon-latest/el/9/$basearch\n")
+	writeTestFile(t, filepath.Join(root, "default", "alpacax_alpamon.repo"), yumAlpamonRepoFile)
+	writeTestFile(t, filepath.Join(root, "a", "alpacax_alpamon-dev.repo"), "[alpacax_alpamon-dev]\nbaseurl=https://packagecloud.io/alpacax/alpamon-dev/el/9/$basearch\n")
+	writeTestFile(t, filepath.Join(root, "b", "alpacax_alpamon-latest.repo"), "[alpacax_alpamon-latest]\nbaseurl=https://packagecloud.io/alpacax/alpamon-latest/el/9/$basearch\n")
 	conf := filepath.Join(root, "dnf.conf")
-	writeFile(t, conf, "[main]\ngpgcheck=1\n#reposdir=/nowhere\nreposdir = "+filepath.Join(root, "a")+", "+filepath.Join(root, "b")+"\n")
+	writeTestFile(t, conf, "[main]\ngpgcheck=1\n#reposdir=/nowhere\nreposdir = "+filepath.Join(root, "a")+", "+filepath.Join(root, "b")+"\n")
 	setYumReposDirs(t, filepath.Join(root, "default"))
 	setDnfConf(t, conf)
 
@@ -192,7 +192,7 @@ func TestYumReposDirs_FallsBackToTheDefaults(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "dnf.conf")
-			writeFile(t, path, conf)
+			writeTestFile(t, path, conf)
 			setYumReposDirs(t, root)
 			setDnfConf(t, path)
 
@@ -201,12 +201,23 @@ func TestYumReposDirs_FallsBackToTheDefaults(t *testing.T) {
 	}
 }
 
-func TestYumReposDirs_ReadsAReposdirContinuedOnIndentedLines(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "dnf.conf")
-	writeFile(t, path, "[main]\nreposdir=/opt/a\n  /opt/b, /opt/c\ngpgcheck=1\n  /opt/not-a-reposdir\n")
-	setDnfConf(t, path)
+func TestYumReposDirs_ReadsReposdirAsYumDoes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		conf string
+		want []string
+	}{
+		"continued on indented lines": {"[main]\nreposdir=/opt/a\n  /opt/b, /opt/c\ngpgcheck=1\n  /opt/not-a-reposdir\n", []string{"/opt/a", "/opt/b", "/opt/c"}},
+		"set twice":                   {"[main]\nreposdir=/opt/first\nreposdir=/opt/last\n", []string{"/opt/last"}},
+		"continued past a comment":    {"[main]\nreposdir=/opt/a\n# note\n  /opt/b\n", []string{"/opt/a", "/opt/b"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "dnf.conf")
+			writeTestFile(t, path, tc.conf)
+			setDnfConf(t, path)
 
-	assert.Equal(t, []string{"/opt/a", "/opt/b", "/opt/c"}, yumReposDirs())
+			assert.Equal(t, tc.want, yumReposDirs())
+		})
+	}
 }
 
 func TestYumReposDirs_ReadsTheConfigOfTheImplementationBehindYum(t *testing.T) {
@@ -216,7 +227,7 @@ func TestYumReposDirs_ReadsTheConfigOfTheImplementationBehindYum(t *testing.T) {
 	}{
 		"yum linked to dnf reads dnf.conf": {
 			binary: func(t *testing.T, dir string) string {
-				writeFile(t, filepath.Join(dir, "bin", "dnf5"), "")
+				writeTestFile(t, filepath.Join(dir, "bin", "dnf5"), "")
 				require.NoError(t, os.Symlink("dnf5", filepath.Join(dir, "bin", "yum")))
 				return filepath.Join(dir, "bin", "yum")
 			},
@@ -224,7 +235,7 @@ func TestYumReposDirs_ReadsTheConfigOfTheImplementationBehindYum(t *testing.T) {
 		},
 		"yum 3 reads yum.conf even beside dnf.conf": {
 			binary: func(t *testing.T, dir string) string {
-				writeFile(t, filepath.Join(dir, "bin", "yum"), "#!/usr/bin/python\n")
+				writeTestFile(t, filepath.Join(dir, "bin", "yum"), "#!/usr/bin/python\n")
 				return filepath.Join(dir, "bin", "yum")
 			},
 			want: []string{"/opt/yum-repos"},
@@ -237,8 +248,8 @@ func TestYumReposDirs_ReadsTheConfigOfTheImplementationBehindYum(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			dnfConf, yumConf := filepath.Join(dir, "dnf.conf"), filepath.Join(dir, "yum.conf")
-			writeFile(t, dnfConf, "[main]\nreposdir=/opt/dnf-repos\n")
-			writeFile(t, yumConf, "[main]\nreposdir=/opt/yum-repos\n")
+			writeTestFile(t, dnfConf, "[main]\nreposdir=/opt/dnf-repos\n")
+			writeTestFile(t, yumConf, "[main]\nreposdir=/opt/yum-repos\n")
 			setYumHost(t, tc.binary(t, dir), dnfConf, yumConf)
 
 			assert.Equal(t, tc.want, yumReposDirs())
@@ -283,10 +294,11 @@ func TestRunYum_DisablesEachRepoWhoseMirrorlistFails(t *testing.T) {
 		{0, "Updated:\n  alpamon.x86_64 0:9.9.9-1\n"},
 	}}
 
-	code, out, err := RunYum(yum.run, "update", "alpamon")
+	code, out, disabled, err := RunYum(yum.run, nil, "update", "alpamon")
 
 	require.NoError(t, err)
 	assert.Equal(t, 0, code)
+	assert.Equal(t, []string{"base", "extras"}, disabled)
 	strict := []string{
 		"--setopt=*.skip_if_unavailable=True",
 		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
@@ -334,11 +346,12 @@ func TestRunYum_DoesNotRetry(t *testing.T) {
 			writeYumRepos(t, tc.files)
 			yum := &fakeYum{results: []fakeYumResult{tc.result}}
 
-			code, out, err := RunYum(yum.run, "update", "alpamon")
+			code, out, disabled, err := RunYum(yum.run, nil, "update", "alpamon")
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.result.code, code)
 			assert.Equal(t, tc.result.out, out)
+			assert.Empty(t, disabled)
 			assert.Len(t, yum.argvs, 1)
 		})
 	}
@@ -349,9 +362,32 @@ func TestRunYum_StopsWhenADisabledRepoIsReportedAgain(t *testing.T) {
 	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
 	yum := &fakeYum{results: []fakeYumResult{{1, yumMirrorlistFailure("base")}}}
 
-	code, out, _ := RunYum(yum.run, "update", "alpamon")
+	code, out, _, _ := RunYum(yum.run, nil, "update", "alpamon")
 
 	assert.Equal(t, 1, code)
 	assert.Len(t, yum.argvs, 2)
 	assert.Contains(t, out, "Disabled yum repos whose mirrorlist could not be reached: base.")
+}
+
+// TestRunYum_StartsWithTheReposAnEarlierRunDisabled pins what the rollback relies on: it does not pay
+// again for a repo the install already found unreachable, and it reports every repo it ran without.
+func TestRunYum_StartsWithTheReposAnEarlierRunDisabled(t *testing.T) {
+	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
+	yum := &fakeYum{results: []fakeYumResult{{1, yumMirrorlistFailure("extras")}, {0, "Complete!\n"}}}
+
+	code, out, disabled, err := RunYum(yum.run, []string{"base"}, "downgrade", "alpamon-2.4.0")
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, code)
+	assert.Equal(t, []string{"base", "extras"}, disabled)
+	strict := []string{
+		"--setopt=*.skip_if_unavailable=True",
+		"--setopt=alpacax_alpamon.skip_if_unavailable=False",
+		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
+	}
+	assert.Equal(t, [][]string{
+		append(append([]string{"yum"}, strict...), "--disablerepo=base", "downgrade", "-y", "alpamon-2.4.0"),
+		append(append([]string{"yum"}, strict...), "--disablerepo=base", "--disablerepo=extras", "downgrade", "-y", "alpamon-2.4.0"),
+	}, yum.argvs)
+	assert.Equal(t, "Complete!\n\nDisabled yum repos whose mirrorlist could not be reached: base, extras.", out)
 }
