@@ -144,11 +144,11 @@ func TestChunkWriter_OversizedBufferSplitsAtThreshold(t *testing.T) {
 	require.NoError(t, err, "write line end")
 
 	require.Len(t, chunks, 1, "expected 1 threshold chunk before flush, sizes %v", chunkSizes(chunks))
-	assert.Len(t, chunks[0], chunkSizeThreshold, "chunk[0] size")
+	assert.Equal(t, chunkSizeThreshold, len(chunks[0]), "chunk[0] size")
 
 	cw.flush()
 	require.Len(t, chunks, 2, "flush should emit the 100-byte tail, sizes %v", chunkSizes(chunks))
-	require.Len(t, chunks[1], 100, "flush should emit the 100-byte tail")
+	require.Equal(t, 100, len(chunks[1]), "flush should emit the 100-byte tail")
 	assert.True(t, strings.HasSuffix(chunks[1], "\n"), "final chunk should retain trailing newline, got %q", chunks[1])
 }
 

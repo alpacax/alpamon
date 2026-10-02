@@ -157,7 +157,7 @@ func TestGroupHandler_AddGroup_Execute(t *testing.T) {
 			args := &common.CommandArgs{Groupname: "testgroup", GID: 1001}
 			exitCode, output, err := handler.Execute(context.Background(), "addgroup", args)
 			require.NoError(t, err, "Execute() exitCode=%d output=%q", exitCode, output)
-			require.Equal(t, 0, exitCode, "Execute() err=%v output=%q", err, output)
+			require.Equal(t, 0, exitCode, "Execute() output=%q", output)
 			assert.True(t, mock.Invoked(tt.createCmd), "expected %s to be invoked; got %+v", tt.createCmd, mock.GetExecutedCommands())
 		})
 	}
@@ -177,7 +177,7 @@ func TestGroupHandler_AddGroup_Idempotent(t *testing.T) {
 
 		exitCode, output, err := handler.Execute(context.Background(), "addgroup", &common.CommandArgs{Groupname: "testgroup", GID: 1001})
 		require.NoError(t, err, "Execute() exitCode=%d output=%q", exitCode, output)
-		require.Equal(t, 0, exitCode, "Execute() err=%v output=%q", err, output)
+		require.Equal(t, 0, exitCode, "Execute() output=%q", output)
 		assert.False(t, mock.Invoked("/usr/sbin/addgroup"), "addgroup must be skipped when the group already exists with matching gid")
 		assert.Contains(t, output, "already exists with GID 1001", "expected an 'already exists' message")
 	})

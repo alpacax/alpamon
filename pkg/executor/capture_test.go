@@ -30,7 +30,7 @@ func TestCapBuffer_TruncatesMiddleKeepingEnds(t *testing.T) {
 
 	assert.True(t, bytes.HasPrefix(got, head), "output should keep the first %d bytes", captureHeadCap)
 	assert.True(t, bytes.HasSuffix(got, tail), "output should keep the last %d bytes", captureTailCap)
-	assert.Contains(t, string(got), "100000 bytes truncated", "output should mark the dropped middle, got %q", truncatedMarkerOf(got))
+	assert.True(t, bytes.Contains(got, []byte("100000 bytes truncated")), "output should mark the dropped middle, got %q", truncatedMarkerOf(got))
 	// Bounded: head + tail + a short marker.
 	assert.LessOrEqual(t, len(got), captureCap+64, "output size exceeds cap+marker")
 }
@@ -58,5 +58,5 @@ func TestCapBuffer_CompactsAcrossWrites(t *testing.T) {
 	require.LessOrEqual(t, len(got), captureCap+64, "output size exceeds cap+marker")
 	dropped := total - captureCap
 	want := fmt.Sprintf("%d bytes truncated", dropped)
-	require.Contains(t, string(got), want, "expected marker %q, got %q", want, truncatedMarkerOf(got))
+	require.True(t, bytes.Contains(got, []byte(want)), "expected marker %q, got %q", want, truncatedMarkerOf(got))
 }
