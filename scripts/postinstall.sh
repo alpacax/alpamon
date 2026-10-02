@@ -207,7 +207,6 @@ defer_alpamon_restart() {
       echo "A later upgrade took over the deferred restart; leaving it to that one."
       exit 0
     fi
-    rm -f "$RESTART_TOKEN_FILE"
     restart_alpamon_process
   ) </dev/null >>"$ALPAMON_LOG" 2>&1 &
   set +m
