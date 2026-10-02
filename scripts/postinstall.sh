@@ -3,6 +3,13 @@
 ALPAMON_BIN="/usr/bin/alpamon"
 TEMPLATE_FILE="/etc/alpamon/alpamon.config.tmpl"
 SYSTEMD_AVAILABLE=true
+ALPAMON_LOG="/var/log/alpamon/alpamon.log"
+# Upper bound on how long a deferred restart waits for the agent's upgrade command,
+# matching the delay alpamon-restart.timer gives the systemd path.
+RESTART_WAIT_LIMIT=300
+# The agent posts a command's result from an in-memory queue, so it needs a moment
+# after the command exits before it can be stopped without losing that result.
+RESTART_GRACE=30
 
 main() {
   check_root_permission
@@ -14,6 +21,8 @@ main() {
   if is_upgrade "$@"; then
     if [ "$SYSTEMD_AVAILABLE" = "true" ]; then
       restart_alpamon_by_timer
+    elif agent_command_pid=$(find_agent_command); then
+      defer_alpamon_restart "$agent_command_pid"
     else
       restart_alpamon_process
     fi
@@ -104,13 +113,17 @@ setup_alpamon() {
   fi
 }
 
-start_alpamon_process() {
-  local log_file="/var/log/alpamon/alpamon.log"
-  # Create log file with restrictive permissions (0640) to match register.go behavior
-  if [ ! -e "$log_file" ]; then
-    touch "$log_file"
-    chmod 0640 "$log_file" 2>/dev/null || true
+# Creates the log with the 0640 mode register.go gives it; a redirect that creates it follows the umask.
+create_log_file() {
+  if [ ! -e "$ALPAMON_LOG" ]; then
+    touch "$ALPAMON_LOG"
+    chmod 0640 "$ALPAMON_LOG" 2>/dev/null || true
   fi
+}
+
+start_alpamon_process() {
+  local log_file="$ALPAMON_LOG"
+  create_log_file
   echo "Starting Alpamon as a background process..."
   # Trap SIGHUP to prevent the child from being killed when the
   # postinstall script (and its parent shell session) exits.
@@ -142,6 +155,52 @@ restart_alpamon_process() {
   fi
   create_directories
   start_alpamon_process
+}
+
+# Prints the PID of the ancestor an alpamon process spawned, i.e. the agent's own upgrade command;
+# fails when there is none. Reads /proc because minimal container images ship without ps.
+find_agent_command() {
+  local pid=$$ ppid key value
+  while [ "$pid" -gt 1 ]; do
+    ppid=""
+    while read -r key value; do
+      if [ "$key" = "PPid:" ]; then
+        ppid=$value
+        break
+      fi
+    done < "/proc/$pid/status" || return 1
+    if [ -z "$ppid" ] || [ "$ppid" -lt 1 ]; then
+      return 1
+    fi
+    if [ "$(cat "/proc/$ppid/comm" 2>/dev/null)" = "alpamon" ]; then
+      echo "$pid"
+      return 0
+    fi
+    pid=$ppid
+  done
+  return 1
+}
+
+# Restarting at once would kill the agent mid-command and report a truncated failure,
+# so the restart waits for the command to exit and the agent to post its result.
+defer_alpamon_restart() {
+  local command_pid="$1"
+  create_directories
+  create_log_file
+  echo "Alpamon is running this upgrade itself; it will restart after the upgrade command exits."
+  # set -m moves the job out of the command's process group, which the agent SIGKILLs on exit;
+  # the log redirect keeps it off the output pipe the agent drains.
+  set -m
+  (
+    waited=0
+    while [ "$waited" -lt "$RESTART_WAIT_LIMIT" ] && kill -0 "$command_pid" 2>/dev/null; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    sleep "$RESTART_GRACE"
+    restart_alpamon_process
+  ) </dev/null >>"$ALPAMON_LOG" 2>&1 &
+  set +m
 }
 
 start_systemd_service() {
@@ -206,6 +265,8 @@ is_upgrade() {
     return 1 # Initial installation
 }
 
-# Exit on error
-set -e
-main "$@"
+# postinstall_test.go sets POSTINSTALL_SOURCED and sources this file to drive single functions.
+if [ -z "${POSTINSTALL_SOURCED-}" ]; then
+  set -e # Exit on error
+  main "$@"
+fi
