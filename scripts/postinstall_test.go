@@ -32,8 +32,9 @@ restart_alpamon_process() {
   mv "$DIR/restarted.tmp" "$DIR/restarted"
 }
 ALPAMON_LOG="$DIR/alpamon.log"
-RESTART_GRACE=1 # the agent touches "exited" only after reaping the command and draining its output
+RESTART_GRACE="${GRACE:-1}" # the agent touches "exited" only after reaping the command and draining its output
 RESTART_WAIT_LIMIT="$WAIT_LIMIT"
+RESTART_TOKEN_FILE="${TOKEN_FILE:-$DIR/restart.token}"
 set -e
 main 2
 `
@@ -171,3 +172,21 @@ func TestUpgradeWithoutSystemdOutsideTheAgentRestartsBeforeReturning(t *testing.
 	// Then the restart has already run by the time postinstall returns
 	assert.FileExists(t, filepath.Join(run.dir, "restarted"))
 }
+
+func TestSelfUpgradeWithoutSystemdLeavesTheRestartToALaterUpgrade(t *testing.T) {
+	// Given a deferred restart still in its grace when a second self-upgrade starts, both sharing one token file
+	tokenFile := filepath.Join(t.TempDir(), "restart.token")
+	first := newUpgradeRun(t, 60, 0)
+	first.env = append(first.env, "GRACE=4", "TOKEN_FILE="+tokenFile)
+	second := newUpgradeRun(t, 60, 0)
+	second.env = append(second.env, "TOKEN_FILE="+tokenFile)
+	require.NoError(t, first.startAgent(t).Wait())
+
+	// When the second upgrade runs before the first job's grace ends
+	require.NoError(t, second.startAgent(t).Wait())
+
+	// Then only the later job restarts the agent
+	assert.Equal(t, "after", second.restarted(t, 15*time.Second))
+	assert.Empty(t, first.restarted(t, 6*time.Second), "the superseded job must not restart the agent again")
+}
+
