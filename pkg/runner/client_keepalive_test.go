@@ -131,7 +131,7 @@ func dialRecording(conns chan<- *deadlineConn) func(context.Context, string, htt
 }
 
 func TestRunForever_RedialsAPeerThatStopsAnsweringPings(t *testing.T) {
-	// Production timings divided by 100, so the issue's 150 s bound becomes 1.5 s.
+	// Scaled-down timings; redialBound is keepaliveTimeout plus the redial jitter, with slack.
 	shrinkKeepalive(t, 300*time.Millisecond, 1200*time.Millisecond, 100*time.Millisecond)
 	const redialBound = 1500 * time.Millisecond
 

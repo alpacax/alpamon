@@ -45,6 +45,10 @@ func TestControlRunForever_RedialsAPeerThatStopsAnsweringPings(t *testing.T) {
 	shrinkKeepalive(t, 50*time.Millisecond, 300*time.Millisecond, 10*time.Millisecond)
 
 	redialed := make(chan struct{}, 1)
+	resume := make(chan struct{})
+	releaseResume := sync.OnceFunc(func() { close(resume) })
+	t.Cleanup(releaseResume)
+	firstReadEnd := make(chan struct{})
 	var closeFrame atomic.Bool
 	url := newKeepaliveServer(t, func(n int, c *websocket.Conn) {
 		if n > 0 {
@@ -60,7 +64,7 @@ func TestControlRunForever_RedialsAPeerThatStopsAnsweringPings(t *testing.T) {
 			}
 			answered = true
 			_ = c.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(time.Second))
-			time.Sleep(10 * time.Second)
+			<-resume
 			return nil
 		})
 		c.SetCloseHandler(func(int, string) error {
@@ -68,6 +72,7 @@ func TestControlRunForever_RedialsAPeerThatStopsAnsweringPings(t *testing.T) {
 			return nil
 		})
 		_ = readUntilError(c)
+		close(firstReadEnd)
 	})
 	useControlWSPath(t, url)
 
@@ -78,6 +83,14 @@ func TestControlRunForever_RedialsAPeerThatStopsAnsweringPings(t *testing.T) {
 	case <-redialed:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the control client never redialled after the server went silent")
+	}
+
+	// Let the silent side read what the client left behind: its pings, then the end of the socket.
+	releaseResume()
+	select {
+	case <-firstReadEnd:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the dropped control connection was never closed")
 	}
 	assert.False(t, closeFrame.Load(), "the control client sent a close frame on a keepalive timeout")
 }

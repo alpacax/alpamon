@@ -8,7 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// tcpUserTimeout caps unacknowledged sends; without it Linux waits out tcp_retries2 (~15 min),
+// tcpUserTimeout caps unacknowledged sends; without it Linux waits out tcp_retries2 (~15 min at the default),
 // because pending data suppresses keepalive probes and the control read timeout is 35 minutes.
 const tcpUserTimeout = 45 * time.Second
 

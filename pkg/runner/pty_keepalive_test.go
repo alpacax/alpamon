@@ -74,7 +74,7 @@ func ptyPingGoroutines() int {
 }
 
 func TestPtyKeepalive_SilentPeerEntersRecovery(t *testing.T) {
-	// Production timings divided by 200: 150 ms pings, a 600 ms silence limit.
+	// Scaled-down timings: 150 ms pings, a 600 ms silence limit.
 	shrinkKeepalive(t, 150*time.Millisecond, 600*time.Millisecond, 0)
 
 	silentAt := make(chan time.Time, 1)
