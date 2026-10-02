@@ -7,9 +7,9 @@ ALPAMON_LOG="/var/log/alpamon/alpamon.log"
 # Upper bound on how long a deferred restart waits for the agent's upgrade command,
 # matching the delay alpamon-restart.timer gives the systemd path.
 RESTART_WAIT_LIMIT=300
-# The agent posts a command's result from an in-memory queue, so it needs a moment
-# after the command exits before it can be stopped without losing that result.
-RESTART_GRACE=30
+# The agent posts a command's result from an in-memory queue that a restart drops. pkg/scheduler
+# retries a failed post 5 times, 1-16 s apart with a 5 s timeout, ending about 36 s after the first try.
+RESTART_GRACE=60
 
 main() {
   check_root_permission
