@@ -44,7 +44,9 @@ func InitSession() *Session {
 
 	tlsConfig.InsecureSkipVerify = !config.GlobalSettings.SSLVerify
 	client.Transport = &http.Transport{
-		TLSClientConfig: tlsConfig,
+		TLSClientConfig:     tlsConfig,
+		MaxIdleConnsPerHost: utils.MaxIdleConnsPerHost,
+		IdleConnTimeout:     utils.IdleConnTimeout,
 	}
 
 	session.Client = &client
