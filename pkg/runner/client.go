@@ -292,7 +292,7 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 		default:
 			conn, ka := wc.connState()
 			if err := conn.SetReadDeadline(time.Now().Add(ka.readTimeout())); err != nil {
-				if err = wc.CloseAndReconnect(ctx); err != nil {
+				if err = wc.reconnectAfterDrop(ctx); err != nil {
 					return
 				}
 				authenticatedThisConn = false
@@ -303,7 +303,7 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 				if ka.expired(err) {
 					err = wc.reconnectAfterSilence(ctx, conn, ka)
 				} else {
-					err = wc.CloseAndReconnect(ctx)
+					err = wc.reconnectAfterDrop(ctx)
 				}
 				if err != nil {
 					return
@@ -452,6 +452,21 @@ func (wc *WebsocketClient) reconnectAfterSilence(ctx context.Context, conn *webs
 	ka.stop()
 
 	if err := wc.connectBackoff.waitBeforeRedial(ctx); err != nil {
+		return err
+	}
+	return wc.Connect(ctx)
+}
+
+// reconnectAfterDrop closes a connection that failed a read and dials a new
+// one, paced by waitAfterDrop. Call it only from the read loop: it drains the
+// peer's close reply.
+func (wc *WebsocketClient) reconnectAfterDrop(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	wc.closeAndDrain()
+
+	if err := wc.connectBackoff.waitAfterDrop(ctx); err != nil {
 		return err
 	}
 	return wc.Connect(ctx)
@@ -636,11 +651,32 @@ func (wc *WebsocketClient) WriteJSON(data any) error {
 	if conn == nil {
 		return net.ErrClosed
 	}
-	if err := conn.WriteJSON(data); err != nil {
+	if err := writeJSONWithin(conn, data); err != nil {
 		log.Debug().Err(err).Msgf("Failed to write json data to websocket.")
 		return err
 	}
 	return nil
+}
+
+// writeWait bounds one JSON write, so a peer that stops reading cannot hold
+// the writer.
+const writeWait = 10 * time.Second
+
+// writeJSONWithin writes data on conn, giving up after writeWait. A timed-out
+// write leaves conn unable to write again, so it also closes conn: the read
+// loop's next read then fails and reconnects, as after a read timeout.
+func writeJSONWithin(conn *websocket.Conn, data any) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+		return err
+	}
+	err := conn.WriteJSON(data)
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		if closeErr := conn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			log.Debug().Err(closeErr).Msg("Failed to close the websocket connection after a write timeout.")
+		}
+	}
+	return err
 }
 
 func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol.CommandData) {

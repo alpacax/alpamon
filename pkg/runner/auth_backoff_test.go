@@ -162,7 +162,7 @@ func TestAuthBackoff_Escalation(t *testing.T) {
 				clock = clock.Add(step.advance)
 
 				if step.err == nil {
-					a.success()
+					a.connected()
 					assert.False(t, a.escalated, "attempt %d: a successful connection leaves the backoff escalated", i)
 					assert.Zero(t, a.count, "attempt %d: a successful connection leaves rejections counted", i)
 					continue
@@ -351,4 +351,23 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 
 	return &buf
+}
+
+func TestAuthBackoff_SettleResetsOnlyAfterTheConnectionStayedUp(t *testing.T) {
+	clock := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	a := newTestBackoff(&clock)
+	for range 3 {
+		a.next(errors.New("connection refused"))
+	}
+
+	a.connected()
+	clock = clock.Add(healthyUptime - time.Second)
+	require.False(t, a.settle(), "a connection that dropped early counted as healthy")
+	assert.Equal(t, 8*minConnectInterval, a.backoff.NextBackOff(), "an early drop reset the backoff")
+
+	a.connected()
+	clock = clock.Add(healthyUptime)
+	require.True(t, a.settle(), "a connection that stayed up did not count as healthy")
+	assert.Equal(t, minConnectInterval, a.backoff.NextBackOff(), "a connection that stayed up left the backoff raised")
+	assert.False(t, a.settle(), "the same connection was judged twice")
 }

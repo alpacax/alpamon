@@ -129,6 +129,10 @@ type authBackoff struct {
 	count     int
 	first     time.Time
 	escalated bool
+
+	// connectedAt is when connectForever last opened a connection, zero once
+	// settle has judged it.
+	connectedAt time.Time
 }
 
 func newAuthBackoff(initialInterval, maxInterval time.Duration) *authBackoff {
@@ -175,13 +179,35 @@ func (a *authBackoff) next(err error) (wait time.Duration, escalated bool) {
 	return a.backoff.NextBackOff(), false
 }
 
-// success clears the streak, so a connection that comes up puts the agent
-// back on the short interval for whatever disconnects it next.
-func (a *authBackoff) success() {
+// connected records a connection that came up. It clears the rejection
+// streak, since the server accepted the credentials, but leaves the backoff
+// where it is: a server that accepts the upgrade and drops the connection at
+// once would otherwise be redialled in a tight loop. settle resets the
+// backoff once the connection has stayed up for healthyUptime.
+func (a *authBackoff) connected() {
 	a.count = 0
 	a.first = time.Time{}
 	a.escalated = false
-	a.backoff.Reset()
+	a.connectedAt = a.now()
+}
+
+// healthyUptime is how long a connection must stay up before its end puts
+// the backoff back at the initial interval.
+const healthyUptime = 30 * time.Second
+
+// settle judges the connection connectForever last opened, once: if it
+// stayed up for healthyUptime it resets the backoff and reports true. It
+// reports false when there is no connection left to judge.
+func (a *authBackoff) settle() bool {
+	if a.connectedAt.IsZero() {
+		return false
+	}
+	healthy := a.now().Sub(a.connectedAt) >= healthyUptime
+	a.connectedAt = time.Time{}
+	if healthy {
+		a.backoff.Reset()
+	}
+	return healthy
 }
 
 // longInterval applies the same 0.5x-to-1.5x jitter the ordinary backoff
@@ -206,7 +232,25 @@ func (a *authBackoff) redialJitter() time.Duration {
 
 // waitBeforeRedial sleeps for redialJitter, or until ctx ends.
 func (a *authBackoff) waitBeforeRedial(ctx context.Context) error {
-	timer := time.NewTimer(a.redialJitter())
+	return sleepCtx(ctx, a.redialJitter())
+}
+
+// waitAfterDrop paces the redial after a connection ended on a read error.
+// A connection that stayed up for healthyUptime gets redialJitter, so agents
+// dropped together do not redial together. One that did not continues the
+// backoff, so a server that accepts and drops every connection is redialled
+// at a growing interval.
+func (a *authBackoff) waitAfterDrop(ctx context.Context) error {
+	wait := a.backoff.NextBackOff
+	if a.settle() {
+		wait = a.redialJitter
+	}
+	return sleepCtx(ctx, wait())
+}
+
+// sleepCtx sleeps for d, or until ctx ends.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
 	defer timer.Stop()
 
 	select {
@@ -222,6 +266,10 @@ func (a *authBackoff) waitBeforeRedial(ctx context.Context) error {
 // after three days and exit, which only handed the same loop back to the
 // service manager to start over, having lost the agent in the meantime.
 func connectForever(ctx context.Context, a *authBackoff, endpoint string, dial func() error) error {
+	// A caller that reconnects without waitAfterDrop still gets the backoff
+	// reset after a connection that stayed up.
+	a.settle()
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -232,7 +280,7 @@ func connectForever(ctx context.Context, a *authBackoff, endpoint string, dial f
 			if a.escalated {
 				log.Info().Msgf("Connection to %s was accepted, returning to the normal reconnect interval.", endpoint)
 			}
-			a.success()
+			a.connected()
 			return nil
 		}
 
