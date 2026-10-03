@@ -227,7 +227,11 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 				cancel()
 				return
 			}
-			pc.wsToPty <- msg
+			select {
+			case pc.wsToPty <- msg:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
