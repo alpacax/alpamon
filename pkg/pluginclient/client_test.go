@@ -3,13 +3,18 @@ package pluginclient
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/testutil"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -190,4 +195,40 @@ func TestRunForever_TakesThePacedPathOnRepeatedPeerReconnectRequests(t *testing.
 
 	cancel()
 	<-done
+}
+
+func TestRunForever_BacksOffWhenTheServerDropsEachConnectionAtOnce(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	var connections atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		connections.Add(1)
+		_ = c.Close()
+	}))
+	t.Cleanup(ts.Close)
+	origWSPath := config.GlobalSettings.WSPath
+	config.GlobalSettings.WSPath = "ws" + strings.TrimPrefix(ts.URL, "http")
+	t.Cleanup(func() { config.GlobalSettings.WSPath = origWSPath })
+
+	c := &Client{WsClient: runner.NewWebsocketClient(nil, nil, nil)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.RunForever(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	require.Eventually(t, func() bool { return connections.Load() >= 1 }, 5*time.Second, 10*time.Millisecond,
+		"the client never connected")
+	// A connection dropped right after the upgrade waits out at least the
+	// initial backoff, several seconds, before the next dial.
+	assert.Never(t, func() bool { return connections.Load() >= 2 }, time.Second, 10*time.Millisecond,
+		"the client redialled a dropped connection without waiting")
 }

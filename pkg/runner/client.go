@@ -292,7 +292,7 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 		default:
 			conn, ka := wc.connState()
 			if err := conn.SetReadDeadline(time.Now().Add(ka.readTimeout())); err != nil {
-				if err = wc.reconnectAfterDrop(ctx); err != nil {
+				if err = wc.ReconnectAfterDrop(ctx); err != nil {
 					return
 				}
 				authenticatedThisConn = false
@@ -303,7 +303,7 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 				if ka.expired(err) {
 					err = wc.reconnectAfterSilence(ctx, conn, ka)
 				} else {
-					err = wc.reconnectAfterDrop(ctx)
+					err = wc.ReconnectAfterDrop(ctx)
 				}
 				if err != nil {
 					return
@@ -457,10 +457,10 @@ func (wc *WebsocketClient) reconnectAfterSilence(ctx context.Context, conn *webs
 	return wc.Connect(ctx)
 }
 
-// reconnectAfterDrop closes a connection that failed a read and dials a new
+// ReconnectAfterDrop closes a connection that failed a read and dials a new
 // one, paced by waitAfterDrop. Call it only from the read loop: it drains the
 // peer's close reply.
-func (wc *WebsocketClient) reconnectAfterDrop(ctx context.Context) error {
+func (wc *WebsocketClient) ReconnectAfterDrop(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

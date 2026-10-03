@@ -286,7 +286,7 @@ func (c *Client) RunForever(ctx context.Context) {
 			err := c.WsClient.SetReadDeadline(time.Now().Add(runner.ConnectionReadTimeout))
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to set read deadline, reconnecting")
-				if err = c.WsClient.CloseAndReconnect(ctx); err != nil {
+				if err = c.WsClient.ReconnectAfterDrop(ctx); err != nil {
 					return
 				}
 				c.WsClient.SetReadLimit(MaxMessageSize)
@@ -294,7 +294,7 @@ func (c *Client) RunForever(ctx context.Context) {
 			}
 			_, message, err := c.WsClient.ReadMessage()
 			if err != nil {
-				if err = c.WsClient.CloseAndReconnect(ctx); err != nil {
+				if err = c.WsClient.ReconnectAfterDrop(ctx); err != nil {
 					return
 				}
 				c.WsClient.SetReadLimit(MaxMessageSize)
