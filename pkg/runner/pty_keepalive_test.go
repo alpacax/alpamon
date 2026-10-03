@@ -29,8 +29,8 @@ func startKeepalivePty(t *testing.T, s *wshServer) (pc *PtyClient, ctx context.C
 	pc = &PtyClient{
 		apiSession:   &scheduler.Session{BaseURL: s.ts.URL, Client: s.ts.Client()},
 		sessionID:    "keepalive-test",
-		wsToPty:      make(chan []byte, bufferSize),
-		ptyToWs:      make(chan []byte, bufferSize),
+		wsToPty:      make(chan []byte, channelCapacity),
+		ptyToWs:      make(chan []byte, channelCapacity),
 		recoveryDone: make(chan struct{}),
 		manager:      NewTerminalManager(),
 	}

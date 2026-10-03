@@ -253,16 +253,27 @@ func buildHealthResponseBody(status, errMsg string) string {
 	return string(data)
 }
 
-// connect establishes WebSocket connection and creates smux session.
-func (tc *TunnelClient) connect() error {
-	log.Info().Msgf("Connecting to tunnel server at %s...", ServerHostFromURL(tc.serverURL))
+const (
+	smuxHeaderSize     = 8
+	tunnelWSBufferSize = config.SmuxMaxFrameSize + smuxHeaderSize // gorilla adds its frame header on top
+)
 
-	dialer := websocket.Dialer{
+func newTunnelDialer() websocket.Dialer {
+	return websocket.Dialer{
+		ReadBufferSize:  tunnelWSBufferSize,
+		WriteBufferSize: tunnelWSBufferSize,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
 		HandshakeTimeout: 30 * time.Second,
 	}
+}
+
+// connect establishes WebSocket connection and creates smux session.
+func (tc *TunnelClient) connect() error {
+	log.Info().Msgf("Connecting to tunnel server at %s...", ServerHostFromURL(tc.serverURL))
+
+	dialer := newTunnelDialer()
 
 	// Server URL is provided by the authenticated Alpacon console which the agent trusts.
 	conn, _, err := dialer.Dial(tc.serverURL, tc.requestHeader) // lgtm[go/request-forgery]

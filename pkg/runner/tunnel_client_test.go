@@ -5,8 +5,16 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/tunnel"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -187,4 +195,94 @@ func TestCloseAllActiveTunnels(t *testing.T) {
 		CloseAllActiveTunnels()
 		tc.Close() // second close should not panic (sync.Once)
 	})
+}
+
+const smuxFrameWithHeader = config.SmuxMaxFrameSize + smuxHeaderSize
+
+type writeCountingConn struct {
+	net.Conn
+	writes *atomic.Int64
+}
+
+func (c *writeCountingConn) Write(p []byte) (int, error) {
+	if len(p) > 0 {
+		c.writes.Add(1)
+	}
+	return c.Conn.Write(p)
+}
+
+func dialTunnelServer(t testing.TB) (*tunnel.WebSocketConn, *atomic.Int64, <-chan *websocket.Conn) {
+	t.Helper()
+	serverConns := make(chan *websocket.Conn, 1)
+	upgrader := websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConns <- c
+	}))
+	t.Cleanup(srv.Close)
+
+	writes := &atomic.Int64{}
+	dialer := newTunnelDialer()
+	var nd net.Dialer
+	dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := nd.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &writeCountingConn{Conn: c, writes: writes}, nil
+	}
+	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return tunnel.NewWebSocketConn(conn), writes, serverConns
+}
+
+func TestTunnelDialerWritesFullSmuxFrameAsOneSocketWrite(t *testing.T) {
+	wc, writes, serverConns := dialTunnelServer(t)
+	server := <-serverConns
+	t.Cleanup(func() { _ = server.Close() })
+	payload := make([]byte, smuxFrameWithHeader)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	writes.Store(0)
+
+	n, err := wc.Write(payload)
+	require.NoError(t, err)
+	require.Equal(t, len(payload), n)
+
+	assert.EqualValues(t, 1, writes.Load())
+	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, got, err := server.ReadMessage()
+	require.NoError(t, err)
+	assert.Equal(t, payload, got)
+}
+
+func BenchmarkTunnelWrite(b *testing.B) {
+	wc, writes, serverConns := dialTunnelServer(b)
+	server := <-serverConns
+	b.Cleanup(func() { _ = server.Close() })
+	go func() {
+		for {
+			if _, _, err := server.NextReader(); err != nil {
+				return
+			}
+		}
+	}()
+	payload := make([]byte, smuxFrameWithHeader)
+	writes.Store(0)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := wc.Write(payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(writes.Load())/float64(b.N), "sockwrites/op")
 }

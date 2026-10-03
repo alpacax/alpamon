@@ -135,8 +135,8 @@ func newTestPtyClient(t *testing.T, s *wshServer) *PtyClient {
 		conn:         conn,
 		apiSession:   &scheduler.Session{BaseURL: s.ts.URL, Client: s.ts.Client()},
 		sessionID:    "test-session",
-		wsToPty:      make(chan []byte, bufferSize),
-		ptyToWs:      make(chan []byte, bufferSize),
+		wsToPty:      make(chan []byte, channelCapacity),
+		ptyToWs:      make(chan []byte, channelCapacity),
 		recoveryDone: make(chan struct{}),
 		manager:      NewTerminalManager(),
 	}
