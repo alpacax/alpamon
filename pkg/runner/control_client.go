@@ -78,7 +78,7 @@ func (cc *ControlClient) RunForever(ctx context.Context) {
 
 			err := conn.SetReadDeadline(time.Now().Add(ka.readTimeoutOr(controlReadTimeout)))
 			if err != nil {
-				if err = cc.CloseAndReconnect(ctx); err != nil {
+				if err = cc.reconnectAfterDrop(ctx); err != nil {
 					return
 				}
 				continue
@@ -89,7 +89,7 @@ func (cc *ControlClient) RunForever(ctx context.Context) {
 				if ka.expired(err) {
 					err = cc.reconnectAfterSilence(ctx, conn, ka)
 				} else {
-					err = cc.CloseAndReconnect(ctx)
+					err = cc.reconnectAfterDrop(ctx)
 				}
 				if err != nil {
 					return
@@ -172,6 +172,20 @@ func (cc *ControlClient) Connect(ctx context.Context) error {
 	})
 }
 
+// reconnectAfterDrop closes a connection that failed a read and dials a new
+// one, paced by waitAfterDrop.
+func (cc *ControlClient) reconnectAfterDrop(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	cc.Close()
+
+	if err := cc.connectBackoff.waitAfterDrop(ctx); err != nil {
+		return err
+	}
+	return cc.Connect(ctx)
+}
+
 // CloseAndReconnect closes current connection and reconnects
 func (cc *ControlClient) CloseAndReconnect(ctx context.Context) error {
 	if ctx.Err() != nil {
@@ -216,7 +230,7 @@ func (cc *ControlClient) WriteJSON(data any) error {
 		return fmt.Errorf("control WebSocket not connected")
 	}
 
-	err := cc.Conn.WriteJSON(data)
+	err := writeJSONWithin(cc.Conn, data)
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to write JSON to control websocket.")
 		return err
