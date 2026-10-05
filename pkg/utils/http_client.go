@@ -56,7 +56,7 @@ func Put(url string, body io.Reader, contentLength int64, timeout time.Duration)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, HostOnlyURLError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

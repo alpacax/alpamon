@@ -586,13 +586,14 @@ func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.R
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	if parsedRequestURL.Host == parsedServerURL.Host && parsedRequestURL.Scheme == parsedServerURL.Scheme {
+	if utils.IsServerURL(parsedRequestURL, parsedServerURL) {
 		req.Header.Set("Authorization", fmt.Sprintf(`id="%s", key="%s"`,
 			config.GlobalSettings.ID, config.GlobalSettings.Key))
 	}
 
 	// lgtm[go/request-forgery]: Intentional - Admin-specified URL for file content
 	client := utils.NewHTTPClient()
+	client.CheckRedirect = utils.ServerOnlyAuthorization(parsedServerURL)
 	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
 		// The path and query may carry a token or a signature; name only the host.

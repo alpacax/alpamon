@@ -511,8 +511,9 @@ func newHTTPClient(sslVerify bool, caCertPath string) (*http.Client, error) {
 		cfg.RootCAs = pool
 	}
 	return &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: cfg},
+		Timeout:       30 * time.Second,
+		Transport:     &http.Transport{TLSClientConfig: cfg},
+		CheckRedirect: utils.OriginOnlyAuthorization,
 	}, nil
 }
 
