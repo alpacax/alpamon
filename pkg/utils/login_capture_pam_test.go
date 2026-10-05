@@ -729,6 +729,65 @@ func TestLoginCaptureLayouts(t *testing.T) {
 				SSHDUsePAM: strPtr("yes")},
 		},
 		{
+			name: "stock sshd_config with the drop-in Include",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config":                "Include /etc/ssh/sshd_config.d/*.conf\nKbdInteractiveAuthentication no\nUsePAM yes\n",
+				"/etc/ssh/sshd_config.d/50-site.conf": "PasswordAuthentication no\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "unreadable sshd drop-in",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config":                "Include /etc/ssh/sshd_config.d/*.conf\nUsePAM yes\n",
+				"/etc/ssh/sshd_config.d/50-site.conf": "PasswordAuthentication no\n",
+			}),
+			failRead: map[string]error{"/etc/ssh/sshd_config.d/50-site.conf": fs.ErrPermission},
+			bins:     debianBins,
+			sshdOut:  usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "unreadable", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "FIFO sshd drop-in",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config": "Include /etc/ssh/sshd_config.d/*.conf\nUsePAM yes\n",
+			}),
+			fifos:   []string{"/etc/ssh/sshd_config.d/50-site.conf"},
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "unreadable", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "sshd Include outside the drop-in directories",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config": "Include /etc/ssh/sshd_config.d/*.conf\nInclude /opt/x.conf\nUsePAM yes\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "unreadable", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "sshd Include after Match",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config": "UsePAM yes\nMatch Group admins\n    Include /etc/ssh/sshd_config.d/*.conf\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "unreadable", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
 			// Known limit: control flow is not evaluated. A sufficient module
 			// that succeeds ends the stack before the hook, yet this reads as
 			// registered.
@@ -848,7 +907,9 @@ func TestLoginCaptureLayouts(t *testing.T) {
 				require.NoError(t, os.Symlink(target, full))
 			}
 			for _, fifo := range tt.fifos {
-				require.NoError(t, syscall.Mkfifo(filepath.Join(root, fifo), 0o644))
+				full := filepath.Join(root, fifo)
+				require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+				require.NoError(t, syscall.Mkfifo(full, 0o644))
 			}
 			sshd := &fakeSSHD{out: tt.sshdOut, err: tt.sshdErr}
 			c := newTestCollector(root, sshd, &countingReader{fail: tt.failRead})
@@ -1057,7 +1118,7 @@ func TestLoginCapturePanicIsContained(t *testing.T) {
 	assert.Equal(t, HookRegistered, got.Hooks.SSHD)
 }
 
-func TestSSHDConfigSetsServiceInMatch(t *testing.T) {
+func TestSSHDConfigServiceUncertain(t *testing.T) {
 	tests := []struct {
 		name   string
 		config string
@@ -1072,10 +1133,19 @@ func TestSSHDConfigSetsServiceInMatch(t *testing.T) {
 		{"Match=all", "Match User deploy\nMatch=all\nPAMServiceName sshd\n", false},
 		{"commented out", "Match User deploy\n# PAMServiceName other\n", false},
 		{"Match all plus a criterion", "Match all User deploy\nPAMServiceName other\n", true},
+		{"stock drop-in Include", "Include /etc/ssh/sshd_config.d/*.conf\nUsePAM yes\n", false},
+		{"relative drop-in Include", "Include sshd_config.d/*.conf\n", false},
+		{"SUSE vendor drop-ins", "Include /etc/ssh/sshd_config.d/*.conf /usr/etc/ssh/sshd_config.d/*.conf\n", false},
+		{"quoted drop-in Include", "Include \"/etc/ssh/sshd_config.d/*.conf\"\n", false},
+		{"Include outside the drop-in directories", "Include /opt/x.conf\n", true},
+		{"Include escaping the drop-in directory", "Include /etc/ssh/sshd_config.d/../../../opt/*.conf\n", true},
+		{"Include in a subdirectory", "Include /etc/ssh/sshd_config.d/site/*.conf\n", true},
+		{"Include after Match", "Match User deploy\nInclude /etc/ssh/sshd_config.d/*.conf\n", true},
+		{"Include with no argument", "Include\n", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, sshdConfigSetsServiceInMatch(tt.config))
+			assert.Equal(t, tt.want, sshdConfigServiceUncertain(tt.config))
 		})
 	}
 }

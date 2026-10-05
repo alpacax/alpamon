@@ -28,3 +28,24 @@ func TestGetLoginCaptureOnThisHost(t *testing.T) {
 		assert.Contains(t, []string{HookRegistered, HookMissing, HookNotApplicable, HookUnreadable}, hook)
 	}
 }
+
+// TestStockSSHDConfigIsFollowed checks that the host's own sshd
+// configuration, where there is one, is fully readable by the PAMServiceName
+// scan: the stock Include of the drop-in directory must not turn hooks.sshd
+// into unreadable.
+func TestStockSSHDConfigIsFollowed(t *testing.T) {
+	c := newLoginCaptureCollector("/")
+	_, files := c.sshdFingerprint("")
+	if len(files) == 0 {
+		t.Log("no sshd configuration on this host")
+		return
+	}
+	for _, f := range files {
+		data, _, _, ok := c.readSmallFile(f, fileStamp{})
+		if !assert.True(t, ok, "read %s", f) {
+			continue
+		}
+		t.Logf("sshd config %s: uncertain=%v", f, sshdConfigServiceUncertain(string(data)))
+		assert.False(t, sshdConfigServiceUncertain(string(data)), "stock %s must not read as uncertain", f)
+	}
+}

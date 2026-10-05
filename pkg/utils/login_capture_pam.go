@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -145,9 +146,12 @@ type sshdEntry struct {
 	at          time.Time
 	usePAM      string // "yes", "no", or "" when undeterminable
 	service     string // PAMServiceName, "sshd" when sshd -T did not say
-	// matchScoped is set when a config file sets PAMServiceName inside a
-	// Match block, so different connections may run different PAM stacks.
-	matchScoped bool
+	// serviceUncertain is set when the PAM service cannot be pinned to one
+	// stack: a config file sets PAMServiceName inside a Match block, so
+	// different connections may run different stacks, or some of sshd's
+	// configuration could not be read or is included from where this check
+	// does not look.
+	serviceUncertain bool
 }
 
 type moduleDirEntry struct {
@@ -291,7 +295,7 @@ func (c *loginCaptureCollector) collect() *LoginCapture {
 	var acc hookResult
 	block := &LoginCapture{Schema: loginCaptureSchema}
 	block.Hooks.SSHD = c.hookStatus(sshd.service, sshdBinaries, moduleDir, &acc)
-	if sshd.matchScoped {
+	if sshd.serviceUncertain {
 		block.Hooks.SSHD = HookUnreadable
 	}
 	block.Hooks.Login = c.hookStatus("login", loginBinaries, moduleDir, &acc)
@@ -658,10 +662,12 @@ func (c *loginCaptureCollector) sshdState() sshdEntry {
 			entry.service = service
 		}
 	}
+	// Fail closed: a config file that exists but cannot be read may hide a
+	// Match-scoped PAMServiceName.
 	for _, f := range configFiles {
 		data, _, _, ok := c.readSmallFile(f, fileStamp{})
-		if ok && sshdConfigSetsServiceInMatch(string(data)) {
-			entry.matchScoped = true
+		if !ok || sshdConfigServiceUncertain(string(data)) {
+			entry.serviceUncertain = true
 			break
 		}
 	}
@@ -686,10 +692,13 @@ func parseSSHDPAMServiceName(out string) string {
 	return ""
 }
 
-// sshdConfigSetsServiceInMatch reports whether an sshd config file sets
-// PAMServiceName after a Match line other than "Match all", where it applies
-// only to the connections that match.
-func sshdConfigSetsServiceInMatch(config string) bool {
+// sshdConfigServiceUncertain reports whether an sshd config file leaves the
+// PAM service open: PAMServiceName after a Match line other than
+// "Match all", where it applies only to the connections that match, or an
+// Include this check does not follow. Only an Include of the standard
+// drop-in directories outside any Match block is followed, since those files
+// are scanned too.
+func sshdConfigServiceUncertain(config string) bool {
 	inMatch := false
 	for line := range strings.SplitSeq(config, "\n") {
 		args := sshdConfigArgs(line)
@@ -703,9 +712,29 @@ func sshdConfigSetsServiceInMatch(config string) bool {
 			if inMatch {
 				return true
 			}
+		case "include":
+			if inMatch || len(args) < 2 {
+				return true
+			}
+			for _, pattern := range args[1:] {
+				if !sshdIncludeIsDropIn(pattern) {
+					return true
+				}
+			}
 		}
 	}
 	return false
+}
+
+// sshdIncludeIsDropIn reports whether an Include pattern names files directly
+// in one of the standard drop-in directories. sshd resolves a relative
+// pattern against /etc/ssh.
+func sshdIncludeIsDropIn(pattern string) bool {
+	pattern = strings.Trim(pattern, `"`)
+	if !strings.HasPrefix(pattern, "/") {
+		pattern = "/etc/ssh/" + pattern
+	}
+	return slices.Contains(sshdConfigDirs, path.Dir(path.Clean(pattern)))
 }
 
 // sshdConfigArgs splits an sshd config line into its keyword and arguments:
@@ -753,7 +782,7 @@ func (c *loginCaptureCollector) sshdFingerprint(sshd string) (string, []string) 
 		}
 		for _, e := range entries {
 			p := filepath.Join(dir, e.Name())
-			if stampInto(&b, p) {
+			if stampInto(&b, p) && !e.IsDir() {
 				files = append(files, p)
 			}
 		}
