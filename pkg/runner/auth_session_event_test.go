@@ -523,6 +523,8 @@ func TestHandleSessionEvent_RepeatOfAnEventTheQueueDroppedIsStored(t *testing.T)
 
 	o.startWriter()
 	t.Cleanup(func() { o.stop(5 * time.Second) })
+	// Waits until the writer has taken the filler, so the queue has room.
+	o.flush()
 	assert.True(t, handleSessionEventSync(t, am, []byte(suLoginFrame)).Received)
 
 	rows := outboxRows(t, o)
