@@ -127,7 +127,7 @@ type accessEventOutbox struct {
 	// Replaced in tests.
 	now     func() time.Time
 	sleep   func(ctx context.Context, d time.Duration) error
-	jitter  func(max time.Duration) time.Duration
+	jitter  func(limit time.Duration) time.Duration
 	maxRows int
 	maxAge  time.Duration
 
@@ -177,11 +177,11 @@ func newAccessEventOutbox(client *ent.Client, send accessEventSender) *accessEve
 	}
 }
 
-func randomJitter(max time.Duration) time.Duration {
-	if max <= 0 {
+func randomJitter(limit time.Duration) time.Duration {
+	if limit <= 0 {
 		return 0
 	}
-	return rand.N(max)
+	return rand.N(limit)
 }
 
 // accessOutboxBackoff is the wait after the nth consecutive failure: one
