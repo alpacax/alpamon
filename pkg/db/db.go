@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
@@ -15,6 +16,17 @@ import (
 )
 
 const dbFileName = "alpamon.db"
+
+var registerDriverOnce sync.Once
+
+// registerDriver registers the driver ent opens as "sqlite3". sql.Register
+// panics on a second registration of one name, so a test binary that opens
+// more than one database needs this to run once.
+func registerDriver() {
+	registerDriverOnce.Do(func() {
+		sql.Register("sqlite3", &sqlite.Driver{})
+	})
+}
 
 func InitDB() *ent.Client {
 	dataDir := utils.DataDir()
@@ -32,7 +44,7 @@ func InitDB() *ent.Client {
 	}
 	_ = dbFile.Close() // The migration and the ent client open the path themselves.
 
-	sql.Register("sqlite3", &sqlite.Driver{})
+	registerDriver()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -63,7 +75,7 @@ func InitTestDB(path string) *ent.Client {
 	}
 	_ = dbFile.Close() // On Windows an open handle blocks TearDownSuite's os.Remove.
 
-	sql.Register("sqlite3", &sqlite.Driver{})
+	registerDriver()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

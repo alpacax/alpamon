@@ -117,6 +117,13 @@ func (session *Session) newRequest(method, url string, rawBody any) (*http.Reque
 }
 
 func (session *Session) do(req *http.Request, timeout time.Duration) ([]byte, int, error) {
+	body, statusCode, _, err := session.doWithHeader(req, timeout)
+	return body, statusCode, err
+}
+
+// doWithHeader is do that also returns the response headers. The timeout is
+// bounded by req's own context, so a caller can cancel the request early.
+func (session *Session) doWithHeader(req *http.Request, timeout time.Duration) ([]byte, int, http.Header, error) {
 	ctx, cancel := context.WithTimeout(req.Context(), timeout*time.Second)
 	defer cancel()
 
@@ -131,17 +138,17 @@ func (session *Session) do(req *http.Request, timeout time.Duration) ([]byte, in
 
 	resp, err := session.Client.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, resp.StatusCode, err
+		return nil, resp.StatusCode, resp.Header, err
 	}
 
-	return body, resp.StatusCode, nil
+	return body, resp.StatusCode, resp.Header, nil
 }
 
 func (session *Session) Request(method, url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
@@ -181,6 +188,17 @@ func (session *Session) Post(url string, rawBody any, timeout time.Duration) ([]
 	}
 
 	return session.do(req, timeout)
+}
+
+// PostWithContext is Post bound to ctx that also returns the response
+// headers, for a caller that must stop with its owner or read Retry-After.
+func (session *Session) PostWithContext(ctx context.Context, url string, rawBody any, timeout time.Duration) ([]byte, int, http.Header, error) {
+	req, err := session.newRequest(http.MethodPost, url, rawBody)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+
+	return session.doWithHeader(req.WithContext(ctx), timeout)
 }
 
 func (session *Session) Put(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {

@@ -11,11 +11,11 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/retry"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog"
@@ -144,22 +144,9 @@ type AuthManager struct {
 	session            *scheduler.Session
 	blockLocalSudo     bool
 	detectLocalAccess  bool
-	// emitAccessEventFn overrides emitAccessEvent in tests; nil means
-	// the real emitter is used.
-	emitAccessEventFn func(NonAlpaconAccessEvent)
-	// emitSem bounds concurrent access-event emit goroutines. Each emit
-	// can hold a slot for roughly authRetryTimeout plus one HTTP timeout —
-	// retry.Retry checks MaxElapsedTime only after an attempt returns, so the
-	// attempt in flight at the 25s mark still runs its full 10s budget, giving
-	// a ~35s worst case. A login burst could otherwise spawn goroutines
-	// without limit. A full channel means the budget is exhausted and the
-	// event is dropped (non-blocking, never blocks the ack path).
-	emitSem chan struct{}
-	// accessEndpointSeen latches once the access event endpoint has answered
-	// 2xx on this agent, which is what lets a later 404 be reported instead of
-	// being read as "Phase 2 not deployed yet". Per-manager rather than
-	// package-level so tests cannot leak the latch into one another.
-	accessEndpointSeen atomic.Bool
+	// outbox holds non-Alpacon access events until the server has them. Set
+	// once by UseAccessEventStore before Start; nil means events are dropped.
+	outbox *accessEventOutbox
 }
 
 const (
@@ -173,8 +160,6 @@ const (
 	// authSocketHandoverTimeout outlives one bounded write, which is all a taker
 	// needs before it signals. A longer silence means the signal is never coming.
 	authSocketHandoverTimeout = authSocketWriteTimeout + time.Second
-	// emitConcurrencyLimit caps in-flight access-event emit goroutines.
-	emitConcurrencyLimit = 16
 	// authSocketReadBufferSize bounds a single auth.sock request. The largest
 	// frame is a session_event carrying all four PAM items at alpamon-pam's
 	// PAM_ITEM_MAX_LEN of 256 bytes: ~1.1 KB of plain ASCII, but jansson
@@ -195,7 +180,6 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 			pidToSessionMap:    make(map[int]*SessionInfo),
 			completionChannels: make(map[string]chan struct{}),
 			session:            session,
-			emitSem:            make(chan struct{}, emitConcurrencyLimit),
 		}
 	})
 
@@ -209,10 +193,6 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 
 	if authManager.session == nil {
 		authManager.session = session
-	}
-
-	if authManager.emitSem == nil {
-		authManager.emitSem = make(chan struct{}, emitConcurrencyLimit)
 	}
 
 	return authManager
@@ -238,8 +218,32 @@ func (am *AuthManager) UpdateDetectLocalAccess(value bool) {
 	log.Info().Bool("detect_local_access", value).Msg("Updated detect_local_access setting")
 }
 
+// UseAccessEventStore gives the manager the agent's database to hold access
+// events in until the server has them. Call it once, before Start.
+func (am *AuthManager) UseAccessEventStore(client *ent.Client) {
+	if client == nil {
+		return
+	}
+	am.outbox = newAccessEventOutbox(client, am.postAccessEvent)
+}
+
+// NotifyServerReachable tells the access event outbox that the server answered
+// again, so events held through an outage go out without waiting out the
+// backoff. Safe to call from any goroutine, and before Start.
+func (am *AuthManager) NotifyServerReachable() {
+	if am.outbox != nil {
+		am.outbox.notifyReachable()
+	}
+}
+
 func (am *AuthManager) Start(ctx context.Context) {
 	am.ctx, am.cancel = context.WithCancel(ctx)
+
+	// Started ahead of the listener, so events held from a previous run are
+	// delivered even if the socket cannot be opened.
+	if am.outbox != nil {
+		am.outbox.start(am.ctx)
+	}
 
 	if err := am.startSocketListener(am.ctx); err != nil {
 		log.Error().Err(err).Msg("Failed to start socket listener")
@@ -872,6 +876,13 @@ func (am *AuthManager) Stop() {
 	}
 	if am.listener != nil {
 		_ = am.listener.Close()
+	}
+	// Events already acked finish reaching the disk; held ones stay there for
+	// the next run. Only a manager that was started has a drain to join.
+	if am.outbox != nil && am.cancel != nil {
+		if !am.outbox.stop(accessOutboxStopTimeout) {
+			log.Warn().Msg("Access event outbox did not stop in time")
+		}
 	}
 }
 

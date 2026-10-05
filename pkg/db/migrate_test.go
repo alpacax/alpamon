@@ -153,11 +153,15 @@ func TestRunMigration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "disk_usages", tableName)
 
+	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='access_event_outbox'").Scan(&tableName)
+	require.NoError(t, err)
+	assert.Equal(t, "access_event_outbox", tableName)
+
 	// Verify migration records
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM atlas_schema_revisions").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 2, count, "should have 2 migration records")
+	assert.Equal(t, 3, count, "should have 3 migration records")
 
 	// Verify migration versions
 	rows, err := db.Query("SELECT version, description FROM atlas_schema_revisions ORDER BY version")
@@ -170,6 +174,7 @@ func TestRunMigration(t *testing.T) {
 	}{
 		{"20250116061438", "init_schemas"},
 		{"20250313082232", "alter_disk_usage_fields"},
+		{"20261005042722", "add_access_event_outbox"},
 	}
 
 	i := 0
@@ -181,7 +186,7 @@ func TestRunMigration(t *testing.T) {
 		assert.Equal(t, expectedMigrations[i].description, description)
 		i++
 	}
-	assert.Equal(t, 2, i, "should have iterated over 2 migrations")
+	assert.Equal(t, 3, i, "should have iterated over 3 migrations")
 }
 
 func TestRunMigrationIdempotent(t *testing.T) {
@@ -198,7 +203,7 @@ func TestRunMigrationIdempotent(t *testing.T) {
 	err = RunMigration(dbPath, ctx)
 	require.NoError(t, err)
 
-	// Verify still only 2 migrations
+	// Verify still only 3 migrations
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
@@ -206,7 +211,7 @@ func TestRunMigrationIdempotent(t *testing.T) {
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM atlas_schema_revisions").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 2, count, "migrations should not be re-applied")
+	assert.Equal(t, 3, count, "migrations should not be re-applied")
 }
 
 func TestRunMigrationContextCancellation(t *testing.T) {

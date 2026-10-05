@@ -116,6 +116,7 @@ Commands from the Alpacon console flow through:
 - `tunnel_client.go`, `tunnel_daemon.go`: Tunnel operations
 - `auth_manager.go`: PAM authentication and sudo approval
 - `auth_session_event.go`: Non-Alpacon access detection (PAM session events via auth.sock, gated by `detect_local_access` policy)
+- `access_event_outbox.go`: Holds detected access events in the local database (`access_event_outbox` table) and delivers them oldest first, so a server outage delays them instead of losing them
 
 **Collector (`pkg/collector/`)**
 - `check/realtime/`: CPU, memory, disk I/O, network traffic (via gopsutil)
