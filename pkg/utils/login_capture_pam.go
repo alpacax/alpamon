@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -57,6 +56,8 @@ const (
 	loginCaptureWarnAfter = 3
 
 	defaultSSHDPAMService = "sshd"
+	// sshdMaxIncludeDepth is sshd's own Include limit (READCONF_MAX_DEPTH).
+	sshdMaxIncludeDepth = 16
 )
 
 // pamConfigDirs is the order libpam searches for a service's file and for a
@@ -149,8 +150,7 @@ type sshdEntry struct {
 	// serviceUncertain is set when the PAM service cannot be pinned to one
 	// stack: a config file sets PAMServiceName inside a Match block, so
 	// different connections may run different stacks, or some of sshd's
-	// configuration could not be read or is included from where this check
-	// does not look.
+	// configuration could not be read in full.
 	serviceUncertain bool
 }
 
@@ -662,11 +662,9 @@ func (c *loginCaptureCollector) sshdState() sshdEntry {
 			entry.service = service
 		}
 	}
-	// Fail closed: a config file that exists but cannot be read may hide a
-	// Match-scoped PAMServiceName.
+	seen := make(map[string]bool)
 	for _, f := range configFiles {
-		data, _, _, ok := c.readSmallFile(f, fileStamp{})
-		if !ok || sshdConfigServiceUncertain(string(data)) {
+		if c.sshdConfigUncertain(f, 0, seen) {
 			entry.serviceUncertain = true
 			break
 		}
@@ -692,13 +690,51 @@ func parseSSHDPAMServiceName(out string) string {
 	return ""
 }
 
-// sshdConfigServiceUncertain reports whether an sshd config file leaves the
-// PAM service open: PAMServiceName after a Match line other than
-// "Match all", where it applies only to the connections that match, or an
-// Include this check does not follow. Only an Include of the standard
-// drop-in directories outside any Match block is followed, since those files
-// are scanned too.
-func sshdConfigServiceUncertain(config string) bool {
+// sshdConfigUncertain reports whether file, or a file it includes, leaves
+// sshd's PAM service open. It fails closed: a file that exists but cannot be
+// read, an Include inside a Match block, a bad Include pattern or a chain
+// deeper than sshd allows all count as open, since what they hold is unknown.
+// Include patterns are followed as sshd follows them, relative ones against
+// /etc/ssh; one that matches no file adds nothing, as in sshd.
+func (c *loginCaptureCollector) sshdConfigUncertain(file string, depth int, seen map[string]bool) bool {
+	if seen[file] {
+		return false
+	}
+	seen[file] = true
+	if depth >= sshdMaxIncludeDepth {
+		return true
+	}
+	data, _, _, ok := c.readSmallFile(file, fileStamp{})
+	if !ok {
+		return true
+	}
+	scoped, includes := sshdConfigScan(string(data))
+	if scoped {
+		return true
+	}
+	for _, pattern := range includes {
+		pattern = strings.Trim(pattern, `"`)
+		if !strings.HasPrefix(pattern, "/") {
+			pattern = "/etc/ssh/" + pattern
+		}
+		matches, err := filepath.Glob(filepath.Join(c.root, pattern))
+		if err != nil {
+			return true
+		}
+		for _, m := range matches {
+			if c.sshdConfigUncertain(m, depth+1, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sshdConfigScan reads the text of one sshd config file. scoped is set when
+// it sets PAMServiceName after a Match line other than "Match all", where it
+// applies only to the connections that match, or has an Include inside such
+// a block or without a pattern. includes are the Include patterns to follow.
+func sshdConfigScan(config string) (scoped bool, includes []string) {
 	inMatch := false
 	for line := range strings.SplitSeq(config, "\n") {
 		args := sshdConfigArgs(line)
@@ -710,31 +746,16 @@ func sshdConfigServiceUncertain(config string) bool {
 			inMatch = len(args) != 2 || !strings.EqualFold(args[1], "all")
 		case "pamservicename":
 			if inMatch {
-				return true
+				return true, nil
 			}
 		case "include":
 			if inMatch || len(args) < 2 {
-				return true
+				return true, nil
 			}
-			for _, pattern := range args[1:] {
-				if !sshdIncludeIsDropIn(pattern) {
-					return true
-				}
-			}
+			includes = append(includes, args[1:]...)
 		}
 	}
-	return false
-}
-
-// sshdIncludeIsDropIn reports whether an Include pattern names files directly
-// in one of the standard drop-in directories. sshd resolves a relative
-// pattern against /etc/ssh.
-func sshdIncludeIsDropIn(pattern string) bool {
-	pattern = strings.Trim(pattern, `"`)
-	if !strings.HasPrefix(pattern, "/") {
-		pattern = "/etc/ssh/" + pattern
-	}
-	return slices.Contains(sshdConfigDirs, path.Dir(path.Clean(pattern)))
+	return false, includes
 }
 
 // sshdConfigArgs splits an sshd config line into its keyword and arguments:

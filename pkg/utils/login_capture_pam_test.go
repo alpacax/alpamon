@@ -766,14 +766,65 @@ func TestLoginCaptureLayouts(t *testing.T) {
 				SSHDUsePAM: strPtr("yes")},
 		},
 		{
-			name: "sshd Include outside the drop-in directories",
+			// The RHEL family includes the crypto policy from outside
+			// sshd_config.d; it is followed and read like any other file.
+			name: "sshd Include outside the drop-in directories is followed",
 			files: with(debianFiles(), map[string]string{
-				"/etc/ssh/sshd_config": "Include /etc/ssh/sshd_config.d/*.conf\nInclude /opt/x.conf\nUsePAM yes\n",
+				"/etc/ssh/sshd_config":                                "Include /etc/ssh/sshd_config.d/*.conf\nUsePAM yes\n",
+				"/etc/ssh/sshd_config.d/50-redhat.conf":               "Include /etc/crypto-policies/back-ends/opensshserver.config\nSyslogFacility AUTHPRIV\n",
+				"/etc/crypto-policies/back-ends/opensshserver.config": "Ciphers aes256-gcm@openssh.com\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "sshd Include outside the drop-in directories with a Match-scoped service",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config": "Include /opt/x.conf\nUsePAM yes\n",
+				"/opt/x.conf":          "Match User deploy\n    PAMServiceName sshd-deploy\n",
 			}),
 			bins:    debianBins,
 			sshdOut: usePAMYes,
 			want: LoginCapture{Schema: 1, PAMModule: "present",
 				Hooks:      LoginCaptureHooks{SSHD: "unreadable", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "unreadable sshd Include outside the drop-in directories",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config": "Include /opt/x.conf\nUsePAM yes\n",
+				"/opt/x.conf":          "PasswordAuthentication no\n",
+			}),
+			failRead: map[string]error{"/opt/x.conf": fs.ErrPermission},
+			bins:     debianBins,
+			sshdOut:  usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "unreadable", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "sshd Include that matches no file",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config": "Include /opt/x.conf\nUsePAM yes\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "sshd Include loop",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config": "Include /etc/ssh/sshd_config\nUsePAM yes\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
 				SSHDUsePAM: strPtr("yes")},
 		},
 		{
@@ -1118,34 +1169,32 @@ func TestLoginCapturePanicIsContained(t *testing.T) {
 	assert.Equal(t, HookRegistered, got.Hooks.SSHD)
 }
 
-func TestSSHDConfigServiceUncertain(t *testing.T) {
+func TestSSHDConfigScan(t *testing.T) {
 	tests := []struct {
-		name   string
-		config string
-		want   bool
+		name     string
+		config   string
+		scoped   bool
+		includes []string
 	}{
-		{"global only", "PAMServiceName sshd\nUsePAM yes\n", false},
-		{"inside Match", "Match User deploy\n  PAMServiceName other\n", true},
-		{"equals sign", "Match Address 10.0.0.0/8\nPAMServiceName=other\n", true},
-		{"after Match all", "Match User deploy\n  X11Forwarding no\nMatch all\nPAMServiceName sshd\n", false},
-		{"Match all with a tab", "Match User deploy\nMatch\tall\nPAMServiceName sshd\n", false},
-		{"Match all with a comment", "Match User deploy\nMatch all # back to global\nPAMServiceName sshd\n", false},
-		{"Match=all", "Match User deploy\nMatch=all\nPAMServiceName sshd\n", false},
-		{"commented out", "Match User deploy\n# PAMServiceName other\n", false},
-		{"Match all plus a criterion", "Match all User deploy\nPAMServiceName other\n", true},
-		{"stock drop-in Include", "Include /etc/ssh/sshd_config.d/*.conf\nUsePAM yes\n", false},
-		{"relative drop-in Include", "Include sshd_config.d/*.conf\n", false},
-		{"SUSE vendor drop-ins", "Include /etc/ssh/sshd_config.d/*.conf /usr/etc/ssh/sshd_config.d/*.conf\n", false},
-		{"quoted drop-in Include", "Include \"/etc/ssh/sshd_config.d/*.conf\"\n", false},
-		{"Include outside the drop-in directories", "Include /opt/x.conf\n", true},
-		{"Include escaping the drop-in directory", "Include /etc/ssh/sshd_config.d/../../../opt/*.conf\n", true},
-		{"Include in a subdirectory", "Include /etc/ssh/sshd_config.d/site/*.conf\n", true},
-		{"Include after Match", "Match User deploy\nInclude /etc/ssh/sshd_config.d/*.conf\n", true},
-		{"Include with no argument", "Include\n", true},
+		{"global only", "PAMServiceName sshd\nUsePAM yes\n", false, nil},
+		{"inside Match", "Match User deploy\n  PAMServiceName other\n", true, nil},
+		{"equals sign", "Match Address 10.0.0.0/8\nPAMServiceName=other\n", true, nil},
+		{"after Match all", "Match User deploy\n  X11Forwarding no\nMatch all\nPAMServiceName sshd\n", false, nil},
+		{"Match all with a tab", "Match User deploy\nMatch\tall\nPAMServiceName sshd\n", false, nil},
+		{"Match all with a comment", "Match User deploy\nMatch all # back to global\nPAMServiceName sshd\n", false, nil},
+		{"Match=all", "Match User deploy\nMatch=all\nPAMServiceName sshd\n", false, nil},
+		{"commented out", "Match User deploy\n# PAMServiceName other\n", false, nil},
+		{"Match all plus a criterion", "Match all User deploy\nPAMServiceName other\n", true, nil},
+		{"stock drop-in Include", "Include /etc/ssh/sshd_config.d/*.conf\nUsePAM yes\n", false, []string{"/etc/ssh/sshd_config.d/*.conf"}},
+		{"several patterns", "Include /etc/ssh/sshd_config.d/*.conf /usr/etc/ssh/sshd_config.d/*.conf\n", false, []string{"/etc/ssh/sshd_config.d/*.conf", "/usr/etc/ssh/sshd_config.d/*.conf"}},
+		{"Include after Match", "Match User deploy\nInclude /etc/ssh/sshd_config.d/*.conf\n", true, nil},
+		{"Include with no pattern", "Include\n", true, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, sshdConfigServiceUncertain(tt.config))
+			scoped, includes := sshdConfigScan(tt.config)
+			assert.Equal(t, tt.scoped, scoped)
+			assert.Equal(t, tt.includes, includes)
 		})
 	}
 }

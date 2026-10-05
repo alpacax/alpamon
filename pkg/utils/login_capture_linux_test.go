@@ -4,6 +4,9 @@ package utils
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,9 +33,10 @@ func TestGetLoginCaptureOnThisHost(t *testing.T) {
 }
 
 // TestStockSSHDConfigIsFollowed checks that the host's own sshd
-// configuration, where there is one, is fully readable by the PAMServiceName
-// scan: the stock Include of the drop-in directory must not turn hooks.sshd
-// into unreadable.
+// configuration, where there is one, does not by itself turn hooks.sshd into
+// unreadable: the stock Include lines are followed and every file is read.
+// Files only root can read are skipped when the test runs unprivileged; the
+// agent runs as root.
 func TestStockSSHDConfigIsFollowed(t *testing.T) {
 	c := newLoginCaptureCollector("/")
 	_, files := c.sshdFingerprint("")
@@ -40,12 +44,20 @@ func TestStockSSHDConfigIsFollowed(t *testing.T) {
 		t.Log("no sshd configuration on this host")
 		return
 	}
-	for _, f := range files {
-		data, _, _, ok := c.readSmallFile(f, fileStamp{})
-		if !assert.True(t, ok, "read %s", f) {
-			continue
+	if os.Geteuid() != 0 {
+		c.readFile = func(name string) ([]byte, error) {
+			data, err := os.ReadFile(name)
+			if errors.Is(err, fs.ErrPermission) {
+				t.Logf("sshd config %s: readable by root only, skipped", name)
+				return nil, nil
+			}
+			return data, err
 		}
-		t.Logf("sshd config %s: uncertain=%v", f, sshdConfigServiceUncertain(string(data)))
-		assert.False(t, sshdConfigServiceUncertain(string(data)), "stock %s must not read as uncertain", f)
+	}
+	seen := make(map[string]bool)
+	for _, f := range files {
+		uncertain := c.sshdConfigUncertain(f, 0, seen)
+		t.Logf("sshd config %s: uncertain=%v", f, uncertain)
+		assert.False(t, uncertain, "stock %s must not read as uncertain", f)
 	}
 }
