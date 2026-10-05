@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build linux || darwin
 
 package utils
 
@@ -12,7 +12,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -142,6 +146,9 @@ session		include		su
 const (
 	debianModule = "/lib/x86_64-linux-gnu/security/pam_alpamon.so"
 	rpmModule    = "/usr/lib64/security/pam_alpamon.so"
+	// pam_unix.so marks the directory libpam loads modules from.
+	debianPamUnix = "/lib/x86_64-linux-gnu/security/pam_unix.so"
+	rpmPamUnix    = "/usr/lib64/security/pam_unix.so"
 )
 
 var (
@@ -159,6 +166,7 @@ func debianFiles() map[string]string {
 		"/etc/pam.d/login":           debianLogin + alpamonHookBare,
 		"/etc/pam.d/su":              debianSu + alpamonHookBare,
 		debianModule:                 "",
+		debianPamUnix:                "",
 	}
 }
 
@@ -172,6 +180,7 @@ func rhelFiles() map[string]string {
 		"/etc/pam.d/su":            rhelSu + alpamonHookAbs,
 		"/etc/pam.d/su-l":          rhelSuL + alpamonHookAbs,
 		rpmModule:                  "",
+		rpmPamUnix:                 "",
 	}
 }
 
@@ -206,30 +215,39 @@ func buildLoginCaptureRoot(t *testing.T, files map[string]string, bins []string)
 	return root
 }
 
-// fakeSSHD stands in for `sshd -T` and counts its runs.
+// fakeSSHD stands in for `sshd -T` and counts its runs. The fields other
+// than the counter are set between Get calls, never during one.
 type fakeSSHD struct {
 	out   string
 	err   error
-	runs  int
+	runs  atomic.Int32
 	panic bool
+	block chan struct{} // when set, a run waits for it to close
 }
 
 func (f *fakeSSHD) run(_ context.Context, _ string) ([]byte, error) {
-	f.runs++
+	f.runs.Add(1)
+	if f.block != nil {
+		<-f.block
+	}
 	if f.panic {
 		panic("sshd runner exploded")
 	}
 	return []byte(f.out), f.err
 }
 
+func (f *fakeSSHD) count() int { return int(f.runs.Load()) }
+
 // countingReader wraps os.ReadFile, counts reads and can fail chosen paths.
 type countingReader struct {
-	reads int
+	reads atomic.Int32
 	fail  map[string]error
 }
 
+func (r *countingReader) count() int { return int(r.reads.Load()) }
+
 func (r *countingReader) read(path string) ([]byte, error) {
-	r.reads++
+	r.reads.Add(1)
 	for suffix, err := range r.fail {
 		if strings.HasSuffix(path, suffix) {
 			return nil, err
@@ -240,6 +258,7 @@ func (r *countingReader) read(path string) ([]byte, error) {
 
 func newTestCollector(root string, sshd *fakeSSHD, reader *countingReader) *loginCaptureCollector {
 	c := newLoginCaptureCollector(root)
+	c.triplets = []string{"x86_64-linux-gnu"}
 	c.runSSHDT = sshd.run
 	if reader != nil {
 		c.readFile = reader.read
@@ -259,6 +278,8 @@ func TestLoginCaptureLayouts(t *testing.T) {
 		sshdOut  string
 		sshdErr  error
 		failRead map[string]error
+		links    map[string]string // path -> relative symlink target
+		fifos    []string
 		want     LoginCapture
 	}{
 		{
@@ -330,6 +351,7 @@ func TestLoginCaptureLayouts(t *testing.T) {
 				"/usr/lib/pam.d/su":             "session include common-session\n" + alpamonHookAbs,
 				"/usr/lib/pam.d/su-l":           "session include su\n",
 				rpmModule:                       "",
+				rpmPamUnix:                      "",
 			},
 			bins:    []string{"/usr/sbin/sshd", "/usr/bin/login", "/usr/bin/su"},
 			sshdOut: usePAMYes,
@@ -344,6 +366,7 @@ func TestLoginCaptureLayouts(t *testing.T) {
 				"/usr/etc/pam.d/login": alpamonHookAbs,
 				"/usr/etc/pam.d/su":    alpamonHookAbs,
 				rpmModule:              "",
+				rpmPamUnix:             "",
 			},
 			bins:    []string{"/usr/sbin/sshd", "/usr/bin/login", "/usr/bin/su"},
 			sshdOut: usePAMYes,
@@ -359,6 +382,7 @@ func TestLoginCaptureLayouts(t *testing.T) {
 				"/usr/lib/pam.d/login": alpamonHookAbs,
 				"/usr/lib/pam.d/su":    alpamonHookAbs,
 				rpmModule:              "",
+				rpmPamUnix:             "",
 			},
 			bins:    []string{"/usr/sbin/sshd", "/usr/bin/login", "/usr/bin/su"},
 			sshdOut: usePAMYes,
@@ -376,14 +400,14 @@ func TestLoginCaptureLayouts(t *testing.T) {
 				SSHDUsePAM: strPtr("yes")},
 		},
 		{
-			name: "bare module name in a non-gnu multiarch directory",
+			name: "bare name with the module only in another architecture's directory",
 			files: with(without(debianFiles(), debianModule), map[string]string{
-				"/usr/lib/arm-linux-gnueabihf/security/pam_alpamon.so": "",
+				"/usr/lib/aarch64-linux-gnu/security/pam_alpamon.so": "",
 			}),
 			bins:    debianBins,
 			sshdOut: usePAMYes,
-			want: LoginCapture{Schema: 1, PAMModule: "present",
-				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+			want: LoginCapture{Schema: 1, PAMModule: "missing",
+				Hooks:      LoginCaptureHooks{SSHD: "missing", Login: "missing", Su: "missing"},
 				SSHDUsePAM: strPtr("yes")},
 		},
 		{
@@ -567,7 +591,7 @@ func TestLoginCaptureLayouts(t *testing.T) {
 			bins:    debianBins,
 			sshdOut: usePAMYes,
 			want: LoginCapture{Schema: 1, PAMModule: "missing",
-				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				Hooks:      LoginCaptureHooks{SSHD: "missing", Login: "missing", Su: "missing"},
 				SSHDUsePAM: strPtr("yes")},
 		},
 		{
@@ -576,8 +600,223 @@ func TestLoginCaptureLayouts(t *testing.T) {
 			bins:    rhelBins,
 			sshdOut: usePAMYes,
 			want: LoginCapture{Schema: 1, PAMModule: "missing",
+				Hooks:      LoginCaptureHooks{SSHD: "missing", Login: "missing", Su: "missing", SuL: "missing"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			// The packaging once installed to /usr/lib64/security on a layout
+			// whose libpam loads bare names from /lib64/security.
+			name: "bare name with the module outside libpam's directory",
+			files: map[string]string{
+				"/lib64/security/pam_unix.so":        "",
+				"/usr/lib64/security/pam_alpamon.so": "",
+				"/etc/pam.d/sshd":                    alpamonHookBare,
+				"/etc/pam.d/login":                   alpamonHookBare,
+				"/etc/pam.d/su":                      alpamonHookBare,
+			},
+			bins:    rhelBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "missing",
+				Hooks:      LoginCaptureHooks{SSHD: "missing", Login: "missing", Su: "missing"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "bare name with the module in /usr/lib/security on a lib64 layout",
+			files: map[string]string{
+				rpmPamUnix:                         "",
+				"/usr/lib/security/pam_alpamon.so": "",
+				"/etc/pam.d/sshd":                  alpamonHookBare,
+				"/etc/pam.d/login":                 alpamonHookBare,
+				"/etc/pam.d/su":                    alpamonHookBare,
+			},
+			bins:    rhelBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "missing",
+				Hooks:      LoginCaptureHooks{SSHD: "missing", Login: "missing", Su: "missing"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "symlinked lib64 is one directory",
+			files: map[string]string{
+				rpmPamUnix:         "",
+				rpmModule:          "",
+				"/etc/pam.d/sshd":  alpamonHookBare,
+				"/etc/pam.d/login": "session optional /lib64/security/pam_alpamon.so\n",
+				"/etc/pam.d/su":    alpamonHookAbs,
+			},
+			links:   map[string]string{"/lib64": "usr/lib64"},
+			bins:    rhelBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "relative module path resolves against libpam's directory",
+			files: with(debianFiles(), map[string]string{
+				"/etc/pam.d/su": debianSu + "session optional ../security/pam_alpamon.so\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name:    "bare hook with no libpam directory found",
+			files:   without(debianFiles(), debianPamUnix),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "missing",
+				Hooks:      LoginCaptureHooks{SSHD: "unreadable", Login: "unreadable", Su: "unreadable"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "sshd's PAMServiceName picks the stack",
+			files: with(debianFiles(), map[string]string{
+				"/etc/pam.d/sshd-custom": debianSSHD,
+			}),
+			bins:    debianBins,
+			sshdOut: "usepam yes\npamservicename sshd-custom\n",
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "missing", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "PAMServiceName normalized as pam_start does",
+			files: with(debianFiles(), map[string]string{
+				"/etc/pam.d/sshd":        debianSSHD,
+				"/etc/pam.d/sshd-custom": debianSSHD + alpamonHookBare,
+			}),
+			bins:    debianBins,
+			sshdOut: "usepam yes\npamservicename /opt/SSHD-Custom\n",
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "PAMServiceName inside a Match block",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config": "UsePAM yes\nMatch User deploy\n    PAMServiceName sshd-deploy\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "unreadable", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "PAMServiceName inside a Match block of a drop-in",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config":                "Include /etc/ssh/sshd_config.d/*.conf\nUsePAM yes\n",
+				"/etc/ssh/sshd_config.d/50-site.conf": "Match Address 10.0.0.0/8\nPAMServiceName=sshd-internal\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "unreadable", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "PAMServiceName globally or after Match all",
+			files: with(debianFiles(), map[string]string{
+				"/etc/ssh/sshd_config": "PAMServiceName sshd\nMatch User deploy\n    X11Forwarding no\nMatch all\nPAMServiceName sshd\n# Match User x\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			// Known limit: control flow is not evaluated. A sufficient module
+			// that succeeds ends the stack before the hook, yet this reads as
+			// registered.
+			name: "known limit: session sufficient before the hook",
+			files: with(debianFiles(), map[string]string{
+				"/etc/pam.d/su": debianSu + "session sufficient pam_permit.so\n" + alpamonHookBare,
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			// Known limit: a jump over the hook line is not evaluated.
+			name: "known limit: [default=1] jump over the hook",
+			files: with(debianFiles(), map[string]string{
+				"/etc/pam.d/su": debianSu + "session [default=1] pam_permit.so\nsession optional pam_alpamon.so\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			// Known limit: success=done ends the stack before the hook, which
+			// is not evaluated.
+			name: "known limit: [success=done] before the hook",
+			files: with(debianFiles(), map[string]string{
+				"/etc/pam.d/su": debianSu + "session [success=done default=ignore] pam_permit.so\n" + alpamonHookBare,
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "authselect-style symlinked system-auth",
+			files: with(without(rhelFiles(), "/etc/pam.d/system-auth"), map[string]string{
+				"/etc/pam.d/login":            rhelLogin,
+				"/etc/pam.d/su":               rhelSu,
+				"/etc/pam.d/su-l":             rhelSuL,
+				"/etc/authselect/system-auth": rhelPasswordAuth + alpamonHookAbs,
+			}),
+			links:   map[string]string{"/etc/pam.d/system-auth": "../authselect/system-auth"},
+			bins:    rhelBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
 				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "registered", SuL: "registered"},
 				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			name: "FIFO as an include target",
+			files: with(debianFiles(), map[string]string{
+				"/etc/pam.d/su": "session include fifo-target\n" + alpamonHookBare,
+			}),
+			fifos:   []string{"/etc/pam.d/fifo-target"},
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "registered", Su: "unreadable"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			// libpam keeps the carriage return in each token, so it can open
+			// neither "common-auth\r" nor "pam_alpamon.so\r".
+			name: "CRLF files",
+			files: with(debianFiles(), map[string]string{
+				"/etc/pam.d/su":    strings.ReplaceAll(debianSu+alpamonHookBare, "\n", "\r\n"),
+				"/etc/pam.d/login": "session optional pam_alpamon.so\r\n",
+			}),
+			bins:    debianBins,
+			sshdOut: usePAMYes,
+			want: LoginCapture{Schema: 1, PAMModule: "present",
+				Hooks:      LoginCaptureHooks{SSHD: "registered", Login: "missing", Su: "unreadable"},
+				SSHDUsePAM: strPtr("yes")},
+		},
+		{
+			// busybox login and su, and an sshd built without PAM.
+			name:    "Alpine-like layout without PAM",
+			files:   map[string]string{},
+			bins:    []string{"/bin/busybox", "/usr/sbin/sshd"},
+			links:   map[string]string{"/bin/login": "busybox", "/bin/su": "busybox"},
+			sshdOut: "port 22\npermitrootlogin no\n",
+			want: LoginCapture{Schema: 1, PAMModule: "missing",
+				Hooks: LoginCaptureHooks{SSHD: "unreadable", Login: "unreadable", Su: "unreadable"}},
 		},
 		{
 			name: "module installed but no hook anywhere",
@@ -603,6 +842,14 @@ func TestLoginCaptureLayouts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			root := buildLoginCaptureRoot(t, tt.files, tt.bins)
+			for link, target := range tt.links {
+				full := filepath.Join(root, link)
+				require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+				require.NoError(t, os.Symlink(target, full))
+			}
+			for _, fifo := range tt.fifos {
+				require.NoError(t, syscall.Mkfifo(filepath.Join(root, fifo), 0o644))
+			}
 			sshd := &fakeSSHD{out: tt.sshdOut, err: tt.sshdErr}
 			c := newTestCollector(root, sshd, &countingReader{fail: tt.failRead})
 
@@ -623,7 +870,7 @@ func TestLoginCaptureSSHDNotRunWithoutSSHD(t *testing.T) {
 	got := c.Get()
 	require.NotNil(t, got)
 	assert.Nil(t, got.SSHDUsePAM)
-	assert.Equal(t, 0, sshd.runs)
+	assert.Equal(t, 0, sshd.count())
 }
 
 // TestLoginCaptureUnreadableByPermission uses a real mode-000 file; root
@@ -665,16 +912,16 @@ func TestLoginCaptureCache(t *testing.T) {
 
 	first := c.Get()
 	require.NotNil(t, first)
-	assert.Equal(t, 1, sshd.runs)
-	firstReads := reader.reads
+	assert.Equal(t, 1, sshd.count())
+	firstReads := reader.count()
 	assert.Positive(t, firstReads)
 
 	// Nothing changed: no file is read again and sshd -T is not re-run.
 	second := c.Get()
 	require.NotNil(t, second)
 	assert.Equal(t, *first, *second)
-	assert.Equal(t, firstReads, reader.reads, "unchanged PAM files must come from the cache")
-	assert.Equal(t, 1, sshd.runs, "unchanged sshd config must not re-run sshd -T")
+	assert.Equal(t, firstReads, reader.count(), "unchanged PAM files must come from the cache")
+	assert.Equal(t, 1, sshd.count(), "unchanged sshd config must not re-run sshd -T")
 
 	// A changed PAM file is read again, and only that file.
 	later := time.Now().Add(time.Hour)
@@ -684,8 +931,8 @@ func TestLoginCaptureCache(t *testing.T) {
 	third := c.Get()
 	require.NotNil(t, third)
 	assert.Equal(t, HookMissing, third.Hooks.Su)
-	assert.Equal(t, firstReads+1, reader.reads)
-	assert.Equal(t, 1, sshd.runs)
+	assert.Equal(t, firstReads+1, reader.count())
+	assert.Equal(t, 1, sshd.count())
 
 	// A changed sshd_config re-runs sshd -T.
 	sshd.out = "usepam no\n"
@@ -693,7 +940,7 @@ func TestLoginCaptureCache(t *testing.T) {
 	require.NoError(t, os.Chtimes(cfg, later, later))
 	fourth := c.Get()
 	require.NotNil(t, fourth)
-	assert.Equal(t, 2, sshd.runs)
+	assert.Equal(t, 2, sshd.count())
 	assert.Equal(t, strPtr("no"), fourth.SSHDUsePAM)
 
 	// So does a new drop-in under sshd_config.d.
@@ -703,14 +950,14 @@ func TestLoginCaptureCache(t *testing.T) {
 	sshd.out = "usepam yes\n"
 	fifth := c.Get()
 	require.NotNil(t, fifth)
-	assert.Equal(t, 3, sshd.runs)
+	assert.Equal(t, 3, sshd.count())
 	assert.Equal(t, strPtr("yes"), fifth.SSHDUsePAM)
 
 	// And a replaced sshd binary.
 	bin := filepath.Join(root, "usr/sbin/sshd")
 	require.NoError(t, os.Chtimes(bin, later, later))
 	c.Get()
-	assert.Equal(t, 4, sshd.runs)
+	assert.Equal(t, 4, sshd.count())
 }
 
 func TestLoginCaptureSSHDRecheckAfterFailureAndAge(t *testing.T) {
@@ -721,31 +968,31 @@ func TestLoginCaptureSSHDRecheckAfterFailureAndAge(t *testing.T) {
 	c.now = func() time.Time { return now }
 
 	assert.Nil(t, c.Get().SSHDUsePAM)
-	assert.Equal(t, 1, sshd.runs)
+	assert.Equal(t, 1, sshd.count())
 
 	// A failed check is not retried on every report...
 	now = now.Add(sshdUsePAMRetryAfter - time.Minute)
 	c.Get()
-	assert.Equal(t, 1, sshd.runs)
+	assert.Equal(t, 1, sshd.count())
 
 	// ...but it is retried after the retry interval.
 	now = now.Add(2 * time.Minute)
 	c.Get()
-	assert.Equal(t, 2, sshd.runs)
+	assert.Equal(t, 2, sshd.count())
 
 	// The privilege separation directory appearing re-runs it at once.
 	sshd.err, sshd.out = nil, "usepam yes\n"
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "run/sshd"), 0o755))
 	assert.Equal(t, strPtr("yes"), c.Get().SSHDUsePAM)
-	assert.Equal(t, 3, sshd.runs)
+	assert.Equal(t, 3, sshd.count())
 
 	// A successful answer is re-checked once it is old, even with no change on disk.
 	now = now.Add(sshdUsePAMMaxAge - time.Minute)
 	c.Get()
-	assert.Equal(t, 3, sshd.runs)
+	assert.Equal(t, 3, sshd.count())
 	now = now.Add(2 * time.Minute)
 	c.Get()
-	assert.Equal(t, 4, sshd.runs)
+	assert.Equal(t, 4, sshd.count())
 }
 
 func TestLoginCaptureReturnedValueIsACopy(t *testing.T) {
@@ -808,4 +1055,105 @@ func TestLoginCapturePanicIsContained(t *testing.T) {
 	got = c.Get()
 	require.NotNil(t, got, "a contained failure must not wedge the collector")
 	assert.Equal(t, HookRegistered, got.Hooks.SSHD)
+}
+
+func TestMultiarchTriplets(t *testing.T) {
+	assert.Equal(t, []string{"x86_64-linux-gnu"}, multiarchTriplets("amd64"))
+	assert.Equal(t, []string{"aarch64-linux-gnu"}, multiarchTriplets("arm64"))
+	assert.Contains(t, multiarchTriplets("arm"), "arm-linux-gnueabihf")
+	assert.Empty(t, multiarchTriplets("wasm"))
+}
+
+// TestLoginCaptureCacheSeesSameSizeRewrite edits a PAM file without changing
+// its size and puts its mtime back: the ctime in the cache key still catches
+// it.
+func TestLoginCaptureCacheSeesSameSizeRewrite(t *testing.T) {
+	root := buildLoginCaptureRoot(t, debianFiles(), debianBins)
+	reader := &countingReader{}
+	c := newTestCollector(root, &fakeSSHD{out: "usepam yes\n"}, reader)
+
+	first := c.Get()
+	require.NotNil(t, first)
+	require.Equal(t, HookRegistered, first.Hooks.Su)
+	reads := reader.count()
+
+	su := filepath.Join(root, "etc/pam.d/su")
+	before, err := os.Stat(su)
+	require.NoError(t, err)
+	content, err := os.ReadFile(su)
+	require.NoError(t, err)
+	edited := strings.Replace(string(content), "\nsession optional pam_alpamon.so", "\n#ession optional pam_alpamon.so", 1)
+	require.Len(t, edited, len(content))
+	time.Sleep(10 * time.Millisecond) // let the ctime move on coarse clocks
+	require.NoError(t, os.WriteFile(su, []byte(edited), 0o644))
+	require.NoError(t, os.Chtimes(su, before.ModTime(), before.ModTime()))
+	after, err := os.Stat(su)
+	require.NoError(t, err)
+	require.Equal(t, before.ModTime(), after.ModTime())
+	require.Equal(t, before.Size(), after.Size())
+
+	second := c.Get()
+	require.NotNil(t, second)
+	assert.Equal(t, HookMissing, second.Hooks.Su)
+	assert.Equal(t, reads+1, reader.count())
+}
+
+// TestLoginCaptureDeadline runs a check that hangs (here in sshd -T; a hung
+// mount under /etc or /usr/lib behaves the same). The report gets no block
+// once the deadline passes, a later report neither waits nor starts a second
+// check, and the check's result is used once it finishes.
+func TestLoginCaptureDeadline(t *testing.T) {
+	root := buildLoginCaptureRoot(t, debianFiles(), debianBins)
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		sshd := &fakeSSHD{out: "usepam yes\n", block: release}
+		c := newTestCollector(root, sshd, nil)
+
+		start := time.Now()
+		assert.Nil(t, c.Get())
+		assert.Equal(t, loginCaptureDeadline, time.Since(start))
+		assert.Equal(t, 1, sshd.count())
+
+		start = time.Now()
+		assert.Nil(t, c.Get(), "a check that outlived the deadline must not be waited on")
+		assert.Zero(t, time.Since(start))
+		assert.Equal(t, 1, sshd.count(), "no second check while one is running")
+
+		close(release)
+		synctest.Wait()
+		got := c.Get()
+		require.NotNil(t, got)
+		assert.Equal(t, HookRegistered, got.Hooks.SSHD)
+		assert.Equal(t, 1, sshd.count(), "the finished check's sshd answer is cached")
+	})
+}
+
+// TestLoginCaptureConcurrentGet is for -race: callers that arrive while a
+// check runs get the last result or nil at once, and only one check runs.
+func TestLoginCaptureConcurrentGet(t *testing.T) {
+	root := buildLoginCaptureRoot(t, debianFiles(), debianBins)
+	sshd := &fakeSSHD{out: "usepam yes\n"}
+	c := newTestCollector(root, sshd, nil)
+
+	var wg sync.WaitGroup
+	results := make([]*LoginCapture, 16)
+	for i := range results {
+		wg.Go(func() { results[i] = c.Get() })
+	}
+	wg.Wait()
+
+	completed := 0
+	for _, r := range results {
+		if r != nil {
+			completed++
+			assert.Equal(t, HookRegistered, r.Hooks.SSHD)
+		}
+	}
+	assert.Positive(t, completed)
+	assert.Equal(t, 1, sshd.count(), "the sshd answer is cached across checks")
+
+	got := c.Get()
+	require.NotNil(t, got)
+	*got.SSHDUsePAM = "no"
+	assert.Equal(t, strPtr("yes"), c.Get().SSHDUsePAM, "callers get copies")
 }

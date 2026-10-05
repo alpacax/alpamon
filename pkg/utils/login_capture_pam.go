@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build linux || darwin
 
 package utils
 
@@ -9,8 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,13 +24,17 @@ const (
 	// pamModuleName is the file the alpamon-pam packages install and the
 	// session hook line loads, by bare name (deb) or absolute path (rpm).
 	pamModuleName = "pam_alpamon.so"
+	// pamReferenceModule is the module every libpam installation ships. The
+	// directory holding it is the one libpam resolves relative names against.
+	pamReferenceModule = "pam_unix.so"
 	// pamMaxIncludeDepth is libpam's own limit (PAM_SUBSTACK_MAX_LEVEL):
 	// deeper includes fail there, so they cannot carry the hook.
 	pamMaxIncludeDepth = 16
 	// pamMaxFilesPerService bounds the work for one service on a host with a
 	// large include tree. Real stacks visit fewer than ten files.
 	pamMaxFilesPerService = 64
-	// pamMaxFileSize is far above any real PAM file; a larger one is not read.
+	// pamMaxFileSize is far above any real PAM or sshd config file; a larger
+	// one is not read.
 	pamMaxFileSize = 256 << 10
 	// pamFileCacheMax bounds the parsed-file cache; it is cleared when full.
 	pamFileCacheMax = 256
@@ -42,23 +46,22 @@ const (
 	sshdUsePAMMaxAge     = 24 * time.Hour
 	sshdUsePAMRetryAfter = time.Hour
 
+	// loginCaptureDeadline is how long a report waits for the check. A check
+	// still running then (a hung mount under /etc or /usr/lib) is left to
+	// finish on its own and the report goes out without the block.
+	loginCaptureDeadline = 5 * time.Second
+
 	// loginCaptureWarnAfter is how many consecutive failed checks it takes
 	// to log one WARN for the life of the process.
 	loginCaptureWarnAfter = 3
+
+	defaultSSHDPAMService = "sshd"
 )
 
 // pamConfigDirs is the order libpam searches for a service's file and for a
 // relative include: /etc/pam.d, then the distribution's copies. /usr/etc/pam.d
 // is the vendor directory some SUSE releases build libpam with.
 var pamConfigDirs = []string{"/etc/pam.d", "/usr/lib/pam.d", "/usr/etc/pam.d"}
-
-// pamModuleDirs are the directories libpam resolves a bare module name
-// against, by distribution: rpm-based in lib64, Debian-family in the multiarch
-// directories (x86_64-linux-gnu, arm-linux-gnueabihf, ...) found under /lib
-// and /usr/lib.
-var pamModuleDirs = []string{"/lib/security", "/lib64/security", "/usr/lib/security", "/usr/lib64/security"}
-
-var pamMultiarchParents = []string{"/lib", "/usr/lib"}
 
 // The binaries that tell an installed service from an absent one.
 var (
@@ -72,9 +75,55 @@ var (
 // directory is missing, as on a socket-activated sshd that has not yet taken
 // a connection since boot; the check is re-run as soon as it appears.
 var (
-	sshdConfigFiles = []string{"/etc/ssh/sshd_config", "/usr/etc/ssh/sshd_config", "/run/sshd"}
+	sshdConfigFiles = []string{"/etc/ssh/sshd_config", "/usr/etc/ssh/sshd_config"}
 	sshdConfigDirs  = []string{"/etc/ssh/sshd_config.d", "/usr/etc/ssh/sshd_config.d"}
+	sshdPrivsepDir  = "/run/sshd"
 )
+
+// multiarchTriplets maps a Go architecture to the Debian multiarch names its
+// PAM modules are installed under.
+func multiarchTriplets(goarch string) []string {
+	switch goarch {
+	case "amd64":
+		return []string{"x86_64-linux-gnu"}
+	case "arm64":
+		return []string{"aarch64-linux-gnu"}
+	case "386":
+		return []string{"i386-linux-gnu"}
+	case "arm":
+		return []string{"arm-linux-gnueabihf", "arm-linux-gnueabi"}
+	case "ppc64le":
+		return []string{"powerpc64le-linux-gnu"}
+	case "s390x":
+		return []string{"s390x-linux-gnu"}
+	case "riscv64":
+		return []string{"riscv64-linux-gnu"}
+	case "mips64le":
+		return []string{"mips64el-linux-gnuabi64"}
+	case "loong64":
+		return []string{"loongarch64-linux-gnu"}
+	}
+	return nil
+}
+
+// fileStamp identifies one version of a file: a same-size rewrite that puts
+// the mtime back still changes ctime, and a replaced file changes inode.
+type fileStamp struct {
+	modTime int64
+	size    int64
+	ino     uint64
+	ctime   int64
+}
+
+func stampOf(info fs.FileInfo) fileStamp {
+	ino, ctime := statIdentity(info)
+	return fileStamp{modTime: info.ModTime().UnixNano(), size: info.Size(), ino: ino, ctime: ctime}
+}
+
+func (s fileStamp) String() string {
+	return strconv.FormatInt(s.modTime, 10) + "|" + strconv.FormatInt(s.size, 10) + "|" +
+		strconv.FormatUint(s.ino, 10) + "|" + strconv.FormatInt(s.ctime, 10)
+}
 
 // pamDirective is one session-relevant line of a PAM file: either a session
 // module (module set) or a file to follow (include set), from a session
@@ -85,36 +134,56 @@ type pamDirective struct {
 }
 
 type pamFileEntry struct {
-	modTime    time.Time
-	size       int64
+	stamp      fileStamp
 	directives []pamDirective
 }
 
-type sshdUsePAMEntry struct {
+// sshdEntry caches what sshd -T and sshd's config files say.
+type sshdEntry struct {
 	checked     bool
 	fingerprint string
-	value       string
 	at          time.Time
+	usePAM      string // "yes", "no", or "" when undeterminable
+	service     string // PAMServiceName, "sshd" when sshd -T did not say
+	// matchScoped is set when a config file sets PAMServiceName inside a
+	// Match block, so different connections may run different PAM stacks.
+	matchScoped bool
+}
+
+type moduleDirEntry struct {
+	fingerprint string
+	dir         string
 }
 
 // loginCaptureCollector builds the login_capture block from a filesystem
 // rooted at root, which tests point at a fixture tree.
 type loginCaptureCollector struct {
 	root     string
+	triplets []string
+	deadline time.Duration
 	readFile func(string) ([]byte, error)
 	runSSHDT func(ctx context.Context, sshdPath string) ([]byte, error)
 	now      func() time.Time
 
-	mu       sync.Mutex
-	files    map[string]pamFileEntry
-	sshd     sshdUsePAMEntry
-	failures int
-	warned   bool
+	// mu guards the fields below it. The caches after them belong to the one
+	// collection running at a time and need no lock.
+	mu            sync.Mutex
+	inflight      chan struct{}
+	inflightSince time.Time
+	last          *LoginCapture
+	failures      int
+	warned        bool
+
+	files     map[string]pamFileEntry
+	sshd      sshdEntry
+	moduleDir moduleDirEntry
 }
 
 func newLoginCaptureCollector(root string) *loginCaptureCollector {
 	return &loginCaptureCollector{
 		root:     root,
+		triplets: multiarchTriplets(runtime.GOARCH),
+		deadline: loginCaptureDeadline,
 		readFile: os.ReadFile,
 		runSSHDT: runSSHDT,
 		now:      time.Now,
@@ -126,24 +195,68 @@ func runSSHDT(ctx context.Context, sshdPath string) ([]byte, error) {
 	return exec.CommandContext(ctx, sshdPath, "-T").Output()
 }
 
-// Get returns the block, or nil when the check failed. A failure, including a
-// panic, never reaches the caller: the report goes out without the block.
-func (c *loginCaptureCollector) Get() (block *LoginCapture) {
+// Get returns the block, or nil when the check failed or did not finish
+// within the deadline. The check runs in its own goroutine and at most one
+// runs at a time: a caller arriving while one is in flight gets the last
+// result at once, or nil once the running check has outlived the deadline,
+// and never starts a second one. A failure, including a panic, never reaches
+// the caller.
+func (c *loginCaptureCollector) Get() *LoginCapture {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	defer func() {
-		if r := recover(); r != nil {
-			block = nil
-			c.recordFailure(fmt.Errorf("panic: %v", r))
+	if c.inflight != nil {
+		stuck := time.Since(c.inflightSince) >= c.deadline
+		last := c.last.clone()
+		c.mu.Unlock()
+		if stuck {
+			return nil
 		}
-	}()
+		return last
+	}
+	done := make(chan struct{})
+	c.inflight, c.inflightSince = done, time.Now()
+	c.mu.Unlock()
 
-	block = c.collect()
-	c.failures = 0
-	return block
+	go c.run(done)
+
+	timer := time.NewTimer(c.deadline)
+	defer timer.Stop()
+	select {
+	case <-done:
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.last.clone()
+	case <-timer.C:
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.recordFailureLocked(errors.New("timed out"))
+		return nil
+	}
 }
 
-func (c *loginCaptureCollector) recordFailure(err error) {
+func (c *loginCaptureCollector) run(done chan struct{}) {
+	block, err := c.collectSafely()
+	c.mu.Lock()
+	c.last = block
+	if err != nil {
+		c.recordFailureLocked(err)
+	} else {
+		c.failures = 0
+	}
+	c.inflight = nil
+	c.mu.Unlock()
+	close(done)
+}
+
+func (c *loginCaptureCollector) collectSafely() (block *LoginCapture, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			block, err = nil, fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return c.collect(), nil
+}
+
+func (c *loginCaptureCollector) recordFailureLocked(err error) {
 	c.failures++
 	log.Debug().Err(err).Msg("Login capture check failed; reporting without it.")
 	if c.failures >= loginCaptureWarnAfter && !c.warned {
@@ -153,26 +266,64 @@ func (c *loginCaptureCollector) recordFailure(err error) {
 	}
 }
 
+func (b *LoginCapture) clone() *LoginCapture {
+	if b == nil {
+		return nil
+	}
+	out := *b
+	if b.SSHDUsePAM != nil {
+		v := *b.SSHDUsePAM
+		out.SSHDUsePAM = &v
+	}
+	return &out
+}
+
+// hookResult accumulates, across services, what the module status needs.
+type hookResult struct {
+	anyLine  bool // some reachable session line names the module
+	loadable bool // and at least one of them resolves to an installed file
+}
+
 func (c *loginCaptureCollector) collect() *LoginCapture {
-	var modules []string
+	moduleDir := c.libpamModuleDir()
+	sshd := c.sshdState()
+
+	var acc hookResult
 	block := &LoginCapture{Schema: loginCaptureSchema}
-	block.Hooks.SSHD = c.hookStatus("sshd", sshdBinaries, &modules)
-	block.Hooks.Login = c.hookStatus("login", loginBinaries, &modules)
-	block.Hooks.Su = c.hookStatus("su", suBinaries, &modules)
+	block.Hooks.SSHD = c.hookStatus(sshd.service, sshdBinaries, moduleDir, &acc)
+	if sshd.matchScoped {
+		block.Hooks.SSHD = HookUnreadable
+	}
+	block.Hooks.Login = c.hookStatus("login", loginBinaries, moduleDir, &acc)
+	block.Hooks.Su = c.hookStatus("su", suBinaries, moduleDir, &acc)
 	// su-l is reported only where it has a file of its own; elsewhere su
 	// serves login shells too and the server reads the absent key that way.
 	if c.findPAMFile("su-l") != "" {
-		block.Hooks.SuL = c.hookStatus("su-l", nil, &modules)
+		block.Hooks.SuL = c.hookStatus("su-l", nil, moduleDir, &acc)
 	}
-	block.PAMModule = c.moduleStatus(modules)
-	block.SSHDUsePAM = c.sshdUsePAM()
+
+	switch {
+	case acc.loadable:
+		block.PAMModule = PAMModulePresent
+	case !acc.anyLine && moduleDir != "" && isRegularFile(filepath.Join(moduleDir, pamModuleName)):
+		block.PAMModule = PAMModulePresent
+	default:
+		block.PAMModule = PAMModuleMissing
+	}
+
+	if sshd.usePAM != "" {
+		value := sshd.usePAM
+		block.SSHDUsePAM = &value
+	}
 	return block
 }
 
 // hookStatus resolves service's PAM file the way libpam does and reports
-// whether a session line loading the module is reachable from it, adding
-// the module references it found to modules.
-func (c *loginCaptureCollector) hookStatus(service string, binaries []string, modules *[]string) string {
+// whether a session line reachable from it loads the module: the line must
+// name pam_alpamon.so and resolve, as libpam resolves it, to an installed
+// file. A hook whose module is not where libpam loads it from is skipped at
+// login and reads as missing.
+func (c *loginCaptureCollector) hookStatus(service string, binaries []string, moduleDir string, acc *hookResult) string {
 	file := c.findPAMFile(service)
 	if file == "" {
 		if c.firstExisting(binaries) != "" {
@@ -186,15 +337,77 @@ func (c *loginCaptureCollector) hookStatus(service string, binaries []string, mo
 
 	w := pamWalk{}
 	c.walk(file, &w, 0, nil)
-	switch {
-	case w.failed:
+	if w.failed {
 		return HookUnreadable
-	case len(w.modules) > 0:
-		*modules = append(*modules, w.modules...)
-		return HookRegistered
-	default:
+	}
+	if len(w.modules) == 0 {
 		return HookMissing
 	}
+	acc.anyLine = true
+	unresolvable := false
+	for _, ref := range w.modules {
+		if !strings.HasPrefix(ref, "/") && moduleDir == "" {
+			unresolvable = true
+			continue
+		}
+		if c.moduleLoadable(ref, moduleDir) {
+			acc.loadable = true
+			return HookRegistered
+		}
+	}
+	if unresolvable {
+		// The line names the module relative to libpam's directory, which
+		// could not be found on this host.
+		return HookUnreadable
+	}
+	return HookMissing
+}
+
+// moduleLoadable reports whether libpam would find the module a hook line
+// names: an absolute path as is, anything else under libpam's directory.
+func (c *loginCaptureCollector) moduleLoadable(ref, moduleDir string) bool {
+	if strings.HasPrefix(ref, "/") {
+		return isRegularFile(filepath.Join(c.root, ref))
+	}
+	return isRegularFile(filepath.Join(moduleDir, ref))
+}
+
+// libpamModuleDir returns the directory libpam resolves relative module
+// names against, found as the first candidate holding pam_unix.so, with
+// symlinks resolved; "" when none does. The candidates are the multiarch
+// directories for this architecture (Debian family), then lib64 (RHEL family,
+// SUSE) and lib. The answer is cached by the stat of the candidates, so on an
+// unchanged host it costs only those stats.
+func (c *loginCaptureCollector) libpamModuleDir() string {
+	candidates := make([]string, 0, 2*len(c.triplets)+4)
+	for _, t := range c.triplets {
+		candidates = append(candidates, "/lib/"+t+"/security", "/usr/lib/"+t+"/security")
+	}
+	candidates = append(candidates, "/lib64/security", "/usr/lib64/security", "/lib/security", "/usr/lib/security")
+
+	var fp strings.Builder
+	for _, d := range candidates {
+		stampInto(&fp, filepath.Join(c.root, d))
+	}
+	if c.moduleDir.fingerprint == fp.String() {
+		return c.moduleDir.dir
+	}
+
+	dir := ""
+	for _, d := range candidates {
+		full := filepath.Join(c.root, d)
+		if !isRegularFile(filepath.Join(full, pamReferenceModule)) {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(full); err == nil {
+			dir = resolved
+		} else {
+			dir = full
+		}
+		break
+	}
+	c.moduleDir = moduleDirEntry{fingerprint: fp.String(), dir: dir}
+	return dir
 }
 
 type pamWalk struct {
@@ -225,7 +438,9 @@ func (c *loginCaptureCollector) walk(file string, w *pamWalk, depth int, ancesto
 	ancestors = append(slices.Clip(ancestors), file)
 	for _, d := range directives {
 		if d.include == "" {
-			if path.Base(d.module) == pamModuleName {
+			// Exact file name only: pam_alpamon_legacy.so or
+			// pam_alpamon.so.bak is another module.
+			if filepath.Base(d.module) == pamModuleName {
 				w.modules = append(w.modules, d.module)
 			}
 			continue
@@ -267,19 +482,14 @@ func (c *loginCaptureCollector) resolveInclude(name string) string {
 }
 
 // loadPAMFile returns file's session directives, parsing it only when its
-// mtime or size changed since the last read. Only regular files are read, so
-// a FIFO planted in pam.d cannot block the report.
+// stamp (mtime, size, inode, ctime) changed since the last read.
 func (c *loginCaptureCollector) loadPAMFile(file string) ([]pamDirective, bool) {
-	info, err := os.Stat(file)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > pamMaxFileSize {
+	data, stamp, cached, ok := c.readSmallFile(file, c.files[file].stamp)
+	if !ok {
 		return nil, false
 	}
-	if e, ok := c.files[file]; ok && e.size == info.Size() && e.modTime.Equal(info.ModTime()) {
-		return e.directives, true
-	}
-	data, err := c.readFile(file)
-	if err != nil || len(data) > pamMaxFileSize {
-		return nil, false
+	if cached {
+		return c.files[file].directives, true
 	}
 	directives, ok := parsePAMSessionDirectives(data)
 	if !ok {
@@ -288,8 +498,27 @@ func (c *loginCaptureCollector) loadPAMFile(file string) ([]pamDirective, bool) 
 	if len(c.files) >= pamFileCacheMax {
 		clear(c.files)
 	}
-	c.files[file] = pamFileEntry{modTime: info.ModTime(), size: info.Size(), directives: directives}
+	c.files[file] = pamFileEntry{stamp: stamp, directives: directives}
 	return directives, true
+}
+
+// readSmallFile reads file unless its stamp equals known (cached is then
+// true and nothing is read). Only regular files up to pamMaxFileSize are
+// read, so a FIFO or device where a config file should be cannot block.
+func (c *loginCaptureCollector) readSmallFile(file string, known fileStamp) (data []byte, stamp fileStamp, cached, ok bool) {
+	info, err := os.Stat(file)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > pamMaxFileSize {
+		return nil, fileStamp{}, false, false
+	}
+	stamp = stampOf(info)
+	if stamp == known {
+		return nil, stamp, true, true
+	}
+	data, err = c.readFile(file)
+	if err != nil || len(data) > pamMaxFileSize {
+		return nil, fileStamp{}, false, false
+	}
+	return data, stamp, false, true
 }
 
 // parsePAMSessionDirectives reads a pam.d file the way libpam assembles its
@@ -383,55 +612,7 @@ func pamTokens(s string, max int) []string {
 	return tokens
 }
 
-// moduleStatus reports the module present only when every module reference
-// on a registered hook resolves to an installed file; a hook naming a path
-// that is not there loads nothing. With no hook registered it looks for the
-// module where libpam resolves a bare name.
-func (c *loginCaptureCollector) moduleStatus(refs []string) string {
-	if len(refs) == 0 {
-		refs = []string{pamModuleName}
-	}
-	slices.Sort(refs)
-	for _, ref := range slices.Compact(refs) {
-		if !c.moduleInstalled(ref) {
-			return PAMModuleMissing
-		}
-	}
-	return PAMModulePresent
-}
-
-func (c *loginCaptureCollector) moduleInstalled(ref string) bool {
-	if strings.HasPrefix(ref, "/") {
-		return c.isRegularFile(filepath.Join(c.root, ref))
-	}
-	for _, dir := range c.moduleDirs() {
-		if c.isRegularFile(filepath.Join(dir, ref)) {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *loginCaptureCollector) moduleDirs() []string {
-	dirs := make([]string, 0, len(pamModuleDirs)+4)
-	for _, d := range pamModuleDirs {
-		dirs = append(dirs, filepath.Join(c.root, d))
-	}
-	for _, parent := range pamMultiarchParents {
-		entries, err := os.ReadDir(filepath.Join(c.root, parent))
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if strings.Contains(e.Name(), "-linux-gnu") {
-				dirs = append(dirs, filepath.Join(c.root, parent, e.Name(), "security"))
-			}
-		}
-	}
-	return dirs
-}
-
-func (c *loginCaptureCollector) isRegularFile(p string) bool {
+func isRegularFile(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && info.Mode().IsRegular()
 }
@@ -439,74 +620,139 @@ func (c *loginCaptureCollector) isRegularFile(p string) bool {
 func (c *loginCaptureCollector) firstExisting(paths []string) string {
 	for _, p := range paths {
 		full := filepath.Join(c.root, p)
-		if c.isRegularFile(full) {
+		if isRegularFile(full) {
 			return full
 		}
 	}
 	return ""
 }
 
-// sshdUsePAM returns sshd's effective UsePAM from sshd -T, or nil when sshd
-// is not installed or the check fails. sshd -T runs again only when the
-// fingerprint of sshd's binary and config files changes or the cached answer
-// ages out.
-func (c *loginCaptureCollector) sshdUsePAM() *string {
+// sshdState returns what sshd -T and sshd's config files say: UsePAM, the
+// PAM service sshd opens sessions under, and whether that service is chosen
+// per connection. sshd -T runs again only when the fingerprint of sshd's
+// binary and config files changes or the cached answer ages out.
+func (c *loginCaptureCollector) sshdState() sshdEntry {
 	sshd := c.firstExisting(sshdBinaries)
 	if sshd == "" {
-		c.sshd = sshdUsePAMEntry{}
-		return nil
+		c.sshd = sshdEntry{}
+		return sshdEntry{service: defaultSSHDPAMService}
 	}
 
-	fingerprint := c.sshdFingerprint(sshd)
+	fingerprint, configFiles := c.sshdFingerprint(sshd)
 	now := c.now()
 	maxAge := sshdUsePAMMaxAge
-	if c.sshd.value == "" {
+	if c.sshd.usePAM == "" {
 		maxAge = sshdUsePAMRetryAfter
 	}
-	if !c.sshd.checked || c.sshd.fingerprint != fingerprint || now.Sub(c.sshd.at) >= maxAge {
-		ctx, cancel := context.WithTimeout(context.Background(), pamQueryTimeout)
-		out, err := c.runSSHDT(ctx, sshd)
-		cancel()
-		value := ""
-		if err == nil {
-			value = parseSSHDUsePAM(string(out))
-		}
-		c.sshd = sshdUsePAMEntry{checked: true, fingerprint: fingerprint, value: value, at: now}
+	if c.sshd.checked && c.sshd.fingerprint == fingerprint && now.Sub(c.sshd.at) < maxAge {
+		return c.sshd
 	}
 
-	if c.sshd.value == "" {
-		return nil
+	entry := sshdEntry{checked: true, fingerprint: fingerprint, at: now, service: defaultSSHDPAMService}
+	ctx, cancel := context.WithTimeout(context.Background(), pamQueryTimeout)
+	out, err := c.runSSHDT(ctx, sshd)
+	cancel()
+	if err == nil {
+		entry.usePAM = parseSSHDUsePAM(string(out))
+		if service := parseSSHDPAMServiceName(string(out)); service != "" {
+			entry.service = service
+		}
 	}
-	value := c.sshd.value
-	return &value
+	for _, f := range configFiles {
+		data, _, _, ok := c.readSmallFile(f, fileStamp{})
+		if ok && sshdConfigSetsServiceInMatch(string(data)) {
+			entry.matchScoped = true
+			break
+		}
+	}
+	c.sshd = entry
+	return entry
 }
 
-// sshdFingerprint identifies the inputs of sshd -T by path, mtime and size:
-// the binary, the main config files and every drop-in in their .d
-// directories.
-func (c *loginCaptureCollector) sshdFingerprint(sshd string) string {
-	var b strings.Builder
-	stamp := func(p string) {
-		b.WriteString(p)
-		if info, err := os.Stat(p); err == nil {
-			b.WriteString("|" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "|" + strconv.FormatInt(info.Size(), 10))
+// parseSSHDPAMServiceName returns the pamservicename line of sshd -T output
+// (OpenSSH 9.8 and later), normalized as libpam's pam_start does: only the
+// part after the last '/', lowercased. Older sshd prints no such line.
+func parseSSHDPAMServiceName(out string) string {
+	for line := range strings.SplitSeq(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && strings.EqualFold(fields[0], "pamservicename") {
+			name := fields[1]
+			if i := strings.LastIndexByte(name, '/'); i >= 0 {
+				name = name[i+1:]
+			}
+			return strings.ToLower(name)
 		}
-		b.WriteByte('\n')
 	}
-	stamp(sshd)
+	return ""
+}
+
+// sshdConfigSetsServiceInMatch reports whether an sshd config file sets
+// PAMServiceName after a Match line other than "Match all", where it applies
+// only to the connections that match.
+func sshdConfigSetsServiceInMatch(config string) bool {
+	inMatch := false
+	for line := range strings.SplitSeq(config, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		keyword, rest, _ := strings.Cut(line, " ")
+		if k, _, found := strings.Cut(keyword, "="); found {
+			keyword = k
+		}
+		keyword, _, _ = strings.Cut(keyword, "\t")
+		rest = strings.TrimSpace(rest)
+		switch strings.ToLower(keyword) {
+		case "match":
+			inMatch = !strings.EqualFold(rest, "all")
+		case "pamservicename":
+			if inMatch {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sshdFingerprint identifies the inputs of sshd -T by their stamps: the
+// binary, the main config files, every drop-in in their .d directories and
+// the privilege separation directory. It also returns the config files that
+// exist, for the Match scan.
+func (c *loginCaptureCollector) sshdFingerprint(sshd string) (string, []string) {
+	var b strings.Builder
+	var files []string
+	stampInto(&b, sshd)
+	stampInto(&b, filepath.Join(c.root, sshdPrivsepDir))
 	for _, f := range sshdConfigFiles {
-		stamp(filepath.Join(c.root, f))
+		p := filepath.Join(c.root, f)
+		if stampInto(&b, p) {
+			files = append(files, p)
+		}
 	}
 	for _, d := range sshdConfigDirs {
 		dir := filepath.Join(c.root, d)
-		stamp(dir)
+		stampInto(&b, dir)
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
 		for _, e := range entries {
-			stamp(filepath.Join(dir, e.Name()))
+			p := filepath.Join(dir, e.Name())
+			if stampInto(&b, p) {
+				files = append(files, p)
+			}
 		}
 	}
-	return b.String()
+	return b.String(), files
+}
+
+// stampInto appends p and its stamp to b and reports whether p exists.
+func stampInto(b *strings.Builder, p string) bool {
+	b.WriteString(p)
+	info, err := os.Stat(p)
+	if err == nil {
+		b.WriteString("|" + stampOf(info).String())
+	}
+	b.WriteByte('\n')
+	return err == nil
 }
