@@ -1,5 +1,7 @@
 package runner
 
+import "github.com/alpacax/alpamon/v2/pkg/utils"
+
 // SyncHashes maps sync category keys to their SHA-256 content hashes.
 type SyncHashes map[string]string
 
@@ -67,6 +69,11 @@ type ServerData struct {
 	// loudly rather than quietly.
 	SshdUsePam *string `json:"sshd_use_pam"`
 	Load       float64 `json:"load"`
+	// LoginCapture is omitted when nil (non-Linux builds, or a failed
+	// check), leaving the server with pam_version and sshd_use_pam alone,
+	// from which it never reads a host as covered. Servers that predate the
+	// key ignore it.
+	LoginCapture *utils.LoginCapture `json:"login_capture,omitempty"`
 }
 
 type SystemData struct {
@@ -168,20 +175,22 @@ type AccessPolicy struct {
 }
 
 type commitData struct {
-	Version    string      `json:"version"`
-	PamVersion string      `json:"pam_version,omitempty"`
-	SshdUsePam *string     `json:"sshd_use_pam"` // no omitempty; see ServerData
-	Load       float64     `json:"load"`
-	Info       SystemData  `json:"info"`
-	OS         OSData      `json:"os"`
-	Time       *TimeData   `json:"time,omitempty"`
-	Users      []UserData  `json:"users,omitempty"`
-	Groups     []GroupData `json:"groups,omitempty"`
-	Interfaces []Interface `json:"interfaces,omitempty"`
-	Addresses  []Address   `json:"addresses,omitempty"`
-	Disks      []Disk      `json:"disks,omitempty"`
-	Partitions []Partition `json:"partitions,omitempty"`
-	SyncHashes SyncHashes  `json:"sync_hashes,omitempty"`
+	Version    string  `json:"version"`
+	PamVersion string  `json:"pam_version,omitempty"`
+	SshdUsePam *string `json:"sshd_use_pam"` // no omitempty; see ServerData
+	Load       float64 `json:"load"`
+	// LoginCapture is omitted when nil; see ServerData.
+	LoginCapture *utils.LoginCapture `json:"login_capture,omitempty"`
+	Info         SystemData          `json:"info"`
+	OS           OSData              `json:"os"`
+	Time         *TimeData           `json:"time,omitempty"`
+	Users        []UserData          `json:"users,omitempty"`
+	Groups       []GroupData         `json:"groups,omitempty"`
+	Interfaces   []Interface         `json:"interfaces,omitempty"`
+	Addresses    []Address           `json:"addresses,omitempty"`
+	Disks        []Disk              `json:"disks,omitempty"`
+	Partitions   []Partition         `json:"partitions,omitempty"`
+	SyncHashes   SyncHashes          `json:"sync_hashes,omitempty"`
 }
 
 // Defines the ComparableData interface for comparing different types.

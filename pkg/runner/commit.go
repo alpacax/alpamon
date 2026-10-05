@@ -192,9 +192,10 @@ func commitAndNotify(data *commitData) {
 // caller to fall back to the full commit path.
 func collectEssentialData() *commitData {
 	data := &commitData{
-		Version:    version.Version,
-		PamVersion: utils.GetPamVersion(),
-		SshdUsePam: utils.GetSSHDUsePAM(),
+		Version:      version.Version,
+		PamVersion:   utils.GetPamVersion(),
+		SshdUsePam:   utils.GetSSHDUsePAM(),
+		LoginCapture: utils.GetLoginCapture(),
 	}
 
 	if load, err := getLoadAverage(); err == nil {
@@ -285,10 +286,11 @@ func syncServerData(session *scheduler.Session) {
 	}
 	entry := commitDefs["server"]
 	data := &ServerData{
-		Version:    version.Version,
-		PamVersion: utils.GetPamVersion(),
-		SshdUsePam: utils.GetSSHDUsePAM(),
-		Load:       loadAvg,
+		Version:      version.Version,
+		PamVersion:   utils.GetPamVersion(),
+		SshdUsePam:   utils.GetSSHDUsePAM(),
+		LoginCapture: utils.GetLoginCapture(),
+		Load:         loadAvg,
 	}
 	scheduler.Rqueue.Patch(utils.JoinPath(entry.URL, entry.URLSuffix), data, 80, time.Time{})
 }
@@ -442,9 +444,10 @@ func compareListData[T ComparableData](entry commitDef, currentData, remoteData 
 
 func collectData() *commitData {
 	data := &commitData{
-		Version:    version.Version,
-		PamVersion: utils.GetPamVersion(),
-		SshdUsePam: utils.GetSSHDUsePAM(),
+		Version:      version.Version,
+		PamVersion:   utils.GetPamVersion(),
+		SshdUsePam:   utils.GetSSHDUsePAM(),
+		LoginCapture: utils.GetLoginCapture(),
 	}
 
 	if load, err := getLoadAverage(); err == nil {
