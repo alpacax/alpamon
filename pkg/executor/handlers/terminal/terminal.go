@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -175,13 +176,23 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 		return 1, fmt.Sprintf("openftp: Failed to get executable path. %v", err), nil
 	}
 
-	cmd := exec.Command(
-		executable,
-		"ftp",
+	// Read here rather than in the worker, which runs as the session's user.
+	caCertPEM, err := runner.ReadFtpCACert(config.GlobalSettings.CaCert)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to prepare the ftp worker's TLS settings")
+		return 1, fmt.Sprintf("openftp: Failed to prepare TLS settings. %v", err), nil
+	}
+
+	cmd := exec.Command(executable, runner.FtpWorkerArgs(
 		args.URL,
 		config.GlobalSettings.ServerURL,
 		homeDirectory,
-	)
+		config.GlobalSettings.SSLVerify,
+		caCertPEM != nil,
+	)...)
+	if caCertPEM != nil {
+		cmd.Stdin = bytes.NewReader(caCertPEM)
+	}
 	cmd.SysProcAttr = sysProcAttr
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -3,7 +3,9 @@ package runner
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/logger"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/gorilla/websocket"
@@ -31,6 +32,7 @@ type FtpClient struct {
 	homeDirectory    string
 	workingDirectory string
 	log              logger.FtpLogger
+	tlsConfig        *tls.Config
 	commandChan      chan []byte
 	responseChan     chan []byte
 	writeTimeout     time.Duration
@@ -55,6 +57,11 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 		data.Logger.Debug().Msg("Refusing to open WebFTP session with empty home directory on Windows.")
 		return nil
 	}
+	tlsConfig, err := ftpTLSConfig(data)
+	if err != nil {
+		data.Logger.Error().Err(err).Msg("Refusing to open WebFTP session without its TLS settings.")
+		return nil
+	}
 	client := &FtpClient{
 		requestHeader:    headers,
 		url:              data.URL,
@@ -62,6 +69,7 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 		homeDirectory:    homeDir,
 		workingDirectory: homeDir,
 		log:              data.Logger,
+		tlsConfig:        tlsConfig,
 		commandChan:      make(chan []byte, 1),
 		responseChan:     make(chan []byte, 1),
 		writeTimeout:     ftpWriteTimeout,
@@ -70,12 +78,13 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 	return client
 }
 
-func (fc *FtpClient) RunFtpBackground() {
+// RunFtpBackground runs the WebFTP session. It returns only when the channel
+// cannot be opened; once open, the session ends the process in close().
+func (fc *FtpClient) RunFtpBackground() error {
 	fc.log.Debug().Msg("Opening websocket for ftp session.")
 
 	if err := fc.connect(); err != nil {
-		fc.log.Debug().Err(err).Msgf("Failed to connect to ftp websocket at %s.", serverHostFor(fc.url, fc.serverURL))
-		return
+		return fmt.Errorf("failed to connect to ftp websocket at %s: %w", serverHostFor(fc.url, fc.serverURL), err)
 	}
 	defer fc.close()
 
@@ -87,6 +96,7 @@ func (fc *FtpClient) RunFtpBackground() {
 	go fc.write(ctx, cancel)
 
 	<-ctx.Done()
+	return nil
 }
 
 // connect dials the WebFTP channel. The worker runs without the agent's
@@ -97,9 +107,7 @@ func (fc *FtpClient) connect() error {
 		return err
 	}
 	dialer := websocket.Dialer{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
-		},
+		TLSClientConfig: fc.tlsConfig,
 	}
 	conn, _, err := dialer.Dial(target, fc.requestHeader)
 	if err != nil {
@@ -755,4 +763,19 @@ func (fc *FtpClient) chown(path, username, groupname string, recursive bool) (Co
 	return CommandResult{
 		Message: fmt.Sprintf("Changed owner of %s to UID: %d, GID: %d%s", path, uid, gid, msg),
 	}, nil
+}
+
+// ftpTLSConfig builds the TLS settings for the WebFTP channel from the ones the
+// agent passed to the worker, which does not load the agent's configuration.
+func ftpTLSConfig(data FtpConfigData) (*tls.Config, error) {
+	cfg := &tls.Config{InsecureSkipVerify: data.SkipSSLVerify}
+	if len(data.CaCertPEM) == 0 {
+		return cfg, nil
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(data.CaCertPEM) {
+		return nil, errors.New("no certificate found in the CA certificate")
+	}
+	cfg.RootCAs = pool
+	return cfg, nil
 }

@@ -1,6 +1,10 @@
 package runner
 
 import (
+	"fmt"
+	"io"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +43,12 @@ type FtpConfigData struct {
 	ServerURL     string
 	HomeDirectory string
 	Logger        logger.FtpLogger
+	// SkipSSLVerify turns off server certificate verification. The zero
+	// value verifies, matching the agent's default.
+	SkipSSLVerify bool
+	// CaCertPEM is the CA certificate to verify the server against. Empty
+	// uses the system roots.
+	CaCertPEM []byte
 }
 
 type FtpData struct {
@@ -200,4 +210,52 @@ func GetFtpErrorCode(command FtpCommand, result CommandResult) (CommandResult, i
 	return CommandResult{
 		Message: result.Message,
 	}, 550
+}
+
+// FtpSSLVerifyFlag is the ftp worker flag that carries the agent's SSL verify
+// setting.
+const FtpSSLVerifyFlag = "ssl-verify"
+
+// FtpCACertStdinFlag tells the ftp worker to read the agent's CA certificate,
+// by content, from its standard input. The worker runs as the session's user,
+// who may not be able to read the file.
+const FtpCACertStdinFlag = "ca-cert-stdin"
+
+// MaxFtpCACertSize caps the CA certificate passed to the ftp worker.
+const MaxFtpCACertSize = 1 << 20 // 1 MiB
+
+// FtpWorkerArgs returns the arguments that start the ftp worker for a session.
+// caCertOnStdin says the CA certificate will be written to the worker's stdin.
+func FtpWorkerArgs(url, serverURL, homeDirectory string, sslVerify, caCertOnStdin bool) []string {
+	args := []string{"ftp", "--" + FtpSSLVerifyFlag + "=" + strconv.FormatBool(sslVerify)}
+	if caCertOnStdin {
+		args = append(args, "--"+FtpCACertStdinFlag)
+	}
+	return append(args, "--", url, serverURL, homeDirectory)
+}
+
+// ReadFtpCACert reads the CA certificate at caCert for the ftp worker. An empty
+// caCert returns nil.
+func ReadFtpCACert(caCert string) ([]byte, error) {
+	if caCert == "" {
+		return nil, nil
+	}
+	f, err := os.Open(caCert)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	return ReadCACertLimited(f)
+}
+
+// ReadCACertLimited reads a CA certificate of at most MaxFtpCACertSize bytes.
+func ReadCACertLimited(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, MaxFtpCACertSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+	}
+	if len(data) > MaxFtpCACertSize {
+		return nil, fmt.Errorf("CA certificate is larger than %d bytes", MaxFtpCACertSize)
+	}
+	return data, nil
 }
