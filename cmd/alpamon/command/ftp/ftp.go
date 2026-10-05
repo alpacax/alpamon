@@ -9,20 +9,38 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var FtpCmd = &cobra.Command{
-	Use:   "ftp <url> <serverURL> <homeDirectory>",
-	Short: "Start worker for Web FTP",
-	Args:  cobra.ExactArgs(3),
-	Run: func(cmd *cobra.Command, args []string) {
-		data := runner.FtpConfigData{
-			URL:           args[0],
-			ServerURL:     args[1],
-			HomeDirectory: args[2],
-			Logger:        logger.NewFtpLogger(),
-		}
+var FtpCmd = newFtpCmd()
 
-		RunFtpWorker(data)
-	},
+func newFtpCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ftp [flags] <url> <serverURL> <homeDirectory>",
+		Short: "Start worker for Web FTP",
+		Args:  cobra.ExactArgs(3),
+		Run: func(cmd *cobra.Command, args []string) {
+			RunFtpWorker(configData(cmd, args))
+		},
+	}
+	cmd.Flags().Bool(runner.FtpSSLVerifyFlag, true, "verify the server certificate")
+	return cmd
+}
+
+// configData reads the worker's arguments. The worker does not load the
+// agent's configuration, so the agent passes its SSL verify setting as a flag
+// and its CA certificate, by content, in the environment.
+func configData(cmd *cobra.Command, args []string) runner.FtpConfigData {
+	sslVerify, _ := cmd.Flags().GetBool(runner.FtpSSLVerifyFlag)
+	var caCertPEM []byte
+	if v := os.Getenv(runner.FtpCaCertEnv); v != "" {
+		caCertPEM = []byte(v)
+	}
+	return runner.FtpConfigData{
+		URL:           args[0],
+		ServerURL:     args[1],
+		HomeDirectory: args[2],
+		Logger:        logger.NewFtpLogger(),
+		SkipSSLVerify: !sslVerify,
+		CaCertPEM:     caCertPEM,
+	}
 }
 
 func RunFtpWorker(data runner.FtpConfigData) {

@@ -1,6 +1,9 @@
 package runner
 
 import (
+	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +42,12 @@ type FtpConfigData struct {
 	ServerURL     string
 	HomeDirectory string
 	Logger        logger.FtpLogger
+	// SkipSSLVerify turns off server certificate verification. The zero
+	// value verifies, matching the agent's default.
+	SkipSSLVerify bool
+	// CaCertPEM is the CA certificate to verify the server against. Empty
+	// uses the system roots.
+	CaCertPEM []byte
 }
 
 type FtpData struct {
@@ -200,4 +209,37 @@ func GetFtpErrorCode(command FtpCommand, result CommandResult) (CommandResult, i
 	return CommandResult{
 		Message: result.Message,
 	}, 550
+}
+
+// FtpSSLVerifyFlag is the ftp worker flag that carries the agent's SSL verify
+// setting.
+const FtpSSLVerifyFlag = "ssl-verify"
+
+// FtpCaCertEnv carries the agent's CA certificate to the ftp worker by content.
+// The worker runs as the session's user, who may not be able to read the file.
+const FtpCaCertEnv = "ALPAMON_FTP_CA_CERT"
+
+// FtpWorkerArgs returns the arguments that start the ftp worker for a session.
+func FtpWorkerArgs(url, serverURL, homeDirectory string, sslVerify bool) []string {
+	return []string{
+		"ftp",
+		"--" + FtpSSLVerifyFlag + "=" + strconv.FormatBool(sslVerify),
+		"--",
+		url,
+		serverURL,
+		homeDirectory,
+	}
+}
+
+// FtpWorkerEnv reads the CA certificate at caCert and returns the environment
+// entry that passes it to the ftp worker. An empty caCert returns no entry.
+func FtpWorkerEnv(caCert string) ([]string, error) {
+	if caCert == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(caCert)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+	}
+	return []string{FtpCaCertEnv + "=" + string(data)}, nil
 }
