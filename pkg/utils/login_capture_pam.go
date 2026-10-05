@@ -149,7 +149,7 @@ func (c *loginCaptureCollector) recordFailure(err error) {
 	if c.failures >= loginCaptureWarnAfter && !c.warned {
 		c.warned = true
 		// No error detail: it may carry paths, and DEBUG already has it.
-		log.Warn().Int("attempts", c.failures).Msg("Login capture check keeps failing; the server will show this host's capture as unknown.")
+		log.Warn().Int("attempts", c.failures).Msg("Login capture check keeps failing; reports go out without it.")
 	}
 }
 
