@@ -1,19 +1,13 @@
 package runner
 
 import (
-	"context"
 	"encoding/json"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
-	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -279,211 +273,96 @@ func readSessionEventAck(t *testing.T, client net.Conn) SessionEventResponse {
 	return resp
 }
 
-// TestHandleSessionEvent_AcksAndEmits verifies the happy path: a valid
-// non-Alpacon session_event is acked and the event reaches the emitter.
-func TestHandleSessionEvent_AcksAndEmits(t *testing.T) {
-	am := newTestAuthManager()
-	am.detectLocalAccess = true
-	emitted := make(chan NonAlpaconAccessEvent, 1)
-	am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) { emitted <- ev }
-
+// handleSessionEventSync runs handleSessionEvent to completion and returns
+// the ack PAM would have read.
+func handleSessionEventSync(t *testing.T, am *AuthManager, raw []byte) SessionEventResponse {
+	t.Helper()
 	server, client := newSessionEventPipe(t)
-	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","rhost":"203.0.113.5","tty":"pts/1","pid":712345,"ppid":712340}`)
-	go am.handleSessionEvent(raw, server)
-
+	done := make(chan struct{})
+	go func() {
+		am.handleSessionEvent(raw, server)
+		close(done)
+	}()
 	resp := readSessionEventAck(t, client)
+	<-done
+	return resp
+}
+
+func newSessionEventTestAuthManager(t *testing.T) (*AuthManager, *accessEventOutbox) {
+	t.Helper()
+	o := newTestOutbox(t, newFakeOutboxClock(), &fakeAccessEventSender{})
+	am := newTestAuthManager()
+	am.outbox = o
+	return am, o
+}
+
+// TestHandleSessionEvent_AcksAndStores verifies the happy path: a valid
+// non-Alpacon session_event is acked and the event lands in the outbox.
+func TestHandleSessionEvent_AcksAndStores(t *testing.T) {
+	am, o := newSessionEventTestAuthManager(t)
+	am.detectLocalAccess = true
+
+	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","rhost":"203.0.113.5","tty":"pts/1","pid":712345,"ppid":712340}`)
+	resp := handleSessionEventSync(t, am, raw)
 	assert.Equal(t, "session_event_response", resp.Type, "unexpected ack: %+v", resp)
 	assert.True(t, resp.Received, "unexpected ack: %+v", resp)
 
-	select {
-	case ev := <-emitted:
-		assert.Equal(t, "alice", ev.Username, "unexpected event: %+v", ev)
-		assert.Equal(t, "sshd", ev.Service, "unexpected event: %+v", ev)
-	case <-time.After(2 * time.Second):
-		t.Fatal("event was not emitted")
-	}
+	rows := outboxRows(t, o)
+	require.Len(t, rows, 1, "the event must be stored")
+	var ev NonAlpaconAccessEvent
+	require.NoError(t, json.Unmarshal(rows[0].Payload, &ev))
+	assert.Equal(t, rows[0].ID, ev.EventID, "the row is keyed by the event id")
+	assert.Equal(t, "alice", ev.Username, "unexpected event: %+v", ev)
+	assert.Equal(t, "sshd", ev.Service, "unexpected event: %+v", ev)
+	assert.True(t, ev.Timestamp.Equal(rows[0].CreatedAt), "the row keeps the host-recorded time")
 }
 
 // TestHandleSessionEvent_MalformedJSONAcksFalse verifies fail-open
-// behavior on garbage input: PAM still gets an answer, nothing emits.
+// behavior on garbage input: PAM still gets an answer, nothing is stored.
 func TestHandleSessionEvent_MalformedJSONAcksFalse(t *testing.T) {
-	am := newTestAuthManager()
+	am, o := newSessionEventTestAuthManager(t)
 	am.detectLocalAccess = true
-	am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-		assert.Fail(t, "must not emit on malformed input")
-	}
 
-	server, client := newSessionEventPipe(t)
-	go am.handleSessionEvent([]byte(`{not-json`), server)
-
-	resp := readSessionEventAck(t, client)
+	resp := handleSessionEventSync(t, am, []byte(`{not-json`))
 	assert.False(t, resp.Received, "expected received=false for malformed input, got %+v", resp)
+	assert.Empty(t, outboxRows(t, o), "must not store malformed input")
 }
 
 // TestHandleSessionEvent_SuppressedStillAcks verifies Alpacon-originated
-// sessions are acked but not emitted.
+// sessions are acked but not stored.
 func TestHandleSessionEvent_SuppressedStillAcks(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		am := newTestAuthManager()
-		am.detectLocalAccess = true
-		am.AddPIDSessionMapping(5555, &SessionInfo{
-			SessionID: "sess-1",
-			Requests:  make(map[string]*SudoRequest),
-		})
-		am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-			assert.Fail(t, "must not emit for tracked Alpacon session")
-		}
-
-		server, client := newSessionEventPipe(t)
-		raw := []byte(`{"type":"session_event","username":"alice","service":"su","pid":424242,"ppid":5555}`)
-		go am.handleSessionEvent(raw, server)
-
-		resp := readSessionEventAck(t, client)
-		assert.Truef(t, resp.Received, "suppressed events must still ack true, got %+v", resp)
-		// Settle every goroutine: a wrong emit has no chance left to fire.
-		synctest.Wait()
+	am, o := newSessionEventTestAuthManager(t)
+	am.detectLocalAccess = true
+	am.AddPIDSessionMapping(5555, &SessionInfo{
+		SessionID: "sess-1",
+		Requests:  make(map[string]*SudoRequest),
 	})
+
+	raw := []byte(`{"type":"session_event","username":"alice","service":"su","pid":424242,"ppid":5555}`)
+	resp := handleSessionEventSync(t, am, raw)
+	assert.Truef(t, resp.Received, "suppressed events must still ack true, got %+v", resp)
+	assert.Empty(t, outboxRows(t, o), "must not store a tracked Alpacon session")
 }
 
-// TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted verifies the
-// non-blocking bound: when every emit slot is occupied, a further
-// session_event is still acked but its emission is dropped instead of
-// spawning an unbounded goroutine.
-func TestHandleSessionEvent_DropsWhenEmitConcurrencyExhausted(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		am := newTestAuthManager()
-		am.detectLocalAccess = true
-		am.emitSem = make(chan struct{}, 1) // force a single emit slot
-
-		entered := make(chan struct{}, 2)
-		release := make(chan struct{})
-		am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-			entered <- struct{}{}
-			<-release // hold the slot until the test releases it
-		}
-		defer close(release)
-
-		raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
-
-		server1, client1 := newSessionEventPipe(t)
-		go am.handleSessionEvent(raw, server1)
-		resp1 := readSessionEventAck(t, client1)
-		require.Truef(t, resp1.Received, "first event must ack true, got %+v", resp1)
-		// No wall-clock guard: an emit that never starts makes this receive unsatisfiable, and the bubble says so.
-		<-entered
-
-		server2, client2 := newSessionEventPipe(t)
-		go am.handleSessionEvent(raw, server2)
-		resp2 := readSessionEventAck(t, client2)
-		require.Truef(t, resp2.Received, "dropped event must still ack true, got %+v", resp2)
-		// Settle every goroutine: an empty channel now means the drop, not a slow emit.
-		synctest.Wait()
-		select {
-		case <-entered:
-			assert.Fail(t, "second event exceeded the concurrency limit and must be dropped")
-		default:
-		}
-	})
-}
-
-// TestHandleSessionEvent_FlagOffDoesNotEmit verifies the policy gate:
+// TestHandleSessionEvent_FlagOffDoesNotStore verifies the policy gate:
 // detection default-off means ack-only behavior.
-func TestHandleSessionEvent_FlagOffDoesNotEmit(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		am := newTestAuthManager()
-		am.emitAccessEventFn = func(ev NonAlpaconAccessEvent) {
-			assert.Fail(t, "must not emit while detect_local_access is off")
-		}
+func TestHandleSessionEvent_FlagOffDoesNotStore(t *testing.T) {
+	am, o := newSessionEventTestAuthManager(t)
 
-		server, client := newSessionEventPipe(t)
-		raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
-		go am.handleSessionEvent(raw, server)
-
-		resp := readSessionEventAck(t, client)
-		assert.Truef(t, resp.Received, "flag-off events must still ack true, got %+v", resp)
-		synctest.Wait()
-	})
+	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
+	resp := handleSessionEventSync(t, am, raw)
+	assert.Truef(t, resp.Received, "flag-off events must still ack true, got %+v", resp)
+	assert.Empty(t, outboxRows(t, o), "must not store while detect_local_access is off")
 }
 
-// newEmitTestAuthManager wires an AuthManager whose session points at the
-// given test server URL, so emitAccessEvent's real HTTP/retry path can be
-// exercised directly instead of through the emitAccessEventFn stub.
-func newEmitTestAuthManager(baseURL string) *AuthManager {
+// TestHandleSessionEvent_WithoutStoreStillAcks covers an AuthManager that was
+// never given a database: the ack still goes out and nothing panics.
+func TestHandleSessionEvent_WithoutStoreStillAcks(t *testing.T) {
 	am := newTestAuthManager()
-	am.ctx = context.Background()
-	am.session = &scheduler.Session{BaseURL: baseURL, Client: http.DefaultClient}
-	return am
-}
+	am.detectLocalAccess = true
 
-// TestEmitAccessEvent_DropsOn404 verifies the Phase-2-not-deployed case posts
-// once and gives up quietly (no retry).
-func TestEmitAccessEvent_DropsOn404(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	newEmitTestAuthManager(srv.URL).emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
-
-	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "404 must not be retried")
-}
-
-// TestEmitAccessEvent_DropsOnRejection verifies a non-429 4xx is permanent:
-// posted once, then dropped.
-func TestEmitAccessEvent_DropsOnRejection(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		w.WriteHeader(http.StatusForbidden)
-	}))
-	defer srv.Close()
-
-	newEmitTestAuthManager(srv.URL).emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
-
-	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "a 4xx rejection must not be retried")
-}
-
-// TestEmitAccessEvent_DropsOn429 verifies 429 is permanent: the server's
-// throttle window (60s, a DRF SimpleRateThrottle) outlives this client's whole
-// retry budget (authRetryTimeout, 25s), so every retry is guaranteed to
-// re-throttle while pinning an emit slot. Posted once, then dropped.
-func TestEmitAccessEvent_DropsOn429(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		w.WriteHeader(http.StatusTooManyRequests)
-	}))
-	defer srv.Close()
-
-	newEmitTestAuthManager(srv.URL).emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
-
-	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "429 must not be retried")
-}
-
-// TestEmitAccessEvent_404AfterSuccessIsReported verifies the 404 sunset: once
-// the endpoint has answered 2xx, a later 404 means the server row is gone
-// (console-deleted server, agent still running) rather than "Phase 2 not
-// deployed", so it must not take the quiet path. Both are permanent, so the
-// observable difference is the sentinel the emit resolves to.
-func TestEmitAccessEvent_404AfterSuccessIsReported(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			w.WriteHeader(http.StatusCreated)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	am := newEmitTestAuthManager(srv.URL)
-	am.emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 1})
-	require.True(t, am.accessEndpointSeen.Load(), "a 2xx must latch the endpoint as deployed")
-
-	am.emitAccessEvent(NonAlpaconAccessEvent{Username: "a", Service: "sshd", PID: 2})
-	assert.Equal(t, int32(2), atomic.LoadInt32(&calls), "404 must not be retried")
+	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
+	assert.True(t, handleSessionEventSync(t, am, raw).Received)
 }
 
 // TestUpdateDetectLocalAccess verifies the policy flag setter mirrors

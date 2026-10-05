@@ -166,11 +166,21 @@ func runAgent(ready chan<- struct{}) {
 	// Websocket Client - pass context manager and worker pool for centralized management
 	wsClient := runner.NewWebsocketClient(session, ctxManager, workerPool)
 
+	// Control Client (Control - sudo approval) and the Auth Manager are built
+	// here, before the websocket hooks, so a reconnect can tell the Auth
+	// Manager the server is reachable again. Both start further down.
+	controlClient := runner.NewControlClient()
+	authManager := runner.GetAuthManager(controlClient, session)
+	authManager.UseAccessEventStore(client)
+
+	// A reconnect ends the access event outbox's backoff early, so login
+	// events held through an outage go out without waiting it out.
+	authHooks := []func(){authManager.NotifyServerReachable}
+
 	// Workspace migration: if a previous `alpamon migrate` left a pending
 	// marker, arm the watchdog and register the connect-success hook so
 	// the marker is cleared once we authenticate against the new
 	// workspace. See pkg/migrate for the full state machine.
-	var authHooks []func()
 	if hook := wirePendingMigration(ctx, wsClient, settings); hook != nil {
 		authHooks = append(authHooks, hook)
 	}
@@ -180,13 +190,11 @@ func runAgent(ready chan<- struct{}) {
 	if hook := wirePendingUpgrade(ctx, wsClient, session); hook != nil {
 		authHooks = append(authHooks, hook)
 	}
-	if len(authHooks) > 0 {
-		wsClient.SetOnAuthenticated(func() {
-			for _, hook := range authHooks {
-				hook()
-			}
-		})
-	}
+	wsClient.SetOnAuthenticated(func() {
+		for _, hook := range authHooks {
+			hook()
+		}
+	})
 
 	// Initialize dispatcher system with callbacks
 	dispatcher, err := executor.InitDispatcher(
@@ -208,12 +216,9 @@ func runAgent(ready chan<- struct{}) {
 
 	go wsClient.RunForever(ctx)
 
-	// Control Client (Control - sudo approval)
-	controlClient := runner.NewControlClient()
 	go controlClient.RunForever(ctx)
 
-	// Auth Manager for sudo approval workflow
-	authManager := runner.GetAuthManager(controlClient, session)
+	// Auth Manager for sudo approval and access event delivery
 	go authManager.Start(ctx)
 
 	for {

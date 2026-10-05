@@ -4,63 +4,26 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
-	"net/http"
-	"sync/atomic"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/internal/retry"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
-// lastEmitDropWarn holds the Unix second of the last Warn-level emit-drop log,
-// so a sustained outage rate-limits the Warn instead of flooding.
-var lastEmitDropWarn atomic.Int64
-
-// nonAlpaconAccessEventURL is the alpacon-server ingestion endpoint for
-// non-Alpacon access events. Phase 2 (server) must implement this path;
-// until then alpamon treats 404 as "not deployed" and drops the event.
+// nonAlpaconAccessEventURL is the Alpacon ingestion endpoint for non-Alpacon
+// access events. A server that predates it answers 404, which the outbox reads
+// as "not deployed" until the endpoint has once answered 2xx.
 const nonAlpaconAccessEventURL = "/api/events/access/"
 
-// errAccessEndpointNotDeployed marks the expected steady state where
-// alpacon-server has not yet implemented the access event endpoint
-// (Phase 2 not deployed): the POST returns 404. It is the normal
-// condition until the server rolls out, so it is logged quietly rather
-// than as an emit failure. Only 404s seen before this agent's first 2xx
-// qualify — see errAccessEndpointGone. Matched via errors.Is because
-// retry.Retry unwraps the PermanentError and returns this sentinel
-// directly.
-var errAccessEndpointNotDeployed = errors.New("access event endpoint not available (404)")
+// errNoHTTPSession is returned by postAccessEvent before the agent has an
+// HTTP session; the outbox holds the event like any other failed send.
+var errNoHTTPSession = errors.New("HTTP session not available")
 
-// errAccessEndpointGone marks a 404 seen after this agent has already had a
-// 2xx from the endpoint. The endpoint clearly exists, so 404 no longer means
-// "Phase 2 not deployed": alpacon-server answers 404 when the authenticated
-// agent has no live Server row, i.e. the server was deleted in the console
-// while its agent kept running. That is a reportable condition, not a quiet
-// drop, so it is logged at Warn.
-var errAccessEndpointGone = errors.New("access event endpoint returned 404 after a previous success (server row may have been deleted)")
-
-// errAccessEventRejected marks a 4xx other than 404: the server refused this
-// event (bad credentials, revoked permission, schema mismatch). Retrying
-// cannot change the outcome, so the emit is abandoned immediately.
-var errAccessEventRejected = errors.New("access event rejected")
-
-// errAccessEventThrottled marks a 429. It is permanent rather than transient:
-// alpacon-server's LocalAccessEventThrottle is a DRF SimpleRateThrottle, so
-// its window is 60 seconds, while this client's whole retry budget is
-// authRetryTimeout (25s). A window that outlives the budget cannot clear
-// inside it, so every retry is guaranteed to re-throttle while pinning one of
-// the emitConcurrencyLimit slots for the full budget. Saturating those slots
-// starts dropping newly arriving events at the semaphore, which loses more
-// audit records than dropping this one does.
-var errAccessEventThrottled = errors.New("access event throttled (429)")
-
-// Server-side max_length caps for the access event payload (alpacon-server
-// events/models.py). DRF rejects an over-length string with a 400, which this
-// client treats as permanent — so without truncation an over-long PAM item
-// silently costs the whole audit record.
+// Server-side max_length caps for the access event payload. The server
+// rejects an over-length string with a 400, which this client treats as
+// permanent, so without truncation an over-long PAM item silently costs the
+// whole audit record.
 const (
 	maxAccessEventUsernameLen = 128
 	maxAccessEventServiceLen  = 64
@@ -105,11 +68,12 @@ type SessionEventResponse struct {
 // session opens outside the Alpacon paths (direct SSH, scp/sftp, local
 // console, su from a non-Alpacon shell).
 type NonAlpaconAccessEvent struct {
-	// EventID makes delivery idempotent. Post is retried on transport
+	// EventID makes delivery idempotent. The outbox resends on transport
 	// errors and 5xx, which cannot distinguish "the server never got it"
-	// from "the server stored it but the reply was lost" — without a
-	// stable id per session, that second case records the same login
-	// twice. The server treats (server, event_id) as unique.
+	// from "the server stored it but the reply was lost"; without a stable
+	// id per session, that second case records the same login twice. The
+	// server treats (server, event_id) as unique, and the outbox keys its
+	// rows on it.
 	EventID  string `json:"event_id"`
 	Username string `json:"username"`
 	Service  string `json:"service"`
@@ -119,9 +83,15 @@ type NonAlpaconAccessEvent struct {
 	// they identify the process that opened the PAM session, which for sshd
 	// is the daemon child, not the intruder's shell. An operator reading
 	// these in the console should not expect a shell pid.
-	PID       int       `json:"pid"`
-	PPID      int       `json:"ppid"`
+	PID  int `json:"pid"`
+	PPID int `json:"ppid"`
+	// Timestamp is when the host saw the session open. It is sent unchanged
+	// however long the event was held.
 	Timestamp time.Time `json:"timestamp"`
+	// HeldSeconds is how long the outbox held the event before this send.
+	// Omitted when zero, and set per send, never stored. Servers that predate
+	// the field ignore it as an unknown key.
+	HeldSeconds int64 `json:"held_seconds,omitempty"`
 }
 
 // ancestorPIDs returns the chain of ancestors of pid, nearest first, stopping
@@ -255,10 +225,10 @@ func (am *AuthManager) resolveSessionEvent(req SessionEventRequest) (NonAlpaconA
 }
 
 // handleSessionEvent processes a session_event from the PAM session
-// hook. The ack is written before any server round-trip so PAM (and
-// thus sshd) never waits on emission; the POST runs on its own
-// goroutine. Fail-open: every path answers the socket. Closing
-// unixConn is the caller's job.
+// hook. The ack is written first, then the event is stored in the outbox,
+// whose drain goroutine delivers it, so PAM (and thus sshd) never waits on
+// the server. Fail-open: every path answers the socket. Closing unixConn is
+// the caller's job.
 func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 	var req SessionEventRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -272,7 +242,7 @@ func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 	// upstream; the ack still goes out so PAM never waits on us.
 	if req.Username == "" || req.Service == "" || req.PID <= 0 {
 		log.Warn().
-			Str("username", req.Username).
+			Bool("has_username", req.Username != "").
 			Str("service", req.Service).
 			Int("pid", req.PID).
 			Msg("Incomplete session_event request; dropping")
@@ -283,69 +253,29 @@ func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 	// Resolve (and its suppression Debug log) runs before the flag check on
 	// purpose: it keeps the "why was this suppressed" trace available even
 	// while detect_local_access is off, at the cost of one Getsid syscall and
-	// a map lookup per session. The emit itself stays gated below.
+	// a map lookup per session. Storing the event stays gated below.
 	event, emit := am.resolveSessionEvent(req)
 
 	am.sendSessionEventResponse(unixConn, true)
 
 	am.mu.RLock()
 	detect := am.detectLocalAccess
-	emitFn := am.emitAccessEventFn
 	am.mu.RUnlock()
 
+	// Turning detection off stops capture only. Events already held were
+	// captured while the policy asked for them, so the outbox still delivers
+	// them; the server accepts them regardless of the current setting.
 	if !emit || !detect {
 		return
 	}
-	if emitFn == nil {
-		emitFn = am.emitAccessEvent
-	}
-
-	// Bound in-flight emit goroutines: each can hold up to authRetryTimeout
-	// of retry against an unreachable server, so a login burst could
-	// otherwise spawn goroutines without limit. Acquire a slot without
-	// blocking (the ack was already sent above); drop the event if the
-	// budget is exhausted.
-	select {
-	case am.emitSem <- struct{}{}:
-	default:
-		// Every slot busy means the server has been unreachable long enough
-		// for retries to pile up while logins keep arriving — an abnormal
-		// state that loses audit events, so surface it at Warn. Rate-limit the
-		// Warn (at most once per minute) so a sustained outage can't flood the
-		// log; intervening drops still record at Debug.
-		//
-		// Pick the level before allocating the event: a *zerolog.Event that is
-		// never given a .Msg() is leaked out of the pool rather than reused.
-		now := time.Now().Unix()
-		warn := false
-		if prev := lastEmitDropWarn.Load(); now-prev >= 60 &&
-			lastEmitDropWarn.CompareAndSwap(prev, now) {
-			warn = true
-		}
-		dropLog := log.Debug()
-		if warn {
-			dropLog = log.Warn()
-		}
-		dropLog.
-			Str("username", event.Username).
-			Str("service", event.Service).
-			Msg("access event dropped: emit concurrency limit reached")
+	if am.outbox == nil {
+		log.Debug().Str("event_id", event.EventID).Msg("No access event store; dropping event")
 		return
 	}
-	go func() {
-		// Registered first so it runs last: the slot is returned even if the
-		// emit panics, otherwise one panic would permanently cost a slot.
-		defer func() { <-am.emitSem }()
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error().Interface("panic", r).
-					Str("username", event.Username).
-					Str("service", event.Service).
-					Msg("Access event emit panicked")
-			}
-		}()
-		emitFn(event)
-	}()
+	// Stored on this goroutine, after the ack: PAM reads the ack once and
+	// does not wait for the close, so the insert adds nothing to the login,
+	// and a crash can lose only an event caught between the two.
+	am.outbox.enqueue(event)
 }
 
 func (am *AuthManager) sendSessionEventResponse(conn net.Conn, received bool) {
@@ -366,111 +296,15 @@ func (am *AuthManager) sendSessionEventResponse(conn net.Conn, received bool) {
 	}
 }
 
-// emitAccessEvent POSTs a non-Alpacon access event to alpacon-server
-// with bounded best-effort retry (same backoff envelope as the sudo
-// approval path). It runs on its own goroutine; failures are logged and
-// dropped so detection never blocks logins. Every 4xx is permanent: a 404
-// before this agent's first 2xx means the endpoint is not deployed yet and
-// drops quietly, a 404 after it means the server row is gone and is reported,
-// and a 429 cannot clear inside the retry budget (see errAccessEventThrottled).
-//
-// Best-effort is literal: Stop() cancels the AuthManager context and closes
-// the listener but does not wait for in-flight emits, and the HTTP layer does
-// not observe am.ctx either, so up to emitConcurrencyLimit events can be lost
-// on shutdown. Delivery here is not guaranteed and nothing downstream should
-// assume it is.
-func (am *AuthManager) emitAccessEvent(event NonAlpaconAccessEvent) {
+// postAccessEvent sends one access event for the outbox. It reports the
+// status and any Retry-After; deciding what to do with them is the outbox's.
+func (am *AuthManager) postAccessEvent(ctx context.Context, event NonAlpaconAccessEvent) (int, time.Duration, error) {
 	if am.session == nil {
-		log.Warn().Msg("HTTP session not available; dropping access event")
-		return
+		return 0, 0, errNoHTTPSession
 	}
-
-	baseCtx := am.ctx
-	if baseCtx == nil {
-		baseCtx = context.Background()
-	}
-	// authRetryTimeout is reused only for its value here. Its "less than PAM's
-	// 30s" rationale does not apply on this path: emit runs on its own
-	// goroutine after the ack, so it never holds up PAM. The bound just caps
-	// how long a single event keeps retrying an unreachable server.
-	ctx, cancel := context.WithTimeout(baseCtx, authRetryTimeout)
-	defer cancel()
-
-	b := &retry.ExponentialBackoff{
-		InitialInterval: authRetryInitialInterval,
-		MaxInterval:     authRetryMaxInterval,
-		MaxElapsedTime:  authRetryTimeout,
-	}
-
-	err := retry.Retry(ctx, b, func() error {
-		_, statusCode, err := am.session.Post(nonAlpaconAccessEventURL, event, 10)
-		if err != nil {
-			return err
-		}
-		if statusCode == http.StatusNotFound {
-			// Once the endpoint has answered 2xx on this agent, "not deployed"
-			// stops being a plausible reading of 404 and the quiet drop would
-			// hide the deleted-server case. Both readings are permanent; only
-			// the log level differs.
-			if am.accessEndpointSeen.Load() {
-				return retry.Permanent(errAccessEndpointGone)
-			}
-			return retry.Permanent(errAccessEndpointNotDeployed)
-		}
-		// 429 is permanent here, not transient: see errAccessEventThrottled.
-		if statusCode == http.StatusTooManyRequests {
-			return retry.Permanent(errAccessEventThrottled)
-		}
-		// Any other 4xx means the server rejected this event (bad token,
-		// revoked permission, schema mismatch); retrying cannot change the
-		// verdict and would pin an emit slot for the whole backoff window,
-		// dropping the events that arrive meanwhile. Fail fast instead.
-		if statusCode >= 400 && statusCode < 500 {
-			return retry.Permanent(fmt.Errorf(
-				"%w with status code: %d", errAccessEventRejected, statusCode))
-		}
-		if statusCode < 200 || statusCode >= 300 {
-			return fmt.Errorf("access event failed with status code: %d", statusCode)
-		}
-		// Latch the endpoint as deployed so a later 404 is read as the server
-		// row being gone rather than as Phase 2 still being absent.
-		am.accessEndpointSeen.Store(true)
-		return nil
-	})
+	_, status, header, err := am.session.PostWithContext(ctx, nonAlpaconAccessEventURL, event, accessOutboxPostTimeout)
 	if err != nil {
-		if errors.Is(err, errAccessEndpointNotDeployed) {
-			// Expected until Phase 2 (server endpoint) ships; not a
-			// failure, so log quietly and drop.
-			log.Debug().
-				Str("username", event.Username).
-				Str("service", event.Service).
-				Msg("Access event endpoint not deployed (404); dropping event")
-			return
-		}
-		if errors.Is(err, errAccessEndpointGone) {
-			log.Warn().Err(err).
-				Str("username", event.Username).
-				Str("service", event.Service).
-				Msg("Access event endpoint returned 404; dropping event")
-			return
-		}
-		if errors.Is(err, errAccessEventThrottled) {
-			log.Warn().Err(err).
-				Str("username", event.Username).
-				Str("service", event.Service).
-				Msg("Access event throttled by server; dropping event")
-			return
-		}
-		if errors.Is(err, errAccessEventRejected) {
-			log.Warn().Err(err).
-				Str("username", event.Username).
-				Str("service", event.Service).
-				Msg("Access event rejected by server; dropping event")
-			return
-		}
-		log.Warn().Err(err).
-			Str("username", event.Username).
-			Str("service", event.Service).
-			Msg("Failed to emit non-Alpacon access event: server unreachable")
+		return 0, 0, err
 	}
+	return status, parseRetryAfter(header.Get("Retry-After"), time.Now()), nil
 }
