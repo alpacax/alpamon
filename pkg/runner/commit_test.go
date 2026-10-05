@@ -758,3 +758,38 @@ func TestSshdUsePamWireShape(t *testing.T) {
 		})
 	}
 }
+
+// TestLoginCaptureWireShape pins the login_capture key on both report bodies:
+// present as an object when the agent collected the block, absent otherwise
+// (non-Linux builds, or a failed check), and never touching the existing
+// pam_version and sshd_use_pam keys.
+func TestLoginCaptureWireShape(t *testing.T) {
+	yes := "yes"
+	block := &utils.LoginCapture{
+		Schema:     1,
+		PAMModule:  utils.PAMModulePresent,
+		Hooks:      utils.LoginCaptureHooks{SSHD: utils.HookRegistered, Login: utils.HookRegistered, Su: utils.HookRegistered},
+		SSHDUsePAM: &yes,
+	}
+	want := `{"schema":1,"pam_module":"present","hooks":{"sshd":"registered","login":"registered","su":"registered"},"sshd_use_pam":"yes"}`
+
+	for _, body := range []any{
+		ServerData{PamVersion: "1.2.0", SshdUsePam: &yes, LoginCapture: block},
+		commitData{PamVersion: "1.2.0", SshdUsePam: &yes, LoginCapture: block},
+	} {
+		data, err := json.Marshal(body)
+		require.NoError(t, err)
+		var decoded map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(data, &decoded))
+		assert.JSONEq(t, want, string(decoded["login_capture"]))
+		assert.JSONEq(t, `"1.2.0"`, string(decoded["pam_version"]))
+		assert.JSONEq(t, `"yes"`, string(decoded["sshd_use_pam"]))
+	}
+
+	for _, body := range []any{ServerData{}, commitData{}} {
+		data, err := json.Marshal(body)
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), "login_capture")
+		assert.Contains(t, string(data), `"sshd_use_pam":null`)
+	}
+}
