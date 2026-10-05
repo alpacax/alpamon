@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -250,6 +249,8 @@ type accessEventOutbox struct {
 	// queued and stop; abandon, cancelled when stop runs out of time, makes
 	// it stop at once.
 	inbox         chan accessOutboxWrite
+	admitMu       sync.RWMutex
+	closed        bool
 	closing       chan struct{}
 	closeOnce     sync.Once
 	abandon       context.Context
@@ -350,11 +351,24 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 // goroutine after the PAM ack is written and the socket closed, and never
 // blocks: with the queue full the event is dropped and counted.
 func (o *accessEventOutbox) enqueue(event NonAlpaconAccessEvent) {
-	select {
-	case o.inbox <- accessOutboxWrite{event: event}:
-	default:
-		o.lost.add(1, o.now())
-		log.Debug().Str("event_id", event.EventID).Msg("Access event queue full; dropping event")
+	// The read lock lets stop wait out a hand-off already under way, so the
+	// writer drains it; one that comes after stop has begun cannot rely on
+	// the writer and stores the event itself while the process lasts.
+	o.admitMu.RLock()
+	closed := o.closed
+	if !closed {
+		select {
+		case o.inbox <- accessOutboxWrite{event: event}:
+		default:
+			o.lost.add(1, o.now())
+			log.Debug().Str("event_id", event.EventID).Msg("Access event queue full; dropping event")
+		}
+	}
+	o.admitMu.RUnlock()
+	if closed {
+		ctx, cancel := context.WithTimeout(context.Background(), accessOutboxStopTimeout)
+		defer cancel()
+		o.store(ctx, []NonAlpaconAccessEvent{event})
 	}
 }
 
@@ -401,6 +415,9 @@ func (o *accessEventOutbox) startWriter() {
 // and for the drain, whose context the caller has already cancelled. It
 // reports whether both finished; on a timeout the writer is told to give up.
 func (o *accessEventOutbox) stop(timeout time.Duration) bool {
+	o.admitMu.Lock()
+	o.closed = true
+	o.admitMu.Unlock()
 	o.closeOnce.Do(func() { close(o.closing) })
 	defer o.abandonNow()
 
@@ -440,9 +457,8 @@ func (o *accessEventOutbox) supervise(name string, stopped <-chan struct{}, loop
 	}
 }
 
-// runRecovered runs loop and reports whether it panicked. The log names the
-// panic's type, or a runtime error's message, and never its value, which
-// could carry event data.
+// runRecovered runs loop and reports whether it panicked. The log names only
+// the panic's type, never its value, which could carry event data.
 func runRecovered(name string, loop func()) (panicked bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -456,9 +472,6 @@ func runRecovered(name string, loop func()) (panicked bool) {
 }
 
 func describePanic(r any) string {
-	if err, ok := r.(runtime.Error); ok {
-		return err.Error()
-	}
 	return fmt.Sprintf("%T", r)
 }
 
@@ -527,7 +540,7 @@ func (o *accessEventOutbox) writeBatch(batch []accessOutboxWrite) {
 		}
 	}
 	if len(events) > 0 {
-		o.store(events)
+		o.store(o.abandon, events)
 	}
 	o.reportLosses()
 }
@@ -541,7 +554,7 @@ type accessOutboxRow struct {
 // store writes events in one transaction, retrying while SQLite is locked by
 // another writer until the outbox is abandoned at shutdown. Events queue
 // behind it meanwhile, up to accessOutboxInboxSize.
-func (o *accessEventOutbox) store(events []NonAlpaconAccessEvent) {
+func (o *accessEventOutbox) store(ctx context.Context, events []NonAlpaconAccessEvent) {
 	rows := make([]accessOutboxRow, 0, len(events))
 	for _, event := range events {
 		// Stored without held_seconds; that is worked out at each send.
@@ -562,7 +575,7 @@ func (o *accessEventOutbox) store(events []NonAlpaconAccessEvent) {
 	}
 
 	for attempt := 1; ; attempt++ {
-		stored, refused, err := o.insertRows(o.abandon, rows)
+		stored, refused, err := o.insertRows(ctx, rows)
 		if err == nil {
 			o.refused.add(refused, o.now())
 			log.Debug().Int("stored", stored).Int("refused", refused).Msg("Access events stored for delivery")
@@ -571,14 +584,14 @@ func (o *accessEventOutbox) store(events []NonAlpaconAccessEvent) {
 			}
 			return
 		}
-		if !isSQLiteBusy(err) || o.abandon.Err() != nil {
+		if !isSQLiteBusy(err) || ctx.Err() != nil {
 			o.lost.add(len(rows), o.now())
 			log.Debug().Err(err).Int("events", len(rows)).Msg("Failed to store access events")
 			return
 		}
 		o.reportLosses()
 		pause := min(time.Duration(attempt)*20*time.Millisecond, 100*time.Millisecond)
-		if sleepCtx(o.abandon, pause) != nil {
+		if sleepCtx(ctx, pause) != nil {
 			o.lost.add(len(rows), o.now())
 			return
 		}

@@ -1163,3 +1163,16 @@ func TestAccessEventOutbox_DrainComesBackAfterAPanic(t *testing.T) {
 	assert.Contains(t, errorLines[0], `"loop":"drain"`)
 	assert.NotContains(t, logs.String(), "alice", "the panic value is not logged")
 }
+
+// TestAccessEventOutbox_HandOffAfterStopIsStillStored covers a socket handler
+// that reaches the outbox only after shutdown began: the writer is gone, so
+// the event is stored directly.
+func TestAccessEventOutbox_HandOffAfterStopIsStillStored(t *testing.T) {
+	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
+	o := newAccessEventOutbox(client, (&fakeAccessEventSender{}).send)
+	o.startWriter()
+	require.True(t, o.stop(5*time.Second))
+
+	o.enqueue(newTestAccessEvent(newFakeOutboxClock(), "alice"))
+	assert.Len(t, outboxRows(t, o), 1)
+}
