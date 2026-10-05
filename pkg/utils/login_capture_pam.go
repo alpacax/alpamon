@@ -698,7 +698,7 @@ func sshdConfigSetsServiceInMatch(config string) bool {
 		}
 		switch strings.ToLower(args[0]) {
 		case "match":
-			inMatch = !(len(args) == 2 && strings.EqualFold(args[1], "all"))
+			inMatch = len(args) != 2 || !strings.EqualFold(args[1], "all")
 		case "pamservicename":
 			if inMatch {
 				return true
