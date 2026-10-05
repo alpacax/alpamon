@@ -241,7 +241,17 @@ func (session *Session) MultipartRequest(rawURL string, body io.Reader, contentT
 	req.Header.Set("Content-Type", contentType)
 
 	client := *session.Client
-	client.CheckRedirect = utils.ServerOnlyAuthorization(server)
+	serverOnly := utils.ServerOnlyAuthorization(server)
+	next := session.Client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := serverOnly(req, via); err != nil {
+			return err
+		}
+		if next != nil {
+			return next(req, via)
+		}
+		return nil
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err

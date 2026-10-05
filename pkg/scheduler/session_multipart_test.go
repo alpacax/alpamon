@@ -74,3 +74,25 @@ func TestMultipartRequest_CarriesTheKeyOnlyToTheServer(t *testing.T) {
 		})
 	}
 }
+
+func TestMultipartRequest_KeepsTheClientRedirectPolicy(t *testing.T) {
+	var redirected bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/next", http.StatusFound)
+			return
+		}
+		redirected = true
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	session := &Session{BaseURL: srv.URL, Client: client, Authorization: "key"}
+
+	_, code, err := session.MultipartRequest("/start", strings.NewReader("x"), "text/plain", 1, 5)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusFound, code)
+	assert.False(t, redirected)
+}
