@@ -1,11 +1,14 @@
 package scheduler
 
 import (
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/alpacax/alpamon/v2/pkg/config"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,7 +56,7 @@ func TestMultipartRequest_CarriesTheKeyOnlyToTheServer(t *testing.T) {
 		{name: "same server carries the key", target: srv.URL + "/api/uploads/1/", want: uploadHit{server: "server", path: "/api/uploads/1/", auth: agentAuth}},
 		{name: "foreign host uploads without the key", target: foreign + "/bucket/object", want: uploadHit{server: "server", path: "/bucket/object"}},
 		{name: "another port uploads without the key", target: other.URL + "/bucket/object", want: uploadHit{server: "other", path: "/bucket/object"}},
-		{name: "redirect to another port drops the key", target: "/to-other-port", want: uploadHit{server: "other", path: "/final"}},
+		{name: "redirect to another port drops the key", target: srv.URL + "/to-other-port", want: uploadHit{server: "other", path: "/final"}},
 		{name: "scheme-relative refused", target: "//" + host + "/api/uploads/1/", wantErr: "scheme-relative"},
 		{name: "userinfo refused", target: "http://user:pass@" + host + "/api/uploads/1/", wantErr: "userinfo"},
 		{name: "backslash refused", target: "/api\\uploads/1/", wantErr: "backslash"},
@@ -95,4 +98,85 @@ func TestMultipartRequest_KeepsTheClientRedirectPolicy(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusFound, code)
 	assert.False(t, redirected)
+}
+
+// A streamed body, which is what file upload sends, cannot be replayed, so
+// Go does not follow a 307 or 308 and neither the body nor the key moves on.
+func TestMultipartRequest_DoesNotFollowA307WithAStreamedBody(t *testing.T) {
+	var otherHit bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherHit = true
+	}))
+	t.Cleanup(other.Close)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/final", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(srv.Close)
+
+	session := &Session{BaseURL: srv.URL, Client: &http.Client{}, Authorization: "key"}
+
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = io.WriteString(pw, "file content")
+		_ = pw.Close()
+	}()
+
+	_, code, err := session.MultipartRequest("/api/uploads/1/", pr, "text/plain", -1, 5)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusTemporaryRedirect, code)
+	assert.False(t, otherHit, "the upload must not reach the redirect target")
+}
+
+func TestMultipartRequest_ErrorNamesOnlyTheHost(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+
+	session := &Session{BaseURL: closedURL, Client: &http.Client{}, Authorization: "key"}
+	_, _, err := session.MultipartRequest(closedURL+"/api/uploads/secret-path/?sig=secret-sig", strings.NewReader("x"), "text/plain", 1, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), strings.TrimPrefix(closedURL, "http://"))
+	assert.NotContains(t, err.Error(), "secret")
+}
+
+func TestInitSession_RedirectCarriesTheKeyOnlyOnTheServer(t *testing.T) {
+	type hit struct{ server, auth string }
+	hits := make(chan hit, 4)
+
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits <- hit{server: "other", auth: r.Header.Get("Authorization")}
+	}))
+	t.Cleanup(other.Close)
+
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/to-server":
+			http.Redirect(w, r, srvURL+"/final", http.StatusFound)
+		case "/to-other-port":
+			http.Redirect(w, r, other.URL+"/final", http.StatusFound)
+		default:
+			hits <- hit{server: "server", auth: r.Header.Get("Authorization")}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	srvURL = srv.URL
+
+	prev := config.GlobalSettings
+	t.Cleanup(func() { config.GlobalSettings = prev })
+	config.GlobalSettings = config.Settings{ServerURL: srv.URL, ID: "agent-id", Key: "agent-key", SSLVerify: true}
+	const agentAuth = `id="agent-id", key="agent-key"`
+
+	session := InitSession()
+
+	_, _, err := session.Get("/to-server", 5)
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.Equal(t, hit{server: "server", auth: agentAuth}, <-hits)
+
+	_, _, err = session.Get("/to-other-port", 5)
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.Equal(t, hit{server: "other"}, <-hits)
 }

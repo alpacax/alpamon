@@ -47,6 +47,12 @@ func InitSession() *Session {
 	client.Transport = &http.Transport{
 		TLSClientConfig: tlsConfig,
 	}
+	// Send the agent key only to the configured server, across redirects too.
+	if server, err := url.Parse(config.GlobalSettings.ServerURL); err == nil && server.Host != "" {
+		client.CheckRedirect = utils.ServerOnlyAuthorization(server)
+	} else {
+		client.CheckRedirect = utils.OriginOnlyAuthorization
+	}
 
 	session.Client = &client
 	session.Authorization = fmt.Sprintf(`id="%s", key="%s"`, config.GlobalSettings.ID, config.GlobalSettings.Key)
@@ -254,7 +260,7 @@ func (session *Session) MultipartRequest(rawURL string, body io.Reader, contentT
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, utils.HostOnlyURLError(err)
 	}
 
 	defer func() { _ = resp.Body.Close() }()

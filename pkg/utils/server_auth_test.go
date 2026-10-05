@@ -67,3 +67,33 @@ func TestServerOnlyAuthorization(t *testing.T) {
 		assert.Error(t, check(req, make([]*http.Request, 10)))
 	})
 }
+
+func TestOriginOnlyAuthorization(t *testing.T) {
+	origin, err := http.NewRequest(http.MethodGet, "https://console.example.com/api/", nil)
+	require.NoError(t, err)
+
+	tests := []struct {
+		dest     string
+		wantAuth bool
+	}{
+		{dest: "https://console.example.com/api/next/", wantAuth: true},
+		{dest: "https://console.example.com:8443/api/", wantAuth: false},
+		{dest: "http://console.example.com/api/", wantAuth: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.dest, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, tc.dest, nil)
+			require.NoError(t, err)
+			req.Header.Set("Authorization", "key")
+
+			require.NoError(t, OriginOnlyAuthorization(req, []*http.Request{origin}))
+			assert.Equal(t, tc.wantAuth, req.Header.Get("Authorization") != "")
+		})
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://console.example.com/", nil)
+	require.NoError(t, err)
+	via := make([]*http.Request, 10)
+	via[0] = origin
+	assert.Error(t, OriginOnlyAuthorization(req, via))
+}
