@@ -567,20 +567,23 @@ func (h *FileHandler) getFileData(ctx context.Context, args *common.CommandArgs)
 }
 
 // fetchFromURL returns the response body. Caller must Close to release the connection.
+// A path-only contentURL resolves to the configured server. The agent's key is
+// attached only when the URL points at the configured server; any other host,
+// such as object storage, is fetched without it.
 func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.ReadCloser, error) {
-	parsedRequestURL, err := url.Parse(contentURL)
+	parsedServerURL, err := url.Parse(config.GlobalSettings.ServerURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse URL '%s': %w", contentURL, err)
+		return nil, fmt.Errorf("failed to parse url: %w", err)
+	}
+
+	parsedRequestURL, err := utils.ResolveServerURL(contentURL, parsedServerURL, parsedServerURL.Scheme)
+	if err != nil {
+		return nil, fmt.Errorf("invalid file URL: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedRequestURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	parsedServerURL, err := url.Parse(config.GlobalSettings.ServerURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse url: %w", err)
 	}
 
 	if parsedRequestURL.Host == parsedServerURL.Host && parsedRequestURL.Scheme == parsedServerURL.Scheme {
@@ -592,12 +595,17 @@ func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.R
 	client := utils.NewHTTPClient()
 	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
+		// The path and query may carry a token or a signature; name only the host.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = fmt.Errorf("%s %s: %w", urlErr.Op, parsedRequestURL.Host, urlErr.Err)
+		}
 		return nil, fmt.Errorf("failed to download content from URL: %w", err)
 	}
 
 	if resp.StatusCode/100 != 2 {
 		_ = resp.Body.Close()
-		log.Error().Msgf("Failed to download content from URL: %d %s", resp.StatusCode, parsedRequestURL)
+		log.Error().Msgf("Failed to download content from %s: %d", parsedRequestURL.Host, resp.StatusCode)
 		return nil, errors.New("downloading content failed")
 	}
 

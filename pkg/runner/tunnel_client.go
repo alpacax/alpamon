@@ -271,12 +271,15 @@ func newTunnelDialer() websocket.Dialer {
 
 // connect establishes WebSocket connection and creates smux session.
 func (tc *TunnelClient) connect() error {
-	log.Info().Msgf("Connecting to tunnel server at %s...", ServerHostFromURL(tc.serverURL))
+	target, err := validateWebSocketURL(tc.serverURL)
+	if err != nil {
+		return fmt.Errorf("refused tunnel server URL: %w", err)
+	}
+	log.Info().Msgf("Connecting to tunnel server at %s...", ServerHostFromURL(target))
 
 	dialer := newTunnelDialer()
 
-	// Server URL is provided by the authenticated Alpacon console which the agent trusts.
-	conn, _, err := dialer.Dial(tc.serverURL, tc.requestHeader) // lgtm[go/request-forgery]
+	conn, _, err := dialer.Dial(target, tc.requestHeader)
 	if err != nil {
 		return fmt.Errorf("failed to connect to tunnel server: %w", sanitizeURLError(err))
 	}
