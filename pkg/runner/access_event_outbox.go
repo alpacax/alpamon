@@ -3,12 +3,13 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
@@ -18,11 +19,26 @@ import (
 
 const (
 	// accessOutboxMaxRows and accessOutboxMaxAge bound what an outage can
-	// leave on disk, whichever is reached first. A row is at most a few KB (the
-	// strings are capped at the server's limits), so the count bound keeps the
-	// table in the tens of MB.
+	// leave on disk. A row is at most a few KB (the strings are capped at the
+	// server's limits), so the count bound keeps the table in the tens of MB.
+	//
+	// At the count bound new events are refused and the held ones kept. Anyone
+	// who can log in can fill the outbox during an outage by looping logins,
+	// and dropping the oldest would let them push out the first entry, which
+	// is the one that has to survive; a flood instead names its own account in
+	// the events that are stored. The age bound removes the oldest by age.
+	//
+	// The age bound reads the host clock: an event captured while the clock
+	// was far behind is purged once the clock is corrected.
 	accessOutboxMaxRows = 10000
 	accessOutboxMaxAge  = 30 * 24 * time.Hour
+
+	// accessOutboxInboxSize bounds events accepted from PAM but not yet
+	// written. The socket handler never blocks on it: past it, an event is
+	// dropped and counted.
+	accessOutboxInboxSize = 1024
+	// accessOutboxWriteBatch caps the events one transaction writes.
+	accessOutboxWriteBatch = 256
 
 	// accessOutboxSendInterval paces delivery to five events a second, below
 	// the server's per-agent ingest throttle, so draining a backlog does not
@@ -50,12 +66,23 @@ const (
 	// than one event it cannot process.
 	accessOutboxRowFailureStreak = 3
 
-	accessOutboxMinWait     = 50 * time.Millisecond
-	accessOutboxBatchSize   = 50
-	accessOutboxPostTimeout = 10 // seconds, the unit scheduler.Session takes
-	accessOutboxDBTimeout   = 5 * time.Second
-	accessOutboxDropWarnGap = time.Minute
-	accessOutboxStopTimeout = 5 * time.Second
+	// Losses are reported at most once a minute. Events dropped before they
+	// were stored are gathered for a second first, so a burst is one Warn.
+	accessOutboxLossWarnGap = time.Minute
+	accessOutboxLossSettle  = time.Second
+
+	// While events have been held longer than accessOutboxLongHold, one Warn
+	// an hour says so, so a server that keeps refusing the agent (a revoked
+	// credential, say) is not left at Debug.
+	accessOutboxLongHold         = 10 * time.Minute
+	accessOutboxLongHoldWarnGap  = time.Hour
+	accessOutboxLongHoldCheckGap = time.Minute
+
+	accessOutboxRestartDelay = time.Second
+	accessOutboxMinWait      = 50 * time.Millisecond
+	accessOutboxBatchSize    = 50
+	accessOutboxPostTimeout  = 10 // seconds, the unit scheduler.Session takes
+	accessOutboxStopTimeout  = 5 * time.Second
 )
 
 // accessOutboxIdle is what drainOnce returns when nothing is waiting: the
@@ -72,32 +99,29 @@ const (
 	verdictDelivered accessDeliveryVerdict = iota
 	// verdictHoldServer means the server as a whole is unavailable: no
 	// answer, a throttle, rejected agent credentials, a gateway error, or a
-	// 404 from an endpoint that has answered before. Delivery pauses for
-	// every event.
+	// 404. Delivery pauses for every event.
 	verdictHoldServer
 	// verdictHoldEvent is a server error that may be about this one event.
 	// Only this event backs off unless several in a row fail the same way.
 	verdictHoldEvent
 	verdictDrop
-	// verdictDropQuiet is a 404 before any delivery has succeeded: a server
-	// that predates the endpoint, which is a normal state, not a failure.
-	verdictDropQuiet
 )
 
 // classifyAccessDelivery maps one delivery attempt to what the outbox does
 // with the event.
-func classifyAccessDelivery(status int, err error, endpointSeen bool) accessDeliveryVerdict {
+func classifyAccessDelivery(status int, err error) accessDeliveryVerdict {
 	switch {
 	case err != nil:
 		return verdictHoldServer
 	case status >= 200 && status < 300:
 		return verdictDelivered
-	case status == http.StatusNotFound:
-		if endpointSeen {
-			return verdictHoldServer
-		}
-		return verdictDropQuiet
-	case status == http.StatusTooManyRequests,
+	// 404 is held, never dropped. Capture starts only once the server's
+	// policy turns detection on, so a server without the endpoint is not a
+	// real case, while a misrouted or half-deployed endpoint answering 404
+	// for a while is; dropping would delete every held login in one drain.
+	// The bounds limit what a server that never accepts can leave on disk.
+	case status == http.StatusNotFound,
+		status == http.StatusTooManyRequests,
 		// 401 and 407 are about the agent's credentials or a proxy, not this
 		// event; dropping on them would empty the whole backlog during an
 		// auth hiccup. 403 means the server will not take the event.
@@ -118,17 +142,93 @@ func classifyAccessDelivery(status int, err error, endpointSeen bool) accessDeli
 	}
 }
 
+// accessResponseClass names a failed delivery for the long-hold Warn.
+func accessResponseClass(status int, err error) string {
+	switch {
+	case err != nil:
+		return "unreachable"
+	case status == http.StatusUnauthorized, status == http.StatusProxyAuthRequired:
+		return "unauthorized"
+	case status == http.StatusNotFound:
+		return "not_found"
+	case status == http.StatusTooManyRequests:
+		return "throttled"
+	case status == http.StatusRequestTimeout, status == http.StatusTooEarly, status == http.StatusGatewayTimeout:
+		return "timeout"
+	case status >= 500:
+		return "server_error"
+	default:
+		return "status_" + strconv.Itoa(status)
+	}
+}
+
+// rateLimitedCount gathers a count of lost events and releases it at most
+// once per accessOutboxLossWarnGap, so many losses make one Warn carrying
+// their number.
+type rateLimitedCount struct {
+	settle time.Duration // how long a first loss waits for more
+
+	mu           sync.Mutex
+	pending      int
+	firstPending time.Time
+	last         time.Time
+}
+
+func (c *rateLimitedCount) add(n int, now time.Time) {
+	if n <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pending == 0 {
+		c.firstPending = now
+	}
+	c.pending += n
+}
+
+// take returns the count to report now, or zero.
+func (c *rateLimitedCount) take(now time.Time) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pending == 0 || now.Sub(c.firstPending) < c.settle {
+		return 0
+	}
+	if !c.last.IsZero() && now.Sub(c.last) < accessOutboxLossWarnGap {
+		return 0
+	}
+	n := c.pending
+	c.pending = 0
+	c.last = now
+	return n
+}
+
+func (c *rateLimitedCount) hasPending() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pending > 0
+}
+
+// accessOutboxWrite is one item for the writer: an event, or a flush marker
+// that is closed once everything queued before it is settled.
+type accessOutboxWrite struct {
+	event   NonAlpaconAccessEvent
+	flushed chan struct{}
+}
+
 // accessEventOutbox holds login events in the agent's database until the
 // server has them. Events are written before any delivery is tried, so a
 // server outage, an agent restart or a shutdown delays them rather than
-// losing them, and one goroutine delivers them oldest first.
+// losing them. One writer goroutine stores them, batching what is queued into
+// one transaction, and one drain goroutine delivers them oldest first.
 //
-// The only loss window is between the PAM ack and the insert committing,
-// normally milliseconds and at most the five-second insert budget when SQLite
-// stays locked: a crash there, or an insert that fails outright, loses that
-// event. Past that, an event leaves the table only by
-// being delivered, being refused by the server, or falling outside the bounds
-// above.
+// The loss window is between the PAM ack and the insert committing: normally
+// milliseconds, longer while SQLite is locked by another writer. A crash in
+// it loses the queued events; so does an insert that fails outright, or a
+// queue that is full. Past that, an event leaves the table only by being
+// delivered, being refused by the server, or ageing out.
+//
+// The table comes from the agent's embedded migrations: a migration that
+// fails at startup stops the agent, as any other migration does.
 type accessEventOutbox struct {
 	client *ent.Client
 	send   accessEventSender
@@ -140,22 +240,28 @@ type accessEventOutbox struct {
 	maxRows int
 	maxAge  time.Duration
 
+	restartDelay time.Duration
+
 	wake      chan struct{}
 	reachable chan struct{}
 	done      chan struct{}
 
-	// endpointSeen latches once the endpoint has answered 2xx in this
-	// process, which is what turns a later 404 from "server predates the
-	// endpoint" into "hold and retry".
-	endpointSeen atomic.Bool
+	// The writer takes events from inbox. closing asks it to write what is
+	// queued and stop; abandon, cancelled when stop runs out of time, makes
+	// it stop at once.
+	inbox         chan accessOutboxWrite
+	closing       chan struct{}
+	closeOnce     sync.Once
+	abandon       context.Context
+	abandonNow    context.CancelFunc
+	writerDone    chan struct{}
+	startMu       sync.Mutex
+	writerStarted bool
+	drainStarted  bool
 
-	// inflight counts enqueue calls in progress, so stop can let an event
-	// that was already acked reach the disk. An insert that starts while stop
-	// is waiting is counted too; drained is closed when the count reaches zero.
-	inflightMu sync.Mutex
-	inflight   int
-	stopping   bool
-	drained    chan struct{}
+	refused rateLimitedCount // new events refused at the count bound
+	expired rateLimitedCount // held events removed by the age bound
+	lost    rateLimitedCount // events dropped before they were stored
 
 	// Drain state, owned by the drain goroutine.
 	gate           time.Time // no send before this
@@ -168,24 +274,31 @@ type accessEventOutbox struct {
 	recovered      int
 	dbFailures     int
 	removeFailures int
-
-	dropMu       sync.Mutex
-	droppedQuiet int
-	lastDropWarn time.Time
+	lastClass      string // the last failed delivery, for the long-hold Warn
+	lastHeldCheck  time.Time
+	lastHeldWarn   time.Time
 }
 
 func newAccessEventOutbox(client *ent.Client, send accessEventSender) *accessEventOutbox {
+	abandon, abandonNow := context.WithCancel(context.Background())
 	return &accessEventOutbox{
-		client:    client,
-		send:      send,
-		now:       time.Now,
-		sleep:     sleepCtx,
-		jitter:    randomJitter,
-		maxRows:   accessOutboxMaxRows,
-		maxAge:    accessOutboxMaxAge,
-		wake:      make(chan struct{}, 1),
-		reachable: make(chan struct{}, 1),
-		done:      make(chan struct{}),
+		client:       client,
+		send:         send,
+		now:          time.Now,
+		sleep:        sleepCtx,
+		jitter:       randomJitter,
+		maxRows:      accessOutboxMaxRows,
+		maxAge:       accessOutboxMaxAge,
+		restartDelay: accessOutboxRestartDelay,
+		wake:         make(chan struct{}, 1),
+		reachable:    make(chan struct{}, 1),
+		done:         make(chan struct{}),
+		inbox:        make(chan accessOutboxWrite, accessOutboxInboxSize),
+		closing:      make(chan struct{}),
+		abandon:      abandon,
+		abandonNow:   abandonNow,
+		writerDone:   make(chan struct{}),
+		lost:         rateLimitedCount{settle: accessOutboxLossSettle},
 	}
 }
 
@@ -233,148 +346,77 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	return min(d, accessOutboxMaxRetryAfter)
 }
 
-// enqueue stores an accepted event. It runs on the auth socket goroutine after
-// the PAM ack has been written, so it adds nothing to the login. It does not
-// observe the agent's context: an event that was acked is written even while
-// the agent shuts down.
+// enqueue hands an accepted event to the writer. It runs on the auth socket
+// goroutine after the PAM ack is written and the socket closed, and never
+// blocks: with the queue full the event is dropped and counted.
 func (o *accessEventOutbox) enqueue(event NonAlpaconAccessEvent) {
-	o.inflightMu.Lock()
-	o.inflight++
-	o.inflightMu.Unlock()
-	defer func() {
-		o.inflightMu.Lock()
-		o.inflight--
-		if o.inflight == 0 && o.drained != nil {
-			close(o.drained)
-			o.drained = nil
-		}
-		o.inflightMu.Unlock()
-	}()
-
-	// Stored without held_seconds; that is worked out at each send.
-	event.HeldSeconds = 0
-	payload, err := json.Marshal(event)
-	if err != nil {
-		log.Warn().Err(err).Str("event_id", event.EventID).Msg("Failed to encode access event; dropping")
-		return
+	select {
+	case o.inbox <- accessOutboxWrite{event: event}:
+	default:
+		o.lost.add(1, o.now())
+		log.Debug().Str("event_id", event.EventID).Msg("Access event queue full; dropping event")
 	}
-	createdAt := event.Timestamp
-	if createdAt.IsZero() {
-		createdAt = o.now()
-	}
-	createdAt = createdAt.UTC()
-
-	ctx, cancel := context.WithTimeout(context.Background(), accessOutboxDBTimeout)
-	defer cancel()
-
-	err = retrySQLiteBusy(ctx, func() error {
-		return o.client.AccessEventOutbox.Create().
-			SetID(event.EventID).
-			SetPayload(payload).
-			SetCreatedAt(createdAt).
-			SetNextAttemptAt(o.now().UTC()).
-			Exec(ctx)
-	})
-	if ent.IsConstraintError(err) {
-		// Already held: the server deduplicates on event_id, so one row is
-		// all the delivery needs.
-		log.Debug().Str("event_id", event.EventID).Msg("Access event already held")
-		return
-	}
-	if err != nil {
-		log.Warn().Err(err).Str("event_id", event.EventID).Msg("Failed to store access event; dropping")
-		return
-	}
-	log.Debug().Str("event_id", event.EventID).Msg("Access event stored for delivery")
-
-	o.trimToMaxRows(ctx)
-	nudge(o.wake)
 }
 
-// trimToMaxRows drops the oldest rows past maxRows.
-func (o *accessEventOutbox) trimToMaxRows(ctx context.Context) {
-	var count int
-	err := retrySQLiteBusy(ctx, func() error {
-		var err error
-		count, err = o.client.AccessEventOutbox.Query().Count(ctx)
-		return err
-	})
-	if err != nil || count <= o.maxRows {
+// flush waits until everything enqueued before it is stored or given up on.
+func (o *accessEventOutbox) flush() {
+	done := make(chan struct{})
+	select {
+	case o.inbox <- accessOutboxWrite{flushed: done}:
+	case <-o.writerDone:
 		return
 	}
-	var ids []string
-	err = retrySQLiteBusy(ctx, func() error {
-		var err error
-		ids, err = o.client.AccessEventOutbox.Query().
-			Order(ent.Asc(accesseventoutbox.FieldCreatedAt), ent.Asc(accesseventoutbox.FieldID)).
-			Limit(count - o.maxRows).
-			IDs(ctx)
-		return err
-	})
-	if err != nil || len(ids) == 0 {
-		return
+	select {
+	case <-done:
+	case <-o.writerDone:
 	}
-	var dropped int
-	err = retrySQLiteBusy(ctx, func() error {
-		var err error
-		dropped, err = o.client.AccessEventOutbox.Delete().Where(accesseventoutbox.IDIn(ids...)).Exec(ctx)
-		return err
-	})
-	if err != nil {
-		log.Debug().Err(err).Msg("Failed to trim the access event outbox")
-		return
-	}
-	o.noteDropped(dropped)
 }
 
-// noteDropped reports events lost to the outbox bounds: one Warn a minute at
-// most, carrying every drop since the previous one.
-func (o *accessEventOutbox) noteDropped(n int) {
-	if n <= 0 {
-		return
-	}
-	now := o.now()
-	o.dropMu.Lock()
-	o.droppedQuiet += n
-	if !o.lastDropWarn.IsZero() && now.Sub(o.lastDropWarn) < accessOutboxDropWarnGap {
-		o.dropMu.Unlock()
-		log.Debug().Int("dropped", n).Msg("Dropped held access events past the outbox bounds")
-		return
-	}
-	count := o.droppedQuiet
-	o.droppedQuiet = 0
-	o.lastDropWarn = now
-	o.dropMu.Unlock()
-
-	log.Warn().
-		Int("dropped", count).
-		Int("max_events", o.maxRows).
-		Dur("max_age", o.maxAge).
-		Msg("Dropped the oldest held access events: the outbox is past its bounds")
-}
-
-// start launches the drain goroutine. stop joins it.
+// start launches the writer and the drain. stop joins them.
 func (o *accessEventOutbox) start(ctx context.Context) {
+	o.startWriter()
+	o.startMu.Lock()
+	defer o.startMu.Unlock()
+	if o.drainStarted {
+		return
+	}
+	o.drainStarted = true
 	go o.run(ctx)
 }
 
-// stop waits, up to timeout, for in-progress inserts and for the drain
-// goroutine, whose context the caller has already cancelled. It reports
-// whether both finished.
-func (o *accessEventOutbox) stop(timeout time.Duration) bool {
-	inserted := make(chan struct{})
-	o.inflightMu.Lock()
-	o.stopping = true
-	if o.inflight == 0 {
-		close(inserted)
-	} else {
-		o.drained = inserted
+func (o *accessEventOutbox) startWriter() {
+	o.startMu.Lock()
+	defer o.startMu.Unlock()
+	if o.writerStarted {
+		return
 	}
-	o.inflightMu.Unlock()
+	o.writerStarted = true
+	go func() {
+		defer close(o.writerDone)
+		o.supervise("writer", o.abandon.Done(), o.writeLoop)
+	}()
+}
+
+// stop lets the writer store what is queued and waits, up to timeout, for it
+// and for the drain, whose context the caller has already cancelled. It
+// reports whether both finished; on a timeout the writer is told to give up.
+func (o *accessEventOutbox) stop(timeout time.Duration) bool {
+	o.closeOnce.Do(func() { close(o.closing) })
+	defer o.abandonNow()
+
+	o.startMu.Lock()
+	var waits []<-chan struct{}
+	if o.writerStarted {
+		waits = append(waits, o.writerDone)
+	}
+	if o.drainStarted {
+		waits = append(waits, o.done)
+	}
+	o.startMu.Unlock()
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-	for _, ch := range []<-chan struct{}{inserted, o.done} {
+	for _, ch := range waits {
 		select {
 		case <-ch:
 		case <-timer.C:
@@ -382,6 +424,227 @@ func (o *accessEventOutbox) stop(timeout time.Duration) bool {
 		}
 	}
 	return true
+}
+
+// supervise runs loop until it returns, restarting it after a recovered panic
+// so one bad moment cannot end delivery for the life of the agent.
+func (o *accessEventOutbox) supervise(name string, stopped <-chan struct{}, loop func()) {
+	for runRecovered(name, loop) {
+		timer := time.NewTimer(o.restartDelay)
+		select {
+		case <-stopped:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// runRecovered runs loop and reports whether it panicked. The log names the
+// panic's type, or a runtime error's message, and never its value, which
+// could carry event data.
+func runRecovered(name string, loop func()) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			log.Error().Str("loop", name).Str("panic", describePanic(r)).
+				Msg("Access event outbox loop panicked; restarting it")
+		}
+	}()
+	loop()
+	return false
+}
+
+func describePanic(r any) string {
+	if err, ok := r.(runtime.Error); ok {
+		return err.Error()
+	}
+	return fmt.Sprintf("%T", r)
+}
+
+func (o *accessEventOutbox) writeLoop() {
+	for {
+		// Losses gathered while the writer waits for work are reported
+		// once they have settled.
+		var timer *time.Timer
+		var report <-chan time.Time
+		if o.lost.hasPending() {
+			timer = time.NewTimer(accessOutboxLossSettle)
+			report = timer.C
+		}
+		select {
+		case w := <-o.inbox:
+			o.writeBatch(o.collect(w))
+		case <-report:
+			o.reportLosses()
+		case <-o.closing:
+			// Shutdown: store whatever is queued, then stop.
+			for {
+				select {
+				case w := <-o.inbox:
+					o.writeBatch(o.collect(w))
+				default:
+					o.reportLosses()
+					return
+				}
+			}
+		case <-o.abandon.Done():
+			return
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+	}
+}
+
+func (o *accessEventOutbox) collect(first accessOutboxWrite) []accessOutboxWrite {
+	batch := []accessOutboxWrite{first}
+	for len(batch) < accessOutboxWriteBatch {
+		select {
+		case w := <-o.inbox:
+			batch = append(batch, w)
+		default:
+			return batch
+		}
+	}
+	return batch
+}
+
+// writeBatch stores the events in batch and releases its flush markers,
+// whatever happens to the events.
+func (o *accessEventOutbox) writeBatch(batch []accessOutboxWrite) {
+	defer func() {
+		for _, w := range batch {
+			if w.flushed != nil {
+				close(w.flushed)
+			}
+		}
+	}()
+	var events []NonAlpaconAccessEvent
+	for _, w := range batch {
+		if w.flushed == nil {
+			events = append(events, w.event)
+		}
+	}
+	if len(events) > 0 {
+		o.store(events)
+	}
+	o.reportLosses()
+}
+
+type accessOutboxRow struct {
+	id        string
+	payload   []byte
+	createdAt time.Time
+}
+
+// store writes events in one transaction, retrying while SQLite is locked by
+// another writer until the outbox is abandoned at shutdown. Events queue
+// behind it meanwhile, up to accessOutboxInboxSize.
+func (o *accessEventOutbox) store(events []NonAlpaconAccessEvent) {
+	rows := make([]accessOutboxRow, 0, len(events))
+	for _, event := range events {
+		// Stored without held_seconds; that is worked out at each send.
+		event.HeldSeconds = 0
+		payload, err := json.Marshal(event)
+		if err != nil {
+			o.lost.add(1, o.now())
+			continue
+		}
+		createdAt := event.Timestamp
+		if createdAt.IsZero() {
+			createdAt = o.now()
+		}
+		rows = append(rows, accessOutboxRow{id: event.EventID, payload: payload, createdAt: createdAt.UTC()})
+	}
+	if len(rows) == 0 {
+		return
+	}
+
+	for attempt := 1; ; attempt++ {
+		stored, refused, err := o.insertRows(o.abandon, rows)
+		if err == nil {
+			o.refused.add(refused, o.now())
+			log.Debug().Int("stored", stored).Int("refused", refused).Msg("Access events stored for delivery")
+			if stored > 0 {
+				nudge(o.wake)
+			}
+			return
+		}
+		if !isSQLiteBusy(err) || o.abandon.Err() != nil {
+			o.lost.add(len(rows), o.now())
+			log.Debug().Err(err).Int("events", len(rows)).Msg("Failed to store access events")
+			return
+		}
+		o.reportLosses()
+		pause := min(time.Duration(attempt)*20*time.Millisecond, 100*time.Millisecond)
+		if sleepCtx(o.abandon, pause) != nil {
+			o.lost.add(len(rows), o.now())
+			return
+		}
+	}
+}
+
+// insertRows inserts what fits under maxRows and refuses the rest; a row
+// whose event_id is already held is skipped, since the server deduplicates
+// on it and one row is all delivery needs.
+func (o *accessEventOutbox) insertRows(ctx context.Context, rows []accessOutboxRow) (stored, refused int, err error) {
+	tx, err := o.client.Tx(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	count, err := tx.AccessEventOutbox.Query().Count(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	nextAttempt := o.now().UTC()
+	for _, row := range rows {
+		if count >= o.maxRows {
+			refused++
+			continue
+		}
+		insertErr := tx.AccessEventOutbox.Create().
+			SetID(row.id).
+			SetPayload(row.payload).
+			SetCreatedAt(row.createdAt).
+			SetNextAttemptAt(nextAttempt).
+			Exec(ctx)
+		if ent.IsConstraintError(insertErr) {
+			continue
+		}
+		if insertErr != nil {
+			return 0, 0, insertErr
+		}
+		count++
+		stored++
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return stored, refused, nil
+}
+
+// reportLosses logs the rate-limited Warns for events that never reached,
+// or left, the outbox other than by delivery.
+func (o *accessEventOutbox) reportLosses() {
+	now := o.now()
+	if n := o.refused.take(now); n > 0 {
+		log.Warn().Int("refused", n).Int("max_events", o.maxRows).
+			Msg("Refused new access events: the outbox is full and keeps the earliest")
+	}
+	if n := o.expired.take(now); n > 0 {
+		log.Warn().Int("expired", n).Str("max_age", o.maxAge.String()).
+			Msg("Dropped held access events past the outbox age limit")
+	}
+	if n := o.lost.take(now); n > 0 {
+		log.Warn().Int("dropped", n).
+			Msg("Dropped access events before they were stored")
+	}
 }
 
 // notifyReachable tells the drain the server answered on another channel, so
@@ -399,12 +662,10 @@ func nudge(ch chan struct{}) {
 
 func (o *accessEventOutbox) run(ctx context.Context) {
 	defer close(o.done)
-	defer func() {
-		if r := recover(); r != nil {
-			log.Error().Interface("panic", r).Msg("Access event outbox drain panicked")
-		}
-	}()
+	o.supervise("drain", ctx.Done(), func() { o.drainLoop(ctx) })
+}
 
+func (o *accessEventOutbox) drainLoop(ctx context.Context) {
 	if o.pending(ctx) {
 		// Held from a previous run. Spread the first drain, since agents
 		// restarted together would otherwise drain together.
@@ -466,6 +727,8 @@ func (o *accessEventOutbox) pending(ctx context.Context) bool {
 // returns how long to wait before the next pass, or accessOutboxIdle.
 func (o *accessEventOutbox) drainOnce(ctx context.Context) time.Duration {
 	o.purgeExpired(ctx)
+	o.warnLongHold(ctx)
+	o.reportLosses()
 
 	for ctx.Err() == nil {
 		now := o.now()
@@ -595,7 +858,7 @@ func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOut
 		return verdictHoldServer, true
 	}
 
-	verdict = classifyAccessDelivery(status, err, o.endpointSeen.Load())
+	verdict = classifyAccessDelivery(status, err)
 	if verdict == verdictHoldServer && o.lastSucceeded && row.Attempts > 0 && retryAfter == 0 {
 		// The send before this one went through, and this event has failed
 		// before: the failure is more likely this event than the server.
@@ -606,7 +869,6 @@ func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOut
 	o.lastSucceeded = verdict == verdictDelivered
 	switch verdict {
 	case verdictDelivered:
-		o.endpointSeen.Store(true)
 		o.failures = 0
 		o.gate = time.Time{}
 		o.gateFromRetry = false
@@ -615,12 +877,6 @@ func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOut
 		}
 		log.Debug().Str("event_id", row.ID).Int("status", status).Int64("held_seconds", event.HeldSeconds).
 			Msg("Access event delivered")
-		return verdict, o.settle(ctx, row.ID)
-
-	case verdictDropQuiet:
-		o.failures = 0
-		log.Debug().Str("event_id", row.ID).
-			Msg("Access event endpoint not available on this server (404); dropping event")
 		return verdict, o.settle(ctx, row.ID)
 
 	case verdictDrop:
@@ -635,6 +891,7 @@ func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOut
 	// pauses, the row waits one step longer than the queue does, so the next
 	// probe is a different event rather than the same one in lockstep.
 	o.failures++
+	o.lastClass = accessResponseClass(status, err)
 	attempts := row.Attempts + 1
 	step := attempts
 	if verdict == verdictHoldServer {
@@ -738,7 +995,38 @@ func (o *accessEventOutbox) purgeExpired(ctx context.Context) {
 		log.Debug().Err(err).Msg("Failed to purge expired access events")
 		return
 	}
-	o.noteDropped(dropped)
+	o.expired.add(dropped, o.now())
+}
+
+// warnLongHold logs, at most once an hour, how many events have been held for
+// more than accessOutboxLongHold and how the last delivery failed.
+func (o *accessEventOutbox) warnLongHold(ctx context.Context) {
+	now := o.now()
+	if !o.lastHeldWarn.IsZero() && now.Sub(o.lastHeldWarn) < accessOutboxLongHoldWarnGap {
+		return
+	}
+	if !o.lastHeldCheck.IsZero() && now.Sub(o.lastHeldCheck) < accessOutboxLongHoldCheckGap {
+		return
+	}
+	o.lastHeldCheck = now
+	var held int
+	err := retrySQLiteBusy(ctx, func() error {
+		var err error
+		held, err = o.client.AccessEventOutbox.Query().
+			Where(accesseventoutbox.CreatedAtLT(now.UTC().Add(-accessOutboxLongHold))).
+			Count(ctx)
+		return err
+	})
+	if err != nil || held == 0 {
+		return
+	}
+	class := o.lastClass
+	if class == "" {
+		class = "not_attempted"
+	}
+	o.lastHeldWarn = now
+	log.Warn().Int("held", held).Str("last_response", class).
+		Msg("Access events have been held for more than ten minutes")
 }
 
 // finishRecovery logs the one Info line of a drain that followed an outage or
@@ -755,16 +1043,13 @@ func (o *accessEventOutbox) finishRecovery() {
 }
 
 // retrySQLiteBusy retries op while SQLite reports the database or a table as
-// locked, which the agent's other writers can cause for a moment. With a
-// deadline on ctx it retries until the deadline, so an acked event is given
-// the whole insert budget; without one it gives up after ten tries and the
-// drain comes back to it later.
+// locked, which the agent's other writers can cause for a moment. It gives
+// up after ten tries; the drain comes back to the work on its next pass.
 func retrySQLiteBusy(ctx context.Context, op func() error) error {
-	_, bounded := ctx.Deadline()
 	var err error
 	for attempt := 1; ; attempt++ {
 		err = op()
-		if err == nil || !isSQLiteBusy(err) || (!bounded && attempt == 10) {
+		if err == nil || !isSQLiteBusy(err) || attempt == 10 {
 			return err
 		}
 		pause := min(time.Duration(attempt)*20*time.Millisecond, 100*time.Millisecond)

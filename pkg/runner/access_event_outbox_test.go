@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/db/ent/accesseventoutbox"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -126,16 +129,83 @@ func openTestOutboxDB(t *testing.T, path string) *ent.Client {
 func newTestOutbox(t *testing.T, clock *fakeOutboxClock, sender *fakeAccessEventSender) *accessEventOutbox {
 	t.Helper()
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
-	return newTestOutboxOn(client, clock, sender)
+	return newTestOutboxOn(t, client, clock, sender)
 }
 
-func newTestOutboxOn(client *ent.Client, clock *fakeOutboxClock, sender *fakeAccessEventSender) *accessEventOutbox {
+// newTestOutboxOn builds an outbox on a fake clock with its writer running;
+// the drain is driven by calling drainOnce.
+func newTestOutboxOn(t *testing.T, client *ent.Client, clock *fakeOutboxClock, sender *fakeAccessEventSender) *accessEventOutbox {
+	t.Helper()
 	sender.clock = clock
 	o := newAccessEventOutbox(client, sender.send)
 	o.now = clock.Now
 	o.sleep = clock.Sleep
 	o.jitter = func(time.Duration) time.Duration { return 0 }
+	o.startWriter()
+	t.Cleanup(func() { o.stop(5 * time.Second) })
 	return o
+}
+
+// put hands events to the writer and waits until they are stored.
+func put(o *accessEventOutbox, events ...NonAlpaconAccessEvent) {
+	for _, event := range events {
+		o.enqueue(event)
+	}
+	o.flush()
+}
+
+// syncBuffer is a log sink that goroutines may write while a test reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func captureLogsSync(t *testing.T) *syncBuffer {
+	t.Helper()
+	previousLogger, previousLevel := log.Logger, zerolog.GlobalLevel()
+	t.Cleanup(func() {
+		log.Logger = previousLogger
+		zerolog.SetGlobalLevel(previousLevel)
+	})
+	buf := &syncBuffer{}
+	log.Logger = zerolog.New(buf)
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	return buf
+}
+
+// lockDatabase holds SQLite's write lock from a separate connection until the
+// returned function is called.
+func lockDatabase(t *testing.T, path string) (unlock func()) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	conn, err := raw.Conn(context.Background())
+	require.NoError(t, err)
+	_, err = conn.ExecContext(context.Background(), "BEGIN EXCLUSIVE")
+	require.NoError(t, err)
+	var once sync.Once
+	unlock = func() {
+		once.Do(func() {
+			_, err := conn.ExecContext(context.Background(), "COMMIT")
+			assert.NoError(t, err)
+			_ = conn.Close()
+			_ = raw.Close()
+		})
+	}
+	t.Cleanup(unlock)
+	return unlock
 }
 
 func newTestAccessEvent(clock *fakeOutboxClock, username string) NonAlpaconAccessEvent {
@@ -166,7 +236,7 @@ func TestAccessEventOutbox_UnreachableServerHoldsEvent(t *testing.T) {
 	sender.setResponse(0, 0, errTestUnreachable)
 
 	event := newTestAccessEvent(clock, "alice")
-	o.enqueue(event)
+	put(o, event)
 	wait := o.drainOnce(context.Background())
 
 	rows := outboxRows(t, o)
@@ -230,6 +300,7 @@ func TestAccessEventOutbox_AckIsNotDelayedByDelivery(t *testing.T) {
 	require.True(t, readSessionEventAck(t, client2).Received)
 	assert.Less(t, time.Since(start), time.Second, "the ack must not wait on delivery")
 	<-done
+	o.flush()
 
 	assert.Len(t, outboxRows(t, o), 2, "both events must be on disk while the server is unreachable")
 }
@@ -242,12 +313,12 @@ func TestAccessEventOutbox_DeliversOldestFirstWithOriginalTimestamp(t *testing.T
 
 	sender.setResponse(0, 0, errTestUnreachable)
 	first := newTestAccessEvent(clock, "alice")
-	o.enqueue(first)
+	put(o, first)
 	o.drainOnce(ctx)
 
 	clock.Advance(10 * time.Second)
 	second := newTestAccessEvent(clock, "bob")
-	o.enqueue(second)
+	put(o, second)
 	clock.Advance(5 * time.Second)
 
 	sender.setResponse(http.StatusCreated, 0, nil)
@@ -273,7 +344,7 @@ func TestAccessEventOutbox_ImmediateDeliveryOmitsHeldSeconds(t *testing.T) {
 	o := newTestOutbox(t, clock, sender)
 
 	event := newTestAccessEvent(clock, "alice")
-	o.enqueue(event)
+	put(o, event)
 	o.drainOnce(context.Background())
 
 	sent := sender.sentEvents()
@@ -311,7 +382,7 @@ func TestAccessEventOutbox_RetryableResponsesBackOff(t *testing.T) {
 			sender.setResponse(tc.status, 0, tc.err)
 			ctx := context.Background()
 
-			o.enqueue(newTestAccessEvent(clock, "alice"))
+			put(o, newTestAccessEvent(clock, "alice"))
 			for attempt, want := range tc.delays {
 				before := clock.Now()
 				o.drainOnce(ctx)
@@ -336,7 +407,7 @@ func TestAccessEventOutbox_HonorsRetryAfter(t *testing.T) {
 	o := newTestOutbox(t, clock, sender)
 	sender.setResponse(http.StatusTooManyRequests, 42*time.Second, nil)
 
-	o.enqueue(newTestAccessEvent(clock, "alice"))
+	put(o, newTestAccessEvent(clock, "alice"))
 	wait := o.drainOnce(context.Background())
 
 	rows := outboxRows(t, o)
@@ -378,7 +449,7 @@ func TestAccessEventOutbox_RejectionDropsWithOneWarn(t *testing.T) {
 			sender.setResponse(status, 0, nil)
 
 			event := newTestAccessEvent(clock, "alice")
-			o.enqueue(event)
+			put(o, event)
 			o.drainOnce(context.Background())
 
 			assert.Empty(t, outboxRows(t, o), "a rejected event must be dropped")
@@ -395,41 +466,45 @@ func TestAccessEventOutbox_RejectionDropsWithOneWarn(t *testing.T) {
 	}
 }
 
-func TestAccessEventOutbox_404BeforeFirstSuccessDropsQuietly(t *testing.T) {
+// TestAccessEventOutbox_404HoldsAcrossARestart pins that a 404 never deletes
+// held events: it pauses the queue like a gateway error, a restart changes
+// nothing, and the backlog drains once the endpoint answers.
+func TestAccessEventOutbox_404HoldsAcrossARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outbox.db")
 	clock := newFakeOutboxClock()
 	sender := &fakeAccessEventSender{}
-	o := newTestOutbox(t, clock, sender)
-	// Captured after the database exists, so migration logs stay out.
-	logs := captureLogs(t)
 	sender.setResponse(http.StatusNotFound, 0, nil)
-
-	o.enqueue(newTestAccessEvent(clock, "alice"))
-	o.drainOnce(context.Background())
-
-	assert.Empty(t, outboxRows(t, o), "a server without the endpoint cannot take the event")
-	assert.Len(t, sender.sentIDs(), 1)
-	assert.Empty(t, nonEmptyLines(logs.String()), "the drop is quiet")
-}
-
-func TestAccessEventOutbox_404AfterFirstSuccessHolds(t *testing.T) {
-	clock := newFakeOutboxClock()
-	sender := &fakeAccessEventSender{}
-	o := newTestOutbox(t, clock, sender)
 	ctx := context.Background()
 
-	o.enqueue(newTestAccessEvent(clock, "alice"))
-	o.drainOnce(ctx)
-	require.True(t, o.endpointSeen.Load(), "a 2xx latches the endpoint as present")
+	firstClient := db.InitTestDB(path)
+	before := newTestOutboxOn(t, firstClient, clock, sender)
+	var ids []string
+	for range 20 {
+		clock.Advance(time.Second)
+		event := newTestAccessEvent(clock, "alice")
+		ids = append(ids, event.EventID)
+		put(before, event)
+	}
+	wait := before.drainOnce(ctx)
+	assert.Len(t, sender.sentIDs(), 1, "a 404 pauses the queue after one probe")
+	assert.Positive(t, wait)
+	assert.Len(t, outboxRows(t, before), 20, "a 404 loses nothing")
+	require.True(t, before.stop(5*time.Second))
+	require.NoError(t, firstClient.Close())
 
-	sender.setResponse(http.StatusNotFound, 0, nil)
-	event := newTestAccessEvent(clock, "bob")
-	o.enqueue(event)
-	o.drainOnce(ctx)
+	// Restarted, still answered with 404.
+	clock.Advance(time.Minute)
+	after := newTestOutboxOn(t, openTestOutboxDB(t, path), clock, sender)
+	after.drainOnce(ctx)
+	assert.Len(t, sender.sentIDs(), 2, "the restarted agent probes once and pauses again")
+	assert.Len(t, outboxRows(t, after), 20, "a restart does not turn a 404 into a drop")
 
-	rows := outboxRows(t, o)
-	require.Len(t, rows, 1, "after a success, 404 is held like a 5xx")
-	assert.Equal(t, event.EventID, rows[0].ID)
-	assert.Equal(t, 1, rows[0].Attempts)
+	sender.setResponse(http.StatusCreated, 0, nil)
+	clock.Advance(time.Hour)
+	after.drainOnce(ctx)
+	assert.Empty(t, outboxRows(t, after), "the backlog drains once the endpoint answers")
+	sent := sender.sentIDs()
+	assert.Equal(t, ids[1:], sent[len(sent)-19:], "the rest go oldest first after the probe")
 }
 
 func TestAccessEventOutbox_RestartDrainsHeldEvents(t *testing.T) {
@@ -440,19 +515,20 @@ func TestAccessEventOutbox_RestartDrainsHeldEvents(t *testing.T) {
 	firstClient := db.InitTestDB(path)
 	down := &fakeAccessEventSender{}
 	down.setResponse(0, 0, errTestUnreachable)
-	before := newTestOutboxOn(firstClient, clock, down)
+	before := newTestOutboxOn(t, firstClient, clock, down)
 	events := []NonAlpaconAccessEvent{newTestAccessEvent(clock, "alice")}
-	before.enqueue(events[0])
+	put(before, events[0])
 	clock.Advance(time.Second)
 	events = append(events, newTestAccessEvent(clock, "bob"))
-	before.enqueue(events[1])
+	put(before, events[1])
 	before.drainOnce(context.Background())
+	require.True(t, before.stop(5*time.Second))
 	require.NoError(t, firstClient.Close())
 
 	// Second run over the same file, with the server back.
 	clock.Advance(time.Hour)
 	up := &fakeAccessEventSender{}
-	after := newTestOutboxOn(openTestOutboxDB(t, path), clock, up)
+	after := newTestOutboxOn(t, openTestOutboxDB(t, path), clock, up)
 	ctx, cancel := context.WithCancel(context.Background())
 	after.start(ctx)
 	defer func() {
@@ -473,8 +549,8 @@ func TestAccessEventOutbox_DuplicateEventIDStoredAndSentOnce(t *testing.T) {
 	sender.setResponse(0, 0, errTestUnreachable)
 
 	event := newTestAccessEvent(clock, "alice")
-	o.enqueue(event)
-	o.enqueue(event)
+	put(o, event)
+	put(o, event)
 	assert.Len(t, outboxRows(t, o), 1, "one row per event id")
 
 	sender.setResponse(http.StatusCreated, 0, nil)
@@ -482,7 +558,10 @@ func TestAccessEventOutbox_DuplicateEventIDStoredAndSentOnce(t *testing.T) {
 	assert.Equal(t, []string{event.EventID}, sender.sentIDs(), "one delivery per event id")
 }
 
-func TestAccessEventOutbox_CapsByCountDroppingOldest(t *testing.T) {
+// TestAccessEventOutbox_CapKeepsTheEarliestEvents pins the cap policy: once
+// full, new events are refused and the earliest held ones kept, so a flood of
+// logins cannot push out the first entry.
+func TestAccessEventOutbox_CapKeepsTheEarliestEvents(t *testing.T) {
 	clock := newFakeOutboxClock()
 	sender := &fakeAccessEventSender{}
 	o := newTestOutbox(t, clock, sender)
@@ -490,29 +569,35 @@ func TestAccessEventOutbox_CapsByCountDroppingOldest(t *testing.T) {
 	logs := captureLogs(t)
 	o.maxRows = 3
 
-	var ids []string
-	// The fourth and fifth inserts overflow within one minute of each other.
-	for range 5 {
-		event := newTestAccessEvent(clock, "alice")
-		ids = append(ids, event.EventID)
-		o.enqueue(event)
+	var first []string
+	for range 3 {
 		clock.Advance(time.Second)
+		event := newTestAccessEvent(clock, "alice")
+		first = append(first, event.EventID)
+		put(o, event)
 	}
+	clock.Advance(time.Second)
+	put(o, newTestAccessEvent(clock, "mallory"), newTestAccessEvent(clock, "mallory"))
 
 	rows := outboxRows(t, o)
 	require.Len(t, rows, 3)
-	assert.Equal(t, ids[2:], []string{rows[0].ID, rows[1].ID, rows[2].ID}, "the oldest are dropped first")
+	assert.Equal(t, first, []string{rows[0].ID, rows[1].ID, rows[2].ID}, "the earliest events are kept")
 
 	warns := nonEmptyLines(logs.String())
-	require.Len(t, warns, 1, "overflow warnings are rate-limited to one a minute: %q", logs.String())
-	assert.Contains(t, warns[0], `"dropped":1`)
+	require.Len(t, warns, 1, "one Warn for the refused events: %q", logs.String())
+	assert.Contains(t, warns[0], `"refused":2`)
+
+	// Within the minute: counted, not logged.
+	put(o, newTestAccessEvent(clock, "mallory"))
+	assert.Len(t, nonEmptyLines(logs.String()), 1)
 
 	clock.Advance(time.Minute)
-	o.enqueue(newTestAccessEvent(clock, "alice"))
+	put(o, newTestAccessEvent(clock, "mallory"))
 	warns = nonEmptyLines(logs.String())
 	require.Len(t, warns, 2)
-	assert.Contains(t, warns[1], `"dropped":2`, "the next warning carries the drops it held back")
-	assert.NotContains(t, logs.String(), "alice")
+	assert.Contains(t, warns[1], `"refused":2`, "the next Warn carries the refusals it held back")
+	assert.NotContains(t, logs.String(), "mallory")
+	assert.Len(t, outboxRows(t, o), 3)
 }
 
 func TestAccessEventOutbox_CapsByAge(t *testing.T) {
@@ -523,12 +608,12 @@ func TestAccessEventOutbox_CapsByAge(t *testing.T) {
 	ctx := context.Background()
 
 	stale := newTestAccessEvent(clock, "alice")
-	o.enqueue(stale)
+	put(o, stale)
 	o.drainOnce(ctx)
 
 	clock.Advance(30*24*time.Hour + time.Second)
 	fresh := newTestAccessEvent(clock, "bob")
-	o.enqueue(fresh)
+	put(o, fresh)
 	sender.setResponse(http.StatusCreated, 0, nil)
 	o.drainOnce(ctx)
 
@@ -543,7 +628,7 @@ func TestAccessEventOutbox_RateLimitsToFivePerSecond(t *testing.T) {
 	o := newTestOutbox(t, clock, sender)
 
 	for range 6 {
-		o.enqueue(newTestAccessEvent(clock, "alice"))
+		put(o, newTestAccessEvent(clock, "alice"))
 	}
 	start := clock.Now()
 	o.drainOnce(context.Background())
@@ -562,13 +647,13 @@ func TestAccessEventOutbox_PoisonEventDoesNotBlockTheQueue(t *testing.T) {
 	o := newTestOutbox(t, clock, sender)
 
 	poison := newTestAccessEvent(clock, "alice")
-	o.enqueue(poison)
+	put(o, poison)
 	var good []NonAlpaconAccessEvent
 	for _, username := range []string{"bob", "carol"} {
 		clock.Advance(time.Second)
 		event := newTestAccessEvent(clock, username)
 		good = append(good, event)
-		o.enqueue(event)
+		put(o, event)
 	}
 	sender.respond = func(event NonAlpaconAccessEvent) (int, time.Duration, error) {
 		if event.EventID == poison.EventID {
@@ -609,7 +694,7 @@ func TestAccessEventOutbox_DropResetsTheFailureStreak(t *testing.T) {
 		event := newTestAccessEvent(clock, "alice")
 		byID[event.EventID] = status
 		last = event.EventID
-		o.enqueue(event)
+		put(o, event)
 	}
 	sender.respond = func(event NonAlpaconAccessEvent) (int, time.Duration, error) {
 		return byID[event.EventID], 0, nil
@@ -629,7 +714,7 @@ func TestAccessEventOutbox_FailedDeleteDoesNotResendInALoop(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outbox.db")
 	clock := newFakeOutboxClock()
 	sender := &fakeAccessEventSender{}
-	o := newTestOutboxOn(openTestOutboxDB(t, path), clock, sender)
+	o := newTestOutboxOn(t, openTestOutboxDB(t, path), clock, sender)
 
 	raw, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
@@ -637,7 +722,7 @@ func TestAccessEventOutbox_FailedDeleteDoesNotResendInALoop(t *testing.T) {
 	_, err = raw.Exec("CREATE TRIGGER refuse_delete BEFORE DELETE ON access_event_outbox BEGIN SELECT RAISE(ABORT, 'disk is read-only'); END")
 	require.NoError(t, err)
 
-	o.enqueue(newTestAccessEvent(clock, "alice"))
+	put(o, newTestAccessEvent(clock, "alice"))
 	wait := o.drainOnce(context.Background())
 
 	assert.Len(t, sender.sentIDs(), 1, "one send, then the drain backs off")
@@ -659,13 +744,13 @@ func TestAccessEventOutbox_ServerErrorOnOneEventDoesNotStallTheQueue(t *testing.
 	ctx := context.Background()
 
 	poison := newTestAccessEvent(clock, "alice")
-	o.enqueue(poison)
+	put(o, poison)
 	var good []string
 	for range 3 {
 		clock.Advance(time.Second)
 		event := newTestAccessEvent(clock, "bob")
 		good = append(good, event.EventID)
-		o.enqueue(event)
+		put(o, event)
 	}
 	sender.respond = func(event NonAlpaconAccessEvent) (int, time.Duration, error) {
 		if event.EventID == poison.EventID {
@@ -712,7 +797,7 @@ func TestAccessEventOutbox_ClockSetBackDoesNotStrandEvents(t *testing.T) {
 	ctx := context.Background()
 
 	event := newTestAccessEvent(clock, "alice")
-	o.enqueue(event)
+	put(o, event)
 	o.drainOnce(ctx)
 
 	// The host clock is set back a day. The row's next attempt now looks a day
@@ -747,6 +832,7 @@ func TestAccessEventOutbox_DetectionOffStopsCaptureButDeliversHeld(t *testing.T)
 		}()
 		require.True(t, readSessionEventAck(t, client).Received)
 		<-done
+		o.flush()
 	}
 
 	handle()
@@ -776,7 +862,7 @@ func TestAccessEventOutbox_LogsOneInfoAfterAnOutage(t *testing.T) {
 	ctx := context.Background()
 
 	for range 3 {
-		o.enqueue(newTestAccessEvent(clock, "alice"))
+		put(o, newTestAccessEvent(clock, "alice"))
 	}
 	o.drainOnce(ctx)
 	clock.Advance(time.Minute)
@@ -790,7 +876,7 @@ func TestAccessEventOutbox_LogsOneInfoAfterAnOutage(t *testing.T) {
 	assert.NotContains(t, lines[0], "alice")
 
 	// A healthy delivery afterwards logs nothing at Info.
-	o.enqueue(newTestAccessEvent(clock, "alice"))
+	put(o, newTestAccessEvent(clock, "alice"))
 	o.drainOnce(ctx)
 	assert.Len(t, nonEmptyLines(logs.String()), 1)
 }
@@ -848,7 +934,7 @@ func TestAccessEventOutbox_StopJoinsTheDrain(t *testing.T) {
 	o.start(ctx)
 	event := newTestAccessEvent(newFakeOutboxClock(), "alice")
 	event.Timestamp = time.Now()
-	o.enqueue(event)
+	put(o, event)
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
@@ -894,4 +980,186 @@ func nonEmptyLines(s string) []string {
 		}
 	}
 	return lines
+}
+
+// TestAccessEventOutbox_BurstWhileTheDatabaseIsLockedLosesNothing sends a
+// burst of concurrent logins while another connection holds SQLite's write
+// lock: every ack stays fast, and every event is stored once the lock lifts.
+func TestAccessEventOutbox_BurstWhileTheDatabaseIsLockedLosesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outbox.db")
+	clock := newFakeOutboxClock()
+	o := newTestOutboxOn(t, openTestOutboxDB(t, path), clock, &fakeAccessEventSender{})
+	am := newTestAuthManager()
+	am.detectLocalAccess = true
+	am.outbox = o
+	logs := captureLogsSync(t)
+
+	unlock := lockDatabase(t, path)
+
+	const logins = 300
+	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","pid":712345,"ppid":712340}`)
+	latencies := make(chan time.Duration, logins)
+	var wg sync.WaitGroup
+	for range logins {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			server, client := newSessionEventPipe(t)
+			start := time.Now()
+			go am.handleSessionEvent(raw, server)
+			resp := readSessionEventAck(t, client)
+			latencies <- time.Since(start)
+			assert.True(t, resp.Received)
+		}()
+	}
+	wg.Wait()
+	close(latencies)
+	var slowest time.Duration
+	for latency := range latencies {
+		slowest = max(slowest, latency)
+	}
+	assert.Less(t, slowest, 250*time.Millisecond, "an ack must not wait on the locked database")
+
+	time.Sleep(2 * time.Second) // hold the lock while the writer retries
+	unlock()
+	o.flush()
+
+	assert.Len(t, outboxRows(t, o), logins, "nothing within the queue bound is lost")
+	assert.Empty(t, nonEmptyLines(logs.String()), "no loss to report")
+}
+
+// TestAccessEventOutbox_QueueOverflowIsCountedInOneWarn fills a small queue
+// while the writer is stuck on a locked database: the overflow is dropped
+// without blocking and reported once with its count.
+func TestAccessEventOutbox_QueueOverflowIsCountedInOneWarn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outbox.db")
+	client := openTestOutboxDB(t, path)
+	o := newAccessEventOutbox(client, (&fakeAccessEventSender{}).send)
+	o.inbox = make(chan accessOutboxWrite, 4)
+	logs := captureLogsSync(t)
+
+	unlock := lockDatabase(t, path)
+	o.startWriter()
+	t.Cleanup(func() { o.stop(5 * time.Second) })
+
+	const sent = 20
+	clock := newFakeOutboxClock()
+	for range sent {
+		o.enqueue(newTestAccessEvent(clock, "alice"))
+		time.Sleep(time.Millisecond)
+	}
+
+	// The driver waits out a lock for a few seconds per attempt, so the
+	// report comes after the writer's first attempt gives up.
+	require.Eventually(t, func() bool { return len(nonEmptyLines(logs.String())) > 0 }, 15*time.Second, 20*time.Millisecond,
+		"the overflow is reported while the writer is still stuck")
+	unlock()
+	o.flush()
+
+	lines := nonEmptyLines(logs.String())
+	require.Len(t, lines, 1, "one Warn for the whole overflow: %q", logs.String())
+	var entry struct {
+		Level   string `json:"level"`
+		Dropped int    `json:"dropped"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &entry))
+	assert.Equal(t, "warn", entry.Level)
+	assert.Positive(t, entry.Dropped)
+	assert.Equal(t, sent, entry.Dropped+len(outboxRows(t, o)), "every event is either stored or counted")
+	assert.NotContains(t, lines[0], "alice")
+}
+
+// TestAccessEventOutbox_StopStoresWhatIsQueued checks shutdown: events
+// accepted before stop reach the disk.
+func TestAccessEventOutbox_StopStoresWhatIsQueued(t *testing.T) {
+	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
+	o := newAccessEventOutbox(client, (&fakeAccessEventSender{}).send)
+	o.startWriter()
+
+	clock := newFakeOutboxClock()
+	for range 50 {
+		o.enqueue(newTestAccessEvent(clock, "alice"))
+	}
+	require.True(t, o.stop(5*time.Second), "the writer must finish within the budget")
+	assert.Len(t, outboxRows(t, o), 50)
+}
+
+// TestAccessEventOutbox_LongHoldWarnsOnceAnHour covers a server that keeps
+// refusing the agent: the held events surface at Warn, once an hour, with
+// the count and the kind of failure and nothing about the logins.
+func TestAccessEventOutbox_LongHoldWarnsOnceAnHour(t *testing.T) {
+	clock := newFakeOutboxClock()
+	sender := &fakeAccessEventSender{}
+	o := newTestOutbox(t, clock, sender)
+	sender.setResponse(http.StatusUnauthorized, 0, nil)
+	logs := captureLogs(t)
+	ctx := context.Background()
+
+	put(o, newTestAccessEvent(clock, "alice"), newTestAccessEvent(clock, "alice"))
+	o.drainOnce(ctx)
+	assert.Empty(t, nonEmptyLines(logs.String()), "a short hold stays at Debug")
+
+	clock.Advance(11 * time.Minute)
+	o.drainOnce(ctx)
+	lines := nonEmptyLines(logs.String())
+	require.Len(t, lines, 1, "%q", logs.String())
+	assert.Contains(t, lines[0], `"level":"warn"`)
+	assert.Contains(t, lines[0], `"held":2`)
+	assert.Contains(t, lines[0], `"last_response":"unauthorized"`)
+	assert.NotContains(t, lines[0], "alice")
+	assert.NotContains(t, lines[0], "203.0.113.5")
+
+	clock.Advance(30 * time.Minute)
+	o.drainOnce(ctx)
+	assert.Len(t, nonEmptyLines(logs.String()), 1, "at most once an hour")
+
+	clock.Advance(31 * time.Minute)
+	o.drainOnce(ctx)
+	assert.Len(t, nonEmptyLines(logs.String()), 2)
+}
+
+// TestAccessEventOutbox_DrainComesBackAfterAPanic injects a panic into a
+// send: the drain logs it once at Error, without event data, and restarts.
+func TestAccessEventOutbox_DrainComesBackAfterAPanic(t *testing.T) {
+	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
+	var mu sync.Mutex
+	calls := 0
+	o := newAccessEventOutbox(client, func(_ context.Context, event NonAlpaconAccessEvent) (int, time.Duration, error) {
+		mu.Lock()
+		calls++
+		first := calls == 1
+		mu.Unlock()
+		if first {
+			panic(fmt.Errorf("send failed for %s", event.Username))
+		}
+		return http.StatusCreated, 0, nil
+	})
+	o.jitter = func(time.Duration) time.Duration { return 0 }
+	o.restartDelay = 10 * time.Millisecond
+	logs := captureLogsSync(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	o.start(ctx)
+	event := newTestAccessEvent(newFakeOutboxClock(), "alice")
+	event.Timestamp = time.Now()
+	o.enqueue(event)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		sent := calls
+		mu.Unlock()
+		return sent >= 2 && len(outboxRows(t, o)) == 0
+	}, 5*time.Second, 10*time.Millisecond, "the restarted drain delivers the event")
+	cancel()
+	require.True(t, o.stop(5*time.Second), "the supervised drain still exits on stop")
+
+	var errorLines []string
+	for _, line := range nonEmptyLines(logs.String()) {
+		if strings.Contains(line, `"level":"error"`) {
+			errorLines = append(errorLines, line)
+		}
+	}
+	require.Len(t, errorLines, 1, "the panic is logged once: %q", logs.String())
+	assert.Contains(t, errorLines[0], `"loop":"drain"`)
+	assert.NotContains(t, logs.String(), "alice", "the panic value is not logged")
 }

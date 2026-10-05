@@ -286,6 +286,9 @@ func handleSessionEventSync(t *testing.T, am *AuthManager, raw []byte) SessionEv
 	}()
 	resp := readSessionEventAck(t, client)
 	<-done
+	if am.outbox != nil {
+		am.outbox.flush()
+	}
 	return resp
 }
 
@@ -318,6 +321,7 @@ func TestHandleSessionEvent_AcksAndStores(t *testing.T) {
 	_, err := client.Read(make([]byte, 1))
 	assert.ErrorIs(t, err, io.EOF)
 	<-done
+	o.flush()
 
 	rows := outboxRows(t, o)
 	require.Len(t, rows, 1, "the event must be stored")

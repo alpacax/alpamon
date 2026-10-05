@@ -12,8 +12,7 @@ import (
 )
 
 // nonAlpaconAccessEventURL is the Alpacon ingestion endpoint for non-Alpacon
-// access events. A server that predates it answers 404, which the outbox reads
-// as "not deployed" until the endpoint has once answered 2xx.
+// access events. The outbox holds an event on any 404 rather than dropping it.
 const nonAlpaconAccessEventURL = "/api/events/access/"
 
 // errNoHTTPSession is returned by postAccessEvent before the agent has an
@@ -272,10 +271,10 @@ func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 		log.Debug().Str("event_id", event.EventID).Msg("No access event store; dropping event")
 		return
 	}
-	// Closed before the insert so the login never waits on the database,
+	// Closed before the hand-off so the login never waits on the outbox,
 	// even for a PAM module that reads the ack until EOF; the caller's own
-	// close afterwards is harmless. Stored on this goroutine, after the ack:
-	// a crash can lose only an event caught between the two.
+	// close afterwards is harmless. enqueue never blocks: the outbox's writer
+	// stores the event.
 	_ = unixConn.Close()
 	am.outbox.enqueue(event)
 }
