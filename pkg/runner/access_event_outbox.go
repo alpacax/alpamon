@@ -37,7 +37,8 @@ const (
 	// accessOutboxMaxDelay is the longest wait any response can schedule,
 	// jitter included. A wait longer than this can only come from the wall
 	// clock being set back, and is treated as already over.
-	accessOutboxMaxDelay = accessOutboxMaxRetryAfter + accessOutboxMaxRetryAfter/5
+	accessOutboxMaxDelay = accessOutboxMaxRetryAfter + accessOutboxMaxRetryAfter/5 +
+		accessOutboxMaxBackoff + accessOutboxMaxBackoff/5
 
 	// accessOutboxReachableJitter spreads the first drain after startup and
 	// after the server becomes reachable again, so a fleet that lost the
@@ -70,8 +71,9 @@ type accessDeliveryVerdict int
 const (
 	verdictDelivered accessDeliveryVerdict = iota
 	// verdictHoldServer means the server as a whole is unavailable: no
-	// answer, a throttle, a gateway error, or a 404 from an endpoint that
-	// has answered before. Delivery pauses for every event.
+	// answer, a throttle, rejected agent credentials, a gateway error, or a
+	// 404 from an endpoint that has answered before. Delivery pauses for
+	// every event.
 	verdictHoldServer
 	// verdictHoldEvent is a server error that may be about this one event.
 	// Only this event backs off unless several in a row fail the same way.
@@ -96,6 +98,11 @@ func classifyAccessDelivery(status int, err error, endpointSeen bool) accessDeli
 		}
 		return verdictDropQuiet
 	case status == http.StatusTooManyRequests,
+		// 401 and 407 are about the agent's credentials or a proxy, not this
+		// event; dropping on them would empty the whole backlog during an
+		// auth hiccup. 403 means the server will not take the event.
+		status == http.StatusUnauthorized,
+		status == http.StatusProxyAuthRequired,
 		status == http.StatusRequestTimeout,
 		status == http.StatusTooEarly,
 		status == http.StatusBadGateway,
@@ -103,8 +110,8 @@ func classifyAccessDelivery(status int, err error, endpointSeen bool) accessDeli
 		status == http.StatusGatewayTimeout:
 		return verdictHoldServer
 	case status >= 400 && status < 500:
-		// 400, 401, 403 and the rest: the server will not take this event
-		// however often it is sent.
+		// 400, 403 and the rest: the server will not take this event however
+		// often it is sent.
 		return verdictDrop
 	default:
 		return verdictHoldEvent
@@ -116,8 +123,10 @@ func classifyAccessDelivery(status int, err error, endpointSeen bool) accessDeli
 // server outage, an agent restart or a shutdown delays them rather than
 // losing them, and one goroutine delivers them oldest first.
 //
-// The only loss window is between the PAM ack and the insert committing: a
-// crash there loses that event. Past that, an event leaves the table only by
+// The only loss window is between the PAM ack and the insert committing,
+// normally milliseconds and at most the five-second insert budget when SQLite
+// stays locked: a crash there, or an insert that fails outright, loses that
+// event. Past that, an event leaves the table only by
 // being delivered, being refused by the server, or falling outside the bounds
 // above.
 type accessEventOutbox struct {
@@ -141,21 +150,24 @@ type accessEventOutbox struct {
 	endpointSeen atomic.Bool
 
 	// inflight counts enqueue calls in progress, so stop can let an event
-	// that was already acked reach the disk.
+	// that was already acked reach the disk. An insert that starts while stop
+	// is waiting is counted too; drained is closed when the count reaches zero.
 	inflightMu sync.Mutex
-	inflight   sync.WaitGroup
+	inflight   int
 	stopping   bool
+	drained    chan struct{}
 
 	// Drain state, owned by the drain goroutine.
-	gate          time.Time // no send before this
-	gateFromRetry bool      // the gate came from the server's Retry-After
-	failures      int       // consecutive held deliveries
-	outage        bool      // a server-wide failure since the last delivery
-	lastSucceeded bool      // the previous send was delivered
-	lastSend      time.Time
-	recovering    bool // count deliveries for the after-outage Info line
-	recovered     int
-	dbFailures    int
+	gate           time.Time // no send before this
+	gateFromRetry  bool      // the gate came from the server's Retry-After
+	failures       int       // consecutive held deliveries
+	outage         bool      // a server-wide failure since the last delivery
+	lastSucceeded  bool      // the previous send was delivered
+	lastSend       time.Time
+	recovering     bool // count deliveries for the after-outage Info line
+	recovered      int
+	dbFailures     int
+	removeFailures int
 
 	dropMu       sync.Mutex
 	droppedQuiet int
@@ -227,14 +239,17 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 // the agent shuts down.
 func (o *accessEventOutbox) enqueue(event NonAlpaconAccessEvent) {
 	o.inflightMu.Lock()
-	tracked := !o.stopping
-	if tracked {
-		o.inflight.Add(1)
-	}
+	o.inflight++
 	o.inflightMu.Unlock()
-	if tracked {
-		defer o.inflight.Done()
-	}
+	defer func() {
+		o.inflightMu.Lock()
+		o.inflight--
+		if o.inflight == 0 && o.drained != nil {
+			close(o.drained)
+			o.drained = nil
+		}
+		o.inflightMu.Unlock()
+	}()
 
 	// Stored without held_seconds; that is worked out at each send.
 	event.HeldSeconds = 0
@@ -347,15 +362,15 @@ func (o *accessEventOutbox) start(ctx context.Context) {
 // goroutine, whose context the caller has already cancelled. It reports
 // whether both finished.
 func (o *accessEventOutbox) stop(timeout time.Duration) bool {
+	inserted := make(chan struct{})
 	o.inflightMu.Lock()
 	o.stopping = true
-	o.inflightMu.Unlock()
-
-	inserted := make(chan struct{})
-	go func() {
-		o.inflight.Wait()
+	if o.inflight == 0 {
 		close(inserted)
-	}()
+	} else {
+		o.drained = inserted
+	}
+	o.inflightMu.Unlock()
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -410,7 +425,7 @@ func (o *accessEventOutbox) run(ctx context.Context) {
 		case <-ctx.Done():
 		case <-o.wake:
 		case <-o.reachable:
-			o.onReachable()
+			o.onReachable(ctx)
 		case <-fire:
 		}
 		if timer != nil {
@@ -422,15 +437,19 @@ func (o *accessEventOutbox) run(ctx context.Context) {
 	}
 }
 
-// onReachable ends a backoff early once the server is known to answer again.
-// A Retry-After is the server's own instruction and stands.
-func (o *accessEventOutbox) onReachable() {
+// onReachable ends a backoff early once the server is known to answer again:
+// the queue's pause and every held event's own backoff, which after a long
+// outage sit up to ten minutes out. A Retry-After is the server's own
+// instruction and stands.
+func (o *accessEventOutbox) onReachable(ctx context.Context) {
 	if o.failures == 0 || o.gateFromRetry {
 		return
 	}
-	if at := o.now().Add(o.jitter(accessOutboxReachableJitter)); at.Before(o.gate) {
+	at := o.now().Add(o.jitter(accessOutboxReachableJitter))
+	if at.Before(o.gate) {
 		o.gate = at
 	}
+	o.releaseHeldUntil(ctx, at)
 }
 
 func (o *accessEventOutbox) pending(ctx context.Context) bool {
@@ -559,8 +578,7 @@ func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOut
 	var event NonAlpaconAccessEvent
 	if err := json.Unmarshal(row.Payload, &event); err != nil {
 		log.Warn().Str("event_id", row.ID).Msg("Held access event is unreadable; dropping")
-		o.remove(ctx, row.ID)
-		return verdictDrop, false
+		return verdictDrop, o.settle(ctx, row.ID)
 	}
 
 	now := o.now()
@@ -597,20 +615,19 @@ func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOut
 		}
 		log.Debug().Str("event_id", row.ID).Int("status", status).Int64("held_seconds", event.HeldSeconds).
 			Msg("Access event delivered")
-		o.remove(ctx, row.ID)
-		return verdict, false
+		return verdict, o.settle(ctx, row.ID)
 
 	case verdictDropQuiet:
+		o.failures = 0
 		log.Debug().Str("event_id", row.ID).
 			Msg("Access event endpoint not available on this server (404); dropping event")
-		o.remove(ctx, row.ID)
-		return verdict, false
+		return verdict, o.settle(ctx, row.ID)
 
 	case verdictDrop:
+		o.failures = 0
 		log.Warn().Str("event_id", row.ID).Int("status", status).
 			Msg("Access event rejected by server; dropping event")
-		o.remove(ctx, row.ID)
-		return verdict, false
+		return verdict, o.settle(ctx, row.ID)
 	}
 
 	// Held. The row backs off on its own count, so an event the server keeps
@@ -618,15 +635,17 @@ func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOut
 	// pauses, the row waits one step longer than the queue does, so the next
 	// probe is a different event rather than the same one in lockstep.
 	o.failures++
-	o.recovering = true
 	attempts := row.Attempts + 1
 	step := attempts
 	if verdict == verdictHoldServer {
 		step++
 	}
 	delay := accessOutboxBackoff(step, o.jitter)
+	retryDelay := retryAfter + o.jitter(retryAfter/5)
 	if retryAfter > 0 {
-		delay = retryAfter + o.jitter(retryAfter/5)
+		// The server's wait, plus the event's own step, so the probe after
+		// the pause is still a different event.
+		delay = retryDelay + accessOutboxBackoff(attempts, o.jitter)
 	}
 	ev := log.Debug().Str("event_id", row.ID).Int("attempts", attempts).Dur("retry_in", delay)
 	if err != nil {
@@ -658,25 +677,42 @@ func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOut
 	gateDelay := accessOutboxBackoff(o.failures, o.jitter)
 	o.gateFromRetry = retryAfter > 0
 	if o.gateFromRetry {
-		gateDelay = delay
+		gateDelay = retryDelay
 	}
 	o.gate = now.Add(gateDelay)
+	// Count what the drain delivers once the pause ends, for its Info line.
+	o.recovering = true
 	return verdict, true
 }
 
-func (o *accessEventOutbox) remove(ctx context.Context, id string) {
+// settle removes a row the server has answered for good. If the delete
+// fails, as on a full or read-only disk, the row is still due and would be
+// resent at once, so the pass ends and the drain backs off; the server
+// deduplicates the resend when it comes. stop reports that the pass must end.
+func (o *accessEventOutbox) settle(ctx context.Context, id string) (stop bool) {
 	err := retrySQLiteBusy(ctx, func() error {
 		return o.client.AccessEventOutbox.DeleteOneID(id).Exec(ctx)
 	})
-	if err != nil && !ent.IsNotFound(err) {
-		// The row stays and is sent again; the server deduplicates.
-		log.Debug().Err(err).Str("event_id", id).Msg("Failed to remove access event from the outbox")
+	if err == nil || ent.IsNotFound(err) {
+		o.removeFailures = 0
+		return false
 	}
+	o.removeFailures++
+	log.Debug().Err(err).Str("event_id", id).Msg("Failed to remove access event from the outbox")
+	o.gate = o.now().Add(accessOutboxBackoff(o.removeFailures, o.jitter))
+	o.gateFromRetry = false
+	return true
 }
 
 // releaseDeferred makes every held event due again after an outage ends.
 func (o *accessEventOutbox) releaseDeferred(ctx context.Context) {
-	utc := o.now().UTC()
+	o.releaseHeldUntil(ctx, o.now())
+}
+
+// releaseHeldUntil moves every held event whose next attempt is later than at
+// to at.
+func (o *accessEventOutbox) releaseHeldUntil(ctx context.Context, at time.Time) {
+	utc := at.UTC()
 	err := retrySQLiteBusy(ctx, func() error {
 		return o.client.AccessEventOutbox.Update().
 			Where(accesseventoutbox.NextAttemptAtGT(utc)).
@@ -719,15 +755,20 @@ func (o *accessEventOutbox) finishRecovery() {
 }
 
 // retrySQLiteBusy retries op while SQLite reports the database or a table as
-// locked, which the agent's other writers can cause for a moment.
+// locked, which the agent's other writers can cause for a moment. With a
+// deadline on ctx it retries until the deadline, so an acked event is given
+// the whole insert budget; without one it gives up after ten tries and the
+// drain comes back to it later.
 func retrySQLiteBusy(ctx context.Context, op func() error) error {
+	_, bounded := ctx.Deadline()
 	var err error
 	for attempt := 1; ; attempt++ {
 		err = op()
-		if err == nil || attempt == 10 || !isSQLiteBusy(err) {
+		if err == nil || !isSQLiteBusy(err) || (!bounded && attempt == 10) {
 			return err
 		}
-		if sleepErr := sleepCtx(ctx, time.Duration(attempt)*20*time.Millisecond); sleepErr != nil {
+		pause := min(time.Duration(attempt)*20*time.Millisecond, 100*time.Millisecond)
+		if sleepErr := sleepCtx(ctx, pause); sleepErr != nil {
 			return err
 		}
 	}

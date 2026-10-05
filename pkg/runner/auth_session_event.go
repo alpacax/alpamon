@@ -272,9 +272,11 @@ func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 		log.Debug().Str("event_id", event.EventID).Msg("No access event store; dropping event")
 		return
 	}
-	// Stored on this goroutine, after the ack: PAM reads the ack once and
-	// does not wait for the close, so the insert adds nothing to the login,
-	// and a crash can lose only an event caught between the two.
+	// Closed before the insert so the login never waits on the database,
+	// even for a PAM module that reads the ack until EOF; the caller's own
+	// close afterwards is harmless. Stored on this goroutine, after the ack:
+	// a crash can lose only an event caught between the two.
+	_ = unixConn.Close()
 	am.outbox.enqueue(event)
 }
 

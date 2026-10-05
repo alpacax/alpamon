@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -298,6 +299,7 @@ func TestAccessEventOutbox_RetryableResponsesBackOff(t *testing.T) {
 	}{
 		{name: "transport error", err: errTestUnreachable, delays: serverWide},
 		{name: "429", status: http.StatusTooManyRequests, delays: serverWide},
+		{name: "401", status: http.StatusUnauthorized, delays: serverWide},
 		{name: "500", status: http.StatusInternalServerError, delays: eventOnly},
 		{name: "503", status: http.StatusServiceUnavailable, delays: serverWide},
 	}
@@ -339,8 +341,9 @@ func TestAccessEventOutbox_HonorsRetryAfter(t *testing.T) {
 
 	rows := outboxRows(t, o)
 	require.Len(t, rows, 1)
-	assert.Equal(t, clock.Now().Add(42*time.Second), rows[0].NextAttemptAt.UTC())
-	assert.Equal(t, 42*time.Second, wait)
+	assert.Equal(t, clock.Now().Add(43*time.Second), rows[0].NextAttemptAt.UTC(),
+		"the event waits out Retry-After plus its own step")
+	assert.Equal(t, 42*time.Second, wait, "the queue waits out Retry-After")
 }
 
 func TestAccessOutboxBackoff_CapsAtTenMinutes(t *testing.T) {
@@ -366,7 +369,7 @@ func TestParseRetryAfter(t *testing.T) {
 }
 
 func TestAccessEventOutbox_RejectionDropsWithOneWarn(t *testing.T) {
-	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusConflict} {
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden, http.StatusConflict} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			clock := newFakeOutboxClock()
 			sender := &fakeAccessEventSender{}
@@ -573,6 +576,7 @@ func TestAccessEventOutbox_PoisonEventDoesNotBlockTheQueue(t *testing.T) {
 		}
 		return http.StatusCreated, 0, nil
 	}
+	logs := captureLogs(t)
 
 	o.drainOnce(context.Background())
 
@@ -580,6 +584,69 @@ func TestAccessEventOutbox_PoisonEventDoesNotBlockTheQueue(t *testing.T) {
 	require.Len(t, rows, 1, "only the failing event stays")
 	assert.Equal(t, poison.EventID, rows[0].ID)
 	assert.Equal(t, []string{poison.EventID, good[0].EventID, good[1].EventID}, sender.sentIDs())
+	assert.Empty(t, nonEmptyLines(logs.String()), "one failing event is not an outage worth an Info line")
+}
+
+// TestAccessEventOutbox_DropResetsTheFailureStreak checks that the streak
+// which pauses the queue counts consecutive held deliveries only: a rejected
+// event in between ends it.
+func TestAccessEventOutbox_DropResetsTheFailureStreak(t *testing.T) {
+	clock := newFakeOutboxClock()
+	sender := &fakeAccessEventSender{}
+	o := newTestOutbox(t, clock, sender)
+
+	statuses := []int{
+		http.StatusInternalServerError,
+		http.StatusInternalServerError,
+		http.StatusBadRequest,
+		http.StatusInternalServerError,
+		http.StatusCreated,
+	}
+	byID := map[string]int{}
+	var last string
+	for _, status := range statuses {
+		clock.Advance(time.Second)
+		event := newTestAccessEvent(clock, "alice")
+		byID[event.EventID] = status
+		last = event.EventID
+		o.enqueue(event)
+	}
+	sender.respond = func(event NonAlpaconAccessEvent) (int, time.Duration, error) {
+		return byID[event.EventID], 0, nil
+	}
+
+	o.drainOnce(context.Background())
+
+	ids := sender.sentIDs()
+	require.Len(t, ids, 5, "the 400 ends the streak, so the queue never pauses")
+	assert.Equal(t, last, ids[4])
+}
+
+// TestAccessEventOutbox_FailedDeleteDoesNotResendInALoop covers a disk that
+// refuses deletes: a delivered row that cannot be removed is still due, and
+// must not be sent again at the full pace.
+func TestAccessEventOutbox_FailedDeleteDoesNotResendInALoop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outbox.db")
+	clock := newFakeOutboxClock()
+	sender := &fakeAccessEventSender{}
+	o := newTestOutboxOn(openTestOutboxDB(t, path), clock, sender)
+
+	raw, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer func() { _ = raw.Close() }()
+	_, err = raw.Exec("CREATE TRIGGER refuse_delete BEFORE DELETE ON access_event_outbox BEGIN SELECT RAISE(ABORT, 'disk is read-only'); END")
+	require.NoError(t, err)
+
+	o.enqueue(newTestAccessEvent(clock, "alice"))
+	wait := o.drainOnce(context.Background())
+
+	assert.Len(t, sender.sentIDs(), 1, "one send, then the drain backs off")
+	assert.GreaterOrEqual(t, wait, time.Second)
+	assert.Len(t, outboxRows(t, o), 1)
+
+	clock.Advance(wait)
+	o.drainOnce(context.Background())
+	assert.Len(t, sender.sentIDs(), 2, "retried once per backoff")
 }
 
 // TestAccessEventOutbox_ServerErrorOnOneEventDoesNotStallTheQueue covers an
@@ -730,22 +797,26 @@ func TestAccessEventOutbox_LogsOneInfoAfterAnOutage(t *testing.T) {
 
 func TestAccessEventOutbox_ReachableShortensTheBackoff(t *testing.T) {
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
-	var mu sync.Mutex
-	reachable := false
-	var sent []string
-	o := newAccessEventOutbox(client, func(_ context.Context, event NonAlpaconAccessEvent) (int, time.Duration, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		sent = append(sent, event.EventID)
-		if !reachable {
-			return 0, 0, errTestUnreachable
-		}
-		return http.StatusCreated, 0, nil
-	})
+	sender := &fakeAccessEventSender{}
+	o := newAccessEventOutbox(client, sender.send)
 	o.jitter = func(time.Duration) time.Duration { return 0 }
 
-	// Push the backoff far out, as a long outage would.
-	o.failures = 20
+	// The state a long outage leaves: the queue paused and the held event
+	// itself ten minutes out after many failed attempts.
+	now := time.Now()
+	event := newTestAccessEvent(newFakeOutboxClock(), "alice")
+	event.Timestamp = now.Add(-time.Hour)
+	payload, err := json.Marshal(event)
+	require.NoError(t, err)
+	require.NoError(t, client.AccessEventOutbox.Create().
+		SetID(event.EventID).
+		SetPayload(payload).
+		SetCreatedAt(event.Timestamp.UTC()).
+		SetAttempts(12).
+		SetNextAttemptAt(now.Add(10*time.Minute).UTC()).
+		Exec(context.Background()))
+	o.failures = 12
+
 	ctx, cancel := context.WithCancel(context.Background())
 	o.start(ctx)
 	defer func() {
@@ -753,22 +824,11 @@ func TestAccessEventOutbox_ReachableShortensTheBackoff(t *testing.T) {
 		assert.True(t, o.stop(5*time.Second), "the drain goroutine must exit")
 	}()
 
-	event := newTestAccessEvent(newFakeOutboxClock(), "alice")
-	event.Timestamp = time.Now()
-	o.enqueue(event)
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(sent) == 1
-	}, 5*time.Second, 10*time.Millisecond)
-
-	mu.Lock()
-	reachable = true
-	mu.Unlock()
 	o.notifyReachable()
 
 	require.Eventually(t, func() bool { return len(outboxRows(t, o)) == 0 }, 5*time.Second, 10*time.Millisecond,
 		"connectivity returning must not wait out a ten-minute backoff")
+	assert.Equal(t, []string{event.EventID}, sender.sentIDs())
 }
 
 // TestAccessEventOutbox_StopJoinsTheDrain is the goroutine-leak check: stop

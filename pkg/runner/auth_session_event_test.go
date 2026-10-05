@@ -2,6 +2,7 @@ package runner
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -303,9 +304,20 @@ func TestHandleSessionEvent_AcksAndStores(t *testing.T) {
 	am.detectLocalAccess = true
 
 	raw := []byte(`{"type":"session_event","username":"alice","service":"sshd","rhost":"203.0.113.5","tty":"pts/1","pid":712345,"ppid":712340}`)
-	resp := handleSessionEventSync(t, am, raw)
+	server, client := newSessionEventPipe(t)
+	done := make(chan struct{})
+	go func() {
+		am.handleSessionEvent(raw, server)
+		close(done)
+	}()
+	resp := readSessionEventAck(t, client)
 	assert.Equal(t, "session_event_response", resp.Type, "unexpected ack: %+v", resp)
 	assert.True(t, resp.Received, "unexpected ack: %+v", resp)
+	// The connection is closed before the insert, so a PAM module that reads
+	// to EOF is not held up by the database.
+	_, err := client.Read(make([]byte, 1))
+	assert.ErrorIs(t, err, io.EOF)
+	<-done
 
 	rows := outboxRows(t, o)
 	require.Len(t, rows, 1, "the event must be stored")
