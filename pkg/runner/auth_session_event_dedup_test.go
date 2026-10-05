@@ -58,8 +58,8 @@ func TestSessionEventRepeats_FullMapLetsEventsThrough(t *testing.T) {
 	assert.True(t, repeats.isRepeat(suLoginRequest()), "with room again, repeats are dropped")
 }
 
-// TestSessionEventRepeats_ClockSetBackLetsEventThrough verifies a wall clock
-// stepped backwards does not stretch the window.
+// TestSessionEventRepeats_ClockSetBackLetsEventThrough verifies a clock that
+// reads earlier than the stored event lets the next one through.
 func TestSessionEventRepeats_ClockSetBackLetsEventThrough(t *testing.T) {
 	clock := newFakeOutboxClock()
 	repeats := sessionEventRepeats{now: clock.Now}

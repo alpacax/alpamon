@@ -287,7 +287,11 @@ func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 	// close afterwards is harmless. enqueue never blocks: the outbox's writer
 	// stores the event.
 	_ = unixConn.Close()
-	am.outbox.enqueue(event)
+	if !am.outbox.enqueue(event) {
+		// The event never reached the outbox, so an identical frame after it
+		// is the only copy left and must not be dropped as a repeat.
+		am.sessionRepeats.forget(req)
+	}
 }
 
 func (am *AuthManager) sendSessionEventResponse(conn net.Conn, received bool) {

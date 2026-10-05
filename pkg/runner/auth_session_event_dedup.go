@@ -46,17 +46,9 @@ type sessionEventRepeats struct {
 // same service could not be told apart. rhost is empty for every local login,
 // so it is compared but not required.
 func (r *sessionEventRepeats) isRepeat(req SessionEventRequest) bool {
-	if req.PID <= 0 || req.PPID <= 0 || req.TTY == "" {
+	key, ok := sessionEventKeyOf(req)
+	if !ok {
 		return false
-	}
-	key := sessionEventKey{
-		eventType: req.Type,
-		username:  req.Username,
-		service:   req.Service,
-		rhost:     req.RHost,
-		tty:       req.TTY,
-		pid:       req.PID,
-		ppid:      req.PPID,
 	}
 
 	r.mu.Lock()
@@ -84,8 +76,39 @@ func (r *sessionEventRepeats) isRepeat(req SessionEventRequest) bool {
 	return false
 }
 
-// withinRepeatWindow is false for a clock that went backwards, so a step in
-// wall time lets an event through rather than dropping it.
+// forget drops what isRepeat remembered for req, for an event that was not
+// stored after all.
+func (r *sessionEventRepeats) forget(req SessionEventRequest) {
+	key, ok := sessionEventKeyOf(req)
+	if !ok {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.stored, key)
+}
+
+// sessionEventKeyOf builds the key for req, or reports false when req lacks a
+// field the key needs.
+func sessionEventKeyOf(req SessionEventRequest) (sessionEventKey, bool) {
+	if req.PID <= 0 || req.PPID <= 0 || req.TTY == "" {
+		return sessionEventKey{}, false
+	}
+	return sessionEventKey{
+		eventType: req.Type,
+		username:  req.Username,
+		service:   req.Service,
+		rhost:     req.RHost,
+		tty:       req.TTY,
+		pid:       req.PID,
+		ppid:      req.PPID,
+	}, true
+}
+
+// withinRepeatWindow measures elapsed time with the monotonic reading
+// time.Now carries, so a wall-clock step neither stretches nor shrinks the
+// window. A negative elapsed time, which only a clock without that reading can
+// produce, lets the event through rather than dropping it.
 func withinRepeatWindow(storedAt, now time.Time) bool {
 	elapsed := now.Sub(storedAt)
 	return elapsed >= 0 && elapsed < sessionEventRepeatWindow

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -495,4 +496,38 @@ func TestHandleSessionEvent_IncompleteEventIsNeverARepeat(t *testing.T) {
 			assert.Equal(t, 2, storeSessionEvents(t, time.Millisecond, req, req))
 		})
 	}
+}
+
+// TestHandleSessionEvent_RepeatOfAnEventTheQueueDroppedIsStored verifies that
+// when the outbox queue is full and drops the first copy, the identical frame
+// after it is stored rather than dropped as a repeat of an event that was
+// never kept.
+func TestHandleSessionEvent_RepeatOfAnEventTheQueueDroppedIsStored(t *testing.T) {
+	db := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
+	o := newAccessEventOutbox(db, (&fakeAccessEventSender{}).send)
+	o.inbox = make(chan accessOutboxWrite, 1)
+	require.True(t, o.enqueue(newTestAccessEvent(newFakeOutboxClock(), "bob")), "fills the queue")
+	am := newTestAuthManager()
+	am.outbox = o
+	am.detectLocalAccess = true
+
+	// The writer is not running yet, so this copy finds the queue full.
+	server, client := newSessionEventPipe(t)
+	done := make(chan struct{})
+	go func() {
+		am.handleSessionEvent([]byte(suLoginFrame), server)
+		close(done)
+	}()
+	assert.True(t, readSessionEventAck(t, client).Received)
+	<-done
+
+	o.startWriter()
+	t.Cleanup(func() { o.stop(5 * time.Second) })
+	assert.True(t, handleSessionEventSync(t, am, []byte(suLoginFrame)).Received)
+
+	rows := outboxRows(t, o)
+	require.Len(t, rows, 2, "the filler and the second copy are stored")
+	var ev NonAlpaconAccessEvent
+	require.NoError(t, json.Unmarshal(rows[1].Payload, &ev))
+	assert.Equal(t, "alice", ev.Username)
 }
