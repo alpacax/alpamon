@@ -1,6 +1,7 @@
 package file
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -81,4 +84,41 @@ func TestFetchFromURL_Targets(t *testing.T) {
 			assert.Equal(t, tc.wantAuth, hit.auth)
 		})
 	}
+}
+
+func TestFetchFromURL_FailuresNameOnlyTheHost(t *testing.T) {
+	var logged bytes.Buffer
+	prevLogger := log.Logger
+	t.Cleanup(func() { log.Logger = prevLogger })
+	log.Logger = zerolog.New(&logged)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := config.GlobalSettings
+	t.Cleanup(func() { config.GlobalSettings = prev })
+	config.GlobalSettings.ServerURL = srv.URL
+
+	h := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+
+	t.Run("non-2xx response", func(t *testing.T) {
+		_, err := h.fetchFromURL(context.Background(), "/files/secret-path/?sig=secret-sig")
+		require.Error(t, err)
+		assert.Contains(t, logged.String(), strings.TrimPrefix(srv.URL, "http://"))
+		assert.NotContains(t, logged.String(), "secret")
+		assert.NotContains(t, err.Error(), "secret")
+	})
+
+	t.Run("transport error", func(t *testing.T) {
+		closed := httptest.NewServer(http.NotFoundHandler())
+		closedURL := closed.URL
+		closed.Close()
+
+		_, err := h.fetchFromURL(context.Background(), closedURL+"/files/secret-path/?sig=secret-sig")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), strings.TrimPrefix(closedURL, "http://"))
+		assert.NotContains(t, err.Error(), "secret")
+	})
 }

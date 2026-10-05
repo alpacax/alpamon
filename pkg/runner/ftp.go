@@ -74,7 +74,7 @@ func (fc *FtpClient) RunFtpBackground() {
 	fc.log.Debug().Msg("Opening websocket for ftp session.")
 
 	if err := fc.connect(); err != nil {
-		fc.log.Debug().Err(err).Msgf("Failed to connect to ftp websocket at %s.", ServerHostFromURL(fc.url))
+		fc.log.Debug().Err(err).Msgf("Failed to connect to ftp websocket at %s.", serverHostFor(fc.url, fc.serverURL))
 		return
 	}
 	defer fc.close()

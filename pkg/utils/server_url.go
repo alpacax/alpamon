@@ -34,7 +34,7 @@ func ResolveServerURL(rawURL string, server *url.URL, scheme string) (*url.URL, 
 	}
 
 	if parsed.Scheme != "" {
-		if parsed.Host == "" {
+		if parsed.Hostname() == "" {
 			return nil, fmt.Errorf("%s URL has no host", parsed.Scheme)
 		}
 		return parsed, nil
@@ -43,7 +43,7 @@ func ResolveServerURL(rawURL string, server *url.URL, scheme string) (*url.URL, 
 	if !strings.HasPrefix(rawURL, "/") {
 		return nil, errors.New("path-only URL must start with /")
 	}
-	if server == nil || server.Host == "" {
+	if server == nil || server.Hostname() == "" {
 		return nil, errors.New("no server host to resolve a path-only URL against")
 	}
 	return &url.URL{

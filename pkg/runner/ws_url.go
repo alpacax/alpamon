@@ -70,12 +70,18 @@ func resolveWebSocketURL(rawURL, serverURL string) (string, error) {
 // host is the only part of such a URL that may be logged. A path-only URL
 // reports the configured server's host, which is where it resolves.
 func ServerHostFromURL(rawURL string) string {
+	return serverHostFor(rawURL, config.GlobalSettings.ServerURL)
+}
+
+// serverHostFor is ServerHostFromURL against an explicit server URL, for the
+// WebFTP worker, which runs without the agent's configuration.
+func serverHostFor(rawURL, serverURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return unknownServerHost
 	}
 	if parsed.Host == "" && parsed.Scheme == "" && strings.HasPrefix(rawURL, "/") {
-		parsed, err = url.Parse(config.GlobalSettings.ServerURL)
+		parsed, err = url.Parse(serverURL)
 		if err != nil {
 			return unknownServerHost
 		}

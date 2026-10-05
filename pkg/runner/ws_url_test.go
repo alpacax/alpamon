@@ -37,6 +37,12 @@ func TestServerHostFromURL(t *testing.T) {
 	}
 }
 
+func TestServerHostFor_UsesTheGivenServerURL(t *testing.T) {
+	setServerURL(t, "")
+	assert.Equal(t, "console.example.com:8443", serverHostFor("/ws/ftp/abc123secret/", "https://console.example.com:8443"))
+	assert.Equal(t, "invalid", serverHostFor("/ws/ftp/abc123secret/", ""))
+}
+
 func TestSanitizeURLError(t *testing.T) {
 	t.Run("replaces the URL with its host", func(t *testing.T) {
 		inner := errors.New("dial tcp: connection refused")

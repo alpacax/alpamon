@@ -595,12 +595,17 @@ func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.R
 	client := utils.NewHTTPClient()
 	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
+		// The path and query may carry a token or a signature; name only the host.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = fmt.Errorf("%s %s: %w", urlErr.Op, parsedRequestURL.Host, urlErr.Err)
+		}
 		return nil, fmt.Errorf("failed to download content from URL: %w", err)
 	}
 
 	if resp.StatusCode/100 != 2 {
 		_ = resp.Body.Close()
-		log.Error().Msgf("Failed to download content from URL: %d %s", resp.StatusCode, parsedRequestURL)
+		log.Error().Msgf("Failed to download content from %s: %d", parsedRequestURL.Host, resp.StatusCode)
 		return nil, errors.New("downloading content failed")
 	}
 

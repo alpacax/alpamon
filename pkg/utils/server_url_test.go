@@ -32,6 +32,7 @@ func TestResolveServerURL(t *testing.T) {
 		{name: "backslash refused", raw: "/ws\\channel/", wantErr: "backslash"},
 		{name: "backslash in host refused", raw: "wss://console.example.com\\@other.example.com/ws/", wantErr: "backslash"},
 		{name: "absolute URL without host refused", raw: "wss:/ws/channel/", wantErr: "has no host"},
+		{name: "absolute URL with only a port refused", raw: "wss://:443/ws/channel/", wantErr: "has no host"},
 		{name: "unparsable URL refused", raw: "/ws/\x7f", wantErr: "does not parse"},
 	}
 
@@ -53,6 +54,9 @@ func TestResolveServerURL_PathOnlyNeedsServerHost(t *testing.T) {
 	require.ErrorContains(t, err, "no server host")
 
 	_, err = ResolveServerURL("/ws/channel/", nil, "wss")
+	require.ErrorContains(t, err, "no server host")
+
+	_, err = ResolveServerURL("/ws/channel/", &url.URL{Scheme: "https", Host: ":443"}, "wss")
 	require.ErrorContains(t, err, "no server host")
 }
 
