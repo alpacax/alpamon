@@ -577,7 +577,12 @@ func TestAccessEventOutbox_CapKeepsTheEarliestEvents(t *testing.T) {
 		put(o, event)
 	}
 	clock.Advance(time.Second)
-	put(o, newTestAccessEvent(clock, "mallory"), newTestAccessEvent(clock, "mallory"))
+	// One batch, written here rather than through the writer: two enqueues
+	// can reach the writer as two batches, and each batch reports its own Warn.
+	o.writeBatch([]accessOutboxWrite{
+		{event: newTestAccessEvent(clock, "mallory")},
+		{event: newTestAccessEvent(clock, "mallory")},
+	})
 
 	rows := outboxRows(t, o)
 	require.Len(t, rows, 3)
