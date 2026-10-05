@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -402,4 +403,133 @@ func TestAccessPolicy_ParsesDetectLocalAccess(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(raw), &policy), "unmarshal failed")
 	assert.True(t, policy.DetectLocalAccess, "expected DetectLocalAccess=true")
 	assert.False(t, policy.BlockLocalSudo, "expected BlockLocalSudo=false")
+}
+
+// suLoginFrame is the session_event one `su -` sends from a terminal: no
+// rhost, a tty, and the pid of the su process.
+const suLoginFrame = `{"type":"session_event","username":"alice","service":"su-l","tty":"/dev/pts/3","pid":812345,"ppid":812300}`
+
+// TestHandleSessionEvent_RepeatedEventStoredOnce reproduces a hook registered
+// for both su and su-l, where su-l includes su: one `su -` runs the hook twice
+// in the same PAM transaction and sends the same frame twice. Only one login
+// may be stored.
+func TestHandleSessionEvent_RepeatedEventStoredOnce(t *testing.T) {
+	am, o := newSessionEventTestAuthManager(t)
+	am.detectLocalAccess = true
+
+	assert.True(t, handleSessionEventSync(t, am, []byte(suLoginFrame)).Received)
+	assert.True(t, handleSessionEventSync(t, am, []byte(suLoginFrame)).Received, "a repeat is still acked")
+
+	assert.Len(t, outboxRows(t, o), 1, "one su must be stored as one login")
+}
+
+// suLoginRequest is suLoginFrame as a request, for tests that vary one field.
+func suLoginRequest() SessionEventRequest {
+	return SessionEventRequest{
+		Type:     "session_event",
+		Username: "alice",
+		Service:  "su-l",
+		TTY:      "/dev/pts/3",
+		PID:      812345,
+		PPID:     812300,
+	}
+}
+
+// storeSessionEvents runs each request through intake on a fake clock that
+// advances by gap between them, and returns how many outbox rows resulted.
+func storeSessionEvents(t *testing.T, gap time.Duration, requests ...SessionEventRequest) int {
+	t.Helper()
+	am, o := newSessionEventTestAuthManager(t)
+	am.detectLocalAccess = true
+	clock := newFakeOutboxClock()
+	am.sessionRepeats.now = clock.Now
+
+	for _, req := range requests {
+		raw, err := json.Marshal(req)
+		require.NoError(t, err)
+		require.True(t, handleSessionEventSync(t, am, raw).Received)
+		clock.Advance(gap)
+	}
+	return len(outboxRows(t, o))
+}
+
+// TestHandleSessionEvent_DistinctLoginsAreBothStored verifies that two logins
+// differing in any one identifying field are never taken for a repeat.
+func TestHandleSessionEvent_DistinctLoginsAreBothStored(t *testing.T) {
+	cases := map[string]func(*SessionEventRequest){
+		"username": func(r *SessionEventRequest) { r.Username = "bob" },
+		"service":  func(r *SessionEventRequest) { r.Service = "su" },
+		"rhost":    func(r *SessionEventRequest) { r.RHost = "203.0.113.5" },
+		"tty":      func(r *SessionEventRequest) { r.TTY = "/dev/pts/4" },
+		"pid":      func(r *SessionEventRequest) { r.PID++ },
+		"ppid":     func(r *SessionEventRequest) { r.PPID++ },
+	}
+	for field, change := range cases {
+		t.Run(field, func(t *testing.T) {
+			other := suLoginRequest()
+			change(&other)
+			assert.Equal(t, 2, storeSessionEvents(t, time.Millisecond, suLoginRequest(), other))
+		})
+	}
+}
+
+// TestHandleSessionEvent_RepeatWindow verifies the same event is dropped only
+// while it is inside the window, measured from the stored one.
+func TestHandleSessionEvent_RepeatWindow(t *testing.T) {
+	justInside := sessionEventRepeatWindow - time.Millisecond
+	assert.Equal(t, 1, storeSessionEvents(t, justInside, suLoginRequest(), suLoginRequest()), "a repeat inside the window is dropped")
+	assert.Equal(t, 2, storeSessionEvents(t, sessionEventRepeatWindow, suLoginRequest(), suLoginRequest()), "the same event after the window is a new login")
+}
+
+// TestHandleSessionEvent_IncompleteEventIsNeverARepeat verifies an event that
+// lacks an identifying field is always stored, because without it two
+// separate logins could look identical.
+func TestHandleSessionEvent_IncompleteEventIsNeverARepeat(t *testing.T) {
+	cases := map[string]func(*SessionEventRequest){
+		"tty":  func(r *SessionEventRequest) { r.TTY = "" },
+		"ppid": func(r *SessionEventRequest) { r.PPID = 0 },
+	}
+	for field, change := range cases {
+		t.Run(field, func(t *testing.T) {
+			req := suLoginRequest()
+			change(&req)
+			assert.Equal(t, 2, storeSessionEvents(t, time.Millisecond, req, req))
+		})
+	}
+}
+
+// TestHandleSessionEvent_RepeatOfAnEventTheQueueDroppedIsStored verifies that
+// when the outbox queue is full and drops the first copy, the identical frame
+// after it is stored rather than dropped as a repeat of an event that was
+// never kept.
+func TestHandleSessionEvent_RepeatOfAnEventTheQueueDroppedIsStored(t *testing.T) {
+	db := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
+	o := newAccessEventOutbox(db, (&fakeAccessEventSender{}).send)
+	o.inbox = make(chan accessOutboxWrite, 1)
+	require.True(t, o.enqueue(newTestAccessEvent(newFakeOutboxClock(), "bob")), "fills the queue")
+	am := newTestAuthManager()
+	am.outbox = o
+	am.detectLocalAccess = true
+
+	// The writer is not running yet, so this copy finds the queue full.
+	server, client := newSessionEventPipe(t)
+	done := make(chan struct{})
+	go func() {
+		am.handleSessionEvent([]byte(suLoginFrame), server)
+		close(done)
+	}()
+	assert.True(t, readSessionEventAck(t, client).Received)
+	<-done
+
+	o.startWriter()
+	t.Cleanup(func() { o.stop(5 * time.Second) })
+	// Waits until the writer has taken the filler, so the queue has room.
+	o.flush()
+	assert.True(t, handleSessionEventSync(t, am, []byte(suLoginFrame)).Received)
+
+	rows := outboxRows(t, o)
+	require.Len(t, rows, 2, "the filler and the second copy are stored")
+	var ev NonAlpaconAccessEvent
+	require.NoError(t, json.Unmarshal(rows[1].Payload, &ev))
+	assert.Equal(t, "alice", ev.Username)
 }

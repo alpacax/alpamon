@@ -349,17 +349,20 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 
 // enqueue hands an accepted event to the writer. It runs on the auth socket
 // goroutine after the PAM ack is written and the socket closed, and never
-// blocks: with the queue full the event is dropped and counted.
-func (o *accessEventOutbox) enqueue(event NonAlpaconAccessEvent) {
+// blocks: with the queue full the event is dropped and counted. It reports
+// whether the event was taken, which is false only for that drop.
+func (o *accessEventOutbox) enqueue(event NonAlpaconAccessEvent) bool {
 	// The read lock lets stop wait out a hand-off already under way, so the
 	// writer drains it; one that comes after stop has begun cannot rely on
 	// the writer and stores the event itself while the process lasts.
+	taken := true
 	o.admitMu.RLock()
 	closed := o.closed
 	if !closed {
 		select {
 		case o.inbox <- accessOutboxWrite{event: event}:
 		default:
+			taken = false
 			o.lost.add(1, o.now())
 			log.Debug().Str("event_id", event.EventID).Msg("Access event queue full; dropping event")
 		}
@@ -370,6 +373,7 @@ func (o *accessEventOutbox) enqueue(event NonAlpaconAccessEvent) {
 		defer cancel()
 		o.store(ctx, []NonAlpaconAccessEvent{event})
 	}
+	return taken
 }
 
 // flush waits until everything enqueued before it is stored or given up on.
