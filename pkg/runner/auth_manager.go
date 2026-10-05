@@ -147,6 +147,9 @@ type AuthManager struct {
 	// outbox holds non-Alpacon access events until the server has them. Set
 	// once by UseAccessEventStore before Start; nil means events are dropped.
 	outbox *accessEventOutbox
+	// sessionRepeats drops a session event the PAM stack sent twice for one
+	// login. It has its own lock, so intake never takes mu for it.
+	sessionRepeats sessionEventRepeats
 }
 
 const (

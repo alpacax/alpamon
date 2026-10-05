@@ -271,6 +271,17 @@ func (am *AuthManager) handleSessionEvent(data []byte, unixConn net.Conn) {
 		log.Debug().Str("event_id", event.EventID).Msg("No access event store; dropping event")
 		return
 	}
+	// A hook registered for both su and su-l, where su-l includes su, runs
+	// twice for one `su -` and sends the same frame twice. Checked on the raw
+	// request, before truncation, so two values cut to the same prefix never
+	// collide.
+	if am.sessionRepeats.isRepeat(req) {
+		log.Debug().
+			Str("username", req.Username).
+			Int("pid", req.PID).
+			Msg("Session event dropped: repeat from the same PAM transaction")
+		return
+	}
 	// Closed before the hand-off so the login never waits on the outbox,
 	// even for a PAM module that reads the ack until EOF; the caller's own
 	// close afterwards is harmless. enqueue never blocks: the outbox's writer
