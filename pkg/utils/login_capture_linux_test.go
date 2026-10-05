@@ -21,6 +21,7 @@ func TestGetLoginCaptureOnThisHost(t *testing.T) {
 	data, err := json.Marshal(got)
 	assert.NoError(t, err)
 	t.Logf("login_capture on this host: %s", data)
+	t.Logf("libpam module directory on this host: %q", newLoginCaptureCollector("/").libpamModuleDir())
 	assert.Equal(t, 1, got.Schema)
 	assert.Contains(t, []string{PAMModulePresent, PAMModuleMissing}, got.PAMModule)
 	for _, hook := range []string{got.Hooks.SSHD, got.Hooks.Login, got.Hooks.Su} {
