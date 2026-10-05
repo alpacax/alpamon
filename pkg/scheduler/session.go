@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -208,8 +209,21 @@ func (session *Session) Delete(url string, rawBody any, timeout time.Duration) (
 // (avoids per-write chunk header overhead). Overwrites req.ContentLength
 // unconditionally because http.NewRequest auto-fills it for bytes/strings
 // readers, which would defeat a caller's -1 chunked opt-in.
-func (session *Session) MultipartRequest(url string, body io.Reader, contentType string, contentLength int64, timeout time.Duration) ([]byte, int, error) {
-	req, err := http.NewRequest(http.MethodPost, url, body)
+//
+// A path-only rawURL resolves to the configured server. The agent key goes only
+// to the configured server, including across redirects; any other host is
+// uploaded to without it.
+func (session *Session) MultipartRequest(rawURL string, body io.Reader, contentType string, contentLength int64, timeout time.Duration) ([]byte, int, error) {
+	server, err := url.Parse(session.BaseURL)
+	if err != nil {
+		return nil, 0, fmt.Errorf("invalid server URL: %w", err)
+	}
+	target, err := utils.ResolveServerURL(rawURL, server, server.Scheme)
+	if err != nil {
+		return nil, 0, fmt.Errorf("invalid upload URL: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, target.String(), body)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -220,11 +234,15 @@ func (session *Session) MultipartRequest(url string, body io.Reader, contentType
 
 	req = req.WithContext(ctx)
 
-	req.Header.Set("Authorization", session.Authorization)
+	if utils.IsServerURL(target, server) {
+		req.Header.Set("Authorization", session.Authorization)
+	}
 	req.Header.Set("User-Agent", utils.GetUserAgent("alpamon"))
 	req.Header.Set("Content-Type", contentType)
 
-	resp, err := session.Client.Do(req)
+	client := *session.Client
+	client.CheckRedirect = utils.ServerOnlyAuthorization(server)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}

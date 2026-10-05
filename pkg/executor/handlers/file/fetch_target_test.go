@@ -104,7 +104,7 @@ func TestFetchFromURL_FailuresNameOnlyTheHost(t *testing.T) {
 	h := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 
 	t.Run("non-2xx response", func(t *testing.T) {
-		_, err := h.fetchFromURL(context.Background(), "/files/secret-path/?sig=secret-sig")
+		_, err := h.fetchFromURL(context.Background(), srv.URL+"/files/secret-path/?sig=secret-sig")
 		require.Error(t, err)
 		assert.Contains(t, logged.String(), strings.TrimPrefix(srv.URL, "http://"))
 		assert.NotContains(t, logged.String(), "secret")
@@ -121,4 +121,61 @@ func TestFetchFromURL_FailuresNameOnlyTheHost(t *testing.T) {
 		assert.Contains(t, err.Error(), strings.TrimPrefix(closedURL, "http://"))
 		assert.NotContains(t, err.Error(), "secret")
 	})
+}
+
+func TestFetchFromURL_RedirectCarriesTheKeyOnlyOnTheServer(t *testing.T) {
+	type hit struct{ server, auth string }
+	hits := make(chan hit, 8)
+
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits <- hit{server: "other", auth: r.Header.Get("Authorization")}
+		_, _ = io.WriteString(w, "content")
+	}))
+	t.Cleanup(other.Close)
+
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/to-server":
+			http.Redirect(w, r, srvURL+"/final", http.StatusFound)
+		case "/to-other-port":
+			// Same hostname, different port: Go's own redirect policy keeps
+			// the Authorization header here.
+			http.Redirect(w, r, other.URL+"/final", http.StatusFound)
+		default:
+			hits <- hit{server: "server", auth: r.Header.Get("Authorization")}
+			_, _ = io.WriteString(w, "content")
+		}
+	}))
+	t.Cleanup(srv.Close)
+	srvURL = srv.URL
+
+	prev := config.GlobalSettings
+	t.Cleanup(func() { config.GlobalSettings = prev })
+	config.GlobalSettings.ServerURL = srv.URL
+	config.GlobalSettings.ID = "agent-id"
+	config.GlobalSettings.Key = "agent-key"
+	const agentAuth = `id="agent-id", key="agent-key"`
+
+	tests := []struct {
+		name   string
+		target string
+		want   hit
+	}{
+		{name: "redirect within the server keeps the key", target: "/to-server", want: hit{server: "server", auth: agentAuth}},
+		{name: "redirect to another port drops the key", target: "/to-other-port", want: hit{server: "other"}},
+	}
+
+	h := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rc, err := h.fetchFromURL(context.Background(), tc.target)
+			require.NoError(t, err)
+			_, _ = io.Copy(io.Discard, rc)
+			_ = rc.Close()
+
+			require.Len(t, hits, 1)
+			assert.Equal(t, tc.want, <-hits)
+		})
+	}
 }
