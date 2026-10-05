@@ -567,20 +567,23 @@ func (h *FileHandler) getFileData(ctx context.Context, args *common.CommandArgs)
 }
 
 // fetchFromURL returns the response body. Caller must Close to release the connection.
+// A path-only contentURL resolves to the configured server. The agent's key is
+// attached only when the URL points at the configured server; any other host,
+// such as object storage, is fetched without it.
 func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.ReadCloser, error) {
-	parsedRequestURL, err := url.Parse(contentURL)
+	parsedServerURL, err := url.Parse(config.GlobalSettings.ServerURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse URL '%s': %w", contentURL, err)
+		return nil, fmt.Errorf("failed to parse url: %w", err)
+	}
+
+	parsedRequestURL, err := utils.ResolveServerURL(contentURL, parsedServerURL, parsedServerURL.Scheme)
+	if err != nil {
+		return nil, fmt.Errorf("invalid file URL: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedRequestURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	parsedServerURL, err := url.Parse(config.GlobalSettings.ServerURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse url: %w", err)
 	}
 
 	if parsedRequestURL.Host == parsedServerURL.Host && parsedRequestURL.Scheme == parsedServerURL.Scheme {

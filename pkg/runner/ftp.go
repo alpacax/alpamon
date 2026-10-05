@@ -27,6 +27,7 @@ type FtpClient struct {
 	conn             *websocket.Conn
 	requestHeader    http.Header
 	url              string
+	serverURL        string
 	homeDirectory    string
 	workingDirectory string
 	log              logger.FtpLogger
@@ -57,6 +58,7 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 	client := &FtpClient{
 		requestHeader:    headers,
 		url:              data.URL,
+		serverURL:        data.ServerURL,
 		homeDirectory:    homeDir,
 		workingDirectory: homeDir,
 		log:              data.Logger,
@@ -71,15 +73,8 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 func (fc *FtpClient) RunFtpBackground() {
 	fc.log.Debug().Msg("Opening websocket for ftp session.")
 
-	var err error
-	dialer := websocket.Dialer{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
-		},
-	}
-	fc.conn, _, err = dialer.Dial(fc.url, fc.requestHeader)
-	if err != nil {
-		fc.log.Debug().Err(err).Msgf("Failed to connect to pty websocket at %s.", fc.url)
+	if err := fc.connect(); err != nil {
+		fc.log.Debug().Err(err).Msgf("Failed to connect to ftp websocket at %s.", ServerHostFromURL(fc.url))
 		return
 	}
 	defer fc.close()
@@ -92,6 +87,26 @@ func (fc *FtpClient) RunFtpBackground() {
 	go fc.write(ctx, cancel)
 
 	<-ctx.Done()
+}
+
+// connect dials the WebFTP channel. The worker runs without the agent's
+// configuration, so the URL is checked against the server URL it was started with.
+func (fc *FtpClient) connect() error {
+	target, err := resolveWebSocketURL(fc.url, fc.serverURL)
+	if err != nil {
+		return err
+	}
+	dialer := websocket.Dialer{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
+		},
+	}
+	conn, _, err := dialer.Dial(target, fc.requestHeader)
+	if err != nil {
+		return sanitizeURLError(err)
+	}
+	fc.conn = conn
+	return nil
 }
 
 func (fc *FtpClient) read(ctx context.Context, cancel context.CancelFunc) {
