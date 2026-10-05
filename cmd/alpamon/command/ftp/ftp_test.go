@@ -1,35 +1,52 @@
 package ftp
 
 import (
-	"os"
-	"path/filepath"
+	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"io"
+	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func parseWorkerArgs(t *testing.T, args []string) runner.FtpConfigData {
+func parseWorkerArgs(t *testing.T, args []string, stdin io.Reader) (runner.FtpConfigData, error) {
 	t.Helper()
 	cmd := newFtpCmd()
 	require.NoError(t, cmd.ParseFlags(args))
 	positional := cmd.Flags().Args()
 	require.NoError(t, cmd.ValidateArgs(positional))
-	return configData(cmd, positional)
+	return configData(cmd, positional, stdin)
 }
 
-// unsetCAEnv clears the CA variable for the test and restores it afterwards.
-func unsetCAEnv(t *testing.T) {
+// testCertPEM returns a self-signed certificate in PEM form.
+func testCertPEM(t *testing.T) []byte {
 	t.Helper()
-	t.Setenv(runner.FtpCaCertEnv, "")
-	require.NoError(t, os.Unsetenv(runner.FtpCaCertEnv))
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test CA"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IsCA:         true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 func TestConfigData_VerifiesByDefault(t *testing.T) {
-	unsetCAEnv(t)
-	data := parseWorkerArgs(t, []string{"wss://console.example.com/ws/ftp/", "https://console.example.com", "/home/u"})
+	data, err := parseWorkerArgs(t, []string{"wss://console.example.com/ws/ftp/", "https://console.example.com", "/home/u"}, strings.NewReader("ignored"))
+	require.NoError(t, err)
 
 	assert.Equal(t, "wss://console.example.com/ws/ftp/", data.URL)
 	assert.Equal(t, "https://console.example.com", data.ServerURL)
@@ -39,41 +56,52 @@ func TestConfigData_VerifiesByDefault(t *testing.T) {
 }
 
 func TestConfigData_ReadsWhatTheAgentPasses(t *testing.T) {
-	caPEM := "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
-	caPath := filepath.Join(t.TempDir(), "ca.pem")
-	require.NoError(t, os.WriteFile(caPath, []byte(caPEM), 0o600))
+	cert := testCertPEM(t)
+	// A bundle over 128 KiB, the most one environment string can hold on Linux.
+	bundle := bytes.Repeat(cert, 128*1024/len(cert)+1)
+	require.Greater(t, len(bundle), 128*1024)
 
 	tests := []struct {
 		name      string
 		sslVerify bool
-		caCert    string
-		wantPEM   string
+		caPEM     []byte
 	}{
 		{name: "verification on", sslVerify: true},
 		{name: "verification off", sslVerify: false},
-		{name: "configured CA", sslVerify: true, caCert: caPath, wantPEM: caPEM},
+		{name: "configured CA", sslVerify: true, caPEM: cert},
+		{name: "CA bundle over 128 KiB", sslVerify: true, caPEM: bundle},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			unsetCAEnv(t)
-			env, err := runner.FtpWorkerEnv(tc.caCert)
-			require.NoError(t, err)
-			for _, kv := range env {
-				name, value, ok := strings.Cut(kv, "=")
-				require.True(t, ok)
-				t.Setenv(name, value)
-			}
-
-			args := runner.FtpWorkerArgs("wss://console.example.com/ws/ftp/", "https://console.example.com", "-home", tc.sslVerify)
+			args := runner.FtpWorkerArgs("wss://console.example.com/ws/ftp/", "https://console.example.com", "-home", tc.sslVerify, tc.caPEM != nil)
 			require.Equal(t, "ftp", args[0])
 
-			data := parseWorkerArgs(t, args[1:])
+			data, err := parseWorkerArgs(t, args[1:], bytes.NewReader(tc.caPEM))
+			require.NoError(t, err)
 			assert.Equal(t, "wss://console.example.com/ws/ftp/", data.URL)
 			assert.Equal(t, "https://console.example.com", data.ServerURL)
 			assert.Equal(t, "-home", data.HomeDirectory)
 			assert.Equal(t, !tc.sslVerify, data.SkipSSLVerify)
-			assert.Equal(t, tc.wantPEM, string(data.CaCertPEM))
+			assert.Equal(t, tc.caPEM, data.CaCertPEM)
+		})
+	}
+}
+
+func TestConfigData_RefusesABadCAOnStdin(t *testing.T) {
+	tests := []struct {
+		name    string
+		stdin   []byte
+		wantErr string
+	}{
+		{name: "empty", stdin: nil, wantErr: "no CA certificate"},
+		{name: "over the cap", stdin: make([]byte, runner.MaxFtpCACertSize+1), wantErr: "larger than"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := runner.FtpWorkerArgs("wss://console.example.com/ws/ftp/", "https://console.example.com", "/home/u", true, true)
+			_, err := parseWorkerArgs(t, args[1:], bytes.NewReader(tc.stdin))
+			assert.ErrorContains(t, err, tc.wantErr)
 		})
 	}
 }

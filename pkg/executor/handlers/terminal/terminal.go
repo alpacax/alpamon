@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -176,7 +177,7 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 	}
 
 	// Read here rather than in the worker, which runs as the session's user.
-	caEnv, err := runner.FtpWorkerEnv(config.GlobalSettings.CaCert)
+	caCertPEM, err := runner.ReadFtpCACert(config.GlobalSettings.CaCert)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to prepare the ftp worker's TLS settings")
 		return 1, fmt.Sprintf("openftp: Failed to prepare TLS settings. %v", err), nil
@@ -187,9 +188,10 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 		config.GlobalSettings.ServerURL,
 		homeDirectory,
 		config.GlobalSettings.SSLVerify,
+		caCertPEM != nil,
 	)...)
-	if caEnv != nil {
-		cmd.Env = append(os.Environ(), caEnv...)
+	if caCertPEM != nil {
+		cmd.Stdin = bytes.NewReader(caCertPEM)
 	}
 	cmd.SysProcAttr = sysProcAttr
 	cmd.Stdout = os.Stdout

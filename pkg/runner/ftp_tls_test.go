@@ -102,25 +102,43 @@ func TestNewFtpClient_RefusesACAWithNoCertificate(t *testing.T) {
 	assert.Nil(t, fc)
 }
 
-func TestFtpWorkerEnv(t *testing.T) {
+func TestReadFtpCACert(t *testing.T) {
 	t.Run("no CA configured", func(t *testing.T) {
-		env, err := FtpWorkerEnv("")
+		data, err := ReadFtpCACert("")
 		require.NoError(t, err)
-		assert.Empty(t, env)
+		assert.Nil(t, data)
 	})
 
-	t.Run("configured CA is passed by content", func(t *testing.T) {
-		data := []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+	t.Run("configured CA is read by content", func(t *testing.T) {
+		want := []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
 		path := filepath.Join(t.TempDir(), "ca.pem")
-		require.NoError(t, os.WriteFile(path, data, 0o600))
+		require.NoError(t, os.WriteFile(path, want, 0o600))
 
-		env, err := FtpWorkerEnv(path)
+		data, err := ReadFtpCACert(path)
 		require.NoError(t, err)
-		assert.Equal(t, []string{FtpCaCertEnv + "=" + string(data)}, env)
+		assert.Equal(t, want, data)
 	})
 
 	t.Run("unreadable CA", func(t *testing.T) {
-		_, err := FtpWorkerEnv(filepath.Join(t.TempDir(), "missing.pem"))
+		_, err := ReadFtpCACert(filepath.Join(t.TempDir(), "missing.pem"))
 		assert.ErrorContains(t, err, "CA certificate")
 	})
+
+	t.Run("CA over the size cap", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "big.pem")
+		require.NoError(t, os.WriteFile(path, make([]byte, MaxFtpCACertSize+1), 0o600))
+
+		_, err := ReadFtpCACert(path)
+		assert.ErrorContains(t, err, "larger than")
+	})
+}
+
+func TestRunFtpBackground_ReturnsTheConnectError(t *testing.T) {
+	srv := newFtpTLSServer(t)
+	fc := newTLSFtpClient(t, srv, FtpConfigData{})
+
+	err := fc.RunFtpBackground()
+	require.ErrorContains(t, err, "certificate")
+	assert.Contains(t, err.Error(), strings.TrimPrefix(srv.URL, "https://"))
+	assert.NotContains(t, err.Error(), "/ws/ftp/")
 }

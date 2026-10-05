@@ -78,12 +78,13 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 	return client
 }
 
-func (fc *FtpClient) RunFtpBackground() {
+// RunFtpBackground runs the WebFTP session. It returns only when the channel
+// cannot be opened; once open, the session ends the process in close().
+func (fc *FtpClient) RunFtpBackground() error {
 	fc.log.Debug().Msg("Opening websocket for ftp session.")
 
 	if err := fc.connect(); err != nil {
-		fc.log.Debug().Err(err).Msgf("Failed to connect to ftp websocket at %s.", serverHostFor(fc.url, fc.serverURL))
-		return
+		return fmt.Errorf("failed to connect to ftp websocket at %s: %w", serverHostFor(fc.url, fc.serverURL), err)
 	}
 	defer fc.close()
 
@@ -95,6 +96,7 @@ func (fc *FtpClient) RunFtpBackground() {
 	go fc.write(ctx, cancel)
 
 	<-ctx.Done()
+	return nil
 }
 
 // connect dials the WebFTP channel. The worker runs without the agent's
