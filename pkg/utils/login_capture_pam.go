@@ -692,19 +692,13 @@ func parseSSHDPAMServiceName(out string) string {
 func sshdConfigSetsServiceInMatch(config string) bool {
 	inMatch := false
 	for line := range strings.SplitSeq(config, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		args := sshdConfigArgs(line)
+		if len(args) == 0 {
 			continue
 		}
-		keyword, rest, _ := strings.Cut(line, " ")
-		if k, _, found := strings.Cut(keyword, "="); found {
-			keyword = k
-		}
-		keyword, _, _ = strings.Cut(keyword, "\t")
-		rest = strings.TrimSpace(rest)
-		switch strings.ToLower(keyword) {
+		switch strings.ToLower(args[0]) {
 		case "match":
-			inMatch = !strings.EqualFold(rest, "all")
+			inMatch = !(len(args) == 2 && strings.EqualFold(args[1], "all"))
 		case "pamservicename":
 			if inMatch {
 				return true
@@ -712,6 +706,27 @@ func sshdConfigSetsServiceInMatch(config string) bool {
 		}
 	}
 	return false
+}
+
+// sshdConfigArgs splits an sshd config line into its keyword and arguments:
+// blanks separate them, the keyword may also end in '=', and a token starting
+// with '#' begins a comment.
+func sshdConfigArgs(line string) []string {
+	fields := strings.Fields(line)
+	if len(fields) > 0 {
+		if keyword, rest, found := strings.Cut(fields[0], "="); found {
+			fields = slices.Insert(fields[1:], 0, keyword)
+			if rest != "" {
+				fields = slices.Insert(fields, 1, rest)
+			}
+		}
+	}
+	for i, f := range fields {
+		if strings.HasPrefix(f, "#") {
+			return fields[:i]
+		}
+	}
+	return fields
 }
 
 // sshdFingerprint identifies the inputs of sshd -T by their stamps: the

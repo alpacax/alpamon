@@ -1057,6 +1057,29 @@ func TestLoginCapturePanicIsContained(t *testing.T) {
 	assert.Equal(t, HookRegistered, got.Hooks.SSHD)
 }
 
+func TestSSHDConfigSetsServiceInMatch(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   bool
+	}{
+		{"global only", "PAMServiceName sshd\nUsePAM yes\n", false},
+		{"inside Match", "Match User deploy\n  PAMServiceName other\n", true},
+		{"equals sign", "Match Address 10.0.0.0/8\nPAMServiceName=other\n", true},
+		{"after Match all", "Match User deploy\n  X11Forwarding no\nMatch all\nPAMServiceName sshd\n", false},
+		{"Match all with a tab", "Match User deploy\nMatch\tall\nPAMServiceName sshd\n", false},
+		{"Match all with a comment", "Match User deploy\nMatch all # back to global\nPAMServiceName sshd\n", false},
+		{"Match=all", "Match User deploy\nMatch=all\nPAMServiceName sshd\n", false},
+		{"commented out", "Match User deploy\n# PAMServiceName other\n", false},
+		{"Match all plus a criterion", "Match all User deploy\nPAMServiceName other\n", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, sshdConfigSetsServiceInMatch(tt.config))
+		})
+	}
+}
+
 func TestMultiarchTriplets(t *testing.T) {
 	assert.Equal(t, []string{"x86_64-linux-gnu"}, multiarchTriplets("amd64"))
 	assert.Equal(t, []string{"aarch64-linux-gnu"}, multiarchTriplets("arm64"))
