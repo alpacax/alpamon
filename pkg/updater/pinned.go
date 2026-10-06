@@ -209,13 +209,13 @@ func preparePinned(ctx context.Context, src *pinnedSources, opts Options, tempDi
 // before swapping. It does not restart: the caller schedules that. Every
 // error it returns carries an ErrorClass.
 func PinnedSelfUpdate(ctx context.Context, req PinnedRequest, opts Options) error {
-	if !selfUpdateInFlight.CompareAndSwap(false, true) {
+	if !takeUpgradeLatch() {
 		return ErrSelfUpdateInProgress
 	}
 	success := false
 	defer func() {
 		if !success {
-			selfUpdateInFlight.Store(false)
+			releaseUpgradeLatch()
 		}
 	}()
 
