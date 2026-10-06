@@ -456,6 +456,65 @@ func TestSystemHandler_PinnedUpgrade_PackageScriptsRestartWithoutServiceManager(
 	assert.False(t, h.ws.RestartCalled)
 }
 
+func TestSystemHandler_PinnedUpgrade_WithoutSystemdTheDeadlineCoversThePackageScriptRestart(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	hasSystemd = func() bool { return false }
+	h.sm.restartErr = updater.ErrNoServiceManager
+	h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.5.0", nil)
+
+	before := time.Now()
+	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0", HealthGracePeriod: time.Minute})
+	after := time.Now()
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode, output)
+
+	m, err := updater.LoadPending()
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	allowance := updater.RestartDelay + time.Minute + packageScriptRestartDelay
+	assert.False(t, m.Deadline.Before(before.Add(allowance)), "deadline %v is short of the package script restart", m.Deadline)
+	assert.False(t, m.Deadline.After(after.Add(allowance)), "deadline %v overshoots the allowance", m.Deadline)
+}
+
+func TestSystemHandler_PinnedUpgrade_WithSystemdTheDeadlineHasNoPackageScriptAllowance(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.5.0", nil)
+
+	before := time.Now()
+	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0", HealthGracePeriod: time.Minute})
+	after := time.Now()
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode, output)
+
+	m, err := updater.LoadPending()
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	allowance := updater.RestartDelay + time.Minute
+	assert.False(t, m.Deadline.Before(before.Add(allowance)), "deadline %v is too early", m.Deadline)
+	assert.False(t, m.Deadline.After(after.Add(allowance)), "deadline %v carries an allowance it must not", m.Deadline)
+}
+
+func TestSystemHandler_PinnedUpgrade_FailedPackageRestartLeavesTheLatchToTheHandler(t *testing.T) {
+	// Given the package path holding the latch, with no restart the service manager or the pool will take
+	h := newPinnedHarness(t, utils.PkgApt)
+	h.sm.restartErr = errors.New("systemctl failed")
+	stopped := pool.NewPool(1, 1)
+	require.NoError(t, stopped.Shutdown(time.Second))
+	h.handler.pool = stopped
+	require.True(t, updater.AcquireUpgradeLatch())
+	t.Cleanup(updater.ReleaseSelfUpdateLatch)
+
+	// When the restart into the installed package cannot be scheduled
+	exitCode, _, err := h.handler.restartIntoUpgrade("v2.5.0", false)
+	require.Error(t, err)
+	require.Equal(t, 1, exitCode)
+
+	// Then the latch is still held, for the handler's deferred release alone to clear
+	assert.False(t, updater.AcquireUpgradeLatch())
+}
+
 func TestSystemHandler_PinnedUpgrade_AptWithoutTargetFails(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
 	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)

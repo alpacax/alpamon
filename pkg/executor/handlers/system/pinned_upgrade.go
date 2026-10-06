@@ -123,12 +123,18 @@ func (h *SystemHandler) restartIntoUpgrade(tag string, inProcessFallback bool) (
 	if err := h.scheduleDelayedAction(delayedActionDelay, func(_ context.Context) {
 		h.wsClient.Restart()
 	}); err != nil {
-		updater.ReleaseSelfUpdateLatch()
+		if inProcessFallback { // the package path releases the latch in its own defer
+			updater.ReleaseSelfUpdateLatch()
+		}
 		log.Error().Err(err).Msg("Failed to schedule the restart after a pinned upgrade. The upgrade guard restores the previous version if the agent is not restarted.")
 		return 1, fmt.Sprintf("Updated to %s, but the restart could not be scheduled: %v. Please restart alpamon manually.", tag, err), err
 	}
 	return 0, fmt.Sprintf("Updated to %s. Restarting...", tag), nil
 }
+
+// packageScriptRestartDelay covers scripts/postinstall.sh's deferred restart
+// (RESTART_GRACE plus its shutdown wait); keep it in step with the script.
+const packageScriptRestartDelay = 70 * time.Second
 
 // pinnedPackageUpgrade installs report.ToVersion through the package manager and confirms it
 // against the package database afterward, rolling back with a pinned reinstall on failure.
@@ -141,6 +147,7 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 		err := fmt.Errorf("the package database does not report a usable installed alpamon version (%q), so a rollback would be impossible", previous)
 		return h.failPinned(report, updater.Classify(updater.ClassPackageManager, err), "")
 	}
+	grace = updater.ClampHealthGrace(grace)
 	marker := &updater.PendingUpgrade{
 		AttemptID:              report.AttemptID,
 		FromVersion:            report.FromVersion,
@@ -152,7 +159,7 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 	}
 	// The install is bounded by the command timeout; the deadline and the
 	// guard count from its end, and are re-armed once it has finished.
-	abort, err := updater.BeginTransition(marker, h.serviceManager, common.UpgradeTimeout, updater.ClampHealthGrace(grace), h.now())
+	abort, err := updater.BeginTransition(marker, h.serviceManager, common.UpgradeTimeout, grace, h.now())
 	if err != nil {
 		return h.failPinned(report, updater.Classify(updater.ClassUnknown, err), "")
 	}
@@ -167,7 +174,11 @@ func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater
 		return h.failPinned(report, updater.Classify(updater.ClassPackageManager, err), output)
 	}
 
-	if err := updater.Rearm(marker, h.serviceManager, updater.ClampHealthGrace(grace), h.now()); err != nil {
+	rearmGrace := grace
+	if !hasSystemd() {
+		rearmGrace += packageScriptRestartDelay
+	}
+	if err := updater.Rearm(marker, h.serviceManager, rearmGrace, h.now()); err != nil {
 		// Rearm put the marker back as it was, so the first guard, still
 		// scheduled, keeps covering the attempt.
 		log.Warn().Err(err).Msg("Failed to re-arm the upgrade guard after the install.")
