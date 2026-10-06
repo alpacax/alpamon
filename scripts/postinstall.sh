@@ -12,6 +12,10 @@ RESTART_WAIT_LIMIT=300
 RESTART_GRACE=60
 # Holds the token of the newest deferred restart; an older job that finds another token stands down.
 RESTART_TOKEN_FILE="/run/alpamon/restart.token"
+# The agent holds this flock for the length of an upgrade command (pkg/updater/upgrade_lock_linux.go).
+RESTART_LOCK_FILE="/run/alpamon/upgrade.lock"
+# Outlasts the agent's upgrade command timeout (UpgradeTimeout in pkg/executor/handlers/common/timeout.go).
+RESTART_LOCK_WAIT=1800
 
 main() {
   check_root_permission
@@ -26,6 +30,7 @@ main() {
     elif agent_command_pid=$(find_agent_command); then
       defer_alpamon_restart "$agent_command_pid"
     else
+      rm -f "$RESTART_TOKEN_FILE" # a deferred restart still in its grace stands down instead of restarting again
       restart_alpamon_process
     fi
     # No cleanup_tmpl_files here on purpose. The package re-ships the template
@@ -124,21 +129,19 @@ create_log_file() {
 }
 
 start_alpamon_process() {
-  local log_file="$ALPAMON_LOG"
   create_log_file
   echo "Starting Alpamon as a background process..."
-  # Trap SIGHUP to prevent the child from being killed when the
-  # postinstall script (and its parent shell session) exits.
-  # Uses exec to replace the subshell with alpamon directly.
-  (trap '' HUP; exec "$ALPAMON_BIN" >>"$log_file" 2>&1) &
+  # The HUP trap keeps the agent alive once postinstall's session exits; 9>&- keeps the
+  # restart job's upgrade lock fd out of the agent, which would otherwise hold the lock forever.
+  (trap '' HUP; exec "$ALPAMON_BIN" >>"$ALPAMON_LOG" 2>&1 9>&-) &
   local pid=$!
   sleep 0.5
   if ! kill -0 "$pid" 2>/dev/null; then
-    echo "Warning: Alpamon process (PID: $pid) exited immediately. Check $log_file for details." >&2
+    echo "Warning: Alpamon process (PID: $pid) exited immediately. Check $ALPAMON_LOG for details." >&2
     return
   fi
   echo "Alpamon started (PID: $pid)."
-  echo "Logs: $log_file"
+  echo "Logs: $ALPAMON_LOG"
 }
 
 restart_alpamon_process() {
@@ -203,6 +206,12 @@ defer_alpamon_restart() {
       waited=$((waited + 1))
     done
     sleep "$RESTART_GRACE"
+    # Held through the check and the restart so a new upgrade cannot start in between.
+    # A failed open must not end the job: set -e would, and so would sh (how rpm runs scriptlets) without command.
+    command exec 9>>"$RESTART_LOCK_FILE" || true
+    if command -v flock >/dev/null 2>&1 && ! flock -w "$RESTART_LOCK_WAIT" 9; then
+      echo "Timed out waiting for the upgrade lock; restarting anyway."
+    fi
     if [ "$(cat "$RESTART_TOKEN_FILE" 2>/dev/null)" != "$token" ]; then
       echo "A later upgrade took over the deferred restart; leaving it to that one."
       exit 0
@@ -276,6 +285,6 @@ is_upgrade() {
 
 # scripts/postinstall_test.go sets POSTINSTALL_SOURCED and sources this file to drive single functions.
 if [ -z "${POSTINSTALL_SOURCED-}" ]; then
-  set -e # Exit on error
+  set -e
   main "$@"
 fi
