@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
@@ -806,11 +807,13 @@ func TestCapabilitiesWireShape(t *testing.T) {
 		want = `["file_exec"]`
 	}
 
-	essential := collectEssentialData()
-	if essential == nil {
-		t.Skip("skipping: essential data collection failed in this environment")
+	bodies := []any{newServerData(0.5), collectData()}
+	if essential := collectEssentialData(); essential != nil {
+		bodies = append(bodies, essential)
+	} else {
+		t.Log("essential data collection failed in this environment; checking the other bodies only")
 	}
-	for _, body := range []any{newServerData(0.5), essential, collectData()} {
+	for _, body := range bodies {
 		encoded, err := json.Marshal(body)
 		require.NoError(t, err)
 		var decoded map[string]json.RawMessage
@@ -821,18 +824,27 @@ func TestCapabilitiesWireShape(t *testing.T) {
 	yes := "yes"
 	encoded, err := json.Marshal(ServerData{
 		Version: "2.6.0", PamVersion: "1.2.0", SshdUsePam: &yes, Load: 0.5,
-		Capabilities: []string{CapabilityFileExec},
+		Capabilities: []string{capabilityFileExec},
 	})
 	require.NoError(t, err)
 	assert.JSONEq(t,
 		`{"version":"2.6.0","pam_version":"1.2.0","sshd_use_pam":"yes","load":0.5,"capabilities":["file_exec"]}`,
 		string(encoded))
 
-	encoded, err = json.Marshal(commitData{Version: "2.6.0", Capabilities: []string{CapabilityFileExec}})
+	encoded, err = json.Marshal(commitData{Version: "2.6.0", Capabilities: []string{capabilityFileExec}})
 	require.NoError(t, err)
 	var decoded map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(encoded, &decoded))
 	assert.ElementsMatch(t,
 		[]string{"version", "sshd_use_pam", "load", "capabilities", "info", "os"},
 		slices.Collect(maps.Keys(decoded)))
+}
+
+// TestFileExecCapabilityMatchesTheLane ties the reported flag to the platforms
+// where the file lane can actually run, so adding a platform to one and not
+// the other fails here.
+func TestFileExecCapabilityMatchesTheLane(t *testing.T) {
+	_, err := common.VerifiedFilePath()
+	assert.Equal(t, err == nil, fileExecCompiled,
+		"fileExecCompiled must follow the platforms where VerifiedFilePath succeeds")
 }
