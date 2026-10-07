@@ -793,3 +793,33 @@ func TestLoginCaptureWireShape(t *testing.T) {
 		assert.Contains(t, string(data), `"sshd_use_pam":null`)
 	}
 }
+
+// TestCapabilitiesWireShape pins the capabilities key on both report bodies:
+// a JSON list that names file_exec exactly when the file lane is compiled in,
+// present even when empty, and leaving every other key as it was.
+func TestCapabilitiesWireShape(t *testing.T) {
+	want := `[]`
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		want = `["file_exec"]`
+	}
+
+	data := collectEssentialData()
+	require.NotNil(t, data)
+	for _, body := range []any{newServerData(0.5), data, collectData()} {
+		encoded, err := json.Marshal(body)
+		require.NoError(t, err)
+		var decoded map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		assert.JSONEq(t, want, string(decoded["capabilities"]))
+	}
+
+	yes := "yes"
+	encoded, err := json.Marshal(ServerData{
+		Version: "2.6.0", PamVersion: "1.2.0", SshdUsePam: &yes, Load: 0.5,
+		Capabilities: []string{CapabilityFileExec},
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t,
+		`{"version":"2.6.0","pam_version":"1.2.0","sshd_use_pam":"yes","load":0.5,"capabilities":["file_exec"]}`,
+		string(encoded))
+}
