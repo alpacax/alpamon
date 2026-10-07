@@ -3,6 +3,7 @@ package runner
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"runtime"
 	"slices"
@@ -798,14 +799,16 @@ func TestLoginCaptureWireShape(t *testing.T) {
 // a JSON list that names file_exec exactly when the file lane is compiled in,
 // present even when empty, and leaving every other key as it was.
 func TestCapabilitiesWireShape(t *testing.T) {
+	// Restates the build constraint on purpose: deriving want from
+	// fileExecCompiled would make the check agree with itself.
 	want := `[]`
 	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		want = `["file_exec"]`
 	}
 
-	data := collectEssentialData()
-	require.NotNil(t, data)
-	for _, body := range []any{newServerData(0.5), data, collectData()} {
+	essential := collectEssentialData()
+	require.NotNil(t, essential)
+	for _, body := range []any{newServerData(0.5), essential, collectData()} {
 		encoded, err := json.Marshal(body)
 		require.NoError(t, err)
 		var decoded map[string]json.RawMessage
@@ -822,4 +825,12 @@ func TestCapabilitiesWireShape(t *testing.T) {
 	assert.JSONEq(t,
 		`{"version":"2.6.0","pam_version":"1.2.0","sshd_use_pam":"yes","load":0.5,"capabilities":["file_exec"]}`,
 		string(encoded))
+
+	encoded, err = json.Marshal(commitData{Version: "2.6.0", Capabilities: []string{CapabilityFileExec}})
+	require.NoError(t, err)
+	var decoded map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.ElementsMatch(t,
+		[]string{"version", "sshd_use_pam", "load", "capabilities", "info", "os"},
+		slices.Collect(maps.Keys(decoded)))
 }
