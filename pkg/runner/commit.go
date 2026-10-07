@@ -196,6 +196,7 @@ func collectEssentialData() *commitData {
 		PamVersion:   utils.GetPamVersion(),
 		SshdUsePam:   utils.GetSSHDUsePAM(),
 		LoginCapture: utils.GetLoginCapture(),
+		Capabilities: agentCapabilities(),
 	}
 
 	if load, err := getLoadAverage(); err == nil {
@@ -285,14 +286,18 @@ func syncServerData(session *scheduler.Session) {
 		log.Debug().Err(err).Msg("Failed to retrieve load average.")
 	}
 	entry := commitDefs["server"]
-	data := &ServerData{
+	scheduler.Rqueue.Patch(utils.JoinPath(entry.URL, entry.URLSuffix), newServerData(loadAvg), 80, time.Time{})
+}
+
+func newServerData(load float64) *ServerData {
+	return &ServerData{
 		Version:      version.Version,
 		PamVersion:   utils.GetPamVersion(),
 		SshdUsePam:   utils.GetSSHDUsePAM(),
 		LoginCapture: utils.GetLoginCapture(),
-		Load:         loadAvg,
+		Load:         load,
+		Capabilities: agentCapabilities(),
 	}
-	scheduler.Rqueue.Patch(utils.JoinPath(entry.URL, entry.URLSuffix), data, 80, time.Time{})
 }
 
 func syncFirewallData() {
@@ -448,6 +453,7 @@ func collectData() *commitData {
 		PamVersion:   utils.GetPamVersion(),
 		SshdUsePam:   utils.GetSSHDUsePAM(),
 		LoginCapture: utils.GetLoginCapture(),
+		Capabilities: agentCapabilities(),
 	}
 
 	if load, err := getLoadAverage(); err == nil {

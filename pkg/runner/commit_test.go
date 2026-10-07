@@ -3,6 +3,7 @@ package runner
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"runtime"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
@@ -792,4 +794,57 @@ func TestLoginCaptureWireShape(t *testing.T) {
 		assert.NotContains(t, string(data), "login_capture")
 		assert.Contains(t, string(data), `"sshd_use_pam":null`)
 	}
+}
+
+// TestCapabilitiesWireShape pins the capabilities key on both report bodies:
+// a JSON list that names file_exec exactly when the file lane is compiled in,
+// present even when empty, and leaving every other key as it was.
+func TestCapabilitiesWireShape(t *testing.T) {
+	// Restates the build constraint on purpose: deriving want from
+	// fileExecCompiled would make the check agree with itself.
+	want := `[]`
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		want = `["file_exec"]`
+	}
+
+	bodies := []any{newServerData(0.5), collectData()}
+	if essential := collectEssentialData(); essential != nil {
+		bodies = append(bodies, essential)
+	} else {
+		t.Log("essential data collection failed in this environment; checking the other bodies only")
+	}
+	for _, body := range bodies {
+		encoded, err := json.Marshal(body)
+		require.NoError(t, err)
+		var decoded map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		assert.JSONEq(t, want, string(decoded["capabilities"]))
+	}
+
+	yes := "yes"
+	encoded, err := json.Marshal(ServerData{
+		Version: "2.6.0", PamVersion: "1.2.0", SshdUsePam: &yes, Load: 0.5,
+		Capabilities: []string{capabilityFileExec},
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t,
+		`{"version":"2.6.0","pam_version":"1.2.0","sshd_use_pam":"yes","load":0.5,"capabilities":["file_exec"]}`,
+		string(encoded))
+
+	encoded, err = json.Marshal(commitData{Version: "2.6.0", Capabilities: []string{capabilityFileExec}})
+	require.NoError(t, err)
+	var decoded map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.ElementsMatch(t,
+		[]string{"version", "sshd_use_pam", "load", "capabilities", "info", "os"},
+		slices.Collect(maps.Keys(decoded)))
+}
+
+// TestFileExecCapabilityMatchesTheLane ties the reported flag to the platforms
+// where the file lane can actually run, so adding a platform to one and not
+// the other fails here.
+func TestFileExecCapabilityMatchesTheLane(t *testing.T) {
+	_, err := common.VerifiedFilePath()
+	assert.Equal(t, err == nil, fileExecCompiled,
+		"fileExecCompiled must follow the platforms where VerifiedFilePath succeeds")
 }

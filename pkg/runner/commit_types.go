@@ -74,6 +74,11 @@ type ServerData struct {
 	// from which it never reads a host as covered. Servers that predate the
 	// key ignore it.
 	LoginCapture *utils.LoginCapture `json:"login_capture,omitempty"`
+	// Capabilities lists the execution lanes this build runs (see
+	// agentCapabilities). It has no omitempty: an empty list says the agent
+	// reports capabilities and has none, which an absent key cannot. Agents
+	// that predate the key send nothing, and servers that predate it ignore it.
+	Capabilities []string `json:"capabilities"`
 }
 
 type SystemData struct {
@@ -181,6 +186,7 @@ type commitData struct {
 	Load       float64 `json:"load"`
 	// LoginCapture is omitted when nil; see ServerData.
 	LoginCapture *utils.LoginCapture `json:"login_capture,omitempty"`
+	Capabilities []string            `json:"capabilities"` // no omitempty; see ServerData
 	Info         SystemData          `json:"info"`
 	OS           OSData              `json:"os"`
 	Time         *TimeData           `json:"time,omitempty"`
