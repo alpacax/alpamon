@@ -3,6 +3,19 @@
 ALPAMON_BIN="/usr/bin/alpamon"
 TEMPLATE_FILE="/etc/alpamon/alpamon.config.tmpl"
 SYSTEMD_AVAILABLE=true
+ALPAMON_LOG="/var/log/alpamon/alpamon.log"
+# Upper bound on how long a deferred restart waits for the agent's upgrade command,
+# matching the delay configs/alpamon-restart.timer gives the systemd path.
+RESTART_WAIT_LIMIT=300
+# A restart drops the agent's in-memory result queue, so the grace must outlast the retries
+# Reporter.query in pkg/scheduler/reporter.go gives a failed post of the command's result.
+RESTART_GRACE=60
+# Holds the token of the newest deferred restart; an older job that finds another token stands down.
+RESTART_TOKEN_FILE="/run/alpamon/restart.token"
+# The agent holds this flock for the length of an upgrade command (pkg/updater/upgrade_lock_linux.go).
+RESTART_LOCK_FILE="/run/alpamon/upgrade.lock"
+# Outlasts the agent's upgrade command timeout (UpgradeTimeout in pkg/executor/handlers/common/timeout.go).
+RESTART_LOCK_WAIT=1800
 
 main() {
   check_root_permission
@@ -14,7 +27,10 @@ main() {
   if is_upgrade "$@"; then
     if [ "$SYSTEMD_AVAILABLE" = "true" ]; then
       restart_alpamon_by_timer
+    elif agent_command_pid=$(find_agent_command); then
+      defer_alpamon_restart "$agent_command_pid"
     else
+      rm -f "$RESTART_TOKEN_FILE" # a deferred restart still in its grace stands down instead of restarting again
       restart_alpamon_process
     fi
     # No cleanup_tmpl_files here on purpose. The package re-ships the template
@@ -97,33 +113,35 @@ setup_alpamon() {
     return 1  # Return non-zero to skip start_systemd_service
   fi
 
-  "$ALPAMON_BIN" setup
-  if [ $? -ne 0 ]; then
+  if ! "$ALPAMON_BIN" setup; then
     echo "Error: Alpamon setup command failed."
     exit 1
   fi
 }
 
-start_alpamon_process() {
-  local log_file="/var/log/alpamon/alpamon.log"
-  # Create log file with restrictive permissions (0640) to match register.go behavior
-  if [ ! -e "$log_file" ]; then
-    touch "$log_file"
-    chmod 0640 "$log_file" 2>/dev/null || true
+# Creates the log with the 0640 mode cmd/alpamon/command/register/service_linux.go gives it;
+# a redirect that creates it follows the umask.
+create_log_file() {
+  if [ ! -e "$ALPAMON_LOG" ]; then
+    touch "$ALPAMON_LOG"
+    chmod 0640 "$ALPAMON_LOG" 2>/dev/null || true
   fi
+}
+
+start_alpamon_process() {
+  create_log_file
   echo "Starting Alpamon as a background process..."
-  # Trap SIGHUP to prevent the child from being killed when the
-  # postinstall script (and its parent shell session) exits.
-  # Uses exec to replace the subshell with alpamon directly.
-  (trap '' HUP; exec "$ALPAMON_BIN" >>"$log_file" 2>&1) &
+  # The HUP trap keeps the agent alive once postinstall's session exits; 9>&- keeps the
+  # restart job's upgrade lock fd out of the agent, which would otherwise hold the lock forever.
+  (trap '' HUP; exec "$ALPAMON_BIN" >>"$ALPAMON_LOG" 2>&1 9>&-) &
   local pid=$!
   sleep 0.5
   if ! kill -0 "$pid" 2>/dev/null; then
-    echo "Warning: Alpamon process (PID: $pid) exited immediately. Check $log_file for details." >&2
+    echo "Warning: Alpamon process (PID: $pid) exited immediately. Check $ALPAMON_LOG for details." >&2
     return
   fi
   echo "Alpamon started (PID: $pid)."
-  echo "Logs: $log_file"
+  echo "Logs: $ALPAMON_LOG"
 }
 
 restart_alpamon_process() {
@@ -142,6 +160,65 @@ restart_alpamon_process() {
   fi
   create_directories
   start_alpamon_process
+}
+
+# Prints the PID of the ancestor an alpamon process spawned, i.e. the agent's own upgrade command;
+# fails when there is none. Reads /proc because minimal container images ship without ps.
+find_agent_command() {
+  local pid=$$ ppid key value
+  while [ "$pid" -gt 1 ]; do
+    ppid=""
+    while read -r key value; do
+      if [ "$key" = "PPid:" ]; then
+        ppid=$value
+        break
+      fi
+    done < "/proc/$pid/status" || return 1
+    if [ -z "$ppid" ] || [ "$ppid" -lt 1 ]; then
+      return 1
+    fi
+    if [ "$(cat "/proc/$ppid/comm" 2>/dev/null)" = "alpamon" ]; then
+      echo "$pid"
+      return 0
+    fi
+    pid=$ppid
+  done
+  return 1
+}
+
+# Restarting at once would kill the agent mid-command and report a truncated failure,
+# so the restart waits for the command to exit and the agent to post its result.
+defer_alpamon_restart() {
+  local command_pid="$1"
+  create_directories
+  create_log_file
+  echo "Alpamon is running this upgrade itself; it will restart after the upgrade command exits."
+  # set -m moves the job out of the command's process group, which the agent SIGKILLs on exit;
+  # the log redirect keeps it off the output pipe the agent drains.
+  local token
+  token="$$.$(date +%s%N)"
+  echo "$token" > "$RESTART_TOKEN_FILE"
+  set -m
+  (
+    waited=0
+    while [ "$waited" -lt "$RESTART_WAIT_LIMIT" ] && kill -0 "$command_pid" 2>/dev/null; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    sleep "$RESTART_GRACE"
+    # Held through the check and the restart so a new upgrade cannot start in between.
+    # A failed open must not end the job: set -e would, and so would sh (how rpm runs scriptlets) without command.
+    command exec 9>>"$RESTART_LOCK_FILE" || true
+    if command -v flock >/dev/null 2>&1 && ! flock -w "$RESTART_LOCK_WAIT" 9; then
+      echo "Timed out waiting for the upgrade lock; restarting anyway."
+    fi
+    if [ "$(cat "$RESTART_TOKEN_FILE" 2>/dev/null)" != "$token" ]; then
+      echo "A later upgrade took over the deferred restart; leaving it to that one."
+      exit 0
+    fi
+    restart_alpamon_process
+  ) </dev/null >>"$ALPAMON_LOG" 2>&1 &
+  set +m
 }
 
 start_systemd_service() {
@@ -206,6 +283,8 @@ is_upgrade() {
     return 1 # Initial installation
 }
 
-# Exit on error
-set -e
-main "$@"
+# scripts/postinstall_test.go sets POSTINSTALL_SOURCED and sources this file to drive single functions.
+if [ -z "${POSTINSTALL_SOURCED-}" ]; then
+  set -e
+  main "$@"
+fi

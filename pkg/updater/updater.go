@@ -35,11 +35,25 @@ const (
 
 var versionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[\w.]+)?$`)
 
-// selfUpdateInFlight serializes SelfUpdate: concurrent runs race on the same staging
-// paths and can delete each other's files mid-replace, killing the agent. Process-local,
-// so it does not guard against a second alpamon process. Held through a successful run
-// (the expected restart resets it), released on failure or via ReleaseSelfUpdateLatch.
+// selfUpdateInFlight keeps upgrades from overlapping; on Linux a flock (upgrade_lock_linux.go) extends it across processes.
+// A successful self-update holds it until the restart. Change it only through takeUpgradeLatch and releaseUpgradeLatch.
 var selfUpdateInFlight atomic.Bool
+
+func takeUpgradeLatch() bool {
+	if !selfUpdateInFlight.CompareAndSwap(false, true) {
+		return false
+	}
+	if !lockUpgrade() {
+		selfUpdateInFlight.Store(false)
+		return false
+	}
+	return true
+}
+
+func releaseUpgradeLatch() {
+	unlockUpgrade()
+	selfUpdateInFlight.Store(false)
+}
 
 // ErrSelfUpdateInProgress is returned when a self-update is already running.
 // Callers should treat it as a benign no-op, not a failure.
@@ -77,19 +91,19 @@ func (o Options) baseURL() string {
 // for another upgrade path that must not overlap them. It reports false when
 // an upgrade is already running.
 func AcquireUpgradeLatch() bool {
-	return selfUpdateInFlight.CompareAndSwap(false, true)
+	return takeUpgradeLatch()
 }
 
 // ReleaseSelfUpdateLatch clears the latch SelfUpdate keeps set after a successful
 // run. Call it only when the expected post-update restart could not be triggered.
 func ReleaseSelfUpdateLatch() {
-	selfUpdateInFlight.Store(false)
+	releaseUpgradeLatch()
 }
 
 // SelfUpdate downloads the latest binary from GitHub Releases,
 // verifies its checksum, and replaces the current binary.
 func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
-	if !selfUpdateInFlight.CompareAndSwap(false, true) {
+	if !takeUpgradeLatch() {
 		return ErrSelfUpdateInProgress
 	}
 	// Release only on failure: on success the pending restart resets it, and holding
@@ -98,7 +112,7 @@ func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
 	success := false
 	defer func() {
 		if !success {
-			selfUpdateInFlight.Store(false)
+			releaseUpgradeLatch()
 		}
 	}()
 
