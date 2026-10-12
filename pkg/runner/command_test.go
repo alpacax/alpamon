@@ -230,3 +230,31 @@ func TestNewChunkCallback_GivenMoreChunksThanServerCap_WhenCalled_ThenNothingPas
 		return len(*bodies) > serverCap
 	}, time.Second, 50*time.Millisecond, "no chunk past the server cap should be sent")
 }
+
+// Regression (#553): 32 KiB chunks make the server's count cap a 320 MB bound; the agent holds the old 40 MiB one.
+func TestNewChunkCallback_GivenOutputOverByteBudget_WhenCalled_ThenDeliveredBytesStayWithinBudget(t *testing.T) {
+	cleanup, mu, bodies := startFakeAlpacon(t)
+	defer cleanup()
+
+	cr := NewCommandRunner(nil, nil, protocol.Command{ID: "cmd-1"}, protocol.CommandData{}, nil)
+	callback := cr.newChunkCallback()
+	require.NotNil(t, callback, "a non-empty command ID should yield a callback")
+
+	const budget = 40 * 1024 * 1024
+	content := strings.Repeat("x", 32*1024)
+	for range budget/len(content) + 20 {
+		callback(context.Background(), content)
+	}
+
+	delivered := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		total := 0
+		for _, c := range *bodies {
+			total += len(c.content)
+		}
+		return total
+	}
+	require.Eventually(t, func() bool { return delivered() >= budget }, 30*time.Second, 50*time.Millisecond, "chunks within the budget should be delivered")
+	require.Never(t, func() bool { return delivered() > budget }, time.Second, 50*time.Millisecond, "no byte past the budget should be sent")
+}

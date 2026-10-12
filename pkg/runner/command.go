@@ -21,6 +21,9 @@ const chunkDeliveryGrace = 5 * time.Minute
 // every chunk from this seq on yet answers 204, and fin still carries the audit copy.
 const maxChunksPerCommand = 10000
 
+// maxChunkBytesPerCommand keeps the server's per-command storage at its pre-32 KiB bound (10000 x 4 KiB).
+const maxChunkBytesPerCommand = 40 * 1024 * 1024
+
 // CommandDispatcher interface to avoid circular import with executor package
 type CommandDispatcher interface {
 	Execute(ctx context.Context, command string, args *common.CommandArgs) (int, string, error)
@@ -63,15 +66,18 @@ func (cr *CommandRunner) newChunkCallback() func(ctx context.Context, content st
 	chunkURL := fmt.Sprintf(eventCommandChunkURL, cr.command.ID)
 	// Runner owns seq so chunks across shell operators share one series.
 	var seq int
-	capWarned := false
+	var sentBytes int
+	capped := false
 	return func(ctx context.Context, content string) {
-		if seq >= maxChunksPerCommand {
-			if !capWarned {
-				capWarned = true
-				log.Warn().Str("command", cr.command.ID).Msgf("Chunk cap of %d reached; later output is not streamed and the final result keeps only the head and tail of the output", maxChunksPerCommand)
-			}
+		if capped {
 			return
 		}
+		if seq >= maxChunksPerCommand || sentBytes+len(content) > maxChunkBytesPerCommand {
+			capped = true
+			log.Warn().Str("command", cr.command.ID).Msgf("Chunk cap of %d chunks or %d bytes reached; later output is not streamed and the final result keeps only the head and tail of the output", maxChunksPerCommand, maxChunkBytesPerCommand)
+			return
+		}
+		sentBytes += len(content)
 		// Advance seq before Post so it stays monotonic even if Post
 		// panics; a reused seq would collide server-side on (command, seq).
 		s := seq
