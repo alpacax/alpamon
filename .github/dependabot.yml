@@ -25,6 +25,11 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    # Each directory tests one distro release, and the golang builder follows
+    # go.mod; allow only digest refreshes and patch tags.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     commit-message:
       prefix: "chore(docker)"
     groups:
