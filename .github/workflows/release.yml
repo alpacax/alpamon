@@ -45,7 +45,7 @@ jobs:
           echo "tag=${TAG_WITHOUT_V}" >> $GITHUB_OUTPUT
 
       - name: Check out code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
 
@@ -53,7 +53,7 @@ jobs:
         run: git fetch --force --tags
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
 
@@ -66,7 +66,7 @@ jobs:
       # "Publish stable-alias checksums file" step.
       - name: Generate App token
         id: release-publisher-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.RELEASE_PUBLISHER_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PUBLISHER_PRIVATE_KEY }}
@@ -81,11 +81,11 @@ jobs:
           permission-contents: write
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
           # Explicit v2 lock; also silences the per-run 'latest' warning.
-          version: '~> v2'
+          version: 'v2.18.3'
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ steps.release-publisher-token.outputs.token }}
@@ -150,25 +150,25 @@ jobs:
         run: echo "TAG_NAME=${{ steps.channel.outputs.tag }}" >> $GITHUB_ENV
 
       - name: Upload AMD64 DEB artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpamon_${{ env.TAG_NAME }}_linux_amd64.deb
           path: dist/alpamon_${{ env.TAG_NAME }}_linux_amd64.deb
 
       - name: Upload ARM64 DEB artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpamon_${{ env.TAG_NAME }}_linux_arm64.deb
           path: dist/alpamon_${{ env.TAG_NAME }}_linux_arm64.deb
 
       - name: Upload AMD64 RPM artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpamon-${{ env.TAG_NAME }}-1.linux.amd64.rpm
           path: dist/alpamon-${{ env.TAG_NAME }}-1.linux.amd64.rpm
 
       - name: Upload ARM64 RPM artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpamon-${{ env.TAG_NAME }}-1.linux.arm64.rpm
           path: dist/alpamon-${{ env.TAG_NAME }}-1.linux.arm64.rpm
@@ -181,20 +181,20 @@ jobs:
       matrix:
         include:
           - pkg_type: deb
-            container: ubuntu:24.04
+            container: ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
             arch: amd64
             install_cmd: apt-get install -y -o Acquire::Retries=3
           - pkg_type: rpm
-            container: rockylinux/rockylinux:9
+            container: rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f
             arch: amd64
             install_cmd: dnf install -y
           # Proves zypper resolves the rpm's EL dependency names on SUSE.
           - pkg_type: rpm
-            container: opensuse/leap:15.6
+            container: opensuse/leap:15.6@sha256:79be7751205ea84559990fb76b1bec71e38d6fad41c70a4f6c921b803b58f421
             arch: amd64
             install_cmd: zypper --non-interactive install --allow-unsigned-rpm
           - pkg_type: rpm
-            container: opensuse/leap:16.0
+            container: opensuse/leap:16.0@sha256:7f3aeccb6a613c0fc1690d3d3e5eb493fd477ee4587de20640017fc36d72f9b0
             arch: amd64
             install_cmd: zypper --non-interactive install --allow-unsigned-rpm
     # Pinned so a later step that prepends to PATH keeps /usr/bin: the runner
@@ -215,7 +215,7 @@ jobs:
           fi
 
       - name: Download artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ env.PKG_NAME }}
 
@@ -382,12 +382,12 @@ jobs:
           fi
 
       - name: Download artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ env.PKG_NAME }}
 
       - name: Upload to PackageCloud
-        uses: danielmundi/upload-packagecloud@v1
+        uses: danielmundi/upload-packagecloud@46cd0e61152bf952dbc0d1759e609d3d22649030 # v1
         with:
           package-name: ${{ env.PKG_NAME }}
           packagecloud-username: alpacax

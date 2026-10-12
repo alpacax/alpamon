@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Go and generate ent code
         uses: ./.github/actions/setup-go-generate
@@ -50,10 +50,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
           # setup-go's cache key here is the one the ubuntu jobs using
@@ -170,7 +170,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       # pkg/collector/scheduler reaches ent through the check interface, so
       # this job needs codegen even though pkg/wsclient alone would not.
@@ -199,78 +199,78 @@ jobs:
         include:
           # Debian/Ubuntu (amd64)
           - distro: ubuntu-20.04
-            container: ubuntu:20.04
+            container: ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
             pkg_manager: apt-get
             runner: ubuntu-latest
           - distro: ubuntu-22.04
-            container: ubuntu:22.04
+            container: ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
             pkg_manager: apt-get
             runner: ubuntu-latest
           - distro: ubuntu-24.04
-            container: ubuntu:24.04
+            container: ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
             pkg_manager: apt-get
             runner: ubuntu-latest
           - distro: debian-11
-            container: debian:11
+            container: debian:11@sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9
             pkg_manager: apt-get
             runner: ubuntu-latest
           - distro: debian-12
-            container: debian:12
+            container: debian:12@sha256:2c037a04925515fdd6ea85ea14a682d0e79931f5e9f5d07b6dbfc6ba12f9e858
             pkg_manager: apt-get
             runner: ubuntu-latest
           # RHEL/CentOS yum-based (amd64)
           - distro: rocky-8
-            container: rockylinux/rockylinux:8
+            container: rockylinux/rockylinux:8@sha256:e8a49c5403b687db05d4d67333fa45808fbe74f36e683cec7abb1f7d0f2338c6
             pkg_manager: yum
             runner: ubuntu-latest
           - distro: rhel-8
-            container: redhat/ubi8
+            container: redhat/ubi8:latest@sha256:b76f9ead999002af783d7b7036b7b57ceee6033712ad07577240ee06489a3a40
             pkg_manager: yum
             runner: ubuntu-latest
           # RHEL/CentOS dnf-based (amd64)
           - distro: rocky-9
-            container: rockylinux/rockylinux:9
+            container: rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f
             pkg_manager: dnf
             runner: ubuntu-latest
           - distro: almalinux-9
-            container: almalinux:9
+            container: almalinux:9@sha256:9819dc675b67b595c2b59e42be7763fca1a8bb217fa5944e04daa22e9a64db16
             pkg_manager: dnf
             runner: ubuntu-latest
           - distro: rhel-9
-            container: redhat/ubi9
+            container: redhat/ubi9:latest@sha256:5858f9ace07316e3b12caab62f6c2481a5030bb6bafdca5a9ea324c321ef36df
             pkg_manager: dnf
             runner: ubuntu-latest
           # Fedora (amd64)
           - distro: fedora-41
-            container: fedora:41
+            container: fedora:41@sha256:f1a3fab47bcb3c3ddf3135d5ee7ba8b7b25f2e809a47440936212a3a50957f3d
             pkg_manager: dnf
             runner: ubuntu-latest
           # Oracle Linux (amd64)
           - distro: oracle-9
-            container: oraclelinux:9
+            container: oraclelinux:9@sha256:9c17aad70aaff782a1c31d20d5121ba205c19589d1f2ae2ee04b30b1498375c5
             pkg_manager: dnf
             runner: ubuntu-latest
           # Amazon Linux (amd64)
           - distro: amazonlinux-2023
-            container: amazonlinux:2023
+            container: amazonlinux:2023@sha256:8ed3c0a996841537f75607e7d1de2114d8150391f75792e8da9268738547e73f
             pkg_manager: dnf
             runner: ubuntu-latest
           # SUSE (amd64)
           - distro: opensuse-leap-15
-            container: opensuse/leap:15
+            container: opensuse/leap:15@sha256:bd9b5fdf67c88509f01c7b108007f77580d750fb2c8b46aead15ccfafbb13b4e
             pkg_manager: zypper
             runner: ubuntu-latest
           # ARM64
           - distro: ubuntu-24.04-arm64
-            container: ubuntu:24.04
+            container: ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
             pkg_manager: apt-get
             runner: ubuntu-24.04-arm
           - distro: rocky-9-arm64
-            container: rockylinux/rockylinux:9
+            container: rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f
             pkg_manager: dnf
             runner: ubuntu-24.04-arm
           - distro: amazonlinux-2023-arm64
-            container: amazonlinux:2023
+            container: amazonlinux:2023@sha256:8ed3c0a996841537f75607e7d1de2114d8150391f75792e8da9268738547e73f
             pkg_manager: dnf
             runner: ubuntu-24.04-arm
 
@@ -326,7 +326,7 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Check out code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Go and generate ent code
         uses: ./.github/actions/setup-go-generate
@@ -343,7 +343,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Go and generate ent code
         uses: ./.github/actions/setup-go-generate
@@ -425,7 +425,7 @@ jobs:
     runs-on: macos-14
     steps:
       - name: Check out code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Go and generate ent code
         uses: ./.github/actions/setup-go-generate

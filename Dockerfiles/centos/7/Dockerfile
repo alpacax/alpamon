@@ -1,4 +1,4 @@
-FROM golang:1.26.9 AS builder
+FROM golang:1.26.9@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89 AS builder
 
 # Set golang env
 ENV GO111MODULE=on \
@@ -16,7 +16,7 @@ COPY . .
 
 RUN go build -o alpamon ./cmd/alpamon/main.go
 
-FROM centos:centos7
+FROM centos:centos7@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4
 
 WORKDIR /usr/local/alpamon
 

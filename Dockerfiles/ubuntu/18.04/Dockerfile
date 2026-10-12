@@ -1,4 +1,4 @@
-FROM golang:1.26.9 AS builder
+FROM golang:1.26.9@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89 AS builder
 
 # Set golang env
 ENV GO111MODULE=on \
@@ -16,7 +16,7 @@ COPY . .
 
 RUN go build -o alpamon ./cmd/alpamon/main.go
 
-FROM ubuntu:18.04
+FROM ubuntu:18.04@sha256:152dc042452c496007f07ca9127571cb9c29697f42acbfad72324b2bb2e43c98
 
 RUN apt-get update -o Acquire::Retries=3 && apt-get install -y -o Acquire::Retries=3 --no-install-recommends ca-certificates
 
