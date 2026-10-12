@@ -81,7 +81,7 @@ func TestChunkWriter_ThresholdTriggersEmissionWithoutNewline(t *testing.T) {
 	_, err := cw.Write([]byte(big))
 	require.NoError(t, err, "write")
 
-	// First 4KB emits; sub-threshold tail stays buffered until Flush.
+	// The first chunkSizeThreshold bytes emit; the sub-threshold tail stays buffered until Flush.
 	require.Len(t, chunks, 1, "threshold should trigger one emission")
 	assert.Equal(t, strings.Repeat("x", chunkSizeThreshold), chunks[0], "emitted chunk should be exactly chunkSizeThreshold bytes")
 
@@ -198,7 +198,7 @@ func TestChunkWriter_FlusherEmitsBufferedOutput(t *testing.T) {
 	})
 }
 
-// A multi-byte rune straddling the 4KB cut must not be split—a split chunk is invalid UTF-8.
+// A multi-byte rune straddling the threshold cut must not be split—a split chunk is invalid UTF-8.
 func TestChunkWriter_DoesNotSplitRuneAtThreshold(t *testing.T) {
 	var chunks []string
 	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
@@ -214,4 +214,32 @@ func TestChunkWriter_DoesNotSplitRuneAtThreshold(t *testing.T) {
 		assert.True(t, utf8.ValidString(c), "chunk %d is not valid UTF-8—a rune was split at the boundary", i)
 	}
 	assert.Equal(t, input, strings.Join(chunks, ""), "reassembled output mismatch")
+}
+
+// Small chunks flood the chunk endpoint with one POST each; 32 KiB is the agreed size.
+func TestChunkWriter_GivenLargeOutput_WhenWritten_ThenEmits32KiBChunks(t *testing.T) {
+	var chunks []string
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
+
+	_, err := cw.Write([]byte(strings.Repeat("x", 64*1024)))
+	require.NoError(t, err, "write")
+
+	require.Len(t, chunks, 2, "64 KiB should go out as two chunks")
+	assert.Len(t, chunks[0], 32*1024)
+}
+
+// The server rejects a chunk over 65,536 characters; 4-byte runes give the fewest bytes per character.
+func TestChunkWriter_GivenFourByteRunes_WhenWritten_ThenEachChunkFitsServerCharLimit(t *testing.T) {
+	const serverChunkCharLimit = 65536
+	var chunks []string
+	cw := newChunkWriter(context.Background(), func(_ context.Context, content string) { chunks = append(chunks, content) })
+
+	_, err := cw.Write([]byte(strings.Repeat("😀", serverChunkCharLimit+1)))
+	require.NoError(t, err, "write")
+	cw.flush()
+
+	require.NotEmpty(t, chunks)
+	for i, c := range chunks {
+		assert.LessOrEqual(t, utf8.RuneCountInString(c), serverChunkCharLimit, "chunk %d exceeds the server limit", i)
+	}
 }
