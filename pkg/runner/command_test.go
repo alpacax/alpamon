@@ -204,3 +204,29 @@ func TestNewChunkCallback_GivenEmptyCommandID_WhenCalled_ThenCallbackIsNil(t *te
 
 	assert.Nil(t, callback, "an empty command ID must not produce a streaming callback")
 }
+
+// Regression (#553): the server drops chunks from seq 10000 on, yet replies 204 as if stored.
+func TestNewChunkCallback_GivenMoreChunksThanServerCap_WhenCalled_ThenNothingPastTheCapIsSent(t *testing.T) {
+	cleanup, mu, bodies := startFakeAlpacon(t)
+	defer cleanup()
+
+	cr := NewCommandRunner(nil, nil, protocol.Command{ID: "cmd-1"}, protocol.CommandData{}, nil)
+	callback := cr.newChunkCallback()
+	require.NotNil(t, callback, "a non-empty command ID should yield a callback")
+
+	const serverCap = 10000
+	for range serverCap + 50 {
+		callback(context.Background(), "x")
+	}
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(*bodies) >= serverCap
+	}, 30*time.Second, 50*time.Millisecond, "chunks below the cap should be delivered")
+	require.Never(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(*bodies) > serverCap
+	}, time.Second, 50*time.Millisecond, "no chunk past the server cap should be sent")
+}
