@@ -196,6 +196,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Dependabot may not raise matrix container digests, and the packages
+        # installed in them are unpinned; refresh the digests by hand.
         include:
           # Debian/Ubuntu (amd64)
           - distro: ubuntu-20.04

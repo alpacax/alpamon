@@ -179,6 +179,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Dependabot may not raise matrix container digests, and the packages
+        # installed in them are unpinned; refresh the digests by hand.
         include:
           - pkg_type: deb
             container: ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
@@ -386,6 +388,8 @@ jobs:
         with:
           name: ${{ env.PKG_NAME }}
 
+      # The action installs the package_cloud gem with no version, so this
+      # pin does not fix the uploader that runs.
       - name: Upload to PackageCloud
         uses: danielmundi/upload-packagecloud@46cd0e61152bf952dbc0d1759e609d3d22649030 # v1
         with:

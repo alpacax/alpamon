@@ -30,7 +30,7 @@ jobs:
       - name: GolangCI-Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.14.0
+          version: v2.14.0 # Dependabot does not raise action inputs; bump by hand.
           args: --timeout=5m
 
   govulncheck:
@@ -44,6 +44,7 @@ jobs:
       - name: Set up Go and generate ent code
         uses: ./.github/actions/setup-go-generate
 
+      # Dependabot does not raise go install versions; bump by hand.
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
 
