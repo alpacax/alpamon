@@ -107,7 +107,7 @@ func TestReporter_GivenRetryAfterFailure_WhenBackoffCrossesExpiry_ThenResurrecte
 	assert.Equal(t, int32(1), atomic.LoadInt32(hits), "retry/backoff must not resurrect a chunk past its expiry")
 }
 
-// Regression (#553): backoff was added to the entry's old due time, so on a backed-up queue it vanished.
+// Backoff was added to the entry's old due time, so on a backed-up queue it vanished.
 func TestReporter_GivenFailureOnBackedUpQueue_WhenRequeued_ThenBackoffCountsFromNow(t *testing.T) {
 	reporter, _ := newTestReporter(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -126,7 +126,7 @@ func TestReporter_GivenFailureOnBackedUpQueue_WhenRequeued_ThenBackoffCountsFrom
 	assert.True(t, getOne(t).due.After(time.Now()), "the retry should wait, not fire at once")
 }
 
-// Regression (#553): 400, 401 and 404 fail the same way on every retry.
+// 400, 401 and 404 fail the same way on every retry.
 func TestReporter_GivenNonRetryableStatus_WhenQueried_ThenNotRequeued(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusNotFound} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -150,7 +150,7 @@ func TestReporter_GivenNonRetryableStatus_WhenQueried_ThenNotRequeued(t *testing
 	}
 }
 
-// Regression (#553): a 429 carries the server's own wait, which the reporter ignored.
+// A 429 carries the server's own wait, which the reporter ignored.
 func TestReporter_Given429WithRetryAfter_WhenRequeued_ThenWaitsAtLeastRetryAfter(t *testing.T) {
 	reporter, _ := newTestReporter(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "30")

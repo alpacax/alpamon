@@ -205,7 +205,7 @@ func TestNewChunkCallback_GivenEmptyCommandID_WhenCalled_ThenCallbackIsNil(t *te
 	assert.Nil(t, callback, "an empty command ID must not produce a streaming callback")
 }
 
-// Regression (#553): the server drops chunks from seq 10000 on, yet replies 204 as if stored.
+// The server drops chunks from seq 10000 on, yet replies 204 as if stored.
 func TestNewChunkCallback_GivenMoreChunksThanServerCap_WhenCalled_ThenNothingPastTheCapIsSent(t *testing.T) {
 	cleanup, mu, bodies := startFakeAlpacon(t)
 	defer cleanup()
@@ -231,7 +231,7 @@ func TestNewChunkCallback_GivenMoreChunksThanServerCap_WhenCalled_ThenNothingPas
 	}, time.Second, 50*time.Millisecond, "no chunk past the server cap should be sent")
 }
 
-// Regression (#553): 32 KiB chunks make the server's count cap a 320 MB bound; the agent holds the old 40 MiB one.
+// 32 KiB chunks make the server's count cap a 320 MB bound; the agent holds the old 40 MiB one.
 func TestNewChunkCallback_GivenOutputOverByteBudget_WhenCalled_ThenDeliveredBytesStayWithinBudget(t *testing.T) {
 	cleanup, mu, bodies := startFakeAlpacon(t)
 	defer cleanup()
