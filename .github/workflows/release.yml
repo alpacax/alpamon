@@ -387,7 +387,7 @@ jobs:
           name: ${{ env.PKG_NAME }}
 
       - name: Upload to PackageCloud
-        uses: danielmundi/upload-packagecloud@v1
+        uses: danielmundi/upload-packagecloud@46cd0e61152bf952dbc0d1759e609d3d22649030 # v1
         with:
           package-name: ${{ env.PKG_NAME }}
           packagecloud-username: alpacax
