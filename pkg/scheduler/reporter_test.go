@@ -84,8 +84,6 @@ func TestReporter_GivenRetryAfterFailure_WhenBackoffCrossesExpiry_ThenResurrecte
 	})
 	newRequestQueue()
 
-	// due is far enough in the past that retry's backoff still leaves the requeued
-	// entry immediately due.
 	entry := PriorityEntry{
 		method: http.MethodPost,
 		url:    "/chunk",
@@ -100,7 +98,6 @@ func TestReporter_GivenRetryAfterFailure_WhenBackoffCrossesExpiry_ThenResurrecte
 	require.Equal(t, 1, queueSize(), "failed entry with retries left should be requeued")
 
 	requeued := getOne(t)
-	require.False(t, requeued.due.After(time.Now()), "test setup: requeued entry must already be due")
 
 	assert.Equal(t, entry.expiry, requeued.expiry, "requeue must carry the original expiry")
 
@@ -108,4 +105,86 @@ func TestReporter_GivenRetryAfterFailure_WhenBackoffCrossesExpiry_ThenResurrecte
 	reporter.processEntry(requeued)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(hits), "retry/backoff must not resurrect a chunk past its expiry")
+}
+
+// Regression (#553): backoff was added to the entry's old due time, so on a backed-up queue it vanished.
+func TestReporter_GivenFailureOnBackedUpQueue_WhenRequeued_ThenBackoffCountsFromNow(t *testing.T) {
+	reporter, _ := newTestReporter(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	newRequestQueue()
+
+	reporter.query(PriorityEntry{
+		method: http.MethodPost,
+		url:    "/chunk",
+		data:   json.RawMessage(`{}`),
+		due:    time.Now().Add(-10 * time.Second),
+		retry:  RetryLimit,
+	})
+
+	require.Equal(t, 1, queueSize(), "a 500 should be requeued")
+	assert.True(t, getOne(t).due.After(time.Now()), "the retry should wait, not fire at once")
+}
+
+// Regression (#553): 400, 401 and 404 fail the same way on every retry.
+func TestReporter_GivenNonRetryableStatus_WhenQueried_ThenNotRequeued(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusNotFound} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			reporter, hits := newTestReporter(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			})
+			newRequestQueue()
+
+			reporter.query(PriorityEntry{
+				method: http.MethodPost,
+				url:    "/chunk",
+				data:   json.RawMessage(`{}`),
+				due:    time.Now(),
+				retry:  RetryLimit,
+			})
+
+			assert.Equal(t, int32(1), atomic.LoadInt32(hits), "the request should be sent once")
+			assert.Zero(t, queueSize(), "a status that fails again must not be requeued")
+			assert.Equal(t, 1, reporter.counters.ignored, "the dropped entry should be counted as ignored")
+		})
+	}
+}
+
+// Regression (#553): a 429 carries the server's own wait, which the reporter ignored.
+func TestReporter_Given429WithRetryAfter_WhenRequeued_ThenWaitsAtLeastRetryAfter(t *testing.T) {
+	reporter, _ := newTestReporter(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	newRequestQueue()
+
+	reporter.query(PriorityEntry{
+		method: http.MethodPost,
+		url:    "/chunk",
+		data:   json.RawMessage(`{}`),
+		due:    time.Now(),
+		retry:  RetryLimit,
+	})
+
+	require.Equal(t, 1, queueSize(), "a 429 should be requeued")
+	assert.True(t, getOne(t).due.After(time.Now().Add(25*time.Second)), "the retry should wait for Retry-After")
+}
+
+// 403 stays retryable: an edge rate limit may answer it, so it must not be dropped like a 401.
+func TestReporter_GivenForbidden_WhenQueried_ThenRequeuedWithBackoff(t *testing.T) {
+	reporter, _ := newTestReporter(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	newRequestQueue()
+
+	reporter.query(PriorityEntry{
+		method: http.MethodPost,
+		url:    "/chunk",
+		data:   json.RawMessage(`{}`),
+		due:    time.Now(),
+		retry:  RetryLimit,
+	})
+
+	require.Equal(t, 1, queueSize(), "a 403 should be requeued")
+	assert.True(t, getOne(t).due.After(time.Now()), "the retry should wait")
 }

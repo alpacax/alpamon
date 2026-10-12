@@ -18,6 +18,8 @@ import (
 
 const (
 	startUpEventURL = "/api/events/events/"
+	// maxRetryAfter caps a server's Retry-After so one bogus value cannot park a retry for days.
+	maxRetryAfter = 5 * time.Minute
 )
 
 func NewReporter(index int, session *Session) *Reporter {
@@ -104,7 +106,7 @@ func (r *Reporter) query(entry PriorityEntry) {
 	if entry.headers != nil {
 		headers = *entry.headers
 	}
-	resp, statusCode, err := r.session.RequestWithHeaders(entry.method, entry.url, entry.data, 5, headers)
+	resp, statusCode, respHeader, err := r.session.RequestWithHeaders(entry.method, entry.url, entry.data, 5, headers)
 	t2 := time.Now()
 
 	r.counters.delay = r.counters.delay*0.9 + (t2.Sub(entry.due).Seconds())*0.1
@@ -129,9 +131,13 @@ func (r *Reporter) query(entry PriorityEntry) {
 		r.counters.success++
 	} else {
 		r.counters.failure++
-		if entry.retry > 0 {
+		if entry.retry > 0 && isRetryable(statusCode) {
+			now := time.Now()
 			backoff := time.Duration(math.Pow(2, float64(RetryLimit-entry.retry))) * time.Second
-			entry.due = entry.due.Add(backoff)
+			if statusCode == http.StatusTooManyRequests {
+				backoff = max(backoff, utils.ParseRetryAfter(respHeader.Get("Retry-After"), now, maxRetryAfter))
+			}
+			entry.due = now.Add(backoff)
 			entry.retry--
 			if err = Rqueue.Requeue(entry); err != nil {
 				r.counters.ignored++
@@ -140,6 +146,17 @@ func (r *Reporter) query(entry PriorityEntry) {
 			r.counters.ignored++
 		}
 	}
+}
+
+// isRetryable reports whether a failed request can succeed on a later try.
+// 403 stays retryable: an edge rate limit may answer it, and a real denial
+// costs at most RetryLimit spaced attempts.
+func isRetryable(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusNotFound:
+		return false
+	}
+	return true
 }
 
 func (r *Reporter) Run(ctx context.Context) {

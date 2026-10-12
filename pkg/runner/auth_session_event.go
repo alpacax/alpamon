@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
@@ -322,5 +323,5 @@ func (am *AuthManager) postAccessEvent(ctx context.Context, event NonAlpaconAcce
 	if err != nil {
 		return 0, 0, err
 	}
-	return status, parseRetryAfter(header.Get("Retry-After"), time.Now()), nil
+	return status, utils.ParseRetryAfter(header.Get("Retry-After"), time.Now(), accessOutboxMaxRetryAfter), nil
 }
