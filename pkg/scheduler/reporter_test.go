@@ -170,6 +170,26 @@ func TestReporter_Given429WithRetryAfter_WhenRequeued_ThenWaitsAtLeastRetryAfter
 	assert.True(t, getOne(t).due.After(time.Now().Add(25*time.Second)), "the retry should wait for Retry-After")
 }
 
+// A 503 may carry Retry-After too (RFC 9110), and the reporter must wait for it.
+func TestReporter_Given503WithRetryAfter_WhenRequeued_ThenWaitsAtLeastRetryAfter(t *testing.T) {
+	reporter, _ := newTestReporter(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	newRequestQueue()
+
+	reporter.query(PriorityEntry{
+		method: http.MethodPost,
+		url:    "/chunk",
+		data:   json.RawMessage(`{}`),
+		due:    time.Now(),
+		retry:  RetryLimit,
+	})
+
+	require.Equal(t, 1, queueSize(), "a 503 should be requeued")
+	assert.True(t, getOne(t).due.After(time.Now().Add(25*time.Second)), "the retry should wait for Retry-After")
+}
+
 // 403 stays retryable: an edge rate limit may answer it, so it must not be dropped like a 401.
 func TestReporter_GivenForbidden_WhenQueried_ThenRequeuedWithBackoff(t *testing.T) {
 	reporter, _ := newTestReporter(t, func(w http.ResponseWriter, r *http.Request) {
@@ -187,4 +207,19 @@ func TestReporter_GivenForbidden_WhenQueried_ThenRequeuedWithBackoff(t *testing.
 
 	require.Equal(t, 1, queueSize(), "a 403 should be requeued")
 	assert.True(t, getOne(t).due.After(time.Now()), "the retry should wait")
+}
+
+// A retry waiting out its backoff must not hold back an entry that is due, whatever the priorities.
+func TestReporter_GivenFutureEntryAheadByPriority_WhenWaitingForEntry_ThenDueEntryComesFirst(t *testing.T) {
+	reporter, _ := newTestReporter(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	newRequestQueue()
+	Rqueue.Post("/chunk", json.RawMessage(`{}`), 10, time.Now().Add(time.Minute))
+	Rqueue.Post("/fin", json.RawMessage(`{}`), 11, time.Time{})
+
+	entry, ok := reporter.waitForEntry(t.Context())
+
+	require.True(t, ok)
+	assert.Equal(t, "/fin", entry.url, "the due entry should be taken, not the one still backing off")
 }

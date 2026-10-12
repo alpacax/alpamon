@@ -134,7 +134,7 @@ func (r *Reporter) query(entry PriorityEntry) {
 		if entry.retry > 0 && isRetryable(statusCode) {
 			now := time.Now()
 			backoff := time.Duration(math.Pow(2, float64(RetryLimit-entry.retry))) * time.Second
-			if statusCode == http.StatusTooManyRequests {
+			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
 				backoff = max(backoff, utils.ParseRetryAfter(respHeader.Get("Retry-After"), now, maxRetryAfter))
 			}
 			entry.due = now.Add(backoff)
@@ -180,29 +180,36 @@ func (r *Reporter) Run(ctx context.Context) {
 	}
 }
 
-// waitForEntry waits for an entry from the queue or context cancellation
+// waitForEntry waits for a due entry from the queue or context cancellation
 func (r *Reporter) waitForEntry(ctx context.Context) (PriorityEntry, bool) {
 	Rqueue.cond.L.Lock()
 	defer Rqueue.cond.L.Unlock()
 
-	for Rqueue.queue.Size() == 0 {
-		// Check context before waiting
+	for {
 		select {
 		case <-ctx.Done():
 			log.Debug().Msgf("Reporter %s shutting down", r.name)
 			return PriorityEntry{}, false
 		default:
 		}
-		Rqueue.cond.Wait()
-	}
 
-	entry, err := Rqueue.queue.Get()
-	if err != nil {
-		// Return empty entry to continue loop
-		return PriorityEntry{}, true
-	}
+		entry, wait, ok := Rqueue.queue.Next(time.Now())
+		if ok {
+			return entry, true
+		}
+		if wait <= 0 {
+			Rqueue.cond.Wait()
+			continue
+		}
 
-	return entry, true
+		// Only backing-off entries remain: sleep until the soonest is due, waking early on shutdown.
+		Rqueue.cond.L.Unlock()
+		select {
+		case <-ctx.Done():
+		case <-time.After(min(wait, time.Second)):
+		}
+		Rqueue.cond.L.Lock()
+	}
 }
 
 // processEntry handles the business logic for a queue entry
@@ -210,15 +217,6 @@ func (r *Reporter) processEntry(entry PriorityEntry) {
 	// Handle expired entries
 	if !entry.expiry.IsZero() && entry.expiry.Before(time.Now()) {
 		r.counters.ignored++
-		return
-	}
-
-	// Handle entries that are not yet due
-	if !entry.due.IsZero() && entry.due.After(time.Now()) {
-		if err := Rqueue.Requeue(entry); err != nil {
-			r.counters.ignored++
-		}
-		time.Sleep(1 * time.Second)
 		return
 	}
 
