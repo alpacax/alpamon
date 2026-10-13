@@ -26,13 +26,6 @@ func NewReporter(index int, session *Session) *Reporter {
 	return &Reporter{
 		name:    fmt.Sprintf("Reporter-%d", index),
 		session: session,
-		counters: &counters{
-			success: 0,
-			failure: 0,
-			ignored: 0,
-			delay:   0.0,
-			latency: 0.0,
-		},
 	}
 }
 
@@ -101,16 +94,11 @@ func reportStartupEvent() {
 }
 
 func (r *Reporter) query(entry PriorityEntry) {
-	t1 := time.Now()
 	var headers Headers
 	if entry.headers != nil {
 		headers = *entry.headers
 	}
 	resp, statusCode, respHeader, err := r.session.RequestWithHeaders(entry.method, entry.url, entry.data, 5, headers)
-	t2 := time.Now()
-
-	r.counters.delay = r.counters.delay*0.9 + (t2.Sub(entry.due).Seconds())*0.1
-	r.counters.latency = r.counters.latency*0.9 + (t2.Sub(t1).Seconds())*0.1
 
 	var success bool
 	if err != nil {
@@ -128,22 +116,18 @@ func (r *Reporter) query(entry PriorityEntry) {
 	}
 
 	if success {
-		r.counters.success++
-	} else {
-		r.counters.failure++
-		if entry.retry > 0 && isRetryable(statusCode) {
-			now := time.Now()
-			backoff := time.Duration(math.Pow(2, float64(RetryLimit-entry.retry))) * time.Second
-			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
-				backoff = max(backoff, utils.ParseRetryAfter(respHeader.Get("Retry-After"), now, maxRetryAfter))
-			}
-			entry.due = now.Add(backoff)
-			entry.retry--
-			if err = Rqueue.Requeue(entry); err != nil {
-				r.counters.ignored++
-			}
-		} else {
-			r.counters.ignored++
+		return
+	}
+	if entry.retry > 0 && isRetryable(statusCode) {
+		now := time.Now()
+		backoff := time.Duration(math.Pow(2, float64(RetryLimit-entry.retry))) * time.Second
+		if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+			backoff = max(backoff, utils.ParseRetryAfter(respHeader.Get("Retry-After"), now, maxRetryAfter))
+		}
+		entry.due = now.Add(backoff)
+		entry.retry--
+		if err = Rqueue.Requeue(entry); err != nil {
+			log.Error().Err(err).Msgf("Dropping retry of %s %s", entry.method, entry.url)
 		}
 	}
 }
@@ -219,7 +203,6 @@ func broadcastQueue() {
 func (r *Reporter) processEntry(entry PriorityEntry) {
 	// Handle expired entries
 	if !entry.expiry.IsZero() && entry.expiry.Before(time.Now()) {
-		r.counters.ignored++
 		return
 	}
 

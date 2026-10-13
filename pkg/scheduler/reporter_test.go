@@ -53,7 +53,6 @@ func TestReporter_GivenChunkPastExpiryPlusGrace_WhenProcessed_ThenDroppedWithout
 	reporter.processEntry(entry)
 
 	assert.Equal(t, int32(0), atomic.LoadInt32(hits), "an expired chunk must never reach the server")
-	assert.Equal(t, 1, reporter.counters.ignored, "expired chunk should be counted as ignored")
 }
 
 func TestReporter_GivenChunkQueuedBeforeDeadlineButDrainedWithinGrace_WhenProcessed_ThenDelivered(t *testing.T) {
@@ -75,8 +74,6 @@ func TestReporter_GivenChunkQueuedBeforeDeadlineButDrainedWithinGrace_WhenProces
 	reporter.processEntry(entry)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(hits), "a chunk still within its grace window must be delivered")
-	assert.Equal(t, 1, reporter.counters.success)
-	assert.Equal(t, 0, reporter.counters.ignored)
 }
 
 func TestReporter_GivenRetryAfterFailure_WhenBackoffCrossesExpiry_ThenResurrectedEntryIsDropped(t *testing.T) {
@@ -146,7 +143,6 @@ func TestReporter_GivenNonRetryableStatus_WhenQueried_ThenNotRequeued(t *testing
 
 			assert.Equal(t, int32(1), atomic.LoadInt32(hits), "the request should be sent once")
 			assert.Zero(t, queueSize(), "a status that fails again must not be requeued")
-			assert.Equal(t, 1, reporter.counters.ignored, "the dropped entry should be counted as ignored")
 		})
 	}
 }
