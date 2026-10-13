@@ -7,8 +7,8 @@ ALPAMON_LOG="/var/log/alpamon/alpamon.log"
 # Upper bound on how long a deferred restart waits for the agent's upgrade command,
 # matching the delay configs/alpamon-restart.timer gives the systemd path.
 RESTART_WAIT_LIMIT=300
-# A restart drops the agent's in-memory result queue, so the grace must outlast the retries
-# Reporter.query in pkg/scheduler/reporter.go gives a failed post of the command's result.
+# A restart drops the agent's in-memory result queue, so the grace outlasts the backoff retries Reporter.query
+# (pkg/scheduler/reporter.go) gives a failed result post; a Retry-After delay, up to 5 minutes each, is not covered.
 RESTART_GRACE=60
 # Holds the token of the newest deferred restart; an older job that finds another token stands down.
 RESTART_TOKEN_FILE="/run/alpamon/restart.token"
