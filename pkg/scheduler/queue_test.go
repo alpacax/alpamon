@@ -21,8 +21,8 @@ func getOne(t *testing.T) PriorityEntry {
 	t.Helper()
 	Rqueue.cond.L.Lock()
 	defer Rqueue.cond.L.Unlock()
-	entry, err := Rqueue.queue.Get()
-	require.NoError(t, err, "drain")
+	entry, _, ok := Rqueue.queue.Next(time.Now().Add(24 * time.Hour)) // also takes a retry still backing off
+	require.True(t, ok, "drain")
 	return entry
 }
 
@@ -37,7 +37,7 @@ func fill(n int) {
 	}
 }
 
-func TestPriorityQueue_GetReleasesOnlyRemovedEntry(t *testing.T) {
+func TestPriorityQueue_NextReleasesOnlyRemovedEntry(t *testing.T) {
 	queue := newPriorityQueue(3)
 	headers := Headers{"X-Test": "value"}
 	entries := []PriorityEntry{
@@ -50,8 +50,8 @@ func TestPriorityQueue_GetReleasesOnlyRemovedEntry(t *testing.T) {
 	}
 
 	vacated := len(queue.h) - 1
-	got, err := queue.Get()
-	require.NoError(t, err)
+	got, _, ok := queue.Next(time.Now())
+	require.True(t, ok)
 	assert.Equal(t, "/a", got.url)
 
 	assert.Len(t, queue.h, 2)
@@ -60,12 +60,12 @@ func TestPriorityQueue_GetReleasesOnlyRemovedEntry(t *testing.T) {
 		assert.Len(t, remaining.data, 4096)
 	}
 
-	got, err = queue.Get()
-	require.NoError(t, err)
+	got, _, ok = queue.Next(time.Now())
+	require.True(t, ok)
 	assert.Equal(t, "/b", got.url)
 
-	got, err = queue.Get()
-	require.NoError(t, err)
+	got, _, ok = queue.Next(time.Now())
+	require.True(t, ok)
 	assert.Equal(t, "/c", got.url)
 }
 

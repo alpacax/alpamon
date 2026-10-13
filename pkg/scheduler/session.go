@@ -151,11 +151,6 @@ func (session *Session) doWithHeader(req *http.Request, timeout time.Duration) (
 	return body, resp.StatusCode, resp.Header, nil
 }
 
-func (session *Session) Request(method, url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
-	body, statusCode, _, err := session.RequestWithHeaders(method, url, rawBody, timeout, nil)
-	return body, statusCode, err
-}
-
 func (session *Session) RequestWithHeaders(method, url string, rawBody any, timeout time.Duration, headers Headers) ([]byte, int, http.Header, error) {
 	req, err := session.newRequest(method, url, rawBody)
 	if err != nil {

@@ -110,17 +110,6 @@ func (pq *priorityQueue) Offer(entry PriorityEntry) error {
 	return nil
 }
 
-// Get pops the best due entry, or the soonest waiting one when none is due.
-func (pq *priorityQueue) Get() (PriorityEntry, error) {
-	if pq.h.Len() > 0 {
-		return pq.take(heap.Pop(&pq.h)), nil
-	}
-	if pq.waiting.Len() > 0 {
-		return pq.take(heap.Pop(&pq.waiting)), nil
-	}
-	return PriorityEntry{}, errors.New("queue is empty")
-}
-
 // Next pops the best entry that is due at now. When none is, it reports how long until the soonest one is.
 func (pq *priorityQueue) Next(now time.Time) (entry PriorityEntry, wait time.Duration, ok bool) {
 	for pq.waiting.Len() > 0 && !pq.waiting[0].due.After(now) {
