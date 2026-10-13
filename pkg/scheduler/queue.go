@@ -32,69 +32,56 @@ const (
 
 var errQueueFull = errors.New("queue is full")
 
-// priorityHeap implements heap.Interface for PriorityEntry.
-type priorityHeap []PriorityEntry
-
-func (h priorityHeap) Len() int { return len(h) }
-func (h priorityHeap) Less(i, j int) bool {
-	if h[i].priority == h[j].priority {
-		return h[i].due.Before(h[j].due)
-	}
-	return h[i].priority < h[j].priority
-}
-func (h priorityHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-
-func (h *priorityHeap) Push(x any) {
-	*h = append(*h, x.(PriorityEntry))
+// entryHeap implements heap.Interface for PriorityEntry in the order less gives.
+type entryHeap struct {
+	entries []PriorityEntry
+	less    func(a, b PriorityEntry) bool
 }
 
-func (h *priorityHeap) Pop() any {
-	old := *h
+func (h entryHeap) Len() int           { return len(h.entries) }
+func (h entryHeap) Less(i, j int) bool { return h.less(h.entries[i], h.entries[j]) }
+func (h entryHeap) Swap(i, j int)      { h.entries[i], h.entries[j] = h.entries[j], h.entries[i] }
+
+func (h *entryHeap) Push(x any) {
+	h.entries = append(h.entries, x.(PriorityEntry))
+}
+
+func (h *entryHeap) Pop() any {
+	old := h.entries
 	n := len(old)
 	item := old[n-1]
 	// Clear the backing-array slot so processed request data can be reclaimed.
 	old[n-1] = PriorityEntry{}
-	*h = old[:n-1]
+	h.entries = old[:n-1]
 	return item
 }
 
-// dueHeap orders entries still backing off by when they become due.
-type dueHeap []PriorityEntry
-
-func (h dueHeap) Len() int           { return len(h) }
-func (h dueHeap) Less(i, j int) bool { return h[i].due.Before(h[j].due) }
-func (h dueHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-
-func (h *dueHeap) Push(x any) {
-	*h = append(*h, x.(PriorityEntry))
+func byPriority(a, b PriorityEntry) bool {
+	if a.priority == b.priority {
+		return a.due.Before(b.due)
+	}
+	return a.priority < b.priority
 }
 
-func (h *dueHeap) Pop() any {
-	old := *h
-	n := len(old)
-	item := old[n-1]
-	old[n-1] = PriorityEntry{}
-	*h = old[:n-1]
-	return item
-}
+// byDue orders entries still backing off by when they become due.
+func byDue(a, b PriorityEntry) bool { return a.due.Before(b.due) }
 
 // priorityQueue is a bounded priority queue backed by container/heap.
 // Entries not yet due wait in a separate heap so they never sit ahead of a due entry.
 // NOT thread-safe: callers must hold RequestQueue.cond.L for all operations.
 type priorityQueue struct {
-	h        priorityHeap
-	waiting  dueHeap
+	h        entryHeap
+	waiting  entryHeap
 	capacity int
 	bytes    int // sum of size over queued entries
 }
 
 func newPriorityQueue(capacity int) *priorityQueue {
-	pq := &priorityQueue{
-		h:        make(priorityHeap, 0),
+	return &priorityQueue{
+		h:        entryHeap{less: byPriority},
+		waiting:  entryHeap{less: byDue},
 		capacity: capacity,
 	}
-	heap.Init(&pq.h)
-	return pq
 }
 
 func (pq *priorityQueue) Offer(entry PriorityEntry) error {
@@ -112,14 +99,14 @@ func (pq *priorityQueue) Offer(entry PriorityEntry) error {
 
 // Next pops the best entry that is due at now. When none is, it reports how long until the soonest one is.
 func (pq *priorityQueue) Next(now time.Time) (entry PriorityEntry, wait time.Duration, ok bool) {
-	for pq.waiting.Len() > 0 && !pq.waiting[0].due.After(now) {
+	for pq.waiting.Len() > 0 && !pq.waiting.entries[0].due.After(now) {
 		heap.Push(&pq.h, heap.Pop(&pq.waiting))
 	}
 	if pq.h.Len() > 0 {
 		return pq.take(heap.Pop(&pq.h)), 0, true
 	}
 	if pq.waiting.Len() > 0 {
-		return PriorityEntry{}, pq.waiting[0].due.Sub(now), false
+		return PriorityEntry{}, pq.waiting.entries[0].due.Sub(now), false
 	}
 	return PriorityEntry{}, 0, false
 }

@@ -49,14 +49,14 @@ func TestPriorityQueue_NextReleasesOnlyRemovedEntry(t *testing.T) {
 		require.NoError(t, queue.Offer(e))
 	}
 
-	vacated := len(queue.h) - 1
+	vacated := len(queue.h.entries) - 1
 	got, _, ok := queue.Next(time.Now())
 	require.True(t, ok)
 	assert.Equal(t, "/a", got.url)
 
-	assert.Len(t, queue.h, 2)
-	assert.Equal(t, PriorityEntry{}, queue.h[:cap(queue.h)][vacated])
-	for _, remaining := range queue.h {
+	assert.Len(t, queue.h.entries, 2)
+	assert.Equal(t, PriorityEntry{}, queue.h.entries[:cap(queue.h.entries)][vacated])
+	for _, remaining := range queue.h.entries {
 		assert.Len(t, remaining.data, 4096)
 	}
 
@@ -260,4 +260,17 @@ func TestPostChunk_GivenCommandChunk_WhenEnqueued_ThenQueuedBytesCountItsContent
 	Rqueue.cond.L.Lock()
 	defer Rqueue.cond.L.Unlock()
 	assert.Equal(t, len(content), Rqueue.queue.Bytes())
+}
+
+// Next only looks at the head of the waiting heap, so it must be the soonest due whatever the priority.
+func TestPriorityQueue_GivenBackingOffEntries_WhenOneFallsDue_ThenNextTakesItAheadOfAHigherPriorityOne(t *testing.T) {
+	queue := newPriorityQueue(10)
+	now := time.Now()
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/later", priority: 1, due: now.Add(time.Hour)}))
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/sooner", priority: 10, due: now.Add(time.Minute)}))
+
+	entry, _, ok := queue.Next(now.Add(2 * time.Minute))
+
+	require.True(t, ok, "the entry due a minute in should be taken")
+	assert.Equal(t, "/sooner", entry.url)
 }
