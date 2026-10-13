@@ -39,6 +39,7 @@ RESTART_GRACE="${GRACE:-1}" # the agent touches "exited" only after reaping the 
 RESTART_WAIT_LIMIT="$WAIT_LIMIT"
 RESTART_TOKEN_FILE="${TOKEN_FILE:-$DIR/restart.token}"
 RESTART_LOCK_FILE="${LOCK_FILE:-$DIR/upgrade.lock}"
+RESTART_LOCK_WAIT="${LOCK_WAIT:-1800}"
 RESTART_SERIAL_FILE="${SERIAL_FILE:-$DIR/restart.lock}"
 set -e
 main 2
@@ -328,6 +329,24 @@ func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedWit
 	require.Empty(t, run.restarted(t, 2*time.Second))
 	assert.Equal(t, "after", run.restarted(t, 10*time.Second))
 	assert.Contains(t, run.log(t), "waiting out the grace again")
+}
+
+func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedPastTheDeadline(t *testing.T) {
+	// Given a deferred restart with a six-second deadline whose grace ends while the agent holds the lock
+	run := newUpgradeRun(t, 60, 0)
+	run.env = append(run.env, "GRACE=3", "LOCK_WAIT=6")
+	release := holdLock(t, filepath.Join(run.dir, "upgrade.lock"))
+	defer release()
+	require.NoError(t, run.startAgent(t).Wait())
+	require.Empty(t, run.restarted(t, 7*time.Second))
+
+	// When the holder releases only after the deadline has passed
+	release()
+
+	// Then the job still gives that upgrade's result a full grace before it restarts the agent
+	require.Empty(t, run.restarted(t, 2*time.Second))
+	assert.Equal(t, "after", run.restarted(t, 10*time.Second))
+	assert.Contains(t, run.log(t), "waiting out the grace once more")
 }
 
 func TestStartAlpamonProcessDoesNotPassTheLocksToTheNewAgent(t *testing.T) {

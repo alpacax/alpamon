@@ -250,6 +250,10 @@ defer_alpamon_restart() {
           flock -u 9
           echo "The upgrade lock was released; waiting out the grace again before restarting."
           continue
+        else
+          # Past the deadline the lock stays held through this last grace, so no new upgrade starts to be cut short.
+          echo "The upgrade lock was released past the deadline; waiting out the grace once more before restarting."
+          sleep "$RESTART_GRACE"
         fi
       fi
       # Held from the token check through the restart, so a manual upgrade cannot remove the token in between.
