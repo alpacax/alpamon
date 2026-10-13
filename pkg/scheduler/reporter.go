@@ -71,8 +71,8 @@ func (rm *ReporterManager) Shutdown(timeout time.Duration) error {
 		cancel()
 	}
 
-	// Wake up all waiting reporters
-	Rqueue.cond.Broadcast()
+	// Under the lock, so a reporter between its ctx check and cond.Wait cannot miss it.
+	broadcastQueue()
 
 	// Wait for all reporters to finish with timeout
 	done := make(chan struct{})
@@ -202,14 +202,17 @@ func (r *Reporter) waitForEntry(ctx context.Context) (PriorityEntry, bool) {
 			continue
 		}
 
-		// Only backing-off entries remain: sleep until the soonest is due, waking early on shutdown.
-		Rqueue.cond.L.Unlock()
-		select {
-		case <-ctx.Done():
-		case <-time.After(min(wait, time.Second)):
-		}
-		Rqueue.cond.L.Lock()
+		// Only backing-off entries remain: wait on cond so an enqueue or shutdown still wakes us.
+		timer := time.AfterFunc(wait, broadcastQueue)
+		Rqueue.cond.Wait()
+		timer.Stop()
 	}
+}
+
+func broadcastQueue() {
+	Rqueue.cond.L.Lock()
+	Rqueue.cond.Broadcast()
+	Rqueue.cond.L.Unlock()
 }
 
 // processEntry handles the business logic for a queue entry

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
@@ -222,4 +223,26 @@ func TestReporter_GivenFutureEntryAheadByPriority_WhenWaitingForEntry_ThenDueEnt
 
 	require.True(t, ok)
 	assert.Equal(t, "/fin", entry.url, "the due entry should be taken, not the one still backing off")
+}
+
+// A reporter sleeping on a backing-off entry must wake for a new due entry, not finish its sleep.
+func TestReporter_GivenOnlyBackingOffEntry_WhenDueEntryEnqueued_ThenTakenWithoutDelay(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		newRequestQueue()
+		Rqueue.Post("/chunk", json.RawMessage(`{}`), 10, time.Now().Add(time.Minute))
+		reporter := NewReporter(0, nil)
+		got := make(chan PriorityEntry, 1)
+		go func() {
+			entry, _ := reporter.waitForEntry(t.Context())
+			got <- entry
+		}()
+		synctest.Wait()
+
+		start := time.Now()
+		Rqueue.Post("/fin", json.RawMessage(`{}`), 11, time.Time{})
+		entry := <-got
+
+		assert.Equal(t, "/fin", entry.url)
+		assert.Zero(t, time.Since(start), "the reporter should wake on enqueue")
+	})
 }
