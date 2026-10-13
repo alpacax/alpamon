@@ -164,7 +164,8 @@ func (r *Reporter) Run(ctx context.Context) {
 	}
 }
 
-// waitForEntry waits for a due entry from the queue or context cancellation
+// waitForEntry waits for a due entry from the queue or context cancellation.
+// Cancelling ctx alone does not wake cond.Wait; ReporterManager.Shutdown broadcasts after cancelling.
 func (r *Reporter) waitForEntry(ctx context.Context) (PriorityEntry, bool) {
 	Rqueue.cond.L.Lock()
 	defer Rqueue.cond.L.Unlock()
