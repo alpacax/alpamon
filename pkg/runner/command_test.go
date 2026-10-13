@@ -107,6 +107,24 @@ func TestNewChunkCallback_GivenCtxWithExpiredDeadline_WhenCalled_ThenChunkIsDrop
 	assert.Equal(t, "live", got[0].content, "the expired chunk must never reach the server")
 }
 
+func TestNewChunkCallback_GivenRunnerBuiltAsLiteral_WhenCalled_ThenChunkIsDelivered(t *testing.T) {
+	cleanup, mu, bodies := startFakeAlpacon(t)
+	defer cleanup()
+	cr := &CommandRunner{command: protocol.Command{ID: "cmd-1"}}
+	callback := cr.newChunkCallback()
+
+	callback(context.Background(), "from a literal")
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(*bodies) == 1
+	}, 2*time.Second, 10*time.Millisecond, "a runner without a posting step should still post through the queue")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "from a literal", (*bodies)[0].content)
+}
+
 // The final flush of a timed-out command arrives just past its deadline, which is what the grace is for.
 func TestNewChunkCallback_GivenCtxDeadlineJustPassed_WhenCalled_ThenChunkIsDeliveredWithinGrace(t *testing.T) {
 	cleanup, mu, bodies := startFakeAlpacon(t)

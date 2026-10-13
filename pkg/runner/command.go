@@ -39,7 +39,7 @@ type CommandRunner struct {
 	apiSession *scheduler.Session
 	data       protocol.CommandData
 	dispatcher CommandDispatcher
-	postChunk  func(ctx context.Context, url string, chunk *protocol.CommandChunk, priority int, expiry time.Time)
+	postChunk  func(ctx context.Context, url string, chunk *protocol.CommandChunk, priority int, expiry time.Time) // nil posts to scheduler.Rqueue
 }
 
 func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command protocol.Command, data protocol.CommandData, dispatcher CommandDispatcher) *CommandRunner {
@@ -55,9 +55,6 @@ func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, 
 		wsClient:   wsClient,
 		apiSession: apiSession,
 		dispatcher: dispatcher,
-		postChunk: func(ctx context.Context, url string, chunk *protocol.CommandChunk, priority int, expiry time.Time) {
-			scheduler.Rqueue.PostChunk(ctx, url, chunk, priority, expiry)
-		},
 	}
 }
 
@@ -69,6 +66,10 @@ func (cr *CommandRunner) newChunkCallback() func(ctx context.Context, content st
 	}
 
 	chunkURL := fmt.Sprintf(eventCommandChunkURL, cr.command.ID)
+	post := cr.postChunk
+	if post == nil {
+		post = scheduler.Rqueue.PostChunk
+	}
 	// Runner owns seq so chunks across shell operators share one series.
 	var seq int
 	var sentBytes int
@@ -91,7 +92,7 @@ func (cr *CommandRunner) newChunkCallback() func(ctx context.Context, content st
 		if deadline, ok := ctx.Deadline(); ok {
 			expiry = deadline.Add(chunkDeliveryGrace)
 		}
-		cr.postChunk(ctx, chunkURL, &protocol.CommandChunk{
+		post(ctx, chunkURL, &protocol.CommandChunk{
 			Seq:     s,
 			Content: content,
 		}, 10, expiry)
