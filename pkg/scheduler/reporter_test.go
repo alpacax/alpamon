@@ -242,3 +242,19 @@ func TestReporter_GivenOnlyBackingOffEntry_WhenDueEntryEnqueued_ThenTakenWithout
 		assert.Zero(t, time.Since(start), "the reporter should wake on enqueue")
 	})
 }
+
+// With nothing due, the reporter sleeps until the backing-off entry falls due, then takes it.
+func TestReporter_GivenOnlyBackingOffEntry_WhenItFallsDue_ThenTakenAtItsDueTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		newRequestQueue()
+		Rqueue.Post("/chunk", json.RawMessage(`{}`), 10, time.Now().Add(time.Minute))
+		reporter := NewReporter(0, nil)
+		start := time.Now()
+
+		entry, ok := reporter.waitForEntry(t.Context())
+
+		require.True(t, ok)
+		assert.Equal(t, "/chunk", entry.url)
+		assert.Equal(t, time.Minute, time.Since(start), "the reporter should wake when the entry falls due")
+	})
+}

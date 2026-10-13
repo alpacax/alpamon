@@ -274,3 +274,16 @@ func TestPriorityQueue_GivenBackingOffEntries_WhenOneFallsDue_ThenNextTakesItAhe
 	require.True(t, ok, "the entry due a minute in should be taken")
 	assert.Equal(t, "/sooner", entry.url)
 }
+
+func TestPriorityQueue_GivenOnlyBackingOffEntries_WhenNextCalled_ThenReportsWaitUntilSoonestDue(t *testing.T) {
+	queue := newPriorityQueue(10)
+	now := time.Now()
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/later", due: now.Add(time.Hour)}))
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/sooner", due: now.Add(time.Minute)}))
+
+	_, wait, ok := queue.Next(now)
+
+	assert.False(t, ok, "no entry is due yet")
+	assert.Equal(t, time.Minute, wait)
+	assert.Equal(t, 2, queue.Size(), "a wait must not take any entry")
+}
