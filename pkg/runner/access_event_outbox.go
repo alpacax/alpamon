@@ -207,7 +207,7 @@ func (c *rateLimitedCount) hasPending() bool {
 	return c.pending > 0
 }
 
-// accessOutboxWrite is one item for the writer: an event, or a flush marker
+// accessOutboxWrite is one item for the writer: an event, or a flush marker (sent only by tests)
 // that is closed once everything queued before it is settled.
 type accessOutboxWrite struct {
 	event   NonAlpaconAccessEvent
@@ -348,20 +348,6 @@ func (o *accessEventOutbox) enqueue(event NonAlpaconAccessEvent) bool {
 		o.store(ctx, []NonAlpaconAccessEvent{event})
 	}
 	return taken
-}
-
-// flush waits until everything enqueued before it is stored or given up on.
-func (o *accessEventOutbox) flush() {
-	done := make(chan struct{})
-	select {
-	case o.inbox <- accessOutboxWrite{flushed: done}:
-	case <-o.writerDone:
-		return
-	}
-	select {
-	case <-done:
-	case <-o.writerDone:
-	}
 }
 
 // start launches the writer and the drain. stop joins them.

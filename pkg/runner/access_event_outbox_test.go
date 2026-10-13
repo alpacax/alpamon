@@ -1170,3 +1170,17 @@ func TestAccessEventOutbox_HandOffAfterStopIsStillStored(t *testing.T) {
 	o.enqueue(newTestAccessEvent(newFakeOutboxClock(), "alice"))
 	assert.Len(t, outboxRows(t, o), 1)
 }
+
+// flush waits until everything enqueued before it is stored or given up on.
+func (o *accessEventOutbox) flush() {
+	done := make(chan struct{})
+	select {
+	case o.inbox <- accessOutboxWrite{flushed: done}:
+	case <-o.writerDone:
+		return
+	}
+	select {
+	case <-done:
+	case <-o.writerDone:
+	}
+}
