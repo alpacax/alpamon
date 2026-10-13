@@ -205,12 +205,19 @@ func TestNewChunkCallback_GivenEmptyCommandID_WhenCalled_ThenCallbackIsNil(t *te
 	assert.Nil(t, callback, "an empty command ID must not produce a streaming callback")
 }
 
+// recordChunks swaps the runner's posting step for one that keeps what it is handed.
+func recordChunks(cr *CommandRunner) *[]*protocol.CommandChunk {
+	var posted []*protocol.CommandChunk
+	cr.postChunk = func(_ context.Context, _ string, chunk *protocol.CommandChunk, _ int, _ time.Time) {
+		posted = append(posted, chunk)
+	}
+	return &posted
+}
+
 // The server drops chunks from seq 10000 on, yet replies 204 as if stored.
 func TestNewChunkCallback_GivenMoreChunksThanServerCap_WhenCalled_ThenNothingPastTheCapIsSent(t *testing.T) {
-	cleanup, mu, bodies := startFakeAlpacon(t)
-	defer cleanup()
-
 	cr := NewCommandRunner(nil, nil, protocol.Command{ID: "cmd-1"}, protocol.CommandData{}, nil)
+	posted := recordChunks(cr)
 	callback := cr.newChunkCallback()
 	require.NotNil(t, callback, "a non-empty command ID should yield a callback")
 
@@ -219,24 +226,14 @@ func TestNewChunkCallback_GivenMoreChunksThanServerCap_WhenCalled_ThenNothingPas
 		callback(context.Background(), "x")
 	}
 
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(*bodies) >= serverCap
-	}, 30*time.Second, 50*time.Millisecond, "chunks below the cap should be delivered")
-	require.Never(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(*bodies) > serverCap
-	}, time.Second, 50*time.Millisecond, "no chunk past the server cap should be sent")
+	require.Len(t, *posted, serverCap)
+	assert.Equal(t, serverCap-1, (*posted)[serverCap-1].Seq, "the last chunk sent should be the one just under the cap")
 }
 
 // 32 KiB chunks make the server's count cap a 320 MB bound; the agent holds the old 40 MiB one.
-func TestNewChunkCallback_GivenOutputOverByteBudget_WhenCalled_ThenDeliveredBytesStayWithinBudget(t *testing.T) {
-	cleanup, mu, bodies := startFakeAlpacon(t)
-	defer cleanup()
-
+func TestNewChunkCallback_GivenOutputOverByteBudget_WhenCalled_ThenSentBytesStayWithinBudget(t *testing.T) {
 	cr := NewCommandRunner(nil, nil, protocol.Command{ID: "cmd-1"}, protocol.CommandData{}, nil)
+	posted := recordChunks(cr)
 	callback := cr.newChunkCallback()
 	require.NotNil(t, callback, "a non-empty command ID should yield a callback")
 
@@ -246,15 +243,9 @@ func TestNewChunkCallback_GivenOutputOverByteBudget_WhenCalled_ThenDeliveredByte
 		callback(context.Background(), content)
 	}
 
-	delivered := func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		total := 0
-		for _, c := range *bodies {
-			total += len(c.content)
-		}
-		return total
+	sent := 0
+	for _, chunk := range *posted {
+		sent += len(chunk.Content)
 	}
-	require.Eventually(t, func() bool { return delivered() >= budget }, 30*time.Second, 50*time.Millisecond, "chunks within the budget should be delivered")
-	require.Never(t, func() bool { return delivered() > budget }, time.Second, 50*time.Millisecond, "no byte past the budget should be sent")
+	assert.Equal(t, budget, sent, "every chunk that fits the budget should be sent, and none past it")
 }

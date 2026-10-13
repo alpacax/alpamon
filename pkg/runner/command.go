@@ -39,6 +39,7 @@ type CommandRunner struct {
 	apiSession *scheduler.Session
 	data       protocol.CommandData
 	dispatcher CommandDispatcher
+	postChunk  func(ctx context.Context, url string, chunk *protocol.CommandChunk, priority int, expiry time.Time)
 }
 
 func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command protocol.Command, data protocol.CommandData, dispatcher CommandDispatcher) *CommandRunner {
@@ -54,6 +55,9 @@ func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, 
 		wsClient:   wsClient,
 		apiSession: apiSession,
 		dispatcher: dispatcher,
+		postChunk: func(ctx context.Context, url string, chunk *protocol.CommandChunk, priority int, expiry time.Time) {
+			scheduler.Rqueue.PostChunk(ctx, url, chunk, priority, expiry)
+		},
 	}
 }
 
@@ -87,7 +91,7 @@ func (cr *CommandRunner) newChunkCallback() func(ctx context.Context, content st
 		if deadline, ok := ctx.Deadline(); ok {
 			expiry = deadline.Add(chunkDeliveryGrace)
 		}
-		scheduler.Rqueue.PostChunk(ctx, chunkURL, &protocol.CommandChunk{
+		cr.postChunk(ctx, chunkURL, &protocol.CommandChunk{
 			Seq:     s,
 			Content: content,
 		}, 10, expiry)
