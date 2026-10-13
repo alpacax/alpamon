@@ -251,10 +251,6 @@ func (rq *RequestQueue) Put(url string, data any, priority int, due time.Time) {
 	rq.request(http.MethodPut, url, data, priority, due, nil)
 }
 
-func (rq *RequestQueue) Delete(url string, data any, priority int, due time.Time) {
-	rq.request(http.MethodDelete, url, data, priority, due, nil)
-}
-
 func (rq *RequestQueue) DeleteWithHeaders(url string, data any, priority int, due time.Time, headers Headers) {
 	rq.request(http.MethodDelete, url, data, priority, due, headers)
 }

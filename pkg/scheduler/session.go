@@ -192,15 +192,6 @@ func (session *Session) PostWithContext(ctx context.Context, url string, rawBody
 	return session.doWithHeader(req.WithContext(ctx), timeout)
 }
 
-func (session *Session) Put(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
-	req, err := session.newRequest(http.MethodPut, url, rawBody)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return session.do(req, timeout)
-}
-
 func (session *Session) Patch(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
 	req, err := session.newRequest(http.MethodPatch, url, rawBody)
 	if err != nil {
