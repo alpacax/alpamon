@@ -227,8 +227,15 @@ defer_alpamon_restart() {
         waited=$((waited + 1))
       done
       sleep "$RESTART_GRACE"
-      if command -v flock >/dev/null 2>&1 && ! flock -w "$RESTART_LOCK_WAIT" 9; then
-        echo "Timed out waiting for the upgrade lock; restarting anyway."
+      if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+        if ! flock -w "$RESTART_LOCK_WAIT" 9; then
+          echo "Timed out waiting for the upgrade lock; restarting anyway."
+        elif [ "$(date +%s)" -lt "$deadline" ]; then
+          # The holder posts its result only after it releases the lock, so that result needs a grace of its own.
+          flock -u 9
+          echo "The upgrade lock was released; waiting out the grace again before restarting."
+          continue
+        fi
       fi
       if [ "$(cat "$RESTART_TOKEN_FILE" 2>/dev/null)" != "$token" ]; then
         echo "A later upgrade took over the deferred restart; leaving it to that one."

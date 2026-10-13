@@ -280,20 +280,22 @@ func TestSelfUpgradeWithoutSystemdWaitsForTheUpgradeLockAndStandsDownForANewerTo
 	assert.Contains(t, run.log(t), "A later upgrade took over the deferred restart")
 }
 
-func TestSelfUpgradeWithoutSystemdRestartsOnceTheUpgradeLockIsReleasedWithTheSameToken(t *testing.T) {
-	// Given a deferred restart whose grace ends while another holder has the lock
+func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedWithTheSameToken(t *testing.T) {
+	// Given a deferred restart whose grace ends while the agent still holds the lock for an upgrade
 	run := newUpgradeRun(t, 60, 0)
-	run.env = append(run.env, "GRACE=2")
+	run.env = append(run.env, "GRACE=3")
 	release := holdLock(t, filepath.Join(run.dir, "upgrade.lock"))
 	defer release()
 	require.NoError(t, run.startAgent(t).Wait())
-	require.Empty(t, run.restarted(t, 4*time.Second))
+	require.Empty(t, run.restarted(t, 5*time.Second))
 
 	// When the holder releases without a newer token
 	release()
 
-	// Then the job restarts the agent
+	// Then the job gives that upgrade's result a full grace before it restarts the agent
+	require.Empty(t, run.restarted(t, 2*time.Second))
 	assert.Equal(t, "after", run.restarted(t, 10*time.Second))
+	assert.Contains(t, run.log(t), "waiting out the grace again")
 }
 
 func TestStartAlpamonProcessDoesNotPassTheUpgradeLockToTheNewAgent(t *testing.T) {
