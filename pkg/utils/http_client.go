@@ -21,7 +21,8 @@ import (
 const (
 	// Covers the reporter threads and collector workers posting to Alpacon, plus downloads.
 	maxIdleConnsPerHost = 16
-	idleConnTimeout     = 90 * time.Second
+	// Kept below the 60s and 75s idle timeouts ALB and nginx default to, since Go does not retry a POST the server cut off.
+	idleConnTimeout = 55 * time.Second
 )
 
 var (
