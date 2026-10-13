@@ -6,6 +6,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -71,7 +72,7 @@ func TestPriorityQueue_GetReleasesOnlyRemovedEntry(t *testing.T) {
 func TestPostChunk_GivenZeroExpiry_WhenBelowHighWater_ThenEnqueuedWithZeroExpiry(t *testing.T) {
 	newRequestQueue()
 
-	Rqueue.postChunk(context.Background(), "/chunk", nil, 10, time.Time{}, 5, time.Millisecond, time.Second)
+	Rqueue.postChunk(context.Background(), "/chunk", nil, 0, 10, time.Time{}, 5, chunkQueueMaxBytes, time.Millisecond, time.Second)
 
 	assert.Equal(t, 1, queueSize(), "expected chunk enqueued")
 	entry := getOne(t)
@@ -85,7 +86,7 @@ func TestPostChunk_BlocksUntilSpaceFrees(t *testing.T) {
 
 		done := make(chan struct{})
 		go func() {
-			Rqueue.postChunk(context.Background(), "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, time.Second)
+			Rqueue.postChunk(context.Background(), "/chunk", nil, 0, 10, time.Time{}, 3, chunkQueueMaxBytes, time.Millisecond, time.Second)
 			close(done)
 		}()
 
@@ -114,11 +115,58 @@ func TestPostChunk_DropsAfterMaxWait(t *testing.T) {
 		fill(3)
 
 		start := time.Now()
-		Rqueue.postChunk(context.Background(), "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, 30*time.Millisecond)
+		Rqueue.postChunk(context.Background(), "/chunk", nil, 0, 10, time.Time{}, 3, chunkQueueMaxBytes, time.Millisecond, 30*time.Millisecond)
 
 		assert.Equal(t, 30*time.Millisecond, time.Since(start), "expected to wait exactly maxWait before dropping")
 		assert.Equal(t, 3, queueSize(), "chunk should be dropped under sustained pressure")
 	})
+}
+
+// The entry count alone lets 32 KiB chunks hold eight times the memory 4 KiB ones did.
+func TestPostChunk_GivenQueuedChunkBytesNearByteLimit_WhenChunkWouldExceedIt_ThenWaitsUntilBytesFree(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		newRequestQueue()
+		Rqueue.postChunk(context.Background(), "/chunk", nil, 100, 10, time.Time{}, 5, 150, time.Millisecond, time.Second)
+
+		done := make(chan struct{})
+		go func() {
+			Rqueue.postChunk(context.Background(), "/chunk", nil, 100, 10, time.Time{}, 5, 150, time.Millisecond, time.Second)
+			close(done)
+		}()
+
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("postChunk returned past the byte limit; expected backpressure")
+		default:
+		}
+
+		drainOne(t)
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("postChunk did not return after bytes freed")
+		}
+		assert.Equal(t, 1, queueSize())
+	})
+}
+
+func TestPriorityQueue_GivenSizedEntries_WhenTakenAndRequeued_ThenBytesCountOnlyQueuedEntries(t *testing.T) {
+	queue := newPriorityQueue(10)
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/a", size: 100}))
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/b", size: 30, due: time.Now().Add(time.Hour)}))
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/c", priority: 1}))
+	require.Equal(t, 130, queue.Bytes())
+
+	taken, _, ok := queue.Next(time.Now())
+	require.True(t, ok)
+	afterTake := queue.Bytes()
+	require.NoError(t, queue.Offer(taken))
+
+	assert.Equal(t, "/a", taken.url)
+	assert.Equal(t, 30, afterTake)
+	assert.Equal(t, 130, queue.Bytes())
 }
 
 func TestPostChunk_DropsOnContextCancel(t *testing.T) {
@@ -128,7 +176,7 @@ func TestPostChunk_DropsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	Rqueue.postChunk(ctx, "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, time.Second)
+	Rqueue.postChunk(ctx, "/chunk", nil, 0, 10, time.Time{}, 3, chunkQueueMaxBytes, time.Millisecond, time.Second)
 
 	assert.Equal(t, 3, queueSize(), "cancelled chunk should be dropped")
 }
@@ -145,7 +193,7 @@ func TestPostChunk_GivenDeadlineExceededCtx_WhenQueueDrainsBeforeMaxWait_ThenChu
 
 		done := make(chan struct{})
 		go func() {
-			Rqueue.postChunk(ctx, "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, time.Second)
+			Rqueue.postChunk(ctx, "/chunk", nil, 0, 10, time.Time{}, 3, chunkQueueMaxBytes, time.Millisecond, time.Second)
 			close(done)
 		}()
 
@@ -169,7 +217,7 @@ func TestPostChunk_GivenExpiry_WhenEnqueued_ThenEntryCarriesThatExpiryUnchanged(
 
 	expiry := time.Now().Add(15 * time.Minute)
 
-	Rqueue.postChunk(context.Background(), "/chunk", nil, 10, expiry, 5, time.Millisecond, time.Second)
+	Rqueue.postChunk(context.Background(), "/chunk", nil, 0, 10, expiry, 5, chunkQueueMaxBytes, time.Millisecond, time.Second)
 
 	entry := getOne(t)
 	assert.Equal(t, expiry, entry.expiry, "expiry should be stamped onto the entry exactly as given")
@@ -184,7 +232,7 @@ func TestPostChunk_GivenCtxAlreadyPastDeadline_WhenQueueHasRoom_ThenChunkStillEn
 	require.Error(t, ctx.Err(), "test setup: ctx must already be expired")
 	expiry := deadline.Add(5 * time.Minute)
 
-	Rqueue.postChunk(ctx, "/chunk", nil, 10, expiry, 5, time.Millisecond, time.Second)
+	Rqueue.postChunk(ctx, "/chunk", nil, 0, 10, expiry, 5, chunkQueueMaxBytes, time.Millisecond, time.Second)
 
 	require.Equal(t, 1, queueSize(), "the fast path must enqueue regardless of ctx.Err(); expiry, not ctx, bounds delivery")
 	entry := getOne(t)
@@ -201,4 +249,15 @@ func TestPost_GivenNonChunkEntry_WhenEnqueued_ThenExpiryStaysZero(t *testing.T) 
 	Rqueue.PostWithHeaders("/fin", nil, 11, time.Time{}, Headers{"X-Test": "1"})
 	entry = getOne(t)
 	assert.True(t, entry.expiry.IsZero(), "PostWithHeaders must not stamp an expiry")
+}
+
+func TestPostChunk_GivenCommandChunk_WhenEnqueued_ThenQueuedBytesCountItsContent(t *testing.T) {
+	newRequestQueue()
+	content := "héllo, 世界"
+
+	Rqueue.PostChunk(context.Background(), "/chunk", &protocol.CommandChunk{Seq: 0, Content: content}, 10, time.Time{})
+
+	Rqueue.cond.L.Lock()
+	defer Rqueue.cond.L.Unlock()
+	assert.Equal(t, len(content), Rqueue.queue.Bytes())
 }

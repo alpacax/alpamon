@@ -25,6 +25,7 @@ type PriorityEntry struct {
 	due      time.Time
 	expiry   time.Time
 	retry    int
+	size     int // chunk content bytes, counted against chunkQueueMaxBytes
 }
 
 type RequestQueue struct {

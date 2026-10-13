@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/rs/zerolog/log"
 )
 
@@ -21,6 +22,8 @@ const (
 
 	// chunkQueueHighWater is the depth at which chunks back off, reserving slots for other telemetry.
 	chunkQueueHighWater = MaxQueueSize * 8 / 10
+	// chunkQueueMaxBytes holds queued chunk data to what the high-water mark held at 4 KiB per chunk.
+	chunkQueueMaxBytes = chunkQueueHighWater * 4 * 1024
 	// chunkBackpressurePoll is how often a throttled chunk re-checks for room.
 	chunkBackpressurePoll = 10 * time.Millisecond
 	// chunkBackpressureMaxWait caps the throttle per chunk so sustained overload can't freeze a command.
@@ -82,6 +85,7 @@ type priorityQueue struct {
 	h        priorityHeap
 	waiting  dueHeap
 	capacity int
+	bytes    int // sum of size over queued entries
 }
 
 func newPriorityQueue(capacity int) *priorityQueue {
@@ -97,6 +101,7 @@ func (pq *priorityQueue) Offer(entry PriorityEntry) error {
 	if pq.capacity > 0 && pq.Size() >= pq.capacity {
 		return errQueueFull
 	}
+	pq.bytes += entry.size
 	if !entry.due.IsZero() && entry.due.After(time.Now()) {
 		heap.Push(&pq.waiting, entry)
 		return nil
@@ -108,10 +113,10 @@ func (pq *priorityQueue) Offer(entry PriorityEntry) error {
 // Get pops the best due entry, or the soonest waiting one when none is due.
 func (pq *priorityQueue) Get() (PriorityEntry, error) {
 	if pq.h.Len() > 0 {
-		return heap.Pop(&pq.h).(PriorityEntry), nil
+		return pq.take(heap.Pop(&pq.h)), nil
 	}
 	if pq.waiting.Len() > 0 {
-		return heap.Pop(&pq.waiting).(PriorityEntry), nil
+		return pq.take(heap.Pop(&pq.waiting)), nil
 	}
 	return PriorityEntry{}, errors.New("queue is empty")
 }
@@ -122,7 +127,7 @@ func (pq *priorityQueue) Next(now time.Time) (entry PriorityEntry, wait time.Dur
 		heap.Push(&pq.h, heap.Pop(&pq.waiting))
 	}
 	if pq.h.Len() > 0 {
-		return heap.Pop(&pq.h).(PriorityEntry), 0, true
+		return pq.take(heap.Pop(&pq.h)), 0, true
 	}
 	if pq.waiting.Len() > 0 {
 		return PriorityEntry{}, pq.waiting[0].due.Sub(now), false
@@ -130,8 +135,18 @@ func (pq *priorityQueue) Next(now time.Time) (entry PriorityEntry, wait time.Dur
 	return PriorityEntry{}, 0, false
 }
 
+func (pq *priorityQueue) take(x any) PriorityEntry {
+	entry := x.(PriorityEntry)
+	pq.bytes -= entry.size
+	return entry
+}
+
 func (pq *priorityQueue) Size() int {
 	return pq.h.Len() + pq.waiting.Len()
+}
+
+func (pq *priorityQueue) Bytes() int {
+	return pq.bytes
 }
 
 func newRequestQueue() {
@@ -142,10 +157,10 @@ func newRequestQueue() {
 }
 
 func (rq *RequestQueue) request(method, url string, data any, priority int, due time.Time, headers Headers) {
-	rq.requestWithExpiry(method, url, data, priority, due, time.Time{}, headers)
+	rq.requestWithExpiry(method, url, data, 0, priority, due, time.Time{}, headers)
 }
 
-func (rq *RequestQueue) requestWithExpiry(method, url string, data any, priority int, due, expiry time.Time, headers Headers) {
+func (rq *RequestQueue) requestWithExpiry(method, url string, data any, size, priority int, due, expiry time.Time, headers Headers) {
 	// time.Time{}: 0001-01-01 00:00:00 +0000 UTC
 	if due.IsZero() {
 		due = time.Now()
@@ -165,6 +180,7 @@ func (rq *RequestQueue) requestWithExpiry(method, url string, data any, priority
 		due:      due,
 		expiry:   expiry,
 		retry:    RetryLimit,
+		size:     size,
 	}
 
 	rq.cond.L.Lock()
@@ -199,23 +215,23 @@ func (rq *RequestQueue) PostWithHeaders(url string, data any, priority int, due 
 	rq.request(http.MethodPost, url, data, priority, due, headers)
 }
 
-// PostChunk enqueues a chunk to be dropped past expiry, throttling the command while the queue is full.
+// PostChunk enqueues a chunk to be dropped past expiry, throttling the command while the queue is full in entries or chunk bytes.
 // It drops the chunk on ctx cancellation or past maxWait; a ctx deadline alone keeps polling.
-func (rq *RequestQueue) PostChunk(ctx context.Context, url string, data any, priority int, expiry time.Time) {
-	rq.postChunk(ctx, url, data, priority, expiry, chunkQueueHighWater, chunkBackpressurePoll, chunkBackpressureMaxWait)
+func (rq *RequestQueue) PostChunk(ctx context.Context, url string, chunk *protocol.CommandChunk, priority int, expiry time.Time) {
+	rq.postChunk(ctx, url, chunk, len(chunk.Content), priority, expiry, chunkQueueHighWater, chunkQueueMaxBytes, chunkBackpressurePoll, chunkBackpressureMaxWait)
 }
 
-func (rq *RequestQueue) postChunk(ctx context.Context, url string, data any, priority int, expiry time.Time, highWater int, poll, maxWait time.Duration) {
+func (rq *RequestQueue) postChunk(ctx context.Context, url string, data any, size, priority int, expiry time.Time, highWater, maxBytes int, poll, maxWait time.Duration) {
 	start := time.Now()
 
 	for {
 		rq.cond.L.Lock()
-		size := rq.queue.Size()
+		room := rq.queue.Size() < highWater && rq.queue.Bytes()+size <= maxBytes
 		rq.cond.L.Unlock()
 
-		if size < highWater {
+		if room {
 			// No ctx.Err() check: a timed-out command's final flush arrives past its deadline, and expiry bounds delivery instead.
-			rq.requestWithExpiry(http.MethodPost, url, data, priority, time.Time{}, expiry, nil)
+			rq.requestWithExpiry(http.MethodPost, url, data, size, priority, time.Time{}, expiry, nil)
 			return
 		}
 		if errors.Is(ctx.Err(), context.Canceled) || time.Since(start) >= maxWait {
