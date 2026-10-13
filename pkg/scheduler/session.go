@@ -3,8 +3,6 @@ package scheduler
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,23 +30,11 @@ func InitSession() *Session {
 
 	client := http.Client{}
 
-	tlsConfig := &tls.Config{}
-	if config.GlobalSettings.CaCert != "" {
-		caCertPool := x509.NewCertPool()
-		caCert, err := os.ReadFile(config.GlobalSettings.CaCert)
-		if err != nil {
-			log.Fatal().Err(err).Msg("Failed to read CA certificate.")
-		}
-		caCertPool.AppendCertsFromPEM(caCert)
-		tlsConfig.RootCAs = caCertPool
+	transport, err := utils.NewTransport()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to load the CA certificate.")
 	}
-
-	tlsConfig.InsecureSkipVerify = !config.GlobalSettings.SSLVerify
-	client.Transport = &http.Transport{
-		TLSClientConfig:     tlsConfig,
-		MaxIdleConnsPerHost: utils.MaxIdleConnsPerHost,
-		IdleConnTimeout:     utils.IdleConnTimeout,
-	}
+	client.Transport = transport
 	// Send the agent key only to the configured server, across redirects too.
 	if server, err := url.Parse(config.GlobalSettings.ServerURL); err == nil && server.Host != "" {
 		client.CheckRedirect = utils.ServerOnlyAuthorization(server)

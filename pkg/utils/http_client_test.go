@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bufio"
+	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -118,6 +120,65 @@ func TestNewHTTPClient_GivenCACertWithoutPEM_WhenCalledAgain_ThenTransportIsRebu
 	after := NewHTTPClient().Transport
 
 	assert.NotSame(t, before, after)
+}
+
+func TestNewHTTPClient_GivenValidCACert_WhenCalledTwice_ThenTransportAndConnectionAreShared(t *testing.T) {
+	var newConns int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			atomic.AddInt32(&newConns, 1)
+		}
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	caCert := filepath.Join(t.TempDir(), "ca.pem")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	require.NoError(t, os.WriteFile(caCert, certPEM, 0o600))
+	setSettings(t, config.Settings{SSLVerify: true, CaCert: caCert})
+
+	first, second := NewHTTPClient(), NewHTTPClient()
+	get(t, first, server.URL)
+	get(t, second, server.URL)
+
+	assert.Same(t, first.Transport, second.Transport)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&newConns))
+}
+
+func TestNewHTTPClient_WhenFirstCalledConcurrently_ThenEveryClientSharesOneTransport(t *testing.T) {
+	setSettings(t, config.Settings{})
+	const callers = 8
+	transports := make([]http.RoundTripper, callers)
+	var wg sync.WaitGroup
+
+	for i := range callers {
+		wg.Go(func() { transports[i] = NewHTTPClient().Transport })
+	}
+	wg.Wait()
+
+	for _, transport := range transports[1:] {
+		assert.Same(t, transports[0], transport)
+	}
+}
+
+func TestNewTransport_GivenCACertWithoutPEM_ThenReturnsError(t *testing.T) {
+	caCert := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caCert, []byte("not a certificate"), 0o600))
+	setSettings(t, config.Settings{SSLVerify: true, CaCert: caCert})
+
+	_, err := NewTransport()
+
+	assert.ErrorContains(t, err, "no PEM certificate")
+}
+
+func TestNewTransport_GivenUnreadableCACert_ThenReturnsError(t *testing.T) {
+	setSettings(t, config.Settings{SSLVerify: true, CaCert: filepath.Join(t.TempDir(), "missing.pem")})
+
+	_, err := NewTransport()
+
+	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestPut_GivenServerDropsIdleConnection_WhenUploadingTwice_ThenSecondUploadSucceeds(t *testing.T) {

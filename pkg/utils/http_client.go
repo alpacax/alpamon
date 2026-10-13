@@ -3,6 +3,7 @@ package utils
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,10 +17,11 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Idle pool settings for the session transport and NewHTTPClient.
 const (
-	// MaxIdleConnsPerHost covers the reporter threads plus collector workers posting to one host.
-	MaxIdleConnsPerHost = 16
-	IdleConnTimeout     = 90 * time.Second
+	// Covers the reporter threads and collector workers posting to Alpacon, plus downloads.
+	maxIdleConnsPerHost = 16
+	idleConnTimeout     = 90 * time.Second
 )
 
 var (
@@ -30,43 +32,44 @@ var (
 // NewHTTPClient returns a new client over one shared transport.
 // A transport whose CA file failed to load or parse is not shared, so the next call retries the read.
 func NewHTTPClient() *http.Client {
+	return &http.Client{Transport: transport()}
+}
+
+func transport() *http.Transport {
 	transportMu.Lock()
 	defer transportMu.Unlock()
 	if sharedTransport != nil {
-		return &http.Client{Transport: sharedTransport}
+		return sharedTransport
 	}
-	transport, ok := newTransport()
-	if ok {
-		sharedTransport = transport
+	t, err := NewTransport()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to load the CA certificate.")
+		return t
 	}
-	return &http.Client{Transport: transport}
+	sharedTransport = t
+	return t
 }
 
-func newTransport() (*http.Transport, bool) {
+// NewTransport builds a transport from the TLS settings. When the CA file cannot be
+// read or holds no PEM certificate, it returns the error with a transport that trusts no CA.
+func NewTransport() (*http.Transport, error) {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 	}
-	ok := true
-
+	var err error
 	if config.GlobalSettings.CaCert != "" {
-		caCertPool := x509.NewCertPool()
-		if caCert, err := os.ReadFile(config.GlobalSettings.CaCert); err == nil {
-			if !caCertPool.AppendCertsFromPEM(caCert) {
-				log.Error().Msg("No PEM certificate found in the CA file.")
-				ok = false
-			}
-			tlsConfig.RootCAs = caCertPool
-		} else {
-			log.Error().Err(err).Msg("Failed to read CA certificate.")
-			ok = false
+		tlsConfig.RootCAs = x509.NewCertPool()
+		var caCert []byte
+		if caCert, err = os.ReadFile(config.GlobalSettings.CaCert); err == nil && !tlsConfig.RootCAs.AppendCertsFromPEM(caCert) {
+			err = errors.New("no PEM certificate found in the CA file")
 		}
 	}
 
 	return &http.Transport{
 		TLSClientConfig:     tlsConfig,
-		MaxIdleConnsPerHost: MaxIdleConnsPerHost,
-		IdleConnTimeout:     IdleConnTimeout,
-	}, ok
+		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+		IdleConnTimeout:     idleConnTimeout,
+	}, err
 }
 
 // putMaxResponseSize caps response bodies for Put. Read putMaxResponseSize+1
@@ -86,12 +89,10 @@ func Put(url string, body io.Reader, contentLength int64, timeout time.Duration)
 	// bytes/strings readers, which would defeat a caller's -1 chunked opt-in.
 	req.ContentLength = contentLength
 
-	client := NewHTTPClient()
-	client.Timeout = timeout
 	// A streamed PUT is never retried, so it must not land on an idle connection the server just closed.
-	transport := client.Transport.(*http.Transport).Clone()
-	transport.DisableKeepAlives = true
-	client.Transport = transport
+	t := transport().Clone()
+	t.DisableKeepAlives = true
+	client := &http.Client{Transport: t, Timeout: timeout}
 
 	resp, err := client.Do(req)
 	if err != nil {
