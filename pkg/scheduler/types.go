@@ -25,6 +25,7 @@ type PriorityEntry struct {
 	due      time.Time
 	expiry   time.Time
 	retry    int
+	size     int // chunk content bytes, counted against chunkQueueMaxBytes
 }
 
 type RequestQueue struct {
@@ -34,17 +35,8 @@ type RequestQueue struct {
 
 // reporter //
 type Reporter struct {
-	name     string
-	session  *Session
-	counters *counters
-}
-
-type counters struct {
-	success int
-	failure int
-	ignored int
-	delay   float64
-	latency float64
+	name    string
+	session *Session
 }
 
 // ReporterManager manages the lifecycle of multiple reporter goroutines

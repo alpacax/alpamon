@@ -17,6 +17,14 @@ import (
 // enough for last-second output, short enough to drop stale chunks.
 const chunkDeliveryGrace = 5 * time.Minute
 
+const (
+	// maxChunksPerCommand mirrors the server's COMMAND_CHUNK_MAX_COUNT default; it drops
+	// every chunk from this seq on yet answers 204, and fin still carries the audit copy.
+	maxChunksPerCommand = 10000
+	// maxChunkBytesPerCommand keeps the server's per-command storage at its pre-32 KiB bound (10000 x 4 KiB).
+	maxChunkBytesPerCommand = 40 * 1024 * 1024
+)
+
 // CommandDispatcher interface to avoid circular import with executor package
 type CommandDispatcher interface {
 	Execute(ctx context.Context, command string, args *common.CommandArgs) (int, string, error)
@@ -31,6 +39,7 @@ type CommandRunner struct {
 	apiSession *scheduler.Session
 	data       protocol.CommandData
 	dispatcher CommandDispatcher
+	postChunk  func(ctx context.Context, url string, chunk *protocol.CommandChunk, priority int, expiry time.Time) // nil posts to scheduler.Rqueue
 }
 
 func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command protocol.Command, data protocol.CommandData, dispatcher CommandDispatcher) *CommandRunner {
@@ -57,9 +66,24 @@ func (cr *CommandRunner) newChunkCallback() func(ctx context.Context, content st
 	}
 
 	chunkURL := fmt.Sprintf(eventCommandChunkURL, cr.command.ID)
+	post := cr.postChunk
+	if post == nil {
+		post = scheduler.Rqueue.PostChunk
+	}
 	// Runner owns seq so chunks across shell operators share one series.
 	var seq int
+	var sentBytes int
+	var capped bool
 	return func(ctx context.Context, content string) {
+		if capped {
+			return
+		}
+		if seq >= maxChunksPerCommand || sentBytes+len(content) > maxChunkBytesPerCommand {
+			capped = true
+			log.Warn().Str("command", cr.command.ID).Msgf("Chunk cap of %d chunks or %d bytes reached; later output is not streamed and the final result keeps only the head and tail of the output", maxChunksPerCommand, maxChunkBytesPerCommand)
+			return
+		}
+		sentBytes += len(content)
 		// Advance seq before Post so it stays monotonic even if Post
 		// panics; a reused seq would collide server-side on (command, seq).
 		s := seq
@@ -68,7 +92,7 @@ func (cr *CommandRunner) newChunkCallback() func(ctx context.Context, content st
 		if deadline, ok := ctx.Deadline(); ok {
 			expiry = deadline.Add(chunkDeliveryGrace)
 		}
-		scheduler.Rqueue.PostChunk(ctx, chunkURL, &protocol.CommandChunk{
+		post(ctx, chunkURL, &protocol.CommandChunk{
 			Seq:     s,
 			Content: content,
 		}, 10, expiry)

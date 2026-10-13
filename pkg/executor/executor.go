@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	chunkSizeThreshold = 4 * 1024
+	// chunkSizeThreshold stays under the server's 65,536-character chunk limit even at 4 bytes per character.
+	chunkSizeThreshold = 32 * 1024
 	// chunkFlushInterval caps buffering so small writes coalesce instead of one POST per line.
 	chunkFlushInterval = 100 * time.Millisecond
 	// commandWaitDelay bounds cancellation and inherited-pipe waits.

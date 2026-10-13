@@ -6,6 +6,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,8 +21,8 @@ func getOne(t *testing.T) PriorityEntry {
 	t.Helper()
 	Rqueue.cond.L.Lock()
 	defer Rqueue.cond.L.Unlock()
-	entry, err := Rqueue.queue.Get()
-	require.NoError(t, err, "drain")
+	entry, _, ok := Rqueue.queue.Next(time.Now().Add(24 * time.Hour)) // also takes a retry still backing off
+	require.True(t, ok, "drain")
 	return entry
 }
 
@@ -36,7 +37,7 @@ func fill(n int) {
 	}
 }
 
-func TestPriorityQueue_GetReleasesOnlyRemovedEntry(t *testing.T) {
+func TestPriorityQueue_NextReleasesOnlyRemovedEntry(t *testing.T) {
 	queue := newPriorityQueue(3)
 	headers := Headers{"X-Test": "value"}
 	entries := []PriorityEntry{
@@ -48,30 +49,30 @@ func TestPriorityQueue_GetReleasesOnlyRemovedEntry(t *testing.T) {
 		require.NoError(t, queue.Offer(e))
 	}
 
-	vacated := len(queue.h) - 1
-	got, err := queue.Get()
-	require.NoError(t, err)
+	vacated := len(queue.h.entries) - 1
+	got, _, ok := queue.Next(time.Now())
+	require.True(t, ok)
 	assert.Equal(t, "/a", got.url)
 
-	assert.Len(t, queue.h, 2)
-	assert.Equal(t, PriorityEntry{}, queue.h[:cap(queue.h)][vacated])
-	for _, remaining := range queue.h {
+	assert.Len(t, queue.h.entries, 2)
+	assert.Equal(t, PriorityEntry{}, queue.h.entries[:cap(queue.h.entries)][vacated])
+	for _, remaining := range queue.h.entries {
 		assert.Len(t, remaining.data, 4096)
 	}
 
-	got, err = queue.Get()
-	require.NoError(t, err)
+	got, _, ok = queue.Next(time.Now())
+	require.True(t, ok)
 	assert.Equal(t, "/b", got.url)
 
-	got, err = queue.Get()
-	require.NoError(t, err)
+	got, _, ok = queue.Next(time.Now())
+	require.True(t, ok)
 	assert.Equal(t, "/c", got.url)
 }
 
 func TestPostChunk_GivenZeroExpiry_WhenBelowHighWater_ThenEnqueuedWithZeroExpiry(t *testing.T) {
 	newRequestQueue()
 
-	Rqueue.postChunk(context.Background(), "/chunk", nil, 10, time.Time{}, 5, time.Millisecond, time.Second)
+	Rqueue.postChunk(context.Background(), "/chunk", nil, 0, 10, time.Time{}, 5, chunkQueueMaxBytes, time.Millisecond, time.Second)
 
 	assert.Equal(t, 1, queueSize(), "expected chunk enqueued")
 	entry := getOne(t)
@@ -85,7 +86,7 @@ func TestPostChunk_BlocksUntilSpaceFrees(t *testing.T) {
 
 		done := make(chan struct{})
 		go func() {
-			Rqueue.postChunk(context.Background(), "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, time.Second)
+			Rqueue.postChunk(context.Background(), "/chunk", nil, 0, 10, time.Time{}, 3, chunkQueueMaxBytes, time.Millisecond, time.Second)
 			close(done)
 		}()
 
@@ -114,11 +115,58 @@ func TestPostChunk_DropsAfterMaxWait(t *testing.T) {
 		fill(3)
 
 		start := time.Now()
-		Rqueue.postChunk(context.Background(), "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, 30*time.Millisecond)
+		Rqueue.postChunk(context.Background(), "/chunk", nil, 0, 10, time.Time{}, 3, chunkQueueMaxBytes, time.Millisecond, 30*time.Millisecond)
 
 		assert.Equal(t, 30*time.Millisecond, time.Since(start), "expected to wait exactly maxWait before dropping")
 		assert.Equal(t, 3, queueSize(), "chunk should be dropped under sustained pressure")
 	})
+}
+
+// The entry count alone lets 32 KiB chunks hold eight times the memory 4 KiB ones did.
+func TestPostChunk_GivenQueuedChunkBytesNearByteLimit_WhenChunkWouldExceedIt_ThenWaitsUntilBytesFree(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		newRequestQueue()
+		Rqueue.postChunk(context.Background(), "/chunk", nil, 100, 10, time.Time{}, 5, 150, time.Millisecond, time.Second)
+
+		done := make(chan struct{})
+		go func() {
+			Rqueue.postChunk(context.Background(), "/chunk", nil, 100, 10, time.Time{}, 5, 150, time.Millisecond, time.Second)
+			close(done)
+		}()
+
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("postChunk returned past the byte limit; expected backpressure")
+		default:
+		}
+
+		drainOne(t)
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("postChunk did not return after bytes freed")
+		}
+		assert.Equal(t, 1, queueSize())
+	})
+}
+
+func TestPriorityQueue_GivenSizedEntries_WhenTakenAndRequeued_ThenBytesCountOnlyQueuedEntries(t *testing.T) {
+	queue := newPriorityQueue(10)
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/a", size: 100}))
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/b", size: 30, due: time.Now().Add(time.Hour)}))
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/c", priority: 1}))
+	require.Equal(t, 130, queue.Bytes())
+
+	taken, _, ok := queue.Next(time.Now())
+	require.True(t, ok)
+	afterTake := queue.Bytes()
+	require.NoError(t, queue.Offer(taken))
+
+	assert.Equal(t, "/a", taken.url)
+	assert.Equal(t, 30, afterTake)
+	assert.Equal(t, 130, queue.Bytes())
 }
 
 func TestPostChunk_DropsOnContextCancel(t *testing.T) {
@@ -128,7 +176,7 @@ func TestPostChunk_DropsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	Rqueue.postChunk(ctx, "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, time.Second)
+	Rqueue.postChunk(ctx, "/chunk", nil, 0, 10, time.Time{}, 3, chunkQueueMaxBytes, time.Millisecond, time.Second)
 
 	assert.Equal(t, 3, queueSize(), "cancelled chunk should be dropped")
 }
@@ -145,7 +193,7 @@ func TestPostChunk_GivenDeadlineExceededCtx_WhenQueueDrainsBeforeMaxWait_ThenChu
 
 		done := make(chan struct{})
 		go func() {
-			Rqueue.postChunk(ctx, "/chunk", nil, 10, time.Time{}, 3, time.Millisecond, time.Second)
+			Rqueue.postChunk(ctx, "/chunk", nil, 0, 10, time.Time{}, 3, chunkQueueMaxBytes, time.Millisecond, time.Second)
 			close(done)
 		}()
 
@@ -169,7 +217,7 @@ func TestPostChunk_GivenExpiry_WhenEnqueued_ThenEntryCarriesThatExpiryUnchanged(
 
 	expiry := time.Now().Add(15 * time.Minute)
 
-	Rqueue.postChunk(context.Background(), "/chunk", nil, 10, expiry, 5, time.Millisecond, time.Second)
+	Rqueue.postChunk(context.Background(), "/chunk", nil, 0, 10, expiry, 5, chunkQueueMaxBytes, time.Millisecond, time.Second)
 
 	entry := getOne(t)
 	assert.Equal(t, expiry, entry.expiry, "expiry should be stamped onto the entry exactly as given")
@@ -184,7 +232,7 @@ func TestPostChunk_GivenCtxAlreadyPastDeadline_WhenQueueHasRoom_ThenChunkStillEn
 	require.Error(t, ctx.Err(), "test setup: ctx must already be expired")
 	expiry := deadline.Add(5 * time.Minute)
 
-	Rqueue.postChunk(ctx, "/chunk", nil, 10, expiry, 5, time.Millisecond, time.Second)
+	Rqueue.postChunk(ctx, "/chunk", nil, 0, 10, expiry, 5, chunkQueueMaxBytes, time.Millisecond, time.Second)
 
 	require.Equal(t, 1, queueSize(), "the fast path must enqueue regardless of ctx.Err(); expiry, not ctx, bounds delivery")
 	entry := getOne(t)
@@ -201,4 +249,41 @@ func TestPost_GivenNonChunkEntry_WhenEnqueued_ThenExpiryStaysZero(t *testing.T) 
 	Rqueue.PostWithHeaders("/fin", nil, 11, time.Time{}, Headers{"X-Test": "1"})
 	entry = getOne(t)
 	assert.True(t, entry.expiry.IsZero(), "PostWithHeaders must not stamp an expiry")
+}
+
+func TestPostChunk_GivenCommandChunk_WhenEnqueued_ThenQueuedBytesCountItsContent(t *testing.T) {
+	newRequestQueue()
+	content := "héllo, 世界"
+
+	Rqueue.PostChunk(context.Background(), "/chunk", &protocol.CommandChunk{Seq: 0, Content: content}, 10, time.Time{})
+
+	Rqueue.cond.L.Lock()
+	defer Rqueue.cond.L.Unlock()
+	assert.Equal(t, len(content), Rqueue.queue.Bytes())
+}
+
+// Next only looks at the head of the waiting heap, so it must be the soonest due whatever the priority.
+func TestPriorityQueue_GivenBackingOffEntries_WhenOneFallsDue_ThenNextTakesItAheadOfAHigherPriorityOne(t *testing.T) {
+	queue := newPriorityQueue(10)
+	now := time.Now()
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/later", priority: 1, due: now.Add(time.Hour)}))
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/sooner", priority: 10, due: now.Add(time.Minute)}))
+
+	entry, _, ok := queue.Next(now.Add(2 * time.Minute))
+
+	require.True(t, ok, "the entry due a minute in should be taken")
+	assert.Equal(t, "/sooner", entry.url)
+}
+
+func TestPriorityQueue_GivenOnlyBackingOffEntries_WhenNextCalled_ThenReportsWaitUntilSoonestDue(t *testing.T) {
+	queue := newPriorityQueue(10)
+	now := time.Now()
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/later", due: now.Add(time.Hour)}))
+	require.NoError(t, queue.Offer(PriorityEntry{url: "/sooner", due: now.Add(time.Minute)}))
+
+	_, wait, ok := queue.Next(now)
+
+	assert.False(t, ok, "no entry is due yet")
+	assert.Equal(t, time.Minute, wait)
+	assert.Equal(t, 2, queue.Size(), "a wait must not take any entry")
 }

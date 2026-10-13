@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
@@ -69,4 +71,30 @@ func Put(url string, body io.Reader, contentLength int64, timeout time.Duration)
 	}
 
 	return respBody, resp.StatusCode, nil
+}
+
+// ParseRetryAfter reads a Retry-After value in either form RFC 9110 allows,
+// delay-seconds or an HTTP date. It returns zero when the header is absent or
+// unusable, and caps the result at maxWait.
+func ParseRetryAfter(value string, now time.Time, maxWait time.Duration) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	var d time.Duration
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		if seconds > int64(maxWait/time.Second) {
+			return maxWait
+		}
+		d = time.Duration(seconds) * time.Second
+	} else if at, err := http.ParseTime(value); err == nil {
+		d = at.Sub(now)
+	}
+	if d <= 0 {
+		return 0
+	}
+	return min(d, maxWait)
 }

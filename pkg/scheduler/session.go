@@ -151,25 +151,16 @@ func (session *Session) doWithHeader(req *http.Request, timeout time.Duration) (
 	return body, resp.StatusCode, resp.Header, nil
 }
 
-func (session *Session) Request(method, url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
-	return session.RequestWithHeaders(method, url, rawBody, timeout, nil)
-}
-
-func (session *Session) RequestWithHeaders(method, url string, rawBody any, timeout time.Duration, headers Headers) ([]byte, int, error) {
+func (session *Session) RequestWithHeaders(method, url string, rawBody any, timeout time.Duration, headers Headers) ([]byte, int, http.Header, error) {
 	req, err := session.newRequest(method, url, rawBody)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 
-	resp, statusCode, err := session.do(req, timeout)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return resp, statusCode, nil
+	return session.doWithHeader(req, timeout)
 }
 
 func (session *Session) Get(url string, timeout time.Duration) ([]byte, int, error) {
@@ -199,15 +190,6 @@ func (session *Session) PostWithContext(ctx context.Context, url string, rawBody
 	}
 
 	return session.doWithHeader(req.WithContext(ctx), timeout)
-}
-
-func (session *Session) Put(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
-	req, err := session.newRequest(http.MethodPut, url, rawBody)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return session.do(req, timeout)
 }
 
 func (session *Session) Patch(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {

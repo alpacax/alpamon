@@ -207,7 +207,7 @@ func (c *rateLimitedCount) hasPending() bool {
 	return c.pending > 0
 }
 
-// accessOutboxWrite is one item for the writer: an event, or a flush marker
+// accessOutboxWrite is one item for the writer: an event, or a flush marker (sent only by tests)
 // that is closed once everything queued before it is settled.
 type accessOutboxWrite struct {
 	event   NonAlpaconAccessEvent
@@ -321,32 +321,6 @@ func accessOutboxBackoff(n int, jitter func(time.Duration) time.Duration) time.D
 	return d + jitter(d/5)
 }
 
-// parseRetryAfter reads a Retry-After value in either form RFC 9110 allows,
-// delay-seconds or an HTTP date. It returns zero when the header is absent or
-// unusable, and caps the result at accessOutboxMaxRetryAfter.
-func parseRetryAfter(value string, now time.Time) time.Duration {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	var d time.Duration
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
-		if seconds <= 0 {
-			return 0
-		}
-		if seconds > int64(accessOutboxMaxRetryAfter/time.Second) {
-			return accessOutboxMaxRetryAfter
-		}
-		d = time.Duration(seconds) * time.Second
-	} else if at, err := http.ParseTime(value); err == nil {
-		d = at.Sub(now)
-	}
-	if d <= 0 {
-		return 0
-	}
-	return min(d, accessOutboxMaxRetryAfter)
-}
-
 // enqueue hands an accepted event to the writer. It runs on the auth socket
 // goroutine after the PAM ack is written and the socket closed, and never
 // blocks: with the queue full the event is dropped and counted. It reports
@@ -374,20 +348,6 @@ func (o *accessEventOutbox) enqueue(event NonAlpaconAccessEvent) bool {
 		o.store(ctx, []NonAlpaconAccessEvent{event})
 	}
 	return taken
-}
-
-// flush waits until everything enqueued before it is stored or given up on.
-func (o *accessEventOutbox) flush() {
-	done := make(chan struct{})
-	select {
-	case o.inbox <- accessOutboxWrite{flushed: done}:
-	case <-o.writerDone:
-		return
-	}
-	select {
-	case <-done:
-	case <-o.writerDone:
-	}
 }
 
 // start launches the writer and the drain. stop joins them.

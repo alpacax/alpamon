@@ -428,17 +428,6 @@ func TestAccessOutboxBackoff_CapsAtTenMinutes(t *testing.T) {
 	assert.LessOrEqual(t, accessOutboxBackoff(1000, maxJitter), 12*time.Minute, "jitter is bounded")
 }
 
-func TestParseRetryAfter(t *testing.T) {
-	now := time.Date(2026, time.March, 1, 12, 0, 0, 0, time.UTC)
-	assert.Equal(t, 120*time.Second, parseRetryAfter("120", now))
-	assert.Equal(t, 30*time.Second, parseRetryAfter(now.Add(30*time.Second).Format(http.TimeFormat), now))
-	assert.Zero(t, parseRetryAfter("", now))
-	assert.Zero(t, parseRetryAfter("soon", now))
-	assert.Zero(t, parseRetryAfter("-5", now))
-	assert.Zero(t, parseRetryAfter(now.Add(-time.Minute).Format(http.TimeFormat), now))
-	assert.Equal(t, accessOutboxMaxRetryAfter, parseRetryAfter("86400", now), "a huge value must not stall the outbox for a day")
-}
-
 func TestAccessEventOutbox_RejectionDropsWithOneWarn(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden, http.StatusConflict} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -1180,4 +1169,18 @@ func TestAccessEventOutbox_HandOffAfterStopIsStillStored(t *testing.T) {
 
 	o.enqueue(newTestAccessEvent(newFakeOutboxClock(), "alice"))
 	assert.Len(t, outboxRows(t, o), 1)
+}
+
+// flush waits until everything enqueued before it is stored or given up on.
+func (o *accessEventOutbox) flush() {
+	done := make(chan struct{})
+	select {
+	case o.inbox <- accessOutboxWrite{flushed: done}:
+	case <-o.writerDone:
+		return
+	}
+	select {
+	case <-done:
+	case <-o.writerDone:
+	}
 }

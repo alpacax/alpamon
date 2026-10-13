@@ -18,19 +18,14 @@ import (
 
 const (
 	startUpEventURL = "/api/events/events/"
+	// maxRetryAfter caps a server's Retry-After so one bogus value cannot park a retry for days.
+	maxRetryAfter = 5 * time.Minute
 )
 
 func NewReporter(index int, session *Session) *Reporter {
 	return &Reporter{
 		name:    fmt.Sprintf("Reporter-%d", index),
 		session: session,
-		counters: &counters{
-			success: 0,
-			failure: 0,
-			ignored: 0,
-			delay:   0.0,
-			latency: 0.0,
-		},
 	}
 }
 
@@ -69,8 +64,8 @@ func (rm *ReporterManager) Shutdown(timeout time.Duration) error {
 		cancel()
 	}
 
-	// Wake up all waiting reporters
-	Rqueue.cond.Broadcast()
+	// Under the lock, so a reporter between its ctx check and cond.Wait cannot miss it.
+	broadcastQueue()
 
 	// Wait for all reporters to finish with timeout
 	done := make(chan struct{})
@@ -99,16 +94,11 @@ func reportStartupEvent() {
 }
 
 func (r *Reporter) query(entry PriorityEntry) {
-	t1 := time.Now()
 	var headers Headers
 	if entry.headers != nil {
 		headers = *entry.headers
 	}
-	resp, statusCode, err := r.session.RequestWithHeaders(entry.method, entry.url, entry.data, 5, headers)
-	t2 := time.Now()
-
-	r.counters.delay = r.counters.delay*0.9 + (t2.Sub(entry.due).Seconds())*0.1
-	r.counters.latency = r.counters.latency*0.9 + (t2.Sub(t1).Seconds())*0.1
+	resp, statusCode, respHeader, err := r.session.RequestWithHeaders(entry.method, entry.url, entry.data, 5, headers)
 
 	var success bool
 	if err != nil {
@@ -126,20 +116,31 @@ func (r *Reporter) query(entry PriorityEntry) {
 	}
 
 	if success {
-		r.counters.success++
-	} else {
-		r.counters.failure++
-		if entry.retry > 0 {
-			backoff := time.Duration(math.Pow(2, float64(RetryLimit-entry.retry))) * time.Second
-			entry.due = entry.due.Add(backoff)
-			entry.retry--
-			if err = Rqueue.Requeue(entry); err != nil {
-				r.counters.ignored++
-			}
-		} else {
-			r.counters.ignored++
+		return
+	}
+	if entry.retry > 0 && isRetryable(statusCode) {
+		now := time.Now()
+		backoff := time.Duration(math.Pow(2, float64(RetryLimit-entry.retry))) * time.Second
+		if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+			backoff = max(backoff, utils.ParseRetryAfter(respHeader.Get("Retry-After"), now, maxRetryAfter))
+		}
+		entry.due = now.Add(backoff)
+		entry.retry--
+		if err = Rqueue.Requeue(entry); err != nil {
+			log.Error().Err(err).Msgf("Dropping retry of %s %s", entry.method, entry.url)
 		}
 	}
+}
+
+// isRetryable reports whether a failed request can succeed on a later try.
+// 403 stays retryable: an edge rate limit may answer it, and a real denial
+// costs at most RetryLimit spaced attempts.
+func isRetryable(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusNotFound:
+		return false
+	}
+	return true
 }
 
 func (r *Reporter) Run(ctx context.Context) {
@@ -163,45 +164,46 @@ func (r *Reporter) Run(ctx context.Context) {
 	}
 }
 
-// waitForEntry waits for an entry from the queue or context cancellation
+// waitForEntry waits for a due entry from the queue or context cancellation.
+// Cancelling ctx alone does not wake cond.Wait; ReporterManager.Shutdown broadcasts after cancelling.
 func (r *Reporter) waitForEntry(ctx context.Context) (PriorityEntry, bool) {
 	Rqueue.cond.L.Lock()
 	defer Rqueue.cond.L.Unlock()
 
-	for Rqueue.queue.Size() == 0 {
-		// Check context before waiting
+	for {
 		select {
 		case <-ctx.Done():
 			log.Debug().Msgf("Reporter %s shutting down", r.name)
 			return PriorityEntry{}, false
 		default:
 		}
+
+		entry, wait, ok := Rqueue.queue.Next(time.Now())
+		if ok {
+			return entry, true
+		}
+		if wait <= 0 {
+			Rqueue.cond.Wait()
+			continue
+		}
+
+		// Only backing-off entries remain: wait on cond so an enqueue or shutdown still wakes us.
+		timer := time.AfterFunc(wait, broadcastQueue)
 		Rqueue.cond.Wait()
+		timer.Stop()
 	}
+}
 
-	entry, err := Rqueue.queue.Get()
-	if err != nil {
-		// Return empty entry to continue loop
-		return PriorityEntry{}, true
-	}
-
-	return entry, true
+func broadcastQueue() {
+	Rqueue.cond.L.Lock()
+	Rqueue.cond.Broadcast()
+	Rqueue.cond.L.Unlock()
 }
 
 // processEntry handles the business logic for a queue entry
 func (r *Reporter) processEntry(entry PriorityEntry) {
 	// Handle expired entries
 	if !entry.expiry.IsZero() && entry.expiry.Before(time.Now()) {
-		r.counters.ignored++
-		return
-	}
-
-	// Handle entries that are not yet due
-	if !entry.due.IsZero() && entry.due.After(time.Now()) {
-		if err := Rqueue.Requeue(entry); err != nil {
-			r.counters.ignored++
-		}
-		time.Sleep(1 * time.Second)
 		return
 	}
 
