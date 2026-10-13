@@ -173,7 +173,7 @@ agent_command_of() {
         ppid=$value
         break
       fi
-    done < "/proc/$pid/status" || return 1
+    done 2>/dev/null < "/proc/$pid/status" || return 1 # the process can exit between lookups
     if [ -z "$ppid" ] || [ "$ppid" -lt 1 ]; then
       return 1
     fi
