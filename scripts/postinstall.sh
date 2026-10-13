@@ -16,6 +16,10 @@ RESTART_TOKEN_FILE="/run/alpamon/restart.token"
 RESTART_LOCK_FILE="/run/alpamon/upgrade.lock"
 # Outlasts the agent's upgrade command timeout (UpgradeTimeout in pkg/executor/handlers/common/timeout.go).
 RESTART_LOCK_WAIT=1800
+# Serializes the token check and restart of a deferred job against a manual upgrade's restart. Kept apart from
+# the upgrade lock: a manual apt holding the dpkg lock would otherwise wait on an agent upgrade waiting on it.
+RESTART_SERIAL_FILE="/run/alpamon/restart.lock"
+RESTART_SERIAL_WAIT=60
 
 main() {
   check_root_permission
@@ -30,8 +34,7 @@ main() {
     elif agent_command_pid=$(find_agent_command); then
       defer_alpamon_restart "$agent_command_pid"
     else
-      rm -f "$RESTART_TOKEN_FILE" # a deferred restart still in its grace stands down instead of restarting again
-      restart_alpamon_process
+      restart_alpamon_manually
     fi
     # No cleanup_tmpl_files here on purpose. The package re-ships the template
     # on every upgrade and only `alpamon setup` ever consumes it, so deleting it
@@ -131,9 +134,9 @@ create_log_file() {
 start_alpamon_process() {
   create_log_file
   echo "Starting Alpamon as a background process..."
-  # The HUP trap keeps the agent alive once postinstall's session exits; 9>&- keeps the
-  # restart job's upgrade lock fd out of the agent, which would otherwise hold the lock forever.
-  (trap '' HUP; exec "$ALPAMON_BIN" >>"$ALPAMON_LOG" 2>&1 9>&-) &
+  # The HUP trap keeps the agent alive once postinstall's session exits; 8>&- 9>&- keep the restart
+  # and upgrade lock fds out of the agent, which would otherwise hold those locks forever.
+  (trap '' HUP; exec "$ALPAMON_BIN" >>"$ALPAMON_LOG" 2>&1 8>&- 9>&-) &
   local pid=$!
   sleep 0.5
   if ! kill -0 "$pid" 2>/dev/null; then
@@ -160,6 +163,17 @@ restart_alpamon_process() {
   fi
   create_directories
   start_alpamon_process
+}
+
+# Waits for a deferred job already restarting the agent, then takes the restart over from any job still in its grace.
+restart_alpamon_manually() {
+  create_directories
+  if command exec 8>>"$RESTART_SERIAL_FILE" && command -v flock >/dev/null 2>&1 \
+    && ! flock -w "$RESTART_SERIAL_WAIT" 8; then
+    echo "Warning: Timed out waiting for a deferred restart to finish; restarting anyway." >&2
+  fi
+  rm -f "$RESTART_TOKEN_FILE" # a deferred restart still in its grace stands down instead of restarting again
+  restart_alpamon_process
 }
 
 # Prints the PID of the ancestor of $1 (or $1 itself) that an alpamon process spawned, i.e. the agent
@@ -219,6 +233,7 @@ defer_alpamon_restart() {
     # Held through the check and the restart so a new upgrade cannot start in between.
     # A failed open must not end the job: set -e would, and so would sh (how rpm runs scriptlets) without command.
     command exec 9>>"$RESTART_LOCK_FILE" || true
+    command exec 8>>"$RESTART_SERIAL_FILE" || true
     deadline=$(( $(date +%s) + RESTART_LOCK_WAIT ))
     while :; do
       waited=0
@@ -237,6 +252,10 @@ defer_alpamon_restart() {
           continue
         fi
       fi
+      # Held from the token check through the restart, so a manual upgrade cannot remove the token in between.
+      if command -v flock >/dev/null 2>&1 && ! flock -w "$RESTART_SERIAL_WAIT" 8; then
+        echo "Timed out waiting for a manual restart to finish; checking the token anyway."
+      fi
       if [ "$(cat "$RESTART_TOKEN_FILE" 2>/dev/null)" != "$token" ]; then
         echo "A later upgrade took over the deferred restart; leaving it to that one."
         exit 0
@@ -245,6 +264,7 @@ defer_alpamon_restart() {
       if [ "$(date +%s)" -ge "$deadline" ] || ! command_pid=$(find_running_upgrade); then
         break
       fi
+      flock -u 8 2>/dev/null || true
       echo "Upgrade command $command_pid is running; waiting for it before restarting."
     done
     restart_alpamon_process

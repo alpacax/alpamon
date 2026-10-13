@@ -28,14 +28,18 @@ check_alpamon_binary() { :; }
 cleanup_old_binary() { :; }
 create_directories() { :; }
 restart_alpamon_process() {
+  if [ -n "${EVENTS-}" ]; then echo "start $DIR" >> "$EVENTS"; fi
+  sleep "${RESTART_TIME:-0}"
   if [ -e "$DIR/${DONE_MARKER:-exited}" ]; then echo after; else echo before; fi > "$DIR/restarted.tmp"
   mv "$DIR/restarted.tmp" "$DIR/restarted"
+  if [ -n "${EVENTS-}" ]; then echo "end $DIR" >> "$EVENTS"; fi
 }
 ALPAMON_LOG="$DIR/alpamon.log"
 RESTART_GRACE="${GRACE:-1}" # the agent touches "exited" only after reaping the command and draining its output
 RESTART_WAIT_LIMIT="$WAIT_LIMIT"
 RESTART_TOKEN_FILE="${TOKEN_FILE:-$DIR/restart.token}"
 RESTART_LOCK_FILE="${LOCK_FILE:-$DIR/upgrade.lock}"
+RESTART_SERIAL_FILE="${SERIAL_FILE:-$DIR/restart.lock}"
 set -e
 main 2
 `
@@ -224,6 +228,34 @@ func TestSelfUpgradeWithoutSystemdLeavesTheRestartToAManualUpgradeDuringItsGrace
 	assert.Contains(t, deferred.log(t), "A later upgrade took over the deferred restart")
 }
 
+func TestUpgradeWithoutSystemdOutsideTheAgentWaitsForADeferredRestartAlreadyUnderWay(t *testing.T) {
+	// Given a deferred job that has passed its token check and is three seconds into restarting the agent
+	shared := t.TempDir()
+	events := filepath.Join(shared, "events")
+	common := []string{"TOKEN_FILE=" + filepath.Join(shared, "restart.token"), "SERIAL_FILE=" + filepath.Join(shared, "restart.lock"), "EVENTS=" + events}
+	deferred := newUpgradeRun(t, 60, 0)
+	deferred.env = append(deferred.env, append(common, "RESTART_TIME=3")...)
+	manual := newUpgradeRun(t, 60, 0)
+	manual.env = append(manual.env, common...)
+	require.NoError(t, deferred.startAgent(t).Wait())
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(events)
+		return err == nil && strings.Contains(string(data), "start "+deferred.dir)
+	}, 15*time.Second, 50*time.Millisecond)
+
+	// When the operator upgrades by hand outside the agent
+	cmd := exec.Command("bash", filepath.Join(manual.dir, "driver.sh"))
+	cmd.Env = manual.env
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// Then the manual restart starts only after the deferred one has finished
+	data, err := os.ReadFile(events)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"start " + deferred.dir, "end " + deferred.dir, "start " + manual.dir, "end " + manual.dir},
+		strings.Split(strings.TrimSpace(string(data)), "\n"))
+}
+
 func TestSelfUpgradeWithoutSystemdStillRestartsInPOSIXModeWhenTheLockCannotBeOpened(t *testing.T) {
 	// Given an agent-run upgrade under sh, as rpm runs scriptlets, whose lock directory is missing
 	run := newUpgradeRun(t, 60, 0)
@@ -298,21 +330,21 @@ func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedWit
 	assert.Contains(t, run.log(t), "waiting out the grace again")
 }
 
-func TestStartAlpamonProcessDoesNotPassTheUpgradeLockToTheNewAgent(t *testing.T) {
-	// Given an agent binary that reports whether fd 9 is open, and fd 9 open in the caller
+func TestStartAlpamonProcessDoesNotPassTheLocksToTheNewAgent(t *testing.T) {
+	// Given an agent binary that reports which of fds 8 and 9 are open, and both open in the caller
 	dir := t.TempDir()
 	postinstall, err := filepath.Abs("postinstall.sh")
 	require.NoError(t, err)
 	fakeAgent := filepath.Join(dir, "agent.sh")
 	require.NoError(t, os.WriteFile(fakeAgent, []byte(
-		"#!/bin/bash\nif [ -e /proc/self/fd/9 ]; then echo open; else echo closed; fi > \""+dir+"/fd9\"\nsleep 2\n"), 0o700))
+		"#!/bin/bash\nls /proc/self/fd > \""+dir+"/fds\"\nsleep 2\n"), 0o700))
 	driver := `
 POSTINSTALL_SOURCED=1
 source "$POSTINSTALL"
 create_log_file() { :; }
 ALPAMON_BIN="$FAKE_AGENT"
 ALPAMON_LOG="$DIR/alpamon.log"
-exec 9>>"$DIR/upgrade.lock"
+exec 8>>"$DIR/restart.lock" 9>>"$DIR/upgrade.lock"
 start_alpamon_process
 `
 	cmd := exec.Command("bash", "-c", driver)
@@ -322,8 +354,9 @@ start_alpamon_process
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 
-	// Then the agent does not hold fd 9
-	data, err := os.ReadFile(filepath.Join(dir, "fd9"))
+	// Then the agent holds neither lock fd
+	data, err := os.ReadFile(filepath.Join(dir, "fds"))
 	require.NoError(t, err)
-	assert.Equal(t, "closed", strings.TrimSpace(string(data)))
+	assert.NotContains(t, strings.Fields(string(data)), "8")
+	assert.NotContains(t, strings.Fields(string(data)), "9")
 }
