@@ -39,6 +39,9 @@ var versionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[\w.]+)?$`)
 // A successful self-update holds it until the restart. Change it only through takeUpgradeLatch and releaseUpgradeLatch.
 var selfUpdateInFlight atomic.Bool
 
+// UpgradeLockPath is the file of that flock; scripts/postinstall.sh takes it before it restarts the agent.
+var UpgradeLockPath = "/run/alpamon/upgrade.lock"
+
 func takeUpgradeLatch() bool {
 	if !selfUpdateInFlight.CompareAndSwap(false, true) {
 		return false

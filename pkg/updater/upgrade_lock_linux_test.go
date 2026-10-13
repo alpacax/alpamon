@@ -14,13 +14,13 @@ import (
 
 func useTempUpgradeLock(t *testing.T) string {
 	t.Helper()
-	orig := upgradeLockPath
-	upgradeLockPath = filepath.Join(t.TempDir(), "run", "upgrade.lock")
+	orig := UpgradeLockPath
+	UpgradeLockPath = filepath.Join(t.TempDir(), "run", "upgrade.lock")
 	t.Cleanup(func() {
 		ReleaseSelfUpdateLatch()
-		upgradeLockPath = orig
+		UpgradeLockPath = orig
 	})
-	return upgradeLockPath
+	return UpgradeLockPath
 }
 
 func flockFile(t *testing.T, path string) error {

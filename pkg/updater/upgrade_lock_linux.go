@@ -12,9 +12,6 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// scripts/postinstall.sh takes the same file before it restarts the agent.
-var upgradeLockPath = "/run/alpamon/upgrade.lock"
-
 var (
 	upgradeLockMu   sync.Mutex
 	upgradeLockFile *os.File
@@ -28,11 +25,11 @@ func lockUpgrade() bool {
 	if upgradeLockFile != nil {
 		return true
 	}
-	if err := os.MkdirAll(filepath.Dir(upgradeLockPath), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(UpgradeLockPath), 0o750); err != nil {
 		log.Warn().Err(err).Msg("Failed to create the upgrade lock directory; continuing without it.")
 		return true
 	}
-	f, err := os.OpenFile(upgradeLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(UpgradeLockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to open the upgrade lock; continuing without it.")
 		return true

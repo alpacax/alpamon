@@ -221,8 +221,8 @@ func (e *versionSteppingExecutor) RunAsUser(ctx context.Context, username string
 	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
 }
 
-// TestMain points aptSourcesDir and the updater's yum paths at an empty temp dir for the whole
-// package run, so tests never read the host's real apt sources or yum config.
+// TestMain points aptSourcesDir and the updater's yum and upgrade lock paths at an empty temp dir for the
+// whole package run, so tests never read the host's apt sources or yum config or create /run/alpamon.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "alpamon-pkg-sources")
 	if err != nil {
@@ -233,6 +233,7 @@ func TestMain(m *testing.M) {
 	updater.YumBinary = filepath.Join(dir, "missing-yum")
 	updater.DnfConfFile = filepath.Join(dir, "missing-dnf.conf")
 	updater.YumConfFile = filepath.Join(dir, "missing-yum.conf")
+	updater.UpgradeLockPath = filepath.Join(dir, "upgrade.lock")
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
