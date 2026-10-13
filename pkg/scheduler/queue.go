@@ -89,7 +89,7 @@ func (pq *priorityQueue) Offer(entry PriorityEntry) error {
 		return errQueueFull
 	}
 	pq.bytes += entry.size
-	if !entry.due.IsZero() && entry.due.After(time.Now()) {
+	if entry.due.After(time.Now()) {
 		heap.Push(&pq.waiting, entry)
 		return nil
 	}

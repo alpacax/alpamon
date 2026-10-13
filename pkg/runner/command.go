@@ -17,12 +17,13 @@ import (
 // enough for last-second output, short enough to drop stale chunks.
 const chunkDeliveryGrace = 5 * time.Minute
 
-// maxChunksPerCommand mirrors the server's COMMAND_CHUNK_MAX_COUNT default; it drops
-// every chunk from this seq on yet answers 204, and fin still carries the audit copy.
-const maxChunksPerCommand = 10000
-
-// maxChunkBytesPerCommand keeps the server's per-command storage at its pre-32 KiB bound (10000 x 4 KiB).
-const maxChunkBytesPerCommand = 40 * 1024 * 1024
+const (
+	// maxChunksPerCommand mirrors the server's COMMAND_CHUNK_MAX_COUNT default; it drops
+	// every chunk from this seq on yet answers 204, and fin still carries the audit copy.
+	maxChunksPerCommand = 10000
+	// maxChunkBytesPerCommand keeps the server's per-command storage at its pre-32 KiB bound (10000 x 4 KiB).
+	maxChunkBytesPerCommand = 40 * 1024 * 1024
+)
 
 // CommandDispatcher interface to avoid circular import with executor package
 type CommandDispatcher interface {
@@ -67,7 +68,7 @@ func (cr *CommandRunner) newChunkCallback() func(ctx context.Context, content st
 	// Runner owns seq so chunks across shell operators share one series.
 	var seq int
 	var sentBytes int
-	capped := false
+	var capped bool
 	return func(ctx context.Context, content string) {
 		if capped {
 			return
