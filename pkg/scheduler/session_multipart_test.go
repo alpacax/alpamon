@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
@@ -179,4 +180,23 @@ func TestInitSession_RedirectCarriesTheKeyOnlyOnTheServer(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, hits, 1)
 	assert.Equal(t, hit{server: "other"}, <-hits)
+}
+
+func TestMultipartRequest_WhenUploading_ThenAsksServerToCloseConnection(t *testing.T) {
+	var closeRequested atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		closeRequested.Store(r.Close)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(srv.Close)
+	prev := config.GlobalSettings
+	t.Cleanup(func() { config.GlobalSettings = prev })
+	config.GlobalSettings = config.Settings{ServerURL: srv.URL, SSLVerify: true}
+	session := InitSession()
+
+	_, code, err := session.MultipartRequest("/api/uploads/1/", strings.NewReader("x"), "text/plain", 1, 5)
+
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, code)
+	assert.True(t, closeRequested.Load(), "a streamed POST is never retried, so it must not stay on a pooled connection")
 }

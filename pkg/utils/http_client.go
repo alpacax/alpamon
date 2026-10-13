@@ -73,6 +73,21 @@ func NewTransport() (*http.Transport, error) {
 	}, err
 }
 
+// WithoutKeepAlives returns a copy of rt that opens a fresh connection per request.
+// Go never retries a streamed upload, so it must not land on an idle connection the server just closed.
+func WithoutKeepAlives(rt http.RoundTripper) http.RoundTripper {
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	t, ok := rt.(*http.Transport)
+	if !ok {
+		return rt
+	}
+	t = t.Clone()
+	t.DisableKeepAlives = true
+	return t
+}
+
 // putMaxResponseSize caps response bodies for Put. Read putMaxResponseSize+1
 // bytes so an over-cap response can be detected explicitly instead of silently
 // truncating (which would hide server error details).
@@ -90,10 +105,7 @@ func Put(url string, body io.Reader, contentLength int64, timeout time.Duration)
 	// bytes/strings readers, which would defeat a caller's -1 chunked opt-in.
 	req.ContentLength = contentLength
 
-	// A streamed PUT is never retried, so it must not land on an idle connection the server just closed.
-	t := transport().Clone()
-	t.DisableKeepAlives = true
-	client := &http.Client{Transport: t, Timeout: timeout}
+	client := &http.Client{Transport: WithoutKeepAlives(transport()), Timeout: timeout}
 
 	resp, err := client.Do(req)
 	if err != nil {
