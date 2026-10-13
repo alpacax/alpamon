@@ -3,37 +3,89 @@ package utils
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/rs/zerolog/log"
 )
 
-// NewHTTPClient creates an HTTP client with TLS configuration from global settings
+// Idle pool settings for the session transport and NewHTTPClient.
+const (
+	// Covers the reporter threads and collector workers posting to Alpacon, plus downloads.
+	maxIdleConnsPerHost = 16
+	// Kept below the 60s and 75s idle timeouts ALB and nginx default to, since Go does not retry a POST the server cut off.
+	idleConnTimeout = 55 * time.Second
+)
+
+var (
+	transportMu     sync.Mutex
+	sharedTransport *http.Transport
+)
+
+// NewHTTPClient returns a new client over one shared transport.
+// A transport whose CA file failed to load or parse is not shared, so the next call retries the read.
 func NewHTTPClient() *http.Client {
+	return &http.Client{Transport: transport()}
+}
+
+func transport() *http.Transport {
+	transportMu.Lock()
+	defer transportMu.Unlock()
+	if sharedTransport != nil {
+		return sharedTransport
+	}
+	t, err := NewTransport()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to load the CA certificate.")
+		return t
+	}
+	sharedTransport = t
+	return t
+}
+
+// NewTransport builds a transport from the TLS settings. When the CA file cannot be
+// read or holds no PEM certificate, it returns the error with a transport that trusts no CA.
+func NewTransport() (*http.Transport, error) {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 	}
-
+	var err error
 	if config.GlobalSettings.CaCert != "" {
-		caCertPool := x509.NewCertPool()
-		if caCert, err := os.ReadFile(config.GlobalSettings.CaCert); err == nil {
-			caCertPool.AppendCertsFromPEM(caCert)
-			tlsConfig.RootCAs = caCertPool
-		} else {
-			log.Error().Err(err).Msg("Failed to read CA certificate.")
+		tlsConfig.RootCAs = x509.NewCertPool()
+		var caCert []byte
+		if caCert, err = os.ReadFile(config.GlobalSettings.CaCert); err == nil && !tlsConfig.RootCAs.AppendCertsFromPEM(caCert) {
+			err = errors.New("no PEM certificate found in the CA file")
 		}
 	}
 
-	return &http.Client{
-		Transport: &http.Transport{TLSClientConfig: tlsConfig},
+	return &http.Transport{
+		TLSClientConfig:     tlsConfig,
+		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+		IdleConnTimeout:     idleConnTimeout,
+	}, err
+}
+
+// WithoutKeepAlives returns a copy of rt that opens a fresh connection per request.
+// Go never retries a streamed upload, so it must not land on an idle connection the server just closed.
+func WithoutKeepAlives(rt http.RoundTripper) http.RoundTripper {
+	if rt == nil {
+		rt = http.DefaultTransport
 	}
+	t, ok := rt.(*http.Transport)
+	if !ok {
+		return rt
+	}
+	t = t.Clone()
+	t.DisableKeepAlives = true
+	return t
 }
 
 // putMaxResponseSize caps response bodies for Put. Read putMaxResponseSize+1
@@ -53,8 +105,7 @@ func Put(url string, body io.Reader, contentLength int64, timeout time.Duration)
 	// bytes/strings readers, which would defeat a caller's -1 chunked opt-in.
 	req.ContentLength = contentLength
 
-	client := NewHTTPClient()
-	client.Timeout = timeout
+	client := &http.Client{Transport: WithoutKeepAlives(transport()), Timeout: timeout}
 
 	resp, err := client.Do(req)
 	if err != nil {
