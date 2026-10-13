@@ -162,10 +162,10 @@ restart_alpamon_process() {
   start_alpamon_process
 }
 
-# Prints the PID of the ancestor an alpamon process spawned, i.e. the agent's own upgrade command;
-# fails when there is none. Reads /proc because minimal container images ship without ps.
-find_agent_command() {
-  local pid=$$ ppid key value
+# Prints the PID of the ancestor of $1 (or $1 itself) that an alpamon process spawned, i.e. the agent
+# command running it; fails when there is none. Reads /proc because minimal container images ship without ps.
+agent_command_of() {
+  local pid=$1 ppid key value
   while [ "$pid" -gt 1 ]; do
     ppid=""
     while read -r key value; do
@@ -186,6 +186,22 @@ find_agent_command() {
   return 1
 }
 
+find_agent_command() {
+  agent_command_of $$
+}
+
+# Prints the agent command running a package manager; fails when there is none.
+find_running_upgrade() {
+  local proc
+  for proc in /proc/[0-9]*; do
+    case "$(cat "$proc/comm" 2>/dev/null)" in
+      apt|apt-get|dpkg|yum|dnf|dnf-3|dnf5|microdnf|zypper|rpm)
+        agent_command_of "${proc#/proc/}" && return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # Restarting at once would kill the agent mid-command and report a truncated failure,
 # so the restart waits for the command to exit and the agent to post its result.
 defer_alpamon_restart() {
@@ -200,22 +216,30 @@ defer_alpamon_restart() {
   echo "$token" > "$RESTART_TOKEN_FILE"
   set -m
   (
-    waited=0
-    while [ "$waited" -lt "$RESTART_WAIT_LIMIT" ] && kill -0 "$command_pid" 2>/dev/null; do
-      sleep 1
-      waited=$((waited + 1))
-    done
-    sleep "$RESTART_GRACE"
     # Held through the check and the restart so a new upgrade cannot start in between.
     # A failed open must not end the job: set -e would, and so would sh (how rpm runs scriptlets) without command.
     command exec 9>>"$RESTART_LOCK_FILE" || true
-    if command -v flock >/dev/null 2>&1 && ! flock -w "$RESTART_LOCK_WAIT" 9; then
-      echo "Timed out waiting for the upgrade lock; restarting anyway."
-    fi
-    if [ "$(cat "$RESTART_TOKEN_FILE" 2>/dev/null)" != "$token" ]; then
-      echo "A later upgrade took over the deferred restart; leaving it to that one."
-      exit 0
-    fi
+    deadline=$(( $(date +%s) + RESTART_LOCK_WAIT ))
+    while :; do
+      waited=0
+      while [ "$waited" -lt "$RESTART_WAIT_LIMIT" ] && kill -0 "$command_pid" 2>/dev/null; do
+        sleep 1
+        waited=$((waited + 1))
+      done
+      sleep "$RESTART_GRACE"
+      if command -v flock >/dev/null 2>&1 && ! flock -w "$RESTART_LOCK_WAIT" 9; then
+        echo "Timed out waiting for the upgrade lock; restarting anyway."
+      fi
+      if [ "$(cat "$RESTART_TOKEN_FILE" 2>/dev/null)" != "$token" ]; then
+        echo "A later upgrade took over the deferred restart; leaving it to that one."
+        exit 0
+      fi
+      # An agent older than the upgrade lock can start another upgrade during the grace without taking it.
+      if [ "$(date +%s)" -ge "$deadline" ] || ! command_pid=$(find_running_upgrade); then
+        break
+      fi
+      echo "Upgrade command $command_pid is running; waiting for it before restarting."
+    done
     restart_alpamon_process
   ) </dev/null >>"$ALPAMON_LOG" 2>&1 &
   set +m

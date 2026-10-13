@@ -28,7 +28,7 @@ check_alpamon_binary() { :; }
 cleanup_old_binary() { :; }
 create_directories() { :; }
 restart_alpamon_process() {
-  if [ -e "$DIR/exited" ]; then echo after; else echo before; fi > "$DIR/restarted.tmp"
+  if [ -e "$DIR/${DONE_MARKER:-exited}" ]; then echo after; else echo before; fi > "$DIR/restarted.tmp"
   mv "$DIR/restarted.tmp" "$DIR/restarted"
 }
 ALPAMON_LOG="$DIR/alpamon.log"
@@ -54,6 +54,10 @@ wait "$command"
 wait "$reader"
 touch "$DIR/exited"
 kill -KILL -- "-$command" 2>/dev/null || true
+if [ -n "${SECOND_HOLD-}" ]; then
+  "$DIR/apt-get" "$SECOND_HOLD"
+  touch "$DIR/second-exited"
+fi
 `
 
 type upgradeRun struct {
@@ -230,6 +234,20 @@ func TestSelfUpgradeWithoutSystemdStillRestartsInPOSIXModeWhenTheLockCannotBeOpe
 
 	// Then the job survives the failed open and still restarts the agent
 	assert.Equal(t, "after", run.restarted(t, 15*time.Second))
+}
+
+func TestSelfUpgradeWithoutSystemdWaitsForAnUpgradeTheAgentStartsDuringTheGrace(t *testing.T) {
+	// Given an agent older than the upgrade lock that starts a second upgrade during the grace
+	run := newUpgradeRun(t, 60, 0)
+	require.NoError(t, os.WriteFile(filepath.Join(run.dir, "apt-get"), []byte("#!/bin/bash\nsleep \"$1\"\n"), 0o700))
+	run.env = append(run.env, "GRACE=2", "SECOND_HOLD=4", "DONE_MARKER=second-exited")
+
+	// When the first upgrade command exits and the agent runs the second one
+	require.NoError(t, run.startAgent(t).Wait())
+
+	// Then the job restarts the agent only after the second command has exited
+	assert.Equal(t, "after", run.restarted(t, 15*time.Second))
+	assert.Contains(t, run.log(t), "is running; waiting for it before restarting")
 }
 
 // holdLock takes the upgrade lock the way the agent's latch does and returns its release.
