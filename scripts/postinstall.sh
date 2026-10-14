@@ -167,8 +167,8 @@ restart_alpamon_process() {
 
 # Waits for a deferred job already restarting the agent, then takes the restart over from any job still in its grace.
 restart_alpamon_manually() {
-  create_directories
-  if command exec 8>>"$RESTART_SERIAL_FILE" && command -v flock >/dev/null 2>&1 \
+  # Without the directory no deferred job exists to wait for: the job creates it before it starts.
+  if [ -d "${RESTART_SERIAL_FILE%/*}" ] && command exec 8>>"$RESTART_SERIAL_FILE" && command -v flock >/dev/null 2>&1 \
     && ! flock -w "$RESTART_SERIAL_WAIT" 8; then
     echo "Warning: Timed out waiting for a deferred restart to finish; restarting anyway." >&2
   fi
