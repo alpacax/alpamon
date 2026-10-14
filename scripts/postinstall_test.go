@@ -215,7 +215,6 @@ func TestSelfUpgradeWithoutSystemdLeavesTheRestartToALaterUpgrade(t *testing.T) 
 	assert.Empty(t, first.restarted(t, 6*time.Second), "the superseded job must not restart the agent again")
 }
 
-
 func TestSelfUpgradeWithoutSystemdLeavesTheRestartToAManualUpgradeDuringItsGrace(t *testing.T) {
 	// Given a deferred restart still in its grace, sharing its token file with an operator's upgrade
 	tokenFile := filepath.Join(t.TempDir(), "restart.token")
