@@ -16,6 +16,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Tests that run a package manager stub stay serial: find_running_upgrade scans all of /proc, so a parallel
+// test's deferred job would wait for that stub too. The others run in parallel, each in its own temp dir.
+
 // driverScript runs postinstall's upgrade path with every host-touching step stubbed out. The
 // restart stub records whether the agent had already seen the upgrade command exit.
 const driverScript = `
@@ -145,6 +148,7 @@ func (r *upgradeRun) restarted(t *testing.T, timeout time.Duration) string {
 }
 
 func TestSelfUpgradeWithoutSystemdRestartsOnlyAfterTheUpgradeCommandExits(t *testing.T) {
+	t.Parallel()
 	// Given an agent-run upgrade whose package manager outlives the scriptlet by two seconds
 	run := newUpgradeRun(t, 60, 2)
 
@@ -157,6 +161,7 @@ func TestSelfUpgradeWithoutSystemdRestartsOnlyAfterTheUpgradeCommandExits(t *tes
 }
 
 func TestSelfUpgradeWithoutSystemdCreatesAMissingLogOwnerAndGroupReadableOnly(t *testing.T) {
+	t.Parallel()
 	// Given an agent-run upgrade on a host whose log file is gone, under umask 022
 	run := newUpgradeRun(t, 60, 0)
 	logPath := filepath.Join(run.dir, "alpamon.log")
@@ -174,6 +179,7 @@ func TestSelfUpgradeWithoutSystemdCreatesAMissingLogOwnerAndGroupReadableOnly(t 
 }
 
 func TestSelfUpgradeWithoutSystemdRestartsOnceTheWaitLimitPasses(t *testing.T) {
+	t.Parallel()
 	// Given an agent-run upgrade whose command stays up well past a one-second wait limit
 	run := newUpgradeRun(t, 1, 8)
 
@@ -185,6 +191,7 @@ func TestSelfUpgradeWithoutSystemdRestartsOnceTheWaitLimitPasses(t *testing.T) {
 }
 
 func TestUpgradeWithoutSystemdOutsideTheAgentRestartsBeforeReturning(t *testing.T) {
+	t.Parallel()
 	// Given an upgrade an operator runs by hand, with no alpamon process among its ancestors
 	run := newUpgradeRun(t, 60, 0)
 	cmd := exec.Command("bash", filepath.Join(run.dir, "driver.sh"))
@@ -199,6 +206,7 @@ func TestUpgradeWithoutSystemdOutsideTheAgentRestartsBeforeReturning(t *testing.
 }
 
 func TestSelfUpgradeWithoutSystemdLeavesTheRestartToALaterUpgrade(t *testing.T) {
+	t.Parallel()
 	// Given a deferred restart still in its grace when a second self-upgrade starts, both sharing one token file
 	tokenFile := filepath.Join(t.TempDir(), "restart.token")
 	first := newUpgradeRun(t, 60, 0)
@@ -216,6 +224,7 @@ func TestSelfUpgradeWithoutSystemdLeavesTheRestartToALaterUpgrade(t *testing.T) 
 }
 
 func TestSelfUpgradeWithoutSystemdLeavesTheRestartToAManualUpgradeDuringItsGrace(t *testing.T) {
+	t.Parallel()
 	// Given a deferred restart still in its grace, sharing its token file with an operator's upgrade
 	tokenFile := filepath.Join(t.TempDir(), "restart.token")
 	deferred := newUpgradeRun(t, 60, 0)
@@ -237,6 +246,7 @@ func TestSelfUpgradeWithoutSystemdLeavesTheRestartToAManualUpgradeDuringItsGrace
 }
 
 func TestUpgradeWithoutSystemdOutsideTheAgentWaitsForADeferredRestartAlreadyUnderWay(t *testing.T) {
+	t.Parallel()
 	// Given a deferred job that has passed its token check and is three seconds into restarting the agent
 	shared := t.TempDir()
 	events := filepath.Join(shared, "events")
@@ -265,6 +275,7 @@ func TestUpgradeWithoutSystemdOutsideTheAgentWaitsForADeferredRestartAlreadyUnde
 }
 
 func TestSelfUpgradeWithoutSystemdStillRestartsInPOSIXModeWhenTheLockCannotBeOpened(t *testing.T) {
+	t.Parallel()
 	// Given an agent-run upgrade under sh, as rpm runs scriptlets, whose lock directory is missing
 	run := newUpgradeRun(t, 60, 0)
 	run.env = append(run.env, "DRIVER_FLAGS=--posix", "LOCK_FILE="+filepath.Join(run.dir, "missing", "upgrade.lock"))
@@ -339,6 +350,7 @@ func holdLock(t *testing.T, path string) func() {
 }
 
 func TestSelfUpgradeWithoutSystemdWaitsForTheUpgradeLockAndStandsDownForANewerToken(t *testing.T) {
+	t.Parallel()
 	// Given a deferred restart whose grace ends while another upgrade holds the lock
 	run := newUpgradeRun(t, 60, 0)
 	lockFile := filepath.Join(run.dir, "upgrade.lock")
@@ -360,6 +372,7 @@ func TestSelfUpgradeWithoutSystemdWaitsForTheUpgradeLockAndStandsDownForANewerTo
 }
 
 func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedWithTheSameToken(t *testing.T) {
+	t.Parallel()
 	// Given a deferred restart whose grace ends while the agent still holds the lock for an upgrade
 	run := newUpgradeRun(t, 60, 0)
 	run.env = append(run.env, "GRACE=3")
@@ -378,6 +391,7 @@ func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedWit
 }
 
 func TestSelfUpgradeWithoutSystemdDoesNotWaitAgainOnTheExitedCommandAfterTheUpgradeLockIsReleased(t *testing.T) {
+	t.Parallel()
 	// Given a deferred restart whose command PID was reused, and whose grace ends while the agent holds the lock
 	run := newUpgradeRun(t, 3, 0)
 	run.env = append(run.env, "GRACE=1", "PIDS_REUSED=1")
@@ -394,6 +408,7 @@ func TestSelfUpgradeWithoutSystemdDoesNotWaitAgainOnTheExitedCommandAfterTheUpgr
 }
 
 func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedPastTheDeadline(t *testing.T) {
+	t.Parallel()
 	// Given a deferred restart with a six-second deadline whose grace ends while the agent holds the lock
 	run := newUpgradeRun(t, 60, 0)
 	run.env = append(run.env, "GRACE=3", "LOCK_WAIT=6")
@@ -412,6 +427,7 @@ func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedPas
 }
 
 func TestStartAlpamonProcessDoesNotPassTheLocksToTheNewAgent(t *testing.T) {
+	t.Parallel()
 	// Given an agent binary that reports which of fds 8 and 9 are open, and both open in the caller
 	dir := t.TempDir()
 	postinstall, err := filepath.Abs("postinstall.sh")
