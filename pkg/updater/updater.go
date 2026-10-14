@@ -89,7 +89,7 @@ func AcquireUpgradeLatch() bool {
 }
 
 // ReleaseSelfUpdateLatch releases the latch. A successful self-update keeps it until the restart,
-// so after one call this only when the expected restart could not be triggered.
+// so after one, call this only when the expected restart could not be triggered.
 func ReleaseSelfUpdateLatch() {
 	unlockUpgrade()
 	selfUpdateInFlight.Store(false)
