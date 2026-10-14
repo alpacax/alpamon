@@ -204,13 +204,17 @@ find_agent_command() {
   agent_command_of $$
 }
 
-# Prints the agent command running a package manager; fails when there is none.
+# Prints the PID of a package manager an agent command runs; fails when there is none. Not the command's own PID:
+# a Websh shell that ran it is also an agent command, and it stays open long after the package manager exits.
 find_running_upgrade() {
   local proc
   for proc in /proc/[0-9]*; do
     case "$(cat "$proc/comm" 2>/dev/null)" in
       apt|apt-get|dpkg|yum|dnf|dnf-3|dnf5|microdnf|zypper|rpm)
-        agent_command_of "${proc#/proc/}" && return 0 ;;
+        if agent_command_of "${proc#/proc/}" >/dev/null; then
+          echo "${proc#/proc/}"
+          return 0
+        fi ;;
     esac
   done
   return 1
@@ -268,8 +272,10 @@ defer_alpamon_restart() {
       if [ "$(date +%s)" -ge "$deadline" ] || ! command_pid=$(find_running_upgrade); then
         break
       fi
+      # Released while waiting, so the agent can still run an upgrade; the lock is taken again after the grace.
       flock -u 8 2>/dev/null || true
-      echo "Upgrade command $command_pid is running; waiting for it before restarting."
+      flock -u 9 2>/dev/null || true
+      echo "Package manager $command_pid is running; waiting for it before restarting."
     done
     restart_alpamon_process
   ) </dev/null >>"$ALPAMON_LOG" 2>&1 &

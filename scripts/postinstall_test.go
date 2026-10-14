@@ -46,8 +46,12 @@ main 2
 `
 
 // agentScript runs a command as pkg/executor does: own process group, output drained to EOF, group
-// SIGKILLed after. The command plays a package manager that outlives its scriptlet by $HOLD seconds.
+// SIGKILLed after. The command plays a package manager that outlives its scriptlet by $HOLD seconds. With
+// WEBSH_PM_HOLD set, a Websh shell started before set -m, so it stays in the agent's group, runs one too.
 const agentScript = `
+if [ -n "${WEBSH_PM_HOLD-}" ]; then
+  bash -c '"$DIR/apt-get" "$WEBSH_PM_HOLD"; touch "$DIR/websh-pm-exited"; sleep 60' &
+fi
 set -m
 mkfifo "$DIR/out"
 cat "$DIR/out" > "$DIR/output.txt" &
@@ -63,6 +67,7 @@ if [ -n "${SECOND_HOLD-}" ]; then
   "$DIR/apt-get" "$SECOND_HOLD"
   touch "$DIR/second-exited"
 fi
+wait
 `
 
 type upgradeRun struct {
@@ -281,6 +286,45 @@ func TestSelfUpgradeWithoutSystemdWaitsForAnUpgradeTheAgentStartsDuringTheGrace(
 	// Then the job restarts the agent only after the second command has exited
 	assert.Equal(t, "after", run.restarted(t, 15*time.Second))
 	assert.Contains(t, run.log(t), "is running; waiting for it before restarting")
+}
+
+// startWebshUpgrade runs an upgrade while a Websh shell of the same agent has a package manager running for pmHold
+// seconds and then stays open.
+func startWebshUpgrade(t *testing.T, pmHold int) *upgradeRun {
+	t.Helper()
+	run := newUpgradeRun(t, 60, 0)
+	require.NoError(t, os.WriteFile(filepath.Join(run.dir, "apt-get"), []byte("#!/bin/bash\nsleep \"$1\"\n"), 0o700))
+	run.env = append(run.env, "GRACE=2", "WEBSH_PM_HOLD="+strconv.Itoa(pmHold), "DONE_MARKER=websh-pm-exited")
+	run.startAgent(t)
+	return run
+}
+
+func TestSelfUpgradeWithoutSystemdReleasesTheUpgradeLockWhileWaitingForAWebshPackageManager(t *testing.T) {
+	// Given a deferred restart that found a package manager running in a Websh shell
+	run := startWebshUpgrade(t, 8)
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(filepath.Join(run.dir, "alpamon.log"))
+		return err == nil && strings.Contains(string(data), "is running; waiting for it before restarting")
+	}, 10*time.Second, 50*time.Millisecond)
+
+	// When the console starts an upgrade while the job waits
+	f, err := os.OpenFile(filepath.Join(run.dir, "upgrade.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	require.NoError(t, err)
+	defer f.Close()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+
+	// Then the agent can take the upgrade lock
+	require.NoError(t, err, "the job must not hold the upgrade lock while it waits")
+	require.NoError(t, syscall.Flock(int(f.Fd()), syscall.LOCK_UN))
+}
+
+func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterAWebshPackageManagerExitsWhileItsShellStaysOpen(t *testing.T) {
+	// Given a deferred restart that found a package manager in a Websh shell that stays open after it exits
+	// When the package manager exits four seconds in
+	run := startWebshUpgrade(t, 4)
+
+	// Then the job restarts the agent a grace later instead of waiting for the shell
+	assert.Equal(t, "after", run.restarted(t, 12*time.Second))
 }
 
 // holdLock takes the upgrade lock the way the agent's latch does and returns its release.
