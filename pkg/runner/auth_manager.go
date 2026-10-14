@@ -78,6 +78,10 @@ type SudoApprovalRequest struct {
 	IsAlpconUser bool   `json:"is_alpacon_user"`
 	SessionID    string `json:"session_id,omitempty"`
 	CommandID    string `json:"command_id,omitempty"`
+	// RunasUser is the OS user sudo will run the command as, as the approval
+	// plugin reports it (a user name, or "#<uid>"). Forwarded unchanged to the
+	// server; omitted when the client does not send it.
+	RunasUser string `json:"runas_user,omitempty"`
 }
 
 type SudoApprovalResponse struct {
