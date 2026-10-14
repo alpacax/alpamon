@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -34,7 +35,8 @@ const (
 // capBuffer keeps a stream's first and last halves and drops the middle, bounding retained memory.
 type capBuffer struct {
 	head    []byte
-	tail    []byte
+	tail    []byte // fills up to captureTailCap, then wraps as a ring whose oldest byte is at pos
+	pos     int
 	dropped int64
 }
 
@@ -51,31 +53,28 @@ func (c *capBuffer) write(p []byte) {
 	if len(p) == 0 {
 		return
 	}
-	c.tail = append(c.tail, p...)
-	// Compact lazily (grow to 2x, then drop the front) for amortized O(1).
-	if len(c.tail) > 2*captureTailCap {
-		c.dropTail(len(c.tail) - captureTailCap)
-		c.tail = append([]byte(nil), c.tail...)
+	if len(p) > captureTailCap {
+		c.dropped += int64(len(p) - captureTailCap)
+		p = p[len(p)-captureTailCap:]
 	}
-}
-
-func (c *capBuffer) dropTail(n int) {
-	c.dropped += int64(n)
-	c.tail = c.tail[n:]
+	if c.tail == nil {
+		c.tail = make([]byte, 0, captureTailCap)
+	}
+	n := min(captureTailCap-len(c.tail), len(p))
+	c.tail = append(c.tail, p[:n]...)
+	p = p[n:]
+	k := copy(c.tail[c.pos:], p)
+	copy(c.tail, p[k:])
+	c.pos = (c.pos + len(p)) % captureTailCap
+	c.dropped += int64(len(p))
 }
 
 func (c *capBuffer) bytes() []byte {
-	if len(c.tail) > captureTailCap {
-		c.dropTail(len(c.tail) - captureTailCap)
-	}
-	var marker string
+	var marker []byte
 	if c.dropped > 0 {
-		marker = fmt.Sprintf("\n... [%d bytes truncated] ...\n", c.dropped)
+		marker = fmt.Appendf(nil, "\n... [%d bytes truncated] ...\n", c.dropped)
 	}
-	out := make([]byte, 0, len(c.head)+len(marker)+len(c.tail))
-	out = append(out, c.head...)
-	out = append(out, marker...)
-	return append(out, c.tail...)
+	return slices.Concat(c.head, marker, c.tail[c.pos:], c.tail[:c.pos])
 }
 
 // chunkWriter emits coalesced stdout/stderr chunks and tees a capped copy for the fin payload.
@@ -160,14 +159,11 @@ func (w *chunkWriter) flush() {
 }
 
 // emit nil-guards and recovers from callback panics so a bad callback
-// cannot crash the agent.
+// cannot crash the agent. content must not be a substring of a larger string.
 func (w *chunkWriter) emit(content string) {
 	if w.callback == nil {
 		return
 	}
-	// Clone so a chunk sliced from a larger line/buffer doesn't pin the
-	// full backing array alive while queued downstream.
-	content = strings.Clone(content)
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error().Interface("panic", r).Msg("ChunkCallback panicked")
