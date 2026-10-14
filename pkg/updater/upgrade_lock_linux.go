@@ -22,9 +22,6 @@ var (
 func lockUpgrade() bool {
 	upgradeLockMu.Lock()
 	defer upgradeLockMu.Unlock()
-	if upgradeLockFile != nil {
-		return true
-	}
 	if err := os.MkdirAll(filepath.Dir(UpgradeLockPath), 0o750); err != nil {
 		log.Warn().Err(err).Msg("Failed to create the upgrade lock directory; continuing without it.")
 		return true
