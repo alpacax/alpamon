@@ -35,7 +35,8 @@ baseurl=https://download.docker.com/linux/rhel/$releasever/$basearch/test
 enabled=0
 `
 
-// TestMain points YumReposDirs at an empty temp dir and the yum binary and configs at none, so no test reads the host's.
+// TestMain points YumReposDirs at an empty temp dir and the yum binary and configs at none, so no test reads the host's;
+// the upgrade lock moves there too, so no test creates /run/alpamon.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "alpamon-yum-repos")
 	if err != nil {
@@ -45,6 +46,7 @@ func TestMain(m *testing.M) {
 	YumBinary = filepath.Join(dir, "missing-yum")
 	DnfConfFile = filepath.Join(dir, "missing-dnf.conf")
 	YumConfFile = filepath.Join(dir, "missing-yum.conf")
+	UpgradeLockPath = filepath.Join(dir, "upgrade.lock")
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
