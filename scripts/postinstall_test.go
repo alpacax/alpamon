@@ -23,6 +23,9 @@ umask 022
 POSTINSTALL_SOURCED=1
 source "$POSTINSTALL"
 check_root_permission() { :; }
+if [ -n "${PIDS_REUSED-}" ]; then # every waited-for PID looks alive, as if reused after its process exited
+  kill() { if [ "$1" = -0 ] && [ -n "$2" ]; then return 0; fi; command kill "$@"; }
+fi
 check_systemd_status() { SYSTEMD_AVAILABLE=false; }
 check_alpamon_binary() { :; }
 cleanup_old_binary() { :; }
@@ -373,6 +376,22 @@ func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedWit
 	require.Empty(t, run.restarted(t, 2*time.Second))
 	assert.Equal(t, "after", run.restarted(t, 10*time.Second))
 	assert.Contains(t, run.log(t), "waiting out the grace again")
+}
+
+func TestSelfUpgradeWithoutSystemdDoesNotWaitAgainOnTheExitedCommandAfterTheUpgradeLockIsReleased(t *testing.T) {
+	// Given a deferred restart whose command PID was reused, and whose grace ends while the agent holds the lock
+	run := newUpgradeRun(t, 3, 0)
+	run.env = append(run.env, "GRACE=1", "PIDS_REUSED=1")
+	release := holdLock(t, filepath.Join(run.dir, "upgrade.lock"))
+	defer release()
+	require.NoError(t, run.startAgent(t).Wait())
+	require.Empty(t, run.restarted(t, 5*time.Second))
+
+	// When the holder releases the lock
+	release()
+
+	// Then the job restarts a grace later instead of waiting on the old command's PID again
+	assert.Equal(t, "after", run.restarted(t, 2500*time.Millisecond))
 }
 
 func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedPastTheDeadline(t *testing.T) {

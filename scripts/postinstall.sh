@@ -245,6 +245,7 @@ defer_alpamon_restart() {
         sleep 1
         waited=$((waited + 1))
       done
+      command_pid="" # waited for once, as its PID may be reused; a found package manager sets the next one
       sleep "$RESTART_GRACE"
       if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
         if ! flock -w "$RESTART_LOCK_WAIT" 9; then
