@@ -25,7 +25,8 @@ UserShell: /bin/zsh
 	shells := []string{"/bin/zsh"}
 
 	// When
-	users := parseDsclUsers(out, shells)
+	users, err := parseDsclUsers(out, shells)
+	require.NoError(t, err)
 
 	// Then
 	require.Len(t, users, 2)
@@ -46,7 +47,8 @@ UserShell: /bin/sh
 `
 
 	// When
-	users := parseDsclUsers(out, nil)
+	users, err := parseDsclUsers(out, nil)
+	require.NoError(t, err)
 
 	// Then
 	require.Len(t, users, 1)
@@ -59,7 +61,8 @@ func TestParseDsclUsers_UsesFirstAlias(t *testing.T) {
 	out := "RecordName: _amavisd amavisd\nUniqueID: 83\nPrimaryGroupID: 83\n"
 
 	// When
-	users := parseDsclUsers(out, nil)
+	users, err := parseDsclUsers(out, nil)
+	require.NoError(t, err)
 
 	// Then
 	require.Len(t, users, 1)
@@ -71,7 +74,8 @@ func TestParseDsclUsers_InlineMultiValueUsesFirstValue(t *testing.T) {
 	out := "NFSHomeDirectory: /var/root /private/var/root\nRecordName: root\nUniqueID: 0\nUserShell: /bin/sh /bin/zsh\n"
 
 	// When
-	users := parseDsclUsers(out, nil)
+	users, err := parseDsclUsers(out, nil)
+	require.NoError(t, err)
 
 	// Then
 	require.Len(t, users, 1)
@@ -84,7 +88,8 @@ func TestParseDsclUsers_UnparsableGIDFallsBackToZero(t *testing.T) {
 	out := "PrimaryGroupID: 9223372036854775808\nRecordName: alice\nUniqueID: 501\n"
 
 	// When
-	users := parseDsclUsers(out, nil)
+	users, err := parseDsclUsers(out, nil)
+	require.NoError(t, err)
 
 	// Then
 	require.Len(t, users, 1)
@@ -96,7 +101,8 @@ func TestParseDsclUsers_MissingAttributesUseDefaults(t *testing.T) {
 	out := "RecordName: nobody\nUniqueID: -2\n"
 
 	// When
-	users := parseDsclUsers(out, nil)
+	users, err := parseDsclUsers(out, nil)
+	require.NoError(t, err)
 
 	// Then
 	require.Len(t, users, 1)
@@ -118,7 +124,8 @@ UniqueID: 7
 `
 
 	// When
-	users := parseDsclUsers(out, nil)
+	users, err := parseDsclUsers(out, nil)
+	require.NoError(t, err)
 
 	// Then
 	require.Len(t, users, 1)
@@ -127,8 +134,33 @@ UniqueID: 7
 
 func TestParseDsclUsers_EmptyOutput(t *testing.T) {
 	// Given / When
-	users := parseDsclUsers("", nil)
+	users, err := parseDsclUsers("", nil)
+	require.NoError(t, err)
 
 	// Then
 	assert.Equal(t, []UserData{}, users)
+}
+
+func TestParseDsclUsers_RepeatedAttributeIsAnError(t *testing.T) {
+	// Given
+	out := "RecordName: root\nUniqueID: 0\nRecordName: alice\nUniqueID: 501\n"
+
+	// When
+	users, err := parseDsclUsers(out, nil)
+
+	// Then
+	assert.ErrorContains(t, err, "RecordName")
+	assert.Nil(t, users)
+}
+
+func TestParseDsclUsers_RepeatedIndentedAttributeIsAnError(t *testing.T) {
+	// Given
+	out := "RecordName:\n root\n BUILTIN\\Local System\nUniqueID: 0\nRecordName:\n alice\n"
+
+	// When
+	users, err := parseDsclUsers(out, nil)
+
+	// Then
+	assert.ErrorContains(t, err, "RecordName")
+	assert.Nil(t, users)
 }

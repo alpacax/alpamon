@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -35,12 +36,12 @@ func getUserData() ([]UserData, error) {
 		return nil, err
 	}
 
-	return parseDsclUsers(string(out), loadValidShells()), nil
+	return parseDsclUsers(string(out), loadValidShells())
 }
 
 // parseDsclUsers parses `dscl . -readall /Users`: a "-" line ends a record, and dscl moves an
 // attribute's values to indented lines when any holds a space, so inline values split on spaces.
-func parseDsclUsers(out string, validShells []string) []UserData {
+func parseDsclUsers(out string, validShells []string) ([]UserData, error) {
 	users := []UserData{}
 
 	flush := func(rec map[string]string) {
@@ -90,18 +91,19 @@ func parseDsclUsers(out string, validShells []string) []UserData {
 		if !ok {
 			continue
 		}
+		if _, exists := rec[attr]; exists { // a lost "-" separator would merge users into one record
+			return nil, fmt.Errorf("dscl output repeats %s within one record", attr)
+		}
 		fields := strings.Fields(value)
 		if len(fields) == 0 {
 			pending = attr
 			continue
 		}
-		if _, exists := rec[attr]; !exists {
-			rec[attr] = fields[0]
-		}
+		rec[attr] = fields[0]
 	}
 	flush(rec)
 
-	return users
+	return users, nil
 }
 
 // getGroupData enumerates local groups via dscl on macOS.
