@@ -323,7 +323,7 @@ func TestSelfUpgradeWithoutSystemdReleasesTheUpgradeLockWhileWaitingForAWebshPac
 	// When the console starts an upgrade while the job waits
 	f, err := os.OpenFile(filepath.Join(run.dir, "upgrade.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 
 	// Then the agent can take the upgrade lock
