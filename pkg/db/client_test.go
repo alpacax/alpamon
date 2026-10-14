@@ -14,7 +14,7 @@ func TestSQLiteDSNEnablesForeignKeys(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
-	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
+	db, err := sql.Open("sqlite", SQLiteDSN(dbPath))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
