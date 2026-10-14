@@ -165,6 +165,18 @@ func TestParseDsclUsers_RepeatedIndentedAttributeIsAnError(t *testing.T) {
 	assert.Nil(t, users)
 }
 
+func TestParseDsclUsers_RepeatedValuelessAttributeIsAnError(t *testing.T) {
+	// Given
+	out := "RecordName: root\nUniqueID: 0\nUserShell:\nUserShell: /bin/zsh\n"
+
+	// When
+	users, err := parseDsclUsers(out, nil)
+
+	// Then
+	assert.ErrorContains(t, err, "UserShell")
+	assert.Nil(t, users)
+}
+
 func TestUsersFromDscl_WarnsWhenOutputDoesNotParse(t *testing.T) {
 	// Given
 	logs := captureLogs(t)

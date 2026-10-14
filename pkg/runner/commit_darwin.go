@@ -89,10 +89,8 @@ func parseDsclUsers(out string, validShells []string) ([]UserData, error) {
 			continue
 		}
 		if strings.HasPrefix(line, " ") {
-			if pending != "" {
-				if _, ok := rec[pending]; !ok {
-					rec[pending] = strings.TrimSpace(line)
-				}
+			if pending != "" && rec[pending] == "" {
+				rec[pending] = strings.TrimSpace(line)
 			}
 			continue
 		}
@@ -106,6 +104,7 @@ func parseDsclUsers(out string, validShells []string) ([]UserData, error) {
 		}
 		fields := strings.Fields(value)
 		if len(fields) == 0 {
+			rec[attr] = "" // marks the attribute as seen even if no indented value follows
 			pending = attr
 			continue
 		}
