@@ -36,27 +36,11 @@ const (
 var versionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[\w.]+)?$`)
 
 // selfUpdateInFlight keeps upgrades from overlapping; on Linux a flock (upgrade_lock_linux.go) extends it across processes.
-// A successful self-update holds it until the restart. Change it only through takeUpgradeLatch and releaseUpgradeLatch.
+// A successful self-update holds it until the restart. Change it only through AcquireUpgradeLatch and ReleaseSelfUpdateLatch.
 var selfUpdateInFlight atomic.Bool
 
 // UpgradeLockPath is the file of that flock; scripts/postinstall.sh takes it before it restarts the agent.
 var UpgradeLockPath = "/run/alpamon/upgrade.lock"
-
-func takeUpgradeLatch() bool {
-	if !selfUpdateInFlight.CompareAndSwap(false, true) {
-		return false
-	}
-	if !lockUpgrade() {
-		selfUpdateInFlight.Store(false)
-		return false
-	}
-	return true
-}
-
-func releaseUpgradeLatch() {
-	unlockUpgrade()
-	selfUpdateInFlight.Store(false)
-}
 
 // ErrSelfUpdateInProgress is returned when a self-update is already running.
 // Callers should treat it as a benign no-op, not a failure.
@@ -94,19 +78,27 @@ func (o Options) baseURL() string {
 // for another upgrade path that must not overlap them. It reports false when
 // an upgrade is already running.
 func AcquireUpgradeLatch() bool {
-	return takeUpgradeLatch()
+	if !selfUpdateInFlight.CompareAndSwap(false, true) {
+		return false
+	}
+	if !lockUpgrade() {
+		selfUpdateInFlight.Store(false)
+		return false
+	}
+	return true
 }
 
-// ReleaseSelfUpdateLatch clears the latch SelfUpdate keeps set after a successful
-// run. Call it only when the expected post-update restart could not be triggered.
+// ReleaseSelfUpdateLatch releases the latch. A successful self-update keeps it until the restart,
+// so after one call this only when the expected restart could not be triggered.
 func ReleaseSelfUpdateLatch() {
-	releaseUpgradeLatch()
+	unlockUpgrade()
+	selfUpdateInFlight.Store(false)
 }
 
 // SelfUpdate downloads the latest binary from GitHub Releases,
 // verifies its checksum, and replaces the current binary.
 func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
-	if !takeUpgradeLatch() {
+	if !AcquireUpgradeLatch() {
 		return ErrSelfUpdateInProgress
 	}
 	// Release only on failure: on success the pending restart resets it, and holding
@@ -115,7 +107,7 @@ func SelfUpdate(ctx context.Context, latestVersion string, opts Options) error {
 	success := false
 	defer func() {
 		if !success {
-			releaseUpgradeLatch()
+			ReleaseSelfUpdateLatch()
 		}
 	}()
 
