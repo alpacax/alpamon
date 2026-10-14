@@ -1,6 +1,7 @@
-// Package testutil holds filesystem assertions and the WebSocket reconnect peer
-// server shared by tests in more than one package. It lives under the repo-root
-// internal/ tree so the Go compiler blocks imports from outside this module.
+// Package testutil holds filesystem assertions, the WebSocket reconnect peer
+// server and a commit-failing ent client shared by tests in more than one
+// package. It lives under the repo-root internal/ tree so the Go compiler
+// blocks imports from outside this module.
 //
 // This package must only be imported from *_test.go files.
 package testutil

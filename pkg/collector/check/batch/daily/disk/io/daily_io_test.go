@@ -7,9 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/testutil"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlydiskio"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -77,6 +79,28 @@ func (suite *DailyDiskIOCheckSuite) TestDeleteHourlyDiskIO() {
 
 	err = suite.check.deleteHourlyDiskIO(suite.ctx)
 	assert.NoError(suite.T(), err, "Failed to delete hourly disk io.")
+}
+
+func (suite *DailyDiskIOCheckSuite) commitFailingCheck() *Check {
+	return NewCheck(&base.CheckArgs{
+		Type:     base.DailyDiskIO,
+		Name:     string(base.DailyDiskIO) + "_" + uuid.NewString(),
+		Interval: time.Second,
+		Buffer:   base.NewCheckBuffer(10),
+		Client:   testutil.CommitFailingClient(suite.T(), dbFileName),
+	}).(*Check)
+}
+
+func (suite *DailyDiskIOCheckSuite) TestDeleteHourlyDiskIOReturnsCommitError() {
+	old := time.Now().Add(-25 * time.Hour)
+	suite.Require().NoError(suite.client.HourlyDiskIO.Create().SetTimestamp(old).SetDevice(uuid.NewString()).SetPeakReadBps(1).SetPeakWriteBps(1).SetAvgReadBps(1).SetAvgWriteBps(1).Exec(suite.ctx))
+
+	err := suite.commitFailingCheck().deleteHourlyDiskIO(suite.ctx)
+
+	suite.ErrorIs(err, testutil.ErrCommitFailed)
+	kept, err := suite.client.HourlyDiskIO.Query().Where(hourlydiskio.TimestampEQ(old)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.True(kept, "the failed commit must not delete the row")
 }
 
 func TestDailyDiskIOCheckSuite(t *testing.T) {

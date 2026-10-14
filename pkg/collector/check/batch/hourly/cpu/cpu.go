@@ -2,6 +2,7 @@ package cpu
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
@@ -43,7 +44,7 @@ func (c *Check) queryCPUUsage(ctx context.Context) (base.MetricData, error) {
 	}
 
 	if len(querySet) == 0 {
-		err = c.deleteCPU(ctx)
+		err = deleteCPU(ctx, c.GetClient().CPU)
 		if err != nil {
 			return base.MetricData{}, err
 		}
@@ -61,11 +62,6 @@ func (c *Check) queryCPUUsage(ctx context.Context) (base.MetricData, error) {
 	}
 
 	err = c.saveHourlyCPUUsage(data, ctx)
-	if err != nil {
-		return base.MetricData{}, err
-	}
-
-	err = c.deleteCPU(ctx)
 	if err != nil {
 		return base.MetricData{}, err
 	}
@@ -107,27 +103,23 @@ func (c *Check) saveHourlyCPUUsage(data base.CheckResult, ctx context.Context) e
 		return err
 	}
 
-	_ = tx.Commit()
+	// Same transaction as the insert: a retry after a failed prune would aggregate these rows into a second hourly row.
+	err = deleteCPU(ctx, tx.CPU)
+	if err != nil {
+		return err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly cpu usage: %w", err)
+	}
 
 	return nil
 }
 
-func (c *Check) deleteCPU(ctx context.Context) error {
-	tx, err := c.GetClient().Tx(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
+func deleteCPU(ctx context.Context, client *ent.CPUClient) error {
 	from := time.Now().Add(-1 * time.Hour)
 
-	_, err = tx.CPU.Delete().
+	_, err := client.Delete().
 		Where(cpu.TimestampLTE(from)).Exec(ctx)
-	if err != nil {
-		return err
-	}
-
-	_ = tx.Commit()
-
-	return nil
+	return err
 }

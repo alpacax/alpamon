@@ -7,9 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/testutil"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlytraffic"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/traffic"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -107,8 +110,52 @@ func (suite *HourlyNetCheckSuite) TestDeleteTraffic() {
 		SetOutputBps(rand.Float64()).Exec(suite.ctx)
 	assert.NoError(suite.T(), err, "Failed to create traffic.")
 
-	err = suite.check.deleteTraffic(suite.ctx)
+	err = deleteTraffic(suite.ctx, suite.client.Traffic)
 	assert.NoError(suite.T(), err, "Failed to delete traffic.")
+}
+
+func (suite *HourlyNetCheckSuite) commitFailingCheck() *Check {
+	return NewCheck(&base.CheckArgs{
+		Type:     base.HourlyNet,
+		Name:     string(base.HourlyNet) + "_" + uuid.NewString(),
+		Interval: time.Second,
+		Buffer:   base.NewCheckBuffer(10),
+		Client:   testutil.CommitFailingClient(suite.T(), dbFileName),
+	}).(*Check)
+}
+
+func (suite *HourlyNetCheckSuite) TestSaveHourlyTrafficReturnsCommitErrorAndKeepsRawRows() {
+	old := time.Now().Add(-2 * time.Hour)
+	suite.Require().NoError(suite.client.Traffic.Create().SetTimestamp(old).SetName(uuid.NewString()).SetInputPps(1).SetInputBps(1).SetOutputPps(1).SetOutputBps(1).Exec(suite.ctx))
+	ts := time.Now().Add(-42 * time.Minute)
+	data := []base.CheckResult{{Timestamp: ts, Name: uuid.NewString()}}
+
+	err := suite.commitFailingCheck().saveHourlyTraffic(data, suite.ctx)
+
+	suite.ErrorIs(err, testutil.ErrCommitFailed)
+	stored, err := suite.client.HourlyTraffic.Query().Where(hourlytraffic.TimestampEQ(ts)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.False(stored, "the failed commit must not store the hourly row")
+	kept, err := suite.client.Traffic.Query().Where(traffic.TimestampEQ(old)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.True(kept, "the failed commit must not delete the raw row")
+}
+
+func (suite *HourlyNetCheckSuite) TestSaveHourlyTrafficDeletesOldRawRows() {
+	old := time.Now().Add(-2 * time.Hour)
+	suite.Require().NoError(suite.client.Traffic.Create().SetTimestamp(old).SetName(uuid.NewString()).SetInputPps(1).SetInputBps(1).SetOutputPps(1).SetOutputBps(1).Exec(suite.ctx))
+	ts := time.Now().Add(-41 * time.Minute)
+	data := []base.CheckResult{{Timestamp: ts, Name: uuid.NewString()}}
+
+	err := suite.check.saveHourlyTraffic(data, suite.ctx)
+
+	suite.Require().NoError(err)
+	stored, err := suite.client.HourlyTraffic.Query().Where(hourlytraffic.TimestampEQ(ts)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.True(stored)
+	kept, err := suite.client.Traffic.Query().Where(traffic.TimestampEQ(old)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.False(kept, "the save must delete raw rows older than an hour")
 }
 
 func TestHourlyNetCheckSuite(t *testing.T) {

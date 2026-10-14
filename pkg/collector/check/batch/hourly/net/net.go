@@ -2,6 +2,7 @@ package net
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
@@ -58,7 +59,7 @@ func (c *Check) queryTraffic(ctx context.Context) (base.MetricData, error) {
 		})
 	}
 	if len(data) == 0 {
-		err = c.deleteTraffic(ctx)
+		err = deleteTraffic(ctx, c.GetClient().Traffic)
 		if err != nil {
 			return base.MetricData{}, err
 		}
@@ -71,11 +72,6 @@ func (c *Check) queryTraffic(ctx context.Context) (base.MetricData, error) {
 	}
 
 	err = c.saveHourlyTraffic(data, ctx)
-	if err != nil {
-		return base.MetricData{}, err
-	}
-
-	err = c.deleteTraffic(ctx)
 	if err != nil {
 		return base.MetricData{}, err
 	}
@@ -132,27 +128,23 @@ func (c *Check) saveHourlyTraffic(data []base.CheckResult, ctx context.Context) 
 		return err
 	}
 
-	_ = tx.Commit()
+	// Same transaction as the insert: a retry after a failed prune would aggregate these rows into a second hourly row.
+	err = deleteTraffic(ctx, tx.Traffic)
+	if err != nil {
+		return err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly traffic: %w", err)
+	}
 
 	return nil
 }
 
-func (c *Check) deleteTraffic(ctx context.Context) error {
-	tx, err := c.GetClient().Tx(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
+func deleteTraffic(ctx context.Context, client *ent.TrafficClient) error {
 	from := time.Now().Add(-1 * time.Hour)
 
-	_, err = tx.Traffic.Delete().
+	_, err := client.Delete().
 		Where(traffic.TimestampLTE(from)).Exec(ctx)
-	if err != nil {
-		return err
-	}
-
-	_ = tx.Commit()
-
-	return nil
+	return err
 }

@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/testutil"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlymemoryusage"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -70,6 +72,28 @@ func (suite *DailyMemoryUsageCheckSuite) TestDeleteHourlyMemoryUsage() {
 
 	err = suite.check.deleteHourlyMemoryUsage(suite.ctx)
 	assert.NoError(suite.T(), err, "Failed to delete hourly memory usage.")
+}
+
+func (suite *DailyMemoryUsageCheckSuite) commitFailingCheck() *Check {
+	return NewCheck(&base.CheckArgs{
+		Type:     base.DailyMemUsage,
+		Name:     string(base.DailyMemUsage) + "_" + uuid.NewString(),
+		Interval: time.Second,
+		Buffer:   base.NewCheckBuffer(10),
+		Client:   testutil.CommitFailingClient(suite.T(), dbFileName),
+	}).(*Check)
+}
+
+func (suite *DailyMemoryUsageCheckSuite) TestDeleteHourlyMemoryUsageReturnsCommitError() {
+	old := time.Now().Add(-25 * time.Hour)
+	suite.Require().NoError(suite.client.HourlyMemoryUsage.Create().SetTimestamp(old).SetPeak(1).SetAvg(1).Exec(suite.ctx))
+
+	err := suite.commitFailingCheck().deleteHourlyMemoryUsage(suite.ctx)
+
+	suite.ErrorIs(err, testutil.ErrCommitFailed)
+	kept, err := suite.client.HourlyMemoryUsage.Query().Where(hourlymemoryusage.TimestampEQ(old)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.True(kept, "the failed commit must not delete the row")
 }
 
 func TestDailyMemoryUsageCheckSuite(t *testing.T) {
