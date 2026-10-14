@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -51,6 +52,12 @@ func (c *capBuffer) write(p []byte) {
 	if len(p) == 0 {
 		return
 	}
+	// Appending an oversized p would leave its whole allocation behind the compacted tail.
+	if len(p) >= captureTailCap {
+		c.dropped += int64(len(c.tail) + len(p) - captureTailCap)
+		c.tail = append(c.tail[:0], p[len(p)-captureTailCap:]...)
+		return
+	}
 	c.tail = append(c.tail, p...)
 	// Compact lazily (grow to 2x, then drop the front) in place for amortized O(1).
 	if len(c.tail) > 2*captureTailCap {
@@ -61,23 +68,16 @@ func (c *capBuffer) write(p []byte) {
 	}
 }
 
-func (c *capBuffer) dropTail(n int) {
-	c.dropped += int64(n)
-	c.tail = c.tail[n:]
-}
-
 func (c *capBuffer) bytes() []byte {
-	if len(c.tail) > captureTailCap {
-		c.dropTail(len(c.tail) - captureTailCap)
+	if n := len(c.tail) - captureTailCap; n > 0 {
+		c.dropped += int64(n)
+		c.tail = c.tail[n:]
 	}
 	var marker string
 	if c.dropped > 0 {
 		marker = fmt.Sprintf("\n... [%d bytes truncated] ...\n", c.dropped)
 	}
-	out := make([]byte, 0, len(c.head)+len(marker)+len(c.tail))
-	out = append(out, c.head...)
-	out = append(out, marker...)
-	return append(out, c.tail...)
+	return slices.Concat(c.head, []byte(marker), c.tail)
 }
 
 // chunkWriter emits coalesced stdout/stderr chunks and tees a capped copy for the fin payload.
