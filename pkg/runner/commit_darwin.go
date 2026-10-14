@@ -32,11 +32,21 @@ func getUserData() ([]UserData, error) {
 	out, err := exec.Command("dscl", ".", "-readall", "/Users",
 		"RecordName", "UniqueID", "PrimaryGroupID", "NFSHomeDirectory", "UserShell").Output()
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to read users via dscl.")
+		log.Warn().Err(err).Msg("Failed to read users via dscl, skipping the users sync.")
 		return nil, err
 	}
 
-	return parseDsclUsers(string(out), loadValidShells())
+	return usersFromDscl(out)
+}
+
+// usersFromDscl warns on a parse failure because callers log collection errors at Debug only.
+func usersFromDscl(out []byte) ([]UserData, error) {
+	users, err := parseDsclUsers(string(out), loadValidShells())
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to parse dscl user records, skipping the users sync.")
+		return nil, err
+	}
+	return users, nil
 }
 
 // parseDsclUsers parses `dscl . -readall /Users`: a "-" line ends a record, and dscl moves an

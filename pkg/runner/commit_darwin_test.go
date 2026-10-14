@@ -164,3 +164,17 @@ func TestParseDsclUsers_RepeatedIndentedAttributeIsAnError(t *testing.T) {
 	assert.ErrorContains(t, err, "RecordName")
 	assert.Nil(t, users)
 }
+
+func TestUsersFromDscl_WarnsWhenOutputDoesNotParse(t *testing.T) {
+	// Given
+	logs := captureLogs(t)
+	out := []byte("RecordName: root\nUniqueID: 0\nRecordName: alice\nUniqueID: 501\n")
+
+	// When
+	_, err := usersFromDscl(out)
+
+	// Then
+	require.Error(t, err)
+	assert.Contains(t, logs.String(), `"level":"warn"`)
+	assert.Contains(t, logs.String(), "repeats RecordName")
+}
