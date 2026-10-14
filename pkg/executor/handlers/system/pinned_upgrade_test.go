@@ -184,7 +184,7 @@ func TestSystemHandler_Upgrade_LegacyPathUnchanged(t *testing.T) {
 	assert.Equal(t, []string{"update", "-y", "-o", "Acquire::Retries=3"}, commands[0].Args)
 	assert.Equal(t, "apt-get", commands[0].Name)
 	assert.Equal(t, "apt-get", commands[1].Name)
-	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon", "-y", "-o", "Acquire::Retries=3"}, commands[1].Args)
+	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon", "-y", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout}, commands[1].Args)
 	assert.Empty(t, h.api.posts(), "the legacy path sends no upgrade report")
 }
 
@@ -218,7 +218,7 @@ func TestSystemHandler_PinnedUpgrade_Apt(t *testing.T) {
 	assert.Contains(t, output, "Installed alpamon 2.5.0")
 
 	assert.Zero(t, h.versions.LatestCalls, "a pinned upgrade does not ask for the latest release")
-	assert.True(t, h.ran("apt-get", "install", "-y", "--allow-downgrades", "-o", "Acquire::Retries=3", "alpamon=2.5.0"))
+	assert.True(t, h.ran("apt-get", "install", "-y", "--allow-downgrades", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout, "alpamon=2.5.0"))
 	assert.Nil(t, findLastExecuted(h.exec, "sh"), "the pinned install runs without a shell")
 
 	assert.True(t, h.ran("systemctl", "stop", "alpamon-restart.timer"), "the package's own delayed restart is replaced")
@@ -230,6 +230,33 @@ func TestSystemHandler_PinnedUpgrade_Apt(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, h.sm.guards[1], marker.GuardUnit)
 	assert.Empty(t, h.api.posts(), "success is reported by the process that confirms its health")
+}
+
+// unattended-upgrades holds the dpkg frontend lock for minutes; without a lock timeout apt-get exits 100 at once.
+func TestSystemHandler_Upgrade_AptInstallWaitsForDpkgLock(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+
+	exitCode, output, err := h.handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode, output)
+
+	install := findExecutedAptInstall(h.exec)
+	require.NotNil(t, install, "an apt-get install must be spawned")
+	assert.Contains(t, strings.Join(install.Args, " "), "-o DPkg::Lock::Timeout=")
+}
+
+func TestSystemHandler_PinnedUpgrade_AptInstallWaitsForDpkgLock(t *testing.T) {
+	h := newPinnedHarness(t, utils.PkgApt)
+	h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
+	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.5.0", nil)
+
+	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0", AttemptID: "att-1"})
+	require.NoError(t, err)
+	require.Equal(t, 0, exitCode, output)
+
+	install := findExecutedAptInstall(h.exec)
+	require.NotNil(t, install, "an apt-get install must be spawned")
+	assert.Contains(t, strings.Join(install.Args, " "), "-o DPkg::Lock::Timeout=")
 }
 
 // TestSystemHandler_PinnedUpgrade_ScopesAptUpdateToAlpamonSource checks that a broken
@@ -334,7 +361,7 @@ func TestSystemHandler_PinnedUpgrade_FailureClearsMarkerAndGuard(t *testing.T) {
 }
 
 func TestSystemHandler_PinnedUpgrade_ChangedPackageIsReinstalledOnFailure(t *testing.T) {
-	const rollback = "apt-get install -y --allow-downgrades alpamon=2.4.0"
+	const rollback = "apt-get install -y --allow-downgrades -o " + utils.AptLockTimeout + " alpamon=2.4.0"
 	for _, tc := range []struct {
 		name        string
 		versions    []string // before, after the install, after the reinstall
@@ -358,7 +385,7 @@ func TestSystemHandler_PinnedUpgrade_ChangedPackageIsReinstalledOnFailure(t *tes
 			assert.Equal(t, 1, exitCode)
 			assert.Equal(t, updater.ClassPackageManager, h.lastReport(t).ErrorClass)
 
-			reinstalled := h.ran("apt-get", "install", "-y", "--allow-downgrades", "alpamon=2.4.0")
+			reinstalled := h.ran("apt-get", "install", "-y", "--allow-downgrades", "-o", utils.AptLockTimeout, "alpamon=2.4.0")
 			assert.Equal(t, len(tc.versions) > 2 || tc.rollbackErr, reinstalled)
 
 			marker, err := updater.LoadPending()
@@ -550,7 +577,7 @@ func TestSystemHandler_PinnedUpgrade_InstallFailure(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
 	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
 	h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
-	h.exec.SetResult("apt-get install -y --allow-downgrades -o Acquire::Retries=3 alpamon=2.5.0", 100, "E: broken", errors.New("exit status 100"))
+	h.exec.SetResult("apt-get install -y --allow-downgrades -o Acquire::Retries=3 -o "+utils.AptLockTimeout+" alpamon=2.5.0", 100, "E: broken", errors.New("exit status 100"))
 
 	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0", AttemptID: "att-4"})
 	require.Error(t, err)

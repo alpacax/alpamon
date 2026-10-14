@@ -48,6 +48,9 @@ const (
 	PkgZypper = "zypper"
 	PkgBrew   = "brew"
 	PkgNone   = "none"
+
+	// Waits out unattended-upgrades instead of exiting 100 at once. Covers only the dpkg locks, and apt before 1.9.11 ignores it.
+	AptLockTimeout = "DPkg::Lock::Timeout=300"
 )
 
 // Pure, so the table is testable without a host; ok=false must never be defaulted by callers (see platformAliases).

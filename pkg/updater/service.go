@@ -249,7 +249,7 @@ func PackageRollbackCommand(packageManager, previous, current string, disabledYu
 	}
 	switch packageManager {
 	case utils.PkgApt:
-		return []string{"apt-get", "install", "-y", "--allow-downgrades", "alpamon=" + previous}, nil
+		return []string{"apt-get", "install", "-y", "--allow-downgrades", "-o", utils.AptLockTimeout, "alpamon=" + previous}, nil
 	case utils.PkgYum:
 		return YumArgv(disabledYumRepos, yumRollbackVerb(previous, current), "alpamon-"+previous), nil
 	case utils.PkgZypper:

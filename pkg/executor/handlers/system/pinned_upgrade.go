@@ -209,7 +209,9 @@ func (h *SystemHandler) undoPackageChange(ctx context.Context, marker *updater.P
 	case updater.GuardRunning:
 		return output + "\nThe upgrade guard is still reinstalling the previous version."
 	}
-	run := func(argv ...string) (int, string, error) { return h.Executor.Exec(ctx, argv, "root", "root", env, 0) }
+	run := func(argv ...string) (int, string, error) {
+		return retryWhileLocked(ctx, func() (int, string, error) { return h.Executor.Exec(ctx, argv, "root", "root", env, 0) })
+	}
 	code, out, err := updater.RunPackageRollback(run, marker, installed)
 	if out != "" {
 		output = strings.TrimRight(output, "\n") + "\n\n" + out
@@ -238,7 +240,7 @@ func (h *SystemHandler) undoPackageChange(ctx context.Context, marker *updater.P
 func (h *SystemHandler) installPinnedPackage(ctx context.Context, marker *updater.PendingUpgrade, env map[string]string) (string, error) {
 	target := marker.ToVersion
 	run := func(args ...string) (int, string, error) {
-		return retryWhileZypperLocked(ctx, func() (int, string, error) {
+		return retryWhileLocked(ctx, func() (int, string, error) {
 			return h.Executor.Exec(ctx, args, "root", "root", env, 0)
 		})
 	}
@@ -258,7 +260,7 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, marker *update
 		if exact == "" {
 			return out, fmt.Errorf("the configured repositories do not carry alpamon %s", target)
 		}
-		code, out, err = run("apt-get", "install", "-y", "--allow-downgrades", "-o", "Acquire::Retries=3", "alpamon="+exact)
+		code, out, err = run("apt-get", "install", "-y", "--allow-downgrades", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout, "alpamon="+exact)
 		if code != 0 {
 			return out, commandFailed("apt-get install", code, err)
 		}

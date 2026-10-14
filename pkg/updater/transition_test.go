@@ -348,9 +348,16 @@ func TestNoServiceManager(t *testing.T) {
 	assert.ErrorIs(t, sm.ArmGuard("u", time.Second, "true"), ErrNoServiceManager)
 }
 
+func TestPackageRollbackCommand_AptWaitsForDpkgLock(t *testing.T) {
+	got, err := PackageRollbackCommand(utils.PkgApt, "2.4.0", "2.5.0", nil)
+
+	require.NoError(t, err)
+	assert.Contains(t, strings.Join(got, " "), "-o DPkg::Lock::Timeout=")
+}
+
 func TestPackageRollbackCommand(t *testing.T) {
 	for pm, want := range map[string][]string{
-		utils.PkgApt:    {"apt-get", "install", "-y", "--allow-downgrades", "alpamon=2.4.0"},
+		utils.PkgApt:    {"apt-get", "install", "-y", "--allow-downgrades", "-o", utils.AptLockTimeout, "alpamon=2.4.0"},
 		utils.PkgYum:    {"yum", "downgrade", "-y", "alpamon-2.4.0"},
 		utils.PkgZypper: {"zypper", "--non-interactive", "install", "--oldpackage", "alpamon=2.4.0"},
 	} {
@@ -528,7 +535,7 @@ func TestGuardScript(t *testing.T) {
 		m := shellQuote(MarkerPath())
 		res := shellQuote(guardResultPath())
 		assert.Equal(t, "if [ -f "+m+" ] && grep -qxF '  \"guard_unit\": \"g1\",' "+m+"; then "+
-			"if 'apt-get' 'install' '-y' '--allow-downgrades' 'alpamon=2.4.0'; then echo 'g1' 0 > "+res+"; systemctl restart alpamon; "+
+			"if 'apt-get' 'install' '-y' '--allow-downgrades' '-o' '"+utils.AptLockTimeout+"' 'alpamon=2.4.0'; then echo 'g1' 0 > "+res+"; systemctl restart alpamon; "+
 			"else echo 'g1' 1 > "+res+"; fi; fi", script)
 	})
 

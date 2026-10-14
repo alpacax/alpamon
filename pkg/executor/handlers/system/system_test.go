@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1436,7 +1437,7 @@ func TestSystemHandler_Upgrade_AptInstallFailureNamesTheStep(t *testing.T) {
 	writeAptAlpamonSource(t)
 
 	const installOutput = "E: Sub-process /usr/bin/dpkg returned an error code (1)"
-	mockExec.SetResult("apt-get install --only-upgrade alpamon -y -o Acquire::Retries=3",
+	mockExec.SetResult("apt-get install --only-upgrade alpamon -y -o Acquire::Retries=3 -o "+utils.AptLockTimeout,
 		100, installOutput, errors.New("exit status 100"))
 
 	exitCode, output, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
@@ -1509,7 +1510,8 @@ func TestSystemHandler_SystemUpdate_ZypperInformationalExitCodes(t *testing.T) {
 		{"failed post script stays a failure", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 107, 107},
 		{"unreachable repo stays a failure", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 4, 4},
 		// apt has no informational family, so 102 there is a real failure.
-		{"apt is untouched", utils.PkgApt, "ubuntu", "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 && apt-get autoremove -y", 102, 102},
+		{"apt is untouched", utils.PkgApt, "ubuntu", "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 -o " + utils.AptLockTimeout +
+			" && apt-get autoremove -y -o " + utils.AptLockTimeout, 102, 102},
 	}
 
 	for _, tt := range tests {
@@ -1605,6 +1607,29 @@ func TestSystemHandler_SystemUpdate_ZypperDupOnlyOnTumbleweed(t *testing.T) {
 // Asserts against every captured command: the uninstall is scheduled through
 // systemd-run where systemd exists and a deferred subshell where it does not, so
 // the zypper string lands in different argv positions per host.
+// The purge runs detached under systemd-run, so a held dpkg lock would fail it with nobody watching.
+func TestSystemHandler_Uninstall_AptWaitsForDpkgLock(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+	handler := NewSystemHandler(mockExec, &MockWSClient{}, ctxManager, workerPool, newMockVersionResolver(), nil)
+	setPackageManagerAndID(t, utils.PkgApt, "")
+
+	handler.executeUninstall()
+
+	var purge string
+	for _, c := range mockExec.GetExecutedCommands() {
+		if joined := strings.Join(c.Args, " "); strings.Contains(joined, "apt-get purge alpamon") {
+			purge = joined
+		}
+	}
+	require.NotEmpty(t, purge, "expected an apt-get purge, got %+v", mockExec.GetExecutedCommands())
+	assert.Contains(t, purge, "apt-get purge alpamon -y -o DPkg::Lock::Timeout=")
+	assert.Contains(t, purge, "apt-get autoremove -y -o DPkg::Lock::Timeout=")
+}
+
 func TestSystemHandler_Uninstall_UsesZypper(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -1656,38 +1681,50 @@ func TestSystemHandler_Uninstall_WithoutSystemdStartsDetached(t *testing.T) {
 	assert.Equal(t, "/bin/sh", c.Name)
 	require.Len(t, c.Args, 2)
 	assert.Equal(t, "-c", c.Args[0])
-	assert.True(t, strings.HasPrefix(c.Args[1], "(sleep 5 && apt-get purge alpamon -y && apt-get autoremove -y) >>"), "script: %q", c.Args[1])
+	assert.True(t, strings.HasPrefix(c.Args[1], "(sleep 5 && apt-get purge alpamon -y -o "+utils.AptLockTimeout+" && apt-get autoremove -y -o "+utils.AptLockTimeout+") >>"), "script: %q", c.Args[1])
 	assert.False(t, strings.HasSuffix(strings.TrimSpace(c.Args[1]), "&"), "the script must not background itself: %q", c.Args[1])
 	assert.True(t, mockWS.ShutDownCalled, "the agent must shut itself down once the uninstall is scheduled")
 }
 
-func TestRetryWhileZypperLocked(t *testing.T) {
-	orig := zypperLockRetryDelay
-	zypperLockRetryDelay = 0
-	t.Cleanup(func() { zypperLockRetryDelay = orig })
+func TestRetryWhileLocked(t *testing.T) {
+	orig := lockRetryDelay
+	lockRetryDelay = 0
+	t.Cleanup(func() { lockRetryDelay = orig })
 
+	// Messages as apt 1.6, 2.0 and 2.8 print them.
+	const (
+		aptOldDpkgLock = "E: Could not get lock /var/lib/dpkg/lock-frontend - open (11: Resource temporarily unavailable)"
+		aptListsLock   = "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 391 (apt-get)"
+		aptWaitedOut   = "E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is another process using it?"
+	)
 	tests := []struct {
-		name       string
-		pkgManager string
-		lockedRuns int
-		wantCalls  int
-		wantExit   int
+		name         string
+		pkgManager   string
+		lockedExit   int
+		lockedOutput string
+		lockedRuns   int
+		wantCalls    int
+		wantExit     int
 	}{
-		{"retries until the lock clears", utils.PkgZypper, 1, 2, 0},
-		{"gives up after the attempt cap", utils.PkgZypper, 99, zypperLockAttempts, 7},
+		{"retries until the lock clears", utils.PkgZypper, 7, "locked", 1, 2, 0},
+		{"gives up after the attempt cap", utils.PkgZypper, 7, "locked", 99, lockRetryAttempts, 7},
 		// apt has no ZYPP_LOCKED, so 7 there is a real failure to report as-is.
-		{"apt exit 7 is not retried", utils.PkgApt, 99, 1, 7},
+		{"apt exit 7 is not retried", utils.PkgApt, 7, "locked", 99, 1, 7},
+		{"apt before DPkg::Lock::Timeout is retried", utils.PkgApt, 100, aptOldDpkgLock, 1, 2, 0},
+		{"apt lists lock is retried", utils.PkgApt, 100, aptListsLock, 1, 2, 0},
+		{"apt that already waited out its lock timeout is not retried", utils.PkgApt, 100, aptWaitedOut, 99, 1, 100},
+		{"apt failure without a lock is not retried", utils.PkgApt, 100, "E: Unable to locate package alpamon", 99, 1, 100},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			setPackageManagerAndID(t, tt.pkgManager, "opensuse-leap")
+			setPackageManagerAndID(t, tt.pkgManager, "")
 
 			var calls int
-			exitCode, _, _ := retryWhileZypperLocked(context.Background(), func() (int, string, error) {
+			exitCode, _, _ := retryWhileLocked(context.Background(), func() (int, string, error) {
 				calls++
 				if calls <= tt.lockedRuns {
-					return 7, "locked", errors.New("exit status 7")
+					return tt.lockedExit, tt.lockedOutput, errors.New("exit status " + strconv.Itoa(tt.lockedExit))
 				}
 				return 0, "", nil
 			})
@@ -1701,9 +1738,9 @@ func TestRetryWhileZypperLocked(t *testing.T) {
 // A console update racing the agent's own upgrade, or packagekit holding the
 // lock, must not surface as a failed command when the lock clears.
 func TestSystemHandler_ZypperLockIsRetried(t *testing.T) {
-	orig := zypperLockRetryDelay
-	zypperLockRetryDelay = 0
-	t.Cleanup(func() { zypperLockRetryDelay = orig })
+	orig := lockRetryDelay
+	lockRetryDelay = 0
+	t.Cleanup(func() { lockRetryDelay = orig })
 
 	tests := []struct {
 		name    string
@@ -1984,7 +2021,7 @@ func TestSystemHandler_Upgrade_PamIsNotComparedToAlpamonRelease(t *testing.T) {
 
 	install := findExecutedAptInstall(mockExec)
 	require.NotNil(t, install, "an installed alpamon-pam must reach the package manager")
-	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon-pam", "-y", "-o", "Acquire::Retries=3"}, install.Args,
+	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon-pam", "-y", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout}, install.Args,
 		"only alpamon-pam is behind; alpamon itself is already current")
 	assert.True(t, mockVersions.InvalidatePamCalled, "the cached pam version must be refreshed after the upgrade")
 }

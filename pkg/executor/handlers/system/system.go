@@ -40,13 +40,17 @@ const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionD
 // zypper behavior the other package managers do not share; per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
 const (
 	// ZYPP_LOCKED: packagekit, an operator session, or a racing console update holds the libzypp lock.
-	// dnf waits for its lock and apt can be told to retry; zypper --non-interactive gives up at once.
-	zypperLockedExit   = 7
-	zypperLockAttempts = 3
+	// dnf waits for its lock; zypper --non-interactive gives up at once.
+	zypperLockedExit = 7
 )
 
+// apt-get exits 100 on any error, a held lock included; lockedOut tells the lock apart by its message.
+const aptFailedExit = 100
+
+const lockRetryAttempts = 3
+
 // Var so tests do not sleep. Long enough for a short transaction elsewhere to finish, short enough to stay inside a console command's patience.
-var zypperLockRetryDelay = 15 * time.Second
+var lockRetryDelay = 15 * time.Second
 
 // aptSourcesDir is where apt reads source files from. Var so tests point it at a temp dir.
 var aptSourcesDir = "/etc/apt/sources.list.d"
@@ -249,13 +253,13 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 
 	// The proxy environment (nil without a package proxy) applies to the
 	// spawned package-manager process only, never to the agent process.
-	install := func(argv ...string) (int, string, error) {
-		return retryWhileZypperLocked(ctx, func() (int, string, error) {
+	runPkg := func(argv ...string) (int, string, error) {
+		return retryWhileLocked(ctx, func() (int, string, error) {
 			return h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
 		})
 	}
 	var installArgv []string
-	runInstall := func() (int, string, error) { return install(installArgv...) }
+	runInstall := func() (int, string, error) { return runPkg(installArgv...) }
 	// Set when the refresh was scoped to alpamon's own repo, which is what makes
 	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
 	var alpamonRepoRefreshed bool
@@ -267,17 +271,17 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		// One scoped update per alpamon channel source, apart from install: a broken repo
 		// elsewhere on the host must not block the upgrade, and a failure must name its step.
 		for _, argv := range aptUpdateArgvs() {
-			code, out, rerr := h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
+			code, out, rerr := runPkg(argv...)
 			if code != 0 {
 				return code, appendStepFailure(out, "apt-get update", code, rerr), rerr
 			}
 		}
 		installArgv = append([]string{"apt-get", "install", "--only-upgrade"}, packages...)
-		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3")
+		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout)
 	case utils.PkgYum:
 		// updater.RunYum builds its own argv, so installArgv stays unset.
 		runInstall = func() (int, string, error) {
-			code, out, _, err := updater.RunYum(install, nil, "update", packages...)
+			code, out, _, err := updater.RunYum(runPkg, nil, "update", packages...)
 			return code, out, err
 		}
 	case utils.PkgZypper:
@@ -288,7 +292,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 			refresh = append(refresh, aliases...)
 			alpamonRepoRefreshed = true
 		}
-		code, out, rerr := retryWhileZypperLocked(ctx, func() (int, string, error) {
+		code, out, rerr := retryWhileLocked(ctx, func() (int, string, error) {
 			return h.Executor.Exec(ctx, refresh, "root", "root", packageProxyEnv(packageProxy), 0)
 		})
 		if code != 0 {
@@ -525,7 +529,7 @@ func (h *SystemHandler) executeUninstall() {
 	switch utils.PackageManager {
 	case utils.PkgApt:
 		// purge removes package and config files
-		cmd = "apt-get purge alpamon -y && apt-get autoremove -y"
+		cmd = "apt-get purge alpamon -y -o " + utils.AptLockTimeout + " && apt-get autoremove -y -o " + utils.AptLockTimeout
 	case utils.PkgYum:
 		cmd = "yum remove alpamon -y"
 	case utils.PkgZypper:
@@ -615,7 +619,8 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	var cmd string
 	switch utils.PackageManager {
 	case utils.PkgApt:
-		cmd = "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 && apt-get autoremove -y"
+		cmd = "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 -o " + utils.AptLockTimeout +
+			" && apt-get autoremove -y -o " + utils.AptLockTimeout
 	case utils.PkgYum:
 		cmd = "yum update -y"
 	case utils.PkgZypper:
@@ -634,7 +639,7 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 
 	// A system-wide update covers every repo by definition, so a skipped repo
 	// means part of the update did not happen: 106 stays a failure here.
-	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
+	exitCode, output, err := retryWhileLocked(ctx, func() (int, string, error) {
 		return h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
 	})
 	exitCode, err = normalizeZypperExit(exitCode, err, false)
@@ -774,19 +779,31 @@ func appendStepFailure(output, step string, code int, err error) string {
 	return strings.TrimRight(output, "\n") + "\n\n" + commandFailed(step, code, err).Error()
 }
 
-func retryWhileZypperLocked(ctx context.Context, run func() (int, string, error)) (int, string, error) {
+func retryWhileLocked(ctx context.Context, run func() (int, string, error)) (int, string, error) {
 	for attempt := 1; ; attempt++ {
 		exitCode, output, err := run()
-		if exitCode != zypperLockedExit || utils.PackageManager != utils.PkgZypper || attempt >= zypperLockAttempts {
+		if !lockedOut(exitCode, output) || attempt >= lockRetryAttempts {
 			return exitCode, output, err
 		}
-		log.Info().Int("attempt", attempt).Msg("zypper is locked by another process; retrying.")
+		log.Info().Int("attempt", attempt).Msgf("%s is locked by another process; retrying.", utils.PackageManager)
 		select {
 		case <-ctx.Done():
 			return exitCode, output, err
-		case <-time.After(zypperLockRetryDelay):
+		case <-time.After(lockRetryDelay):
 		}
 	}
+}
+
+// lockedOut reports a run that lost a package manager lock to another process. apt 1.9.11+ prints "Could not get lock"
+// only for a lock DPkg::Lock::Timeout does not wait on (lists, archives), so a lock it already waited for is not retried.
+func lockedOut(exitCode int, output string) bool {
+	switch utils.PackageManager {
+	case utils.PkgZypper:
+		return exitCode == zypperLockedExit
+	case utils.PkgApt:
+		return exitCode == aptFailedExit && strings.Contains(output, "Could not get lock")
+	}
+	return false
 }
 
 // The console only shows the exit code and output, and zypper's own text does not say what to fix.
