@@ -179,7 +179,7 @@ restart_alpamon_manually() {
 # Prints the PID of the ancestor of $1 (or $1 itself) that an alpamon process spawned, i.e. the agent
 # command running it; fails when there is none. Reads /proc because minimal container images ship without ps.
 agent_command_of() {
-  local pid=$1 ppid key value
+  local pid=$1 ppid key value comm
   while [ "$pid" -gt 1 ]; do
     ppid=""
     while read -r key value; do
@@ -191,7 +191,9 @@ agent_command_of() {
     if [ -z "$ppid" ] || [ "$ppid" -lt 1 ]; then
       return 1
     fi
-    if [ "$(cat "/proc/$ppid/comm" 2>/dev/null)" = "alpamon" ]; then
+    comm=""
+    { read -r comm < "/proc/$ppid/comm"; } 2>/dev/null
+    if [ "$comm" = "alpamon" ]; then
       echo "$pid"
       return 0
     fi
@@ -207,9 +209,10 @@ find_agent_command() {
 # Prints the PID of a package manager an agent command runs; fails when there is none. Not the command's own PID:
 # a Websh shell that ran it is also an agent command, and it stays open long after the package manager exits.
 find_running_upgrade() {
-  local proc
+  local proc comm
   for proc in /proc/[0-9]*; do
-    case "$(cat "$proc/comm" 2>/dev/null)" in
+    { read -r comm < "$proc/comm"; } 2>/dev/null || continue # read, not $(cat), so a pass over /proc forks nothing
+    case "$comm" in
       apt|apt-get|dpkg|yum|dnf|dnf-3|dnf5|microdnf|zypper|rpm)
         if agent_command_of "${proc#/proc/}" >/dev/null; then
           echo "${proc#/proc/}"
