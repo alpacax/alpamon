@@ -33,15 +33,16 @@ func ListenUnixPrivate(path string) (net.Listener, error) {
 	}
 	ln.SetUnlinkOnClose(false) // The remembered temp path is gone once the socket is linked into place.
 
+	// Taken from the temp path, which no one else can reach: after the link, path may
+	// already hold another listener's socket. The hard link shares this inode.
+	fi, err := os.Lstat(tmpPath)
+	if err != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("failed to stat socket %s: %w", tmpPath, err)
+	}
 	if err := moveSocketIntoPlace(tmpPath, path); err != nil {
 		_ = ln.Close()
 		return nil, err
-	}
-	fi, err := os.Lstat(path)
-	if err != nil {
-		_ = ln.Close()
-		_ = os.Remove(path)
-		return nil, fmt.Errorf("failed to stat published socket %s: %w", path, err)
 	}
 	return &privateListener{UnixListener: ln, path: path, info: fi}, nil
 }
