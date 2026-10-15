@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
@@ -147,7 +148,9 @@ func (c *Check) deleteHourlyDiskUsage(ctx context.Context) error {
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly disk usage deletion: %w", err)
+	}
 
 	return nil
 }

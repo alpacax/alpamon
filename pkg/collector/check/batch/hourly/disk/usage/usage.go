@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
@@ -56,7 +57,7 @@ func (c *Check) queryDiskUsage(ctx context.Context) (base.MetricData, error) {
 		})
 	}
 	if len(data) == 0 {
-		err = c.deleteDiskUsage(ctx)
+		err = deleteDiskUsage(ctx, c.GetClient().DiskUsage)
 		if err != nil {
 			return base.MetricData{}, err
 		}
@@ -69,11 +70,6 @@ func (c *Check) queryDiskUsage(ctx context.Context) (base.MetricData, error) {
 	}
 
 	err = c.saveHourlyDiskUsage(data, ctx)
-	if err != nil {
-		return base.MetricData{}, err
-	}
-
-	err = c.deleteDiskUsage(ctx)
 	if err != nil {
 		return base.MetricData{}, err
 	}
@@ -161,27 +157,23 @@ func (c *Check) saveHourlyDiskUsage(data []base.CheckResult, ctx context.Context
 		return err
 	}
 
-	_ = tx.Commit()
+	// Prune in the insert's transaction: if the insert committed and the prune failed, the retry would store a second hourly row.
+	err = deleteDiskUsage(ctx, tx.DiskUsage)
+	if err != nil {
+		return err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly disk usage: %w", err)
+	}
 
 	return nil
 }
 
-func (c *Check) deleteDiskUsage(ctx context.Context) error {
-	tx, err := c.GetClient().Tx(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
+func deleteDiskUsage(ctx context.Context, client *ent.DiskUsageClient) error {
 	from := time.Now().Add(-1 * time.Hour)
 
-	_, err = tx.DiskUsage.Delete().
+	_, err := client.Delete().
 		Where(diskusage.TimestampLTE(from)).Exec(ctx)
-	if err != nil {
-		return err
-	}
-
-	_ = tx.Commit()
-
-	return nil
+	return err
 }
