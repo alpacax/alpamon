@@ -330,7 +330,8 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 	}
 	cmd.WaitDelay = commandWaitDelay
 	cmd.Cancel = func() error {
-		return cleanup.cancel(cmd)
+		_, err := cleanup.cancel(cmd)
+		return err
 	}
 
 	var buf bytes.Buffer
@@ -360,13 +361,14 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 	// Kill the whole tree on every exit path: a non-zero exit that leaves a descendant holding the pipe
 	// fires neither Cancel (timeout-only) nor the ErrWaitDelay branch, so it would otherwise leak. cancel is idempotent.
 	defer func() {
-		if err := cleanup.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if _, err := cleanup.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			log.Debug().Err(err).Msg("Failed to clean up command process tree")
 		}
 	}()
 	if err := cleanup.afterStart(cmd); err != nil {
-		// afterStart may re-run cancel on a Start/cancel race (unix-like and windows alike) and surface its error
-		// here; the deferred cancel then re-runs harmlessly (idempotent).
+		// Kill before Wait: on Windows a root whose setup failed is still suspended and would never exit on
+		// its own. The deferred cancel then re-runs harmlessly (idempotent).
+		_, _ = cleanup.cancel(cmd)
 		_ = cmd.Wait()
 		return finish(err)
 	}

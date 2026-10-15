@@ -4,6 +4,7 @@ package executor
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"sync"
@@ -13,13 +14,25 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// The steps afterStart can fail, behind variables so Windows tests can force each failure.
+var (
+	assignProcessToJobObject = windows.AssignProcessToJobObject
+	resumeProcessThreads     = resumeThreadsOfProcess
+)
+
+var procGetProcessIdOfThread = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetProcessIdOfThread")
+
 // commandCleanup mirrors the type in process_tree_unix.go; the commandCleaner assertion below pins
 // the shared afterStart/cancel/close method set across build tags. State differs per platform.
+//
+// Every kill goes through something this type created: the job object, or its own handle to the root.
+// Never a PID: once the root exits its PID can be reused, and Windows leaves that PID in the
+// ParentProcessID of every process the root ever started, so a PID-based tree walk reaches processes
+// that were never part of the command.
 type commandCleanup struct {
 	mu       sync.Mutex
 	job      windows.Handle
-	handle   windows.Handle // retained handle to the root process; stable identity across PID reuse
-	pid      uint32
+	handle   windows.Handle // our handle to the root; stable identity across PID reuse
 	assigned bool
 	canceled bool
 	closed   bool
@@ -27,95 +40,129 @@ type commandCleanup struct {
 
 var _ commandCleaner = (*commandCleanup)(nil)
 
-func configureProcessTreeCleanup(_ *exec.Cmd, _ bool) (*commandCleanup, error) {
+func configureProcessTreeCleanup(cmd *exec.Cmd, _ bool) (*commandCleanup, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, err
 	}
+	// Set at creation, not at cancel, so the tree dies with the last job handle even when Alpamon itself
+	// exits without running cancel.
+	if err := setKillOnJobClose(job); err != nil {
+		_ = windows.CloseHandle(job)
+		return nil, err
+	}
+	// The root starts suspended and runs only once afterStart has put it in the job, so nothing it
+	// starts can run outside the job. Merged into any flags the caller already set.
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
 	return &commandCleanup{job: job}, nil
 }
 
+// afterStart puts the suspended root in the job, then resumes it. On error the root may still be
+// suspended, so the caller must cancel before it waits.
 func (c *commandCleanup) afterStart(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return os.ErrProcessDone
 	}
-	// A cancel between Start and here saw no job/handle yet, so its kill missed; redo it now that we hold them.
-	if canceled := c.assignForStart(uint32(cmd.Process.Pid)); canceled {
-		return c.cancel(cmd)
+	canceled, err := c.attachAndResume(uint32(cmd.Process.Pid))
+	if err != nil {
+		return err
+	}
+	if canceled {
+		// A cancel between Start and here had no handle of ours. The root never ran; kill it with the
+		// handle now recorded, without resuming it.
+		if _, err := c.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
 	}
 	return nil
 }
 
-// Locked only here (defer-released) so afterStart can re-enter cancel without deadlocking c.mu, and a tryAssignToJob panic can't strand the lock.
-func (c *commandCleanup) assignForStart(pid uint32) (canceled bool) {
+// attachAndResume holds c.mu throughout, so a concurrent cancel cannot close the job or the handle while
+// they are in use here; that cancel waits, then finds the root in the job.
+func (c *commandCleanup) attachAndResume(pid uint32) (canceled bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.pid = pid
-	c.assigned = c.tryAssignToJob(pid)
-	return c.canceled
-}
 
-// tryAssignToJob returning false isn't fatal to the command: cancel falls back to the PID-based tree walk.
-func (c *commandCleanup) tryAssignToJob(pid uint32) bool {
+	// The only open by PID on this path, and safe: Start has returned and Wait has not, so Go's own
+	// handle to the root keeps this PID from being reused. Never open a PID that nothing we hold pins.
 	handle, err := windows.OpenProcess(
-		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION,
 		false, // bInheritHandles: this cleanup handle must not leak into child processes
 		pid,
 	)
 	if err != nil {
-		return false
+		return c.canceled, fmt.Errorf("open command process: %w", err)
 	}
 	c.handle = handle
-
-	return windows.AssignProcessToJobObject(c.job, handle) == nil
+	if c.canceled {
+		return true, nil
+	}
+	if err := assignProcessToJobObject(c.job, handle); err != nil {
+		return false, fmt.Errorf("assign command process to job object: %w", err)
+	}
+	c.assigned = true
+	if err := resumeProcessThreads(pid); err != nil {
+		return false, fmt.Errorf("resume command process: %w", err)
+	}
+	return false, nil
 }
 
-func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
-	var pid uint32
-	if cmd.Process != nil {
-		pid = uint32(cmd.Process.Pid)
-	}
-	pid, job, handle := c.takeForCancel(pid)
+// cancel kills the root through its handle and every other member through the job, then closes both.
+// Idempotent: a second call finds no handles and kills nothing.
+func (c *commandCleanup) cancel(cmd *exec.Cmd) (cleanupOutcome, error) {
+	job, handle, assigned := c.takeForCancel()
+	outcome := cleanupOutcome{assigned: assigned}
 
 	var firstErr error
+	keep := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if assigned && job != 0 {
+		active, err := queryActiveProcesses(job)
+		outcome.active = active
+		keep(err)
+	}
+	switch {
+	case handle != 0:
+		err := windows.TerminateProcess(handle, 1)
+		if err == nil {
+			outcome.rootKilled = true
+		} else if !isWindowsTerminateGone(err) {
+			keep(err)
+		}
+		keep(windows.CloseHandle(handle))
+	case cmd.Process != nil:
+		// No handle of ours: a cancel that raced ahead of afterStart, or an OpenProcess that failed.
+		// Kill goes through Go's own handle to the root, never a PID, and after Wait it returns
+		// os.ErrProcessDone without touching anything.
+		err := cmd.Process.Kill()
+		if err == nil {
+			outcome.rootKilled = true
+		} else if !errors.Is(err, os.ErrProcessDone) {
+			keep(err)
+		}
+	}
 	if job != 0 {
-		if err := setKillOnJobClose(job); err != nil {
-			firstErr = err
-		}
-		if err := windows.CloseHandle(job); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		// Explicit, because kill-on-close fires only when the last handle to the job closes, and any
+		// other holder (a debugger, security software) would make our CloseHandle a no-op.
+		keep(windows.TerminateJobObject(job, 1))
+		keep(windows.CloseHandle(job))
 	}
-	if handle != 0 {
-		// Unlike the PID-based terminate below, this handle can't have been reused by an unrelated process.
-		if err := windows.TerminateProcess(handle, 1); err != nil && !isWindowsTerminateGone(err) && firstErr == nil {
-			firstErr = err
-		}
-		if err := windows.CloseHandle(handle); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	if pid != 0 {
-		if err := terminateWindowsProcessTree(pid); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return outcome, firstErr
 }
 
-// Confines the locked field work so cancel's slow Win32 kills run lock-free; defer-released so a panic can't strand c.mu.
-func (c *commandCleanup) takeForCancel(pid uint32) (uint32, windows.Handle, windows.Handle) {
+// takeForCancel confines the locked field work so cancel's Win32 calls run lock-free; defer-released so a
+// panic can't strand c.mu.
+func (c *commandCleanup) takeForCancel() (windows.Handle, windows.Handle, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.canceled = true
-	if pid == 0 {
-		pid = c.pid
-	}
-	var job windows.Handle
-	if c.assigned {
-		job = c.takeJobHandleLocked()
-	}
-	return pid, job, c.takeProcessHandleLocked()
+	return c.takeJobHandleLocked(), c.takeProcessHandleLocked(), c.assigned
 }
 
 func (c *commandCleanup) close() error {
@@ -177,81 +224,88 @@ func setKillOnJobClose(job windows.Handle) error {
 	return nil
 }
 
-func terminateWindowsProcessTree(rootPID uint32) error {
-	children, err := snapshotWindowsChildProcesses()
-	if err != nil {
-		return err
-	}
-
-	var firstErr error
-	visited := map[uint32]bool{}
-	var terminate func(pid uint32)
-	terminate = func(pid uint32) {
-		if visited[pid] {
-			return
-		}
-		visited[pid] = true
-		for _, child := range children[pid] {
-			terminate(child)
-		}
-		if err := terminateWindowsProcess(pid); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	terminate(rootPID)
-	return firstErr
+// jobBasicAccounting mirrors JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, which x/sys/windows does not define.
+type jobBasicAccounting struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
 }
 
-func snapshotWindowsChildProcesses() (map[uint32][]uint32, error) {
-	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+func queryActiveProcesses(job windows.Handle) (uint32, error) {
+	var info jobBasicAccounting
+	err := windows.QueryInformationJobObject(
+		job,
+		windows.JobObjectBasicAccountingInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+		nil,
+	)
 	if err != nil {
-		return nil, err
+		return 0, err
+	}
+	return info.ActiveProcesses, nil
+}
+
+// resumeThreadsOfProcess resumes a process started with CREATE_SUSPENDED. Go closes the thread handle
+// CreateProcess returns, so the threads come from a snapshot. The caller must hold a handle to pid, which
+// keeps the PID from being reused, so the threads matched by OwnerProcessID are that process's threads.
+func resumeThreadsOfProcess(pid uint32) error {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return err
 	}
 	defer windows.CloseHandle(snapshot)
 
-	children := map[uint32][]uint32{}
-	var entry windows.ProcessEntry32
+	resumed := 0
+	var entry windows.ThreadEntry32
 	entry.Size = uint32(unsafe.Sizeof(entry))
-	if err := windows.Process32First(snapshot, &entry); err != nil {
-		if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
-			return children, nil
+	for err = windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
+		if entry.OwnerProcessID == pid {
+			if err := resumeThreadOf(entry.ThreadID, pid); err != nil {
+				return err
+			}
+			resumed++
 		}
-		return nil, err
-	}
-	for {
-		children[entry.ParentProcessID] = append(children[entry.ParentProcessID], entry.ProcessID)
 		entry.Size = uint32(unsafe.Sizeof(entry))
-		err := windows.Process32Next(snapshot, &entry)
-		if err == nil {
-			continue
-		}
-		if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
-			return children, nil
-		}
-		return nil, err
 	}
-}
-
-func terminateWindowsProcess(pid uint32) error {
-	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pid)
-	if err != nil {
-		if isWindowsProcessGone(err) {
-			return nil
-		}
+	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
 		return err
 	}
-	defer windows.CloseHandle(handle)
-	if err := windows.TerminateProcess(handle, 1); err != nil && !isWindowsTerminateGone(err) {
-		return err
+	if resumed == 0 {
+		return fmt.Errorf("no thread of process %d in the snapshot", pid)
 	}
 	return nil
+}
+
+// resumeThreadOf resumes thread tid only if it still belongs to pid: a thread ID is free for reuse once
+// its thread is gone, which can happen between the snapshot and the open.
+func resumeThreadOf(tid, pid uint32) error {
+	thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME|windows.THREAD_QUERY_LIMITED_INFORMATION, false, tid)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(thread)
+	owner, _, err := procGetProcessIdOfThread.Call(uintptr(thread))
+	if owner == 0 {
+		return err
+	}
+	if uint32(owner) != pid {
+		return fmt.Errorf("thread %d no longer belongs to process %d", tid, pid)
+	}
+	_, err = windows.ResumeThread(thread)
+	return err
 }
 
 func isWindowsProcessGone(err error) bool {
 	return errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_FOUND)
 }
 
-// isWindowsTerminateGone treats ACCESS_DENIED as already-exited: Windows' actual signal when the target died first (e.g. to KILL_ON_JOB_CLOSE) — safe to assume only because we just opened this handle with PROCESS_TERMINATE ourselves.
+// isWindowsTerminateGone treats ACCESS_DENIED as already-exited: it is what TerminateProcess returns for a process that has already ended—safe to assume only because the handle is one we opened with PROCESS_TERMINATE ourselves.
 func isWindowsTerminateGone(err error) bool {
 	return isWindowsProcessGone(err) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
 }
