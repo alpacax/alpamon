@@ -36,6 +36,8 @@ type ExecutedCommand struct {
 	// File is the inherited descriptor for a verified file execution, so
 	// tests can assert which open object was handed to the child.
 	File *os.File
+	// Detached marks a command started through StartDetached.
+	Detached bool
 }
 
 // CommandResult represents the result of a mocked command execution.
@@ -151,6 +153,14 @@ func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, fil
 	exitCode, output, err := m.lookupResult(args[0], args[1:]...)
 	emitMockChunk(ctx, timeout, chunkCallback, output)
 	return exitCode, output, err
+}
+
+// StartDetached records the command like the other methods and starts nothing;
+// a result set for it supplies the error.
+func (m *MockCommandExecutor) StartDetached(name string, args ...string) error {
+	m.commands = append(m.commands, ExecutedCommand{Name: name, Args: args, Detached: true})
+	_, _, err := m.lookupResult(name, args...)
+	return err
 }
 
 func (m *MockCommandExecutor) SetResult(command string, exitCode int, output string, err error) {

@@ -66,6 +66,12 @@ type CommandExecutor interface {
 	// expansion, and no shell to split words or honor operators. The caller
 	// retains ownership of file and closes it once this returns.
 	ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error)
+
+	// StartDetached starts a command as root in a new session and returns
+	// without waiting. Every other method kills what a command leaves running
+	// when it exits; this one is for work that must outlive the agent, such as
+	// a deferred self-uninstall. Not supported on Windows.
+	StartDetached(name string, args ...string) error
 }
 
 // WSClient interface for WebSocket client operations
