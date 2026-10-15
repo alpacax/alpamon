@@ -93,6 +93,10 @@ type endedHold struct {
 	rawCommand string
 	runasUser  string
 	until      time.Time
+	// unheld marks a request displaced before any hold: the server's form of
+	// its command is unknown, so a verdict counts as the new request's only
+	// when it names the new request's command and not the old one's.
+	unheld bool
 }
 
 // sudoWaitEnded tells the server the client stopped waiting. The approval
@@ -166,14 +170,7 @@ func interimFrame(hold *sudoHold) []byte {
 func (am *AuthManager) awaitHeldRequest(sudoRequest *SudoRequest, hold *sudoHold) {
 	req := sudoRequest.Request
 	requestID := req.RequestID
-
-	if hold != nil {
-		if hold.command == "" {
-			hold.command = req.Command
-		}
-		hold.sessionID = req.SessionID
-		hold.commandID = req.CommandID
-	}
+	prepareHold(hold, req)
 
 	if !req.HoldCapable || hold == nil {
 		// A client that did not offer to wait reads one object to EOF, so it
@@ -239,6 +236,49 @@ func (am *AuthManager) awaitHeldRequest(sudoRequest *SudoRequest, hold *sudoHold
 			am.awaitTakenRequest(sudoRequest)
 		}
 	}
+}
+
+// prepareHold fills in what a verdict for hold must carry. Idempotent; a nil
+// hold is a no-op.
+func prepareHold(hold *sudoHold, req SudoApprovalRequest) {
+	if hold == nil {
+		return
+	}
+	if hold.command == "" {
+		hold.command = req.Command
+	}
+	hold.sessionID = req.SessionID
+	hold.commandID = req.CommandID
+}
+
+// settlePost ends sudoRequest's posting state once the post is classified:
+// hold is the server's pending answer, or nil when it did not hold the request.
+// A verdict parked meanwhile is checked as it would be now: against hold's
+// command when there is one, as before otherwise. The first that fits is taken
+// with the request and returned; the rest are dropped. With none, a hold is
+// attached in the same critical section, so no verdict slips in unchecked.
+func (am *AuthManager) settlePost(sudoRequest *SudoRequest, hold *sudoHold) (SudoApprovalResponse, bool) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	sudoRequest.posting = false
+	early := sudoRequest.early
+	sudoRequest.early = nil
+	if am.findRequestLocked(sudoRequest.Request.RequestID) != sudoRequest {
+		return SudoApprovalResponse{}, false
+	}
+	if hold != nil {
+		sudoRequest.hold = hold
+	}
+	for _, verdict := range early {
+		if reason := am.mismatchLocked(verdict, sudoRequest); reason != "" {
+			log.Warn().Str("request_id", verdict.RequestID).Str("mismatch", reason).
+				Msg("Dropped a sudo_approval response that arrived before the post was answered")
+			continue
+		}
+		am.takeInstanceLocked(sudoRequest)
+		return verdict, true
+	}
+	return SudoApprovalResponse{}, false
 }
 
 // beginHold marks sudoRequest as held and reports whether it still was
@@ -486,14 +526,25 @@ func (am *AuthManager) mismatchLocked(response SudoApprovalResponse, req *SudoRe
 		delete(am.endedHolds, response.RequestID)
 		return ""
 	}
-	if response.Command != ended.command || response.SessionID != ended.sessionID ||
-		response.CommandID != ended.commandID {
-		return "" // Not the ended wait's verdict.
+	if response.SessionID != ended.sessionID || response.CommandID != ended.commandID {
+		return "" // Not the ended request's verdict.
 	}
 	if req != nil && req.Request.Command == ended.rawCommand &&
 		req.Request.SessionID == ended.sessionID && req.Request.CommandID == ended.commandID &&
 		req.Request.RunasUser == ended.runasUser {
 		return "" // The same command, session and run-as user: the verdict fits it too.
+	}
+	if ended.unheld {
+		// Only a verdict naming the new request's command, and not the old
+		// one's, is told apart; anything else may be the old request's.
+		if req != nil && response.Command != ended.rawCommand &&
+			(response.Command == req.Request.Command || (req.hold != nil && response.Command == req.hold.command)) {
+			return ""
+		}
+		return "displaced request"
+	}
+	if response.Command != ended.command {
+		return "" // Not the ended wait's verdict.
 	}
 	return "ended wait"
 }
@@ -501,6 +552,28 @@ func (am *AuthManager) mismatchLocked(response SudoApprovalResponse, req *SudoRe
 // rememberEndedHoldLocked guards the id of a wait that ended without a verdict.
 // Callers must hold am.mu.
 func (am *AuthManager) rememberEndedHoldLocked(req SudoApprovalRequest, hold *sudoHold) {
+	am.rememberLocked(req.RequestID, endedHold{
+		command:    hold.command,
+		sessionID:  hold.sessionID,
+		commandID:  hold.commandID,
+		rawCommand: req.Command,
+		runasUser:  req.RunasUser,
+	})
+}
+
+// rememberDisplacedLocked guards the id of a request displaced before any
+// hold. Callers must hold am.mu.
+func (am *AuthManager) rememberDisplacedLocked(req SudoApprovalRequest) {
+	am.rememberLocked(req.RequestID, endedHold{
+		sessionID:  req.SessionID,
+		commandID:  req.CommandID,
+		rawCommand: req.Command,
+		runasUser:  req.RunasUser,
+		unheld:     true,
+	})
+}
+
+func (am *AuthManager) rememberLocked(requestID string, ended endedHold) {
 	now := time.Now()
 	if am.endedHolds == nil {
 		am.endedHolds = make(map[string]endedHold)
@@ -510,12 +583,6 @@ func (am *AuthManager) rememberEndedHoldLocked(req SudoApprovalRequest, hold *su
 			delete(am.endedHolds, id)
 		}
 	}
-	am.endedHolds[req.RequestID] = endedHold{
-		command:    hold.command,
-		sessionID:  hold.sessionID,
-		commandID:  hold.commandID,
-		rawCommand: req.Command,
-		runasUser:  req.RunasUser,
-		until:      now.Add(endedHoldTTL),
-	}
+	ended.until = now.Add(endedHoldTTL)
+	am.endedHolds[requestID] = ended
 }

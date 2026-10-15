@@ -1136,3 +1136,93 @@ func TestHold_SessionTeardownEndsHeldWait(t *testing.T) {
 		assert.True(t, guarded, "the torn-down wait's id is not guarded")
 	})
 }
+
+// A verdict that arrives while the post is in flight waits until the post is
+// classified. Once the server holds the request, a parked verdict naming
+// another command, or none, is dropped and the hold goes on.
+func TestHold_EarlyVerdictCheckedAgainstHold(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var am *AuthManager
+		req := holdTestRequest("150", true)
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		server.onApproval = func() {
+			other := serverVerdict(req, true, "")
+			other.Command = "rm -rf /srv/data"
+			assert.NoError(t, am.HandleSudoApprovalResponse(other), "an early verdict is parked, not refused")
+			other.Command = ""
+			assert.NoError(t, am.HandleSudoApprovalResponse(other))
+		}
+		am = newHoldTestManager(t, server)
+		pc, rec := startPAMClient(t, am, req)
+
+		assert.Equal(t, wantInterim, pc.interim(t), "a parked verdict for another command answered the request")
+		assert.Equal(t, 1, rec.writeCount())
+
+		verdict := serverVerdict(req, true, "")
+		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
+		assert.Equal(t, wantInterim+marshalResponse(t, verdict), pc.output(t))
+	})
+}
+
+// When the server did not hold the request, a verdict parked during the post
+// is applied as before.
+func TestHold_EarlyVerdictAppliedWhenNotHeld(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var am *AuthManager
+		req := holdTestRequest("151", true)
+		verdict := SudoApprovalResponse{RequestID: "151", Type: "sudo_approval_response", SessionID: holdTestSession, Approved: true}
+		server := &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`}
+		server.onApproval = func() {
+			assert.NoError(t, am.HandleSudoApprovalResponse(verdict))
+		}
+		am = newHoldTestManager(t, server)
+		pc, _ := startPAMClient(t, am, req)
+
+		assert.Equal(t, marshalResponse(t, verdict), pc.output(t))
+	})
+}
+
+// A request displaced while its post is in flight leaves a guard: its late
+// verdict, or one that cannot be told apart, is not applied to the request
+// that reused its id, which still takes its own.
+func TestDisplacedInFlightVerdictNotAppliedToNewRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		var posts int
+		server := &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`}
+		server.onApproval = func() {
+			server.mu.Lock()
+			posts++
+			first := posts == 1
+			server.mu.Unlock()
+			if first {
+				<-release
+			}
+		}
+		am := newHoldTestManager(t, server)
+		old := holdTestRequest("152", false)
+		pc, _ := startPAMClient(t, am, old)
+		synctest.Wait()
+
+		reused := holdTestRequest("152", false)
+		reused.Command = "systemctl restart postgresql"
+		pc2, rec2 := startPAMClient(t, am, reused)
+		synctest.Wait()
+
+		// The old post is still in flight.
+		assert.Error(t, am.HandleSudoApprovalResponse(serverVerdict(old, true, "")), "the displaced request's verdict was applied")
+		noCommand := serverVerdict(old, true, "")
+		noCommand.Command = ""
+		assert.Error(t, am.HandleSudoApprovalResponse(noCommand), "a verdict that may be the displaced request's was applied")
+
+		close(release)
+		synctest.Wait()
+		assert.Empty(t, pc.output(t), "the displaced request was written to")
+		assert.Error(t, am.HandleSudoApprovalResponse(serverVerdict(old, true, "")), "the displaced request's verdict was applied")
+		assert.Zero(t, rec2.writeCount())
+
+		own := serverVerdict(reused, false, "SUDO_APPROVAL_REJECTED")
+		require.NoError(t, am.HandleSudoApprovalResponse(own))
+		assert.Equal(t, marshalResponse(t, own), pc2.output(t))
+	})
+}

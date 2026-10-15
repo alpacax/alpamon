@@ -87,7 +87,16 @@ type SudoRequest struct {
 	// pushed out of the registry. Its sudo process is gone (the kernel reused
 	// its pid), so nothing is written to it.
 	displaced bool
+	// posting, guarded by am.mu, marks a request whose post has not been
+	// answered yet: whether the server holds it is still unknown, so a verdict
+	// that arrives now is parked in early until settlePost classifies the post.
+	posting bool
+	early   []SudoApprovalResponse
 }
+
+// maxEarlyVerdicts bounds the verdicts parked on one request while its post is
+// in flight.
+const maxEarlyVerdicts = 4
 
 // newSudoRequest is the one way to build a registered request, so every
 // instance carries its own completion channel.
@@ -561,6 +570,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	}
 
 	sudoRequest := newSudoRequest(unixConn, sudoApprovalReq)
+	sudoRequest.posting = true
 	session.Requests[sudoApprovalReq.RequestID] = sudoRequest
 	am.mu.Unlock()
 	// Before this request's own post, so the old wait's end reaches the server
@@ -576,6 +586,18 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		Msg("Alpacon user sudo request")
 
 	body, err := am.sendSudoRequestWithRetry(sudoApprovalReq)
+	var pending *sudoHold
+	isPending := false
+	if err == nil {
+		pending, isPending = parseApprovalPending(body)
+		prepareHold(pending, sudoApprovalReq)
+	}
+	if early, ok := am.settlePost(sudoRequest, pending); ok {
+		// A verdict arrived while the post was in flight and fits the request
+		// as now classified; it is the final answer.
+		_ = am.deliverVerdict(sudoRequest, early)
+		return
+	}
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to send sudo_approval request after retries")
 		if !am.finalizeRequest(sudoRequest, "Communication error") {
@@ -586,7 +608,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 
 	log.Debug().Msgf("sudo_approval request sent via REST API, waiting for response...")
 
-	if pending, isPending := parseApprovalPending(body); isPending {
+	if isPending {
 		am.awaitHeldRequest(sudoRequest, pending)
 		return
 	}
@@ -727,6 +749,21 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 			Msg("Dropped a sudo_approval response that does not match the pending request")
 		return fmt.Errorf("sudo_approval response for request_id %s does not match the pending request: %s", response.RequestID, reason)
 	}
+	if sudoRequest != nil && sudoRequest.posting {
+		// Whether the server holds this request is not known yet, so the
+		// command a verdict must name is not either: settlePost decides.
+		parked := len(sudoRequest.early) < maxEarlyVerdicts
+		if parked {
+			sudoRequest.early = append(sudoRequest.early, response)
+		}
+		am.mu.Unlock()
+		if !parked {
+			log.Warn().Str("request_id", response.RequestID).Msg("Dropped a sudo_approval response: too many arrived before the post was answered")
+			return fmt.Errorf("too many sudo_approval responses for request_id %s before its post was answered", response.RequestID)
+		}
+		log.Debug().Str("request_id", response.RequestID).Msg("sudo_approval response arrived before the post was answered; parked")
+		return nil
+	}
 	// Found and taken in one critical section, so the instance the match was
 	// checked against is the one answered.
 	if sudoRequest != nil {
@@ -741,6 +778,12 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 		return fmt.Errorf("no pending sudo_approval request found for request_id: %s", response.RequestID)
 	}
 
+	return am.deliverVerdict(sudoRequest, response)
+}
+
+// deliverVerdict writes the server's verdict to a request the caller took,
+// closes it and releases its waiter.
+func (am *AuthManager) deliverVerdict(sudoRequest *SudoRequest, response SudoApprovalResponse) error {
 	// The take has no owner left to answer it, so every exit from here has to release
 	// the waiter—including an early return added later between the take and the write.
 	defer am.signalCompletion(sudoRequest)
@@ -1021,6 +1064,10 @@ func (am *AuthManager) displaceRequestLocked(requestID string) *SudoRequest {
 	old.displaced = true
 	if old.hold != nil {
 		am.rememberEndedHoldLocked(old.Request, old.hold)
+	} else {
+		// Its verdict may still come (its post may even be in flight), with
+		// the same id and session as the request that displaced it.
+		am.rememberDisplacedLocked(old.Request)
 	}
 	return old
 }
