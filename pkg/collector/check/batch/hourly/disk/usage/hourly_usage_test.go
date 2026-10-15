@@ -29,15 +29,7 @@ type HourlyDiskUsageCheckSuite struct {
 
 func (suite *HourlyDiskUsageCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
-	buffer := base.NewCheckBuffer(10)
-	args := &base.CheckArgs{
-		Type:     base.HourlyDiskUsage,
-		Name:     string(base.HourlyDiskUsage) + "_" + uuid.NewString(),
-		Interval: time.Duration(1 * time.Second),
-		Buffer:   buffer,
-		Client:   suite.client,
-	}
-	suite.check = NewCheck(args).(*Check)
+	suite.check = newCheck(suite.client)
 	suite.ctx = context.Background()
 }
 
@@ -102,14 +94,18 @@ func (suite *HourlyDiskUsageCheckSuite) TestDeleteDiskUsage() {
 	assert.NoError(suite.T(), err, "Failed to delete disk usage.")
 }
 
-func (suite *HourlyDiskUsageCheckSuite) commitFailingCheck() *Check {
+func newCheck(client *ent.Client) *Check {
 	return NewCheck(&base.CheckArgs{
 		Type:     base.HourlyDiskUsage,
 		Name:     string(base.HourlyDiskUsage) + "_" + uuid.NewString(),
 		Interval: time.Second,
 		Buffer:   base.NewCheckBuffer(10),
-		Client:   dbtest.CommitFailingClient(suite.T(), dbFileName),
+		Client:   client,
 	}).(*Check)
+}
+
+func (suite *HourlyDiskUsageCheckSuite) commitFailingCheck() *Check {
+	return newCheck(dbtest.CommitFailingClient(suite.T(), dbFileName))
 }
 
 func (suite *HourlyDiskUsageCheckSuite) TestSaveHourlyDiskUsageReturnsCommitErrorAndKeepsRawRows() {

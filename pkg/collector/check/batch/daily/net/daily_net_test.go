@@ -28,15 +28,7 @@ type DailyNetCheckSuite struct {
 
 func (suite *DailyNetCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
-	buffer := base.NewCheckBuffer(10)
-	args := &base.CheckArgs{
-		Type:     base.DailyNet,
-		Name:     string(base.DailyNet) + "_" + uuid.NewString(),
-		Interval: time.Duration(1 * time.Second),
-		Buffer:   buffer,
-		Client:   suite.client,
-	}
-	suite.check = NewCheck(args).(*Check)
+	suite.check = newCheck(suite.client)
 	suite.ctx = context.Background()
 }
 
@@ -89,14 +81,18 @@ func (suite *DailyNetCheckSuite) TestDeleteHourlyTraffic() {
 	assert.NoError(suite.T(), err, "Failed to delete hourly traffic.")
 }
 
-func (suite *DailyNetCheckSuite) commitFailingCheck() *Check {
+func newCheck(client *ent.Client) *Check {
 	return NewCheck(&base.CheckArgs{
 		Type:     base.DailyNet,
 		Name:     string(base.DailyNet) + "_" + uuid.NewString(),
 		Interval: time.Second,
 		Buffer:   base.NewCheckBuffer(10),
-		Client:   dbtest.CommitFailingClient(suite.T(), dbFileName),
+		Client:   client,
 	}).(*Check)
+}
+
+func (suite *DailyNetCheckSuite) commitFailingCheck() *Check {
+	return newCheck(dbtest.CommitFailingClient(suite.T(), dbFileName))
 }
 
 func (suite *DailyNetCheckSuite) TestDeleteHourlyTrafficReturnsCommitError() {
