@@ -208,4 +208,6 @@ cpu := client.CPU.Create().SetUsage(usage).SetTimestamp(time.Now()).SaveX(ctx)
 
 **Database migrations**: Migration system uses direct SQL execution via Go's `database/sql` package. Migration files in `pkg/db/migration/` are pure SQLite SQL. The `RunMigration()` function tracks applied migrations in the `atlas_schema_revisions` table and executes unapplied migrations in transactions. No external tools required.
 
+**Process termination**: Terminate only through a handle, a job object or a process group you created; never by PID or image name. Open a PID only while something you hold pins it. Any change to a kill path gets a security review. The executor kills each command's tree on every exit path (`pkg/executor/process_tree_*.go`), and `TestKillPrimitivesStayInTheirHomes` confines the Windows primitives that find or kill processes by PID; work that must outlive its command goes through `StartDetached`.
+
 **Timeout handling**: Commands that exceed their timeout return exit code 124 with an elapsed time message, matching the GNU `timeout` convention. Default shell command timeout is 30 minutes.
