@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -87,6 +88,7 @@ type endedHold struct {
 	command    string
 	sessionID  string
 	rawCommand string
+	runasUser  string
 	until      time.Time
 }
 
@@ -211,14 +213,19 @@ func (am *AuthManager) awaitHeldRequest(req SudoApprovalRequest, hold *sudoHold,
 		// for a re-run, which is what the code tells the client.
 		if am.finalizeHeldRequest(req, hold, "Approval pending", sudoCodeApprovalPending) {
 			log.Warn().Str("request_id", requestID).Msg("Held sudo_approval request reached its deadline")
-			am.postWaitEnded(req, hold)
+			go am.postWaitEnded(req, hold)
 		} else {
 			am.awaitTakenRequest(requestID, completionChan)
 		}
 	case <-peerGone:
 		am.abandonHeldRequest(req, hold, completionChan, "client closed the connection")
 	case <-am.ctx.Done():
-		if !am.finalizeRequest(requestID, "Service shutdown") {
+		// The request stays open on the server, so a re-run after the restart
+		// can pick it up. The ended-wait guard lives in memory and does not
+		// survive the restart; the server's own deadline still ends the wait.
+		if am.finalizeHeldRequest(req, hold, "Service shutdown", sudoCodeApprovalPending) {
+			am.postWaitEndedOnShutdown(req, hold)
+		} else {
 			am.awaitTakenRequest(requestID, completionChan)
 		}
 	}
@@ -297,7 +304,7 @@ func (am *AuthManager) abandonHeldRequest(req SudoApprovalRequest, hold *sudoHol
 
 	log.Info().Str("request_id", req.RequestID).Str("approval_request", hold.ref).Str("why", why).
 		Msg("Stopped waiting for a sudo approval")
-	am.postWaitEnded(req, hold)
+	go am.postWaitEnded(req, hold)
 }
 
 // finalizeHeldRequest denies a held request with a code and guards its id
@@ -327,34 +334,66 @@ func (am *AuthManager) endHold(req SudoApprovalRequest, hold *sudoHold) {
 	am.mu.Lock()
 	am.rememberEndedHoldLocked(req, hold)
 	am.mu.Unlock()
-	am.postWaitEnded(req, hold)
+	go am.postWaitEnded(req, hold)
 }
 
-// postWaitEnded tells the server the client stopped waiting for hold. Best
-// effort: the server's own deadline ends the wait if this never lands.
-func (am *AuthManager) postWaitEnded(req SudoApprovalRequest, hold *sudoHold) {
-	if am.session == nil || am.ctx == nil {
-		return
-	}
-	url := sudoApprovalURL(req) + hold.ref + "/wait-ended/"
-	body := sudoWaitEnded{
+// waitEndedShutdownTimeout bounds the one wait-ended post made while the agent
+// stops, so it never holds up the shutdown.
+const waitEndedShutdownTimeout = 3 * time.Second
+
+func waitEndedURL(req SudoApprovalRequest, hold *sudoHold) string {
+	return sudoApprovalURL(req) + hold.ref + "/wait-ended/"
+}
+
+func waitEndedBody(req SudoApprovalRequest) sudoWaitEnded {
+	return sudoWaitEnded{
 		RequestID: req.RequestID,
 		Command:   req.Command,
 		SessionID: req.SessionID,
 		CommandID: req.CommandID,
 	}
-	if err := am.postWithRetry(url, body, nil); err != nil {
+}
+
+// postWaitEnded tells the server the client stopped waiting for hold. Best
+// effort: the server's own deadline ends the wait if this never lands. It runs
+// on its own goroutine, so the waiter returns (and frees the request id) at once.
+func (am *AuthManager) postWaitEnded(req SudoApprovalRequest, hold *sudoHold) {
+	if am.session == nil || am.ctx == nil {
+		return
+	}
+	if err := am.postWithRetry(waitEndedURL(req, hold), waitEndedBody(req), nil); err != nil {
 		log.Warn().Err(err).Str("request_id", req.RequestID).Str("approval_request", hold.ref).
 			Msg("Failed to report the end of a sudo approval wait")
 	}
 }
 
-// liveHoldForLocked reports whether a request for the same user, run-as user
-// and command is already held. Callers must hold am.mu.
+// postWaitEndedOnShutdown makes one bounded attempt at the wait-ended post
+// while the agent stops; am.ctx is already cancelled, so it cannot be used.
+func (am *AuthManager) postWaitEndedOnShutdown(req SudoApprovalRequest, hold *sudoHold) {
+	if am.session == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), waitEndedShutdownTimeout)
+		defer cancel()
+		_, status, _, err := am.session.PostWithContext(ctx, waitEndedURL(req, hold), waitEndedBody(req), waitEndedShutdownTimeout/time.Second)
+		if err != nil || status < 200 || status >= 300 {
+			log.Debug().Err(err).Int("status_code", status).Str("request_id", req.RequestID).
+				Msg("Could not report the end of a sudo approval wait during shutdown")
+		}
+	}()
+}
+
+// liveHoldForLocked reports whether the same session (or deploy Command)
+// already holds a request for the same command and run-as user: one wait per
+// session. Waits across sessions are the server's to deduplicate, since two
+// Alpacon users may share one host account. Callers must hold am.mu.
 func (am *AuthManager) liveHoldForLocked(req SudoApprovalRequest) bool {
 	for _, session := range am.pidToSessionMap {
 		for _, other := range session.Requests {
 			if other.hold != nil &&
+				other.Request.SessionID == req.SessionID &&
+				other.Request.CommandID == req.CommandID &&
 				other.Request.Username == req.Username &&
 				other.Request.RunasUser == req.RunasUser &&
 				other.Request.Command == req.Command {
@@ -405,8 +444,9 @@ func (am *AuthManager) mismatchLocked(response SudoApprovalResponse) string {
 	if response.Command != ended.command || response.SessionID != ended.sessionID {
 		return "" // Not the ended wait's verdict.
 	}
-	if req != nil && req.Request.Command == ended.rawCommand && req.Request.SessionID == ended.sessionID {
-		return "" // The same command in the same session: the verdict fits it too.
+	if req != nil && req.Request.Command == ended.rawCommand &&
+		req.Request.SessionID == ended.sessionID && req.Request.RunasUser == ended.runasUser {
+		return "" // The same command, session and run-as user: the verdict fits it too.
 	}
 	return "ended wait"
 }
@@ -427,6 +467,7 @@ func (am *AuthManager) rememberEndedHoldLocked(req SudoApprovalRequest, hold *su
 		command:    hold.command,
 		sessionID:  hold.sessionID,
 		rawCommand: req.Command,
+		runasUser:  req.RunasUser,
 		until:      now.Add(endedHoldTTL),
 	}
 }

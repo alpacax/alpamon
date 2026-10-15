@@ -66,8 +66,26 @@ func TestSignalCompletion_DoesNotBlockWhenAlreadySignaled(t *testing.T) {
 // timeout path removed the channel.
 func TestSignalCompletion_UnknownRequestIsNoop(t *testing.T) {
 	am := newTestAuthManager()
-	registerCompletionChannel(am, "req-1")
-	am.removeCompletionChannel("req-1")
+	ch := registerCompletionChannel(am, "req-1")
+	am.removeCompletionChannel("req-1", ch)
 
 	am.signalCompletion("req-1")
+}
+
+// TestRemoveCompletionChannel_KeepsNewerWaitersChannel covers a request id (the
+// sudo pid) reused while the previous waiter is still on its way out: the
+// newer waiter's channel must survive the older waiter's cleanup.
+func TestRemoveCompletionChannel_KeepsNewerWaitersChannel(t *testing.T) {
+	am := newTestAuthManager()
+	older := registerCompletionChannel(am, "req-1")
+	newer := registerCompletionChannel(am, "req-1")
+
+	am.removeCompletionChannel("req-1", older)
+	am.signalCompletion("req-1")
+
+	select {
+	case <-newer:
+	default:
+		t.Fatal("the older waiter's cleanup removed the newer waiter's channel")
+	}
 }

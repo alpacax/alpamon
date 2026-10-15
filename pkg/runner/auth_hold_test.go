@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -90,7 +91,7 @@ func newHoldTestManager(t *testing.T, server *fakeAlpacon) *AuthManager {
 	am := newTestAuthManager()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	am.ctx = ctx
+	am.ctx, am.cancel = ctx, cancel
 	am.session = &scheduler.Session{BaseURL: "http://alpacon.test", Client: &http.Client{Transport: server}}
 	am.pidToSessionMap[holdTestPPID] = &SessionInfo{
 		Kind:      TrackerKindWebsh,
@@ -571,4 +572,210 @@ func TestParseApprovalPending_ExpiryFallback(t *testing.T) {
 		require.NotNil(t, hold)
 		assert.Equal(t, time.Now().Add(time.Minute).UTC().Format(time.RFC3339), hold.expiresAt)
 	})
+}
+
+// Two Alpacon users may share one host account: the same command from another
+// session is not the same wait, and the server decides about it.
+func TestHold_SameCommandInAnotherSessionIsForwarded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		am := newHoldTestManager(t, server)
+		am.pidToSessionMap[holdTestPPID+1] = &SessionInfo{
+			Kind:      TrackerKindWebsh,
+			SessionID: "sess-other",
+			PID:       holdTestPPID + 1,
+			Requests:  make(map[string]*SudoRequest),
+		}
+		first := holdTestRequest("120", true)
+		pc, _ := startPAMClient(t, am, first)
+		pc.interim(t)
+
+		second := holdTestRequest("121", true)
+		second.PPID = holdTestPPID + 1
+		pc2, _ := startPAMClient(t, am, second)
+		line := pc2.interim(t)
+		assert.True(t, strings.HasPrefix(line, `{"type":"sudo_approval_pending"`), line)
+		assert.Len(t, server.postsTo("/sudo-approval/"), 2)
+
+		require.NoError(t, am.HandleSudoApprovalResponse(serverVerdict(first, true, "")))
+		pc.output(t)
+		verdict := serverVerdict(second, true, "")
+		verdict.SessionID = "sess-other"
+		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
+		pc2.output(t)
+	})
+}
+
+// A Websh verdict without the session it answers is not applied to a held
+// request.
+func TestHold_VerdictWithoutSessionDropped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		am := newHoldTestManager(t, server)
+		req := holdTestRequest("122", true)
+		pc, rec := startPAMClient(t, am, req)
+		pc.interim(t)
+
+		noSession := serverVerdict(req, true, "")
+		noSession.SessionID = ""
+		assert.Error(t, am.HandleSudoApprovalResponse(noSession))
+		synctest.Wait()
+		assert.Equal(t, 1, rec.writeCount())
+
+		require.NoError(t, am.HandleSudoApprovalResponse(serverVerdict(req, false, "SUDO_APPROVAL_REJECTED")))
+		pc.output(t)
+	})
+}
+
+// wait_seconds above 600 is capped, so alpamon answers at 645 s, ahead of the
+// client's 660 s cap.
+func TestHold_WaitCappedDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(900)}
+		am := newHoldTestManager(t, server)
+		pc, _ := startPAMClient(t, am, holdTestRequest("123", true))
+		assert.Equal(t, strings.Replace(wantInterim, `"wait_seconds":300`, `"wait_seconds":600`, 1), pc.interim(t))
+
+		time.Sleep(645*time.Second - time.Millisecond)
+		synctest.Wait()
+		select {
+		case <-pc.done:
+			t.Fatal("answered before 645 s")
+		default:
+		}
+		time.Sleep(time.Millisecond)
+		assert.Contains(t, pc.output(t), `"error_code":"SUDO_APPROVAL_PENDING"`)
+	})
+}
+
+// Stopping the agent mid-hold answers the coded pending deny and reports the
+// end of the wait without holding up the shutdown.
+func TestHold_ShutdownDuringHold(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		am := newHoldTestManager(t, server)
+		req := holdTestRequest("124", true)
+		pc, _ := startPAMClient(t, am, req)
+		pc.interim(t)
+
+		am.cancel()
+		out := pc.output(t)
+		var final SudoApprovalResponse
+		require.NoError(t, json.Unmarshal([]byte(out[strings.IndexByte(out, '\n')+1:]), &final))
+		assert.False(t, final.Approved)
+		assert.Equal(t, "SUDO_APPROVAL_PENDING", final.ErrorCode)
+
+		synctest.Wait()
+		assert.Len(t, server.postsTo("/wait-ended/"), 1)
+	})
+}
+
+// The same command in the same session but as another run-as user is a
+// different request: an ended wait's verdict is not applied to it.
+func TestHold_EndedWaitVerdictNeedsSameRunasUser(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		am := newHoldTestManager(t, server)
+		held := holdTestRequest("125", true)
+		pc, _ := startPAMClient(t, am, held)
+		pc.interim(t)
+		require.NoError(t, pc.conn.Close())
+		synctest.Wait()
+
+		server.mu.Lock()
+		server.approvalBody = `{"status":"mfa_required"}`
+		server.mu.Unlock()
+		reused := holdTestRequest("125", false)
+		reused.RunasUser = "postgres"
+		pc2, _ := startPAMClient(t, am, reused)
+		synctest.Wait()
+
+		assert.Error(t, am.HandleSudoApprovalResponse(serverVerdict(held, true, "")))
+		own := SudoApprovalResponse{RequestID: "125", Type: "sudo_approval_response", Command: reused.Command, Approved: false}
+		require.NoError(t, am.HandleSudoApprovalResponse(own))
+		assert.Equal(t, marshalResponse(t, own), pc2.output(t))
+	})
+}
+
+// A verdict racing the client's close settles one way: either the verdict was
+// taken (and the wait was not reported as ended), or the wait ended and no
+// verdict was written. Never both, never a write after the interim frame plus
+// a wait-ended post.
+func TestHold_VerdictRacesPeerClose(t *testing.T) {
+	for i := range 25 {
+		t.Run(itoa(i), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				server := &fakeAlpacon{approvalBody: pendingBody(300)}
+				am := newHoldTestManager(t, server)
+				req := holdTestRequest("126", true)
+				pc, rec := startPAMClient(t, am, req)
+				pc.interim(t)
+
+				verdictErr := make(chan error, 1)
+				go func() { verdictErr <- am.HandleSudoApprovalResponse(serverVerdict(req, true, "")) }()
+				go func() { _ = pc.conn.Close() }()
+				synctest.Wait()
+
+				ended := len(server.postsTo("/wait-ended/"))
+				writes := rec.writeCount()
+				err := <-verdictErr
+				assert.LessOrEqual(t, ended, 1)
+				if ended == 1 {
+					assert.Equal(t, 1, writes, "a verdict was written to a wait that ended")
+					assert.Error(t, err)
+				} else {
+					assert.Equal(t, 2, writes, "the verdict was neither written nor the wait ended")
+				}
+			})
+		})
+	}
+}
+
+type scriptedReadConn struct {
+	net.Conn
+	reads chan error
+}
+
+func (c *scriptedReadConn) Read([]byte) (int, error) {
+	err, ok := <-c.reads
+	if !ok {
+		return 0, net.ErrClosed
+	}
+	if err == nil {
+		return 1, nil
+	}
+	return 0, err
+}
+
+func TestWatchPeerClose(t *testing.T) {
+	tests := []struct {
+		name  string
+		reads []error
+		gone  bool
+	}{
+		{name: "EOF", reads: []error{io.EOF}, gone: true},
+		{name: "reset", reads: []error{syscall.ECONNRESET}, gone: true},
+		{name: "stray bytes then EOF", reads: []error{nil, nil, io.EOF}, gone: true},
+		{name: "closed by alpamon", reads: []error{net.ErrClosed}},
+		{name: "deadline", reads: []error{syscall.ETIMEDOUT}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				conn := &scriptedReadConn{reads: make(chan error, len(tt.reads))}
+				for _, r := range tt.reads {
+					conn.reads <- r
+				}
+				gone := watchPeerClose(conn)
+				synctest.Wait()
+				select {
+				case <-gone:
+					assert.True(t, tt.gone, "reported a close that was not the peer's")
+				default:
+					assert.False(t, tt.gone, "missed the peer's close")
+					close(conn.reads)
+				}
+			})
+		})
+	}
 }

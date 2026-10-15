@@ -550,7 +550,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	// channel that does not exist yet, leaving this goroutine to its full timeout.
 	completionChan := am.newCompletionChannelLocked(sudoApprovalReq.RequestID)
 	am.mu.Unlock()
-	defer am.removeCompletionChannel(sudoApprovalReq.RequestID)
+	defer am.removeCompletionChannel(sudoApprovalReq.RequestID, completionChan)
 
 	log.Debug().
 		Str("request_id", sudoApprovalReq.RequestID).
@@ -928,9 +928,13 @@ func (am *AuthManager) newCompletionChannelLocked(requestID string) chan struct{
 	return ch
 }
 
-func (am *AuthManager) removeCompletionChannel(requestID string) {
+// removeCompletionChannel drops the waiter's channel, unless a newer request
+// reusing the id (the sudo pid) has already registered its own.
+func (am *AuthManager) removeCompletionChannel(requestID string, ch chan struct{}) {
 	am.mu.Lock()
-	delete(am.completionChannels, requestID)
+	if am.completionChannels[requestID] == ch {
+		delete(am.completionChannels, requestID)
+	}
 	am.mu.Unlock()
 }
 
