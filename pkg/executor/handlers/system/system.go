@@ -255,7 +255,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	// spawned package-manager process only, never to the agent process.
 	runPkg := func(argv ...string) (int, string, error) {
 		return retryWhileLocked(ctx, func() (int, string, error) {
-			return h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
+			return h.Executor.Exec(ctx, argv, "root", "root", packageEnv(packageProxy), 0)
 		})
 	}
 	var installArgv []string
@@ -293,7 +293,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 			alpamonRepoRefreshed = true
 		}
 		code, out, rerr := retryWhileLocked(ctx, func() (int, string, error) {
-			return h.Executor.Exec(ctx, refresh, "root", "root", packageProxyEnv(packageProxy), 0)
+			return h.Executor.Exec(ctx, refresh, "root", "root", packageEnv(packageProxy), 0)
 		})
 		if code != 0 {
 			return code, withZypperHint(code, out), rerr
@@ -640,7 +640,7 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	// A system-wide update covers every repo by definition, so a skipped repo
 	// means part of the update did not happen: 106 stays a failure here.
 	exitCode, output, err := retryWhileLocked(ctx, func() (int, string, error) {
-		return h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
+		return h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageEnv(""), 0)
 	})
 	exitCode, err = normalizeZypperExit(exitCode, err, false)
 	return exitCode, withZypperHint(exitCode, output), err
@@ -801,7 +801,7 @@ func lockedOut(exitCode int, output string) bool {
 	case utils.PkgZypper:
 		return exitCode == zypperLockedExit
 	case utils.PkgApt:
-		return exitCode == aptFailedExit && strings.Contains(output, "Could not get lock")
+		return exitCode == aptFailedExit && strings.Contains(output, "E: Could not get lock")
 	}
 	return false
 }
@@ -851,11 +851,11 @@ func normalizeZypperExit(exitCode int, err error, alpamonRepoRefreshed bool) (in
 	return exitCode, err
 }
 
-// packageProxyEnv builds the proxy environment for the package manager process in closed network
-// setups; nil means no proxy. no_proxy excludes the Alpacon host, the IMDS endpoints, and localhost.
-func packageProxyEnv(proxyURL string) map[string]string {
+// packageEnv is the package manager's environment. LC_ALL=C keeps the lock message lockedOut matches in English over an
+// /etc/environment locale; an empty proxyURL adds no proxy. no_proxy excludes the Alpacon host, IMDS, and localhost.
+func packageEnv(proxyURL string) map[string]string {
 	if proxyURL == "" {
-		return nil
+		return map[string]string{"LC_ALL": "C"}
 	}
 
 	noProxy := "localhost,127.0.0.1,::1,169.254.169.254,fd00:ec2::254,metadata.google.internal"
@@ -864,6 +864,7 @@ func packageProxyEnv(proxyURL string) map[string]string {
 	}
 
 	return map[string]string{
+		"LC_ALL":      "C",
 		"http_proxy":  proxyURL,
 		"https_proxy": proxyURL,
 		"HTTP_PROXY":  proxyURL,

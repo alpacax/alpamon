@@ -639,7 +639,7 @@ func TestSystemHandler_Upgrade_NoPackageProxy(t *testing.T) {
 
 	install := findExecutedAptInstall(mockExec)
 	require.NotNil(t, install, "an apt-get install must be spawned")
-	assert.Empty(t, install.Env, "no env override without package_proxy")
+	assert.Equal(t, map[string]string{"LC_ALL": "C"}, install.Env, "no proxy variables without package_proxy")
 }
 
 // TestSystemHandler_Upgrade_InvalidPackageProxy verifies that an invalid
@@ -674,7 +674,7 @@ func TestSystemHandler_Upgrade_InvalidPackageProxy(t *testing.T) {
 
 			install := findExecutedAptInstall(mockExec)
 			require.NotNil(t, install, "an apt-get install must be spawned")
-			assert.Empty(t, install.Env, "no env override for invalid proxy %q", proxy)
+			assert.Equal(t, map[string]string{"LC_ALL": "C"}, install.Env, "no proxy variables for invalid proxy %q", proxy)
 		})
 	}
 }
@@ -1423,6 +1423,42 @@ func TestSystemHandler_Upgrade_AptUpdateFailureStopsTheUpgradeAndNamesTheStep(t 
 	}
 }
 
+// Fails the first apt-get update on the lists lock, which DPkg::Lock::Timeout does not wait for.
+type listsLockedOnceExecutor struct {
+	*common.MockCommandExecutor
+	updates int
+	envs    []map[string]string
+}
+
+func (e *listsLockedOnceExecutor) Exec(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
+	if len(args) > 1 && args[0] == "apt-get" && args[1] == "update" {
+		e.updates++
+		e.envs = append(e.envs, env)
+		if e.updates == 1 {
+			return 100, "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 391 (apt-get)", errors.New("exit status 100")
+		}
+	}
+	return e.MockCommandExecutor.Exec(ctx, args, username, groupname, env, timeout)
+}
+
+func TestSystemHandler_Upgrade_AptUpdateRetriesTheListsLock(t *testing.T) {
+	orig := lockRetryDelay
+	lockRetryDelay = 0
+	t.Cleanup(func() { lockRetryDelay = orig })
+	h := newPinnedHarness(t, utils.PkgApt)
+	exec := &listsLockedOnceExecutor{MockCommandExecutor: h.exec}
+	h.handler.Executor = exec
+
+	exitCode, output, err := h.handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode, output)
+	assert.Equal(t, 2, exec.updates, "the update must run again once the lists lock clears")
+	for _, env := range exec.envs {
+		assert.Equal(t, "C", env["LC_ALL"], "a translated lock message would not be recognized")
+	}
+}
+
 func TestSystemHandler_Upgrade_AptInstallFailureNamesTheStep(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -1604,9 +1640,6 @@ func TestSystemHandler_SystemUpdate_ZypperDupOnlyOnTumbleweed(t *testing.T) {
 	}
 }
 
-// Asserts against every captured command: the uninstall is scheduled through
-// systemd-run where systemd exists and a deferred subshell where it does not, so
-// the zypper string lands in different argv positions per host.
 // The purge runs detached under systemd-run, so a held dpkg lock would fail it with nobody watching.
 func TestSystemHandler_Uninstall_AptWaitsForDpkgLock(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
@@ -1630,6 +1663,9 @@ func TestSystemHandler_Uninstall_AptWaitsForDpkgLock(t *testing.T) {
 	assert.Contains(t, purge, "apt-get autoremove -y -o DPkg::Lock::Timeout=")
 }
 
+// Asserts against every captured command: the uninstall is scheduled through
+// systemd-run where systemd exists and a deferred subshell where it does not, so
+// the zypper string lands in different argv positions per host.
 func TestSystemHandler_Uninstall_UsesZypper(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -1714,6 +1750,8 @@ func TestRetryWhileLocked(t *testing.T) {
 		{"apt lists lock is retried", utils.PkgApt, 100, aptListsLock, 1, 2, 0},
 		{"apt that already waited out its lock timeout is not retried", utils.PkgApt, 100, aptWaitedOut, 99, 1, 100},
 		{"apt failure without a lock is not retried", utils.PkgApt, 100, "E: Unable to locate package alpamon", 99, 1, 100},
+		{"a maintainer script echoing the lock text is not retried", utils.PkgApt, 100,
+			"postinst: Could not get lock /run/foo.lock\nE: Sub-process /usr/bin/dpkg returned an error code (1)", 99, 1, 100},
 	}
 
 	for _, tt := range tests {

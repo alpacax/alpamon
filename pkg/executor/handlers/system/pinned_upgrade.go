@@ -140,7 +140,7 @@ const packageScriptRestartDelay = 70 * time.Second
 // against the package database afterward, rolling back with a pinned reinstall on failure.
 func (h *SystemHandler) pinnedPackageUpgrade(ctx context.Context, report updater.Report, packageProxy string, grace time.Duration) (int, string, error) {
 	target := report.ToVersion
-	env := packageProxyEnv(packageProxy)
+	env := packageEnv(packageProxy)
 
 	previous := h.installedAlpamonVersion(ctx)
 	if !updater.PackageVersionRe.MatchString(previous) {
