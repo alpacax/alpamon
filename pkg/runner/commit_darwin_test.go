@@ -225,10 +225,3 @@ func TestGetGroupData_WarnsWhenDsclFails(t *testing.T) {
 	assert.Contains(t, logs.String(), `"level":"warn"`)
 	assert.Contains(t, logs.String(), "groups will not be reported")
 }
-
-func stubCollectCommand(t *testing.T, err error) {
-	t.Helper()
-	previous := runCollectCommand
-	t.Cleanup(func() { runCollectCommand = previous })
-	runCollectCommand = func(string, ...string) ([]byte, error) { return nil, err }
-}

@@ -29,8 +29,8 @@ func getUserData() ([]UserData, error) {
 	out, err := runCollectCommand("powershell", "-NoProfile", "-Command",
 		"Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation")
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to list users via PowerShell.")
-		return []UserData{}, nil
+		log.Warn().Err(err).Msg("Failed to list users via PowerShell; users will not be reported.")
+		return nil, err
 	}
 	return parseGetLocalUserCSV(string(out)), nil
 }
@@ -113,8 +113,8 @@ func getGroupData() ([]GroupData, error) {
 	out, err := runCollectCommand("powershell", "-NoProfile", "-Command",
 		"Get-LocalGroup | Select-Object Name,SID | ConvertTo-Csv -NoTypeInformation")
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to list groups via PowerShell.")
-		return []GroupData{}, nil
+		log.Warn().Err(err).Msg("Failed to list groups via PowerShell; groups will not be reported.")
+		return nil, err
 	}
 
 	var groups []GroupData

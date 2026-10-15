@@ -1,9 +1,11 @@
 package runner
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestParseGetLocalUserCSV exercises the predicate that decides whether a
@@ -184,4 +186,34 @@ func TestParseGetLocalUserCSV(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestGetUserData_ReturnsTheErrorWhenPowerShellFails(t *testing.T) {
+	// Given
+	logs := captureLogs(t)
+	stubCollectCommand(t, errors.New("powershell timed out after 30s"))
+
+	// When
+	users, err := getUserData()
+
+	// Then
+	require.Error(t, err)
+	assert.Nil(t, users)
+	assert.Contains(t, logs.String(), `"level":"warn"`)
+	assert.Contains(t, logs.String(), "users will not be reported")
+}
+
+func TestGetGroupData_ReturnsTheErrorWhenPowerShellFails(t *testing.T) {
+	// Given
+	logs := captureLogs(t)
+	stubCollectCommand(t, errors.New("powershell timed out after 30s"))
+
+	// When
+	groups, err := getGroupData()
+
+	// Then
+	require.Error(t, err)
+	assert.Nil(t, groups)
+	assert.Contains(t, logs.String(), `"level":"warn"`)
+	assert.Contains(t, logs.String(), "groups will not be reported")
 }
