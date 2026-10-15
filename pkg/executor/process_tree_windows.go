@@ -89,7 +89,7 @@ func (c *commandCleanup) attachAndResume(pid uint32) (canceled bool, err error) 
 	// The only open by PID on this path, and safe: Start has returned and Wait has not, so Go's own
 	// handle to the root keeps this PID from being reused. Never open a PID that nothing we hold pins.
 	handle, err := windows.OpenProcess(
-		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION,
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, // what AssignProcessToJobObject and TerminateProcess need
 		false, // bInheritHandles: this cleanup handle must not leak into child processes
 		pid,
 	)

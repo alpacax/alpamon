@@ -242,6 +242,11 @@ The service starts as `LocalSystem`; see [Permissions and
 identity](#permissions-and-identity) for what that means for commands
 sent from Alpacon.
 
+Each command runs in a job object that is killed when the agent's
+handle to it closes, so commands still running end when the agent
+process exits, and a command that stops, restarts or reinstalls the
+`alpamon` service ends with it.
+
 ### Permissions and identity
 
 Alpamon cannot yet demote privileges on Windows (see [unsupported

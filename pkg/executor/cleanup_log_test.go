@@ -31,18 +31,24 @@ func (b *lockedBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
+// cleanupLogLine is one process-tree cleanup line: decoded, and as written.
+type cleanupLogLine struct {
+	fields map[string]any
+	raw    string
+}
+
 // captureCleanupLog points the global logger at a buffer for the test and returns a reader of the
-// process-tree cleanup lines written so far, decoded.
-func captureCleanupLog(t *testing.T) func() []map[string]any {
+// process-tree cleanup lines written so far.
+func captureCleanupLog(t *testing.T) func() []cleanupLogLine {
 	t.Helper()
 	sink := &lockedBuffer{}
 	orig := log.Logger
 	log.Logger = zerolog.New(sink).Level(zerolog.DebugLevel)
 	t.Cleanup(func() { log.Logger = orig })
-	return func() []map[string]any {
+	return func() []cleanupLogLine {
 		sink.mu.Lock()
 		defer sink.mu.Unlock()
-		var lines []map[string]any
+		var lines []cleanupLogLine
 		for _, raw := range strings.Split(strings.TrimSpace(sink.buf.String()), "\n") {
 			if raw == "" {
 				continue
@@ -50,7 +56,7 @@ func captureCleanupLog(t *testing.T) func() []map[string]any {
 			var line map[string]any
 			require.NoError(t, json.Unmarshal([]byte(raw), &line), "log line %q", raw)
 			if line["message"] == "Cleaned up the command's process tree." {
-				lines = append(lines, line)
+				lines = append(lines, cleanupLogLine{fields: line, raw: raw})
 			}
 		}
 		return lines
@@ -79,7 +85,7 @@ func TestLogProcessTreeCleanup_LevelFollowsWhatWasKilled(t *testing.T) {
 
 			lines := read()
 			require.Len(t, lines, 1)
-			line := lines[0]
+			line := lines[0].fields
 			assert.Equal(t, tc.wantLevel, line["level"])
 			assert.Equal(t, "cmd-1", line["command_id"])
 			assert.Equal(t, tc.reason, line["reason"])
@@ -95,16 +101,18 @@ func TestLogProcessTreeCleanup_LevelFollowsWhatWasKilled(t *testing.T) {
 		logProcessTreeCleanup("", &exec.Cmd{}, cleanupReasonExit, cleanupOutcome{}, errors.New("boom"))
 		lines := read()
 		require.Len(t, lines, 1)
-		assert.Equal(t, "boom", lines[0]["error"])
+		assert.Equal(t, "boom", lines[0].fields["error"])
 	})
 }
 
-// A timed-out command gets one Info line naming its command ID and the reason, and the line carries no
-// argument of the command.
+// A timed-out command gets one Info line naming its command ID and the reason, and no cleanup line
+// carries an argument of the command.
 func TestExecutor_TimeoutLogsOneCleanupLineWithCommandID(t *testing.T) {
-	args := []string{"sleep", "10"}
+	const sentinel = "cleanup-log-sentinel-3f9a1c"
+	// The sentinel is $0 of the shell, or a cmd.exe remark: on the command line, inert when it runs.
+	args := []string{"/bin/sh", "-c", "sleep 10", sentinel}
 	if runtime.GOOS == "windows" {
-		args = []string{"ping", "-n", "10", "127.0.0.1"}
+		args = []string{"cmd", "/c", "ping", "-n", "10", "127.0.0.1", "&", "rem", sentinel}
 	}
 	read := captureCleanupLog(t)
 
@@ -118,12 +126,10 @@ func TestExecutor_TimeoutLogsOneCleanupLineWithCommandID(t *testing.T) {
 
 	var timeouts []map[string]any
 	for _, line := range read() {
-		assert.Equal(t, "cmd-timeout", line["command_id"])
-		for _, v := range line {
-			assert.NotEqual(t, args[len(args)-1], v, "a command argument reached the cleanup log")
-		}
-		if line["reason"] == cleanupReasonTimeout {
-			timeouts = append(timeouts, line)
+		assert.Equal(t, "cmd-timeout", line.fields["command_id"])
+		assert.NotContains(t, line.raw, sentinel, "a command argument reached the cleanup log")
+		if line.fields["reason"] == cleanupReasonTimeout {
+			timeouts = append(timeouts, line.fields)
 		}
 	}
 	require.Len(t, timeouts, 1, "want exactly one timeout cleanup line")

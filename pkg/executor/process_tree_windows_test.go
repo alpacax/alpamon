@@ -281,7 +281,8 @@ func TestExecutor_SetupFailureFailsCommandWithoutRunningIt(t *testing.T) {
 // cancel racing ahead of afterStart: the raced cancel kills the suspended root through Go's own handle,
 // and afterStart must notice canceled==true and redo the cancel instead of resuming it.
 func TestCommandCleanup_AfterStartReCancelsWhenAlreadyCanceled(t *testing.T) {
-	cmd := exec.Command("ping", "-n", "60", "127.0.0.1")
+	marker := filepath.Join(t.TempDir(), "ran")
+	cmd := exec.Command("cmd", "/c", "mkdir", marker)
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	require.NoError(t, err, "configureProcessTreeCleanup")
 	defer func() { _ = cleanup.close() }()
@@ -298,6 +299,8 @@ func TestCommandCleanup_AfterStartReCancelsWhenAlreadyCanceled(t *testing.T) {
 	assert.False(t, cleanup.assigned, "a canceled root must not be assigned and resumed")
 	waitForCmd(t, cmd)
 	waitForWindowsPidGone(t, pid, "after afterStart re-cancel")
+	_, err = os.Stat(marker)
+	assert.ErrorIs(t, err, os.ErrNotExist, "the canceled root ran")
 }
 
 // Black-box counterpart to the Unix test: cmd.exe runs ping, which inherits and holds stdout open.
