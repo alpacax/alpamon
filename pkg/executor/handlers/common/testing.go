@@ -114,7 +114,7 @@ func (m *MockCommandExecutor) ExecWithHook(ctx context.Context, args []string, u
 }
 
 // ExecWithStreamingHook mirrors ExecWithHook and emits the full output as one chunk.
-func (m *MockCommandExecutor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+func (m *MockCommandExecutor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, _ string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	if pidHook != nil {
 		pid := int(mockSyntheticPIDBase + mockSyntheticPID.Add(1))
 		pidHook(pid)
@@ -137,7 +137,7 @@ func emitMockChunk(ctx context.Context, timeout time.Duration, chunkCallback fun
 // ExecFileWithStreamingHook mirrors ExecWithStreamingHook and additionally
 // records the inherited descriptor, so tests can assert that the object handed
 // to the child is the one the verifier opened.
-func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, _ string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	if len(args) == 0 {
 		return 0, "", nil
 	}

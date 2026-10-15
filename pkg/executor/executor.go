@@ -289,7 +289,7 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 
 	// Execute command
 	start := time.Now()
-	output, err := e.runCommand(cmd, opts.PIDHook, cw)
+	output, err := e.runCommand(ctx, cmd, opts.CommandID, opts.PIDHook, cw)
 	exitCode := 0
 	result := string(output)
 	if err != nil {
@@ -318,8 +318,9 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	return exitCode, result, err
 }
 
-// runCommand uses Start/Wait so platform cleanup can attach process groups or jobs.
-func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
+// runCommand uses Start/Wait so platform cleanup can attach process groups or jobs. ctx is the one
+// cmd was built with; its error names why the Cancel hook fired.
+func (e *Executor) runCommand(ctx context.Context, cmd *exec.Cmd, commandID string, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
 	cleanup, err := configureProcessTreeCleanup(cmd, pidHook != nil)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to configure process tree cleanup")
@@ -330,7 +331,12 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 	}
 	cmd.WaitDelay = commandWaitDelay
 	cmd.Cancel = func() error {
-		_, err := cleanup.cancel(cmd)
+		reason := cleanupReasonShutdown
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			reason = cleanupReasonTimeout
+		}
+		outcome, err := cleanup.cancel(cmd)
+		logProcessTreeCleanup(commandID, cmd, reason, outcome, err)
 		return err
 	}
 
@@ -359,16 +365,28 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 		return finish(err)
 	}
 	// Kill the whole tree on every exit path: a non-zero exit that leaves a descendant holding the pipe
-	// fires neither Cancel (timeout-only) nor the ErrWaitDelay branch, so it would otherwise leak. cancel is idempotent.
-	defer func() {
-		if _, err := cleanup.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			log.Debug().Err(err).Msg("Failed to clean up command process tree")
+	// fires neither Cancel (timeout-only) nor the ErrWaitDelay branch, so it would otherwise leak. This
+	// also kills background work a command meant to outlive it (`nohup ... &`, Start-Process). Runs once.
+	var waitErr error
+	exitCleanupDone := false
+	exitCleanup := func() {
+		if exitCleanupDone {
+			return
 		}
-	}()
+		exitCleanupDone = true
+		reason := cleanupReasonExit
+		if errors.Is(waitErr, exec.ErrWaitDelay) {
+			reason = cleanupReasonWaitDelay
+		}
+		outcome, err := cleanup.cancel(cmd)
+		logProcessTreeCleanup(commandID, cmd, reason, outcome, err)
+	}
+	defer exitCleanup()
 	if err := cleanup.afterStart(cmd); err != nil {
-		// Kill before Wait: on Windows a root whose setup failed is still suspended and would never exit on
-		// its own. The deferred cancel then re-runs harmlessly (idempotent).
-		_, _ = cleanup.cancel(cmd)
+		log.Warn().Err(err).Str("command_id", commandID).Int("pid", cmd.Process.Pid).
+			Msg("Failed to confine the command's process tree; failing the command.")
+		// Kill before Wait: on Windows a root whose setup failed is still suspended and would never exit on its own.
+		exitCleanup()
 		_ = cmd.Wait()
 		return finish(err)
 	}
@@ -378,8 +396,40 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 	if cmd.Process != nil {
 		invokePIDHook(pidHook, cmd.Process.Pid)
 	}
-	err = cmd.Wait()
-	return finish(err)
+	waitErr = cmd.Wait()
+	return finish(waitErr)
+}
+
+// Why a cancel ran, as logged.
+const (
+	cleanupReasonTimeout   = "timeout"      // the command's deadline passed
+	cleanupReasonShutdown  = "shutdown"     // the command's context was canceled
+	cleanupReasonWaitDelay = "wait-delay"   // the command exited but a descendant held its output open
+	cleanupReasonExit      = "exit-cleanup" // the routine kill after every exit
+)
+
+// logProcessTreeCleanup writes the one line each cancel gets: Info when it terminated something, Debug
+// otherwise. Only identifiers and counts, never the command's arguments, environment or output.
+func logProcessTreeCleanup(commandID string, cmd *exec.Cmd, reason string, outcome cleanupOutcome, err error) {
+	if errors.Is(err, os.ErrProcessDone) {
+		err = nil
+	}
+	event := log.Debug()
+	if reason != cleanupReasonExit || outcome.killedAny() {
+		event = log.Info()
+	}
+	pid := 0
+	if cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+	event.Err(err).
+		Str("command_id", commandID).
+		Int("pid", pid).
+		Str("reason", reason).
+		Bool("assigned", outcome.assigned).
+		Uint32("active", outcome.active).
+		Bool("root_killed", outcome.rootKilled).
+		Msg("Cleaned up the command's process tree.")
 }
 
 func invokePIDHook(pidHook func(pid int), pid int) {
@@ -419,6 +469,10 @@ type CommandOptions struct {
 	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks with
 	// the ctx live at emit time. Sequencing is the caller's responsibility.
 	ChunkCallback func(ctx context.Context, content string)
+
+	// CommandID, when set, is the console command this execution belongs to.
+	// It is used only to correlate the process-tree cleanup log line.
+	CommandID string
 }
 
 // buildEnv constructs the environment for a command. It starts from the
@@ -580,14 +634,16 @@ func (e *Executor) ExecWithHook(ctx context.Context, args []string, username, gr
 	})
 }
 
-// ExecWithStreamingHook combines PIDHook and ChunkCallback. Either may be nil.
-func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+// ExecWithStreamingHook combines PIDHook and ChunkCallback. Either may be nil;
+// commandID may be empty.
+func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	return e.Execute(ctx, CommandOptions{
 		Args:          args,
 		Username:      username,
 		Groupname:     groupname,
 		Env:           env,
 		Timeout:       timeout,
+		CommandID:     commandID,
 		PIDHook:       pidHook,
 		ChunkCallback: chunkCallback,
 	})
@@ -596,7 +652,7 @@ func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, use
 // ExecFileWithStreamingHook is ExecWithStreamingHook for a digest-verified
 // entrypoint: file is inherited by the child and args names it by its
 // descriptor path, so the verified object is the one that runs.
-func (e *Executor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+func (e *Executor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	return e.Execute(ctx, CommandOptions{
 		Args:          args,
 		ExecFile:      file,
@@ -604,6 +660,7 @@ func (e *Executor) ExecFileWithStreamingHook(ctx context.Context, file *os.File,
 		Groupname:     groupname,
 		Env:           env,
 		Timeout:       timeout,
+		CommandID:     commandID,
 		PIDHook:       pidHook,
 		ChunkCallback: chunkCallback,
 	})

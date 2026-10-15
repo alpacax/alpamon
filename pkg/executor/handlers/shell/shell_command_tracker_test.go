@@ -15,12 +15,13 @@ import (
 
 // hookRecordingExecutor wraps a MockCommandExecutor and records whether
 // ExecWithStreamingHook (the shell handler's sole entry point into the
-// executor) received a non-nil pidHook.
+// executor) received a non-nil pidHook, and which command ID it received.
 type hookRecordingExecutor struct {
 	*common.MockCommandExecutor
-	mu       sync.Mutex
-	called   bool
-	hookSeen bool
+	mu        sync.Mutex
+	called    bool
+	hookSeen  bool
+	commandID string
 }
 
 func (r *hookRecordingExecutor) ExecWithStreamingHook(
@@ -29,12 +30,14 @@ func (r *hookRecordingExecutor) ExecWithStreamingHook(
 	username, groupname string,
 	env map[string]string,
 	timeout time.Duration,
+	commandID string,
 	pidHook func(pid int),
 	chunkCallback func(ctx context.Context, content string),
 ) (int, string, error) {
 	r.mu.Lock()
 	r.called = true
 	r.hookSeen = pidHook != nil
+	r.commandID = commandID
 	r.mu.Unlock()
 
 	if pidHook != nil {
@@ -72,6 +75,7 @@ func TestShellHandler_CommandID_RegistersAndUnregistersPID(t *testing.T) {
 	assert.Equal(t, 0, exit, "exit")
 	assert.True(t, rec.called, "ExecWithStreamingHook was not invoked")
 	assert.True(t, rec.hookSeen, "shell handler must pass a non-nil hook when CommandID is set")
+	assert.Equal(t, "cmd-xyz", rec.commandID, "shell handler must pass CommandID to the executor")
 	_, ok := am.LookupPID(424242)
 	assert.False(t, ok, "tracker entry should have been removed after execution")
 }
@@ -95,4 +99,5 @@ func TestShellHandler_NoCommandID_PassesNilHook(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, rec.called, "ExecWithStreamingHook should still be the entry point")
 	assert.False(t, rec.hookSeen, "shell handler must pass a nil hook when CommandID is empty")
+	assert.Empty(t, rec.commandID, "commandID")
 }
