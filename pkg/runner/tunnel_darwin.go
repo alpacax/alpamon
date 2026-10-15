@@ -17,7 +17,7 @@ func ensureTunnelSocketDir() (string, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create tunnel socket directory: %w", err)
 	}
-	if err := secureTunnelSocketDir(dir, uint32(os.Geteuid())); err != nil {
+	if err := secureTunnelSocketDir(dir, -1, -1, uint32(os.Geteuid())); err != nil {
 		return "", err
 	}
 	return dir, nil

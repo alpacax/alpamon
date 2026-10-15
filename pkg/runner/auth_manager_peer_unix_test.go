@@ -1,9 +1,10 @@
-//go:build !windows
+//go:build linux || darwin
 
 package runner
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -70,4 +71,39 @@ func TestHandleSudoRequest_DropsConnectionWhenPeerCheckIsNotConfigured(t *testin
 		require.ErrorIs(t, err, syscall.ECONNRESET) // Linux resets a socket closed with its request still unread.
 	}
 	assert.Empty(t, body, "a request was answered without a peer check")
+}
+
+func assertConnectionDroppedUnanswered(t *testing.T, client net.Conn) {
+	t.Helper()
+	body, err := io.ReadAll(client)
+	if err != nil {
+		require.ErrorIs(t, err, syscall.ECONNRESET) // Linux resets a socket closed with its request still unread.
+	}
+	assert.Empty(t, body, "a refused peer was answered")
+}
+
+func TestHandleSudoRequest_DropsConnectionFromPeerThatIsNeitherRootNorAgentUser(t *testing.T) {
+	am := newTestAuthManager()
+	am.peerCreds = func(net.Conn) (peerCred, error) {
+		return peerCred{uid: os.Geteuid() + 1}, nil
+	}
+	client, server := dialAuthSocket(t)
+	sendCheckUser(t, client, os.Getpid())
+
+	am.handleSudoRequest(server)
+
+	assertConnectionDroppedUnanswered(t, client)
+}
+
+func TestHandleSudoRequest_DropsConnectionWhenPeerCredentialsCannotBeRead(t *testing.T) {
+	am := newTestAuthManager()
+	am.peerCreds = func(net.Conn) (peerCred, error) {
+		return peerCred{}, errors.New("no credentials")
+	}
+	client, server := dialAuthSocket(t)
+	sendCheckUser(t, client, os.Getpid())
+
+	am.handleSudoRequest(server)
+
+	assertConnectionDroppedUnanswered(t, client)
 }

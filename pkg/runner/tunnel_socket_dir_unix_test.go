@@ -5,6 +5,7 @@ package runner
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,7 +22,7 @@ func TestSecureTunnelSocketDir_TightensAPreMadeOpenDirectory(t *testing.T) {
 	d := filepath.Join(t.TempDir(), "tunnels")
 	makeOpenDir(t, d)
 
-	err := secureTunnelSocketDir(d, uint32(os.Geteuid()))
+	err := secureTunnelSocketDir(d, -1, -1, uint32(os.Geteuid()))
 
 	require.NoError(t, err)
 	fi, err := os.Stat(d)
@@ -36,7 +37,7 @@ func TestSecureTunnelSocketDir_RefusesSymlink(t *testing.T) {
 	link := filepath.Join(parent, "link")
 	require.NoError(t, os.Symlink(target, link))
 
-	err := secureTunnelSocketDir(link, uint32(os.Geteuid()))
+	err := secureTunnelSocketDir(link, -1, -1, uint32(os.Geteuid()))
 
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "symlink")
@@ -49,7 +50,7 @@ func TestSecureTunnelSocketDir_RefusesRegularFile(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "file")
 	require.NoError(t, os.WriteFile(f, nil, 0600))
 
-	err := secureTunnelSocketDir(f, uint32(os.Geteuid()))
+	err := secureTunnelSocketDir(f, -1, -1, uint32(os.Geteuid()))
 
 	assert.ErrorContains(t, err, "not a directory")
 }
@@ -58,10 +59,69 @@ func TestSecureTunnelSocketDir_RefusesDirectoryOwnedBySomeoneElse(t *testing.T) 
 	d := filepath.Join(t.TempDir(), "tunnels")
 	makeOpenDir(t, d)
 
-	err := secureTunnelSocketDir(d, uint32(os.Geteuid())+1)
+	err := secureTunnelSocketDir(d, -1, -1, uint32(os.Geteuid())+1)
 
 	require.Error(t, err)
 	fi, statErr := os.Stat(d)
 	require.NoError(t, statErr)
 	assert.Equal(t, os.FileMode(0777), fi.Mode().Perm())
+}
+
+func TestTunnelSocketDirPolicy(t *testing.T) {
+	cases := []struct {
+		name      string
+		isRoot    bool
+		euid      uint32
+		wantOwner []uint32
+		wantUID   int
+		wantGID   int
+	}{
+		{"root allows root and nobody and chowns to nobody", true, 0, []uint32{0, 65534}, 65534, 65533},
+		{"non-root allows only itself and never chowns", false, 1000, []uint32{1000}, -1, -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			allowed, uid, gid := tunnelSocketDirPolicy(tc.isRoot, tc.euid, 65534, 65533)
+
+			assert.Equal(t, tc.wantOwner, allowed)
+			assert.Equal(t, tc.wantUID, uid)
+			assert.Equal(t, tc.wantGID, gid)
+		})
+	}
+}
+
+func dirOwner(t *testing.T, path string) uint32 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	require.NoError(t, err)
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	return st.Uid
+}
+
+func TestSecureTunnelSocketDir_ChownsToRequestedOwnerWhenRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chown to another uid needs root")
+	}
+	d := filepath.Join(t.TempDir(), "tunnels")
+	makeOpenDir(t, d)
+
+	err := secureTunnelSocketDir(d, 65534, 65534, 0)
+
+	require.NoError(t, err)
+	assert.Equal(t, uint32(65534), dirOwner(t, d))
+}
+
+func TestSecureTunnelSocketDir_RefusesForeignDirWithoutChowningIt(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chown to another uid needs root")
+	}
+	d := filepath.Join(t.TempDir(), "tunnels")
+	makeOpenDir(t, d)
+	require.NoError(t, os.Chown(d, 65534, 65534))
+
+	err := secureTunnelSocketDir(d, 0, 0, 0)
+
+	require.Error(t, err)
+	assert.Equal(t, uint32(65534), dirOwner(t, d))
 }

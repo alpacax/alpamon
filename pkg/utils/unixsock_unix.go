@@ -40,6 +40,7 @@ func ListenUnixPrivate(path string) (net.Listener, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		_ = ln.Close()
+		_ = os.Remove(path)
 		return nil, fmt.Errorf("failed to stat published socket %s: %w", path, err)
 	}
 	return &privateListener{UnixListener: ln, path: path, info: fi}, nil
@@ -77,23 +78,4 @@ func (l *privateListener) Close() error {
 		}
 	})
 	return err
-}
-
-// RemoveSocket deletes the Unix socket at path; a missing path is not an error.
-// A symlink or non-socket file is refused so a planted link cannot redirect the delete.
-func RemoveSocket(path string) error {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to stat socket %s: %w", path, err)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to remove symlink at %s", path)
-	}
-	if fi.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("refusing to remove non-socket file at %s", path)
-	}
-	return os.Remove(path)
 }

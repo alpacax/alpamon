@@ -213,11 +213,3 @@ func TestMoveSocketIntoPlace_KeepsAnotherListenerThatAppearedAfterTheCheck(t *te
 	require.NoError(t, err, "the other listener no longer owns the path")
 	_ = accepted.Close()
 }
-
-func TestRemoveSocket_MissingPathIsNotAnError(t *testing.T) {
-	path := filepath.Join(shortSocketDir(t), "absent.sock")
-
-	err := RemoveSocket(path)
-
-	assert.NoError(t, err)
-}
