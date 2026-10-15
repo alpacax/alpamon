@@ -40,24 +40,10 @@ func NewLogServer(workerPool *pool.Pool, ctxManager *agent.ContextManager) *LogS
 		log.Error().Err(err).Msgf("Log server startup failed: cannot create run directory %s.", filepath.Dir(path))
 		return nil
 	}
-	// Remove stale socket from a previous run.
-	_ = os.Remove(path)
-
-	listener, err := net.Listen("unix", path)
+	listener, err := utils.ListenUnixPrivate(path)
 	if err != nil {
 		log.Error().Err(err).Msgf("Log server startup failed: cannot bind to %s.", path)
 		return nil
-	}
-
-	// Restrict socket to root only, independent of process umask.
-	// Matches the pattern used in pkg/runner/auth_manager.go.
-	if err := os.Chmod(path, 0600); err != nil {
-		log.Warn().Err(err).Msg("Failed to set log socket permissions.")
-	}
-	if os.Getuid() == 0 {
-		if err := os.Chown(path, 0, 0); err != nil {
-			log.Warn().Err(err).Msg("Failed to set log socket ownership.")
-		}
 	}
 
 	return &LogServer{
@@ -149,5 +135,4 @@ func (ls *LogServer) handleRecord(record LogRecord) {
 func (ls *LogServer) Stop() {
 	close(ls.shutDownChan)
 	_ = ls.listener.Close()
-	_ = os.Remove(ls.path)
 }

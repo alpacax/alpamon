@@ -2,8 +2,12 @@
 
 package runner
 
-import "net"
+import (
+	"net"
+
+	"github.com/alpacax/alpamon/v2/pkg/utils"
+)
 
 func listenAuthSocket(path string) (net.Listener, error) {
-	return net.Listen("unix", path)
+	return utils.ListenUnixPrivate(path)
 }

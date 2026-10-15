@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/tunnel"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
@@ -39,27 +40,6 @@ func validateTargetAddr(targetAddr string) bool {
 	}
 	addr, err := netip.ParseAddr(host)
 	return err == nil && addr.IsLoopback()
-}
-
-// safeRemoveSocket removes a Unix domain socket file after verifying it is not a symlink.
-// This prevents symlink attacks where an attacker replaces the socket with a symlink to an arbitrary file.
-func safeRemoveSocket(path string) error {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to stat socket %s: %w", path, err)
-	}
-
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to remove symlink at %s", path)
-	}
-	if fi.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("refusing to remove non-socket file at %s", path)
-	}
-
-	return os.Remove(path)
 }
 
 // dialDirect dials targetAddr over TCP with relay tuning applied, rejecting
@@ -89,20 +69,9 @@ func dialDirect(targetAddr string) (net.Conn, error) {
 // parent demotes it to nobody on Linux; on macOS it inherits the parent's
 // credentials.
 func RunTunnelDaemon(socketPath string) {
-	// Remove stale socket file if it exists (safe against symlink attacks)
-	if err := safeRemoveSocket(socketPath); err != nil {
-		log.Warn().Err(err).Msgf("Failed to remove stale socket %s.", socketPath)
-	}
-
-	listener, err := net.Listen("unix", socketPath)
+	listener, err := utils.ListenUnixPrivate(socketPath)
 	if err != nil {
 		log.Error().Err(err).Msgf("Failed to listen on socket %s.", socketPath)
-		os.Exit(1)
-	}
-
-	if err := os.Chmod(socketPath, 0600); err != nil {
-		_ = listener.Close()
-		log.Error().Err(err).Msgf("Failed to set socket permissions for %s.", socketPath)
 		os.Exit(1)
 	}
 
@@ -145,7 +114,7 @@ func RunTunnelDaemon(socketPath string) {
 		log.Warn().Msg("Tunnel daemon shutdown timed out, forcing exit.")
 	}
 
-	_ = safeRemoveSocket(socketPath)
+	_ = listener.Close()
 	log.Info().Msg("Tunnel daemon stopped.")
 }
 
