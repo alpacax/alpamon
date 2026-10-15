@@ -100,7 +100,7 @@ func readDirNames(fd int, path string) ([]string, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	f := os.NewFile(uintptr(lfd), path)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	names, err := f.Readdirnames(-1)
 	if err != nil {

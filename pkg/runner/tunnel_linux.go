@@ -63,20 +63,21 @@ func ensureTunnelSocketDir() (string, error) {
 		return "", fmt.Errorf("failed to create tunnel socket directory: %w", err)
 	}
 
-	var nobodyUID, nobodyGID uint32
+	var nobodyUID, nobodyGID int
 	isRoot := os.Getuid() == 0
 	if isRoot {
 		usr, err := user.Lookup("nobody")
 		if err != nil {
 			return "", fmt.Errorf("failed to lookup nobody user for socket dir: %w", err)
 		}
-		nobodyUID, nobodyGID, err = parseUserCredentials(usr.Uid, usr.Gid)
+		uid, gid, err := parseUserCredentials(usr.Uid, usr.Gid)
 		if err != nil {
 			return "", fmt.Errorf("failed to parse nobody credentials for socket dir: %w", err)
 		}
-		if nobodyUID > math.MaxInt32 || nobodyGID > math.MaxInt32 {
-			return "", fmt.Errorf("nobody uid/gid exceeds int32 range: uid=%d, gid=%d", nobodyUID, nobodyGID)
+		if uid > math.MaxInt32 || gid > math.MaxInt32 {
+			return "", fmt.Errorf("nobody uid/gid exceeds int32 range: uid=%d, gid=%d", uid, gid)
 		}
+		nobodyUID, nobodyGID = int(uid), int(gid)
 	}
 
 	allowed, chownUID, chownGID := tunnelSocketDirPolicy(isRoot, uint32(os.Geteuid()), nobodyUID, nobodyGID)

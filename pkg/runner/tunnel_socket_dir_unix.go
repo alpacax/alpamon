@@ -13,9 +13,9 @@ import (
 
 // tunnelSocketDirPolicy returns the owners a pre-existing tunnel socket dir may have
 // and the owner to give it; chownUID is -1 when the dir keeps its owner.
-func tunnelSocketDirPolicy(isRoot bool, euid, nobodyUID, nobodyGID uint32) (allowed []uint32, chownUID, chownGID int) {
+func tunnelSocketDirPolicy(isRoot bool, euid uint32, nobodyUID, nobodyGID int) (allowed []uint32, chownUID, chownGID int) {
 	if isRoot {
-		return []uint32{0, nobodyUID}, int(nobodyUID), int(nobodyGID)
+		return []uint32{0, uint32(nobodyUID)}, nobodyUID, nobodyGID
 	}
 	return []uint32{euid}, -1, -1
 }
