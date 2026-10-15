@@ -103,7 +103,7 @@ func (c *Check) saveHourlyMemoryUsage(data base.CheckResult, ctx context.Context
 		return err
 	}
 
-	// Same transaction as the insert: a retry after a failed prune would aggregate these rows into a second hourly row.
+	// Prune in the insert's transaction: if the insert committed and the prune failed, the retry would store a second hourly row.
 	err = deleteMemory(ctx, tx.Memory)
 	if err != nil {
 		return err

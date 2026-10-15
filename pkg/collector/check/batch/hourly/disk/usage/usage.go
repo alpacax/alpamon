@@ -157,7 +157,7 @@ func (c *Check) saveHourlyDiskUsage(data []base.CheckResult, ctx context.Context
 		return err
 	}
 
-	// Same transaction as the insert: a retry after a failed prune would aggregate these rows into a second hourly row.
+	// Prune in the insert's transaction: if the insert committed and the prune failed, the retry would store a second hourly row.
 	err = deleteDiskUsage(ctx, tx.DiskUsage)
 	if err != nil {
 		return err
