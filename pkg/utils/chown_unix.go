@@ -13,8 +13,8 @@ import (
 
 const openDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
-// ChownRecursive changes the owner of path and everything under it. It never
-// follows a symlink: links inside the tree are skipped, and a symlink path is left alone.
+// ChownRecursive changes the owner of path and everything under it. Symlinks inside the
+// tree and at path itself are left alone; path's parent directories resolve as usual.
 func ChownRecursive(path string, uid, gid int) error {
 	if path == "" {
 		return fmt.Errorf("path must not be empty")
