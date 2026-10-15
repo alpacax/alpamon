@@ -44,7 +44,7 @@ const (
 	zypperLockedExit = 7
 )
 
-// apt-get exits 100 on any error, a held lock included; lockedOut tells the lock apart by its message.
+// apt-get exits 100 on any error, a held lock included.
 const aptFailedExit = 100
 
 const lockRetryAttempts = 3
@@ -794,7 +794,7 @@ func retryWhileLocked(ctx context.Context, run func() (int, string, error)) (int
 	}
 }
 
-// lockedOut reports a run that lost a package manager lock to another process. apt 1.9.11+ prints "Could not get lock"
+// lockedOut reports a run that lost a package manager lock to another process. apt 1.9.11+ prints "E: Could not get lock"
 // only for a lock DPkg::Lock::Timeout does not wait on (lists, archives), so a lock it already waited for is not retried.
 func lockedOut(exitCode int, output string) bool {
 	switch utils.PackageManager {
