@@ -206,6 +206,7 @@ func runAgent(ready chan<- struct{}) {
 			CommitFunc: runner.CommitSystemInfo,
 			SyncFunc:   runner.SyncSystemInfo,
 		},
+		authManager,
 	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize dispatcher system")

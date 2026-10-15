@@ -398,9 +398,9 @@ func TestHandleSudoRequest_ClosesConnectionOnEveryPath(t *testing.T) {
 		{name: "malformed JSON", payload: "{"},
 		{name: "missing type", payload: `{"username":"alice"}`},
 		{name: "unknown type", payload: `{"type":"nope"}`},
-		{name: "check_user with a malformed body", payload: `{"type":"check_user","pid":"not-an-int"}`, wantResponse: true},
+		{name: "check_user with a malformed body", payload: `{"type":"check_user","ppid":"not-an-int"}`, wantResponse: true},
 		{name: "check_user with no session", payload: `{"type":"check_user","username":"alice","pid":4242,"ppid":1}`, wantResponse: true},
-		{name: "sudo_approval with a malformed body", payload: `{"type":"sudo_approval","pid":"not-an-int"}`, wantResponse: true},
+		{name: "sudo_approval with a malformed body", payload: `{"type":"sudo_approval","ppid":"not-an-int"}`, wantResponse: true},
 		{name: "session_event with no username", payload: `{"type":"session_event","service":"sshd","pid":4242}`, wantResponse: true},
 	}
 

@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
@@ -54,7 +55,7 @@ func (tc *TunnelClient) startTunnelRelay() error {
 	if err := tc.waitForDaemonReady(); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		_ = safeRemoveSocket(tc.daemonSocket)
+		_ = utils.RemoveSocket(tc.daemonSocket)
 		// Cleared so a later stopTunnelRelay is a no-op instead of
 		// re-signaling and re-Waiting the already-reaped process.
 		tc.daemonCmd = nil
@@ -141,6 +142,6 @@ func (tc *TunnelClient) stopTunnelRelay() {
 		log.Warn().Msg("Tunnel daemon killed after timeout.")
 	}
 
-	_ = safeRemoveSocket(tc.daemonSocket)
+	_ = utils.RemoveSocket(tc.daemonSocket)
 	tc.daemonCmd = nil
 }

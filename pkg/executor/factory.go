@@ -53,6 +53,7 @@ func (f *HandlerFactory) RegisterAll(
 	session *scheduler.Session,
 	wsClient common.WSClient,
 	callbacks SystemInfoCallbacks,
+	authManager *runner.AuthManager,
 ) error {
 	// Create group service for dependency injection
 	groupService := services.NewDefaultGroupService(f.cmdExec)
@@ -61,7 +62,7 @@ func (f *HandlerFactory) RegisterAll(
 	infoAdapter := NewSystemInfoAdapter(session, callbacks.CommitFunc, callbacks.SyncFunc)
 
 	// Create terminal manager for PTY session lifecycle
-	terminalManager := runner.NewTerminalManager()
+	terminalManager := runner.NewTerminalManager(authManager)
 
 	// Cross-platform handlers
 	handlers := []common.Handler{

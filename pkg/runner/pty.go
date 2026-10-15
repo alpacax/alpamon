@@ -144,7 +144,7 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 		Requests:  make(map[string]*SudoRequest),
 	}
 
-	authManager.AddPIDSessionMapping(pid, sessionInfo)
+	pc.manager.auth.AddPIDSessionMapping(pid, sessionInfo)
 	log.Debug().Msgf("PID mapping added: %d -> Session: %s", pid, pc.sessionID)
 
 	return nil
@@ -467,7 +467,7 @@ func (pc *PtyClient) close() {
 
 	// Remove PID-to-session mapping before cleaning up
 	if pc.cmd != nil && pc.cmd.Process != nil {
-		authManager.RemovePIDSessionMapping(pc.cmd.Process.Pid)
+		pc.manager.auth.RemovePIDSessionMapping(pc.cmd.Process.Pid)
 	}
 
 	if pc.ptmx != nil {

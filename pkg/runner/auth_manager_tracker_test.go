@@ -2,15 +2,24 @@ package runner
 
 import (
 	"encoding/json"
+	"net"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// The shipped helper already builds exactly what these tests need.
 func newTestAuthManager() *AuthManager {
-	return NewEmptyAuthManager()
+	am := NewEmptyAuthManager()
+	am.peerCreds = trustedTestPeer
+	return am
+}
+
+// trustedTestPeer stands in for the kernel check on net.Pipe connections; pidKnown
+// stays false so payloads without a matching pid still reach their handler.
+func trustedTestPeer(net.Conn) (peerCred, error) {
+	return peerCred{uid: os.Geteuid()}, nil
 }
 
 // TestAddPIDCommandMapping_RegistersCommandKind verifies that Commands

@@ -9,12 +9,15 @@ import (
 type TerminalManager struct {
 	mu        sync.RWMutex
 	terminals map[string]*PtyClient
+	auth      *AuthManager
 }
 
-// NewTerminalManager creates a new TerminalManager.
-func NewTerminalManager() *TerminalManager {
+// NewTerminalManager creates a TerminalManager whose PTY sessions register their
+// shell PIDs with auth, so a sudo inside a Websh session resolves to that session.
+func NewTerminalManager(auth *AuthManager) *TerminalManager {
 	return &TerminalManager{
 		terminals: make(map[string]*PtyClient),
+		auth:      auth,
 	}
 }
 
