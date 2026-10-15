@@ -2,7 +2,6 @@ package runner
 
 import (
 	"encoding/csv"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,8 +26,8 @@ func loadShadowData() map[string]shadowEntry {
 // demotion is not implemented on Windows; see parseGetLocalUserCSV for the
 // trade-off and the Alpacon-RBAC dependency that justifies it.
 func getUserData() ([]UserData, error) {
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation").Output()
+	out, err := runCollectCommand("powershell", "-NoProfile", "-Command",
+		"Get-LocalUser | Select-Object Name,SID,Enabled | ConvertTo-Csv -NoTypeInformation")
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to list users via PowerShell.")
 		return []UserData{}, nil
@@ -111,8 +110,8 @@ func parseGetLocalUserCSV(csvData string) []UserData {
 
 // getGroupData enumerates local groups via PowerShell on Windows.
 func getGroupData() ([]GroupData, error) {
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"Get-LocalGroup | Select-Object Name,SID | ConvertTo-Csv -NoTypeInformation").Output()
+	out, err := runCollectCommand("powershell", "-NoProfile", "-Command",
+		"Get-LocalGroup | Select-Object Name,SID | ConvertTo-Csv -NoTypeInformation")
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to list groups via PowerShell.")
 		return []GroupData{}, nil

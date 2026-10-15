@@ -2,7 +2,6 @@ package runner
 
 import (
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -29,10 +28,10 @@ func loadShadowData() map[string]shadowEntry {
 // All user attributes are fetched via dscl to avoid os/user.Lookup(),
 // which requires CGO on macOS and fails with CGO_ENABLED=0 builds.
 func getUserData() ([]UserData, error) {
-	out, err := exec.Command("dscl", ".", "-readall", "/Users",
-		"RecordName", "UniqueID", "PrimaryGroupID", "NFSHomeDirectory", "UserShell").Output()
+	out, err := runCollectCommand("dscl", ".", "-readall", "/Users",
+		"RecordName", "UniqueID", "PrimaryGroupID", "NFSHomeDirectory", "UserShell")
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to read users via dscl, skipping the users sync.")
+		log.Warn().Err(err).Msg("Failed to read users via dscl; users will not be reported.")
 		return nil, err
 	}
 
@@ -43,7 +42,7 @@ func getUserData() ([]UserData, error) {
 func usersFromDscl(out []byte) ([]UserData, error) {
 	users, err := parseDsclUsers(string(out), loadValidShells())
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to parse dscl user records, skipping the users sync.")
+		log.Warn().Err(err).Msg("Failed to parse dscl user records; users will not be reported.")
 		return nil, err
 	}
 	return users, nil
@@ -54,36 +53,13 @@ func usersFromDscl(out []byte) ([]UserData, error) {
 func parseDsclUsers(out string, validShells []string) ([]UserData, error) {
 	users := []UserData{}
 
-	flush := func(rec map[string]string) {
-		name := rec["RecordName"]
-		uid, err := strconv.Atoi(rec["UniqueID"])
-		if name == "" || err != nil {
-			return
-		}
-		gid, err := strconv.Atoi(rec["PrimaryGroupID"])
-		if err != nil {
-			gid = 0
-		}
-		shell := rec["UserShell"]
-		if shell == "" {
-			shell = utils.DefaultShell()
-		}
-		users = append(users, UserData{
-			Username:    name,
-			UID:         uid,
-			GID:         gid,
-			Directory:   rec["NFSHomeDirectory"],
-			Shell:       shell,
-			ValidShells: validShells,
-		})
-	}
-
 	rec := map[string]string{}
 	pending := "" // attribute whose values follow on indented lines
 	for line := range strings.SplitSeq(out, "\n") {
-		line = strings.TrimRight(line, "\r")
 		if line == "-" {
-			flush(rec)
+			if u, ok := userFromRecord(rec, validShells); ok {
+				users = append(users, u)
+			}
 			clear(rec)
 			pending = ""
 			continue
@@ -110,16 +86,43 @@ func parseDsclUsers(out string, validShells []string) ([]UserData, error) {
 		}
 		rec[attr] = fields[0]
 	}
-	flush(rec)
+	if u, ok := userFromRecord(rec, validShells); ok {
+		users = append(users, u)
+	}
 
 	return users, nil
 }
 
+// userFromRecord maps one dscl record; ok is false when it lacks a name or a numeric UniqueID.
+func userFromRecord(rec map[string]string, validShells []string) (UserData, bool) {
+	name := rec["RecordName"]
+	uid, err := strconv.Atoi(rec["UniqueID"])
+	if name == "" || err != nil {
+		return UserData{}, false
+	}
+	gid, err := strconv.Atoi(rec["PrimaryGroupID"])
+	if err != nil {
+		gid = 0 // Atoi returns the max int on a range error
+	}
+	shell := rec["UserShell"]
+	if shell == "" {
+		shell = utils.DefaultShell()
+	}
+	return UserData{
+		Username:    name,
+		UID:         uid,
+		GID:         gid,
+		Directory:   rec["NFSHomeDirectory"],
+		Shell:       shell,
+		ValidShells: validShells,
+	}, true
+}
+
 // getGroupData enumerates local groups via dscl on macOS.
 func getGroupData() ([]GroupData, error) {
-	out, err := exec.Command("dscl", ".", "-list", "/Groups", "PrimaryGroupID").Output()
+	out, err := runCollectCommand("dscl", ".", "-list", "/Groups", "PrimaryGroupID")
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to list groups via dscl.")
+		log.Warn().Err(err).Msg("Failed to list groups via dscl; groups will not be reported.")
 		return nil, err
 	}
 

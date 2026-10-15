@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -83,33 +84,51 @@ func TestParseDsclUsers_InlineMultiValueUsesFirstValue(t *testing.T) {
 	assert.Equal(t, "/bin/sh", users[0].Shell)
 }
 
-func TestParseDsclUsers_UnparsableGIDFallsBackToZero(t *testing.T) {
+func TestUserFromRecord_UnparsableGIDFallsBackToZero(t *testing.T) {
 	// Given
-	out := "PrimaryGroupID: 9223372036854775808\nRecordName: alice\nUniqueID: 501\n"
+	rec := map[string]string{"RecordName": "alice", "UniqueID": "501", "PrimaryGroupID": "9223372036854775808"}
 
 	// When
-	users, err := parseDsclUsers(out, nil)
-	require.NoError(t, err)
+	user, ok := userFromRecord(rec, nil)
 
 	// Then
-	require.Len(t, users, 1)
-	assert.Equal(t, 0, users[0].GID)
+	require.True(t, ok)
+	assert.Equal(t, 0, user.GID)
 }
 
-func TestParseDsclUsers_MissingAttributesUseDefaults(t *testing.T) {
+func TestUserFromRecord_MissingAttributesUseDefaults(t *testing.T) {
 	// Given
-	out := "RecordName: nobody\nUniqueID: -2\n"
+	rec := map[string]string{"RecordName": "nobody", "UniqueID": "-2"}
 
 	// When
-	users, err := parseDsclUsers(out, nil)
-	require.NoError(t, err)
+	user, ok := userFromRecord(rec, nil)
 
 	// Then
-	require.Len(t, users, 1)
-	assert.Equal(t, -2, users[0].UID)
-	assert.Equal(t, 0, users[0].GID)
-	assert.Empty(t, users[0].Directory)
-	assert.Equal(t, utils.DefaultShell(), users[0].Shell)
+	require.True(t, ok)
+	assert.Equal(t, -2, user.UID)
+	assert.Equal(t, 0, user.GID)
+	assert.Empty(t, user.Directory)
+	assert.Equal(t, utils.DefaultShell(), user.Shell)
+}
+
+func TestUserFromRecord_RejectsRecordWithoutNameOrNumericUID(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  map[string]string
+	}{
+		{"no name", map[string]string{"UniqueID": "501"}},
+		{"no UniqueID", map[string]string{"RecordName": "alice"}},
+		{"non-numeric UniqueID", map[string]string{"RecordName": "alice", "UniqueID": "abc"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// When
+			_, ok := userFromRecord(tt.rec, nil)
+
+			// Then
+			assert.False(t, ok)
+		})
+	}
 }
 
 func TestParseDsclUsers_SkipsBadUniqueID(t *testing.T) {
@@ -142,39 +161,25 @@ func TestParseDsclUsers_EmptyOutput(t *testing.T) {
 }
 
 func TestParseDsclUsers_RepeatedAttributeIsAnError(t *testing.T) {
-	// Given
-	out := "RecordName: root\nUniqueID: 0\nRecordName: alice\nUniqueID: 501\n"
+	tests := []struct {
+		name string
+		out  string
+		attr string
+	}{
+		{"inline", "RecordName: root\nUniqueID: 0\nRecordName: alice\nUniqueID: 501\n", "RecordName"},
+		{"indented", "RecordName:\n root\n BUILTIN\\Local System\nUniqueID: 0\nRecordName:\n alice\n", "RecordName"},
+		{"valueless first", "RecordName: root\nUniqueID: 0\nUserShell:\nUserShell: /bin/zsh\n", "UserShell"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// When
+			users, err := parseDsclUsers(tt.out, nil)
 
-	// When
-	users, err := parseDsclUsers(out, nil)
-
-	// Then
-	assert.ErrorContains(t, err, "RecordName")
-	assert.Nil(t, users)
-}
-
-func TestParseDsclUsers_RepeatedIndentedAttributeIsAnError(t *testing.T) {
-	// Given
-	out := "RecordName:\n root\n BUILTIN\\Local System\nUniqueID: 0\nRecordName:\n alice\n"
-
-	// When
-	users, err := parseDsclUsers(out, nil)
-
-	// Then
-	assert.ErrorContains(t, err, "RecordName")
-	assert.Nil(t, users)
-}
-
-func TestParseDsclUsers_RepeatedValuelessAttributeIsAnError(t *testing.T) {
-	// Given
-	out := "RecordName: root\nUniqueID: 0\nUserShell:\nUserShell: /bin/zsh\n"
-
-	// When
-	users, err := parseDsclUsers(out, nil)
-
-	// Then
-	assert.ErrorContains(t, err, "UserShell")
-	assert.Nil(t, users)
+			// Then
+			assert.ErrorContains(t, err, tt.attr)
+			assert.Nil(t, users)
+		})
+	}
 }
 
 func TestUsersFromDscl_WarnsWhenOutputDoesNotParse(t *testing.T) {
@@ -189,4 +194,41 @@ func TestUsersFromDscl_WarnsWhenOutputDoesNotParse(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, logs.String(), `"level":"warn"`)
 	assert.Contains(t, logs.String(), "repeats RecordName")
+}
+
+func TestGetUserData_WarnsWhenDsclFails(t *testing.T) {
+	// Given
+	logs := captureLogs(t)
+	stubCollectCommand(t, errors.New("dscl timed out after 30s"))
+
+	// When
+	users, err := getUserData()
+
+	// Then
+	require.Error(t, err)
+	assert.Nil(t, users)
+	assert.Contains(t, logs.String(), `"level":"warn"`)
+	assert.Contains(t, logs.String(), "users will not be reported")
+}
+
+func TestGetGroupData_WarnsWhenDsclFails(t *testing.T) {
+	// Given
+	logs := captureLogs(t)
+	stubCollectCommand(t, errors.New("dscl timed out after 30s"))
+
+	// When
+	groups, err := getGroupData()
+
+	// Then
+	require.Error(t, err)
+	assert.Nil(t, groups)
+	assert.Contains(t, logs.String(), `"level":"warn"`)
+	assert.Contains(t, logs.String(), "groups will not be reported")
+}
+
+func stubCollectCommand(t *testing.T, err error) {
+	t.Helper()
+	previous := runCollectCommand
+	t.Cleanup(func() { runCollectCommand = previous })
+	runCollectCommand = func(string, ...string) ([]byte, error) { return nil, err }
 }
