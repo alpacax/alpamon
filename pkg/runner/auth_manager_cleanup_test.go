@@ -19,8 +19,7 @@ import (
 )
 
 // registerPipeRequest registers a pending request the way handleSudoApprovalRequest
-// does, minus the completion channel—tests that need one add it with
-// registerCompletionChannel.
+// does; registeredRequest returns the instance it registered.
 func registerPipeRequest(am *AuthManager, req SudoApprovalRequest) net.Conn {
 	client, server := net.Pipe()
 	am.pidToSessionMap[req.PID] = &SessionInfo{
@@ -28,10 +27,23 @@ func registerPipeRequest(am *AuthManager, req SudoApprovalRequest) net.Conn {
 		SessionID: req.SessionID,
 		PID:       req.PID,
 		Requests: map[string]*SudoRequest{
-			req.RequestID: {Connection: server, Request: req},
+			req.RequestID: newSudoRequest(server, req),
 		},
 	}
 	return client
+}
+
+// registeredRequest returns the instance registered under requestID, or nil.
+func registeredRequest(am *AuthManager, requestID string) *SudoRequest {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.findRequestLocked(requestID)
+}
+
+// registerCompletionChannel returns the completion channel of the request
+// registered under requestID: the one its waiter parks on.
+func registerCompletionChannel(am *AuthManager, requestID string) chan struct{} {
+	return registeredRequest(am, requestID).done
 }
 
 // expectSingleResponse decodes the one response the connection is allowed to
@@ -69,7 +81,7 @@ func TestFinalizeRequest_SendsSingleFullResponseAndCloses(t *testing.T) {
 		client := registerPipeRequest(am, req)
 
 		// net.Pipe is unbuffered, so the write has to run against this goroutine's reads.
-		go am.finalizeRequest(req.RequestID, "Communication error")
+		go am.finalizeRequest(registeredRequest(am, req.RequestID), "Communication error")
 
 		want := SudoApprovalResponse{
 			RequestID: "req-1",
@@ -96,7 +108,7 @@ func TestFinalizeRequest_UnknownRequestIsNoop(t *testing.T) {
 	pending := SudoApprovalRequest{RequestID: "req-pending", PID: 2, SessionID: "sess-2"}
 	registerPipeRequest(am, pending)
 
-	am.finalizeRequest("req-gone", "Response timeout")
+	am.finalizeRequest(newSudoRequest(nil, SudoApprovalRequest{RequestID: "req-gone"}), "Response timeout")
 
 	assert.Contains(t, am.pidToSessionMap[2].Requests, "req-pending", "an unrelated pending request was dropped")
 }
@@ -108,12 +120,13 @@ func TestFinalizeRequest_RacesHandleResponse(t *testing.T) {
 	am := newTestAuthManager()
 	req := SudoApprovalRequest{RequestID: "req-race", Username: "alice", PID: 3333, SessionID: "sess-race"}
 	client := registerPipeRequest(am, req)
+	registered := registeredRequest(am, req.RequestID)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		am.finalizeRequest(req.RequestID, "Response timeout")
+		am.finalizeRequest(registered, "Response timeout")
 	}()
 	go func() {
 		defer wg.Done()
@@ -308,8 +321,7 @@ func TestHandleSudoApprovalRequest_RetryFailureAnswersOnce(t *testing.T) {
 }
 
 // TestHandleSudoApprovalRequest_LocalSudoRegistersNothing checks a sudo outside any
-// tracked session is answered on the spot and registers nothing—no request, and no
-// completion channel for a waiter that never exists.
+// tracked session is answered on the spot and registers nothing.
 func TestHandleSudoApprovalRequest_LocalSudoRegistersNothing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		am := newTestAuthManager()
@@ -329,7 +341,6 @@ func TestHandleSudoApprovalRequest_LocalSudoRegistersNothing(t *testing.T) {
 		resp := expectSingleResponse(t, client)
 		assert.Truef(t, resp.Approved, "local sudo must be approved: %+v", resp)
 		assert.Falsef(t, resp.IsAlpconUser, "local sudo is not an Alpacon user: %+v", resp)
-		assert.Empty(t, am.completionChannels, "completion channels left behind")
 		assert.Empty(t, am.pidToSessionMap, "tracker entries left behind")
 	})
 }
@@ -634,13 +645,11 @@ func TestDenyPendingRequests_StalledPeerDoesNotDelayTheRest(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	go func() { _, _ = io.Copy(io.Discard, client) }()
 
-	stalledDone := registerCompletionChannel(am, "req-stalled")
-	nextDone := registerCompletionChannel(am, "req-next")
-
 	pending := []*SudoRequest{
-		{Connection: stalled, Request: SudoApprovalRequest{RequestID: "req-stalled", Username: "alice"}},
-		{Connection: server, Request: SudoApprovalRequest{RequestID: "req-next", Username: "bob"}},
+		newSudoRequest(stalled, SudoApprovalRequest{RequestID: "req-stalled", Username: "alice"}),
+		newSudoRequest(server, SudoApprovalRequest{RequestID: "req-next", Username: "bob"}),
 	}
+	stalledDone, nextDone := pending[0].done, pending[1].done
 	go am.denyPendingRequests(pending, "Session ended")
 
 	select {
@@ -685,10 +694,10 @@ func TestDenyPendingRequests_SignalsWhenAnsweringPanics(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 
-	done := registerCompletionChannel(am, "req-panic")
 	pending := []*SudoRequest{
-		{Connection: panicOnWriteConn{server}, Request: SudoApprovalRequest{RequestID: "req-panic", Username: "alice"}},
+		newSudoRequest(panicOnWriteConn{server}, SudoApprovalRequest{RequestID: "req-panic", Username: "alice"}),
 	}
+	done := pending[0].done
 
 	returned := make(chan struct{})
 	go func() {

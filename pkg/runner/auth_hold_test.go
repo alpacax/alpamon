@@ -52,12 +52,13 @@ func (f *fakeAlpacon) RoundTrip(r *http.Request) (*http.Response, error) {
 	f.posts = append(f.posts, recordedPost{path: r.URL.Path, body: body})
 	answer := "{}"
 	onApproval := f.onApproval
-	if strings.HasSuffix(r.URL.Path, "/sudo-approval/") {
+	approval := strings.HasSuffix(r.URL.Path, "/sudo-approval/") || r.URL.Path == "/api/sudo/approval/"
+	if approval {
 		answer = f.approvalBody
 	}
 	f.mu.Unlock()
 
-	if onApproval != nil && strings.HasSuffix(r.URL.Path, "/sudo-approval/") {
+	if onApproval != nil && approval {
 		onApproval()
 	}
 	return &http.Response{
@@ -132,9 +133,14 @@ type recordingConn struct {
 	net.Conn
 	mu     sync.Mutex
 	writes [][]byte
+	// onWrite, when set, runs before each write.
+	onWrite func()
 }
 
 func (c *recordingConn) Write(b []byte) (int, error) {
+	if c.onWrite != nil {
+		c.onWrite()
+	}
 	c.mu.Lock()
 	c.writes = append(c.writes, append([]byte(nil), b...))
 	c.mu.Unlock()
@@ -149,8 +155,15 @@ func (c *recordingConn) writeCount() int {
 
 func startPAMClient(t *testing.T, am *AuthManager, req SudoApprovalRequest) (*pamClient, *recordingConn) {
 	t.Helper()
+	return startPAMClientWith(t, am, req, nil)
+}
+
+// startPAMClientWith is startPAMClient with a hook that runs before each of
+// alpamon's writes.
+func startPAMClientWith(t *testing.T, am *AuthManager, req SudoApprovalRequest, onWrite func()) (*pamClient, *recordingConn) {
+	t.Helper()
 	client, server := net.Pipe()
-	rec := &recordingConn{Conn: server}
+	rec := &recordingConn{Conn: server, onWrite: onWrite}
 	go am.handleSudoRequest(rec)
 
 	data, err := json.Marshal(req)
@@ -185,7 +198,7 @@ func (pc *pamClient) output(t *testing.T) string {
 	select {
 	case <-pc.done:
 	default:
-		t.Fatal("alpamon did not close the connection")
+		require.Fail(t, "alpamon did not close the connection")
 	}
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
@@ -199,7 +212,7 @@ func (pc *pamClient) interim(t *testing.T) string {
 	case line := <-pc.lines:
 		return line
 	default:
-		t.Fatal("no interim frame")
+		require.Fail(t, "no interim frame")
 		return ""
 	}
 }
@@ -330,7 +343,7 @@ func TestHold_DeadlineAnswersPending(t *testing.T) {
 		synctest.Wait()
 		select {
 		case <-pc.done:
-			t.Fatal("answered before wait_seconds+45")
+			require.Fail(t, "answered before wait_seconds+45")
 		default:
 		}
 
@@ -400,7 +413,7 @@ func TestHold_MismatchedVerdictDropped(t *testing.T) {
 		synctest.Wait()
 		select {
 		case <-pc.done:
-			t.Fatal("a mismatched verdict answered the request")
+			require.Fail(t, "a mismatched verdict answered the request")
 		default:
 		}
 
@@ -640,7 +653,7 @@ func TestHold_WaitCappedDeadline(t *testing.T) {
 		synctest.Wait()
 		select {
 		case <-pc.done:
-			t.Fatal("answered before 645 s")
+			require.Fail(t, "answered before 645 s")
 		default:
 		}
 		time.Sleep(time.Millisecond)
@@ -778,4 +791,242 @@ func TestWatchPeerClose(t *testing.T) {
 			})
 		})
 	}
+}
+
+// The request id is the sudo pid, which the kernel reuses. The tests below
+// reuse an id at each step of a hold and check the old request's verdict,
+// signal, hold or cleanup never reaches the newer one.
+
+// A pending answer for a client that cannot wait guards the id before the deny
+// goes out, so no reuse can slip in between the answer and the guard.
+func TestHold_NonHoldablePendingGuardsBeforeDeny(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		am := newHoldTestManager(t, server)
+		req := holdTestRequest("130", false)
+
+		var guarded []bool
+		pc, _ := startPAMClientWith(t, am, req, func() {
+			am.mu.RLock()
+			_, ok := am.endedHolds[req.RequestID]
+			am.mu.RUnlock()
+			guarded = append(guarded, ok)
+		})
+
+		assert.Contains(t, pc.output(t), `"error_code":"SUDO_APPROVAL_PENDING"`)
+		assert.Equal(t, []bool{true}, guarded, "the deny was written before the id was guarded")
+	})
+}
+
+// A newer request reuses the id while the old request's post is in flight: the
+// old pending answer must not attach its hold to the newer request or write
+// its interim frame there, and the old wait is reported as ended.
+func TestHold_PendingAfterReuseDoesNotAttachToNewRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		var posts int
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		server.onApproval = func() {
+			server.mu.Lock()
+			posts++
+			first := posts == 1
+			server.mu.Unlock()
+			if first {
+				<-release
+			}
+		}
+		am := newHoldTestManager(t, server)
+		old := holdTestRequest("131", true)
+		pc, _ := startPAMClient(t, am, old)
+		synctest.Wait()
+
+		server.mu.Lock()
+		server.approvalBody = `{"status":"mfa_required"}`
+		server.mu.Unlock()
+		reused := holdTestRequest("131", true)
+		reused.Command = "systemctl restart postgresql"
+		pc2, rec2 := startPAMClient(t, am, reused)
+		synctest.Wait()
+		assert.Empty(t, pc.output(t), "the displaced request was written to")
+
+		close(release)
+		synctest.Wait()
+
+		assert.Zero(t, rec2.writeCount(), "the old interim frame went to the new request")
+		newer := registeredRequest(am, "131")
+		require.NotNil(t, newer)
+		assert.Equal(t, reused.Command, newer.Request.Command)
+		assert.Nil(t, newer.hold, "the old hold attached to the new request")
+		ended := server.postsTo("/wait-ended/")
+		require.Len(t, ended, 1)
+		assert.Equal(t, old.Command, ended[0].body["command"])
+
+		assert.Error(t, am.HandleSudoApprovalResponse(serverVerdict(old, true, "")), "the old wait's verdict was applied")
+		own := serverVerdict(reused, true, "")
+		require.NoError(t, am.HandleSudoApprovalResponse(own))
+		assert.Equal(t, marshalResponse(t, own), pc2.output(t))
+	})
+}
+
+// A newer request reuses the id of a live hold: the old hold's close watcher
+// and deadline must not take, deny or close the newer request.
+func TestHold_OldWatcherAndDeadlineSpareReusedID(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(10)}
+		am := newHoldTestManager(t, server)
+		old := holdTestRequest("132", true)
+		pc, _ := startPAMClient(t, am, old)
+		oldInterim := pc.interim(t)
+
+		server.mu.Lock()
+		server.approvalBody = pendingBody(300)
+		server.mu.Unlock()
+		reused := holdTestRequest("132", true)
+		pc2, rec2 := startPAMClient(t, am, reused)
+		assert.Equal(t, wantInterim, pc2.interim(t))
+		assert.Equal(t, oldInterim, pc.output(t), "the displaced request got more than its interim frame")
+
+		_ = pc.conn.Close()
+		time.Sleep(10*time.Second + holdGrace)
+		synctest.Wait()
+		select {
+		case <-pc2.done:
+			require.Fail(t, "the old hold's watcher or deadline ended the new request")
+		default:
+		}
+		assert.Equal(t, 1, rec2.writeCount())
+		assert.Len(t, server.postsTo("/wait-ended/"), 1, "only the displaced wait ended")
+
+		verdict := serverVerdict(reused, true, "")
+		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
+		assert.Equal(t, wantInterim+marshalResponse(t, verdict), pc2.output(t))
+	})
+}
+
+// reuseConn registers a newer request under the same id at the first write or
+// close: the moment between a take and its completion signal.
+type reuseConn struct {
+	net.Conn
+	once  sync.Once
+	reuse func()
+}
+
+func (c *reuseConn) Write(b []byte) (int, error) {
+	c.once.Do(c.reuse)
+	return c.Conn.Write(b)
+}
+
+func (c *reuseConn) Close() error {
+	c.once.Do(c.reuse)
+	return c.Conn.Close()
+}
+
+// Each taker signals the instance it took, never the one registered under the
+// id by the time it signals.
+func TestTakers_SignalOnlyTheTakenInstance(t *testing.T) {
+	takers := map[string]func(am *AuthManager, old *SudoRequest){
+		"verdict": func(am *AuthManager, old *SudoRequest) {
+			_ = am.HandleSudoApprovalResponse(SudoApprovalResponse{RequestID: old.Request.RequestID, Type: "sudo_approval_response", Approved: true})
+		},
+		"deny": func(am *AuthManager, old *SudoRequest) {
+			assert.True(t, am.finalizeRequest(old, "Response timeout"))
+		},
+		"abandon": func(am *AuthManager, old *SudoRequest) {
+			am.abandonHeldRequest(old, &sudoHold{ref: holdTestRef}, "client closed the connection")
+		},
+	}
+	for name, take := range takers {
+		t.Run(name, func(t *testing.T) {
+			am := newTestAuthManager()
+			req := SudoApprovalRequest{RequestID: "133", Username: "alice", PID: 133, SessionID: holdTestSession}
+			session := &SessionInfo{Kind: TrackerKindWebsh, SessionID: holdTestSession, PID: 1, Requests: map[string]*SudoRequest{}}
+			am.pidToSessionMap[1] = session
+
+			client, server := net.Pipe()
+			defer func() { _ = client.Close() }()
+			go func() { _, _ = io.Copy(io.Discard, client) }()
+			newerClient, newerServer := net.Pipe()
+			defer func() { _ = newerClient.Close() }()
+			newer := newSudoRequest(newerServer, req)
+
+			conn := &reuseConn{Conn: server, reuse: func() {
+				am.mu.Lock()
+				session.Requests[req.RequestID] = newer
+				am.mu.Unlock()
+			}}
+			old := newSudoRequest(conn, req)
+			session.Requests[req.RequestID] = old
+
+			take(am, old)
+
+			assert.Len(t, old.done, 1, "the taken instance was not signaled")
+			assert.Empty(t, newer.done, "the newer request's waiter was signaled")
+			assert.Same(t, newer, registeredRequest(am, req.RequestID), "the newer request was taken")
+			newer.writeMu.Lock()
+			assert.False(t, newer.final, "the newer request was finalized")
+			newer.writeMu.Unlock()
+		})
+	}
+}
+
+// After a held wait ended, a new held request reusing the id with the same
+// command and session but another run-as user must not take the old verdict.
+func TestHold_HeldReuseNeedsSameRunasUser(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		am := newHoldTestManager(t, server)
+		old := holdTestRequest("134", true)
+		pc, _ := startPAMClient(t, am, old)
+		pc.interim(t)
+		require.NoError(t, pc.conn.Close())
+		synctest.Wait()
+
+		reused := holdTestRequest("134", true)
+		reused.RunasUser = "postgres"
+		pc2, rec2 := startPAMClient(t, am, reused)
+		pc2.interim(t)
+
+		assert.Error(t, am.HandleSudoApprovalResponse(serverVerdict(old, true, "")), "the old run-as user's verdict was applied")
+		synctest.Wait()
+		assert.Equal(t, 1, rec2.writeCount(), "only the interim frame may be written")
+		select {
+		case <-pc2.done:
+			require.Fail(t, "the stale verdict answered the new request")
+		default:
+		}
+		am.cancel()
+		pc2.output(t)
+	})
+}
+
+// A held deploy Command request takes only a verdict naming its own Command.
+func TestHold_SessionlessVerdictNeedsCommandID(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		am := newHoldTestManager(t, server)
+		am.pidToSessionMap[holdTestPPID+2] = &SessionInfo{
+			Kind:      TrackerKindCommand,
+			CommandID: "cmd-1",
+			PID:       holdTestPPID + 2,
+			Requests:  make(map[string]*SudoRequest),
+		}
+		req := holdTestRequest("135", true)
+		req.PPID = holdTestPPID + 2
+		pc, rec := startPAMClient(t, am, req)
+		pc.interim(t)
+		assert.Len(t, server.postsTo("/api/sudo/approval/"), 1)
+
+		verdict := serverVerdict(req, true, "")
+		verdict.SessionID = ""
+		verdict.CommandID = "cmd-2"
+		assert.Error(t, am.HandleSudoApprovalResponse(verdict), "another Command's verdict was applied")
+		verdict.CommandID = ""
+		assert.Error(t, am.HandleSudoApprovalResponse(verdict), "a verdict without a Command was applied")
+		synctest.Wait()
+		assert.Equal(t, 1, rec.writeCount())
+
+		verdict.CommandID = "cmd-1"
+		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
+		assert.Equal(t, wantInterim+marshalResponse(t, verdict), pc.output(t))
+	})
 }

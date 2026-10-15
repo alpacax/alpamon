@@ -78,15 +78,18 @@ type sudoHold struct {
 	waitSeconds int64
 	expiresAt   string
 	holdReason  string
-	// command and sessionID are what a verdict for this request must carry.
+	// command, sessionID and commandID are what a verdict for this request
+	// must carry. commandID is set only for a deploy Command request.
 	command   string
 	sessionID string
+	commandID string
 }
 
 // endedHold remembers a wait that ended without a verdict.
 type endedHold struct {
 	command    string
 	sessionID  string
+	commandID  string
 	rawCommand string
 	runasUser  string
 	until      time.Time
@@ -157,35 +160,42 @@ func interimFrame(hold *sudoHold) []byte {
 }
 
 // awaitHeldRequest runs the rest of a request the server answered with
-// approval_pending. It is called by the waiter that registered req, with the
-// request's completion channel.
-func (am *AuthManager) awaitHeldRequest(req SudoApprovalRequest, hold *sudoHold, completionChan <-chan struct{}) {
+// approval_pending. It is called by the waiter that registered sudoRequest, and
+// every step below acts on that instance only: the request id is the sudo pid,
+// which a newer request may reuse at any point of the wait.
+func (am *AuthManager) awaitHeldRequest(sudoRequest *SudoRequest, hold *sudoHold) {
+	req := sudoRequest.Request
 	requestID := req.RequestID
+
+	if hold != nil {
+		if hold.command == "" {
+			hold.command = req.Command
+		}
+		hold.sessionID = req.SessionID
+		hold.commandID = req.CommandID
+	}
 
 	if !req.HoldCapable || hold == nil {
 		// A client that did not offer to wait reads one object to EOF, so it
 		// gets the final answer only: the request stays open on the server.
 		log.Warn().Str("request_id", requestID).Bool("hold_capable", req.HoldCapable).
 			Msg("Server holds a sudo request alpamon cannot relay; answering pending")
-		if am.finalizeRequestWithCode(requestID, "Approval pending", sudoCodeApprovalPending) {
+		if am.finalizeHeldRequest(sudoRequest, hold, "Approval pending", sudoCodeApprovalPending) {
 			if hold != nil {
-				am.endHold(req, hold)
+				go am.postWaitEnded(req, hold)
 			}
 		} else {
-			am.awaitTakenRequest(requestID, completionChan)
+			am.endDisplacedHold(sudoRequest, hold)
+			am.awaitTakenRequest(sudoRequest)
 		}
 		return
 	}
 
-	if hold.command == "" {
-		hold.command = req.Command
-	}
-	hold.sessionID = req.SessionID
-
-	sudoRequest := am.beginHold(requestID, hold)
-	if sudoRequest == nil {
-		// Answered between the post and here; the taker signals when done.
-		am.awaitTakenRequest(requestID, completionChan)
+	if !am.beginHold(sudoRequest, hold) {
+		// Answered or displaced between the post and here; the taker signals
+		// when done.
+		am.endDisplacedHold(sudoRequest, hold)
+		am.awaitTakenRequest(sudoRequest)
 		return
 	}
 
@@ -195,7 +205,7 @@ func (am *AuthManager) awaitHeldRequest(req SudoApprovalRequest, hold *sudoHold,
 	case err != nil:
 		log.WithLevel(authSocketWriteLevel(err)).Err(err).Str("request_id", requestID).
 			Msg("Failed to send sudo_approval_pending")
-		am.abandonHeldRequest(req, hold, completionChan, "interim frame not delivered")
+		am.abandonHeldRequest(sudoRequest, hold, "interim frame not delivered")
 		return
 	case written:
 		log.Info().Str("request_id", requestID).Str("approval_request", hold.ref).
@@ -206,41 +216,60 @@ func (am *AuthManager) awaitHeldRequest(req SudoApprovalRequest, hold *sudoHold,
 	defer deadline.Stop()
 
 	select {
-	case <-completionChan:
+	case <-sudoRequest.done:
 		log.Debug().Str("request_id", requestID).Msg("Held sudo_approval request answered")
 	case <-deadline.C:
 		// The server's own deadline answer never arrived. The request stays open
 		// for a re-run, which is what the code tells the client.
-		if am.finalizeHeldRequest(req, hold, "Approval pending", sudoCodeApprovalPending) {
+		if am.finalizeHeldRequest(sudoRequest, hold, "Approval pending", sudoCodeApprovalPending) {
 			log.Warn().Str("request_id", requestID).Msg("Held sudo_approval request reached its deadline")
 			go am.postWaitEnded(req, hold)
 		} else {
-			am.awaitTakenRequest(requestID, completionChan)
+			am.awaitTakenRequest(sudoRequest)
 		}
 	case <-peerGone:
-		am.abandonHeldRequest(req, hold, completionChan, "client closed the connection")
+		am.abandonHeldRequest(sudoRequest, hold, "client closed the connection")
 	case <-am.ctx.Done():
 		// The request stays open on the server, so a re-run after the restart
 		// can pick it up. The ended-wait guard lives in memory and does not
 		// survive the restart; the server's own deadline still ends the wait.
-		if am.finalizeHeldRequest(req, hold, "Service shutdown", sudoCodeApprovalPending) {
+		if am.finalizeHeldRequest(sudoRequest, hold, "Service shutdown", sudoCodeApprovalPending) {
 			am.postWaitEndedOnShutdown(req, hold)
 		} else {
-			am.awaitTakenRequest(requestID, completionChan)
+			am.awaitTakenRequest(sudoRequest)
 		}
 	}
 }
 
-// beginHold marks the registered request as held and returns it, or nil when it
-// was already taken.
-func (am *AuthManager) beginHold(requestID string, hold *sudoHold) *SudoRequest {
+// beginHold marks sudoRequest as held and reports whether it still was
+// registered. It checks the instance, not the id, so a hold never attaches to a
+// newer request that reuses the id.
+func (am *AuthManager) beginHold(sudoRequest *SudoRequest, hold *sudoHold) bool {
 	am.mu.Lock()
 	defer am.mu.Unlock()
-	req := am.findRequestLocked(requestID)
-	if req != nil {
-		req.hold = hold
+	if am.findRequestLocked(sudoRequest.Request.RequestID) != sudoRequest {
+		return false
 	}
-	return req
+	sudoRequest.hold = hold
+	return true
+}
+
+// endDisplacedHold finishes a request that a newer one with the same id
+// displaced while its post was in flight: the displacement found no hold to
+// guard, so the pending answer that arrived since is guarded and reported now.
+func (am *AuthManager) endDisplacedHold(sudoRequest *SudoRequest, hold *sudoHold) {
+	if hold == nil {
+		return
+	}
+	am.mu.Lock()
+	displaced := sudoRequest.displaced
+	if displaced {
+		am.rememberEndedHoldLocked(sudoRequest.Request, hold)
+	}
+	am.mu.Unlock()
+	if displaced {
+		go am.postWaitEnded(sudoRequest.Request, hold)
+	}
 }
 
 // writeInterimFrame writes the interim frame unless the final answer already
@@ -282,17 +311,10 @@ func watchPeerClose(conn net.Conn) <-chan struct{} {
 
 // abandonHeldRequest ends a held request whose client is gone: nothing is
 // written, the connection is closed, and the server is told the wait ended.
-func (am *AuthManager) abandonHeldRequest(req SudoApprovalRequest, hold *sudoHold, completionChan <-chan struct{}, why string) {
-	am.mu.Lock()
-	sudoRequest := am.takeRequestLocked(req.RequestID)
-	if sudoRequest != nil {
-		am.rememberEndedHoldLocked(req, hold)
-	}
-	am.mu.Unlock()
-
-	if sudoRequest == nil {
+func (am *AuthManager) abandonHeldRequest(sudoRequest *SudoRequest, hold *sudoHold, why string) {
+	if !am.takeHeldLocked(sudoRequest, hold) {
 		// A verdict is going out; it fails on the closed peer, which is fine.
-		am.awaitTakenRequest(req.RequestID, completionChan)
+		am.awaitTakenRequest(sudoRequest)
 		return
 	}
 
@@ -300,41 +322,38 @@ func (am *AuthManager) abandonHeldRequest(req SudoApprovalRequest, hold *sudoHol
 	sudoRequest.final = true
 	_ = sudoRequest.Connection.Close()
 	sudoRequest.writeMu.Unlock()
-	am.signalCompletion(req.RequestID)
+	am.signalCompletion(sudoRequest)
 
+	req := sudoRequest.Request
 	log.Info().Str("request_id", req.RequestID).Str("approval_request", hold.ref).Str("why", why).
 		Msg("Stopped waiting for a sudo approval")
 	go am.postWaitEnded(req, hold)
 }
 
-// finalizeHeldRequest denies a held request with a code and guards its id
-// against a late verdict. It reports whether it took the request.
-func (am *AuthManager) finalizeHeldRequest(req SudoApprovalRequest, hold *sudoHold, reason, errorCode string) bool {
-	am.mu.Lock()
-	sudoRequest := am.takeRequestLocked(req.RequestID)
-	if sudoRequest != nil {
-		am.rememberEndedHoldLocked(req, hold)
-	}
-	am.mu.Unlock()
-
-	if sudoRequest == nil {
+// finalizeHeldRequest denies sudoRequest with a code. It reports whether it
+// took the request.
+func (am *AuthManager) finalizeHeldRequest(sudoRequest *SudoRequest, hold *sudoHold, reason, errorCode string) bool {
+	if !am.takeHeldLocked(sudoRequest, hold) {
 		return false
 	}
 	am.denyPendingRequestsWithCode([]*SudoRequest{sudoRequest}, reason, errorCode)
 	return true
 }
 
-// endHold guards the id of a hold that ended without a verdict and tells the
-// server.
-func (am *AuthManager) endHold(req SudoApprovalRequest, hold *sudoHold) {
-	if hold.command == "" {
-		hold.command = req.Command
-	}
-	hold.sessionID = req.SessionID
+// takeHeldLocked takes sudoRequest and, when hold is set, guards its id against
+// the wait's late verdict in the same critical section, before anything is
+// written: a newer request reusing the id can never register in between and
+// take that verdict. It reports whether it took the request.
+func (am *AuthManager) takeHeldLocked(sudoRequest *SudoRequest, hold *sudoHold) bool {
 	am.mu.Lock()
-	am.rememberEndedHoldLocked(req, hold)
-	am.mu.Unlock()
-	go am.postWaitEnded(req, hold)
+	defer am.mu.Unlock()
+	if !am.takeInstanceLocked(sudoRequest) {
+		return false
+	}
+	if hold != nil {
+		am.rememberEndedHoldLocked(sudoRequest.Request, hold)
+	}
+	return true
 }
 
 // waitEndedShutdownTimeout bounds the one wait-ended post made while the agent
@@ -415,22 +434,22 @@ func (am *AuthManager) findRequestLocked(requestID string) *SudoRequest {
 	return nil
 }
 
-// mismatchLocked says why response must not be applied, or "" when it may. A
-// held request takes only a verdict that names its command and session. A
-// verdict that names a wait which already ended is not applied to a different
-// request that reuses the id. Every other response is matched on its id alone,
-// as before. Callers must hold am.mu.
-func (am *AuthManager) mismatchLocked(response SudoApprovalResponse) string {
-	req := am.findRequestLocked(response.RequestID)
-
+// mismatchLocked says why response must not be applied to req, the request
+// registered under its id (nil when none), or "" when it may. A held request
+// takes only a verdict that names its command and its session (or deploy
+// Command). A verdict that names a wait which already ended is not applied to a
+// different request that reuses the id, held or not. Every other response is
+// matched on its id alone, as before. Callers must hold am.mu.
+func (am *AuthManager) mismatchLocked(response SudoApprovalResponse, req *SudoRequest) string {
 	if req != nil && req.hold != nil {
 		switch {
 		case response.Command != req.hold.command:
 			return "command"
 		case response.SessionID != req.hold.sessionID:
 			return "session"
+		case response.CommandID != req.hold.commandID:
+			return "command id"
 		}
-		return ""
 	}
 
 	ended, ok := am.endedHolds[response.RequestID]
@@ -441,11 +460,13 @@ func (am *AuthManager) mismatchLocked(response SudoApprovalResponse) string {
 		delete(am.endedHolds, response.RequestID)
 		return ""
 	}
-	if response.Command != ended.command || response.SessionID != ended.sessionID {
+	if response.Command != ended.command || response.SessionID != ended.sessionID ||
+		response.CommandID != ended.commandID {
 		return "" // Not the ended wait's verdict.
 	}
 	if req != nil && req.Request.Command == ended.rawCommand &&
-		req.Request.SessionID == ended.sessionID && req.Request.RunasUser == ended.runasUser {
+		req.Request.SessionID == ended.sessionID && req.Request.CommandID == ended.commandID &&
+		req.Request.RunasUser == ended.runasUser {
 		return "" // The same command, session and run-as user: the verdict fits it too.
 	}
 	return "ended wait"
@@ -466,6 +487,7 @@ func (am *AuthManager) rememberEndedHoldLocked(req SudoApprovalRequest, hold *su
 	am.endedHolds[req.RequestID] = endedHold{
 		command:    hold.command,
 		sessionID:  hold.sessionID,
+		commandID:  hold.commandID,
 		rawCommand: req.Command,
 		runasUser:  req.RunasUser,
 		until:      now.Add(endedHoldTTL),

@@ -5,32 +5,24 @@ import (
 	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// registerCompletionChannel mirrors what handleSudoApprovalRequest does inside
-// its registration critical section.
-func registerCompletionChannel(am *AuthManager, requestID string) chan struct{} {
-	am.mu.Lock()
-	defer am.mu.Unlock()
-
-	return am.newCompletionChannelLocked(requestID)
-}
-
-// TestNewCompletionChannel_SurvivesSignalBeforeReceive takes its channel from
-// newCompletionChannelLocked: one the test allocates itself would keep passing
-// after the production capacity is dropped.
-func TestNewCompletionChannel_SurvivesSignalBeforeReceive(t *testing.T) {
+// TestNewSudoRequest_SurvivesSignalBeforeReceive takes its channel from
+// newSudoRequest: one the test allocates itself would keep passing after the
+// production capacity is dropped.
+func TestNewSudoRequest_SurvivesSignalBeforeReceive(t *testing.T) {
 	am := newTestAuthManager()
-	ch := registerCompletionChannel(am, "req-1")
+	req := newSudoRequest(nil, SudoApprovalRequest{RequestID: "req-1"})
 
 	// The websocket read loop can process the response while the waiter is still
 	// inside sendSudoRequestWithRetry, before it reaches its select.
-	am.signalCompletion("req-1")
+	am.signalCompletion(req)
 
 	select {
-	case <-ch:
+	case <-req.done:
 	default:
-		t.Fatal("completion signal was dropped before the waiter received it")
+		require.Fail(t, "completion signal was dropped before the waiter received it")
 	}
 }
 
@@ -40,17 +32,17 @@ func TestNewCompletionChannel_SurvivesSignalBeforeReceive(t *testing.T) {
 func TestSignalCompletion_DoesNotBlockWhenAlreadySignaled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		am := newTestAuthManager()
-		ch := registerCompletionChannel(am, "req-1")
-		am.signalCompletion("req-1")
+		req := newSudoRequest(nil, SudoApprovalRequest{RequestID: "req-1"})
+		am.signalCompletion(req)
 
 		returned := make(chan struct{})
 		go func() {
-			am.signalCompletion("req-1")
+			am.signalCompletion(req)
 			close(returned)
 		}()
 
 		// Draining releases a send that did block, so a regression fails on the assertion below instead of as a bubble deadlock.
-		defer func() { <-ch }()
+		defer func() { <-req.done }()
 
 		// Wait returns once every goroutine in the bubble is blocked, so a send still waiting for a receiver is visible here.
 		synctest.Wait()
@@ -62,30 +54,23 @@ func TestSignalCompletion_DoesNotBlockWhenAlreadySignaled(t *testing.T) {
 	})
 }
 
-// TestSignalCompletion_UnknownRequestIsNoop covers a response arriving after the
-// timeout path removed the channel.
-func TestSignalCompletion_UnknownRequestIsNoop(t *testing.T) {
+// TestSignalCompletion_WithoutChannelIsNoop covers a request built without
+// newSudoRequest: signaling it must not block.
+func TestSignalCompletion_WithoutChannelIsNoop(t *testing.T) {
 	am := newTestAuthManager()
-	ch := registerCompletionChannel(am, "req-1")
-	am.removeCompletionChannel("req-1", ch)
-
-	am.signalCompletion("req-1")
+	am.signalCompletion(&SudoRequest{})
 }
 
-// TestRemoveCompletionChannel_KeepsNewerWaitersChannel covers a request id (the
-// sudo pid) reused while the previous waiter is still on its way out: the
-// newer waiter's channel must survive the older waiter's cleanup.
-func TestRemoveCompletionChannel_KeepsNewerWaitersChannel(t *testing.T) {
+// TestSignalCompletion_ReachesOnlyItsInstance covers a request id (the sudo pid)
+// reused while the previous waiter is still on its way out: signaling the older
+// instance must not release the newer waiter.
+func TestSignalCompletion_ReachesOnlyItsInstance(t *testing.T) {
 	am := newTestAuthManager()
-	older := registerCompletionChannel(am, "req-1")
-	newer := registerCompletionChannel(am, "req-1")
+	older := newSudoRequest(nil, SudoApprovalRequest{RequestID: "req-1"})
+	newer := newSudoRequest(nil, SudoApprovalRequest{RequestID: "req-1"})
 
-	am.removeCompletionChannel("req-1", older)
-	am.signalCompletion("req-1")
+	am.signalCompletion(older)
 
-	select {
-	case <-newer:
-	default:
-		t.Fatal("the older waiter's cleanup removed the newer waiter's channel")
-	}
+	assert.Len(t, older.done, 1, "the older instance was not signaled")
+	assert.Empty(t, newer.done, "the older instance's signal reached the newer waiter")
 }
