@@ -10,12 +10,15 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// ensureTunnelSocketDir creates and returns the tunnel socket directory.
-// Uses 0700 permissions to prevent other users from creating symlinks or files inside.
+// ensureTunnelSocketDir returns the tunnel socket directory, refusing a symlinked
+// or foreign-owned one and forcing it to 0700.
 func ensureTunnelSocketDir() (string, error) {
 	dir := "/tmp/alpamon-tunnels"
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create tunnel socket directory: %w", err)
+	}
+	if err := secureTunnelSocketDir(dir, -1, -1, uint32(os.Geteuid())); err != nil {
+		return "", err
 	}
 	return dir, nil
 }
