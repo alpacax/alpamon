@@ -263,11 +263,21 @@ func (am *AuthManager) endDisplacedHold(sudoRequest *SudoRequest, hold *sudoHold
 	}
 	am.mu.Lock()
 	displaced := sudoRequest.displaced
+	report := displaced
 	if displaced {
 		am.rememberEndedHoldLocked(sudoRequest.Request, hold)
+		// The newer request's post already went out and may have joined this
+		// wait on the server, which keys it on the id and session. Ending it
+		// then would end the newer request's wait too; the server's own
+		// deadline ends it instead.
+		if newer := am.findRequestLocked(sudoRequest.Request.RequestID); newer != nil &&
+			newer.Request.SessionID == sudoRequest.Request.SessionID &&
+			newer.Request.CommandID == sudoRequest.Request.CommandID {
+			report = false
+		}
 	}
 	am.mu.Unlock()
-	if displaced {
+	if report {
 		go am.postWaitEnded(sudoRequest.Request, hold)
 	}
 }
@@ -356,8 +366,9 @@ func (am *AuthManager) takeHeldLocked(sudoRequest *SudoRequest, hold *sudoHold) 
 	return true
 }
 
-// waitEndedShutdownTimeout bounds the one wait-ended post made while the agent
-// stops, so it never holds up the shutdown.
+// waitEndedShutdownTimeout bounds a single wait-ended attempt: the one made
+// while the agent stops, so it never holds up the shutdown, and the one made
+// before a request that displaced a held one is forwarded.
 const waitEndedShutdownTimeout = 3 * time.Second
 
 func waitEndedURL(req SudoApprovalRequest, hold *sudoHold) string {
@@ -389,18 +400,25 @@ func (am *AuthManager) postWaitEnded(req SudoApprovalRequest, hold *sudoHold) {
 // postWaitEndedOnShutdown makes one bounded attempt at the wait-ended post
 // while the agent stops; am.ctx is already cancelled, so it cannot be used.
 func (am *AuthManager) postWaitEndedOnShutdown(req SudoApprovalRequest, hold *sudoHold) {
+	go am.postWaitEndedOnce(context.Background(), req, hold)
+}
+
+// postWaitEndedOnce makes one wait-ended attempt bounded by
+// waitEndedShutdownTimeout and returns when it is done.
+func (am *AuthManager) postWaitEndedOnce(parent context.Context, req SudoApprovalRequest, hold *sudoHold) {
 	if am.session == nil {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), waitEndedShutdownTimeout)
-		defer cancel()
-		_, status, _, err := am.session.PostWithContext(ctx, waitEndedURL(req, hold), waitEndedBody(req), waitEndedShutdownTimeout/time.Second)
-		if err != nil || status < 200 || status >= 300 {
-			log.Debug().Err(err).Int("status_code", status).Str("request_id", req.RequestID).
-				Msg("Could not report the end of a sudo approval wait during shutdown")
-		}
-	}()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, waitEndedShutdownTimeout)
+	defer cancel()
+	_, status, _, err := am.session.PostWithContext(ctx, waitEndedURL(req, hold), waitEndedBody(req), waitEndedShutdownTimeout/time.Second)
+	if err != nil || status < 200 || status >= 300 {
+		log.Warn().Err(err).Int("status_code", status).Str("request_id", req.RequestID).
+			Msg("Could not report the end of a sudo approval wait")
+	}
 }
 
 // liveHoldForLocked reports whether the same session (or deploy Command)
@@ -435,18 +453,26 @@ func (am *AuthManager) findRequestLocked(requestID string) *SudoRequest {
 }
 
 // mismatchLocked says why response must not be applied to req, the request
-// registered under its id (nil when none), or "" when it may. A held request
-// takes only a verdict that names its command and its session (or deploy
-// Command). A verdict that names a wait which already ended is not applied to a
-// different request that reuses the id, held or not. Every other response is
-// matched on its id alone, as before. Callers must hold am.mu.
+// registered under its id (nil when none), or "" when it may. Every verdict
+// must name the request's session (empty for a deploy Command), and a command
+// id when it names one: the id alone is the sudo pid, which another session may
+// reuse. A held request also takes only a verdict that names its command and,
+// for a deploy Command, its command id. A verdict that names a wait which
+// already ended is not applied to a different request that reuses the id, held
+// or not. Callers must hold am.mu.
 func (am *AuthManager) mismatchLocked(response SudoApprovalResponse, req *SudoRequest) string {
+	if req != nil {
+		switch {
+		case response.SessionID != req.Request.SessionID:
+			return "session"
+		case response.CommandID != "" && response.CommandID != req.Request.CommandID:
+			return "command id"
+		}
+	}
 	if req != nil && req.hold != nil {
 		switch {
 		case response.Command != req.hold.command:
 			return "command"
-		case response.SessionID != req.hold.sessionID:
-			return "session"
 		case response.CommandID != req.hold.commandID:
 			return "command id"
 		}

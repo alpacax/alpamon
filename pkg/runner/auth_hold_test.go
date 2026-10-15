@@ -267,7 +267,7 @@ func TestHold_NonHoldRequestUnchanged(t *testing.T) {
 		assert.NotContains(t, posts[0].body, "hold_capable")
 		assert.Equal(t, "root", posts[0].body["runas_user"])
 
-		verdict := SudoApprovalResponse{RequestID: "101", Type: "sudo_approval_response", Username: "alice", Approved: true}
+		verdict := SudoApprovalResponse{RequestID: "101", Type: "sudo_approval_response", Username: "alice", SessionID: holdTestSession, Approved: true}
 		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
 		assert.Equal(t, marshalResponse(t, verdict), pc.output(t))
 	})
@@ -445,7 +445,7 @@ func TestHold_EndedWaitVerdictNotAppliedToReusedID(t *testing.T) {
 
 		assert.Error(t, am.HandleSudoApprovalResponse(serverVerdict(held, true, "")), "the ended wait's verdict was applied")
 
-		own := SudoApprovalResponse{RequestID: "108", Type: "sudo_approval_response", Command: reused.Command, Approved: false, ErrorCode: "SUDO_NO_AUTHORITY"}
+		own := SudoApprovalResponse{RequestID: "108", Type: "sudo_approval_response", Command: reused.Command, SessionID: holdTestSession, Approved: false, ErrorCode: "SUDO_NO_AUTHORITY"}
 		require.NoError(t, am.HandleSudoApprovalResponse(own))
 		assert.Equal(t, marshalResponse(t, own), pc2.output(t))
 	})
@@ -703,10 +703,12 @@ func TestHold_EndedWaitVerdictNeedsSameRunasUser(t *testing.T) {
 		pc2, _ := startPAMClient(t, am, reused)
 		synctest.Wait()
 
+		// The new request's own verdict carries the same command and session, so
+		// it cannot be told apart and is dropped too: the request ends on its
+		// own timeout, fail-closed.
 		assert.Error(t, am.HandleSudoApprovalResponse(serverVerdict(held, true, "")))
-		own := SudoApprovalResponse{RequestID: "125", Type: "sudo_approval_response", Command: reused.Command, Approved: false}
-		require.NoError(t, am.HandleSudoApprovalResponse(own))
-		assert.Equal(t, marshalResponse(t, own), pc2.output(t))
+		time.Sleep(sudoApprovalResponseTimeout)
+		assert.Contains(t, pc2.output(t), `"reason":"Response timeout"`)
 	})
 }
 
@@ -857,9 +859,9 @@ func TestHold_PendingAfterReuseDoesNotAttachToNewRequest(t *testing.T) {
 		require.NotNil(t, newer)
 		assert.Equal(t, reused.Command, newer.Request.Command)
 		assert.Nil(t, newer.hold, "the old hold attached to the new request")
-		ended := server.postsTo("/wait-ended/")
-		require.Len(t, ended, 1)
-		assert.Equal(t, old.Command, ended[0].body["command"])
+		// The newer request's post went out first and may share the old wait on
+		// the server, so the old wait is left to the server's deadline.
+		assert.Empty(t, server.postsTo("/wait-ended/"))
 
 		assert.Error(t, am.HandleSudoApprovalResponse(serverVerdict(old, true, "")), "the old wait's verdict was applied")
 		own := serverVerdict(reused, true, "")
@@ -895,7 +897,7 @@ func TestHold_OldWatcherAndDeadlineSpareReusedID(t *testing.T) {
 		default:
 		}
 		assert.Equal(t, 1, rec2.writeCount())
-		assert.Len(t, server.postsTo("/wait-ended/"), 1, "only the displaced wait ended")
+		assert.Empty(t, server.postsTo("/wait-ended/"), "the same wait continues; nothing ended")
 
 		verdict := serverVerdict(reused, true, "")
 		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
@@ -926,7 +928,7 @@ func (c *reuseConn) Close() error {
 func TestTakers_SignalOnlyTheTakenInstance(t *testing.T) {
 	takers := map[string]func(am *AuthManager, old *SudoRequest){
 		"verdict": func(am *AuthManager, old *SudoRequest) {
-			_ = am.HandleSudoApprovalResponse(SudoApprovalResponse{RequestID: old.Request.RequestID, Type: "sudo_approval_response", Approved: true})
+			_ = am.HandleSudoApprovalResponse(SudoApprovalResponse{RequestID: old.Request.RequestID, Type: "sudo_approval_response", SessionID: holdTestSession, Approved: true})
 		},
 		"deny": func(am *AuthManager, old *SudoRequest) {
 			assert.True(t, am.finalizeRequest(old, "Response timeout"))
@@ -1028,5 +1030,109 @@ func TestHold_SessionlessVerdictNeedsCommandID(t *testing.T) {
 		verdict.CommandID = "cmd-1"
 		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
 		assert.Equal(t, wantInterim+marshalResponse(t, verdict), pc.output(t))
+	})
+}
+
+// A late verdict naming another session is not applied to a request that
+// reuses its id, held or not: the id alone is the sudo pid.
+func TestVerdict_NeedsTheRequestsSession(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`}
+		am := newHoldTestManager(t, server)
+		req := holdTestRequest("140", false)
+		pc, rec := startPAMClient(t, am, req)
+		synctest.Wait()
+
+		late := serverVerdict(req, true, "")
+		late.SessionID = "sess-other"
+		assert.Error(t, am.HandleSudoApprovalResponse(late))
+		late.SessionID = ""
+		assert.Error(t, am.HandleSudoApprovalResponse(late))
+		synctest.Wait()
+		assert.Zero(t, rec.writeCount(), "a verdict for another session was written")
+
+		own := serverVerdict(req, false, "SUDO_APPROVAL_REJECTED")
+		require.NoError(t, am.HandleSudoApprovalResponse(own))
+		assert.Equal(t, marshalResponse(t, own), pc.output(t))
+	})
+}
+
+// A deploy Command request takes a verdict without a command id, as the
+// server sends it, but not one naming another Command or a Websh session.
+func TestVerdict_SessionlessNeedsItsCommand(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`}
+		am := newHoldTestManager(t, server)
+		am.pidToSessionMap[holdTestPPID+2] = &SessionInfo{
+			Kind:      TrackerKindCommand,
+			CommandID: "cmd-1",
+			PID:       holdTestPPID + 2,
+			Requests:  make(map[string]*SudoRequest),
+		}
+		req := holdTestRequest("141", false)
+		req.PPID = holdTestPPID + 2
+		pc, rec := startPAMClient(t, am, req)
+		synctest.Wait()
+
+		verdict := serverVerdict(req, true, "")
+		assert.Error(t, am.HandleSudoApprovalResponse(verdict), "a Websh session's verdict was applied")
+		verdict.SessionID = ""
+		verdict.CommandID = "cmd-2"
+		assert.Error(t, am.HandleSudoApprovalResponse(verdict), "another Command's verdict was applied")
+		synctest.Wait()
+		assert.Zero(t, rec.writeCount())
+
+		verdict.CommandID = ""
+		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
+		assert.Equal(t, marshalResponse(t, verdict), pc.output(t))
+	})
+}
+
+// A held request displaced by a different wait (here another run-as user) has
+// its end reported before the newer request is forwarded, so the server never
+// ends the newer wait with it.
+func TestHold_DisplacedWaitEndsBeforeNewPost(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		am := newHoldTestManager(t, server)
+		old := holdTestRequest("142", true)
+		pc, _ := startPAMClient(t, am, old)
+		pc.interim(t)
+
+		reused := holdTestRequest("142", true)
+		reused.RunasUser = "postgres"
+		pc2, _ := startPAMClient(t, am, reused)
+		pc2.interim(t)
+
+		var order []string
+		for _, p := range server.recorded() {
+			order = append(order, p.path)
+		}
+		approval := "/api/websh/sessions/" + holdTestSession + "/sudo-approval/"
+		assert.Equal(t, []string{approval, approval + holdTestRef + "/wait-ended/", approval}, order)
+		assert.Equal(t, old.Command, server.postsTo("/wait-ended/")[0].body["command"])
+		assert.Equal(t, wantInterim, pc.output(t), "the displaced request got more than its interim frame")
+	})
+}
+
+// Tearing down a session with a held request guards its id and reports the
+// wait as ended, so the server's late verdict cannot reach a reused id and
+// the server's wait does not run to its deadline.
+func TestHold_SessionTeardownEndsHeldWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		am := newHoldTestManager(t, server)
+		held := holdTestRequest("143", true)
+		pc, _ := startPAMClient(t, am, held)
+		pc.interim(t)
+
+		am.RemovePIDSessionMapping(holdTestPPID)
+		assert.Contains(t, pc.output(t), `"reason":"Session ended"`)
+		synctest.Wait()
+		assert.Len(t, server.postsTo("/wait-ended/"), 1)
+		am.mu.RLock()
+		_, guarded := am.endedHolds["143"]
+		am.mu.RUnlock()
+		assert.True(t, guarded, "the torn-down wait's id is not guarded")
 	})
 }

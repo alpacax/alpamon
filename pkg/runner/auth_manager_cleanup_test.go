@@ -599,6 +599,7 @@ func TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse(t *testing.T) {
 			RequestID: "req-shutdown",
 			Type:      "sudo_approval_response",
 			Username:  "alice",
+			SessionID: "sess-shutdown",
 			Approved:  true,
 		})
 	}()

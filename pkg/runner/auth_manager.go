@@ -554,7 +554,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	// wait per command is enough, and the server would refuse this one anyway.
 	if sudoApprovalReq.HoldCapable && am.liveHoldForLocked(sudoApprovalReq) {
 		am.mu.Unlock()
-		am.releaseDisplaced(displaced)
+		am.releaseDisplaced(displaced, sudoApprovalReq)
 		log.Info().Str("request_id", sudoApprovalReq.RequestID).Msg("sudo command already waits for approval; not forwarding")
 		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Already waiting", sudoCodeAlreadyWaiting)
 		return
@@ -563,7 +563,9 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	sudoRequest := newSudoRequest(unixConn, sudoApprovalReq)
 	session.Requests[sudoApprovalReq.RequestID] = sudoRequest
 	am.mu.Unlock()
-	am.releaseDisplaced(displaced)
+	// Before this request's own post, so the old wait's end reaches the server
+	// first and cannot end the wait this request is about to start.
+	am.releaseDisplaced(displaced, sudoApprovalReq)
 
 	log.Debug().
 		Str("request_id", sudoApprovalReq.RequestID).
@@ -803,7 +805,7 @@ func (am *AuthManager) putSessionLocked(pid int, session *SessionInfo) []*SudoRe
 	var replaced []*SudoRequest
 
 	if old, exists := am.pidToSessionMap[pid]; exists && old != session {
-		replaced = takePendingRequestsLocked(old)
+		replaced = am.takePendingRequestsLocked(old)
 	}
 	am.pidToSessionMap[pid] = session
 
@@ -816,7 +818,7 @@ func (am *AuthManager) RemovePIDSessionMapping(pid int) {
 	am.mu.Lock()
 	if session, exists := am.pidToSessionMap[pid]; exists {
 		delete(am.pidToSessionMap, pid)
-		pending = takePendingRequestsLocked(session)
+		pending = am.takePendingRequestsLocked(session)
 		log.Debug().
 			Int("pid", pid).
 			Str("kind", session.effectiveKind()).
@@ -875,7 +877,7 @@ func (am *AuthManager) RemovePIDCommandMapping(pid int, commandID string) {
 		if existing.effectiveKind() == TrackerKindCommand &&
 			existing.CommandID == commandID {
 			delete(am.pidToSessionMap, pid)
-			pending = takePendingRequestsLocked(existing)
+			pending = am.takePendingRequestsLocked(existing)
 			log.Debug().
 				Int("pid", pid).
 				Str("command_id", existing.CommandID).
@@ -1024,9 +1026,12 @@ func (am *AuthManager) displaceRequestLocked(requestID string) *SudoRequest {
 }
 
 // releaseDisplaced closes a displaced request without writing to it (its sudo
-// process is gone), releases its waiter, and tells the server when it was held.
-// Must run without am.mu held.
-func (am *AuthManager) releaseDisplaced(old *SudoRequest) {
+// process is gone) and releases its waiter. A held one's end is reported to the
+// server before it returns, so the caller can post newcomer's request after it,
+// unless newcomer is the same wait: same session (or deploy Command), command
+// and run-as user, which the server continues as one wait. Must run without
+// am.mu held.
+func (am *AuthManager) releaseDisplaced(old *SudoRequest, newcomer SudoApprovalRequest) {
 	if old == nil {
 		return
 	}
@@ -1039,17 +1044,30 @@ func (am *AuthManager) releaseDisplaced(old *SudoRequest) {
 	}
 	old.writeMu.Unlock()
 	am.signalCompletion(old)
-	if old.hold != nil {
-		go am.postWaitEnded(old.Request, old.hold)
+	if old.hold != nil && !sameWait(old.Request, newcomer) {
+		am.postWaitEndedOnce(am.ctx, old.Request, old.hold)
 	}
 }
 
+// sameWait reports whether a and b ask for the same decision: the same session
+// (or deploy Command), command and run-as user.
+func sameWait(a, b SudoApprovalRequest) bool {
+	return a.SessionID == b.SessionID && a.CommandID == b.CommandID &&
+		a.Command == b.Command && a.RunasUser == b.RunasUser
+}
+
 // takePendingRequestsLocked detaches a session's pending requests. They are then
-// beyond finalizeRequest's reach, so the taker owns answering them.
-// Callers must hold am.mu.
-func takePendingRequestsLocked(session *SessionInfo) []*SudoRequest {
+// beyond finalizeRequest's reach, so the taker owns answering them, which
+// denyPendingRequests does. A held one has its id guarded against the wait's
+// late verdict in the same critical section. Callers must hold am.mu.
+func (am *AuthManager) takePendingRequestsLocked(session *SessionInfo) []*SudoRequest {
 	pending := slices.Collect(maps.Values(session.Requests))
 	clear(session.Requests)
+	for _, req := range pending {
+		if req.hold != nil {
+			am.rememberEndedHoldLocked(req.Request, req.hold)
+		}
+	}
 	return pending
 }
 
@@ -1060,8 +1078,18 @@ func takePendingRequestsLocked(session *SessionInfo) []*SudoRequest {
 // sit behind every write before it, so one peer that stopped reading pushes the
 // later waiters past their bound and they close connections this loop has yet to
 // write to. Must run without am.mu held: it writes to client sockets.
+//
+// A held request among them also has its wait reported as ended: the session
+// is gone, and the server's wait would otherwise run to its own deadline.
 func (am *AuthManager) denyPendingRequests(pending []*SudoRequest, reason string) {
 	am.denyPendingRequestsWithCode(pending, reason, "")
+	for _, req := range pending {
+		// hold is stable once the request is taken: beginHold sets it only
+		// on a registered request.
+		if req.hold != nil {
+			go am.postWaitEnded(req.Request, req.hold)
+		}
+	}
 }
 
 // denyPendingRequestsWithCode is denyPendingRequests with a machine-readable
