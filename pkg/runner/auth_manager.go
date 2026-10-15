@@ -159,6 +159,7 @@ type MFAResponse struct {
 
 type BaseRequest struct {
 	Type string `json:"type"`
+	PID  int    `json:"pid"`
 }
 
 type IsAlpconRequest struct {
@@ -179,12 +180,14 @@ type IsAlpconResponse struct {
 }
 
 type AuthManager struct {
-	mu                sync.RWMutex
-	ctx               context.Context
-	cancel            context.CancelFunc
-	pidToSessionMap   map[int]*SessionInfo
-	controlClient     *ControlClient
-	listener          net.Listener
+	mu              sync.RWMutex
+	ctx             context.Context
+	cancel          context.CancelFunc
+	pidToSessionMap map[int]*SessionInfo
+	controlClient   *ControlClient
+	listener        net.Listener
+	// peerCreds reads the kernel's view of an auth.sock peer; nil drops every connection.
+	peerCreds         func(net.Conn) (peerCred, error)
 	session           *scheduler.Session
 	blockLocalSudo    bool
 	detectLocalAccess bool
@@ -233,6 +236,7 @@ func GetAuthManager(controlClient *ControlClient, session *scheduler.Session) *A
 		authManager = &AuthManager{
 			pidToSessionMap: make(map[int]*SessionInfo),
 			session:         session,
+			peerCreds:       peerCredentials,
 		}
 	})
 
@@ -448,6 +452,11 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		_ = unixConn.Close() // Closing on every exit lets PAM read EOF and fail open at once.
 	}()
 
+	peer, ok := am.verifyPeer(unixConn)
+	if !ok {
+		return
+	}
+
 	buf := make([]byte, authSocketReadBufferSize)
 	n, err := unixConn.Read(buf)
 	if err != nil {
@@ -464,6 +473,16 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 
 	if baseReq.Type == "" {
 		log.Warn().Msg("Missing or invalid type field")
+		return
+	}
+
+	if peer.pidKnown && baseReq.PID != peer.pid {
+		log.Warn().
+			Int("peer_pid", peer.pid).
+			Int("peer_uid", peer.uid).
+			Int("claimed_pid", baseReq.PID).
+			Str("type", baseReq.Type).
+			Msg("Auth socket request claims a pid other than the connecting process; dropping it")
 		return
 	}
 
@@ -499,6 +518,25 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 	default:
 		log.Warn().Str("type", baseReq.Type).Msg("Unknown request type")
 	}
+}
+
+// verifyPeer reports the connecting process when it may use auth.sock. A refused
+// peer gets no response, so nothing about the agent's state reaches it.
+func (am *AuthManager) verifyPeer(conn net.Conn) (peerCred, bool) {
+	if am.peerCreds == nil {
+		log.Error().Msg("Auth socket peer check is not configured; dropping connection")
+		return peerCred{}, false
+	}
+	peer, err := am.peerCreds(conn)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to read auth socket peer credentials; dropping connection")
+		return peerCred{}, false
+	}
+	if !peerUIDAllowed(peer.uid, os.Geteuid()) {
+		log.Warn().Int("peer_uid", peer.uid).Int("peer_pid", peer.pid).Msg("Auth socket peer is not root; dropping connection")
+		return peerCred{}, false
+	}
+	return peer, true
 }
 
 // handleSudoApprovalRequest answers one sudo_approval request, parking the
