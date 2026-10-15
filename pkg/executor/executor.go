@@ -418,6 +418,10 @@ func logProcessTreeCleanup(commandID string, cmd *exec.Cmd, reason string, outco
 	if reason != cleanupReasonExit || outcome.killedAny() {
 		event = log.Info()
 	}
+	if err != nil {
+		// A cleanup that failed may have left descendants running; it must not hide at Debug.
+		event = log.Warn()
+	}
 	pid := 0
 	if cmd.Process != nil {
 		pid = cmd.Process.Pid

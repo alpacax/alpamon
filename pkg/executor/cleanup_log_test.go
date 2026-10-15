@@ -78,6 +78,7 @@ func TestLogProcessTreeCleanup_LevelFollowsWhatWasKilled(t *testing.T) {
 		{name: "timeout", reason: cleanupReasonTimeout, wantLevel: "info"},
 		{name: "shutdown", reason: cleanupReasonShutdown, wantLevel: "info"},
 		{name: "wait delay", reason: cleanupReasonWaitDelay, wantLevel: "info"},
+		{name: "a failed cleanup that killed nothing is not hidden", reason: cleanupReasonExit, outcome: cleanupOutcome{assigned: true}, err: errors.New("terminate job: access denied"), wantLevel: "warn"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			read := captureCleanupLog(t)
@@ -92,7 +93,11 @@ func TestLogProcessTreeCleanup_LevelFollowsWhatWasKilled(t *testing.T) {
 			assert.Equal(t, tc.outcome.assigned, line["assigned"])
 			assert.EqualValues(t, tc.outcome.active, line["active"])
 			assert.Equal(t, tc.outcome.rootKilled, line["root_killed"])
-			assert.NotContains(t, line, "error", "os.ErrProcessDone must not be logged as an error")
+			if tc.err == nil || errors.Is(tc.err, os.ErrProcessDone) {
+				assert.NotContains(t, line, "error", "os.ErrProcessDone must not be logged as an error")
+			} else {
+				assert.Equal(t, tc.err.Error(), line["error"])
+			}
 		})
 	}
 
