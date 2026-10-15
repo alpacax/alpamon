@@ -251,7 +251,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		}
 	}
 
-	// The proxy environment (nil without a package proxy) applies to the
+	// The package environment (LC_ALL=C, plus proxy variables with a package proxy) applies to the
 	// spawned package-manager process only, never to the agent process.
 	runPkg := func(argv ...string) (int, string, error) {
 		return retryWhileLocked(ctx, func() (int, string, error) {

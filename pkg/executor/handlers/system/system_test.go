@@ -1423,7 +1423,7 @@ func TestSystemHandler_Upgrade_AptUpdateFailureStopsTheUpgradeAndNamesTheStep(t 
 	}
 }
 
-// Fails the first apt-get update on the lists lock, which DPkg::Lock::Timeout does not wait for.
+// Fails the first apt-get update, bare or as the head of an `sh -c` chain, on the lists lock DPkg::Lock::Timeout does not cover.
 type listsLockedOnceExecutor struct {
 	*common.MockCommandExecutor
 	updates int
@@ -1431,7 +1431,7 @@ type listsLockedOnceExecutor struct {
 }
 
 func (e *listsLockedOnceExecutor) Exec(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
-	if len(args) > 1 && args[0] == "apt-get" && args[1] == "update" {
+	if strings.HasPrefix(strings.Join(args, " "), "apt-get update") || (len(args) == 3 && strings.HasPrefix(args[2], "apt-get update")) {
 		e.updates++
 		e.envs = append(e.envs, env)
 		if e.updates == 1 {
@@ -1454,6 +1454,24 @@ func TestSystemHandler_Upgrade_AptUpdateRetriesTheListsLock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode, output)
 	assert.Equal(t, 2, exec.updates, "the update must run again once the lists lock clears")
+	for _, env := range exec.envs {
+		assert.Equal(t, "C", env["LC_ALL"], "a translated lock message would not be recognized")
+	}
+}
+
+func TestSystemHandler_SystemUpdate_AptRetriesTheListsLockInEnglish(t *testing.T) {
+	orig := lockRetryDelay
+	lockRetryDelay = 0
+	t.Cleanup(func() { lockRetryDelay = orig })
+	h := newPinnedHarness(t, utils.PkgApt)
+	exec := &listsLockedOnceExecutor{MockCommandExecutor: h.exec}
+	h.handler.Executor = exec
+
+	exitCode, output, err := h.handler.Execute(context.Background(), common.Update.String(), &common.CommandArgs{})
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode, output)
+	assert.Equal(t, 2, exec.updates, "the chain must run again once the lists lock clears")
 	for _, env := range exec.envs {
 		assert.Equal(t, "C", env["LC_ALL"], "a translated lock message would not be recognized")
 	}
