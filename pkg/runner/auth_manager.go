@@ -65,6 +65,16 @@ type SudoRequest struct {
 	// Request is kept whole so whoever finalizes it can answer with the fields
 	// the PAM client sent.
 	Request SudoApprovalRequest
+
+	// writeMu serializes writes to Connection: the waiter's interim frame and
+	// the taker's final response may race. final, guarded by writeMu, marks
+	// that the final response went out (or the connection was given up), after
+	// which nothing more may be written.
+	writeMu sync.Mutex
+	final   bool
+	// hold is set under am.mu once the server answered that the request waits
+	// for an approval decision. Nil for every other request.
+	hold *sudoHold
 }
 
 type SudoApprovalRequest struct {
@@ -82,6 +92,10 @@ type SudoApprovalRequest struct {
 	// plugin reports it (a user name, or "#<uid>"). Forwarded unchanged to the
 	// server; omitted when the client does not send it.
 	RunasUser string `json:"runas_user,omitempty"`
+	// HoldCapable reports that the client can show a pending approval and keep
+	// waiting for the decision. Forwarded unchanged to the server; only a request
+	// that carried it may receive an interim frame.
+	HoldCapable bool `json:"hold_capable,omitempty"`
 }
 
 type SudoApprovalResponse struct {
@@ -154,6 +168,10 @@ type AuthManager struct {
 	// sessionRepeats drops a session event the PAM stack sent twice for one
 	// login. It has its own lock, so intake never takes mu for it.
 	sessionRepeats sessionEventRepeats
+	// endedHolds remembers waits that ended without a server verdict, so a late
+	// verdict for one is not applied to a new request that reuses its id.
+	// Guarded by mu; created on first use.
+	endedHolds map[string]endedHold
 }
 
 const (
@@ -174,6 +192,9 @@ const (
 	// previous 1 KB truncated those into a JSON parse error, which closed the
 	// connection and lost the audit event.
 	authSocketReadBufferSize = 8192
+	// sudoApprovalResponseTimeout is how long a request the server did not hold
+	// waits for its verdict after the post.
+	sudoApprovalResponseTimeout = 30 * time.Second
 )
 
 var (
@@ -316,7 +337,17 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 	}
 }
 
-func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) error {
+// sendSudoRequestWithRetry posts the request and returns the body of the
+// successful answer, which says whether the server holds the request.
+func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) ([]byte, error) {
+	var body []byte
+	err := am.postWithRetry(sudoApprovalURL(req), req, &body)
+	return body, err
+}
+
+// postWithRetry posts payload to url until a 2xx answer or authRetryTimeout,
+// storing the answer's body in *body when body is not nil.
+func (am *AuthManager) postWithRetry(url string, payload any, body *[]byte) error {
 	b := &retry.ExponentialBackoff{
 		InitialInterval: authRetryInitialInterval,
 		MaxInterval:     authRetryMaxInterval,
@@ -326,10 +357,20 @@ func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) error {
 	ctx, cancel := context.WithTimeout(am.ctx, authRetryTimeout)
 	defer cancel()
 
-	return retry.Retry(ctx, b, am.createSendOperation(ctx, req))
+	return retry.Retry(ctx, b, am.createSendOperation(ctx, url, payload, body))
 }
 
-func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApprovalRequest) func() error {
+// sudoApprovalURL is the endpoint a sudo request is posted to. Deploy shell
+// (Command) sudo requests go to the session-less endpoint so the server can
+// resolve the IAM user via command_id.
+func sudoApprovalURL(req SudoApprovalRequest) string {
+	if req.CommandID != "" && req.SessionID == "" {
+		return "/api/sudo/approval/"
+	}
+	return fmt.Sprintf("/api/websh/sessions/%s/sudo-approval/", req.SessionID)
+}
+
+func (am *AuthManager) createSendOperation(ctx context.Context, url string, payload any, body *[]byte) func() error {
 	return func() error {
 		select {
 		case <-ctx.Done():
@@ -339,26 +380,21 @@ func (am *AuthManager) createSendOperation(ctx context.Context, req SudoApproval
 				return fmt.Errorf("HTTP session not available")
 			}
 
-			// Deploy shell (Command) sudo requests go to the session-less
-			// endpoint so the server can resolve the IAM user via command_id.
-			var url string
-			if req.CommandID != "" && req.SessionID == "" {
-				url = "/api/sudo/approval/"
-			} else {
-				url = fmt.Sprintf("/api/websh/sessions/%s/sudo-approval/", req.SessionID)
-			}
-			_, statusCode, err := am.session.Post(url, req, 10)
+			resp, statusCode, err := am.session.Post(url, payload, 10)
 			if err != nil {
-				log.Warn().Err(err).Msg("Failed to send sudo request via REST API, will retry")
+				log.Warn().Err(err).Str("url", url).Msg("Failed to send sudo request via REST API, will retry")
 				return err
 			}
 
 			if statusCode < 200 || statusCode >= 300 {
-				log.Warn().Int("status_code", statusCode).Msgf("Sudo request failed with status %d, will retry", statusCode)
+				log.Warn().Int("status_code", statusCode).Str("url", url).Msgf("Sudo request failed with status %d, will retry", statusCode)
 				return fmt.Errorf("sudo request failed with status code: %d", statusCode)
 			}
 
-			log.Debug().Msg("Sudo request sent successfully via REST API")
+			if body != nil {
+				*body = resp
+			}
+			log.Debug().Str("url", url).Msg("Sudo request sent successfully via REST API")
 			return nil
 		}
 	}
@@ -451,7 +487,7 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	var sudoApprovalReq SudoApprovalRequest
 	if err := json.Unmarshal(data, &sudoApprovalReq); err != nil {
 		log.Warn().Err(err).Msg("Invalid sudo_approval_request")
-		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Invalid sudo_approval_request")
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Invalid sudo_approval_request", "")
 		return
 	}
 
@@ -467,13 +503,13 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		if blockLocalSudo {
 			// block_local_sudo=true: reject all local sudo (original behavior)
 			log.Debug().Msgf("Local sudo blocked by policy: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
-			am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority")
+			am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority", "")
 			return
 		}
 
 		// block_local_sudo=false: allow local sudo, respect existing sudoers permissions
 		log.Debug().Msgf("Local sudo approved: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
-		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, true, "Approved")
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, true, "Approved", "")
 		return
 	}
 
@@ -493,7 +529,16 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		// as websh. A future new Kind must be added to the switch.
 		am.mu.Unlock()
 		log.Warn().Str("kind", kind).Msg("Unknown tracker kind; rejecting sudo")
-		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Unknown session kind")
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Unknown session kind", "")
+		return
+	}
+
+	// The same command already waits for a decision in another terminal: one
+	// wait per command is enough, and the server would refuse this one anyway.
+	if sudoApprovalReq.HoldCapable && am.liveHoldForLocked(sudoApprovalReq) {
+		am.mu.Unlock()
+		log.Info().Str("request_id", sudoApprovalReq.RequestID).Msg("sudo command already waits for approval; not forwarding")
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Already waiting", sudoCodeAlreadyWaiting)
 		return
 	}
 
@@ -512,9 +557,11 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		Str("kind", kind).
 		Str("session_id", sudoApprovalReq.SessionID).
 		Str("command_id", sudoApprovalReq.CommandID).
+		Bool("hold_capable", sudoApprovalReq.HoldCapable).
 		Msg("Alpacon user sudo request")
 
-	if err := am.sendSudoRequestWithRetry(sudoApprovalReq); err != nil {
+	body, err := am.sendSudoRequestWithRetry(sudoApprovalReq)
+	if err != nil {
 		log.Error().Err(err).Msg("Failed to send sudo_approval request after retries")
 		if !am.finalizeRequest(sudoApprovalReq.RequestID, "Communication error") {
 			am.awaitTakenRequest(sudoApprovalReq.RequestID, completionChan)
@@ -524,13 +571,18 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 
 	log.Debug().Msgf("sudo_approval request sent via REST API, waiting for response...")
 
+	if pending, isPending := parseApprovalPending(body); isPending {
+		am.awaitHeldRequest(sudoApprovalReq, pending, completionChan)
+		return
+	}
+
 	// Wait for response, timeout, or context cancellation
 	select {
 	case <-completionChan:
 		// Signaled by whoever took the request: HandleSudoApprovalResponse on a
 		// server response, denyPendingRequests on a locally decided deny.
 		log.Debug().Str("request_id", sudoApprovalReq.RequestID).Msg("sudo_approval request answered")
-	case <-time.After(30 * time.Second):
+	case <-time.After(sudoApprovalResponseTimeout):
 		// finalizeRequest's own take under am.mu is what settles the race with the
 		// response path; a separate pending check ahead of it would only reopen the
 		// gap between the two locks.
@@ -590,7 +642,10 @@ func (am *AuthManager) sendIsAlpconResponse(conn net.Conn, username, groupname s
 // sendSudoApprovalResponse writes the response alpamon itself decided on, for
 // every case the alpacon-server does not answer. Closing the connection is the
 // caller's job.
-func (am *AuthManager) sendSudoApprovalResponse(conn net.Conn, req SudoApprovalRequest, approved bool, reason string) {
+//
+// errorCode is the machine-readable code the client shows; empty omits the key,
+// which is how every response alpamon decided on looked before codes existed.
+func (am *AuthManager) sendSudoApprovalResponse(conn net.Conn, req SudoApprovalRequest, approved bool, reason, errorCode string) {
 	response := SudoApprovalResponse{
 		Type:         "sudo_approval_response",
 		Username:     req.Username,
@@ -604,6 +659,7 @@ func (am *AuthManager) sendSudoApprovalResponse(conn net.Conn, req SudoApprovalR
 		RequestID:    req.RequestID,
 		Approved:     approved,
 		Reason:       reason,
+		ErrorCode:    errorCode,
 	}
 
 	responseJSON, err := json.Marshal(response)
@@ -644,6 +700,17 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 	log.Info().Str("request_id", response.RequestID).Bool("approved", response.Approved).Msg("Processing sudo_approval response")
 
 	am.mu.Lock()
+	if reason := am.mismatchLocked(response); reason != "" {
+		am.mu.Unlock()
+		// A verdict for another request that used the same id (the id is the sudo
+		// pid, which the kernel reuses). Applying it would answer the wrong command.
+		log.Warn().
+			Str("request_id", response.RequestID).
+			Str("session_id", response.SessionID).
+			Str("mismatch", reason).
+			Msg("Dropped a sudo_approval response that does not match the pending request")
+		return fmt.Errorf("sudo_approval response for request_id %s does not match the pending request: %s", response.RequestID, reason)
+	}
 	sudoRequest := am.takeRequestLocked(response.RequestID)
 	am.mu.Unlock()
 
@@ -664,10 +731,14 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 		return err
 	}
 
-	// The request is already deregistered, so nobody else can reclaim this connection.
+	// The request is already deregistered, so nobody else can reclaim this
+	// connection; writeMu only waits out an interim frame still going out.
+	sudoRequest.writeMu.Lock()
+	sudoRequest.final = true
 	_ = sudoRequest.Connection.SetWriteDeadline(time.Now().Add(authSocketWriteTimeout))
 	_, err = sudoRequest.Connection.Write(responseJSON)
 	_ = sudoRequest.Connection.Close()
+	sudoRequest.writeMu.Unlock()
 	if err != nil {
 		logSudoResponseWriteError(err, response.RequestID)
 		return err
@@ -904,6 +975,12 @@ func (am *AuthManager) Stop() {
 // that taker's response may still be going out, so a caller holding the
 // connection owes it an awaitTakenRequest before its own close.
 func (am *AuthManager) finalizeRequest(requestID, reason string) bool {
+	return am.finalizeRequestWithCode(requestID, reason, "")
+}
+
+// finalizeRequestWithCode is finalizeRequest with a machine-readable code on the
+// deny.
+func (am *AuthManager) finalizeRequestWithCode(requestID, reason, errorCode string) bool {
 	am.mu.Lock()
 	req := am.takeRequestLocked(requestID)
 	am.mu.Unlock()
@@ -917,7 +994,7 @@ func (am *AuthManager) finalizeRequest(requestID, reason string) bool {
 		return false
 	}
 
-	am.denyPendingRequests([]*SudoRequest{req}, reason)
+	am.denyPendingRequestsWithCode([]*SudoRequest{req}, reason, errorCode)
 
 	return true
 }
@@ -954,6 +1031,12 @@ func takePendingRequestsLocked(session *SessionInfo) []*SudoRequest {
 // later waiters past their bound and they close connections this loop has yet to
 // write to. Must run without am.mu held: signalCompletion takes it.
 func (am *AuthManager) denyPendingRequests(pending []*SudoRequest, reason string) {
+	am.denyPendingRequestsWithCode(pending, reason, "")
+}
+
+// denyPendingRequestsWithCode is denyPendingRequests with a machine-readable
+// code on every deny.
+func (am *AuthManager) denyPendingRequestsWithCode(pending []*SudoRequest, reason, errorCode string) {
 	var wg sync.WaitGroup
 	for _, req := range pending {
 		wg.Add(1)
@@ -975,7 +1058,12 @@ func (am *AuthManager) denyPendingRequests(pending []*SudoRequest, reason string
 			// whole handover bound for a body that is never coming.
 			defer am.signalCompletion(req.Request.RequestID)
 			if req.Connection != nil {
-				am.sendSudoApprovalResponse(req.Connection, req.Request, false, reason)
+				// writeMu is released by its own defer: on the panic path the
+				// signal above must not find it still held.
+				req.writeMu.Lock()
+				defer req.writeMu.Unlock()
+				req.final = true
+				am.sendSudoApprovalResponse(req.Connection, req.Request, false, reason, errorCode)
 				_ = req.Connection.Close()
 			}
 		}()

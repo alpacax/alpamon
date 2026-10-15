@@ -1,0 +1,432 @@
+package runner
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"regexp"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/rs/zerolog/log"
+)
+
+// A sudo request the server holds for an approval decision.
+//
+// The server answers the post with an approval_pending body instead of a
+// verdict. If the client said it can wait (hold_capable), alpamon writes one
+// interim frame, keeps the connection open past the usual 30 s and relays the
+// final verdict when it arrives on the control stream. The client protocol is
+// newline-delimited JSON: interim frames, each ending in "\n", then exactly one
+// final sudo_approval_response, then close. A client that did not send
+// hold_capable reads everything to EOF as one JSON object, so it must never get
+// an interim frame.
+
+const (
+	// Final codes alpamon itself answers a held or holdable request with.
+	sudoCodeApprovalPending = "SUDO_APPROVAL_PENDING"
+	sudoCodeAlreadyWaiting  = "SUDO_APPROVAL_ALREADY_WAITING"
+
+	approvalPendingStatus = "approval_pending"
+	approvalPendingFrame  = "sudo_approval_pending"
+
+	// maxHoldWaitSeconds bounds the server's wait_seconds. The client gives up
+	// at wait_seconds+60, capped at 660 s, so alpamon must stay below that.
+	maxHoldWaitSeconds = 600
+	// holdGrace is how long after the server's own deadline alpamon still waits
+	// for the final verdict. It stays below the client's 60 s, so the client
+	// hears alpamon's coded answer instead of timing out on its own.
+	holdGrace = 45 * time.Second
+	// endedHoldTTL is how long an ended wait's id stays guarded against a late
+	// verdict: past the longest hold plus an identity check that may follow
+	// an approval.
+	endedHoldTTL = 15 * time.Minute
+)
+
+var (
+	approvalRefPattern = regexp.MustCompile(`^[0-9a-fA-F-]{1,64}$`)
+	holdReasonPattern  = regexp.MustCompile(`^[A-Z0-9_]{1,64}$`)
+)
+
+// approvalPending is the server's answer to the post when it holds the request.
+type approvalPending struct {
+	Status          string          `json:"status"`
+	ApprovalRequest string          `json:"approval_request"`
+	ExpiresAt       string          `json:"expires_at"`
+	WaitSeconds     json.RawMessage `json:"wait_seconds"`
+	HoldReason      string          `json:"hold_reason"`
+	// Command is the form of the command the server will echo on the final
+	// verdict, when it differs from what was sent. Optional.
+	Command string `json:"command"`
+}
+
+// approvalPendingFrameBody is the interim frame written to the client.
+type approvalPendingFrameBody struct {
+	Type        string `json:"type"`
+	RequestRef  string `json:"request_ref"`
+	WaitSeconds int64  `json:"wait_seconds"`
+	ExpiresAt   string `json:"expires_at"`
+	HoldReason  string `json:"hold_reason,omitempty"`
+}
+
+// sudoHold is what alpamon knows about a held request.
+type sudoHold struct {
+	ref         string
+	waitSeconds int64
+	expiresAt   string
+	holdReason  string
+	// command and sessionID are what a verdict for this request must carry.
+	command   string
+	sessionID string
+}
+
+// endedHold remembers a wait that ended without a verdict.
+type endedHold struct {
+	command    string
+	sessionID  string
+	rawCommand string
+	until      time.Time
+}
+
+// sudoWaitEnded tells the server the client stopped waiting. The approval
+// request stays open.
+type sudoWaitEnded struct {
+	RequestID string `json:"request_id"`
+	Command   string `json:"command"`
+	SessionID string `json:"session_id,omitempty"`
+	CommandID string `json:"command_id,omitempty"`
+}
+
+// parseApprovalPending reports whether body is an approval_pending answer. A
+// pending answer that is malformed still reports true with a nil hold: the
+// server is holding, alpamon just cannot relay it.
+func parseApprovalPending(body []byte) (*sudoHold, bool) {
+	var status struct {
+		Status string `json:"status"`
+	}
+	if len(body) == 0 || json.Unmarshal(body, &status) != nil || status.Status != approvalPendingStatus {
+		return nil, false
+	}
+
+	var p approvalPending
+	if err := json.Unmarshal(body, &p); err != nil {
+		log.Warn().Err(err).Msg("Malformed approval_pending answer")
+		return nil, true
+	}
+	// A JSON integer only: a quoted or fractional value is not a wait.
+	wait, err := strconv.ParseInt(string(p.WaitSeconds), 10, 64)
+	if err != nil || wait <= 0 || !approvalRefPattern.MatchString(p.ApprovalRequest) {
+		log.Warn().Str("approval_request", p.ApprovalRequest).Str("wait_seconds", string(p.WaitSeconds)).
+			Msg("approval_pending answer without a usable reference or wait")
+		return nil, true
+	}
+	wait = min(wait, maxHoldWaitSeconds)
+
+	expires, err := time.Parse(time.RFC3339, p.ExpiresAt)
+	if err != nil {
+		// Display only; the wait itself runs on wait_seconds.
+		expires = time.Now().Add(time.Duration(wait) * time.Second)
+	}
+
+	hold := &sudoHold{
+		ref:         p.ApprovalRequest,
+		waitSeconds: wait,
+		expiresAt:   expires.UTC().Format(time.RFC3339),
+		command:     p.Command,
+	}
+	if holdReasonPattern.MatchString(p.HoldReason) {
+		hold.holdReason = p.HoldReason
+	}
+	return hold, true
+}
+
+// interimFrame is the exact bytes of the interim frame for hold.
+func interimFrame(hold *sudoHold) []byte {
+	b, _ := json.Marshal(approvalPendingFrameBody{
+		Type:        approvalPendingFrame,
+		RequestRef:  hold.ref,
+		WaitSeconds: hold.waitSeconds,
+		ExpiresAt:   hold.expiresAt,
+		HoldReason:  hold.holdReason,
+	})
+	return append(b, '\n')
+}
+
+// awaitHeldRequest runs the rest of a request the server answered with
+// approval_pending. It is called by the waiter that registered req, with the
+// request's completion channel.
+func (am *AuthManager) awaitHeldRequest(req SudoApprovalRequest, hold *sudoHold, completionChan <-chan struct{}) {
+	requestID := req.RequestID
+
+	if !req.HoldCapable || hold == nil {
+		// A client that did not offer to wait reads one object to EOF, so it
+		// gets the final answer only: the request stays open on the server.
+		log.Warn().Str("request_id", requestID).Bool("hold_capable", req.HoldCapable).
+			Msg("Server holds a sudo request alpamon cannot relay; answering pending")
+		if am.finalizeRequestWithCode(requestID, "Approval pending", sudoCodeApprovalPending) {
+			if hold != nil {
+				am.endHold(req, hold)
+			}
+		} else {
+			am.awaitTakenRequest(requestID, completionChan)
+		}
+		return
+	}
+
+	if hold.command == "" {
+		hold.command = req.Command
+	}
+	hold.sessionID = req.SessionID
+
+	sudoRequest := am.beginHold(requestID, hold)
+	if sudoRequest == nil {
+		// Answered between the post and here; the taker signals when done.
+		am.awaitTakenRequest(requestID, completionChan)
+		return
+	}
+
+	peerGone := watchPeerClose(sudoRequest.Connection)
+	written, err := writeInterimFrame(sudoRequest, hold)
+	switch {
+	case err != nil:
+		log.WithLevel(authSocketWriteLevel(err)).Err(err).Str("request_id", requestID).
+			Msg("Failed to send sudo_approval_pending")
+		am.abandonHeldRequest(req, hold, completionChan, "interim frame not delivered")
+		return
+	case written:
+		log.Info().Str("request_id", requestID).Str("approval_request", hold.ref).
+			Int64("wait_seconds", hold.waitSeconds).Msg("sudo request waits for approval")
+	}
+
+	deadline := time.NewTimer(time.Duration(hold.waitSeconds)*time.Second + holdGrace)
+	defer deadline.Stop()
+
+	select {
+	case <-completionChan:
+		log.Debug().Str("request_id", requestID).Msg("Held sudo_approval request answered")
+	case <-deadline.C:
+		// The server's own deadline answer never arrived. The request stays open
+		// for a re-run, which is what the code tells the client.
+		if am.finalizeHeldRequest(req, hold, "Approval pending", sudoCodeApprovalPending) {
+			log.Warn().Str("request_id", requestID).Msg("Held sudo_approval request reached its deadline")
+			am.postWaitEnded(req, hold)
+		} else {
+			am.awaitTakenRequest(requestID, completionChan)
+		}
+	case <-peerGone:
+		am.abandonHeldRequest(req, hold, completionChan, "client closed the connection")
+	case <-am.ctx.Done():
+		if !am.finalizeRequest(requestID, "Service shutdown") {
+			am.awaitTakenRequest(requestID, completionChan)
+		}
+	}
+}
+
+// beginHold marks the registered request as held and returns it, or nil when it
+// was already taken.
+func (am *AuthManager) beginHold(requestID string, hold *sudoHold) *SudoRequest {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	req := am.findRequestLocked(requestID)
+	if req != nil {
+		req.hold = hold
+	}
+	return req
+}
+
+// writeInterimFrame writes the interim frame unless the final answer already
+// went out. It reports whether it wrote.
+func writeInterimFrame(req *SudoRequest, hold *sudoHold) (bool, error) {
+	req.writeMu.Lock()
+	defer req.writeMu.Unlock()
+	if req.final {
+		return false, nil
+	}
+	_ = req.Connection.SetWriteDeadline(time.Now().Add(authSocketWriteTimeout))
+	if _, err := req.Connection.Write(interimFrame(hold)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// watchPeerClose reports the client closing its end. The client sends nothing
+// after its request, so any read that ends in EOF or a reset means it is gone:
+// Ctrl+C, a hang-up, or its own deadline. A read that fails because alpamon
+// closed the connection itself reports nothing.
+func watchPeerClose(conn net.Conn) <-chan struct{} {
+	gone := make(chan struct{})
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			_, err := conn.Read(buf)
+			if err == nil {
+				continue // Not part of the protocol; ignored.
+			}
+			if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
+				close(gone)
+			}
+			return
+		}
+	}()
+	return gone
+}
+
+// abandonHeldRequest ends a held request whose client is gone: nothing is
+// written, the connection is closed, and the server is told the wait ended.
+func (am *AuthManager) abandonHeldRequest(req SudoApprovalRequest, hold *sudoHold, completionChan <-chan struct{}, why string) {
+	am.mu.Lock()
+	sudoRequest := am.takeRequestLocked(req.RequestID)
+	if sudoRequest != nil {
+		am.rememberEndedHoldLocked(req, hold)
+	}
+	am.mu.Unlock()
+
+	if sudoRequest == nil {
+		// A verdict is going out; it fails on the closed peer, which is fine.
+		am.awaitTakenRequest(req.RequestID, completionChan)
+		return
+	}
+
+	sudoRequest.writeMu.Lock()
+	sudoRequest.final = true
+	_ = sudoRequest.Connection.Close()
+	sudoRequest.writeMu.Unlock()
+	am.signalCompletion(req.RequestID)
+
+	log.Info().Str("request_id", req.RequestID).Str("approval_request", hold.ref).Str("why", why).
+		Msg("Stopped waiting for a sudo approval")
+	am.postWaitEnded(req, hold)
+}
+
+// finalizeHeldRequest denies a held request with a code and guards its id
+// against a late verdict. It reports whether it took the request.
+func (am *AuthManager) finalizeHeldRequest(req SudoApprovalRequest, hold *sudoHold, reason, errorCode string) bool {
+	am.mu.Lock()
+	sudoRequest := am.takeRequestLocked(req.RequestID)
+	if sudoRequest != nil {
+		am.rememberEndedHoldLocked(req, hold)
+	}
+	am.mu.Unlock()
+
+	if sudoRequest == nil {
+		return false
+	}
+	am.denyPendingRequestsWithCode([]*SudoRequest{sudoRequest}, reason, errorCode)
+	return true
+}
+
+// endHold guards the id of a hold that ended without a verdict and tells the
+// server.
+func (am *AuthManager) endHold(req SudoApprovalRequest, hold *sudoHold) {
+	if hold.command == "" {
+		hold.command = req.Command
+	}
+	hold.sessionID = req.SessionID
+	am.mu.Lock()
+	am.rememberEndedHoldLocked(req, hold)
+	am.mu.Unlock()
+	am.postWaitEnded(req, hold)
+}
+
+// postWaitEnded tells the server the client stopped waiting for hold. Best
+// effort: the server's own deadline ends the wait if this never lands.
+func (am *AuthManager) postWaitEnded(req SudoApprovalRequest, hold *sudoHold) {
+	if am.session == nil || am.ctx == nil {
+		return
+	}
+	url := sudoApprovalURL(req) + hold.ref + "/wait-ended/"
+	body := sudoWaitEnded{
+		RequestID: req.RequestID,
+		Command:   req.Command,
+		SessionID: req.SessionID,
+		CommandID: req.CommandID,
+	}
+	if err := am.postWithRetry(url, body, nil); err != nil {
+		log.Warn().Err(err).Str("request_id", req.RequestID).Str("approval_request", hold.ref).
+			Msg("Failed to report the end of a sudo approval wait")
+	}
+}
+
+// liveHoldForLocked reports whether a request for the same user, run-as user
+// and command is already held. Callers must hold am.mu.
+func (am *AuthManager) liveHoldForLocked(req SudoApprovalRequest) bool {
+	for _, session := range am.pidToSessionMap {
+		for _, other := range session.Requests {
+			if other.hold != nil &&
+				other.Request.Username == req.Username &&
+				other.Request.RunasUser == req.RunasUser &&
+				other.Request.Command == req.Command {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// findRequestLocked returns the registered request for id without taking it.
+// Callers must hold am.mu.
+func (am *AuthManager) findRequestLocked(requestID string) *SudoRequest {
+	for _, session := range am.pidToSessionMap {
+		if req, exists := session.Requests[requestID]; exists {
+			return req
+		}
+	}
+	return nil
+}
+
+// mismatchLocked says why response must not be applied, or "" when it may. A
+// held request takes only a verdict that names its command and session. A
+// verdict that names a wait which already ended is not applied to a different
+// request that reuses the id. Every other response is matched on its id alone,
+// as before. Callers must hold am.mu.
+func (am *AuthManager) mismatchLocked(response SudoApprovalResponse) string {
+	req := am.findRequestLocked(response.RequestID)
+
+	if req != nil && req.hold != nil {
+		switch {
+		case response.Command != req.hold.command:
+			return "command"
+		case response.SessionID != req.hold.sessionID:
+			return "session"
+		}
+		return ""
+	}
+
+	ended, ok := am.endedHolds[response.RequestID]
+	if !ok {
+		return ""
+	}
+	if time.Now().After(ended.until) {
+		delete(am.endedHolds, response.RequestID)
+		return ""
+	}
+	if response.Command != ended.command || response.SessionID != ended.sessionID {
+		return "" // Not the ended wait's verdict.
+	}
+	if req != nil && req.Request.Command == ended.rawCommand && req.Request.SessionID == ended.sessionID {
+		return "" // The same command in the same session: the verdict fits it too.
+	}
+	return "ended wait"
+}
+
+// rememberEndedHoldLocked guards the id of a wait that ended without a verdict.
+// Callers must hold am.mu.
+func (am *AuthManager) rememberEndedHoldLocked(req SudoApprovalRequest, hold *sudoHold) {
+	now := time.Now()
+	if am.endedHolds == nil {
+		am.endedHolds = make(map[string]endedHold)
+	}
+	for id, ended := range am.endedHolds {
+		if now.After(ended.until) {
+			delete(am.endedHolds, id)
+		}
+	}
+	am.endedHolds[req.RequestID] = endedHold{
+		command:    hold.command,
+		sessionID:  hold.sessionID,
+		rawCommand: req.Command,
+		until:      now.Add(endedHoldTTL),
+	}
+}
