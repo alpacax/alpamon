@@ -174,3 +174,27 @@ func TestChownRecursive_DoesNotDescendIntoADirectorySymlink(t *testing.T) {
 	requireOwner(t, victimFile, victimID, victimID)
 	requireOwner(t, tree, newOwnerID, newOwnerID)
 }
+
+func TestChownRecursive_ChownsATreeDeeperThanTheFdLimit(t *testing.T) {
+	root := t.TempDir()
+	leafDir := root
+	for range 200 {
+		leafDir = filepath.Join(leafDir, "d")
+	}
+	require.NoError(t, os.MkdirAll(leafDir, 0o755))
+	leaf := filepath.Join(leafDir, "leaf.txt")
+	require.NoError(t, os.WriteFile(leaf, []byte("x"), 0o644))
+	uid, gid := newOwnerFor(t, root)
+	var prev syscall.Rlimit
+	require.NoError(t, syscall.Getrlimit(syscall.RLIMIT_NOFILE, &prev))
+	lowered := prev
+	lowered.Cur = 64
+	require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_NOFILE, &lowered))
+	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &prev) })
+
+	err := ChownRecursive(root, uid, gid)
+
+	require.NoError(t, err)
+	requireOwner(t, leafDir, uid, gid)
+	requireOwner(t, leaf, uid, gid)
+}
