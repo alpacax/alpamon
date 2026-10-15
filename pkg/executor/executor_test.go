@@ -108,7 +108,7 @@ func TestExecutor_ExecWithStreamingHook_StreamsChunks(t *testing.T) {
 	exitCode, output, err := e.ExecWithStreamingHook(
 		ctx,
 		[]string{"/bin/sh", "-c", "printf 'line1\\nline2\\nline3\\n'"},
-		"", "", nil, 5*time.Second, nil, callback,
+		"", "", nil, 5*time.Second, "", nil, callback,
 	)
 	require.NoError(t, err, "ExecWithStreamingHook")
 	assert.Equal(t, 0, exitCode, "exit code")
@@ -145,7 +145,7 @@ func TestExecutor_StreamingTimeoutBannerHasNoLeadingNewlines(t *testing.T) {
 	exitCode, result, err := e.ExecWithStreamingHook(
 		context.Background(),
 		[]string{"/bin/sh", "-c", "sleep 5"},
-		"", "", nil, 500*time.Millisecond,
+		"", "", nil, 500*time.Millisecond, "",
 		nil, func(_ context.Context, content string) {},
 	)
 	require.Error(t, err, "expected timeout error")

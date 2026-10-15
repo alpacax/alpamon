@@ -490,8 +490,8 @@ type cancelAfterFirstExec struct {
 	cancel context.CancelFunc
 }
 
-func (c *cancelAfterFirstExec) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
-	code, out, err := c.MockCommandExecutor.ExecWithStreamingHook(ctx, args, username, groupname, env, timeout, pidHook, chunkCallback)
+func (c *cancelAfterFirstExec) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+	code, out, err := c.MockCommandExecutor.ExecWithStreamingHook(ctx, args, username, groupname, env, timeout, commandID, pidHook, chunkCallback)
 	c.cancel()
 	return code, out, err
 }
@@ -536,9 +536,9 @@ type blockUntilChainDeadline struct {
 	*common.MockCommandExecutor
 }
 
-func (b *blockUntilChainDeadline) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+func (b *blockUntilChainDeadline) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	<-ctx.Done()
-	return b.MockCommandExecutor.ExecWithStreamingHook(ctx, args, username, groupname, env, timeout, pidHook, chunkCallback)
+	return b.MockCommandExecutor.ExecWithStreamingHook(ctx, args, username, groupname, env, timeout, commandID, pidHook, chunkCallback)
 }
 
 func TestExecuteWithOperators_GivenStreamingOutputOverAuditCap_WhenChainTimesOut_ThenOneChainBannerSurvivesTruncation(t *testing.T) {

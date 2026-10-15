@@ -1630,6 +1630,37 @@ func TestSystemHandler_Uninstall_UsesZypper(t *testing.T) {
 	assert.True(t, found, "expected a zypper remove command, got %+v", mockExec.GetExecutedCommands())
 }
 
+// Without systemd the deferred removal must leave the command's process group: run as an ordinary
+// command, a backgrounded `sleep 5 && remove` is killed with the group when the shell exits.
+func TestSystemHandler_Uninstall_WithoutSystemdStartsDetached(t *testing.T) {
+	orig := hasSystemd
+	hasSystemd = func() bool { return false }
+	t.Cleanup(func() { hasSystemd = orig })
+
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+	setPackageManagerAndID(t, utils.PkgApt, "ubuntu")
+
+	handler.executeUninstall()
+
+	commands := mockExec.GetExecutedCommands()
+	require.Len(t, commands, 1, "want only the detached removal, got %+v", commands)
+	c := commands[0]
+	assert.True(t, c.Detached, "the deferred removal must be started detached")
+	assert.Equal(t, "/bin/sh", c.Name)
+	require.Len(t, c.Args, 2)
+	assert.Equal(t, "-c", c.Args[0])
+	assert.True(t, strings.HasPrefix(c.Args[1], "(sleep 5 && apt-get purge alpamon -y && apt-get autoremove -y) >>"), "script: %q", c.Args[1])
+	assert.False(t, strings.HasSuffix(strings.TrimSpace(c.Args[1]), "&"), "the script must not background itself: %q", c.Args[1])
+	assert.True(t, mockWS.ShutDownCalled, "the agent must shut itself down once the uninstall is scheduled")
+}
+
 func TestRetryWhileZypperLocked(t *testing.T) {
 	orig := zypperLockRetryDelay
 	zypperLockRetryDelay = 0

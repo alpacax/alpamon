@@ -571,11 +571,13 @@ func (h *SystemHandler) executeUninstall() {
 			_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
 		}
 	} else {
-		// Defer the uninstall so the process can shut down cleanly first.
-		// Uses a subshell background pattern instead of nohup, which may be missing in minimal images.
-		deferredCmd := fmt.Sprintf("(sleep 5 && %s) >>%s/alpamon.log 2>&1 &", cmd, utils.LogDir())
+		// Defer the uninstall so the process can shut down cleanly first. Started detached: run as an
+		// ordinary command, it would be killed with the command's process group as soon as the shell exits.
+		deferredCmd := fmt.Sprintf("(sleep 5 && %s) >>%s/alpamon.log 2>&1", cmd, utils.LogDir())
 		log.Info().Msg("Systemd not available, scheduling deferred uninstall.")
-		_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", deferredCmd)
+		if err := h.Executor.StartDetached("/bin/sh", "-c", deferredCmd); err != nil {
+			log.Error().Err(err).Msg("Failed to schedule the deferred uninstall.")
+		}
 	}
 
 	h.wsClient.ShutDown()
