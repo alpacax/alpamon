@@ -3,7 +3,7 @@
 package utils
 
 import (
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -11,7 +11,7 @@ import (
 // ChownRecursive walks path as on Unix; chown is not meaningful on Windows.
 func ChownRecursive(path string, uid, gid int) error {
 	if path == "" {
-		return fmt.Errorf("path must not be empty")
+		return errors.New("path must not be empty")
 	}
 	path = filepath.Clean(path)
 	return filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
