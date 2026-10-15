@@ -11,13 +11,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const openDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+const _openDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+type dirFrame struct {
+	path  string
+	dev   uint64
+	ino   uint64
+	names []string
+}
 
 // ChownRecursive changes the owner of path and everything under it. Symlinks inside the
 // tree and at path itself are left alone; path's parent directories resolve as usual.
 func ChownRecursive(path string, uid, gid int) error {
 	if path == "" {
-		return fmt.Errorf("path must not be empty")
+		return errors.New("path must not be empty")
 	}
 	path = filepath.Clean(path)
 
@@ -29,24 +36,18 @@ func ChownRecursive(path string, uid, gid int) error {
 		return nil
 	}
 	if !info.IsDir() {
-		if err := unix.Fchownat(unix.AT_FDCWD, path, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		err = unix.Fchownat(unix.AT_FDCWD, path, uid, gid, unix.AT_SYMLINK_NOFOLLOW)
+		if err != nil {
 			return fmt.Errorf("chown %s: %w", path, err)
 		}
 		return nil
 	}
 
-	fd, err := unix.Open(path, openDirFlags, 0)
+	fd, err := unix.Open(path, _openDirFlags, 0)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
 	return chownTree(fd, path, uid, gid)
-}
-
-type dirFrame struct {
-	path  string
-	dev   uint64
-	ino   uint64
-	names []string
 }
 
 // chownTree takes ownership of fd, the open root directory. Only the current
@@ -72,7 +73,7 @@ func chownTree(fd int, path string, uid, gid int) (err error) {
 				return nil
 			}
 			parent := stack[len(stack)-1]
-			pfd, err := unix.Openat(fd, "..", openDirFlags, 0)
+			pfd, err := unix.Openat(fd, "..", _openDirFlags, 0)
 			if err != nil {
 				return fmt.Errorf("open %s: %w", parent.path, err)
 			}
@@ -96,7 +97,7 @@ func chownTree(fd int, path string, uid, gid int) (err error) {
 		case unix.S_IFLNK:
 			continue
 		case unix.S_IFDIR:
-			cfd, err := unix.Openat(fd, name, openDirFlags, 0)
+			cfd, err := unix.Openat(fd, name, _openDirFlags, 0)
 			if err != nil {
 				if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
 					// Replaced after the stat: fail closed instead of retrying.
@@ -106,7 +107,8 @@ func chownTree(fd int, path string, uid, gid int) (err error) {
 			}
 			_ = unix.Close(fd)
 			fd, path = cfd, child
-			if err := sameDir(fd, &dirFrame{path: child, dev: uint64(st.Dev), ino: st.Ino}); err != nil {
+			want := &dirFrame{path: child, dev: uint64(st.Dev), ino: st.Ino}
+			if err := sameDir(fd, want); err != nil {
 				return err
 			}
 			frame, err := enterDir(fd, path, uid, gid)
@@ -153,7 +155,7 @@ func sameDir(fd int, want *dirFrame) error {
 // readDirNames lists the directory behind fd through a fresh descriptor, so
 // the caller's fd keeps its own offset and is never reopened by name.
 func readDirNames(fd int, path string) ([]string, error) {
-	lfd, err := unix.Openat(fd, ".", openDirFlags, 0)
+	lfd, err := unix.Openat(fd, ".", _openDirFlags, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
