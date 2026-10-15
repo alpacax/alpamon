@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/internal/testutil"
+	"github.com/alpacax/alpamon/v2/internal/testutil/dbtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestDeleteQueriesReturnCommitError(t *testing.T) {
-	client := testutil.CommitFailingClient(t, filepath.Join(t.TempDir(), "cleanup.db"))
+	client := dbtest.CommitFailingClient(t, filepath.Join(t.TempDir(), "cleanup.db"))
 
 	for _, table := range tables {
 		t.Run(string(table), func(t *testing.T) {
@@ -21,7 +21,7 @@ func TestDeleteQueriesReturnCommitError(t *testing.T) {
 
 			err := query(context.Background(), client, time.Now())
 
-			assert.ErrorIs(t, err, testutil.ErrCommitFailed)
+			assert.ErrorIs(t, err, dbtest.ErrCommitFailed)
 		})
 	}
 }

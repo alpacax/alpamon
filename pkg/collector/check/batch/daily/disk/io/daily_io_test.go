@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/internal/testutil"
+	"github.com/alpacax/alpamon/v2/internal/testutil/dbtest"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
@@ -87,7 +87,7 @@ func (suite *DailyDiskIOCheckSuite) commitFailingCheck() *Check {
 		Name:     string(base.DailyDiskIO) + "_" + uuid.NewString(),
 		Interval: time.Second,
 		Buffer:   base.NewCheckBuffer(10),
-		Client:   testutil.CommitFailingClient(suite.T(), dbFileName),
+		Client:   dbtest.CommitFailingClient(suite.T(), dbFileName),
 	}).(*Check)
 }
 
@@ -97,7 +97,7 @@ func (suite *DailyDiskIOCheckSuite) TestDeleteHourlyDiskIOReturnsCommitError() {
 
 	err := suite.commitFailingCheck().deleteHourlyDiskIO(suite.ctx)
 
-	suite.ErrorIs(err, testutil.ErrCommitFailed)
+	suite.ErrorIs(err, dbtest.ErrCommitFailed)
 	kept, err := suite.client.HourlyDiskIO.Query().Where(hourlydiskio.TimestampEQ(old)).Exist(suite.ctx)
 	suite.Require().NoError(err)
 	suite.True(kept, "the failed commit must not delete the row")

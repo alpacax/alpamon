@@ -1,4 +1,4 @@
-package db
+package sqlitedsn
 
 import (
 	"context"
@@ -10,11 +10,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSQLiteDSNEnablesForeignKeys(t *testing.T) {
+func TestForEnablesForeignKeys(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
-	db, err := sql.Open("sqlite", SQLiteDSN(dbPath))
+	db, err := sql.Open("sqlite", For(dbPath))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 

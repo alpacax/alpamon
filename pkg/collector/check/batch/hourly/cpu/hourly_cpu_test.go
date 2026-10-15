@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/internal/testutil"
+	"github.com/alpacax/alpamon/v2/internal/testutil/dbtest"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
@@ -91,7 +91,7 @@ func (suite *HourlyCPUUsageCheckSuite) commitFailingCheck() *Check {
 		Name:     string(base.HourlyCPUUsage) + "_" + uuid.NewString(),
 		Interval: time.Second,
 		Buffer:   base.NewCheckBuffer(10),
-		Client:   testutil.CommitFailingClient(suite.T(), dbFileName),
+		Client:   dbtest.CommitFailingClient(suite.T(), dbFileName),
 	}).(*Check)
 }
 
@@ -103,7 +103,7 @@ func (suite *HourlyCPUUsageCheckSuite) TestSaveHourlyCPUUsageReturnsCommitErrorA
 
 	err := suite.commitFailingCheck().saveHourlyCPUUsage(data, suite.ctx)
 
-	suite.ErrorIs(err, testutil.ErrCommitFailed)
+	suite.ErrorIs(err, dbtest.ErrCommitFailed)
 	stored, err := suite.client.HourlyCPUUsage.Query().Where(hourlycpuusage.TimestampEQ(ts)).Exist(suite.ctx)
 	suite.Require().NoError(err)
 	suite.False(stored, "the failed commit must not store the hourly row")

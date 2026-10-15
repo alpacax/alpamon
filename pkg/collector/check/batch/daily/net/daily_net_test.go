@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/internal/testutil"
+	"github.com/alpacax/alpamon/v2/internal/testutil/dbtest"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
@@ -95,7 +95,7 @@ func (suite *DailyNetCheckSuite) commitFailingCheck() *Check {
 		Name:     string(base.DailyNet) + "_" + uuid.NewString(),
 		Interval: time.Second,
 		Buffer:   base.NewCheckBuffer(10),
-		Client:   testutil.CommitFailingClient(suite.T(), dbFileName),
+		Client:   dbtest.CommitFailingClient(suite.T(), dbFileName),
 	}).(*Check)
 }
 
@@ -105,7 +105,7 @@ func (suite *DailyNetCheckSuite) TestDeleteHourlyTrafficReturnsCommitError() {
 
 	err := suite.commitFailingCheck().deleteHourlyTraffic(suite.ctx)
 
-	suite.ErrorIs(err, testutil.ErrCommitFailed)
+	suite.ErrorIs(err, dbtest.ErrCommitFailed)
 	kept, err := suite.client.HourlyTraffic.Query().Where(hourlytraffic.TimestampEQ(old)).Exist(suite.ctx)
 	suite.Require().NoError(err)
 	suite.True(kept, "the failed commit must not delete the row")

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/internal/testutil"
+	"github.com/alpacax/alpamon/v2/internal/testutil/dbtest"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
@@ -108,7 +108,7 @@ func (suite *HourlyDiskIOCheckSuite) commitFailingCheck() *Check {
 		Name:     string(base.HourlyDiskIO) + "_" + uuid.NewString(),
 		Interval: time.Second,
 		Buffer:   base.NewCheckBuffer(10),
-		Client:   testutil.CommitFailingClient(suite.T(), dbFileName),
+		Client:   dbtest.CommitFailingClient(suite.T(), dbFileName),
 	}).(*Check)
 }
 
@@ -120,7 +120,7 @@ func (suite *HourlyDiskIOCheckSuite) TestSaveHourlyDiskIOReturnsCommitErrorAndKe
 
 	err := suite.commitFailingCheck().saveHourlyDiskIO(data, suite.ctx)
 
-	suite.ErrorIs(err, testutil.ErrCommitFailed)
+	suite.ErrorIs(err, dbtest.ErrCommitFailed)
 	stored, err := suite.client.HourlyDiskIO.Query().Where(hourlydiskio.TimestampEQ(ts)).Exist(suite.ctx)
 	suite.Require().NoError(err)
 	suite.False(stored, "the failed commit must not store the hourly row")

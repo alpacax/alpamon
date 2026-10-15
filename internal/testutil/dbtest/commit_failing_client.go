@@ -1,4 +1,6 @@
-package testutil
+// Package dbtest holds a commit-failing ent client for tests. It is apart from testutil so tests that
+// only need testutil do not link ent and SQLite, and pkg/db tests can import testutil.
+package dbtest
 
 import (
 	"context"
@@ -8,13 +10,14 @@ import (
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/alpacax/alpamon/v2/internal/sqlitedsn"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
 	"github.com/stretchr/testify/require"
 )
 
 // ErrCommitFailed is what every Commit on a CommitFailingClient returns.
-var ErrCommitFailed = errors.New("testutil: injected commit failure")
+var ErrCommitFailed = errors.New("dbtest: injected commit failure")
 
 // CommitFailingClient migrates the database at path and opens it with transactions that roll back
 // and return ErrCommitFailed on Commit.
@@ -23,7 +26,7 @@ func CommitFailingClient(t *testing.T, path string) *ent.Client {
 	require.NoError(t, db.InitTestDB(path).Close()) // InitTestDB also registers the sqlite3 driver.
 	abs, err := filepath.Abs(path)
 	require.NoError(t, err)
-	drv, err := entsql.Open(dialect.SQLite, db.SQLiteDSN(abs))
+	drv, err := entsql.Open(dialect.SQLite, sqlitedsn.For(abs))
 	require.NoError(t, err)
 	client := ent.NewClient(ent.Driver(commitFailingDriver{drv}))
 	t.Cleanup(func() { _ = client.Close() })

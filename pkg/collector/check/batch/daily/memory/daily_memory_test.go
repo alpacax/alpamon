@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/internal/testutil"
+	"github.com/alpacax/alpamon/v2/internal/testutil/dbtest"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
@@ -80,7 +80,7 @@ func (suite *DailyMemoryUsageCheckSuite) commitFailingCheck() *Check {
 		Name:     string(base.DailyMemUsage) + "_" + uuid.NewString(),
 		Interval: time.Second,
 		Buffer:   base.NewCheckBuffer(10),
-		Client:   testutil.CommitFailingClient(suite.T(), dbFileName),
+		Client:   dbtest.CommitFailingClient(suite.T(), dbFileName),
 	}).(*Check)
 }
 
@@ -90,7 +90,7 @@ func (suite *DailyMemoryUsageCheckSuite) TestDeleteHourlyMemoryUsageReturnsCommi
 
 	err := suite.commitFailingCheck().deleteHourlyMemoryUsage(suite.ctx)
 
-	suite.ErrorIs(err, testutil.ErrCommitFailed)
+	suite.ErrorIs(err, dbtest.ErrCommitFailed)
 	kept, err := suite.client.HourlyMemoryUsage.Query().Where(hourlymemoryusage.TimestampEQ(old)).Exist(suite.ctx)
 	suite.Require().NoError(err)
 	suite.True(kept, "the failed commit must not delete the row")
