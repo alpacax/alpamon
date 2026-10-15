@@ -259,7 +259,7 @@ func resumeThreadsOfProcess(pid uint32) error {
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(snapshot)
+	defer func() { _ = windows.CloseHandle(snapshot) }()
 
 	resumed := 0
 	var entry windows.ThreadEntry32
@@ -289,7 +289,7 @@ func resumeThreadOf(tid, pid uint32) error {
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(thread)
+	defer func() { _ = windows.CloseHandle(thread) }()
 	owner, _, err := procGetProcessIdOfThread.Call(uintptr(thread))
 	if owner == 0 {
 		return err

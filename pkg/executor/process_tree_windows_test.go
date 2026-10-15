@@ -43,7 +43,7 @@ func TestConfigureProcessTreeCleanup_StartsSuspendedAndKeepsCallerFlags(t *testi
 		cmd := &exec.Cmd{}
 		cleanup, err := configureProcessTreeCleanup(cmd, false)
 		require.NoError(t, err, "configureProcessTreeCleanup")
-		defer cleanup.close()
+		defer func() { _ = cleanup.close() }()
 		require.NotNil(t, cmd.SysProcAttr, "SysProcAttr was not allocated")
 		assert.Equal(t, uint32(windows.CREATE_SUSPENDED), cmd.SysProcAttr.CreationFlags)
 	})
@@ -52,7 +52,7 @@ func TestConfigureProcessTreeCleanup_StartsSuspendedAndKeepsCallerFlags(t *testi
 		cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}}
 		cleanup, err := configureProcessTreeCleanup(cmd, false)
 		require.NoError(t, err, "configureProcessTreeCleanup")
-		defer cleanup.close()
+		defer func() { _ = cleanup.close() }()
 		assert.True(t, cmd.SysProcAttr.HideWindow, "HideWindow was clobbered")
 		assert.Equal(t, uint32(windows.CREATE_NEW_PROCESS_GROUP|windows.CREATE_SUSPENDED), cmd.SysProcAttr.CreationFlags)
 	})
@@ -60,7 +60,7 @@ func TestConfigureProcessTreeCleanup_StartsSuspendedAndKeepsCallerFlags(t *testi
 	t.Run("sets kill-on-close at creation", func(t *testing.T) {
 		cleanup, err := configureProcessTreeCleanup(&exec.Cmd{}, false)
 		require.NoError(t, err, "configureProcessTreeCleanup")
-		defer cleanup.close()
+		defer func() { _ = cleanup.close() }()
 		var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 		err = windows.QueryInformationJobObject(cleanup.job, windows.JobObjectExtendedLimitInformation,
 			uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil)
@@ -74,7 +74,7 @@ func TestCommandCleanup_CancelTerminatesViaJobAssignment(t *testing.T) {
 	cmd := exec.Command("ping", "-n", "60", "127.0.0.1")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	require.NoError(t, err, "configureProcessTreeCleanup")
-	defer cleanup.close()
+	defer func() { _ = cleanup.close() }()
 
 	err = cmd.Start()
 	require.NoError(t, err, "cmd.Start")
@@ -99,7 +99,7 @@ func TestCommandCleanup_CancelTerminatesMultiLevelTreeViaJob(t *testing.T) {
 	cmd := exec.Command("cmd", "/c", "ping", "-n", "60", "127.0.0.1")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	require.NoError(t, err, "configureProcessTreeCleanup")
-	defer cleanup.close()
+	defer func() { _ = cleanup.close() }()
 
 	err = cmd.Start()
 	require.NoError(t, err, "cmd.Start")
@@ -144,7 +144,7 @@ func TestCommandCleanup_RootStaysSuspendedUntilAssigned(t *testing.T) {
 	cmd := exec.Command("cmd", "/c", "ping", "-n", "60", "127.0.0.1")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	require.NoError(t, err, "configureProcessTreeCleanup")
-	defer cleanup.close()
+	defer func() { _ = cleanup.close() }()
 
 	err = cmd.Start()
 	require.NoError(t, err, "cmd.Start")
@@ -174,7 +174,7 @@ func TestCommandCleanup_RootThatExitsAtOnceIsAssignedAndReaped(t *testing.T) {
 	cmd := exec.Command("cmd", "/c", "exit", "7")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	require.NoError(t, err, "configureProcessTreeCleanup")
-	defer cleanup.close()
+	defer func() { _ = cleanup.close() }()
 
 	err = cmd.Start()
 	require.NoError(t, err, "cmd.Start")
@@ -207,7 +207,7 @@ func TestCommandCleanup_CancelSparesProcessesParentedByExitedRoot(t *testing.T) 
 	cmd := exec.Command("cmd", "/c", "start", "", "ping", "-n", "30", "127.0.0.1")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	require.NoError(t, err, "configureProcessTreeCleanup")
-	defer cleanup.close()
+	defer func() { _ = cleanup.close() }()
 
 	err = cmd.Start()
 	require.NoError(t, err, "cmd.Start")
@@ -284,7 +284,7 @@ func TestCommandCleanup_AfterStartReCancelsWhenAlreadyCanceled(t *testing.T) {
 	cmd := exec.Command("ping", "-n", "60", "127.0.0.1")
 	cleanup, err := configureProcessTreeCleanup(cmd, false)
 	require.NoError(t, err, "configureProcessTreeCleanup")
-	defer cleanup.close()
+	defer func() { _ = cleanup.close() }()
 
 	err = cmd.Start()
 	require.NoError(t, err, "cmd.Start")
@@ -368,7 +368,7 @@ func isWindowsPidAlive(pid uint32) bool {
 	if err != nil {
 		return false
 	}
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 	event, err := windows.WaitForSingleObject(h, 0)
 	return err == nil && event == uint32(windows.WAIT_TIMEOUT)
 }
@@ -435,7 +435,7 @@ func snapshotWindowsChildProcesses() (map[uint32][]windowsChildProcess, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer windows.CloseHandle(snapshot)
+	defer func() { _ = windows.CloseHandle(snapshot) }()
 
 	children := map[uint32][]windowsChildProcess{}
 	var entry windows.ProcessEntry32
