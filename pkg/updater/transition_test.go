@@ -348,13 +348,6 @@ func TestNoServiceManager(t *testing.T) {
 	assert.ErrorIs(t, sm.ArmGuard("u", time.Second, "true"), ErrNoServiceManager)
 }
 
-func TestPackageRollbackCommand_AptWaitsForDpkgLock(t *testing.T) {
-	got, err := PackageRollbackCommand(utils.PkgApt, "2.4.0", "2.5.0", nil)
-
-	require.NoError(t, err)
-	assert.Contains(t, strings.Join(got, " "), "-o DPkg::Lock::Timeout=")
-}
-
 func TestPackageRollbackCommand(t *testing.T) {
 	for pm, want := range map[string][]string{
 		utils.PkgApt:    {"apt-get", "install", "-y", "--allow-downgrades", "-o", utils.AptLockTimeout, "alpamon=2.4.0"},

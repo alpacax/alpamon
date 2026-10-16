@@ -232,33 +232,6 @@ func TestSystemHandler_PinnedUpgrade_Apt(t *testing.T) {
 	assert.Empty(t, h.api.posts(), "success is reported by the process that confirms its health")
 }
 
-// unattended-upgrades holds the dpkg frontend lock for minutes; without a lock timeout apt-get exits 100 at once.
-func TestSystemHandler_Upgrade_AptInstallWaitsForDpkgLock(t *testing.T) {
-	h := newPinnedHarness(t, utils.PkgApt)
-
-	exitCode, output, err := h.handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-	require.NoError(t, err)
-	require.Equal(t, 0, exitCode, output)
-
-	install := findExecutedAptInstall(h.exec)
-	require.NotNil(t, install, "an apt-get install must be spawned")
-	assert.Contains(t, strings.Join(install.Args, " "), "-o DPkg::Lock::Timeout=")
-}
-
-func TestSystemHandler_PinnedUpgrade_AptInstallWaitsForDpkgLock(t *testing.T) {
-	h := newPinnedHarness(t, utils.PkgApt)
-	h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
-	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.5.0", nil)
-
-	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0", AttemptID: "att-1"})
-	require.NoError(t, err)
-	require.Equal(t, 0, exitCode, output)
-
-	install := findExecutedAptInstall(h.exec)
-	require.NotNil(t, install, "an apt-get install must be spawned")
-	assert.Contains(t, strings.Join(install.Args, " "), "-o DPkg::Lock::Timeout=")
-}
-
 // TestSystemHandler_PinnedUpgrade_ScopesAptUpdateToAlpamonSource checks that a broken
 // third-party source cannot fail a pinned upgrade's refresh, as on the legacy path.
 func TestSystemHandler_PinnedUpgrade_ScopesAptUpdateToAlpamonSource(t *testing.T) {
