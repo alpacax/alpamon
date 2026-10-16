@@ -53,7 +53,7 @@ func waitForLine(t *testing.T, out *bufio.Reader, want string) {
 	select {
 	case <-found:
 	case <-time.After(5 * time.Second):
-		t.Fatalf("PTY never printed %q", want)
+		require.Failf(t, "PTY never printed the expected line", "want %q", want)
 	}
 }
 
