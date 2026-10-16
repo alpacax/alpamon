@@ -37,27 +37,29 @@ func startPtyShell(t *testing.T, script string) (*PtyClient, *bufio.Reader) {
 
 func waitForLine(t *testing.T, out *bufio.Reader, want string) {
 	t.Helper()
-	found := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
 		for {
 			line, err := out.ReadString('\n')
 			if strings.TrimSpace(line) == want {
-				close(found)
+				done <- nil
 				return
 			}
 			if err != nil {
+				done <- err
 				return
 			}
 		}
 	}()
 	select {
-	case <-found:
+	case err := <-done:
+		require.NoError(t, err, "PTY closed before printing %q", want)
 	case <-time.After(5 * time.Second):
 		require.Failf(t, "PTY never printed the expected line", "want %q", want)
 	}
 }
 
-func TestRefreshSignalsForegroundGroupOfLiveShell(t *testing.T) {
+func TestPtyRefresh_SignalsLiveShellForegroundGroup(t *testing.T) {
 	pc, out := startPtyShell(t, `trap 'echo winch' WINCH; echo ready; while :; do sleep 0.1; done`)
 
 	err := pc.Refresh()
@@ -66,7 +68,7 @@ func TestRefreshSignalsForegroundGroupOfLiveShell(t *testing.T) {
 	waitForLine(t, out, "winch")
 }
 
-func TestRefreshDoesNotSignalCallerGroupAfterShellExits(t *testing.T) {
+func TestPtyRefresh_NoSignalToCallerGroupAfterShellExit(t *testing.T) {
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	t.Cleanup(func() { signal.Stop(winch) })
