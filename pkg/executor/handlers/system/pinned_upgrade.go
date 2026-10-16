@@ -258,7 +258,7 @@ func (h *SystemHandler) installPinnedPackage(ctx context.Context, marker *update
 		if exact == "" {
 			return out, fmt.Errorf("the configured repositories do not carry alpamon %s", target)
 		}
-		code, out, err = run("apt-get", "install", "-y", "--allow-downgrades", "-o", "Acquire::Retries=3", "alpamon="+exact)
+		code, out, err = run("apt-get", "install", "-y", "--allow-downgrades", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout, "alpamon="+exact)
 		if code != 0 {
 			return out, commandFailed("apt-get install", code, err)
 		}

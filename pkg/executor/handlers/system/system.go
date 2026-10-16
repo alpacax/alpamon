@@ -273,7 +273,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 			}
 		}
 		installArgv = append([]string{"apt-get", "install", "--only-upgrade"}, packages...)
-		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3")
+		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout)
 	case utils.PkgYum:
 		// updater.RunYum builds its own argv, so installArgv stays unset.
 		runInstall = func() (int, string, error) {
@@ -525,7 +525,7 @@ func (h *SystemHandler) executeUninstall() {
 	switch utils.PackageManager {
 	case utils.PkgApt:
 		// purge removes package and config files
-		cmd = "apt-get purge alpamon -y && apt-get autoremove -y"
+		cmd = "apt-get purge alpamon -y -o " + utils.AptLockTimeout + " && apt-get autoremove -y -o " + utils.AptLockTimeout
 	case utils.PkgYum:
 		cmd = "yum remove alpamon -y"
 	case utils.PkgZypper:
@@ -615,7 +615,8 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	var cmd string
 	switch utils.PackageManager {
 	case utils.PkgApt:
-		cmd = "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 && apt-get autoremove -y"
+		cmd = "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 -o " + utils.AptLockTimeout +
+			" && apt-get autoremove -y -o " + utils.AptLockTimeout
 	case utils.PkgYum:
 		cmd = "yum update -y"
 	case utils.PkgZypper:
