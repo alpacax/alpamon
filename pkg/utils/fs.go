@@ -202,29 +202,6 @@ func FormatPermissions(mode os.FileMode) string {
 
 // GetFileInfo is implemented in fs_unix.go and fs_windows.go
 
-func ChownRecursive(path string, uid, gid int) error {
-	if path == "" {
-		return fmt.Errorf("path must not be empty")
-	}
-	path = filepath.Clean(path)
-	return filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil
-		}
-
-		return os.Chown(p, uid, gid)
-	})
-}
-
 func GetCopyPath(src, dst string) string {
 	src = filepath.Clean(src)
 	dst = filepath.Clean(dst)
