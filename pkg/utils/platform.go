@@ -48,11 +48,11 @@ const (
 	PkgZypper = "zypper"
 	PkgBrew   = "brew"
 	PkgNone   = "none"
-
-	// AptLockTimeout makes apt wait out unattended-upgrades instead of exiting 100 at once.
-	// It covers only the dpkg locks, and apt before 1.9.11 ignores it.
-	AptLockTimeout = "DPkg::Lock::Timeout=300"
 )
+
+// AptLockTimeout makes apt wait out unattended-upgrades instead of exiting 100 at once.
+// It covers only the dpkg locks, and apt before 1.9.11 ignores it.
+const AptLockTimeout = "DPkg::Lock::Timeout=300"
 
 // Pure, so the table is testable without a host; ok=false must never be defaulted by callers (see platformAliases).
 func ResolvePlatform(goos, rawPlatform string) (like, pkgManager string, ok bool) {
