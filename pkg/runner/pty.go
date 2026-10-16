@@ -431,10 +431,8 @@ func (pc *PtyClient) Resize(rows, cols uint16) error {
 	return pc.resize(rows, cols)
 }
 
-// Refresh sends SIGWINCH to the PTY foreground process group to force a
-// terminal redraw without changing the terminal size. It uses TIOCGPGRP to
-// look up the foreground process group from the PTY fd, ensuring that
-// full-screen programs (vim, less, top, etc.) also receive the signal.
+// Refresh redraws the terminal by sending SIGWINCH to the PTY's foreground process group, so
+// full-screen programs repaint too. With no foreground group (shell exited) it returns an error.
 func (pc *PtyClient) Refresh() error {
 	if pc.ptmx == nil {
 		return fmt.Errorf("no PTY for session %s", pc.sessionID)
@@ -447,6 +445,10 @@ func (pc *PtyClient) Refresh() error {
 			return fmt.Errorf("no running process for session %s", pc.sessionID)
 		}
 		pgid = pc.cmd.Process.Pid
+	}
+	// A PTY whose shell has exited reports 0, and kill(0, sig) signals Alpamon's own group.
+	if pgid <= 0 {
+		return fmt.Errorf("no foreground process group for session %s", pc.sessionID)
 	}
 
 	err = syscall.Kill(-pgid, syscall.SIGWINCH)
