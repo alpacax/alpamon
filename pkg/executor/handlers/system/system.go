@@ -40,17 +40,13 @@ const _ = uint(delayedActionDelay-time.Second) + uint(time.Second-delayedActionD
 // zypper behavior the other package managers do not share; per-code reasoning and the apt/yum contrast are in docs/opensuse.md.
 const (
 	// ZYPP_LOCKED: packagekit, an operator session, or a racing console update holds the libzypp lock.
-	// dnf waits for its lock; zypper --non-interactive gives up at once.
-	zypperLockedExit = 7
+	// dnf waits for its lock and apt can be told to retry; zypper --non-interactive gives up at once.
+	zypperLockedExit   = 7
+	zypperLockAttempts = 3
 )
 
-// apt-get exits 100 on any error, a held lock included.
-const aptFailedExit = 100
-
-const lockRetryAttempts = 3
-
 // Var so tests do not sleep. Long enough for a short transaction elsewhere to finish, short enough to stay inside a console command's patience.
-var lockRetryDelay = 15 * time.Second
+var zypperLockRetryDelay = 15 * time.Second
 
 // aptSourcesDir is where apt reads source files from. Var so tests point it at a temp dir.
 var aptSourcesDir = "/etc/apt/sources.list.d"
@@ -251,15 +247,15 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		}
 	}
 
-	// The package environment (LC_ALL=C, plus proxy variables with a package proxy) applies to the
+	// The proxy environment (nil without a package proxy) applies to the
 	// spawned package-manager process only, never to the agent process.
-	runPkg := func(argv ...string) (int, string, error) {
-		return retryWhileLocked(ctx, func() (int, string, error) {
-			return h.Executor.Exec(ctx, argv, "root", "root", packageEnv(packageProxy), 0)
+	install := func(argv ...string) (int, string, error) {
+		return retryWhileZypperLocked(ctx, func() (int, string, error) {
+			return h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
 		})
 	}
 	var installArgv []string
-	runInstall := func() (int, string, error) { return runPkg(installArgv...) }
+	runInstall := func() (int, string, error) { return install(installArgv...) }
 	// Set when the refresh was scoped to alpamon's own repo, which is what makes
 	// a later "some repos were skipped" tolerable; see normalizeZypperExit.
 	var alpamonRepoRefreshed bool
@@ -271,7 +267,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 		// One scoped update per alpamon channel source, apart from install: a broken repo
 		// elsewhere on the host must not block the upgrade, and a failure must name its step.
 		for _, argv := range aptUpdateArgvs() {
-			code, out, rerr := runPkg(argv...)
+			code, out, rerr := h.Executor.Exec(ctx, argv, "root", "root", packageProxyEnv(packageProxy), 0)
 			if code != 0 {
 				return code, appendStepFailure(out, "apt-get update", code, rerr), rerr
 			}
@@ -281,7 +277,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 	case utils.PkgYum:
 		// updater.RunYum builds its own argv, so installArgv stays unset.
 		runInstall = func() (int, string, error) {
-			code, out, _, err := updater.RunYum(runPkg, nil, "update", packages...)
+			code, out, _, err := updater.RunYum(install, nil, "update", packages...)
 			return code, out, err
 		}
 	case utils.PkgZypper:
@@ -292,8 +288,8 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 			refresh = append(refresh, aliases...)
 			alpamonRepoRefreshed = true
 		}
-		code, out, rerr := retryWhileLocked(ctx, func() (int, string, error) {
-			return h.Executor.Exec(ctx, refresh, "root", "root", packageEnv(packageProxy), 0)
+		code, out, rerr := retryWhileZypperLocked(ctx, func() (int, string, error) {
+			return h.Executor.Exec(ctx, refresh, "root", "root", packageProxyEnv(packageProxy), 0)
 		})
 		if code != 0 {
 			return code, withZypperHint(code, out), rerr
@@ -639,8 +635,8 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 
 	// A system-wide update covers every repo by definition, so a skipped repo
 	// means part of the update did not happen: 106 stays a failure here.
-	exitCode, output, err := retryWhileLocked(ctx, func() (int, string, error) {
-		return h.Executor.Exec(ctx, []string{"sh", "-c", cmd}, "root", "root", packageEnv(""), 0)
+	exitCode, output, err := retryWhileZypperLocked(ctx, func() (int, string, error) {
+		return h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
 	})
 	exitCode, err = normalizeZypperExit(exitCode, err, false)
 	return exitCode, withZypperHint(exitCode, output), err
@@ -779,31 +775,19 @@ func appendStepFailure(output, step string, code int, err error) string {
 	return strings.TrimRight(output, "\n") + "\n\n" + commandFailed(step, code, err).Error()
 }
 
-func retryWhileLocked(ctx context.Context, run func() (int, string, error)) (int, string, error) {
+func retryWhileZypperLocked(ctx context.Context, run func() (int, string, error)) (int, string, error) {
 	for attempt := 1; ; attempt++ {
 		exitCode, output, err := run()
-		if !lockedOut(exitCode, output) || attempt >= lockRetryAttempts {
+		if exitCode != zypperLockedExit || utils.PackageManager != utils.PkgZypper || attempt >= zypperLockAttempts {
 			return exitCode, output, err
 		}
-		log.Info().Int("attempt", attempt).Msgf("%s is locked by another process; retrying.", utils.PackageManager)
+		log.Info().Int("attempt", attempt).Msg("zypper is locked by another process; retrying.")
 		select {
 		case <-ctx.Done():
 			return exitCode, output, err
-		case <-time.After(lockRetryDelay):
+		case <-time.After(zypperLockRetryDelay):
 		}
 	}
-}
-
-// lockedOut reports a run that lost a package manager lock to another process. apt 1.9.11+ prints "E: Could not get lock"
-// only for a lock DPkg::Lock::Timeout does not wait on (lists, archives), so a lock it already waited for is not retried.
-func lockedOut(exitCode int, output string) bool {
-	switch utils.PackageManager {
-	case utils.PkgZypper:
-		return exitCode == zypperLockedExit
-	case utils.PkgApt:
-		return exitCode == aptFailedExit && strings.Contains(output, "E: Could not get lock")
-	}
-	return false
 }
 
 // The console only shows the exit code and output, and zypper's own text does not say what to fix.
@@ -851,11 +835,11 @@ func normalizeZypperExit(exitCode int, err error, alpamonRepoRefreshed bool) (in
 	return exitCode, err
 }
 
-// packageEnv is the package manager's environment. LC_ALL=C keeps the lock message lockedOut matches in English over an
-// /etc/environment locale; an empty proxyURL adds no proxy. no_proxy excludes the Alpacon host, IMDS, and localhost.
-func packageEnv(proxyURL string) map[string]string {
+// packageProxyEnv builds the proxy environment for the package manager process in closed network
+// setups; nil means no proxy. no_proxy excludes the Alpacon host, the IMDS endpoints, and localhost.
+func packageProxyEnv(proxyURL string) map[string]string {
 	if proxyURL == "" {
-		return map[string]string{"LC_ALL": "C"}
+		return nil
 	}
 
 	noProxy := "localhost,127.0.0.1,::1,169.254.169.254,fd00:ec2::254,metadata.google.internal"
@@ -864,7 +848,6 @@ func packageEnv(proxyURL string) map[string]string {
 	}
 
 	return map[string]string{
-		"LC_ALL":      "C",
 		"http_proxy":  proxyURL,
 		"https_proxy": proxyURL,
 		"HTTP_PROXY":  proxyURL,

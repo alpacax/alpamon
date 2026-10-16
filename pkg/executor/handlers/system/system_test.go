@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -639,7 +638,7 @@ func TestSystemHandler_Upgrade_NoPackageProxy(t *testing.T) {
 
 	install := findExecutedAptInstall(mockExec)
 	require.NotNil(t, install, "an apt-get install must be spawned")
-	assert.Equal(t, map[string]string{"LC_ALL": "C"}, install.Env, "no proxy variables without package_proxy")
+	assert.Empty(t, install.Env, "no env override without package_proxy")
 }
 
 // TestSystemHandler_Upgrade_InvalidPackageProxy verifies that an invalid
@@ -674,7 +673,7 @@ func TestSystemHandler_Upgrade_InvalidPackageProxy(t *testing.T) {
 
 			install := findExecutedAptInstall(mockExec)
 			require.NotNil(t, install, "an apt-get install must be spawned")
-			assert.Equal(t, map[string]string{"LC_ALL": "C"}, install.Env, "no proxy variables for invalid proxy %q", proxy)
+			assert.Empty(t, install.Env, "no env override for invalid proxy %q", proxy)
 		})
 	}
 }
@@ -1423,60 +1422,6 @@ func TestSystemHandler_Upgrade_AptUpdateFailureStopsTheUpgradeAndNamesTheStep(t 
 	}
 }
 
-// Fails the first apt-get update, bare or as the head of an `sh -c` chain, on the lists lock DPkg::Lock::Timeout does not cover.
-type listsLockedOnceExecutor struct {
-	*common.MockCommandExecutor
-	updates int
-	envs    []map[string]string
-}
-
-func (e *listsLockedOnceExecutor) Exec(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration) (int, string, error) {
-	if strings.HasPrefix(strings.Join(args, " "), "apt-get update") || (len(args) == 3 && strings.HasPrefix(args[2], "apt-get update")) {
-		e.updates++
-		e.envs = append(e.envs, env)
-		if e.updates == 1 {
-			return 100, "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 391 (apt-get)", errors.New("exit status 100")
-		}
-	}
-	return e.MockCommandExecutor.Exec(ctx, args, username, groupname, env, timeout)
-}
-
-func TestSystemHandler_Upgrade_AptUpdateRetriesTheListsLock(t *testing.T) {
-	orig := lockRetryDelay
-	lockRetryDelay = 0
-	t.Cleanup(func() { lockRetryDelay = orig })
-	h := newPinnedHarness(t, utils.PkgApt)
-	exec := &listsLockedOnceExecutor{MockCommandExecutor: h.exec}
-	h.handler.Executor = exec
-
-	exitCode, output, err := h.handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
-
-	require.NoError(t, err)
-	assert.Equal(t, 0, exitCode, output)
-	assert.Equal(t, 2, exec.updates, "the update must run again once the lists lock clears")
-	for _, env := range exec.envs {
-		assert.Equal(t, "C", env["LC_ALL"], "a translated lock message would not be recognized")
-	}
-}
-
-func TestSystemHandler_SystemUpdate_AptRetriesTheListsLockInEnglish(t *testing.T) {
-	orig := lockRetryDelay
-	lockRetryDelay = 0
-	t.Cleanup(func() { lockRetryDelay = orig })
-	h := newPinnedHarness(t, utils.PkgApt)
-	exec := &listsLockedOnceExecutor{MockCommandExecutor: h.exec}
-	h.handler.Executor = exec
-
-	exitCode, output, err := h.handler.Execute(context.Background(), common.Update.String(), &common.CommandArgs{})
-
-	require.NoError(t, err)
-	assert.Equal(t, 0, exitCode, output)
-	assert.Equal(t, 2, exec.updates, "the chain must run again once the lists lock clears")
-	for _, env := range exec.envs {
-		assert.Equal(t, "C", env["LC_ALL"], "a translated lock message would not be recognized")
-	}
-}
-
 func TestSystemHandler_Upgrade_AptInstallFailureNamesTheStep(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	mockWS := &MockWSClient{}
@@ -1658,7 +1603,7 @@ func TestSystemHandler_SystemUpdate_ZypperDupOnlyOnTumbleweed(t *testing.T) {
 	}
 }
 
-// The purge runs detached under systemd-run, so a held dpkg lock would fail it with nobody watching.
+// The purge runs detached, so a held dpkg lock would fail it with nobody watching.
 func TestSystemHandler_Uninstall_AptWaitsForDpkgLock(t *testing.T) {
 	mockExec := common.NewMockCommandExecutor(t)
 	ctxManager := agent.NewContextManager()
@@ -1740,47 +1685,33 @@ func TestSystemHandler_Uninstall_WithoutSystemdStartsDetached(t *testing.T) {
 	assert.True(t, mockWS.ShutDownCalled, "the agent must shut itself down once the uninstall is scheduled")
 }
 
-func TestRetryWhileLocked(t *testing.T) {
-	orig := lockRetryDelay
-	lockRetryDelay = 0
-	t.Cleanup(func() { lockRetryDelay = orig })
+func TestRetryWhileZypperLocked(t *testing.T) {
+	orig := zypperLockRetryDelay
+	zypperLockRetryDelay = 0
+	t.Cleanup(func() { zypperLockRetryDelay = orig })
 
-	// Messages as apt 1.6, 2.0 and 2.8 print them.
-	const (
-		aptOldDpkgLock = "E: Could not get lock /var/lib/dpkg/lock-frontend - open (11: Resource temporarily unavailable)"
-		aptListsLock   = "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 391 (apt-get)"
-		aptWaitedOut   = "E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is another process using it?"
-	)
 	tests := []struct {
-		name         string
-		pkgManager   string
-		lockedExit   int
-		lockedOutput string
-		lockedRuns   int
-		wantCalls    int
-		wantExit     int
+		name       string
+		pkgManager string
+		lockedRuns int
+		wantCalls  int
+		wantExit   int
 	}{
-		{"retries until the lock clears", utils.PkgZypper, 7, "locked", 1, 2, 0},
-		{"gives up after the attempt cap", utils.PkgZypper, 7, "locked", 99, lockRetryAttempts, 7},
+		{"retries until the lock clears", utils.PkgZypper, 1, 2, 0},
+		{"gives up after the attempt cap", utils.PkgZypper, 99, zypperLockAttempts, 7},
 		// apt has no ZYPP_LOCKED, so 7 there is a real failure to report as-is.
-		{"apt exit 7 is not retried", utils.PkgApt, 7, "locked", 99, 1, 7},
-		{"apt before DPkg::Lock::Timeout is retried", utils.PkgApt, 100, aptOldDpkgLock, 1, 2, 0},
-		{"apt lists lock is retried", utils.PkgApt, 100, aptListsLock, 1, 2, 0},
-		{"apt that already waited out its lock timeout is not retried", utils.PkgApt, 100, aptWaitedOut, 99, 1, 100},
-		{"apt failure without a lock is not retried", utils.PkgApt, 100, "E: Unable to locate package alpamon", 99, 1, 100},
-		{"a maintainer script echoing the lock text is not retried", utils.PkgApt, 100,
-			"postinst: Could not get lock /run/foo.lock\nE: Sub-process /usr/bin/dpkg returned an error code (1)", 99, 1, 100},
+		{"apt exit 7 is not retried", utils.PkgApt, 99, 1, 7},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			setPackageManagerAndID(t, tt.pkgManager, "")
+			setPackageManagerAndID(t, tt.pkgManager, "opensuse-leap")
 
 			var calls int
-			exitCode, _, _ := retryWhileLocked(context.Background(), func() (int, string, error) {
+			exitCode, _, _ := retryWhileZypperLocked(context.Background(), func() (int, string, error) {
 				calls++
 				if calls <= tt.lockedRuns {
-					return tt.lockedExit, tt.lockedOutput, errors.New("exit status " + strconv.Itoa(tt.lockedExit))
+					return 7, "locked", errors.New("exit status 7")
 				}
 				return 0, "", nil
 			})
@@ -1794,9 +1725,9 @@ func TestRetryWhileLocked(t *testing.T) {
 // A console update racing the agent's own upgrade, or packagekit holding the
 // lock, must not surface as a failed command when the lock clears.
 func TestSystemHandler_ZypperLockIsRetried(t *testing.T) {
-	orig := lockRetryDelay
-	lockRetryDelay = 0
-	t.Cleanup(func() { lockRetryDelay = orig })
+	orig := zypperLockRetryDelay
+	zypperLockRetryDelay = 0
+	t.Cleanup(func() { zypperLockRetryDelay = orig })
 
 	tests := []struct {
 		name    string
