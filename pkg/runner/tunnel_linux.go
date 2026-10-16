@@ -54,16 +54,18 @@ func parseUserCredentials(uidStr, gidStr string) (uint32, uint32, error) {
 	return uint32(uid), uint32(gid), nil
 }
 
-// ensureTunnelSocketDir creates and returns the tunnel socket directory with proper ownership.
-// Uses 0700 permissions to prevent other users from creating symlinks or files inside.
-// When running as root, the directory is chowned to nobody so the daemon can create sockets.
+// ensureTunnelSocketDir returns the tunnel socket directory, refusing a symlinked
+// or foreign-owned one and forcing it to 0700. As root it is chowned to nobody
+// so the daemon can create sockets.
 func ensureTunnelSocketDir() (string, error) {
 	dir := "/tmp/alpamon-tunnels"
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create tunnel socket directory: %w", err)
 	}
 
-	if os.Getuid() == 0 {
+	var nobodyUID, nobodyGID int
+	isRoot := os.Getuid() == 0
+	if isRoot {
 		usr, err := user.Lookup("nobody")
 		if err != nil {
 			return "", fmt.Errorf("failed to lookup nobody user for socket dir: %w", err)
@@ -75,11 +77,13 @@ func ensureTunnelSocketDir() (string, error) {
 		if uid > math.MaxInt32 || gid > math.MaxInt32 {
 			return "", fmt.Errorf("nobody uid/gid exceeds int32 range: uid=%d, gid=%d", uid, gid)
 		}
-		if err := os.Chown(dir, int(uid), int(gid)); err != nil {
-			return "", fmt.Errorf("failed to chown tunnel socket directory: %w", err)
-		}
+		nobodyUID, nobodyGID = int(uid), int(gid)
 	}
 
+	allowed, chownUID, chownGID := tunnelSocketDirPolicy(isRoot, uint32(os.Geteuid()), nobodyUID, nobodyGID)
+	if err := secureTunnelSocketDir(dir, chownUID, chownGID, allowed...); err != nil {
+		return "", err
+	}
 	return dir, nil
 }
 
