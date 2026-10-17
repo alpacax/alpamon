@@ -1,4 +1,4 @@
-FROM golang:1.26.9 AS builder
+FROM golang:1.26.9@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89 AS builder
 
 # Automatically set GOARCH to the build-time architecture
 ARG TARGETARCH
@@ -17,7 +17,7 @@ COPY . .
 
 RUN go build -o alpamon ./cmd/alpamon/main.go
 
-FROM ubuntu:22.04
+FROM ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
 
 RUN apt-get update -o Acquire::Retries=3 && apt-get install -y -o Acquire::Retries=3 --no-install-recommends \
     ca-certificates
