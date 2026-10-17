@@ -1,4 +1,4 @@
-FROM golang:1.26.9 AS builder
+FROM golang:1.26.9@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89 AS builder
 
 # Set golang env
 ENV GO111MODULE=on \
@@ -16,7 +16,7 @@ COPY . .
 
 RUN go build -o alpamon ./cmd/alpamon/main.go
 
-FROM debian:11
+FROM debian:11@sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9
 
 # Debian 11 (bullseye) left LTS on 2026-08-31 and bullseye-security's CDN pool is being retired. Point it at snapshot.debian.org instead of dropping it, since a main-only source can conflict with packages the base image already carries at a security-updated version.
 RUN (sed -i 's|^deb .*bullseye-security.*|deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260901T000000Z bullseye-security main|' /etc/apt/sources.list 2>/dev/null || true) && \
