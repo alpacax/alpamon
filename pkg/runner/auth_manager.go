@@ -319,7 +319,7 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 		_ = os.Remove(socketPath)
 	}
 
-	listener, err := net.Listen("unix", socketPath)
+	listener, err := listenAuthSocket(socketPath)
 	if err != nil {
 		return fmt.Errorf("socket listen error: %w", err)
 	}
