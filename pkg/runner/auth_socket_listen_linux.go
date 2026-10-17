@@ -82,16 +82,17 @@ func listenUnixLabeled(path string, l sockcreateLabeler) (net.Listener, error) {
 	}
 	results := make(chan result, 1)
 	go func() {
+		// The thread is unlocked only after a clear that succeeded. On any
+		// failure the goroutine returns still locked, so the runtime ends its
+		// OS thread along with whatever socket context a failed write left.
 		runtime.LockOSThread()
 		if err := l.write(authSocketContext); err != nil {
-			runtime.UnlockOSThread()
 			results <- result{err: err}
 			return
 		}
 
 		listener, listenErr := l.listen("unix", path)
 		clearErr := l.write("")
-		// A failed clear leaves this goroutine locked so its OS thread exits with it.
 		if clearErr == nil {
 			runtime.UnlockOSThread()
 		}
