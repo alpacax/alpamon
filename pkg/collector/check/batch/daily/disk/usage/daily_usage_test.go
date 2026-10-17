@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/testutil/dbtest"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlydiskusage"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -25,15 +27,7 @@ type DailyDiskUsageCheckSuite struct {
 
 func (suite *DailyDiskUsageCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
-	buffer := base.NewCheckBuffer(10)
-	args := &base.CheckArgs{
-		Type:     base.DailyDiskUsage,
-		Name:     string(base.DailyDiskUsage) + "_" + uuid.NewString(),
-		Interval: time.Duration(1 * time.Second),
-		Buffer:   buffer,
-		Client:   suite.client,
-	}
-	suite.check = NewCheck(args).(*Check)
+	suite.check = newCheck(suite.client)
 	suite.ctx = context.Background()
 }
 
@@ -72,6 +66,32 @@ func (suite *DailyDiskUsageCheckSuite) TestDeleteHourlyDiskUsage() {
 
 	err = suite.check.deleteHourlyDiskUsage(suite.ctx)
 	assert.NoError(suite.T(), err, "Failed to delete hourly disk usage.")
+}
+
+func newCheck(client *ent.Client) *Check {
+	return NewCheck(&base.CheckArgs{
+		Type:     base.DailyDiskUsage,
+		Name:     string(base.DailyDiskUsage) + "_" + uuid.NewString(),
+		Interval: time.Second,
+		Buffer:   base.NewCheckBuffer(10),
+		Client:   client,
+	}).(*Check)
+}
+
+func (suite *DailyDiskUsageCheckSuite) commitFailingCheck() *Check {
+	return newCheck(dbtest.CommitFailingClient(suite.T(), dbFileName))
+}
+
+func (suite *DailyDiskUsageCheckSuite) TestDeleteHourlyDiskUsageReturnsCommitError() {
+	old := time.Now().Add(-25 * time.Hour)
+	suite.Require().NoError(suite.client.HourlyDiskUsage.Create().SetTimestamp(old).SetDevice(uuid.NewString()).SetPeak(1).SetAvg(1).SetTotal(1).SetFree(1).SetUsed(1).Exec(suite.ctx))
+
+	err := suite.commitFailingCheck().deleteHourlyDiskUsage(suite.ctx)
+
+	suite.ErrorIs(err, dbtest.ErrCommitFailed)
+	kept, err := suite.client.HourlyDiskUsage.Query().Where(hourlydiskusage.TimestampEQ(old)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.True(kept, "the failed commit must not delete the row")
 }
 
 func TestDailyDiskUsageCheckSuite(t *testing.T) {

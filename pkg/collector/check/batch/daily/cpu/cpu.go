@@ -2,6 +2,7 @@ package cpu
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
@@ -98,7 +99,9 @@ func (c *Check) deleteHourlyCPUUsage(ctx context.Context) error {
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly cpu usage deletion: %w", err)
+	}
 
 	return nil
 }

@@ -8,8 +8,7 @@ package runner
 // Go compiler's internal rule and only imported from *_test.go files.
 func NewEmptyAuthManager() *AuthManager {
 	return &AuthManager{
-		pidToSessionMap:    make(map[int]*SessionInfo),
-		completionChannels: make(map[string]chan struct{}),
+		pidToSessionMap: make(map[int]*SessionInfo),
 	}
 }
 

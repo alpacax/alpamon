@@ -7,9 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/testutil/dbtest"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/cpu"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlycpuusage"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -26,15 +29,7 @@ type HourlyCPUUsageCheckSuite struct {
 
 func (suite *HourlyCPUUsageCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
-	buffer := base.NewCheckBuffer(10)
-	args := &base.CheckArgs{
-		Type:     base.HourlyCPUUsage,
-		Name:     string(base.HourlyCPUUsage) + "_" + uuid.NewString(),
-		Interval: time.Duration(1 * time.Second),
-		Buffer:   buffer,
-		Client:   suite.client,
-	}
-	suite.check = NewCheck(args).(*Check)
+	suite.check = newCheck(suite.client)
 	suite.ctx = context.Background()
 }
 
@@ -78,8 +73,56 @@ func (suite *HourlyCPUUsageCheckSuite) TestDeleteCPU() {
 		SetUsage(rand.Float64()).Exec(suite.ctx)
 	assert.NoError(suite.T(), err, "Failed to create cpu usage.")
 
-	err = suite.check.deleteCPU(suite.ctx)
+	err = deleteCPU(suite.ctx, suite.client.CPU)
 	assert.NoError(suite.T(), err, "Failed to delete cpu usage.")
+}
+
+func newCheck(client *ent.Client) *Check {
+	return NewCheck(&base.CheckArgs{
+		Type:     base.HourlyCPUUsage,
+		Name:     string(base.HourlyCPUUsage) + "_" + uuid.NewString(),
+		Interval: time.Second,
+		Buffer:   base.NewCheckBuffer(10),
+		Client:   client,
+	}).(*Check)
+}
+
+func (suite *HourlyCPUUsageCheckSuite) commitFailingCheck() *Check {
+	return newCheck(dbtest.CommitFailingClient(suite.T(), dbFileName))
+}
+
+func (suite *HourlyCPUUsageCheckSuite) TestSaveHourlyCPUUsageReturnsCommitErrorAndKeepsRawRows() {
+	old := time.Now().Add(-2 * time.Hour)
+	suite.Require().NoError(suite.client.CPU.Create().SetTimestamp(old).SetUsage(1).Exec(suite.ctx))
+	ts := time.Now().Add(-42 * time.Minute)
+	data := base.CheckResult{Timestamp: ts, Peak: 50.0, Avg: 50.0}
+
+	err := suite.commitFailingCheck().saveHourlyCPUUsage(data, suite.ctx)
+
+	suite.ErrorIs(err, dbtest.ErrCommitFailed)
+	stored, err := suite.client.HourlyCPUUsage.Query().Where(hourlycpuusage.TimestampEQ(ts)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.False(stored, "the failed commit must not store the hourly row")
+	kept, err := suite.client.CPU.Query().Where(cpu.TimestampEQ(old)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.True(kept, "the failed commit must not delete the raw row")
+}
+
+func (suite *HourlyCPUUsageCheckSuite) TestSaveHourlyCPUUsageDeletesOldRawRows() {
+	old := time.Now().Add(-2 * time.Hour)
+	suite.Require().NoError(suite.client.CPU.Create().SetTimestamp(old).SetUsage(1).Exec(suite.ctx))
+	ts := time.Now().Add(-41 * time.Minute)
+	data := base.CheckResult{Timestamp: ts, Peak: 50.0, Avg: 50.0}
+
+	err := suite.check.saveHourlyCPUUsage(data, suite.ctx)
+
+	suite.Require().NoError(err)
+	stored, err := suite.client.HourlyCPUUsage.Query().Where(hourlycpuusage.TimestampEQ(ts)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.True(stored)
+	kept, err := suite.client.CPU.Query().Where(cpu.TimestampEQ(old)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.False(kept, "the save must delete raw rows older than an hour")
 }
 
 func TestHourlyCPUUsageCheckSuite(t *testing.T) {

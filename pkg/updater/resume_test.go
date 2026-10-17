@@ -228,7 +228,7 @@ func TestResumePending_PackageRollback(t *testing.T) {
 		_, done := ResumePending(t.Context(), f.deps)
 		<-done
 
-		assert.Equal(t, [][]string{{"apt-get", "install", "-y", "--allow-downgrades", "alpamon=2.4.0"}}, f.runner.snapshot())
+		assert.Equal(t, [][]string{{"apt-get", "install", "-y", "--allow-downgrades", "-o", utils.AptLockTimeout, "alpamon=2.4.0"}}, f.runner.snapshot())
 		restarts, _, disarmed := f.sm.snapshot()
 		assert.Len(t, restarts, 1)
 		assert.Equal(t, []string{"alpamon-upgrade-guard-1"}, disarmed, "the guard stands down while the reinstall runs")

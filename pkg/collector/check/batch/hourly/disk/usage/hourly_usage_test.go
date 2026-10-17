@@ -7,9 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/testutil/dbtest"
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/diskusage"
+	"github.com/alpacax/alpamon/v2/pkg/db/ent/hourlydiskusage"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -26,15 +29,7 @@ type HourlyDiskUsageCheckSuite struct {
 
 func (suite *HourlyDiskUsageCheckSuite) SetupSuite() {
 	suite.client = db.InitTestDB(dbFileName)
-	buffer := base.NewCheckBuffer(10)
-	args := &base.CheckArgs{
-		Type:     base.HourlyDiskUsage,
-		Name:     string(base.HourlyDiskUsage) + "_" + uuid.NewString(),
-		Interval: time.Duration(1 * time.Second),
-		Buffer:   buffer,
-		Client:   suite.client,
-	}
-	suite.check = NewCheck(args).(*Check)
+	suite.check = newCheck(suite.client)
 	suite.ctx = context.Background()
 }
 
@@ -95,8 +90,56 @@ func (suite *HourlyDiskUsageCheckSuite) TestDeleteDiskUsage() {
 		SetUsed(int64(rand.Int())).Exec(suite.ctx)
 	assert.NoError(suite.T(), err, "Failed to create disk usage.")
 
-	err = suite.check.deleteDiskUsage(suite.ctx)
+	err = deleteDiskUsage(suite.ctx, suite.client.DiskUsage)
 	assert.NoError(suite.T(), err, "Failed to delete disk usage.")
+}
+
+func newCheck(client *ent.Client) *Check {
+	return NewCheck(&base.CheckArgs{
+		Type:     base.HourlyDiskUsage,
+		Name:     string(base.HourlyDiskUsage) + "_" + uuid.NewString(),
+		Interval: time.Second,
+		Buffer:   base.NewCheckBuffer(10),
+		Client:   client,
+	}).(*Check)
+}
+
+func (suite *HourlyDiskUsageCheckSuite) commitFailingCheck() *Check {
+	return newCheck(dbtest.CommitFailingClient(suite.T(), dbFileName))
+}
+
+func (suite *HourlyDiskUsageCheckSuite) TestSaveHourlyDiskUsageReturnsCommitErrorAndKeepsRawRows() {
+	old := time.Now().Add(-2 * time.Hour)
+	suite.Require().NoError(suite.client.DiskUsage.Create().SetTimestamp(old).SetDevice(uuid.NewString()).SetUsage(1).SetTotal(1).SetFree(1).SetUsed(1).Exec(suite.ctx))
+	ts := time.Now().Add(-42 * time.Minute)
+	data := []base.CheckResult{{Timestamp: ts, Device: uuid.NewString()}}
+
+	err := suite.commitFailingCheck().saveHourlyDiskUsage(data, suite.ctx)
+
+	suite.ErrorIs(err, dbtest.ErrCommitFailed)
+	stored, err := suite.client.HourlyDiskUsage.Query().Where(hourlydiskusage.TimestampEQ(ts)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.False(stored, "the failed commit must not store the hourly row")
+	kept, err := suite.client.DiskUsage.Query().Where(diskusage.TimestampEQ(old)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.True(kept, "the failed commit must not delete the raw row")
+}
+
+func (suite *HourlyDiskUsageCheckSuite) TestSaveHourlyDiskUsageDeletesOldRawRows() {
+	old := time.Now().Add(-2 * time.Hour)
+	suite.Require().NoError(suite.client.DiskUsage.Create().SetTimestamp(old).SetDevice(uuid.NewString()).SetUsage(1).SetTotal(1).SetFree(1).SetUsed(1).Exec(suite.ctx))
+	ts := time.Now().Add(-41 * time.Minute)
+	data := []base.CheckResult{{Timestamp: ts, Device: uuid.NewString()}}
+
+	err := suite.check.saveHourlyDiskUsage(data, suite.ctx)
+
+	suite.Require().NoError(err)
+	stored, err := suite.client.HourlyDiskUsage.Query().Where(hourlydiskusage.TimestampEQ(ts)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.True(stored)
+	kept, err := suite.client.DiskUsage.Query().Where(diskusage.TimestampEQ(old)).Exist(suite.ctx)
+	suite.Require().NoError(err)
+	suite.False(kept, "the save must delete raw rows older than an hour")
 }
 
 func TestHourlyDiskUsageCheckSuite(t *testing.T) {

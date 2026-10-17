@@ -36,6 +36,8 @@ type ExecutedCommand struct {
 	// File is the inherited descriptor for a verified file execution, so
 	// tests can assert which open object was handed to the child.
 	File *os.File
+	// Detached marks a command started through StartDetached.
+	Detached bool
 }
 
 // CommandResult represents the result of a mocked command execution.
@@ -114,7 +116,7 @@ func (m *MockCommandExecutor) ExecWithHook(ctx context.Context, args []string, u
 }
 
 // ExecWithStreamingHook mirrors ExecWithHook and emits the full output as one chunk.
-func (m *MockCommandExecutor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+func (m *MockCommandExecutor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, _ string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	if pidHook != nil {
 		pid := int(mockSyntheticPIDBase + mockSyntheticPID.Add(1))
 		pidHook(pid)
@@ -137,7 +139,7 @@ func emitMockChunk(ctx context.Context, timeout time.Duration, chunkCallback fun
 // ExecFileWithStreamingHook mirrors ExecWithStreamingHook and additionally
 // records the inherited descriptor, so tests can assert that the object handed
 // to the child is the one the verifier opened.
-func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, _ string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	if len(args) == 0 {
 		return 0, "", nil
 	}
@@ -151,6 +153,14 @@ func (m *MockCommandExecutor) ExecFileWithStreamingHook(ctx context.Context, fil
 	exitCode, output, err := m.lookupResult(args[0], args[1:]...)
 	emitMockChunk(ctx, timeout, chunkCallback, output)
 	return exitCode, output, err
+}
+
+// StartDetached records the command like the other methods and starts nothing;
+// a result set for it supplies the error.
+func (m *MockCommandExecutor) StartDetached(name string, args ...string) error {
+	m.commands = append(m.commands, ExecutedCommand{Name: name, Args: args, Detached: true})
+	_, _, err := m.lookupResult(name, args...)
+	return err
 }
 
 func (m *MockCommandExecutor) SetResult(command string, exitCode int, output string, err error) {

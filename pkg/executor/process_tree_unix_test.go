@@ -87,7 +87,7 @@ func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
 	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 
 	// Cancel before the group is recorded: pgid is still 0, so only the leader is targeted.
-	err = cleanup.cancel(cmd)
+	_, err = cleanup.cancel(cmd)
 	if err != nil {
 		require.ErrorIs(t, err, os.ErrProcessDone, "cancel")
 	}
@@ -127,7 +127,7 @@ func TestCommandCleanup_AfterStartRedoSwallowsProcessDone(t *testing.T) {
 
 func TestCommandCleanup_CancelNilProcessReturnsProcessDone(t *testing.T) {
 	var cleanup commandCleanup
-	err := cleanup.cancel(&exec.Cmd{})
+	_, err := cleanup.cancel(&exec.Cmd{})
 	require.ErrorIs(t, err, os.ErrProcessDone, "cancel")
 }
 
@@ -143,7 +143,7 @@ func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	// Kill and reap the leader even when an assertion below fails before cancel runs; the in-body
 	// cancel makes this a no-op on the happy path.
 	t.Cleanup(func() {
-		_ = cleanup.cancel(cmd)
+		_, _ = cleanup.cancel(cmd)
 		_ = cmd.Wait()
 	})
 	err = cleanup.afterStart(cmd)
@@ -152,7 +152,7 @@ func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	childPID := readChildPID(t, pidFile)
 	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 
-	err = cleanup.cancel(cmd)
+	_, err = cleanup.cancel(cmd)
 	require.NoError(t, err, "cancel")
 
 	require.True(t, waitForProcessGone(childPID, 3*time.Second), "grandchild %d survived the group kill", childPID)

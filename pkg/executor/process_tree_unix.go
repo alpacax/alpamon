@@ -59,16 +59,24 @@ func (c *commandCleanup) afterStart(cmd *exec.Cmd) error {
 	// group recorded. An already-gone group (ErrProcessDone) is the expected benign outcome, so let the
 	// normal Wait path report the real termination status rather than surfacing it as an afterStart failure.
 	if canceled := c.recordPgid(pgid); canceled {
-		if err := c.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if _, err := c.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
+// cancel SIGKILLs the group the child leads, or the child alone when it leads none.
+//
+// -pgid can reach a foreign group only within a narrow bound. A number in use as a PID, a PGID or a SID
+// is never handed to a new process, so while any member of our group is alive, or the leader is still
+// unreaped, -pgid names our group and no other. The one window is a group that is already empty: Wait
+// has reaped the leader, the last member has exited, and in the microseconds between that wait4 and
+// this kill the number is handed to a new process that also makes itself a group leader.
+func (c *commandCleanup) cancel(cmd *exec.Cmd) (cleanupOutcome, error) {
+	outcome := cleanupOutcome{assigned: c.leadsGroup}
 	if cmd.Process == nil {
-		return os.ErrProcessDone
+		return outcome, os.ErrProcessDone
 	}
 	pid := cmd.Process.Pid
 	if pgid := c.takeForCancel(); pgid != 0 {
@@ -76,11 +84,12 @@ func (c *commandCleanup) cancel(cmd *exec.Cmd) error {
 	}
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
+			return outcome, os.ErrProcessDone
 		}
-		return err
+		return outcome, err
 	}
-	return nil
+	outcome.rootKilled = true
+	return outcome, nil
 }
 
 func (c *commandCleanup) close() error {

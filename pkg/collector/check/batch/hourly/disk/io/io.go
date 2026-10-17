@@ -2,6 +2,7 @@ package io
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
@@ -54,7 +55,7 @@ func (c *Check) queryDiskIO(ctx context.Context) (base.MetricData, error) {
 		})
 	}
 	if len(data) == 0 {
-		err = c.deleteDiskIO(ctx)
+		err = deleteDiskIO(ctx, c.GetClient().DiskIO)
 		if err != nil {
 			return base.MetricData{}, err
 		}
@@ -67,11 +68,6 @@ func (c *Check) queryDiskIO(ctx context.Context) (base.MetricData, error) {
 	}
 
 	err = c.saveHourlyDiskIO(data, ctx)
-	if err != nil {
-		return base.MetricData{}, err
-	}
-
-	err = c.deleteDiskIO(ctx)
 	if err != nil {
 		return base.MetricData{}, err
 	}
@@ -104,7 +100,7 @@ func (c *Check) getDiskIO(ctx context.Context) ([]base.DiskIOQuerySet, error) {
 func (c *Check) saveHourlyDiskIO(data []base.CheckResult, ctx context.Context) error {
 	tx, err := c.GetClient().Tx(ctx)
 	if err != nil {
-		return nil
+		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -120,27 +116,23 @@ func (c *Check) saveHourlyDiskIO(data []base.CheckResult, ctx context.Context) e
 		return err
 	}
 
-	_ = tx.Commit()
-
-	return nil
-}
-
-func (c *Check) deleteDiskIO(ctx context.Context) error {
-	tx, err := c.GetClient().Tx(ctx)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	from := time.Now().Add(-1 * time.Hour)
-
-	_, err = tx.DiskIO.Delete().
-		Where(diskio.TimestampLTE(from)).Exec(ctx)
+	// Prune in the insert's transaction: if the insert committed and the prune failed, the retry would store a second hourly row.
+	err = deleteDiskIO(ctx, tx.DiskIO)
 	if err != nil {
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly disk io: %w", err)
+	}
 
 	return nil
+}
+
+func deleteDiskIO(ctx context.Context, client *ent.DiskIOClient) error {
+	from := time.Now().Add(-1 * time.Hour)
+
+	_, err := client.Delete().
+		Where(diskio.TimestampLTE(from)).Exec(ctx)
+	return err
 }

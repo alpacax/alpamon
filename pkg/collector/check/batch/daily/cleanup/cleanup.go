@@ -2,6 +2,7 @@ package cpu
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
@@ -96,7 +97,9 @@ func deleteAllCPU(ctx context.Context, client *ent.Client, now time.Time) error 
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit cpu deletion: %w", err)
+	}
 
 	return nil
 }
@@ -114,7 +117,9 @@ func deleteAllHourlyCPUUsage(ctx context.Context, client *ent.Client, now time.T
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly cpu usage deletion: %w", err)
+	}
 
 	return nil
 }
@@ -132,7 +137,9 @@ func deleteAllMemory(ctx context.Context, client *ent.Client, now time.Time) err
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit memory deletion: %w", err)
+	}
 
 	return nil
 }
@@ -150,7 +157,9 @@ func deleteAllHourlyMemoryUsage(ctx context.Context, client *ent.Client, now tim
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly memory usage deletion: %w", err)
+	}
 
 	return nil
 }
@@ -168,7 +177,9 @@ func deleteAllDiskUsage(ctx context.Context, client *ent.Client, now time.Time) 
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit disk usage deletion: %w", err)
+	}
 
 	return nil
 }
@@ -186,7 +197,9 @@ func deleteAllHourlyDiskUsage(ctx context.Context, client *ent.Client, now time.
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly disk usage deletion: %w", err)
+	}
 
 	return nil
 }
@@ -204,7 +217,9 @@ func deleteAllDiskIO(ctx context.Context, client *ent.Client, now time.Time) err
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit disk io deletion: %w", err)
+	}
 
 	return nil
 }
@@ -222,7 +237,9 @@ func deleteAllHourlyDiskIO(ctx context.Context, client *ent.Client, now time.Tim
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly disk io deletion: %w", err)
+	}
 
 	return nil
 }
@@ -240,7 +257,9 @@ func deleteAllTraffic(ctx context.Context, client *ent.Client, now time.Time) er
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit traffic deletion: %w", err)
+	}
 
 	return nil
 }
@@ -258,7 +277,9 @@ func deleteAllHourlyTraffic(ctx context.Context, client *ent.Client, now time.Ti
 		return err
 	}
 
-	_ = tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly traffic deletion: %w", err)
+	}
 
 	return nil
 }

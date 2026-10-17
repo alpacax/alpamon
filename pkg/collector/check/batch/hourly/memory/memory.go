@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
@@ -43,7 +44,7 @@ func (c *Check) queryMemoryUsage(ctx context.Context) (base.MetricData, error) {
 	}
 
 	if len(querySet) == 0 {
-		err = c.deleteMemory(ctx)
+		err = deleteMemory(ctx, c.GetClient().Memory)
 		if err != nil {
 			return base.MetricData{}, err
 		}
@@ -61,11 +62,6 @@ func (c *Check) queryMemoryUsage(ctx context.Context) (base.MetricData, error) {
 	}
 
 	err = c.saveHourlyMemoryUsage(data, ctx)
-	if err != nil {
-		return base.MetricData{}, err
-	}
-
-	err = c.deleteMemory(ctx)
 	if err != nil {
 		return base.MetricData{}, err
 	}
@@ -107,27 +103,23 @@ func (c *Check) saveHourlyMemoryUsage(data base.CheckResult, ctx context.Context
 		return err
 	}
 
-	_ = tx.Commit()
+	// Prune in the insert's transaction: if the insert committed and the prune failed, the retry would store a second hourly row.
+	err = deleteMemory(ctx, tx.Memory)
+	if err != nil {
+		return err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit hourly memory usage: %w", err)
+	}
 
 	return nil
 }
 
-func (c *Check) deleteMemory(ctx context.Context) error {
-	tx, err := c.GetClient().Tx(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
+func deleteMemory(ctx context.Context, client *ent.MemoryClient) error {
 	from := time.Now().Add(-1 * time.Hour)
 
-	_, err = tx.Memory.Delete().
+	_, err := client.Delete().
 		Where(memory.TimestampLTE(from)).Exec(ctx)
-	if err != nil {
-		return err
-	}
-
-	_ = tx.Commit()
-
-	return nil
+	return err
 }

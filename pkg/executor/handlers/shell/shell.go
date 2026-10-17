@@ -149,7 +149,7 @@ func (h *ShellHandler) handleExecFile(ctx context.Context, args *common.CommandA
 	// Execute folds startup errors into output, so the err return is dropped
 	// here for the same reason as executeCommand.
 	exitCode, output, _ := h.Executor.ExecFileWithStreamingHook(
-		ctx, args.VerifiedFile, args.ExecArgs, username, groupname, args.Env, timeout, pidHook, args.ChunkCallback,
+		ctx, args.VerifiedFile, args.ExecArgs, username, groupname, args.Env, timeout, args.CommandID, pidHook, args.ChunkCallback,
 	)
 	if cleanup != nil {
 		cleanup()
@@ -261,7 +261,7 @@ func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, use
 			cleanup = runner.RegisterCommandPID(pid, commandID, username)
 		}
 	}
-	exitCode, output, _ := h.Executor.ExecWithStreamingHook(ctx, cmdArgs, username, groupname, env, timeout, pidHook, chunkCallback)
+	exitCode, output, _ := h.Executor.ExecWithStreamingHook(ctx, cmdArgs, username, groupname, env, timeout, commandID, pidHook, chunkCallback)
 	if cleanup != nil {
 		cleanup()
 	}

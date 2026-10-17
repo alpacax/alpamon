@@ -273,7 +273,7 @@ func (h *SystemHandler) handleUpgrade(ctx context.Context, args *common.CommandA
 			}
 		}
 		installArgv = append([]string{"apt-get", "install", "--only-upgrade"}, packages...)
-		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3")
+		installArgv = append(installArgv, "-y", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout)
 	case utils.PkgYum:
 		// updater.RunYum builds its own argv, so installArgv stays unset.
 		runInstall = func() (int, string, error) {
@@ -525,7 +525,7 @@ func (h *SystemHandler) executeUninstall() {
 	switch utils.PackageManager {
 	case utils.PkgApt:
 		// purge removes package and config files
-		cmd = "apt-get purge alpamon -y && apt-get autoremove -y"
+		cmd = "apt-get purge alpamon -y -o " + utils.AptLockTimeout + " && apt-get autoremove -y -o " + utils.AptLockTimeout
 	case utils.PkgYum:
 		cmd = "yum remove alpamon -y"
 	case utils.PkgZypper:
@@ -571,11 +571,13 @@ func (h *SystemHandler) executeUninstall() {
 			_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", cmd)
 		}
 	} else {
-		// Defer the uninstall so the process can shut down cleanly first.
-		// Uses a subshell background pattern instead of nohup, which may be missing in minimal images.
-		deferredCmd := fmt.Sprintf("(sleep 5 && %s) >>%s/alpamon.log 2>&1 &", cmd, utils.LogDir())
+		// Defer the uninstall so the process can shut down cleanly first. Started detached: run as an
+		// ordinary command, it would be killed with the command's process group as soon as the shell exits.
+		deferredCmd := fmt.Sprintf("(sleep 5 && %s) >>%s/alpamon.log 2>&1", cmd, utils.LogDir())
 		log.Info().Msg("Systemd not available, scheduling deferred uninstall.")
-		_, _, _ = h.Executor.RunAsUser(ctx, "root", "sh", "-c", deferredCmd)
+		if err := h.Executor.StartDetached("/bin/sh", "-c", deferredCmd); err != nil {
+			log.Error().Err(err).Msg("Failed to schedule the deferred uninstall.")
+		}
 	}
 
 	h.wsClient.ShutDown()
@@ -613,7 +615,8 @@ func (h *SystemHandler) handleSystemUpdate(ctx context.Context) (int, string, er
 	var cmd string
 	switch utils.PackageManager {
 	case utils.PkgApt:
-		cmd = "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 && apt-get autoremove -y"
+		cmd = "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 -o " + utils.AptLockTimeout +
+			" && apt-get autoremove -y -o " + utils.AptLockTimeout
 	case utils.PkgYum:
 		cmd = "yum update -y"
 	case utils.PkgZypper:

@@ -43,7 +43,7 @@ func TestExecFileWithStreamingHook_RunsInheritedDescriptor(t *testing.T) {
 	file := openScript(t, filepath.Join(t.TempDir(), "deploy.sh"), "printf 'ORIGINAL\\n'\n")
 
 	exitCode, output, err := e.ExecFileWithStreamingHook(
-		context.Background(), file, verifiedFileArgv(t, "/bin/sh"), "", "", nil, 30*time.Second, nil, nil,
+		context.Background(), file, verifiedFileArgv(t, "/bin/sh"), "", "", nil, 30*time.Second, "", nil, nil,
 	)
 
 	require.NoError(t, err)
@@ -69,7 +69,7 @@ func TestExecFileWithStreamingHook_SwapAtPathRunsVerifiedBytes(t *testing.T) {
 	require.NoError(t, os.Rename(decoy, path))
 
 	_, output, err := e.ExecFileWithStreamingHook(
-		context.Background(), file, verifiedFileArgv(t, "/bin/sh"), "", "", nil, 30*time.Second, nil, nil,
+		context.Background(), file, verifiedFileArgv(t, "/bin/sh"), "", "", nil, 30*time.Second, "", nil, nil,
 	)
 
 	require.NoError(t, err)
@@ -92,7 +92,7 @@ func TestExecFileWithStreamingHook_ArgsArePassedLiterally(t *testing.T) {
 
 	_, output, err := e.ExecFileWithStreamingHook(
 		context.Background(), file, verifiedFileArgv(t, "/bin/sh", scriptArgs...),
-		"", "", map[string]string{"HOME": "/should/not/appear"}, 30*time.Second, nil, nil,
+		"", "", map[string]string{"HOME": "/should/not/appear"}, 30*time.Second, "", nil, nil,
 	)
 
 	require.NoError(t, err)
@@ -106,7 +106,7 @@ func TestExecFileWithStreamingHook_StreamsChunks(t *testing.T) {
 
 	var streamed strings.Builder
 	_, output, err := e.ExecFileWithStreamingHook(
-		context.Background(), file, verifiedFileArgv(t, "/bin/sh"), "", "", nil, 30*time.Second, nil,
+		context.Background(), file, verifiedFileArgv(t, "/bin/sh"), "", "", nil, 30*time.Second, "", nil,
 		func(_ context.Context, content string) { streamed.WriteString(content) },
 	)
 
@@ -120,7 +120,7 @@ func TestExecFileWithStreamingHook_PropagatesExitCode(t *testing.T) {
 	file := openScript(t, filepath.Join(t.TempDir(), "deploy.sh"), "exit 42\n")
 
 	exitCode, _, _ := e.ExecFileWithStreamingHook(
-		context.Background(), file, verifiedFileArgv(t, "/bin/sh"), "", "", nil, 30*time.Second, nil, nil,
+		context.Background(), file, verifiedFileArgv(t, "/bin/sh"), "", "", nil, 30*time.Second, "", nil, nil,
 	)
 
 	assert.Equal(t, 42, exitCode)

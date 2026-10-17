@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -43,13 +44,13 @@ func truncatedMarkerOf(b []byte) string {
 	return string(b[i:min(i+40, len(b))])
 }
 
-// Blocks exceed captureTailCap so in-write compaction fires; only the last tail bytes survive.
-func TestCapBuffer_CompactsAcrossWrites(t *testing.T) {
+// Blocks stay under captureTailCap so each one wraps the ring instead of replacing it.
+func TestCapBuffer_WrapsAcrossWrites(t *testing.T) {
 	c := newCapBuffer()
 
-	block := bytes.Repeat([]byte("x"), captureTailCap+1000)
+	block := bytes.Repeat([]byte("x"), captureTailCap/2+1000)
 	var total int
-	for range 5 {
+	for range 8 {
 		c.write(block)
 		total += len(block)
 	}
@@ -59,4 +60,96 @@ func TestCapBuffer_CompactsAcrossWrites(t *testing.T) {
 	dropped := total - captureCap
 	want := fmt.Sprintf("%d bytes truncated", dropped)
 	require.True(t, bytes.Contains(got, []byte(want)), "expected marker %q, got %q", want, truncatedMarkerOf(got))
+}
+
+func patternStream(n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = byte(i*7 + i>>8)
+	}
+	return out
+}
+
+func wantCapped(stream []byte) []byte {
+	if len(stream) <= captureCap {
+		return stream
+	}
+	marker := fmt.Sprintf("\n... [%d bytes truncated] ...\n", len(stream)-captureCap)
+	return slices.Concat(stream[:captureHeadCap], []byte(marker), stream[len(stream)-captureTailCap:])
+}
+
+func TestCapBuffer_KeepsHeadAndLastTailAcrossManyWraps(t *testing.T) {
+	stream := patternStream(captureHeadCap + 7*captureTailCap + 123)
+	c := newCapBuffer()
+
+	for chunk := range slices.Chunk(stream, 64) {
+		c.write(chunk)
+	}
+
+	require.Equal(t, wantCapped(stream), c.bytes())
+}
+
+func TestCapBuffer_MatchesCappedStreamAtBoundaries(t *testing.T) {
+	sizes := []int{
+		captureHeadCap, captureCap, captureCap + 1,
+		captureHeadCap + 2*captureTailCap - 1, captureHeadCap + 2*captureTailCap,
+		captureHeadCap + 2*captureTailCap + 1,
+	}
+	for _, size := range sizes {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			stream := patternStream(size)
+			c := newCapBuffer()
+
+			for chunk := range slices.Chunk(stream, 4096) {
+				c.write(chunk)
+			}
+
+			assert.Equal(t, wantCapped(stream), c.bytes())
+		})
+	}
+}
+
+func TestCapBuffer_SingleWriteAroundTailCapMatchesCappedStream(t *testing.T) {
+	for _, n := range []int{captureTailCap - 1, captureTailCap, captureTailCap + 1} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			stream := patternStream(captureHeadCap + 2*captureTailCap - 10 + n)
+			c := newCapBuffer()
+			split := len(stream) - n
+
+			for chunk := range slices.Chunk(stream[:split], 4096) {
+				c.write(chunk)
+			}
+			c.write(stream[split:])
+
+			assert.Equal(t, wantCapped(stream), c.bytes())
+		})
+	}
+}
+
+func TestCapBuffer_BytesIsRepeatableAndWritableAfterwards(t *testing.T) {
+	stream := patternStream(captureHeadCap + 3*captureTailCap)
+	extra := patternStream(captureTailCap + 5)
+	c := newCapBuffer()
+	for chunk := range slices.Chunk(stream, 4096) {
+		c.write(chunk)
+	}
+
+	first := c.bytes()
+	second := c.bytes()
+	for chunk := range slices.Chunk(extra, 4096) {
+		c.write(chunk)
+	}
+
+	assert.Equal(t, first, second)
+	assert.Equal(t, wantCapped(slices.Concat(stream, extra)), c.bytes())
+}
+
+func TestCapBuffer_OversizedWriteDoesNotRetainItsBackingArray(t *testing.T) {
+	stream := patternStream(captureHeadCap + 64*captureTailCap)
+	c := newCapBuffer()
+
+	c.write(stream)
+
+	assert.Equal(t, captureTailCap, cap(c.tail), "tail keeps the oversized write's allocation")
+	assert.Equal(t, wantCapped(stream), c.bytes())
 }

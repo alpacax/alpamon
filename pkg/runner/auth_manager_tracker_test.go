@@ -244,6 +244,33 @@ func TestSudoApprovalRequest_JSONTagsOmitEmpty(t *testing.T) {
 	assert.NotContains(t, string(emptyJSON), `"command_id"`, "payload with neither id must omit both keys")
 }
 
+// TestSudoApprovalRequest_RunasUserPassthrough verifies that the optional
+// runas_user field sent by the approval plugin survives the socket unmarshal
+// and the re-marshal for the server, and stays off the wire when absent.
+func TestSudoApprovalRequest_RunasUserPassthrough(t *testing.T) {
+	pluginMsg := `{"type":"sudo_approval","username":"alice","groupname":"alice","pid":10,"ppid":9,"command":"ls","is_alpacon_user":null,"session_id":"","request_id":"10","runas_user":"deploy"}`
+	var req SudoApprovalRequest
+	require.NoError(t, json.Unmarshal([]byte(pluginMsg), &req))
+	assert.Equal(t, "deploy", req.RunasUser)
+
+	out, err := json.Marshal(req)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `"runas_user":"deploy"`)
+
+	var uidReq SudoApprovalRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"sudo_approval","request_id":"11","runas_user":"#1234"}`), &uidReq))
+	assert.Equal(t, "#1234", uidReq.RunasUser)
+
+	// An older plugin (or the PAM-only path) omits the field; it must stay
+	// absent on the way to the server.
+	var legacy SudoApprovalRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"sudo_approval","username":"alice","pid":10,"ppid":9,"command":"ls","request_id":"12"}`), &legacy))
+	assert.Empty(t, legacy.RunasUser)
+	legacyOut, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	assert.NotContains(t, string(legacyOut), `"runas_user"`)
+}
+
 // TestSudoApprovalResponse_ErrorCodePassthrough verifies that the optional
 // error_code field round-trips through the response struct and stays off the
 // wire when empty. alpacon-server emits error_code on denial; Alpamon

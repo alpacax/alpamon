@@ -184,7 +184,7 @@ func TestSystemHandler_Upgrade_LegacyPathUnchanged(t *testing.T) {
 	assert.Equal(t, []string{"update", "-y", "-o", "Acquire::Retries=3"}, commands[0].Args)
 	assert.Equal(t, "apt-get", commands[0].Name)
 	assert.Equal(t, "apt-get", commands[1].Name)
-	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon", "-y", "-o", "Acquire::Retries=3"}, commands[1].Args)
+	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon", "-y", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout}, commands[1].Args)
 	assert.Empty(t, h.api.posts(), "the legacy path sends no upgrade report")
 }
 
@@ -218,7 +218,7 @@ func TestSystemHandler_PinnedUpgrade_Apt(t *testing.T) {
 	assert.Contains(t, output, "Installed alpamon 2.5.0")
 
 	assert.Zero(t, h.versions.LatestCalls, "a pinned upgrade does not ask for the latest release")
-	assert.True(t, h.ran("apt-get", "install", "-y", "--allow-downgrades", "-o", "Acquire::Retries=3", "alpamon=2.5.0"))
+	assert.True(t, h.ran("apt-get", "install", "-y", "--allow-downgrades", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout, "alpamon=2.5.0"))
 	assert.Nil(t, findLastExecuted(h.exec, "sh"), "the pinned install runs without a shell")
 
 	assert.True(t, h.ran("systemctl", "stop", "alpamon-restart.timer"), "the package's own delayed restart is replaced")
@@ -334,7 +334,7 @@ func TestSystemHandler_PinnedUpgrade_FailureClearsMarkerAndGuard(t *testing.T) {
 }
 
 func TestSystemHandler_PinnedUpgrade_ChangedPackageIsReinstalledOnFailure(t *testing.T) {
-	const rollback = "apt-get install -y --allow-downgrades alpamon=2.4.0"
+	const rollback = "apt-get install -y --allow-downgrades -o " + utils.AptLockTimeout + " alpamon=2.4.0"
 	for _, tc := range []struct {
 		name        string
 		versions    []string // before, after the install, after the reinstall
@@ -358,7 +358,7 @@ func TestSystemHandler_PinnedUpgrade_ChangedPackageIsReinstalledOnFailure(t *tes
 			assert.Equal(t, 1, exitCode)
 			assert.Equal(t, updater.ClassPackageManager, h.lastReport(t).ErrorClass)
 
-			reinstalled := h.ran("apt-get", "install", "-y", "--allow-downgrades", "alpamon=2.4.0")
+			reinstalled := h.ran("apt-get", "install", "-y", "--allow-downgrades", "-o", utils.AptLockTimeout, "alpamon=2.4.0")
 			assert.Equal(t, len(tc.versions) > 2 || tc.rollbackErr, reinstalled)
 
 			marker, err := updater.LoadPending()
@@ -456,6 +456,59 @@ func TestSystemHandler_PinnedUpgrade_PackageScriptsRestartWithoutServiceManager(
 	assert.False(t, h.ws.RestartCalled)
 }
 
+func TestSystemHandler_PinnedUpgrade_DeadlineCoversThePackageScriptRestartOnlyWithoutSystemd(t *testing.T) {
+	tests := []struct {
+		name      string
+		systemd   bool
+		allowance time.Duration
+	}{
+		{"without systemd", false, updater.RestartDelay + time.Minute + packageScriptRestartDelay},
+		{"with systemd", true, updater.RestartDelay + time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPinnedHarness(t, utils.PkgApt)
+			hasSystemd = func() bool { return tt.systemd }
+			if !tt.systemd {
+				h.sm.restartErr = updater.ErrNoServiceManager
+			}
+			h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
+			h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.5.0", nil)
+
+			before := time.Now()
+			exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0", HealthGracePeriod: time.Minute})
+			after := time.Now()
+			require.NoError(t, err)
+			require.Equal(t, 0, exitCode, output)
+
+			m, err := updater.LoadPending()
+			require.NoError(t, err)
+			require.NotNil(t, m)
+			assert.False(t, m.Deadline.Before(before.Add(tt.allowance)), "deadline %v is short of the allowance", m.Deadline)
+			assert.False(t, m.Deadline.After(after.Add(tt.allowance)), "deadline %v overshoots the allowance", m.Deadline)
+		})
+	}
+}
+
+func TestSystemHandler_PinnedUpgrade_FailedPackageRestartLeavesTheLatchToTheHandler(t *testing.T) {
+	// Given the package path holding the latch, with no restart the service manager or the pool will take
+	h := newPinnedHarness(t, utils.PkgApt)
+	h.sm.restartErr = errors.New("systemctl failed")
+	stopped := pool.NewPool(1, 1)
+	require.NoError(t, stopped.Shutdown(time.Second))
+	h.handler.pool = stopped
+	require.True(t, updater.AcquireUpgradeLatch())
+	t.Cleanup(updater.ReleaseSelfUpdateLatch)
+
+	// When the restart into the installed package cannot be scheduled
+	exitCode, _, err := h.handler.restartIntoUpgrade("v2.5.0", false)
+	require.Error(t, err)
+	require.Equal(t, 1, exitCode)
+
+	// Then the latch is still held, for the handler's deferred release alone to clear
+	assert.False(t, updater.AcquireUpgradeLatch())
+}
+
 func TestSystemHandler_PinnedUpgrade_AptWithoutTargetFails(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
 	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
@@ -497,7 +550,7 @@ func TestSystemHandler_PinnedUpgrade_InstallFailure(t *testing.T) {
 	h := newPinnedHarness(t, utils.PkgApt)
 	h.exec.SetResult("dpkg-query -W -f=${Version} alpamon", 0, "2.4.0", nil)
 	h.exec.SetResult("apt-cache madison alpamon", 0, madisonOutput, nil)
-	h.exec.SetResult("apt-get install -y --allow-downgrades -o Acquire::Retries=3 alpamon=2.5.0", 100, "E: broken", errors.New("exit status 100"))
+	h.exec.SetResult("apt-get install -y --allow-downgrades -o Acquire::Retries=3 -o "+utils.AptLockTimeout+" alpamon=2.5.0", 100, "E: broken", errors.New("exit status 100"))
 
 	exitCode, output, err := h.upgrade(t, &common.UpgradeTarget{TargetVersion: "2.5.0", AttemptID: "att-4"})
 	require.Error(t, err)

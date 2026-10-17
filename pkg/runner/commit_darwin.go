@@ -1,7 +1,7 @@
 package runner
 
 import (
-	"os/exec"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -24,58 +24,105 @@ func loadShadowData() map[string]shadowEntry {
 	return nil
 }
 
-// getUserData enumerates local users via dscl on macOS.
+// getUserData enumerates local users via a single dscl -readall call on macOS.
 // All user attributes are fetched via dscl to avoid os/user.Lookup(),
 // which requires CGO on macOS and fails with CGO_ENABLED=0 builds.
 func getUserData() ([]UserData, error) {
-	out, err := exec.Command("dscl", ".", "-list", "/Users", "UniqueID").Output()
+	out, err := runCollectCommand("dscl", ".", "-readall", "/Users",
+		"RecordName", "UniqueID", "PrimaryGroupID", "NFSHomeDirectory", "UserShell")
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to list users via dscl.")
+		log.Warn().Err(err).Msg("Failed to read users via dscl; users will not be reported.")
 		return nil, err
 	}
 
-	validShells := loadValidShells()
-	var users []UserData
+	return usersFromDscl(out)
+}
 
-	for line := range strings.SplitSeq(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
-		}
-		username := fields[0]
-		uid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-
-		gid := lookupDsclInt(username, "PrimaryGroupID")
-		homeDir := lookupDsclAttr(username, "NFSHomeDirectory")
-		shell := lookupDsclAttr(username, "UserShell")
-		if shell == "" {
-			shell = utils.DefaultShell()
-		}
-
-		users = append(users, UserData{
-			Username:    username,
-			UID:         uid,
-			GID:         gid,
-			Directory:   homeDir,
-			Shell:       shell,
-			ValidShells: validShells,
-		})
-	}
-
-	if users == nil {
-		users = []UserData{}
+// usersFromDscl warns on a parse failure because callers log collection errors at Debug only.
+func usersFromDscl(out []byte) ([]UserData, error) {
+	users, err := parseDsclUsers(string(out), loadValidShells())
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to parse dscl user records; users will not be reported.")
+		return nil, err
 	}
 	return users, nil
 }
 
+// parseDsclUsers parses `dscl . -readall /Users`: a "-" line ends a record, and dscl moves an
+// attribute's values to indented lines when any holds a space, so inline values split on spaces.
+func parseDsclUsers(out string, validShells []string) ([]UserData, error) {
+	users := []UserData{}
+
+	rec := map[string]string{}
+	pending := "" // attribute whose values follow on indented lines
+	for line := range strings.SplitSeq(out, "\n") {
+		if line == "-" {
+			if u, ok := userFromRecord(rec, validShells); ok {
+				users = append(users, u)
+			}
+			clear(rec)
+			pending = ""
+			continue
+		}
+		if strings.HasPrefix(line, " ") {
+			if pending != "" && rec[pending] == "" {
+				rec[pending] = strings.TrimSpace(line)
+			}
+			continue
+		}
+		attr, value, ok := strings.Cut(line, ":")
+		pending = ""
+		if !ok {
+			continue
+		}
+		if _, exists := rec[attr]; exists { // a lost "-" separator would merge users into one record
+			return nil, fmt.Errorf("dscl output repeats %s within one record", attr)
+		}
+		fields := strings.Fields(value)
+		if len(fields) == 0 {
+			rec[attr] = "" // marks the attribute as seen even if no indented value follows
+			pending = attr
+			continue
+		}
+		rec[attr] = fields[0]
+	}
+	if u, ok := userFromRecord(rec, validShells); ok {
+		users = append(users, u)
+	}
+
+	return users, nil
+}
+
+// userFromRecord maps one dscl record; ok is false when it lacks a name or a numeric UniqueID.
+func userFromRecord(rec map[string]string, validShells []string) (UserData, bool) {
+	name := rec["RecordName"]
+	uid, err := strconv.Atoi(rec["UniqueID"])
+	if name == "" || err != nil {
+		return UserData{}, false
+	}
+	gid, err := strconv.Atoi(rec["PrimaryGroupID"])
+	if err != nil {
+		gid = 0 // Atoi returns the max int on a range error
+	}
+	shell := rec["UserShell"]
+	if shell == "" {
+		shell = utils.DefaultShell()
+	}
+	return UserData{
+		Username:    name,
+		UID:         uid,
+		GID:         gid,
+		Directory:   rec["NFSHomeDirectory"],
+		Shell:       shell,
+		ValidShells: validShells,
+	}, true
+}
+
 // getGroupData enumerates local groups via dscl on macOS.
 func getGroupData() ([]GroupData, error) {
-	out, err := exec.Command("dscl", ".", "-list", "/Groups", "PrimaryGroupID").Output()
+	out, err := runCollectCommand("dscl", ".", "-list", "/Groups", "PrimaryGroupID")
 	if err != nil {
-		log.Debug().Err(err).Msg("Failed to list groups via dscl.")
+		log.Warn().Err(err).Msg("Failed to list groups via dscl; groups will not be reported.")
 		return nil, err
 	}
 
@@ -99,33 +146,4 @@ func getGroupData() ([]GroupData, error) {
 		groups = []GroupData{}
 	}
 	return groups, nil
-}
-
-// lookupDsclAttr reads a single attribute for a user via dscl.
-// Returns empty string on failure.
-func lookupDsclAttr(username, attr string) string {
-	out, err := exec.Command("dscl", ".", "-read", "/Users/"+username, attr).Output()
-	if err != nil {
-		return ""
-	}
-	// Output format: "AttrName: value"
-	parts := strings.SplitN(strings.TrimSpace(string(out)), " ", 2)
-	if len(parts) == 2 {
-		return strings.TrimSpace(parts[1])
-	}
-	return ""
-}
-
-// lookupDsclInt reads a single integer attribute for a user via dscl.
-// Returns 0 on failure.
-func lookupDsclInt(username, attr string) int {
-	s := lookupDsclAttr(username, attr)
-	if s == "" {
-		return 0
-	}
-	v, err := strconv.Atoi(s)
-	if err != nil {
-		return 0
-	}
-	return v
 }

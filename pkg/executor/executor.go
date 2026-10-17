@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -34,7 +35,8 @@ const (
 // capBuffer keeps a stream's first and last halves and drops the middle, bounding retained memory.
 type capBuffer struct {
 	head    []byte
-	tail    []byte
+	tail    []byte // fills up to captureTailCap, then wraps as a ring whose oldest byte is at pos
+	pos     int
 	dropped int64
 }
 
@@ -51,31 +53,28 @@ func (c *capBuffer) write(p []byte) {
 	if len(p) == 0 {
 		return
 	}
-	c.tail = append(c.tail, p...)
-	// Compact lazily (grow to 2x, then drop the front) for amortized O(1).
-	if len(c.tail) > 2*captureTailCap {
-		c.dropTail(len(c.tail) - captureTailCap)
-		c.tail = append([]byte(nil), c.tail...)
+	if len(p) > captureTailCap {
+		c.dropped += int64(len(p) - captureTailCap)
+		p = p[len(p)-captureTailCap:]
 	}
-}
-
-func (c *capBuffer) dropTail(n int) {
-	c.dropped += int64(n)
-	c.tail = c.tail[n:]
+	if c.tail == nil {
+		c.tail = make([]byte, 0, captureTailCap)
+	}
+	n := min(captureTailCap-len(c.tail), len(p))
+	c.tail = append(c.tail, p[:n]...)
+	p = p[n:]
+	k := copy(c.tail[c.pos:], p)
+	copy(c.tail, p[k:])
+	c.pos = (c.pos + len(p)) % captureTailCap
+	c.dropped += int64(len(p))
 }
 
 func (c *capBuffer) bytes() []byte {
-	if len(c.tail) > captureTailCap {
-		c.dropTail(len(c.tail) - captureTailCap)
-	}
-	var marker string
+	var marker []byte
 	if c.dropped > 0 {
-		marker = fmt.Sprintf("\n... [%d bytes truncated] ...\n", c.dropped)
+		marker = fmt.Appendf(nil, "\n... [%d bytes truncated] ...\n", c.dropped)
 	}
-	out := make([]byte, 0, len(c.head)+len(marker)+len(c.tail))
-	out = append(out, c.head...)
-	out = append(out, marker...)
-	return append(out, c.tail...)
+	return slices.Concat(c.head, marker, c.tail[c.pos:], c.tail[:c.pos])
 }
 
 // chunkWriter emits coalesced stdout/stderr chunks and tees a capped copy for the fin payload.
@@ -160,14 +159,11 @@ func (w *chunkWriter) flush() {
 }
 
 // emit nil-guards and recovers from callback panics so a bad callback
-// cannot crash the agent.
+// cannot crash the agent. content must not be a substring of a larger string.
 func (w *chunkWriter) emit(content string) {
 	if w.callback == nil {
 		return
 	}
-	// Clone so a chunk sliced from a larger line/buffer doesn't pin the
-	// full backing array alive while queued downstream.
-	content = strings.Clone(content)
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error().Interface("panic", r).Msg("ChunkCallback panicked")
@@ -293,7 +289,7 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 
 	// Execute command
 	start := time.Now()
-	output, err := e.runCommand(cmd, opts.PIDHook, cw)
+	output, err := e.runCommand(ctx, cmd, opts.CommandID, opts.PIDHook, cw)
 	exitCode := 0
 	result := string(output)
 	if err != nil {
@@ -322,8 +318,9 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 	return exitCode, result, err
 }
 
-// runCommand uses Start/Wait so platform cleanup can attach process groups or jobs.
-func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
+// runCommand uses Start/Wait so platform cleanup can attach process groups or jobs. ctx is the one
+// cmd was built with; its error names why the Cancel hook fired.
+func (e *Executor) runCommand(ctx context.Context, cmd *exec.Cmd, commandID string, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
 	cleanup, err := configureProcessTreeCleanup(cmd, pidHook != nil)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to configure process tree cleanup")
@@ -334,7 +331,13 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 	}
 	cmd.WaitDelay = commandWaitDelay
 	cmd.Cancel = func() error {
-		return cleanup.cancel(cmd)
+		reason := cleanupReasonShutdown
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			reason = cleanupReasonTimeout
+		}
+		outcome, err := cleanup.cancel(cmd)
+		logProcessTreeCleanup(commandID, cmd, reason, outcome, err)
+		return err
 	}
 
 	var buf bytes.Buffer
@@ -362,15 +365,28 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 		return finish(err)
 	}
 	// Kill the whole tree on every exit path: a non-zero exit that leaves a descendant holding the pipe
-	// fires neither Cancel (timeout-only) nor the ErrWaitDelay branch, so it would otherwise leak. cancel is idempotent.
-	defer func() {
-		if err := cleanup.cancel(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			log.Debug().Err(err).Msg("Failed to clean up command process tree")
+	// fires neither Cancel (timeout-only) nor the ErrWaitDelay branch, so it would otherwise leak. This
+	// also kills background work a command meant to outlive it (`nohup ... &`, Start-Process). Runs once.
+	var waitErr error
+	exitCleanupDone := false
+	exitCleanup := func() {
+		if exitCleanupDone {
+			return
 		}
-	}()
+		exitCleanupDone = true
+		reason := cleanupReasonExit
+		if errors.Is(waitErr, exec.ErrWaitDelay) {
+			reason = cleanupReasonWaitDelay
+		}
+		outcome, err := cleanup.cancel(cmd)
+		logProcessTreeCleanup(commandID, cmd, reason, outcome, err)
+	}
+	defer exitCleanup()
 	if err := cleanup.afterStart(cmd); err != nil {
-		// afterStart may re-run cancel on a Start/cancel race (unix-like and windows alike) and surface its error
-		// here; the deferred cancel then re-runs harmlessly (idempotent).
+		log.Warn().Err(err).Str("command_id", commandID).Int("pid", cmd.Process.Pid).
+			Msg("Failed to confine the command's process tree; failing the command.")
+		// Kill before Wait: on Windows a root whose setup failed is still suspended and would never exit on its own.
+		exitCleanup()
 		_ = cmd.Wait()
 		return finish(err)
 	}
@@ -380,8 +396,44 @@ func (e *Executor) runCommand(cmd *exec.Cmd, pidHook func(pid int), cw *chunkWri
 	if cmd.Process != nil {
 		invokePIDHook(pidHook, cmd.Process.Pid)
 	}
-	err = cmd.Wait()
-	return finish(err)
+	waitErr = cmd.Wait()
+	return finish(waitErr)
+}
+
+// Why a cancel ran, as logged.
+const (
+	cleanupReasonTimeout   = "timeout"      // the command's deadline passed
+	cleanupReasonShutdown  = "shutdown"     // the command's context was canceled
+	cleanupReasonWaitDelay = "wait-delay"   // the command exited but a descendant held its output open
+	cleanupReasonExit      = "exit-cleanup" // the routine kill after every exit
+)
+
+// logProcessTreeCleanup writes the one line each cancel gets: Info when it terminated something, Debug
+// otherwise. Only identifiers and counts, never the command's arguments, environment or output.
+func logProcessTreeCleanup(commandID string, cmd *exec.Cmd, reason string, outcome cleanupOutcome, err error) {
+	if errors.Is(err, os.ErrProcessDone) {
+		err = nil
+	}
+	event := log.Debug()
+	if reason != cleanupReasonExit || outcome.killedAny() {
+		event = log.Info()
+	}
+	if err != nil {
+		// A cleanup that failed may have left descendants running; it must not hide at Debug.
+		event = log.Warn()
+	}
+	pid := 0
+	if cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+	event.Err(err).
+		Str("command_id", commandID).
+		Int("pid", pid).
+		Str("reason", reason).
+		Bool("assigned", outcome.assigned).
+		Uint32("active", outcome.active).
+		Bool("root_killed", outcome.rootKilled).
+		Msg("Cleaned up the command's process tree.")
 }
 
 func invokePIDHook(pidHook func(pid int), pid int) {
@@ -421,6 +473,10 @@ type CommandOptions struct {
 	// ChunkCallback, if non-nil, receives streamed stdout/stderr chunks with
 	// the ctx live at emit time. Sequencing is the caller's responsibility.
 	ChunkCallback func(ctx context.Context, content string)
+
+	// CommandID, when set, is the console command this execution belongs to.
+	// It is used only to correlate the process-tree cleanup log line.
+	CommandID string
 }
 
 // buildEnv constructs the environment for a command. It starts from the
@@ -582,14 +638,16 @@ func (e *Executor) ExecWithHook(ctx context.Context, args []string, username, gr
 	})
 }
 
-// ExecWithStreamingHook combines PIDHook and ChunkCallback. Either may be nil.
-func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+// ExecWithStreamingHook combines PIDHook and ChunkCallback. Either may be nil;
+// commandID may be empty.
+func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	return e.Execute(ctx, CommandOptions{
 		Args:          args,
 		Username:      username,
 		Groupname:     groupname,
 		Env:           env,
 		Timeout:       timeout,
+		CommandID:     commandID,
 		PIDHook:       pidHook,
 		ChunkCallback: chunkCallback,
 	})
@@ -598,7 +656,7 @@ func (e *Executor) ExecWithStreamingHook(ctx context.Context, args []string, use
 // ExecFileWithStreamingHook is ExecWithStreamingHook for a digest-verified
 // entrypoint: file is inherited by the child and args names it by its
 // descriptor path, so the verified object is the one that runs.
-func (e *Executor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
+func (e *Executor) ExecFileWithStreamingHook(ctx context.Context, file *os.File, args []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error) {
 	return e.Execute(ctx, CommandOptions{
 		Args:          args,
 		ExecFile:      file,
@@ -606,6 +664,7 @@ func (e *Executor) ExecFileWithStreamingHook(ctx context.Context, file *os.File,
 		Groupname:     groupname,
 		Env:           env,
 		Timeout:       timeout,
+		CommandID:     commandID,
 		PIDHook:       pidHook,
 		ChunkCallback: chunkCallback,
 	})

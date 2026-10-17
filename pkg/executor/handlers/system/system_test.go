@@ -221,8 +221,8 @@ func (e *versionSteppingExecutor) RunAsUser(ctx context.Context, username string
 	return e.MockCommandExecutor.RunAsUser(ctx, username, name, args...)
 }
 
-// TestMain points aptSourcesDir and the updater's yum paths at an empty temp dir for the whole
-// package run, so tests never read the host's real apt sources or yum config.
+// TestMain points aptSourcesDir and the updater's yum and upgrade lock paths at an empty temp dir for the
+// whole package run, so tests never read the host's apt sources or yum config or create /run/alpamon.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "alpamon-pkg-sources")
 	if err != nil {
@@ -233,6 +233,7 @@ func TestMain(m *testing.M) {
 	updater.YumBinary = filepath.Join(dir, "missing-yum")
 	updater.DnfConfFile = filepath.Join(dir, "missing-dnf.conf")
 	updater.YumConfFile = filepath.Join(dir, "missing-yum.conf")
+	updater.UpgradeLockPath = filepath.Join(dir, "upgrade.lock")
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
@@ -1435,7 +1436,7 @@ func TestSystemHandler_Upgrade_AptInstallFailureNamesTheStep(t *testing.T) {
 	writeAptAlpamonSource(t)
 
 	const installOutput = "E: Sub-process /usr/bin/dpkg returned an error code (1)"
-	mockExec.SetResult("apt-get install --only-upgrade alpamon -y -o Acquire::Retries=3",
+	mockExec.SetResult("apt-get install --only-upgrade alpamon -y -o Acquire::Retries=3 -o "+utils.AptLockTimeout,
 		100, installOutput, errors.New("exit status 100"))
 
 	exitCode, output, _ := handler.Execute(context.Background(), common.Upgrade.String(), &common.CommandArgs{})
@@ -1508,7 +1509,8 @@ func TestSystemHandler_SystemUpdate_ZypperInformationalExitCodes(t *testing.T) {
 		{"failed post script stays a failure", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 107, 107},
 		{"unreachable repo stays a failure", utils.PkgZypper, "opensuse-leap", "zypper --non-interactive refresh && zypper --non-interactive update", 4, 4},
 		// apt has no informational family, so 102 there is a real failure.
-		{"apt is untouched", utils.PkgApt, "ubuntu", "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 && apt-get autoremove -y", 102, 102},
+		{"apt is untouched", utils.PkgApt, "ubuntu", "apt-get update -o Acquire::Retries=3 && apt-get upgrade -y -o Acquire::Retries=3 -o " + utils.AptLockTimeout +
+			" && apt-get autoremove -y -o " + utils.AptLockTimeout, 102, 102},
 	}
 
 	for _, tt := range tests {
@@ -1601,6 +1603,29 @@ func TestSystemHandler_SystemUpdate_ZypperDupOnlyOnTumbleweed(t *testing.T) {
 	}
 }
 
+// The purge runs detached, so a held dpkg lock would fail it with nobody watching.
+func TestSystemHandler_Uninstall_AptWaitsForDpkgLock(t *testing.T) {
+	mockExec := common.NewMockCommandExecutor(t)
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+	handler := NewSystemHandler(mockExec, &MockWSClient{}, ctxManager, workerPool, newMockVersionResolver(), nil)
+	setPackageManagerAndID(t, utils.PkgApt, "")
+
+	handler.executeUninstall()
+
+	var purge string
+	for _, c := range mockExec.GetExecutedCommands() {
+		if joined := strings.Join(c.Args, " "); strings.Contains(joined, "apt-get purge alpamon") {
+			purge = joined
+		}
+	}
+	require.NotEmpty(t, purge, "expected an apt-get purge, got %+v", mockExec.GetExecutedCommands())
+	assert.Contains(t, purge, "apt-get purge alpamon -y -o DPkg::Lock::Timeout=")
+	assert.Contains(t, purge, "apt-get autoremove -y -o DPkg::Lock::Timeout=")
+}
+
 // Asserts against every captured command: the uninstall is scheduled through
 // systemd-run where systemd exists and a deferred subshell where it does not, so
 // the zypper string lands in different argv positions per host.
@@ -1627,6 +1652,37 @@ func TestSystemHandler_Uninstall_UsesZypper(t *testing.T) {
 		assert.NotContains(t, joined, "apt-get purge", "a zypper host must not run apt")
 	}
 	assert.True(t, found, "expected a zypper remove command, got %+v", mockExec.GetExecutedCommands())
+}
+
+// Without systemd the deferred removal must leave the command's process group: run as an ordinary
+// command, a backgrounded `sleep 5 && remove` is killed with the group when the shell exits.
+func TestSystemHandler_Uninstall_WithoutSystemdStartsDetached(t *testing.T) {
+	orig := hasSystemd
+	hasSystemd = func() bool { return false }
+	t.Cleanup(func() { hasSystemd = orig })
+
+	mockExec := common.NewMockCommandExecutor(t)
+	mockWS := &MockWSClient{}
+	ctxManager := agent.NewContextManager()
+	workerPool := pool.NewPool(2, 10)
+	defer func() { _ = workerPool.Shutdown(1 * time.Second) }()
+	defer ctxManager.Shutdown()
+
+	handler := NewSystemHandler(mockExec, mockWS, ctxManager, workerPool, newMockVersionResolver(), nil)
+	setPackageManagerAndID(t, utils.PkgApt, "ubuntu")
+
+	handler.executeUninstall()
+
+	commands := mockExec.GetExecutedCommands()
+	require.Len(t, commands, 1, "want only the detached removal, got %+v", commands)
+	c := commands[0]
+	assert.True(t, c.Detached, "the deferred removal must be started detached")
+	assert.Equal(t, "/bin/sh", c.Name)
+	require.Len(t, c.Args, 2)
+	assert.Equal(t, "-c", c.Args[0])
+	assert.True(t, strings.HasPrefix(c.Args[1], "(sleep 5 && apt-get purge alpamon -y -o "+utils.AptLockTimeout+" && apt-get autoremove -y -o "+utils.AptLockTimeout+") >>"), "script: %q", c.Args[1])
+	assert.False(t, strings.HasSuffix(strings.TrimSpace(c.Args[1]), "&"), "the script must not background itself: %q", c.Args[1])
+	assert.True(t, mockWS.ShutDownCalled, "the agent must shut itself down once the uninstall is scheduled")
 }
 
 func TestRetryWhileZypperLocked(t *testing.T) {
@@ -1952,7 +2008,7 @@ func TestSystemHandler_Upgrade_PamIsNotComparedToAlpamonRelease(t *testing.T) {
 
 	install := findExecutedAptInstall(mockExec)
 	require.NotNil(t, install, "an installed alpamon-pam must reach the package manager")
-	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon-pam", "-y", "-o", "Acquire::Retries=3"}, install.Args,
+	assert.Equal(t, []string{"install", "--only-upgrade", "alpamon-pam", "-y", "-o", "Acquire::Retries=3", "-o", utils.AptLockTimeout}, install.Args,
 		"only alpamon-pam is behind; alpamon itself is already current")
 	assert.True(t, mockVersions.InvalidatePamCalled, "the cached pam version must be refreshed after the upgrade")
 }

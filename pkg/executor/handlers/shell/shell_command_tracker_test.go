@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -15,12 +16,13 @@ import (
 
 // hookRecordingExecutor wraps a MockCommandExecutor and records whether
 // ExecWithStreamingHook (the shell handler's sole entry point into the
-// executor) received a non-nil pidHook.
+// executor) received a non-nil pidHook, and which command ID it received.
 type hookRecordingExecutor struct {
 	*common.MockCommandExecutor
-	mu       sync.Mutex
-	called   bool
-	hookSeen bool
+	mu        sync.Mutex
+	called    bool
+	hookSeen  bool
+	commandID string
 }
 
 func (r *hookRecordingExecutor) ExecWithStreamingHook(
@@ -29,18 +31,44 @@ func (r *hookRecordingExecutor) ExecWithStreamingHook(
 	username, groupname string,
 	env map[string]string,
 	timeout time.Duration,
+	commandID string,
 	pidHook func(pid int),
 	chunkCallback func(ctx context.Context, content string),
 ) (int, string, error) {
 	r.mu.Lock()
 	r.called = true
 	r.hookSeen = pidHook != nil
+	r.commandID = commandID
 	r.mu.Unlock()
 
 	if pidHook != nil {
 		pidHook(424242)
 	}
 	return r.Exec(ctx, args, username, groupname, env, timeout)
+}
+
+// ExecFileWithStreamingHook records the same facts for the verified-file path.
+func (r *hookRecordingExecutor) ExecFileWithStreamingHook(
+	ctx context.Context,
+	file *os.File,
+	args []string,
+	username, groupname string,
+	env map[string]string,
+	timeout time.Duration,
+	commandID string,
+	pidHook func(pid int),
+	chunkCallback func(ctx context.Context, content string),
+) (int, string, error) {
+	r.mu.Lock()
+	r.called = true
+	r.hookSeen = pidHook != nil
+	r.commandID = commandID
+	r.mu.Unlock()
+
+	if pidHook != nil {
+		pidHook(424243)
+	}
+	return r.MockCommandExecutor.ExecFileWithStreamingHook(ctx, file, args, username, groupname, env, timeout, commandID, nil, chunkCallback)
 }
 
 // withTrackerAuthManager installs a clean in-process AuthManager for the
@@ -72,6 +100,7 @@ func TestShellHandler_CommandID_RegistersAndUnregistersPID(t *testing.T) {
 	assert.Equal(t, 0, exit, "exit")
 	assert.True(t, rec.called, "ExecWithStreamingHook was not invoked")
 	assert.True(t, rec.hookSeen, "shell handler must pass a non-nil hook when CommandID is set")
+	assert.Equal(t, "cmd-xyz", rec.commandID, "shell handler must pass CommandID to the executor")
 	_, ok := am.LookupPID(424242)
 	assert.False(t, ok, "tracker entry should have been removed after execution")
 }
@@ -95,4 +124,28 @@ func TestShellHandler_NoCommandID_PassesNilHook(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, rec.called, "ExecWithStreamingHook should still be the entry point")
 	assert.False(t, rec.hookSeen, "shell handler must pass a nil hook when CommandID is empty")
+	assert.Empty(t, rec.commandID, "commandID")
+}
+
+// TestShellHandler_ExecFile_PassesCommandID verifies that the verified-file path
+// hands args.CommandID to the executor, as the shell path does.
+func TestShellHandler_ExecFile_PassesCommandID(t *testing.T) {
+	am := withTrackerAuthManager(t)
+
+	rec := &hookRecordingExecutor{MockCommandExecutor: common.NewMockCommandExecutor(t)}
+	handler := NewShellHandler(rec)
+	args := &common.CommandArgs{
+		CommandID:    "cmd-file",
+		VerifiedFile: openTempFile(t),
+		ExecArgs:     []string{"/bin/bash", "/proc/self/fd/3"},
+		Username:     "alice",
+	}
+
+	_, _, err := handler.Execute(context.Background(), common.ExecFile.String(), args)
+	require.NoError(t, err)
+	assert.True(t, rec.called, "ExecFileWithStreamingHook was not invoked")
+	assert.True(t, rec.hookSeen, "shell handler must pass a non-nil hook when CommandID is set")
+	assert.Equal(t, "cmd-file", rec.commandID, "shell handler must pass CommandID to the executor")
+	_, ok := am.LookupPID(424243)
+	assert.False(t, ok, "tracker entry should have been removed after execution")
 }
