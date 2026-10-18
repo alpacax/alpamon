@@ -212,6 +212,10 @@ jobs:
             container: ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
             pkg_manager: apt-get
             runner: ubuntu-latest
+          - distro: ubuntu-26.04
+            container: ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944
+            pkg_manager: apt-get
+            runner: ubuntu-latest
           - distro: debian-11
             container: debian:11@sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9
             pkg_manager: apt-get
@@ -265,6 +269,10 @@ jobs:
           # ARM64
           - distro: ubuntu-24.04-arm64
             container: ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+            pkg_manager: apt-get
+            runner: ubuntu-24.04-arm
+          - distro: ubuntu-26.04-arm64
+            container: ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944
             pkg_manager: apt-get
             runner: ubuntu-24.04-arm
           - distro: rocky-9-arm64
