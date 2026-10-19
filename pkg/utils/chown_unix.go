@@ -11,7 +11,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const _openDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+const openDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+// afterReadDir runs once a directory's entries are listed; tests use it to race the walk.
+var afterReadDir = func(string) {}
 
 type dirFrame struct {
 	path  string
@@ -22,6 +25,7 @@ type dirFrame struct {
 
 // ChownRecursive changes the owner of path and everything under it. Symlinks inside the
 // tree and at path itself are left alone; path's parent directories resolve as usual.
+// Entries removed while the walk runs are skipped.
 func ChownRecursive(path string, uid, gid int) error {
 	if path == "" {
 		return errors.New("path must not be empty")
@@ -36,14 +40,10 @@ func ChownRecursive(path string, uid, gid int) error {
 		return nil
 	}
 	if !info.IsDir() {
-		err = unix.Fchownat(unix.AT_FDCWD, path, uid, gid, unix.AT_SYMLINK_NOFOLLOW)
-		if err != nil {
-			return fmt.Errorf("chown %s: %w", path, err)
-		}
-		return nil
+		return os.Lchown(path, uid, gid)
 	}
 
-	fd, err := unix.Open(path, _openDirFlags, 0)
+	fd, err := unix.Open(path, openDirFlags, 0)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
@@ -73,7 +73,7 @@ func chownTree(fd int, path string, uid, gid int) (err error) {
 				return nil
 			}
 			parent := stack[len(stack)-1]
-			pfd, err := unix.Openat(fd, "..", _openDirFlags, 0)
+			pfd, err := unix.Openat(fd, "..", openDirFlags, 0)
 			if err != nil {
 				return fmt.Errorf("open %s: %w", parent.path, err)
 			}
@@ -91,33 +91,32 @@ func chownTree(fd int, path string, uid, gid int) (err error) {
 
 		var st unix.Stat_t
 		if err := unix.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				continue
+			}
 			return fmt.Errorf("stat %s: %w", child, err)
 		}
 		switch uint32(st.Mode) & unix.S_IFMT {
 		case unix.S_IFLNK:
 			continue
 		case unix.S_IFDIR:
-			cfd, err := unix.Openat(fd, name, _openDirFlags, 0)
+			cfd, err := unix.Openat(fd, name, openDirFlags, 0)
 			if err != nil {
-				if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
-					// Replaced after the stat: fail closed instead of retrying.
-					return fmt.Errorf("%s changed while walking: %w", child, err)
+				if errors.Is(err, unix.ENOENT) {
+					continue
 				}
-				return fmt.Errorf("open %s: %w", child, err)
+				return fmt.Errorf("open %s: %w", child, err) // ELOOP or ENOTDIR: replaced, fail closed
 			}
 			_ = unix.Close(fd)
 			fd, path = cfd, child
-			want := &dirFrame{path: child, dev: uint64(st.Dev), ino: st.Ino}
-			if err := sameDir(fd, want); err != nil {
-				return err
-			}
 			frame, err := enterDir(fd, path, uid, gid)
 			if err != nil {
 				return err
 			}
 			stack = append(stack, frame)
 		default:
-			if err := unix.Fchownat(fd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			err := unix.Fchownat(fd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW)
+			if err != nil && !errors.Is(err, unix.ENOENT) {
 				return fmt.Errorf("chown %s: %w", child, err)
 			}
 		}
@@ -138,6 +137,7 @@ func enterDir(fd int, path string, uid, gid int) (*dirFrame, error) {
 	if err != nil {
 		return nil, err
 	}
+	afterReadDir(path)
 	return &dirFrame{path: path, dev: uint64(st.Dev), ino: st.Ino, names: names}, nil
 }
 
@@ -152,10 +152,10 @@ func sameDir(fd int, want *dirFrame) error {
 	return nil
 }
 
-// readDirNames lists the directory behind fd through a fresh descriptor, so
-// the caller's fd keeps its own offset and is never reopened by name.
+// readDirNames lists the directory behind fd through a fresh descriptor, because
+// os.File takes ownership of the fd it wraps and the walk closes fd itself.
 func readDirNames(fd int, path string) ([]string, error) {
-	lfd, err := unix.Openat(fd, ".", _openDirFlags, 0)
+	lfd, err := unix.Openat(fd, ".", openDirFlags, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
