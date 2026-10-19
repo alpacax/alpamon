@@ -32,7 +32,7 @@ func startKeepalivePty(t *testing.T, s *wshServer) (pc *PtyClient, ctx context.C
 		wsToPty:      make(chan []byte, channelCapacity),
 		ptyToWs:      make(chan []byte, channelCapacity),
 		recoveryDone: make(chan struct{}),
-		manager:      NewTerminalManager(),
+		manager:      NewTerminalManager(nil),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

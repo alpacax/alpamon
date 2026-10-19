@@ -41,7 +41,7 @@ func TestPtyRecovery_ResendsFailedWriteAfterRecovery(t *testing.T) {
 		wsToPty:      make(chan []byte, channelCapacity),
 		ptyToWs:      make(chan []byte, channelCapacity),
 		recoveryDone: make(chan struct{}),
-		manager:      NewTerminalManager(),
+		manager:      NewTerminalManager(nil),
 	}
 	defer pc.close()
 
@@ -106,7 +106,7 @@ func TestPtyRecovery_FailedRecoveryEndsWriteLoop(t *testing.T) {
 		wsToPty:      make(chan []byte, channelCapacity),
 		ptyToWs:      make(chan []byte, channelCapacity),
 		recoveryDone: make(chan struct{}),
-		manager:      NewTerminalManager(),
+		manager:      NewTerminalManager(nil),
 	}
 	defer pc.close()
 
