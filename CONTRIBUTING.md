@@ -31,13 +31,15 @@ how to undo it. This section is the rule that line refers to.
 
   | Status | Meaning |
   | --- | --- |
-  | success, `reviewed <sha>: ...` | Approved at that commit |
-  | failure | Findings to fix; they are posted as review threads |
-  | pending, `reviewing:` or `queued:` | The review is running or waiting its turn |
-  | pending, `awaiting-request:` | Comment `@alpacax-wall-d review` to request a review |
-  | pending, `author-questions:` | Answer the questions in the review |
-  | pending, `human-hold:` | A maintainer has to approve the current commit |
+  | success, `reviewed <sha>: ...` | Approved at that commit, including `cleared by <maintainer>` after a hold |
+  | success, `skipped: ...` | Not reviewed by WALL-D, for example a pull request from an outside contributor; a maintainer reviews it |
+  | failure, `reviewed <sha>: ...` or `held: ...` | Findings to fix. They are review threads, or kept for maintainers when they cannot be shown publicly |
+  | pending, `reviewing: ...` or `queued: ...` | The review is running or waiting its turn |
+  | pending, `awaiting-request: ...` | Comment `@alpacax-wall-d review` to request a review |
+  | pending, `author-questions: ...` | Answer the questions in the review |
+  | pending, `human-hold: ...` | A maintainer has to approve the current commit |
+  | pending, `reviewed <sha>: approves after ...` | Reviewed; approval waits for a paired pull request |
+  | error, `failed: ...` or `not reviewed: ...` | The review did not run; a maintainer reruns it |
 
 - The labels `needs-author-fix`, `needs-author-answer` and `needs-maintainer-approval` show whose
   turn it is. Only WALL-D sets them.
-- A maintainer reviews pull requests from outside contributors.
