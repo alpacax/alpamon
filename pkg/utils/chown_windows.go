@@ -9,7 +9,7 @@ import (
 )
 
 // ChownRecursive is unsupported on Windows, which has no uid/gid ownership.
-func ChownRecursive(path string, uid, gid int) error {
+func ChownRecursive(path string, uid, gid, linkOwner int) error {
 	if path == "" {
 		return errors.New("path must not be empty")
 	}

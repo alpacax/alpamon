@@ -1027,3 +1027,23 @@ func TestUserHandler_AddUser_ExistingUser_GroupAddSoftFailMessage(t *testing.T) 
 	assert.Contains(t, output, "already exists but failed to add to groups")
 	assert.False(t, mock.Invoked("/usr/sbin/adduser"), "adduser must not run for an existing user")
 }
+
+func TestUserHandler_HomeOwnerUID(t *testing.T) {
+	for name, tc := range map[string]struct {
+		lookup common.UserLookupFunc
+		want   int
+	}{
+		"existing user":   {lookup: common.ExistingUserLookup("1001"), want: 1001},
+		"absent user":     {lookup: common.AbsentUserLookup, want: -1},
+		"non-numeric uid": {lookup: common.ExistingUserLookup("not-a-uid"), want: -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestUserHandler(nil, nil)
+			h.lookupUser = tc.lookup
+
+			got := h.homeOwnerUID("alice")
+
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
