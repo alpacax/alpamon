@@ -35,10 +35,10 @@ type dirFrame struct {
 // A file under path with more than one hard link may share its inode with a file outside
 // the tree, so it is chowned only when linkOwner owns it; -1 skips every such file.
 // Sockets are skipped. Entries removed while the walk runs are skipped. On error, entries
-// already chowned keep their new owner.
-func ChownRecursive(path string, uid, gid, linkOwner int) error {
+// already chowned keep their new owner. skipped counts the hard-linked files left alone.
+func ChownRecursive(path string, uid, gid, linkOwner int) (skipped int, err error) {
 	if path == "" {
-		return errors.New("path must not be empty")
+		return 0, errors.New("path must not be empty")
 	}
 	path = filepath.Clean(path)
 
@@ -48,28 +48,32 @@ func ChownRecursive(path string, uid, gid, linkOwner int) error {
 		return chownTree(fd, path, uid, gid, linkOwner)
 	}
 	if !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.ELOOP) {
-		return &os.PathError{Op: "open", Path: path, Err: err}
+		return 0, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	// Not a directory, and Linux reports a symlink to a file as ENOTDIR: treat it as a file in the tree.
 	var st unix.Stat_t
 	if serr := unix.Fstatat(unix.AT_FDCWD, path, &st, unix.AT_SYMLINK_NOFOLLOW); serr != nil {
-		return &os.PathError{Op: "stat", Path: path, Err: serr}
+		return 0, &os.PathError{Op: "stat", Path: path, Err: serr}
 	}
 	switch uint32(st.Mode) & unix.S_IFMT {
 	case unix.S_IFLNK:
-		return nil
+		return 0, nil
 	case unix.S_IFDIR:
-		return &os.PathError{Op: "open", Path: path, Err: err} // became a directory after the open
+		return 0, &os.PathError{Op: "open", Path: path, Err: err} // became a directory after the open
 	}
-	if err := chownFile(unix.AT_FDCWD, path, &st, uid, gid, linkOwner); err != nil {
-		return &os.PathError{Op: "chown", Path: path, Err: err}
+	left, err := chownFile(unix.AT_FDCWD, path, &st, uid, gid, linkOwner)
+	if err != nil {
+		return 0, &os.PathError{Op: "chown", Path: path, Err: err}
 	}
-	return nil
+	if left {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 // chownTree takes ownership of fd, the open root. It holds one directory fd at a time so depth
 // cannot hit the fd limit, and fails closed when ".." is not the directory it left.
-func chownTree(fd int, root string, uid, gid, linkOwner int) (err error) {
+func chownTree(fd int, root string, uid, gid, linkOwner int) (skipped int, err error) {
 	defer func() {
 		if cerr := unix.Close(fd); cerr != nil && err == nil {
 			err = fmt.Errorf("close %s: %w", root, cerr) // only a finished walk is back at root
@@ -78,7 +82,7 @@ func chownTree(fd int, root string, uid, gid, linkOwner int) (err error) {
 
 	top, err := enterDir(fd, root, uid, gid)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	stack := []*dirFrame{top}
 	for {
@@ -86,21 +90,21 @@ func chownTree(fd int, root string, uid, gid, linkOwner int) (err error) {
 		if len(cur.names) == 0 {
 			stack = stack[:len(stack)-1]
 			if len(stack) == 0 {
-				return nil
+				return skipped, nil
 			}
 			parent := stack[len(stack)-1]
 			pfd, err := unix.Openat(fd, "..", openDirFlags, 0)
 			if err != nil {
-				return fmt.Errorf("open %s: %w", parent.path, err)
+				return skipped, fmt.Errorf("open %s: %w", parent.path, err)
 			}
 			_ = unix.Close(fd)
 			fd = pfd
 			dev, ino, err := dirID(fd, parent.path)
 			if err != nil {
-				return err
+				return skipped, err
 			}
 			if dev != parent.dev || ino != parent.ino {
-				return fmt.Errorf("%s changed while walking", parent.path)
+				return skipped, fmt.Errorf("%s changed while walking", parent.path)
 			}
 			continue
 		}
@@ -114,7 +118,7 @@ func chownTree(fd int, root string, uid, gid, linkOwner int) (err error) {
 			if errors.Is(err, unix.ENOENT) {
 				continue
 			}
-			return fmt.Errorf("stat %s: %w", child, err)
+			return skipped, fmt.Errorf("stat %s: %w", child, err)
 		}
 		switch uint32(st.Mode) & unix.S_IFMT {
 		case unix.S_IFLNK:
@@ -126,54 +130,59 @@ func chownTree(fd int, root string, uid, gid, linkOwner int) (err error) {
 				if errors.Is(err, unix.ENOENT) {
 					continue
 				}
-				return fmt.Errorf("open %s: %w", child, err) // ELOOP or ENOTDIR: replaced, fail closed
+				return skipped, fmt.Errorf("open %s: %w", child, err) // ELOOP or ENOTDIR: replaced, fail closed
 			}
 			_ = unix.Close(fd)
 			fd = cfd
 			frame, err := enterDir(fd, child, uid, gid)
 			if err != nil {
-				return err
+				return skipped, err
 			}
 			stack = append(stack, frame)
 		default:
 			beforeOpen(child)
-			if err := chownFile(fd, name, &st, uid, gid, linkOwner); err != nil {
-				return fmt.Errorf("chown %s: %w", child, err)
+			left, err := chownFile(fd, name, &st, uid, gid, linkOwner)
+			if err != nil {
+				return skipped, fmt.Errorf("chown %s: %w", child, err)
+			}
+			if left {
+				skipped++
 			}
 		}
 	}
 }
 
 // chownFile chowns a non-directory through its own descriptor, so the inode whose link
-// count was checked is the one chowned. st holds the walk's stat of name.
-func chownFile(dirfd int, name string, st *unix.Stat_t, uid, gid, linkOwner int) error {
+// count was checked is the one chowned. st holds the walk's stat of name. left reports a
+// hard-linked file left alone.
+func chownFile(dirfd int, name string, st *unix.Stat_t, uid, gid, linkOwner int) (left bool, err error) {
 	fd, err := unix.Openat(dirfd, name, openFileFlags, 0)
 	switch {
 	case err == nil:
 		defer func() { _ = unix.Close(fd) }()
 		if err := unix.Fstat(fd, st); err != nil {
-			return err
+			return false, err
 		}
 		if !mayChown(st, linkOwner) {
-			return nil
+			return true, nil
 		}
-		return unix.Fchown(fd, uid, gid)
+		return false, unix.Fchown(fd, uid, gid)
 	case errors.Is(err, unix.ENOENT), errors.Is(err, unix.ELOOP):
-		return nil // removed, or swapped for a symlink
+		return false, nil // removed, or swapped for a symlink
 	case errors.Is(err, unix.ENXIO), errors.Is(err, unix.EOPNOTSUPP):
-		return nil // a socket: Linux and macOS refuse to open one with these
+		return false, nil // a socket: Linux and macOS refuse to open one with these
 	case errors.Is(err, unix.EACCES) && unix.Geteuid() != 0:
 		// By name, but a non-root walk can chown nothing but its own files.
 		if !mayChown(st, linkOwner) {
-			return nil
+			return true, nil
 		}
 		if err := unix.Fchownat(dirfd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil &&
 			!errors.Is(err, unix.ENOENT) {
-			return err
+			return false, err
 		}
-		return nil
+		return false, nil
 	}
-	return err
+	return false, err
 }
 
 func mayChown(st *unix.Stat_t, linkOwner int) bool {

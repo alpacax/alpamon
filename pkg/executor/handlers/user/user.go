@@ -381,13 +381,15 @@ func (h *UserHandler) backupHomeDirectory(username string) error {
 	}
 
 	// Change ownership to root
-	if err := utils.ChownRecursive(backupDir, 0, 0, h.homeOwnerUID(username)); err != nil {
+	skipped, err := utils.ChownRecursive(backupDir, 0, 0, h.homeOwnerUID(username))
+	if err != nil {
 		return fmt.Errorf("failed to chown backup directory: %w", err)
 	}
 
 	log.Info().
 		Str("username", username).
 		Str("backupDir", backupDir).
+		Int("hardLinksLeftUnchanged", skipped).
 		Msg("Home directory backed up")
 
 	return nil

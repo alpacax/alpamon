@@ -107,7 +107,7 @@ func TestChownRecursive_ChownsEveryEntryInTheTree(t *testing.T) {
 	dirs := []string{root, filepath.Join(root, "a"), filepath.Join(root, "a", "b")}
 	uid, gid := newOwnerFor(t, root)
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	require.NoError(t, err)
 	for _, p := range append(files, dirs...) {
@@ -120,7 +120,7 @@ func TestChownRecursive_ChownsAFileRoot(t *testing.T) {
 	require.NoError(t, os.WriteFile(f, []byte("x"), 0o644))
 	uid, gid := newOwnerFor(t, f)
 
-	err := ChownRecursive(f, uid, gid, -1)
+	_, err := ChownRecursive(f, uid, gid, -1)
 
 	require.NoError(t, err)
 	assertOwner(t, f, uid, gid)
@@ -139,7 +139,7 @@ func TestChownRecursive_LeavesASymlinkRootAlone(t *testing.T) {
 			uid, gid := newOwnerFor(t, link)
 			outsideKept, victimKept, linkKept := assertUnchanged(t, outside), assertUnchanged(t, victim), assertUnchanged(t, link)
 
-			err := ChownRecursive(link, uid, gid, -1)
+			_, err := ChownRecursive(link, uid, gid, -1)
 
 			require.NoError(t, err)
 			outsideKept()
@@ -150,13 +150,13 @@ func TestChownRecursive_LeavesASymlinkRootAlone(t *testing.T) {
 }
 
 func TestChownRecursive_RejectsEmptyPath(t *testing.T) {
-	err := ChownRecursive("", 0, 0, -1)
+	_, err := ChownRecursive("", 0, 0, -1)
 
 	assert.EqualError(t, err, "path must not be empty")
 }
 
 func TestChownRecursive_FailsOnAMissingPath(t *testing.T) {
-	err := ChownRecursive(filepath.Join(t.TempDir(), "missing"), 0, 0, -1)
+	_, err := ChownRecursive(filepath.Join(t.TempDir(), "missing"), 0, 0, -1)
 
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
@@ -165,7 +165,7 @@ func TestChownRecursive_FailsWhenAParentIsAFile(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "file")
 	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
 
-	err := ChownRecursive(filepath.Join(file, "child"), os.Getuid(), os.Getgid(), -1)
+	_, err := ChownRecursive(filepath.Join(file, "child"), os.Getuid(), os.Getgid(), -1)
 
 	assert.ErrorIs(t, err, syscall.ENOTDIR)
 }
@@ -175,7 +175,7 @@ func TestChownRecursive_ChownsAFifoRootWithoutBlocking(t *testing.T) {
 	require.NoError(t, syscall.Mkfifo(fifo, 0o644))
 	uid, gid := newOwnerFor(t, fifo)
 
-	err := ChownRecursive(fifo, uid, gid, -1)
+	_, err := ChownRecursive(fifo, uid, gid, -1)
 
 	require.NoError(t, err)
 	assertOwner(t, fifo, uid, gid)
@@ -188,7 +188,7 @@ func TestChownRecursive_DoesNotFollowAFileSymlinkOutOfTheTree(t *testing.T) {
 	uid, gid := newOwnerFor(t, root)
 	victimKept, linkKept := assertUnchanged(t, victim), assertUnchanged(t, link)
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	require.NoError(t, err)
 	victimKept()
@@ -202,7 +202,7 @@ func TestChownRecursive_DoesNotDescendIntoADirectorySymlink(t *testing.T) {
 	uid, gid := newOwnerFor(t, root)
 	outsideKept, victimKept := assertUnchanged(t, outside), assertUnchanged(t, victim)
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	require.NoError(t, err)
 	outsideKept()
@@ -227,7 +227,7 @@ func TestChownRecursive_ChownsATreeDeeperThanTheFdLimit(t *testing.T) {
 	require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_NOFILE, &lowered))
 	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &prev) })
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	require.NoError(t, err)
 	assertOwner(t, leafDir, uid, gid)
@@ -246,7 +246,7 @@ func TestChownRecursive_SkipsEntriesRemovedDuringTheWalk(t *testing.T) {
 		require.NoError(t, os.Remove(filepath.Join(root, "gone.txt")))
 	})
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	require.NoError(t, err)
 	assertOwner(t, root, uid, gid)
@@ -262,7 +262,7 @@ func TestChownRecursive_DoesNotFollowADirectorySwappedForASymlinkAfterListing(t 
 		require.NoError(t, os.Symlink(outside, sub))
 	})
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	require.NoError(t, err)
 	victimKept()
@@ -278,7 +278,7 @@ func TestChownRecursive_FailsClosedWhenADirectoryBecomesASymlinkBeforeItIsOpened
 		require.NoError(t, os.Symlink(outside, sub))
 	})
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	assert.ErrorContains(t, err, "open "+sub)
 	victimKept()
@@ -292,7 +292,7 @@ func TestChownRecursive_FailsClosedWhenADirectoryBecomesAFileBeforeItIsOpened(t 
 		require.NoError(t, os.WriteFile(sub, []byte("x"), 0o644))
 	})
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	assert.ErrorIs(t, err, syscall.ENOTDIR)
 	assert.ErrorContains(t, err, "open "+sub)
@@ -305,7 +305,7 @@ func TestChownRecursive_FailsClosedWhenADirectoryMovesOutOfTheTree(t *testing.T)
 		require.NoError(t, os.Rename(sub, filepath.Join(outside, "sub")))
 	})
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	assert.EqualError(t, err, root+" changed while walking")
 }
@@ -321,7 +321,7 @@ func TestChownRecursive_ClimbsBackWhenTheCurrentDirectoryIsRemoved(t *testing.T)
 		require.NoError(t, os.Remove(gone))
 	})
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	require.NoError(t, err)
 	assertOwner(t, root, uid, gid)
@@ -345,13 +345,15 @@ func TestChownRecursive_ChownsAHardLinkOnlyWhenLinkOwnerOwnsIt(t *testing.T) {
 			fileUID, _ := ownerOf(t, victim)
 			victimKept := assertUnchanged(t, victim)
 
-			err := ChownRecursive(root, uid, gid, tc.linkOwner(fileUID))
+			skipped, err := ChownRecursive(root, uid, gid, tc.linkOwner(fileUID))
 
 			require.NoError(t, err)
 			assertOwner(t, root, uid, gid)
 			if tc.changed {
+				assert.Zero(t, skipped)
 				assertOwner(t, victim, uid, gid)
 			} else {
+				assert.Equal(t, 1, skipped)
 				victimKept()
 			}
 		})
@@ -369,9 +371,10 @@ func TestChownRecursive_SkipsAFileSwappedForAHardLinkBeforeItIsOpened(t *testing
 		require.NoError(t, os.Link(victim, file))
 	})
 
-	err := ChownRecursive(root, uid, gid, fileUID+1)
+	skipped, err := ChownRecursive(root, uid, gid, fileUID+1)
 
 	require.NoError(t, err)
+	assert.Equal(t, 1, skipped)
 	victimKept()
 	assertOwner(t, sub, uid, gid)
 }
@@ -387,7 +390,7 @@ func TestChownRecursive_SkipsASocket(t *testing.T) {
 	uid, gid := newOwnerFor(t, root)
 	sockKept := assertUnchanged(t, sock)
 
-	err = ChownRecursive(root, uid, gid, -1)
+	_, err = ChownRecursive(root, uid, gid, -1)
 
 	require.NoError(t, err)
 	assertOwner(t, root, uid, gid)
@@ -400,7 +403,7 @@ func TestChownRecursive_ChownsAnUnreadableFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(file, []byte("x"), 0o000))
 	uid, gid := newOwnerFor(t, root)
 
-	err := ChownRecursive(root, uid, gid, -1)
+	_, err := ChownRecursive(root, uid, gid, -1)
 
 	require.NoError(t, err)
 	assertOwner(t, file, uid, gid)
@@ -414,9 +417,10 @@ func TestChownRecursive_LeavesAHardLinkedFileRootAloneUnlessLinkOwnerOwnsIt(t *t
 	fileUID, _ := ownerOf(t, victim)
 	victimKept := assertUnchanged(t, victim)
 
-	err := ChownRecursive(root, uid, gid, fileUID+1)
+	skipped, err := ChownRecursive(root, uid, gid, fileUID+1)
 
 	require.NoError(t, err)
+	assert.Equal(t, 1, skipped)
 	victimKept()
 }
 
@@ -434,7 +438,7 @@ func TestChownRecursive_FailsClosedWhenRootCannotOpenAFile(t *testing.T) {
 	fileKept := assertUnchanged(t, file)
 	t.Cleanup(func() { _ = os.Chown(root, 0, 0) }) // let TempDir remove it without CAP_DAC_OVERRIDE
 
-	err := ChownRecursive(root, newOwnerID, newOwnerID, -1)
+	_, err := ChownRecursive(root, newOwnerID, newOwnerID, -1)
 
 	assert.ErrorIs(t, err, syscall.EACCES)
 	fileKept()

@@ -757,8 +757,12 @@ func (fc *FtpClient) chown(path, username, groupname string, recursive bool) (Co
 
 	msg := ""
 	if recursive {
+		var skipped int
+		skipped, err = utils.ChownRecursive(path, uid, gid, sessionLinkOwner())
 		msg = " recursively"
-		err = utils.ChownRecursive(path, uid, gid, sessionLinkOwner())
+		if skipped > 0 {
+			msg += fmt.Sprintf(", leaving %d hard-linked file(s) unchanged", skipped)
+		}
 	} else {
 		err = os.Chown(path, uid, gid)
 	}
