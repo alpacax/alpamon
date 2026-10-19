@@ -28,29 +28,32 @@ type dirFrame struct {
 
 // ChownRecursive changes the owner of path and everything under it. Symlinks inside the
 // tree and at path itself are left alone; path's parent directories resolve as usual.
-// Entries removed while the walk runs are skipped.
+// Entries removed while the walk runs are skipped. On error, entries already
+// chowned keep their new owner.
 func ChownRecursive(path string, uid, gid int) error {
 	if path == "" {
 		return errors.New("path must not be empty")
 	}
 	path = filepath.Clean(path)
 
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
+	// Open first: a stat before it would leave a window to swap the root.
+	fd, err := unix.Open(path, openDirFlags, 0)
+	if err == nil {
+		return chownTree(fd, path, uid, gid)
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
+	if !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.ELOOP) {
+		return &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	info, lerr := os.Lstat(path) // Linux reports a symlink to a file as ENOTDIR
+	switch {
+	case lerr != nil:
+		return lerr
+	case info.Mode()&os.ModeSymlink != 0:
 		return nil
-	}
-	if !info.IsDir() {
+	case !info.IsDir():
 		return os.Lchown(path, uid, gid)
 	}
-
-	fd, err := unix.Open(path, openDirFlags, 0)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
-	}
-	return chownTree(fd, path, uid, gid)
+	return &os.PathError{Op: "open", Path: path, Err: err} // became a directory after the open
 }
 
 // chownTree takes ownership of fd, the open root directory. Only the current
