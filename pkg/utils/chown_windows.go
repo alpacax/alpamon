@@ -4,30 +4,14 @@ package utils
 
 import (
 	"errors"
-	"os"
+	"fmt"
 	"path/filepath"
 )
 
-// ChownRecursive walks path as on Unix; chown is not meaningful on Windows.
+// ChownRecursive is unsupported on Windows, which has no uid/gid ownership.
 func ChownRecursive(path string, uid, gid int) error {
 	if path == "" {
 		return errors.New("path must not be empty")
 	}
-	path = filepath.Clean(path)
-	return filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil
-		}
-
-		return os.Chown(p, uid, gid)
-	})
+	return fmt.Errorf("chown %s: %w", filepath.Clean(path), errors.ErrUnsupported)
 }
