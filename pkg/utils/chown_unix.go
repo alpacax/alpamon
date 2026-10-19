@@ -13,8 +13,9 @@ import (
 
 const openDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
-// O_NONBLOCK keeps a FIFO from waiting for a writer; O_NOFOLLOW makes a symlink ELOOP.
-const openFileFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
+// O_NONBLOCK keeps a FIFO from waiting for a writer; O_NOFOLLOW makes a symlink ELOOP;
+// O_NOCTTY keeps a tty node from becoming the agent's controlling terminal.
+const openFileFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_NOCTTY | unix.O_CLOEXEC
 
 // Tests swap these hooks in to race the walk.
 var (

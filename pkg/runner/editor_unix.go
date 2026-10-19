@@ -32,8 +32,9 @@ const homeDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
 
 // For an entry of unknown type, so that stat and chown act on the descriptor
 // rather than on a name the user can rename something else onto in between.
-// O_RDONLY on a FIFO would wait for a writer; O_NOFOLLOW makes a symlink ELOOP.
-const entryFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
+// O_RDONLY on a FIFO would wait for a writer; O_NOFOLLOW makes a symlink ELOOP;
+// O_NOCTTY keeps a tty node from becoming the agent's controlling terminal.
+const entryFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_NOCTTY | unix.O_CLOEXEC
 
 // Reading a user-controlled directory whole would materialize millions of
 // strings in the root agent and put the first cancellation check after all of it.
