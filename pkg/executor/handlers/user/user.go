@@ -343,6 +343,20 @@ func (h *UserHandler) runUserCreate(ctx context.Context, tool string, cmdArgs []
 	return createCode != 0, 0, out, err
 }
 
+// homeOwnerUID returns the uid of the user being deleted, whose hard-linked files in the
+// backup may change hands, or -1 when it cannot be looked up.
+func (h *UserHandler) homeOwnerUID(username string) int {
+	u, err := h.lookupUser(username)
+	if err != nil {
+		return -1
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return -1
+	}
+	return uid
+}
+
 // backupHomeDirectory backs up the user's home directory before deletion
 func (h *UserHandler) backupHomeDirectory(username string) error {
 	homeDir := fmt.Sprintf("/home/%s", username)
@@ -367,13 +381,15 @@ func (h *UserHandler) backupHomeDirectory(username string) error {
 	}
 
 	// Change ownership to root
-	if err := utils.ChownRecursive(backupDir, 0, 0); err != nil {
+	skipped, err := utils.ChownRecursive(backupDir, 0, 0, h.homeOwnerUID(username))
+	if err != nil {
 		return fmt.Errorf("failed to chown backup directory: %w", err)
 	}
 
 	log.Info().
 		Str("username", username).
 		Str("backupDir", backupDir).
+		Int("hardLinksLeftUnchanged", skipped).
 		Msg("Home directory backed up")
 
 	return nil

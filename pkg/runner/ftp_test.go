@@ -22,6 +22,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/logger"
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -431,4 +432,40 @@ func TestFtpCommandsAreSerializedInOrder(t *testing.T) {
 		_, err := os.Stat(filepath.Join(base, name))
 		require.NoError(t, err, "expected directory %q to exist", name)
 	}
+}
+
+// hardLinkedTree makes root/link, a second name for a file outside root.
+func hardLinkedTree(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("x"), 0o644))
+	require.NoError(t, os.Link(victim, filepath.Join(root, "link")))
+	return root
+}
+
+func TestFtpChown_ReportsHardLinkedFilesLeftUnchanged(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("a demoted session may chown its own hard links, so only root leaves one alone")
+	}
+	root := hardLinkedTree(t)
+	fc := newTestFtpClient(root)
+
+	res, err := fc.chown(root, "", "", true)
+
+	require.NoError(t, err)
+	assert.Equal(t, "Changed owner of "+root+" to UID: -1, GID: -1 recursively, leaving 1 hard-linked file(s) unchanged", res.Message)
+}
+
+func TestFtpChown_ReportsNoHardLinksWhenAllWereChowned(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a root session leaves every hard link alone")
+	}
+	root := hardLinkedTree(t)
+	fc := newTestFtpClient(root)
+
+	res, err := fc.chown(root, "", "", true)
+
+	require.NoError(t, err)
+	assert.Equal(t, "Changed owner of "+root+" to UID: -1, GID: -1 recursively", res.Message)
 }

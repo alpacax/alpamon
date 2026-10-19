@@ -721,6 +721,15 @@ func (fc *FtpClient) chmodRecursive(path string, fileMode os.FileMode) error {
 	})
 }
 
+// sessionLinkOwner is whose hard-linked files a recursive chown may change: a demoted
+// session can chown only its own files anyway, while a root session takes none of them.
+func sessionLinkOwner() int {
+	if euid := os.Geteuid(); euid != 0 {
+		return euid
+	}
+	return -1
+}
+
 func (fc *FtpClient) chown(path, username, groupname string, recursive bool) (CommandResult, error) {
 	if runtime.GOOS == "windows" {
 		msg := fmt.Sprintf("chown is %s. Windows uses SID-based ownership instead of UID/GID.", ErrNotSupported)
@@ -748,8 +757,12 @@ func (fc *FtpClient) chown(path, username, groupname string, recursive bool) (Co
 
 	msg := ""
 	if recursive {
+		var skipped int
+		skipped, err = utils.ChownRecursive(path, uid, gid, sessionLinkOwner())
 		msg = " recursively"
-		err = utils.ChownRecursive(path, uid, gid)
+		if skipped > 0 {
+			msg += fmt.Sprintf(", leaving %d hard-linked file(s) unchanged", skipped)
+		}
 	} else {
 		err = os.Chown(path, uid, gid)
 	}

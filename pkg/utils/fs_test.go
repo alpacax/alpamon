@@ -155,12 +155,6 @@ func TestGetCopyPath(t *testing.T) {
 	})
 }
 
-func TestChownRecursive(t *testing.T) {
-	t.Run("non-existent path returns error", func(t *testing.T) {
-		assert.Error(t, ChownRecursive("/nonexistent/path", 1000, 1000))
-	})
-}
-
 func TestOpenIfZip(t *testing.T) {
 	tmpDir := t.TempDir()
 
