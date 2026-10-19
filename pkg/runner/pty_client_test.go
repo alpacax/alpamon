@@ -31,6 +31,7 @@ func TestPtyClientClose_RemovesPIDMappingFromInjectedAuthManager(t *testing.T) {
 	am := newTestAuthManager()
 	cmd := exec.Command("sleep", "60")
 	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	pid := cmd.Process.Pid
 	am.AddPIDSessionMapping(pid, &SessionInfo{SessionID: "s1"})
 	pc := &PtyClient{sessionID: "s1", cmd: cmd, manager: NewTerminalManager(am)}
