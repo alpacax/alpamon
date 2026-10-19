@@ -3,6 +3,8 @@ package runner
 import (
 	"errors"
 	"sync"
+
+	"github.com/rs/zerolog/log"
 )
 
 // TerminalManager manages PTY session lifecycle in a single place.
@@ -12,8 +14,8 @@ type TerminalManager struct {
 	auth      *AuthManager
 }
 
-// NewTerminalManager creates a TerminalManager that holds auth for its PTY
-// sessions. auth may be nil.
+// NewTerminalManager creates a TerminalManager whose PTY sessions register their
+// shell PIDs with auth. A nil auth disables that tracking; see trackPID.
 func NewTerminalManager(auth *AuthManager) *TerminalManager {
 	return &TerminalManager{
 		terminals: make(map[string]*PtyClient),
@@ -40,6 +42,24 @@ func (m *TerminalManager) Remove(sessionID string) {
 	m.mu.Lock()
 	delete(m.terminals, sessionID)
 	m.mu.Unlock()
+}
+
+// trackPID maps a session's shell pid on auth, so a sudo inside the session
+// resolves to it. A no-op when auth is nil (sudo approval not wired up).
+func (m *TerminalManager) trackPID(pid int, session *SessionInfo) {
+	if m.auth == nil {
+		return
+	}
+	m.auth.AddPIDSessionMapping(pid, session)
+	log.Debug().Msgf("PID mapping added: %d -> Session: %s", pid, session.SessionID)
+}
+
+// untrackPID removes the mapping trackPID added. A no-op when auth is nil.
+func (m *TerminalManager) untrackPID(pid int) {
+	if m.auth == nil {
+		return
+	}
+	m.auth.RemovePIDSessionMapping(pid)
 }
 
 // Resize resizes the terminal for the given session ID.

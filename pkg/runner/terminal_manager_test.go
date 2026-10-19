@@ -115,3 +115,25 @@ func TestTerminalManager_ConcurrentResizeAndRemove(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestTerminalManager_TrackPID_MapsOnInjectedAuthManager(t *testing.T) {
+	prev := SwapAuthManager(nil) // The package global must play no part.
+	t.Cleanup(func() { SwapAuthManager(prev) })
+	am := newTestAuthManager()
+	m := NewTerminalManager(am)
+
+	m.trackPID(4242, &SessionInfo{SessionID: "s1", PID: 4242})
+
+	entry, ok := am.LookupPID(4242)
+	require.True(t, ok, "PID mapping missing after trackPID")
+	assert.Equal(t, "s1", entry.SessionID)
+}
+
+func TestTerminalManager_TrackPID_NoopWithoutAuthManager(t *testing.T) {
+	m := NewTerminalManager(nil)
+
+	assert.NotPanics(t, func() {
+		m.trackPID(4242, &SessionInfo{SessionID: "s1", PID: 4242})
+		m.untrackPID(4242)
+	})
+}
