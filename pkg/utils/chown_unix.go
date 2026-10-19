@@ -49,16 +49,21 @@ func ChownRecursive(path string, uid, gid, linkOwner int) error {
 	if !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.ELOOP) {
 		return &os.PathError{Op: "open", Path: path, Err: err}
 	}
-	info, lerr := os.Lstat(path) // Linux reports a symlink to a file as ENOTDIR
-	switch {
-	case lerr != nil:
-		return lerr
-	case info.Mode()&os.ModeSymlink != 0:
-		return nil
-	case !info.IsDir():
-		return os.Lchown(path, uid, gid)
+	// Not a directory, and Linux reports a symlink to a file as ENOTDIR: treat it as a file in the tree.
+	var st unix.Stat_t
+	if serr := unix.Fstatat(unix.AT_FDCWD, path, &st, unix.AT_SYMLINK_NOFOLLOW); serr != nil {
+		return &os.PathError{Op: "stat", Path: path, Err: serr}
 	}
-	return &os.PathError{Op: "open", Path: path, Err: err} // became a directory after the open
+	switch uint32(st.Mode) & unix.S_IFMT {
+	case unix.S_IFLNK:
+		return nil
+	case unix.S_IFDIR:
+		return &os.PathError{Op: "open", Path: path, Err: err} // became a directory after the open
+	}
+	if err := chownFile(unix.AT_FDCWD, path, &st, uid, gid, linkOwner); err != nil {
+		return &os.PathError{Op: "chown", Path: path, Err: err}
+	}
+	return nil
 }
 
 // chownTree takes ownership of fd, the open root. It holds one directory fd at a time so depth

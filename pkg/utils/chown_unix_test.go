@@ -405,3 +405,17 @@ func TestChownRecursive_ChownsAnUnreadableFile(t *testing.T) {
 	require.NoError(t, err)
 	assertOwner(t, file, uid, gid)
 }
+
+func TestChownRecursive_LeavesAHardLinkedFileRootAloneUnlessLinkOwnerOwnsIt(t *testing.T) {
+	_, _, _, victim := treeWithVictim(t)
+	root := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Link(victim, root))
+	uid, gid := newOwnerFor(t, root)
+	fileUID, _ := ownerOf(t, victim)
+	victimKept := assertUnchanged(t, victim)
+
+	err := ChownRecursive(root, uid, gid, fileUID+1)
+
+	require.NoError(t, err)
+	victimKept()
+}
