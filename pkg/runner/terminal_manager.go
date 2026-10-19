@@ -42,23 +42,6 @@ func (m *TerminalManager) Remove(sessionID string) {
 	m.mu.Unlock()
 }
 
-// trackPID maps a session's shell pid on auth, so a sudo inside the session
-// resolves to it. A no-op when auth is nil (sudo approval not wired up).
-func (m *TerminalManager) trackPID(pid int, session *SessionInfo) {
-	if m.auth == nil {
-		return
-	}
-	m.auth.AddPIDSessionMapping(pid, session)
-}
-
-// untrackPID removes the mapping trackPID added. A no-op when auth is nil.
-func (m *TerminalManager) untrackPID(pid int) {
-	if m.auth == nil {
-		return
-	}
-	m.auth.RemovePIDSessionMapping(pid)
-}
-
 // Resize resizes the terminal for the given session ID.
 // It holds a read lock for the duration of the resize syscall so that a
 // concurrent close/Remove cannot tear down the PTY mid-operation.

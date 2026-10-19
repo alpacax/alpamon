@@ -601,3 +601,20 @@ func (pc *PtyClient) getPtyUserAndEnv() (uid, gid int, groupIds []string, env ma
 
 	return uid, gid, groupIds, env, nil
 }
+
+// trackPID maps a session's shell pid on the manager's auth, so a sudo inside the
+// session resolves to it. A no-op when auth is nil (in tests, or with sudo approval off).
+func (m *TerminalManager) trackPID(pid int, session *SessionInfo) {
+	if m.auth == nil {
+		return
+	}
+	m.auth.AddPIDSessionMapping(pid, session)
+}
+
+// untrackPID removes the mapping trackPID added. A no-op when auth is nil.
+func (m *TerminalManager) untrackPID(pid int) {
+	if m.auth == nil {
+		return
+	}
+	m.auth.RemovePIDSessionMapping(pid)
+}
