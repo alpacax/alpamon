@@ -56,22 +56,21 @@ func ChownRecursive(path string, uid, gid int) error {
 	return &os.PathError{Op: "open", Path: path, Err: err} // became a directory after the open
 }
 
-// chownTree takes ownership of fd, the open root directory. Only the current
-// directory's fd stays open, so a deep tree cannot exhaust the fd limit: the walk
-// climbs back through ".." and fails closed when that is not the directory it left.
-func chownTree(fd int, path string, uid, gid int) (err error) {
+// chownTree takes ownership of fd, the open root. It holds one directory fd at a time so depth
+// cannot hit the fd limit, and fails closed when ".." is not the directory it left.
+func chownTree(fd int, root string, uid, gid int) (err error) {
 	defer func() {
 		if cerr := unix.Close(fd); cerr != nil && err == nil {
-			err = fmt.Errorf("close %s: %w", path, cerr)
+			err = fmt.Errorf("close %s: %w", root, cerr) // only a finished walk is back at root
 		}
 	}()
 
-	top, err := enterDir(fd, path, uid, gid)
+	top, err := enterDir(fd, root, uid, gid)
 	if err != nil {
 		return err
 	}
 	stack := []*dirFrame{top}
-	for len(stack) > 0 {
+	for {
 		cur := stack[len(stack)-1]
 		if len(cur.names) == 0 {
 			stack = stack[:len(stack)-1]
@@ -84,9 +83,13 @@ func chownTree(fd int, path string, uid, gid int) (err error) {
 				return fmt.Errorf("open %s: %w", parent.path, err)
 			}
 			_ = unix.Close(fd)
-			fd, path = pfd, parent.path
-			if err := sameDir(fd, parent); err != nil {
+			fd = pfd
+			dev, ino, err := dirID(fd, parent.path)
+			if err != nil {
 				return err
+			}
+			if dev != parent.dev || ino != parent.ino {
+				return fmt.Errorf("%s changed while walking", parent.path)
 			}
 			continue
 		}
@@ -115,8 +118,8 @@ func chownTree(fd int, path string, uid, gid int) (err error) {
 				return fmt.Errorf("open %s: %w", child, err) // ELOOP or ENOTDIR: replaced, fail closed
 			}
 			_ = unix.Close(fd)
-			fd, path = cfd, child
-			frame, err := enterDir(fd, path, uid, gid)
+			fd = cfd
+			frame, err := enterDir(fd, child, uid, gid)
 			if err != nil {
 				return err
 			}
@@ -128,14 +131,13 @@ func chownTree(fd int, path string, uid, gid int) (err error) {
 			}
 		}
 	}
-	return nil
 }
 
 // enterDir chowns the directory behind fd and records its identity and entries.
 func enterDir(fd int, path string, uid, gid int) (*dirFrame, error) {
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return nil, fmt.Errorf("stat %s: %w", path, err)
+	dev, ino, err := dirID(fd, path)
+	if err != nil {
+		return nil, err
 	}
 	if err := unix.Fchown(fd, uid, gid); err != nil {
 		return nil, fmt.Errorf("chown %s: %w", path, err)
@@ -145,18 +147,15 @@ func enterDir(fd int, path string, uid, gid int) (*dirFrame, error) {
 		return nil, err
 	}
 	afterReadDir(path)
-	return &dirFrame{path: path, dev: uint64(st.Dev), ino: st.Ino, names: names}, nil
+	return &dirFrame{path: path, dev: dev, ino: ino, names: names}, nil
 }
 
-func sameDir(fd int, want *dirFrame) error {
+func dirID(fd int, path string) (dev, ino uint64, err error) {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		return fmt.Errorf("stat %s: %w", want.path, err)
+		return 0, 0, fmt.Errorf("stat %s: %w", path, err)
 	}
-	if uint64(st.Dev) != want.dev || st.Ino != want.ino {
-		return fmt.Errorf("%s changed while walking", want.path)
-	}
-	return nil
+	return uint64(st.Dev), st.Ino, nil
 }
 
 // readDirNames lists the directory behind fd through a fresh descriptor, because
