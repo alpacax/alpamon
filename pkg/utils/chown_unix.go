@@ -161,8 +161,8 @@ func chownFile(dirfd int, name string, st *unix.Stat_t, uid, gid, linkOwner int)
 		return nil // removed, or swapped for a symlink
 	case errors.Is(err, unix.ENXIO), errors.Is(err, unix.EOPNOTSUPP):
 		return nil // a socket: Linux and macOS refuse to open one with these
-	case errors.Is(err, unix.EACCES):
-		// Only a non-root walk is refused, and it can chown nothing but its own files.
+	case errors.Is(err, unix.EACCES) && unix.Geteuid() != 0:
+		// By name, but a non-root walk can chown nothing but its own files.
 		if !mayChown(st, linkOwner) {
 			return nil
 		}

@@ -419,3 +419,23 @@ func TestChownRecursive_LeavesAHardLinkedFileRootAloneUnlessLinkOwnerOwnsIt(t *t
 	require.NoError(t, err)
 	victimKept()
 }
+
+func TestChownRecursive_FailsClosedWhenRootCannotOpenAFile(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("only root is kept off the chown-by-name fallback")
+	}
+	root := t.TempDir()
+	file := filepath.Join(root, "secret")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0o000))
+	if f, err := os.Open(file); err == nil {
+		_ = f.Close()
+		t.Skip("root bypasses read permission here (CAP_DAC_OVERRIDE)")
+	}
+	fileKept := assertUnchanged(t, file)
+	t.Cleanup(func() { _ = os.Chown(root, 0, 0) }) // let TempDir remove it without CAP_DAC_OVERRIDE
+
+	err := ChownRecursive(root, newOwnerID, newOwnerID, -1)
+
+	assert.ErrorIs(t, err, syscall.EACCES)
+	fileKept()
+}
