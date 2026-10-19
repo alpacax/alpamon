@@ -836,6 +836,11 @@ func (am *AuthManager) AddPIDSessionMapping(pid int, session *SessionInfo) {
 		session.PID = pid
 	}
 	replaced := am.putSessionLocked(pid, session)
+	log.Debug().
+		Int("pid", pid).
+		Str("kind", session.effectiveKind()).
+		Str("session_id", session.SessionID).
+		Msg("PID mapping added")
 	am.mu.Unlock()
 
 	am.denyPendingRequests(replaced, "Session replaced")

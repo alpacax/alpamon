@@ -3,8 +3,6 @@ package runner
 import (
 	"errors"
 	"sync"
-
-	"github.com/rs/zerolog/log"
 )
 
 // TerminalManager manages PTY session lifecycle in a single place.
@@ -51,7 +49,6 @@ func (m *TerminalManager) trackPID(pid int, session *SessionInfo) {
 		return
 	}
 	m.auth.AddPIDSessionMapping(pid, session)
-	log.Debug().Msgf("PID mapping added: %d -> Session: %s", pid, session.SessionID)
 }
 
 // untrackPID removes the mapping trackPID added. A no-op when auth is nil.
