@@ -13,8 +13,11 @@ import (
 
 const openDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
-// afterReadDir runs once a directory's entries are listed; tests use it to race the walk.
-var afterReadDir = func(string) {}
+// Tests swap these hooks in to race the walk.
+var (
+	afterReadDir  = func(dir string) {}
+	beforeOpenDir = func(child string) {} // after the stat, before the open
+)
 
 type dirFrame struct {
 	path  string
@@ -100,6 +103,7 @@ func chownTree(fd int, path string, uid, gid int) (err error) {
 		case unix.S_IFLNK:
 			continue
 		case unix.S_IFDIR:
+			beforeOpenDir(child)
 			cfd, err := unix.Openat(fd, name, openDirFlags, 0)
 			if err != nil {
 				if errors.Is(err, unix.ENOENT) {
