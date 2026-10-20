@@ -7,14 +7,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // shortSocketDir keeps socket paths under sun_path's 104-byte limit, which
-// t.TempDir() exceeds on macOS once the private temp subdirectory is added.
+// t.TempDir() can exceed on macOS.
 func shortSocketDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "us")
@@ -122,20 +124,39 @@ func TestListenUnixPrivate_FailsWhenParentDirectoryIsMissing(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestListenUnixPrivate_TooLongTempPathFailsWithoutLeftovers(t *testing.T) {
+func TestListenUnixPrivate_ServesAPathAtTheSunPathLimit(t *testing.T) {
 	base := shortSocketDir(t)
-	// A 99-byte dir makes "<dir>/a" (101 bytes) fit sun_path on Linux (107) and macOS (103),
-	// while "<dir>/.sock-<1..10 digits>/s" (at least 109 bytes) fits neither.
+	// "<99-byte dir>/a" is 101 bytes, inside sun_path on Linux (107) and macOS (103).
 	dir := filepath.Join(base, strings.Repeat("d", 99-len(base)-1))
 	require.NoError(t, os.Mkdir(dir, 0700))
 	path := filepath.Join(dir, "a")
 
-	_, err := ListenUnixPrivate(path)
+	ln, err := ListenUnixPrivate(path)
 
-	assert.Error(t, err)
-	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
-	assert.Empty(t, entries, "a temp directory or socket was left behind")
+	fi, err := os.Lstat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
+	client, err := net.Dial("unix", path)
+	require.NoError(t, err)
+	_ = client.Close()
+	require.NoError(t, ln.Close())
+	_, err = os.Stat(path)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestListenUnixPrivate_ModeDoesNotDependOnTheUmask(t *testing.T) {
+	old := syscall.Umask(0)
+	t.Cleanup(func() { syscall.Umask(old) })
+	path := filepath.Join(shortSocketDir(t), "a.sock")
+
+	ln, err := ListenUnixPrivate(path)
+
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	fi, err := os.Lstat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
 }
 
 func TestListenUnixPrivate_CloseRemovesTheSocket(t *testing.T) {
@@ -147,15 +168,6 @@ func TestListenUnixPrivate_CloseRemovesTheSocket(t *testing.T) {
 
 	_, err = os.Stat(path)
 	assert.ErrorIs(t, err, os.ErrNotExist)
-}
-
-func listenTempSocket(t *testing.T, dir string) string {
-	t.Helper()
-	tmpPath := filepath.Join(dir, "tmp.sock")
-	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: tmpPath, Net: "unix"})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-	return tmpPath
 }
 
 func TestListenUnixPrivate_CloseKeepsASocketThatReplacedIt(t *testing.T) {
@@ -179,33 +191,32 @@ func TestListenUnixPrivate_CloseKeepsASocketThatReplacedIt(t *testing.T) {
 	_ = accepted.Close()
 }
 
-// These tests call moveSocketIntoPlace directly to land a file at path after
+// These tests call listenPrivateAt directly to land a file at path after
 // RemoveSocket's check, which ListenUnixPrivate gives no hook for.
-func TestMoveSocketIntoPlace_KeepsRegularFileThatAppearedAfterTheCheck(t *testing.T) {
-	dir := shortSocketDir(t)
-	tmpPath := listenTempSocket(t, dir)
-	path := filepath.Join(dir, "a.sock")
-	require.NoError(t, os.WriteFile(path, []byte("keep"), 0600))
+func TestListenPrivateAt_KeepsRegularFileThatAppearedAfterTheCheck(t *testing.T) {
+	path := filepath.Join(shortSocketDir(t), "a.sock")
+	require.NoError(t, os.WriteFile(path, []byte("keep"), 0644))
 
-	err := moveSocketIntoPlace(tmpPath, path)
+	_, err := listenPrivateAt(path)
 
-	assert.ErrorIs(t, err, os.ErrExist)
+	assert.ErrorIs(t, err, unix.EADDRINUSE)
+	fi, err := os.Lstat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0644), fi.Mode().Perm())
 	content, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "keep", string(content))
 }
 
-func TestMoveSocketIntoPlace_KeepsAnotherListenerThatAppearedAfterTheCheck(t *testing.T) {
-	dir := shortSocketDir(t)
-	tmpPath := listenTempSocket(t, dir)
-	path := filepath.Join(dir, "a.sock")
+func TestListenPrivateAt_KeepsAnotherListenerThatAppearedAfterTheCheck(t *testing.T) {
+	path := filepath.Join(shortSocketDir(t), "a.sock")
 	other, err := net.Listen("unix", path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = other.Close() })
 
-	err = moveSocketIntoPlace(tmpPath, path)
+	_, err = listenPrivateAt(path)
 
-	assert.ErrorIs(t, err, os.ErrExist)
+	assert.ErrorIs(t, err, unix.EADDRINUSE)
 	client, err := net.Dial("unix", path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })

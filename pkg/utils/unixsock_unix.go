@@ -6,77 +6,88 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
+	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // ListenUnixPrivate listens on a Unix socket at path that is never reachable with
-// wider permissions than 0600. Closing the listener removes the socket unless
-// another one has since replaced it.
+// wider permissions than 0600. Closing the listener removes the socket only while it is
+// still this one; the check and the unlink are not atomic, so a replacement can still go.
 func ListenUnixPrivate(path string) (net.Listener, error) {
 	if err := RemoveSocket(path); err != nil {
 		return nil, err
 	}
-
-	// Bound inside a 0700 directory and linked into place: a socket bound at its final
-	// path would sit under the umask's mode until chmod, open to anyone who connects first.
-	tmpDir, err := os.MkdirTemp(filepath.Dir(path), ".sock-")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create private socket directory: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	tmpPath := filepath.Join(tmpDir, "s")
-	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: tmpPath, Net: "unix"})
-	if err != nil {
-		return nil, fmt.Errorf("failed to listen on %s: %w", path, err)
-	}
-	ln.SetUnlinkOnClose(false) // The remembered temp path is gone once the socket is linked into place.
-
-	// Taken from the temp path, which no one else can reach: after the link, path may
-	// already hold another listener's socket. The hard link shares this inode.
-	fi, err := os.Lstat(tmpPath)
-	if err != nil {
-		_ = ln.Close()
-		return nil, fmt.Errorf("failed to stat socket %s: %w", tmpPath, err)
-	}
-	if err := moveSocketIntoPlace(tmpPath, path); err != nil {
-		_ = ln.Close()
-		return nil, err
-	}
-	return &privateListener{UnixListener: ln, path: path, info: fi}, nil
+	return listenPrivateAt(path)
 }
 
-func moveSocketIntoPlace(tmpPath, path string) error {
-	if err := os.Chmod(tmpPath, 0600); err != nil {
+// listenPrivateAt binds at path itself, which fails instead of replacing whatever appeared
+// there after RemoveSocket. Nothing can connect before listen, so mode and owner come first.
+func listenPrivateAt(path string) (net.Listener, error) {
+	fd, err := newPrivateSocket()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create socket for %s: %w", path, err)
+	}
+	f := os.NewFile(uintptr(fd), path) // Owns fd from here; closed on every return.
+	defer func() { _ = f.Close() }()
+
+	if err := unix.Bind(fd, &unix.SockaddrUnix{Name: path}); err != nil {
+		return nil, fmt.Errorf("failed to bind socket at %s: %w", path, err)
+	}
+	fi, err := os.Lstat(path)
+	if err == nil {
+		err = restrictBoundSocket(path, fi)
+	}
+	if err == nil {
+		err = unix.Listen(fd, unix.SOMAXCONN)
+	}
+	var ln net.Listener
+	if err == nil {
+		ln, err = net.FileListener(f) // Dups fd, so closing f leaves the listener open.
+	}
+	if err != nil {
+		if fi != nil {
+			removeIfSame(path, fi)
+		}
+		return nil, fmt.Errorf("failed to listen on %s: %w", path, err)
+	}
+	return &privateListener{UnixListener: ln.(*net.UnixListener), path: path, info: fi}, nil
+}
+
+// restrictBoundSocket sets the bound socket's owner to root when running as root, without
+// following a symlink; the mode is the platform's part, in setBoundSocketMode.
+func restrictBoundSocket(path string, fi os.FileInfo) error {
+	if err := setBoundSocketMode(path); err != nil {
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
-	if os.Geteuid() == 0 {
-		if err := os.Chown(tmpPath, 0, 0); err != nil {
-			return fmt.Errorf("failed to set socket ownership: %w", err)
-		}
+	if os.Geteuid() != 0 {
+		return nil
 	}
-	// Link, not rename: rename would replace whatever appeared at path after
-	// RemoveSocket checked it, while link fails with EEXIST.
-	if err := os.Link(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to publish socket at %s: %w", path, err)
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid == 0 && st.Gid == 0 {
+		return nil
+	}
+	if err := os.Lchown(path, 0, 0); err != nil {
+		return fmt.Errorf("failed to set socket ownership: %w", err)
 	}
 	return nil
+}
+
+func removeIfSame(path string, fi os.FileInfo) {
+	if cur, err := os.Lstat(path); err == nil && os.SameFile(fi, cur) {
+		_ = os.Remove(path) // Only a writer of the directory can swap it in between, and it could unlink it anyway.
+	}
 }
 
 type privateListener struct {
 	*net.UnixListener
 	path      string
-	info      os.FileInfo // identity of the published socket; Close leaves a replacement alone
+	info      os.FileInfo // identity of the published socket, checked by Close before unlinking
 	closeOnce sync.Once
 }
 
 func (l *privateListener) Close() error {
 	err := l.UnixListener.Close()
-	l.closeOnce.Do(func() {
-		if cur, statErr := os.Lstat(l.path); statErr == nil && os.SameFile(l.info, cur) {
-			_ = RemoveSocket(l.path)
-		}
-	})
+	l.closeOnce.Do(func() { removeIfSame(l.path, l.info) })
 	return err
 }

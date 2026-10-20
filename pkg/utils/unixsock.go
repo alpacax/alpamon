@@ -6,7 +6,7 @@ import (
 )
 
 // RemoveSocket deletes the Unix socket at path; a missing path is not an error.
-// A symlink or non-socket file is refused so a planted link cannot redirect the delete.
+// A symlink or non-socket file is refused; a file swapped in after the check is not.
 func RemoveSocket(path string) error {
 	fi, err := os.Lstat(path)
 	if err != nil {
