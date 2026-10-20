@@ -11,8 +11,9 @@ Thanks for helping improve Alpamon.
 ## How work is tracked and reviewed
 
 The maintainers and their AI agents follow the same conventions on every issue and pull request in
-this repository. A comment from a bot or an agent ends with one short line saying what it did and
-how to undo it. This section is the rule that line refers to.
+this repository. A comment from a bot or an agent ends with one short line saying what it did, the
+rule it followed, and how to undo it. The rule is named in words or links this file, and this
+section describes it.
 
 ### Issues
 
