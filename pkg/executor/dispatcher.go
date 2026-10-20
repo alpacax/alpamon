@@ -51,7 +51,11 @@ func (e *CommandDispatcher) Execute(ctx context.Context, cmd string, args *commo
 	// Validate arguments before execution
 	if err := handler.Validate(cmd, args); err != nil {
 		log.Error().Err(err).Msgf("Command %s validation failed", cmd)
-		return 1, "", fmt.Errorf("validation failed: %w", err)
+		message := err.Error()
+		if args.ChunkCallback != nil {
+			args.ChunkCallback(ctx, "alpamon: "+message+"\n")
+		}
+		return 1, message, fmt.Errorf("validation failed: %w", err)
 	}
 
 	// Execute the command

@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"os/user"
 	"syscall"
 
@@ -24,6 +25,9 @@ type DemoteResult struct {
 // CreateProcessAsUser with a logon token, which needs the user's credentials
 // and is not yet implemented.
 func Demote(username, groupname string, opts DemoteOptions) (*DemoteResult, error) {
+	if opts.ValidateGroup && groupname == "" {
+		return nil, fmt.Errorf("groupname is required")
+	}
 	if username == "" || groupname == "" {
 		log.Debug().Msg("No username or groupname provided, running as the current user.")
 		return nil, nil

@@ -1,11 +1,14 @@
 package tunnel
 
 import (
+	"context"
+	"fmt"
 	"runtime"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,7 +21,8 @@ func TestEditorTunnelSupported(t *testing.T) {
 
 func TestTunnelHandler_ValidateClientTypeRequirements(t *testing.T) {
 	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
-	data := OpenTunnelData{SessionID: "s1", URL: "wss://tunnel.example.com", ClientType: runner.ClientTypeEditor, Username: "u"}
+	h.demote = func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error) { return nil, nil }
+	data := OpenTunnelData{SessionID: "s1", URL: "wss://tunnel.example.com", ClientType: runner.ClientTypeEditor, Username: "u", Groupname: "g"}
 
 	if runtime.GOOS == "windows" {
 		err := h.validateClientTypeRequirements(runner.ClientTypeEditor, data)
@@ -31,6 +35,12 @@ func TestTunnelHandler_ValidateClientTypeRequirements(t *testing.T) {
 
 func TestTunnelHandler_Validate(t *testing.T) {
 	handler := NewTunnelHandler(common.NewMockCommandExecutor(t))
+	handler.demote = func(_, groupname string, _ utils.DemoteOptions) (*utils.DemoteResult, error) {
+		if groupname == "" {
+			return nil, fmt.Errorf("groupname is required")
+		}
+		return nil, nil
+	}
 
 	tests := []struct {
 		name    string
@@ -73,7 +83,7 @@ func TestTunnelHandler_Validate(t *testing.T) {
 			wantErr: runtime.GOOS == "windows",
 		},
 		{
-			name: "opentunnel editor valid without groupname",
+			name: "opentunnel editor missing groupname",
 			cmd:  "opentunnel",
 			args: &common.CommandArgs{
 				SessionID:  "session101",
@@ -81,7 +91,7 @@ func TestTunnelHandler_Validate(t *testing.T) {
 				ClientType: runner.ClientTypeEditor,
 				Username:   "testuser",
 			},
-			wantErr: runtime.GOOS == "windows",
+			wantErr: true,
 		},
 		{
 			name: "opentunnel cli missing target port",
@@ -232,4 +242,51 @@ func TestTunnelHandler_Commands(t *testing.T) {
 
 	commands := handler.Commands()
 	assert.ElementsMatch(t, []string{"opentunnel", "closetunnel"}, commands)
+}
+
+func TestTunnelHandler_EditorValidatesGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("editor tunnel is not implemented on Windows")
+	}
+	tests := []struct {
+		name      string
+		groupname string
+		wantError string
+	}{
+		{name: "primary group", groupname: "primary"},
+		{name: "supplementary group", groupname: "shared"},
+		{name: "non-member group", groupname: "other", wantError: "groupname other is not in user member's group list"},
+		{name: "unknown group", groupname: "unknown", wantError: "there is no corresponding unknown groupname in this server"},
+		{name: "empty group", wantError: "groupname is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+			called := false
+			h.demote = func(username, groupname string, opts utils.DemoteOptions) (*utils.DemoteResult, error) {
+				called = true
+				assert.Equal(t, "member", username)
+				assert.Equal(t, tt.groupname, groupname)
+				assert.True(t, opts.ValidateGroup)
+				if tt.wantError != "" {
+					return nil, fmt.Errorf("%s", tt.wantError)
+				}
+				usr, err := common.ExistingUserLookup("1001")(username)
+				require.NoError(t, err)
+				return &utils.DemoteResult{User: usr}, nil
+			}
+			args := &common.CommandArgs{SessionID: "editor-group-test", URL: "wss://example.com/tunnel", ClientType: runner.ClientTypeEditor, Username: "member", Groupname: tt.groupname}
+			if tt.wantError == "" {
+				require.NoError(t, h.Validate("opentunnel", args))
+			} else {
+				code, output, err := h.Execute(context.Background(), "opentunnel", args)
+				require.NoError(t, err)
+				assert.Equal(t, 1, code)
+				assert.Contains(t, output, tt.wantError)
+			}
+			if tt.groupname != "" {
+				assert.True(t, called, "the operation must validate the requested identity")
+			}
+		})
+	}
 }

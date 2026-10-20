@@ -52,7 +52,8 @@ func TestShellHandler_Execute_Basic(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "ls",
+		Groupname: "root",
+		Command:   "ls",
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -69,7 +70,8 @@ func TestShellHandler_Execute_Exec(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "echo hello",
+		Groupname: "root",
+		Command:   "echo hello",
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.Exec.String(), args)
@@ -88,7 +90,8 @@ func TestShellHandler_Execute_AndOperator(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "cmd1 && cmd2",
+		Groupname: "root",
+		Command:   "cmd1 && cmd2",
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -107,7 +110,8 @@ func TestShellHandler_AndStopsOnFailure(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "cmd1 && cmd2",
+		Groupname: "root",
+		Command:   "cmd1 && cmd2",
 	}
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -124,7 +128,8 @@ func TestShellHandler_Execute_OrOperator(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "cmd1 || cmd2",
+		Groupname: "root",
+		Command:   "cmd1 || cmd2",
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -142,7 +147,8 @@ func TestShellHandler_OrStopsOnSuccess(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "cmd1 || cmd2",
+		Groupname: "root",
+		Command:   "cmd1 || cmd2",
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -162,7 +168,8 @@ func TestShellHandler_Execute_Semicolon(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "cmd1 ; cmd2",
+		Groupname: "root",
+		Command:   "cmd1 ; cmd2",
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -182,8 +189,9 @@ func TestShellHandler_CustomUser(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command:  "whoami",
-		Username: "testuser",
+		Groupname: "root",
+		Command:   "whoami",
+		Username:  "testuser",
 	}
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -203,7 +211,8 @@ func TestShellHandler_DefaultUser(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "whoami",
+		Groupname: "root",
+		Command:   "whoami",
 		// Username not set - should default to "root"
 	}
 
@@ -220,8 +229,9 @@ func TestShellHandler_WithTimeout(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "sleep 1",
-		Timeout: 10 * time.Second,
+		Groupname: "root",
+		Command:   "sleep 1",
+		Timeout:   10 * time.Second,
 	}
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -238,7 +248,8 @@ func TestShellHandler_GivenNoTimeout_WhenExecuted_ThenChainDeadlineIsThirtyMinut
 
 	var capturedCtx context.Context
 	args := &common.CommandArgs{
-		Command: "ls",
+		Groupname: "root",
+		Command:   "ls",
 		// Timeout not set - should default to 30 minutes
 		ChunkCallback: func(cbCtx context.Context, content string) {
 			capturedCtx = cbCtx
@@ -266,7 +277,8 @@ func TestShellHandler_Validate_Empty(t *testing.T) {
 	handler := NewShellHandler(mockExec)
 
 	args := &common.CommandArgs{
-		Command: "", // Empty command
+		Groupname: "root",
+		Command:   "",
 	}
 
 	err := handler.Validate(common.ShellCmd.String(), args)
@@ -279,7 +291,8 @@ func TestShellHandler_Validate_Valid(t *testing.T) {
 	handler := NewShellHandler(mockExec)
 
 	args := &common.CommandArgs{
-		Command: "ls -la",
+		Groupname: "root",
+		Command:   "ls -la",
 	}
 
 	err := handler.Validate(common.ShellCmd.String(), args)
@@ -293,7 +306,8 @@ func TestShellHandler_UnknownCommand(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "ls",
+		Groupname: "root",
+		Command:   "ls",
 	}
 
 	exitCode, _, err := handler.Execute(ctx, "unknown_command", args)
@@ -310,7 +324,8 @@ func TestShellHandler_CommandExecutionError(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "failing_cmd",
+		Groupname: "root",
+		Command:   "failing_cmd",
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -327,7 +342,8 @@ func TestShellHandler_WithEnv(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "printenv",
+		Groupname: "root",
+		Command:   "printenv",
 		Env: map[string]string{
 			"TEST_VAR": "test_value",
 		},
@@ -351,7 +367,8 @@ func TestShellHandler_MixedOperators(t *testing.T) {
 	// cmd1 succeeds (0), run cmd2
 	// cmd2 fails (1), run cmd3 (due to ||)
 	args := &common.CommandArgs{
-		Command: "cmd1 && cmd2 || cmd3",
+		Groupname: "root",
+		Command:   "cmd1 && cmd2 || cmd3",
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -378,8 +395,9 @@ func TestShellHandler_AllowSh(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "grep err /log | head",
-		AllowSh: true,
+		Groupname: "root",
+		Command:   "grep err /log | head",
+		AllowSh:   true,
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -403,8 +421,9 @@ func TestShellHandler_AllowSh_False_UsesDirectExec(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "echo hello",
-		AllowSh: false,
+		Groupname: "root",
+		Command:   "echo hello",
+		AllowSh:   false,
 	}
 
 	exitCode, _, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -428,7 +447,8 @@ func TestShellHandler_MultiWordCommand(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
-		Command: "ls -la /tmp",
+		Groupname: "root",
+		Command:   "ls -la /tmp",
 	}
 
 	exitCode, output, err := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -448,8 +468,9 @@ func TestExecuteWithOperators_GivenExpiredDeadline_WhenChainRuns_ThenReportsTime
 	defer cancel()
 
 	args := &common.CommandArgs{
-		Command: "echo a && echo b",
-		AllowSh: false,
+		Groupname: "root",
+		Command:   "echo a && echo b",
+		AllowSh:   false,
 	}
 
 	exitCode, output, err := handler.Execute(parentCtx, common.ShellCmd.String(), args)
@@ -470,8 +491,9 @@ func TestExecuteWithOperators_GivenCancelledParent_WhenChainRuns_ThenStopsWithou
 	cancel()
 
 	args := &common.CommandArgs{
-		Command: "echo a ; echo b",
-		AllowSh: false,
+		Groupname: "root",
+		Command:   "echo a ; echo b",
+		AllowSh:   false,
 	}
 
 	exitCode, output, err := handler.Execute(parentCtx, common.ShellCmd.String(), args)
@@ -516,8 +538,9 @@ func TestExecuteWithOperators_GivenParentCancelledMidChain_WhenNextSegmentSkippe
 			handler := NewShellHandler(&cancelAfterFirstExec{MockCommandExecutor: mockExec, cancel: cancel})
 
 			args := &common.CommandArgs{
-				Command: tt.command,
-				AllowSh: false,
+				Groupname: "root",
+				Command:   tt.command,
+				AllowSh:   false,
 			}
 
 			exitCode, output, err := handler.Execute(parentCtx, common.ShellCmd.String(), args)
@@ -550,6 +573,7 @@ func TestExecuteWithOperators_GivenStreamingOutputOverAuditCap_WhenChainTimesOut
 		handler := NewShellHandler(&blockUntilChainDeadline{MockCommandExecutor: mockExec})
 
 		args := &common.CommandArgs{
+			Groupname:     "root",
 			Command:       "cmd1 || cmd2",
 			Timeout:       30 * time.Second,
 			ChunkCallback: func(ctx context.Context, content string) {},
@@ -575,7 +599,8 @@ func TestExecuteWithOperators_GivenSegmentExits124ByItself_WhenChainDeadlineLive
 	handler := NewShellHandler(mockExec)
 
 	args := &common.CommandArgs{
-		Command: "cmd1 || cmd2",
+		Groupname: "root",
+		Command:   "cmd1 || cmd2",
 	}
 
 	exitCode, output, err := handler.Execute(context.Background(), common.ShellCmd.String(), args)

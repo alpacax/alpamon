@@ -22,6 +22,7 @@ type TerminalHandler struct {
 	*common.BaseHandler
 	apiSession *scheduler.Session
 	manager    *runner.TerminalManager
+	demote     func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error)
 }
 
 // NewTerminalHandler creates a new terminal handler
@@ -39,6 +40,7 @@ func NewTerminalHandler(cmdExecutor common.CommandExecutor, apiSession *schedule
 		),
 		apiSession: apiSession,
 		manager:    manager,
+		demote:     utils.Demote,
 	}
 	return h
 }
@@ -148,7 +150,7 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 		Str("server", runner.ServerHostFromURL(args.URL)).
 		Msg("Opening FTP session")
 
-	result, err := utils.Demote(args.Username, args.Groupname, utils.DemoteOptions{ValidateGroup: false})
+	result, err := h.demote(args.Username, args.Groupname, utils.DemoteOptions{ValidateGroup: true})
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to get demote permission")
 		return 1, fmt.Sprintf("openftp: Failed to get demoted permission. %v", err), nil

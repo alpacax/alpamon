@@ -55,10 +55,11 @@ func (h *ShellHandler) Validate(cmd string, args *common.CommandArgs) error {
 		if len(args.ExecArgs) == 0 {
 			return fmt.Errorf("file execution arguments are required")
 		}
-		return nil
-	}
-	if args.Command == "" {
+	} else if args.Command == "" {
 		return fmt.Errorf("shell command is required")
+	}
+	if args.Groupname == "" {
+		return fmt.Errorf("groupname is required")
 	}
 	return nil
 }
@@ -72,7 +73,11 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 	}
 	groupname := args.Groupname
 	if groupname == "" {
-		groupname = username
+		output := "groupname is required"
+		if args.ChunkCallback != nil {
+			args.ChunkCallback(ctx, output)
+		}
+		return 1, output, nil
 	}
 
 	env := args.Env
@@ -123,7 +128,11 @@ func (h *ShellHandler) handleExecFile(ctx context.Context, args *common.CommandA
 	}
 	groupname := args.Groupname
 	if groupname == "" {
-		groupname = username
+		output := "groupname is required"
+		if args.ChunkCallback != nil {
+			args.ChunkCallback(ctx, output)
+		}
+		return 1, output, nil
 	}
 
 	timeout := args.Timeout

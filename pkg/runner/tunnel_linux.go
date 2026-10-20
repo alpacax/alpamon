@@ -155,48 +155,12 @@ func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataD
 
 // getCodeServerCredential returns SysProcAttr for running code-server as the specified user.
 func getCodeServerCredential(username, groupname string) (*syscall.SysProcAttr, error) {
-	if os.Getuid() != 0 {
-		log.Debug().Msg("Alpamon is not running as root. code-server will run as current user.")
-		return nil, nil
-	}
-
-	usr, err := user.Lookup(username)
-	if err != nil {
-		return nil, fmt.Errorf("user %s not found: %w", username, err)
-	}
-
-	uid, gid, err := codeServerIDs(usr, groupname)
+	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
 	if err != nil {
 		return nil, err
 	}
-
-	groupIds, err := usr.GroupIds()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list groups of user %s: %w", username, err)
+	if result == nil {
+		return nil, nil
 	}
-
-	sysProcAttr, err := utils.DemotedSysProcAttr(uid, gid, groupIds)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build credentials for user %s: %w", username, err)
-	}
-
-	log.Debug().Msgf("Demoting code-server to user %s (group: %s).", username, groupname)
-
-	return sysProcAttr, nil
-}
-
-// codeServerIDs resolves the uid and gid to demote code-server to: groupname when
-// set, otherwise the user's primary group. It cannot defer to utils.Demote, which
-// treats an empty groupname as "do not demote" and would leave the session as root.
-func codeServerIDs(usr *user.User, groupname string) (uid, gid uint32, err error) {
-	gidStr := usr.Gid
-	if groupname != "" {
-		group, err := user.LookupGroup(groupname)
-		if err != nil {
-			return 0, 0, fmt.Errorf("group %s not found: %w", groupname, err)
-		}
-		gidStr = group.Gid
-	}
-
-	return parseUserCredentials(usr.Uid, gidStr)
+	return result.SysProcAttr, nil
 }

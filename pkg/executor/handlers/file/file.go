@@ -30,6 +30,7 @@ import (
 type FileHandler struct {
 	*common.BaseHandler
 	apiSession common.APISession
+	demote     func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error)
 }
 
 // base64Reader wraps a base64 decoder and re-tags decode errors for clearer diagnostics.
@@ -68,6 +69,7 @@ func NewFileHandler(cmdExecutor common.CommandExecutor, apiSession common.APISes
 			cmdExecutor,
 		),
 		apiSession: apiSession,
+		demote:     utils.Demote,
 	}
 	return h
 }
@@ -156,9 +158,7 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		return 1, "No paths provided"
 	}
 
-	// Upload accepts looser group matching; supplementary-group
-	// enforcement applies to downloads via ValidateGroup=true.
-	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, false, args.HomeDirectory)
+	sysProcAttr, homeDirectory, err := h.demoteWithHomeDir(args.Username, args.Groupname, true, args.HomeDirectory)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to demote user.")
 		return 1, err.Error()
@@ -369,24 +369,10 @@ func (h *FileHandler) handleRm(args *common.CommandArgs) (int, string) {
 	return removeStaged(cleaned)
 }
 
-// demoteWithHomeDir demotes privilege and returns the home directory.
-// validateGroup enforces that the requested group is a supplementary
-// group of the user. Required on Unix download paths to prevent
-// using an arbitrary GID for filesystem access; off on upload paths
-// which accept looser group matching.
-//
-// Home directory is resolved in descending priority:
-//  1. utils.Demote result (Unix, running as root)
-//  2. os/user.Lookup on the given username
-//  3. fallbackHome (typically args.HomeDirectory carried in the
-//     protocol message from alpacon-server)
-//
-// The fallback exists so Windows and non-root Unix paths do not end
-// up with an empty home, which would otherwise cause relative paths
-// and tilde expansion to resolve against the process CWD and yield
-// unpredictable results.
+// Keep a home-directory fallback for platforms without demotion so relative
+// paths and tilde expansion still resolve against the account home.
 func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGroup bool, fallbackHome string) (*syscall.SysProcAttr, string, error) {
-	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: validateGroup})
+	result, err := h.demote(username, groupname, utils.DemoteOptions{ValidateGroup: validateGroup})
 	if err != nil {
 		return nil, "", err
 	}

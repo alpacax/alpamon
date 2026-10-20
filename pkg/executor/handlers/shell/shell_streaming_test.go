@@ -17,6 +17,7 @@ func TestShellHandler_StreamingForwardsCallback(t *testing.T) {
 
 	var captured []string
 	args := &common.CommandArgs{
+		Groupname:     "root",
 		Command:       "echo hi",
 		ChunkCallback: func(_ context.Context, content string) { captured = append(captured, content) },
 	}
@@ -49,6 +50,7 @@ func TestShellHandler_StreamingAcrossOperators(t *testing.T) {
 	}
 
 	args := &common.CommandArgs{
+		Groupname:     "root",
 		Command:       "cmd1 && cmd2 ; cmd3",
 		ChunkCallback: callback,
 	}
@@ -78,6 +80,7 @@ func TestShellHandler_StreamingOperatorsReturnAuditResult(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
+		Groupname:     "root",
 		Command:       "cmd1 && cmd2",
 		ChunkCallback: func(_ context.Context, content string) {},
 	}
@@ -94,6 +97,7 @@ func TestShellHandler_NilChunkCallback(t *testing.T) {
 	ctx := context.Background()
 
 	args := &common.CommandArgs{
+		Groupname:     "root",
 		Command:       "ls",
 		ChunkCallback: nil,
 	}

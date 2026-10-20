@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/mem"
 )
@@ -256,20 +257,21 @@ func NewCodeServerManager(parentCtx context.Context, username, groupname string)
 }
 
 func lookupUserForCodeServer(username, groupname string) (*user.User, error) {
+	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
+	if err != nil {
+		return nil, err
+	}
 	if runtime.GOOS == "darwin" {
 		log.Debug().Msg("macOS: skipping credential demotion")
 		return user.Current()
+	}
+	if result != nil {
+		return result.User, nil
 	}
 
 	usr, err := user.Lookup(username)
 	if err != nil {
 		return nil, fmt.Errorf("user %s not found: %w", username, err)
-	}
-
-	if groupname != "" {
-		if _, err := user.LookupGroup(groupname); err != nil {
-			return nil, fmt.Errorf("group %s not found: %w", groupname, err)
-		}
 	}
 
 	return usr, nil
@@ -656,6 +658,9 @@ func setupUserDataDir(ctx context.Context, homeDir, username, groupname string) 
 
 // chownUserDataDir changes ownership of the user data directory and its contents.
 func chownUserDataDir(ctx context.Context, userDataDir, username, groupname string) error {
+	if groupname == "" {
+		return fmt.Errorf("groupname is required")
+	}
 	usr, err := user.Lookup(username)
 	if err != nil {
 		return fmt.Errorf("user %s not found: %w", username, err)
@@ -666,17 +671,12 @@ func chownUserDataDir(ctx context.Context, userDataDir, username, groupname stri
 		return fmt.Errorf("invalid uid: %w", err)
 	}
 
-	// Use user's primary group if groupname is empty
-	gidStr := usr.Gid
-	if groupname != "" {
-		group, err := user.LookupGroup(groupname)
-		if err != nil {
-			return fmt.Errorf("group %s not found: %w", groupname, err)
-		}
-		gidStr = group.Gid
+	group, err := user.LookupGroup(groupname)
+	if err != nil {
+		return fmt.Errorf("group %s not found: %w", groupname, err)
 	}
 
-	gid, err := strconv.Atoi(gidStr)
+	gid, err := strconv.Atoi(group.Gid)
 	if err != nil {
 		return fmt.Errorf("invalid gid: %w", err)
 	}

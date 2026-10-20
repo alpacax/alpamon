@@ -17,6 +17,13 @@ func TestFindAvailablePort(t *testing.T) {
 	assert.True(t, port <= 65535, "Port should be less than or equal to 65535")
 }
 
+func TestEditorRequiresGroup(t *testing.T) {
+	manager, err := NewCodeServerManager(t.Context(), "account", "")
+	assert.EqualError(t, err, "groupname is required")
+	assert.Nil(t, manager)
+	assert.EqualError(t, chownUserDataDir(t.Context(), "unused", "account", ""), "groupname is required")
+}
+
 func TestFindAvailablePortRepeated(t *testing.T) {
 	for range 10 {
 		port, err := findAvailablePort()

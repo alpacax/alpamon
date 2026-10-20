@@ -7,12 +7,14 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
 // TunnelHandler handles tunnel connection commands (opentunnel, closetunnel)
 type TunnelHandler struct {
 	*common.BaseHandler
+	demote func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error)
 }
 
 // NewTunnelHandler creates a new tunnel handler
@@ -26,6 +28,7 @@ func NewTunnelHandler(cmdExecutor common.CommandExecutor) *TunnelHandler {
 			},
 			cmdExecutor,
 		),
+		demote: utils.Demote,
 	}
 	return h
 }
@@ -92,6 +95,9 @@ func (h *TunnelHandler) validateClientTypeRequirements(clientType string, data O
 		}
 		if data.Username == "" {
 			return fmt.Errorf("username is required for editor tunnel")
+		}
+		if _, err := h.demote(data.Username, data.Groupname, utils.DemoteOptions{ValidateGroup: true}); err != nil {
+			return err
 		}
 	}
 	return nil

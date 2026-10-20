@@ -89,6 +89,7 @@ func TestShellHandler_CommandID_RegistersAndUnregistersPID(t *testing.T) {
 
 	handler := NewShellHandler(rec)
 	args := &common.CommandArgs{
+		Groupname: "root",
 		CommandID: "cmd-xyz",
 		Command:   "echo hello",
 		Username:  "alice",
@@ -115,9 +116,10 @@ func TestShellHandler_NoCommandID_PassesNilHook(t *testing.T) {
 
 	handler := NewShellHandler(rec)
 	args := &common.CommandArgs{
-		Command:  "echo ok",
-		Username: "alice",
-		AllowSh:  true,
+		Groupname: "root",
+		Command:   "echo ok",
+		Username:  "alice",
+		AllowSh:   true,
 	}
 
 	_, _, err := handler.Execute(context.Background(), common.ShellCmd.String(), args)
@@ -135,6 +137,7 @@ func TestShellHandler_ExecFile_PassesCommandID(t *testing.T) {
 	rec := &hookRecordingExecutor{MockCommandExecutor: common.NewMockCommandExecutor(t)}
 	handler := NewShellHandler(rec)
 	args := &common.CommandArgs{
+		Groupname:    "root",
 		CommandID:    "cmd-file",
 		VerifiedFile: openTempFile(t),
 		ExecArgs:     []string{"/bin/bash", "/proc/self/fd/3"},

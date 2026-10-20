@@ -13,6 +13,13 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+var (
+	demoteGetuid      = os.Getuid
+	demoteLookupUser  = user.Lookup
+	demoteLookupGroup = user.LookupGroup
+	demoteGroupIDs    = (*user.User).GroupIds
+)
+
 // DemotedSysProcAttr is the single entry point for demotions that keep the
 // user's supplementary groups (Demote, Websh PTY, code-server): one place for
 // setgroups(2) capping, so those paths cannot drift. Demotions that must drop
@@ -86,25 +93,32 @@ type DemoteResult struct {
 }
 
 // Demote creates syscall attributes for privilege demotion to the specified user/group.
-// If username or groupname is empty, or if not running as root, returns nil without error.
-// When ValidateGroup is true, returns an error if the group is not in the user's group list.
+// Root requires a group name. ValidateGroup requires an explicit user and group,
+// and checks primary or supplementary membership even when not running as root.
+// Non-root execution retains the current credentials after validation.
 func Demote(username, groupname string, opts DemoteOptions) (*DemoteResult, error) {
-	if username == "" || groupname == "" {
-		log.Debug().Msg("No username or groupname provided, running as the current user.")
+	isRoot := demoteGetuid() == 0
+	if groupname == "" && (isRoot || opts.ValidateGroup) {
+		return nil, fmt.Errorf("groupname is required")
+	}
+	if username == "" {
+		if opts.ValidateGroup {
+			return nil, fmt.Errorf("username is required")
+		}
 		return nil, nil
 	}
 
-	if os.Getuid() != 0 {
+	if !isRoot && !opts.ValidateGroup {
 		log.Warn().Msg("Not running as root. Falling back to the current user.")
 		return nil, nil
 	}
 
-	usr, err := user.Lookup(username)
+	usr, err := demoteLookupUser(username)
 	if err != nil {
 		return nil, fmt.Errorf("there is no corresponding %s username in this server", username)
 	}
 
-	grp, err := user.LookupGroup(groupname)
+	grp, err := demoteLookupGroup(groupname)
 	if err != nil {
 		return nil, fmt.Errorf("there is no corresponding %s groupname in this server", groupname)
 	}
@@ -119,10 +133,11 @@ func Demote(username, groupname string, opts DemoteOptions) (*DemoteResult, erro
 		return nil, err
 	}
 
-	groupIds, err := usr.GroupIds()
+	groupIds, err := demoteGroupIDs(usr)
 	if err != nil {
 		return nil, err
 	}
+	groupIds = append(groupIds, usr.Gid)
 
 	sysProcAttr, groupInList, err := demotedSysProcAttr(uint32(uid), uint32(gid), groupIds)
 	if err != nil {
@@ -131,6 +146,10 @@ func Demote(username, groupname string, opts DemoteOptions) (*DemoteResult, erro
 
 	if opts.ValidateGroup && !groupInList {
 		return nil, fmt.Errorf("groupname %s is not in user %s's group list", groupname, username)
+	}
+	if !isRoot {
+		log.Warn().Msg("Not running as root. Falling back to the current user.")
+		return nil, nil
 	}
 
 	log.Debug().Msgf("Demote permission to match user: %s, group: %s.", username, groupname)
