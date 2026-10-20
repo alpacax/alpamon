@@ -385,8 +385,8 @@ func TestDispatcherReportsMissingGroup(t *testing.T) {
 		{command: "upload", args: common.CommandArgs{Username: "account", Paths: []string{"unused"}}},
 	} {
 		t.Run(tt.command, func(t *testing.T) {
-			if tt.command == "opentunnel" && runtime.GOOS == "windows" {
-				t.Skip("editor tunnel is not implemented on Windows")
+			if tt.command == "opentunnel" && runtime.GOOS != "linux" {
+				t.Skip("editor group validation applies on Linux")
 			}
 			mock := common.NewMockCommandExecutor(t)
 			dispatcher := NewCommandDispatcher(nil, nil)

@@ -72,13 +72,6 @@ func (h *ShellHandler) handleShellCommand(ctx context.Context, args *common.Comm
 		username = "root"
 	}
 	groupname := args.Groupname
-	if groupname == "" {
-		output := "groupname is required"
-		if args.ChunkCallback != nil {
-			args.ChunkCallback(ctx, output)
-		}
-		return 1, output, nil
-	}
 
 	env := args.Env
 
@@ -127,13 +120,6 @@ func (h *ShellHandler) handleExecFile(ctx context.Context, args *common.CommandA
 		username = "root"
 	}
 	groupname := args.Groupname
-	if groupname == "" {
-		output := "groupname is required"
-		if args.ChunkCallback != nil {
-			args.ChunkCallback(ctx, output)
-		}
-		return 1, output, nil
-	}
 
 	timeout := args.Timeout
 	if timeout == 0 {

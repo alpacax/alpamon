@@ -96,8 +96,10 @@ func (h *TunnelHandler) validateClientTypeRequirements(clientType string, data O
 		if data.Username == "" {
 			return fmt.Errorf("username is required for editor tunnel")
 		}
-		if _, err := h.demote(data.Username, data.Groupname, utils.DemoteOptions{ValidateGroup: true}); err != nil {
-			return err
+		if runtime.GOOS == "linux" {
+			if _, err := h.demote(data.Username, data.Groupname, utils.DemoteOptions{ValidateGroup: true}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

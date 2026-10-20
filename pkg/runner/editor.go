@@ -257,13 +257,14 @@ func NewCodeServerManager(parentCtx context.Context, username, groupname string)
 }
 
 func lookupUserForCodeServer(username, groupname string) (*user.User, error) {
+	if runtime.GOOS == "darwin" {
+		// macOS keeps the pre-#581 editor behavior because the server sends a Linux group name.
+		log.Debug().Msg("macOS: skipping credential demotion")
+		return user.Current()
+	}
 	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
 	if err != nil {
 		return nil, err
-	}
-	if runtime.GOOS == "darwin" {
-		log.Debug().Msg("macOS: skipping credential demotion")
-		return user.Current()
 	}
 	if result != nil {
 		return result.User, nil

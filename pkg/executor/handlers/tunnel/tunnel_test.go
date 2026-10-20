@@ -91,7 +91,7 @@ func TestTunnelHandler_Validate(t *testing.T) {
 				ClientType: runner.ClientTypeEditor,
 				Username:   "testuser",
 			},
-			wantErr: true,
+			wantErr: runtime.GOOS == "linux" || runtime.GOOS == "windows",
 		},
 		{
 			name: "opentunnel cli missing target port",
@@ -245,8 +245,8 @@ func TestTunnelHandler_Commands(t *testing.T) {
 }
 
 func TestTunnelHandler_EditorValidatesGroup(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("editor tunnel is not implemented on Windows")
+	if runtime.GOOS != "linux" {
+		t.Skip("editor group validation applies on Linux")
 	}
 	tests := []struct {
 		name      string
@@ -287,6 +287,23 @@ func TestTunnelHandler_EditorValidatesGroup(t *testing.T) {
 			if tt.groupname != "" {
 				assert.True(t, called, "the operation must validate the requested identity")
 			}
+		})
+	}
+}
+
+func TestTunnelHandler_DarwinEditorSkipsGroupValidation(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS editor behavior")
+	}
+	for _, groupname := range []string{"alpacon", "account", ""} {
+		t.Run(groupname, func(t *testing.T) {
+			h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+			h.demote = func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error) {
+				t.Fatal("macOS editor must not look up the requested identity")
+				return nil, nil
+			}
+			args := &common.CommandArgs{SessionID: "editor-group-test", URL: "wss://example.com/tunnel", ClientType: runner.ClientTypeEditor, Username: "account", Groupname: groupname}
+			require.NoError(t, h.Validate("opentunnel", args))
 		})
 	}
 }
