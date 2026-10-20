@@ -658,9 +658,6 @@ func setupUserDataDir(ctx context.Context, homeDir, username, groupname string) 
 
 // chownUserDataDir changes ownership of the user data directory and its contents.
 func chownUserDataDir(ctx context.Context, userDataDir, username, groupname string) error {
-	if groupname == "" {
-		return fmt.Errorf("groupname is required")
-	}
 	usr, err := user.Lookup(username)
 	if err != nil {
 		return fmt.Errorf("user %s not found: %w", username, err)
@@ -671,12 +668,17 @@ func chownUserDataDir(ctx context.Context, userDataDir, username, groupname stri
 		return fmt.Errorf("invalid uid: %w", err)
 	}
 
-	group, err := user.LookupGroup(groupname)
-	if err != nil {
-		return fmt.Errorf("group %s not found: %w", groupname, err)
+	// Use user's primary group if groupname is empty
+	gidStr := usr.Gid
+	if groupname != "" {
+		group, err := user.LookupGroup(groupname)
+		if err != nil {
+			return fmt.Errorf("group %s not found: %w", groupname, err)
+		}
+		gidStr = group.Gid
 	}
 
-	gid, err := strconv.Atoi(group.Gid)
+	gid, err := strconv.Atoi(gidStr)
 	if err != nil {
 		return fmt.Errorf("invalid gid: %w", err)
 	}
