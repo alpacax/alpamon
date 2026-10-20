@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/mem"
 )
@@ -257,19 +258,21 @@ func NewCodeServerManager(parentCtx context.Context, username, groupname string)
 
 func lookupUserForCodeServer(username, groupname string) (*user.User, error) {
 	if runtime.GOOS == "darwin" {
+		// macOS keeps the pre-#581 editor behavior because the server sends a Linux group name.
 		log.Debug().Msg("macOS: skipping credential demotion")
 		return user.Current()
+	}
+	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
+	if err != nil {
+		return nil, err
+	}
+	if result != nil {
+		return result.User, nil
 	}
 
 	usr, err := user.Lookup(username)
 	if err != nil {
 		return nil, fmt.Errorf("user %s not found: %w", username, err)
-	}
-
-	if groupname != "" {
-		if _, err := user.LookupGroup(groupname); err != nil {
-			return nil, fmt.Errorf("group %s not found: %w", groupname, err)
-		}
 	}
 
 	return usr, nil

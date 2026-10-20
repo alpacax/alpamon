@@ -4,12 +4,71 @@ package utils
 
 import (
 	"math"
+	"os/user"
 	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDemoteValidatesGroup(t *testing.T) {
+	oldUID, oldUser, oldGroup, oldIDs := demoteGetuid, demoteLookupUser, demoteLookupGroup, demoteGroupIDs
+	t.Cleanup(func() {
+		demoteGetuid, demoteLookupUser, demoteLookupGroup, demoteGroupIDs = oldUID, oldUser, oldGroup, oldIDs
+	})
+
+	for _, uid := range []int{0, 1000} {
+		for _, tt := range []struct {
+			name, group, gid string
+			ids              []string
+			wantErr          string
+		}{
+			{name: "primary member", group: "primary", gid: "1000", ids: []string{"2000"}},
+			{name: "supplementary member", group: "shared", gid: "2000", ids: []string{"1000", "2000"}},
+			{name: "non-member", group: "other", gid: "3000", ids: []string{"1000", "2000"}, wantErr: "groupname other is not in user account's group list"},
+			{name: "unknown group", group: "missing", wantErr: "there is no corresponding missing groupname in this server"},
+			{name: "empty group", wantErr: "groupname is required"},
+		} {
+			t.Run(strconv.Itoa(uid)+"/"+tt.name, func(t *testing.T) {
+				demoteGetuid = func() int { return uid }
+				demoteLookupUser = func(name string) (*user.User, error) {
+					require.NotEmpty(t, tt.group, "empty group must fail before lookup")
+					return &user.User{Username: name, Uid: "1000", Gid: "1000", HomeDir: "/home/account"}, nil
+				}
+				demoteLookupGroup = func(name string) (*user.Group, error) {
+					if tt.gid == "" {
+						return nil, user.UnknownGroupError(name)
+					}
+					return &user.Group{Name: name, Gid: tt.gid}, nil
+				}
+				demoteGroupIDs = func(*user.User) ([]string, error) { return tt.ids, nil }
+				result, err := Demote("account", tt.group, DemoteOptions{ValidateGroup: true})
+				if tt.wantErr != "" {
+					require.EqualError(t, err, tt.wantErr)
+					assert.Nil(t, result)
+				} else {
+					require.NoError(t, err)
+					if uid == 0 {
+						require.NotNil(t, result)
+						assert.Equal(t, tt.gid, strconv.FormatUint(uint64(result.SysProcAttr.Credential.Gid), 10))
+					} else {
+						assert.Nil(t, result, "non-root execution retains current credentials")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestDemoteRootRequiresGroupWithoutValidation(t *testing.T) {
+	oldUID := demoteGetuid
+	t.Cleanup(func() { demoteGetuid = oldUID })
+	demoteGetuid = func() int { return 0 }
+	result, err := Demote("account", "", DemoteOptions{})
+	assert.EqualError(t, err, "groupname is required")
+	assert.Nil(t, result)
+}
 
 func TestResolveGroups(t *testing.T) {
 	tests := []struct {

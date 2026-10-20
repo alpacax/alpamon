@@ -30,6 +30,7 @@ func TestShellHandler_ExecFile_ForwardsDescriptorAndArgs(t *testing.T) {
 	execArgs := []string{"/bin/bash", "/proc/self/fd/3", "--fast", "a b"}
 
 	exitCode, _, err := handler.Execute(context.Background(), common.ExecFile.String(), &common.CommandArgs{
+		Groupname:    "root",
 		VerifiedFile: file,
 		ExecArgs:     execArgs,
 		Username:     "deploy",
@@ -78,6 +79,7 @@ func TestShellHandler_ExecFile_ValidateAcceptsCompleteArgs(t *testing.T) {
 	handler := NewShellHandler(common.NewMockCommandExecutor(t))
 
 	err := handler.Validate(common.ExecFile.String(), &common.CommandArgs{
+		Groupname:    "root",
 		VerifiedFile: openTempFile(t),
 		ExecArgs:     []string{"/bin/bash", "/proc/self/fd/3"},
 	})

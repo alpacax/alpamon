@@ -2,6 +2,7 @@ package runner_test
 
 import (
 	"context"
+	"os/user"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -49,11 +50,17 @@ func TestE2E_ShellCommandTimeout_ChunkStreamCarriesHandlerDeadlineAndDeliversFin
 	}
 
 	handler := shell.NewShellHandler(executor.NewExecutor())
+	usr, err := user.Current()
+	require.NoError(t, err)
+	grp, err := user.LookupGroupId(usr.Gid)
+	require.NoError(t, err)
 
 	const timeout = 300 * time.Millisecond
 	start := time.Now()
 	args := &common.CommandArgs{
 		Command:       `i=0; while true; do i=$((i+1)); echo "line-$i"; sleep 0.01; done`,
+		Username:      usr.Username,
+		Groupname:     grp.Name,
 		AllowSh:       true,
 		Timeout:       timeout,
 		ChunkCallback: wrapped,

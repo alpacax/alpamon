@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"os/user"
 	"runtime"
 	"strings"
 	"sync"
@@ -11,7 +12,10 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/file"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/shell"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/terminal"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/tunnel"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -262,6 +266,7 @@ func TestE2E_ShellChain_GivenParentCtxCancelledMidSegment_ThenExitCodeOneAndLate
 	}
 
 	handler := shell.NewShellHandler(NewExecutor())
+	username, groupname := currentIntegrationUser(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -270,7 +275,9 @@ func TestE2E_ShellChain_GivenParentCtxCancelledMidSegment_ThenExitCodeOneAndLate
 	}()
 
 	args := &common.CommandArgs{
-		Command: "sleep 5 && echo after",
+		Command:   "sleep 5 && echo after",
+		Username:  username,
+		Groupname: groupname,
 	}
 
 	exitCode, output, _ := handler.Execute(ctx, common.ShellCmd.String(), args)
@@ -287,11 +294,14 @@ func TestE2E_ShellOperatorChain_TimeoutCapsWholeChainNotEachSegment(t *testing.T
 	}
 
 	handler := shell.NewShellHandler(NewExecutor())
+	username, groupname := currentIntegrationUser(t)
 
 	const timeout = 1500 * time.Millisecond
 	args := &common.CommandArgs{
-		Command: "sleep 1 && sleep 1 && sleep 1",
-		Timeout: timeout,
+		Command:   "sleep 1 && sleep 1 && sleep 1",
+		Username:  username,
+		Groupname: groupname,
+		Timeout:   timeout,
 	}
 
 	start := time.Now()
@@ -310,11 +320,14 @@ func TestE2E_ShellOperatorChain_TimeoutBannerReportsChainTimeoutNotSegmentElapse
 	}
 
 	handler := shell.NewShellHandler(NewExecutor())
+	username, groupname := currentIntegrationUser(t)
 
 	const timeout = 2 * time.Second
 	args := &common.CommandArgs{
-		Command: "sleep 1 && sleep 5",
-		Timeout: timeout,
+		Command:   "sleep 1 && sleep 5",
+		Username:  username,
+		Groupname: groupname,
+		Timeout:   timeout,
 	}
 
 	exitCode, output, _ := handler.Execute(context.Background(), common.ShellCmd.String(), args)
@@ -334,11 +347,14 @@ func TestE2E_ShellOperatorChain_TimeoutBannerPresentEvenWhenNextSegmentSkipped(t
 	}
 
 	handler := shell.NewShellHandler(NewExecutor())
+	username, groupname := currentIntegrationUser(t)
 
 	const timeout = 1 * time.Second
 	args := &common.CommandArgs{
-		Command: "sleep 3 ; echo done",
-		Timeout: timeout,
+		Command:   "sleep 3 ; echo done",
+		Username:  username,
+		Groupname: groupname,
+		Timeout:   timeout,
 	}
 
 	exitCode, output, _ := handler.Execute(context.Background(), common.ShellCmd.String(), args)
@@ -347,4 +363,50 @@ func TestE2E_ShellOperatorChain_TimeoutBannerPresentEvenWhenNextSegmentSkipped(t
 	assert.Equal(t, 1, strings.Count(output, "Command timed out after"), "exactly one timeout banner, output: %q", output)
 	assert.Contains(t, output, "Command timed out after 1s")
 	assert.NotContains(t, output, "done")
+}
+
+func currentIntegrationUser(t *testing.T) (string, string) {
+	t.Helper()
+	usr, err := user.Current()
+	require.NoError(t, err)
+	grp, err := user.LookupGroupId(usr.Gid)
+	require.NoError(t, err)
+	return usr.Username, grp.Name
+}
+
+func TestDispatcherReportsMissingGroup(t *testing.T) {
+	for _, tt := range []struct {
+		command string
+		args    common.CommandArgs
+	}{
+		{command: "shell", args: common.CommandArgs{Command: "echo hi", Username: "account"}},
+		{command: "opentunnel", args: common.CommandArgs{SessionID: "editor-group", URL: "wss://example.com", ClientType: "editor", Username: "account"}},
+		{command: "openftp", args: common.CommandArgs{SessionID: "ftp-group", URL: "wss://example.com", Username: "account"}},
+		{command: "upload", args: common.CommandArgs{Username: "account", Paths: []string{"unused"}}},
+	} {
+		t.Run(tt.command, func(t *testing.T) {
+			if tt.command == "opentunnel" && runtime.GOOS != "linux" {
+				t.Skip("editor group validation applies on Linux")
+			}
+			mock := common.NewMockCommandExecutor(t)
+			dispatcher := NewCommandDispatcher(nil, nil)
+			for _, handler := range []common.Handler{
+				shell.NewShellHandler(mock), file.NewFileHandler(mock, nil),
+				terminal.NewTerminalHandler(mock, nil, nil), tunnel.NewTunnelHandler(mock),
+			} {
+				require.NoError(t, dispatcher.RegisterHandler(handler))
+			}
+			var chunks []string
+			if tt.command == "shell" {
+				tt.args.ChunkCallback = func(_ context.Context, content string) { chunks = append(chunks, content) }
+			}
+			code, output, _ := dispatcher.Execute(t.Context(), tt.command, &tt.args)
+			assert.Equal(t, 1, code)
+			assert.Contains(t, output, "groupname is required")
+			assert.Empty(t, mock.GetExecutedCommands())
+			if tt.command == "shell" {
+				assert.Equal(t, []string{"alpamon: groupname is required\n"}, chunks)
+			}
+		})
+	}
 }

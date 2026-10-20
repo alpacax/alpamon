@@ -3,6 +3,7 @@ package file
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -525,6 +526,50 @@ func TestUploadSummary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, uploadSummary(tt.count, tt.skipped))
+		})
+	}
+}
+
+func TestFileHandler_UploadValidatesGroup(t *testing.T) {
+	tests := []struct {
+		name      string
+		groupname string
+		wantError string
+	}{
+		{name: "primary group", groupname: "primary"},
+		{name: "supplementary group", groupname: "shared"},
+		{name: "non-member group", groupname: "other", wantError: "groupname other is not in user member's group list"},
+		{name: "unknown group", groupname: "unknown", wantError: "there is no corresponding unknown groupname in this server"},
+		{name: "empty group", wantError: "groupname is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewFileHandler(common.NewMockCommandExecutor(t), nil)
+			called := false
+			h.demote = func(username, groupname string, opts utils.DemoteOptions) (*utils.DemoteResult, error) {
+				called = true
+				assert.Equal(t, "member", username)
+				assert.Equal(t, tt.groupname, groupname)
+				assert.True(t, opts.ValidateGroup)
+				if tt.wantError != "" {
+					return nil, fmt.Errorf("%s", tt.wantError)
+				}
+				usr, err := common.ExistingUserLookup("1001")(username)
+				require.NoError(t, err)
+				return &utils.DemoteResult{User: usr}, nil
+			}
+			missing := filepath.Join(t.TempDir(), "missing-file")
+			args := &common.CommandArgs{Username: "member", Groupname: tt.groupname, Paths: []string{missing}}
+			code, output := h.handleUpload(context.Background(), args)
+			assert.Equal(t, 1, code)
+			if tt.wantError == "" {
+				assert.Contains(t, output, missing, "an accepted group must reach the file read")
+			} else {
+				assert.Equal(t, tt.wantError, output)
+			}
+			if tt.groupname != "" {
+				assert.True(t, called, "the operation must validate the requested identity")
+			}
 		})
 	}
 }

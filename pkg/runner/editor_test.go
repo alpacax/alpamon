@@ -2,7 +2,9 @@ package runner
 
 import (
 	"net"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -15,6 +17,30 @@ func TestFindAvailablePort(t *testing.T) {
 	assert.NoError(t, err, "Failed to find available port")
 	assert.True(t, port > 0, "Port should be greater than 0")
 	assert.True(t, port <= 65535, "Port should be less than or equal to 65535")
+}
+
+func TestEditorRequiresGroup(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS keeps the current editor identity")
+	}
+	manager, err := NewCodeServerManager(t.Context(), "account", "")
+	assert.EqualError(t, err, "groupname is required")
+	assert.Nil(t, manager)
+}
+
+func TestEditorDarwinKeepsCurrentUser(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS editor behavior")
+	}
+	current, err := user.Current()
+	require.NoError(t, err)
+	for _, groupname := range []string{"alpacon", "account", ""} {
+		t.Run(groupname, func(t *testing.T) {
+			usr, err := lookupUserForCodeServer(current.Username, groupname)
+			require.NoError(t, err)
+			assert.Equal(t, current, usr)
+		})
+	}
 }
 
 func TestFindAvailablePortRepeated(t *testing.T) {
