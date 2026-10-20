@@ -138,7 +138,7 @@ func newTestPtyClient(t *testing.T, s *wshServer) *PtyClient {
 		wsToPty:      make(chan []byte, channelCapacity),
 		ptyToWs:      make(chan []byte, channelCapacity),
 		recoveryDone: make(chan struct{}),
-		manager:      NewTerminalManager(),
+		manager:      NewTerminalManager(nil),
 	}
 }
 
@@ -264,7 +264,7 @@ func TestPtyClose_ClosesConnAfterWriteControlFailure(t *testing.T) {
 	pc := &PtyClient{
 		conn:      conn,
 		sessionID: "close-test",
-		manager:   NewTerminalManager(),
+		manager:   NewTerminalManager(nil),
 	}
 
 	tracked.failWrites.Store(true)

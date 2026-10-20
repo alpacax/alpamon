@@ -9,12 +9,15 @@ import (
 type TerminalManager struct {
 	mu        sync.RWMutex
 	terminals map[string]*PtyClient
+	auth      *AuthManager
 }
 
-// NewTerminalManager creates a new TerminalManager.
-func NewTerminalManager() *TerminalManager {
+// NewTerminalManager creates a TerminalManager whose PTY sessions register their
+// shell PIDs with auth. A nil auth disables that tracking; see trackPID.
+func NewTerminalManager(auth *AuthManager) *TerminalManager {
 	return &TerminalManager{
 		terminals: make(map[string]*PtyClient),
+		auth:      auth,
 	}
 }
 

@@ -10,7 +10,7 @@ import (
 )
 
 func TestTerminalHandler_Validate(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager(nil))
 
 	tests := []struct {
 		name    string
@@ -110,7 +110,7 @@ func TestTerminalHandler_Validate(t *testing.T) {
 }
 
 func TestTerminalHandler_Execute_UnknownCommand(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager(nil))
 
 	exitCode, _, err := handler.Execute(context.TODO(), "unknown", &common.CommandArgs{})
 
@@ -119,7 +119,7 @@ func TestTerminalHandler_Execute_UnknownCommand(t *testing.T) {
 }
 
 func TestTerminalHandler_RefreshPTY_InvalidSession(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager(nil))
 
 	args := &common.CommandArgs{
 		SessionID: "nonexistent",
@@ -133,7 +133,7 @@ func TestTerminalHandler_RefreshPTY_InvalidSession(t *testing.T) {
 }
 
 func TestTerminalHandler_ResizePTY_InvalidSession(t *testing.T) {
-	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager())
+	handler := NewTerminalHandler(common.NewMockCommandExecutor(t), nil, runner.NewTerminalManager(nil))
 
 	args := &common.CommandArgs{
 		SessionID: "nonexistent",

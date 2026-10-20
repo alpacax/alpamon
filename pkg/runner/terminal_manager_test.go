@@ -13,7 +13,7 @@ import (
 )
 
 func TestTerminalManager_RegisterAndGet(t *testing.T) {
-	m := NewTerminalManager()
+	m := NewTerminalManager(nil)
 	pc := &PtyClient{sessionID: "test-session"}
 
 	m.Register("test-session", pc)
@@ -26,7 +26,7 @@ func TestTerminalManager_RegisterAndGet(t *testing.T) {
 }
 
 func TestTerminalManager_Remove(t *testing.T) {
-	m := NewTerminalManager()
+	m := NewTerminalManager(nil)
 	pc := &PtyClient{sessionID: "test-session"}
 
 	m.Register("test-session", pc)
@@ -37,14 +37,14 @@ func TestTerminalManager_Remove(t *testing.T) {
 }
 
 func TestTerminalManager_Resize_InvalidSession(t *testing.T) {
-	m := NewTerminalManager()
+	m := NewTerminalManager(nil)
 
 	err := m.Resize("nonexistent", 40, 120)
 	assert.EqualError(t, err, "invalid session ID")
 }
 
 func TestTerminalManager_Refresh_InvalidSession(t *testing.T) {
-	m := NewTerminalManager()
+	m := NewTerminalManager(nil)
 
 	err := m.Refresh("nonexistent")
 	assert.EqualError(t, err, "invalid session ID")
@@ -53,7 +53,7 @@ func TestTerminalManager_Refresh_InvalidSession(t *testing.T) {
 // TestTerminalManager_ConcurrentRegisterGetRemove exercises concurrent map
 // access. Run with -race to verify no data race on the terminals map.
 func TestTerminalManager_ConcurrentRegisterGetRemove(t *testing.T) {
-	m := NewTerminalManager()
+	m := NewTerminalManager(nil)
 	const n = 50
 
 	var wg sync.WaitGroup
@@ -86,7 +86,7 @@ func TestTerminalManager_ConcurrentRegisterGetRemove(t *testing.T) {
 // for the in-flight Resize to finish before the PTY fd is closed.
 // Run with -race to verify no data race on ptmx access.
 func TestTerminalManager_ConcurrentResizeAndRemove(t *testing.T) {
-	m := NewTerminalManager()
+	m := NewTerminalManager(nil)
 
 	ptmx, tty, err := pty.Open()
 	require.NoError(t, err)
@@ -114,4 +114,26 @@ func TestTerminalManager_ConcurrentResizeAndRemove(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+func TestTerminalManager_TrackPID_MapsOnInjectedAuthManager(t *testing.T) {
+	prev := SwapAuthManager(nil) // The package global must play no part.
+	t.Cleanup(func() { SwapAuthManager(prev) })
+	am := newTestAuthManager()
+	m := NewTerminalManager(am)
+
+	m.trackPID(4242, &SessionInfo{SessionID: "s1", PID: 4242})
+
+	entry, ok := am.LookupPID(4242)
+	require.True(t, ok, "PID mapping missing after trackPID")
+	assert.Equal(t, "s1", entry.SessionID)
+}
+
+func TestTerminalManager_TrackPID_NoopWithoutAuthManager(t *testing.T) {
+	m := NewTerminalManager(nil)
+
+	assert.NotPanics(t, func() {
+		m.trackPID(4242, &SessionInfo{SessionID: "s1", PID: 4242})
+		m.untrackPID(4242)
+	})
 }

@@ -144,8 +144,7 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 		Requests:  make(map[string]*SudoRequest),
 	}
 
-	authManager.AddPIDSessionMapping(pid, sessionInfo)
-	log.Debug().Msgf("PID mapping added: %d -> Session: %s", pid, pc.sessionID)
+	pc.manager.trackPID(pid, sessionInfo)
 
 	return nil
 }
@@ -469,7 +468,7 @@ func (pc *PtyClient) close() {
 
 	// Remove PID-to-session mapping before cleaning up
 	if pc.cmd != nil && pc.cmd.Process != nil {
-		authManager.RemovePIDSessionMapping(pc.cmd.Process.Pid)
+		pc.manager.untrackPID(pc.cmd.Process.Pid)
 	}
 
 	if pc.ptmx != nil {
@@ -601,4 +600,21 @@ func (pc *PtyClient) getPtyUserAndEnv() (uid, gid int, groupIds []string, env ma
 	}
 
 	return uid, gid, groupIds, env, nil
+}
+
+// trackPID maps a session's shell pid on the manager's auth, so a sudo inside the
+// session resolves to it. A no-op when auth is nil (in tests, or with sudo approval off).
+func (m *TerminalManager) trackPID(pid int, session *SessionInfo) {
+	if m.auth == nil {
+		return
+	}
+	m.auth.AddPIDSessionMapping(pid, session)
+}
+
+// untrackPID removes the mapping trackPID added. A no-op when auth is nil.
+func (m *TerminalManager) untrackPID(pid int) {
+	if m.auth == nil {
+		return
+	}
+	m.auth.RemovePIDSessionMapping(pid)
 }

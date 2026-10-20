@@ -8,6 +8,7 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/rs/zerolog/log"
 )
@@ -106,6 +107,7 @@ func InitDispatcher(
 	session *scheduler.Session,
 	wsClient common.WSClient,
 	callbacks SystemInfoCallbacks,
+	authManager *runner.AuthManager,
 ) (*CommandDispatcher, error) {
 	// Create the main command dispatcher
 	dispatcher := NewCommandDispatcher(pool, ctxManager)
@@ -115,7 +117,7 @@ func InitDispatcher(
 
 	// Create and register all handlers using the handler factory pattern
 	factory := NewHandlerFactory(dispatcher, cmdExecutor)
-	err := factory.RegisterAll(pool, ctxManager, session, wsClient, callbacks)
+	err := factory.RegisterAll(pool, ctxManager, session, wsClient, callbacks, authManager)
 	if err != nil {
 		return nil, err
 	}
