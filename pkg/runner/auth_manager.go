@@ -533,7 +533,7 @@ func (am *AuthManager) verifyPeer(conn net.Conn) (peerCred, bool) {
 		return peerCred{}, false
 	}
 	if !peerUIDAllowed(peer.uid, os.Geteuid()) {
-		log.Warn().Int("peer_uid", peer.uid).Int("peer_pid", peer.pid).Msg("Auth socket peer is not root; dropping connection")
+		log.Warn().Int("peer_uid", peer.uid).Msg("Auth socket peer is neither root nor the agent user; dropping connection")
 		return peerCred{}, false
 	}
 	return peer, true
