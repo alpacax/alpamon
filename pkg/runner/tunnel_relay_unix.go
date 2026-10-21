@@ -142,6 +142,6 @@ func (tc *TunnelClient) stopTunnelRelay() {
 		log.Warn().Msg("Tunnel daemon killed after timeout.")
 	}
 
-	_ = utils.RemoveSocket(tc.daemonSocket)
+	_ = utils.RemoveSocket(tc.daemonSocket) // The daemon's Close already removed it unless the daemon was killed.
 	tc.daemonCmd = nil
 }
