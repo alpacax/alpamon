@@ -3,12 +3,12 @@
 package runner
 
 import (
-	"fmt"
+	"errors"
 	"net"
 )
 
 // peerCredentials always fails here: no auth.sock client exists on these
 // platforms, so every connection is dropped.
-func peerCredentials(conn net.Conn) (peerCred, error) {
-	return peerCred{}, fmt.Errorf("auth socket peer credentials are not supported on this platform")
+func peerCredentials(net.Conn) (peerCred, error) {
+	return peerCred{}, errors.New("auth socket peer credentials are not supported on this platform")
 }
