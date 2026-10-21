@@ -32,6 +32,7 @@ func dialAuthSocket(t *testing.T) (client net.Conn, server net.Conn) {
 	t.Cleanup(func() { _ = client.Close() })
 	server, err = ln.Accept()
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = server.Close() })
 	return client, server
 }
 
@@ -65,11 +66,7 @@ func TestHandleSudoRequest_DropsConnectionWhenPeerCheckIsNotConfigured(t *testin
 
 	am.handleSudoRequest(server)
 
-	body, err := io.ReadAll(client)
-	if err != nil {
-		require.ErrorIs(t, err, syscall.ECONNRESET) // Linux resets a socket closed with its request still unread.
-	}
-	assert.Empty(t, body, "a request was answered without a peer check")
+	assertConnectionDroppedUnanswered(t, client)
 }
 
 func assertConnectionDroppedUnanswered(t *testing.T, client net.Conn) {
