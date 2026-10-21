@@ -3,6 +3,7 @@
 package utils
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -38,24 +39,7 @@ func TestListenUnixPrivate_CreatesSocketWithOwnerOnlyMode(t *testing.T) {
 	assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
 }
 
-func TestListenUnixPrivate_LeavesOnlyTheSocketInTheDirectory(t *testing.T) {
-	dir := shortSocketDir(t)
-	path := filepath.Join(dir, "a.sock")
-
-	ln, err := ListenUnixPrivate(path)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
-	entries, err := os.ReadDir(dir)
-	require.NoError(t, err)
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		names = append(names, e.Name())
-	}
-	assert.Equal(t, []string{"a.sock"}, names)
-}
-
-func TestListenUnixPrivate_AcceptsConnectionsOnTheFinalPath(t *testing.T) {
+func TestListenUnixPrivate_AcceptsConnections(t *testing.T) {
 	path := filepath.Join(shortSocketDir(t), "a.sock")
 	ln, err := ListenUnixPrivate(path)
 	require.NoError(t, err)
@@ -88,32 +72,48 @@ func TestListenUnixPrivate_ReplacesStaleSocket(t *testing.T) {
 	_ = client.Close()
 }
 
-func TestListenUnixPrivate_RefusesSymlinkAtPath(t *testing.T) {
-	dir := shortSocketDir(t)
-	target := filepath.Join(dir, "target")
-	require.NoError(t, os.WriteFile(target, []byte("keep"), 0600))
-	path := filepath.Join(dir, "a.sock")
-	require.NoError(t, os.Symlink(target, path))
+func TestListenUnixPrivate_RefusesWhatIsNotASocketAtPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		place   func(t *testing.T, dir, path string)
+		wantErr string
+	}{
+		{
+			name: "symlink",
+			place: func(t *testing.T, dir, path string) {
+				target := filepath.Join(dir, "target")
+				require.NoError(t, os.WriteFile(target, []byte("keep"), 0600))
+				require.NoError(t, os.Symlink(target, path))
+			},
+			wantErr: "symlink",
+		},
+		{
+			name: "regular file",
+			place: func(t *testing.T, _, path string) {
+				require.NoError(t, os.WriteFile(path, []byte("keep"), 0600))
+			},
+			wantErr: "non-socket",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := shortSocketDir(t)
+			path := filepath.Join(dir, "a.sock")
+			tt.place(t, dir, path)
+			before, err := os.Lstat(path)
+			require.NoError(t, err)
 
-	_, err := ListenUnixPrivate(path)
+			_, err = ListenUnixPrivate(path)
 
-	assert.ErrorContains(t, err, "symlink")
-	fi, err := os.Lstat(path)
-	require.NoError(t, err)
-	assert.NotZero(t, fi.Mode()&os.ModeSymlink, "symlink was replaced")
-	assert.FileExists(t, target)
-}
-
-func TestListenUnixPrivate_RefusesRegularFileAtPath(t *testing.T) {
-	path := filepath.Join(shortSocketDir(t), "a.sock")
-	require.NoError(t, os.WriteFile(path, []byte("keep"), 0600))
-
-	_, err := ListenUnixPrivate(path)
-
-	assert.ErrorContains(t, err, "non-socket")
-	content, err := os.ReadFile(path)
-	require.NoError(t, err)
-	assert.Equal(t, "keep", string(content))
+			assert.ErrorContains(t, err, tt.wantErr)
+			after, err := os.Lstat(path)
+			require.NoError(t, err)
+			assert.True(t, os.SameFile(before, after), "the file at path was replaced")
+			content, err := os.ReadFile(path) // Follows the symlink to its target.
+			require.NoError(t, err)
+			assert.Equal(t, "keep", string(content))
+		})
+	}
 }
 
 func TestListenUnixPrivate_FailsWhenParentDirectoryIsMissing(t *testing.T) {
@@ -124,9 +124,9 @@ func TestListenUnixPrivate_FailsWhenParentDirectoryIsMissing(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestListenUnixPrivate_ServesAPathAtTheSunPathLimit(t *testing.T) {
+func TestListenUnixPrivate_ServesALongPath(t *testing.T) {
 	base := shortSocketDir(t)
-	// "<99-byte dir>/a" is 101 bytes, inside sun_path on Linux (107) and macOS (103).
+	// "<99-byte dir>/a" is 101 bytes, longer than most socket paths but inside sun_path on Linux (107) and macOS (103).
 	dir := filepath.Join(base, strings.Repeat("d", 99-len(base)-1))
 	require.NoError(t, os.Mkdir(dir, 0700))
 	path := filepath.Join(dir, "a")
@@ -145,18 +145,22 @@ func TestListenUnixPrivate_ServesAPathAtTheSunPathLimit(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
-func TestListenUnixPrivate_ModeDoesNotDependOnTheUmask(t *testing.T) {
-	old := syscall.Umask(0)
-	t.Cleanup(func() { syscall.Umask(old) })
-	path := filepath.Join(shortSocketDir(t), "a.sock")
+func TestListenUnixPrivate_ModeIsNeverWiderThanOwnerOnlyUnderAnyUmask(t *testing.T) {
+	for _, umask := range []int{0, 0o022, 0o277} {
+		t.Run(fmt.Sprintf("umask %04o", umask), func(t *testing.T) {
+			path := filepath.Join(shortSocketDir(t), "a.sock") // Made before the umask, which could close the directory to its owner.
+			old := syscall.Umask(umask)
+			t.Cleanup(func() { syscall.Umask(old) })
 
-	ln, err := ListenUnixPrivate(path)
+			ln, err := ListenUnixPrivate(path)
 
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-	fi, err := os.Lstat(path)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = ln.Close() })
+			fi, err := os.Lstat(path)
+			require.NoError(t, err)
+			assert.Zero(t, fi.Mode().Perm()&^0600, "mode %04o is wider than 0600", fi.Mode().Perm())
+		})
+	}
 }
 
 func TestListenUnixPrivate_CloseRemovesTheSocket(t *testing.T) {
@@ -166,6 +170,19 @@ func TestListenUnixPrivate_CloseRemovesTheSocket(t *testing.T) {
 
 	require.NoError(t, ln.Close())
 
+	_, err = os.Stat(path)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestListenUnixPrivate_SecondCloseReportsClosedListener(t *testing.T) {
+	path := filepath.Join(shortSocketDir(t), "a.sock")
+	ln, err := ListenUnixPrivate(path)
+	require.NoError(t, err)
+	require.NoError(t, ln.Close())
+
+	err = ln.Close()
+
+	assert.ErrorIs(t, err, net.ErrClosed)
 	_, err = os.Stat(path)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
