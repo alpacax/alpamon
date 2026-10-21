@@ -63,7 +63,7 @@ func TestListenUnixLabeledSuccess(t *testing.T) {
 			tids = append(tids, unix.Gettid())
 			return nil
 		},
-		listen: listenUnixPrivate,
+		listen: privateListen,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{authSocketContext, ""}, writes)
@@ -81,7 +81,7 @@ func TestListenUnixLabeledSetFails(t *testing.T) {
 			writes = append(writes, context)
 			return syscall.EINVAL
 		},
-		listen: listenUnixPrivate,
+		listen: privateListen,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{authSocketContext}, writes)
@@ -100,7 +100,7 @@ func TestListenUnixLabeledClearFails(t *testing.T) {
 			}
 			return nil
 		},
-		listen: listenUnixPrivate,
+		listen: privateListen,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{authSocketContext, ""}, writes)

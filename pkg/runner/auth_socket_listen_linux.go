@@ -37,11 +37,12 @@ func listenAuthSocket(path string) (net.Listener, error) {
 			return err == nil
 		},
 		write:  writeSockcreateContext,
-		listen: listenUnixPrivate,
+		listen: privateListen,
 	})
 }
 
-func listenUnixPrivate(_, address string) (net.Listener, error) {
+// privateListen adapts utils.ListenUnixPrivate to the net.Listen signature.
+func privateListen(_, address string) (net.Listener, error) {
 	return utils.ListenUnixPrivate(address)
 }
 
