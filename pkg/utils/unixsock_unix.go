@@ -12,14 +12,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ListenUnixPrivate listens on a Unix socket at path that is never reachable with
-// wider permissions than 0600. Closing the listener removes the socket only while it is
-// still this one; the check and the unlink are not atomic, so a replacement can still go.
-func ListenUnixPrivate(path string) (net.Listener, error) {
-	if err := RemoveSocket(path); err != nil {
-		return nil, err
-	}
-	return listenPrivateAt(path)
+// privateListener removes its socket on Close only while the path is still this socket;
+// the check and the unlink are not atomic, so a replacement can still go.
+type privateListener struct {
+	*net.UnixListener
+	path      string
+	info      os.FileInfo // identity of the published socket, checked by Close before unlinking
+	closeOnce sync.Once
+}
+
+func (l *privateListener) Close() error {
+	err := l.UnixListener.Close()
+	l.closeOnce.Do(func() { removeIfSame(l.path, l.info) })
+	return err
 }
 
 // listenPrivateAt binds at path itself, which fails instead of replacing whatever appeared
@@ -36,39 +41,51 @@ func listenPrivateAt(path string) (net.Listener, error) {
 		return nil, fmt.Errorf("failed to bind socket at %s: %w", path, err)
 	}
 	fi, err := os.Lstat(path)
-	if err == nil {
-		err = restrictBoundSocket(path, fi)
+	if err != nil { // Without its identity the bound file cannot be told from a replacement, so it stays.
+		return nil, fmt.Errorf("failed to stat bound socket at %s: %w", path, err)
 	}
-	if err == nil {
-		err = unix.Listen(fd, unix.SOMAXCONN)
-	}
-	var ln net.Listener
-	if err == nil {
-		ln, err = net.FileListener(f) // Dups fd, so closing f leaves the listener open.
-	}
+	ln, err := serveBoundSocket(f, fd, path, fi)
 	if err != nil {
-		if fi != nil {
-			removeIfSame(path, fi)
-		}
+		removeIfSame(path, fi)
+		return nil, err
+	}
+	return ln, nil
+}
+
+// serveBoundSocket restricts the socket fd, owned by f and bound at path, then listens on it.
+func serveBoundSocket(f *os.File, fd int, path string, fi os.FileInfo) (net.Listener, error) {
+	if err := restrictBoundSocket(path, fi); err != nil {
+		return nil, err
+	}
+	if err := unix.Listen(fd, unix.SOMAXCONN); err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", path, err)
 	}
-	return &privateListener{UnixListener: ln.(*net.UnixListener), path: path, info: fi}, nil
+	ln, err := net.FileListener(f) // Dups fd, so closing f leaves the listener open.
+	if err != nil {
+		return nil, fmt.Errorf("failed to wrap listener for %s: %w", path, err)
+	}
+	ul, ok := ln.(*net.UnixListener)
+	if !ok { // Unreachable for an AF_UNIX fd; checked so a change cannot panic here.
+		_ = ln.Close()
+		return nil, fmt.Errorf("unexpected listener type %T for %s", ln, path)
+	}
+	return &privateListener{UnixListener: ul, path: path, info: fi}, nil
 }
 
 // restrictBoundSocket sets the bound socket's owner to root when running as root, without
 // following a symlink; the mode is the platform's part, in setBoundSocketMode.
 func restrictBoundSocket(path string, fi os.FileInfo) error {
 	if err := setBoundSocketMode(path); err != nil {
-		return fmt.Errorf("failed to set socket permissions: %w", err)
+		return fmt.Errorf("failed to set permissions on socket %s: %w", path, err)
 	}
 	if os.Geteuid() != 0 {
 		return nil
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid == 0 && st.Gid == 0 {
-		return nil
+		return nil // Already root:root; skipping the chown spares a setattr SELinux would have to allow.
 	}
 	if err := os.Lchown(path, 0, 0); err != nil {
-		return fmt.Errorf("failed to set socket ownership: %w", err)
+		return fmt.Errorf("failed to set ownership on socket %s: %w", path, err)
 	}
 	return nil
 }
@@ -77,17 +94,4 @@ func removeIfSame(path string, fi os.FileInfo) {
 	if cur, err := os.Lstat(path); err == nil && os.SameFile(fi, cur) {
 		_ = os.Remove(path) // Only a writer of the directory can swap it in between, and it could unlink it anyway.
 	}
-}
-
-type privateListener struct {
-	*net.UnixListener
-	path      string
-	info      os.FileInfo // identity of the published socket, checked by Close before unlinking
-	closeOnce sync.Once
-}
-
-func (l *privateListener) Close() error {
-	err := l.UnixListener.Close()
-	l.closeOnce.Do(func() { removeIfSame(l.path, l.info) })
-	return err
 }
