@@ -4,6 +4,7 @@ package runner
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"os/user"
@@ -59,7 +60,11 @@ func ensureTunnelSocketDir(daemon *syscall.Credential) (string, error) {
 
 	var daemonUID, daemonGID int
 	if daemon != nil {
-		daemonUID, daemonGID = int(daemon.Uid), int(daemon.Gid) // release targets are 64-bit, so macOS nobody (4294967294) fits
+		uid, gid := uint64(daemon.Uid), uint64(daemon.Gid)
+		if uid > math.MaxInt || gid > math.MaxInt { // macOS nobody (4294967294) fits only a 64-bit int
+			return "", fmt.Errorf("daemon uid/gid exceeds int range: uid=%d, gid=%d", uid, gid)
+		}
+		daemonUID, daemonGID = int(uid), int(gid)
 	}
 
 	allowed, chownUID, chownGID := tunnelSocketDirPolicy(daemon != nil, uint32(os.Geteuid()), daemonUID, daemonGID)
