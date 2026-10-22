@@ -72,16 +72,19 @@ func TestTunnelSocketDirPolicy(t *testing.T) {
 		name      string
 		isRoot    bool
 		euid      uint32
+		nobodyUID int
+		nobodyGID int
 		wantOwner []uint32
 		wantUID   int
 		wantGID   int
 	}{
-		{"root allows root and nobody and chowns to nobody", true, 0, []uint32{0, 65534}, 65534, 65533},
-		{"non-root allows only itself and never chowns", false, 1000, []uint32{1000}, -1, -1},
+		{"root allows root and nobody and chowns to nobody", true, 0, 65534, 65533, []uint32{0, 65534}, 65534, 65533},
+		{"root keeps macOS nobody's uid past MaxInt32", true, 0, 4294967294, 4294967294, []uint32{0, 4294967294}, 4294967294, 4294967294},
+		{"non-root allows only itself and never chowns", false, 1000, 0, 0, []uint32{1000}, -1, -1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			allowed, uid, gid := tunnelSocketDirPolicy(tc.isRoot, tc.euid, 65534, 65533)
+			allowed, uid, gid := tunnelSocketDirPolicy(tc.isRoot, tc.euid, tc.nobodyUID, tc.nobodyGID)
 
 			assert.Equal(t, tc.wantOwner, allowed)
 			assert.Equal(t, tc.wantUID, uid)

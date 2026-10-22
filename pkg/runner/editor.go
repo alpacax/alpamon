@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
@@ -222,6 +223,7 @@ type CodeServerManager struct {
 	username  string
 	groupname string
 	homeDir   string
+	procAttr  *syscall.SysProcAttr // nil keeps Alpamon's own credentials
 	ctx       context.Context
 	cancel    context.CancelFunc
 	mu        sync.RWMutex
@@ -236,7 +238,7 @@ type CodeServerManager struct {
 }
 
 func NewCodeServerManager(parentCtx context.Context, username, groupname string) (*CodeServerManager, error) {
-	usr, err := lookupUserForCodeServer(username, groupname)
+	id, err := lookupUserForCodeServer(username, groupname)
 	if err != nil {
 		return nil, err
 	}
@@ -245,8 +247,9 @@ func NewCodeServerManager(parentCtx context.Context, username, groupname string)
 
 	return &CodeServerManager{
 		username:  username,
-		groupname: groupname,
-		homeDir:   usr.HomeDir,
+		groupname: id.groupname,
+		homeDir:   id.user.HomeDir,
+		procAttr:  id.procAttr,
 		ctx:       ctx,
 		cancel:    cancel,
 		status:    CodeServerStatusIdle,
@@ -256,18 +259,35 @@ func NewCodeServerManager(parentCtx context.Context, username, groupname string)
 	}, nil
 }
 
-func lookupUserForCodeServer(username, groupname string) (*user.User, error) {
+// codeServerIdentity is who code-server runs as; procAttr is nil when Alpamon keeps its own credentials.
+type codeServerIdentity struct {
+	user      *user.User
+	groupname string
+	procAttr  *syscall.SysProcAttr
+}
+
+func lookupUserForCodeServer(username, groupname string) (*codeServerIdentity, error) {
 	if runtime.GOOS == "darwin" {
-		// macOS keeps the pre-#581 editor behavior because the server sends a Linux group name.
-		log.Debug().Msg("macOS: skipping credential demotion")
-		return user.Current()
+		if os.Getuid() != 0 {
+			log.Debug().Msg("macOS: not root, so code-server keeps the current user.")
+			usr, err := user.Current()
+			if err != nil {
+				return nil, err
+			}
+			return &codeServerIdentity{user: usr, groupname: groupname}, nil
+		}
+		// The server sends a Linux group name, so macOS demotes to the user's primary group.
+		var err error
+		if groupname, err = primaryGroupName(username); err != nil {
+			return nil, err
+		}
 	}
 	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
 	if err != nil {
 		return nil, err
 	}
 	if result != nil {
-		return result.User, nil
+		return &codeServerIdentity{user: result.User, groupname: groupname, procAttr: result.SysProcAttr}, nil
 	}
 
 	usr, err := user.Lookup(username)
@@ -275,7 +295,19 @@ func lookupUserForCodeServer(username, groupname string) (*user.User, error) {
 		return nil, fmt.Errorf("user %s not found: %w", username, err)
 	}
 
-	return usr, nil
+	return &codeServerIdentity{user: usr, groupname: groupname}, nil
+}
+
+func primaryGroupName(username string) (string, error) {
+	usr, err := user.Lookup(username)
+	if err != nil {
+		return "", fmt.Errorf("there is no corresponding %s username in this server", username)
+	}
+	grp, err := user.LookupGroupId(usr.Gid)
+	if err != nil {
+		return "", fmt.Errorf("failed to lookup primary group of %s: %w", username, err)
+	}
+	return grp.Name, nil
 }
 
 // Status returns the current status and last error message.
@@ -527,6 +559,15 @@ func getCodeServerPath() (string, error) {
 	return "", fmt.Errorf("code-server not found")
 }
 
+// codeServerInstallArgs keeps a root macOS install out of /var/root, which demoted users cannot read,
+// and off Homebrew, which refuses to run as root.
+func codeServerInstallArgs(goos string, isRoot bool) []string {
+	if goos == "darwin" && isRoot {
+		return []string{"-s", "--", "--method", "standalone", "--prefix", "/usr/local"}
+	}
+	return nil
+}
+
 // installCodeServer installs code-server using the official install script.
 func installCodeServer(parentCtx context.Context) error {
 	cfg := GetCodeServerConfig()
@@ -538,7 +579,7 @@ func installCodeServer(parentCtx context.Context) error {
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, "sh")
+	cmd := exec.CommandContext(ctx, "sh", codeServerInstallArgs(runtime.GOOS, os.Getuid() == 0)...)
 	cmd.Stdin = bytes.NewReader(script)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -626,7 +667,7 @@ func validateUserDataDirName(name string) error {
 }
 
 // setupUserDataDir creates the user-data-dir with config.yaml and settings.json for code-server.
-// If running as root on Linux, ownership of created files is changed to the specified user.
+// If running as root, ownership of created files is changed to the specified user.
 func setupUserDataDir(ctx context.Context, homeDir, username, groupname string) (string, error) {
 	cfg := GetCodeServerConfig()
 
@@ -647,7 +688,7 @@ func setupUserDataDir(ctx context.Context, homeDir, username, groupname string) 
 	}
 
 	// Change ownership if running as root (so demoted user can modify their config)
-	if os.Getuid() == 0 && runtime.GOOS != "darwin" {
+	if os.Getuid() == 0 {
 		if err := chownUserDataDir(ctx, userDataDir, username, groupname); err != nil {
 			log.Warn().Err(err).Msg("Failed to change ownership of user data dir.")
 		}
