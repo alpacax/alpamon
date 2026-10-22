@@ -1,4 +1,4 @@
-FROM golang:1.26.9@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89 AS builder
+FROM golang:1.26.10@sha256:672c944cfd07599b5f1bb179869270cdc94c6254e41db4d431259693cb286b82 AS builder
 
 # Automatically set GOARCH to the build-time architecture
 ARG TARGETARCH
