@@ -8,7 +8,7 @@ type peerCred struct {
 	pidKnown bool
 }
 
-// peerUIDAllowed admits root and the agent's own user: with the socket at 0600,
+// peerUIDAllowed admits root and the agent's own user: with the socket no wider than 0600,
 // they are the only users the kernel lets connect anyway.
 func peerUIDAllowed(uid, selfEUID int) bool {
 	return uid == 0 || uid == selfEUID
