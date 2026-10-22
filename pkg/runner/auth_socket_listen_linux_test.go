@@ -26,6 +26,9 @@ func shortAuthSocketPath(t *testing.T) string {
 func assertAuthListenerAccepts(t *testing.T, listener net.Listener, path string) {
 	t.Helper()
 	t.Cleanup(func() { assert.NoError(t, listener.Close()) })
+	info, err := os.Lstat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 	client, err := net.Dial("unix", path)
 	require.NoError(t, err)
 	defer func() { _ = client.Close() }()
@@ -60,7 +63,7 @@ func TestListenUnixLabeledSuccess(t *testing.T) {
 			tids = append(tids, unix.Gettid())
 			return nil
 		},
-		listen: net.Listen,
+		listen: privateListen,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{authSocketContext, ""}, writes)
@@ -78,7 +81,7 @@ func TestListenUnixLabeledSetFails(t *testing.T) {
 			writes = append(writes, context)
 			return syscall.EINVAL
 		},
-		listen: net.Listen,
+		listen: privateListen,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{authSocketContext}, writes)
@@ -97,7 +100,7 @@ func TestListenUnixLabeledClearFails(t *testing.T) {
 			}
 			return nil
 		},
-		listen: net.Listen,
+		listen: privateListen,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{authSocketContext, ""}, writes)
@@ -115,7 +118,7 @@ func TestListenUnixLabeledListenFails(t *testing.T) {
 			return nil
 		},
 		listen: func(_, address string) (net.Listener, error) {
-			created <- os.WriteFile(address, []byte("leftover"), 0600)
+			created <- leaveSocketAt(address)
 			return nil, errors.New("labeled listen failed")
 		},
 	})
@@ -126,4 +129,14 @@ func TestListenUnixLabeledListenFails(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotZero(t, info.Mode()&os.ModeSocket)
 	assertAuthListenerAccepts(t, listener, path)
+}
+
+// leaveSocketAt closes a listener on path without unlinking it, as a failed listen can.
+func leaveSocketAt(path string) error {
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		return err
+	}
+	ln.SetUnlinkOnClose(false)
+	return ln.Close()
 }

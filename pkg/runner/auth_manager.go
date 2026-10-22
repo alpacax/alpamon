@@ -319,23 +319,9 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 		return fmt.Errorf("failed to create socket directory %q: %w", socketDir, err)
 	}
 
-	if _, err := os.Stat(socketPath); err == nil {
-		_ = os.Remove(socketPath)
-	}
-
 	listener, err := listenAuthSocket(socketPath)
 	if err != nil {
 		return fmt.Errorf("socket listen error: %w", err)
-	}
-
-	if err := os.Chmod(socketPath, 0600); err != nil {
-		return fmt.Errorf("failed to set socket permissions: %w", err)
-	}
-
-	if os.Getuid() == 0 {
-		if err := os.Chown(socketPath, 0, 0); err != nil {
-			return fmt.Errorf("failed to set socket ownership: %w", err)
-		}
 	}
 
 	log.Info().Msgf("Auth socket created at %s", socketPath)

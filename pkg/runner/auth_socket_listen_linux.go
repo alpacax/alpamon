@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
 )
@@ -36,8 +37,13 @@ func listenAuthSocket(path string) (net.Listener, error) {
 			return err == nil
 		},
 		write:  writeSockcreateContext,
-		listen: net.Listen,
+		listen: privateListen,
 	})
+}
+
+// privateListen adapts utils.ListenUnixPrivate to the net.Listen signature.
+func privateListen(_, address string) (net.Listener, error) {
+	return utils.ListenUnixPrivate(address)
 }
 
 // writeSockcreateContext sets the context the calling thread gives the sockets
@@ -70,10 +76,11 @@ func writeSockcreateContext(context string) error {
 
 // listenUnixLabeled listens on path with authSocketContext where SELinux is
 // enabled. The context is set, used and cleared on one locked OS thread, so no
-// other socket gets it. Any failure to label falls back to a plain listener.
+// other socket gets it. Any failure to label falls back to an unlabeled one.
+// Every listener comes from utils.ListenUnixPrivate, so it is never wider than 0600.
 func listenUnixLabeled(path string, l sockcreateLabeler) (net.Listener, error) {
 	if !l.enabled() {
-		return net.Listen("unix", path)
+		return utils.ListenUnixPrivate(path)
 	}
 
 	type result struct {
@@ -106,8 +113,5 @@ func listenUnixLabeled(path string, l sockcreateLabeler) (net.Listener, error) {
 	}
 
 	log.Debug().Err(res.err).Msg("Auth socket keeps the process's default label")
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Debug().Err(err).Str("path", path).Msg("Could not remove failed auth socket path")
-	}
-	return net.Listen("unix", path)
+	return utils.ListenUnixPrivate(path) // Also clears a socket the failed listen left at path.
 }
