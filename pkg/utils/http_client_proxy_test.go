@@ -144,7 +144,7 @@ func TestNewHTTPClient_ProxyEnvironment(t *testing.T) {
 				assert.Contains(t, out, "PROXY=direct")
 				select {
 				case got := <-seen:
-					t.Fatalf("the proxy received %q", got)
+					assert.Failf(t, "the proxy must not be used", "it received %q", got)
 				default:
 				}
 				return
