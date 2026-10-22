@@ -18,6 +18,12 @@ RUN go build -o alpamon ./cmd/alpamon/main.go
 
 FROM debian:10@sha256:58ce6f1271ae1c8a2006ff7d3e54e9874d839f573d8009c20154ad0f2fb0a225
 
+# Buster is EOL; its repositories now live only on archive.debian.org
+RUN printf '%s\n' \
+      'deb http://archive.debian.org/debian buster main' \
+      'deb http://archive.debian.org/debian-security buster/updates main' \
+    > /etc/apt/sources.list
+
 RUN apt-get update -o Acquire::Retries=3 && apt-get install -y -o Acquire::Retries=3 --no-install-recommends ca-certificates
 
 WORKDIR /usr/local/alpamon
