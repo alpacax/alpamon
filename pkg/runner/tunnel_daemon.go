@@ -85,9 +85,8 @@ func dialDirect(targetAddr string) (net.Conn, error) {
 }
 
 // RunTunnelDaemon serves the tunnel-daemon subcommand, which is registered on
-// Unix only, relaying Unix domain socket connections to local TCP services. The
-// parent demotes it to nobody on Linux; on macOS it inherits the parent's
-// credentials.
+// Unix only, relaying Unix domain socket connections to local TCP services. A
+// root parent demotes it to nobody.
 func RunTunnelDaemon(socketPath string) {
 	// Remove stale socket file if it exists (safe against symlink attacks)
 	if err := safeRemoveSocket(socketPath); err != nil {

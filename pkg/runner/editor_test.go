@@ -2,6 +2,7 @@ package runner
 
 import (
 	"net"
+	"os"
 	"os/user"
 	"path/filepath"
 	"runtime"
@@ -21,24 +22,25 @@ func TestFindAvailablePort(t *testing.T) {
 
 func TestEditorRequiresGroup(t *testing.T) {
 	if runtime.GOOS == "darwin" {
-		t.Skip("macOS keeps the current editor identity")
+		t.Skip("macOS ignores the server's group name")
 	}
 	manager, err := NewCodeServerManager(t.Context(), "account", "")
 	assert.EqualError(t, err, "groupname is required")
 	assert.Nil(t, manager)
 }
 
-func TestEditorDarwinKeepsCurrentUser(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("macOS editor behavior")
+func TestEditorDarwinNonRootKeepsCurrentUser(t *testing.T) {
+	if runtime.GOOS != "darwin" || os.Getuid() == 0 {
+		t.Skip("macOS editor behavior without root")
 	}
 	current, err := user.Current()
 	require.NoError(t, err)
 	for _, groupname := range []string{"alpacon", "account", ""} {
 		t.Run(groupname, func(t *testing.T) {
-			usr, err := lookupUserForCodeServer(current.Username, groupname)
+			id, err := lookupUserForCodeServer(current.Username, groupname)
 			require.NoError(t, err)
-			assert.Equal(t, current, usr)
+			assert.Equal(t, current, id.user)
+			assert.Nil(t, id.procAttr)
 		})
 	}
 }
@@ -169,4 +171,24 @@ func TestWaitForReadyChecksTheExitBeforeTheDial(t *testing.T) {
 	close(waitDone)
 
 	assert.ErrorContains(t, m.waitForReady(waitDone), "exited unexpectedly")
+}
+
+func TestCodeServerInstallArgs(t *testing.T) {
+	cases := []struct {
+		name   string
+		goos   string
+		isRoot bool
+		want   []string
+	}{
+		{"root macOS installs standalone under /usr/local", "darwin", true, []string{"-s", "--", "--method", "standalone", "--prefix", "/usr/local"}},
+		{"non-root macOS keeps the script defaults", "darwin", false, nil},
+		{"root Linux keeps the package manager install", "linux", true, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := codeServerInstallArgs(tc.goos, tc.isRoot)
+
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

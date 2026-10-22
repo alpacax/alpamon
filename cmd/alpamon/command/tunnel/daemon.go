@@ -6,7 +6,7 @@ import (
 )
 
 // TunnelDaemonCmd is the subcommand for running the tunnel daemon subprocess.
-// It is invoked by the main alpamon process with demoted user credentials.
+// It is invoked by the main alpamon process, demoted to nobody when that process runs as root.
 var TunnelDaemonCmd = &cobra.Command{
 	Use:   "tunnel-daemon <socketPath>",
 	Short: "Tunnel daemon subprocess for multiplexed TCP relay",
