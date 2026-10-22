@@ -19,6 +19,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/tunnel"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -260,7 +261,7 @@ const (
 
 func newTunnelDialer() websocket.Dialer {
 	return websocket.Dialer{
-		Proxy:           http.ProxyFromEnvironment,
+		Proxy:           utils.WebsocketProxy,
 		ReadBufferSize:  tunnelWSBufferSize,
 		WriteBufferSize: tunnelWSBufferSize,
 		TLSClientConfig: &tls.Config{

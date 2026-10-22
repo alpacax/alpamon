@@ -14,6 +14,7 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
@@ -123,7 +124,8 @@ func (pc *PtyClient) initializeSession() error {
 	}
 
 	dialer := websocket.Dialer{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy:            utils.WebsocketProxy,
+		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
