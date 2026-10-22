@@ -107,7 +107,9 @@ func (fc *FtpClient) connect() error {
 		return err
 	}
 	dialer := websocket.Dialer{
-		TLSClientConfig: fc.tlsConfig,
+		Proxy:            utils.WebsocketProxy,
+		HandshakeTimeout: handshakeTimeout,
+		TLSClientConfig:  fc.tlsConfig,
 	}
 	conn, _, err := dialer.Dial(target, fc.requestHeader)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/internal/retry"
 	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
@@ -91,6 +92,7 @@ func isAuthRejection(err error) bool {
 // then says nothing parks this call, and with it a shutdown, indefinitely.
 func dialWebsocket(ctx context.Context, url string, header http.Header) (*websocket.Conn, error) {
 	dialer := websocket.Dialer{
+		Proxy:            utils.WebsocketProxy,
 		NetDialContext:   (&net.Dialer{Control: setTCPUserTimeout}).DialContext,
 		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig: &tls.Config{

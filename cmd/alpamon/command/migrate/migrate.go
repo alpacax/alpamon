@@ -408,7 +408,7 @@ func buildHTTPClient(verify bool, ca string) (*http.Client, error) {
 	}
 	return &http.Client{
 		Timeout:       30 * time.Second,
-		Transport:     &http.Transport{TLSClientConfig: cfg},
+		Transport:     &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: cfg},
 		CheckRedirect: utils.OriginOnlyAuthorization,
 	}, nil
 }

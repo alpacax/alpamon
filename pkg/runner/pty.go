@@ -101,6 +101,8 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 	}
 	pc.url = sanitizedURL
 	dialer := websocket.Dialer{
+		Proxy:            utils.WebsocketProxy,
+		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
@@ -542,6 +544,8 @@ func (pc *PtyClient) recovery(ctx context.Context) error {
 		}
 
 		dialer := websocket.Dialer{
+			Proxy:            utils.WebsocketProxy,
+			HandshakeTimeout: handshakeTimeout,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 			},
