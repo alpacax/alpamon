@@ -123,6 +123,7 @@ func (pc *PtyClient) initializeSession() error {
 	}
 
 	dialer := websocket.Dialer{
+		Proxy: http.ProxyFromEnvironment,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},

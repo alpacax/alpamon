@@ -53,6 +53,7 @@ func transport() *http.Transport {
 
 // NewTransport builds a transport from the TLS settings. When the CA file cannot be
 // read or holds no PEM certificate, it returns the error with a transport that trusts no CA.
+// It honors HTTPS_PROXY, HTTP_PROXY and NO_PROXY; with none of them set it dials directly.
 func NewTransport() (*http.Transport, error) {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
@@ -67,6 +68,7 @@ func NewTransport() (*http.Transport, error) {
 	}
 
 	return &http.Transport{
+		Proxy:               http.ProxyFromEnvironment,
 		TLSClientConfig:     tlsConfig,
 		MaxIdleConnsPerHost: maxIdleConnsPerHost,
 		IdleConnTimeout:     idleConnTimeout,

@@ -107,6 +107,7 @@ func (fc *FtpClient) connect() error {
 		return err
 	}
 	dialer := websocket.Dialer{
+		Proxy:           http.ProxyFromEnvironment,
 		TLSClientConfig: fc.tlsConfig,
 	}
 	conn, _, err := dialer.Dial(target, fc.requestHeader)

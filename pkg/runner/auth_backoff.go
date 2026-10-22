@@ -91,6 +91,7 @@ func isAuthRejection(err error) bool {
 // then says nothing parks this call, and with it a shutdown, indefinitely.
 func dialWebsocket(ctx context.Context, url string, header http.Header) (*websocket.Conn, error) {
 	dialer := websocket.Dialer{
+		Proxy:            http.ProxyFromEnvironment,
 		NetDialContext:   (&net.Dialer{Control: setTCPUserTimeout}).DialContext,
 		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig: &tls.Config{
