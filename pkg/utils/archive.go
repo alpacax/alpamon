@@ -607,7 +607,7 @@ func mkdirAllInside(root, dir, name string) error {
 	}
 
 	current := root
-	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+	for part := range strings.SplitSeq(rel, string(os.PathSeparator)) {
 		current = filepath.Join(current, part)
 		fi, err := os.Lstat(current)
 		if os.IsNotExist(err) {
