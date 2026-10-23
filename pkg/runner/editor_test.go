@@ -39,7 +39,7 @@ func TestEditorDarwinNonRootKeepsCurrentUser(t *testing.T) {
 		t.Run(groupname, func(t *testing.T) {
 			id, err := lookupUserForCodeServer(current.Username, groupname)
 			require.NoError(t, err)
-			assert.Equal(t, current, id.user)
+			assert.Equal(t, current.HomeDir, id.homeDir)
 			assert.Nil(t, id.procAttr)
 		})
 	}

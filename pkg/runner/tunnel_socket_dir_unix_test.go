@@ -70,21 +70,33 @@ func TestSecureTunnelSocketDir_RefusesDirectoryOwnedBySomeoneElse(t *testing.T) 
 func TestTunnelSocketDirPolicy(t *testing.T) {
 	cases := []struct {
 		name      string
-		isRoot    bool
+		hasDaemon bool
 		euid      uint32
-		nobodyUID int
-		nobodyGID int
+		daemonUID int
+		daemonGID int
 		wantOwner []uint32
 		wantUID   int
 		wantGID   int
 	}{
-		{"root allows root and nobody and chowns to nobody", true, 0, 65534, 65533, []uint32{0, 65534}, 65534, 65533},
-		{"root keeps macOS nobody's uid past MaxInt32", true, 0, 4294967294, 4294967294, []uint32{0, 4294967294}, 4294967294, 4294967294},
-		{"non-root allows only itself and never chowns", false, 1000, 0, 0, []uint32{1000}, -1, -1},
+		{
+			name:      "root allows root and nobody and chowns to nobody",
+			hasDaemon: true, euid: 0, daemonUID: 65534, daemonGID: 65533,
+			wantOwner: []uint32{0, 65534}, wantUID: 65534, wantGID: 65533,
+		},
+		{
+			name:      "root keeps macOS nobody's uid past MaxInt32",
+			hasDaemon: true, euid: 0, daemonUID: 4294967294, daemonGID: 4294967294,
+			wantOwner: []uint32{0, 4294967294}, wantUID: 4294967294, wantGID: 4294967294,
+		},
+		{
+			name:      "non-root allows only itself and never chowns",
+			hasDaemon: false, euid: 1000,
+			wantOwner: []uint32{1000}, wantUID: -1, wantGID: -1,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			allowed, uid, gid := tunnelSocketDirPolicy(tc.isRoot, tc.euid, tc.nobodyUID, tc.nobodyGID)
+			allowed, uid, gid := tunnelSocketDirPolicy(tc.hasDaemon, tc.euid, tc.daemonUID, tc.daemonGID)
 
 			assert.Equal(t, tc.wantOwner, allowed)
 			assert.Equal(t, tc.wantUID, uid)

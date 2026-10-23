@@ -248,7 +248,7 @@ func NewCodeServerManager(parentCtx context.Context, username, groupname string)
 	return &CodeServerManager{
 		username:  username,
 		groupname: id.groupname,
-		homeDir:   id.user.HomeDir,
+		homeDir:   id.homeDir,
 		procAttr:  id.procAttr,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -257,57 +257,6 @@ func NewCodeServerManager(parentCtx context.Context, username, groupname string)
 		stopGrace:   codeServerStopGrace,
 		terminateFn: terminateProcess,
 	}, nil
-}
-
-// codeServerIdentity is who code-server runs as; procAttr is nil when Alpamon keeps its own credentials.
-type codeServerIdentity struct {
-	user      *user.User
-	groupname string
-	procAttr  *syscall.SysProcAttr
-}
-
-func lookupUserForCodeServer(username, groupname string) (*codeServerIdentity, error) {
-	if runtime.GOOS == "darwin" {
-		if os.Getuid() != 0 {
-			log.Debug().Msg("macOS: not root, so code-server keeps the current user.")
-			usr, err := user.Current()
-			if err != nil {
-				return nil, err
-			}
-			return &codeServerIdentity{user: usr, groupname: groupname}, nil
-		}
-		// The server sends a Linux group name, so macOS demotes to the user's primary group.
-		var err error
-		if groupname, err = primaryGroupName(username); err != nil {
-			return nil, err
-		}
-	}
-	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
-	if err != nil {
-		return nil, err
-	}
-	if result != nil {
-		return &codeServerIdentity{user: result.User, groupname: groupname, procAttr: result.SysProcAttr}, nil
-	}
-
-	usr, err := user.Lookup(username)
-	if err != nil {
-		return nil, fmt.Errorf("user %s not found: %w", username, err)
-	}
-
-	return &codeServerIdentity{user: usr, groupname: groupname}, nil
-}
-
-func primaryGroupName(username string) (string, error) {
-	usr, err := user.Lookup(username)
-	if err != nil {
-		return "", fmt.Errorf("there is no corresponding %s username in this server", username)
-	}
-	grp, err := user.LookupGroupId(usr.Gid)
-	if err != nil {
-		return "", fmt.Errorf("failed to lookup primary group of %s: %w", username, err)
-	}
-	return grp.Name, nil
 }
 
 // Status returns the current status and last error message.
@@ -538,6 +487,57 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// codeServerIdentity is who code-server runs as.
+type codeServerIdentity struct {
+	homeDir   string
+	groupname string
+	procAttr  *syscall.SysProcAttr
+}
+
+func lookupUserForCodeServer(username, groupname string) (*codeServerIdentity, error) {
+	if runtime.GOOS == "darwin" {
+		if os.Getuid() != 0 {
+			log.Debug().Msg("macOS: not root, so code-server keeps the current user.")
+			usr, err := user.Current()
+			if err != nil {
+				return nil, err
+			}
+			return &codeServerIdentity{homeDir: usr.HomeDir, groupname: groupname}, nil
+		}
+		// The server sends a Linux group name, so macOS demotes to the user's primary group.
+		var err error
+		if groupname, err = primaryGroupName(username); err != nil {
+			return nil, err
+		}
+	}
+	result, err := utils.Demote(username, groupname, utils.DemoteOptions{ValidateGroup: true})
+	if err != nil {
+		return nil, err
+	}
+	if result != nil {
+		return &codeServerIdentity{homeDir: result.User.HomeDir, groupname: groupname, procAttr: result.SysProcAttr}, nil
+	}
+
+	usr, err := user.Lookup(username)
+	if err != nil {
+		return nil, fmt.Errorf("user %s not found: %w", username, err)
+	}
+
+	return &codeServerIdentity{homeDir: usr.HomeDir, groupname: groupname}, nil
+}
+
+func primaryGroupName(username string) (string, error) {
+	usr, err := user.Lookup(username)
+	if err != nil {
+		return "", fmt.Errorf("there is no corresponding %s username in this server: %w", username, err)
+	}
+	grp, err := user.LookupGroupId(usr.Gid)
+	if err != nil {
+		return "", fmt.Errorf("failed to lookup primary group of %s: %w", username, err)
+	}
+	return grp.Name, nil
 }
 
 func isCodeServerInstalled() bool {
