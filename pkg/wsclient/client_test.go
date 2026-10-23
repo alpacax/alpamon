@@ -1071,7 +1071,7 @@ func liveInPackage() []string {
 		buf = make([]byte, 2*len(buf))
 	}
 	var live []string
-	for _, g := range strings.Split(string(buf), "\n\n") {
+	for g := range strings.SplitSeq(string(buf), "\n\n") {
 		for _, file := range []string{"/wsclient/client.go:", "/wsclient/dial.go:", "/wsclient/config.go:", "/wsclient/backoff.go:"} {
 			if strings.Contains(g, file) {
 				live = append(live, g)

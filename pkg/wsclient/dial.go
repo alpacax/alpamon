@@ -96,7 +96,7 @@ func (s dialSettings) dial(ctx context.Context) (conn *websocket.Conn, resp *htt
 // and the reconnect after it would meet the same server again.
 func unofferedExtension(values []string, compression bool) (string, bool) {
 	for _, value := range values {
-		for _, extension := range strings.Split(value, ",") {
+		for extension := range strings.SplitSeq(value, ",") {
 			name, _, _ := strings.Cut(extension, ";")
 			name = strings.TrimSpace(name)
 			switch {

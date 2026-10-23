@@ -158,7 +158,7 @@ func lookupSSHDPath() string {
 // the value rides the same sync PATCH as version, pam_version and load, so
 // an unexpected token would make DRF reject all of them, not just this field.
 func parseSSHDUsePAM(out string) string {
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		fields := strings.Fields(strings.ToLower(line))
 		if len(fields) == 2 && fields[0] == "usepam" {
 			if fields[1] == "yes" || fields[1] == "no" {
