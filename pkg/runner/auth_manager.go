@@ -126,18 +126,20 @@ type SudoApprovalRequest struct {
 }
 
 type SudoApprovalResponse struct {
-	RequestID    string `json:"request_id"`
-	Type         string `json:"type"`
-	Username     string `json:"username"`
-	Groupname    string `json:"groupname"`
-	PID          int    `json:"pid"`
-	PPID         int    `json:"ppid"`
-	Command      string `json:"command"`
-	IsAlpconUser bool   `json:"is_alpacon_user"`
-	SessionID    string `json:"session_id,omitempty"`
-	CommandID    string `json:"command_id,omitempty"`
-	Approved     bool   `json:"approved"`
-	Reason       string `json:"reason"`
+	RequestID       string `json:"request_id"`
+	Type            string `json:"type"`
+	Username        string `json:"username"`
+	Groupname       string `json:"groupname"`
+	PID             int    `json:"pid"`
+	PPID            int    `json:"ppid"`
+	Command         string `json:"command"`
+	IsAlpconUser    bool   `json:"is_alpacon_user"`
+	SessionID       string `json:"session_id,omitempty"`
+	CommandID       string `json:"command_id,omitempty"`
+	Approved        bool   `json:"approved"`
+	Reason          string `json:"reason"`
+	Hint            string `json:"hint,omitempty"`
+	ApprovalRequest string `json:"approval_request,omitempty"`
 	// ErrorCode is an optional machine-readable denial code (e.g.
 	// SUDO_NO_WORKSESSION_POLICY) from alpacon-server. Its value is forwarded
 	// unchanged to the auth socket so the PAM module / approval plugin can show
