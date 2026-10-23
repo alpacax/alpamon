@@ -118,7 +118,7 @@ func verifyOwnedEntry(path string, allowedOwners []uint32) error {
 	if !slices.Contains(allowedOwners, st.Uid) {
 		return fmt.Errorf("%s is owned by uid %d, which is not allowed", path, st.Uid)
 	}
-	if info.Mode().Perm()&0022 != 0 && !(info.IsDir() && info.Mode()&fs.ModeSticky != 0) {
+	if info.Mode().Perm()&0022 != 0 && (!info.IsDir() || info.Mode()&fs.ModeSticky == 0) {
 		return fmt.Errorf("%s is writable by group or other", path)
 	}
 	return nil
