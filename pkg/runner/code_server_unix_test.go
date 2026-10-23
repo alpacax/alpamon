@@ -30,8 +30,8 @@ func TestPrimaryGroupName_RejectsUnknownUser(t *testing.T) {
 	assert.ErrorContains(t, err, "there is no corresponding alpamon-no-such-user username")
 }
 
-// sessionUser is the account sudo was run from, standing in for the Alpacon session user.
-func sessionUser(t *testing.T) *user.User {
+// sudoInvokingUser is the account sudo was run from, standing in for the Alpacon session user.
+func sudoInvokingUser(t *testing.T) *user.User {
 	t.Helper()
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 {
 		t.Skip("macOS root behavior")
@@ -46,7 +46,7 @@ func sessionUser(t *testing.T) *user.User {
 }
 
 func TestEditorDarwinRootDemotesToPrimaryGroup(t *testing.T) {
-	usr := sessionUser(t)
+	usr := sudoInvokingUser(t)
 	primary, err := user.LookupGroupId(usr.Gid)
 	require.NoError(t, err)
 
@@ -54,7 +54,7 @@ func TestEditorDarwinRootDemotesToPrimaryGroup(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, primary.Name, id.groupname)
-	assert.Equal(t, usr.HomeDir, id.user.HomeDir)
+	assert.Equal(t, usr.HomeDir, id.homeDir)
 	require.NotNil(t, id.procAttr, "a root Alpamon must not start code-server as root")
 	gotUID := runWithCredential(t, id.procAttr.Credential, "id", "-u")
 	gotGID := runWithCredential(t, id.procAttr.Credential, "id", "-g")
