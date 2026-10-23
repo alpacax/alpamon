@@ -247,8 +247,8 @@ jobs:
             pkg_manager: dnf
             runner: ubuntu-latest
           # Fedora (amd64)
-          - distro: fedora-41
-            container: fedora:41@sha256:f1a3fab47bcb3c3ddf3135d5ee7ba8b7b25f2e809a47440936212a3a50957f3d
+          - distro: fedora-44
+            container: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
             pkg_manager: dnf
             runner: ubuntu-latest
           # Oracle Linux (amd64)
