@@ -335,3 +335,37 @@ func TestAddPIDCommandMapping_OverwritesStaleEntry(t *testing.T) {
 	assert.Equal(t, "new-cmd", entry.CommandID)
 	assert.Equal(t, "bob", entry.Username)
 }
+
+func TestSudoApprovalResponse_ApprovalDetailsPassthrough(t *testing.T) {
+	for _, tc := range []struct{ name, fields, hint, request string }{
+		{name: "with details", fields: `,"hint":"Run the approval command\nthen retry","approval_request":"request-123"`, hint: "Run the approval command\nthen retry", request: "request-123"},
+		{name: "hint only", fields: `,"hint":"Retry after approval"`, hint: "Retry after approval"},
+		{name: "request only", fields: `,"approval_request":"request-456"`, request: "request-456"},
+		{name: "absent"},
+		{name: "empty", fields: `,"hint":"","approval_request":""`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var response SudoApprovalResponse
+			require.NoError(t, json.Unmarshal([]byte(`{"type":"sudo_approval_response","request_id":"r1","approved":false,"reason":"Approval required","unknown":"ignored"`+tc.fields+`}`), &response))
+			assert.Equal(t, tc.hint, response.Hint)
+			assert.Equal(t, tc.request, response.ApprovalRequest)
+			client, conn := net.Pipe()
+			defer func() { require.NoError(t, client.Close()) }()
+			result := make(chan error, 1)
+			request := newSudoRequest(conn, SudoApprovalRequest{RequestID: "r1"})
+			go func() { result <- newTestAuthManager().deliverVerdict(request, response) }()
+			var frame map[string]any
+			require.NoError(t, json.NewDecoder(client).Decode(&frame))
+			require.NoError(t, <-result)
+			assert.Equal(t, "Approval required", frame["reason"])
+			for key, value := range map[string]string{"hint": tc.hint, "approval_request": tc.request} {
+				if value == "" {
+					assert.NotContains(t, frame, key)
+				} else {
+					assert.Equal(t, value, frame[key])
+				}
+			}
+			assert.NotContains(t, frame, "unknown")
+		})
+	}
+}
