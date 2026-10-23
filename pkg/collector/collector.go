@@ -38,7 +38,6 @@ type Collector struct {
 	transporter transporter.TransportStrategy
 	scheduler   *scheduler.Scheduler
 	buffer      *base.CheckBuffer
-	errorChan   chan error
 	wg          sync.WaitGroup
 	// flushWG covers the goroutine flushPending leaves running when its
 	// bound expires while a send is still in flight. Nothing in the agent
@@ -121,7 +120,6 @@ func NewCollector(args collectorArgs, ctxManager *agent.ContextManager) (*Collec
 		transporter: metricTransporter,
 		scheduler:   scheduler.NewScheduler(),
 		buffer:      checkBuffer,
-		errorChan:   make(chan error, 10),
 		ctxManager:  ctxManager,
 	}
 
@@ -184,8 +182,6 @@ func (c *Collector) Start() {
 	}
 
 	c.wg.Go(func() { c.failureQueueWorker(ctx) })
-
-	go c.handleErrors()
 }
 
 func (c *Collector) successQueueWorker(ctx context.Context) {
@@ -257,12 +253,6 @@ func (c *Collector) retryWithBackoff(ctx context.Context, metric base.MetricData
 	return fmt.Errorf("max retries exceeded for metric %s", metric.Type)
 }
 
-func (c *Collector) handleErrors() {
-	for err := range c.errorChan {
-		log.Error().Err(err).Msgf("Collector error: %v.", err)
-	}
-}
-
 // Stop never closes the metric queues—a check still running past the
 // bounded wait could still publish, racing a send against a closed channel.
 func (c *Collector) Stop() {
@@ -288,9 +278,6 @@ func (c *Collector) Stop() {
 			log.Info().Msgf("Collector flushed %d pending metric(s) on stop, dropped %d.", sent, dropped)
 		}
 
-		// errorChan has no sender anywhere, so no straggler can race this
-		// close, and handleErrors leaks on every restart without it.
-		close(c.errorChan)
 	})
 }
 

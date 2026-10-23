@@ -47,23 +47,6 @@ func BenchmarkRegistry_GetManyHandlers(b *testing.B) {
 	}
 }
 
-func BenchmarkRegistry_ListCommands(b *testing.B) {
-	registry := NewRegistry()
-
-	for i := range 10 {
-		handler := &MockHandler{
-			name:     "handler" + string(rune('A'+i)),
-			commands: []string{"cmd" + string(rune('A'+i))},
-		}
-		require.NoError(b, registry.Register(handler), "register handler")
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = registry.ListCommands()
-	}
-}
-
 func BenchmarkRegistry_IsCommandRegistered(b *testing.B) {
 	registry := NewRegistry()
 

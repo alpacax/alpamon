@@ -87,23 +87,6 @@ func (e *CommandDispatcher) HasHandler(cmd string) bool {
 	return e.registry.IsCommandRegistered(cmd)
 }
 
-// Shutdown gracefully shuts down the executor
-func (e *CommandDispatcher) Shutdown(timeout time.Duration) error {
-	log.Info().Msg("Shutting down executor")
-
-	// Cancel all contexts
-	e.ctxManager.Shutdown()
-
-	// Shutdown the pool
-	if err := e.pool.Shutdown(timeout); err != nil {
-		log.Error().Err(err).Msg("Failed to shutdown pool gracefully")
-		return err
-	}
-
-	log.Info().Msg("Executor shutdown complete")
-	return nil
-}
-
 // InitDispatcher initializes and configures the command dispatching system with all handlers
 func InitDispatcher(
 	pool *pool.Pool,

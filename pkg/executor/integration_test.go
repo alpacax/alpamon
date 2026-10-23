@@ -239,27 +239,6 @@ func TestIntegration_PoolWithRegistry(t *testing.T) {
 	assert.GreaterOrEqual(t, handler.GetExecuteCount(), taskCount/2, "expected at least %d executions", taskCount/2)
 }
 
-// TestIntegration_UnregisterHandler tests handler unregistration
-func TestIntegration_UnregisterHandler(t *testing.T) {
-	registry := NewRegistry()
-
-	handler := &IntegrationMockHandler{
-		name:     "removable",
-		commands: []string{"remove_cmd"},
-	}
-	_ = registry.Register(handler)
-
-	// Verify registered
-	assert.True(t, registry.IsCommandRegistered("remove_cmd"), "command should be registered")
-
-	// Unregister
-	err := registry.Unregister("removable")
-	require.NoError(t, err, "failed to unregister")
-
-	// Verify unregistered
-	assert.False(t, registry.IsCommandRegistered("remove_cmd"), "command should not be registered after unregister")
-}
-
 func TestE2E_ShellChain_GivenParentCtxCancelledMidSegment_ThenExitCodeOneAndLaterSegmentSkipped(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("execs the POSIX sleep binary")

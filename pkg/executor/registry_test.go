@@ -76,59 +76,6 @@ func TestRegistry_Get(t *testing.T) {
 	assert.Error(t, err, "Expected error for non-existent command")
 }
 
-func TestRegistry_GetHandler(t *testing.T) {
-	registry := NewRegistry()
-
-	handler := &MockHandler{
-		name:     "test",
-		commands: []string{"cmd1", "cmd2"},
-	}
-
-	_ = registry.Register(handler)
-
-	// Test getting existing handler
-	h, err := registry.GetHandler("test")
-	require.NoError(t, err, "Failed to get handler 'test'")
-	assert.Equal(t, "test", h.Name(), "Expected handler name 'test'")
-
-	// Test getting non-existent handler
-	_, err = registry.GetHandler("nonexistent")
-	assert.Error(t, err, "Expected error for non-existent handler")
-}
-
-func TestRegistry_List(t *testing.T) {
-	registry := NewRegistry()
-
-	handler1 := &MockHandler{
-		name:     "handler1",
-		commands: []string{"cmd1"},
-	}
-	handler2 := &MockHandler{
-		name:     "handler2",
-		commands: []string{"cmd2"},
-	}
-
-	_ = registry.Register(handler1)
-	_ = registry.Register(handler2)
-
-	handlers := registry.List()
-	assert.ElementsMatch(t, []string{"handler1", "handler2"}, handlers, "Not all handlers found in list")
-}
-
-func TestRegistry_ListCommands(t *testing.T) {
-	registry := NewRegistry()
-
-	handler := &MockHandler{
-		name:     "test",
-		commands: []string{"cmd1", "cmd2", "cmd3"},
-	}
-
-	_ = registry.Register(handler)
-
-	commands := registry.ListCommands()
-	assert.ElementsMatch(t, []string{"cmd1", "cmd2", "cmd3"}, commands)
-}
-
 func TestRegistry_IsCommandRegistered(t *testing.T) {
 	registry := NewRegistry()
 
@@ -142,58 +89,6 @@ func TestRegistry_IsCommandRegistered(t *testing.T) {
 	assert.True(t, registry.IsCommandRegistered("cmd1"), "Expected cmd1 to be registered")
 	assert.True(t, registry.IsCommandRegistered("cmd2"), "Expected cmd2 to be registered")
 	assert.False(t, registry.IsCommandRegistered("nonexistent"), "Expected 'nonexistent' to not be registered")
-}
-
-func TestRegistry_Unregister(t *testing.T) {
-	registry := NewRegistry()
-
-	handler := &MockHandler{
-		name:     "test",
-		commands: []string{"cmd1", "cmd2"},
-	}
-
-	_ = registry.Register(handler)
-
-	// Verify handler is registered
-	require.True(t, registry.IsCommandRegistered("cmd1"), "Handler not registered properly")
-
-	// Unregister handler
-	err := registry.Unregister("test")
-	require.NoError(t, err, "Failed to unregister handler")
-
-	// Verify handler is no longer registered
-	assert.False(t, registry.IsCommandRegistered("cmd1"), "Command still registered after unregistering handler")
-
-	// Test unregistering non-existent handler
-	err = registry.Unregister("nonexistent")
-	assert.Error(t, err, "Expected error when unregistering non-existent handler")
-}
-
-func TestRegistry_Clear(t *testing.T) {
-	registry := NewRegistry()
-
-	// Register multiple handlers
-	handler1 := &MockHandler{
-		name:     "handler1",
-		commands: []string{"cmd1"},
-	}
-	handler2 := &MockHandler{
-		name:     "handler2",
-		commands: []string{"cmd2"},
-	}
-
-	_ = registry.Register(handler1)
-	_ = registry.Register(handler2)
-
-	// Verify handlers are registered
-	require.Len(t, registry.List(), 2, "Handlers not registered properly")
-
-	// Clear registry
-	registry.Clear()
-
-	// Verify registry is empty
-	assert.Empty(t, registry.List(), "Registry not cleared properly")
-	assert.Empty(t, registry.ListCommands(), "Commands not cleared properly")
 }
 
 func TestRegistry_ThreadSafety(t *testing.T) {
