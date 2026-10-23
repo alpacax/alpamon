@@ -44,9 +44,9 @@ func (m *ContextManager) NewContextWithDeadline(deadline time.Time) (context.Con
 	return context.WithDeadline(m.root, deadline)
 }
 
-// Root returns the root context.
-// This should be used sparingly, primarily for operations that need
-// to outlive the normal shutdown process.
+// Root returns the root context, the shared cancellation signal that
+// Shutdown cancels. Callers select on its Done channel to detect shutdown;
+// work derived from it does not outlive Shutdown.
 func (m *ContextManager) Root() context.Context {
 	m.mu.Lock()
 	defer m.mu.Unlock()

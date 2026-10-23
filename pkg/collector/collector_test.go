@@ -62,7 +62,6 @@ func newTestCollector() *Collector {
 	return &Collector{
 		scheduler: scheduler.NewScheduler(),
 		buffer:    base.NewCheckBuffer(10),
-		errorChan: make(chan error, 10),
 	}
 }
 
@@ -182,7 +181,6 @@ func TestCollector_Stop_NeverClosesSuccessQueueWhenGoroutinesJoin(t *testing.T) 
 	synctest.Test(t, func(t *testing.T) {
 		c := newTestCollector()
 		c.ctxManager = agent.NewContextManager()
-		c.errorChan = make(chan error, 10)
 		c.ctx, c.cancel = c.ctxManager.NewContext(0)
 
 		done := make(chan struct{})
@@ -204,7 +202,6 @@ func TestCollector_Stop_NeverClosesSuccessQueueWhenWaitExpires(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c := newTestCollector()
 		c.ctxManager = agent.NewContextManager()
-		c.errorChan = make(chan error, 10)
 		c.ctx, c.cancel = c.ctxManager.NewContext(0)
 
 		// Ignores ctx and never returns, like a goroutine stuck in a
@@ -226,7 +223,6 @@ func TestCollector_Stop_NeverClosesSuccessQueueWhenWaitExpires(t *testing.T) {
 func TestCollector_StopIsSafeToCallTwice(t *testing.T) {
 	c := newTestCollector()
 	c.ctxManager = agent.NewContextManager()
-	c.errorChan = make(chan error, 10)
 	c.Start()
 
 	require.NotPanics(t, func() {

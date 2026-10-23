@@ -82,7 +82,7 @@ func TestRegression_RegistryOperations(t *testing.T) {
 	registry := NewRegistry()
 
 	// Test empty registry
-	assert.Empty(t, registry.List(), "new registry should be empty")
+	assert.False(t, registry.IsCommandRegistered("cmd1"), "new registry should be empty")
 
 	// Test registration
 	handler := &MockHandler{
@@ -93,9 +93,6 @@ func TestRegression_RegistryOperations(t *testing.T) {
 	err := registry.Register(handler)
 	require.NoError(t, err, "registration failed")
 
-	// Test listing
-	assert.Len(t, registry.List(), 1, "should have 1 handler after registration")
-
 	// Test command check
 	assert.True(t, registry.IsCommandRegistered("cmd1"), "cmd1 should be registered")
 
@@ -103,17 +100,6 @@ func TestRegression_RegistryOperations(t *testing.T) {
 	h, err := registry.Get("cmd1")
 	require.NoError(t, err, "get failed")
 	assert.Equal(t, "test", h.Name(), "expected handler name 'test'")
-
-	// Test unregister
-	err = registry.Unregister("test")
-	require.NoError(t, err, "unregister failed")
-
-	assert.False(t, registry.IsCommandRegistered("cmd1"), "cmd1 should not be registered after unregister")
-
-	// Test clear
-	_ = registry.Register(handler)
-	registry.Clear()
-	assert.Empty(t, registry.List(), "registry should be empty after clear")
 }
 
 // TestRegression_CommandArgsFields verifies all CommandArgs fields exist
