@@ -197,6 +197,10 @@ func (c *CodeServerConfig) ToEnv(homeDir string, includeXDG bool) []string {
 	return env
 }
 
+// darwinRootCodeServerPrefix is where a root macOS Alpamon installs code-server: a root-owned tree
+// outside /usr/local, whose subdirs Homebrew hands to an admin account on Intel Macs.
+const darwinRootCodeServerPrefix = "/opt/alpamon/code-server"
+
 // Common installation paths for code-server
 var codeServerPaths = []string{
 	"/usr/bin/code-server",
@@ -489,7 +493,7 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 	}
 }
 
-// codeServerIdentity is who code-server runs as.
+// codeServerIdentity is who code-server runs as; a nil procAttr keeps Alpamon's own credentials.
 type codeServerIdentity struct {
 	homeDir   string
 	groupname string
@@ -546,6 +550,20 @@ func isCodeServerInstalled() bool {
 }
 
 func getCodeServerPath() (string, error) {
+	return lookupCodeServerPath(runtime.GOOS, os.Getuid() == 0)
+}
+
+// lookupCodeServerPath limits a root macOS host to its own install, since a binary on PATH or under
+// Homebrew may be one another account can change.
+func lookupCodeServerPath(goos string, isRoot bool) (string, error) {
+	if goos == "darwin" && isRoot {
+		path := filepath.Join(darwinRootCodeServerPrefix, "bin", "code-server")
+		if _, err := os.Stat(path); err != nil {
+			return "", fmt.Errorf("code-server not found")
+		}
+		return path, nil
+	}
+
 	if path, err := exec.LookPath("code-server"); err == nil {
 		return path, nil
 	}
@@ -563,7 +581,7 @@ func getCodeServerPath() (string, error) {
 // and off Homebrew, which refuses to run as root.
 func codeServerInstallArgs(goos string, isRoot bool) []string {
 	if goos == "darwin" && isRoot {
-		return []string{"-s", "--", "--method", "standalone", "--prefix", "/usr/local"}
+		return []string{"-s", "--", "--method", "standalone", "--prefix", darwinRootCodeServerPrefix}
 	}
 	return nil
 }
@@ -607,6 +625,13 @@ func installCodeServer(parentCtx context.Context) error {
 	if err := cmd.Run(); err != nil {
 		log.Error().Err(err).Msg("code-server install script failed.")
 		return fmt.Errorf("install script failed: %w", err)
+	}
+
+	if runtime.GOOS == "darwin" && os.Getuid() == 0 {
+		// macOS tar run as root restores the archive's owner (501:20), handing the tree to the first account.
+		if err := secureCodeServerTree(darwinRootCodeServerPrefix, 0, 0); err != nil {
+			return fmt.Errorf("failed to secure code-server install: %w", err)
+		}
 	}
 
 	return nil
@@ -687,7 +712,6 @@ func setupUserDataDir(ctx context.Context, homeDir, username, groupname string) 
 		return "", fmt.Errorf("failed to set up user data dir: %w", err)
 	}
 
-	// Change ownership if running as root (so demoted user can modify their config)
 	if os.Getuid() == 0 {
 		if err := chownUserDataDir(ctx, userDataDir, username, groupname); err != nil {
 			log.Warn().Err(err).Msg("Failed to change ownership of user data dir.")

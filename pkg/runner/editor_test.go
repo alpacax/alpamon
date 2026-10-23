@@ -35,9 +35,15 @@ func TestEditorDarwinNonRootKeepsCurrentUser(t *testing.T) {
 	}
 	current, err := user.Current()
 	require.NoError(t, err)
-	for _, groupname := range []string{"alpacon", "account", ""} {
-		t.Run(groupname, func(t *testing.T) {
-			id, err := lookupUserForCodeServer(current.Username, groupname)
+	cases := []struct{ username, groupname string }{
+		{current.Username, "alpacon"},
+		{current.Username, "account"},
+		{current.Username, ""},
+		{"nobody", "nogroup"}, // another account still runs as the current user
+	}
+	for _, tc := range cases {
+		t.Run(tc.username+"/"+tc.groupname, func(t *testing.T) {
+			id, err := lookupUserForCodeServer(tc.username, tc.groupname)
 			require.NoError(t, err)
 			assert.Equal(t, current.HomeDir, id.homeDir)
 			assert.Nil(t, id.procAttr)
@@ -180,7 +186,7 @@ func TestCodeServerInstallArgs(t *testing.T) {
 		isRoot bool
 		want   []string
 	}{
-		{"root macOS installs standalone under /usr/local", "darwin", true, []string{"-s", "--", "--method", "standalone", "--prefix", "/usr/local"}},
+		{"root macOS installs standalone under its own prefix", "darwin", true, []string{"-s", "--", "--method", "standalone", "--prefix", "/opt/alpamon/code-server"}},
 		{"non-root macOS keeps the script defaults", "darwin", false, nil},
 		{"root Linux keeps the package manager install", "linux", true, nil},
 	}
