@@ -4,7 +4,6 @@ package runner
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"os/user"
@@ -58,34 +57,21 @@ func ensureTunnelSocketDir(daemon *syscall.Credential) (string, error) {
 		return "", fmt.Errorf("failed to create tunnel socket directory: %w", err)
 	}
 
-	var daemonUID, daemonGID int
-	if daemon != nil {
-		uid, gid := uint64(daemon.Uid), uint64(daemon.Gid)
-		if uid > math.MaxInt || gid > math.MaxInt { // macOS nobody (4294967294) fits only a 64-bit int
-			return "", fmt.Errorf("daemon uid/gid exceeds int range: uid=%d, gid=%d", uid, gid)
-		}
-		daemonUID, daemonGID = int(uid), int(gid)
-	}
-
-	allowed, chownUID, chownGID := tunnelSocketDirPolicy(daemon != nil, uint32(os.Geteuid()), daemonUID, daemonGID)
-	if err := secureTunnelSocketDir(dir, chownUID, chownGID, allowed...); err != nil {
+	allowed, owner := tunnelSocketDirPolicy(daemon, uint32(os.Geteuid()))
+	if err := secureTunnelSocketDir(dir, owner, allowed...); err != nil {
 		return "", err
 	}
 	return dir, nil
 }
 
-// spawnTunnelDaemon starts the tunnel daemon on socketPath in its own process group,
-// as daemon when it is non-nil and as the current user otherwise.
+// spawnTunnelDaemon starts tunnelDaemonCommand for the running Alpamon binary.
 func spawnTunnelDaemon(socketPath string, daemon *syscall.Credential) (*exec.Cmd, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	cmd := exec.Command(executable, "tunnel-daemon", socketPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: daemon}
-	cmd.Stderr = os.Stderr
-
+	cmd := tunnelDaemonCommand(executable, socketPath, daemon)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start tunnel daemon: %w", err)
 	}
@@ -97,4 +83,13 @@ func spawnTunnelDaemon(socketPath string, daemon *syscall.Credential) (*exec.Cmd
 	}
 
 	return cmd, nil
+}
+
+// tunnelDaemonCommand runs the tunnel daemon on socketPath in its own process group,
+// as daemon when it is non-nil and as the current user otherwise.
+func tunnelDaemonCommand(executable, socketPath string, daemon *syscall.Credential) *exec.Cmd {
+	cmd := exec.Command(executable, "tunnel-daemon", socketPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: daemon}
+	cmd.Stderr = os.Stderr
+	return cmd
 }

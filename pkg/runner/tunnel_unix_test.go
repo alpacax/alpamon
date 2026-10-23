@@ -4,11 +4,9 @@ package runner
 
 import (
 	"os"
-	"os/exec"
 	"os/user"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 	"testing"
 
@@ -76,6 +74,8 @@ func TestParseUserCredentials(t *testing.T) {
 		{"negative uid", "-2", "0", 0, 0, "invalid uid"},
 		{"uid past uint32 must not wrap to root", "4294967296", "0", 0, 0, "invalid uid"},
 		{"non-numeric gid", "0", "abc", 0, 0, "invalid gid"},
+		{"negative gid", "0", "-2", 0, 0, "invalid gid"},
+		{"gid past uint32 must not wrap to root", "0", "4294967296", 0, 0, "invalid gid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,15 +90,6 @@ func TestParseUserCredentials(t *testing.T) {
 			assert.Equal(t, tc.wantGID, gid)
 		})
 	}
-}
-
-func runWithCredential(t *testing.T, cred *syscall.Credential, name string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: cred}
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(out))
 }
 
 func TestTunnelDaemonCredential_RootChildRunsAsNobodyWithoutSupplementaryGroups(t *testing.T) {
@@ -116,5 +107,25 @@ func TestTunnelDaemonCredential_RootChildRunsAsNobodyWithoutSupplementaryGroups(
 	assert.Equal(t, strconv.FormatUint(uint64(wantGID), 10), gotGID)
 	if runtime.GOOS == "linux" { // macOS id -G mixes in directory-service memberships, so only the kernel view is checked
 		assert.Equal(t, "Groups:", runWithCredential(t, cred, "grep", "^Groups:", "/proc/self/status"))
+	}
+}
+
+func TestTunnelDaemonCommand_CarriesTheDaemonCredential(t *testing.T) {
+	cases := []struct {
+		name   string
+		daemon *syscall.Credential
+	}{
+		{"root demotes to the daemon credential", &syscall.Credential{Uid: 65534, Gid: 65534}},
+		{"non-root keeps the current user", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := tunnelDaemonCommand("/usr/local/bin/alpamon", "/tmp/alpamon-tunnels/t.sock", tc.daemon)
+
+			assert.Equal(t, []string{"/usr/local/bin/alpamon", "tunnel-daemon", "/tmp/alpamon-tunnels/t.sock"}, cmd.Args)
+			require.NotNil(t, cmd.SysProcAttr)
+			assert.Same(t, tc.daemon, cmd.SysProcAttr.Credential)
+			assert.True(t, cmd.SysProcAttr.Setpgid)
+		})
 	}
 }

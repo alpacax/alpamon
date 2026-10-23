@@ -4,60 +4,132 @@ package runner
 
 import (
 	"os"
-	"os/user"
-	"runtime"
+	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestPrimaryGroupName_ReturnsTheUsersPrimaryGroup(t *testing.T) {
-	current, err := user.Current()
-	require.NoError(t, err)
-	want, err := user.LookupGroupId(current.Gid)
-	require.NoError(t, err)
+func TestCodeServerSysProcAttr_CarriesTheResolvedCredential(t *testing.T) {
+	cred := &syscall.Credential{Uid: 501, Gid: 20}
+	shared := &syscall.SysProcAttr{Credential: cred}
 
-	got, err := primaryGroupName(current.Username)
+	attr := codeServerSysProcAttr(shared)
 
-	require.NoError(t, err)
-	assert.Equal(t, want.Name, got)
+	assert.Same(t, cred, attr.Credential)
+	assert.True(t, attr.Setpgid)
+	assert.NotSame(t, shared, attr)
+	assert.False(t, shared.Setpgid, "the manager's shared SysProcAttr must stay untouched")
 }
 
-func TestPrimaryGroupName_RejectsUnknownUser(t *testing.T) {
-	_, err := primaryGroupName("alpamon-no-such-user")
+func TestCodeServerSysProcAttr_NilKeepsTheCurrentUser(t *testing.T) {
+	attr := codeServerSysProcAttr(nil)
 
-	assert.ErrorContains(t, err, "there is no corresponding alpamon-no-such-user username")
+	assert.Nil(t, attr.Credential)
+	assert.True(t, attr.Setpgid)
 }
 
-// sudoInvokingUser is the account sudo was run from, standing in for the Alpacon session user.
-func sudoInvokingUser(t *testing.T) *user.User {
+// makeOpenTree builds a tree whose modes let group and other write, like the macOS release tarball.
+func makeOpenTree(t *testing.T) (root, dir, file, link string) {
 	t.Helper()
-	if runtime.GOOS != "darwin" || os.Getuid() != 0 {
-		t.Skip("macOS root behavior")
-	}
-	name := os.Getenv("SUDO_USER")
-	if name == "" || name == "root" {
-		t.Skip("run under sudo from a regular account")
-	}
-	usr, err := user.Lookup(name)
-	require.NoError(t, err)
-	return usr
+	root = filepath.Join(t.TempDir(), "code-server")
+	dir = filepath.Join(root, "bin")
+	file = filepath.Join(dir, "code-server")
+	link = filepath.Join(root, "current")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.WriteFile(file, nil, 0644))
+	require.NoError(t, os.Symlink(file, link))
+	require.NoError(t, os.Chmod(file, 0777))
+	require.NoError(t, os.Chmod(dir, 0777))
+	require.NoError(t, os.Chmod(root, 0775))
+	return root, dir, file, link
 }
 
-func TestEditorDarwinRootDemotesToPrimaryGroup(t *testing.T) {
-	usr := sudoInvokingUser(t)
-	primary, err := user.LookupGroupId(usr.Gid)
-	require.NoError(t, err)
+func TestSecureCodeServerTree_DropsGroupAndOtherWrite(t *testing.T) {
+	root, dir, file, link := makeOpenTree(t)
 
-	id, err := lookupUserForCodeServer(usr.Username, "alpacon") // a Linux group the Mac does not have
+	err := secureCodeServerTree(root, os.Getuid(), os.Getgid())
 
 	require.NoError(t, err)
-	assert.Equal(t, primary.Name, id.groupname)
-	assert.Equal(t, usr.HomeDir, id.homeDir)
-	require.NotNil(t, id.procAttr, "a root Alpamon must not start code-server as root")
-	gotUID := runWithCredential(t, id.procAttr.Credential, "id", "-u")
-	gotGID := runWithCredential(t, id.procAttr.Credential, "id", "-g")
-	assert.Equal(t, usr.Uid, gotUID)
-	assert.Equal(t, usr.Gid, gotGID)
+	for path, want := range map[string]os.FileMode{root: 0755, dir: 0755, file: 0755} {
+		fi, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, want, fi.Mode().Perm(), path)
+	}
+	fi, err := os.Lstat(link)
+	require.NoError(t, err)
+	assert.Equal(t, os.ModeSymlink, fi.Mode().Type())
+}
+
+func TestSecureCodeServerTree_GivesTheTreeToRootWhenRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chown to another uid needs root")
+	}
+	root, dir, file, link := makeOpenTree(t)
+	for _, p := range []string{root, dir, file, link} {
+		require.NoError(t, os.Lchown(p, 501, 20)) // the owner macOS tar restores from the archive
+	}
+
+	err := secureCodeServerTree(root, 0, 0)
+
+	require.NoError(t, err)
+	for _, p := range []string{root, dir, file, link} {
+		assert.Equal(t, [2]uint32{0, 0}, lstatOwner(t, p), p)
+	}
+}
+
+func lstatOwner(t *testing.T, path string) [2]uint32 {
+	t.Helper()
+	fi, err := os.Lstat(path)
+	require.NoError(t, err)
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	return [2]uint32{st.Uid, st.Gid}
+}
+
+func ownersOfTempDirs() []uint32 {
+	return []uint32{0, uint32(os.Geteuid())} // the temp dir chain mixes root and the test user
+}
+
+func TestVerifyOwnedPath_AcceptsATreeOnlyTheOwnersCanChange(t *testing.T) {
+	root, _, file, _ := makeOpenTree(t)
+	require.NoError(t, secureCodeServerTree(root, os.Getuid(), os.Getgid()))
+
+	err := verifyOwnedPath(file, ownersOfTempDirs()...)
+
+	assert.NoError(t, err)
+}
+
+func TestVerifyOwnedPath_RefusesAGroupWritableParent(t *testing.T) {
+	root, dir, file, _ := makeOpenTree(t)
+	require.NoError(t, secureCodeServerTree(root, os.Getuid(), os.Getgid()))
+	require.NoError(t, os.Chmod(dir, 0775))
+
+	err := verifyOwnedPath(file, ownersOfTempDirs()...)
+
+	assert.ErrorContains(t, err, "writable by group or other")
+}
+
+func TestVerifyOwnedPath_RefusesAFileOwnedByAnotherAccount(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root owns the temp files, so they are not foreign")
+	}
+	root, _, file, _ := makeOpenTree(t)
+	require.NoError(t, secureCodeServerTree(root, os.Getuid(), os.Getgid()))
+
+	err := verifyOwnedPath(file, 0)
+
+	assert.ErrorContains(t, err, "which is not allowed")
+}
+
+func TestVerifyOwnedPath_ChecksTheSymlinkTarget(t *testing.T) {
+	root, dir, _, link := makeOpenTree(t)
+	require.NoError(t, secureCodeServerTree(root, os.Getuid(), os.Getgid()))
+	require.NoError(t, os.Chmod(dir, 0777)) // the link's own dir stays safe; its target's does not
+
+	err := verifyOwnedPath(link, ownersOfTempDirs()...)
+
+	assert.ErrorContains(t, err, "writable by group or other")
 }
