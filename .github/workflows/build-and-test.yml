@@ -447,6 +447,14 @@ jobs:
       - name: Run Tests
         run: go test -v ./... -p 1
 
+      # The demotion tests skip without root; sudo sets SUDO_USER, which stands in for the session user.
+      - name: Run root-only demotion tests
+        run: |
+          sudo env "PATH=$PATH" "GOPATH=$(go env GOPATH)" "GOMODCACHE=$(go env GOMODCACHE)" \
+            "GOCACHE=$RUNNER_TEMP/gocache-root" \
+            go test -v ./pkg/runner -p 1 -count=1 \
+            -run 'TestEditorDarwinRoot|TestTunnelDaemonCredential_Root|WhenRoot'
+
   # The aggregate check. Every job above is matrixed or platform-specific, so
   # each reports under a name carrying its distro, and those names change
   # whenever the matrix does. A name that moves cannot be a required status
