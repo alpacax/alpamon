@@ -14,7 +14,8 @@ import (
 // TunnelHandler handles tunnel connection commands (opentunnel, closetunnel)
 type TunnelHandler struct {
 	*common.BaseHandler
-	demote func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error)
+	demote         func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error)
+	checkResources func() error
 }
 
 // NewTunnelHandler creates a new tunnel handler
@@ -28,16 +29,17 @@ func NewTunnelHandler(cmdExecutor common.CommandExecutor) *TunnelHandler {
 			},
 			cmdExecutor,
 		),
-		demote: utils.Demote,
+		demote:         utils.Demote,
+		checkResources: runner.CheckSystemResources,
 	}
 	return h
 }
 
 // Execute runs the tunnel command
-func (h *TunnelHandler) Execute(_ context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+func (h *TunnelHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
 	switch cmd {
 	case common.OpenTunnel.String():
-		return h.handleOpenTunnel(args)
+		return h.handleOpenTunnel(ctx, args)
 	case common.CloseTunnel.String():
 		return h.handleCloseTunnel(args)
 	default:
@@ -126,12 +128,12 @@ func (h *TunnelHandler) validateCloseTunnel(args *common.CommandArgs) error {
 }
 
 // handleOpenTunnel opens a new tunnel connection
-func (h *TunnelHandler) handleOpenTunnel(args *common.CommandArgs) (int, string, error) {
+func (h *TunnelHandler) handleOpenTunnel(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	if err := h.Validate(common.OpenTunnel.String(), args); err != nil {
 		return 1, fmt.Sprintf("opentunnel: %s", err.Error()), nil
 	}
 
-	if err := runner.CheckSystemResources(); err != nil {
+	if err := h.checkResources(); err != nil {
 		log.Warn().Err(err).Str("sessionID", args.SessionID).Msg("Tunnel creation rejected due to high resource usage.")
 		return 1, fmt.Sprintf("opentunnel: %s", err.Error()), nil
 	}
@@ -160,7 +162,13 @@ func (h *TunnelHandler) handleOpenTunnel(args *common.CommandArgs) (int, string,
 		return 1, fmt.Sprintf("opentunnel: tunnel with session ID %s already exists", args.SessionID), nil
 	}
 
-	go tunnelClient.RunTunnelBackground()
+	// Open before replying so a tunnel that cannot open fails the command.
+	if err := tunnelClient.Open(ctx); err != nil {
+		log.Error().Err(err).Str("sessionID", args.SessionID).Msg("Tunnel open failed.")
+		return 1, fmt.Sprintf("opentunnel: %s", err.Error()), nil
+	}
+
+	go tunnelClient.Serve()
 
 	return 0, formatOpenTunnelMessage(clientType, args), nil
 }
