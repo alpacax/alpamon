@@ -3,11 +3,13 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -285,4 +287,209 @@ func BenchmarkTunnelWrite(b *testing.B) {
 	}
 	b.StopTimer()
 	b.ReportMetric(float64(writes.Load())/float64(b.N), "sockwrites/op")
+}
+
+// registeredTunnel builds a CLI tunnel aimed at the configured server and
+// registers it, as handleOpenTunnel does before Open.
+func registeredTunnel(t *testing.T, sessionID string, startRelay func() error) *TunnelClient {
+	t.Helper()
+	tc := NewTunnelClient(sessionID, ClientTypeCLI, 22, "", "", "/ws/tunnel/"+sessionID+"/")
+	tc.startRelay = startRelay
+	require.True(t, RegisterTunnel(sessionID, tc))
+	t.Cleanup(func() { _ = CloseTunnel(sessionID) })
+	return tc
+}
+
+func relayMustNotStart(t *testing.T) func() error {
+	return func() error {
+		t.Error("the relay must not start")
+		return nil
+	}
+}
+
+// newHeldHandshakeServer never answers the upgrade; reached closes once a
+// request has arrived, so the dial is known to be waiting on the handshake.
+func newHeldHandshakeServer(t *testing.T) (srv *httptest.Server, reached <-chan struct{}) {
+	t.Helper()
+	arrived := make(chan struct{})
+	var once sync.Once
+	release := make(chan struct{})
+	srv = httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(arrived) })
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+	return srv, arrived
+}
+
+func waitFor(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func TestTunnelOpen_ConnectsAndStartsTheRelay(t *testing.T) {
+	srv, _ := newSocketTargetServer(t)
+	setServerURL(t, srv.URL)
+	relayStarted := false
+	tc := registeredTunnel(t, "open-ok", func() error {
+		relayStarted = true
+		return nil
+	})
+
+	err := tc.Open(t.Context())
+
+	require.NoError(t, err)
+	assert.True(t, relayStarted)
+	assert.NotNil(t, tc.session)
+	got, registered := GetActiveTunnel("open-ok")
+	assert.True(t, registered)
+	assert.Same(t, tc, got)
+}
+
+func TestTunnelOpen_ReportsARelayThatCannotStartAndUnregisters(t *testing.T) {
+	srv, _ := newSocketTargetServer(t)
+	setServerURL(t, srv.URL)
+	tc := registeredTunnel(t, "relay-fails", func() error {
+		return errors.New("tunnel daemon not ready")
+	})
+
+	err := tc.Open(t.Context())
+
+	require.EqualError(t, err, "failed to start tunnel relay: tunnel daemon not ready")
+	_, registered := GetActiveTunnel("relay-fails")
+	assert.False(t, registered)
+	assert.Error(t, tc.ctx.Err(), "a failed open must close the tunnel")
+}
+
+func TestTunnelOpen_ReportsTheStatusOfARefusedHandshake(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+	setServerURL(t, srv.URL)
+	tc := registeredTunnel(t, "handshake-refused", relayMustNotStart(t))
+
+	err := tc.Open(t.Context())
+
+	require.EqualError(t, err, "failed to connect to tunnel server: websocket: bad handshake (HTTP 403)")
+	var handshake *handshakeError
+	require.ErrorAs(t, err, &handshake)
+	assert.Equal(t, http.StatusForbidden, handshake.StatusCode)
+	_, registered := GetActiveTunnel("handshake-refused")
+	assert.False(t, registered)
+}
+
+func TestTunnelOpen_IsCanceledByACloseTunnelDuringTheHandshake(t *testing.T) {
+	srv, reached := newHeldHandshakeServer(t)
+	setServerURL(t, srv.URL)
+	tc := registeredTunnel(t, "closed-while-dialing", relayMustNotStart(t))
+	opened := make(chan error, 1)
+	go func() { opened <- tc.Open(t.Context()) }()
+	waitFor(t, reached, "the dial to reach the handshake")
+
+	require.NoError(t, CloseTunnel("closed-while-dialing"))
+
+	select {
+	case err := <-opened:
+		require.ErrorIs(t, err, errTunnelClosedWhileOpening)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Open kept waiting on the handshake after closetunnel")
+	}
+	_, registered := GetActiveTunnel("closed-while-dialing")
+	assert.False(t, registered)
+}
+
+func TestTunnelOpen_StopsTheHandshakeWhenTheCommandContextEnds(t *testing.T) {
+	srv, _ := newHeldHandshakeServer(t)
+	setServerURL(t, srv.URL)
+	tc := registeredTunnel(t, "command-deadline", relayMustNotStart(t))
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+
+	err := tc.Open(ctx)
+
+	require.Error(t, err) // gorilla's own deadline may report it first as an i/o timeout
+	assert.Less(t, time.Since(start), 5*time.Second)
+	_, registered := GetActiveTunnel("command-deadline")
+	assert.False(t, registered)
+}
+
+func TestTunnelOpen_DialsNothingAfterTheTunnelWasClosed(t *testing.T) {
+	srv, hits := newSocketTargetServer(t)
+	setServerURL(t, srv.URL)
+	tc := registeredTunnel(t, "closed-before-open", relayMustNotStart(t))
+	tc.Close()
+
+	err := tc.Open(t.Context())
+
+	require.ErrorIs(t, err, errTunnelClosedWhileOpening)
+	assert.Empty(t, hits)
+	assert.Nil(t, tc.session)
+}
+
+func TestTunnelOpen_ReportsACloseThatArrivesWhileTheRelayStarts(t *testing.T) {
+	srv, _ := newSocketTargetServer(t)
+	setServerURL(t, srv.URL)
+	tc := registeredTunnel(t, "closed-during-relay", func() error {
+		require.NoError(t, CloseTunnel("closed-during-relay"))
+		return nil
+	})
+
+	err := tc.Open(t.Context())
+
+	require.ErrorIs(t, err, errTunnelClosedWhileOpening)
+	_, registered := GetActiveTunnel("closed-during-relay")
+	assert.False(t, registered)
+}
+
+func TestTunnelServe_UnregistersWhenTheServerEndsTheSession(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+	}))
+	t.Cleanup(srv.Close)
+	setServerURL(t, srv.URL)
+	tc := registeredTunnel(t, "server-hangs-up", func() error { return nil })
+	require.NoError(t, tc.Open(t.Context()))
+	served := make(chan struct{})
+
+	go func() {
+		tc.Serve()
+		close(served)
+	}()
+
+	waitFor(t, served, "Serve to return after the server closed the session")
+	_, registered := GetActiveTunnel("server-hangs-up")
+	assert.False(t, registered)
+	assert.Error(t, tc.ctx.Err())
+}
+
+func TestTunnelUnregisterAndClose_LeavesANewerTunnelUnderTheSameID(t *testing.T) {
+	stale := NewTunnelClient("reused-id", ClientTypeCLI, 22, "", "", "/ws/tunnel/reused-id/")
+	newer := NewTunnelClient("reused-id", ClientTypeCLI, 22, "", "", "/ws/tunnel/reused-id/")
+	require.True(t, RegisterTunnel("reused-id", newer))
+	t.Cleanup(func() { _ = CloseTunnel("reused-id") })
+
+	stale.unregisterAndClose()
+
+	got, registered := GetActiveTunnel("reused-id")
+	assert.True(t, registered)
+	assert.Same(t, newer, got)
+	assert.Error(t, stale.ctx.Err())
+	assert.NoError(t, newer.ctx.Err())
 }

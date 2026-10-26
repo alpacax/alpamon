@@ -2,10 +2,14 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"testing"
 
+	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -306,4 +310,80 @@ func TestTunnelHandler_DarwinEditorSkipsGroupValidation(t *testing.T) {
 			require.NoError(t, h.Validate("opentunnel", args))
 		})
 	}
+}
+
+// setServerURL makes srv the configured Alpacon server, which is the only
+// host a tunnel URL may name.
+func setServerURL(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	prev := config.GlobalSettings.ServerURL
+	config.GlobalSettings.ServerURL = srv.URL
+	t.Cleanup(func() { config.GlobalSettings.ServerURL = prev })
+}
+
+func TestOpenTunnel_ReportsATunnelServerThatRefusesTheDial(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer srv.Close()
+	setServerURL(t, srv)
+	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+	h.checkResources = func() error { return nil }
+	args := &common.CommandArgs{
+		SessionID:  "refused-dial",
+		URL:        "/ws/tunnel/refused-dial/",
+		ClientType: runner.ClientTypeCLI,
+		TargetPort: 8080,
+	}
+
+	exitCode, result, err := h.Execute(t.Context(), common.OpenTunnel.String(), args)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, "opentunnel: failed to connect to tunnel server: websocket: bad handshake (HTTP 403)", result)
+	_, registered := runner.GetActiveTunnel(args.SessionID)
+	assert.False(t, registered)
+}
+
+func TestOpenTunnel_ReportsAnEditorWhoseCodeServerCannotBePrepared(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux resolves the editor user when the code-server manager is created")
+	}
+	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+	h.checkResources = func() error { return nil }
+	h.demote = func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error) { return nil, nil }
+	args := &common.CommandArgs{
+		SessionID:  "editor-no-user",
+		URL:        "/ws/tunnel/editor-no-user/",
+		ClientType: runner.ClientTypeEditor,
+		Username:   "alpamon-test-no-such-user",
+		Groupname:  "alpamon-test-no-such-group",
+	}
+
+	exitCode, result, err := h.Execute(t.Context(), common.OpenTunnel.String(), args)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Contains(t, result, "opentunnel: failed to create code-server manager: ")
+	_, registered := runner.GetActiveTunnel(args.SessionID)
+	assert.False(t, registered)
+}
+
+func TestOpenTunnel_RefusesWhenResourcesAreExhausted(t *testing.T) {
+	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+	h.checkResources = func() error { return errors.New("CPU usage 100.0% exceeds limit 90%") }
+	args := &common.CommandArgs{
+		SessionID:  "busy-host",
+		URL:        "/ws/tunnel/busy-host/",
+		ClientType: runner.ClientTypeCLI,
+		TargetPort: 8080,
+	}
+
+	exitCode, result, err := h.Execute(t.Context(), common.OpenTunnel.String(), args)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, "opentunnel: CPU usage 100.0% exceeds limit 90%", result)
+	_, registered := runner.GetActiveTunnel(args.SessionID)
+	assert.False(t, registered)
 }
