@@ -314,17 +314,9 @@ func (m *CodeServerManager) doStart() error {
 		return err
 	}
 
-	// Check if code-server is installed (long operation — no lock held)
-	if !isCodeServerInstalled() {
-		log.Info().Msg("code-server not found, installing...")
-		if err := installCodeServer(m.ctx); err != nil {
-			return fmt.Errorf("code-server installation failed: %w", err)
-		}
-
-		if !isCodeServerInstalled() {
-			return fmt.Errorf("code-server installation completed but binary not found")
-		}
-		log.Info().Msg("code-server installed successfully.")
+	// Install if missing (long operation—m.mu is not held)
+	if err := ensureCodeServerInstalled(m.ctx); err != nil {
+		return err
 	}
 
 	m.mu.Lock()
@@ -586,6 +578,28 @@ func codeServerInstallArgs(goos string, isRoot bool) []string {
 	return nil
 }
 
+// codeServerInstallMu serializes installs across editor sessions, which share one install dir.
+var codeServerInstallMu sync.Mutex
+
+func ensureCodeServerInstalled(ctx context.Context) error {
+	codeServerInstallMu.Lock()
+	defer codeServerInstallMu.Unlock()
+
+	if isCodeServerInstalled() {
+		return nil
+	}
+	log.Info().Msg("code-server not found, installing...")
+	if err := installCodeServer(ctx); err != nil {
+		return fmt.Errorf("code-server installation failed: %w", err)
+	}
+
+	if !isCodeServerInstalled() {
+		return fmt.Errorf("code-server installation completed but binary not found")
+	}
+	log.Info().Msg("code-server installed successfully.")
+	return nil
+}
+
 // installCodeServer installs code-server using the official install script.
 func installCodeServer(parentCtx context.Context) error {
 	cfg := GetCodeServerConfig()
@@ -622,19 +636,17 @@ func installCodeServer(parentCtx context.Context) error {
 	}
 	cmd.Env = append(cmd.Env, fmt.Sprintf("HOME=%s", homeDir))
 
-	if err := cmd.Run(); err != nil {
-		log.Error().Err(err).Msg("code-server install script failed.")
-		return fmt.Errorf("install script failed: %w", err)
-	}
-
-	if runtime.GOOS == "darwin" && os.Getuid() == 0 {
-		// macOS tar run as root restores the archive's owner (501:20), handing the tree to the first account.
-		if err := secureCodeServerTree(darwinRootCodeServerPrefix, 0, 0); err != nil {
-			return fmt.Errorf("failed to secure code-server install: %w", err)
+	run := func() error {
+		if err := cmd.Run(); err != nil {
+			log.Error().Err(err).Msg("code-server install script failed.")
+			return fmt.Errorf("install script failed: %w", err)
 		}
+		return nil
 	}
-
-	return nil
+	if runtime.GOOS == "darwin" && os.Getuid() == 0 {
+		return installRootOwnedCodeServer(darwinRootCodeServerPrefix, 0, 0, run)
+	}
+	return run()
 }
 
 func downloadInstallScript(url string) ([]byte, error) {

@@ -10,6 +10,6 @@ func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataD
 	return nil, fmt.Errorf("code-server is not supported on Windows")
 }
 
-func secureCodeServerTree(root string, uid, gid int) error {
+func installRootOwnedCodeServer(prefix string, uid, gid int, install func() error) error {
 	return fmt.Errorf("code-server is not supported on Windows")
 }

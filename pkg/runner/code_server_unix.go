@@ -4,6 +4,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -62,6 +63,65 @@ func codeServerSysProcAttr(procAttr *syscall.SysProcAttr) *syscall.SysProcAttr {
 	return &attr
 }
 
+// installRootOwnedCodeServer runs install into prefix while only uid can enter it, gives the tree
+// to uid:gid, then opens prefix to every account; on failure it removes prefix so the next start retries.
+func installRootOwnedCodeServer(prefix string, uid, gid int, install func() error) error {
+	if err := lockCodeServerPrefix(prefix, uid, gid); err != nil {
+		return fmt.Errorf("failed to prepare code-server install dir: %w", err)
+	}
+	err := install()
+	if err == nil {
+		// macOS tar run as root restores the archive's owner (501:20), handing the tree to the first account.
+		if err = secureCodeServerTree(prefix, uid, gid); err != nil {
+			err = fmt.Errorf("failed to secure code-server install: %w", err)
+		}
+	}
+	if err == nil {
+		if err = os.Chmod(prefix, 0755); err != nil { // demoted users run code-server from it
+			err = fmt.Errorf("failed to open code-server install dir: %w", err)
+		}
+	}
+	if err != nil {
+		if rmErr := os.RemoveAll(prefix); rmErr != nil {
+			log.Error().Err(rmErr).Msgf("failed to remove the incomplete code-server install at %s.", prefix)
+		}
+		return err
+	}
+	return nil
+}
+
+// lockCodeServerPrefix makes prefix a dir only uid can enter, below parents only root or uid can change.
+func lockCodeServerPrefix(prefix string, uid, gid int) error {
+	parent := filepath.Dir(prefix)
+	if _, err := os.Stat(parent); errors.Is(err, fs.ErrNotExist) {
+		if err := os.MkdirAll(parent, 0755); err != nil {
+			return err
+		}
+		if err := os.Chmod(parent, 0755); err != nil { // umask must not shut demoted users out
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	if err := verifyOwnedPath(parent, 0, uint32(uid)); err != nil {
+		return err
+	}
+	if err := os.Mkdir(prefix, 0700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(prefix)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", prefix)
+	}
+	if err := os.Lchown(prefix, uid, gid); err != nil {
+		return err
+	}
+	return os.Chmod(prefix, 0700)
+}
+
 // secureCodeServerTree gives every entry under root to uid:gid and drops group and other write.
 // Each dir is secured before its entries, so no other account can swap one mid-walk.
 func secureCodeServerTree(root string, uid, gid int) error {
@@ -87,7 +147,7 @@ func secureCodeServerTree(root string, uid, gid int) error {
 }
 
 // verifyOwnedPath refuses path when it, its symlink target, or a dir above either is owned outside
-// allowedOwners or writable by group or other; a sticky dir may be world-writable.
+// allowedOwners or writable by group or other (sticky dirs excepted); files path loads go unchecked.
 func verifyOwnedPath(path string, allowedOwners ...uint32) error {
 	for _, p := range []string{filepath.Dir(path), path} {
 		resolved, err := filepath.EvalSymlinks(p)
