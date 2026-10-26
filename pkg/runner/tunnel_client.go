@@ -212,9 +212,8 @@ func (tc *TunnelClient) Serve() {
 }
 
 func (tc *TunnelClient) isRegistered() bool {
-	activeTunnelsMu.RLock()
-	defer activeTunnelsMu.RUnlock()
-	return activeTunnels[tc.sessionID] == tc
+	got, _ := GetActiveTunnel(tc.sessionID)
+	return got == tc
 }
 
 // unregisterAndClose closes the tunnel and unregisters it only while it is the
@@ -238,7 +237,7 @@ func (tc *TunnelClient) initCodeServerManager() error {
 	tc.connMu.Lock()
 	defer tc.connMu.Unlock()
 	if tc.closed {
-		mgr.cancel()
+		_ = mgr.Stop()
 		return ErrTunnelClosedWhileOpening
 	}
 	tc.codeServerMgr = mgr
@@ -337,8 +336,8 @@ func (tc *TunnelClient) connect(ctx context.Context) error {
 	// gorilla reads the handshake response without watching ctx, so a
 	// canceled dial would otherwise wait out HandshakeTimeout.
 	unwatch := func() bool { return true }
-	dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+	dialer.NetDialContext = func(dctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := (&net.Dialer{}).DialContext(dctx, network, addr)
 		if err != nil {
 			return nil, err
 		}
