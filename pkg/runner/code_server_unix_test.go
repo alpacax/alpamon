@@ -149,7 +149,7 @@ func TestVerifyOwnedPath_ChecksTheSymlinkTarget(t *testing.T) {
 }
 
 func TestLockCodeServerPrefix_CreatesAnOwnerOnlyDir(t *testing.T) {
-	prefix := filepath.Join(t.TempDir(), "alpamon", "code-server")
+	prefix := filepath.Join(t.TempDir(), "opt", "alpamon", "code-server") // /opt is missing on some Macs
 
 	oldMask := syscall.Umask(0077) // the parent must still let demoted users through
 	err := lockCodeServerPrefix(prefix, os.Getuid(), os.Getgid())
@@ -159,9 +159,11 @@ func TestLockCodeServerPrefix_CreatesAnOwnerOnlyDir(t *testing.T) {
 	fi, err := os.Stat(prefix)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0700), fi.Mode().Perm())
-	parent, err := os.Stat(filepath.Dir(prefix))
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0755), parent.Mode().Perm())
+	for _, dir := range []string{filepath.Dir(prefix), filepath.Dir(filepath.Dir(prefix))} {
+		fi, err := os.Stat(dir)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0755), fi.Mode().Perm(), dir)
+	}
 }
 
 func TestLockCodeServerPrefix_ClosesAnExistingInstall(t *testing.T) {

@@ -93,14 +93,7 @@ func installRootOwnedCodeServer(prefix string, uid, gid int, install func() erro
 // lockCodeServerPrefix makes prefix a dir only uid can enter, below parents only root or uid can change.
 func lockCodeServerPrefix(prefix string, uid, gid int) error {
 	parent := filepath.Dir(prefix)
-	if _, err := os.Stat(parent); errors.Is(err, fs.ErrNotExist) {
-		if err := os.MkdirAll(parent, 0755); err != nil {
-			return err
-		}
-		if err := os.Chmod(parent, 0755); err != nil { // umask must not shut demoted users out
-			return err
-		}
-	} else if err != nil {
+	if err := mkdirAllOpen(parent); err != nil {
 		return err
 	}
 	if err := verifyOwnedPath(parent, 0, uint32(uid)); err != nil {
@@ -120,6 +113,23 @@ func lockCodeServerPrefix(prefix string, uid, gid int) error {
 		return err
 	}
 	return os.Chmod(prefix, 0700)
+}
+
+// mkdirAllOpen is MkdirAll that sets 0755 on every dir it creates, whatever the umask.
+func mkdirAllOpen(dir string) error {
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err := mkdirAllOpen(filepath.Dir(dir)); err != nil {
+		return err
+	}
+	if err := os.Mkdir(dir, 0755); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	return os.Chmod(dir, 0755) // umask must not shut demoted users out
 }
 
 // secureCodeServerTree gives every entry under root to uid:gid and drops group and other write.
