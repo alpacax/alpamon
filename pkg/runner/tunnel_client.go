@@ -186,7 +186,7 @@ func (tc *TunnelClient) open(ctx context.Context) error {
 
 	tc.connMu.Lock()
 	defer tc.connMu.Unlock()
-	if tc.closed {
+	if tc.closed || !tc.isRegistered() { // CloseTunnel unregisters before Close sets closed
 		return errTunnelClosedWhileOpening
 	}
 	if err := ctx.Err(); err != nil {
@@ -201,6 +201,12 @@ func (tc *TunnelClient) Serve() {
 	defer tc.unregisterAndClose()
 	tc.handleStreams()
 	log.Info().Msgf("Tunnel session %s ended.", tc.sessionID)
+}
+
+func (tc *TunnelClient) isRegistered() bool {
+	activeTunnelsMu.RLock()
+	defer activeTunnelsMu.RUnlock()
+	return activeTunnels[tc.sessionID] == tc
 }
 
 // unregisterAndClose closes the tunnel and unregisters it only while it is the

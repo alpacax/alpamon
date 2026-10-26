@@ -451,6 +451,22 @@ func TestTunnelOpen_ReportsACloseThatArrivesWhileTheRelayStarts(t *testing.T) {
 	assert.False(t, registered)
 }
 
+func TestTunnelOpen_ReportsATunnelUnregisteredButNotYetClosed(t *testing.T) {
+	srv, _ := newSocketTargetServer(t)
+	setServerURL(t, srv.URL)
+	tc := registeredTunnel(t, "unregistered-during-relay", func() error {
+		activeTunnelsMu.Lock() // CloseTunnel's delete, before its Close sets closed
+		delete(activeTunnels, "unregistered-during-relay")
+		activeTunnelsMu.Unlock()
+		return nil
+	})
+
+	err := tc.Open(t.Context())
+
+	require.ErrorIs(t, err, errTunnelClosedWhileOpening)
+	assert.Error(t, tc.ctx.Err(), "a failed open must close the tunnel")
+}
+
 func TestTunnelOpen_ReportsACommandContextThatEndsWhileTheRelayStarts(t *testing.T) {
 	srv, _ := newSocketTargetServer(t)
 	setServerURL(t, srv.URL)
