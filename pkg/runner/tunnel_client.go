@@ -156,8 +156,8 @@ func RegisterTunnel(sessionID string, tc *TunnelClient) bool {
 	return true
 }
 
-// Open connects a registered tunnel and starts its relay; the dial stops when
-// ctx ends or the tunnel closes. On failure the tunnel is unregistered and closed.
+// Open connects a registered tunnel and starts its relay, failing when ctx ends or
+// the tunnel closes before it finishes. On failure the tunnel is unregistered and closed.
 func (tc *TunnelClient) Open(ctx context.Context) error {
 	if err := tc.open(ctx); err != nil {
 		tc.unregisterAndClose()
@@ -188,6 +188,9 @@ func (tc *TunnelClient) open(ctx context.Context) error {
 	defer tc.connMu.Unlock()
 	if tc.closed {
 		return errTunnelClosedWhileOpening
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("tunnel open stopped: %w", err)
 	}
 	return nil
 }
