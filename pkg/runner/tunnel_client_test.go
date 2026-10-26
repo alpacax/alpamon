@@ -300,12 +300,9 @@ func registeredTunnel(t *testing.T, sessionID string, startRelay func() error) *
 	return tc
 }
 
-func relayMustNotStart(t *testing.T) func() error {
-	return func() error {
-		t.Error("the relay must not start")
-		return nil
-	}
-}
+var errRelayMustNotStart = errors.New("the relay must not start")
+
+func relayMustNotStart() error { return errRelayMustNotStart }
 
 // newHeldHandshakeServer never answers the upgrade; reached closes once a
 // request has arrived, so the dial is known to be waiting on the handshake.
@@ -377,7 +374,7 @@ func TestTunnelOpen_ReportsTheStatusOfARefusedHandshake(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	setServerURL(t, srv.URL)
-	tc := registeredTunnel(t, "handshake-refused", relayMustNotStart(t))
+	tc := registeredTunnel(t, "handshake-refused", relayMustNotStart)
 
 	err := tc.Open(t.Context())
 
@@ -392,7 +389,7 @@ func TestTunnelOpen_ReportsTheStatusOfARefusedHandshake(t *testing.T) {
 func TestTunnelOpen_IsCanceledByACloseTunnelDuringTheHandshake(t *testing.T) {
 	srv, reached := newHeldHandshakeServer(t)
 	setServerURL(t, srv.URL)
-	tc := registeredTunnel(t, "closed-while-dialing", relayMustNotStart(t))
+	tc := registeredTunnel(t, "closed-while-dialing", relayMustNotStart)
 	opened := make(chan error, 1)
 	go func() { opened <- tc.Open(t.Context()) }()
 	waitFor(t, reached, "the dial to reach the handshake")
@@ -412,7 +409,7 @@ func TestTunnelOpen_IsCanceledByACloseTunnelDuringTheHandshake(t *testing.T) {
 func TestTunnelOpen_StopsTheHandshakeWhenTheCommandContextEnds(t *testing.T) {
 	srv, _ := newHeldHandshakeServer(t)
 	setServerURL(t, srv.URL)
-	tc := registeredTunnel(t, "command-deadline", relayMustNotStart(t))
+	tc := registeredTunnel(t, "command-deadline", relayMustNotStart)
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -420,6 +417,7 @@ func TestTunnelOpen_StopsTheHandshakeWhenTheCommandContextEnds(t *testing.T) {
 	err := tc.Open(ctx)
 
 	require.Error(t, err) // gorilla's own deadline may report it first as an i/o timeout
+	assert.NotErrorIs(t, err, errRelayMustNotStart)
 	assert.Less(t, time.Since(start), 5*time.Second)
 	_, registered := GetActiveTunnel("command-deadline")
 	assert.False(t, registered)
@@ -428,7 +426,7 @@ func TestTunnelOpen_StopsTheHandshakeWhenTheCommandContextEnds(t *testing.T) {
 func TestTunnelOpen_DialsNothingAfterTheTunnelWasClosed(t *testing.T) {
 	srv, hits := newSocketTargetServer(t)
 	setServerURL(t, srv.URL)
-	tc := registeredTunnel(t, "closed-before-open", relayMustNotStart(t))
+	tc := registeredTunnel(t, "closed-before-open", relayMustNotStart)
 	tc.Close()
 
 	err := tc.Open(t.Context())
@@ -451,6 +449,23 @@ func TestTunnelOpen_ReportsACloseThatArrivesWhileTheRelayStarts(t *testing.T) {
 	require.ErrorIs(t, err, errTunnelClosedWhileOpening)
 	_, registered := GetActiveTunnel("closed-during-relay")
 	assert.False(t, registered)
+}
+
+func TestTunnelOpen_ReportsACommandContextThatEndsWhileTheRelayStarts(t *testing.T) {
+	srv, _ := newSocketTargetServer(t)
+	setServerURL(t, srv.URL)
+	ctx, cancel := context.WithCancel(t.Context())
+	tc := registeredTunnel(t, "canceled-during-relay", func() error {
+		cancel()
+		return nil
+	})
+
+	err := tc.Open(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+	_, registered := GetActiveTunnel("canceled-during-relay")
+	assert.False(t, registered)
+	assert.Error(t, tc.ctx.Err(), "a failed open must close the tunnel")
 }
 
 func TestTunnelServe_UnregistersWhenTheServerEndsTheSession(t *testing.T) {
