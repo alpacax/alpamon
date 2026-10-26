@@ -167,6 +167,13 @@ func (tc *TunnelClient) Open(ctx context.Context) error {
 }
 
 func (tc *TunnelClient) open(ctx context.Context) error {
+	tc.connMu.Lock()
+	closed := tc.closed // Close sets this before canceling tc.ctx, so it catches a close sooner
+	tc.connMu.Unlock()
+	if closed {
+		return errTunnelClosedWhileOpening
+	}
+
 	// For editor type, initialize code-server manager (startup triggered by health_check)
 	if tc.clientType == ClientTypeEditor {
 		if err := tc.initCodeServerManager(); err != nil {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -424,15 +425,23 @@ func TestTunnelOpen_StopsTheHandshakeWhenTheCommandContextEnds(t *testing.T) {
 }
 
 func TestTunnelOpen_DialsNothingAfterTheTunnelWasClosed(t *testing.T) {
-	srv, hits := newSocketTargetServer(t)
-	setServerURL(t, srv.URL)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	setServerURL(t, "http://"+ln.Addr().String())
 	tc := registeredTunnel(t, "closed-before-open", relayMustNotStart)
 	tc.Close()
 
-	err := tc.Open(t.Context())
+	err = tc.Open(t.Context())
 
 	require.ErrorIs(t, err, errTunnelClosedWhileOpening)
-	assert.Empty(t, hits)
+	// A loopback connect is queued for Accept by the time it returns, so any dial Open made is already here.
+	require.NoError(t, ln.(*net.TCPListener).SetDeadline(time.Now().Add(100*time.Millisecond)))
+	conn, acceptErr := ln.Accept()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	assert.ErrorIs(t, acceptErr, os.ErrDeadlineExceeded, "Open dialed a closed tunnel")
 	assert.Nil(t, tc.session)
 }
 
