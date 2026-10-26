@@ -399,7 +399,7 @@ func TestTunnelOpen_IsCanceledByACloseTunnelDuringTheHandshake(t *testing.T) {
 
 	select {
 	case err := <-opened:
-		require.ErrorIs(t, err, errTunnelClosedWhileOpening)
+		require.ErrorIs(t, err, ErrTunnelClosedWhileOpening)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Open kept waiting on the handshake after closetunnel")
 	}
@@ -434,7 +434,7 @@ func TestTunnelOpen_DialsNothingAfterTheTunnelWasClosed(t *testing.T) {
 
 	err = tc.Open(t.Context())
 
-	require.ErrorIs(t, err, errTunnelClosedWhileOpening)
+	require.ErrorIs(t, err, ErrTunnelClosedWhileOpening)
 	// A loopback connect is queued for Accept by the time it returns, so any dial Open made is already here.
 	require.NoError(t, ln.(*net.TCPListener).SetDeadline(time.Now().Add(100*time.Millisecond)))
 	conn, acceptErr := ln.Accept()
@@ -455,7 +455,7 @@ func TestTunnelOpen_ReportsACloseThatArrivesWhileTheRelayStarts(t *testing.T) {
 
 	err := tc.Open(t.Context())
 
-	require.ErrorIs(t, err, errTunnelClosedWhileOpening)
+	require.ErrorIs(t, err, ErrTunnelClosedWhileOpening)
 	_, registered := GetActiveTunnel("closed-during-relay")
 	assert.False(t, registered)
 }
@@ -472,7 +472,7 @@ func TestTunnelOpen_ReportsATunnelUnregisteredButNotYetClosed(t *testing.T) {
 
 	err := tc.Open(t.Context())
 
-	require.ErrorIs(t, err, errTunnelClosedWhileOpening)
+	require.ErrorIs(t, err, ErrTunnelClosedWhileOpening)
 	assert.Error(t, tc.ctx.Err(), "a failed open must close the tunnel")
 }
 

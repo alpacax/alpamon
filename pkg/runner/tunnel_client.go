@@ -47,7 +47,8 @@ const (
 )
 
 var (
-	errTunnelClosedWhileOpening = errors.New("tunnel session closed while opening")
+	// ErrTunnelClosedWhileOpening reports a tunnel closed, by closetunnel or shutdown, before Open finished.
+	ErrTunnelClosedWhileOpening = errors.New("tunnel session closed while opening")
 
 	// validSessionID restricts session IDs to safe characters.
 	validSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -171,7 +172,7 @@ func (tc *TunnelClient) open(ctx context.Context) error {
 	closed := tc.closed // Close sets this before canceling tc.ctx, so it catches a close sooner
 	tc.connMu.Unlock()
 	if closed {
-		return errTunnelClosedWhileOpening
+		return ErrTunnelClosedWhileOpening
 	}
 
 	// For editor type, initialize code-server manager (startup triggered by health_check)
@@ -194,7 +195,7 @@ func (tc *TunnelClient) open(ctx context.Context) error {
 	tc.connMu.Lock()
 	defer tc.connMu.Unlock()
 	if tc.closed || !tc.isRegistered() { // CloseTunnel unregisters before Close sets closed
-		return errTunnelClosedWhileOpening
+		return ErrTunnelClosedWhileOpening
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("tunnel open stopped: %w", err)
@@ -238,7 +239,7 @@ func (tc *TunnelClient) initCodeServerManager() error {
 	defer tc.connMu.Unlock()
 	if tc.closed {
 		mgr.cancel()
-		return errTunnelClosedWhileOpening
+		return ErrTunnelClosedWhileOpening
 	}
 	tc.codeServerMgr = mgr
 	log.Info().Msgf("code-server manager initialized for session %s (user: %s).", tc.sessionID, tc.username)
@@ -351,7 +352,7 @@ func (tc *TunnelClient) connect(ctx context.Context) error {
 			_ = conn.Close()
 		}
 		if tc.ctx.Err() != nil {
-			return errTunnelClosedWhileOpening
+			return ErrTunnelClosedWhileOpening
 		}
 		return fmt.Errorf("tunnel dial stopped: %w", ctx.Err())
 	}
@@ -376,7 +377,7 @@ func (tc *TunnelClient) connect(ctx context.Context) error {
 	if tc.closed {
 		_ = session.Close()
 		_ = conn.Close()
-		return errTunnelClosedWhileOpening
+		return ErrTunnelClosedWhileOpening
 	}
 	tc.wsConn = conn
 	tc.session = session

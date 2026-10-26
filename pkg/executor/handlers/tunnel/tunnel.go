@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 
@@ -164,7 +165,11 @@ func (h *TunnelHandler) handleOpenTunnel(ctx context.Context, args *common.Comma
 
 	// Open before replying so a tunnel that cannot open fails the command.
 	if err := tunnelClient.Open(ctx); err != nil {
-		log.Error().Err(err).Str("sessionID", args.SessionID).Msg("Tunnel open failed.")
+		event := log.Error()
+		if errors.Is(err, runner.ErrTunnelClosedWhileOpening) { // a close the user asked for, not a fault
+			event = log.Info()
+		}
+		event.Err(err).Str("sessionID", args.SessionID).Msg("Tunnel open failed.")
 		return 1, fmt.Sprintf("opentunnel: %s", err.Error()), nil
 	}
 
