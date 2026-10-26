@@ -5,25 +5,36 @@ package runner
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"slices"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
 // tunnelSocketDirPolicy returns the owners a pre-existing tunnel socket dir may have
-// and the owner to give it; chownUID is -1 when the dir keeps its owner.
-func tunnelSocketDirPolicy(isRoot bool, euid uint32, nobodyUID, nobodyGID int) (allowed []uint32, chownUID, chownGID int) {
-	if isRoot {
-		return []uint32{0, uint32(nobodyUID)}, nobodyUID, nobodyGID
+// and the owner to give it; a nil owner keeps the dir's current one.
+func tunnelSocketDirPolicy(daemon *syscall.Credential, euid uint32) (allowed []uint32, owner *syscall.Credential) {
+	if daemon != nil {
+		return []uint32{0, daemon.Uid}, daemon
 	}
-	return []uint32{euid}, -1, -1
+	return []uint32{euid}, nil
+}
+
+// credentialIDs converts cred's uid and gid for chown; macOS nobody (4294967294) fits only a 64-bit int.
+func credentialIDs(cred *syscall.Credential) (int, int, error) {
+	uid, gid := uint64(cred.Uid), uint64(cred.Gid)
+	if uid > math.MaxInt || gid > math.MaxInt {
+		return 0, 0, fmt.Errorf("uid/gid exceeds int range: uid=%d, gid=%d", uid, gid)
+	}
+	return int(uid), int(gid), nil
 }
 
 // secureTunnelSocketDir rejects a dir that is a symlink, not a directory, or owned by
-// a uid outside allowedOwners, then forces mode 0700 and, when chownUID >= 0, the owner.
+// a uid outside allowedOwners, then forces mode 0700 and, when owner is non-nil, the owner.
 // Every step runs on one open fd, so the dir cannot be swapped for a symlink in between.
-func secureTunnelSocketDir(dir string, chownUID, chownGID int, allowedOwners ...uint32) error {
+func secureTunnelSocketDir(dir string, owner *syscall.Credential, allowedOwners ...uint32) error {
 	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
@@ -50,8 +61,12 @@ func secureTunnelSocketDir(dir string, chownUID, chownGID int, allowedOwners ...
 	if err := unix.Fchmod(fd, 0700); err != nil {
 		return fmt.Errorf("failed to restrict tunnel socket directory: %w", err)
 	}
-	if chownUID >= 0 {
-		if err := unix.Fchown(fd, chownUID, chownGID); err != nil {
+	if owner != nil {
+		uid, gid, err := credentialIDs(owner)
+		if err != nil {
+			return err
+		}
+		if err := unix.Fchown(fd, uid, gid); err != nil {
 			return fmt.Errorf("failed to chown tunnel socket directory: %w", err)
 		}
 	}

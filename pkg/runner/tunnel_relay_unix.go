@@ -5,6 +5,7 @@ package runner
 import (
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -23,8 +24,8 @@ const (
 	daemonStopGrace = 10 * time.Second
 )
 
-// startTunnelRelay spawns the per-session tunnel daemon (demoted to nobody on
-// Linux, current user on macOS), which relays every stream over UDS.
+// startTunnelRelay spawns the per-session tunnel daemon (demoted to nobody when
+// Alpamon runs as root), which relays every stream over UDS.
 // daemonMu serializes it against stopTunnelRelay: a concurrent closetunnel
 // either waits for the spawn and then kills it, or wins the lock first and
 // the closed context stops the spawn from happening at all.
@@ -40,13 +41,18 @@ func (tc *TunnelClient) startTunnelRelay() error {
 		return fmt.Errorf("invalid session ID for tunnel daemon socket")
 	}
 
-	socketDir, err := ensureTunnelSocketDir()
+	daemonCred, err := tunnelDaemonCredential(os.Getuid() == 0)
+	if err != nil {
+		return fmt.Errorf("failed to get tunnel daemon credentials: %w", err)
+	}
+
+	socketDir, err := ensureTunnelSocketDir(daemonCred)
 	if err != nil {
 		return fmt.Errorf("failed to ensure tunnel socket directory: %w", err)
 	}
 	tc.daemonSocket = filepath.Join(socketDir, tc.sessionID+".sock")
 
-	cmd, err := spawnTunnelDaemon(tc.daemonSocket)
+	cmd, err := spawnTunnelDaemon(tc.daemonSocket, daemonCred)
 	if err != nil {
 		return fmt.Errorf("failed to spawn tunnel daemon: %w", err)
 	}
