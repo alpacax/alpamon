@@ -417,8 +417,9 @@ func TestTunnelOpen_StopsTheHandshakeWhenTheCommandContextEnds(t *testing.T) {
 
 	err := tc.Open(ctx)
 
-	require.Error(t, err) // gorilla's own deadline may report it first as an i/o timeout
-	assert.NotErrorIs(t, err, errRelayMustNotStart)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded),
+		"want the command deadline, or gorilla's i/o timeout reporting it first, got %v", err)
 	assert.Less(t, time.Since(start), 5*time.Second)
 	_, registered := GetActiveTunnel("command-deadline")
 	assert.False(t, registered)
