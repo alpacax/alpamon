@@ -312,12 +312,12 @@ func TestTunnelHandler_DarwinEditorSkipsGroupValidation(t *testing.T) {
 	}
 }
 
-// setServerURL makes srv the configured Alpacon server, which is the only
+// setServerURL makes serverURL the configured Alpacon server, which is the only
 // host a tunnel URL may name.
-func setServerURL(t *testing.T, srv *httptest.Server) {
+func setServerURL(t *testing.T, serverURL string) {
 	t.Helper()
 	prev := config.GlobalSettings.ServerURL
-	config.GlobalSettings.ServerURL = srv.URL
+	config.GlobalSettings.ServerURL = serverURL
 	t.Cleanup(func() { config.GlobalSettings.ServerURL = prev })
 }
 
@@ -326,7 +326,7 @@ func TestOpenTunnel_ReportsATunnelServerThatRefusesTheDial(t *testing.T) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}))
 	defer srv.Close()
-	setServerURL(t, srv)
+	setServerURL(t, srv.URL)
 	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
 	h.checkResources = func() error { return nil }
 	args := &common.CommandArgs{
