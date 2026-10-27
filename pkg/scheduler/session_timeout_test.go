@@ -12,21 +12,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// deadlineRecorder answers every request and records the deadline it carried.
 type deadlineRecorder struct {
+	called   bool
 	deadline time.Time
 	ok       bool
 }
 
 func (d *deadlineRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	d.called = true
 	d.deadline, d.ok = req.Context().Deadline()
 	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok")), Request: req}, nil
 }
 
-func TestSession_AppliesTheTimeoutAsARealDuration(t *testing.T) {
-	const timeout = 2 * time.Second
-
-	calls := map[string]func(*Session) error{
+func sessionCalls(timeout time.Duration) map[string]func(*Session) error {
+	return map[string]func(*Session) error{
 		"Get":    func(s *Session) error { _, _, err := s.Get("/x", timeout); return err },
 		"Post":   func(s *Session) error { _, _, err := s.Post("/x", nil, timeout); return err },
 		"Patch":  func(s *Session) error { _, _, err := s.Patch("/x", nil, timeout); return err },
@@ -44,18 +43,37 @@ func TestSession_AppliesTheTimeoutAsARealDuration(t *testing.T) {
 			return err
 		},
 	}
+}
 
-	for name, call := range calls {
+func TestSession_AppliesTheTimeoutAsARealDuration(t *testing.T) {
+	const timeout = 2 * time.Second
+
+	for name, call := range sessionCalls(timeout) {
 		t.Run(name, func(t *testing.T) {
 			rec := &deadlineRecorder{}
 			session := &Session{BaseURL: "http://alpacon.test", Client: &http.Client{Transport: rec}}
 			start := time.Now()
 
 			err := call(session)
+			end := time.Now()
 
 			require.NoError(t, err)
 			require.True(t, rec.ok, "the request carries a deadline")
-			assert.WithinRange(t, rec.deadline, start, start.Add(timeout+time.Second))
+			assert.WithinRange(t, rec.deadline, start.Add(timeout), end.Add(timeout))
+		})
+	}
+}
+
+func TestSession_RejectsABareIntegerTimeoutWithoutSending(t *testing.T) {
+	for name, call := range sessionCalls(10) {
+		t.Run(name, func(t *testing.T) {
+			rec := &deadlineRecorder{}
+			session := &Session{BaseURL: "http://alpacon.test", Client: &http.Client{Transport: rec}}
+
+			err := call(session)
+
+			assert.ErrorContains(t, err, "request timeout 10ns is too short")
+			assert.False(t, rec.called, "nothing is sent")
 		})
 	}
 }

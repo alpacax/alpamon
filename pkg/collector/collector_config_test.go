@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestFetchConfig_DecodesTheServersLowercaseKeys(t *testing.T) {
+func TestFetchConfig_DecodesTheServersCheckList(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, confURL, r.URL.Path)
 		_, _ = w.Write([]byte(`[{"type":"cpu","interval":60},{"type":"memory","interval":30}]`))
