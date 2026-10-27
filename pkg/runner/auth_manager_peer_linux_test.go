@@ -3,7 +3,6 @@
 package runner
 
 import (
-	"io"
 	"os"
 	"testing"
 
@@ -19,9 +18,7 @@ func TestHandleSudoRequest_DropsRequestClaimingAnotherPID(t *testing.T) {
 
 	am.handleSudoRequest(server)
 
-	body, err := io.ReadAll(client)
-	require.NoError(t, err)
-	assert.Empty(t, body, "a request with a spoofed pid was answered")
+	assertDroppedAfterReadingRequest(t, client)
 }
 
 func TestHandleSudoRequest_DropsRequestWithoutPID(t *testing.T) {
@@ -33,9 +30,7 @@ func TestHandleSudoRequest_DropsRequestWithoutPID(t *testing.T) {
 
 	am.handleSudoRequest(server)
 
-	body, err := io.ReadAll(client)
-	require.NoError(t, err)
-	assert.Empty(t, body, "a request without a pid was answered")
+	assertDroppedAfterReadingRequest(t, client)
 }
 
 func TestPeerCredentials_ReportsThisProcessOnLinux(t *testing.T) {
