@@ -37,17 +37,9 @@ import (
 )
 
 const (
-	fetchURLFmt   = "/api/plugins/configs/%s/"
-	appliedURLFmt = "/api/plugins/configs/%s/applied/"
-	// requestTimeout caps each REST call. scheduler.Session.do
-	// multiplies whatever Duration value is passed in by
-	// ``time.Second`` (pkg/scheduler/session.go:113), so the bare
-	// literal ``30`` here resolves to 30 seconds end-to-end — passing
-	// ``30 * time.Second`` would compound the multiplier and overflow
-	// int64. The type stays ``time.Duration`` only because that's the
-	// signature scheduler.Session exposes; the value semantics are
-	// "count of seconds".
-	requestTimeout time.Duration = 30
+	fetchURLFmt    = "/api/plugins/configs/%s/"
+	appliedURLFmt  = "/api/plugins/configs/%s/applied/"
+	requestTimeout = 30 * time.Second
 )
 
 // Envelope is the standardised config-text shape the server emits.

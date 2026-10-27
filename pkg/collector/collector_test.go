@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"sync"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/collector/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/collector/transporter"
 	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	session "github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
@@ -468,4 +471,18 @@ func TestRetryWithBackoff_DoesNotRetryARejectedMetric(t *testing.T) {
 		require.NoError(t, err, "a rejection is handled like success, not treated as a failed attempt")
 		assert.Equal(t, 1, transport.callCount(), "the rejected metric is sent once and not retried")
 	})
+}
+
+func TestFetchConfig_DecodesTheServersCheckList(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, confURL, r.URL.Path)
+		_, _ = w.Write([]byte(`[{"type":"cpu","interval":60},{"type":"memory","interval":30}]`))
+	}))
+	t.Cleanup(srv.Close)
+	s := &session.Session{BaseURL: srv.URL, Client: srv.Client()}
+
+	conf, err := fetchConfig(s)
+
+	require.NoError(t, err)
+	assert.Equal(t, []collectConf{{Type: base.CPU, Interval: 60}, {Type: base.Mem, Interval: 30}}, conf)
 }

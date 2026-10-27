@@ -307,7 +307,7 @@ func (p *Plugin) checkSession(ctx context.Context, session *scheduler.Session) b
 		case <-time.After(timeout):
 			body := map[string]string{"version": p.Version}
 
-			_, statusCode, err := session.Patch(p.CheckServerURL, body, 5)
+			_, statusCode, err := session.Patch(p.CheckServerURL, body, 5*time.Second)
 			if err != nil || (statusCode != http.StatusOK && statusCode != http.StatusCreated) {
 				// Compute the next backoff before logging so the message
 				// reflects the actual delay (the previous version logged the

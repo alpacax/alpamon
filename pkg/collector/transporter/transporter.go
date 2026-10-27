@@ -62,7 +62,7 @@ func (t *Transporter) Send(data base.MetricData) error {
 		return err
 	}
 
-	resp, statusCode, err := t.session.Post(url, data.Data, 10)
+	resp, statusCode, err := t.session.Post(url, data.Data, scheduler.DefaultRequestTimeout)
 	if err != nil {
 		return err
 	}

@@ -98,7 +98,7 @@ func (r *Reporter) query(entry PriorityEntry) {
 	if entry.headers != nil {
 		headers = *entry.headers
 	}
-	resp, statusCode, respHeader, err := r.session.RequestWithHeaders(entry.method, entry.url, entry.data, 5, headers)
+	resp, statusCode, respHeader, err := r.session.RequestWithHeaders(entry.method, entry.url, entry.data, 5*time.Second, headers)
 
 	var success bool
 	if err != nil {

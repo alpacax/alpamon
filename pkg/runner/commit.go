@@ -309,7 +309,7 @@ func syncFirewallData() {
 }
 
 func syncAccessPolicy(session *scheduler.Session) {
-	resp, statusCode, err := session.Get(accessPolicyURL, 10)
+	resp, statusCode, err := session.Get(accessPolicyURL, scheduler.DefaultRequestTimeout)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to fetch access policy")
 		return
@@ -375,7 +375,7 @@ func syncRequiredKeys(session *scheduler.Session, snap syncSnapshot) []string {
 func checkSyncHashes(session *scheduler.Session, hashes SyncHashes) ([]string, error) {
 	payload := map[string]any{"hashes": hashes}
 
-	resp, statusCode, err := session.Post(syncCheckURL, payload, 10)
+	resp, statusCode, err := session.Post(syncCheckURL, payload, scheduler.DefaultRequestTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("sync-check request failed: %w", err)
 	}
@@ -817,7 +817,7 @@ func ReportUpgradeStatus(session *scheduler.Session) error {
 		"record":      "upgraded",
 		"description": fmt.Sprintf("Upgraded to version %s.", version.Version),
 	}
-	_, status, err := session.Post(eventURL, body, 10)
+	_, status, err := session.Post(eventURL, body, scheduler.DefaultRequestTimeout)
 	if err != nil {
 		return err
 	}

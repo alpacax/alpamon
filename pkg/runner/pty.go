@@ -519,7 +519,7 @@ func (pc *PtyClient) recovery(ctx context.Context) error {
 		data := map[string]any{
 			"session": pc.sessionID,
 		}
-		body, statusCode, err := pc.apiSession.Post(reconnectPtyWebsocketURL, data, 5)
+		body, statusCode, err := pc.apiSession.Post(reconnectPtyWebsocketURL, data, 5*time.Second)
 		if err != nil {
 			log.Warn().Err(err).Msgf("Failed to reconnect Websh channel (status: %d), retrying...", statusCode)
 			return fmt.Errorf("reconnect failed: %w", err)

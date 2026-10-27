@@ -18,9 +18,11 @@ import (
 )
 
 const (
-	checkSessionURL      = "/api/servers/servers/-/"
-	MaxRetryTimeout      = 3 * 24 * time.Hour
-	multipartMaxRespSize = 1 << 20 // 1 MiB; read +1 to detect over-limit explicitly
+	checkSessionURL       = "/api/servers/servers/-/"
+	MaxRetryTimeout       = 3 * 24 * time.Hour
+	DefaultRequestTimeout = 10 * time.Second // a routine call to the console API
+	multipartMaxRespSize  = 1 << 20          // 1 MiB; read +1 to detect over-limit explicitly
+	minTimeout            = time.Millisecond // below this, a caller passed a bare integer, which Go reads as nanoseconds
 )
 
 func InitSession() *Session {
@@ -59,7 +61,7 @@ func (session *Session) CheckSession(ctx context.Context) bool {
 			log.Error().Msg("Session check cancelled or timed out.")
 			os.Exit(1)
 		case <-time.After(timeout):
-			resp, statusCode, err := session.Get(checkSessionURL, 5)
+			resp, statusCode, err := session.Get(checkSessionURL, 5*time.Second)
 			if err != nil || statusCode != http.StatusOK {
 				log.Debug().Err(err).Msgf("Failed to connect to %s, will try again in %ds.", config.GlobalSettings.ServerURL, int(timeout.Seconds()))
 			} else {
@@ -104,6 +106,13 @@ func (session *Session) newRequest(method, url string, rawBody any) (*http.Reque
 	return http.NewRequest(method, utils.JoinPath(session.BaseURL, url), body)
 }
 
+func checkTimeout(timeout time.Duration) error {
+	if timeout < minTimeout {
+		return fmt.Errorf("request timeout %v is too short; pass a duration such as 10*time.Second", timeout)
+	}
+	return nil
+}
+
 func (session *Session) do(req *http.Request, timeout time.Duration) ([]byte, int, error) {
 	body, statusCode, _, err := session.doWithHeader(req, timeout)
 	return body, statusCode, err
@@ -112,7 +121,10 @@ func (session *Session) do(req *http.Request, timeout time.Duration) ([]byte, in
 // doWithHeader is do that also returns the response headers. The timeout is
 // bounded by req's own context, so a caller can cancel the request early.
 func (session *Session) doWithHeader(req *http.Request, timeout time.Duration) ([]byte, int, http.Header, error) {
-	ctx, cancel := context.WithTimeout(req.Context(), timeout*time.Second)
+	if err := checkTimeout(timeout); err != nil {
+		return nil, 0, nil, err
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), timeout)
 	defer cancel()
 
 	req = req.WithContext(ctx)
@@ -223,7 +235,10 @@ func (session *Session) MultipartRequest(rawURL string, body io.Reader, contentT
 	}
 	req.ContentLength = contentLength
 
-	ctx, cancel := context.WithTimeout(req.Context(), timeout*time.Second)
+	if err := checkTimeout(timeout); err != nil {
+		return nil, 0, err
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), timeout)
 	defer cancel()
 
 	req = req.WithContext(ctx)

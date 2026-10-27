@@ -80,7 +80,7 @@ const (
 	accessOutboxRestartDelay = time.Second
 	accessOutboxMinWait      = 50 * time.Millisecond
 	accessOutboxBatchSize    = 50
-	accessOutboxPostTimeout  = 10 // seconds, the unit scheduler.Session takes
+	accessOutboxPostTimeout  = 10 * time.Second
 	accessOutboxStopTimeout  = 5 * time.Second
 )
 

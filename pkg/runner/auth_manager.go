@@ -393,7 +393,7 @@ func (am *AuthManager) createSendOperation(ctx context.Context, url string, payl
 				return fmt.Errorf("HTTP session not available")
 			}
 
-			resp, statusCode, err := am.session.Post(url, payload, 10)
+			resp, statusCode, err := am.session.Post(url, payload, scheduler.DefaultRequestTimeout)
 			if err != nil {
 				log.Warn().Err(err).Str("url", url).Msg("Failed to send sudo request via REST API, will retry")
 				return err
@@ -1175,9 +1175,7 @@ func (am *AuthManager) denyPendingRequests(pending []*SudoRequest, reason string
 func (am *AuthManager) denyPendingRequestsWithCode(pending []*SudoRequest, reason, errorCode string) {
 	var wg sync.WaitGroup
 	for _, req := range pending {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// handleSudoRequest's recover used to cover this work, back when
 			// finalizeRequest ran it on the waiter's own stack. Off that stack, an
 			// unrecovered panic takes the whole agent down instead of one request.
@@ -1202,7 +1200,7 @@ func (am *AuthManager) denyPendingRequestsWithCode(pending []*SudoRequest, reaso
 				am.sendSudoApprovalResponse(req.Connection, req.Request, false, reason, errorCode)
 				_ = req.Connection.Close()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
