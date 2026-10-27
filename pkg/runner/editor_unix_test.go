@@ -274,16 +274,35 @@ func TestStopLeavesTheManagerStopped(t *testing.T) {
 	assert.Equal(t, CodeServerStatusStopped, status, "StartAsync must leave a stopped manager as it is")
 }
 
-// TestStartFailureKeepsItsStatus covers doStart's waitForReady failure path: the
-// status has to report that error, not a stop nobody asked for.
-func TestStartFailureKeepsItsStatus(t *testing.T) {
-	m, cmd := newManagerWithProcess(t)
+// TestStartFailureReportsItsError runs StartAsync against a code-server that
+// exits at once: doStart's own cleanup must not hide the error behind stopped.
+func TestStartFailureReportsItsError(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getuid() == 0 {
+		t.Skip("a root macOS host only runs code-server from its own install")
+	}
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "code-server"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+	t.Setenv("PATH", bin)
+	usr, err := user.Current()
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	m := &CodeServerManager{
+		username:    usr.Username,
+		homeDir:     t.TempDir(),
+		ctx:         ctx,
+		cancel:      cancel,
+		status:      CodeServerStatusIdle,
+		stopGrace:   codeServerStopGrace,
+		terminateFn: terminateProcess,
+	}
 
-	require.NoError(t, m.stopProcess())
+	m.StartAsync()
 
-	require.NotNil(t, cmd.ProcessState, "stopProcess must terminate and reap the process")
-	status, _ := m.Status()
-	assert.Equal(t, CodeServerStatusStarting, status, "StartAsync records the start error only over a status that is not stopped")
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		status, lastError := m.Status()
+		assert.Equal(c, CodeServerStatusError, status)
+		assert.Contains(c, lastError, "exited unexpectedly")
+	}, 10*time.Second, 50*time.Millisecond, "a failed start must report why, not a stop nobody asked for")
 }
 
 // TestStopOutranksAStartThatTurnsReady covers a Stop landing between
