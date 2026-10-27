@@ -11,9 +11,7 @@ import (
 // predates it answers 404, which is logged and otherwise ignored.
 const ReportURL = "/api/servers/agent-upgrades/report/"
 
-// reportTimeoutSeconds is in seconds because the session multiplies it by
-// time.Second itself.
-const reportTimeoutSeconds = 10
+const reportTimeout = 10 * time.Second
 
 // Outcome is the final state of an upgrade attempt.
 type Outcome string
@@ -48,7 +46,7 @@ func SendReport(p Poster, r Report) bool {
 	if p == nil || r.AttemptID == "" {
 		return true
 	}
-	_, status, err := p.Post(ReportURL, r, reportTimeoutSeconds)
+	_, status, err := p.Post(ReportURL, r, reportTimeout)
 	switch {
 	case err != nil:
 		log.Warn().Err(err).Str("attempt_id", r.AttemptID).Msg("Failed to send upgrade report.")

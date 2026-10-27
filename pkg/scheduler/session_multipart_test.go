@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
 
@@ -66,7 +67,7 @@ func TestMultipartRequest_CarriesTheKeyOnlyToTheServer(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := session.MultipartRequest(tc.target, strings.NewReader("x"), "text/plain", 1, 5)
+			_, _, err := session.MultipartRequest(tc.target, strings.NewReader("x"), "text/plain", 1, 5*time.Second)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				assert.Empty(t, hits, "a refused URL must not reach the network")
@@ -95,7 +96,7 @@ func TestMultipartRequest_KeepsTheClientRedirectPolicy(t *testing.T) {
 	}}
 	session := &Session{BaseURL: srv.URL, Client: client, Authorization: "key"}
 
-	_, code, err := session.MultipartRequest("/start", strings.NewReader("x"), "text/plain", 1, 5)
+	_, code, err := session.MultipartRequest("/start", strings.NewReader("x"), "text/plain", 1, 5*time.Second)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusFound, code)
 	assert.False(t, redirected)
@@ -123,7 +124,7 @@ func TestMultipartRequest_DoesNotFollowA307WithAStreamedBody(t *testing.T) {
 		_ = pw.Close()
 	}()
 
-	_, code, err := session.MultipartRequest("/api/uploads/1/", pr, "text/plain", -1, 5)
+	_, code, err := session.MultipartRequest("/api/uploads/1/", pr, "text/plain", -1, 5*time.Second)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusTemporaryRedirect, code)
 	assert.False(t, otherHit, "the upload must not reach the redirect target")
@@ -135,7 +136,7 @@ func TestMultipartRequest_ErrorNamesOnlyTheHost(t *testing.T) {
 	closed.Close()
 
 	session := &Session{BaseURL: closedURL, Client: &http.Client{}, Authorization: "key"}
-	_, _, err := session.MultipartRequest(closedURL+"/api/uploads/secret-path/?sig=secret-sig", strings.NewReader("x"), "text/plain", 1, 5)
+	_, _, err := session.MultipartRequest(closedURL+"/api/uploads/secret-path/?sig=secret-sig", strings.NewReader("x"), "text/plain", 1, 5*time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), strings.TrimPrefix(closedURL, "http://"))
 	assert.NotContains(t, err.Error(), "secret")
@@ -171,12 +172,12 @@ func TestInitSession_RedirectCarriesTheKeyOnlyOnTheServer(t *testing.T) {
 
 	session := InitSession()
 
-	_, _, err := session.Get("/to-server", 5)
+	_, _, err := session.Get("/to-server", 5*time.Second)
 	require.NoError(t, err)
 	require.Len(t, hits, 1)
 	assert.Equal(t, hit{server: "server", auth: agentAuth}, <-hits)
 
-	_, _, err = session.Get("/to-other-port", 5)
+	_, _, err = session.Get("/to-other-port", 5*time.Second)
 	require.NoError(t, err)
 	require.Len(t, hits, 1)
 	assert.Equal(t, hit{server: "other"}, <-hits)
@@ -194,7 +195,7 @@ func TestMultipartRequest_WhenUploading_ThenAsksServerToCloseConnection(t *testi
 	config.GlobalSettings = config.Settings{ServerURL: srv.URL, SSLVerify: true}
 	session := InitSession()
 
-	_, code, err := session.MultipartRequest("/api/uploads/1/", strings.NewReader("x"), "text/plain", 1, 5)
+	_, code, err := session.MultipartRequest("/api/uploads/1/", strings.NewReader("x"), "text/plain", 1, 5*time.Second)
 
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, code)

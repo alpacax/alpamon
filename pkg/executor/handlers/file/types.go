@@ -1,7 +1,9 @@
 package file
 
+import "time"
+
 const (
-	fileUploadTimeout = 60 * 10 // 600 seconds
+	fileUploadTimeout = 10 * time.Minute
 )
 
 type transferType string

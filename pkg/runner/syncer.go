@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -89,7 +90,7 @@ func (s *singleRowSyncer[T]) syncData(session *scheduler.Session, data any, hash
 		return
 	}
 	entry := s.Def()
-	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10)
+	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10*time.Second)
 	if err != nil {
 		log.Error().Err(err).Msgf("Failed to get data for %s.", s.key)
 		return
@@ -132,7 +133,7 @@ func (s *multiRowSyncer[T]) syncData(session *scheduler.Session, data any, hash 
 		return
 	}
 	entry := s.Def()
-	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10)
+	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), 10*time.Second)
 	if err != nil {
 		log.Error().Err(err).Msgf("Failed to get data for %s.", s.key)
 		return

@@ -48,7 +48,7 @@ func TestInitSession_GivenConcurrentBursts_WhenSecondBurstFires_ThenIdleConnecti
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				body, status, err := session.Get("/x", 10)
+				body, status, err := session.Get("/x", 10*time.Second)
 				assert.NoError(t, err)
 				assert.Equal(t, http.StatusOK, status)
 				assert.Equal(t, "ok", string(body))

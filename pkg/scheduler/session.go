@@ -59,7 +59,7 @@ func (session *Session) CheckSession(ctx context.Context) bool {
 			log.Error().Msg("Session check cancelled or timed out.")
 			os.Exit(1)
 		case <-time.After(timeout):
-			resp, statusCode, err := session.Get(checkSessionURL, 5)
+			resp, statusCode, err := session.Get(checkSessionURL, 5*time.Second)
 			if err != nil || statusCode != http.StatusOK {
 				log.Debug().Err(err).Msgf("Failed to connect to %s, will try again in %ds.", config.GlobalSettings.ServerURL, int(timeout.Seconds()))
 			} else {
@@ -112,7 +112,7 @@ func (session *Session) do(req *http.Request, timeout time.Duration) ([]byte, in
 // doWithHeader is do that also returns the response headers. The timeout is
 // bounded by req's own context, so a caller can cancel the request early.
 func (session *Session) doWithHeader(req *http.Request, timeout time.Duration) ([]byte, int, http.Header, error) {
-	ctx, cancel := context.WithTimeout(req.Context(), timeout*time.Second)
+	ctx, cancel := context.WithTimeout(req.Context(), timeout)
 	defer cancel()
 
 	req = req.WithContext(ctx)
@@ -223,7 +223,7 @@ func (session *Session) MultipartRequest(rawURL string, body io.Reader, contentT
 	}
 	req.ContentLength = contentLength
 
-	ctx, cancel := context.WithTimeout(req.Context(), timeout*time.Second)
+	ctx, cancel := context.WithTimeout(req.Context(), timeout)
 	defer cancel()
 
 	req = req.WithContext(ctx)

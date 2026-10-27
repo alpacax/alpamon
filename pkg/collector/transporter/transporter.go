@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/collector/check/base"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
@@ -62,7 +63,7 @@ func (t *Transporter) Send(data base.MetricData) error {
 		return err
 	}
 
-	resp, statusCode, err := t.session.Post(url, data.Data, 10)
+	resp, statusCode, err := t.session.Post(url, data.Data, 10*time.Second)
 	if err != nil {
 		return err
 	}

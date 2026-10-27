@@ -88,8 +88,7 @@ type SystemInfoManager interface {
 }
 
 // APISession interface for API operations (file upload, server unregister,
-// upgrade reports). Timeouts are in seconds: the session multiplies them by
-// time.Second itself.
+// upgrade reports).
 type APISession interface {
 	MultipartRequest(url string, body io.Reader, contentType string, contentLength int64, timeout time.Duration) ([]byte, int, error)
 	Delete(url string, rawBody any, timeout time.Duration) ([]byte, int, error)

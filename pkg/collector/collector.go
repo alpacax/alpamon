@@ -52,8 +52,8 @@ type Collector struct {
 }
 
 type collectConf struct {
-	Type     base.CheckType
-	Interval int
+	Type     base.CheckType `json:"type"`
+	Interval int            `json:"interval"`
 }
 
 type collectorArgs struct {
@@ -92,7 +92,7 @@ func InitCollector(session *session.Session, client *ent.Client, ctxManager *age
 }
 
 func fetchConfig(session *session.Session) ([]collectConf, error) {
-	resp, statusCode, err := session.Get(confURL, 10)
+	resp, statusCode, err := session.Get(confURL, 10*time.Second)
 	if err != nil {
 		return nil, err
 	}

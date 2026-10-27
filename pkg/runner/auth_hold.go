@@ -454,7 +454,7 @@ func (am *AuthManager) postWaitEndedOnce(parent context.Context, req SudoApprova
 	}
 	ctx, cancel := context.WithTimeout(parent, waitEndedShutdownTimeout)
 	defer cancel()
-	_, status, _, err := am.session.PostWithContext(ctx, waitEndedURL(req, hold), waitEndedBody(req), waitEndedShutdownTimeout/time.Second)
+	_, status, _, err := am.session.PostWithContext(ctx, waitEndedURL(req, hold), waitEndedBody(req), waitEndedShutdownTimeout)
 	if err != nil || status < 200 || status >= 300 {
 		log.Warn().Err(err).Int("status_code", status).Str("request_id", req.RequestID).
 			Msg("Could not report the end of a sudo approval wait")
