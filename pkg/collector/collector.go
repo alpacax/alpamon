@@ -324,9 +324,7 @@ func (c *Collector) flushPending(ctx context.Context) (sent int, dropped int) {
 	var flushed atomic.Int64
 	done := make(chan struct{})
 
-	c.flushWG.Add(1)
-	go func() {
-		defer c.flushWG.Done()
+	c.flushWG.Go(func() {
 		defer close(done)
 
 		for _, metric := range pending {
@@ -344,7 +342,7 @@ func (c *Collector) flushPending(ctx context.Context) (sent int, dropped int) {
 				flushed.Add(1)
 			}
 		}
-	}()
+	})
 
 	select {
 	case <-done:

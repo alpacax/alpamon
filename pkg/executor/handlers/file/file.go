@@ -580,8 +580,7 @@ func (h *FileHandler) fetchFromURL(ctx context.Context, contentURL string) (io.R
 	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
 		// The path and query may carry a token or a signature; name only the host.
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
+		if urlErr, ok := errors.AsType[*url.Error](err); ok {
 			err = fmt.Errorf("%s %s: %w", urlErr.Op, parsedRequestURL.Host, urlErr.Err)
 		}
 		return nil, fmt.Errorf("failed to download content from URL: %w", err)

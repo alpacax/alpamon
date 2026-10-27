@@ -44,15 +44,13 @@ func TestInitSession_GivenConcurrentBursts_WhenSecondBurstFires_ThenIdleConnecti
 
 	fire := func() {
 		var wg sync.WaitGroup
-		for i := 0; i < burst; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range burst {
+			wg.Go(func() {
 				body, status, err := session.Get("/x", 10*time.Second)
 				assert.NoError(t, err)
 				assert.Equal(t, http.StatusOK, status)
 				assert.Equal(t, "ok", string(body))
-			}()
+			})
 		}
 		wg.Wait()
 	}

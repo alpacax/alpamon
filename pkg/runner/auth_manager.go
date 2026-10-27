@@ -1175,9 +1175,7 @@ func (am *AuthManager) denyPendingRequests(pending []*SudoRequest, reason string
 func (am *AuthManager) denyPendingRequestsWithCode(pending []*SudoRequest, reason, errorCode string) {
 	var wg sync.WaitGroup
 	for _, req := range pending {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// handleSudoRequest's recover used to cover this work, back when
 			// finalizeRequest ran it on the waiter's own stack. Off that stack, an
 			// unrecovered panic takes the whole agent down instead of one request.
@@ -1202,7 +1200,7 @@ func (am *AuthManager) denyPendingRequestsWithCode(pending []*SudoRequest, reaso
 				am.sendSudoApprovalResponse(req.Connection, req.Request, false, reason, errorCode)
 				_ = req.Connection.Close()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
