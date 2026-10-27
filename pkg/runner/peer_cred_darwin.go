@@ -18,6 +18,8 @@ func peerCredentials(conn net.Conn) (peerCred, error) {
 		if credErr != nil {
 			return fmt.Errorf("failed to read LOCAL_PEERCRED: %w", credErr)
 		}
+		// Unlike SO_PEERCRED, LOCAL_PEERPID is the last process to use the peer socket, not its
+		// connector, so a child handed the fd is reported once it writes; the uid stays connect-time.
 		pid, credErr = unix.GetsockoptInt(fd, unix.SOL_LOCAL, unix.LOCAL_PEERPID)
 		if credErr != nil {
 			return fmt.Errorf("failed to read LOCAL_PEERPID: %w", credErr)

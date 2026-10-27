@@ -470,7 +470,7 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 			Int("peer_uid", peer.uid).
 			Int("claimed_pid", baseReq.PID).
 			Str("type", baseReq.Type).
-			Msg("Auth socket request claims a pid other than the connecting process; dropping it")
+			Msg("Auth socket request claims a pid other than the peer process; dropping it")
 		return
 	}
 
@@ -508,7 +508,7 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 	}
 }
 
-// verifyPeer reports the connecting process when it may use auth.sock. A refused
+// verifyPeer reports the peer process when it may use auth.sock. A refused
 // peer gets no response, so nothing about the agent's state reaches it.
 func (am *AuthManager) verifyPeer(conn net.Conn) (peerCred, bool) {
 	if am.peerCreds == nil {
