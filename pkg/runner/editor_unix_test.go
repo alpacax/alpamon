@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -23,24 +24,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// killGroupOnCleanup kills the child's group unless the reaper already closed
-// done: a reaped pid is free for reuse, so the group may no longer be ours.
-func killGroupOnCleanup(t *testing.T, cmd *exec.Cmd, done <-chan struct{}) {
+// killGroupOnCleanup kills the child's group unless the reaper already reaped
+// its leader: a reaped pid is free for reuse, so the group may no longer be ours.
+func killGroupOnCleanup(t *testing.T, proc *codeServerProcess) {
 	t.Helper()
 
-	pgid := cmd.Process.Pid
 	t.Cleanup(func() {
-		select {
-		case <-done:
+		if errors.Is(proc.signal(killProcess), os.ErrProcessDone) {
 			return
-		default:
 		}
-
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		select {
-		case <-done:
+		case <-proc.done:
 		case <-time.After(5 * time.Second):
-			t.Errorf("process group %d outlived the test", pgid)
+			t.Errorf("process group %d outlived the test", proc.cmd.Process.Pid)
 		}
 	})
 }
@@ -56,12 +52,11 @@ func newManagerWithProcess(t *testing.T) (*CodeServerManager, *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	require.NoError(t, cmd.Start())
 
-	waitDone := reapProcess(cmd)
-	killGroupOnCleanup(t, cmd, waitDone)
+	proc := startReaper(cmd, waitExit)
+	killGroupOnCleanup(t, proc)
 
 	m := &CodeServerManager{
-		cmd:         cmd,
-		waitDone:    waitDone,
+		proc:        proc,
 		ctx:         ctx,
 		cancel:      cancel,
 		status:      CodeServerStatusStarting,
@@ -91,8 +86,8 @@ func newManagerWithScript(t *testing.T, script string) (*CodeServerManager, *exe
 	require.NoError(t, cmd.Start())
 	require.NoError(t, pw.Close())
 
-	waitDone := reapProcess(cmd)
-	killGroupOnCleanup(t, cmd, waitDone)
+	proc := startReaper(cmd, waitExit)
+	killGroupOnCleanup(t, proc)
 
 	child := bufio.NewReader(pr)
 	line, err := child.ReadString('\n')
@@ -100,8 +95,7 @@ func newManagerWithScript(t *testing.T, script string) (*CodeServerManager, *exe
 	require.Equal(t, "ready\n", line)
 
 	m := &CodeServerManager{
-		cmd:         cmd,
-		waitDone:    waitDone,
+		proc:        proc,
 		ctx:         ctx,
 		cancel:      cancel,
 		status:      CodeServerStatusStarting,
@@ -133,7 +127,7 @@ func TestStopTwice(t *testing.T) {
 
 	require.NoError(t, m.Stop())
 	require.NoError(t, m.Stop(), "the second Stop must be a no-op, not another signal at a reaped pid")
-	assert.Nil(t, m.cmd, "Stop must clear m.cmd so a later Stop has nothing to signal")
+	assert.Nil(t, m.proc, "Stop must clear m.proc so a later Stop has nothing to signal")
 }
 
 // TestStopWithoutProcess covers Stop during the install phase, which must abort
@@ -186,7 +180,7 @@ func TestStopWaitsAfterSignalFailure(t *testing.T) {
 	require.NotNil(t, cmd.ProcessState, "Stop returned before the process was reaped")
 }
 
-// TestWaitForReadySurvivesConcurrentStop covers TunnelClient.Close mid-startup, where Stop clears m.cmd.
+// TestWaitForReadySurvivesConcurrentStop covers TunnelClient.Close mid-startup, where Stop clears m.proc.
 func TestWaitForReadySurvivesConcurrentStop(t *testing.T) {
 	m, _ := newManagerWithProcess(t)
 
@@ -196,7 +190,7 @@ func TestWaitForReadySurvivesConcurrentStop(t *testing.T) {
 	m.port = port
 
 	// Read before Stop nils the field, not from inside the goroutine.
-	waitDone := m.waitDone
+	waitDone := m.proc.done
 	ready := make(chan error, 1)
 	go func() {
 		ready <- m.waitForReady(waitDone)
@@ -241,16 +235,73 @@ func requireGroupGone(t *testing.T, child *bufio.Reader, pgid int, msg string) {
 }
 
 // TestStopInTheSpawnWindowLeavesNoGroupBehind: a Stop between the spawn and
-// doStart publishing m.cmd finds nothing to signal, and the context's own kill
+// doStart publishing m.proc finds nothing to signal, and the context's own kill
 // reaches only the leader.
 func TestStopInTheSpawnWindowLeavesNoGroupBehind(t *testing.T) {
 	m, cmd, child := newManagerWithScript(t,
 		`sh -c "while :; do sleep 1; done" & echo ready; while :; do sleep 1; done`)
-	m.cmd, m.waitDone = nil, nil
+	m.proc = nil
 
 	require.NoError(t, m.Stop())
 
 	requireGroupGone(t, child, cmd.Process.Pid, "the leader died but the rest of its group kept running")
+}
+
+func TestReaperKillsTheGroupBeforeItReapsTheLeader(t *testing.T) {
+	m, cmd, child := newManagerWithScript(t,
+		`trap 'exit 0' USR1; sh -c "while :; do sleep 1; done" & echo ready; while :; do sleep 1 & wait $!; done`)
+
+	func() {
+		m.proc.mu.Lock() // what a signal in flight holds
+		defer m.proc.mu.Unlock()
+		require.NoError(t, cmd.Process.Signal(syscall.SIGUSR1))
+		require.NoError(t, waitExit(cmd.Process.Pid))
+		// Polled here, not through assert.Never, whose last check can outlive the lock.
+		for deadline := time.Now().Add(300 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			require.Nil(t, cmd.ProcessState, "the leader must stay unreaped while a signal can still reach its group")
+		}
+	}()
+
+	requireGroupGone(t, child, cmd.Process.Pid, "the reaper left the group running")
+	<-m.proc.done
+	assert.NotNil(t, cmd.ProcessState, "the reaper must still collect the leader")
+}
+
+// TestStopWhenTheExitCannotBeWatched: with nothing to tell when the leader exits,
+// the reaper waits on it unlocked, and Stop still ends it.
+func TestStopWhenTheExitCannotBeWatched(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cmd := exec.CommandContext(ctx, "sleep", "300")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, cmd.Start())
+	watched := make(chan struct{})
+	proc := startReaper(cmd, func(int) error {
+		close(watched)
+		return unix.EMFILE
+	})
+	killGroupOnCleanup(t, proc)
+	m := &CodeServerManager{
+		proc:        proc,
+		ctx:         ctx,
+		cancel:      cancel,
+		status:      CodeServerStatusStarting,
+		stopGrace:   codeServerStopGrace,
+		terminateFn: terminateProcess,
+	}
+
+	<-watched
+	time.Sleep(100 * time.Millisecond) // holds Stop back until the reaper is inside its wait
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- m.Stop() }()
+
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop blocked behind the unwatched reap")
+	}
+	assert.NotNil(t, cmd.ProcessState, "Stop must wait for the reap")
 }
 
 func TestReaperKillsWhatAnExitedLeaderLeftInItsGroup(t *testing.T) {

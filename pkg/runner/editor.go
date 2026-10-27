@@ -223,8 +223,7 @@ const (
 
 // CodeServerManager manages a code-server process for editor tunneling.
 type CodeServerManager struct {
-	cmd       *exec.Cmd
-	waitDone  <-chan struct{}
+	proc      *codeServerProcess
 	port      int
 	username  string
 	groupname string
@@ -351,15 +350,14 @@ func (m *CodeServerManager) doStart() error {
 		return err
 	}
 
-	waitDone := reapProcess(cmd)
+	proc := startReaper(cmd, waitExit)
 
 	m.mu.Lock()
-	m.cmd = cmd
-	m.waitDone = waitDone
+	m.proc = proc
 	m.mu.Unlock()
 
 	// Wait for code-server to be ready (no lock needed)
-	if err := m.waitForReady(waitDone); err != nil {
+	if err := m.waitForReady(proc.done); err != nil {
 		_ = m.stopProcess() // not Stop: the status has to carry this error
 		return fmt.Errorf("code-server failed to start: %w", err)
 	}
@@ -388,22 +386,62 @@ func (m *CodeServerManager) setStatusLocked(status CodeServerStatus) bool {
 	return true
 }
 
-// reapProcess owns the only cmd.Wait: a second one would race it over cmd.ProcessState.
-// cmd must lead its own process group, which the reaper kills once the leader is gone.
-func reapProcess(cmd *exec.Cmd) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		if err := cmd.Wait(); err != nil {
-			log.Debug().Err(err).Msg("code-server process exited.")
-		}
-		// Nothing else signals what the leader left behind. A live member keeps the pgid ours; only an
-		// empty group reused since the reap could be another's, the bound pkg/executor's cancel accepts.
-		if err := killProcess(cmd.Process); err != nil && !errors.Is(err, syscall.ESRCH) && !errors.Is(err, os.ErrProcessDone) {
-			log.Debug().Err(err).Msg("Failed to kill what code-server left in its process group.")
-		}
-		close(done)
-	}()
-	return done
+// codeServerProcess is a started code-server whose leader stays unreaped until its
+// group has been killed.
+type codeServerProcess struct {
+	cmd       *exec.Cmd
+	mu        sync.Mutex // held from a signal's check to its send, and over the kill and the reap
+	done      chan struct{}
+	unwatched bool // the exit could not be watched, so the reap runs unlocked
+}
+
+// startReaper owns the only cmd.Wait: a second one would race it over cmd.ProcessState.
+// cmd must lead its own process group.
+func startReaper(cmd *exec.Cmd, watchExit func(pid int) error) *codeServerProcess {
+	p := &codeServerProcess{cmd: cmd, done: make(chan struct{})}
+	go p.reap(watchExit)
+	return p
+}
+
+func (p *codeServerProcess) reap(watchExit func(pid int) error) {
+	if err := watchExit(p.cmd.Process.Pid); err != nil {
+		// The leader may still be running, so the reap cannot hold p.mu against Stop.
+		log.Debug().Err(err).Msg("Could not watch code-server exit, so its group is not swept.")
+		p.mu.Lock()
+		p.unwatched = true
+		p.mu.Unlock()
+		p.wait()
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Nothing else signals what the leader left behind.
+	if err := killProcess(p.cmd.Process); err != nil && !errors.Is(err, syscall.ESRCH) {
+		log.Debug().Err(err).Msg("Failed to kill what code-server left in its process group.")
+	}
+	p.wait()
+}
+
+func (p *codeServerProcess) wait() {
+	if err := p.cmd.Wait(); err != nil {
+		log.Debug().Err(err).Msg("code-server process exited.")
+	}
+	close(p.done)
+}
+
+// signal calls fn on the leader unless it is reaped, which reports os.ErrProcessDone.
+func (p *codeServerProcess) signal(fn func(*os.Process) error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	select {
+	case <-p.done:
+		return os.ErrProcessDone
+	default:
+	}
+	if p.unwatched {
+		return p.cmd.Process.Kill() // the handle refuses once reaped, which a group signal cannot
+	}
+	return fn(p.cmd.Process)
 }
 
 // Stop terminates code-server and waits for the reap, even before it is
@@ -419,47 +457,37 @@ func (m *CodeServerManager) Stop() error {
 // stopProcess is Stop without the final status, for doStart's failure path.
 func (m *CodeServerManager) stopProcess() error {
 	m.mu.Lock()
-	cmd, waitDone, port := m.cmd, m.waitDone, m.port
+	proc, port := m.proc, m.port
 	grace, terminate := m.stopGrace, m.terminateFn
-	m.cmd = nil
-	m.waitDone = nil
+	m.proc = nil
 	m.mu.Unlock()
 
 	if m.cancel != nil {
 		defer m.cancel()
 	}
 
-	if cmd == nil || cmd.Process == nil {
+	if proc == nil {
 		return nil
 	}
 
-	// A reaped pid is free for reuse, so what the leader left is the reaper's to kill, not a group
-	// that may since be someone else's. Check and signal are not atomic; the reaper's bound covers it.
-	select {
-	case <-waitDone:
-		return nil
-	default:
-	}
-
-	log.Info().Msgf("Stopping code-server on port %d...", port)
-
+	// A reaped leader was the reaper's to sweep, so its pgid is nothing to signal.
 	// A failed signal still leaves a child to collect, so the wait below runs anyway.
-	if err := terminate(cmd.Process); err != nil {
+	switch err := proc.signal(terminate); {
+	case errors.Is(err, os.ErrProcessDone):
+		return nil
+	case err != nil:
 		log.Warn().Err(err).Msg("Failed to signal code-server, waiting for it anyway.")
 	}
+	log.Info().Msgf("Stopping code-server on port %d...", port)
 
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
 
 	select {
-	case <-waitDone:
+	case <-proc.done:
 	case <-timer.C:
-		// select picks at random when both are ready, so give the reap another look.
-		select {
-		case <-waitDone:
-		default:
-			// Not terminate: it would repeat the SIGTERM just ignored.
-			killErr := killProcess(cmd.Process)
+		// Not terminate: it would repeat the SIGTERM just ignored.
+		if killErr := proc.signal(killProcess); !errors.Is(killErr, os.ErrProcessDone) {
 			log.Warn().Err(killErr).Dur("grace", grace).Msg("code-server did not exit in time, sending SIGKILL.")
 			return fmt.Errorf("code-server did not exit within %v", grace)
 		}
