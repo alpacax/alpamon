@@ -301,9 +301,7 @@ func registeredTunnel(t *testing.T, sessionID string, startRelay func() error) *
 	return tc
 }
 
-var errRelayMustNotStart = errors.New("the relay must not start")
-
-func relayMustNotStart() error { return errRelayMustNotStart }
+func relayMustNotStart() error { return errors.New("the relay must not start") }
 
 // newHeldHandshakeServer never answers the upgrade; reached closes once a
 // request has arrived, so the dial is known to be waiting on the handshake.
