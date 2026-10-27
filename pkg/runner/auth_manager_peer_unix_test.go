@@ -140,7 +140,7 @@ func TestPeerCredentials_ReportsThisProcess(t *testing.T) {
 	peer, err := peerCredentials(server)
 
 	require.NoError(t, err)
-	assert.True(t, peer.pidKnown)
+	assert.False(t, peer.skipPIDCheck)
 	assert.Equal(t, os.Getpid(), peer.pid)
 	assert.Equal(t, os.Geteuid(), peer.uid)
 }

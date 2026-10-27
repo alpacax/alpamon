@@ -16,10 +16,10 @@ func newTestAuthManager() *AuthManager {
 	return am
 }
 
-// trustedTestPeer stands in for the kernel check on net.Pipe connections; pidKnown
-// stays false so payloads without a matching pid still reach their handler.
+// trustedTestPeer stands in for the kernel check on net.Pipe connections; it skips
+// the pid check so payloads without a matching pid still reach their handler.
 func trustedTestPeer(net.Conn) (peerCred, error) {
-	return peerCred{uid: os.Geteuid()}, nil
+	return peerCred{uid: os.Geteuid(), skipPIDCheck: true}, nil
 }
 
 // TestAddPIDCommandMapping_RegistersCommandKind verifies that Commands

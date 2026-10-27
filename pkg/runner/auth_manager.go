@@ -464,7 +464,7 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		return
 	}
 
-	if peer.pidKnown && baseReq.PID != peer.pid {
+	if !peer.skipPIDCheck && baseReq.PID != peer.pid {
 		log.Warn().
 			Int("peer_pid", peer.pid).
 			Int("peer_uid", peer.uid).

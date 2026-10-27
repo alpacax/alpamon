@@ -27,5 +27,5 @@ func peerCredentials(conn net.Conn) (peerCred, error) {
 	if err != nil {
 		return peerCred{}, err
 	}
-	return peerCred{uid: int(cred.Uid), pid: pid, pidKnown: true}, nil
+	return peerCred{uid: int(cred.Uid), pid: pid}, nil
 }
