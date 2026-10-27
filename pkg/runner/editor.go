@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -217,6 +218,7 @@ const (
 	CodeServerStatusStarting   CodeServerStatus = "starting"
 	CodeServerStatusReady      CodeServerStatus = "ready"
 	CodeServerStatusError      CodeServerStatus = "error"
+	CodeServerStatusStopped    CodeServerStatus = "stopped" // final: Start runs once, and Stop cancels its context
 )
 
 // CodeServerManager manages a code-server process for editor tunneling.
@@ -231,7 +233,6 @@ type CodeServerManager struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	mu        sync.RWMutex
-	started   bool
 	status    CodeServerStatus
 	lastError string
 	startOnce sync.Once
@@ -290,8 +291,9 @@ func (m *CodeServerManager) StartAsync() {
 	go func() {
 		if err := m.Start(); err != nil {
 			m.mu.Lock()
-			m.status = CodeServerStatusError
-			m.lastError = err.Error()
+			if m.setStatusLocked(CodeServerStatusError) {
+				m.lastError = err.Error()
+			}
 			m.mu.Unlock()
 			log.Error().Err(err).Msg("code-server startup failed.")
 		}
@@ -320,8 +322,11 @@ func (m *CodeServerManager) doStart() error {
 	}
 
 	m.mu.Lock()
-	m.status = CodeServerStatusStarting
+	starting := m.setStatusLocked(CodeServerStatusStarting)
 	m.mu.Unlock()
+	if !starting {
+		return errCodeServerStopped
+	}
 
 	// Setup user data directory with settings (no lock needed)
 	userDataDir, err := setupUserDataDir(m.ctx, m.homeDir, m.username, m.groupname)
@@ -355,42 +360,69 @@ func (m *CodeServerManager) doStart() error {
 
 	// Wait for code-server to be ready (no lock needed)
 	if err := m.waitForReady(waitDone); err != nil {
-		_ = m.Stop()
+		_ = m.stopProcess() // not Stop: the status has to carry this error
 		return fmt.Errorf("code-server failed to start: %w", err)
 	}
 
 	m.mu.Lock()
-	m.started = true
-	m.status = CodeServerStatusReady
+	ready := m.setStatusLocked(CodeServerStatusReady)
 	m.mu.Unlock()
+	if !ready {
+		return errCodeServerStopped // Stop took the process with it
+	}
 
 	log.Info().Msgf("code-server started successfully on port %d for user %s.", port, m.username)
 
 	return nil
 }
 
+var errCodeServerStopped = errors.New("code-server was stopped while starting")
+
+// setStatusLocked moves m to status unless Stop got there first, so a start racing
+// Stop cannot report a code-server that is gone. The caller holds m.mu.
+func (m *CodeServerManager) setStatusLocked(status CodeServerStatus) bool {
+	if m.status == CodeServerStatusStopped {
+		return false
+	}
+	m.status = status
+	return true
+}
+
 // reapProcess owns the only cmd.Wait: a second one would race it over cmd.ProcessState.
+// cmd must lead its own process group, which the reaper kills once the leader is gone.
 func reapProcess(cmd *exec.Cmd) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		if err := cmd.Wait(); err != nil {
 			log.Debug().Err(err).Msg("code-server process exited.")
 		}
+		// Nothing else signals what the leader left behind. A live member keeps the pgid ours; only an
+		// empty group reused since the reap could be another's, the bound pkg/executor's cancel accepts.
+		if err := killProcess(cmd.Process); err != nil && !errors.Is(err, syscall.ESRCH) && !errors.Is(err, os.ErrProcessDone) {
+			log.Debug().Err(err).Msg("Failed to kill what code-server left in its process group.")
+		}
 		close(done)
 	}()
 	return done
 }
 
-// Stop terminates code-server and waits for the reap, even before m.started is
-// set—the doStart failure path. It takes m.mu itself, so a caller holding it
+// Stop terminates code-server and waits for the reap, even before it is
+// ready—the doStart failure path. It takes m.mu itself, so a caller holding it
 // deadlocks; the wait runs unlocked so Status() still answers.
 func (m *CodeServerManager) Stop() error {
+	m.mu.Lock()
+	m.status = CodeServerStatusStopped
+	m.mu.Unlock()
+	return m.stopProcess()
+}
+
+// stopProcess is Stop without the final status, for doStart's failure path.
+func (m *CodeServerManager) stopProcess() error {
 	m.mu.Lock()
 	cmd, waitDone, port := m.cmd, m.waitDone, m.port
 	grace, terminate := m.stopGrace, m.terminateFn
 	m.cmd = nil
 	m.waitDone = nil
-	m.started = false
 	m.mu.Unlock()
 
 	if m.cancel != nil {
@@ -401,7 +433,8 @@ func (m *CodeServerManager) Stop() error {
 		return nil
 	}
 
-	// A reaped pid is free for reuse: once the reaper is done, nothing here is ours.
+	// A reaped pid is free for reuse, so what the leader left is the reaper's to kill, not a group
+	// that may since be someone else's. Check and signal are not atomic; the reaper's bound covers it.
 	select {
 	case <-waitDone:
 		return nil
@@ -441,13 +474,6 @@ func (m *CodeServerManager) Port() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.port
-}
-
-// IsRunning checks if code-server is currently running.
-func (m *CodeServerManager) IsRunning() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.started
 }
 
 // waitForReady waits for code-server to listen on its port. It watches the reaper

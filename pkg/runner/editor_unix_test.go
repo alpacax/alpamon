@@ -112,7 +112,7 @@ func newManagerWithScript(t *testing.T, script string) (*CodeServerManager, *exe
 }
 
 // TestStopBeforeStarted covers doStart's waitForReady failure path: it calls
-// Stop before m.started is set—gating teardown on that flag leaks the process.
+// Stop before the manager is ready—gating teardown on readiness leaks the process.
 func TestStopBeforeStarted(t *testing.T) {
 	m, cmd := newManagerWithProcess(t)
 
@@ -147,14 +147,6 @@ func TestStopWithoutProcess(t *testing.T) {
 	assert.ErrorIs(t, ctx.Err(), context.Canceled, "Stop must cancel the context even with no process to signal")
 }
 
-func TestStopClearsRunningState(t *testing.T) {
-	m, _ := newManagerWithProcess(t)
-	m.started = true
-
-	require.NoError(t, m.Stop())
-	assert.False(t, m.IsRunning(), "Stop must clear m.started")
-}
-
 // TestStopKeepsStatusAnswerable pins Stop inside its wait with a child that
 // ignores SIGTERM and reports it, so no sleep or deadline is needed.
 func TestStopKeepsStatusAnswerable(t *testing.T) {
@@ -174,7 +166,7 @@ func TestStopKeepsStatusAnswerable(t *testing.T) {
 	m.mu.RUnlock()
 
 	status, _ := m.Status()
-	assert.Equal(t, CodeServerStatusStarting, status)
+	assert.Equal(t, CodeServerStatusStopped, status)
 
 	require.NoError(t, syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
 	require.NoError(t, <-stopped)
@@ -276,12 +268,37 @@ func TestStopLeavesTheManagerStopped(t *testing.T) {
 	m.startOnce.Do(func() {}) // a ready manager has been through Start
 
 	require.NoError(t, m.Stop())
-	stopped, _ := m.Status()
 	m.StartAsync()
 
-	assert.NotEqual(t, CodeServerStatusReady, stopped, "a stopped manager must not report ready")
 	status, _ := m.Status()
-	assert.Equal(t, stopped, status, "StartAsync must leave a stopped manager as it is")
+	assert.Equal(t, CodeServerStatusStopped, status, "StartAsync must leave a stopped manager as it is")
+}
+
+// TestStartFailureKeepsItsStatus covers doStart's waitForReady failure path: the
+// status has to report that error, not a stop nobody asked for.
+func TestStartFailureKeepsItsStatus(t *testing.T) {
+	m, cmd := newManagerWithProcess(t)
+
+	require.NoError(t, m.stopProcess())
+
+	require.NotNil(t, cmd.ProcessState, "stopProcess must terminate and reap the process")
+	status, _ := m.Status()
+	assert.Equal(t, CodeServerStatusStarting, status, "StartAsync records the start error only over a status that is not stopped")
+}
+
+// TestStopOutranksAStartThatTurnsReady covers a Stop landing between
+// waitForReady returning and doStart publishing the ready state.
+func TestStopOutranksAStartThatTurnsReady(t *testing.T) {
+	m, _ := newManagerWithProcess(t)
+
+	require.NoError(t, m.Stop())
+	m.mu.Lock()
+	ready := m.setStatusLocked(CodeServerStatusReady)
+	m.mu.Unlock()
+
+	assert.False(t, ready)
+	status, _ := m.Status()
+	assert.Equal(t, CodeServerStatusStopped, status, "a start must not report ready after Stop")
 }
 
 func TestSetupUserDataDirRefusesSymlinkedFiles(t *testing.T) {
