@@ -17,7 +17,7 @@ import (
 )
 
 // dialAuthSocket returns a client end and the agent end of a real Unix socket,
-// so SO_PEERCRED/LOCAL_PEERCRED see this test process as the peer.
+// so the kernel reports this test process as the peer.
 func dialAuthSocket(t *testing.T) (client net.Conn, server net.Conn) {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "as") // t.TempDir() overflows sun_path on macOS.
