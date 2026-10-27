@@ -47,7 +47,7 @@ const (
 )
 
 var (
-	// ErrTunnelClosedWhileOpening reports a tunnel closed, by closetunnel or shutdown, before Open finished.
+	// ErrTunnelClosedWhileOpening reports a tunnel closed through Close before Open finished.
 	ErrTunnelClosedWhileOpening = errors.New("tunnel session closed while opening")
 
 	// validSessionID restricts session IDs to safe characters.
