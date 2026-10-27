@@ -218,14 +218,20 @@ func TestWaitForReadySurvivesConcurrentStop(t *testing.T) {
 // exec.CommandContext's own kill reaches only the leader.
 func TestStopKillsGroupIgnoringSIGTERM(t *testing.T) {
 	// Both shells ignore SIGTERM, so only SIGKILL at the group ends them.
-	m, _, child := newManagerWithScript(t,
+	m, cmd, child := newManagerWithScript(t,
 		`trap '' TERM; sh -c "trap '' TERM; while :; do sleep 1; done" & echo ready; while :; do sleep 1; done`)
 	m.stopGrace = 200 * time.Millisecond
 
 	require.ErrorContains(t, m.Stop(), "did not exit within")
 
-	// Both shells hold the write end, so EOF means both are gone. kill(-pgid, 0)
-	// would not do: it still finds a zombie that a container init never reaps.
+	requireGroupGone(t, child, cmd.Process.Pid, "Stop gave up on the process group but left it running")
+}
+
+// requireGroupGone waits for EOF on child, which every member of the group holds.
+// kill(-pgid, 0) would not do: it still finds a zombie that a container init never reaps.
+func requireGroupGone(t *testing.T, child *bufio.Reader, pgid int, msg string) {
+	t.Helper()
+
 	drained := make(chan error, 1)
 	go func() {
 		_, err := io.ReadAll(child)
@@ -236,8 +242,46 @@ func TestStopKillsGroupIgnoringSIGTERM(t *testing.T) {
 	case err := <-drained:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("Stop gave up on the process group but left it running")
+		// A member still holds the pipe, so pgid is still this test's group.
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		t.Fatal(msg)
 	}
+}
+
+// TestStopInTheSpawnWindowLeavesNoGroupBehind: a Stop between the spawn and
+// doStart publishing m.cmd finds nothing to signal, and the context's own kill
+// reaches only the leader.
+func TestStopInTheSpawnWindowLeavesNoGroupBehind(t *testing.T) {
+	m, cmd, child := newManagerWithScript(t,
+		`sh -c "while :; do sleep 1; done" & echo ready; while :; do sleep 1; done`)
+	m.cmd, m.waitDone = nil, nil
+
+	require.NoError(t, m.Stop())
+
+	requireGroupGone(t, child, cmd.Process.Pid, "the leader died but the rest of its group kept running")
+}
+
+func TestReaperKillsWhatAnExitedLeaderLeftInItsGroup(t *testing.T) {
+	_, cmd, child := newManagerWithScript(t,
+		`sh -c "while :; do sleep 1; done" & echo ready; exit 0`)
+
+	requireGroupGone(t, child, cmd.Process.Pid, "the leader exited on its own and left its group running")
+}
+
+// TestStopLeavesTheManagerStopped: a health check that races TunnelClient.Close
+// reads Status after Stop, and starts the manager again if it reads idle.
+func TestStopLeavesTheManagerStopped(t *testing.T) {
+	m, _ := newManagerWithProcess(t)
+	m.status = CodeServerStatusReady
+	m.startOnce.Do(func() {}) // a ready manager has been through Start
+
+	require.NoError(t, m.Stop())
+	stopped, _ := m.Status()
+	m.StartAsync()
+
+	assert.NotEqual(t, CodeServerStatusReady, stopped, "a stopped manager must not report ready")
+	status, _ := m.Status()
+	assert.Equal(t, stopped, status, "StartAsync must leave a stopped manager as it is")
 }
 
 func TestSetupUserDataDirRefusesSymlinkedFiles(t *testing.T) {
