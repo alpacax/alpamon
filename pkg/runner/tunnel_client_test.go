@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -456,6 +457,22 @@ func TestTunnelOpen_ReportsACloseThatArrivesWhileTheRelayStarts(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrTunnelClosedWhileOpening)
 	_, registered := GetActiveTunnel("closed-during-relay")
+	assert.False(t, registered)
+}
+
+func TestTunnelOpen_ReportsACloseThatFailsTheRelayStart(t *testing.T) {
+	srv, _ := newSocketTargetServer(t)
+	setServerURL(t, srv.URL)
+	var tc *TunnelClient
+	tc = registeredTunnel(t, "closed-failing-relay", func() error {
+		require.NoError(t, CloseTunnel("closed-failing-relay"))
+		return fmt.Errorf("tunnel session closed while waiting for daemon socket: %w", tc.ctx.Err()) // as startTunnelRelay reports it
+	})
+
+	err := tc.Open(t.Context())
+
+	require.ErrorIs(t, err, ErrTunnelClosedWhileOpening)
+	_, registered := GetActiveTunnel("closed-failing-relay")
 	assert.False(t, registered)
 }
 
