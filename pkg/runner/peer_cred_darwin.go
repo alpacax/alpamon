@@ -9,20 +9,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// peerCredentials reports the UID only: alpamon-pam does not target macOS, so
-// there is no PAM producer whose claimed pid could be compared.
 func peerCredentials(conn net.Conn) (peerCred, error) {
 	var cred *unix.Xucred
+	var pid int
 	err := controlUnixConn(conn, func(fd int) error {
 		var credErr error
 		cred, credErr = unix.GetsockoptXucred(fd, unix.SOL_LOCAL, unix.LOCAL_PEERCRED)
 		if credErr != nil {
 			return fmt.Errorf("failed to read LOCAL_PEERCRED: %w", credErr)
 		}
+		pid, credErr = unix.GetsockoptInt(fd, unix.SOL_LOCAL, unix.LOCAL_PEERPID)
+		if credErr != nil {
+			return fmt.Errorf("failed to read LOCAL_PEERPID: %w", credErr)
+		}
 		return nil
 	})
 	if err != nil {
 		return peerCred{}, err
 	}
-	return peerCred{uid: int(cred.Uid)}, nil
+	return peerCred{uid: int(cred.Uid), pid: pid, pidKnown: true}, nil
 }
