@@ -393,7 +393,7 @@ func (am *AuthManager) createSendOperation(ctx context.Context, url string, payl
 				return fmt.Errorf("HTTP session not available")
 			}
 
-			resp, statusCode, err := am.session.Post(url, payload, 10*time.Second)
+			resp, statusCode, err := am.session.Post(url, payload, scheduler.DefaultRequestTimeout)
 			if err != nil {
 				log.Warn().Err(err).Str("url", url).Msg("Failed to send sudo request via REST API, will retry")
 				return err

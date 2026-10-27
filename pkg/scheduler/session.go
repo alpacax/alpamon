@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	checkSessionURL      = "/api/servers/servers/-/"
-	MaxRetryTimeout      = 3 * 24 * time.Hour
-	multipartMaxRespSize = 1 << 20          // 1 MiB; read +1 to detect over-limit explicitly
-	minTimeout           = time.Millisecond // below this, a caller passed a bare integer, which Go reads as nanoseconds
+	checkSessionURL       = "/api/servers/servers/-/"
+	MaxRetryTimeout       = 3 * 24 * time.Hour
+	DefaultRequestTimeout = 10 * time.Second // a routine call to the console API
+	multipartMaxRespSize  = 1 << 20          // 1 MiB; read +1 to detect over-limit explicitly
+	minTimeout            = time.Millisecond // below this, a caller passed a bare integer, which Go reads as nanoseconds
 )
 
 func InitSession() *Session {

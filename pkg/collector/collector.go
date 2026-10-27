@@ -91,8 +91,8 @@ func InitCollector(session *session.Session, client *ent.Client, ctxManager *age
 	return collector
 }
 
-func fetchConfig(session *session.Session) ([]collectConf, error) {
-	resp, statusCode, err := session.Get(confURL, 10*time.Second)
+func fetchConfig(s *session.Session) ([]collectConf, error) {
+	resp, statusCode, err := s.Get(confURL, session.DefaultRequestTimeout)
 	if err != nil {
 		return nil, err
 	}

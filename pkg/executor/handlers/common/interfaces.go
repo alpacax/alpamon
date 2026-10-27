@@ -74,21 +74,21 @@ type CommandExecutor interface {
 	StartDetached(name string, args ...string) error
 }
 
-// WSClient interface for WebSocket client operations
+// WSClient is the WebSocket client control handlers use.
 type WSClient interface {
 	Restart()
 	ShutDown()
 	RestartCollector()
 }
 
-// SystemInfoManager interface for system info operations
+// SystemInfoManager commits and syncs system information.
 type SystemInfoManager interface {
 	CommitSystemInfo()
 	SyncSystemInfo(keys []string)
 }
 
-// APISession interface for API operations (file upload, server unregister,
-// upgrade reports).
+// APISession is the console API subset handlers use: file upload, server
+// unregister and upgrade reports.
 type APISession interface {
 	MultipartRequest(url string, body io.Reader, contentType string, contentLength int64, timeout time.Duration) ([]byte, int, error)
 	Delete(url string, rawBody any, timeout time.Duration) ([]byte, int, error)
