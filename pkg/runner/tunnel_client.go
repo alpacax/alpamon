@@ -189,6 +189,9 @@ func (tc *TunnelClient) open(ctx context.Context) error {
 	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort.Load())
 
 	if err := tc.startRelay(); err != nil {
+		if tc.ctx.Err() != nil { // startTunnelRelay reports a close as tc.ctx's error
+			return ErrTunnelClosedWhileOpening
+		}
 		return fmt.Errorf("failed to start tunnel relay: %w", err)
 	}
 
