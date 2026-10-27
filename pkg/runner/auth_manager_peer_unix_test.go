@@ -17,7 +17,7 @@ import (
 )
 
 // dialAuthSocket returns a client end and the agent end of a real Unix socket,
-// so SO_PEERCRED/LOCAL_PEERCRED see this test process as the peer.
+// so the kernel reports this test process as the peer.
 func dialAuthSocket(t *testing.T) (client net.Conn, server net.Conn) {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "as") // t.TempDir() overflows sun_path on macOS.
@@ -66,16 +66,23 @@ func TestHandleSudoRequest_DropsConnectionWhenPeerCheckIsNotConfigured(t *testin
 
 	am.handleSudoRequest(server)
 
-	assertConnectionDroppedUnanswered(t, client)
+	assertDroppedBeforeReadingRequest(t, client)
 }
 
-func assertConnectionDroppedUnanswered(t *testing.T, client net.Conn) {
+func assertDroppedBeforeReadingRequest(t *testing.T, client net.Conn) {
 	t.Helper()
 	body, err := io.ReadAll(client)
 	if err != nil {
 		require.ErrorIs(t, err, syscall.ECONNRESET) // Linux resets a socket closed with its request still unread.
 	}
 	assert.Empty(t, body, "a refused peer was answered")
+}
+
+func assertDroppedAfterReadingRequest(t *testing.T, client net.Conn) {
+	t.Helper()
+	body, err := io.ReadAll(client)
+	require.NoError(t, err) // Nothing was left unread, so the close cannot reset the socket.
+	assert.Empty(t, body, "a dropped request was answered")
 }
 
 func TestHandleSudoRequest_DropsConnectionFromPeerThatIsNeitherRootNorAgentUser(t *testing.T) {
@@ -88,7 +95,7 @@ func TestHandleSudoRequest_DropsConnectionFromPeerThatIsNeitherRootNorAgentUser(
 
 	am.handleSudoRequest(server)
 
-	assertConnectionDroppedUnanswered(t, client)
+	assertDroppedBeforeReadingRequest(t, client)
 }
 
 func TestHandleSudoRequest_DropsConnectionWhenPeerCredentialsCannotBeRead(t *testing.T) {
@@ -101,5 +108,39 @@ func TestHandleSudoRequest_DropsConnectionWhenPeerCredentialsCannotBeRead(t *tes
 
 	am.handleSudoRequest(server)
 
-	assertConnectionDroppedUnanswered(t, client)
+	assertDroppedBeforeReadingRequest(t, client)
+}
+
+func TestHandleSudoRequest_DropsRequestClaimingAnotherPID(t *testing.T) {
+	am := newTestAuthManager()
+	am.peerCreds = peerCredentials
+	client, server := dialAuthSocket(t)
+	sendCheckUser(t, client, os.Getpid()+1)
+
+	am.handleSudoRequest(server)
+
+	assertDroppedAfterReadingRequest(t, client)
+}
+
+func TestHandleSudoRequest_DropsRequestWithoutPID(t *testing.T) {
+	am := newTestAuthManager()
+	am.peerCreds = peerCredentials
+	client, server := dialAuthSocket(t)
+	_, err := client.Write([]byte(`{"type":"check_user","username":"alice"}`))
+	require.NoError(t, err)
+
+	am.handleSudoRequest(server)
+
+	assertDroppedAfterReadingRequest(t, client)
+}
+
+func TestPeerCredentials_ReportsThisProcess(t *testing.T) {
+	_, server := dialAuthSocket(t)
+
+	peer, err := peerCredentials(server)
+
+	require.NoError(t, err)
+	assert.False(t, peer.skipPIDCheck)
+	assert.Equal(t, os.Getpid(), peer.pid)
+	assert.Equal(t, os.Geteuid(), peer.uid)
 }
