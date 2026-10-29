@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"testing"
 
@@ -31,6 +32,15 @@ func StartFakeAlpacon(t *testing.T) (cleanup func(), contents func() []string) {
 }
 
 // SetDial lets runner_test hand a client an in-memory socket instead of a TCP dial.
-func SetDial(wc *WebsocketClient, dial func(ctx context.Context, url string, header http.Header) (*websocket.Conn, error)) {
+func SetDial(
+	wc *WebsocketClient,
+	dial func(ctx context.Context, url string, header http.Header) (*websocket.Conn, error),
+) {
 	wc.dial = dial
+}
+
+// DialPipe exposes dialPipe to runner_test.
+func DialPipe(t *testing.T, serve func(peer net.Conn)) (*websocket.Conn, error) {
+	t.Helper()
+	return dialPipe(t, nil, serve)
 }

@@ -12,8 +12,8 @@
 //  4. Dispatch config_updated to configreceiver.Receiver (modern
 //     pull-based path), dispatch the plugin-private reconfigure
 //     payload to a plugin-supplied callback (legacy push, kept for
-//     the dual-emit rollout window), and handle ping / quit /
-//     reconnect / restart inline against the shared WsClient.
+//     the dual-emit rollout window), handle ping / quit / restart inline,
+//     and hand reconnect back to the read loop.
 //
 // All of that lives here so each plugin only needs to bring an
 // Applier and (during the rollout window) a small reconfigure
@@ -33,7 +33,7 @@ import (
 )
 
 // handlerOutcome carries what the handler wants done with the connection.
-// Only the read loop acts on it, because reconnecting reads the socket.
+// Only Serve acts on it, so a peer's reconnect request is paced like any other.
 type handlerOutcome int
 
 const (

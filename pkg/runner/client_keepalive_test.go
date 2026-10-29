@@ -21,7 +21,7 @@ import (
 )
 
 // shrinkKeepalive swaps in short keepalive timings. Register it before
-// starting RunForever, so its cleanup runs after the loop has stopped.
+// starting Serve, so its cleanup runs after the loop has stopped.
 func shrinkKeepalive(t *testing.T, interval, timeout, jitter time.Duration) {
 	t.Helper()
 	origInterval, origTimeout, origJitter := keepaliveInterval, keepaliveTimeout, keepaliveRedialJitter
@@ -65,15 +65,20 @@ func readUntilError(c *websocket.Conn) error {
 	}
 }
 
-// startRunForever runs the read loop and returns a stop that cancels it and
-// closes the connection, as gracefulShutdown does, then waits for it to return.
 func startRunForever(t *testing.T, wc *WebsocketClient) (stop func()) {
+	t.Helper()
+	return startReadLoop(t, wc, wc.RunForever)
+}
+
+// startReadLoop runs loop and returns a stop that cancels it and closes the
+// connection, as gracefulShutdown does, then waits for it to return.
+func startReadLoop(t *testing.T, wc *WebsocketClient, loop func(ctx context.Context)) (stop func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		wc.RunForever(ctx)
+		loop(ctx)
 	}()
 
 	stop = sync.OnceFunc(func() {
@@ -82,7 +87,7 @@ func startRunForever(t *testing.T, wc *WebsocketClient) (stop func()) {
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			t.Fatal("RunForever did not return after cancel and Close")
+			t.Fatal("the read loop did not return after cancel and Close")
 		}
 	})
 	t.Cleanup(stop)
@@ -545,26 +550,18 @@ func TestServe_KeepsTheReadLimitAcrossAReconnect(t *testing.T) {
 	wc := &WebsocketClient{connectBackoff: newAuthBackoff(minConnectInterval, maxConnectInterval)}
 	wc.SetReadLimit(limit)
 	var handled atomic.Int32
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	startReadLoop(t, wc, func(ctx context.Context) {
 		wc.Serve(ctx, func(message []byte) bool {
 			handled.Add(1)
 			return string(message) == `{"query":"reconnect"}`
 		})
-	}()
-	t.Cleanup(func() {
-		cancel()
-		wc.Close()
-		<-done
 	})
 
 	var err error
 	select {
 	case err = <-secondEnd:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the reconnected connection took a frame over the read limit")
+		t.Fatal("the second connection never closed with CloseMessageTooBig")
 	}
 	var closeErr *websocket.CloseError
 	require.ErrorAs(t, err, &closeErr)

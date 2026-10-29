@@ -121,13 +121,11 @@ func TestRunForever_JittersTheRedialAfterAConnectionThatStayedUpDrops(t *testing
 	assert.Less(t, gap, minConnectInterval, "a connection that stayed up was paced by the backoff instead of the jitter")
 }
 
-// dialPeerThatNeverReads returns a client connection over an in-memory pipe
-// whose far end completes the WebSocket handshake and then never reads, so
-// every write on it blocks until its deadline.
-func dialPeerThatNeverReads(t *testing.T) (*websocket.Conn, *trackedConn) {
+// dialPipe dials a WebSocket over net.Pipe, wrapping the client end with wrap if set, and hands the far end to serve after the handshake; a nil serve never reads it.
+// net.Pipe runs on channels and timers, so a synctest bubble's fake clock drives the connection.
+func dialPipe(t *testing.T, wrap func(net.Conn) net.Conn, serve func(peer net.Conn)) (*websocket.Conn, error) {
 	t.Helper()
 	client, server := net.Pipe()
-	tracked := &trackedConn{Conn: client}
 	t.Cleanup(func() {
 		_ = client.Close()
 		_ = server.Close()
@@ -139,14 +137,34 @@ func dialPeerThatNeverReads(t *testing.T) (*websocket.Conn, *trackedConn) {
 			return
 		}
 		sum := sha1.Sum([]byte(req.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-		_, _ = fmt.Fprintf(server, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n",
+		_, _ = fmt.Fprintf(server, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"+
+			"Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n",
 			base64.StdEncoding.EncodeToString(sum[:]))
+		if serve != nil {
+			serve(server)
+		}
 	}()
 
+	dialed := client
+	if wrap != nil {
+		dialed = wrap(client)
+	}
 	dialer := websocket.Dialer{
-		NetDialContext: func(context.Context, string, string) (net.Conn, error) { return tracked, nil },
+		NetDialContext: func(context.Context, string, string) (net.Conn, error) { return dialed, nil },
 	}
 	conn, _, err := dialer.Dial("ws://peer.test/", nil)
+	return conn, err
+}
+
+// dialPeerThatNeverReads returns a connection whose in-memory peer completes the handshake and then never reads,
+// so every write on it blocks until its deadline.
+func dialPeerThatNeverReads(t *testing.T) (*websocket.Conn, *trackedConn) {
+	t.Helper()
+	var tracked *trackedConn
+	conn, err := dialPipe(t, func(c net.Conn) net.Conn {
+		tracked = &trackedConn{Conn: c}
+		return tracked
+	}, nil)
 	require.NoError(t, err)
 	return conn, tracked
 }

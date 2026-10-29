@@ -1,11 +1,7 @@
 package runner_test
 
 import (
-	"bufio"
 	"context"
-	"crypto/sha1"
-	"encoding/base64"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -18,34 +14,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 )
-
-// dialPipe dials a WebSocket over an in-memory pipe and runs serve on the far
-// end once the handshake is done, so the whole connection lives in a bubble.
-func dialPipe(t *testing.T, serve func(peer net.Conn)) (*websocket.Conn, error) {
-	client, server := net.Pipe()
-	t.Cleanup(func() {
-		_ = client.Close()
-		_ = server.Close()
-	})
-
-	go func() {
-		r := bufio.NewReader(server)
-		req, err := http.ReadRequest(r)
-		if err != nil {
-			return
-		}
-		sum := sha1.Sum([]byte(req.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-		_, _ = fmt.Fprintf(server, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n",
-			base64.StdEncoding.EncodeToString(sum[:]))
-		serve(server)
-	}()
-
-	dialer := websocket.Dialer{
-		NetDialContext: func(context.Context, string, string) (net.Conn, error) { return client, nil },
-	}
-	conn, _, err := dialer.Dial("ws://alpacon.test/ws/", nil)
-	return conn, err
-}
 
 // answerFirstPing pongs the first ping the client sends and then reads on
 // without ever answering, as a link that drops traffic without a close does.
@@ -72,6 +40,7 @@ func answerFirstPing(peer net.Conn, answered chan<- time.Time) {
 	}
 }
 
+// Lives in runner_test for SetDial: the in-memory dial keeps the 45s keepalive inside a synctest bubble.
 func TestPluginClient_RedialsAConnectionThatGoesSilentWithinTheKeepaliveTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		silentAt := make(chan time.Time, 1)
@@ -82,12 +51,12 @@ func TestPluginClient_RedialsAConnectionThatGoesSilentWithinTheKeepaliveTimeout(
 		runner.SetDial(wc, func(context.Context, string, http.Header) (*websocket.Conn, error) {
 			dials++
 			if dials == 1 {
-				return dialPipe(t, func(peer net.Conn) { answerFirstPing(peer, silentAt) })
+				return runner.DialPipe(t, func(peer net.Conn) { answerFirstPing(peer, silentAt) })
 			}
 			if dials == 2 {
 				redialAt <- time.Now()
 			}
-			return dialPipe(t, func(peer net.Conn) { _, _ = io.Copy(io.Discard, peer) })
+			return runner.DialPipe(t, func(peer net.Conn) { _, _ = io.Copy(io.Discard, peer) })
 		})
 		c := &pluginclient.Client{WsClient: wc}
 
@@ -115,7 +84,7 @@ func TestPluginClient_RedialsAConnectionThatGoesSilentWithinTheKeepaliveTimeout(
 			t.Fatal("the plugin client never redialled a connection that went silent")
 		}
 
-		// 45s of keepalive timeout, then up to 10s of redial jitter.
+		// Pins the 45s contract on purpose: the keepalive timeout, then up to 10s of redial jitter.
 		elapsed := redial.Sub(silent)
 		assert.GreaterOrEqual(t, elapsed, 45*time.Second, "the plugin client redialled before the keepalive timeout ran out")
 		assert.LessOrEqual(t, elapsed, 55*time.Second, "the plugin client redialled later than the keepalive timeout plus the redial jitter")
