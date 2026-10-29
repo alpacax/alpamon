@@ -32,7 +32,8 @@ const (
 )
 
 type WebsocketClient struct {
-	// mu guards Conn, keepalive and readLimit: Connect writes Conn from the read loop; Close reads it on shutdown.
+	// mu guards Conn, keepalive and readLimit: Connect writes Conn from the
+	// read loop; Close reads it on shutdown.
 	mu sync.Mutex
 	// Conn stays exported for outside readers; inside this package use the accessors.
 	//
@@ -44,8 +45,8 @@ type WebsocketClient struct {
 	// dial opens a connection; nil means dialWebsocket. Tests swap in a dialer that wraps the socket.
 	dial func(ctx context.Context, url string, header http.Header) (*websocket.Conn, error)
 
-	// keepaliveEnabled makes Connect ping each connection; only Serve sets it, as only its loop acts on a timeout.
-	// Owned by the read loop goroutine.
+	// keepaliveEnabled makes Connect ping each connection; only Serve sets it,
+	// as only its loop acts on a timeout. Owned by the read loop goroutine.
 	keepaliveEnabled bool
 
 	// readLimit caps one inbound frame on every connection; zero means no cap.
@@ -286,8 +287,9 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 	})
 }
 
-// Serve passes each inbound frame to handle until ctx ends, pinging and redialling a silent connection;
-// handle returns true to ask for a paced reconnect. Run one Serve per client.
+// Serve passes each inbound frame to handle until ctx ends, pinging and
+// redialling a silent connection; handle returns true to ask for a paced
+// reconnect. Run one Serve per client.
 func (wc *WebsocketClient) Serve(
 	ctx context.Context,
 	handle func(message []byte) (reconnect bool),

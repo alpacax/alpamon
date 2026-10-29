@@ -138,7 +138,8 @@ func TestEnqueueConfigUpdate_LastWriteWins(t *testing.T) {
 }
 
 func TestHandleMessage_ReconnectAsksTheLoopInsteadOfActing(t *testing.T) {
-	// Only Serve may reconnect, so the reconnect case returns an outcome and leaves WsClient alone.
+	// Only Serve may reconnect, so the reconnect case returns an outcome
+	// and leaves WsClient alone.
 	c := &Client{PluginName: "alpamon-test-plugin", WsClient: &runner.WebsocketClient{}}
 	msg, err := json.Marshal(map[string]string{"query": "reconnect"})
 	require.NoError(t, err)

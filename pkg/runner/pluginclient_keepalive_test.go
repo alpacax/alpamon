@@ -23,7 +23,8 @@ func answerFirstPing(peer net.Conn, answered chan<- time.Time) {
 		if _, err := io.ReadFull(peer, header[:]); err != nil {
 			return
 		}
-		body := make([]byte, 4+int(header[1]&0x7f)) // client frames are masked and pings carry at most 125 bytes
+		// Client frames are masked and pings carry at most 125 bytes.
+		body := make([]byte, 4+int(header[1]&0x7f))
 		if _, err := io.ReadFull(peer, body); err != nil {
 			return
 		}
@@ -32,7 +33,8 @@ func answerFirstPing(peer net.Conn, answered chan<- time.Time) {
 			for i := range payload {
 				payload[i] ^= mask[i%4]
 			}
-			_, _ = peer.Write(append([]byte{0x80 | websocket.PongMessage, byte(len(payload))}, payload...))
+			pong := append([]byte{0x80 | websocket.PongMessage, byte(len(payload))}, payload...)
+			_, _ = peer.Write(pong)
 			answered <- time.Now()
 			_, _ = io.Copy(io.Discard, peer)
 			return
@@ -40,7 +42,8 @@ func answerFirstPing(peer net.Conn, answered chan<- time.Time) {
 	}
 }
 
-// Lives in runner_test for SetDial: the in-memory dial keeps the 45s keepalive inside a synctest bubble.
+// Lives in runner_test for SetDial: the in-memory dial keeps the 45s keepalive
+// inside a synctest bubble.
 func TestPluginClient_RedialsAConnectionThatGoesSilentWithinTheKeepaliveTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		silentAt := make(chan time.Time, 1)
@@ -84,9 +87,12 @@ func TestPluginClient_RedialsAConnectionThatGoesSilentWithinTheKeepaliveTimeout(
 			t.Fatal("the plugin client never redialled a connection that went silent")
 		}
 
-		// Pins the 45s contract on purpose: the keepalive timeout, then up to 10s of redial jitter.
+		// Pins the 45s contract on purpose: the keepalive timeout, then up to 10s
+		// of redial jitter.
 		elapsed := redial.Sub(silent)
-		assert.GreaterOrEqual(t, elapsed, 45*time.Second, "the plugin client redialled before the keepalive timeout ran out")
-		assert.LessOrEqual(t, elapsed, 55*time.Second, "the plugin client redialled later than the keepalive timeout plus the redial jitter")
+		assert.GreaterOrEqual(t, elapsed, 45*time.Second,
+			"the plugin client redialled before the keepalive timeout ran out")
+		assert.LessOrEqual(t, elapsed, 55*time.Second,
+			"the plugin client redialled later than the keepalive timeout plus the redial jitter")
 	})
 }

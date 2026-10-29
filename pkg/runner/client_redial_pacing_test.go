@@ -121,9 +121,15 @@ func TestRunForever_JittersTheRedialAfterAConnectionThatStayedUpDrops(t *testing
 	assert.Less(t, gap, minConnectInterval, "a connection that stayed up was paced by the backoff instead of the jitter")
 }
 
-// dialPipe dials a WebSocket over net.Pipe, wrapping the client end with wrap if set, and hands the far end to serve after the handshake; a nil serve never reads it.
-// net.Pipe runs on channels and timers, so a synctest bubble's fake clock drives the connection.
-func dialPipe(t *testing.T, wrap func(net.Conn) net.Conn, serve func(peer net.Conn)) (*websocket.Conn, error) {
+// dialPipe dials a WebSocket over net.Pipe, wrapping the client end with wrap
+// if set, and hands the far end to serve after the handshake; a nil serve
+// never reads it. net.Pipe runs on channels and timers, so a synctest
+// bubble's fake clock drives the connection.
+func dialPipe(
+	t *testing.T,
+	wrap func(net.Conn) net.Conn,
+	serve func(peer net.Conn),
+) (*websocket.Conn, error) {
 	t.Helper()
 	client, server := net.Pipe()
 	t.Cleanup(func() {
@@ -150,14 +156,17 @@ func dialPipe(t *testing.T, wrap func(net.Conn) net.Conn, serve func(peer net.Co
 		dialed = wrap(client)
 	}
 	dialer := websocket.Dialer{
-		NetDialContext: func(context.Context, string, string) (net.Conn, error) { return dialed, nil },
+		NetDialContext: func(context.Context, string, string) (net.Conn, error) {
+			return dialed, nil
+		},
 	}
 	conn, _, err := dialer.Dial("ws://peer.test/", nil)
 	return conn, err
 }
 
-// dialPeerThatNeverReads returns a connection whose in-memory peer completes the handshake and then never reads,
-// so every write on it blocks until its deadline.
+// dialPeerThatNeverReads returns a connection whose in-memory peer completes
+// the handshake and then never reads, so every write on it blocks until its
+// deadline.
 func dialPeerThatNeverReads(t *testing.T) (*websocket.Conn, *trackedConn) {
 	t.Helper()
 	var tracked *trackedConn

@@ -72,7 +72,11 @@ func startRunForever(t *testing.T, wc *WebsocketClient) (stop func()) {
 
 // startReadLoop runs loop and returns a stop that cancels it and closes the
 // connection, as gracefulShutdown does, then waits for it to return.
-func startReadLoop(t *testing.T, wc *WebsocketClient, loop func(ctx context.Context)) (stop func()) {
+func startReadLoop(
+	t *testing.T,
+	wc *WebsocketClient,
+	loop func(ctx context.Context),
+) (stop func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
