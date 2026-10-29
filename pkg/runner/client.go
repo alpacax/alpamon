@@ -45,11 +45,13 @@ type WebsocketClient struct {
 	dial func(ctx context.Context, url string, header http.Header) (*websocket.Conn, error)
 
 	// keepaliveEnabled makes Connect ping each connection and track its
-	// pongs. Only RunForever sets it, before its first Connect, because only
-	// its read loop acts on a keepalive timeout; pkg/pluginclient drives
-	// Connect from its own loop and keeps the behavior it had. Written and
-	// read by the read loop goroutine alone.
+	// pongs. Only Serve sets it, before its first Connect, because only its
+	// read loop acts on a keepalive timeout. Written and read by the read
+	// loop goroutine alone.
 	keepaliveEnabled bool
+
+	// readLimit caps one inbound frame on every connection; zero means no cap. Guarded by mu.
+	readLimit int64
 
 	// lastPeerReconnect is owned by the read loop goroutine alone: one read
 	// loop per client, so it needs no lock.
@@ -250,19 +252,23 @@ func (wc *WebsocketClient) installConn(conn *websocket.Conn, ka *connKeepalive) 
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 	old := wc.Conn
+	if conn != nil {
+		conn.SetReadLimit(wc.readLimit)
+	}
 	wc.Conn = conn
 	wc.keepalive = ka
 	return old
 }
 
-// SetReadLimit caps one inbound frame. A new connection starts uncapped, so
-// callers reapply it after every reconnect.
+// SetReadLimit caps one inbound frame on the current connection and on every
+// connection after it.
 func (wc *WebsocketClient) SetReadLimit(limit int64) {
-	conn := wc.conn()
-	if conn == nil {
-		return
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	wc.readLimit = limit
+	if wc.Conn != nil {
+		wc.Conn.SetReadLimit(limit)
 	}
-	conn.SetReadLimit(limit)
 }
 
 // SetReadDeadline arms the read timeout for the current connection. It reports
@@ -276,6 +282,15 @@ func (wc *WebsocketClient) SetReadDeadline(t time.Time) error {
 }
 
 func (wc *WebsocketClient) RunForever(ctx context.Context) {
+	wc.Serve(ctx, func(message []byte) bool {
+		return wc.commandRequestHandler(message) == outcomeReconnect
+	})
+}
+
+// Serve keeps a connection up and passes each inbound frame to handle until
+// ctx ends; handle returns true to ask for a paced reconnect. Each connection
+// is pinged, and one that stops answering is redialled after keepaliveTimeout.
+func (wc *WebsocketClient) Serve(ctx context.Context, handle func(message []byte) (reconnect bool)) {
 	wc.keepaliveEnabled = true
 	if err := wc.Connect(ctx); err != nil {
 		return
@@ -317,7 +332,7 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 					(*cb)()
 				}
 			}
-			if wc.commandRequestHandler(message) == outcomeReconnect {
+			if handle(message) {
 				if err := wc.CloseAndReconnectOnRequest(ctx); err != nil {
 					return
 				}

@@ -410,8 +410,8 @@ func TestSendPings_StopsOnceTheConnectionIsClosed(t *testing.T) {
 	assert.Same(t, conn, wc.conn(), "Close is expected to leave Conn in place")
 }
 
-func TestConnect_OutsideRunForeverDoesNotPing(t *testing.T) {
-	// pkg/pluginclient calls Connect from its own read loop, which does not act on a keepalive timeout.
+func TestConnect_OutsideServeDoesNotPing(t *testing.T) {
+	// A caller that runs its own read loop around Connect does not act on a keepalive timeout.
 	shrinkKeepalive(t, time.Millisecond, 10*time.Millisecond, time.Millisecond)
 
 	var pings atomic.Int32
@@ -433,8 +433,8 @@ func TestConnect_OutsideRunForeverDoesNotPing(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	_, ka := wc.connState()
-	assert.Nil(t, ka, "Connect set up keepalive for a read loop that is not RunForever")
-	assert.Zero(t, pings.Load(), "Connect pinged a connection whose read loop is not RunForever")
+	assert.Nil(t, ka, "Connect set up keepalive for a read loop that is not Serve")
+	assert.Zero(t, pings.Load(), "Connect pinged a connection whose read loop is not Serve")
 }
 
 func TestSendPings_KeepsGoingAfterAFailedPing(t *testing.T) {
@@ -526,4 +526,48 @@ func TestAuthBackoff_WaitBeforeRedial(t *testing.T) {
 		require.ErrorIs(t, a.waitBeforeRedial(ctx), context.Canceled)
 		assert.Zero(t, time.Since(start), "a cancelled context should not wait out the jitter")
 	})
+}
+
+func TestServe_KeepsTheReadLimitAcrossAReconnect(t *testing.T) {
+	const limit = 64
+	secondEnd := make(chan error, 1)
+	url := newKeepaliveServer(t, func(n int, c *websocket.Conn) {
+		if n == 0 {
+			_ = c.WriteMessage(websocket.TextMessage, []byte(`{"query":"reconnect"}`))
+			_ = readUntilError(c)
+			return
+		}
+		_ = c.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("x", limit+1)))
+		secondEnd <- readUntilError(c)
+	})
+	useWSPath(t, url)
+
+	wc := &WebsocketClient{connectBackoff: newAuthBackoff(minConnectInterval, maxConnectInterval)}
+	wc.SetReadLimit(limit)
+	var handled atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wc.Serve(ctx, func(message []byte) bool {
+			handled.Add(1)
+			return string(message) == `{"query":"reconnect"}`
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		wc.Close()
+		<-done
+	})
+
+	var err error
+	select {
+	case err = <-secondEnd:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reconnected connection took a frame over the read limit")
+	}
+	var closeErr *websocket.CloseError
+	require.ErrorAs(t, err, &closeErr)
+	assert.Equal(t, websocket.CloseMessageTooBig, closeErr.Code)
+	assert.Equal(t, int32(1), handled.Load(), "a frame over the read limit reached the handler")
 }

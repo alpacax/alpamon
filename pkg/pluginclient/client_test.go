@@ -138,7 +138,7 @@ func TestEnqueueConfigUpdate_LastWriteWins(t *testing.T) {
 }
 
 func TestHandleMessage_ReconnectAsksTheLoopInsteadOfActing(t *testing.T) {
-	// The loop reapplies the read limit after a reconnect, so only the loop may reconnect.
+	// Reconnecting drains the old socket, so only the read loop may reconnect.
 	// A zero WebsocketClient is enough: the reconnect case no longer touches it.
 	c := &Client{PluginName: "alpamon-test-plugin", WsClient: &runner.WebsocketClient{}}
 	msg, err := json.Marshal(map[string]string{"query": "reconnect"})
