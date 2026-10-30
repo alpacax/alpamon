@@ -156,6 +156,56 @@ jobs:
             printf '%s\n' "$deps" | sed 's/^/  /'
           done
 
+  # Other modules get alpamon's tagged tree from the module proxy, which has no
+  # generated ent code: it is gitignored and only `go generate` makes it. This
+  # job builds what they import from a checkout that never ran it.
+  importable-guard:
+    name: Verify imported packages build without generated code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # The same reason as leaf-guard: do not claim the shared cache key.
+          cache: false
+
+      - name: Build the packages other modules import
+        env:
+          # Kept by hand: go list cannot see what other modules import. Add a
+          # package here when another module starts importing it.
+          PKGS: >-
+            ./cmd/alpamon/command/setup
+            ./pkg/agent
+            ./pkg/config
+            ./pkg/configreceiver
+            ./pkg/logsink
+            ./pkg/pidfile
+            ./pkg/plugin
+            ./pkg/pluginclient
+            ./pkg/runner
+            ./pkg/scheduler
+            ./pkg/utils
+        run: |
+          set -euo pipefail
+
+          # A generated file here would hide the failure this job exists to catch.
+          if [ "$(git ls-files --others pkg/db/ent | wc -l)" -ne 0 ]; then
+            echo "::error::pkg/db/ent has generated files before the build"
+            exit 1
+          fi
+
+          for target in linux/amd64/1 linux/amd64/0 linux/arm64/0 darwin/amd64/0 darwin/arm64/0 windows/amd64/0; do
+            IFS=/ read -r goos goarch cgo <<<"$target"
+            echo "building on $target"
+            # Unquoted on purpose: one package per word.
+            # shellcheck disable=SC2086
+            GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="$cgo" go build $PKGS
+          done
+
   # The suite below runs without the race detector on every platform, so the
   # state these packages share between goroutines goes unchecked there.
   # pkg/wsclient hands one connection to a read loop, to callers writing from
@@ -474,6 +524,7 @@ jobs:
     needs:
       - verify-tidy
       - leaf-guard
+      - importable-guard
       - race
       - build-and-test-linux
       - build-and-test-windows
