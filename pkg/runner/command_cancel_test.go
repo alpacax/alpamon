@@ -23,9 +23,11 @@ import (
 )
 
 type cancelTestDispatcher struct {
-	calls   atomic.Int32
-	started chan struct{}
-	block   bool
+	cancelBeforeReturn bool
+	cancel             func()
+	calls              atomic.Int32
+	started            chan struct{}
+	block              bool
 }
 
 func (d *cancelTestDispatcher) HasHandler(string) bool { return true }
@@ -37,6 +39,9 @@ func (d *cancelTestDispatcher) Execute(ctx context.Context, _ string, _ *common.
 	if d.block {
 		<-ctx.Done()
 		return 1, "stopped", ctx.Err()
+	}
+	if d.cancelBeforeReturn {
+		d.cancel()
 	}
 	return 0, "unchanged", nil
 }
@@ -138,7 +143,7 @@ func TestCancelledIDsBoundedAndExpire(t *testing.T) {
 		ctx, state := registry.register(context.Background(), "1")
 		assert.NoError(t, ctx.Err(), "expired cancellation must not suppress a new delivery")
 		registry.finish("1", state)
-		assert.Len(t, registry.recent, 1)
+		assert.Empty(t, registry.recent)
 	})
 }
 
@@ -172,6 +177,7 @@ func TestCancellationRegistrationFinishAndDuplicates(t *testing.T) {
 	_, second := registry.register(context.Background(), "same")
 	registry.finish("same", first)
 	registry.cancel("same")
+	second.Observe()
 	cancelled, _ := registry.finish("same", second)
 	assert.True(t, cancelled, "one finished delivery must not hide another running delivery")
 	assert.ErrorIs(t, ctx.Err(), context.Canceled)
@@ -185,4 +191,38 @@ func TestCancellationRegistrationFinishAndDuplicates(t *testing.T) {
 	repeated, fourth := registry.register(context.Background(), "finished")
 	assert.NoError(t, repeated.Err(), "cancel after finish must be a no-op")
 	registry.finish("finished", fourth)
+}
+
+func TestCancelIgnoredByHandlerDoesNotReportCancelled(t *testing.T) {
+	d := &cancelTestDispatcher{cancelBeforeReturn: true}
+	wc, reports := cancelTestClient(t, d)
+	d.cancel = func() { wc.cancellations.cancel("exited") }
+	wc.commandRequestHandler([]byte(`{"query":"command","command":{"id":"exited","shell":"system","line":"done"}}`))
+	report := receiveCancelReport(t, reports)
+	assert.NotContains(t, report, "cancelled")
+	assert.Equal(t, true, report["success"])
+}
+
+func TestNormalFinishesDoNotEvictPendingCancel(t *testing.T) {
+	var registry commandCancellations
+	registry.cancel("pending")
+	for i := 0; i <= cancelledCommandLimit; i++ {
+		id := strconv.Itoa(i)
+		_, state := registry.register(context.Background(), id)
+		registry.finish(id, state)
+	}
+	assert.True(t, registry.wasCancelled("pending"))
+}
+
+func TestOversizedCancelIDIsIgnored(t *testing.T) {
+	var registry commandCancellations
+	for _, id := range []string{strings.Repeat("x", 129), strings.Repeat("é", 65)} {
+		ctx, state := registry.register(context.Background(), id)
+		registry.cancel(id)
+		assert.NoError(t, ctx.Err())
+		registry.finish(id, state)
+		assert.False(t, registry.wasCancelled(id))
+	}
+	registry.cancel(strings.Repeat("x", 128))
+	assert.True(t, registry.wasCancelled(strings.Repeat("x", 128)))
 }

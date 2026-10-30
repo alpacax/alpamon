@@ -726,6 +726,7 @@ func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol
 	}
 	baseCtx, cancel := wc.ctxManager.NewContext(safetyTimeout)
 	ctx, state := wc.cancellations.register(baseCtx, command.ID)
+	ctx = context.WithValue(ctx, cancellationRegistryKey{}, &wc.cancellations)
 	commandRunner.finishCancellation = func() (bool, []int) { return wc.cancellations.finish(command.ID, state) }
 
 	err := wc.pool.Submit(baseCtx, func() error {

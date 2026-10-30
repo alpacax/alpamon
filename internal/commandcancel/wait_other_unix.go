@@ -22,6 +22,6 @@ func WaitExited(pid int) error {
 		if slices.Contains(statuses, process.Zombie) {
 			return nil
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }

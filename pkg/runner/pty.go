@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,25 +35,30 @@ import (
 type PtyClient struct {
 	conn *websocket.Conn
 	// keepalive belongs to conn and is replaced with it, under recoveryMu. Nil for a conn installConn did not install.
-	keepalive     *connKeepalive
-	apiSession    *scheduler.Session
-	requestHeader http.Header
-	cmd           *exec.Cmd
-	ptmx          *os.File
-	url           string
-	rows          uint16
-	cols          uint16
-	username      string
-	groupname     string
-	homeDirectory string
-	shell         string
-	sessionID     string
-	wsToPty       chan []byte
-	ptyToWs       chan []byte
-	isRecovering  atomic.Bool // default : false
-	recoveryMu    sync.Mutex
-	recoveryDone  chan struct{} // closed on each completed recovery, then replaced
-	manager       *TerminalManager
+	keepalive          *connKeepalive
+	apiSession         *scheduler.Session
+	requestHeader      http.Header
+	cmd                *exec.Cmd
+	ptmx               *os.File
+	url                string
+	rows               uint16
+	cols               uint16
+	username           string
+	groupname          string
+	homeDirectory      string
+	shell              string
+	sessionID          string
+	wsToPty            chan []byte
+	ptyToWs            chan []byte
+	isRecovering       atomic.Bool // default : false
+	recoveryMu         sync.Mutex
+	recoveryDone       chan struct{} // closed on each completed recovery, then replaced
+	manager            *TerminalManager
+	commandID          string
+	cancelState        *commandcancel.State
+	cancelDone         <-chan struct{}
+	finishCancellation func() (bool, []int)
+	closeOnce          sync.Once
 }
 
 const (
@@ -109,7 +113,7 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
 	}
-	conn, _, err := dialer.Dial(sanitizedURL, pc.requestHeader)
+	conn, _, err := dialer.DialContext(ctx, sanitizedURL, pc.requestHeader)
 	if err != nil {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
@@ -153,6 +157,19 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 	return nil
 }
 
+// TrackCommand retains the openpty command ID until the terminal closes.
+// Call before starting the background worker, while the command is registered.
+func (pc *PtyClient) TrackCommand(ctx context.Context, id string) {
+	pc.commandID = id
+	registry, _ := ctx.Value(cancellationRegistryKey{}).(*commandCancellations)
+	if registry == nil || id == "" || len(id) > 128 {
+		return
+	}
+	terminalCtx, state := registry.register(context.Background(), id)
+	pc.cancelState, pc.cancelDone = state, terminalCtx.Done()
+	pc.finishCancellation = func() (bool, []int) { return registry.finish(id, state) }
+}
+
 func (pc *PtyClient) RunPtyBackground() {
 	log.Debug().Msg("Starting Websh session in background.")
 	defer pc.close()
@@ -160,9 +177,27 @@ func (pc *PtyClient) RunPtyBackground() {
 	// Deferred after close, so it runs first: the keepalive pings stop before close tears the channel down.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	go func() {
+		select {
+		case <-pc.cancelDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	if pc.cancelState != nil {
+		select {
+		case <-pc.cancelDone:
+			pc.cancelState.Observe()
+			return
+		default:
+		}
+	}
 
 	err := pc.initializePtySession(ctx)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			pc.cancelState.Observe()
+		}
 		log.Error().Err(err).Str("sessionID", pc.sessionID).Str("username", pc.username).Msg("Failed to initialize PTY session.")
 		return
 	}
@@ -468,6 +503,19 @@ func (pc *PtyClient) Refresh() error {
 // Remove is called first so that the write lock waits for any in-flight
 // Resize/Refresh (which hold a read lock) to finish before we tear down the PTY.
 func (pc *PtyClient) close() {
+	pc.closeOnce.Do(pc.closeSession)
+}
+
+func (pc *PtyClient) closeSession() {
+	remote := pc.cancelState != nil && pc.cancelState.StopRequests()
+	defer func() {
+		if pc.finishCancellation != nil {
+			cancelled, survivors := pc.finishCancellation()
+			if remote {
+				log.Info().Str("command_id", pc.commandID).Str("session_id", pc.sessionID).Bool("cancelled", cancelled).Ints("survivors", survivors).Msg("Terminal cancellation completed")
+			}
+		}
+	}()
 	pc.manager.Remove(pc.sessionID)
 
 	// Remove PID-to-session mapping before cleaning up
@@ -475,26 +523,33 @@ func (pc *PtyClient) close() {
 		pc.manager.untrackPID(pc.cmd.Process.Pid)
 	}
 
-	if pc.ptmx != nil {
-		_ = pc.ptmx.Close()
-	}
-
 	if pc.cmd != nil && pc.cmd.Process != nil {
-		// pty.Start creates a session and group led by this unreaped shell.
+		// Keep the leader unreaped until the final signal so its SID cannot be reused.
 		if pc.cmd.SysProcAttr != nil && pc.cmd.SysProcAttr.Setsid {
-			survivors, err := commandcancel.TerminateSession(pc.cmd.Process.Pid, commandcancel.GracePeriod)
-			if err != nil || len(survivors) > 0 {
-				log.Warn().Err(err).Ints("survivors", survivors).Str("session_id", pc.sessionID).Msg("Terminal process group cleanup incomplete")
-			}
-			if slices.Contains(survivors, pc.cmd.Process.Pid) || err != nil {
-				go func() { _ = pc.cmd.Wait() }()
-			} else {
-				_ = pc.cmd.Wait()
+			if remote {
+				survivors, signalled, err := commandcancel.TerminateSession(pc.cmd.Process.Pid, commandcancel.GracePeriod)
+				pc.cancelState.AddSurvivors(survivors)
+				if signalled {
+					pc.cancelState.Observe()
+				}
+				if err != nil || len(survivors) > 0 {
+					log.Warn().Err(err).Ints("survivors", survivors).Str("session_id", pc.sessionID).Msg("Terminal cancellation incomplete")
+				}
+			} else if err := commandcancel.HangupSession(pc.cmd.Process.Pid); err != nil {
+				log.Warn().Err(err).Str("session_id", pc.sessionID).Msg("Terminal hangup incomplete")
 			}
 		} else {
-			_ = pc.cmd.Process.Kill()
-			_ = pc.cmd.Wait()
+			// A non-PTY child is still owned by its process handle.
+			if err := pc.cmd.Process.Signal(syscall.SIGHUP); err != nil {
+				log.Debug().Err(err).Msg("Terminal hangup failed")
+			}
 		}
+		// A shell may ignore SIGHUP, and a cancelled process may be uninterruptible.
+		// Waiting asynchronously preserves hangup semantics without blocking close.
+		go func() { _ = pc.cmd.Wait() }()
+	}
+	if pc.ptmx != nil {
+		_ = pc.ptmx.Close()
 	}
 
 	conn, ka := pc.getConnState()

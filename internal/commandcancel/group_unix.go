@@ -16,18 +16,27 @@ import (
 
 // TerminateGroup requires an owned, unreaped group leader. The caller must not
 // Wait until this returns: the zombie leader pins the PGID throughout the grace period.
-func TerminateGroup(pgid int, grace time.Duration) ([]int, error) {
-	if pgid <= 0 {
-		return nil, fmt.Errorf("invalid owned process group %d", pgid)
+func TerminateGroup(pgid int, grace time.Duration) ([]int, bool, error) {
+	if pgid <= 1 {
+		return nil, false, fmt.Errorf("invalid owned process group %d", pgid)
 	}
+	signalled := false
 	signal := func(sig syscall.Signal) error {
-		err := syscall.Kill(-pgid, sig)
+		alive, err := GroupMembers(pgid)
+		if err != nil || len(alive) == 0 {
+			return err
+		}
+		err = syscall.Kill(-pgid, sig)
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
+		if err == nil {
+			signalled = true
+		}
 		return err
 	}
-	return terminate(signal, func() ([]int, error) { return GroupMembers(pgid) }, grace)
+	survivors, err := terminate(signal, func() ([]int, error) { return GroupMembers(pgid) }, grace)
+	return survivors, signalled, err
 }
 
 func terminate(signal func(syscall.Signal) error, members func() ([]int, error), grace time.Duration) ([]int, error) {
@@ -41,7 +50,7 @@ func terminate(signal func(syscall.Signal) error, members func() ([]int, error),
 		if !time.Now().Before(deadline) {
 			break
 		}
-		time.Sleep(min(10*time.Millisecond, time.Until(deadline)))
+		time.Sleep(min(50*time.Millisecond, time.Until(deadline)))
 	}
 	killErr := signal(syscall.SIGKILL)
 	// A successful kill is asynchronous. Allow the kernel to finish scheduling it.
@@ -51,7 +60,7 @@ func terminate(signal func(syscall.Signal) error, members func() ([]int, error),
 		if len(alive) == 0 || !time.Now().Before(deadline) || err != nil {
 			return alive, errors.Join(termErr, killErr, err)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -93,39 +102,60 @@ func matchingProcesses(matches func(int) bool) ([]int, error) {
 // takes a fresh membership snapshot; PGIDs are never retained across the grace period.
 // Unix has no atomic session signal: a job can exit between revalidation and
 // kill, leaving a narrow PGID-reuse window, as in normal command exit cleanup.
-func TerminateSession(sid int, grace time.Duration) ([]int, error) {
-	if sid <= 0 {
-		return nil, fmt.Errorf("invalid owned session %d", sid)
+func TerminateSession(sid int, grace time.Duration) ([]int, bool, error) {
+	if sid <= 1 {
+		return nil, false, fmt.Errorf("invalid owned session %d", sid)
 	}
-	members := func() ([]int, error) {
-		return matchingProcesses(func(pid int) bool { session, err := unix.Getsid(pid); return err == nil && session == sid })
+	signalled := false
+	survivors, err := terminate(func(sig syscall.Signal) error {
+		sent, err := signalSession(sid, sig)
+		signalled = signalled || sent
+		return err
+	}, func() ([]int, error) { return SessionMembers(sid) }, grace)
+	return survivors, signalled, err
+}
+
+// HangupSession sends only SIGHUP. Jobs that ignore it may outlive the terminal.
+// The caller retains the unreaped session leader until this returns.
+func HangupSession(sid int) error {
+	if sid <= 1 {
+		return fmt.Errorf("invalid owned session %d", sid)
 	}
-	signal := func(sig syscall.Signal) error {
-		pids, err := members()
-		if err != nil {
-			return err
+	_, err := signalSession(sid, syscall.SIGHUP)
+	return err
+}
+
+func SessionMembers(sid int) ([]int, error) {
+	return matchingProcesses(func(pid int) bool { session, err := unix.Getsid(pid); return err == nil && session == sid })
+}
+
+func signalSession(sid int, sig syscall.Signal) (bool, error) {
+	pids, err := SessionMembers(sid)
+	if err != nil {
+		return false, err
+	}
+	signalled := false
+	groups := make(map[int]bool)
+	var errs []error
+	for _, pid := range pids {
+		pgid, err := syscall.Getpgid(pid)
+		if err != nil || pgid <= 1 || groups[pgid] {
+			continue
 		}
-		groups := make(map[int]bool)
-		var errs []error
-		for _, pid := range pids {
-			pgid, err := syscall.Getpgid(pid)
-			if err != nil || pgid <= 0 || groups[pgid] {
-				continue
-			}
-			session, err := unix.Getsid(pid)
-			if err != nil || session != sid {
-				continue
-			}
-			currentGroup, err := syscall.Getpgid(pid)
-			if err != nil || currentGroup != pgid {
-				continue
-			}
-			groups[pgid] = true
-			if err := syscall.Kill(-pgid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-				errs = append(errs, err)
-			}
+		session, err := unix.Getsid(pid)
+		if err != nil || session != sid {
+			continue
 		}
-		return errors.Join(errs...)
+		currentGroup, err := syscall.Getpgid(pid)
+		if err != nil || currentGroup != pgid {
+			continue
+		}
+		groups[pgid] = true
+		if err := syscall.Kill(-pgid, sig); err == nil {
+			signalled = true
+		} else if !errors.Is(err, syscall.ESRCH) {
+			errs = append(errs, err)
+		}
 	}
-	return terminate(signal, members, grace)
+	return signalled, errors.Join(errs...)
 }

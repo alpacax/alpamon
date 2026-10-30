@@ -18,6 +18,7 @@ type contextKey struct{}
 type State struct {
 	mu        sync.Mutex
 	cancel    context.CancelCauseFunc
+	requested bool
 	cancelled bool
 	finished  bool
 	survivors []int
@@ -38,7 +39,7 @@ func (s *State) Cancel() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.finished {
-		s.cancelled = true
+		s.requested = true
 		s.cancel(ErrCancelled)
 	}
 }
@@ -57,4 +58,24 @@ func (s *State) AddSurvivors(pids []int) {
 	s.survivors = append(s.survivors, pids...)
 	slices.Sort(s.survivors)
 	s.survivors = slices.Compact(s.survivors)
+}
+
+// Observe records that execution acted on the server's cancellation request.
+func (s *State) Observe() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.requested {
+		s.cancelled = true
+	}
+}
+
+// StopRequests fixes the close decision before the process can be reaped.
+func (s *State) StopRequests() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.finished = true
+	return s.requested
 }

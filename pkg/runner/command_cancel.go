@@ -22,10 +22,12 @@ type recentCommand struct {
 }
 
 type commandCancellations struct {
-	mu     sync.Mutex
-	active map[string]map[*commandcancel.State]struct{}
-	recent map[string]*list.Element
-	order  list.List
+	mu            sync.Mutex
+	active        map[string]map[*commandcancel.State]struct{}
+	recent        map[string]*list.Element
+	order         list.List
+	finished      map[string]*list.Element
+	finishedOrder list.List
 }
 
 func (c *commandCancellations) prune(now time.Time) {
@@ -78,7 +80,7 @@ func (c *commandCancellations) wasCancelled(id string) bool {
 }
 
 func (c *commandCancellations) cancel(id string) {
-	if id == "" {
+	if id == "" || len(id) > 128 {
 		return
 	}
 	c.mu.Lock()
@@ -87,7 +89,7 @@ func (c *commandCancellations) cancel(id string) {
 	c.prune(now)
 	if len(c.active[id]) == 0 {
 		log.Debug().Str("command_id", id).Msg("Cancel received for an unknown or finished command")
-		if e := c.recent[id]; e != nil {
+		if e := c.finished[id]; e != nil && e.Value.(recentCommand).expires.After(now) {
 			return
 		}
 		// No immediate report or process action; retain an out-of-order cancellation.
@@ -108,8 +110,26 @@ func (c *commandCancellations) finish(id string, state *commandcancel.State) (bo
 	if len(c.active[id]) == 0 {
 		delete(c.active, id)
 	}
-	if id != "" {
-		c.remember(id, cancelled, time.Now())
+	if id != "" && len(id) <= 128 && !cancelled {
+		if c.finished == nil {
+			c.finished = make(map[string]*list.Element)
+		}
+		if e := c.finished[id]; e != nil {
+			c.finishedOrder.Remove(e)
+		}
+		c.finished[id] = c.finishedOrder.PushBack(recentCommand{id: id, expires: time.Now().Add(cancelledCommandTTL)})
+		for e := c.finishedOrder.Front(); e != nil; e = c.finishedOrder.Front() {
+			entry := e.Value.(recentCommand)
+			if entry.expires.After(time.Now()) && c.finishedOrder.Len() <= cancelledCommandLimit {
+				break
+			}
+			delete(c.finished, entry.id)
+			c.finishedOrder.Remove(e)
+		}
 	}
 	return cancelled, survivors
 }
+
+// cancellationRegistryKey lets a long-lived handler keep its own registration.
+// Its lifetime is independent of the command runner's context and finish report.
+type cancellationRegistryKey struct{}

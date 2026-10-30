@@ -43,6 +43,7 @@ type PtyClient struct {
 	ptyToWs       chan []byte
 	isRecovering  atomic.Bool
 	manager       *TerminalManager
+	commandID     string
 }
 
 func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, manager *TerminalManager) *PtyClient {
@@ -320,3 +321,6 @@ func (pc *PtyClient) Refresh() error {
 	// Windows ConPTY does not have a SIGWINCH equivalent.
 	return nil
 }
+
+// TrackCommand retains the originating ID. Windows terminal close is unchanged.
+func (pc *PtyClient) TrackCommand(_ context.Context, id string) { pc.commandID = id }

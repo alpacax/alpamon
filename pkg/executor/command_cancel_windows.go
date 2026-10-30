@@ -27,7 +27,7 @@ func (c *commandCleanup) cancelRemote(cmd *exec.Cmd, _ time.Duration) (cleanupOu
 		if len(pids) == 0 || queryErr != nil || !time.Now().Before(deadline) {
 			return outcome, errors.Join(err, queryErr)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

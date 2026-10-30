@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -133,4 +135,70 @@ func readCancelPID(t *testing.T, path string) int {
 		return err == nil
 	}, 3*time.Second, 10*time.Millisecond)
 	return pid
+}
+
+func TestRemoteCancelSessionIncludesOtherGroups(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child")
+	ctx, state := commandcancel.NewContext(context.Background())
+	defer state.Cancel()
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `"$1" -test.run=^TestCancelSessionGroupChild$ & wait`, "sh", exe)
+	cmd.Env = append(os.Environ(), "ALPAMON_CANCEL_GROUP_CHILD="+pidFile)
+	cleanup, err := configureProcessTreeCleanup(cmd, true)
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	started := make(chan int, 1)
+	go func() {
+		_, err := runTrackedProcessCommand(ctx, cmd, cleanup, nil, func(pid int) { started <- pid }, "session", state, 100*time.Millisecond)
+		done <- err
+	}()
+	child := readCancelPID(t, pidFile)
+	root := <-started
+	group, err := syscall.Getpgid(child)
+	require.NoError(t, err)
+	require.NotEqual(t, root, group)
+	state.Cancel()
+	select {
+	case <-done:
+	case <-time.After(4 * time.Second):
+		t.Fatal("cancel did not complete")
+	}
+	_, survivors := state.Finish()
+	assert.True(t, waitForProcessGone(child, 200*time.Millisecond) || slices.Contains(survivors, child), "cancel missed another group in the session")
+}
+
+func TestCancelAfterProcessExitIsNotReported(t *testing.T) {
+	ctx, state := commandcancel.NewContext(context.Background())
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "exit 0")
+	cleanup, err := configureProcessTreeCleanup(cmd, false)
+	require.NoError(t, err)
+	_, err = runTrackedProcessCommand(ctx, cmd, cleanup, nil, nil, "exited", state, time.Millisecond)
+	require.NoError(t, err)
+	state.Cancel()
+	cancelled, _ := state.Finish()
+	assert.False(t, cancelled)
+}
+
+func TestCancelSessionGroupChild(t *testing.T) {
+	path := os.Getenv("ALPAMON_CANCEL_GROUP_CHILD")
+	if path == "" {
+		return
+	}
+	require.NoError(t, syscall.Setpgid(0, 0))
+	require.NoError(t, os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0600))
+	// This process fixture needs a real clock and bounds a failed parent's cleanup.
+	time.Sleep(3 * time.Second)
+}
+
+func TestTrackedWaitDelayKeepsCleanupReason(t *testing.T) {
+	read := captureCleanupLog(t)
+	ctx, state := commandcancel.NewContext(context.Background())
+	defer state.Finish()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 30 & exit 0")
+	_, err := NewExecutor().runCommand(ctx, cmd, "wait-delay", nil, nil)
+	assert.ErrorIs(t, err, exec.ErrWaitDelay)
+	lines := read()
+	require.Len(t, lines, 1)
+	assert.Equal(t, cleanupReasonWaitDelay, lines[0].fields["reason"])
 }

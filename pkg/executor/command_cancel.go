@@ -15,13 +15,9 @@ import (
 
 // Own the pipe drain so the leader stays unreaped until cancellation can no
 // longer arrive. exec.Cmd.Wait otherwise reaps before waiting on inherited pipes.
-func runTrackedCommand(ctx context.Context, cmd *exec.Cmd, cleanup *commandCleanup, cw *chunkWriter, pidHook func(int), commandID string) ([]byte, error, bool) {
+func runTrackedCommand(ctx context.Context, cmd *exec.Cmd, cleanup *commandCleanup, cw *chunkWriter, pidHook func(int), commandID string) ([]byte, error) {
 	state := commandcancel.FromContext(ctx)
-	if state == nil {
-		return nil, nil, false
-	}
-	output, err := runTrackedProcessCommand(ctx, cmd, cleanup, cw, pidHook, commandID, state, commandcancel.GracePeriod)
-	return output, err, true
+	return runTrackedProcessCommand(ctx, cmd, cleanup, cw, pidHook, commandID, state, commandcancel.GracePeriod)
 }
 
 func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *commandCleanup, cw *chunkWriter, pidHook func(int), commandID string, state *commandcancel.State, grace time.Duration) ([]byte, error) {
@@ -48,6 +44,9 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 		return buf.Bytes(), err
 	}
 	if err := cmd.Start(); err != nil {
+		if errors.Is(err, context.Canceled) {
+			state.Observe()
+		}
 		return finish(err)
 	}
 	cmd.WaitDelay = commandWaitDelay
@@ -72,7 +71,7 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 		return finish(watchErr)
 	}
 
-	var exitObserved, outputDone, cancelled, pipeExpired, reapLater bool
+	var exitObserved, outputDone, cancelled, pipeExpired, reapLater, remoteEffective bool
 	var copyErr, observeErr, cancelErr error
 	var timer *time.Timer
 	var deadline <-chan time.Time
@@ -97,8 +96,14 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 			cancelled = true
 			if errors.Is(context.Cause(ctx), commandcancel.ErrCancelled) {
 				outcome, err := cleanup.cancelRemote(cmd, grace)
+				remoteEffective = outcome.killedAny()
 				survivors := outcome.survivors
-				state.AddSurvivors(survivors)
+				if state != nil {
+					state.AddSurvivors(survivors)
+					if outcome.killedAny() {
+						state.Observe()
+					}
+				}
 				cancelErr = err
 				if slices.Contains(survivors, cmd.Process.Pid) || err != nil {
 					reapLater = true
@@ -144,6 +149,9 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 			}
 			_ = cmd.Wait()
 		}()
+		if cancelErr != nil {
+			return finish(cancelErr)
+		}
 		return finish(ctx.Err())
 	}
 	// Explicit cancellation has completed while the leader was pinned. The
@@ -151,7 +159,11 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 	waitErr := cmd.Wait()
 	if !cancelled {
 		outcome, cleanupErr := cleanup.cancel(cmd)
-		logProcessTreeCleanup(commandID, cmd, cleanupReasonExit, outcome, cleanupErr)
+		reason := cleanupReasonExit
+		if pipeExpired || errors.Is(waitErr, exec.ErrWaitDelay) {
+			reason = cleanupReasonWaitDelay
+		}
+		logProcessTreeCleanup(commandID, cmd, reason, outcome, cleanupErr)
 	}
 	if waitErr == nil {
 		switch {
@@ -159,7 +171,7 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 			waitErr = observeErr
 		case cancelled && cancelErr != nil && !errors.Is(cancelErr, os.ErrProcessDone):
 			waitErr = cancelErr
-		case cancelled:
+		case cancelled && (!errors.Is(context.Cause(ctx), commandcancel.ErrCancelled) || remoteEffective):
 			waitErr = ctx.Err()
 		case pipeExpired:
 			waitErr = exec.ErrWaitDelay

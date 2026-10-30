@@ -13,8 +13,12 @@ func (c *commandCleanup) cancelRemote(cmd *exec.Cmd, grace time.Duration) (clean
 	if !c.leadsGroup {
 		return c.cancel(cmd)
 	}
-	survivors, err := commandcancel.TerminateGroup(cmd.Process.Pid, grace)
-	return cleanupOutcome{assigned: true, rootKilled: len(survivors) == 0, survivors: survivors}, err
+	terminate := commandcancel.TerminateGroup
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setsid {
+		terminate = commandcancel.TerminateSession
+	}
+	survivors, signalled, err := terminate(cmd.Process.Pid, grace)
+	return cleanupOutcome{assigned: true, rootKilled: signalled, survivors: survivors}, err
 }
 
 func watchCommandExit(cmd *exec.Cmd, _ *commandCleanup) (<-chan error, error) {
