@@ -402,7 +402,7 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	log.Debug().Msgf("Relay target dialed for %s.", targetAddr)
 
 	dataReader := tc.buildDataReader(bufReader, stream)
-	tc.relayBidirectional(stream, targetConn, dataReader)
+	relayBidirectional(stream, dataReader, targetConn, targetConn)
 
 	log.Debug().Msgf("Tunnel stream closed for port %d.", targetPort)
 }
@@ -452,32 +452,40 @@ func (tc *TunnelClient) buildDataReader(bufReader *bufio.Reader, stream *smux.St
 	return io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
 }
 
-func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, targetConn net.Conn, dataReader io.Reader) {
+// halfCloseTimeout bounds the remaining direction after the other ends cleanly: smux sends
+// the same FIN for Close and CloseWrite, so a departed peer looks like a half-closed one.
+var halfCloseTimeout = 30 * time.Second
+
+// relayBidirectional copies aSrc to b and bSrc to a until both directions end. A clean EOF
+// half-closes its destination and starts halfCloseTimeout; a copy error closes both at once.
+func relayBidirectional(a net.Conn, aSrc io.Reader, b net.Conn, bSrc io.Reader) {
 	errChan := make(chan error, 2)
-
-	// stream -> target
-	go func() {
-		_, err := tunnel.CopyBuffered(targetConn, dataReader)
-		closeWriteSide(targetConn)
+	pipe := func(dst net.Conn, src io.Reader) {
+		_, err := tunnel.CopyBuffered(dst, src)
+		if err == nil {
+			closeWriteSide(dst)
+		}
 		errChan <- err
-	}()
+	}
+	go pipe(b, aSrc)
+	go pipe(a, bSrc)
 
-	// target -> stream
-	go func() {
-		_, err := tunnel.CopyBuffered(stream, targetConn)
-		errChan <- err
-	}()
-
-	// Closing both ends unblocks the goroutine still copying.
+	if err := <-errChan; err == nil {
+		deadline := time.Now().Add(halfCloseTimeout)
+		_ = a.SetDeadline(deadline)
+		_ = b.SetDeadline(deadline)
+	} else {
+		// Closing both ends unblocks the goroutine still copying.
+		_ = a.Close()
+		_ = b.Close()
+	}
 	<-errChan
-	_ = stream.Close()
-	_ = targetConn.Close()
-	<-errChan
+	_ = a.Close()
+	_ = b.Close()
 }
 
-// closeWriteSide signals EOF to the peer. The assertion covers *net.UnixConn
-// (Unix daemon path) and *net.TCPConn (Windows direct path); anything else is
-// left alone.
+// closeWriteSide signals EOF to the peer. The assertion covers *smux.Stream,
+// *net.UnixConn (Unix daemon path) and *net.TCPConn; anything else is left alone.
 func closeWriteSide(conn net.Conn) {
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()

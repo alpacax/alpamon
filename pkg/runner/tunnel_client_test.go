@@ -88,7 +88,7 @@ func startClientRelay(t *testing.T) (*smux.Stream, *net.TCPConn, <-chan struct{}
 	agentSide, service := tcpPair(t)
 	done := make(chan struct{})
 	go func() {
-		(&TunnelClient{}).relayBidirectional(stream, agentSide, stream)
+		relayBidirectional(stream, stream, agentSide, agentSide)
 		close(done)
 	}()
 	return peer, service, done
@@ -124,6 +124,51 @@ func TestRelayBidirectionalCarriesStreamDataAfterTargetHalfCloses(t *testing.T) 
 
 	assert.Equal(t, "late", readAllWithin(t, service))
 	waitRelayDone(t, done, 5*time.Second)
+}
+
+func setHalfCloseTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := halfCloseTimeout
+	halfCloseTimeout = d
+	t.Cleanup(func() { halfCloseTimeout = prev })
+}
+
+func TestRelayBidirectionalClosesTargetWhenPeerLeavesAfterHalfClose(t *testing.T) {
+	setHalfCloseTimeout(t, 200*time.Millisecond)
+	peer, service, done := startClientRelay(t)
+
+	require.NoError(t, peer.Close())
+	assert.Equal(t, "", readAllWithin(t, service))
+
+	writeErr := make(chan error, 1)
+	go func() {
+		chunk := make([]byte, 4096)
+		for {
+			if _, err := service.Write(chunk); err != nil {
+				writeErr <- err
+				return
+			}
+		}
+	}()
+
+	waitRelayDone(t, done, 5*time.Second)
+	select {
+	case err := <-writeErr:
+		assert.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("target kept writing after the relay returned")
+	}
+}
+
+func TestRelayBidirectionalEndsBothDirectionsOnCopyError(t *testing.T) {
+	setHalfCloseTimeout(t, time.Hour)
+	peer, service, done := startClientRelay(t)
+
+	require.NoError(t, service.SetLinger(0))
+	require.NoError(t, service.Close())
+
+	waitRelayDone(t, done, 5*time.Second)
+	assert.Equal(t, "", readAllWithin(t, peer))
 }
 
 func TestIsValidSessionID(t *testing.T) {

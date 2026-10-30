@@ -146,6 +146,17 @@ func TestHandleDaemonConnectionCarriesMainDataAfterTargetHalfCloses(t *testing.T
 	waitRelayDone(t, done, 5*time.Second)
 }
 
+func TestHandleDaemonConnectionEndsBothDirectionsOnCopyError(t *testing.T) {
+	setHalfCloseTimeout(t, time.Hour)
+	mainSide, target, done := startDaemonRelay(t)
+
+	require.NoError(t, target.(*net.TCPConn).SetLinger(0))
+	require.NoError(t, target.Close())
+
+	waitRelayDone(t, done, 5*time.Second)
+	assert.Equal(t, "", readAllWithin(t, mainSide))
+}
+
 func TestDialDirect(t *testing.T) {
 	t.Run("rejects invalid targets without dialing", func(t *testing.T) {
 		for _, addr := range []string{"10.0.0.1:80", "example.com:80", "localhost:80", "127.0.0.1"} {
