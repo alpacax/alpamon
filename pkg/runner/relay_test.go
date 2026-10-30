@@ -211,6 +211,40 @@ func TestRelayBidirectionalClosesQuietTargetAtBoundAfterPeerCloses(t *testing.T)
 	})
 }
 
+// stalledConn stands in for a smux v1 stream on a stalled session: a Write already queued ignores
+// later deadlines and Close until the session drains.
+type stalledConn struct {
+	net.Conn
+	drained chan struct{}
+}
+
+func (c *stalledConn) Write([]byte) (int, error) {
+	<-c.drained
+	return 0, net.ErrClosed
+}
+
+func TestRelayBidirectionalReturnsAtBoundWhileAWriteIsStalled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		agentStream, peer := net.Pipe()
+		agentTarget, service := net.Pipe()
+		stream := &stalledConn{Conn: agentStream, drained: make(chan struct{})}
+		done := make(chan struct{})
+		go func() {
+			relayBidirectional(stream, stream, agentTarget, agentTarget, time.Minute)
+			close(done)
+		}()
+		go func() { _, _ = service.Write([]byte("response")) }()
+		synctest.Wait()
+
+		require.NoError(t, peer.Close())
+		time.Sleep(time.Minute + time.Millisecond)
+		synctest.Wait()
+
+		require.True(t, relayDone(done), "relay waited past its bound on a stalled write")
+		close(stream.drained)
+	})
+}
+
 func TestRelayBidirectionalKeepsOpenRelayPastBoundUntilADirectionEnds(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		peer, service, done := startPipeRelay(time.Minute)

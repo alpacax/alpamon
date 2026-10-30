@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"errors"
 	"io"
 	"net"
 	"time"
@@ -28,19 +27,17 @@ func relayBidirectional(a net.Conn, fromA io.Reader, b net.Conn, fromB io.Reader
 	go pipe(b, fromA)
 	go pipe(a, fromB)
 
-	first := <-errChan
-	if first == nil { // the other direction gets bound to finish
-		deadline := time.Now().Add(bound)
-		_ = a.SetDeadline(deadline)
-		_ = b.SetDeadline(deadline)
-	} else { // closing both ends unblocks the goroutine still copying
-		_ = a.Close()
-		_ = b.Close()
+	if <-errChan == nil { // the other direction gets bound to finish
+		timer := time.NewTimer(bound)
+		defer timer.Stop()
+		select {
+		case <-errChan:
+		case <-timer.C:
+			log.Info().Dur("bound", bound).Msg("Relay closed a half-closed connection at its time bound.")
+		}
 	}
-	var netErr net.Error
-	if err := <-errChan; first == nil && errors.As(err, &netErr) && netErr.Timeout() {
-		log.Info().Dur("bound", bound).Msg("Relay closed a half-closed connection at its time bound.")
-	}
+	// Closing ends the other copy, except a smux v1 Write already queued on a stalled session, which
+	// ignores later deadlines and closes; the relay returns without waiting for it.
 	_ = a.Close()
 	_ = b.Close()
 }
