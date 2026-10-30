@@ -151,6 +151,6 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 
 	log.Debug().Msgf("Tunnel daemon connected to %s.", targetAddr)
 
-	relayBidirectional(conn, reader, tcpConn, tcpConn)
+	relayBidirectional(conn, reader, tcpConn, tcpConn, halfCloseTimeout)
 	log.Debug().Msgf("Tunnel daemon relay finished for %s.", targetAddr)
 }

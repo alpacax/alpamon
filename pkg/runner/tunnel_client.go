@@ -402,7 +402,7 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	log.Debug().Msgf("Relay target dialed for %s.", targetAddr)
 
 	dataReader := tc.buildDataReader(bufReader, stream)
-	relayBidirectional(stream, dataReader, targetConn, targetConn)
+	relayBidirectional(stream, dataReader, targetConn, targetConn, halfCloseTimeout)
 
 	log.Debug().Msgf("Tunnel stream closed for port %d.", targetPort)
 }
@@ -450,46 +450,6 @@ func (tc *TunnelClient) buildDataReader(bufReader *bufio.Reader, stream *smux.St
 	}
 
 	return io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
-}
-
-// halfCloseTimeout bounds the remaining direction after the other ends cleanly: smux sends
-// the same FIN for Close and CloseWrite, so a departed peer looks like a half-closed one.
-var halfCloseTimeout = 30 * time.Second
-
-// relayBidirectional copies aSrc to b and bSrc to a until both directions end. A clean EOF
-// half-closes its destination and starts halfCloseTimeout; a copy error closes both at once.
-func relayBidirectional(a net.Conn, aSrc io.Reader, b net.Conn, bSrc io.Reader) {
-	errChan := make(chan error, 2)
-	pipe := func(dst net.Conn, src io.Reader) {
-		_, err := tunnel.CopyBuffered(dst, src)
-		if err == nil {
-			closeWriteSide(dst)
-		}
-		errChan <- err
-	}
-	go pipe(b, aSrc)
-	go pipe(a, bSrc)
-
-	if err := <-errChan; err == nil {
-		deadline := time.Now().Add(halfCloseTimeout)
-		_ = a.SetDeadline(deadline)
-		_ = b.SetDeadline(deadline)
-	} else {
-		// Closing both ends unblocks the goroutine still copying.
-		_ = a.Close()
-		_ = b.Close()
-	}
-	<-errChan
-	_ = a.Close()
-	_ = b.Close()
-}
-
-// closeWriteSide signals EOF to the peer. The assertion covers *smux.Stream,
-// *net.UnixConn (Unix daemon path) and *net.TCPConn; anything else is left alone.
-func closeWriteSide(conn net.Conn) {
-	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-		_ = cw.CloseWrite()
-	}
 }
 
 // Close cleanly shuts down the tunnel connection.
