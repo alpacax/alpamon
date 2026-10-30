@@ -1,11 +1,15 @@
 package runner
 
 import (
+	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWebsocketClientWriteJSON_ReturnsErrorWhenThereIsNoConnection(t *testing.T) {
@@ -17,10 +21,21 @@ func TestWebsocketClientWriteJSON_ReturnsErrorWhenThereIsNoConnection(t *testing
 	assert.ErrorIs(t, err, net.ErrClosed)
 }
 
-func TestWebsocketClientSetReadLimit_IsANoOpWhenThereIsNoConnection(t *testing.T) {
-	wc := &WebsocketClient{}
+func TestWebsocketClientSetReadLimit_WithoutAConnectionCapsTheNextOne(t *testing.T) {
+	const limit = 64
+	url := newKeepaliveServer(t, func(_ int, c *websocket.Conn) {
+		_ = c.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("x", limit+1)))
+		_ = readUntilError(c)
+	})
+	useWSPath(t, url)
+	wc := &WebsocketClient{connectBackoff: newAuthBackoff(minConnectInterval, maxConnectInterval)}
+	require.NotPanics(t, func() { wc.SetReadLimit(limit) })
 
-	assert.NotPanics(t, func() { wc.SetReadLimit(1024) })
+	require.NoError(t, wc.Connect(context.Background()))
+	t.Cleanup(wc.Close)
+	_, _, err := wc.ReadMessage()
+
+	assert.ErrorIs(t, err, websocket.ErrReadLimit)
 }
 
 func TestWebsocketClientSetReadDeadline_ReturnsErrorWhenThereIsNoConnection(t *testing.T) {

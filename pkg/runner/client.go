@@ -32,11 +32,12 @@ const (
 )
 
 type WebsocketClient struct {
-	// mu guards Conn and keepalive: Connect writes them from the read loop; Close reads Conn on shutdown.
+	// mu guards Conn, keepalive and readLimit: Connect writes Conn from the
+	// read loop; Close reads it on shutdown.
 	mu sync.Mutex
 	// Conn stays exported for outside readers; inside this package use the accessors.
 	//
-	// Deprecated: use SetReadDeadline, ReadMessage and WriteJSON.
+	// Deprecated: use Serve for the read loop and WriteJSON to write.
 	Conn *websocket.Conn
 	// keepalive belongs to Conn and is replaced with it. Nil for a Conn that Connect did not install.
 	keepalive *connKeepalive
@@ -44,12 +45,12 @@ type WebsocketClient struct {
 	// dial opens a connection; nil means dialWebsocket. Tests swap in a dialer that wraps the socket.
 	dial func(ctx context.Context, url string, header http.Header) (*websocket.Conn, error)
 
-	// keepaliveEnabled makes Connect ping each connection and track its
-	// pongs. Only RunForever sets it, before its first Connect, because only
-	// its read loop acts on a keepalive timeout; pkg/pluginclient drives
-	// Connect from its own loop and keeps the behavior it had. Written and
-	// read by the read loop goroutine alone.
+	// keepaliveEnabled makes Connect ping each connection; only Serve sets it,
+	// as only its loop acts on a timeout. Owned by the read loop goroutine.
 	keepaliveEnabled bool
+
+	// readLimit caps one inbound frame on every connection; zero means no cap.
+	readLimit int64
 
 	// lastPeerReconnect is owned by the read loop goroutine alone: one read
 	// loop per client, so it needs no lock.
@@ -71,7 +72,7 @@ type WebsocketClient struct {
 	// repeated rejections is only visible across reconnects.
 	connectBackoff *authBackoff
 
-	// onAuthenticated holds a callback invoked from RunForever after the
+	// onAuthenticated holds a callback invoked from Serve after the
 	// first successful ReadMessage on each new connection. Used by the
 	// workspace-migration watchdog to detect that the new workspace's
 	// WebSocket is not merely dial-able but actually streaming traffic
@@ -79,7 +80,7 @@ type WebsocketClient struct {
 	// hook must be idempotent because it fires on every reconnect.
 	//
 	// Stored as an atomic.Pointer so concurrent SetOnAuthenticated calls
-	// from outside the RunForever goroutine race-safely with Connect.
+	// from outside the Serve goroutine race-safely with Connect.
 	onAuthenticated atomic.Pointer[func()]
 
 	// terminalOnce lets only the first of ShutDown and Restart through: root.go
@@ -209,7 +210,7 @@ func (wc *WebsocketClient) SetDispatcher(dispatcher CommandDispatcher) {
 	wc.dispatcher = dispatcher
 }
 
-// SetOnAuthenticated registers a callback invoked from RunForever after
+// SetOnAuthenticated registers a callback invoked from Serve after
 // the first successful ReadMessage of each connection. Firing here rather
 // than at dial-time gives the migration watchdog a strong "the new
 // workspace really did accept us" signal: an upgrade-then-immediate-close
@@ -250,19 +251,23 @@ func (wc *WebsocketClient) installConn(conn *websocket.Conn, ka *connKeepalive) 
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 	old := wc.Conn
+	if conn != nil {
+		conn.SetReadLimit(wc.readLimit)
+	}
 	wc.Conn = conn
 	wc.keepalive = ka
 	return old
 }
 
-// SetReadLimit caps one inbound frame. A new connection starts uncapped, so
-// callers reapply it after every reconnect.
+// SetReadLimit caps one inbound frame on the current connection and on every
+// connection after it. Call it before Serve: gorilla reads the limit without a lock.
 func (wc *WebsocketClient) SetReadLimit(limit int64) {
-	conn := wc.conn()
-	if conn == nil {
-		return
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	wc.readLimit = limit
+	if wc.Conn != nil {
+		wc.Conn.SetReadLimit(limit)
 	}
-	conn.SetReadLimit(limit)
 }
 
 // SetReadDeadline arms the read timeout for the current connection. It reports
@@ -275,7 +280,20 @@ func (wc *WebsocketClient) SetReadDeadline(t time.Time) error {
 	return conn.SetReadDeadline(t)
 }
 
+// RunForever serves the command channel; see Serve.
 func (wc *WebsocketClient) RunForever(ctx context.Context) {
+	wc.Serve(ctx, func(message []byte) bool {
+		return wc.commandRequestHandler(message) == outcomeReconnect
+	})
+}
+
+// Serve passes each inbound frame to handle until ctx ends, pinging and
+// redialling a silent connection; handle returns true to ask for a paced
+// reconnect. Run one Serve per client.
+func (wc *WebsocketClient) Serve(
+	ctx context.Context,
+	handle func(message []byte) (reconnect bool),
+) {
 	wc.keepaliveEnabled = true
 	if err := wc.Connect(ctx); err != nil {
 		return
@@ -317,7 +335,7 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 					(*cb)()
 				}
 			}
-			if wc.commandRequestHandler(message) == outcomeReconnect {
+			if handle(message) {
 				if err := wc.CloseAndReconnectOnRequest(ctx); err != nil {
 					return
 				}

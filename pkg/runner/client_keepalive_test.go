@@ -21,7 +21,7 @@ import (
 )
 
 // shrinkKeepalive swaps in short keepalive timings. Register it before
-// starting RunForever, so its cleanup runs after the loop has stopped.
+// starting Serve, so its cleanup runs after the loop has stopped.
 func shrinkKeepalive(t *testing.T, interval, timeout, jitter time.Duration) {
 	t.Helper()
 	origInterval, origTimeout, origJitter := keepaliveInterval, keepaliveTimeout, keepaliveRedialJitter
@@ -65,15 +65,24 @@ func readUntilError(c *websocket.Conn) error {
 	}
 }
 
-// startRunForever runs the read loop and returns a stop that cancels it and
-// closes the connection, as gracefulShutdown does, then waits for it to return.
 func startRunForever(t *testing.T, wc *WebsocketClient) (stop func()) {
+	t.Helper()
+	return startReadLoop(t, wc, wc.RunForever)
+}
+
+// startReadLoop runs loop and returns a stop that cancels it and closes the
+// connection, as gracefulShutdown does, then waits for it to return.
+func startReadLoop(
+	t *testing.T,
+	wc *WebsocketClient,
+	loop func(ctx context.Context),
+) (stop func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		wc.RunForever(ctx)
+		loop(ctx)
 	}()
 
 	stop = sync.OnceFunc(func() {
@@ -82,7 +91,7 @@ func startRunForever(t *testing.T, wc *WebsocketClient) (stop func()) {
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			t.Fatal("RunForever did not return after cancel and Close")
+			t.Fatal("the read loop did not return after cancel and Close")
 		}
 	})
 	t.Cleanup(stop)
@@ -410,8 +419,8 @@ func TestSendPings_StopsOnceTheConnectionIsClosed(t *testing.T) {
 	assert.Same(t, conn, wc.conn(), "Close is expected to leave Conn in place")
 }
 
-func TestConnect_OutsideRunForeverDoesNotPing(t *testing.T) {
-	// pkg/pluginclient calls Connect from its own read loop, which does not act on a keepalive timeout.
+func TestConnect_OutsideServeDoesNotPing(t *testing.T) {
+	// A caller that runs its own read loop around Connect does not act on a keepalive timeout.
 	shrinkKeepalive(t, time.Millisecond, 10*time.Millisecond, time.Millisecond)
 
 	var pings atomic.Int32
@@ -433,8 +442,8 @@ func TestConnect_OutsideRunForeverDoesNotPing(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	_, ka := wc.connState()
-	assert.Nil(t, ka, "Connect set up keepalive for a read loop that is not RunForever")
-	assert.Zero(t, pings.Load(), "Connect pinged a connection whose read loop is not RunForever")
+	assert.Nil(t, ka, "Connect set up keepalive for a read loop that is not Serve")
+	assert.Zero(t, pings.Load(), "Connect pinged a connection whose read loop is not Serve")
 }
 
 func TestSendPings_KeepsGoingAfterAFailedPing(t *testing.T) {
@@ -526,4 +535,40 @@ func TestAuthBackoff_WaitBeforeRedial(t *testing.T) {
 		require.ErrorIs(t, a.waitBeforeRedial(ctx), context.Canceled)
 		assert.Zero(t, time.Since(start), "a cancelled context should not wait out the jitter")
 	})
+}
+
+func TestServe_KeepsTheReadLimitAcrossAReconnect(t *testing.T) {
+	const limit = 64
+	secondEnd := make(chan error, 1)
+	url := newKeepaliveServer(t, func(n int, c *websocket.Conn) {
+		if n == 0 {
+			_ = c.WriteMessage(websocket.TextMessage, []byte(`{"query":"reconnect"}`))
+			_ = readUntilError(c)
+			return
+		}
+		_ = c.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("x", limit+1)))
+		secondEnd <- readUntilError(c)
+	})
+	useWSPath(t, url)
+
+	wc := &WebsocketClient{connectBackoff: newAuthBackoff(minConnectInterval, maxConnectInterval)}
+	wc.SetReadLimit(limit)
+	var handled atomic.Int32
+	startReadLoop(t, wc, func(ctx context.Context) {
+		wc.Serve(ctx, func(message []byte) bool {
+			handled.Add(1)
+			return string(message) == `{"query":"reconnect"}`
+		})
+	})
+
+	var err error
+	select {
+	case err = <-secondEnd:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second connection never closed with CloseMessageTooBig")
+	}
+	var closeErr *websocket.CloseError
+	require.ErrorAs(t, err, &closeErr)
+	assert.Equal(t, websocket.CloseMessageTooBig, closeErr.Code)
+	assert.Equal(t, int32(1), handled.Load(), "a frame over the read limit reached the handler")
 }

@@ -138,8 +138,8 @@ func TestEnqueueConfigUpdate_LastWriteWins(t *testing.T) {
 }
 
 func TestHandleMessage_ReconnectAsksTheLoopInsteadOfActing(t *testing.T) {
-	// The loop reapplies the read limit after a reconnect, so only the loop may reconnect.
-	// A zero WebsocketClient is enough: the reconnect case no longer touches it.
+	// Only Serve may reconnect, so the reconnect case returns an outcome
+	// and leaves WsClient alone.
 	c := &Client{PluginName: "alpamon-test-plugin", WsClient: &runner.WebsocketClient{}}
 	msg, err := json.Marshal(map[string]string{"query": "reconnect"})
 	require.NoError(t, err)
