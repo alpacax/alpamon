@@ -40,6 +40,8 @@ type CommandRunner struct {
 	data       protocol.CommandData
 	dispatcher CommandDispatcher
 	postChunk  func(ctx context.Context, url string, chunk *protocol.CommandChunk, priority int, expiry time.Time) // nil posts to scheduler.Rqueue
+
+	finishCancellation func() (bool, []int)
 }
 
 func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command protocol.Command, data protocol.CommandData, dispatcher CommandDispatcher) *CommandRunner {
@@ -105,9 +107,15 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 	start := time.Now()
 
 	defer func() {
+		var cancelled bool
+		var survivors []int
+		if cr.finishCancellation != nil {
+			cancelled, survivors = cr.finishCancellation()
+		}
 		if cr.command.ID != "" {
 			finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
 			payload := protocol.NewCommandResponse(exitCode == 0, result, time.Since(start).Seconds(), exitCode)
+			payload.Cancelled, payload.Survivors = cancelled, survivors
 			// Best-effort hint only (retries and concurrent reporters can
 			// still race); server must reassemble via seq.
 			scheduler.Rqueue.Post(finURL, payload, 11, time.Time{})

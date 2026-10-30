@@ -10,6 +10,7 @@ type MessageType string
 
 const (
 	MessageTypeCommand   MessageType = "command"
+	MessageTypeCancel    MessageType = "cancel"
 	MessageTypeQuit      MessageType = "quit"
 	MessageTypeReconnect MessageType = "reconnect"
 	MessageTypePing      MessageType = "ping"
@@ -30,6 +31,8 @@ type Response struct {
 
 // CommandResponse represents a command execution result
 type CommandResponse struct {
+	Cancelled   bool    `json:"cancelled,omitempty"`
+	Survivors   []int   `json:"survivors,omitempty"`
 	Success     bool    `json:"success"`
 	Result      string  `json:"result"`
 	ElapsedTime float64 `json:"elapsed_time"`

@@ -329,6 +329,9 @@ func (e *Executor) runCommand(ctx context.Context, cmd *exec.Cmd, commandID stri
 		}
 		return nil, err
 	}
+	if output, err, handled := runTrackedCommand(ctx, cmd, cleanup, cw, pidHook, commandID); handled {
+		return output, err
+	}
 	cmd.WaitDelay = commandWaitDelay
 	cmd.Cancel = func() error {
 		reason := cleanupReasonShutdown

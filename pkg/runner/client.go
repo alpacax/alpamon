@@ -85,7 +85,8 @@ type WebsocketClient struct {
 
 	// terminalOnce lets only the first of ShutDown and Restart through: root.go
 	// waits on both channels in one select, so closing both picks at random.
-	terminalOnce sync.Once
+	terminalOnce  sync.Once
+	cancellations commandCancellations
 }
 
 const (
@@ -600,6 +601,10 @@ func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome 
 		if err := wc.SendPongResponse(); err != nil {
 			log.Debug().Err(err).Msg("Failed to send pong response.")
 		}
+	case protocol.MessageTypeCancel:
+		if msg.Command != nil {
+			wc.cancellations.cancel(msg.Command.ID)
+		}
 	case protocol.MessageTypeCommand:
 		if msg.Command == nil {
 			log.Warn().Msg("Command message without command data")
@@ -629,6 +634,13 @@ func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome 
 			10,
 			time.Time{},
 		)
+
+		if wc.cancellations.wasCancelled(msg.Command.ID) {
+			payload := protocol.NewCommandResponse(false, "Command cancelled before execution", 0, 1)
+			payload.Cancelled = true
+			scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, msg.Command.ID), payload, 11, time.Time{})
+			return outcomeContinue
+		}
 
 		data, err := msg.Command.ParseCommandData()
 		if err != nil {
@@ -712,9 +724,11 @@ func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol
 			safetyTimeout = minSafetyTimeout
 		}
 	}
-	ctx, cancel := wc.ctxManager.NewContext(safetyTimeout)
+	baseCtx, cancel := wc.ctxManager.NewContext(safetyTimeout)
+	ctx, state := wc.cancellations.register(baseCtx, command.ID)
+	commandRunner.finishCancellation = func() (bool, []int) { return wc.cancellations.finish(command.ID, state) }
 
-	err := wc.pool.Submit(ctx, func() error {
+	err := wc.pool.Submit(baseCtx, func() error {
 		defer cancel()
 		// Run the command - it handles result notification internally via defer
 		return commandRunner.Run(ctx)
@@ -726,6 +740,7 @@ func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol
 		// Send failure notification
 		start := time.Now()
 		payload := protocol.NewCommandResponse(false, fmt.Sprintf("Failed to submit command: %v", err), time.Since(start).Seconds(), 1)
+		payload.Cancelled, payload.Survivors = commandRunner.finishCancellation()
 		scheduler.Rqueue.Post(fmt.Sprintf(eventCommandFinURL, command.ID),
 			payload,
 			10,

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/commandcancel"
 	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/internal/retry"
 	"github.com/alpacax/alpamon/v2/pkg/config"
@@ -478,8 +480,21 @@ func (pc *PtyClient) close() {
 	}
 
 	if pc.cmd != nil && pc.cmd.Process != nil {
-		_ = pc.cmd.Process.Kill()
-		_ = pc.cmd.Wait()
+		// pty.Start creates a session and group led by this unreaped shell.
+		if pc.cmd.SysProcAttr != nil && pc.cmd.SysProcAttr.Setsid {
+			survivors, err := commandcancel.TerminateSession(pc.cmd.Process.Pid, commandcancel.GracePeriod)
+			if err != nil || len(survivors) > 0 {
+				log.Warn().Err(err).Ints("survivors", survivors).Str("session_id", pc.sessionID).Msg("Terminal process group cleanup incomplete")
+			}
+			if slices.Contains(survivors, pc.cmd.Process.Pid) || err != nil {
+				go func() { _ = pc.cmd.Wait() }()
+			} else {
+				_ = pc.cmd.Wait()
+			}
+		} else {
+			_ = pc.cmd.Process.Kill()
+			_ = pc.cmd.Wait()
+		}
 	}
 
 	conn, ka := pc.getConnState()
