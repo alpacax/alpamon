@@ -20,7 +20,7 @@ type Row struct {
 }
 
 // Store holds the outbox's rows. Errors are returned as the database reported
-// them, so the caller can recognise a locked database and retry.
+// them, so the caller can recognize a locked database and retry.
 type Store interface {
 	// Insert adds rows with zero attempts in one transaction, while the table
 	// holds fewer than maxRows, counted inside that transaction; the rest are
