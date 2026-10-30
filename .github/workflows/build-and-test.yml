@@ -175,6 +175,8 @@ jobs:
 
       - name: Build the packages other modules import
         env:
+          # Kept by hand: go list cannot see what other modules import. Add a
+          # package here when another module starts importing it.
           PKGS: >-
             ./cmd/alpamon/command/setup
             ./pkg/agent
