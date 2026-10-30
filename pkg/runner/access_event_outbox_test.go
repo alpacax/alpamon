@@ -268,14 +268,17 @@ func TestAccessEventOutbox_AckIsNotDelayedByDelivery(t *testing.T) {
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
 	release := make(chan struct{})
 	entered := make(chan struct{}, 4)
-	o := newAccessEventOutbox(outboxStore(client), func(ctx context.Context, _ NonAlpaconAccessEvent) (int, time.Duration, error) {
-		entered <- struct{}{}
-		select {
-		case <-release:
-		case <-ctx.Done():
-		}
-		return 0, 0, errTestUnreachable
-	})
+	o := newAccessEventOutbox(
+		outboxStore(client),
+		func(ctx context.Context, _ NonAlpaconAccessEvent) (int, time.Duration, error) {
+			entered <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, 0, errTestUnreachable
+		},
+	)
 	o.jitter = func(time.Duration) time.Duration { return 0 }
 
 	am := newTestAuthManager()
@@ -930,11 +933,14 @@ func TestAccessEventOutbox_ReachableShortensTheBackoff(t *testing.T) {
 func TestAccessEventOutbox_StopJoinsTheDrain(t *testing.T) {
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
 	entered := make(chan struct{}, 1)
-	o := newAccessEventOutbox(outboxStore(client), func(ctx context.Context, _ NonAlpaconAccessEvent) (int, time.Duration, error) {
-		entered <- struct{}{}
-		<-ctx.Done()
-		return 0, 0, ctx.Err()
-	})
+	o := newAccessEventOutbox(
+		outboxStore(client),
+		func(ctx context.Context, _ NonAlpaconAccessEvent) (int, time.Duration, error) {
+			entered <- struct{}{}
+			<-ctx.Done()
+			return 0, 0, ctx.Err()
+		},
+	)
 	o.jitter = func(time.Duration) time.Duration { return 0 }
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1131,16 +1137,19 @@ func TestAccessEventOutbox_DrainComesBackAfterAPanic(t *testing.T) {
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
 	var mu sync.Mutex
 	calls := 0
-	o := newAccessEventOutbox(outboxStore(client), func(_ context.Context, event NonAlpaconAccessEvent) (int, time.Duration, error) {
-		mu.Lock()
-		calls++
-		first := calls == 1
-		mu.Unlock()
-		if first {
-			panic(fmt.Errorf("send failed for %s", event.Username))
-		}
-		return http.StatusCreated, 0, nil
-	})
+	o := newAccessEventOutbox(
+		outboxStore(client),
+		func(_ context.Context, event NonAlpaconAccessEvent) (int, time.Duration, error) {
+			mu.Lock()
+			calls++
+			first := calls == 1
+			mu.Unlock()
+			if first {
+				panic(fmt.Errorf("send failed for %s", event.Username))
+			}
+			return http.StatusCreated, 0, nil
+		},
+	)
 	o.jitter = func(time.Duration) time.Duration { return 0 }
 	o.restartDelay = 10 * time.Millisecond
 	logs := captureLogsSync(t)
