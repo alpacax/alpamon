@@ -171,7 +171,9 @@ func runAgent(ready chan<- struct{}) {
 	// Manager the server is reachable again. Both start further down.
 	controlClient := runner.NewControlClient()
 	authManager := runner.GetAuthManager(controlClient, session)
-	authManager.UseAccessEventStore(db.NewAccessEventOutboxStore(client))
+	if client != nil { // a store on a nil client would pass the nil check and panic
+		authManager.UseAccessEventStore(db.NewAccessEventOutboxStore(client))
+	}
 
 	// A reconnect ends the access event outbox's backoff early, so login
 	// events held through an outage go out without waiting it out.
