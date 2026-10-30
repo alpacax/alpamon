@@ -145,3 +145,15 @@ func TestExcludeVirtualFromInventoryDefault(t *testing.T) {
 	assert.False(t, settings.ExcludeVirtualFromInventory,
 		"the interface inventory reports what it always has unless the setting asks otherwise")
 }
+
+func TestAIServerURL_ComesFromTheBuildNotTheConfigFile(t *testing.T) {
+	original := DefaultAIServerURL
+	t.Cleanup(func() { DefaultAIServerURL = original })
+	DefaultAIServerURL = "http://localhost:8001"
+	path := filepath.Join(t.TempDir(), "alpamon.conf")
+	require.NoError(t, os.WriteFile(path, []byte("[server]\nurl = http://localhost:8000\nid = id\nkey = key\nai_server_url = https://attacker.example\n"), 0o600))
+
+	settings := LoadConfig([]string{path}, "/ws/", "/ws/control/")
+
+	assert.Equal(t, "http://localhost:8001", settings.AIServerURL)
+}

@@ -38,7 +38,6 @@ const (
 	// Command signature verification defaults.
 	// Hardcoded intentionally: mode transitions (monitor → enforce) should be
 	// deployed fleet-wide via code release, not per-server config changes.
-	DefaultAIServerURL    = "https://alpacon.ai"
 	DefaultSigningMode    = "monitor" // change to "enforce" when ready
 	DefaultKeyRefreshSecs = 3600      // 1 hour
 
@@ -50,6 +49,10 @@ const (
 	// Editor configuration defaults
 	DefaultEditorIdleTimeout = 60 // minutes
 )
+
+// DefaultAIServerURL is the signer whose public key verifies commands. It has no
+// config key; a local build points it at a local signer with -ldflags -X (see CLAUDE.md).
+var DefaultAIServerURL = "https://alpacon.ai"
 
 // GetSmuxConfig returns optimized smux configuration for tunnel connections.
 func GetSmuxConfig() *smux.Config {

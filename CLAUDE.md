@@ -46,6 +46,10 @@ atlas migrate diff <migration_name> \
 # Build the main binary
 go build -v ./cmd/alpamon
 
+# Local build against a local command signer. The signer URL has no
+# config key on purpose; only the build can change it.
+go build -v -ldflags "-X github.com/alpacax/alpamon/v2/pkg/config.DefaultAIServerURL=http://localhost:<signer-port>" ./cmd/alpamon
+
 # Install dependencies. Drop stale generated ent output first: it's gitignored,
 # so `go generate` never deletes leftovers (e.g. a `migrate/` directory from
 # before the codegen tool disabled gen.Migrate).
