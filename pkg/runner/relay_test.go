@@ -259,7 +259,10 @@ func TestRelayBidirectionalKeepsOpenRelayPastBoundUntilADirectionEnds(t *testing
 		require.NoError(t, err)
 		assert.Equal(t, "ping", string(buf))
 
-		_ = peer.Close()
+		require.NoError(t, peer.Close())
+		time.Sleep(time.Minute - time.Millisecond)
+		synctest.Wait()
+		require.False(t, relayDone(done), "relay cut the remaining direction before its bound")
 		_ = service.Close()
 		<-done
 	})
