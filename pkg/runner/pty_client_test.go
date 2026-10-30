@@ -199,6 +199,8 @@ func TestPtyOpenCommandHandleLifetime(t *testing.T) {
 			duration := 3
 			if cancelTerminal {
 				duration = 30
+				_, err = io.WriteString(ptmx, "trap '' TERM\n")
+				require.NoError(t, err)
 			}
 			_, err = fmt.Fprintf(ptmx, "out=%q\nsleep %d & plain=$!\nnohup sleep %d >/dev/null 2>&1 & echo $plain $! > \"$out\"\n", pidFile, duration, duration)
 			require.NoError(t, err)
@@ -249,7 +251,7 @@ func TestPtyOpenCommandHandleLifetime(t *testing.T) {
 			start := time.Now()
 			pc.close()
 			if cancelTerminal {
-				assert.GreaterOrEqual(t, time.Since(start), commandcancel.GracePeriod, "interactive shell ignores TERM and must reach KILL")
+				assert.GreaterOrEqual(t, time.Since(start), commandcancel.GracePeriod, "TERM is ignored and cancellation must reach KILL")
 			}
 			assert.NotContains(t, registry.active, "openpty-id")
 			cancelled, survivors := pc.cancelState.Finish()
@@ -290,7 +292,7 @@ func TestPtyBackgroundCancelClosesChannelAndUnregisters(t *testing.T) {
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
-			t.Error("terminal worker did not exit")
+			t.Fatal("terminal worker did not exit")
 		}
 	})
 	require.Eventually(t, func() bool { return manager.Get(pc.sessionID) != nil }, 5*time.Second, 50*time.Millisecond)

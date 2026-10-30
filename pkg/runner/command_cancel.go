@@ -18,6 +18,7 @@ const (
 type recentCommand struct {
 	id        string
 	cancelled bool
+	effective bool
 	expires   time.Time
 }
 
@@ -45,10 +46,12 @@ func (c *commandCancellations) remember(id string, cancelled bool, now time.Time
 	if c.recent == nil {
 		c.recent = make(map[string]*list.Element)
 	}
+	effective := false
 	if e := c.recent[id]; e != nil {
+		effective = e.Value.(recentCommand).effective
 		c.order.Remove(e)
 	}
-	c.recent[id] = c.order.PushBack(recentCommand{id: id, cancelled: cancelled, expires: now.Add(cancelledCommandTTL)})
+	c.recent[id] = c.order.PushBack(recentCommand{id: id, cancelled: cancelled, effective: effective, expires: now.Add(cancelledCommandTTL)})
 	c.prune(now)
 }
 
@@ -106,9 +109,22 @@ func (c *commandCancellations) finish(id string, state *commandcancel.State) (bo
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cancelled, survivors := state.Finish()
+	if cancelled {
+		if e := c.recent[id]; e != nil {
+			entry := e.Value.(recentCommand)
+			entry.effective = true
+			e.Value = entry
+		}
+	}
 	delete(c.active[id], state)
 	if len(c.active[id]) == 0 {
 		delete(c.active, id)
+		if !cancelled {
+			if e := c.recent[id]; e != nil && !e.Value.(recentCommand).effective {
+				delete(c.recent, id)
+				c.order.Remove(e)
+			}
+		}
 	}
 	if id != "" && len(id) <= 128 && !cancelled {
 		if c.finished == nil {

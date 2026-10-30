@@ -21,13 +21,13 @@ func runTrackedCommand(ctx context.Context, cmd *exec.Cmd, cleanup *commandClean
 }
 
 func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *commandCleanup, cw *chunkWriter, pidHook func(int), commandID string, state *commandcancel.State, grace time.Duration) ([]byte, error) {
-	defer cleanup.close()
+	defer func() { _ = cleanup.close() }()
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
-	defer writer.Close()
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
 	cmd.Stdout, cmd.Stderr = writer, writer
 	cmd.Cancel = nil
 	cmd.WaitDelay = 0

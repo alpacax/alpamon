@@ -126,7 +126,7 @@ func TestCancelUnknownAndOlderServerFlow(t *testing.T) {
 	wc.commandRequestHandler([]byte(`{"query":"cancel","command":{"id":"normal"}}`))
 	select {
 	case extra := <-reports:
-		t.Fatalf("unexpected finish report: %v", extra)
+		assert.Failf(t, "unexpected finish report", "%v", extra)
 	case <-time.After(50 * time.Millisecond):
 	}
 }
@@ -201,6 +201,57 @@ func TestCancelIgnoredByHandlerDoesNotReportCancelled(t *testing.T) {
 	report := receiveCancelReport(t, reports)
 	assert.NotContains(t, report, "cancelled")
 	assert.Equal(t, true, report["success"])
+}
+
+func TestLateCancelDoesNotSuppressRedelivery(t *testing.T) {
+	for _, anotherActive := range []bool{false, true} {
+		t.Run(strconv.FormatBool(anotherActive), func(t *testing.T) {
+			var registry commandCancellations
+			_, first := registry.register(context.Background(), "same")
+			var finishOther func()
+			if anotherActive {
+				_, second := registry.register(context.Background(), "same")
+				finishOther = func() {
+					second.Observe()
+					registry.finish("same", second)
+				}
+			}
+			registry.cancel("same")
+			cancelled, _ := registry.finish("same", first)
+			assert.False(t, cancelled, "the completed delivery did not act on cancellation")
+			assert.Equal(t, anotherActive, registry.wasCancelled("same"))
+			if finishOther != nil {
+				finishOther()
+			}
+			ctx, repeated := registry.register(context.Background(), "same")
+			assert.Equal(t, anotherActive, ctx.Err() != nil, "only effective cancellation may suppress redelivery")
+			registry.finish("same", repeated)
+		})
+	}
+}
+
+func TestEffectiveCancelSurvivesDuplicateFinishOrder(t *testing.T) {
+	for _, cancelledFirst := range []bool{false, true} {
+		t.Run(strconv.FormatBool(cancelledFirst), func(t *testing.T) {
+			var registry commandCancellations
+			_, effective := registry.register(context.Background(), "same")
+			_, normal := registry.register(context.Background(), "same")
+			registry.cancel("same")
+			effective.Observe()
+			if cancelledFirst {
+				registry.finish("same", effective)
+				registry.cancel("same")
+				registry.finish("same", normal)
+			} else {
+				registry.finish("same", normal)
+				registry.finish("same", effective)
+			}
+			assert.True(t, registry.wasCancelled("same"), "an effective cancellation survives either completion order")
+			ctx, repeated := registry.register(context.Background(), "same")
+			assert.ErrorIs(t, ctx.Err(), context.Canceled)
+			registry.finish("same", repeated)
+		})
+	}
 }
 
 func TestNormalFinishesDoNotEvictPendingCancel(t *testing.T) {
