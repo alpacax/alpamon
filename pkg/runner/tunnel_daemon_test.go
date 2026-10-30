@@ -3,7 +3,9 @@ package runner
 import (
 	"io"
 	"net"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,6 +49,101 @@ func acceptOne(t *testing.T, ln net.Listener) <-chan net.Conn {
 		ch <- conn
 	}()
 	return ch
+}
+
+// tcpPair returns both ends of a loopback TCP connection, which supports CloseWrite.
+func tcpPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	serverCh := acceptOne(t, ln)
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err)
+	server := <-serverCh
+	require.NotNil(t, server)
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
+	return client.(*net.TCPConn), server.(*net.TCPConn)
+}
+
+// readAllWithin reads conn to EOF, failing instead of hanging when the relay never ends it.
+func readAllWithin(t *testing.T, conn net.Conn) string {
+	t.Helper()
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	data, err := io.ReadAll(conn)
+	require.NoError(t, err)
+	return string(data)
+}
+
+func waitRelayDone(t *testing.T, done <-chan struct{}, within time.Duration) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(within):
+		t.Fatal("relay did not return")
+	}
+}
+
+// startDaemonRelay runs handleDaemonConnection as the daemon would and returns the main
+// process's end of the connection, the target's accepted connection, and a done channel.
+func startDaemonRelay(t *testing.T) (*net.TCPConn, net.Conn, <-chan struct{}) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	targetCh := acceptOne(t, ln)
+
+	mainSide, daemonSide := tcpPair(t)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	done := make(chan struct{})
+	go func() {
+		handleDaemonConnection(daemonSide, &wg)
+		close(done)
+	}()
+
+	_, err = mainSide.Write([]byte(ln.Addr().String() + "\n"))
+	require.NoError(t, err)
+	target := <-targetCh
+	require.NotNil(t, target)
+	t.Cleanup(func() { _ = target.Close() })
+	return mainSide, target, done
+}
+
+func TestHandleDaemonConnectionDeliversResponseAfterMainHalfCloses(t *testing.T) {
+	mainSide, target, done := startDaemonRelay(t)
+
+	_, err := mainSide.Write([]byte("request"))
+	require.NoError(t, err)
+	require.NoError(t, mainSide.CloseWrite())
+	assert.Equal(t, "request", readAllWithin(t, target))
+
+	_, err = target.Write([]byte("response"))
+	require.NoError(t, err)
+	require.NoError(t, target.(*net.TCPConn).CloseWrite())
+
+	assert.Equal(t, "response", readAllWithin(t, mainSide))
+	waitRelayDone(t, done, 5*time.Second)
+}
+
+func TestHandleDaemonConnectionCarriesMainDataAfterTargetHalfCloses(t *testing.T) {
+	mainSide, target, done := startDaemonRelay(t)
+
+	_, err := target.Write([]byte("banner"))
+	require.NoError(t, err)
+	require.NoError(t, target.(*net.TCPConn).CloseWrite())
+	assert.Equal(t, "banner", readAllWithin(t, mainSide))
+
+	_, err = mainSide.Write([]byte("late"))
+	require.NoError(t, err)
+	require.NoError(t, mainSide.CloseWrite())
+
+	assert.Equal(t, "late", readAllWithin(t, target))
+	waitRelayDone(t, done, 5*time.Second)
 }
 
 func TestDialDirect(t *testing.T) {

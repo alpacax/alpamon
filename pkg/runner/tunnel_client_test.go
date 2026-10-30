@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xtaci/smux"
 )
 
 func TestCloseWriteSide(t *testing.T) {
@@ -57,6 +58,72 @@ func TestCloseWriteSide(t *testing.T) {
 
 		assert.NotPanics(t, func() { closeWriteSide(a) })
 	})
+}
+
+// smuxPair returns a stream and its peer over an in-memory session using the tunnel's smux config.
+func smuxPair(t *testing.T) (*smux.Stream, *smux.Stream) {
+	t.Helper()
+	agentConn, serverConn := net.Pipe()
+	agentSession, err := smux.Client(agentConn, config.GetSmuxConfig())
+	require.NoError(t, err)
+	serverSession, err := smux.Server(serverConn, config.GetSmuxConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = agentSession.Close()
+		_ = serverSession.Close()
+	})
+
+	peer, err := serverSession.OpenStream()
+	require.NoError(t, err)
+	stream, err := agentSession.AcceptStream()
+	require.NoError(t, err)
+	return stream, peer
+}
+
+// startClientRelay runs relayBidirectional between a smux stream and a TCP target and
+// returns the stream's peer, the target service's end, and a done channel.
+func startClientRelay(t *testing.T) (*smux.Stream, *net.TCPConn, <-chan struct{}) {
+	t.Helper()
+	stream, peer := smuxPair(t)
+	agentSide, service := tcpPair(t)
+	done := make(chan struct{})
+	go func() {
+		(&TunnelClient{}).relayBidirectional(stream, agentSide, stream)
+		close(done)
+	}()
+	return peer, service, done
+}
+
+func TestRelayBidirectionalDeliversResponseAfterStreamHalfCloses(t *testing.T) {
+	peer, service, done := startClientRelay(t)
+
+	_, err := peer.Write([]byte("request"))
+	require.NoError(t, err)
+	require.NoError(t, peer.CloseWrite())
+	assert.Equal(t, "request", readAllWithin(t, service))
+
+	_, err = service.Write([]byte("response"))
+	require.NoError(t, err)
+	require.NoError(t, service.CloseWrite())
+
+	assert.Equal(t, "response", readAllWithin(t, peer))
+	waitRelayDone(t, done, 5*time.Second)
+}
+
+func TestRelayBidirectionalCarriesStreamDataAfterTargetHalfCloses(t *testing.T) {
+	peer, service, done := startClientRelay(t)
+
+	_, err := service.Write([]byte("banner"))
+	require.NoError(t, err)
+	require.NoError(t, service.CloseWrite())
+	assert.Equal(t, "banner", readAllWithin(t, peer))
+
+	_, err = peer.Write([]byte("late"))
+	require.NoError(t, err)
+	require.NoError(t, peer.CloseWrite())
+
+	assert.Equal(t, "late", readAllWithin(t, service))
+	waitRelayDone(t, done, 5*time.Second)
 }
 
 func TestIsValidSessionID(t *testing.T) {
