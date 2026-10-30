@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/pkg/tunnel"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
@@ -152,24 +151,6 @@ func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
 
 	log.Debug().Msgf("Tunnel daemon connected to %s.", targetAddr)
 
-	errChan := make(chan error, 2)
-
-	// UDS -> TCP
-	go func() {
-		_, err := tunnel.CopyBuffered(tcpConn, reader)
-		errChan <- err
-	}()
-
-	// TCP -> UDS
-	go func() {
-		_, err := tunnel.CopyBuffered(conn, tcpConn)
-		errChan <- err
-	}()
-
-	// Wait for one direction to complete, then close both connections to unblock the other goroutine
-	<-errChan
-	_ = conn.Close()
-	_ = tcpConn.Close()
-	<-errChan
+	relayBidirectional(conn, reader, tcpConn, tcpConn, halfCloseTimeout)
 	log.Debug().Msgf("Tunnel daemon relay finished for %s.", targetAddr)
 }

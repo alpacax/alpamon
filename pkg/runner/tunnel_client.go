@@ -402,7 +402,7 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	log.Debug().Msgf("Relay target dialed for %s.", targetAddr)
 
 	dataReader := tc.buildDataReader(bufReader, stream)
-	tc.relayBidirectional(stream, targetConn, dataReader)
+	relayBidirectional(stream, dataReader, targetConn, targetConn, halfCloseTimeout)
 
 	log.Debug().Msgf("Tunnel stream closed for port %d.", targetPort)
 }
@@ -450,38 +450,6 @@ func (tc *TunnelClient) buildDataReader(bufReader *bufio.Reader, stream *smux.St
 	}
 
 	return io.MultiReader(bytes.NewReader(remainingBuf[:n]), stream)
-}
-
-func (tc *TunnelClient) relayBidirectional(stream *smux.Stream, targetConn net.Conn, dataReader io.Reader) {
-	errChan := make(chan error, 2)
-
-	// stream -> target
-	go func() {
-		_, err := tunnel.CopyBuffered(targetConn, dataReader)
-		closeWriteSide(targetConn)
-		errChan <- err
-	}()
-
-	// target -> stream
-	go func() {
-		_, err := tunnel.CopyBuffered(stream, targetConn)
-		errChan <- err
-	}()
-
-	// Closing both ends unblocks the goroutine still copying.
-	<-errChan
-	_ = stream.Close()
-	_ = targetConn.Close()
-	<-errChan
-}
-
-// closeWriteSide signals EOF to the peer. The assertion covers *net.UnixConn
-// (Unix daemon path) and *net.TCPConn (Windows direct path); anything else is
-// left alone.
-func closeWriteSide(conn net.Conn) {
-	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-		_ = cw.CloseWrite()
-	}
 }
 
 // Close cleanly shuts down the tunnel connection.
