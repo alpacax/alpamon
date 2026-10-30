@@ -70,6 +70,7 @@ func TestWindowsPtyCancelClosesTerminal(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
+	setServerURL(t, server.URL)
 	manager := NewTerminalManager(nil)
 	wc := &WebsocketClient{}
 	ctx, open := wc.cancellations.register(context.Background(), "openpty-id")
