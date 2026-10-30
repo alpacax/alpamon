@@ -13,6 +13,7 @@ type commandCleaner interface {
 
 // cleanupOutcome reports what one cancel did, for the single log line runCommand writes after it.
 type cleanupOutcome struct {
+	survivors []int
 	// assigned: the tree was confined where cancel can reach it—the Windows job object, or a
 	// Unix process group the child leads.
 	assigned bool

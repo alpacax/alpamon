@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/UserExistsError/conpty"
+	"github.com/alpacax/alpamon/v2/internal/commandcancel"
 	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
@@ -27,22 +30,27 @@ const (
 
 // PtyClient manages a ConPTY terminal session on Windows.
 type PtyClient struct {
-	conn          *websocket.Conn
-	apiSession    *scheduler.Session
-	requestHeader http.Header
-	cpty          *conpty.ConPty
-	url           string
-	rows          uint16
-	cols          uint16
-	username      string
-	groupname     string
-	homeDirectory string
-	shell         string
-	sessionID     string
-	wsToPty       chan []byte
-	ptyToWs       chan []byte
-	isRecovering  atomic.Bool
-	manager       *TerminalManager
+	conn               *websocket.Conn
+	apiSession         *scheduler.Session
+	requestHeader      http.Header
+	cpty               *conpty.ConPty
+	url                string
+	rows               uint16
+	cols               uint16
+	username           string
+	groupname          string
+	homeDirectory      string
+	shell              string
+	sessionID          string
+	wsToPty            chan []byte
+	ptyToWs            chan []byte
+	isRecovering       atomic.Bool
+	manager            *TerminalManager
+	commandID          string
+	cancelState        *commandcancel.State
+	cancelDone         <-chan struct{}
+	finishCancellation func() (bool, []int)
+	closeOnce          sync.Once
 }
 
 func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, manager *TerminalManager) *PtyClient {
@@ -72,16 +80,33 @@ func (pc *PtyClient) RunPtyBackground() {
 	log.Debug().Msg("Starting Websh session in background (Windows ConPTY).")
 	defer pc.close()
 
-	if err := pc.initializeSession(); err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-pc.cancelDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	if pc.cancelState != nil {
+		select {
+		case <-pc.cancelDone:
+			pc.cancelState.Observe()
+			return
+		default:
+		}
+	}
+	if err := pc.initializeSession(ctx); err != nil {
+		if ctx.Err() != nil {
+			pc.cancelState.Observe()
+		}
 		log.Error().Err(err).Str("sessionID", pc.sessionID).Str("username", pc.username).
 			Msg("Failed to initialize PTY session.")
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go pc.readFromPty(ctx, cancel)
+	go pc.readFromPty(ctx, cancel, pc.cpty)
 	go pc.writeToWebsocket(ctx, cancel)
 	go pc.readFromWebsocket(ctx, cancel)
 	go pc.writeToPty(ctx, cancel)
@@ -117,7 +142,7 @@ func (pc *PtyClient) waitForChildExit(ctx context.Context, cancel context.Cancel
 	cancel()
 }
 
-func (pc *PtyClient) initializeSession() error {
+func (pc *PtyClient) initializeSession(ctx context.Context) error {
 	sanitizedURL, err := validateWebSocketURL(pc.url)
 	if err != nil {
 		return err
@@ -130,7 +155,7 @@ func (pc *PtyClient) initializeSession() error {
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
 	}
-	pc.conn, _, err = dialer.Dial(sanitizedURL, pc.requestHeader)
+	pc.conn, _, err = dialer.DialContext(ctx, sanitizedURL, pc.requestHeader)
 	if err != nil {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
@@ -173,24 +198,22 @@ func (pc *PtyClient) initializeSession() error {
 	return nil
 }
 
-func (pc *PtyClient) readFromPty(ctx context.Context, cancel context.CancelFunc) {
+func (pc *PtyClient) readFromPty(ctx context.Context, cancel context.CancelFunc, reader io.Reader) {
 	buf := make([]byte, bufferSize)
 	for {
-		select {
-		case <-ctx.Done():
+		n, err := reader.Read(buf)
+		if err != nil {
+			cancel()
 			return
-		default:
-			n, err := pc.cpty.Read(buf)
-			if err != nil {
-				cancel()
-				return
-			}
-			data := append([]byte(nil), buf[:n]...)
-			select {
-			case pc.ptyToWs <- data:
-			case <-ctx.Done():
-				return
-			}
+		}
+		// Older Windows releases require output draining until ClosePseudoConsole returns.
+		if ctx.Err() != nil {
+			continue
+		}
+		data := append([]byte(nil), buf[:n]...)
+		select {
+		case pc.ptyToWs <- data:
+		case <-ctx.Done():
 		}
 	}
 }
@@ -283,8 +306,25 @@ outer:
 }
 
 func (pc *PtyClient) close() {
+	pc.closeOnce.Do(pc.closeSession)
+}
+
+func (pc *PtyClient) closeSession() {
+	remote := pc.cancelState != nil && pc.cancelState.StopRequests()
+	defer func() {
+		if pc.finishCancellation != nil {
+			cancelled, survivors := pc.finishCancellation()
+			if remote {
+				log.Info().Str("command_id", pc.commandID).Str("session_id", pc.sessionID).Bool("cancelled", cancelled).Ints("survivors", survivors).Msg("Terminal cancellation completed")
+			}
+		}
+	}()
 	if pc.cpty != nil {
-		_ = pc.cpty.Close()
+		if err := pc.cpty.Close(); err != nil {
+			log.Warn().Err(err).Str("session_id", pc.sessionID).Msg("ConPTY close failed")
+		} else if remote {
+			pc.cancelState.Observe()
+		}
 	}
 	if pc.conn != nil {
 		// Emit CloseNormalClosure on our end so the web client
@@ -319,4 +359,16 @@ func (pc *PtyClient) Resize(rows, cols uint16) error {
 func (pc *PtyClient) Refresh() error {
 	// Windows ConPTY does not have a SIGWINCH equivalent.
 	return nil
+}
+
+// TrackCommand retains the openpty command ID until the terminal closes.
+func (pc *PtyClient) TrackCommand(ctx context.Context, id string) {
+	pc.commandID = id
+	registry, _ := ctx.Value(cancellationRegistryKey{}).(*commandCancellations)
+	if registry == nil || id == "" || len(id) > 128 {
+		return
+	}
+	terminalCtx, state := registry.register(context.Background(), id)
+	pc.cancelState, pc.cancelDone = state, terminalCtx.Done()
+	pc.finishCancellation = func() (bool, []int) { return registry.finish(id, state) }
 }

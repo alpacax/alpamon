@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/commandcancel"
 	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
@@ -40,6 +41,8 @@ type CommandRunner struct {
 	data       protocol.CommandData
 	dispatcher CommandDispatcher
 	postChunk  func(ctx context.Context, url string, chunk *protocol.CommandChunk, priority int, expiry time.Time) // nil posts to scheduler.Rqueue
+
+	finishCancellation func() (bool, []int)
 }
 
 func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command protocol.Command, data protocol.CommandData, dispatcher CommandDispatcher) *CommandRunner {
@@ -105,9 +108,15 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 	start := time.Now()
 
 	defer func() {
+		var cancelled bool
+		var survivors []int
+		if cr.finishCancellation != nil {
+			cancelled, survivors = cr.finishCancellation()
+		}
 		if cr.command.ID != "" {
 			finURL := fmt.Sprintf(eventCommandFinURL, cr.command.ID)
 			payload := protocol.NewCommandResponse(exitCode == 0, result, time.Since(start).Seconds(), exitCode)
+			payload.Cancelled, payload.Survivors = cancelled, survivors
 			// Best-effort hint only (retries and concurrent reporters can
 			// still race); server must reassemble via seq.
 			scheduler.Rqueue.Post(finURL, payload, 11, time.Time{})
@@ -119,6 +128,7 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 	// Check if context is already cancelled before starting
 	select {
 	case <-ctx.Done():
+		commandcancel.FromContext(ctx).Observe()
 		result = fmt.Sprintf("Command cancelled before execution: %v", ctx.Err())
 		exitCode = 1
 		return fmt.Errorf("command failed with exit code %d: %s", exitCode, result)
@@ -199,6 +209,9 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 
 	var err error
 	exitCode, result, err = cr.dispatcher.Execute(ctx, command, args)
+	if errors.Is(err, context.Canceled) || errors.Is(err, commandcancel.ErrCancelled) {
+		commandcancel.FromContext(ctx).Observe()
+	}
 	if err != nil {
 		log.Error().Err(err).Str("command", command).Msg("Command execution failed")
 	}

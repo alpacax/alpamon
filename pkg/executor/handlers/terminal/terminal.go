@@ -46,10 +46,10 @@ func NewTerminalHandler(cmdExecutor common.CommandExecutor, apiSession *schedule
 }
 
 // Execute runs the terminal command
-func (h *TerminalHandler) Execute(_ context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
+func (h *TerminalHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
 	switch cmd {
 	case common.OpenPty.String():
-		return h.handleOpenPTY(args)
+		return h.handleOpenPTY(ctx, args)
 	case common.OpenFtp.String():
 		return h.handleOpenFTP(args)
 	case common.ResizePty.String():
@@ -106,7 +106,7 @@ func (h *TerminalHandler) Validate(cmd string, args *common.CommandArgs) error {
 }
 
 // handleOpenPTY opens a new PTY terminal session
-func (h *TerminalHandler) handleOpenPTY(args *common.CommandArgs) (int, string, error) {
+func (h *TerminalHandler) handleOpenPTY(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	err := h.Validate(common.OpenPty.String(), args)
 	if err != nil {
 		return 1, fmt.Sprintf("openpty: Not enough information. %s", err.Error()), nil
@@ -132,6 +132,7 @@ func (h *TerminalHandler) handleOpenPTY(args *common.CommandArgs) (int, string, 
 		Msg("Opening PTY terminal")
 
 	ptyClient := runner.NewPtyClient(data, h.apiSession, h.manager)
+	ptyClient.TrackCommand(ctx, args.CommandID)
 	go ptyClient.RunPtyBackground()
 
 	return 0, "Spawned a pty terminal.", nil

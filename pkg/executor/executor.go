@@ -329,75 +329,7 @@ func (e *Executor) runCommand(ctx context.Context, cmd *exec.Cmd, commandID stri
 		}
 		return nil, err
 	}
-	cmd.WaitDelay = commandWaitDelay
-	cmd.Cancel = func() error {
-		reason := cleanupReasonShutdown
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			reason = cleanupReasonTimeout
-		}
-		outcome, err := cleanup.cancel(cmd)
-		logProcessTreeCleanup(commandID, cmd, reason, outcome, err)
-		return err
-	}
-
-	var buf bytes.Buffer
-	if cw != nil {
-		cmd.Stdout = cw
-		cmd.Stderr = cw
-	} else {
-		cmd.Stdout = &buf
-		cmd.Stderr = &buf
-	}
-	finish := func(err error) ([]byte, error) {
-		if cw != nil {
-			cw.close()
-			return cw.captured(), err
-		}
-		return buf.Bytes(), err
-	}
-
-	defer func() {
-		if err := cleanup.close(); err != nil {
-			log.Debug().Err(err).Msg("Failed to close command cleanup handle")
-		}
-	}()
-	if err := cmd.Start(); err != nil {
-		return finish(err)
-	}
-	// Kill the whole tree on every exit path: a non-zero exit that leaves a descendant holding the pipe
-	// fires neither Cancel (timeout-only) nor the ErrWaitDelay branch, so it would otherwise leak. This
-	// also kills background work a command meant to outlive it (`nohup ... &`, Start-Process). Runs once.
-	var waitErr error
-	exitCleanupDone := false
-	exitCleanup := func() {
-		if exitCleanupDone {
-			return
-		}
-		exitCleanupDone = true
-		reason := cleanupReasonExit
-		if errors.Is(waitErr, exec.ErrWaitDelay) {
-			reason = cleanupReasonWaitDelay
-		}
-		outcome, err := cleanup.cancel(cmd)
-		logProcessTreeCleanup(commandID, cmd, reason, outcome, err)
-	}
-	defer exitCleanup()
-	if err := cleanup.afterStart(cmd); err != nil {
-		log.Warn().Err(err).Str("command_id", commandID).Int("pid", cmd.Process.Pid).
-			Msg("Failed to confine the command's process tree; failing the command.")
-		// Kill before Wait: on Windows a root whose setup failed is still suspended and would never exit on its own.
-		exitCleanup()
-		_ = cmd.Wait()
-		return finish(err)
-	}
-	if cw != nil {
-		cw.start(chunkFlushInterval)
-	}
-	if cmd.Process != nil {
-		invokePIDHook(pidHook, cmd.Process.Pid)
-	}
-	waitErr = cmd.Wait()
-	return finish(waitErr)
+	return runTrackedCommand(ctx, cmd, cleanup, cw, pidHook, commandID)
 }
 
 // Why a cancel ran, as logged.

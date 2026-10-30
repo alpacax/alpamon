@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/commandcancel"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -183,6 +184,7 @@ func (h *ShellHandler) executeWithOperators(ctx context.Context, command, userna
 
 	runSegment := func(cmdArgs []string) (int, bool) {
 		if ctx.Err() != nil {
+			commandcancel.FromContext(ctx).Observe()
 			if common.IsTimeout(ctx) {
 				chainTimedOut = true
 				return common.TimeoutExitCode, false
