@@ -116,7 +116,7 @@ Commands from the Alpacon console flow through:
 - `tunnel_client.go`, `tunnel_daemon.go`: Tunnel operations
 - `auth_manager.go`: PAM authentication and sudo approval
 - `auth_session_event.go`: Non-Alpacon access detection (PAM session events via auth.sock, gated by `detect_local_access` policy)
-- `access_event_outbox.go`: Holds detected access events in the local database (`access_event_outbox` table) and delivers them oldest first, so a server outage delays them instead of losing them
+- `access_event_outbox.go`: Holds detected access events in the local database (`access_event_outbox` table) and delivers them oldest first, so a server outage delays them instead of losing them; it reaches the database only through `pkg/accessoutbox.Store`, which `pkg/db` implements
 
 **Collector (`pkg/collector/`)**
 - `check/realtime/`: CPU, memory, disk I/O, network traffic (via gopsutil)
@@ -128,6 +128,7 @@ Commands from the Alpacon console flow through:
 - Ent ORM with code-generated models (`pkg/db/ent/`)
 - Schema definitions in `pkg/db/schema/`
 - Versioned SQL migrations in `pkg/db/migration/`
+- `pkg/db/ent` is generated and gitignored, so the packages other modules import must not reach it; the `importable-guard` job builds them without it
 - SQLite backend with automatic migration
 
 **Agent (`pkg/agent/`)**

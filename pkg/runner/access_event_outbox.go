@@ -11,8 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/pkg/db/ent"
-	"github.com/alpacax/alpamon/v2/pkg/db/ent/accesseventoutbox"
+	"github.com/alpacax/alpamon/v2/pkg/accessoutbox"
 	"github.com/rs/zerolog/log"
 )
 
@@ -229,8 +228,8 @@ type accessOutboxWrite struct {
 // The table comes from the agent's embedded migrations: a migration that
 // fails at startup stops the agent, as any other migration does.
 type accessEventOutbox struct {
-	client *ent.Client
-	send   accessEventSender
+	db   accessoutbox.Store
+	send accessEventSender
 
 	// Replaced in tests.
 	now     func() time.Time
@@ -280,10 +279,10 @@ type accessEventOutbox struct {
 	lastHeldWarn   time.Time
 }
 
-func newAccessEventOutbox(client *ent.Client, send accessEventSender) *accessEventOutbox {
+func newAccessEventOutbox(store accessoutbox.Store, send accessEventSender) *accessEventOutbox {
 	abandon, abandonNow := context.WithCancel(context.Background())
 	return &accessEventOutbox{
-		client:       client,
+		db:           store,
 		send:         send,
 		now:          time.Now,
 		sleep:        sleepCtx,
@@ -509,17 +508,11 @@ func (o *accessEventOutbox) writeBatch(batch []accessOutboxWrite) {
 	o.reportLosses()
 }
 
-type accessOutboxRow struct {
-	id        string
-	payload   []byte
-	createdAt time.Time
-}
-
 // store writes events in one transaction, retrying while SQLite is locked by
 // another writer until the outbox is abandoned at shutdown. Events queue
 // behind it meanwhile, up to accessOutboxInboxSize.
 func (o *accessEventOutbox) store(ctx context.Context, events []NonAlpaconAccessEvent) {
-	rows := make([]accessOutboxRow, 0, len(events))
+	rows := make([]accessoutbox.Row, 0, len(events))
 	for _, event := range events {
 		// Stored without held_seconds; that is worked out at each send.
 		event.HeldSeconds = 0
@@ -532,7 +525,11 @@ func (o *accessEventOutbox) store(ctx context.Context, events []NonAlpaconAccess
 		if createdAt.IsZero() {
 			createdAt = o.now()
 		}
-		rows = append(rows, accessOutboxRow{id: event.EventID, payload: payload, createdAt: createdAt.UTC()})
+		rows = append(rows, accessoutbox.Row{
+			ID:        event.EventID,
+			Payload:   payload,
+			CreatedAt: createdAt.UTC(),
+		})
 	}
 	if len(rows) == 0 {
 		return
@@ -565,45 +562,14 @@ func (o *accessEventOutbox) store(ctx context.Context, events []NonAlpaconAccess
 // insertRows inserts what fits under maxRows and refuses the rest; a row
 // whose event_id is already held is skipped, since the server deduplicates
 // on it and one row is all delivery needs.
-func (o *accessEventOutbox) insertRows(ctx context.Context, rows []accessOutboxRow) (stored, refused int, err error) {
-	tx, err := o.client.Tx(ctx)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-	count, err := tx.AccessEventOutbox.Query().Count(ctx)
-	if err != nil {
-		return 0, 0, err
-	}
+func (o *accessEventOutbox) insertRows(
+	ctx context.Context, rows []accessoutbox.Row,
+) (stored, refused int, err error) {
 	nextAttempt := o.now().UTC()
-	for _, row := range rows {
-		if count >= o.maxRows {
-			refused++
-			continue
-		}
-		insertErr := tx.AccessEventOutbox.Create().
-			SetID(row.id).
-			SetPayload(row.payload).
-			SetCreatedAt(row.createdAt).
-			SetNextAttemptAt(nextAttempt).
-			Exec(ctx)
-		if ent.IsConstraintError(insertErr) {
-			continue
-		}
-		if insertErr != nil {
-			return 0, 0, insertErr
-		}
-		count++
-		stored++
+	for i := range rows {
+		rows[i].NextAttemptAt = nextAttempt
 	}
-	if err = tx.Commit(); err != nil {
-		return 0, 0, err
-	}
-	return stored, refused, nil
+	return o.db.Insert(ctx, rows, o.maxRows)
 }
 
 // reportLosses logs the rate-limited Warns for events that never reached,
@@ -694,7 +660,7 @@ func (o *accessEventOutbox) pending(ctx context.Context) bool {
 	var exists bool
 	err := retrySQLiteBusy(ctx, func() error {
 		var err error
-		exists, err = o.client.AccessEventOutbox.Query().Exist(ctx)
+		exists, err = o.db.Any(ctx)
 		return err
 	})
 	return err == nil && exists
@@ -749,19 +715,14 @@ func (o *accessEventOutbox) drainOnce(ctx context.Context) time.Duration {
 // dueRows returns the next batch of events whose attempt time has come, oldest
 // first. An attempt time further out than any response could schedule means
 // the wall clock was set back, and counts as due.
-func (o *accessEventOutbox) dueRows(ctx context.Context, now time.Time) ([]*ent.AccessEventOutbox, error) {
+func (o *accessEventOutbox) dueRows(
+	ctx context.Context, now time.Time,
+) ([]accessoutbox.Row, error) {
 	utc := now.UTC()
-	var rows []*ent.AccessEventOutbox
+	var rows []accessoutbox.Row
 	err := retrySQLiteBusy(ctx, func() error {
 		var err error
-		rows, err = o.client.AccessEventOutbox.Query().
-			Where(accesseventoutbox.Or(
-				accesseventoutbox.NextAttemptAtLTE(utc),
-				accesseventoutbox.NextAttemptAtGT(utc.Add(accessOutboxMaxDelay)),
-			)).
-			Order(ent.Asc(accesseventoutbox.FieldCreatedAt), ent.Asc(accesseventoutbox.FieldID)).
-			Limit(accessOutboxBatchSize).
-			All(ctx)
+		rows, err = o.db.Due(ctx, utc, utc.Add(accessOutboxMaxDelay), accessOutboxBatchSize)
 		return err
 	})
 	return rows, err
@@ -770,23 +731,22 @@ func (o *accessEventOutbox) dueRows(ctx context.Context, now time.Time) ([]*ent.
 // untilNextDue returns the wait until the earliest held event is due, or
 // accessOutboxIdle when nothing is held.
 func (o *accessEventOutbox) untilNextDue(ctx context.Context, now time.Time) time.Duration {
-	var next *ent.AccessEventOutbox
+	var next time.Time
+	var held bool
 	err := retrySQLiteBusy(ctx, func() error {
 		var err error
-		next, err = o.client.AccessEventOutbox.Query().
-			Order(ent.Asc(accesseventoutbox.FieldNextAttemptAt)).
-			First(ctx)
+		next, held, err = o.db.EarliestAttempt(ctx)
 		return err
 	})
-	if ent.IsNotFound(err) {
-		return accessOutboxIdle
-	}
 	if err != nil {
 		return o.dbFailed(err)
 	}
+	if !held {
+		return accessOutboxIdle
+	}
 	// The floor keeps a row the due query did not return, however that came
 	// about, from turning the drain into a spin.
-	wait := next.NextAttemptAt.Sub(now)
+	wait := next.Sub(now)
 	return max(accessOutboxMinWait, min(wait, accessOutboxMaxDelay))
 }
 
@@ -814,7 +774,9 @@ func (o *accessEventOutbox) pace(ctx context.Context) error {
 
 // deliver sends one held event and settles its row. stop reports that the
 // pass must end, because delivery is paused or the agent is stopping.
-func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOutbox) (verdict accessDeliveryVerdict, stop bool) {
+func (o *accessEventOutbox) deliver(
+	ctx context.Context, row accessoutbox.Row,
+) (verdict accessDeliveryVerdict, stop bool) {
 	var event NonAlpaconAccessEvent
 	if err := json.Unmarshal(row.Payload, &event); err != nil {
 		log.Warn().Str("event_id", row.ID).Msg("Held access event is unreadable; dropping")
@@ -891,12 +853,9 @@ func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOut
 
 	utc := now.UTC()
 	updateErr := retrySQLiteBusy(ctx, func() error {
-		return o.client.AccessEventOutbox.UpdateOneID(row.ID).
-			SetAttempts(attempts).
-			SetNextAttemptAt(utc.Add(delay)).
-			Exec(ctx)
+		return o.db.Reschedule(ctx, row.ID, attempts, utc.Add(delay))
 	})
-	if updateErr != nil && !ent.IsNotFound(updateErr) {
+	if updateErr != nil {
 		log.Debug().Err(updateErr).Str("event_id", row.ID).Msg("Failed to reschedule held access event")
 	}
 
@@ -925,9 +884,9 @@ func (o *accessEventOutbox) deliver(ctx context.Context, row *ent.AccessEventOut
 // deduplicates the resend when it comes. stop reports that the pass must end.
 func (o *accessEventOutbox) settle(ctx context.Context, id string) (stop bool) {
 	err := retrySQLiteBusy(ctx, func() error {
-		return o.client.AccessEventOutbox.DeleteOneID(id).Exec(ctx)
+		return o.db.Remove(ctx, id)
 	})
-	if err == nil || ent.IsNotFound(err) {
+	if err == nil {
 		o.removeFailures = 0
 		return false
 	}
@@ -948,10 +907,7 @@ func (o *accessEventOutbox) releaseDeferred(ctx context.Context) {
 func (o *accessEventOutbox) releaseHeldUntil(ctx context.Context, at time.Time) {
 	utc := at.UTC()
 	err := retrySQLiteBusy(ctx, func() error {
-		return o.client.AccessEventOutbox.Update().
-			Where(accesseventoutbox.NextAttemptAtGT(utc)).
-			SetNextAttemptAt(utc).
-			Exec(ctx)
+		return o.db.ReleaseAfter(ctx, utc)
 	})
 	if err != nil {
 		log.Debug().Err(err).Msg("Failed to release held access events")
@@ -963,9 +919,7 @@ func (o *accessEventOutbox) purgeExpired(ctx context.Context) {
 	var dropped int
 	err := retrySQLiteBusy(ctx, func() error {
 		var err error
-		dropped, err = o.client.AccessEventOutbox.Delete().
-			Where(accesseventoutbox.CreatedAtLT(cutoff)).
-			Exec(ctx)
+		dropped, err = o.db.RemoveCreatedBefore(ctx, cutoff)
 		return err
 	})
 	if err != nil {
@@ -989,9 +943,7 @@ func (o *accessEventOutbox) warnLongHold(ctx context.Context) {
 	var held int
 	err := retrySQLiteBusy(ctx, func() error {
 		var err error
-		held, err = o.client.AccessEventOutbox.Query().
-			Where(accesseventoutbox.CreatedAtLT(now.UTC().Add(-accessOutboxLongHold))).
-			Count(ctx)
+		held, err = o.db.CountCreatedBefore(ctx, now.UTC().Add(-accessOutboxLongHold))
 		return err
 	})
 	if err != nil || held == 0 {

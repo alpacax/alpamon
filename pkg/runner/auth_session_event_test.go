@@ -504,7 +504,7 @@ func TestHandleSessionEvent_IncompleteEventIsNeverARepeat(t *testing.T) {
 // never kept.
 func TestHandleSessionEvent_RepeatOfAnEventTheQueueDroppedIsStored(t *testing.T) {
 	db := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
-	o := newAccessEventOutbox(db, (&fakeAccessEventSender{}).send)
+	o := newAccessEventOutbox(outboxStore(db), (&fakeAccessEventSender{}).send)
 	o.inbox = make(chan accessOutboxWrite, 1)
 	require.True(t, o.enqueue(newTestAccessEvent(newFakeOutboxClock(), "bob")), "fills the queue")
 	am := newTestAuthManager()

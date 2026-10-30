@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/retry"
-	"github.com/alpacax/alpamon/v2/pkg/db/ent"
+	"github.com/alpacax/alpamon/v2/pkg/accessoutbox"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog"
@@ -273,13 +273,13 @@ func (am *AuthManager) UpdateDetectLocalAccess(value bool) {
 	log.Info().Bool("detect_local_access", value).Msg("Updated detect_local_access setting")
 }
 
-// UseAccessEventStore gives the manager the agent's database to hold access
-// events in until the server has them. Call it once, before Start.
-func (am *AuthManager) UseAccessEventStore(client *ent.Client) {
-	if client == nil {
+// UseAccessEventStore gives the manager the store to hold access events in
+// until the server has them. Call it once, before Start.
+func (am *AuthManager) UseAccessEventStore(store accessoutbox.Store) {
+	if store == nil {
 		return
 	}
-	am.outbox = newAccessEventOutbox(client, am.postAccessEvent)
+	am.outbox = newAccessEventOutbox(store, am.postAccessEvent)
 }
 
 // NotifyServerReachable tells the access event outbox that the server answered

@@ -126,6 +126,19 @@ func openTestOutboxDB(t *testing.T, path string) *ent.Client {
 	return client
 }
 
+// testOutboxStore keeps the client so tests can read and seed rows directly.
+type testOutboxStore struct {
+	*db.AccessEventOutboxStore
+	client *ent.Client
+}
+
+func outboxStore(client *ent.Client) testOutboxStore {
+	return testOutboxStore{
+		AccessEventOutboxStore: db.NewAccessEventOutboxStore(client),
+		client:                 client,
+	}
+}
+
 func newTestOutbox(t *testing.T, clock *fakeOutboxClock, sender *fakeAccessEventSender) *accessEventOutbox {
 	t.Helper()
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
@@ -137,7 +150,7 @@ func newTestOutbox(t *testing.T, clock *fakeOutboxClock, sender *fakeAccessEvent
 func newTestOutboxOn(t *testing.T, client *ent.Client, clock *fakeOutboxClock, sender *fakeAccessEventSender) *accessEventOutbox {
 	t.Helper()
 	sender.clock = clock
-	o := newAccessEventOutbox(client, sender.send)
+	o := newAccessEventOutbox(outboxStore(client), sender.send)
 	o.now = clock.Now
 	o.sleep = clock.Sleep
 	o.jitter = func(time.Duration) time.Duration { return 0 }
@@ -222,7 +235,7 @@ func newTestAccessEvent(clock *fakeOutboxClock, username string) NonAlpaconAcces
 
 func outboxRows(t *testing.T, o *accessEventOutbox) []*ent.AccessEventOutbox {
 	t.Helper()
-	rows, err := o.client.AccessEventOutbox.Query().
+	rows, err := o.db.(testOutboxStore).client.AccessEventOutbox.Query().
 		Order(ent.Asc(accesseventoutbox.FieldCreatedAt)).
 		All(context.Background())
 	require.NoError(t, err)
@@ -255,7 +268,7 @@ func TestAccessEventOutbox_AckIsNotDelayedByDelivery(t *testing.T) {
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
 	release := make(chan struct{})
 	entered := make(chan struct{}, 4)
-	o := newAccessEventOutbox(client, func(ctx context.Context, _ NonAlpaconAccessEvent) (int, time.Duration, error) {
+	o := newAccessEventOutbox(outboxStore(client), func(ctx context.Context, _ NonAlpaconAccessEvent) (int, time.Duration, error) {
 		entered <- struct{}{}
 		select {
 		case <-release:
@@ -878,7 +891,7 @@ func TestAccessEventOutbox_LogsOneInfoAfterAnOutage(t *testing.T) {
 func TestAccessEventOutbox_ReachableShortensTheBackoff(t *testing.T) {
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
 	sender := &fakeAccessEventSender{}
-	o := newAccessEventOutbox(client, sender.send)
+	o := newAccessEventOutbox(outboxStore(client), sender.send)
 	o.jitter = func(time.Duration) time.Duration { return 0 }
 
 	// The state a long outage leaves: the queue paused and the held event
@@ -917,7 +930,7 @@ func TestAccessEventOutbox_ReachableShortensTheBackoff(t *testing.T) {
 func TestAccessEventOutbox_StopJoinsTheDrain(t *testing.T) {
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
 	entered := make(chan struct{}, 1)
-	o := newAccessEventOutbox(client, func(ctx context.Context, _ NonAlpaconAccessEvent) (int, time.Duration, error) {
+	o := newAccessEventOutbox(outboxStore(client), func(ctx context.Context, _ NonAlpaconAccessEvent) (int, time.Duration, error) {
 		entered <- struct{}{}
 		<-ctx.Done()
 		return 0, 0, ctx.Err()
@@ -1028,7 +1041,7 @@ func TestAccessEventOutbox_BurstWhileTheDatabaseIsLockedLosesNothing(t *testing.
 func TestAccessEventOutbox_QueueOverflowIsCountedInOneWarn(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outbox.db")
 	client := openTestOutboxDB(t, path)
-	o := newAccessEventOutbox(client, (&fakeAccessEventSender{}).send)
+	o := newAccessEventOutbox(outboxStore(client), (&fakeAccessEventSender{}).send)
 	o.inbox = make(chan accessOutboxWrite, 4)
 	logs := captureLogsSync(t)
 
@@ -1067,7 +1080,7 @@ func TestAccessEventOutbox_QueueOverflowIsCountedInOneWarn(t *testing.T) {
 // accepted before stop reach the disk.
 func TestAccessEventOutbox_StopStoresWhatIsQueued(t *testing.T) {
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
-	o := newAccessEventOutbox(client, (&fakeAccessEventSender{}).send)
+	o := newAccessEventOutbox(outboxStore(client), (&fakeAccessEventSender{}).send)
 	o.startWriter()
 
 	clock := newFakeOutboxClock()
@@ -1118,7 +1131,7 @@ func TestAccessEventOutbox_DrainComesBackAfterAPanic(t *testing.T) {
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
 	var mu sync.Mutex
 	calls := 0
-	o := newAccessEventOutbox(client, func(_ context.Context, event NonAlpaconAccessEvent) (int, time.Duration, error) {
+	o := newAccessEventOutbox(outboxStore(client), func(_ context.Context, event NonAlpaconAccessEvent) (int, time.Duration, error) {
 		mu.Lock()
 		calls++
 		first := calls == 1
@@ -1163,7 +1176,7 @@ func TestAccessEventOutbox_DrainComesBackAfterAPanic(t *testing.T) {
 // the event is stored directly.
 func TestAccessEventOutbox_HandOffAfterStopIsStillStored(t *testing.T) {
 	client := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
-	o := newAccessEventOutbox(client, (&fakeAccessEventSender{}).send)
+	o := newAccessEventOutbox(outboxStore(client), (&fakeAccessEventSender{}).send)
 	o.startWriter()
 	require.True(t, o.stop(5*time.Second))
 
