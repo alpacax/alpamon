@@ -93,31 +93,44 @@ func TestRemoteCancelBackgroundChildAfterLeaderExit(t *testing.T) {
 }
 
 func TestTrackedCommandWithoutCancelMatchesLegacy(t *testing.T) {
-	for _, script := range []string{`printf exact; exit 0`, `printf exact; exit 7`, `sleep 600 & printf exact; exit 0`, `sleep 600 & printf exact; exit 7`, `sleep 600 <&0 & printf exact; exit 0`} {
-		t.Run(script, func(t *testing.T) {
-			run := func(tracked bool) ([]byte, error) {
-				ctx := context.Background()
-				if tracked {
-					var state *commandcancel.State
-					ctx, state = commandcancel.NewContext(ctx)
-					defer state.Finish()
-				}
-				cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
-				cmd.Stdin = strings.NewReader(strings.Repeat("x", 1<<20))
-				return NewExecutor().runCommand(ctx, cmd, "", nil, nil)
-			}
-			start := time.Now()
-			oldOutput, oldErr := run(false)
-			oldElapsed := time.Since(start)
-			start = time.Now()
-			output, err := run(true)
-			assert.Less(t, time.Since(start), oldElapsed+time.Second, "tracked command must share the original pipe-drain deadline")
-			assert.Equal(t, string(oldOutput), string(output))
-			if oldErr == nil {
-				assert.NoError(t, err)
-			} else {
-				require.Error(t, err)
-				assert.Equal(t, oldErr.Error(), err.Error())
+	// Fixed expectations preserve the pre-cancellation output and exit contract.
+	for _, tt := range []struct {
+		script    string
+		exitCode  int
+		waitDelay bool
+	}{
+		{script: `printf exact; exit 0`},
+		{script: `printf exact; exit 7`, exitCode: 7},
+		{script: `sleep 600 & printf exact; exit 0`, waitDelay: true},
+		{script: `sleep 600 & printf exact; exit 7`, exitCode: 7},
+		{script: `sleep 600 <&0 & printf exact; exit 0`, waitDelay: true},
+	} {
+		t.Run(tt.script, func(t *testing.T) {
+			for _, tracked := range []bool{false, true} {
+				t.Run(strconv.FormatBool(tracked), func(t *testing.T) {
+					ctx := context.Background()
+					if tracked {
+						var state *commandcancel.State
+						ctx, state = commandcancel.NewContext(ctx)
+						defer state.Finish()
+					}
+					cmd := exec.CommandContext(ctx, "/bin/sh", "-c", tt.script)
+					cmd.Stdin = strings.NewReader(strings.Repeat("x", 1<<20))
+					start := time.Now()
+					output, err := NewExecutor().runCommand(ctx, cmd, "", nil, nil)
+					assert.Less(t, time.Since(start), 3*time.Second, "inherited pipes must retain the original two-second drain bound")
+					assert.Equal(t, "exact", string(output))
+					switch {
+					case tt.exitCode != 0:
+						var exitErr *exec.ExitError
+						require.ErrorAs(t, err, &exitErr)
+						assert.Equal(t, tt.exitCode, exitErr.ExitCode())
+					case tt.waitDelay:
+						assert.ErrorIs(t, err, exec.ErrWaitDelay)
+					default:
+						assert.NoError(t, err)
+					}
+				})
 			}
 		})
 	}
