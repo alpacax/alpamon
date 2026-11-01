@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
 
@@ -71,7 +72,10 @@ func spawnTunnelDaemon(socketPath string, daemon *syscall.Credential) (*exec.Cmd
 		return nil, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	cmd := tunnelDaemonCommand(executable, socketPath, daemon)
+	cmd, err := tunnelDaemonCommand(executable, socketPath, daemon)
+	if err != nil {
+		return nil, err
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start tunnel daemon: %w", err)
 	}
@@ -87,9 +91,14 @@ func spawnTunnelDaemon(socketPath string, daemon *syscall.Credential) (*exec.Cmd
 
 // tunnelDaemonCommand runs the tunnel daemon on socketPath in its own process group,
 // as daemon when it is non-nil and as the current user otherwise.
-func tunnelDaemonCommand(executable, socketPath string, daemon *syscall.Credential) *exec.Cmd {
+func tunnelDaemonCommand(executable, socketPath string, daemon *syscall.Credential) (*exec.Cmd, error) {
 	cmd := exec.Command(executable, "tunnel-daemon", socketPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: daemon}
+	env, err := utils.ProcessChildEnvironment(cmd.SysProcAttr)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = env
 	cmd.Stderr = os.Stderr
-	return cmd
+	return cmd, nil
 }

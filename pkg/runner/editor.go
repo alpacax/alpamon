@@ -186,22 +186,15 @@ func (c *CodeServerConfig) ToArgs(socketPath string, userDataDir string) []strin
 
 // ToEnv generates environment variables for code-server process.
 func (c *CodeServerConfig) ToEnv(homeDir string, includeXDG bool, username string) []string {
-	lang := os.Getenv("LANG")
-	if lang == "" {
-		lang = "C.UTF-8"
-	}
-	path := "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	env := utils.MinimalChildEnvironment(homeDir, username)
 	if runtime.GOOS == "darwin" {
-		path += ":/opt/homebrew/bin:/opt/homebrew/sbin"
+		for i, entry := range env {
+			if strings.HasPrefix(entry, "PATH=") {
+				env[i] += ":/opt/homebrew/bin:/opt/homebrew/sbin"
+			}
+		}
 	}
-	env := []string{
-		"LANG=" + lang,
-		"HOME=" + homeDir,
-		"USER=" + username,
-		"LOGNAME=" + username,
-		"PATH=" + path,
-		"EXTENSIONS_GALLERY=" + c.ToExtensionGalleryEnv(),
-	}
+	env = append(env, "EXTENSIONS_GALLERY="+c.ToExtensionGalleryEnv())
 	for _, entry := range os.Environ() {
 		key, value, _ := strings.Cut(entry, "=")
 		switch key {
@@ -215,7 +208,7 @@ func (c *CodeServerConfig) ToEnv(homeDir string, includeXDG bool, username strin
 			}
 			env = append(env, key+"="+(&url.URL{Scheme: proxy.Scheme, Host: proxy.Host}).String())
 		default:
-			if strings.HasPrefix(key, "LC_") || editorPassthroughEnv(key) {
+			if editorPassthroughEnv(key) {
 				env = append(env, entry)
 			}
 		}

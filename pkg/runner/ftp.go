@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,6 +34,7 @@ type FtpClient struct {
 	workingDirectory string
 	log              logger.FtpLogger
 	tlsConfig        *tls.Config
+	proxy            func(*http.Request) (*url.URL, error)
 	commandChan      chan []byte
 	responseChan     chan []byte
 	writeTimeout     time.Duration
@@ -74,6 +76,15 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 		responseChan:     make(chan []byte, 1),
 		writeTimeout:     ftpWriteTimeout,
 	}
+	if data.Connection.UseEnvironment {
+		client.proxy = utils.WebsocketProxy
+	} else if data.Connection.ProxyURL != "" {
+		proxy, err := url.Parse(data.Connection.ProxyURL)
+		if err != nil {
+			return nil
+		}
+		client.proxy = http.ProxyURL(proxy)
+	}
 	client.execute = client.handleFtpCommand
 	return client
 }
@@ -102,12 +113,15 @@ func (fc *FtpClient) RunFtpBackground() error {
 // connect dials the WebFTP channel. The worker runs without the agent's
 // configuration, so the URL is checked against the server URL it was started with.
 func (fc *FtpClient) connect() error {
+	// The proxy URL can carry credentials; it is needed for this dial only.
+	proxy := fc.proxy
+	fc.proxy = nil
 	target, err := resolveWebSocketURL(fc.url, fc.serverURL)
 	if err != nil {
 		return err
 	}
 	dialer := websocket.Dialer{
-		Proxy:            utils.WebsocketProxy,
+		Proxy:            proxy,
 		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig:  fc.tlsConfig,
 	}

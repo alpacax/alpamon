@@ -3,9 +3,11 @@ package terminal
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"syscall"
 
 	"github.com/alpacax/alpamon/v2/internal/protocol"
@@ -180,22 +182,20 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 	}
 
 	// Read here rather than in the worker, which runs as the session's user.
-	caCertPEM, err := runner.ReadFtpCACert(config.GlobalSettings.CaCert)
+	settings, err := runner.PrepareFtpWorkerConfig(args.URL, config.GlobalSettings.CaCert)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to prepare the ftp worker's TLS settings")
-		return 1, fmt.Sprintf("openftp: Failed to prepare TLS settings. %v", err), nil
+		log.Error().Err(err).Msg("Failed to prepare the ftp worker's connection settings")
+		return 1, fmt.Sprintf("openftp: Failed to prepare connection settings. %v", err), nil
 	}
 
-	cmd := exec.Command(executable, runner.FtpWorkerArgs(
+	cmd := ftpWorkerCommand(executable, homeDirectory, args.Username, runner.FtpWorkerArgs(
 		args.URL,
 		config.GlobalSettings.ServerURL,
 		homeDirectory,
 		config.GlobalSettings.SSLVerify,
-		caCertPEM != nil,
-	)...)
-	if caCertPEM != nil {
-		cmd.Stdin = bytes.NewReader(caCertPEM)
-	}
+	))
+	payload, _ := json.Marshal(settings)
+	cmd.Stdin = bytes.NewReader(payload)
 	cmd.SysProcAttr = sysProcAttr
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -249,4 +249,19 @@ func (h *TerminalHandler) handleRefreshPTY(args *common.CommandArgs) (int, strin
 	}
 
 	return 0, fmt.Sprintf("Refreshed terminal for %s.", args.SessionID), nil
+}
+
+func ftpWorkerCommand(executable, home, username string, args []string) *exec.Cmd {
+	cmd := exec.Command(executable, args...)
+	if runtime.GOOS == "windows" {
+		cmd.Env = utils.WithoutPluginEnvironment()
+	} else {
+		cmd.Env = utils.MinimalChildEnvironment(home, username)
+		for _, key := range []string{"SSL_CERT_FILE", "SSL_CERT_DIR"} {
+			if value, ok := os.LookupEnv(key); ok {
+				cmd.Env = append(cmd.Env, key+"="+value)
+			}
+		}
+	}
+	return cmd
 }

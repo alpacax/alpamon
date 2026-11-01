@@ -1,6 +1,8 @@
 package ftp
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -28,27 +30,45 @@ func newFtpCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Bool(runner.FtpSSLVerifyFlag, true, "verify the server certificate")
-	cmd.Flags().Bool(runner.FtpCACertStdinFlag, false, "read the CA certificate from standard input")
+	cmd.Flags().Bool(runner.FtpCACertStdinFlag, false, "read worker connection settings from standard input")
 	return cmd
 }
 
 // configData reads the worker's arguments. The worker does not load the
-// agent's configuration, so the agent passes its SSL verify setting as a flag
-// and its CA certificate, by content, on stdin.
+// agent's configuration, so the agent passes its connection settings on stdin.
 func configData(cmd *cobra.Command, args []string, stdin io.Reader) (runner.FtpConfigData, error) {
 	sslVerify, _ := cmd.Flags().GetBool(runner.FtpSSLVerifyFlag)
 	caOnStdin, _ := cmd.Flags().GetBool(runner.FtpCACertStdinFlag)
 
-	var caCertPEM []byte
+	var settings runner.FtpWorkerConfig
+	settings.Connection.UseEnvironment = !caOnStdin
 	if caOnStdin {
-		data, err := runner.ReadCACertLimited(stdin)
+		data, err := io.ReadAll(io.LimitReader(stdin, 2*runner.MaxFtpCACertSize+1))
+		if closer, ok := stdin.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		// The payload can carry proxy credentials; drop the raw copy once parsed.
+		defer clear(data)
 		if err != nil {
 			return runner.FtpConfigData{}, err
 		}
-		if len(data) == 0 {
-			return runner.FtpConfigData{}, errors.New("no CA certificate on stdin")
+		if len(data) > 2*runner.MaxFtpCACertSize {
+			return runner.FtpConfigData{}, errors.New("worker configuration larger than limit")
 		}
-		caCertPEM = data
+		if len(data) == 0 {
+			return runner.FtpConfigData{}, errors.New("no worker configuration on stdin")
+		}
+		if bytes.HasPrefix(bytes.TrimSpace(data), []byte("{")) {
+			if err := json.Unmarshal(data, &settings); err != nil {
+				return runner.FtpConfigData{}, errors.New("invalid worker configuration on stdin")
+			}
+		} else {
+			settings.CaCertPEM = bytes.Clone(data)
+			settings.Connection.UseEnvironment = true
+		}
+		if len(settings.CaCertPEM) > runner.MaxFtpCACertSize {
+			return runner.FtpConfigData{}, errors.New("CA certificate larger than limit")
+		}
 	}
 	return runner.FtpConfigData{
 		URL:           args[0],
@@ -56,7 +76,8 @@ func configData(cmd *cobra.Command, args []string, stdin io.Reader) (runner.FtpC
 		HomeDirectory: args[2],
 		Logger:        logger.NewFtpLogger(),
 		SkipSSLVerify: !sslVerify,
-		CaCertPEM:     caCertPEM,
+		CaCertPEM:     settings.CaCertPEM,
+		Connection:    settings.Connection,
 	}, nil
 }
 

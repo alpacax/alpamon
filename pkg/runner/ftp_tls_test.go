@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,14 +88,15 @@ func TestFtpDialer_TrustsTheConfiguredCA(t *testing.T) {
 
 	require.NotNil(t, fc.tlsConfig)
 	assert.False(t, fc.tlsConfig.InsecureSkipVerify)
-	assert.NotNil(t, fc.tlsConfig.RootCAs)
+	require.NotNil(t, fc.tlsConfig.RootCAs)
+	assert.Len(t, fc.tlsConfig.RootCAs.Subjects(), 1)
 	assert.NoError(t, dialFtp(fc))
 }
 
 func TestNewFtpClient_RefusesACAWithNoCertificate(t *testing.T) {
 	fc := NewFtpClient(FtpConfigData{
-		URL:           "wss://console.example.com/ws/ftp/",
-		ServerURL:     "https://console.example.com",
+		URL:           "wss://console.invalid/ws/ftp/",
+		ServerURL:     "https://console.invalid",
 		HomeDirectory: t.TempDir(),
 		Logger:        logger.NewFtpLogger(),
 		CaCertPEM:     []byte("not a certificate"),
@@ -141,4 +143,72 @@ func TestRunFtpBackground_ReturnsTheConnectError(t *testing.T) {
 	require.ErrorContains(t, err, "certificate")
 	assert.Contains(t, err.Error(), strings.TrimPrefix(srv.URL, "https://"))
 	assert.NotContains(t, err.Error(), "/ws/ftp/")
+}
+
+func TestFtpDialerUsesConfiguredProxyWithoutEnvironment(t *testing.T) {
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
+		t.Setenv(key, "")
+		require.NoError(t, os.Unsetenv(key))
+		_, present := os.LookupEnv(key)
+		require.False(t, present)
+	}
+	requests := make(chan string, 1)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Method + " " + r.Host + " " + r.Header.Get("Proxy-Authorization")
+		http.Error(w, "proxy reached", http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+	fc := NewFtpClient(FtpConfigData{URL: "wss://console.invalid/ws/ftp/", ServerURL: "https://console.invalid", HomeDirectory: t.TempDir(), Logger: logger.NewFtpLogger(), Connection: FtpConnectionConfig{ProxyURL: strings.Replace(proxy.URL, "://", "://user:pass@", 1)}})
+	require.NotNil(t, fc)
+	require.Error(t, fc.connect())
+	assert.Nil(t, fc.proxy, "the proxy, which carries credentials, must not outlive the dial")
+	select {
+	case got := <-requests:
+		assert.Equal(t, "CONNECT console.invalid:443 Basic dXNlcjpwYXNz", got)
+	default:
+		t.Fatal("worker did not dial the configured proxy")
+	}
+}
+
+func TestFtpWorkerProxyResolvesDialTarget(t *testing.T) {
+	if os.Getenv("ALPAMON_TEST_FTP_PROXY_CHILD") == "1" {
+		config.GlobalSettings.ServerURL = "https://console.example.test:8443"
+		settings, err := PrepareFtpWorkerConfig(os.Getenv("ALPAMON_TEST_FTP_TARGET"), "")
+		require.NoError(t, err)
+		assert.Equal(t, os.Getenv("ALPAMON_TEST_FTP_PROXY_WANT"), settings.Connection.ProxyURL)
+		return
+	}
+	for _, tc := range []struct{ name, target, noProxy, want string }{
+		{"path", "/ws/ftp/", "", "http://proxy.invalid:3128"},
+		{"absolute", "wss://console.example.test:8443/ws/ftp/", "", "http://proxy.invalid:3128"},
+		{"bypass", "/ws/ftp/", "console.example.test:8443", ""},
+		{"different target port", "wss://console.example.test:9443/ws/ftp/", "console.example.test:9443", "http://proxy.invalid:3128"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestFtpWorkerProxyResolvesDialTarget$")
+			cmd.Env = []string{"ALPAMON_TEST_FTP_PROXY_CHILD=1", "ALPAMON_TEST_FTP_TARGET=" + tc.target, "ALPAMON_TEST_FTP_PROXY_WANT=" + tc.want, "HTTPS_PROXY=http://proxy.invalid:3128", "NO_PROXY=" + tc.noProxy}
+			output, err := cmd.CombinedOutput()
+			require.NoError(t, err, "%s", output)
+		})
+	}
+}
+
+func TestFtpDialerPreviousAgentUsesEnvironment(t *testing.T) {
+	// A fresh process avoids net/http's cached proxy environment.
+	if os.Getenv("ALPAMON_TEST_FTP_LEGACY_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestFtpDialerPreviousAgentUsesEnvironment$")
+		cmd.Env = []string{"ALPAMON_TEST_FTP_LEGACY_CHILD=1", "HTTPS_PROXY=https://proxy.invalid:3128"}
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", output)
+		return
+	}
+	fc := NewFtpClient(FtpConfigData{URL: "wss://console.invalid/ws/ftp/", HomeDirectory: t.TempDir(), Logger: logger.NewFtpLogger(), Connection: FtpConnectionConfig{UseEnvironment: true}})
+	require.NotNil(t, fc)
+	require.NotNil(t, fc.proxy)
+	req, err := http.NewRequest(http.MethodGet, "https://console.invalid/ws/ftp/", nil)
+	require.NoError(t, err)
+	proxy, err := fc.proxy(req)
+	require.NoError(t, err)
+	assert.Nil(t, proxy, "unsupported proxy schemes must dial directly")
+	assert.Nil(t, fc.tlsConfig.RootCAs)
 }

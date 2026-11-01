@@ -50,6 +50,10 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 	}
 	cmd := exec.CommandContext(ctx, "cat", path)
 	cmd.SysProcAttr = sysProcAttr
+	cmd.Env, err = utils.ProcessChildEnvironment(sysProcAttr)
+	if err != nil {
+		return nil, 0, err
+	}
 	rc, err := newCmdReadCloser(cmd)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to start cat: %w", err)
@@ -86,6 +90,11 @@ func firstMissingAncestor(dir string) string {
 func removeAsRequester(ctx context.Context, path string, sysProcAttr *syscall.SysProcAttr) {
 	cmd := exec.CommandContext(context.WithoutCancel(ctx), "rm", "-f", path)
 	cmd.SysProcAttr = sysProcAttr
+	env, err := utils.ProcessChildEnvironment(sysProcAttr)
+	if err != nil {
+		return
+	}
+	cmd.Env = env
 	_ = cmd.Run()
 }
 
@@ -99,9 +108,15 @@ func removeCreatedDirsAsRequester(ctx context.Context, parentDir, createdRoot st
 	if createdRoot == "" || !filepath.IsAbs(parentDir) {
 		return
 	}
+	env, err := utils.ProcessChildEnvironment(sysProcAttr)
+	if err != nil {
+		log.Warn().Err(err).Str("path", parentDir).Msg("Skipped cleanup after failed write: cannot resolve the requester's environment")
+		return
+	}
 	for dir := parentDir; ; dir = filepath.Dir(dir) {
 		cmd := exec.CommandContext(context.WithoutCancel(ctx), "rmdir", "--", dir)
 		cmd.SysProcAttr = sysProcAttr
+		cmd.Env = env
 		if output, err := cmd.CombinedOutput(); err != nil {
 			// Check as the requester without depending on localized rmdir messages.
 			// Include -L so a dangling symlink is not treated as an absent directory.
@@ -114,6 +129,7 @@ while test -n "$parent"; do
   parent=${parent%/*}
 done`, "sh", dir)
 			check.SysProcAttr = sysProcAttr
+			check.Env = env
 			if check.Run() != nil {
 				log.Warn().Err(err).Str("path", dir).Str("output", strings.TrimSpace(string(output))).Msg("Failed to remove directory after failed write")
 				return
@@ -165,6 +181,11 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	// Create parents as the requesting user to preserve filesystem permissions.
 	cmd := exec.CommandContext(ctx, "sh", "-c", script)
 	cmd.SysProcAttr = sysProcAttr
+	env, err := utils.ProcessChildEnvironment(sysProcAttr)
+	if err != nil {
+		return err
+	}
+	cmd.Env = env
 	// Wrap src to preserve its read error even if a subsequent broken-pipe write
 	// overwrites it before cmd.Wait collects the goroutine result.
 	erc := &errCapReader{r: src}

@@ -1,14 +1,18 @@
 package runner
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/logger"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
 type FtpCommand string
@@ -46,9 +50,9 @@ type FtpConfigData struct {
 	// SkipSSLVerify turns off server certificate verification. The zero
 	// value verifies, matching the agent's default.
 	SkipSSLVerify bool
-	// CaCertPEM is the CA certificate to verify the server against. Empty
-	// uses the system roots.
-	CaCertPEM []byte
+	// CaCertPEM contains the trust bundle read by the agent.
+	CaCertPEM  []byte
+	Connection FtpConnectionConfig
 }
 
 type FtpData struct {
@@ -216,21 +220,17 @@ func GetFtpErrorCode(command FtpCommand, result CommandResult) (CommandResult, i
 // setting.
 const FtpSSLVerifyFlag = "ssl-verify"
 
-// FtpCACertStdinFlag tells the ftp worker to read the agent's CA certificate,
-// by content, from its standard input. The worker runs as the session's user,
-// who may not be able to read the file.
+// FtpCACertStdinFlag tells the worker to read its private connection configuration
+// from stdin, including the CA certificate the session user may not be able to read.
 const FtpCACertStdinFlag = "ca-cert-stdin"
 
 // MaxFtpCACertSize caps the CA certificate passed to the ftp worker.
 const MaxFtpCACertSize = 1 << 20 // 1 MiB
 
 // FtpWorkerArgs returns the arguments that start the ftp worker for a session.
-// caCertOnStdin says the CA certificate will be written to the worker's stdin.
-func FtpWorkerArgs(url, serverURL, homeDirectory string, sslVerify, caCertOnStdin bool) []string {
+func FtpWorkerArgs(url, serverURL, homeDirectory string, sslVerify bool) []string {
 	args := []string{"ftp", "--" + FtpSSLVerifyFlag + "=" + strconv.FormatBool(sslVerify)}
-	if caCertOnStdin {
-		args = append(args, "--"+FtpCACertStdinFlag)
-	}
+	args = append(args, "--"+FtpCACertStdinFlag)
 	return append(args, "--", url, serverURL, homeDirectory)
 }
 
@@ -245,11 +245,11 @@ func ReadFtpCACert(caCert string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	return ReadCACertLimited(f)
+	return readCACertLimited(f)
 }
 
-// ReadCACertLimited reads a CA certificate of at most MaxFtpCACertSize bytes.
-func ReadCACertLimited(r io.Reader) ([]byte, error) {
+// readCACertLimited reads a CA certificate of at most MaxFtpCACertSize bytes.
+func readCACertLimited(r io.Reader) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(r, MaxFtpCACertSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
@@ -258,4 +258,51 @@ func ReadCACertLimited(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("CA certificate is larger than %d bytes", MaxFtpCACertSize)
 	}
 	return data, nil
+}
+
+// FtpConnectionConfig carries resolved agent connection settings over stdin.
+type FtpConnectionConfig struct {
+	ProxyURL       string
+	UseEnvironment bool `json:"-"`
+}
+
+// FtpWorkerConfig is the private stdin payload shared by the agent and worker.
+type FtpWorkerConfig struct {
+	CaCertPEM  []byte
+	Connection FtpConnectionConfig
+}
+
+// ErrFtpProxyConfig reports an unusable proxy setting without its value, which can carry credentials.
+var ErrFtpProxyConfig = errors.New("invalid proxy configuration")
+
+// PrepareFtpWorkerConfig resolves connection settings before the worker is demoted.
+func PrepareFtpWorkerConfig(target, caCert string) (FtpWorkerConfig, error) {
+	var settings FtpWorkerConfig
+	resolved, err := resolveWebSocketURL(target, config.GlobalSettings.ServerURL)
+	if err != nil {
+		return settings, fmt.Errorf("invalid session URL: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, resolved, nil)
+	if err != nil {
+		return settings, fmt.Errorf("invalid session URL: %w", err)
+	}
+	// Gorilla resolves proxies after converting the WebSocket URL to HTTP.
+	switch req.URL.Scheme {
+	case "wss":
+		req.URL.Scheme = "https"
+	case "ws":
+		req.URL.Scheme = "http"
+	}
+	proxy, err := utils.WebsocketProxy(req)
+	if err != nil {
+		return settings, ErrFtpProxyConfig
+	}
+	if proxy != nil {
+		settings.Connection.ProxyURL = proxy.String()
+	}
+	settings.CaCertPEM, err = ReadFtpCACert(caCert)
+	if err != nil {
+		return settings, err
+	}
+	return settings, nil
 }

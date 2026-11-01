@@ -7,6 +7,7 @@ import (
 	"os/user"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -120,12 +121,48 @@ func TestTunnelDaemonCommand_CarriesTheDaemonCredential(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := tunnelDaemonCommand("/usr/local/bin/alpamon", "/tmp/alpamon-tunnels/t.sock", tc.daemon)
+			cmd, err := tunnelDaemonCommand("/usr/local/bin/alpamon", "/tmp/alpamon-tunnels/t.sock", tc.daemon)
+			require.NoError(t, err)
 
 			assert.Equal(t, []string{"/usr/local/bin/alpamon", "tunnel-daemon", "/tmp/alpamon-tunnels/t.sock"}, cmd.Args)
 			require.NotNil(t, cmd.SysProcAttr)
 			assert.Same(t, tc.daemon, cmd.SysProcAttr.Credential)
 			assert.True(t, cmd.SysProcAttr.Setpgid)
 		})
+	}
+}
+
+func TestTunnelDaemonEnvironment(t *testing.T) {
+	t.Setenv("PLUGIN_KEY", "synthetic-value")
+	t.Setenv("HTTP_PROXY", "http://review:synthetic-value@proxy.invalid")
+	t.Setenv("HOME", "/agent")
+	t.Setenv("LC_TIME", "C")
+	current, err := user.LookupId(strconv.Itoa(os.Geteuid()))
+	require.NoError(t, err)
+	nobodyUID, nobodyGID := lookupNobodyIDs(t)
+	nobody, err := user.LookupId(strconv.FormatUint(uint64(nobodyUID), 10))
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		cred *syscall.Credential
+		usr  *user.User
+	}{
+		{nil, current}, {&syscall.Credential{Uid: nobodyUID, Gid: nobodyGID}, nobody},
+	} {
+		cmd, err := tunnelDaemonCommand("/bin/sh", "/unused.sock", tc.cred)
+		require.NoError(t, err)
+		assert.Contains(t, cmd.Env, "HOME="+tc.usr.HomeDir)
+		assert.Contains(t, cmd.Env, "USER="+tc.usr.Username)
+		assert.Contains(t, cmd.Env, "LOGNAME="+tc.usr.Username)
+		assert.Contains(t, cmd.Env, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+		for _, entry := range cmd.Env {
+			key, _, _ := strings.Cut(entry, "=")
+			assert.True(t, key == "HOME" || key == "USER" || key == "LOGNAME" || key == "PATH" || key == "LANG" || strings.HasPrefix(key, "LC_"), "unexpected variable %s", key)
+		}
+		if tc.cred == nil {
+			cmd.Args = []string{"/bin/sh", "-c", `printf '%s|%s|%s' "$USER" "$LC_TIME" "$PLUGIN_KEY"`}
+			output, err := cmd.Output()
+			require.NoError(t, err)
+			assert.Equal(t, current.Username+"|C|", string(output))
+		}
 	}
 }
