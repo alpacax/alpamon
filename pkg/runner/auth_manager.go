@@ -2,6 +2,9 @@ package runner
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,6 +91,8 @@ type SudoRequest struct {
 	// pushed out of the registry. Its sudo process is gone (the kernel reused
 	// its pid), so nothing is written to it.
 	displaced bool
+	// nonceBound is guarded by am.mu and set by the POST acknowledgement.
+	nonceBound bool
 	// posting, guarded by am.mu, marks a request whose post has not been
 	// answered yet: whether the server holds it is still unknown, so a verdict
 	// that arrives now is parked in early until settlePost classifies the post.
@@ -106,16 +111,17 @@ func newSudoRequest(conn net.Conn, req SudoApprovalRequest) *SudoRequest {
 }
 
 type SudoApprovalRequest struct {
-	RequestID    string `json:"request_id"`
-	Type         string `json:"type"`
-	Username     string `json:"username"`
-	Groupname    string `json:"groupname"`
-	PID          int    `json:"pid"`
-	PPID         int    `json:"ppid"`
-	Command      string `json:"command"`
-	IsAlpconUser bool   `json:"is_alpacon_user"`
-	SessionID    string `json:"session_id,omitempty"`
-	CommandID    string `json:"command_id,omitempty"`
+	ApprovalNonce string `json:"approval_nonce,omitempty"`
+	RequestID     string `json:"request_id"`
+	Type          string `json:"type"`
+	Username      string `json:"username"`
+	Groupname     string `json:"groupname"`
+	PID           int    `json:"pid"`
+	PPID          int    `json:"ppid"`
+	Command       string `json:"command"`
+	IsAlpconUser  bool   `json:"is_alpacon_user"`
+	SessionID     string `json:"session_id,omitempty"`
+	CommandID     string `json:"command_id,omitempty"`
 	// RunasUser is the OS user sudo will run the command as, as the approval
 	// plugin reports it (a user name, or "#<uid>"). Forwarded unchanged to the
 	// server; omitted when the client does not send it.
@@ -127,6 +133,7 @@ type SudoApprovalRequest struct {
 }
 
 type SudoApprovalResponse struct {
+	ApprovalNonce   string `json:"approval_nonce,omitempty"`
 	RequestID       string `json:"request_id"`
 	Type            string `json:"type"`
 	Username        string `json:"username"`
@@ -361,16 +368,20 @@ func (am *AuthManager) startSocketListener(ctx context.Context) error {
 }
 
 // sendSudoRequestWithRetry posts the request and returns the body of the
-// successful answer, which says whether the server holds the request.
-func (am *AuthManager) sendSudoRequestWithRetry(req SudoApprovalRequest) ([]byte, error) {
+// last answer, which says whether the server holds the request on success.
+func (am *AuthManager) sendSudoRequestWithRetry(sudoRequest *SudoRequest) ([]byte, error) {
 	var body []byte
-	err := am.postWithRetry(sudoApprovalURL(req), req, &body)
+	req := sudoRequest.Request
+	err := am.postWithRetry(sudoApprovalURL(req), req, func(answer []byte) {
+		body = answer
+		am.bindPostAnswer(sudoRequest, answer)
+	})
 	return body, err
 }
 
 // postWithRetry posts payload to url until a 2xx answer or authRetryTimeout,
-// storing the answer's body in *body when body is not nil.
-func (am *AuthManager) postWithRetry(url string, payload any, body *[]byte) error {
+// calling onAnswer for every received answer before deciding whether to retry.
+func (am *AuthManager) postWithRetry(url string, payload any, onAnswer func([]byte)) error {
 	b := &retry.ExponentialBackoff{
 		InitialInterval: authRetryInitialInterval,
 		MaxInterval:     authRetryMaxInterval,
@@ -380,7 +391,7 @@ func (am *AuthManager) postWithRetry(url string, payload any, body *[]byte) erro
 	ctx, cancel := context.WithTimeout(am.ctx, authRetryTimeout)
 	defer cancel()
 
-	return retry.Retry(ctx, b, am.createSendOperation(ctx, url, payload, body))
+	return retry.Retry(ctx, b, am.createSendOperation(ctx, url, payload, onAnswer))
 }
 
 // sudoApprovalURL is the endpoint a sudo request is posted to. Deploy shell
@@ -393,7 +404,7 @@ func sudoApprovalURL(req SudoApprovalRequest) string {
 	return fmt.Sprintf("/api/websh/sessions/%s/sudo-approval/", req.SessionID)
 }
 
-func (am *AuthManager) createSendOperation(ctx context.Context, url string, payload any, body *[]byte) func() error {
+func (am *AuthManager) createSendOperation(ctx context.Context, url string, payload any, onAnswer func([]byte)) func() error {
 	return func() error {
 		select {
 		case <-ctx.Done():
@@ -404,6 +415,9 @@ func (am *AuthManager) createSendOperation(ctx context.Context, url string, payl
 			}
 
 			resp, statusCode, err := am.session.Post(url, payload, scheduler.DefaultRequestTimeout)
+			if onAnswer != nil {
+				onAnswer(resp)
+			}
 			if err != nil {
 				log.Warn().Err(err).Str("url", url).Msg("Failed to send sudo request via REST API, will retry")
 				return err
@@ -414,9 +428,6 @@ func (am *AuthManager) createSendOperation(ctx context.Context, url string, payl
 				return fmt.Errorf("sudo request failed with status code: %d", statusCode)
 			}
 
-			if body != nil {
-				*body = resp
-			}
 			log.Debug().Str("url", url).Msg("Sudo request sent successfully via REST API")
 			return nil
 		}
@@ -610,6 +621,9 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		return
 	}
 
+	var nonce [16]byte
+	rand.Read(nonce[:])
+	sudoApprovalReq.ApprovalNonce = hex.EncodeToString(nonce[:])
 	sudoRequest := newSudoRequest(unixConn, sudoApprovalReq)
 	sudoRequest.posting = true
 	session.Requests[sudoApprovalReq.RequestID] = sudoRequest
@@ -626,14 +640,14 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		Bool("hold_capable", sudoApprovalReq.HoldCapable).
 		Msg("Alpacon user sudo request")
 
-	body, err := am.sendSudoRequestWithRetry(sudoApprovalReq)
+	body, err := am.sendSudoRequestWithRetry(sudoRequest)
 	var pending *sudoHold
 	isPending := false
 	if err == nil {
 		pending, isPending = parseApprovalPending(body)
 		prepareHold(pending, sudoApprovalReq)
 	}
-	if early, ok := am.settlePost(sudoRequest, pending); ok {
+	if early, ok := am.settlePost(sudoRequest, pending, body); ok {
 		// A verdict arrived while the post was in flight and fits the request
 		// as now classified; it is the final answer.
 		_ = am.deliverVerdict(sudoRequest, early)
@@ -778,18 +792,18 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 	log.Info().Str("request_id", response.RequestID).Bool("approved", response.Approved).Msg("Processing sudo_approval response")
 
 	am.mu.Lock()
-	sudoRequest := am.findRequestLocked(response.RequestID)
+	sudoRequest := am.findVerdictRequestLocked(response)
 	if sudoRequest == nil {
 		am.mu.Unlock()
 		// Routine after an ending: its waiter already deregistered.
 		log.Debug().Str("request_id", response.RequestID).Msg("No pending sudo_approval request for response")
 		return fmt.Errorf("no pending sudo_approval request found for request_id: %s", response.RequestID)
 	}
-	if reason := am.mismatchLocked(response, sudoRequest); reason != "" {
+	if reason := am.verdictMismatchLocked(response, sudoRequest); reason != "" {
 		am.mu.Unlock()
 		// A verdict for another request that used the same id (the id is the sudo
 		// pid, which the kernel reuses). Applying it would answer the wrong command.
-		log.Warn().
+		log.WithLevel(sudoVerdictDropLevel(reason)).
 			Str("request_id", response.RequestID).
 			Str("session_id", response.SessionID).
 			Str("mismatch", reason).
@@ -829,6 +843,7 @@ func (am *AuthManager) deliverVerdict(sudoRequest *SudoRequest, response SudoApp
 	// the waiter—including an early return added later between the take and the write.
 	defer am.signalCompletion(sudoRequest)
 
+	response.ApprovalNonce = ""
 	responseJSON, err := json.Marshal(response)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to marshal sudo_approval_response")
@@ -1213,4 +1228,41 @@ func (am *AuthManager) denyPendingRequestsWithCode(pending []*SudoRequest, reaso
 		})
 	}
 	wg.Wait()
+}
+
+// verdictMismatchLocked applies attempt matching before the legacy fallback.
+// Callers must hold am.mu.
+func (am *AuthManager) verdictMismatchLocked(response SudoApprovalResponse, req *SudoRequest) string {
+	if response.ApprovalNonce != "" {
+		if subtle.ConstantTimeCompare([]byte(response.ApprovalNonce), []byte(req.Request.ApprovalNonce)) != 1 {
+			return "approval nonce"
+		}
+		return ""
+	}
+	if req.nonceBound {
+		return "missing approval nonce"
+	}
+	return am.mismatchLocked(response, req)
+}
+
+// findVerdictRequestLocked finds the attempt named by a verdict. Callers hold am.mu.
+func (am *AuthManager) findVerdictRequestLocked(response SudoApprovalResponse) *SudoRequest {
+	if response.ApprovalNonce == "" {
+		return am.findRequestLocked(response.RequestID)
+	}
+	for _, session := range am.pidToSessionMap {
+		for _, req := range session.Requests {
+			if subtle.ConstantTimeCompare([]byte(response.ApprovalNonce), []byte(req.Request.ApprovalNonce)) == 1 {
+				return req
+			}
+		}
+	}
+	return nil
+}
+
+func sudoVerdictDropLevel(reason string) zerolog.Level {
+	if reason == "approval nonce" || reason == "missing approval nonce" {
+		return zerolog.DebugLevel
+	}
+	return zerolog.WarnLevel
 }

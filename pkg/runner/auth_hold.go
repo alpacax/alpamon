@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -275,13 +277,41 @@ func prepareHold(hold *sudoHold, req SudoApprovalRequest) {
 	hold.commandID = req.CommandID
 }
 
+// bindPostAnswer keeps an attempt bound once any POST answer echoes its nonce.
+func (am *AuthManager) bindPostAnswer(sudoRequest *SudoRequest, body []byte) {
+	var answer struct {
+		ApprovalNonce json.RawMessage `json:"approval_nonce"`
+	}
+	bound := false
+	// Error pages from a proxy are not JSON objects and carry no acknowledgement.
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '{' {
+		if err := json.Unmarshal(body, &answer); err != nil {
+			log.Debug().Str("request_id", sudoRequest.Request.RequestID).Msg("Malformed sudo approval POST acknowledgement")
+		} else if len(answer.ApprovalNonce) > 0 {
+			var nonce string
+			if err := json.Unmarshal(answer.ApprovalNonce, &nonce); err == nil && nonce != "" &&
+				subtle.ConstantTimeCompare([]byte(nonce), []byte(sudoRequest.Request.ApprovalNonce)) == 1 {
+				bound = true
+			} else {
+				log.Debug().Str("request_id", sudoRequest.Request.RequestID).Msg("Sudo approval POST acknowledgement nonce does not match")
+			}
+		}
+	}
+	if bound {
+		am.mu.Lock()
+		sudoRequest.nonceBound = true
+		am.mu.Unlock()
+	}
+}
+
 // settlePost ends sudoRequest's posting state once the post is classified:
 // hold is the server's pending answer, or nil when it did not hold the request.
-// A verdict parked meanwhile is checked as it would be now: against hold's
-// command when there is one, as before otherwise. The first that fits is taken
-// with the request and returned; the rest are dropped. With none, a hold is
+// Parked verdicts are checked after applying the acknowledgement binding.
+// Unbound nonce-less verdicts use retention and the hold command. The first
+// that fits is taken with the request and returned; the rest are dropped. A hold is
 // attached in the same critical section, so no verdict slips in unchecked.
-func (am *AuthManager) settlePost(sudoRequest *SudoRequest, hold *sudoHold) (SudoApprovalResponse, bool) {
+func (am *AuthManager) settlePost(sudoRequest *SudoRequest, hold *sudoHold, body []byte) (SudoApprovalResponse, bool) {
+	am.bindPostAnswer(sudoRequest, body)
 	am.mu.Lock()
 	defer am.mu.Unlock()
 	sudoRequest.posting = false
@@ -294,8 +324,8 @@ func (am *AuthManager) settlePost(sudoRequest *SudoRequest, hold *sudoHold) (Sud
 		sudoRequest.hold = hold
 	}
 	for _, verdict := range early {
-		if reason := am.mismatchLocked(verdict, sudoRequest); reason != "" {
-			log.Warn().Str("request_id", verdict.RequestID).Str("mismatch", reason).
+		if reason := am.verdictMismatchLocked(verdict, sudoRequest); reason != "" {
+			log.WithLevel(sudoVerdictDropLevel(reason)).Str("request_id", verdict.RequestID).Str("mismatch", reason).
 				Msg("Dropped a sudo_approval response that arrived before the post was answered")
 			continue
 		}

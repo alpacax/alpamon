@@ -36,7 +36,9 @@ type fakeAlpacon struct {
 	mu    sync.Mutex
 	posts []recordedPost
 	// approvalBody is the body of the answer to the sudo-approval post.
-	approvalBody string
+	approvalAnswer   func(map[string]any) string
+	approvalBody     string
+	approvalStatuses []int
 	// onApproval runs before the sudo-approval post is answered.
 	onApproval func()
 }
@@ -54,10 +56,18 @@ func (f *fakeAlpacon) RoundTrip(r *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	f.posts = append(f.posts, recordedPost{path: r.URL.Path, body: body})
 	answer := "{}"
+	status := http.StatusOK
 	onApproval := f.onApproval
 	approval := strings.HasSuffix(r.URL.Path, "/sudo-approval/") || r.URL.Path == "/api/sudo/approval/"
 	if approval {
 		answer = f.approvalBody
+		if f.approvalAnswer != nil {
+			answer = f.approvalAnswer(body)
+		}
+		if len(f.approvalStatuses) > 0 {
+			status = f.approvalStatuses[0]
+			f.approvalStatuses = f.approvalStatuses[1:]
+		}
 	}
 	f.mu.Unlock()
 
@@ -65,7 +75,7 @@ func (f *fakeAlpacon) RoundTrip(r *http.Request) (*http.Response, error) {
 		onApproval()
 	}
 	return &http.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: status,
 		Body:       io.NopCloser(strings.NewReader(answer)),
 		Header:     make(http.Header),
 		Request:    r,
