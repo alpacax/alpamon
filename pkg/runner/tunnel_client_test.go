@@ -129,28 +129,24 @@ func TestBuildHealthResponseBody(t *testing.T) {
 }
 
 func TestResolveTargetPort(t *testing.T) {
-	tc := &TunnelClient{}
-	tc.targetPort.Store(3000)
-
-	tests := []struct {
-		name       string
-		remotePort string
-		wantPort   int
-		wantErr    bool
-	}{
-		{name: "empty uses default target port", remotePort: "", wantPort: 3000, wantErr: false},
-		{name: "valid custom port", remotePort: "8080", wantPort: 8080, wantErr: false},
-		{name: "zero port rejected", remotePort: "0", wantPort: 0, wantErr: true},
-		{name: "out of range port rejected", remotePort: "65536", wantPort: 0, wantErr: true},
-		{name: "non numeric rejected", remotePort: "abc", wantPort: 0, wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotPort, err := tc.resolveTargetPort(tt.remotePort)
-			require.Equal(t, tt.wantErr, err != nil, "resolveTargetPort(%q) error = %v", tt.remotePort, err)
-			require.Equal(t, tt.wantPort, gotPort, "resolveTargetPort(%q)", tt.remotePort)
-		})
+	for _, clientType := range []string{ClientTypeCLI, ClientTypeWeb, ClientTypeEditor} {
+		for _, remote := range []string{"", "3000", "8080", "0", "65536", "abc"} {
+			t.Run(clientType+"/"+remote, func(t *testing.T) {
+				tc := &TunnelClient{clientType: clientType}
+				tc.targetPort.Store(3000)
+				port, err := tc.resolveTargetPort(remote)
+				if clientType == ClientTypeEditor || remote == "" || remote == "3000" {
+					require.NoError(t, err)
+					assert.Equal(t, 3000, port)
+				} else {
+					require.Error(t, err)
+					assert.Zero(t, port)
+					if remote == "abc" {
+						assert.NotContains(t, err.Error(), remote)
+					}
+				}
+			})
+		}
 	}
 }
 

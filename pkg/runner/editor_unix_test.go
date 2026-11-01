@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -109,8 +110,16 @@ func newManagerWithScript(t *testing.T, script string) (*CodeServerManager, *exe
 // Stop before the manager is ready—gating teardown on readiness leaks the process.
 func TestStopBeforeStarted(t *testing.T) {
 	m, cmd := newManagerWithProcess(t)
+	dir := t.TempDir()
+	m.socketPath = filepath.Join(dir, "cs.sock")
+	root, err := openEditorDirectory(filepath.Dir(dir))
+	require.NoError(t, err)
+	m.socketRoot = root
+	require.NoError(t, os.WriteFile(m.socketPath, nil, 0600))
 
 	require.NoError(t, m.Stop())
+	_, err = os.Lstat(dir)
+	assert.ErrorIs(t, err, os.ErrNotExist)
 
 	require.NotNil(t, cmd.ProcessState, "Stop must terminate and reap the process")
 	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
@@ -184,10 +193,16 @@ func TestStopWaitsAfterSignalFailure(t *testing.T) {
 func TestWaitForReadySurvivesConcurrentStop(t *testing.T) {
 	m, _ := newManagerWithProcess(t)
 
-	// Nothing listens on it, so every dial fails and the loop keeps running.
-	port, err := findAvailablePort()
+	dir, err := os.MkdirTemp("", "editor-stop-")
 	require.NoError(t, err)
-	m.port = port
+	defer os.RemoveAll(dir)
+	m.socketPath = filepath.Join(dir, "cs.sock")
+	root, err := openEditorDirectory(filepath.Dir(dir))
+	require.NoError(t, err)
+	m.socketRoot = root
+	ln, err := net.Listen("unix", m.socketPath)
+	require.NoError(t, err)
+	require.NoError(t, ln.Close())
 
 	// Read before Stop nils the field, not from inside the goroutine.
 	waitDone := m.proc.done
@@ -347,6 +362,11 @@ func TestStartFailureReportsItsError(t *testing.T) {
 		terminateFn: terminateProcess,
 	}
 
+	m.socketPath = filepath.Join(t.TempDir(), "session", "cs.sock")
+	m.prepareSocketDir = func(m *CodeServerManager) error {
+		return prepareTestEditorSocketDir(m, os.Getuid(), os.Getgid(), func(string, int, int) error { return nil })
+	}
+	t.Cleanup(func() { _ = m.Stop() })
 	m.StartAsync()
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {

@@ -7,18 +7,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestFindAvailablePort(t *testing.T) {
-	port, err := findAvailablePort()
-	assert.NoError(t, err, "Failed to find available port")
-	assert.True(t, port > 0, "Port should be greater than 0")
-	assert.True(t, port <= 65535, "Port should be less than or equal to 65535")
-}
 
 func TestEditorRequiresGroup(t *testing.T) {
 	if runtime.GOOS == "darwin" {
@@ -51,40 +45,63 @@ func TestEditorDarwinNonRootKeepsCurrentUser(t *testing.T) {
 	}
 }
 
-func TestFindAvailablePortRepeated(t *testing.T) {
-	for range 10 {
-		port, err := findAvailablePort()
-		assert.NoError(t, err, "Failed to find available port")
-		assert.True(t, port > 0 && port <= 65535, "Port should be in valid range")
-	}
-}
-
 func TestGetCodeServerArgs(t *testing.T) {
-	userDataDir := "/tmp/test-user-data"
-	args := getCodeServerArgs(8080, userDataDir)
-
-	assert.Contains(t, args, "--config", "Args should contain --config")
-	assert.Contains(t, args, "--user-data-dir", "Args should contain --user-data-dir")
-	assert.Contains(t, args, userDataDir, "Args should contain user data dir path")
-	assert.Contains(t, args, "--bind-addr", "Args should contain --bind-addr")
-	assert.Contains(t, args, "127.0.0.1:8080", "Bind address should be 127.0.0.1:8080")
-	assert.Contains(t, args, "--idle-timeout-seconds", "Args should contain --idle-timeout-seconds")
+	args := getCodeServerArgs("/run/alpamon-editor/session/cs.sock", "/home/editor/.alpamon-editor")
+	assert.Equal(t, []string{
+		"--config", "/home/editor/.alpamon-editor/config.yaml",
+		"--user-data-dir", "/home/editor/.alpamon-editor",
+		"--socket", "/run/alpamon-editor/session/cs.sock", "--socket-mode", "600",
+		"--idle-timeout-seconds", strconv.Itoa(int(GetCodeServerConfig().IdleTimeout.Seconds())),
+	}, args)
+	assert.NotContains(t, args, "--bind-addr")
+	assert.Equal(t, "none", GetCodeServerConfig().Auth)
 }
 
-func TestGetCodeServerArgsDifferentPorts(t *testing.T) {
-	userDataDir := "/tmp/test-user-data"
-	testCases := []struct {
-		port     int
-		expected string
-	}{
-		{8080, "127.0.0.1:8080"},
-		{3000, "127.0.0.1:3000"},
-		{65535, "127.0.0.1:65535"},
+func TestEditorEnvironmentAllowList(t *testing.T) {
+	t.Setenv("EDITOR_SYNTHETIC_SECRET", "synthetic-value")
+	t.Setenv("PLUGIN_KEY", "synthetic-value")
+	t.Setenv("LC_TIME", "C")
+	t.Setenv("LANG", "")
+	passthrough := []string{"ALL_PROXY", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ"}
+	for _, key := range passthrough {
+		if strings.Contains(strings.ToUpper(key), "PROXY") && strings.ToUpper(key) != "NO_PROXY" {
+			t.Setenv(key, "http://proxy.invalid:3128")
+		} else {
+			t.Setenv(key, "configured-value")
+		}
 	}
-
-	for _, tc := range testCases {
-		args := getCodeServerArgs(tc.port, userDataDir)
-		assert.Contains(t, args, tc.expected, "Bind address should match port")
+	for _, xdg := range []bool{false, true} {
+		env := GetCodeServerConfig().ToEnv("/home/editor", xdg, "editor")
+		allowed := map[string]bool{"HOME": true, "USER": true, "LOGNAME": true, "PATH": true, "LANG": true, "EXTENSIONS_GALLERY": true}
+		if xdg {
+			allowed["XDG_DATA_HOME"] = true
+			allowed["XDG_CONFIG_HOME"] = true
+		}
+		seen := map[string]bool{}
+		for _, entry := range env {
+			key, _, _ := strings.Cut(entry, "=")
+			assert.True(t, allowed[key] || strings.HasPrefix(key, "LC_") || editorPassthroughEnv(key), "unexpected variable %s", key)
+			assert.False(t, seen[key], "duplicate variable %s", key)
+			seen[key] = true
+		}
+		for _, key := range passthrough {
+			if strings.Contains(strings.ToUpper(key), "PROXY") && strings.ToUpper(key) != "NO_PROXY" {
+				assert.Contains(t, env, key+"=http://proxy.invalid:3128")
+			} else {
+				assert.Contains(t, env, key+"=configured-value")
+			}
+		}
+		path := "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+		if runtime.GOOS == "darwin" {
+			path += ":/opt/homebrew/bin:/opt/homebrew/sbin"
+		}
+		assert.Contains(t, env, "PATH="+path)
+		assert.NotContains(t, env, "SHELL=/bin/sh")
+		assert.Contains(t, env, "USER=editor")
+		assert.Contains(t, env, "LOGNAME=editor")
+		assert.Contains(t, env, "HOME=/home/editor")
+		assert.Contains(t, env, "LC_TIME=C")
+		assert.Contains(t, env, "LANG=C.UTF-8")
 	}
 }
 
@@ -159,19 +176,20 @@ func TestToSettingsJSONGolden(t *testing.T) {
 	assert.Equal(t, want, string(got))
 }
 
-// TestWaitForReadyChecksTheExitBeforeTheDial: another process can grab the port
+// TestWaitForReadyChecksTheExitBeforeTheDial: another process can replace the socket
 // the moment code-server dies, and a dial that answers is then not our server.
 func TestWaitForReadyChecksTheExitBeforeTheDial(t *testing.T) {
-	ln, err := net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix editor socket")
+	}
+	dir, err := os.MkdirTemp("", "editor-exit-")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
-	_, port, err := net.SplitHostPort(ln.Addr().String())
+	defer os.RemoveAll(dir)
+	socket := filepath.Join(dir, "cs.sock")
+	ln, err := net.Listen("unix", socket)
 	require.NoError(t, err)
-
-	m := &CodeServerManager{}
-	m.port, err = strconv.Atoi(port)
-	require.NoError(t, err)
+	defer ln.Close()
+	m := &CodeServerManager{ctx: t.Context(), socketPath: socket}
 
 	waitDone := make(chan struct{})
 	close(waitDone)
@@ -195,6 +213,34 @@ func TestCodeServerInstallArgs(t *testing.T) {
 			got := codeServerInstallArgs(tc.goos, tc.isRoot)
 
 			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestEditorSocketBasePaths(t *testing.T) {
+	assert.Equal(t, "/run/alpamon-editor", editorSocketBase("linux", 0, "/run/alpamon"))
+	assert.Equal(t, "/var/run/alpamon-editor", editorSocketBase("darwin", 0, "/var/run/alpamon"))
+	assert.Equal(t, filepath.Join("/tmp/alpamon", "editor"), editorSocketBase("linux", 1000, "/tmp/alpamon"))
+}
+
+func TestEditorProxyCredentialNotInherited(t *testing.T) {
+	for _, key := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		t.Run(key, func(t *testing.T) {
+			for _, value := range []string{"http://review:synthetic-proxy-secret@proxy.invalid:3128", "http://review@proxy.invalid:3128", "http://proxy.invalid:3128", "://bad", "proxy.invalid:3128", "proxy:3128", "10.0.0.1:3128", "http://user:1234/x@proxy:8080", "http://user:1234?x@proxy:8080", "http://user:1234#x@proxy:8080", "http:///missing", "http://%zz"} {
+				t.Setenv(key, value)
+				env := GetCodeServerConfig().ToEnv("/home/review", false, "review")
+				if value == "proxy:3128" || value == "10.0.0.1:3128" {
+					assert.Contains(t, env, key+"=http://"+value)
+				} else if strings.Contains(value, "proxy.invalid:3128") {
+					assert.Contains(t, env, key+"=http://proxy.invalid:3128")
+				} else {
+					for _, entry := range env {
+						assert.False(t, strings.HasPrefix(entry, key+"="))
+					}
+				}
+				assert.NotContains(t, strings.Join(env, "\n"), "synthetic-proxy-secret")
+				assert.NotContains(t, strings.Join(env, "\n"), "review@proxy.invalid")
+			}
 		})
 	}
 }

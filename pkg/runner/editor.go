@@ -3,12 +3,14 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -172,21 +174,52 @@ func (c *CodeServerConfig) ToExtensionGalleryEnv() string {
 }
 
 // ToArgs generates command line arguments for code-server.
-func (c *CodeServerConfig) ToArgs(port int, userDataDir string) []string {
+func (c *CodeServerConfig) ToArgs(socketPath string, userDataDir string) []string {
 	return []string{
 		"--config", filepath.Join(userDataDir, userDataConfigFile),
 		"--user-data-dir", userDataDir,
-		"--bind-addr", net.JoinHostPort(loopbackHost, strconv.Itoa(port)),
+		"--socket", socketPath,
+		"--socket-mode", "600",
 		"--idle-timeout-seconds", fmt.Sprintf("%d", int(c.IdleTimeout.Seconds())),
 	}
 }
 
 // ToEnv generates environment variables for code-server process.
-func (c *CodeServerConfig) ToEnv(homeDir string, includeXDG bool) []string {
-	env := append(os.Environ(),
-		fmt.Sprintf("HOME=%s", homeDir),
-		fmt.Sprintf("EXTENSIONS_GALLERY=%s", c.ToExtensionGalleryEnv()),
-	)
+func (c *CodeServerConfig) ToEnv(homeDir string, includeXDG bool, username string) []string {
+	lang := os.Getenv("LANG")
+	if lang == "" {
+		lang = "C.UTF-8"
+	}
+	path := "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	if runtime.GOOS == "darwin" {
+		path += ":/opt/homebrew/bin:/opt/homebrew/sbin"
+	}
+	env := []string{
+		"LANG=" + lang,
+		"HOME=" + homeDir,
+		"USER=" + username,
+		"LOGNAME=" + username,
+		"PATH=" + path,
+		"EXTENSIONS_GALLERY=" + c.ToExtensionGalleryEnv(),
+	}
+	for _, entry := range os.Environ() {
+		key, value, _ := strings.Cut(entry, "=")
+		switch key {
+		case "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy":
+			if !strings.Contains(value, "://") {
+				value = "http://" + value
+			}
+			proxy, err := url.Parse(value)
+			if err != nil || proxy.Host == "" || proxy.Opaque != "" || proxy.RawQuery != "" || proxy.Fragment != "" || (proxy.Path != "" && proxy.Path != "/") {
+				continue
+			}
+			env = append(env, key+"="+(&url.URL{Scheme: proxy.Scheme, Host: proxy.Host}).String())
+		default:
+			if strings.HasPrefix(key, "LC_") || editorPassthroughEnv(key) {
+				env = append(env, entry)
+			}
+		}
+	}
 
 	if includeXDG {
 		env = append(env,
@@ -223,40 +256,51 @@ const (
 
 // CodeServerManager manages a code-server process for editor tunneling.
 type CodeServerManager struct {
-	proc      *codeServerProcess
-	port      int
-	username  string
-	groupname string
-	homeDir   string
-	procAttr  *syscall.SysProcAttr // nil keeps Alpamon's own credentials
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.RWMutex
-	status    CodeServerStatus
-	lastError string
-	startOnce sync.Once
-	startErr  error
+	socketRemoved   bool
+	socketRoot      *os.Root
+	socketCleanupMu sync.Mutex
+	peerWarnOnce    sync.Once
+	proc            *codeServerProcess
+	socketPath      string
+	username        string
+	groupname       string
+	homeDir         string
+	procAttr        *syscall.SysProcAttr // nil keeps Alpamon's own credentials
+	ctx             context.Context
+	cancel          context.CancelFunc
+	mu              sync.RWMutex
+	status          CodeServerStatus
+	lastError       string
+	startOnce       sync.Once
+	startErr        error
 
-	stopGrace   time.Duration
-	terminateFn func(*os.Process) error // a seam: a test needs signalling to fail
+	stopGrace        time.Duration
+	terminateFn      func(*os.Process) error        // signals the process group while its leader remains unreaped
+	prepareSocketDir func(*CodeServerManager) error // prepares an agent-owned base and editor-owned session directory
 }
 
+// NewCodeServerManager runs the editor as the requested user for root agents.
+// A non-root agent runs the editor as itself, whatever user was requested.
 func NewCodeServerManager(parentCtx context.Context, username, groupname string) (*CodeServerManager, error) {
 	id, err := lookupUserForCodeServer(username, groupname)
 	if err != nil {
 		return nil, err
 	}
 
+	if id.username != "" {
+		username = id.username
+	}
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	return &CodeServerManager{
-		username:  username,
-		groupname: id.groupname,
-		homeDir:   id.homeDir,
-		procAttr:  id.procAttr,
-		ctx:       ctx,
-		cancel:    cancel,
-		status:    CodeServerStatusIdle,
+		username:   username,
+		socketPath: filepath.Join(editorSocketBase(runtime.GOOS, os.Geteuid(), utils.RunDir()), rand.Text(), "cs.sock"),
+		groupname:  id.groupname,
+		homeDir:    id.homeDir,
+		procAttr:   id.procAttr,
+		ctx:        ctx,
+		cancel:     cancel,
+		status:     CodeServerStatusIdle,
 
 		stopGrace:   codeServerStopGrace,
 		terminateFn: terminateProcess,
@@ -299,7 +343,7 @@ func (m *CodeServerManager) StartAsync() {
 	}()
 }
 
-// Start installs (if needed) and starts code-server on an available port.
+// Start installs (if needed) and starts code-server on its private socket.
 // Lock is held only for short field updates to avoid blocking Status()/Stop() during
 // long-running install/startup operations.
 func (m *CodeServerManager) Start() error {
@@ -333,28 +377,39 @@ func (m *CodeServerManager) doStart() error {
 		return fmt.Errorf("failed to setup user data dir: %w", err)
 	}
 
-	// Find available port (no lock needed)
-	port, err := findAvailablePort()
-	if err != nil {
-		return fmt.Errorf("failed to find available port: %w", err)
-	}
-
-	// Set port before starting process (startCodeServerProcess reads m.port)
+	// Serialize directory creation and process publication against Stop.
 	m.mu.Lock()
-	m.port = port
-	m.mu.Unlock()
-
-	// Start code-server process (no lock needed)
+	if m.status == CodeServerStatusStopped || m.ctx.Err() != nil {
+		m.mu.Unlock()
+		return errCodeServerStopped
+	}
+	prepare := m.prepareSocketDir
+	if prepare == nil {
+		prepare = prepareEditorSocketDir
+	}
+	if err := prepare(m); err != nil {
+		m.mu.Unlock()
+		return fmt.Errorf("failed to prepare editor socket: %w", err)
+	}
 	cmd, err := startCodeServerProcess(m.ctx, m, userDataDir)
 	if err != nil {
+		m.removeSocketDir()
+		m.mu.Unlock()
 		return err
 	}
-
 	proc := startReaper(cmd, waitExit)
-
-	m.mu.Lock()
 	m.proc = proc
 	m.mu.Unlock()
+	go func() {
+		<-proc.done
+		m.mu.Lock()
+		if m.status == CodeServerStatusReady {
+			m.status = CodeServerStatusError
+			m.lastError = "code-server exited"
+		}
+		m.mu.Unlock()
+		m.removeSocketDir()
+	}()
 
 	// Wait for code-server to be ready (no lock needed)
 	if err := m.waitForReady(proc.done); err != nil {
@@ -364,12 +419,20 @@ func (m *CodeServerManager) doStart() error {
 
 	m.mu.Lock()
 	ready := m.setStatusLocked(CodeServerStatusReady)
+	select {
+	case <-proc.done:
+		if ready {
+			m.status = CodeServerStatusError
+			m.lastError = "code-server exited"
+		}
+	default:
+	}
 	m.mu.Unlock()
 	if !ready {
 		return errCodeServerStopped // Stop took the process with it
 	}
 
-	log.Info().Msgf("code-server started successfully on port %d for user %s.", port, m.username)
+	log.Info().Msgf("code-server started successfully for user %s.", m.username)
 
 	return nil
 }
@@ -457,7 +520,7 @@ func (m *CodeServerManager) Stop() error {
 // stopProcess is Stop without the final status, for doStart's failure path.
 func (m *CodeServerManager) stopProcess() error {
 	m.mu.Lock()
-	proc, port := m.proc, m.port
+	proc := m.proc
 	grace, terminate := m.stopGrace, m.terminateFn
 	m.proc = nil
 	m.mu.Unlock()
@@ -469,6 +532,13 @@ func (m *CodeServerManager) stopProcess() error {
 	if proc == nil {
 		return nil
 	}
+	defer func() {
+		select {
+		case <-proc.done:
+			m.removeSocketDir()
+		default:
+		}
+	}()
 
 	// A reaped leader was the reaper's to sweep, so its pgid is nothing to signal.
 	// A failed signal still leaves a child to collect, so the wait below runs anyway.
@@ -478,7 +548,7 @@ func (m *CodeServerManager) stopProcess() error {
 	case err != nil:
 		log.Warn().Err(err).Msg("Failed to signal code-server, waiting for it anyway.")
 	}
-	log.Info().Msgf("Stopping code-server on port %d...", port)
+	log.Info().Msg("Stopping code-server...")
 
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
@@ -497,18 +567,10 @@ func (m *CodeServerManager) stopProcess() error {
 	return nil
 }
 
-// Port returns the port code-server is running on.
-func (m *CodeServerManager) Port() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.port
-}
-
-// waitForReady waits for code-server to listen on its port. It watches the reaper
+// waitForReady waits for code-server to listen on its socket. It watches the reaper
 // channel, not m.cmd, which a concurrent Stop may have already cleared.
 func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 	cfg := GetCodeServerConfig()
-	addr := net.JoinHostPort(loopbackHost, strconv.Itoa(m.port))
 	deadline := time.NewTimer(cfg.StartupTimeout)
 	defer deadline.Stop()
 
@@ -516,14 +578,14 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 	defer ticker.Stop()
 
 	for {
-		// Before the dial: a dead code-server's port may already answer for someone else.
+		// A completed process cannot be ready, even if its socket still answers.
 		select {
 		case <-waitDone:
 			return fmt.Errorf("code-server process exited unexpectedly")
 		default:
 		}
 
-		conn, err := net.DialTimeout("tcp", addr, codeServerReadyDialTimeout)
+		conn, err := m.dialSocket()
 		if err == nil {
 			_ = conn.Close()
 			return nil
@@ -541,21 +603,24 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 
 // codeServerIdentity is who code-server runs as; a nil procAttr keeps Alpamon's own credentials.
 type codeServerIdentity struct {
+	username  string
 	homeDir   string
 	groupname string
 	procAttr  *syscall.SysProcAttr
 }
 
 func lookupUserForCodeServer(username, groupname string) (*codeServerIdentity, error) {
-	if runtime.GOOS == "darwin" {
-		if os.Getuid() != 0 {
-			log.Debug().Msg("macOS: not root, so code-server keeps the current user.")
-			usr, err := user.Current()
-			if err != nil {
-				return nil, err
-			}
-			return &codeServerIdentity{homeDir: usr.HomeDir, groupname: groupname}, nil
+	if os.Geteuid() != 0 {
+		if runtime.GOOS != "darwin" && groupname == "" {
+			return nil, fmt.Errorf("groupname is required")
 		}
+		usr, err := user.LookupId(strconv.Itoa(os.Geteuid()))
+		if err != nil {
+			return nil, err
+		}
+		return &codeServerIdentity{username: usr.Username, homeDir: usr.HomeDir, groupname: groupname}, nil
+	}
+	if runtime.GOOS == "darwin" {
 		// The server sends a Linux group name, so macOS demotes to the user's primary group.
 		var err error
 		if groupname, err = primaryGroupName(username); err != nil {
@@ -575,7 +640,7 @@ func lookupUserForCodeServer(username, groupname string) (*codeServerIdentity, e
 		return nil, fmt.Errorf("user %s not found: %w", username, err)
 	}
 
-	return &codeServerIdentity{homeDir: usr.HomeDir, groupname: groupname}, nil
+	return &codeServerIdentity{username: usr.Username, homeDir: usr.HomeDir, groupname: groupname}, nil
 }
 
 func primaryGroupName(username string) (string, error) {
@@ -725,24 +790,14 @@ func downloadInstallScript(url string) ([]byte, error) {
 	return script, nil
 }
 
-// findAvailablePort finds an available port by letting the OS assign one.
-func findAvailablePort() (int, error) {
-	listener, err := net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
-	if err != nil {
-		return 0, fmt.Errorf("failed to find available port: %w", err)
-	}
-	defer func() { _ = listener.Close() }()
-	return listener.Addr().(*net.TCPAddr).Port, nil
-}
-
 // getCodeServerArgs returns the command line arguments for code-server.
-func getCodeServerArgs(port int, userDataDir string) []string {
-	return GetCodeServerConfig().ToArgs(port, userDataDir)
+func getCodeServerArgs(socketPath string, userDataDir string) []string {
+	return GetCodeServerConfig().ToArgs(socketPath, userDataDir)
 }
 
 // getCodeServerEnv returns environment variables for code-server process.
-func getCodeServerEnv(homeDir string, includeXDG bool) []string {
-	return GetCodeServerConfig().ToEnv(homeDir, includeXDG)
+func getCodeServerEnv(homeDir string, includeXDG bool, username string) []string {
+	return GetCodeServerConfig().ToEnv(homeDir, includeXDG, username)
 }
 
 // validateUserDataDirName rejects a name setupUserDataFiles could not guard.
@@ -816,4 +871,61 @@ func chownUserDataDir(ctx context.Context, userDataDir, username, groupname stri
 	}
 
 	return chownTreeNoFollow(ctx, userDataDir, uid, gid)
+}
+
+func (m *CodeServerManager) dialSocket() (net.Conn, error) {
+	dialer := net.Dialer{Timeout: codeServerReadyDialTimeout}
+	conn, err := dialer.DialContext(m.ctx, "unix", m.socketPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateEditorPeer(conn.(*net.UnixConn), m.procAttr); err != nil {
+		warned := false
+		m.peerWarnOnce.Do(func() {
+			warned = true
+			log.Warn().Err(err).Str("session", filepath.Base(filepath.Dir(m.socketPath))).Msg("Editor listener validation failed.")
+		})
+		if !warned {
+			log.Debug().Err(err).Msg("Editor listener validation failed.")
+		}
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (m *CodeServerManager) removeSocketDir() {
+	m.socketCleanupMu.Lock()
+	defer m.socketCleanupMu.Unlock()
+	if m.socketPath == "" || m.socketRemoved {
+		return
+	}
+	m.socketRemoved = true
+	root := m.socketRoot
+	if root == nil {
+		return
+	}
+	if err := root.RemoveAll(filepath.Base(filepath.Dir(m.socketPath))); err != nil {
+		log.Warn().Err(err).Msg("Failed to remove editor session directory.")
+	}
+	_ = root.Close()
+	m.socketRoot = nil
+}
+
+func editorPassthroughEnv(key string) bool {
+	switch key {
+	case "ALL_PROXY", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ":
+		return true
+	}
+	return false
+}
+
+func editorSocketBase(goos string, euid int, runDir string) string {
+	if euid != 0 {
+		return filepath.Join(runDir, "editor")
+	}
+	if goos == "darwin" {
+		return "/var/run/alpamon-editor"
+	}
+	return "/run/alpamon-editor"
 }

@@ -426,34 +426,42 @@ func TestSelfUpgradeWithoutSystemdRestartsAGraceAfterTheUpgradeLockIsReleasedPas
 	assert.Contains(t, run.log(t), "waiting out the grace once more")
 }
 
-func TestStartAlpamonProcessDoesNotPassTheLocksToTheNewAgent(t *testing.T) {
-	t.Parallel()
-	// Given an agent binary that reports which of fds 8 and 9 are open, and both open in the caller
-	dir := t.TempDir()
-	postinstall, err := filepath.Abs("postinstall.sh")
-	require.NoError(t, err)
-	fakeAgent := filepath.Join(dir, "agent.sh")
-	require.NoError(t, os.WriteFile(fakeAgent, []byte(
-		"#!/bin/bash\nls /proc/self/fd > \""+dir+"/fds\"\nsleep 2\n"), 0o700))
-	driver := `
+func TestStartAlpamonProcessDoesNotPassLocksOrPluginEnvironment(t *testing.T) {
+	for _, shell := range []string{"bash", "sh"} {
+		t.Run(shell, func(t *testing.T) {
+			t.Parallel()
+			// Given an agent binary that reports which of fds 8 and 9 are open, and both open in the caller
+			dir := t.TempDir()
+			postinstall, err := filepath.Abs("postinstall.sh")
+			require.NoError(t, err)
+			fakeAgent := filepath.Join(dir, "agent.sh")
+			require.NoError(t, os.WriteFile(fakeAgent, []byte(
+				"#!/bin/bash\nls /proc/self/fd > \""+dir+"/fds\"\nprintf '%s\\n' \"${!PLUGIN_@}\" > \""+dir+"/plugin-vars\"\nsleep 2\n"), 0o700))
+			driver := `
 POSTINSTALL_SOURCED=1
-source "$POSTINSTALL"
+. "$POSTINSTALL"
 create_log_file() { :; }
 ALPAMON_BIN="$FAKE_AGENT"
 ALPAMON_LOG="$DIR/alpamon.log"
+export PLUGIN_ID=synthetic PLUGIN_KEY=synthetic PLUGIN_EXTRA=synthetic
 exec 8>>"$DIR/restart.lock" 9>>"$DIR/upgrade.lock"
 start_alpamon_process
 `
-	cmd := exec.Command("bash", "-c", driver)
-	cmd.Env = append(os.Environ(), "POSTINSTALL="+postinstall, "FAKE_AGENT="+fakeAgent, "DIR="+dir)
+			cmd := exec.Command(shell, "-c", driver)
+			cmd.Env = append(os.Environ(), "POSTINSTALL="+postinstall, "FAKE_AGENT="+fakeAgent, "DIR="+dir)
 
-	// When postinstall starts the new agent
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(out))
+			// When postinstall starts the new agent
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(out))
 
-	// Then the agent holds neither lock fd
-	data, err := os.ReadFile(filepath.Join(dir, "fds"))
-	require.NoError(t, err)
-	assert.NotContains(t, strings.Fields(string(data)), "8")
-	assert.NotContains(t, strings.Fields(string(data)), "9")
+			// Then the agent holds neither lock fd
+			data, err := os.ReadFile(filepath.Join(dir, "fds"))
+			require.NoError(t, err)
+			assert.NotContains(t, strings.Fields(string(data)), "8")
+			assert.NotContains(t, strings.Fields(string(data)), "9")
+			data, err = os.ReadFile(filepath.Join(dir, "plugin-vars"))
+			require.NoError(t, err)
+			assert.Empty(t, strings.TrimSpace(string(data)))
+		})
+	}
 }

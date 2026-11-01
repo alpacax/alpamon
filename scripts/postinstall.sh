@@ -136,7 +136,9 @@ start_alpamon_process() {
   echo "Starting Alpamon as a background process..."
   # The HUP trap keeps the agent alive once postinstall's session exits; 8>&- 9>&- keep the restart
   # and upgrade lock fds out of the agent, which would otherwise hold those locks forever.
-  (trap '' HUP; exec "$ALPAMON_BIN" >>"$ALPAMON_LOG" 2>&1 8>&- 9>&-) &
+  (trap '' HUP
+    for plugin_var in $(env | sed -n 's/^\(PLUGIN_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$plugin_var"; done
+    exec "$ALPAMON_BIN" >>"$ALPAMON_LOG" 2>&1 8>&- 9>&-) &
   local pid=$!
   sleep 0.5
   if ! kill -0 "$pid" 2>/dev/null; then

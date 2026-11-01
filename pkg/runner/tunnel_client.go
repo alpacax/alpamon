@@ -87,10 +87,11 @@ type TunnelClient struct {
 	session       *smux.Session
 	ctx           context.Context
 	cancel        context.CancelFunc
+	codeServerMu  sync.RWMutex
 	codeServerMgr *CodeServerManager // for editor type
 	connMu        sync.Mutex         // guards closed and the hand-off of wsConn, session and codeServerMgr from Open to Close
 	closed        bool               // set by Close; Open installs nothing after it
-	startRelay    func() error       // startTunnelRelay; replaced in tests
+	startRelay    func() error       // startSessionRelay; replaced in tests
 	daemonMu      sync.Mutex         // serializes daemon start against stop
 	daemonCmd     *exec.Cmd
 	daemonSocket  string        // UDS path, written before any stream reads it
@@ -141,7 +142,7 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 		streamSem:     make(chan struct{}, maxStreamsPerSession),
 	}
 	tc.targetPort.Store(int32(targetPort))
-	tc.startRelay = tc.startTunnelRelay
+	tc.startRelay = tc.startSessionRelay
 	return tc
 }
 
@@ -186,7 +187,7 @@ func (tc *TunnelClient) open(ctx context.Context) error {
 		return err
 	}
 
-	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort.Load())
+	log.Info().Str("session", tc.sessionID).Msg("Tunnel connection established.")
 
 	if err := tc.startRelay(); err != nil {
 		if tc.ctx.Err() != nil { // startTunnelRelay reports a close as tc.ctx's error
@@ -243,27 +244,39 @@ func (tc *TunnelClient) initCodeServerManager() error {
 		_ = mgr.Stop()
 		return ErrTunnelClosedWhileOpening
 	}
+	tc.codeServerMu.Lock()
 	tc.codeServerMgr = mgr
+	tc.codeServerMu.Unlock()
 	log.Info().Msgf("code-server manager initialized for session %s (user: %s).", tc.sessionID, tc.username)
 	return nil
 }
 
 // handleHealthCheck responds to health check requests with code-server status.
 func (tc *TunnelClient) handleHealthCheck(stream *smux.Stream) {
-	if tc.codeServerMgr == nil {
+	mgr := tc.editorManager()
+	if mgr == nil {
 		tc.sendHealthResponse(stream, "error", "code-server manager not initialized")
 		return
 	}
 
-	status, lastError := tc.codeServerMgr.Status()
+	status, lastError := mgr.Status()
 
 	if status == CodeServerStatusIdle {
-		tc.codeServerMgr.StartAsync()
-		status, _ = tc.codeServerMgr.Status()
+		mgr.StartAsync()
+		status, _ = mgr.Status()
 	}
 
 	if status == CodeServerStatusReady {
-		tc.targetPort.Store(int32(tc.codeServerMgr.Port()))
+		conn, err := mgr.dialSocket()
+		if err != nil {
+			status, lastError = mgr.Status()
+			if status == CodeServerStatusReady {
+				status, lastError = CodeServerStatusStarting, ""
+			}
+			tc.sendHealthResponse(stream, string(status), lastError)
+			return
+		}
+		_ = conn.Close()
 	}
 
 	tc.sendHealthResponse(stream, string(status), lastError)
@@ -460,11 +473,6 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 		return
 	}
 
-	log.Info().
-		Str("remote_port", metadata.RemotePort).
-		Bool("health_check", metadata.HealthCheck).
-		Msg("Received stream metadata")
-
 	if metadata.HealthCheck && tc.clientType == ClientTypeEditor {
 		tc.handleHealthCheck(stream)
 		return
@@ -472,25 +480,23 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 
 	targetPort, err := tc.resolveTargetPort(metadata.RemotePort)
 	if err != nil {
-		log.Debug().Err(err).Msg("Invalid target port.")
+		log.Warn().Err(err).Msg("Rejected tunnel stream target port.")
 		return
 	}
 
-	targetAddr := net.JoinHostPort(loopbackHost, strconv.Itoa(targetPort))
-
-	targetConn, err := tc.dialTunnelTarget(targetAddr)
+	targetConn, err := tc.dialSessionTarget(targetPort)
 	if err != nil {
-		log.Debug().Err(err).Msgf("Failed to dial relay target %s.", targetAddr)
+		log.Debug().Err(err).Msg("Failed to dial session target.")
 		return
 	}
 	defer func() { _ = targetConn.Close() }()
 
-	log.Debug().Msgf("Relay target dialed for %s.", targetAddr)
+	log.Debug().Msg("Session target dialed.")
 
 	dataReader := tc.buildDataReader(bufReader, stream)
 	tc.relayBidirectional(stream, targetConn, dataReader)
 
-	log.Debug().Msgf("Tunnel stream closed for port %d.", targetPort)
+	log.Debug().Msg("Tunnel stream closed.")
 }
 
 func (tc *TunnelClient) readStreamMetadata(stream *smux.Stream) (*streamMetadata, *bufio.Reader, error) {
@@ -511,13 +517,16 @@ func (tc *TunnelClient) readStreamMetadata(stream *smux.Stream) (*streamMetadata
 }
 
 func (tc *TunnelClient) resolveTargetPort(remotePort string) (int, error) {
-	if remotePort == "" {
+	if tc.clientType == ClientTypeEditor || remotePort == "" {
 		return int(tc.targetPort.Load()), nil
 	}
 
 	port, err := strconv.Atoi(remotePort)
 	if err != nil || port < 1 || port > 65535 {
-		return 0, fmt.Errorf("invalid port: %s", remotePort)
+		return 0, fmt.Errorf("invalid port")
+	}
+	if port != int(tc.targetPort.Load()) {
+		return 0, fmt.Errorf("port %d differs from session port %d", port, tc.targetPort.Load())
 	}
 	return port, nil
 }
@@ -646,4 +655,28 @@ func CloseAllActiveTunnels() {
 		log.Info().Str("sessionID", tc.sessionID).Msg("Closing tunnel during shutdown.")
 		tc.Close()
 	}
+}
+
+func (tc *TunnelClient) startSessionRelay() error {
+	if tc.clientType == ClientTypeEditor {
+		return nil
+	}
+	return tc.startTunnelRelay()
+}
+
+func (tc *TunnelClient) dialSessionTarget(targetPort int) (net.Conn, error) {
+	if tc.clientType == ClientTypeEditor {
+		mgr := tc.editorManager()
+		if mgr == nil {
+			return nil, fmt.Errorf("editor manager not initialized")
+		}
+		return mgr.dialSocket()
+	}
+	return tc.dialTunnelTarget(net.JoinHostPort(loopbackHost, strconv.Itoa(targetPort)))
+}
+
+func (tc *TunnelClient) editorManager() *CodeServerManager {
+	tc.codeServerMu.RLock()
+	defer tc.codeServerMu.RUnlock()
+	return tc.codeServerMgr
 }
