@@ -163,15 +163,6 @@ func TestFirstMissingAncestor(t *testing.T) {
 	})
 }
 
-func TestDirTreeIsAllDirs(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "nested"), 0755))
-	assert.True(t, dirTreeIsAllDirs(dir))
-
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "nested", "out.bin"), []byte("x"), 0644))
-	assert.False(t, dirTreeIsAllDirs(dir))
-}
-
 func TestWriteFileAs_TeePath_RemovesDirsItCreatedOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "new", "nested", "out.bin")
@@ -195,7 +186,7 @@ func TestWriteFileAs_TeePath_KeepsPreexistingParentOnFailure(t *testing.T) {
 	assert.DirExists(t, sub)
 }
 
-func TestWriteFileAs_DemotedPath_CreatesParentsAsUser(t *testing.T) {
+func TestRootOnly_WriteFileAsCreatesParentsAsUser(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("credential demotion requires root")
 	}
@@ -223,4 +214,39 @@ func TestWriteFileAs_DemotedPath_CreatesParentsAsUser(t *testing.T) {
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "payload", string(got))
+}
+
+func TestRootOnly_WriteFileAsCleanupCannotRemoveRootOwnedDirectory(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("credential demotion requires root")
+	}
+	const uid, gid = 65534, 65534
+	dir := t.TempDir()
+	parent := filepath.Dir(dir)
+	parentInfo, err := os.Stat(parent)
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(parent, 0755))
+	t.Cleanup(func() { require.NoError(t, os.Chmod(parent, parentInfo.Mode().Perm())) })
+	require.NoError(t, os.Chmod(dir, 0755))
+	userParent := filepath.Join(dir, "requester")
+	otherParent := filepath.Join(dir, "unrelated")
+	require.NoError(t, os.Mkdir(userParent, 0755))
+	require.NoError(t, os.Chown(userParent, uid, gid))
+	require.NoError(t, os.Mkdir(otherParent, 0755))
+	unrelated := filepath.Join(otherParent, "new")
+	require.NoError(t, os.Mkdir(unrelated, 0755))
+	source := &cleanupErrorReader{swap: func() error {
+		if err := os.Rename(userParent, userParent+"-old"); err != nil {
+			return err
+		}
+		return os.Symlink(otherParent, userParent)
+	}}
+	attr := &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid}}
+	err = writeFileAs(t.Context(), filepath.Join(userParent, "new", "output"), source, attr)
+	require.Error(t, err)
+	require.NoError(t, source.err)
+	assert.DirExists(t, unrelated, "cleanup runs with the requester's credentials")
+	entries, err := os.ReadDir(unrelated)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
 }
