@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -104,12 +107,16 @@ func newHoldTestManager(t *testing.T, server *fakeAlpacon) *AuthManager {
 }
 
 func holdTestRequest(id string, holdCapable bool) SudoApprovalRequest {
+	pid, err := strconv.Atoi(id)
+	if err != nil {
+		panic(err)
+	}
 	return SudoApprovalRequest{
 		RequestID:   id,
 		Type:        "sudo_approval",
 		Username:    "alice",
 		Groupname:   "alpacon",
-		PID:         424242,
+		PID:         pid,
 		PPID:        holdTestPPID,
 		Command:     "systemctl restart nginx",
 		RunasUser:   "root",
@@ -1225,4 +1232,626 @@ func TestDisplacedInFlightVerdictNotAppliedToNewRequest(t *testing.T) {
 		require.NoError(t, am.HandleSudoApprovalResponse(own))
 		assert.Equal(t, marshalResponse(t, own), pc2.output(t))
 	})
+}
+
+func TestUnheldEndedRequestVerdictNotAppliedToSuccessor(t *testing.T) {
+	for _, end := range []string{"timeout", "session teardown"} {
+		for _, echo := range []string{"raw", "masked", "same command", "different runas"} {
+			t.Run(end+"/"+echo, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					server := &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`}
+					am := newHoldTestManager(t, server)
+					old := holdTestRequest("160", false)
+					pc, _ := startPAMClient(t, am, old)
+					synctest.Wait()
+					if end == "timeout" {
+						time.Sleep(sudoApprovalResponseTimeout)
+					} else {
+						am.RemovePIDSessionMapping(holdTestPPID)
+						am.AddPIDSessionMapping(holdTestPPID, &SessionInfo{
+							Kind: TrackerKindWebsh, SessionID: holdTestSession,
+							PID: holdTestPPID, Requests: make(map[string]*SudoRequest),
+						})
+					}
+					assert.Contains(t, pc.output(t), `"approved":false`)
+					// Keep the guard past the former fifteen-minute lifetime.
+					time.Sleep(24 * time.Hour)
+					reused := old
+					if echo != "same command" && echo != "different runas" {
+						reused.Command = "systemctl restart postgresql"
+					}
+					if echo == "different runas" {
+						reused.RunasUser = "postgres"
+					}
+					pc2, rec2 := startPAMClient(t, am, reused)
+					synctest.Wait()
+					late := serverVerdict(old, true, "")
+					if echo == "masked" {
+						late.Command = "masked-placeholder #k:opaque"
+					}
+					if echo == "same command" {
+						require.NoError(t, am.HandleSudoApprovalResponse(late))
+						assert.Equal(t, marshalResponse(t, late), pc2.output(t))
+						return
+					}
+					require.Error(t, am.HandleSudoApprovalResponse(late))
+					assert.Zero(t, rec2.writeCount(), "late verdict reached the successor")
+					if echo == "different runas" {
+						am.RemovePIDSessionMapping(holdTestPPID)
+						pc2.output(t)
+						return
+					}
+					own := serverVerdict(reused, true, "")
+					require.NoError(t, am.HandleSudoApprovalResponse(own))
+					assert.Equal(t, marshalResponse(t, own), pc2.output(t))
+				})
+			})
+		}
+	}
+}
+
+func timeoutSudoRequest(t *testing.T, am *AuthManager, req SudoApprovalRequest) {
+	pc, _ := startPAMClient(t, am, req)
+	synctest.Wait()
+	time.Sleep(sudoApprovalResponseTimeout)
+	assert.Contains(t, pc.output(t), `"approved":false`)
+}
+
+func TestEndedRequestsRetainEarlierCommands(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`}
+		am := newHoldTestManager(t, server)
+		a := holdTestRequest("170", false) // systemctl restart nginx
+		timeoutSudoRequest(t, am, a)
+		b := a
+		b.Command = "systemctl restart postgresql"
+		timeoutSudoRequest(t, am, b)
+		c := a
+		c.RunasUser = "postgres"
+		_, rec3 := startPAMClient(t, am, c)
+		synctest.Wait()
+		late := serverVerdict(a, true, "")
+		err := am.HandleSudoApprovalResponse(late)
+		assert.Zero(t, rec3.writeCount())
+		assert.Error(t, err, "A's verdict delivered to a different execution identity")
+	})
+}
+
+func TestEndedRequestsRetainEarlierSessions(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`}
+		am := newHoldTestManager(t, server)
+		am.pidToSessionMap[5300] = &SessionInfo{Kind: TrackerKindWebsh, SessionID: "sess-other", PID: 5300, Requests: make(map[string]*SudoRequest)}
+		a := holdTestRequest("171", false)
+		timeoutSudoRequest(t, am, a)
+		x := a
+		x.PPID = 5300
+		x.Command = "true"
+		timeoutSudoRequest(t, am, x)
+		c := a
+		c.Command = "systemctl restart postgresql"
+		_, rec3 := startPAMClient(t, am, c)
+		synctest.Wait()
+		err := am.HandleSudoApprovalResponse(serverVerdict(a, true, ""))
+		assert.Zero(t, rec3.writeCount())
+		assert.Error(t, err, "A's verdict delivered to a request for another command")
+	})
+}
+
+func TestUnheldEndingPreservesHeldEnding(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: pendingBody(300)}
+		am := newHoldTestManager(t, server)
+		held := holdTestRequest("172", true)
+		pc, _ := startPAMClient(t, am, held)
+		pc.interim(t)
+		require.NoError(t, pc.conn.Close())
+		synctest.Wait()
+
+		server.mu.Lock()
+		server.approvalBody = `{"status":"mfa_required"}`
+		server.mu.Unlock()
+		u := holdTestRequest("172", false)
+		u.Command = "systemctl restart postgresql"
+		timeoutSudoRequest(t, am, u)
+		c := held
+		c.RunasUser = "postgres"
+		_, rec3 := startPAMClient(t, am, c)
+		synctest.Wait()
+		err := am.HandleSudoApprovalResponse(serverVerdict(held, true, ""))
+		assert.Zero(t, rec3.writeCount())
+		assert.Error(t, err, "the ended wait's verdict was applied")
+	})
+}
+
+func TestEndedRequestRejectsDifferentInvokingUser(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`}
+		am := newHoldTestManager(t, server)
+		a := holdTestRequest("173", false)
+		timeoutSudoRequest(t, am, a)
+		c := a
+		c.Username = "bob"
+		_, rec3 := startPAMClient(t, am, c)
+		synctest.Wait()
+		err := am.HandleSudoApprovalResponse(serverVerdict(a, true, ""))
+		assert.Zero(t, rec3.writeCount())
+		assert.Error(t, err, "alice's verdict delivered to bob's request")
+	})
+}
+
+func TestMaskedSuccessorReceivesTimeoutDenial(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`}
+		am := newHoldTestManager(t, server)
+		a := holdTestRequest("174", false)
+		timeoutSudoRequest(t, am, a)
+		c := a
+		c.Command = "mysql -psecret"
+		pc3, _ := startPAMClient(t, am, c)
+		synctest.Wait()
+		own := serverVerdict(c, true, "")
+		own.Command = "mysql -p******** #k:abc"
+		require.Error(t, am.HandleSudoApprovalResponse(own))
+		time.Sleep(sudoApprovalResponseTimeout)
+		var denied SudoApprovalResponse
+		require.NoError(t, json.Unmarshal([]byte(pc3.output(t)), &denied))
+		assert.False(t, denied.Approved)
+		assert.Equal(t, c.Command, denied.Command)
+		am.mu.RLock()
+		assert.Nil(t, am.findRequestLocked(c.RequestID))
+		am.mu.RUnlock()
+	})
+}
+
+func TestEndedRequestsCheckEveryMatchingIdentity(t *testing.T) {
+	for _, change := range []struct {
+		name  string
+		apply func(*SudoApprovalRequest)
+	}{
+		{"username", func(r *SudoApprovalRequest) { r.Username = "bob" }},
+		{"groupname", func(r *SudoApprovalRequest) { r.Groupname = "operators" }},
+		{"runas user", func(r *SudoApprovalRequest) { r.RunasUser = "postgres" }},
+		{"command id", func(r *SudoApprovalRequest) { r.CommandID = "other-command" }},
+		{"Alpacon membership", func(r *SudoApprovalRequest) { r.IsAlpconUser = !r.IsAlpconUser }},
+		{"raw command", func(r *SudoApprovalRequest) { r.Command = "other raw command" }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			am := &AuthManager{}
+			current := holdTestRequest("180", false)
+			current.SessionID = holdTestSession
+			old := current
+			change.apply(&old)
+			hold := &sudoHold{command: current.Command, sessionID: old.SessionID, commandID: old.CommandID}
+			ended := newSudoRequest(nil, old)
+			ended.hold = hold
+			am.rememberEndedLocked(ended)
+			am.rememberEndedLocked(newSudoRequest(nil, current))
+			assert.NotEmpty(t, am.mismatchLocked(serverVerdict(current, true, ""), newSudoRequest(nil, current)))
+		})
+	}
+}
+
+func TestEndedRequestsExpireIndividually(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := &AuthManager{}
+		old := holdTestRequest("181", false)
+		old.SessionID = holdTestSession
+		am.rememberEndedLocked(newSudoRequest(nil, old))
+		time.Sleep(time.Minute)
+		current := old
+		current.Username = "bob"
+		am.rememberEndedLocked(newSudoRequest(nil, current))
+		verdict := serverVerdict(current, true, "")
+		req := newSudoRequest(nil, current)
+		assert.NotEmpty(t, am.mismatchLocked(verdict, req))
+		time.Sleep(endedHoldTTL - time.Minute)
+		assert.Empty(t, am.mismatchLocked(verdict, req))
+		verdict.Command = ""
+		assert.Empty(t, am.mismatchLocked(verdict, req), "the newer record is identical")
+		time.Sleep(time.Minute)
+		assert.Empty(t, am.mismatchLocked(verdict, req), "ordinary matching resumes after expiry")
+	})
+}
+
+func TestEndedRecordsInOtherSessionsDoNotConstrainVerdicts(t *testing.T) {
+	am := &AuthManager{}
+	old := holdTestRequest("182", false)
+	old.SessionID = holdTestSession
+	am.rememberEndedLocked(newSudoRequest(nil, old))
+	current := old
+	current.SessionID = "other-session"
+	verdict := serverVerdict(current, true, "")
+	verdict.Command = ""
+	verdict.SessionID = current.SessionID
+	assert.Empty(t, am.mismatchLocked(verdict, newSudoRequest(nil, current)))
+}
+
+func TestIdenticalRepeatedSudoApprovedAfterTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := newHoldTestManager(t, &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`})
+		req := holdTestRequest("183", false)
+		for range 3 {
+			timeoutSudoRequest(t, am, req)
+		}
+		am.mu.RLock()
+		assert.Len(t, am.endedHolds[req.RequestID], 1)
+		am.mu.RUnlock()
+		pc, _ := startPAMClient(t, am, req)
+		synctest.Wait()
+		verdict := serverVerdict(req, true, "")
+		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
+		assert.Equal(t, marshalResponse(t, verdict), pc.output(t))
+	})
+}
+
+func TestEndedRecordSaturationRefusesVerdicts(t *testing.T) {
+	for _, limit := range []string{"per id", "total"} {
+		t.Run(limit, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				am := newHoldTestManager(t, &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`})
+				req := holdTestRequest("190", false)
+				am.mu.Lock()
+				count := maxEndedHoldsPerID
+				if limit == "total" {
+					am.endedHoldLimit = 8
+					count = am.endedHoldLimit
+				}
+				for i := range count {
+					ended := req
+					ended.Command = strconv.Itoa(i)
+					if limit == "total" {
+						ended.RequestID = "other-" + strconv.Itoa(i)
+					}
+					am.rememberEndedLocked(newSudoRequest(nil, ended))
+				}
+				assert.Empty(t, am.saturatedEndedIDs)
+				am.rememberEndedLocked(newSudoRequest(nil, req))
+				assert.Contains(t, am.saturatedEndedIDs, req.RequestID)
+				am.pruneEndedLocked(time.Now())
+				assert.Equal(t, count, am.endedCount)
+				am.mu.Unlock()
+
+				pc, rec := startPAMClient(t, am, req)
+				synctest.Wait()
+				require.ErrorContains(t, am.HandleSudoApprovalResponse(serverVerdict(req, true, "")), "saturated")
+				assert.Zero(t, rec.writeCount())
+				time.Sleep(sudoApprovalResponseTimeout)
+				assert.Contains(t, pc.output(t), `"approved":false`)
+			})
+		})
+	}
+}
+
+func TestEndedRecordSaturationLastsUntilNewestEndingExpires(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := &AuthManager{}
+		req := holdTestRequest("191", false)
+		req.SessionID = holdTestSession
+		for i := range maxEndedHoldsPerID {
+			old := req
+			old.Command = strconv.Itoa(i)
+			am.rememberEndedLocked(newSudoRequest(nil, old))
+		}
+		first := am.endedHolds[req.RequestID][0]
+		time.Sleep(time.Minute)
+		am.rememberEndedLocked(newSudoRequest(nil, req))
+		assert.Len(t, am.endedHolds[req.RequestID], maxEndedHoldsPerID)
+		assert.Equal(t, first, am.endedHolds[req.RequestID][0])
+		time.Sleep(time.Minute)
+		am.rememberEndedLocked(newSudoRequest(nil, req))
+		time.Sleep(endedHoldTTL - time.Minute)
+		verdict := serverVerdict(req, true, "")
+		assert.Equal(t, "ended records saturated", am.mismatchLocked(verdict, newSudoRequest(nil, req)))
+		assert.Empty(t, am.endedHolds, "detailed records have expired")
+		other := verdict
+		other.RequestID = "another-id"
+		assert.Empty(t, am.mismatchLocked(other, nil))
+		other = verdict
+		other.SessionID = "another-session"
+		assert.Equal(t, "ended records saturated", am.mismatchLocked(other, nil))
+		time.Sleep(time.Minute)
+		assert.Empty(t, am.mismatchLocked(verdict, newSudoRequest(nil, req)))
+		assert.Empty(t, am.saturatedEndedIDs)
+		am.rememberEndedLocked(newSudoRequest(nil, req))
+		assert.Len(t, am.endedHolds[req.RequestID], 1)
+	})
+}
+
+func TestPendingAnswerWithoutRefRecordsEnding(t *testing.T) {
+	for _, successor := range []string{"different command", "identical request", "expired ending"} {
+		t.Run(successor, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				server := &fakeAlpacon{approvalBody: `{"status":"approval_pending","wait_seconds":30}`}
+				am := newHoldTestManager(t, server)
+				old := holdTestRequest("192", true)
+				pc, _ := startPAMClient(t, am, old)
+				synctest.Wait()
+				assert.Contains(t, pc.output(t), `"approved":false`)
+				am.mu.RLock()
+				require.Len(t, am.endedHolds[old.RequestID], 1)
+				assert.True(t, am.endedHolds[old.RequestID][0].unheld)
+				am.mu.RUnlock()
+				if successor == "expired ending" {
+					time.Sleep(endedHoldTTL)
+				}
+				server.mu.Lock()
+				server.approvalBody = `{"status":"mfa_required"}`
+				server.mu.Unlock()
+				current := old
+				if successor != "identical request" {
+					current.Command = "systemctl restart postgresql"
+				}
+				pc2, rec := startPAMClient(t, am, current)
+				synctest.Wait()
+				verdict := serverVerdict(old, true, "")
+				if successor == "different command" {
+					require.Error(t, am.HandleSudoApprovalResponse(verdict))
+					assert.Zero(t, rec.writeCount())
+					am.RemovePIDSessionMapping(holdTestPPID)
+					pc2.output(t)
+					return
+				}
+				require.NoError(t, am.HandleSudoApprovalResponse(verdict))
+				assert.Equal(t, marshalResponse(t, verdict), pc2.output(t))
+			})
+		})
+	}
+}
+
+func TestLateVerdictAfterEndingLogsNoPendingAtDebug(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Logger
+	log.Logger = zerolog.New(&output).Level(zerolog.DebugLevel)
+	t.Cleanup(func() { log.Logger = previous })
+	am := &AuthManager{}
+	req := holdTestRequest("193", false)
+	req.SessionID = holdTestSession
+	am.rememberEndedLocked(newSudoRequest(nil, req))
+	require.ErrorContains(t, am.HandleSudoApprovalResponse(serverVerdict(req, true, "")), "no pending")
+	assert.Contains(t, output.String(), `"level":"debug"`)
+	assert.Contains(t, output.String(), "No pending sudo_approval request for response")
+	assert.NotContains(t, output.String(), `"level":"warn"`)
+}
+
+func TestUnheldEndingRefusesMaskedHeldSuccessor(t *testing.T) {
+	for _, change := range []struct {
+		name  string
+		apply func(*SudoApprovalRequest)
+	}{
+		{"runas user", func(r *SudoApprovalRequest) { r.RunasUser = "postgres" }},
+		{"username", func(r *SudoApprovalRequest) { r.Username = "bob" }},
+		{"groupname", func(r *SudoApprovalRequest) { r.Groupname = "operators" }},
+		{"raw command", func(r *SudoApprovalRequest) { r.Command = "other command" }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				server := &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`}
+				am := newHoldTestManager(t, server)
+				current := holdTestRequest("194", true)
+				current.Command = "mysql -psecret"
+				old := current
+				change.apply(&old)
+				timeoutSudoRequest(t, am, old)
+
+				masked := "mysql -p******** #k:abc"
+				server.mu.Lock()
+				server.approvalBody = `{"status":"approval_pending","approval_request":"` + holdTestRef +
+					`","expires_at":"2026-10-15T10:05:00Z","wait_seconds":300,"command":"` + masked + `"}`
+				server.mu.Unlock()
+				pc, rec := startPAMClient(t, am, current)
+				pc.interim(t)
+				before := rec.writeCount()
+				late := serverVerdict(old, true, "")
+				late.Command = masked
+				require.Error(t, am.HandleSudoApprovalResponse(late))
+				assert.Equal(t, before, rec.writeCount())
+				am.mu.RLock()
+				assert.NotNil(t, am.findRequestLocked(current.RequestID))
+				am.mu.RUnlock()
+				time.Sleep(300*time.Second + holdGrace)
+				assert.Contains(t, pc.output(t), `"approved":false`)
+			})
+		})
+	}
+}
+
+func TestSaturatedEndingStoredAfterPruningDoesNotExtendMarker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := &AuthManager{}
+		req := holdTestRequest("195", false)
+		for i := range maxEndedHoldsPerID {
+			old := req
+			old.Command = strconv.Itoa(i)
+			am.rememberEndedLocked(newSudoRequest(nil, old))
+		}
+		time.Sleep(time.Minute)
+		am.rememberEndedLocked(newSudoRequest(nil, req))
+		marker := am.saturatedEndedIDs[req.RequestID]
+		require.Equal(t, time.Now().Add(endedHoldTTL), marker)
+		time.Sleep(endedHoldTTL - time.Minute)
+		am.rememberEndedLocked(newSudoRequest(nil, req))
+		require.Len(t, am.endedHolds[req.RequestID], 1)
+		assert.Equal(t, time.Now().Add(endedHoldTTL), am.endedHolds[req.RequestID][0].until)
+		assert.Equal(t, marker, am.saturatedEndedIDs[req.RequestID])
+		time.Sleep(time.Minute)
+		am.pruneEndedLocked(time.Now())
+		assert.Empty(t, am.saturatedEndedIDs)
+		assert.Len(t, am.endedHolds[req.RequestID], 1)
+	})
+}
+
+func TestIdenticalEndingRefreshesExpiry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := &AuthManager{}
+		req := holdTestRequest("196", false)
+		am.rememberEndedLocked(newSudoRequest(nil, req))
+		time.Sleep(time.Minute)
+		am.rememberEndedLocked(newSudoRequest(nil, req))
+		require.Len(t, am.endedHolds[req.RequestID], 1)
+		assert.Equal(t, time.Now().Add(endedHoldTTL), am.endedHolds[req.RequestID][0].until)
+		time.Sleep(endedHoldTTL - time.Minute)
+		am.pruneEndedLocked(time.Now())
+		assert.Equal(t, 1, am.endedCount)
+		assert.Len(t, am.endedHolds[req.RequestID], 1, "the stale queue entry must not remove the refreshed record")
+		time.Sleep(time.Minute)
+		am.pruneEndedLocked(time.Now())
+		assert.Zero(t, am.endedCount)
+		assert.Empty(t, am.endedHolds)
+	})
+}
+
+func TestIdenticalRetryAcceptsMaskedVerdict(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := newHoldTestManager(t, &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`})
+		req := holdTestRequest("201", false)
+		req.Command = "sh -c echo TOKEN=s3cret"
+		timeoutSudoRequest(t, am, req)
+		pc, _ := startPAMClient(t, am, req)
+		synctest.Wait()
+		verdict := serverVerdict(req, true, "")
+		verdict.Command = "sh -c echo TOKEN=**** #k:0123456789abcdef"
+		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
+		assert.Equal(t, marshalResponse(t, verdict), pc.output(t))
+	})
+}
+
+func TestStoredFormRawCommandRejectsNonidenticalUnheldEnding(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		name := "unheld"
+		if held {
+			name = "held"
+		}
+		t.Run(name, func(t *testing.T) {
+			am := &AuthManager{}
+			old := holdTestRequest("202", false)
+			old.SessionID = holdTestSession
+			old.Command = "sh -c echo TOKEN=s3cret"
+			old.RunasUser = "nobody"
+			am.rememberEndedLocked(newSudoRequest(nil, old))
+			current := old
+			current.Command = "sh -c echo TOKEN=**** #k:0123456789abcdef"
+			current.RunasUser = "root"
+			req := newSudoRequest(nil, current)
+			if held {
+				req.hold = &sudoHold{command: current.Command, sessionID: current.SessionID, commandID: current.CommandID}
+			}
+			assert.NotEmpty(t, am.mismatchLocked(serverVerdict(current, true, ""), req))
+		})
+	}
+}
+
+func TestAnsweredSudoVolumeAllowsIdenticalPIDReuse(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := newHoldTestManager(t, &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`})
+		for i := range 5000 {
+			r := holdTestRequest(strconv.Itoa(10000+i), false)
+			pc, _ := startPAMClient(t, am, r)
+			synctest.Wait()
+			require.NoError(t, am.HandleSudoApprovalResponse(serverVerdict(r, true, "")))
+			assert.Contains(t, pc.output(t), `"approved":true`)
+		}
+		req := holdTestRequest("14999", false)
+		pc, _ := startPAMClient(t, am, req)
+		synctest.Wait()
+		verdict := serverVerdict(req, true, "")
+		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
+		assert.Equal(t, marshalResponse(t, verdict), pc.output(t))
+		assert.Empty(t, am.saturatedEndedIDs)
+	})
+}
+
+func TestDeployCommandVerdictSkipsOtherCommandEndings(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := newHoldTestManager(t, &fakeAlpacon{approvalBody: `{"status":"mfa_required"}`})
+		old := holdTestRequest("310", false)
+		old.SessionID = ""
+		old.CommandID = "cmd-1"
+		am.pidToSessionMap[holdTestPPID].Kind = TrackerKindCommand
+		am.pidToSessionMap[holdTestPPID].SessionID = ""
+		am.pidToSessionMap[holdTestPPID].CommandID = old.CommandID
+		first, _ := startPAMClient(t, am, old)
+		synctest.Wait()
+		answer := serverVerdict(old, true, "")
+		answer.SessionID, answer.CommandID = "", old.CommandID
+		require.NoError(t, am.HandleSudoApprovalResponse(answer))
+		assert.Contains(t, first.output(t), `"approved":true`)
+		am.pidToSessionMap[holdTestPPID].CommandID = "cmd-2"
+		current := old
+		current.CommandID = "cmd-2"
+		current.Command = "echo TOKEN=s3cret"
+		pc, _ := startPAMClient(t, am, current)
+		synctest.Wait()
+		verdict := serverVerdict(current, true, "")
+		verdict.Command = "echo TOKEN=**** #k:0123456789abcdef"
+		verdict.SessionID, verdict.CommandID = "", current.CommandID
+		require.NoError(t, am.HandleSudoApprovalResponse(verdict))
+		assert.Equal(t, marshalResponse(t, verdict), pc.output(t))
+	})
+}
+
+func TestLateUnheldSudoVerdictRejectsDifferentCommand(t *testing.T) {
+	old := newSudoRequest(nil, SudoApprovalRequest{
+		RequestID: "4100", SessionID: "review-session", Command: "approved-placeholder", RunasUser: "root",
+	})
+	session := &SessionInfo{Requests: map[string]*SudoRequest{"4100": old}}
+	manager := &AuthManager{pidToSessionMap: map[int]*SessionInfo{4000: session}}
+	require.True(t, manager.finalizeRequest(old, "Response timeout"))
+	replacement := newSudoRequest(nil, SudoApprovalRequest{
+		RequestID: "4100", SessionID: "review-session", Command: "different-placeholder", RunasUser: "root",
+	})
+	session.Requests["4100"] = replacement
+	late := SudoApprovalResponse{
+		RequestID: "4100", SessionID: "review-session", Command: "approved-placeholder", Approved: true,
+	}
+	manager.mu.Lock()
+	reason := manager.mismatchLocked(late, replacement)
+	manager.mu.Unlock()
+	assert.NotEmpty(t, reason, "a late verdict after timeout must not authorize a different command that reused the PID")
+}
+
+func TestEndedPruningVisitsOnlyExpiredEntries(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := &AuthManager{}
+		am.rememberLocked("old", endedHold{})
+		// A marker shares the same expiry queue as detailed records.
+		am.endedHoldLimit = 1
+		am.rememberLocked("marker", endedHold{})
+		am.endedHoldLimit = 0
+		time.Sleep(time.Minute)
+		for i := range maxEndedHolds - 1 {
+			am.rememberLocked(strconv.Itoa(i), endedHold{})
+		}
+		assert.LessOrEqual(t, am.pruneEndedLocked(time.Now()), 1)
+		assert.Equal(t, maxEndedHolds, am.endedCount)
+		time.Sleep(endedHoldTTL - time.Minute)
+		assert.LessOrEqual(t, am.pruneEndedLocked(time.Now()), 3)
+		assert.Equal(t, maxEndedHolds-1, am.endedCount)
+		assert.NotContains(t, am.endedHolds, "old")
+		assert.Empty(t, am.saturatedEndedIDs)
+		time.Sleep(time.Minute)
+		am.pruneEndedLocked(time.Now())
+		assert.Zero(t, am.endedCount)
+		assert.Empty(t, am.endedHolds)
+	})
+}
+
+func TestEndedExpiryQueueBoundsRepeatedEndings(t *testing.T) {
+	for _, saturated := range []bool{false, true} {
+		t.Run(strconv.FormatBool(saturated), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				am := &AuthManager{}
+				if saturated {
+					am.endedHoldLimit = 1
+					am.rememberLocked("other", endedHold{})
+				}
+				for range 100000 {
+					am.rememberLocked("123", endedHold{})
+					time.Sleep(time.Nanosecond)
+				}
+				live := am.endedCount + len(am.saturatedEndedIDs)
+				assert.LessOrEqual(t, len(am.endedExpiryQueue), max(64, 2*live))
+			})
+		})
+	}
 }

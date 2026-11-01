@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -202,7 +203,16 @@ type AuthManager struct {
 	// endedHolds remembers waits that ended without a server verdict, so a late
 	// verdict for one is not applied to a new request that reuses its id.
 	// Guarded by mu; created on first use.
-	endedHolds map[string]endedHold
+	endedHolds map[string][]endedHold
+	// endedHoldLimit overrides the total cap in tests; zero uses maxEndedHolds.
+	endedHoldLimit int
+	// endedExpiryQueue is ordered by the fixed TTL; refreshed entries leave stale
+	// entries behind until expiry or compaction. All fields are guarded by mu.
+	endedExpiryQueue []endedExpiry
+	endedCount       int
+	// saturatedEndedIDs retains an expiry for ids whose ending details exceeded
+	// either record limit. Guarded by mu.
+	saturatedEndedIDs map[string]time.Time
 }
 
 const (
@@ -538,6 +548,11 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		return
 	}
 
+	if sudoApprovalReq.RequestID != strconv.Itoa(sudoApprovalReq.PID) {
+		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Invalid sudo_approval_request", "")
+		return
+	}
+
 	sid, sidOK := sessionID(sudoApprovalReq.PID)
 	am.mu.Lock()
 	session, exists := am.lookupSessionLocked(sid, sidOK, sudoApprovalReq.PPID)
@@ -764,6 +779,12 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 
 	am.mu.Lock()
 	sudoRequest := am.findRequestLocked(response.RequestID)
+	if sudoRequest == nil {
+		am.mu.Unlock()
+		// Routine after an ending: its waiter already deregistered.
+		log.Debug().Str("request_id", response.RequestID).Msg("No pending sudo_approval request for response")
+		return fmt.Errorf("no pending sudo_approval request found for request_id: %s", response.RequestID)
+	}
 	if reason := am.mismatchLocked(response, sudoRequest); reason != "" {
 		am.mu.Unlock()
 		// A verdict for another request that used the same id (the id is the sudo
@@ -794,15 +815,9 @@ func (am *AuthManager) HandleSudoApprovalResponse(response SudoApprovalResponse)
 	// checked against is the one answered.
 	if sudoRequest != nil {
 		am.takeInstanceLocked(sudoRequest)
+		am.rememberEndedLocked(sudoRequest)
 	}
 	am.mu.Unlock()
-
-	if sudoRequest == nil {
-		// Routine after a timeout: the waiter already answered and deregistered.
-		log.Debug().Str("request_id", response.RequestID).Msg("No pending sudo_approval request for response")
-
-		return fmt.Errorf("no pending sudo_approval request found for request_id: %s", response.RequestID)
-	}
 
 	return am.deliverVerdict(sudoRequest, response)
 }
@@ -1042,7 +1057,7 @@ func (am *AuthManager) Stop() {
 // second response breaks it. Whoever removes the request from the map under
 // am.mu finalizes it, and nobody else may write to its connection. It always
 // denies—approvals arrive from the server and are answered by
-// HandleSudoApprovalResponse.
+// HandleSudoApprovalResponse. It records the ending before releasing am.mu.
 //
 // It reports whether it took the request. A false means someone else did, and
 // that taker's response may still be going out, so a caller holding the
@@ -1050,6 +1065,9 @@ func (am *AuthManager) Stop() {
 func (am *AuthManager) finalizeRequest(req *SudoRequest, reason string) bool {
 	am.mu.Lock()
 	taken := am.takeInstanceLocked(req)
+	if taken {
+		am.rememberEndedLocked(req)
+	}
 	am.mu.Unlock()
 
 	if !taken {
@@ -1093,13 +1111,7 @@ func (am *AuthManager) displaceRequestLocked(requestID string) *SudoRequest {
 	}
 	am.takeInstanceLocked(old)
 	old.displaced = true
-	if old.hold != nil {
-		am.rememberEndedHoldLocked(old.Request, old.hold)
-	} else {
-		// Its verdict may still come (its post may even be in flight), with
-		// the same id and session as the request that displaced it.
-		am.rememberDisplacedLocked(old.Request)
-	}
+	am.rememberEndedLocked(old)
 	return old
 }
 
@@ -1136,15 +1148,13 @@ func sameWait(a, b SudoApprovalRequest) bool {
 
 // takePendingRequestsLocked detaches a session's pending requests. They are then
 // beyond finalizeRequest's reach, so the taker owns answering them, which
-// denyPendingRequests does. A held one has its id guarded against the wait's
-// late verdict in the same critical section. Callers must hold am.mu.
+// denyPendingRequests does. Each request has its id guarded against a late
+// verdict in the same critical section. Callers must hold am.mu.
 func (am *AuthManager) takePendingRequestsLocked(session *SessionInfo) []*SudoRequest {
 	pending := slices.Collect(maps.Values(session.Requests))
 	clear(session.Requests)
 	for _, req := range pending {
-		if req.hold != nil {
-			am.rememberEndedHoldLocked(req.Request, req.hold)
-		}
+		am.rememberEndedLocked(req)
 	}
 	return pending
 }

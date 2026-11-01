@@ -292,7 +292,7 @@ func TestHandleSudoApprovalRequest_RetryFailureAnswersOnce(t *testing.T) {
 			Requests:  make(map[string]*SudoRequest),
 		}
 		data, err := json.Marshal(SudoApprovalRequest{
-			RequestID: "req-retry",
+			RequestID: "424242",
 			Type:      "sudo_approval",
 			Username:  "alice",
 			PID:       424242,
@@ -305,7 +305,7 @@ func TestHandleSudoApprovalRequest_RetryFailureAnswersOnce(t *testing.T) {
 		go am.handleSudoApprovalRequest(data, server)
 
 		want := SudoApprovalResponse{
-			RequestID:    "req-retry",
+			RequestID:    "424242",
 			Type:         "sudo_approval_response",
 			Username:     "alice",
 			PID:          424242,
@@ -316,7 +316,7 @@ func TestHandleSudoApprovalRequest_RetryFailureAnswersOnce(t *testing.T) {
 			Reason:       "Communication error",
 		}
 		assert.Equal(t, want, expectSingleResponse(t, client))
-		assert.NotContains(t, am.pidToSessionMap[4200].Requests, "req-retry", "request was not deregistered")
+		assert.NotContains(t, am.pidToSessionMap[4200].Requests, "424242", "request was not deregistered")
 	})
 }
 
@@ -326,7 +326,7 @@ func TestHandleSudoApprovalRequest_LocalSudoRegistersNothing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		am := newTestAuthManager()
 		data, err := json.Marshal(SudoApprovalRequest{
-			RequestID: "req-local",
+			RequestID: "999999",
 			Type:      "sudo_approval",
 			Username:  "alice",
 			PID:       999999,
@@ -566,7 +566,7 @@ func TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse(t *testing.T) {
 	}
 
 	data, err := json.Marshal(SudoApprovalRequest{
-		RequestID: "req-shutdown",
+		RequestID: "424242",
 		Type:      "sudo_approval",
 		Username:  "alice",
 		PID:       424242,
@@ -596,7 +596,7 @@ func TestHandleSudoApprovalRequest_ShutdownWaitsForTakenResponse(t *testing.T) {
 
 	go func() {
 		_ = am.HandleSudoApprovalResponse(SudoApprovalResponse{
-			RequestID: "req-shutdown",
+			RequestID: "424242",
 			Type:      "sudo_approval_response",
 			Username:  "alice",
 			SessionID: "sess-shutdown",
@@ -747,7 +747,7 @@ func TestHandleSudoApprovalRequest_RetryFailureWaitsForTakenResponse(t *testing.
 	}
 
 	data, err := json.Marshal(SudoApprovalRequest{
-		RequestID: "req-retry-taken",
+		RequestID: "424242",
 		Type:      "sudo_approval",
 		Username:  "alice",
 		PID:       424242,
