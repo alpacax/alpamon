@@ -489,8 +489,6 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 		log.Debug().Err(err).Msg("Failed to dial session target.")
 		return
 	}
-	defer func() { _ = targetConn.Close() }()
-
 	log.Debug().Msg("Session target dialed.")
 
 	dataReader := tc.buildDataReader(bufReader, stream)
