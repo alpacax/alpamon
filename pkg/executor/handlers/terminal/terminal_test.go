@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
@@ -189,7 +191,7 @@ func TestTerminalHandler_OpenFTPValidatesGroup(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, 1, code)
 			if tt.wantError == "" {
-				assert.Contains(t, output, "Failed to prepare TLS settings", "an accepted group must reach worker setup")
+				assert.Contains(t, output, "Failed to prepare connection settings", "an accepted group must reach worker setup")
 			} else {
 				assert.Contains(t, output, tt.wantError)
 			}
@@ -198,4 +200,33 @@ func TestTerminalHandler_OpenFTPValidatesGroup(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFTPWorkerEnvironment(t *testing.T) {
+	t.Setenv("PLUGIN_KEY", "synthetic-value")
+	t.Setenv("HTTP_PROXY", "http://review:synthetic-value@proxy.invalid")
+	t.Setenv("HOME", "/agent")
+	t.Setenv("LC_TIME", "C")
+	t.Setenv("SSL_CERT_FILE", "/agent/roots.pem")
+	t.Setenv("SSL_CERT_DIR", "/agent/roots:/other/roots")
+	t.Setenv("UNRELATED_SETTING", "excluded")
+	cmd := ftpWorkerCommand("/bin/sh", "/home/session", "session", []string{"-c", `printf '%s|%s|%s|%s|%s' "$HOME" "$USER" "$LOGNAME" "$LC_TIME" "$PLUGIN_KEY"`})
+	if runtime.GOOS == "windows" {
+		assert.Contains(t, cmd.Env, "HOME=/agent")
+		assert.Contains(t, cmd.Env, "HTTP_PROXY=http://review:synthetic-value@proxy.invalid")
+		for _, entry := range cmd.Env {
+			assert.False(t, strings.HasPrefix(strings.ToUpper(entry), "PLUGIN_"))
+		}
+		return
+	}
+	for _, entry := range cmd.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		assert.True(t, key == "SSL_CERT_FILE" || key == "SSL_CERT_DIR" || key == "HOME" || key == "USER" || key == "LOGNAME" || key == "PATH" || key == "LANG" || strings.HasPrefix(key, "LC_"), "unexpected variable %s", key)
+	}
+	assert.Contains(t, cmd.Env, "SSL_CERT_FILE=/agent/roots.pem")
+	assert.Contains(t, cmd.Env, "SSL_CERT_DIR=/agent/roots:/other/roots")
+	assert.Contains(t, cmd.Env, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	output, err := cmd.Output()
+	require.NoError(t, err)
+	assert.Equal(t, "/home/session|session|session|C|", string(output))
 }

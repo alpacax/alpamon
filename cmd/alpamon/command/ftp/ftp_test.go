@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"math/big"
@@ -53,6 +54,7 @@ func TestConfigData_VerifiesByDefault(t *testing.T) {
 	assert.Equal(t, "/home/u", data.HomeDirectory)
 	assert.False(t, data.SkipSSLVerify)
 	assert.Empty(t, data.CaCertPEM)
+	assert.True(t, data.Connection.UseEnvironment)
 }
 
 func TestConfigData_ReadsWhatTheAgentPasses(t *testing.T) {
@@ -74,16 +76,21 @@ func TestConfigData_ReadsWhatTheAgentPasses(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := runner.FtpWorkerArgs("wss://console.example.com/ws/ftp/", "https://console.example.com", "-home", tc.sslVerify, tc.caPEM != nil)
+			args := runner.FtpWorkerArgs("https://console.example.com", "-home", tc.sslVerify)
 			require.Equal(t, "ftp", args[0])
+			assert.NotContains(t, strings.Join(args, " "), "wss://console.example.com/ws/ftp/")
 
-			data, err := parseWorkerArgs(t, args[1:], bytes.NewReader(tc.caPEM))
+			payload, err := json.Marshal(runner.FtpWorkerConfig{URL: "wss://console.example.com/ws/ftp/", CaCertPEM: tc.caPEM, Connection: runner.FtpConnectionConfig{ProxyURL: "http://user:pass@proxy:3128"}})
+			require.NoError(t, err)
+			data, err := parseWorkerArgs(t, args[1:], bytes.NewReader(payload))
 			require.NoError(t, err)
 			assert.Equal(t, "wss://console.example.com/ws/ftp/", data.URL)
 			assert.Equal(t, "https://console.example.com", data.ServerURL)
 			assert.Equal(t, "-home", data.HomeDirectory)
 			assert.Equal(t, !tc.sslVerify, data.SkipSSLVerify)
 			assert.Equal(t, tc.caPEM, data.CaCertPEM)
+			assert.Equal(t, "http://user:pass@proxy:3128", data.Connection.ProxyURL)
+			assert.False(t, data.Connection.UseEnvironment)
 		})
 	}
 }
@@ -94,14 +101,53 @@ func TestConfigData_RefusesABadCAOnStdin(t *testing.T) {
 		stdin   []byte
 		wantErr string
 	}{
-		{name: "empty", stdin: nil, wantErr: "no CA certificate"},
-		{name: "over the cap", stdin: make([]byte, runner.MaxFtpCACertSize+1), wantErr: "larger than"},
+		{name: "empty", stdin: nil, wantErr: "no worker configuration"},
+		{name: "over the cap", stdin: make([]byte, 2*runner.MaxFtpCACertSize+1), wantErr: "larger than"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := runner.FtpWorkerArgs("wss://console.example.com/ws/ftp/", "https://console.example.com", "/home/u", true, true)
+			args := runner.FtpWorkerArgs("https://console.example.com", "/home/u", true)
 			_, err := parseWorkerArgs(t, args[1:], bytes.NewReader(tc.stdin))
 			assert.ErrorContains(t, err, tc.wantErr)
 		})
 	}
+}
+
+func TestConfigDataAcceptsPreviousPEMFormat(t *testing.T) {
+	cert := append([]byte("  # configured roots\n"), testCertPEM(t)...)
+	args := []string{"ftp", "--ca-cert-stdin", "--", "wss://console.invalid/ws/ftp/", "https://console.invalid", "/home/u"}
+	data, err := parseWorkerArgs(t, args[1:], bytes.NewReader(cert))
+	require.NoError(t, err)
+	assert.Equal(t, cert, data.CaCertPEM)
+	client := runner.NewFtpClient(data)
+	require.NotNil(t, client, "a commented PEM bundle must be accepted by the worker")
+}
+
+type closingInput struct {
+	io.Reader
+	closed bool
+}
+
+func (r *closingInput) Close() error { r.closed = true; return nil }
+
+func TestConfigDataClosesMalformedInput(t *testing.T) {
+	input := &closingInput{Reader: strings.NewReader("{malformed")}
+	args := runner.FtpWorkerArgs("https://console.invalid", "/home/u", true)
+	_, err := parseWorkerArgs(t, args[1:], input)
+	assert.ErrorContains(t, err, "invalid worker configuration")
+	assert.True(t, input.closed)
+}
+
+func TestConfigDataAcceptsPreviousJSONFormat(t *testing.T) {
+	payload := []byte(`{"Connection":{}}`)
+	args := []string{"--ca-cert-stdin", "--", "wss://console.invalid/session", "https://console.invalid", "/home/u"}
+	data, err := parseWorkerArgs(t, args, bytes.NewReader(payload))
+	require.NoError(t, err)
+	assert.Equal(t, "wss://console.invalid/session", data.URL)
+}
+
+func TestConfigDataRejectsURLArgumentWithCurrentPayload(t *testing.T) {
+	args := []string{"--ca-cert-stdin", "--", "wss://console.invalid/argv", "https://console.invalid", "/home/u"}
+	_, err := parseWorkerArgs(t, args, strings.NewReader(`{"URL":"wss://console.invalid/stdin"}`))
+	assert.ErrorContains(t, err, "invalid worker configuration arguments")
 }

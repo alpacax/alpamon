@@ -504,6 +504,9 @@ jobs:
             "GOCACHE=$RUNNER_TEMP/gocache-root" \
             go test -v ./pkg/runner -p 1 -count=1 \
             -run 'TestEditorDarwinRoot|TestTunnelDaemonCredential_Root|WhenRoot'
+          sudo env "PATH=$PATH" "GOPATH=$(go env GOPATH)" "GOMODCACHE=$(go env GOMODCACHE)" \
+            "GOCACHE=$RUNNER_TEMP/gocache-root" \
+            go test -v ./pkg/executor/handlers/file -p 1 -count=1 -run '^TestRootOnly_'
 
   # The aggregate check. Every job above is matrixed or platform-specific, so
   # each reports under a name carrying its distro, and those names change

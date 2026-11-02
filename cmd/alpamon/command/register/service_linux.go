@@ -64,7 +64,7 @@ func startService() error {
 		return fmt.Errorf("failed to open log file %s: %w", logPath, err)
 	}
 
-	cmd := exec.Command(alpamonBinPath)
+	cmd := backgroundAgentCommand(alpamonBinPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -116,4 +116,10 @@ func removeService() error {
 		_, _ = exec.Command("systemctl", "disable", "alpamon.service").CombinedOutput()
 	}
 	return nil
+}
+
+func backgroundAgentCommand(executable string) *exec.Cmd {
+	cmd := exec.Command(executable)
+	cmd.Env = utils.WithoutPluginEnvironment()
+	return cmd
 }

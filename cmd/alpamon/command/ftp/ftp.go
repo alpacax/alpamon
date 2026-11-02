@@ -1,6 +1,8 @@
 package ftp
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -15,48 +17,79 @@ var FtpCmd = newFtpCmd()
 
 func newFtpCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "ftp [flags] <url> <serverURL> <homeDirectory>",
+		Use:   "ftp [flags] <serverURL> <homeDirectory>",
 		Short: "Start worker for Web FTP",
-		Args:  cobra.ExactArgs(3),
+		Args:  cobra.RangeArgs(2, 3),
 		Run: func(cmd *cobra.Command, args []string) {
 			data, err := configData(cmd, args, os.Stdin)
 			if err != nil {
-				log.Error().Err(err).Msg("FTP worker aborting: invalid TLS settings")
+				log.Error().Err(err).Msg("FTP worker aborting: invalid worker configuration")
 				os.Exit(1)
 			}
 			RunFtpWorker(data)
 		},
 	}
 	cmd.Flags().Bool(runner.FtpSSLVerifyFlag, true, "verify the server certificate")
-	cmd.Flags().Bool(runner.FtpCACertStdinFlag, false, "read the CA certificate from standard input")
+	cmd.Flags().Bool(runner.FtpCACertStdinFlag, false, "read worker connection settings from standard input")
 	return cmd
 }
 
 // configData reads the worker's arguments. The worker does not load the
-// agent's configuration, so the agent passes its SSL verify setting as a flag
-// and its CA certificate, by content, on stdin.
+// agent's configuration, so the agent passes its connection settings on stdin.
 func configData(cmd *cobra.Command, args []string, stdin io.Reader) (runner.FtpConfigData, error) {
 	sslVerify, _ := cmd.Flags().GetBool(runner.FtpSSLVerifyFlag)
 	caOnStdin, _ := cmd.Flags().GetBool(runner.FtpCACertStdinFlag)
 
-	var caCertPEM []byte
+	legacy := !caOnStdin
+	var settings runner.FtpWorkerConfig
+	settings.Connection.UseEnvironment = !caOnStdin
 	if caOnStdin {
-		data, err := runner.ReadCACertLimited(stdin)
+		data, err := io.ReadAll(io.LimitReader(stdin, 2*runner.MaxFtpCACertSize+1))
+		if closer, ok := stdin.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		// The payload can carry proxy credentials; drop the raw copy once parsed.
+		defer clear(data)
 		if err != nil {
 			return runner.FtpConfigData{}, err
 		}
-		if len(data) == 0 {
-			return runner.FtpConfigData{}, errors.New("no CA certificate on stdin")
+		if len(data) > 2*runner.MaxFtpCACertSize {
+			return runner.FtpConfigData{}, errors.New("worker configuration larger than limit")
 		}
-		caCertPEM = data
+		if len(data) == 0 {
+			return runner.FtpConfigData{}, errors.New("no worker configuration on stdin")
+		}
+		if bytes.HasPrefix(bytes.TrimSpace(data), []byte("{")) {
+			if err := json.Unmarshal(data, &settings); err != nil {
+				return runner.FtpConfigData{}, errors.New("invalid worker configuration on stdin")
+			}
+			legacy = settings.URL == ""
+		} else {
+			legacy = true
+			settings.CaCertPEM = bytes.Clone(data)
+			settings.Connection.UseEnvironment = true
+		}
+		if len(settings.CaCertPEM) > runner.MaxFtpCACertSize {
+			return runner.FtpConfigData{}, errors.New("CA certificate larger than limit")
+		}
+	}
+	if legacy {
+		if len(args) != 3 {
+			return runner.FtpConfigData{}, errors.New("previous worker format requires a session URL argument")
+		}
+		settings.URL = args[0]
+		args = args[1:]
+	} else if len(args) != 2 || settings.URL == "" {
+		return runner.FtpConfigData{}, errors.New("invalid worker configuration arguments")
 	}
 	return runner.FtpConfigData{
-		URL:           args[0],
-		ServerURL:     args[1],
-		HomeDirectory: args[2],
+		URL:           settings.URL,
+		ServerURL:     args[0],
+		HomeDirectory: args[1],
 		Logger:        logger.NewFtpLogger(),
 		SkipSSLVerify: !sslVerify,
-		CaCertPEM:     caCertPEM,
+		CaCertPEM:     settings.CaCertPEM,
+		Connection:    settings.Connection,
 	}, nil
 }
 
