@@ -64,15 +64,6 @@ func waitRelayDone(t *testing.T, done <-chan struct{}) {
 	}
 }
 
-func relayDone(done <-chan struct{}) bool {
-	select {
-	case <-done:
-		return true
-	default:
-		return false
-	}
-}
-
 // smuxPair returns a stream and its peer over an in-memory session using the tunnel's smux config.
 func smuxPair(t *testing.T) (*smux.Stream, *smux.Stream) {
 	t.Helper()
@@ -129,7 +120,7 @@ func TestCloseWriteSide(t *testing.T) {
 		// Server sees EOF on read...
 		buf := make([]byte, 1)
 		_, err := server.Read(buf)
-		assert.Equal(t, io.EOF, err)
+		assert.ErrorIs(t, err, io.EOF)
 
 		// ...but the reverse direction still works.
 		_, err = server.Write([]byte("x"))
@@ -172,7 +163,7 @@ func TestRelayBidirectionalClosesBusyTargetAtBoundAfterPeerCloses(t *testing.T) 
 	peer, service, done := startClientRelay(t, 200*time.Millisecond)
 
 	require.NoError(t, peer.Close())
-	assert.Equal(t, "", readAllWithin(t, service))
+	assert.Empty(t, readAllWithin(t, service))
 
 	writeErr := make(chan error, 1)
 	go func() {
@@ -200,11 +191,11 @@ func TestRelayBidirectionalClosesQuietTargetAtBoundAfterPeerCloses(t *testing.T)
 		require.NoError(t, peer.Close())
 		time.Sleep(time.Minute - time.Millisecond)
 		synctest.Wait()
-		require.False(t, relayDone(done), "relay closed before its bound")
+		require.False(t, isClosed(done), "relay closed before its bound")
 
 		time.Sleep(2 * time.Millisecond)
 		synctest.Wait()
-		require.True(t, relayDone(done), "relay outlived its bound")
+		require.True(t, isClosed(done), "relay outlived its bound")
 		data, err := io.ReadAll(service)
 		require.NoError(t, err)
 		assert.Empty(t, data)
@@ -240,7 +231,7 @@ func TestRelayBidirectionalReturnsAtBoundWhileAWriteIsStalled(t *testing.T) {
 		time.Sleep(time.Minute + time.Millisecond)
 		synctest.Wait()
 
-		require.True(t, relayDone(done), "relay waited past its bound on a stalled write")
+		require.True(t, isClosed(done), "relay waited past its bound on a stalled write")
 		close(stream.drained)
 	})
 }
@@ -251,7 +242,7 @@ func TestRelayBidirectionalKeepsOpenRelayPastBoundUntilADirectionEnds(t *testing
 
 		time.Sleep(2 * time.Minute)
 		synctest.Wait()
-		require.False(t, relayDone(done), "relay closed while both directions were open")
+		require.False(t, isClosed(done), "relay closed while both directions were open")
 
 		go func() { _, _ = peer.Write([]byte("ping")) }()
 		buf := make([]byte, 4)
@@ -262,7 +253,7 @@ func TestRelayBidirectionalKeepsOpenRelayPastBoundUntilADirectionEnds(t *testing
 		require.NoError(t, peer.Close())
 		time.Sleep(time.Minute - time.Millisecond)
 		synctest.Wait()
-		require.False(t, relayDone(done), "relay cut the remaining direction before its bound")
+		require.False(t, isClosed(done), "relay cut the remaining direction before its bound")
 		_ = service.Close()
 		<-done
 	})
@@ -275,5 +266,5 @@ func TestRelayBidirectionalEndsBothDirectionsOnCopyError(t *testing.T) {
 	require.NoError(t, service.Close())
 
 	waitRelayDone(t, done)
-	assert.Equal(t, "", readAllWithin(t, peer))
+	assert.Empty(t, readAllWithin(t, peer))
 }

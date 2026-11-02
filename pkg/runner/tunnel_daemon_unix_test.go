@@ -91,5 +91,5 @@ func TestHandleDaemonConnectionEndsBothDirectionsOnCopyError(t *testing.T) {
 	require.NoError(t, target.Close())
 
 	waitRelayDone(t, done)
-	assert.Equal(t, "", readAllWithin(t, mainSide))
+	assert.Empty(t, readAllWithin(t, mainSide))
 }

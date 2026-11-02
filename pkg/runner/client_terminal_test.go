@@ -15,7 +15,7 @@ func newTerminalTestClient() *WebsocketClient {
 	}
 }
 
-func isClosed(ch chan struct{}) bool {
+func isClosed(ch <-chan struct{}) bool {
 	select {
 	case <-ch:
 		return true
