@@ -154,10 +154,12 @@ func TestEditorStreamsUsePrivateSocket(t *testing.T) {
 				response, err := io.ReadAll(stream)
 				require.NoError(t, err)
 				assert.Contains(t, string(response), `"status":"ready"`)
+				require.NoError(t, stream.Close())
 			} else {
 				_, err = io.WriteString(stream, "editor request\n")
 				require.NoError(t, err)
-				request, err := bufio.NewReader(conn).ReadString('\n')
+				target := bufio.NewReader(conn)
+				request, err := target.ReadString('\n')
 				require.NoError(t, err)
 				assert.Equal(t, "editor request\n", request, "no TCP daemon target header may reach code-server")
 				_, err = io.WriteString(conn, "editor response\n")
@@ -165,8 +167,12 @@ func TestEditorStreamsUsePrivateSocket(t *testing.T) {
 				response, err := bufio.NewReader(stream).ReadString('\n')
 				require.NoError(t, err)
 				assert.Equal(t, "editor response\n", response)
+				require.NoError(t, stream.Close())
+				rest, err := io.ReadAll(target) // the stream's FIN reaches code-server as EOF
+				require.NoError(t, err)
+				assert.Empty(t, rest)
 			}
-			require.NoError(t, stream.Close())
+			require.NoError(t, conn.Close())
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):
@@ -336,6 +342,10 @@ func TestCLIStreamRelaysMatchingSessionPort(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "response\n", response)
 	require.NoError(t, stream.Close())
+	rest, err := io.ReadAll(reader) // the stream's FIN reaches the daemon as EOF
+	require.NoError(t, err)
+	assert.Empty(t, rest)
+	require.NoError(t, conn.Close())
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
