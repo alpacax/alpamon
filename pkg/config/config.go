@@ -50,9 +50,9 @@ const (
 	DefaultEditorIdleTimeout = 60 // minutes
 )
 
-// DefaultAIServerURL is the signer whose public key verifies commands. It has no
-// config key; a local build points it at a local signer with -ldflags -X (see CLAUDE.md).
-var DefaultAIServerURL = "https://alpacon.ai"
+// defaultAIServerURL is the AI server, the command signer whose public key verifies
+// commands. Like the mode above, no config key changes it; only a build can (-ldflags -X, see CLAUDE.md).
+var defaultAIServerURL = "https://alpacon.ai"
 
 // GetSmuxConfig returns optimized smux configuration for tunnel connections.
 func GetSmuxConfig() *smux.Config {
@@ -141,7 +141,7 @@ func validateConfig(config Config, wsPath string, controlWsPath string) (bool, S
 		PoolQueueSize:      DefaultPoolQueueSize,
 		PoolDefaultTimeout: DefaultPoolDefaultTimeout,
 		EditorIdleTimeout:  DefaultEditorIdleTimeout,
-		AIServerURL:        DefaultAIServerURL,
+		AIServerURL:        defaultAIServerURL,
 		SigningMode:        DefaultSigningMode,
 		KeyRefreshSecs:     DefaultKeyRefreshSecs,
 	}
