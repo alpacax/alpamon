@@ -178,3 +178,34 @@ func TestParseCommandData_NoTargetKeepsLegacyUpgrade(t *testing.T) {
 		})
 	}
 }
+
+// TestParseCommandData_ManagedGroupnames pins the signal moduser branches on:
+// an absent managed_groupnames must stay nil (legacy whole-list replace), and
+// an empty list must stay non-nil (reconcile mode with nothing managed).
+func TestParseCommandData_ManagedGroupnames(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantNil bool
+		want    []string
+	}{
+		{name: "absent", data: `{"groupnames": ["alpacon"]}`, wantNil: true},
+		{name: "empty", data: `{"groupnames": ["alpacon"], "managed_groupnames": []}`, want: []string{}},
+		{name: "listed", data: `{"groupnames": ["alpacon"], "managed_groupnames": ["alpacon", "devs"]}`, want: []string{"alpacon", "devs"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &Command{Shell: "internal", Line: "moduser testuser", Data: tt.data}
+
+			parsed, err := cmd.ParseCommandData()
+			require.NoError(t, err)
+			args := parsed.ToArgs()
+			if tt.wantNil {
+				assert.Nil(t, args.ManagedGroupnames)
+				return
+			}
+			require.NotNil(t, args.ManagedGroupnames)
+			assert.Equal(t, tt.want, args.ManagedGroupnames)
+		})
+	}
+}

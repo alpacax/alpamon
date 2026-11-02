@@ -232,3 +232,34 @@ func ReconcileGroupCreate(
 	}
 	return code, out, cmdErr
 }
+
+// SupplementaryGroupsFunc lists a user's supplementary group names.
+type SupplementaryGroupsFunc func(username string) ([]string, error)
+
+// DefaultSupplementaryGroups lists the groups username is a member of, minus
+// its primary group: the set `usermod -G` replaces. The CGO_ENABLED=0 caveat of
+// DefaultUserLookup applies, so it reads /etc/passwd and /etc/group only—the
+// same local files usermod edits, so a directory-backed membership it cannot
+// see is also one usermod would not touch.
+func DefaultSupplementaryGroups(username string) ([]string, error) {
+	u, err := user.Lookup(username)
+	if err != nil {
+		return nil, err
+	}
+	gids, err := u.GroupIds()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(gids))
+	for _, gid := range gids {
+		if gid == u.Gid {
+			continue
+		}
+		g, err := user.LookupGroupId(gid)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, g.Name)
+	}
+	return names, nil
+}
