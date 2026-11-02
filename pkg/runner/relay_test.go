@@ -99,16 +99,17 @@ func startClientRelay(t *testing.T, bound time.Duration) (*smux.Stream, *net.TCP
 }
 
 // startPipeRelay relays two net.Pipe pairs, whose deadlines follow the synctest clock, and returns
-// the peer's end, the target service's end, and a done channel.
-func startPipeRelay(bound time.Duration) (net.Conn, net.Conn, <-chan struct{}) {
+// the peer's end, the target service's end, a done channel, and the relay's cut, set before done closes.
+func startPipeRelay(bound time.Duration) (net.Conn, net.Conn, <-chan struct{}, *bool) {
 	agentStream, peer := net.Pipe()
 	agentTarget, service := net.Pipe()
 	done := make(chan struct{})
+	cut := new(bool)
 	go func() {
-		relayBidirectional(agentStream, agentStream, agentTarget, agentTarget, bound)
+		*cut = relayBidirectional(agentStream, agentStream, agentTarget, agentTarget, bound)
 		close(done)
 	}()
-	return peer, service, done
+	return peer, service, done, cut
 }
 
 func TestCloseWriteSide(t *testing.T) {
@@ -186,7 +187,7 @@ func TestRelayBidirectionalClosesBusyTargetAtBoundAfterPeerCloses(t *testing.T) 
 
 func TestRelayBidirectionalClosesQuietTargetAtBoundAfterPeerCloses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		peer, service, done := startPipeRelay(time.Minute)
+		peer, service, done, cut := startPipeRelay(time.Minute)
 
 		require.NoError(t, peer.Close())
 		time.Sleep(time.Minute - time.Millisecond)
@@ -196,6 +197,7 @@ func TestRelayBidirectionalClosesQuietTargetAtBoundAfterPeerCloses(t *testing.T)
 		time.Sleep(2 * time.Millisecond)
 		synctest.Wait()
 		require.True(t, isClosed(done), "relay outlived its bound")
+		assert.True(t, *cut, "relay must report the cut")
 		data, err := io.ReadAll(service)
 		require.NoError(t, err)
 		assert.Empty(t, data)
@@ -238,7 +240,7 @@ func TestRelayBidirectionalReturnsAtBoundWhileAWriteIsStalled(t *testing.T) {
 
 func TestRelayBidirectionalKeepsOpenRelayPastBoundUntilADirectionEnds(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		peer, service, done := startPipeRelay(time.Minute)
+		peer, service, done, cut := startPipeRelay(time.Minute)
 
 		time.Sleep(2 * time.Minute)
 		synctest.Wait()
@@ -256,6 +258,7 @@ func TestRelayBidirectionalKeepsOpenRelayPastBoundUntilADirectionEnds(t *testing
 		require.False(t, isClosed(done), "relay cut the remaining direction before its bound")
 		_ = service.Close()
 		<-done
+		assert.False(t, *cut, "a direction that ended before the bound is not a cut")
 	})
 }
 

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/tunnel"
-	"github.com/rs/zerolog/log"
 )
 
 // halfCloseTimeout caps the direction left open after the other ends cleanly. A reader gets the same
@@ -14,8 +13,8 @@ import (
 const halfCloseTimeout = 5 * time.Minute
 
 // relayBidirectional copies fromA to b and fromB to a, then closes both before returning. fromA and
-// fromB read a and b, after any bytes already buffered off them.
-func relayBidirectional(a net.Conn, fromA io.Reader, b net.Conn, fromB io.Reader, bound time.Duration) {
+// fromB read a and b, after any bytes already buffered off them. cut reports that the bound ended it.
+func relayBidirectional(a net.Conn, fromA io.Reader, b net.Conn, fromB io.Reader, bound time.Duration) (cut bool) {
 	errChan := make(chan error, 2)
 	pipe := func(dst net.Conn, src io.Reader) {
 		_, err := tunnel.CopyBuffered(dst, src)
@@ -28,18 +27,17 @@ func relayBidirectional(a net.Conn, fromA io.Reader, b net.Conn, fromB io.Reader
 	go pipe(a, fromB)
 
 	if <-errChan == nil { // the other direction gets bound to finish
-		timer := time.NewTimer(bound)
-		defer timer.Stop()
 		select {
 		case <-errChan:
-		case <-timer.C:
-			log.Info().Dur("bound", bound).Msg("Relay closed a half-closed connection at its time bound.")
+		case <-time.After(bound):
+			cut = true
 		}
 	}
 	// Closing ends the other copy, except a smux v1 Write already queued on a stalled session, which
 	// ignores later deadlines and closes; the relay returns without waiting for it.
 	_ = a.Close()
 	_ = b.Close()
+	return cut
 }
 
 // closeWriteSide signals EOF to the peer through conn's CloseWrite; a conn without one is left alone.

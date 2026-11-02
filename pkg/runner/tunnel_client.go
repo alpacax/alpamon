@@ -494,7 +494,10 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 	log.Debug().Msg("Session target dialed.")
 
 	dataReader := tc.buildDataReader(bufReader, stream)
-	relayBidirectional(stream, dataReader, targetConn, targetConn, halfCloseTimeout)
+	if relayBidirectional(stream, dataReader, targetConn, targetConn, halfCloseTimeout) {
+		log.Info().Str("session_id", tc.sessionID).Int("target_port", targetPort).Dur("bound", halfCloseTimeout).
+			Msg("Relay closed a half-closed connection at its time bound.")
+	}
 
 	log.Debug().Msg("Tunnel stream closed.")
 }
