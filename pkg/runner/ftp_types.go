@@ -228,10 +228,10 @@ const FtpCACertStdinFlag = "ca-cert-stdin"
 const MaxFtpCACertSize = 1 << 20 // 1 MiB
 
 // FtpWorkerArgs returns the arguments that start the ftp worker for a session.
-func FtpWorkerArgs(url, serverURL, homeDirectory string, sslVerify bool) []string {
+func FtpWorkerArgs(serverURL, homeDirectory string, sslVerify bool) []string {
 	args := []string{"ftp", "--" + FtpSSLVerifyFlag + "=" + strconv.FormatBool(sslVerify)}
 	args = append(args, "--"+FtpCACertStdinFlag)
-	return append(args, "--", url, serverURL, homeDirectory)
+	return append(args, "--", serverURL, homeDirectory)
 }
 
 // ReadFtpCACert reads the CA certificate at caCert for the ftp worker. An empty
@@ -268,6 +268,7 @@ type FtpConnectionConfig struct {
 
 // FtpWorkerConfig is the private stdin payload shared by the agent and worker.
 type FtpWorkerConfig struct {
+	URL        string
 	CaCertPEM  []byte
 	Connection FtpConnectionConfig
 }
@@ -278,6 +279,7 @@ var ErrFtpProxyConfig = errors.New("invalid proxy configuration")
 // PrepareFtpWorkerConfig resolves connection settings before the worker is demoted.
 func PrepareFtpWorkerConfig(target, caCert string) (FtpWorkerConfig, error) {
 	var settings FtpWorkerConfig
+	settings.URL = target
 	resolved, err := resolveWebSocketURL(target, config.GlobalSettings.ServerURL)
 	if err != nil {
 		return settings, fmt.Errorf("invalid session URL: %w", err)

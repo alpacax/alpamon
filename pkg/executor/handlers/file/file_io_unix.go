@@ -11,10 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
+
+var fileHelperCommand = exec.CommandContext
 
 // errCapReader records the last non-EOF read error so it survives broken-pipe overwrites.
 type errCapReader struct {
@@ -48,9 +51,9 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 	if err != nil {
 		return nil, 0, err
 	}
-	cmd := exec.CommandContext(ctx, "cat", path)
+	cmd := fileHelperCommand(ctx, "/bin/cat", path)
 	cmd.SysProcAttr = sysProcAttr
-	cmd.Env, err = utils.ProcessChildEnvironment(sysProcAttr)
+	cmd.Env, err = fileHelperEnvironment(sysProcAttr)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -88,14 +91,19 @@ func firstMissingAncestor(dir string) string {
 // context.WithoutCancel is deliberate--context cancellation is one of the ways this cleanup
 // path is reached, and the removal must still run even after ctx is done.
 func removeAsRequester(ctx context.Context, path string, sysProcAttr *syscall.SysProcAttr) {
-	cmd := exec.CommandContext(context.WithoutCancel(ctx), "rm", "-f", path)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	cmd := fileHelperCommand(ctx, "/bin/rm", "-f", path)
 	cmd.SysProcAttr = sysProcAttr
-	env, err := utils.ProcessChildEnvironment(sysProcAttr)
+	env, err := fileHelperEnvironment(sysProcAttr)
 	if err != nil {
 		return
 	}
 	cmd.Env = env
 	_ = cmd.Run()
+	if ctx.Err() != nil {
+		log.Warn().Err(ctx.Err()).Msg("File removal timed out")
+	}
 }
 
 // removeCreatedDirsAsRequester walks from parentDir up to createdRoot, running a
@@ -108,19 +116,25 @@ func removeCreatedDirsAsRequester(ctx context.Context, parentDir, createdRoot st
 	if createdRoot == "" || !filepath.IsAbs(parentDir) {
 		return
 	}
-	env, err := utils.ProcessChildEnvironment(sysProcAttr)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	env, err := fileHelperEnvironment(sysProcAttr)
 	if err != nil {
 		log.Warn().Err(err).Str("path", parentDir).Msg("Skipped cleanup after failed write: cannot resolve the requester's environment")
 		return
 	}
 	for dir := parentDir; ; dir = filepath.Dir(dir) {
-		cmd := exec.CommandContext(context.WithoutCancel(ctx), "rmdir", "--", dir)
+		cmd := fileHelperCommand(ctx, "/bin/rmdir", "--", dir)
 		cmd.SysProcAttr = sysProcAttr
 		cmd.Env = env
 		if output, err := cmd.CombinedOutput(); err != nil {
+			if ctx.Err() != nil {
+				log.Warn().Err(ctx.Err()).Msg("Directory cleanup timed out")
+				return
+			}
 			// Check as the requester without depending on localized rmdir messages.
 			// Include -L so a dangling symlink is not treated as an absent directory.
-			check := exec.CommandContext(context.WithoutCancel(ctx), "sh", "-c", `! test -e "$1" && ! test -L "$1" || exit 1
+			check := fileHelperCommand(ctx, "/bin/sh", "-c", `! test -e "$1" && ! test -L "$1" || exit 1
 parent=${1%/*}
 while test -n "$parent"; do
   if test -e "$parent" || test -L "$parent"; then
@@ -131,6 +145,10 @@ done`, "sh", dir)
 			check.SysProcAttr = sysProcAttr
 			check.Env = env
 			if check.Run() != nil {
+				if ctx.Err() != nil {
+					log.Warn().Err(ctx.Err()).Msg("Directory cleanup timed out")
+					return
+				}
 				log.Warn().Err(err).Str("path", dir).Str("output", strings.TrimSpace(string(output))).Msg("Failed to remove directory after failed write")
 				return
 			}
@@ -179,9 +197,9 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 			utils.Quote(parentDir), utils.Quote(path), utils.Quote(path))
 	}
 	// Create parents as the requesting user to preserve filesystem permissions.
-	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd := fileHelperCommand(ctx, "/bin/sh", "-c", script)
 	cmd.SysProcAttr = sysProcAttr
-	env, err := utils.ProcessChildEnvironment(sysProcAttr)
+	env, err := fileHelperEnvironment(sysProcAttr)
 	if err != nil {
 		return err
 	}
@@ -225,4 +243,16 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		return fmt.Errorf("failed to read source: %w", erc.err)
 	}
 	return nil
+}
+
+// fileHelperEnvironment pins PATH to the system directories, so the mkdir, tee and rm
+// that file helper scripts call by name resolve only there.
+func fileHelperEnvironment(attr *syscall.SysProcAttr) ([]string, error) {
+	env, err := utils.ProcessChildEnvironment(attr)
+	for i, entry := range env {
+		if strings.HasPrefix(entry, "PATH=") {
+			env[i] = "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+		}
+	}
+	return env, err
 }

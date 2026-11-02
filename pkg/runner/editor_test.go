@@ -33,7 +33,6 @@ func TestEditorDarwinNonRootKeepsCurrentUser(t *testing.T) {
 		{current.Username, "alpacon"},
 		{current.Username, "account"},
 		{current.Username, ""},
-		{"nobody", "nogroup"}, // another account still runs as the current user
 	}
 	for _, tc := range cases {
 		t.Run(tc.username+"/"+tc.groupname, func(t *testing.T) {
@@ -243,4 +242,17 @@ func TestEditorProxyCredentialNotInherited(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEditorNonRootRefusesAnotherAccount(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("non-root agent behavior")
+	}
+	current, err := user.LookupId(strconv.Itoa(os.Geteuid()))
+	require.NoError(t, err)
+	other := "root"
+	require.NotEqual(t, other, current.Username)
+	id, err := lookupUserForCodeServer(other, "root")
+	assert.ErrorContains(t, err, "agent must run as the requested account or root")
+	assert.Nil(t, id)
 }

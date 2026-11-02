@@ -189,7 +189,6 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 	}
 
 	cmd := ftpWorkerCommand(executable, homeDirectory, args.Username, runner.FtpWorkerArgs(
-		args.URL,
 		config.GlobalSettings.ServerURL,
 		homeDirectory,
 		config.GlobalSettings.SSLVerify,

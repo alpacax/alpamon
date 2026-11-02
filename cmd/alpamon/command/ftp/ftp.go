@@ -17,13 +17,13 @@ var FtpCmd = newFtpCmd()
 
 func newFtpCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "ftp [flags] <url> <serverURL> <homeDirectory>",
+		Use:   "ftp [flags] <serverURL> <homeDirectory>",
 		Short: "Start worker for Web FTP",
-		Args:  cobra.ExactArgs(3),
+		Args:  cobra.RangeArgs(2, 3),
 		Run: func(cmd *cobra.Command, args []string) {
 			data, err := configData(cmd, args, os.Stdin)
 			if err != nil {
-				log.Error().Err(err).Msg("FTP worker aborting: invalid TLS settings")
+				log.Error().Err(err).Msg("FTP worker aborting: invalid worker configuration")
 				os.Exit(1)
 			}
 			RunFtpWorker(data)
@@ -40,6 +40,7 @@ func configData(cmd *cobra.Command, args []string, stdin io.Reader) (runner.FtpC
 	sslVerify, _ := cmd.Flags().GetBool(runner.FtpSSLVerifyFlag)
 	caOnStdin, _ := cmd.Flags().GetBool(runner.FtpCACertStdinFlag)
 
+	legacy := !caOnStdin
 	var settings runner.FtpWorkerConfig
 	settings.Connection.UseEnvironment = !caOnStdin
 	if caOnStdin {
@@ -62,7 +63,9 @@ func configData(cmd *cobra.Command, args []string, stdin io.Reader) (runner.FtpC
 			if err := json.Unmarshal(data, &settings); err != nil {
 				return runner.FtpConfigData{}, errors.New("invalid worker configuration on stdin")
 			}
+			legacy = settings.URL == ""
 		} else {
+			legacy = true
 			settings.CaCertPEM = bytes.Clone(data)
 			settings.Connection.UseEnvironment = true
 		}
@@ -70,10 +73,19 @@ func configData(cmd *cobra.Command, args []string, stdin io.Reader) (runner.FtpC
 			return runner.FtpConfigData{}, errors.New("CA certificate larger than limit")
 		}
 	}
+	if legacy {
+		if len(args) != 3 {
+			return runner.FtpConfigData{}, errors.New("previous worker format requires a session URL argument")
+		}
+		settings.URL = args[0]
+		args = args[1:]
+	} else if len(args) != 2 || settings.URL == "" {
+		return runner.FtpConfigData{}, errors.New("invalid worker configuration arguments")
+	}
 	return runner.FtpConfigData{
-		URL:           args[0],
-		ServerURL:     args[1],
-		HomeDirectory: args[2],
+		URL:           settings.URL,
+		ServerURL:     args[0],
+		HomeDirectory: args[1],
 		Logger:        logger.NewFtpLogger(),
 		SkipSSLVerify: !sslVerify,
 		CaCertPEM:     settings.CaCertPEM,

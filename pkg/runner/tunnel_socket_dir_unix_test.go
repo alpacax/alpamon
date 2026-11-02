@@ -69,7 +69,8 @@ func TestSecureTunnelSocketDir_RefusesDirectoryOwnedBySomeoneElse(t *testing.T) 
 }
 
 func TestTunnelSocketDirPolicy(t *testing.T) {
-	linuxNobody := &syscall.Credential{Uid: 65534, Gid: 65533}
+	uid, gid := lookupNobodyIDs(t)
+	linuxNobody := &syscall.Credential{Uid: uid, Gid: gid}
 	macNobody := &syscall.Credential{Uid: 4294967294, Gid: 4294967294}
 	cases := []struct {
 		name       string
@@ -78,7 +79,7 @@ func TestTunnelSocketDirPolicy(t *testing.T) {
 		wantOwners []uint32
 		wantOwner  *syscall.Credential
 	}{
-		{name: "a daemon credential allows root and the daemon and hands the dir over", daemon: linuxNobody, euid: 0, wantOwners: []uint32{0, 65534}, wantOwner: linuxNobody},
+		{name: "a daemon credential allows root and the daemon and hands the dir over", daemon: linuxNobody, euid: 0, wantOwners: []uint32{0, uid}, wantOwner: linuxNobody},
 		{name: "a daemon credential keeps macOS nobody's uid past MaxInt32", daemon: macNobody, euid: 0, wantOwners: []uint32{0, 4294967294}, wantOwner: macNobody},
 		{name: "no daemon credential allows only the current user and keeps the owner", daemon: nil, euid: 1000, wantOwners: []uint32{1000}, wantOwner: nil},
 	}
@@ -119,11 +120,12 @@ func TestSecureTunnelSocketDir_ChownsToRequestedOwnerWhenRoot(t *testing.T) {
 	}
 	d := filepath.Join(t.TempDir(), "tunnels")
 	makeOpenDir(t, d)
+	uid, gid := lookupNobodyIDs(t)
 
-	err := secureTunnelSocketDir(d, &syscall.Credential{Uid: 65534, Gid: 65534}, 0)
+	err := secureTunnelSocketDir(d, &syscall.Credential{Uid: uid, Gid: gid}, 0)
 
 	require.NoError(t, err)
-	assert.Equal(t, uint32(65534), dirOwner(t, d))
+	assert.Equal(t, uid, dirOwner(t, d))
 }
 
 func TestSecureTunnelSocketDir_RefusesForeignDirWithoutChowningIt(t *testing.T) {
@@ -132,10 +134,11 @@ func TestSecureTunnelSocketDir_RefusesForeignDirWithoutChowningIt(t *testing.T) 
 	}
 	d := filepath.Join(t.TempDir(), "tunnels")
 	makeOpenDir(t, d)
-	require.NoError(t, os.Chown(d, 65534, 65534))
+	uid, gid := lookupNobodyIDs(t)
+	require.NoError(t, os.Chown(d, int(uid), int(gid)))
 
 	err := secureTunnelSocketDir(d, &syscall.Credential{}, 0)
 
 	require.Error(t, err)
-	assert.Equal(t, uint32(65534), dirOwner(t, d))
+	assert.Equal(t, uid, dirOwner(t, d))
 }

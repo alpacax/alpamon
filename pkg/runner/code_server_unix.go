@@ -22,6 +22,8 @@ import (
 
 var editorSocketSweepOnce = new(sync.Once)
 var removeEditorSocketEntry = (*os.Root).RemoveAll
+var editorOpenRoot = os.OpenRoot
+var editorOpenRootAt = (*os.Root).OpenRoot
 
 // startCodeServerProcess starts code-server in its own process group as m.procAttr's user,
 // or as Alpamon's own user when it is nil.
@@ -41,6 +43,7 @@ func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataD
 	cmd.Dir = m.homeDir
 
 	cmd.Env = getCodeServerEnv(m.homeDir, runtime.GOOS != "darwin", m.username)
+	cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+filepath.Dir(m.socketPath))
 	cmd.SysProcAttr = codeServerSysProcAttr(m.procAttr)
 
 	cmd.Stdout = os.Stdout
@@ -245,7 +248,7 @@ func openEditorDirectory(path string) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := os.OpenRoot(path)
+	root, err := editorOpenRoot(path)
 	if err != nil {
 		return nil, err
 	}
@@ -275,9 +278,15 @@ func openEditorSocketBaseAt(parent *os.Root, name string) (*os.Root, error) {
 	}
 	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
-	root, err := parent.OpenRoot(name)
+	root, err := editorOpenRootAt(parent, name)
 	if err != nil {
 		return nil, err
+	}
+	pinned, statErr := file.Stat()
+	opened, openErr := root.Stat(".")
+	if statErr != nil || openErr != nil || !os.SameFile(pinned, opened) {
+		_ = root.Close()
+		return nil, fmt.Errorf("editor socket base changed while opening")
 	}
 	if err := checkEditorSocketBase(root); err != nil {
 		_ = root.Close()
@@ -287,7 +296,11 @@ func openEditorSocketBaseAt(parent *os.Root, name string) (*os.Root, error) {
 }
 
 func openEditorSocketBase(base string) (*os.Root, error) {
-	parent, err := os.OpenRoot(filepath.Dir(base))
+	parentPath, err := filepath.EvalSymlinks(filepath.Dir(base))
+	if err != nil {
+		return nil, err
+	}
+	parent, err := openEditorDirectory(parentPath)
 	if err != nil {
 		return nil, err
 	}

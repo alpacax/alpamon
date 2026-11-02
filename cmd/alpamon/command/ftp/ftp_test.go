@@ -76,10 +76,11 @@ func TestConfigData_ReadsWhatTheAgentPasses(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := runner.FtpWorkerArgs("wss://console.example.com/ws/ftp/", "https://console.example.com", "-home", tc.sslVerify)
+			args := runner.FtpWorkerArgs("https://console.example.com", "-home", tc.sslVerify)
 			require.Equal(t, "ftp", args[0])
+			assert.NotContains(t, strings.Join(args, " "), "wss://console.example.com/ws/ftp/")
 
-			payload, err := json.Marshal(runner.FtpWorkerConfig{CaCertPEM: tc.caPEM, Connection: runner.FtpConnectionConfig{ProxyURL: "http://user:pass@proxy:3128"}})
+			payload, err := json.Marshal(runner.FtpWorkerConfig{URL: "wss://console.example.com/ws/ftp/", CaCertPEM: tc.caPEM, Connection: runner.FtpConnectionConfig{ProxyURL: "http://user:pass@proxy:3128"}})
 			require.NoError(t, err)
 			data, err := parseWorkerArgs(t, args[1:], bytes.NewReader(payload))
 			require.NoError(t, err)
@@ -105,7 +106,7 @@ func TestConfigData_RefusesABadCAOnStdin(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := runner.FtpWorkerArgs("wss://console.example.com/ws/ftp/", "https://console.example.com", "/home/u", true)
+			args := runner.FtpWorkerArgs("https://console.example.com", "/home/u", true)
 			_, err := parseWorkerArgs(t, args[1:], bytes.NewReader(tc.stdin))
 			assert.ErrorContains(t, err, tc.wantErr)
 		})
@@ -114,10 +115,39 @@ func TestConfigData_RefusesABadCAOnStdin(t *testing.T) {
 
 func TestConfigDataAcceptsPreviousPEMFormat(t *testing.T) {
 	cert := append([]byte("  # configured roots\n"), testCertPEM(t)...)
-	args := runner.FtpWorkerArgs("wss://console.invalid/ws/ftp/", "https://console.invalid", "/home/u", true)
+	args := []string{"ftp", "--ca-cert-stdin", "--", "wss://console.invalid/ws/ftp/", "https://console.invalid", "/home/u"}
 	data, err := parseWorkerArgs(t, args[1:], bytes.NewReader(cert))
 	require.NoError(t, err)
 	assert.Equal(t, cert, data.CaCertPEM)
 	client := runner.NewFtpClient(data)
 	require.NotNil(t, client, "a commented PEM bundle must be accepted by the worker")
+}
+
+type closingInput struct {
+	io.Reader
+	closed bool
+}
+
+func (r *closingInput) Close() error { r.closed = true; return nil }
+
+func TestConfigDataClosesMalformedInput(t *testing.T) {
+	input := &closingInput{Reader: strings.NewReader("{malformed")}
+	args := runner.FtpWorkerArgs("https://console.invalid", "/home/u", true)
+	_, err := parseWorkerArgs(t, args[1:], input)
+	assert.ErrorContains(t, err, "invalid worker configuration")
+	assert.True(t, input.closed)
+}
+
+func TestConfigDataAcceptsPreviousJSONFormat(t *testing.T) {
+	payload := []byte(`{"Connection":{}}`)
+	args := []string{"--ca-cert-stdin", "--", "wss://console.invalid/session", "https://console.invalid", "/home/u"}
+	data, err := parseWorkerArgs(t, args, bytes.NewReader(payload))
+	require.NoError(t, err)
+	assert.Equal(t, "wss://console.invalid/session", data.URL)
+}
+
+func TestConfigDataRejectsURLArgumentWithCurrentPayload(t *testing.T) {
+	args := []string{"--ca-cert-stdin", "--", "wss://console.invalid/argv", "https://console.invalid", "/home/u"}
+	_, err := parseWorkerArgs(t, args, strings.NewReader(`{"URL":"wss://console.invalid/stdin"}`))
+	assert.ErrorContains(t, err, "invalid worker configuration arguments")
 }

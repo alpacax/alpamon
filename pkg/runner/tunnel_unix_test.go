@@ -61,6 +61,7 @@ func TestTunnelDaemonCredential_NonRootKeepsCurrentUser(t *testing.T) {
 }
 
 func TestParseUserCredentials(t *testing.T) {
+	uid, gid := lookupNobodyIDs(t)
 	cases := []struct {
 		name    string
 		uid     string
@@ -69,7 +70,7 @@ func TestParseUserCredentials(t *testing.T) {
 		wantGID uint32
 		wantErr string
 	}{
-		{"Linux nobody", "65534", "65534", 65534, 65534, ""},
+		{"nobody", strconv.FormatUint(uint64(uid), 10), strconv.FormatUint(uint64(gid), 10), uid, gid, ""},
 		{"macOS nobody past MaxInt32", "4294967294", "4294967294", 4294967294, 4294967294, ""},
 		{"empty uid", "", "", 0, 0, "invalid uid"},
 		{"negative uid", "-2", "0", 0, 0, "invalid uid"},
@@ -112,11 +113,12 @@ func TestTunnelDaemonCredential_RootChildRunsAsNobodyWithoutSupplementaryGroups(
 }
 
 func TestTunnelDaemonCommand_CarriesTheDaemonCredential(t *testing.T) {
+	uid, gid := lookupNobodyIDs(t)
 	cases := []struct {
 		name   string
 		daemon *syscall.Credential
 	}{
-		{"root demotes to the daemon credential", &syscall.Credential{Uid: 65534, Gid: 65534}},
+		{"root demotes to the daemon credential", &syscall.Credential{Uid: uid, Gid: gid}},
 		{"non-root keeps the current user", nil},
 	}
 	for _, tc := range cases {

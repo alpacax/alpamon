@@ -6,9 +6,11 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -88,7 +90,19 @@ func TestRemoveCreatedDirsAsRequester_StopsAtUnsearchableDirectory(t *testing.T)
 }
 
 func TestRemoveCreatedDirsAsRequester_IgnoresRelativePath(t *testing.T) {
+	base := t.TempDir()
+	t.Chdir(base)
+	require.NoError(t, os.MkdirAll(filepath.Join("relative", "dir"), 0755))
+	original := fileHelperCommand
+	t.Cleanup(func() { fileHelperCommand = original })
+	ran := false
+	fileHelperCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		ran = true
+		return original(ctx, name, args...)
+	}
 	removeCreatedDirsAsRequester(t.Context(), filepath.Join("relative", "dir"), "relative", &syscall.SysProcAttr{})
+	assert.False(t, ran)
+	assert.DirExists(t, filepath.Join("relative", "dir"))
 }
 
 func TestRemoveCreatedDirsAsRequester_RunsAfterCancellation(t *testing.T) {
@@ -112,4 +126,25 @@ func TestRemoveCreatedDirsAsRequester_RemovesPartiallyCreatedParents(t *testing.
 	_, err := os.Stat(createdRoot)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 	assert.DirExists(t, base)
+}
+
+func TestRequesterCleanupCommandsHaveDetachedDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	original := fileHelperCommand
+	t.Cleanup(func() { fileHelperCommand = original })
+	var commands []string
+	fileHelperCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		commands = append(commands, name)
+		assert.NoError(t, ctx.Err())
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok)
+		assert.InDelta(t, 30, time.Until(deadline).Seconds(), 1)
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
+	}
+	attr := &syscall.SysProcAttr{}
+	removeAsRequester(ctx, filepath.Join(t.TempDir(), "output"), attr)
+	root := filepath.Join(t.TempDir(), "new")
+	removeCreatedDirsAsRequester(ctx, root, root, attr)
+	assert.Equal(t, []string{"/bin/rm", "/bin/rmdir", "/bin/sh"}, commands)
 }

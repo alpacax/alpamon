@@ -382,13 +382,14 @@ func TestEditorSocketBaseNonRoot(t *testing.T) {
 	require.NoError(t, os.WriteFile(testBin, data, 0755))
 	base := filepath.Join(dir, "base")
 	require.NoError(t, os.Mkdir(base, 0700))
-	require.NoError(t, os.Chown(base, 65534, 65534))
+	uid, gid := lookupNobodyIDs(t)
+	require.NoError(t, os.Chown(base, int(uid), int(gid)))
 	cmd := exec.Command(testBin, "-test.run=^TestEditorSocketBaseNonRoot$")
 	other := filepath.Join(dir, "other")
 	require.NoError(t, os.Mkdir(other, 0755))
 	require.NoError(t, os.Chown(other, 65533, 65533))
 	cmd.Env = []string{"ALPAMON_EDITOR_TEST_BASE=" + base, "ALPAMON_EDITOR_OTHER_BASE=" + other}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid}}
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", strings.TrimSpace(string(output)))
 }
@@ -404,6 +405,7 @@ func TestEditorSocketProcessHelper(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, socket)
+	require.Equal(t, filepath.Dir(socket), os.Getenv("XDG_RUNTIME_DIR"))
 	listener, err := net.Listen("unix", socket)
 	require.NoError(t, err)
 	defer listener.Close()
@@ -519,4 +521,66 @@ func prepareTestEditorSocketDir(m *CodeServerManager, uid, gid int, chown func(s
 	return createEditorSessionDirAt(root, filepath.Base(filepath.Dir(m.socketPath)), uid, gid, func(name string, uid, gid int) error {
 		return chown(filepath.Join(filepath.Dir(filepath.Dir(m.socketPath)), name), uid, gid)
 	})
+}
+
+func TestEditorDirectoryReopenRejectsReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run")
+	require.NoError(t, os.Mkdir(path, 0755))
+	original := editorOpenRoot
+	t.Cleanup(func() { editorOpenRoot = original })
+	editorOpenRoot = func(name string) (*os.Root, error) {
+		require.NoError(t, os.Rename(path, path+"-old"))
+		require.NoError(t, os.Mkdir(path, 0755))
+		return original(name)
+	}
+	root, err := openEditorDirectory(path)
+	assert.ErrorContains(t, err, "changed while opening")
+	assert.Nil(t, root)
+}
+
+func TestEditorSocketBaseReopenRejectsReplacement(t *testing.T) {
+	path := t.TempDir()
+	parent, err := os.OpenRoot(path)
+	require.NoError(t, err)
+	defer parent.Close()
+	original := editorOpenRootAt
+	t.Cleanup(func() { editorOpenRootAt = original })
+	editorOpenRootAt = func(parent *os.Root, name string) (*os.Root, error) {
+		require.NoError(t, os.Rename(filepath.Join(path, name), filepath.Join(path, name+"-old")))
+		require.NoError(t, parent.Mkdir(name, 0711))
+		return original(parent, name)
+	}
+	root, err := openEditorSocketBaseAt(parent, "editor")
+	assert.ErrorContains(t, err, "changed while opening")
+	assert.Nil(t, root)
+}
+
+func TestEditorSocketAcceptsRequestedPeerUID(t *testing.T) {
+	dir, err := os.MkdirTemp("", "editor-peer-")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	socket := filepath.Join(dir, "cs.sock")
+	listener, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+	defer listener.Close()
+	m := &CodeServerManager{ctx: t.Context(), socketPath: socket, procAttr: &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(os.Geteuid()), Gid: uint32(os.Getegid())}}}
+	conn, err := m.dialSocket()
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+}
+
+func TestEditorSocketBaseAllowsParentSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "private-run")
+	require.NoError(t, os.Mkdir(target, 0755))
+	link := filepath.Join(dir, "run")
+	require.NoError(t, os.Symlink(target, link))
+	root, err := openEditorSocketBase(filepath.Join(link, "editor"))
+	require.NoError(t, err)
+	defer root.Close()
+	pinned, err := root.Stat(".")
+	require.NoError(t, err)
+	actual, err := os.Stat(filepath.Join(target, "editor"))
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(pinned, actual))
 }

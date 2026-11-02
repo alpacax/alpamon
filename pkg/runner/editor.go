@@ -611,6 +611,10 @@ func lookupUserForCodeServer(username, groupname string) (*codeServerIdentity, e
 		if err != nil {
 			return nil, err
 		}
+		requested, err := user.Lookup(username)
+		if err != nil || requested.Uid != usr.Uid {
+			return nil, fmt.Errorf("cannot start editor for %s: agent must run as the requested account or root", username)
+		}
 		return &codeServerIdentity{username: usr.Username, homeDir: usr.HomeDir, groupname: groupname}, nil
 	}
 	if runtime.GOOS == "darwin" {
