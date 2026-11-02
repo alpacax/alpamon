@@ -153,6 +153,7 @@ func TestStopWithoutProcess(t *testing.T) {
 // TestStopKeepsStatusAnswerable pins Stop inside its wait with a child that
 // ignores SIGTERM and reports it, so no sleep or deadline is needed.
 func TestStopKeepsStatusAnswerable(t *testing.T) {
+	t.Parallel()
 	m, cmd, child := newManagerWithScript(t,
 		`trap 'echo signalled' TERM; echo ready; while :; do sleep 1; done`)
 
@@ -218,6 +219,7 @@ func TestWaitForReadySurvivesConcurrentStop(t *testing.T) {
 // TestStopKillsGroupIgnoringSIGTERM: on timeout the whole group must die.
 // exec.CommandContext's own kill reaches only the leader.
 func TestStopKillsGroupIgnoringSIGTERM(t *testing.T) {
+	t.Parallel()
 	// Both shells ignore SIGTERM, so only SIGKILL at the group ends them.
 	m, cmd, child := newManagerWithScript(t,
 		`trap '' TERM; sh -c "trap '' TERM; while :; do sleep 1; done" & echo ready; while :; do sleep 1; done`)
@@ -253,6 +255,7 @@ func requireGroupGone(t *testing.T, child *bufio.Reader, pgid int, msg string) {
 // doStart publishing m.proc finds nothing to signal, and the context's own kill
 // reaches only the leader.
 func TestStopInTheSpawnWindowLeavesNoGroupBehind(t *testing.T) {
+	t.Parallel()
 	m, cmd, child := newManagerWithScript(t,
 		`sh -c "while :; do sleep 1; done" & echo ready; while :; do sleep 1; done`)
 	m.proc = nil
@@ -263,6 +266,7 @@ func TestStopInTheSpawnWindowLeavesNoGroupBehind(t *testing.T) {
 }
 
 func TestReaperKillsTheGroupBeforeItReapsTheLeader(t *testing.T) {
+	t.Parallel()
 	m, cmd, child := newManagerWithScript(t,
 		`trap 'exit 0' USR1; sh -c "while :; do sleep 1; done" & echo ready; while :; do sleep 1 & wait $!; done`)
 
@@ -320,6 +324,7 @@ func TestStopWhenTheExitCannotBeWatched(t *testing.T) {
 }
 
 func TestReaperKillsWhatAnExitedLeaderLeftInItsGroup(t *testing.T) {
+	t.Parallel()
 	_, cmd, child := newManagerWithScript(t,
 		`sh -c "while :; do sleep 1; done" & echo ready; exit 0`)
 

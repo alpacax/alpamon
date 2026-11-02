@@ -174,6 +174,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			pidFile := filepath.Join(t.TempDir(), "child.pid")
 			script := bgChildScript("wait")
 

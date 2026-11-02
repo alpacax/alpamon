@@ -14,6 +14,7 @@ import (
 )
 
 func TestExecutor_TimeoutReturns124(t *testing.T) {
+	t.Parallel()
 	e := NewExecutor()
 	ctx := context.Background()
 
@@ -138,6 +139,7 @@ func TestExecutor_StartFailureSurfacesErrorInResult(t *testing.T) {
 }
 
 func TestExecutor_StreamingTimeoutBannerHasNoLeadingNewlines(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("uses /bin/sh -c which is Unix-only")
 	}
