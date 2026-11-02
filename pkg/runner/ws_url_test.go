@@ -189,7 +189,7 @@ func TestTunnelConnect_Targets(t *testing.T) {
 	for _, tc := range socketTargetCases(host) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := NewTunnelClient("target-test", ClientTypeCLI, 22, "", "", tc.target)
-			err := client.connect()
+			err := client.connect(t.Context())
 			t.Cleanup(func() {
 				if client.session != nil {
 					_ = client.session.Close()

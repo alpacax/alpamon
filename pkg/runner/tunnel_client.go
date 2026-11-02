@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -46,6 +47,9 @@ const (
 )
 
 var (
+	// ErrTunnelClosedWhileOpening reports a tunnel closed through Close before Open finished.
+	ErrTunnelClosedWhileOpening = errors.New("tunnel session closed while opening")
+
 	// validSessionID restricts session IDs to safe characters.
 	validSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
@@ -84,6 +88,9 @@ type TunnelClient struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	codeServerMgr *CodeServerManager // for editor type
+	connMu        sync.Mutex         // guards closed and the hand-off of wsConn, session and codeServerMgr from Open to Close
+	closed        bool               // set by Close; Open installs nothing after it
+	startRelay    func() error       // startTunnelRelay; replaced in tests
 	daemonMu      sync.Mutex         // serializes daemon start against stop
 	daemonCmd     *exec.Cmd
 	daemonSocket  string        // UDS path, written before any stream reads it
@@ -134,6 +141,7 @@ func NewTunnelClient(sessionID, clientType string, targetPort int, username, gro
 		streamSem:     make(chan struct{}, maxStreamsPerSession),
 	}
 	tc.targetPort.Store(int32(targetPort))
+	tc.startRelay = tc.startTunnelRelay
 	return tc
 }
 
@@ -149,40 +157,77 @@ func RegisterTunnel(sessionID string, tc *TunnelClient) bool {
 	return true
 }
 
-// RunTunnelBackground starts the tunnel connection in a goroutine.
-// The caller must register the tunnel via RegisterTunnel before calling this method.
-func (tc *TunnelClient) RunTunnelBackground() {
-	defer func() {
-		// Cleanup on exit
-		activeTunnelsMu.Lock()
-		delete(activeTunnels, tc.sessionID)
-		activeTunnelsMu.Unlock()
-		tc.Close()
-	}()
+// Open connects a registered tunnel and starts its relay, failing when ctx ends or
+// the tunnel closes before it finishes. On failure the tunnel is unregistered and closed.
+func (tc *TunnelClient) Open(ctx context.Context) error {
+	if err := tc.open(ctx); err != nil {
+		tc.unregisterAndClose()
+		return err
+	}
+	return nil
+}
+
+func (tc *TunnelClient) open(ctx context.Context) error {
+	tc.connMu.Lock()
+	closed := tc.closed // Close sets this before canceling tc.ctx, so it catches a close sooner
+	tc.connMu.Unlock()
+	if closed {
+		return ErrTunnelClosedWhileOpening
+	}
 
 	// For editor type, initialize code-server manager (startup triggered by health_check)
 	if tc.clientType == ClientTypeEditor {
 		if err := tc.initCodeServerManager(); err != nil {
-			log.Error().Err(err).Msgf("Failed to initialize code-server manager for session %s.", tc.sessionID)
-			return
+			return err
 		}
 	}
 
-	// Connect and run
-	if err := tc.connect(); err != nil {
-		log.Error().Err(err).Msgf("Tunnel connection failed for session %s.", tc.sessionID)
-		return
+	if err := tc.connect(ctx); err != nil {
+		return err
 	}
 
 	log.Info().Msgf("Tunnel connection established for session %s, target port %d.", tc.sessionID, tc.targetPort.Load())
 
-	if err := tc.startTunnelRelay(); err != nil {
-		log.Error().Err(err).Msgf("Failed to start tunnel relay for session %s.", tc.sessionID)
-		return
+	if err := tc.startRelay(); err != nil {
+		if tc.ctx.Err() != nil { // startTunnelRelay reports a close as tc.ctx's error
+			return ErrTunnelClosedWhileOpening
+		}
+		return fmt.Errorf("failed to start tunnel relay: %w", err)
 	}
 
+	tc.connMu.Lock()
+	defer tc.connMu.Unlock()
+	if tc.closed || !tc.isRegistered() { // CloseTunnel unregisters before Close sets closed
+		return ErrTunnelClosedWhileOpening
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("tunnel open stopped: %w", err)
+	}
+	return nil
+}
+
+// Serve relays streams until the session ends, then unregisters and closes
+// the tunnel. Call it only after Open succeeds.
+func (tc *TunnelClient) Serve() {
+	defer tc.unregisterAndClose()
 	tc.handleStreams()
 	log.Info().Msgf("Tunnel session %s ended.", tc.sessionID)
+}
+
+func (tc *TunnelClient) isRegistered() bool {
+	got, _ := GetActiveTunnel(tc.sessionID)
+	return got == tc
+}
+
+// unregisterAndClose closes the tunnel and unregisters it only while it is the
+// registered entry, so a newer tunnel under the same ID stays.
+func (tc *TunnelClient) unregisterAndClose() {
+	activeTunnelsMu.Lock()
+	if activeTunnels[tc.sessionID] == tc {
+		delete(activeTunnels, tc.sessionID)
+	}
+	activeTunnelsMu.Unlock()
+	tc.Close()
 }
 
 // initCodeServerManager creates the code-server manager without starting it.
@@ -191,6 +236,12 @@ func (tc *TunnelClient) initCodeServerManager() error {
 	mgr, err := NewCodeServerManager(tc.ctx, tc.username, tc.groupname)
 	if err != nil {
 		return fmt.Errorf("failed to create code-server manager: %w", err)
+	}
+	tc.connMu.Lock()
+	defer tc.connMu.Unlock()
+	if tc.closed {
+		_ = mgr.Stop()
+		return ErrTunnelClosedWhileOpening
 	}
 	tc.codeServerMgr = mgr
 	log.Info().Msgf("code-server manager initialized for session %s (user: %s).", tc.sessionID, tc.username)
@@ -272,30 +323,65 @@ func newTunnelDialer() websocket.Dialer {
 }
 
 // connect establishes WebSocket connection and creates smux session.
-func (tc *TunnelClient) connect() error {
+func (tc *TunnelClient) connect(ctx context.Context) error {
 	target, err := validateWebSocketURL(tc.serverURL)
 	if err != nil {
 		return fmt.Errorf("refused tunnel server URL: %w", err)
 	}
 	log.Info().Msgf("Connecting to tunnel server at %s...", ServerHostFromURL(target))
 
-	dialer := newTunnelDialer()
+	dialCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(tc.ctx, cancel)
+	defer stop()
 
-	conn, _, err := dialer.Dial(target, tc.requestHeader)
-	if err != nil {
-		return fmt.Errorf("failed to connect to tunnel server: %w", sanitizeURLError(err))
+	dialer := newTunnelDialer()
+	// gorilla reads the handshake response without watching ctx, so a
+	// canceled dial would otherwise wait out HandshakeTimeout.
+	unwatch := func() bool { return true }
+	dialer.NetDialContext = func(dctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := (&net.Dialer{}).DialContext(dctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		unwatch = context.AfterFunc(dialCtx, func() { _ = c.Close() })
+		return c, nil
 	}
 
-	tc.wsConn = conn
+	conn, resp, err := dialer.DialContext(dialCtx, target, tc.requestHeader)
+	if !unwatch() || dialCtx.Err() != nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if tc.ctx.Err() != nil {
+			return ErrTunnelClosedWhileOpening
+		}
+		return fmt.Errorf("tunnel dial stopped: %w", ctx.Err())
+	}
+	if err != nil {
+		err = sanitizeURLError(err)
+		if resp != nil {
+			err = &handshakeError{StatusCode: resp.StatusCode, Err: err}
+		}
+		return fmt.Errorf("failed to connect to tunnel server: %w", err)
+	}
 
 	// Create smux client session over WebSocket
-	wsNetConn := tunnel.NewWebSocketConn(tc.wsConn)
+	wsNetConn := tunnel.NewWebSocketConn(conn)
 	session, err := smux.Client(wsNetConn, config.GetSmuxConfig())
 	if err != nil {
-		_ = tc.wsConn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("failed to create smux session: %w", err)
 	}
 
+	tc.connMu.Lock()
+	defer tc.connMu.Unlock()
+	if tc.closed {
+		_ = session.Close()
+		_ = conn.Close()
+		return ErrTunnelClosedWhileOpening
+	}
+	tc.wsConn = conn
 	tc.session = session
 	log.Debug().Msgf("Tunnel smux session established for %s.", tc.sessionID)
 	return nil
@@ -488,12 +574,16 @@ func closeWriteSide(conn net.Conn) {
 // Safe to call multiple times; only the first call performs cleanup.
 func (tc *TunnelClient) Close() {
 	tc.closeOnce.Do(func() {
+		tc.connMu.Lock()
+		tc.closed = true
+		codeServerMgr, session, wsConn := tc.codeServerMgr, tc.session, tc.wsConn
+		tc.connMu.Unlock()
+
 		// Stop code-server first (for editor type)
-		if tc.codeServerMgr != nil {
-			if err := tc.codeServerMgr.Stop(); err != nil {
+		if codeServerMgr != nil {
+			if err := codeServerMgr.Stop(); err != nil {
 				log.Debug().Err(err).Msg("Failed to stop code-server.")
 			}
-			tc.codeServerMgr = nil
 		}
 
 		// Cancel before stopping the relay so a not-yet-started
@@ -504,16 +594,16 @@ func (tc *TunnelClient) Close() {
 
 		// Unconditional: a no-op when no daemon is running.
 		tc.stopTunnelRelay()
-		if tc.session != nil {
-			_ = tc.session.Close()
+		if session != nil {
+			_ = session.Close()
 		}
-		if tc.wsConn != nil {
-			_ = tc.wsConn.WriteControl(
+		if wsConn != nil {
+			_ = wsConn.WriteControl(
 				websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 				time.Now().Add(5*time.Second),
 			)
-			_ = tc.wsConn.Close()
+			_ = wsConn.Close()
 		}
 	})
 }
@@ -526,7 +616,6 @@ func CloseTunnel(sessionID string) error {
 		activeTunnelsMu.Unlock()
 		return fmt.Errorf("tunnel session %s not found", sessionID)
 	}
-	// Remove from active tunnels under lock to prevent race condition with defer cleanup
 	delete(activeTunnels, sessionID)
 	activeTunnelsMu.Unlock()
 
