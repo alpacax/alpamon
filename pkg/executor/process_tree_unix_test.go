@@ -84,7 +84,7 @@ func TestCommandCleanup_AfterStartRedoAfterRacedCancel(t *testing.T) {
 	t.Cleanup(func() { _ = cmd.Wait() })
 
 	childPID := readChildPID(t, pidFile)
-	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }) // the unreaped leader pins the group
 
 	// Cancel before the group is recorded: pgid is still 0, so only the leader is targeted.
 	_, err = cleanup.cancel(cmd)
@@ -150,7 +150,7 @@ func TestCommandCleanup_CancelKillsProcessGroup(t *testing.T) {
 	require.NoError(t, err, "afterStart")
 
 	childPID := readChildPID(t, pidFile)
-	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }) // the unreaped leader pins the group
 
 	_, err = cleanup.cancel(cmd)
 	require.NoError(t, err, "cancel")
@@ -207,10 +207,10 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 			require.Contains(t, res.output, "Command timed out after", "expected timeout banner")
 
 			pid := readChildPID(t, pidFile)
-			t.Cleanup(func() {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-			})
-			require.True(t, waitForProcessGone(pid, 3*time.Second), "child process %d was still alive after executor timeout cleanup", pid)
+			if !waitForProcessGone(pid, 3*time.Second) {
+				_ = syscall.Kill(pid, syscall.SIGKILL) // still alive, so the PID is still ours
+				t.Fatalf("child process %d was still alive after executor timeout cleanup", pid)
+			}
 		})
 	}
 }
@@ -246,8 +246,10 @@ func TestExecutor_CleansDescendantWhenCommandExitsNonZero(t *testing.T) {
 	require.Equal(t, 3, res.exitCode, "err=%v", res.err)
 
 	pid := readChildPID(t, pidFile)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	require.True(t, waitForProcessGone(pid, 3*time.Second), "descendant %d survived after a non-zero command exit", pid)
+	if !waitForProcessGone(pid, 3*time.Second) {
+		_ = syscall.Kill(pid, syscall.SIGKILL) // still alive, so the PID is still ours
+		t.Fatalf("descendant %d survived after a non-zero command exit", pid)
+	}
 }
 
 // bgChildScript backgrounds a long sleeper and publishes its pid atomically: echo truncate-opens the
