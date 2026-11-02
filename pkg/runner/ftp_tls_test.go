@@ -89,7 +89,7 @@ func TestFtpDialer_TrustsTheConfiguredCA(t *testing.T) {
 	require.NotNil(t, fc.tlsConfig)
 	assert.False(t, fc.tlsConfig.InsecureSkipVerify)
 	require.NotNil(t, fc.tlsConfig.RootCAs)
-	assert.Len(t, fc.tlsConfig.RootCAs.Subjects(), 1)
+	assert.Len(t, fc.tlsConfig.RootCAs.Subjects(), 1) //nolint:staticcheck // a pool built from one PEM, not SystemCertPool
 	assert.NoError(t, dialFtp(fc))
 }
 

@@ -120,7 +120,7 @@ func TestEditorStreamsUsePrivateSocket(t *testing.T) {
 			socket := filepath.Join(dir, "cs.sock")
 			ln, err := net.Listen("unix", socket)
 			require.NoError(t, err)
-			defer ln.Close()
+			defer func() { _ = ln.Close() }()
 			require.NoError(t, ln.(*net.UnixListener).SetDeadline(time.Now().Add(5*time.Second)))
 			tc := &TunnelClient{clientType: ClientTypeEditor, ctx: t.Context(), codeServerMgr: &CodeServerManager{ctx: t.Context(), socketPath: socket, status: CodeServerStatusReady}}
 			require.NoError(t, tc.startSessionRelay())
@@ -128,13 +128,13 @@ func TestEditorStreamsUsePrivateSocket(t *testing.T) {
 			left, right := net.Pipe()
 			client, err := smux.Client(left, nil)
 			require.NoError(t, err)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 			server, err := smux.Server(right, nil)
 			require.NoError(t, err)
-			defer server.Close()
+			defer func() { _ = server.Close() }()
 			stream, err := server.OpenStream()
 			require.NoError(t, err)
-			defer stream.Close()
+			defer func() { _ = stream.Close() }()
 			require.NoError(t, stream.SetDeadline(time.Now().Add(5*time.Second)))
 			done := make(chan struct{})
 			go func() {
@@ -148,7 +148,7 @@ func TestEditorStreamsUsePrivateSocket(t *testing.T) {
 			require.NoError(t, err)
 			conn, err := ln.Accept()
 			require.NoError(t, err, "editor streams must dial the private socket")
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
 			if metadata == `{"health_check":true}` {
 				response, err := io.ReadAll(stream)
@@ -179,11 +179,11 @@ func TestEditorStreamsUsePrivateSocket(t *testing.T) {
 func TestEditorReadinessUsesPrivateSocket(t *testing.T) {
 	dir, err := os.MkdirTemp("", "editor-ready-")
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	socket := filepath.Join(dir, "cs.sock")
 	ln, err := net.Listen("unix", socket)
 	require.NoError(t, err)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	m := &CodeServerManager{ctx: t.Context(), socketPath: socket}
 	require.NoError(t, m.waitForReady(make(chan struct{})))
 }
@@ -191,11 +191,11 @@ func TestEditorReadinessUsesPrivateSocket(t *testing.T) {
 func TestEditorSocketRejectsDifferentPeerUID(t *testing.T) {
 	dir, err := os.MkdirTemp("", "editor-peer-")
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	target := filepath.Join(dir, "other.sock")
 	ln, err := net.Listen("unix", target)
 	require.NoError(t, err)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	socket := filepath.Join(dir, "cs.sock")
 	require.NoError(t, os.Symlink(target, socket))
 	m := &CodeServerManager{ctx: t.Context(), socketPath: socket,
@@ -206,7 +206,7 @@ func TestEditorSocketRejectsDifferentPeerUID(t *testing.T) {
 	require.NoError(t, ln.(*net.UnixListener).SetDeadline(time.Now().Add(5*time.Second)))
 	peer, err := ln.Accept()
 	require.NoError(t, err)
-	defer peer.Close()
+	defer func() { _ = peer.Close() }()
 	require.NoError(t, peer.SetDeadline(time.Now().Add(5*time.Second)))
 	data, err := io.ReadAll(peer)
 	require.NoError(t, err)
@@ -234,7 +234,7 @@ func TestEditorStartsOnSocketAndReportsExit(t *testing.T) {
 	require.NoError(t, err)
 	dir, err := os.MkdirTemp("/tmp", "es-")
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	bin := filepath.Join(dir, "code-server")
 	script := "#!/bin/sh\nALPAMON_EDITOR_SOCKET_HELPER=1 exec '" + strings.ReplaceAll(exe, "'", "'\\''") + "' -test.run=^TestEditorSocketProcessHelper$ -- \"$@\"\n"
 	require.NoError(t, os.WriteFile(bin, []byte(script), 0700))
@@ -249,7 +249,7 @@ func TestEditorStartsOnSocketAndReportsExit(t *testing.T) {
 		prepareSocketDir: func(m *CodeServerManager) error {
 			return prepareTestEditorSocketDir(m, os.Geteuid(), os.Getegid(), os.Lchown)
 		}}
-	defer m.Stop()
+	defer func() { _ = m.Stop() }()
 	require.NoError(t, m.doStart())
 	status, lastError := m.Status()
 	assert.Equal(t, CodeServerStatusReady, status)
@@ -265,10 +265,10 @@ func TestEditorStartsOnSocketAndReportsExit(t *testing.T) {
 	left, right := net.Pipe()
 	client, err := smux.Client(left, nil)
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	server, err := smux.Server(right, nil)
 	require.NoError(t, err)
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	stream, err := server.OpenStream()
 	require.NoError(t, err)
 	require.NoError(t, stream.SetDeadline(time.Now().Add(5*time.Second)))
@@ -276,7 +276,7 @@ func TestEditorStartsOnSocketAndReportsExit(t *testing.T) {
 	go func() {
 		incoming, err := client.AcceptStream()
 		if err == nil {
-			defer incoming.Close()
+			defer func() { _ = incoming.Close() }()
 			tc.handleHealthCheck(incoming)
 		}
 	}()
@@ -301,13 +301,13 @@ func TestCLIStreamRelaysMatchingSessionPort(t *testing.T) {
 	left, right := net.Pipe()
 	client, err := smux.Client(left, nil)
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	server, err := smux.Server(right, nil)
 	require.NoError(t, err)
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	stream, err := server.OpenStream()
 	require.NoError(t, err)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 	require.NoError(t, stream.SetDeadline(time.Now().Add(5*time.Second)))
 	done := make(chan struct{})
 	go func() {
@@ -321,7 +321,7 @@ func TestCLIStreamRelaysMatchingSessionPort(t *testing.T) {
 	require.NoError(t, err)
 	conn, err := ln.Accept()
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
 	reader := bufio.NewReader(conn)
 	target, err := reader.ReadString('\n')
@@ -408,7 +408,7 @@ func TestEditorSocketProcessHelper(t *testing.T) {
 	require.Equal(t, filepath.Dir(socket), os.Getenv("XDG_RUNTIME_DIR"))
 	listener, err := net.Listen("unix", socket)
 	require.NoError(t, err)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	for range 2 {
 		conn, err := listener.Accept()
 		require.NoError(t, err)
@@ -455,7 +455,7 @@ func TestEditorHealthUnavailableKeepsReady(t *testing.T) {
 	go func() {
 		incoming, err := client.AcceptStream()
 		if err == nil {
-			defer incoming.Close()
+			defer func() { _ = incoming.Close() }()
 			tc.handleHealthCheck(incoming)
 		}
 	}()
@@ -473,7 +473,7 @@ func TestEditorRunDirValidation(t *testing.T) {
 	dir := t.TempDir()
 	root, err := openEditorDirectory(dir)
 	require.NoError(t, err)
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	for _, mode := range []os.FileMode{0770, 0707} {
 		require.NoError(t, os.Chmod(dir, mode))
 		require.ErrorContains(t, validateEditorRunDir(root, uint32(os.Geteuid())), "not writable by group or other")
@@ -498,7 +498,7 @@ func createEditorSessionDir(dir string, uid, gid int, chown func(string, int, in
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	return createEditorSessionDirAt(root, filepath.Base(dir), uid, gid, func(name string, uid, gid int) error { return chown(filepath.Join(filepath.Dir(dir), name), uid, gid) })
 }
 
@@ -507,7 +507,7 @@ func sweepEditorSocketBase(base string) error {
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	sweepEditorSocketRoot(root)
 	return nil
 }
@@ -542,7 +542,7 @@ func TestEditorSocketBaseReopenRejectsReplacement(t *testing.T) {
 	path := t.TempDir()
 	parent, err := os.OpenRoot(path)
 	require.NoError(t, err)
-	defer parent.Close()
+	defer func() { _ = parent.Close() }()
 	original := editorOpenRootAt
 	t.Cleanup(func() { editorOpenRootAt = original })
 	editorOpenRootAt = func(parent *os.Root, name string) (*os.Root, error) {
@@ -562,7 +562,7 @@ func TestEditorSocketAcceptsRequestedPeerUID(t *testing.T) {
 	socket := filepath.Join(dir, "cs.sock")
 	listener, err := net.Listen("unix", socket)
 	require.NoError(t, err)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	m := &CodeServerManager{ctx: t.Context(), socketPath: socket, procAttr: &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(os.Geteuid()), Gid: uint32(os.Getegid())}}}
 	conn, err := m.dialSocket()
 	require.NoError(t, err)

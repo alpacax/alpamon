@@ -29,7 +29,7 @@ func TestFileReaderDoesNotInheritAgentEnvironment(t *testing.T) {
 	// Select the same subprocess branch as a demoted requester without requiring root.
 	reader, _, err := readFileAs(t.Context(), input, &syscall.SysProcAttr{})
 	require.NoError(t, err)
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	got, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Empty(t, string(got), "a file helper must not inherit the agent service's secrets")

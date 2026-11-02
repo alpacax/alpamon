@@ -217,7 +217,7 @@ func prepareEditorSocketDir(m *CodeServerManager) error {
 		if openErr != nil {
 			return fmt.Errorf("editor RunDir: %w", openErr)
 		}
-		defer parent.Close()
+		defer func() { _ = parent.Close() }()
 		if err := validateEditorRunDir(parent, uint32(os.Geteuid())); err != nil {
 			return err
 		}
@@ -243,7 +243,7 @@ func openEditorDirectory(path string) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
@@ -271,13 +271,13 @@ func openEditorSocketBaseAt(parent *os.Root, name string) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), name)
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	root, err := editorOpenRootAt(parent, name)
 	if err != nil {
 		return nil, err
@@ -304,7 +304,7 @@ func openEditorSocketBase(base string) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer parent.Close()
+	defer func() { _ = parent.Close() }()
 	return openEditorSocketBaseAt(parent, filepath.Base(base))
 }
 
@@ -313,7 +313,7 @@ func checkEditorSocketBase(root *os.Root) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return err
