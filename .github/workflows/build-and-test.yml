@@ -352,8 +352,9 @@ jobs:
         if: matrix.pkg_manager == 'yum'
         run: |
           # Mirrors can serve a repomd that names files they have not synced yet (404); retry on fresh metadata.
+          # dnf drops a mirror only below 1000 B/s by default; healthy ones serve tens of MB/s, so give up under 500 kB/s for 15 s.
           for attempt in 1 2 3; do
-            yum install -y git curl gcc glibc-devel tar && exit 0
+            yum install -y --setopt=minrate=500k --setopt=timeout=15 --setopt=install_weak_deps=False git curl gcc glibc-devel tar && exit 0
             [ "$attempt" -lt 3 ] || exit 1
             yum clean metadata || true
             sleep $((attempt * 15))
@@ -363,8 +364,9 @@ jobs:
         if: matrix.pkg_manager == 'dnf'
         run: |
           # Mirrors can serve a repomd that names files they have not synced yet (404); retry on fresh metadata.
+          # dnf drops a mirror only below 1000 B/s by default; healthy ones serve tens of MB/s, so give up under 500 kB/s for 15 s.
           for attempt in 1 2 3; do
-            dnf install -y --allowerasing git curl gcc glibc-devel tar && exit 0
+            dnf install -y --allowerasing --setopt=minrate=500k --setopt=timeout=15 --setopt=install_weak_deps=False git curl gcc glibc-devel tar && exit 0
             [ "$attempt" -lt 3 ] || exit 1
             dnf clean metadata || true
             sleep $((attempt * 15))
