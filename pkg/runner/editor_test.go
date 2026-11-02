@@ -45,6 +45,9 @@ func TestEditorDarwinNonRootKeepsCurrentUser(t *testing.T) {
 }
 
 func TestGetCodeServerArgs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("code-server runs on unix sockets; Windows paths and environment differ")
+	}
 	args := getCodeServerArgs("/run/alpamon-editor/session/cs.sock", "/home/editor/.alpamon-editor")
 	assert.Equal(t, []string{
 		"--config", "/home/editor/.alpamon-editor/config.yaml",
@@ -57,6 +60,9 @@ func TestGetCodeServerArgs(t *testing.T) {
 }
 
 func TestEditorEnvironmentAllowList(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("code-server runs on unix sockets; Windows paths and environment differ")
+	}
 	t.Setenv("EDITOR_SYNTHETIC_SECRET", "synthetic-value")
 	t.Setenv("PLUGIN_KEY", "synthetic-value")
 	t.Setenv("LC_TIME", "C")
