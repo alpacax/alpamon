@@ -278,7 +278,6 @@ func ptyTestProcessAlive(pid int) bool {
 }
 
 func TestPtyBackgroundCancelClosesChannelAndUnregisters(t *testing.T) {
-	t.Parallel()
 	closed := make(chan error, 1)
 	peer := newWshServerWith(t, func(_ int, conn *websocket.Conn) { closed <- readUntilError(conn) })
 	manager := NewTerminalManager(nil)
