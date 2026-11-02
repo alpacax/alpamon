@@ -273,11 +273,10 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 		cmd.Dir = opts.WorkingDir
 	} else if opts.Username != "" {
 		cmd.Dir = env["HOME"]
-		// A become account (nobody, www-data) often has no home; sudo keeps cwd there, so a verified file falls back to /.
-		if opts.ExecFile != nil {
-			if info, err := os.Stat(cmd.Dir); err != nil || !info.IsDir() {
-				cmd.Dir = "/"
-			}
+		// A become account may have no home, or one it cannot enter; start a
+		// verified file in / rather than fail on chdir before exec.
+		if opts.ExecFile != nil && !workingDirUsable(cmd.Dir, cmd.SysProcAttr) {
+			cmd.Dir = "/"
 		}
 	}
 
