@@ -106,8 +106,10 @@ func TestTrackedCommandWithoutCancelMatchesLegacy(t *testing.T) {
 		{script: `sleep 600 <&0 & printf exact; exit 0`, waitDelay: true},
 	} {
 		t.Run(tt.script, func(t *testing.T) {
+			t.Parallel()
 			for _, tracked := range []bool{false, true} {
 				t.Run(strconv.FormatBool(tracked), func(t *testing.T) {
+					t.Parallel()
 					ctx := context.Background()
 					if tracked {
 						var state *commandcancel.State

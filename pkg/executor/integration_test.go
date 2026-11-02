@@ -268,6 +268,7 @@ func TestE2E_ShellChain_GivenParentCtxCancelledMidSegment_ThenExitCodeOneAndLate
 // executeWithOperators used to give each `&&`/`||`/`;` segment its own fresh
 // timeout, letting a 3-segment chain run 3x the nominal timeout.
 func TestE2E_ShellOperatorChain_TimeoutCapsWholeChainNotEachSegment(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("execs the POSIX sleep binary")
 	}
@@ -294,6 +295,7 @@ func TestE2E_ShellOperatorChain_TimeoutCapsWholeChainNotEachSegment(t *testing.T
 // Given a chain whose second segment is killed mid-run by the chain deadline, then the output
 // carries exactly one banner, naming the chain timeout rather than the segment's own elapsed.
 func TestE2E_ShellOperatorChain_TimeoutBannerReportsChainTimeoutNotSegmentElapsed(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("execs the POSIX sleep binary")
 	}
@@ -321,6 +323,7 @@ func TestE2E_ShellOperatorChain_TimeoutBannerReportsChainTimeoutNotSegmentElapse
 // under ";", when the chain times out, then the skipped second segment does
 // not leave the chain without any banner at all.
 func TestE2E_ShellOperatorChain_TimeoutBannerPresentEvenWhenNextSegmentSkipped(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("execs the POSIX sleep binary")
 	}

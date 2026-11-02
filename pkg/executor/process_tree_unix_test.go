@@ -217,6 +217,7 @@ func TestExecutor_TimeoutCleansProcessTreeWhenChildKeepsPipeOpen(t *testing.T) {
 // A non-zero exit while a backgrounded descendant holds the inherited pipe must still reap it: no
 // timeout means no Cancel, and Wait returns ExitError not ErrWaitDelay, so only the unconditional cancel covers it.
 func TestExecutor_CleansDescendantWhenCommandExitsNonZero(t *testing.T) {
+	t.Parallel()
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	script := bgChildScript("exit 3")
 

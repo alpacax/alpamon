@@ -180,6 +180,7 @@ func TestPtyOrdinaryClosePreservesNohupChild(t *testing.T) {
 }
 
 func TestPtyOpenCommandHandleLifetime(t *testing.T) {
+	t.Parallel()
 	for _, cancelTerminal := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cancel_%v", cancelTerminal), func(t *testing.T) {
 			wc := &WebsocketClient{}
@@ -277,6 +278,7 @@ func ptyTestProcessAlive(pid int) bool {
 }
 
 func TestPtyBackgroundCancelClosesChannelAndUnregisters(t *testing.T) {
+	t.Parallel()
 	closed := make(chan error, 1)
 	peer := newWshServerWith(t, func(_ int, conn *websocket.Conn) { closed <- readUntilError(conn) })
 	manager := NewTerminalManager(nil)
