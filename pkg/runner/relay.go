@@ -19,7 +19,7 @@ func relayBidirectional(a net.Conn, fromA io.Reader, b net.Conn, fromB io.Reader
 	pipe := func(dst net.Conn, src io.Reader) {
 		_, err := tunnel.CopyBuffered(dst, src)
 		if err == nil {
-			closeWriteSide(dst)
+			closeWriteSide(dst) // smux holds a FIN up to its 30s close timeout, delaying the bound by as much
 		}
 		errChan <- err
 	}
