@@ -296,7 +296,8 @@ jobs:
         if: matrix.pkg_manager == 'apt-get'
         run: |
           apt-get update -o Acquire::Retries=3
-          apt-get install -y -o Acquire::Retries=3 --no-install-recommends git curl gcc libc6-dev ca-certificates
+          # python3 lets the file lane tests in pkg/runner run an AnsiballZ-shaped module as nobody, whose home is missing here.
+          apt-get install -y -o Acquire::Retries=3 --no-install-recommends git curl gcc libc6-dev ca-certificates python3
 
       - name: Install dependencies (yum)
         if: matrix.pkg_manager == 'yum'
