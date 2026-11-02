@@ -380,7 +380,7 @@ func sweepEditorSocketRoot(root *os.Root) {
 		log.Warn().Err(err).Msg("Failed to open editor socket base for sweep.")
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	entries, err := file.ReadDir(-1)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to read editor socket base for sweep.")

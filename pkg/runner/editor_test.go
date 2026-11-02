@@ -189,11 +189,11 @@ func TestWaitForReadyChecksTheExitBeforeTheDial(t *testing.T) {
 	}
 	dir, err := os.MkdirTemp("", "editor-exit-")
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	socket := filepath.Join(dir, "cs.sock")
 	ln, err := net.Listen("unix", socket)
 	require.NoError(t, err)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	m := &CodeServerManager{ctx: t.Context(), socketPath: socket}
 
 	waitDone := make(chan struct{})

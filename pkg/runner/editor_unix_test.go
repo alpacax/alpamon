@@ -195,7 +195,7 @@ func TestWaitForReadySurvivesConcurrentStop(t *testing.T) {
 
 	dir, err := os.MkdirTemp("", "editor-stop-")
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	m.socketPath = filepath.Join(dir, "cs.sock")
 	root, err := openEditorDirectory(filepath.Dir(dir))
 	require.NoError(t, err)
