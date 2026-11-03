@@ -1047,3 +1047,90 @@ func TestUserHandler_HomeOwnerUID(t *testing.T) {
 		})
 	}
 }
+
+// TestUserHandler_ModUser_ManagedGroupnames pins the reconcile mode: with
+// managed_groupnames present, moduser keeps every current supplementary group
+// Alpacon does not manage and replaces only the managed ones. Without the key
+// it stays the legacy whole-list replace.
+func TestUserHandler_ModUser_ManagedGroupnames(t *testing.T) {
+	current := func(string) ([]string, error) { return []string{"docker", "devs", "oldteam"}, nil }
+
+	tests := []struct {
+		name      string
+		managed   []string
+		groups    []string
+		current   func(string) ([]string, error)
+		wantCode  int
+		wantGroup string // the -G value
+		wantNoMod bool
+	}{
+		{
+			name:      "keeps unmanaged groups and drops managed ones not requested",
+			managed:   []string{"alpacon", "devs", "oldteam"},
+			groups:    []string{"alpacon", "devs"},
+			current:   current,
+			wantGroup: "docker,alpacon,devs",
+		},
+		{
+			name:      "a requested group that is already a kept current group appears once",
+			managed:   []string{"devs"},
+			groups:    []string{"docker", "alpacon"},
+			current:   current,
+			wantGroup: "docker,oldteam,alpacon",
+		},
+		{
+			name:      "legacy payload replaces the whole list",
+			managed:   nil,
+			groups:    []string{"alpacon", "devs"},
+			current:   func(string) ([]string, error) { panic("legacy mode must not read current groups") },
+			wantGroup: "alpacon,devs",
+		},
+		{
+			name:      "empty managed set only adds",
+			managed:   []string{},
+			groups:    []string{"alpacon"},
+			current:   current,
+			wantGroup: "docker,devs,oldteam,alpacon",
+		},
+		{
+			name:      "everything managed and nothing requested clears the list",
+			managed:   []string{"docker", "devs", "oldteam"},
+			groups:    []string{},
+			current:   current,
+			wantGroup: "",
+		},
+		{
+			name:      "current group lookup failure fails without usermod",
+			managed:   []string{"devs"},
+			groups:    []string{"alpacon"},
+			current:   func(string) ([]string, error) { return nil, errors.New("unreadable /etc/group") },
+			wantCode:  1,
+			wantNoMod: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := common.NewMockCommandExecutor(t)
+			h := newTestUserHandler(mock, &MockGroupService{})
+			h.supplementaryGroups = tt.current
+
+			code, _, err := h.Execute(context.Background(), "moduser", &common.CommandArgs{
+				Username:          "testuser",
+				Groupnames:        tt.groups,
+				ManagedGroupnames: tt.managed,
+				Comment:           "Test User",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantCode, code)
+
+			if tt.wantNoMod {
+				assert.False(t, mock.Invoked("/usr/sbin/usermod"))
+				return
+			}
+			assert.NotEqual(t, -1, invokedAt(mock, "/usr/sbin/usermod",
+				"--comment", "Test User", "-G", tt.wantGroup, "testuser"),
+				"executed: %v", mock.GetExecutedCommands())
+		})
+	}
+}

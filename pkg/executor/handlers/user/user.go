@@ -20,10 +20,12 @@ type UserHandler struct {
 	groupService services.GroupService
 	syncManager  common.SystemInfoManager
 	// lookupUser / lookupGroup verify existence before creating (idempotency
-	// gate). They default to os/user-backed implementations and are overridden
-	// in tests. See pkg/executor/handlers/common/lookup.go.
-	lookupUser  common.UserLookupFunc
-	lookupGroup common.GroupLookupFunc
+	// gate), and supplementaryGroups reads current memberships for moduser.
+	// They default to local-file implementations and are overridden in tests.
+	// See pkg/executor/handlers/common/lookup.go.
+	lookupUser          common.UserLookupFunc
+	lookupGroup         common.GroupLookupFunc
+	supplementaryGroups common.SupplementaryGroupsFunc
 }
 
 // NewUserHandler creates a new user handler
@@ -38,10 +40,11 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 			},
 			cmdExecutor,
 		),
-		groupService: groupService,
-		syncManager:  syncManager,
-		lookupUser:   common.DefaultUserLookup,
-		lookupGroup:  common.DefaultGroupLookup,
+		groupService:        groupService,
+		syncManager:         syncManager,
+		lookupUser:          common.DefaultUserLookup,
+		lookupGroup:         common.DefaultGroupLookup,
+		supplementaryGroups: common.DefaultSupplementaryGroups,
 	}
 	return h
 }
@@ -483,7 +486,22 @@ func (h *UserHandler) handleModUser(ctx context.Context, args *common.CommandArg
 	if data.Comment != "" {
 		cmdArgs = append(cmdArgs, "--comment", data.Comment)
 	}
-	if len(data.Groupnames) > 0 {
+	if args.ManagedGroupnames != nil {
+		// Reconcile mode: usermod -G replaces the whole supplementary list,
+		// so keep every current group Alpacon does not manage.
+		current, err := h.supplementaryGroups(data.Username)
+		if err != nil {
+			return 1, fmt.Sprintf("failed to read current groups of %s: %v", data.Username, err), nil
+		}
+		groups := reconcileGroupnames(current, args.ManagedGroupnames, data.Groupnames)
+		log.Info().
+			Str("username", data.Username).
+			Strs("current", current).
+			Strs("managed", args.ManagedGroupnames).
+			Strs("result", groups).
+			Msg("Reconciled supplementary groups")
+		cmdArgs = append(cmdArgs, "-G", strings.Join(groups, ","))
+	} else if len(data.Groupnames) > 0 {
 		cmdArgs = append(cmdArgs, "-G", strings.Join(data.Groupnames, ","))
 	}
 	cmdArgs = append(cmdArgs, data.Username)
@@ -500,4 +518,31 @@ func (h *UserHandler) handleModUser(ctx context.Context, args *common.CommandArg
 		Msg("User modified successfully")
 
 	return exitCode, fmt.Sprintf("User '%s' modified successfully", data.Username), nil
+}
+
+// reconcileGroupnames returns (current - managed) + requested, keeping current
+// order first and dropping duplicates.
+func reconcileGroupnames(current, managed, requested []string) []string {
+	managedSet := make(map[string]struct{}, len(managed))
+	for _, name := range managed {
+		managedSet[name] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(current)+len(requested))
+	result := make([]string, 0, len(current)+len(requested))
+	add := func(name string) {
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	for _, name := range current {
+		if _, ok := managedSet[name]; !ok {
+			add(name)
+		}
+	}
+	for _, name := range requested {
+		add(name)
+	}
+	return result
 }

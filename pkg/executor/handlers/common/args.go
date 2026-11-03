@@ -20,9 +20,14 @@ type CommandArgs struct {
 	AllowSh   bool
 
 	// User management
-	Username                string
-	Groupname               string
-	Groupnames              []string
+	Username   string
+	Groupname  string
+	Groupnames []string
+	// ManagedGroupnames lists the supplementary groups Alpacon manages on
+	// this host. Non-nil switches moduser to reconcile mode, which replaces
+	// only these groups and keeps every other current one; nil (the key
+	// absent, as from a server that predates it) keeps the whole-list replace.
+	ManagedGroupnames       []string
 	HomeDirectory           string
 	HomeDirectoryPermission string
 	PurgeHomeDirectory      bool

@@ -47,6 +47,7 @@ type CommandData struct {
 	Username                string           `json:"username"`
 	Groupname               string           `json:"groupname"`
 	Groupnames              []string         `json:"groupnames"`
+	ManagedGroupnames       []string         `json:"managed_groupnames"`
 	HomeDirectory           string           `json:"home_directory"`
 	HomeDirectoryPermission string           `json:"home_directory_permission"`
 	PurgeHomeDirectory      bool             `json:"purge_home"`
@@ -147,6 +148,7 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 		Username:                c.Username,
 		Groupname:               c.Groupname,
 		Groupnames:              c.Groupnames,
+		ManagedGroupnames:       c.ManagedGroupnames,
 		HomeDirectory:           c.HomeDirectory,
 		HomeDirectoryPermission: c.HomeDirectoryPermission,
 		PurgeHomeDirectory:      c.PurgeHomeDirectory,

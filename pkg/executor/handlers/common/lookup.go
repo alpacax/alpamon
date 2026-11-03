@@ -1,14 +1,19 @@
 package common
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/user"
 	"strconv"
 	"strings"
 
 	"github.com/rs/zerolog/log"
 )
+
+const groupFile = "/etc/group"
 
 // UserLookupFunc resolves a user by name. It mirrors os/user.Lookup so the
 // production default can be assigned directly, while tests inject a fake.
@@ -231,4 +236,55 @@ func ReconcileGroupCreate(
 		return 0, "", nil
 	}
 	return code, out, cmdErr
+}
+
+// SupplementaryGroupsFunc lists a user's supplementary group names.
+type SupplementaryGroupsFunc func(username string) ([]string, error)
+
+// DefaultSupplementaryGroups lists the groups whose /etc/group member list
+// names username: the set `usermod -G` rewrites. It reads the entries by name
+// rather than resolving each gid, because two names can share a gid and the
+// lookup would answer with whichever comes first. Like DefaultUserLookup it
+// reads local files only, the same ones usermod edits, so a directory-backed
+// membership it cannot see is also one usermod would not touch.
+func DefaultSupplementaryGroups(username string) ([]string, error) {
+	if _, err := user.Lookup(username); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(groupFile)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return supplementaryGroupsFrom(f, username)
+}
+
+// supplementaryGroupsFrom lists, in file order, the group names in an
+// /etc/group-format reader whose member list names username. Like the os/user
+// parser it skips NIS compat (+/-) entries and lines with no name, and it puts
+// no limit on line length, since a large group's member list can be long.
+func supplementaryGroupsFrom(r io.Reader, username string) ([]string, error) {
+	var names []string
+	br := bufio.NewReader(r)
+	for {
+		raw, readErr := br.ReadString('\n')
+		if readErr != nil && readErr != io.EOF {
+			return nil, readErr
+		}
+		line := strings.TrimSpace(raw)
+		if line != "" && line[0] != '#' && line[0] != '+' && line[0] != '-' {
+			fields := strings.Split(line, ":")
+			if len(fields) >= 4 && fields[0] != "" {
+				for member := range strings.SplitSeq(fields[3], ",") {
+					if strings.TrimSpace(member) == username {
+						names = append(names, fields[0])
+						break
+					}
+				}
+			}
+		}
+		if readErr == io.EOF {
+			return names, nil
+		}
+	}
 }
