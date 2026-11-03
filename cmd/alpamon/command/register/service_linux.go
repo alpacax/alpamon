@@ -6,12 +6,15 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
 const alpamonBinPath = "/usr/bin/alpamon"
+
+var logPath = filepath.Join(utils.LogDir(), "alpamon.log")
 
 func ensureDirectories() error {
 	if utils.HasSystemd() {

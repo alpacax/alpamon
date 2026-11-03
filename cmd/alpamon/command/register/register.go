@@ -26,10 +26,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var (
-	configPath = filepath.Join(utils.ConfigDir(), "alpamon.conf")
-	logPath    = filepath.Join(utils.LogDir(), "alpamon.log")
-)
+var configPath = filepath.Join(utils.ConfigDir(), "alpamon.conf")
 
 var (
 	serverURL    string
