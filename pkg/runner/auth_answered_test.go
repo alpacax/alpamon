@@ -41,7 +41,7 @@ func TestSecondVerdictAfterAnsweredRequest(t *testing.T) {
 						pc, rec := startPAMClient(t, am, old)
 						synctest.Wait()
 						if failedWrite {
-							require.NoError(t, rec.Conn.Close())
+							require.NoError(t, rec.Close())
 						}
 						if parked {
 							close(release)

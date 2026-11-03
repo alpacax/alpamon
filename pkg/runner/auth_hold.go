@@ -596,8 +596,8 @@ func (am *AuthManager) mismatchLocked(response SudoApprovalResponse, req *SudoRe
 			return "ended request"
 		}
 		if ended.unheld {
-			if !(response.Command == req.Request.Command && ended.rawCommand != responseCommand &&
-				!strings.Contains(req.Request.Command, storedCommandMarker)) {
+			if response.Command != req.Request.Command || ended.rawCommand == responseCommand ||
+				strings.Contains(req.Request.Command, storedCommandMarker) {
 				return "ended request"
 			}
 		} else if responseCommand == ended.command {
@@ -617,7 +617,7 @@ func sudoIdentityHash(req SudoApprovalRequest) [sha256.Size]byte {
 		var size [8]byte
 		binary.BigEndian.PutUint64(size[:], uint64(len(field)))
 		h.Write(size[:])
-		io.WriteString(h, field)
+		_, _ = io.WriteString(h, field)
 	}
 	var digest [sha256.Size]byte
 	copy(digest[:], h.Sum(nil))
@@ -696,7 +696,7 @@ func (am *AuthManager) pruneEndedLocked(now time.Time) int {
 		am.endedExpiryQueue[0] = endedExpiry{}
 		am.endedExpiryQueue = am.endedExpiryQueue[1:]
 		if entry.marker {
-			if am.saturatedEndedIDs[entry.id] == entry.until {
+			if until, ok := am.saturatedEndedIDs[entry.id]; ok && until.Equal(entry.until) {
 				delete(am.saturatedEndedIDs, entry.id)
 			}
 			continue
