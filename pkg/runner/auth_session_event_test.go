@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"io"
 	"net"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/alpacax/alpamon/v2/pkg/accessoutbox/accessoutboxtest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -503,8 +503,7 @@ func TestHandleSessionEvent_IncompleteEventIsNeverARepeat(t *testing.T) {
 // after it is stored rather than dropped as a repeat of an event that was
 // never kept.
 func TestHandleSessionEvent_RepeatOfAnEventTheQueueDroppedIsStored(t *testing.T) {
-	db := openTestOutboxDB(t, filepath.Join(t.TempDir(), "outbox.db"))
-	o := newAccessEventOutbox(outboxStore(db), (&fakeAccessEventSender{}).send)
+	o := newAccessEventOutbox(accessoutboxtest.NewMemStore(), (&fakeAccessEventSender{}).send)
 	o.inbox = make(chan accessOutboxWrite, 1)
 	require.True(t, o.enqueue(newTestAccessEvent(newFakeOutboxClock(), "bob")), "fills the queue")
 	am := newTestAuthManager()

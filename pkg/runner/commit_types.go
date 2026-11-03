@@ -171,7 +171,7 @@ type Partition struct {
 // shadowEntry represents a parsed /etc/shadow entry (internal use only)
 type shadowEntry struct {
 	username   string
-	expireDate *int64 // days since epoch, nil if not set
+	expireDate *int64 //nolint:unused // read only by commit_linux.go; days since epoch, nil if not set
 }
 
 type AccessPolicy struct {

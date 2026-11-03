@@ -139,7 +139,7 @@ Commands from the Alpacon console flow through:
 - Ent ORM with code-generated models (`pkg/db/ent/`)
 - Schema definitions in `pkg/db/schema/`
 - Versioned SQL migrations in `pkg/db/migration/`
-- `pkg/db/ent` is generated and gitignored, so the packages other modules import must not reach it; the `importable-guard` job builds them without it
+- `pkg/db/ent` is generated and gitignored, so the packages other modules import must not reach it, and neither may their tests: `go mod tidy` in an importing module loads them. The `importable-guard` job builds those packages and tidies a module that imports them, both without it; their tests use `pkg/accessoutbox/accessoutboxtest.MemStore`, and `RunContract` holds the SQLite store to the same behavior
 - SQLite backend with automatic migration
 
 **Agent (`pkg/agent/`)**
