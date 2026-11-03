@@ -2,62 +2,69 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/accessoutbox"
+	"github.com/alpacax/alpamon/v2/pkg/accessoutbox/accessoutboxtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func newTestOutboxStore(t *testing.T) *AccessEventOutboxStore {
+func newTestOutboxStore(t *testing.T, path string) *AccessEventOutboxStore {
 	t.Helper()
-	client := InitTestDB(filepath.Join(t.TempDir(), "outbox.db"))
+	client := InitTestDB(path)
 	t.Cleanup(func() { _ = client.Close() })
 	return NewAccessEventOutboxStore(client)
 }
 
 func outboxRow(id string, createdAt time.Time) accessoutbox.Row {
-	return accessoutbox.Row{
-		ID:            id,
-		Payload:       []byte(`{}`),
-		CreatedAt:     createdAt,
-		NextAttemptAt: createdAt,
-	}
+	return accessoutbox.Row{ID: id, Payload: []byte(`{}`), CreatedAt: createdAt, NextAttemptAt: createdAt}
 }
 
-func TestAccessEventOutboxStore_InsertRefusesPastTheBoundAndSkipsHeldIDs(t *testing.T) {
-	store := newTestOutboxStore(t)
-	ctx := context.Background()
+func TestAccessEventOutboxStore_MeetsTheStoreContract(t *testing.T) {
+	accessoutboxtest.RunContract(t, func(t *testing.T) accessoutbox.Store {
+		return newTestOutboxStore(t, filepath.Join(t.TempDir(), "outbox.db"))
+	})
+}
+
+func TestAccessEventOutboxStore_RowsOutliveTheClient(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outbox.db")
 	at := time.Date(2026, time.March, 1, 12, 0, 0, 0, time.UTC)
-	stored, refused, err := store.Insert(ctx, []accessoutbox.Row{outboxRow("a", at)}, 2)
+	first := InitTestDB(path)
+	t.Cleanup(func() { _ = first.Close() }) // a failed require below must not leave the file open on Windows
+	_, _, err := NewAccessEventOutboxStore(first).Insert(context.Background(), []accessoutbox.Row{outboxRow("a", at)}, 10)
 	require.NoError(t, err)
-	require.Equal(t, 1, stored)
-	require.Zero(t, refused)
+	require.NoError(t, first.Close())
 
-	rows := []accessoutbox.Row{outboxRow("a", at), outboxRow("b", at), outboxRow("c", at)}
-	stored, refused, err = store.Insert(ctx, rows, 2)
+	reopened := newTestOutboxStore(t, path)
 
+	due, err := reopened.Due(context.Background(), at, at.Add(time.Hour), 10)
 	require.NoError(t, err)
-	assert.Equal(t, 1, stored, "a is already held and b reaches the bound")
-	assert.Equal(t, 1, refused, "c is past the bound")
-	due, err := store.Due(ctx, at, at.Add(time.Hour), 10)
-	require.NoError(t, err)
-	ids := make([]string, 0, len(due))
-	for _, row := range due {
-		ids = append(ids, row.ID)
-	}
-	assert.Equal(t, []string{"a", "b"}, ids)
+	require.Len(t, due, 1, "a restarted agent finds the held row")
+	assert.Equal(t, "a", due[0].ID)
 }
 
-func TestAccessEventOutboxStore_MissingRowsAreNotErrors(t *testing.T) {
-	store := newTestOutboxStore(t)
-	ctx := context.Background()
-
-	_, held, err := store.EarliestAttempt(ctx)
+// The outbox retries only what accessoutbox.IsBusy recognizes, so this pins
+// that the driver's error for a held write lock is one of them.
+func TestAccessEventOutboxStore_LockedDatabaseReadsAsBusy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outbox.db")
+	store := newTestOutboxStore(t, path)
+	raw, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
-	assert.False(t, held, "an empty table holds nothing")
-	assert.NoError(t, store.Reschedule(ctx, "gone", 1, time.Now().UTC()))
-	assert.NoError(t, store.Remove(ctx, "gone"))
+	t.Cleanup(func() { _ = raw.Close() })
+	conn, err := raw.Conn(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	_, err = conn.ExecContext(context.Background(), "BEGIN EXCLUSIVE")
+	require.NoError(t, err)
+
+	_, _, err = store.Insert(context.Background(), []accessoutbox.Row{outboxRow("a", time.Now().UTC())}, 10)
+
+	require.Error(t, err)
+	assert.True(t, accessoutbox.IsBusy(err), "a held write lock must read as busy: %v", err)
+	_, err = conn.ExecContext(context.Background(), "COMMIT")
+	assert.NoError(t, err)
 }
