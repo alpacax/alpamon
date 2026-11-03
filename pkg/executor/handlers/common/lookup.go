@@ -13,6 +13,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const groupFile = "/etc/group"
+
 // UserLookupFunc resolves a user by name. It mirrors os/user.Lookup so the
 // production default can be assigned directly, while tests inject a fake.
 type UserLookupFunc func(name string) (*user.User, error)
@@ -254,34 +256,35 @@ func DefaultSupplementaryGroups(username string) ([]string, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	return SupplementaryGroupsFrom(f, username)
+	return supplementaryGroupsFrom(f, username)
 }
 
-const groupFile = "/etc/group"
-
-// SupplementaryGroupsFrom lists, in file order, the group names in an
-// /etc/group-format reader whose member list names username.
-func SupplementaryGroupsFrom(r io.Reader, username string) ([]string, error) {
+// supplementaryGroupsFrom lists, in file order, the group names in an
+// /etc/group-format reader whose member list names username. Like the os/user
+// parser it skips NIS compat (+/-) entries and lines with no name, and it puts
+// no limit on line length, since a large group's member list can be long.
+func supplementaryGroupsFrom(r io.Reader, username string) ([]string, error) {
 	var names []string
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	br := bufio.NewReader(r)
+	for {
+		raw, readErr := br.ReadString('\n')
+		if readErr != nil && readErr != io.EOF {
+			return nil, readErr
 		}
-		fields := strings.Split(line, ":")
-		if len(fields) < 4 {
-			continue
-		}
-		for _, member := range strings.Split(fields[3], ",") {
-			if strings.TrimSpace(member) == username {
-				names = append(names, fields[0])
-				break
+		line := strings.TrimSpace(raw)
+		if line != "" && line[0] != '#' && line[0] != '+' && line[0] != '-' {
+			fields := strings.Split(line, ":")
+			if len(fields) >= 4 && fields[0] != "" {
+				for member := range strings.SplitSeq(fields[3], ",") {
+					if strings.TrimSpace(member) == username {
+						names = append(names, fields[0])
+						break
+					}
+				}
 			}
 		}
+		if readErr == io.EOF {
+			return names, nil
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return names, nil
 }

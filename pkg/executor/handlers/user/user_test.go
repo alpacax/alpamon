@@ -1072,6 +1072,13 @@ func TestUserHandler_ModUser_ManagedGroupnames(t *testing.T) {
 			wantGroup: "docker,alpacon,devs",
 		},
 		{
+			name:      "a requested group that is already a kept current group appears once",
+			managed:   []string{"devs"},
+			groups:    []string{"docker", "alpacon"},
+			current:   current,
+			wantGroup: "docker,oldteam,alpacon",
+		},
+		{
 			name:      "legacy payload replaces the whole list",
 			managed:   nil,
 			groups:    []string{"alpacon", "devs"},
