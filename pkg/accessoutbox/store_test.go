@@ -13,4 +13,5 @@ func TestIsBusy_RecognizesOnlyALockedDatabase(t *testing.T) {
 	assert.True(t, IsBusy(errors.New("sqlite: step: SQLITE_BUSY")))
 	assert.False(t, IsBusy(errors.New("disk I/O error")))
 	assert.False(t, IsBusy(errors.New("UNIQUE constraint failed: access_event_outbox.id")))
+	assert.False(t, IsBusy(nil))
 }
