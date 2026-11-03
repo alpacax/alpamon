@@ -1,8 +1,11 @@
 package common
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/user"
 	"strconv"
 	"strings"
@@ -236,30 +239,49 @@ func ReconcileGroupCreate(
 // SupplementaryGroupsFunc lists a user's supplementary group names.
 type SupplementaryGroupsFunc func(username string) ([]string, error)
 
-// DefaultSupplementaryGroups lists the groups username is a member of, minus
-// its primary group: the set `usermod -G` replaces. The CGO_ENABLED=0 caveat of
-// DefaultUserLookup applies, so it reads /etc/passwd and /etc/group only—the
-// same local files usermod edits, so a directory-backed membership it cannot
-// see is also one usermod would not touch.
+// DefaultSupplementaryGroups lists the groups whose /etc/group member list
+// names username: the set `usermod -G` rewrites. It reads the entries by name
+// rather than resolving each gid, because two names can share a gid and the
+// lookup would answer with whichever comes first. Like DefaultUserLookup it
+// reads local files only, the same ones usermod edits, so a directory-backed
+// membership it cannot see is also one usermod would not touch.
 func DefaultSupplementaryGroups(username string) ([]string, error) {
-	u, err := user.Lookup(username)
+	if _, err := user.Lookup(username); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(groupFile)
 	if err != nil {
 		return nil, err
 	}
-	gids, err := u.GroupIds()
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(gids))
-	for _, gid := range gids {
-		if gid == u.Gid {
+	defer func() { _ = f.Close() }()
+	return SupplementaryGroupsFrom(f, username)
+}
+
+const groupFile = "/etc/group"
+
+// SupplementaryGroupsFrom lists, in file order, the group names in an
+// /etc/group-format reader whose member list names username.
+func SupplementaryGroupsFrom(r io.Reader, username string) ([]string, error) {
+	var names []string
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		g, err := user.LookupGroupId(gid)
-		if err != nil {
-			return nil, err
+		fields := strings.Split(line, ":")
+		if len(fields) < 4 {
+			continue
 		}
-		names = append(names, g.Name)
+		for _, member := range strings.Split(fields[3], ",") {
+			if strings.TrimSpace(member) == username {
+				names = append(names, fields[0])
+				break
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 	return names, nil
 }
