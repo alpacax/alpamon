@@ -162,6 +162,21 @@ jobs:
   importable-guard:
     name: Verify imported packages build without generated code
     runs-on: ubuntu-latest
+    env:
+      # Kept by hand: go list cannot see what other modules import. Add a
+      # package here when another module starts importing it.
+      PKGS: >-
+        ./cmd/alpamon/command/setup
+        ./pkg/agent
+        ./pkg/config
+        ./pkg/configreceiver
+        ./pkg/logsink
+        ./pkg/pidfile
+        ./pkg/plugin
+        ./pkg/pluginclient
+        ./pkg/runner
+        ./pkg/scheduler
+        ./pkg/utils
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -174,21 +189,6 @@ jobs:
           cache: false
 
       - name: Build the packages other modules import
-        env:
-          # Kept by hand: go list cannot see what other modules import. Add a
-          # package here when another module starts importing it.
-          PKGS: >-
-            ./cmd/alpamon/command/setup
-            ./pkg/agent
-            ./pkg/config
-            ./pkg/configreceiver
-            ./pkg/logsink
-            ./pkg/pidfile
-            ./pkg/plugin
-            ./pkg/pluginclient
-            ./pkg/runner
-            ./pkg/scheduler
-            ./pkg/utils
         run: |
           set -euo pipefail
 
@@ -205,6 +205,26 @@ jobs:
             # shellcheck disable=SC2086
             GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="$cgo" go build $PKGS
           done
+
+      # go mod tidy in an importing module also loads the tests of every package
+      # it reaches, which go build never compiles.
+      - name: Tidy a module that imports them
+        run: |
+          set -euo pipefail
+          mod="$RUNNER_TEMP/importer"
+          mkdir -p "$mod"
+          {
+            echo 'package importer'
+            echo 'import ('
+            for pkg in $PKGS; do
+              echo "_ \"github.com/alpacax/alpamon/v2/${pkg#./}\""
+            done
+            echo ')'
+          } >"$mod/importer.go"
+          cd "$mod"
+          go mod init example.com/importer
+          go mod edit -require=github.com/alpacax/alpamon/v2@v2.0.0 -replace=github.com/alpacax/alpamon/v2="$GITHUB_WORKSPACE"
+          go mod tidy
 
   # The suite below runs without the race detector on every platform, so the
   # state these packages share between goroutines goes unchecked there.
