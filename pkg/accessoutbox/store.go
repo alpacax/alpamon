@@ -5,6 +5,7 @@ package accessoutbox
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -46,4 +47,11 @@ type Store interface {
 	RemoveCreatedBefore(ctx context.Context, cutoff time.Time) (int, error)
 	// CountCreatedBefore counts the rows created before cutoff.
 	CountCreatedBefore(ctx context.Context, cutoff time.Time) (int, error)
+}
+
+// IsBusy reports whether err is the database refusing because another writer
+// holds its lock, which clears in a moment and is worth retrying.
+func IsBusy(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "is locked") || strings.Contains(msg, "SQLITE_BUSY")
 }

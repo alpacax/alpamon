@@ -7,7 +7,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -545,7 +544,7 @@ func (o *accessEventOutbox) store(ctx context.Context, events []NonAlpaconAccess
 			}
 			return
 		}
-		if !isSQLiteBusy(err) || ctx.Err() != nil {
+		if !accessoutbox.IsBusy(err) || ctx.Err() != nil {
 			o.lost.add(len(rows), o.now())
 			log.Debug().Err(err).Int("events", len(rows)).Msg("Failed to store access events")
 			return
@@ -978,7 +977,7 @@ func retrySQLiteBusy(ctx context.Context, op func() error) error {
 	var err error
 	for attempt := 1; ; attempt++ {
 		err = op()
-		if err == nil || !isSQLiteBusy(err) || attempt == 10 {
+		if err == nil || !accessoutbox.IsBusy(err) || attempt == 10 {
 			return err
 		}
 		pause := min(time.Duration(attempt)*20*time.Millisecond, 100*time.Millisecond)
@@ -986,9 +985,4 @@ func retrySQLiteBusy(ctx context.Context, op func() error) error {
 			return err
 		}
 	}
-}
-
-func isSQLiteBusy(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "is locked") || strings.Contains(msg, "SQLITE_BUSY")
 }
