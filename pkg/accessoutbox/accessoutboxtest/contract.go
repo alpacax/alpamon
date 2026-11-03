@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// RunContract checks that the Store open returns behaves as accessoutbox.Store
+// RunContract checks that each Store from open behaves as accessoutbox.Store
 // documents. open must return an empty Store for each call.
 func RunContract(t *testing.T, open func(t *testing.T) accessoutbox.Store) {
 	at := time.Date(2026, time.March, 1, 12, 0, 0, 0, time.UTC)
