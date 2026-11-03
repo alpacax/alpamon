@@ -180,6 +180,7 @@ func TestPtyOrdinaryClosePreservesNohupChild(t *testing.T) {
 }
 
 func TestPtyOpenCommandHandleLifetime(t *testing.T) {
+	t.Parallel()
 	for _, cancelTerminal := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cancel_%v", cancelTerminal), func(t *testing.T) {
 			wc := &WebsocketClient{}

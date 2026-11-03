@@ -1025,6 +1025,7 @@ func TestClient_ABackoffWaitPrefersAStopToItsTimer(t *testing.T) {
 // the socket fails whether or not the peer is mid-sentence. Without that,
 // Run would sit here for as long as the peer cared to talk.
 func TestClient_TheCloseDrainEndsOnAPeerThatKeepsTalking(t *testing.T) {
+	t.Parallel()
 	srv := newBackhaulServer(t)
 	srv.floodFrames.Store(true)
 	h := newHooks()
@@ -1430,6 +1431,7 @@ func TestClient_ShutdownFromTheHandler(t *testing.T) {
 // answer is the draining backhaul that asked for the reconnect. Waiting the
 // full close timeout there would black out every agent in the fleet for it.
 func TestClient_ReconnectIsNotHeldUpByASilentPeer(t *testing.T) {
+	t.Parallel()
 	srv := newBackhaulServer(t)
 	srv.stallNext.Store(true) // accepts, then neither reads nor answers the close
 	h := newHooks()
@@ -1599,6 +1601,7 @@ func TestClient_RetriesARejectedHandshakeThenConnects(t *testing.T) {
 // OnRetry silent throughout. A connection that ends before it proved itself
 // must now be followed by the same backoff a failed dial gets.
 func TestClient_PacesRedialsAfterAnUnprovenConnection(t *testing.T) {
+	t.Parallel()
 	srv := newBackhaulServer(t)
 	srv.closeOnAccept.Store(true)
 	h := newHooks()
@@ -1671,6 +1674,7 @@ func TestClient_RedialsAtOnceAfterAProvenConnection(t *testing.T) {
 // through the caller-requested path reset the backoff and redialed with no
 // wait at all, which is a storm against a backhaul whose write side is sick.
 func TestClient_PacesARedialAfterAFailedWrite(t *testing.T) {
+	t.Parallel()
 	srv := newBackhaulServer(t)
 	srv.stallNext.Store(true)
 	h := newHooks()
