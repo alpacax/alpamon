@@ -140,3 +140,42 @@ func leaveSocketAt(path string) error {
 	ln.SetUnlinkOnClose(false)
 	return ln.Close()
 }
+
+func TestListenUnixLabeledFallsBackWhenLabelingPanics(t *testing.T) {
+	path := shortAuthSocketPath(t)
+
+	listener, err := listenUnixLabeled(path, sockcreateLabeler{
+		enabled: func() bool { return true },
+		write:   func(string) error { panic("labeling panicked") },
+		listen:  privateListen,
+	})
+
+	require.NoError(t, err)
+	assertAuthListenerAccepts(t, listener, path)
+}
+
+func TestListenUnixLabeledClosesTheLabeledListenerWhenClearingPanics(t *testing.T) {
+	path := shortAuthSocketPath(t)
+	var labeled net.Listener
+
+	listener, err := listenUnixLabeled(path, sockcreateLabeler{
+		enabled: func() bool { return true },
+		write: func(context string) error {
+			if context == "" {
+				panic("clearing the label panicked")
+			}
+			return nil
+		},
+		listen: func(network, address string) (net.Listener, error) {
+			l, err := privateListen(network, address)
+			labeled = l
+			return l, err
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, labeled)
+	_, acceptErr := labeled.Accept()
+	assert.ErrorIs(t, acceptErr, net.ErrClosed, "the labeled listener must not leak")
+	assertAuthListenerAccepts(t, listener, path)
+}

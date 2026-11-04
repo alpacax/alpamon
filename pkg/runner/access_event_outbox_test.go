@@ -1136,7 +1136,7 @@ func TestAccessEventOutbox_DrainComesBackAfterAPanic(t *testing.T) {
 		}
 	}
 	require.Len(t, errorLines, 1, "the panic is logged once: %q", logs.String())
-	assert.Contains(t, errorLines[0], `"loop":"drain"`)
+	assert.Contains(t, errorLines[0], `"goroutine":"access event outbox drain"`)
 	assert.NotContains(t, logs.String(), "alice", "the panic value is not logged")
 }
 
