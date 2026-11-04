@@ -25,9 +25,10 @@ func Recover(name string, onPanic func()) {
 	if r == nil {
 		return
 	}
+	desc := Describe(r)
 	// The message repeats the name and panic: the server's copy of the record keeps only the message.
-	log.Error().Str("goroutine", name).Str("panic", Describe(r)).Str("stack", string(debug.Stack())).
-		Msgf("Recovered a panic in %s: %s", name, Describe(r))
+	log.Error().Str("goroutine", name).Str("panic", desc).Str("stack", string(debug.Stack())).
+		Msgf("Recovered a panic in %s: %s", name, desc)
 	if onPanic != nil {
 		defer recoverCleanup(name)
 		onPanic()
@@ -37,16 +38,19 @@ func Recover(name string, onPanic func()) {
 // recoverCleanup logs a panic in onPanic, which would otherwise end the agent.
 func recoverCleanup(name string) {
 	if r := recover(); r != nil {
-		log.Error().Str("goroutine", name).Str("panic", Describe(r)).Str("stack", string(debug.Stack())).
-			Msgf("Recovered a panic in the panic cleanup of %s: %s", name, Describe(r))
+		desc := Describe(r)
+		log.Error().Str("goroutine", name).Str("panic", desc).Str("stack", string(debug.Stack())).
+			Msgf("Recovered a panic in the panic cleanup of %s: %s", name, desc)
 	}
 }
 
 // Describe names a panic value for a log: its type, plus the message of a
 // runtime error. Any other value may carry session data, so it is not printed.
-func Describe(r any) string {
+func Describe(r any) (desc string) {
+	desc = fmt.Sprintf("%T", r)
 	if err, ok := r.(runtime.Error); ok {
-		return fmt.Sprintf("%T: %s", r, err.Error())
+		defer func() { _ = recover() }() // an Error method that panics leaves the type alone
+		desc += ": " + err.Error()
 	}
-	return fmt.Sprintf("%T", r)
+	return desc
 }
