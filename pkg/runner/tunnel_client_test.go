@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
@@ -503,4 +504,33 @@ func TestTunnelUnregisterAndClose_LeavesANewerTunnelUnderTheSameID(t *testing.T)
 	assert.Same(t, newer, got)
 	assert.Error(t, stale.ctx.Err())
 	assert.NoError(t, newer.ctx.Err())
+}
+
+func TestTunnelServe_UnregistersWhenTheStreamLoopPanics(t *testing.T) {
+	tc := registeredTunnel(t, "panicking-session", relayMustNotStart) // never opened, so AcceptStream dereferences a nil session
+	logs := captureLogs(t)
+
+	tc.Serve()
+
+	_, registered := GetActiveTunnel("panicking-session")
+	assert.False(t, registered)
+	assert.ErrorIs(t, tc.ctx.Err(), context.Canceled)
+	assert.Contains(t, logs.String(), `"goroutine":"tunnel session"`)
+}
+
+func TestTunnelServeStream_FreesItsSlotsWhenTheHandlerPanics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := captureLogs(t)
+		tc := &TunnelClient{sessionID: "s", streamSem: make(chan struct{}, 1)}
+		tc.streamSem <- struct{}{}
+		globalStreamSem <- struct{}{}
+		globalBefore := len(globalStreamSem)
+
+		tc.serveStream(nil) // a nil stream makes handleStream dereference nil
+
+		synctest.Wait()
+		assert.Empty(t, tc.streamSem)
+		assert.Len(t, globalStreamSem, globalBefore-1)
+		assert.Contains(t, logs.String(), `"goroutine":"tunnel stream"`)
+	})
 }

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 )
@@ -120,6 +121,7 @@ func RunTunnelDaemon(socketPath string) {
 // It reads the target address from the first line, connects to the local service,
 // and relays data bidirectionally between the UDS connection and the TCP connection.
 func handleDaemonConnection(conn net.Conn, wg *sync.WaitGroup) {
+	defer safego.Recover("tunnel daemon connection", nil) // a panic here would end the daemon and every tunnel it relays
 	defer wg.Done()
 	defer func() { _ = conn.Close() }()
 
