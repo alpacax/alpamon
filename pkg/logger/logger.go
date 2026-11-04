@@ -49,6 +49,7 @@ var logRecordFileHandlers = map[string]int{
 	"pty.go":     30,
 	"shell.go":   30,
 	"server.go":  40, // logger/server.go
+	"safego.go":  40, // a recovered goroutine panic
 }
 
 func InitLogger() {
