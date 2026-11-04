@@ -152,6 +152,7 @@ Commands from the Alpacon console flow through:
 **Internal packages (`internal/`)**
 - `protocol/`: Command and message protocol definitions
 - `pool/`: Worker pool for concurrent task execution
+- `safego/`: `Go` and `Recover` log a goroutine's panic and run a cleanup instead of ending the agent, and `Describe` names a panic value without printing data it may carry. A `pkg/runner` goroutine that runs agent code starts with `safego.Go`, or defers `safego.Recover` as its function's first defer; one that only waits on the standard library (`cmd.Wait`, `wg.Wait`, a channel `select`) needs neither
 
 **WebSocket transport (`pkg/wsclient/`)**
 - Leaf package for modules outside this repo: dial with the `Authorization: id="...", key="..."` header, jittered reconnect backoff, read timeout, reconnect
