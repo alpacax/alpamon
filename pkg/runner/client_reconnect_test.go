@@ -2,9 +2,13 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/internal/testutil"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/stretchr/testify/assert"
@@ -43,6 +47,63 @@ func TestCommandRequestHandler_EmptyMessageSkipsParsingWithoutLogging(t *testing
 
 	assert.Equal(t, outcomeContinue, outcome)
 	assert.Empty(t, logs.String(), "an empty message should return before ParseMessage ever logs")
+}
+
+func TestCommandRequestHandler_LogsOnlyAQuotedPreviewOfARejectedMessage(t *testing.T) {
+	longQuery := strings.Repeat("q", 1<<20)
+	cases := []struct {
+		name     string
+		message  string
+		logged   string // the format the handler logs the preview with
+		preview  string
+		withSize bool
+	}{
+		{"not JSON", strings.Repeat("x", 1<<20), "Inappropriate message: %q.", strings.Repeat("x", 1<<20), true},
+		{"a line break that would forge a log line", "oops\n[ERROR] forged", "Inappropriate message: %q.", "oops\n[ERROR] forged", true},
+		{
+			"command data whose overflowing number the error quotes",
+			`{"query":"command","command":{"id":"c1","shell":"internal","data":"{\"rows\":` + strings.Repeat("9", 1<<20) + `}"}}`,
+			"Failed to parse command data: %q.",
+			`{"query":"command","command":{"id":"c1","shell":"internal","data":"{\"rows\":` + strings.Repeat("9", 1<<20) + `}"}}`,
+			true,
+		},
+		{"an unknown query", `{"query":"` + longQuery + `"}`, "Not implemented query: %q.", longQuery, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wc, _ := cancelTestClient(t, &cancelTestDispatcher{}) // the command data path posts an ack first
+			logs := captureLogsSync(t)
+
+			outcome := wc.commandRequestHandler([]byte(tc.message))
+
+			assert.Equal(t, outcomeContinue, outcome)
+			entry := warnEntry(t, logs.String())
+			assert.Equal(t, fmt.Sprintf(tc.logged, protocol.Preview(tc.preview)), entry["message"])
+			if tc.withSize {
+				assert.EqualValues(t, len(tc.message), entry["size"])
+			}
+			if tc.logged == "Failed to parse command data: %q." { // only this path's error quotes the input
+				require.Contains(t, entry, "error")
+				assert.LessOrEqual(t, len(entry["error"].(string)), protocol.PreviewBytes+len("..."), "the error quoted the message whole")
+			}
+			assert.Less(t, len(logs.String()), 4*protocol.PreviewBytes, "the log carried more than the previews")
+		})
+	}
+}
+
+// warnEntry decodes the one warn-level line in logs.
+func warnEntry(t *testing.T, logs string) map[string]any {
+	t.Helper()
+	var warns []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &entry))
+		if entry["level"] == "warn" {
+			warns = append(warns, entry)
+		}
+	}
+	require.Len(t, warns, 1)
+	return warns[0]
 }
 
 func TestCloseAndReconnect_DoesNotReconnectAfterContextCancel(t *testing.T) {

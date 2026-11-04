@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/pkg/configreceiver"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
@@ -137,26 +138,16 @@ func (c *Client) handleMessage(ctx context.Context, message []byte) handlerOutco
 
 	var cmd command
 	if err := json.Unmarshal(message, &cmd); err != nil {
-		// Slice the byte buffer FIRST, then convert — converting
-		// the whole ``message`` to string on a 10 MiB frame would
-		// allocate 10 MiB just to render a log preview.
-		const previewBytes = 200
-		previewLen := len(message)
-		ellipsis := ""
-		if previewLen > previewBytes {
-			previewLen = previewBytes
-			ellipsis = "..."
-		}
 		log.Error().
 			Err(err).
 			Int("messageSize", len(message)).
-			Str("messagePreview", string(message[:previewLen])+ellipsis).
+			Str("messagePreview", protocol.Preview(message)).
 			Msg("Failed to unmarshal command")
 		return outcomeContinue
 	}
 
 	if !validQueries[cmd.Query] {
-		log.Warn().Str("query", cmd.Query).Msg("Invalid query type")
+		log.Warn().Str("query", protocol.Preview(cmd.Query)).Msg("Invalid query type")
 		return outcomeContinue
 	}
 
