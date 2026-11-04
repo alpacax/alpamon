@@ -1201,7 +1201,7 @@ func (am *AuthManager) denyPendingRequestsWithCode(pending []*SudoRequest, reaso
 			// finalizeRequest ran it on the waiter's own stack. Off that stack, an
 			// unrecovered panic takes the whole agent down instead of one request.
 			defer safego.Recover("sudo request denial", func() {
-				log.Error().Str("request_id", req.Request.RequestID).Msg("The sudo request denial that panicked")
+				log.Error().Str("request_id", req.Request.RequestID).Msg("Sudo request denial panicked")
 			})
 			// Registered last so it runs first on the way out: after the write and the
 			// close on the ordinary path, and during unwinding on the panic path, where
