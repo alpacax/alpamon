@@ -3,7 +3,9 @@ package runner
 import (
 	"io"
 	"net"
+	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,5 +84,22 @@ func TestDialDirect(t *testing.T) {
 		_, err = io.ReadFull(server, buf)
 		require.NoError(t, err)
 		assert.Equal(t, "ping", string(buf))
+	})
+}
+
+func TestHandleDaemonConnectionSurvivesAPanickingConn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, server := net.Pipe()
+		defer func() { _ = client.Close() }()
+		conn := panicOnReadConn{&closeTrackingConn{Conn: server}}
+		var wg sync.WaitGroup
+		wg.Add(1)
+
+		handleDaemonConnection(conn, &wg)
+
+		wg.Wait() // a panic that skipped wg.Done would deadlock the bubble here
+		assert.True(t, conn.isClosed(), "a panicking relay left the connection open")
+		_, err := client.Read(make([]byte, 1))
+		assert.ErrorIs(t, err, io.EOF)
 	})
 }
