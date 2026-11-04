@@ -8,6 +8,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -271,4 +273,24 @@ func TestPtyClose_ClosesConnAfterWriteControlFailure(t *testing.T) {
 	pc.close()
 
 	require.True(t, tracked.closed.Load(), "close() did not close the websocket connection after WriteControl failure")
+}
+
+func TestPtyPumpThatPanicsCancelsTheSession(t *testing.T) {
+	ptyOut, ptyIn, err := os.Pipe() // stands in for the PTY, so its reader blocks rather than ending the session itself
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ptyOut.Close(); _ = ptyIn.Close() })
+	pc := &PtyClient{ // no channel conn, so the channel reader dereferences nil
+		ptmx:         ptyOut,
+		wsToPty:      make(chan []byte, channelCapacity),
+		ptyToWs:      make(chan []byte, channelCapacity),
+		recoveryDone: make(chan struct{}),
+	}
+	logs := captureLogs(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pc.startPumps(ctx, cancel, make(chan struct{}, 1))
+
+	waitFor(t, ctx.Done(), "a panicking pump to cancel the Websh session")
+	assert.Contains(t, logs.String(), `"goroutine":"Websh channel reader"`)
 }

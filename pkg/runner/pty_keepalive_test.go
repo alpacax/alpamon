@@ -67,7 +67,8 @@ func ptyPingGoroutines() int {
 	for {
 		n := runtime.Stack(buf, true)
 		if n < len(buf) {
-			return strings.Count(string(buf[:n]), "created by github.com/alpacax/alpamon/v2/pkg/runner.(*PtyClient).installConn")
+			// safego.Go is the creator, so match the frame of any closure installConn hands it.
+			return strings.Count(string(buf[:n]), "github.com/alpacax/alpamon/v2/pkg/runner.(*PtyClient).installConn.func")
 		}
 		buf = make([]byte, 2*len(buf))
 	}
