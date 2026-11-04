@@ -32,6 +32,7 @@ func TestGoLogsAPanicAndRunsOnPanic(t *testing.T) {
 		assert.Contains(t, logged.String(), `"goroutine":"test worker"`)
 		assert.Contains(t, logged.String(), `"panic":"string"`)
 		assert.Contains(t, logged.String(), `"stack":`)
+		assert.Contains(t, logged.String(), `"message":"Recovered a panic in test worker: string"`, "the server keeps only the message")
 	})
 }
 
@@ -66,7 +67,7 @@ func TestGoSurvivesAPanicInOnPanic(t *testing.T) {
 		Go("test worker", func() { panic("boom") }, func() { panic("cleanup boom") })
 
 		synctest.Wait() // an unrecovered panic would have ended the test binary here
-		assert.Contains(t, logged.String(), "Recovered a panic in a goroutine's panic cleanup")
+		assert.Contains(t, logged.String(), "Recovered a panic in the panic cleanup of test worker: string")
 	})
 }
 

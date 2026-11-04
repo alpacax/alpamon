@@ -25,8 +25,9 @@ func Recover(name string, onPanic func()) {
 	if r == nil {
 		return
 	}
+	// The message repeats the name and panic: the server's copy of the record keeps only the message.
 	log.Error().Str("goroutine", name).Str("panic", Describe(r)).Str("stack", string(debug.Stack())).
-		Msg("Recovered a panic in a goroutine")
+		Msgf("Recovered a panic in %s: %s", name, Describe(r))
 	if onPanic != nil {
 		defer recoverCleanup(name)
 		onPanic()
@@ -37,7 +38,7 @@ func Recover(name string, onPanic func()) {
 func recoverCleanup(name string) {
 	if r := recover(); r != nil {
 		log.Error().Str("goroutine", name).Str("panic", Describe(r)).Str("stack", string(debug.Stack())).
-			Msg("Recovered a panic in a goroutine's panic cleanup")
+			Msgf("Recovered a panic in the panic cleanup of %s: %s", name, Describe(r))
 	}
 }
 
