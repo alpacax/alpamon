@@ -102,12 +102,18 @@ func (fc *FtpClient) RunFtpBackground() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go fc.read(ctx, cancel)
-	go fc.handleCommands(ctx, cancel)
-	go fc.write(ctx, cancel)
-
+	fc.startPumps(ctx, cancel)
 	<-ctx.Done()
 	return nil
+}
+
+// startPumps starts the read, command, and write loops.
+func (fc *FtpClient) startPumps(ctx context.Context, cancel context.CancelFunc) {
+	goPumps(cancel, map[string]func(){
+		"WebFTP reader":   func() { fc.read(ctx, cancel) },
+		"WebFTP commands": func() { fc.handleCommands(ctx, cancel) },
+		"WebFTP writer":   func() { fc.write(ctx, cancel) },
+	})
 }
 
 // connect dials the WebFTP channel. The worker runs without the agent's
