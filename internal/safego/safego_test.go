@@ -89,3 +89,23 @@ func TestDescribeHidesWhatACustomValueCarries(t *testing.T) {
 	assert.NotContains(t, got, "denied")
 	assert.NotContains(t, got, "alice")
 }
+
+type panickingRuntimeError struct{}
+
+func (panickingRuntimeError) RuntimeError() {}
+func (panickingRuntimeError) Error() string { panic("Error panicked") }
+
+func TestDescribeSurvivesARuntimeErrorWhoseErrorPanics(t *testing.T) {
+	var got string
+
+	assert.NotPanics(t, func() { got = Describe(panickingRuntimeError{}) })
+	assert.Equal(t, "safego.panickingRuntimeError", got)
+}
+
+func TestDescribeSurvivesATypedNilRuntimeError(t *testing.T) {
+	var nilErr *panickingRuntimeError
+	var got string
+
+	assert.NotPanics(t, func() { got = Describe(nilErr) })
+	assert.Equal(t, "*safego.panickingRuntimeError", got)
+}
