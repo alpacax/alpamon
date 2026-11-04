@@ -5,8 +5,8 @@
 //
 //  1. Connect via the shared runner.WebsocketClient, whose read loop
 //     pings the connection and redials one that goes silent.
-//  2. Enforce a 10 MiB read limit.
-//  3. Decode each frame, reject anything outside the whitelist of
+//  2. Enforce the backhaul read limit (runner.MaxMessageSize).
+//  3. Decode each message, reject anything outside the whitelist of
 //     stock queries (ping, config_updated, reconfigure, quit,
 //     reconnect, restart).
 //  4. Dispatch config_updated to configreceiver.Receiver (modern
@@ -88,10 +88,9 @@ type Client struct {
 	configWorkerStarted sync.Once
 }
 
-// MaxMessageSize is the maximum allowed WebSocket message size (10 MiB)
-// enforced both at the gorilla connection layer (SetReadLimit) and as a
-// secondary guard inside the handler.
-const MaxMessageSize = 10 * 1024 * 1024
+// MaxMessageSize is the backhaul message cap (runner.MaxMessageSize), enforced
+// at the connection (SetReadLimit) and again inside the handler.
+const MaxMessageSize = runner.MaxMessageSize
 
 // validQueries is the whitelist of WS command query types the shared
 // dispatcher knows about. Anything else is rejected with a log line
@@ -123,7 +122,7 @@ func New(
 	}
 }
 
-// handleMessage runs the shared dispatch for one inbound frame. It
+// handleMessage runs the shared dispatch for one inbound message. It
 // never panics for arbitrary inputs — the readers above feed it
 // whatever the WebSocket produces.
 func (c *Client) handleMessage(ctx context.Context, message []byte) handlerOutcome {
@@ -264,7 +263,7 @@ func (c *Client) configWorker(ctx context.Context) {
 }
 
 // RunForever maintains the WebSocket connection and dispatches every
-// inbound frame through handleMessage until ctx is cancelled.
+// inbound message through handleMessage until ctx is cancelled.
 func (c *Client) RunForever(ctx context.Context) {
 	if c.WsClient == nil {
 		log.Error().Msg("Cannot run: WsClient is nil")
