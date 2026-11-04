@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/rs/zerolog/log"
 )
 
@@ -428,6 +429,7 @@ func waitEndedBody(req SudoApprovalRequest) sudoWaitEnded {
 // effort: the server's own deadline ends the wait if this never lands. It runs
 // on its own goroutine, so the waiter returns (and frees the request id) at once.
 func (am *AuthManager) postWaitEnded(req SudoApprovalRequest, hold *sudoHold) {
+	defer safego.Recover("sudo wait-ended report", nil)
 	if am.session == nil || am.ctx == nil {
 		return
 	}
@@ -440,7 +442,7 @@ func (am *AuthManager) postWaitEnded(req SudoApprovalRequest, hold *sudoHold) {
 // postWaitEndedOnShutdown makes one bounded attempt at the wait-ended post
 // while the agent stops; am.ctx is already cancelled, so it cannot be used.
 func (am *AuthManager) postWaitEndedOnShutdown(req SudoApprovalRequest, hold *sudoHold) {
-	go am.postWaitEndedOnce(context.Background(), req, hold)
+	safego.Go("sudo wait-ended report on shutdown", func() { am.postWaitEndedOnce(context.Background(), req, hold) }, nil)
 }
 
 // postWaitEndedOnce makes one wait-ended attempt bounded by
