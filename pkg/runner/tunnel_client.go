@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/tunnel"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -210,6 +211,7 @@ func (tc *TunnelClient) open(ctx context.Context) error {
 // Serve relays streams until the session ends, then unregisters and closes
 // the tunnel. Call it only after Open succeeds.
 func (tc *TunnelClient) Serve() {
+	defer safego.Recover("tunnel session", nil)
 	defer tc.unregisterAndClose()
 	tc.handleStreams()
 	log.Info().Msgf("Tunnel session %s ended.", tc.sessionID)
@@ -433,14 +435,20 @@ func (tc *TunnelClient) handleStreams() {
 			return
 		}
 
-		go func() {
-			defer func() {
-				<-globalStreamSem
-				<-tc.streamSem
-			}()
-			tc.handleStream(stream)
-		}()
+		tc.serveStream(stream)
 	}
+}
+
+// serveStream handles stream on its own goroutine and then frees the two slots
+// handleStreams took for it, even when the handler panics.
+func (tc *TunnelClient) serveStream(stream *smux.Stream) {
+	safego.Go("tunnel stream", func() {
+		defer func() {
+			<-globalStreamSem
+			<-tc.streamSem
+		}()
+		tc.handleStream(stream)
+	}, nil)
 }
 
 // logStreamPressure logs a warning when stream concurrency approaches limits.
@@ -489,6 +497,7 @@ func (tc *TunnelClient) handleStream(stream *smux.Stream) {
 		log.Debug().Err(err).Msg("Failed to dial session target.")
 		return
 	}
+	defer func() { _ = targetConn.Close() }() // the relay closes it too; this covers a panic before the relay starts
 	log.Debug().Msg("Session target dialed.")
 
 	dataReader := tc.buildDataReader(bufReader, stream)

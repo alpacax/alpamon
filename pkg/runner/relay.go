@@ -1,10 +1,12 @@
 package runner
 
 import (
+	"errors"
 	"io"
 	"net"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/tunnel"
 )
 
@@ -23,8 +25,9 @@ func relayBidirectional(a net.Conn, fromA io.Reader, b net.Conn, fromB io.Reader
 		}
 		errChan <- err
 	}
-	go pipe(b, fromA)
-	go pipe(a, fromB)
+	failed := func() { errChan <- errors.New("relay copy panicked") } // a direction that never reports would park the relay
+	safego.Go("tunnel relay a-to-b", func() { pipe(b, fromA) }, failed)
+	safego.Go("tunnel relay b-to-a", func() { pipe(a, fromB) }, failed)
 
 	if <-errChan == nil { // the other direction gets bound to finish
 		select {

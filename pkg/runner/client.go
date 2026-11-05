@@ -12,6 +12,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/internal/protocol"
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
@@ -404,7 +405,8 @@ func (wc *WebsocketClient) Connect(ctx context.Context) error {
 			}
 		}
 		if ka != nil {
-			go wc.sendPings(ctx, conn, ka, keepaliveInterval)
+			interval := keepaliveInterval // read before the goroutine starts: tests reassign it
+			safego.Go("backhaul keepalive", func() { wc.sendPings(ctx, conn, ka, interval) }, nil)
 		}
 		log.Debug().Msg("Backhaul connection established.")
 		return nil

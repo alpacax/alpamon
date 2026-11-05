@@ -11,8 +11,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -89,7 +91,7 @@ var deferredSyncKeys = []string{
 func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agent.ContextManager) {
 	if commissioned {
 		// Use a goroutine with delayed execution for commissioned systems
-		go func() {
+		safego.Go("delayed system sync", func() {
 			// Get application-level context for shutdown coordination
 			ctx := ctxManager.Root()
 
@@ -102,9 +104,10 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 				// Shutdown occurred before timeout, skip sync
 				log.Debug().Msg("Skipping syncSystemInfo due to shutdown")
 			}
-		}()
+		}, nil)
 	} else {
-		go func() {
+		var committed atomic.Bool
+		safego.Go("initial system commit", func() {
 			ctx := ctxManager.Root()
 
 			// Step 1: Immediate lightweight commit (no delay).
@@ -119,6 +122,7 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			log.Info().Msg("Committing essential system information (lightweight).")
 			if essentialData := collectEssentialData(); essentialData != nil {
 				commitAndNotify(essentialData)
+				committed.Store(true)
 				log.Info().Msg("Essential system information committed.")
 			} else {
 				// Essential collection failed; fall back to full commit.
@@ -154,7 +158,11 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			case <-ctx.Done():
 				log.Debug().Msg("Skipping deferred sync due to shutdown")
 			}
-		}()
+		}, func() {
+			if !committed.Load() { // only this commit sets commissioned, and nothing else retries it
+				CommitSystemInfo()
+			}
+		})
 	}
 }
 
