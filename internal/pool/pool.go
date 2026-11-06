@@ -8,6 +8,8 @@ import (
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/alpacax/alpamon/v2/internal/safego"
 )
 
 // Job represents a unit of work to be executed by the pool
@@ -91,7 +93,7 @@ func (p *Pool) executeJob(job *Job) {
 	// Panic recovery
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("recovered from panic in pool worker: %v\nstack: %s", r, debug.Stack())
+			log.Printf("recovered from panic in pool worker: %s\nstack: %s", safego.Describe(r), debug.Stack())
 		}
 	}()
 

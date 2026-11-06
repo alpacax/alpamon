@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
@@ -166,7 +167,7 @@ func (w *chunkWriter) emit(content string) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error().Interface("panic", r).Msg("ChunkCallback panicked")
+			log.Error().Str("panic", safego.Describe(r)).Msg("ChunkCallback panicked")
 		}
 	}()
 	w.callback(w.ctx, content)
@@ -374,7 +375,7 @@ func invokePIDHook(pidHook func(pid int), pid int) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error().Interface("panic", r).Int("pid", pid).Msg("PIDHook panicked")
+			log.Error().Str("panic", safego.Describe(r)).Int("pid", pid).Msg("PIDHook panicked")
 		}
 	}()
 	pidHook(pid)

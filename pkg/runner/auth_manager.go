@@ -535,12 +535,53 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	}
 
 	sid, sidOK := sessionID(sudoApprovalReq.PID)
-	am.mu.Lock()
-	session, exists := am.lookupSessionLocked(sid, sidOK, sudoApprovalReq.PPID)
-	blockLocalSudo := am.blockLocalSudo
+	var (
+		exists, blockLocalSudo, alreadyWaiting bool
+		kind                                   string
+		displaced, sudoRequest                 *SudoRequest
+	)
+	func() {
+		am.mu.Lock()
+		defer am.mu.Unlock() // a panic in here must not leave every later sudo request parked on am.mu
+		var session *SessionInfo
+		session, exists = am.lookupSessionLocked(sid, sidOK, sudoApprovalReq.PPID)
+		blockLocalSudo = am.blockLocalSudo
+		if !exists {
+			return
+		}
+		sudoApprovalReq.IsAlpconUser = true // Alpacon user: pidToSessionMap
+		kind = session.effectiveKind()
+		switch kind {
+		case TrackerKindCommand:
+			sudoApprovalReq.SessionID = ""
+			sudoApprovalReq.CommandID = session.CommandID
+		case TrackerKindWebsh:
+			// websh (and legacy entries without Kind, normalized by effectiveKind).
+			sudoApprovalReq.SessionID = session.SessionID
+			sudoApprovalReq.CommandID = ""
+		default:
+			return // unknown kind: rejected below
+		}
+
+		// A request still registered under this id belongs to a sudo process that
+		// is gone, since its pid now names this one. Push it out first, so no take
+		// or cleanup by id can ever reach two instances.
+		displaced = am.displaceRequestLocked(sudoApprovalReq.RequestID)
+
+		// The same command already waits for a decision in another terminal: one
+		// wait per command is enough, and the server would refuse this one anyway.
+		if sudoApprovalReq.HoldCapable && am.liveHoldForLocked(sudoApprovalReq) {
+			alreadyWaiting = true
+			return
+		}
+
+		sudoRequest = newSudoRequest(unixConn, sudoApprovalReq)
+		sudoRequest.posting = true
+		session.Requests[sudoApprovalReq.RequestID] = sudoRequest
+	}()
+
 	if !exists {
 		// Non-WebSH session (local SSH, etc.)
-		am.mu.Unlock()
 		sudoApprovalReq.IsAlpconUser = false
 
 		if blockLocalSudo {
@@ -556,45 +597,19 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		return
 	}
 
-	// Alpacon user: pidToSessionMap
-	sudoApprovalReq.IsAlpconUser = true
-	kind := session.effectiveKind()
-	switch kind {
-	case TrackerKindCommand:
-		sudoApprovalReq.SessionID = ""
-		sudoApprovalReq.CommandID = session.CommandID
-	case TrackerKindWebsh:
-		// websh (and legacy entries without Kind, normalized by effectiveKind).
-		sudoApprovalReq.SessionID = session.SessionID
-		sudoApprovalReq.CommandID = ""
-	default:
-		// Unknown kind: reject explicitly rather than silently misattribute
-		// as websh. A future new Kind must be added to the switch.
-		am.mu.Unlock()
+	if kind != TrackerKindCommand && kind != TrackerKindWebsh {
+		// Reject explicitly rather than silently misattribute as websh.
+		// A future new Kind must be added to the switch.
 		log.Warn().Str("kind", kind).Msg("Unknown tracker kind; rejecting sudo")
 		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Unknown session kind", "")
 		return
 	}
-
-	// A request still registered under this id belongs to a sudo process that
-	// is gone, since its pid now names this one. Push it out first, so no take
-	// or cleanup by id can ever reach two instances.
-	displaced := am.displaceRequestLocked(sudoApprovalReq.RequestID)
-
-	// The same command already waits for a decision in another terminal: one
-	// wait per command is enough, and the server would refuse this one anyway.
-	if sudoApprovalReq.HoldCapable && am.liveHoldForLocked(sudoApprovalReq) {
-		am.mu.Unlock()
+	if alreadyWaiting {
 		am.releaseDisplaced(displaced, sudoApprovalReq)
 		log.Info().Str("request_id", sudoApprovalReq.RequestID).Msg("sudo command already waits for approval; not forwarding")
 		am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "Already waiting", sudoCodeAlreadyWaiting)
 		return
 	}
-
-	sudoRequest := newSudoRequest(unixConn, sudoApprovalReq)
-	sudoRequest.posting = true
-	session.Requests[sudoApprovalReq.RequestID] = sudoRequest
-	am.mu.Unlock()
 	// Before this request's own post, so the old wait's end reaches the server
 	// first and cannot end the wait this request is about to start.
 	am.releaseDisplaced(displaced, sudoApprovalReq)
