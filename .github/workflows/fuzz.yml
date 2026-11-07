@@ -1,0 +1,51 @@
+name: Fuzz
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+    paths:
+      - "pkg/exposure/**"
+      - "testdata/exposure/**"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # A short run of every exposure parser fuzz target on each pull request
+  # that touches them. The nightly workflow runs the same targets for longer.
+  # Go fuzzes one target per invocation, so they run one after another.
+  exposure-short:
+    name: Fuzz exposure parsers (short)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # pkg/exposure needs no generated code; do not claim the cache key
+          # the setup-go-generate jobs compute.
+          cache: false
+
+      - name: Fuzz each target for 10 seconds
+        run: |
+          set -euo pipefail
+          targets="$(go test -list '^Fuzz' ./pkg/exposure | grep '^Fuzz')"
+          if [ -z "$targets" ]; then
+            echo "::error::no fuzz targets found in pkg/exposure"
+            exit 1
+          fi
+          for target in $targets; do
+            echo "fuzzing $target"
+            go test ./pkg/exposure -run '^$' -fuzz "^${target}\$" -fuzztime=10s
+          done
+
+      - name: Keep a failing input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: exposure-fuzz-short
+          path: pkg/exposure/testdata/fuzz
+          if-no-files-found: ignore

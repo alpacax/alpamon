@@ -1,0 +1,4 @@
+deploy
+ops-team
+from="192.0.2.0/24",command="/usr/bin/rsync LEAKCANARY-principals" backup
+not a principal line

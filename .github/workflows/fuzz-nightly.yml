@@ -1,0 +1,59 @@
+name: Fuzz (nightly)
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exposure-long:
+    name: Fuzz ${{ matrix.target }} (long)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in step with the Fuzz functions in pkg/exposure/fuzz_test.go;
+        # the list step below fails when one is missing here.
+        target:
+          - FuzzShadow
+          - FuzzAuthorizedKeys
+          - FuzzPrincipals
+          - FuzzSudoers
+          - FuzzSSHDT
+          - FuzzMatch
+          - FuzzWtmp
+          - FuzzLastlog
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check the target list
+        env:
+          LISTED: FuzzShadow FuzzAuthorizedKeys FuzzPrincipals FuzzSudoers FuzzSSHDT FuzzMatch FuzzWtmp FuzzLastlog
+        run: |
+          set -euo pipefail
+          for target in $(go test -list '^Fuzz' ./pkg/exposure | grep '^Fuzz'); do
+            case " $LISTED " in
+              *" $target "*) ;;
+              *) echo "::error file=.github/workflows/fuzz-nightly.yml::$target is not in the nightly matrix"; exit 1 ;;
+            esac
+          done
+
+      - name: Fuzz for 15 minutes
+        run: go test ./pkg/exposure -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime=15m
+
+      - name: Keep a failing input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: exposure-fuzz-${{ matrix.target }}
+          path: pkg/exposure/testdata/fuzz
+          if-no-files-found: ignore

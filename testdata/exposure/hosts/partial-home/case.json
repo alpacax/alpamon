@@ -1,0 +1,59 @@
+{
+  "hostname": "partial-1",
+  "sshd": "sshd-T.txt",
+  "btime": 1699990000,
+  "processes": [
+    {
+      "pid": 1,
+      "ppid": 0,
+      "comm": "systemd",
+      "argv": [
+        "/sbin/init"
+      ],
+      "start": 1699990001
+    },
+    {
+      "pid": 812,
+      "ppid": 1,
+      "comm": "sshd",
+      "argv": [
+        "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"
+      ],
+      "start": 1700000000
+    },
+    {
+      "pid": 901,
+      "ppid": 812,
+      "comm": "sshd-session",
+      "argv": [
+        "sshd-session: ubuntu [priv]"
+      ],
+      "start": 1700000500
+    }
+  ],
+  "modes": {
+    "home/frank": "0775"
+  },
+  "owners": {
+    "/home/carol": 1003,
+    "/home/dan": 1004,
+    "/home/dan/.ssh": 1004,
+    "/home/dan/.ssh/real_keys": 1004,
+    "/home/eve": 1005,
+    "/home/frank": 1006,
+    "/home/frank/.ssh": 1006,
+    "/home/frank/.ssh/authorized_keys": 1006
+  },
+  "unreadable": [
+    "/home/carol"
+  ],
+  "wtmp": [],
+  "lastlog": [],
+  "canaries": [
+    "LEAKCANARY",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAOhB7/zzhC+HXDdGOdLwJln5NYwm6UNXx3chmQSVTG4",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIK89ICZPnCbvCFtc5Tf0F9QkA3oJY6Y4b/bQUOW/dzcU",
+    "AAAAC3NzaC1lZDI1NTE5AAAAINE0d3NQGyN4uY6LDPN5IjTCs2VEEZtrfEmoQMSFcqzQ"
+  ],
+  "never_opened": []
+}

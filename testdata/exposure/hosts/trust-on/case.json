@@ -1,0 +1,50 @@
+{
+  "hostname": "trust-1",
+  "sshd": "sshd-T.txt",
+  "btime": 1699990000,
+  "processes": [
+    {
+      "pid": 1,
+      "ppid": 0,
+      "comm": "systemd",
+      "argv": [
+        "/sbin/init"
+      ],
+      "start": 1699990001
+    },
+    {
+      "pid": 812,
+      "ppid": 1,
+      "comm": "sshd",
+      "argv": [
+        "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"
+      ],
+      "start": 1700000000
+    },
+    {
+      "pid": 901,
+      "ppid": 812,
+      "comm": "sshd-session",
+      "argv": [
+        "sshd-session: ubuntu [priv]"
+      ],
+      "start": 1700000500
+    }
+  ],
+  "modes": {
+    "home/alice/.k5login": "0600"
+  },
+  "owners": {
+    "/home/alice": 1001,
+    "/home/alice/.k5login": 1001,
+    "/home/alice/.rhosts": 1001,
+    "/home/alice/.shosts": 1001
+  },
+  "unreadable": [],
+  "wtmp": [],
+  "lastlog": [],
+  "canaries": [
+    "LEAKCANARY"
+  ],
+  "never_opened": []
+}

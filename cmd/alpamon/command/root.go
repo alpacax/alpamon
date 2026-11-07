@@ -21,6 +21,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/db"
 	"github.com/alpacax/alpamon/v2/pkg/executor"
+	"github.com/alpacax/alpamon/v2/pkg/exposure"
 	"github.com/alpacax/alpamon/v2/pkg/logger"
 	"github.com/alpacax/alpamon/v2/pkg/migrate"
 	"github.com/alpacax/alpamon/v2/pkg/pidfile"
@@ -142,6 +143,10 @@ func runAgent(ready chan<- struct{}) {
 
 	// Reporter - pass context manager for centralized context management
 	reporters := scheduler.StartReporters(session, ctxManager)
+
+	// Exposure: hourly host access-path reads with their own endpoints,
+	// independent of alpamon-pam and of any policy setting. Linux only.
+	exposure.Start(ctxManager.Root(), session)
 
 	// Log server - pass worker pool and context manager for connection handling
 	logServer := logger.NewLogServer(workerPool, ctxManager)
