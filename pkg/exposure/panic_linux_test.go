@@ -346,7 +346,7 @@ func TestCategoryStarterPanicReturnsTimeout(t *testing.T) {
 	assertPanicLog(t, logs.String(), catPasswords, "Exposure category starter panicked.")
 }
 
-func TestAccountDispatcherPanicTimesOutLane(t *testing.T) {
+func TestAccountDispatcherPanicTimesOutCurrentAccount(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		logs := captureLogs(t)
 		var failed atomic.Bool
@@ -375,7 +375,7 @@ func TestAccountDispatcherPanicTimesOutLane(t *testing.T) {
 				timedOut++
 			}
 		}
-		assert.Equal(t, 3, timedOut)
+		assert.Equal(t, 1, timedOut)
 		assertPanicLog(t, logs.String(), catKeys, "Exposure account dispatcher panicked.")
 	})
 }

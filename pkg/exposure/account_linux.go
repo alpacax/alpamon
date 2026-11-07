@@ -11,7 +11,8 @@ import (
 )
 
 // accountSlot survives collection attempts, including a read abandoned on a
-// hung mount. The collector retains only occupied slots, with a global bound.
+// hung mount. The global bound counts abandoned workers, in addition to
+// each category's in-flight slots.
 type accountSlot struct{ category, username string }
 
 type accountResult[T any] struct {
@@ -181,7 +182,7 @@ func failedAccountTrust(a passwdEntry, t *sshdT, cfg sshdConfig, reason string) 
 	return out
 }
 
-// readAccountResults keeps four account attempts in flight. A timeout frees
+// readAccountResults keeps at most four account attempts in flight. A timeout frees
 // its lane only when the worker can join the abandoned bound; otherwise that
 // lane stops, and the worker retains its in-flight slot until it exits.
 func readAccountResults[T any](ctx context.Context, c *collector, cat string, accounts []passwdEntry, read func(passwdEntry) T, apply func(passwdEntry, T, string)) {
@@ -190,40 +191,58 @@ func readAccountResults[T any](ctx context.Context, c *collector, cat string, ac
 		value   T
 		reason  string
 	}
-	done := make(chan result, maxConcurrentAccounts)
+	done := make(chan result, len(accounts))
+	next := 0
+	// Retained workers already occupy lanes on later reads.
+	c.accountMu.Lock()
+	lanes := maxConcurrentAccounts - c.accountInFlight[cat]
+	c.accountMu.Unlock()
 	var wg sync.WaitGroup
-	for lane := range maxConcurrentAccounts {
+	for range lanes {
 		wg.Add(1)
 		go func() {
-			next := lane
+			current := -1
 			defer wg.Done()
 			defer func() {
 				if recover() != nil {
 					logExposurePanic(cat, "Exposure account dispatcher panicked.")
-					for ; next < len(accounts); next += maxConcurrentAccounts {
+					if current >= 0 {
 						var zero T
-						done <- result{accounts[next], zero, reasonTimeout}
+						done <- result{accounts[current], zero, reasonTimeout}
 					}
 				}
 			}()
-			stopped := false
-			for ; next < len(accounts); next += maxConcurrentAccounts {
-				a := accounts[next]
-				var v T
-				reason := reasonTimeout
-				if !stopped {
-					readHook("account_dispatch:" + cat)
-					v, reason, stopped = runAccountBudget(ctx, c, cat, a.name, func() T { return read(a) })
+			for {
+				c.accountMu.Lock()
+				if c.accountInFlight[cat] >= maxConcurrentAccounts || next >= len(accounts) {
+					c.accountMu.Unlock()
+					return
 				}
+				current = next
+				next++
+				c.accountMu.Unlock()
+				a := accounts[current]
+				readHook("account_dispatch:" + cat)
+				v, reason, stopped := runAccountBudget(ctx, c, cat, a.name, func() T { return read(a) })
 				done <- result{a, v, reason}
+				current = -1
+				if stopped {
+					return
+				}
 			}
 		}()
 	}
-	for range accounts {
-		r := <-done
+	go func() {
+		wg.Wait()
+		for _, a := range accounts[next:] {
+			var zero T
+			done <- result{a, zero, reasonTimeout}
+		}
+		close(done)
+	}()
+	for r := range done {
 		apply(r.account, r.value, r.reason)
 	}
-	wg.Wait()
 }
 
 func (c *collector) readKeysBudget(ctx context.Context, accounts []passwdEntry, t *sshdT, cfg sshdConfig) keysData {
