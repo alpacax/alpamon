@@ -89,7 +89,6 @@ func TestSudoIncompleteRules(t *testing.T) {
 		{"Defaults for one user", "Defaults:alice !authenticate\n", reasonSudoUnsupportedSyntax, false},
 		{"global auth Defaults", "Defaults targetpw\n", reasonSudoUnsupportedSyntax, true},
 		{"command-bound Defaults", "Defaults!/bin/a rootpw\n", reasonSudoUnsupportedSyntax, true},
-		{"ALL users", "ALL ALL = ALL\n", reasonSudoUnsupportedSyntax, true},
 		{"negated user", "!alice ALL = ALL\n", reasonSudoUnsupportedSyntax, true},
 		{"uid user", "#1001 ALL = ALL\n", reasonSudoUnsupportedSyntax, true},
 		{"non-unix group", "%:admins ALL = ALL\n", reasonSudoUnsupportedSyntax, true},
@@ -175,4 +174,17 @@ func TestSudoCommandPathCap(t *testing.T) {
 	assert.Contains(t, got.Reasons, reasonLimitExceeded)
 	require.Len(t, got.Grants, 1)
 	assert.Len(t, got.Grants[0].CommandPaths, maxCommandPaths)
+}
+
+func TestSudoAllUsers(t *testing.T) {
+	p := readSudoPolicy(mapSource{files: map[string]string{sudoersPath: "ALL ALL=(ALL) NOPASSWD: ALL\n"}}, "host")
+	for _, name := range []string{"alice", "bob", "root"} {
+		s := p.forAccount(name, func(string) bool { return false })
+		require.Len(t, s.Grants, 1)
+		assert.True(t, s.Complete)
+		assert.Empty(t, s.Reasons)
+		assert.Equal(t, "all", s.Grants[0].Via)
+		assert.Equal(t, "all", s.Grants[0].Commands)
+		assert.True(t, s.Grants[0].NoPasswd)
+	}
 }

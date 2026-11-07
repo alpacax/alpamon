@@ -6,8 +6,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -34,7 +40,7 @@ type fakePoster struct {
 	answers map[string][]fakeResponse
 }
 
-func (f *fakePoster) PostWithContext(_ context.Context, url string, body any, _ time.Duration) ([]byte, int, http.Header, error) {
+func (f *fakePoster) PostExposure(_ context.Context, url string, body any, _ time.Duration) ([]byte, int, http.Header, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	b, ok := body.([]byte)
@@ -265,4 +271,71 @@ func TestHourlyDueTime(t *testing.T) {
 		assert.Equal(t, 2, reads, "next read one interval plus jitter later")
 		mu.Unlock()
 	})
+}
+
+func TestExposureResponseLimitAndNoRedirect(t *testing.T) {
+	var received atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { received.Add(1); w.WriteHeader(200) }))
+	defer other.Close()
+	for _, code := range []int{200, 307, 308} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, `id="test", key="test"`, r.Header.Get("Authorization"))
+				if code != 200 {
+					w.Header().Set("Location", other.URL)
+					w.WriteHeader(code)
+					return
+				}
+				_, err := io.WriteString(w, strings.Repeat("LEAKCANARY", maxRespBytes))
+				if err != nil {
+					return
+				}
+			}))
+			defer origin.Close()
+			session := &scheduler.Session{BaseURL: origin.URL, Authorization: `id="test", key="test"`, Client: origin.Client()}
+			originalRedirect := session.Client.CheckRedirect
+			for _, path := range []string{checkURL, reportURL} {
+				body, status, _, err := session.PostExposure(context.Background(), path, []byte(`{"x":1}`), time.Second)
+				assert.Error(t, err)
+				assert.Empty(t, body)
+				assert.Equal(t, code, status)
+				svc := newService(session, nil, nil)
+				svc.sleep = func(context.Context, time.Duration) bool { return false }
+				_, ok := svc.send(context.Background(), path, []byte(`{}`), time.Second, nil)
+				assert.False(t, ok)
+			}
+			assert.Equal(t, int32(0), received.Load())
+			assert.Equal(t, fmt.Sprintf("%p", originalRedirect), fmt.Sprintf("%p", session.Client.CheckRedirect))
+		})
+	}
+}
+
+type countingResponseBody struct {
+	read   int
+	closed bool
+}
+
+func (b *countingResponseBody) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	b.read += len(p)
+	return len(p), nil
+}
+func (b *countingResponseBody) Close() error { b.closed = true; return nil }
+
+type exposureRoundTrip func(*http.Request) (*http.Response, error)
+
+func (f exposureRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestExposureReadsAtMostResponseCapPlusOne(t *testing.T) {
+	body := &countingResponseBody{}
+	session := &scheduler.Session{BaseURL: "https://example.test", Client: &http.Client{Transport: exposureRoundTrip(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: body, Header: http.Header{}}, nil
+	})}}
+	data, _, _, err := session.PostExposure(context.Background(), checkURL, []byte(`{}`), time.Second)
+	assert.Error(t, err)
+	assert.Nil(t, data)
+	assert.Equal(t, maxRespBytes+1, body.read)
+	assert.True(t, body.closed)
 }

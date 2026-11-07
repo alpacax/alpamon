@@ -39,6 +39,9 @@ type sudoUser struct {
 }
 
 func (u sudoUser) via() string {
+	if u.name == "ALL" && !u.group {
+		return "all"
+	}
 	if u.group {
 		return "group:" + u.name
 	}
@@ -268,6 +271,7 @@ func (r *sudoReader) line(source, text string, depth int) {
 
 func (r *sudoReader) includeDir(dir string, depth int) {
 	names, l := r.src.list(dir)
+	r.pol.global.merge(l.reasons)
 	if l.status == statusAbsent {
 		return
 	}
@@ -488,7 +492,7 @@ func (r *sudoReader) users(toks []sudoWord, seen map[string]bool) ([]sudoUser, b
 				return nil, false
 			}
 			out = append(out, sub...)
-		case validName(w) && w != "ALL":
+		case validName(w):
 			out = append(out, sudoUser{name: w})
 		default:
 			return nil, false
@@ -932,7 +936,7 @@ func (p *sudoPolicy) forAccount(name string, inGroup func(string) bool) AccountS
 	reasons.merge(p.global)
 	matchUser := func(us []sudoUser) (sudoUser, bool) {
 		for _, u := range us {
-			if (!u.group && u.name == name) || (u.group && inGroup(u.name)) {
+			if (!u.group && (u.name == "ALL" || u.name == name)) || (u.group && inGroup(u.name)) {
 				return u, true
 			}
 		}

@@ -14,7 +14,7 @@ const Supported = false
 
 // Poster is the part of scheduler.Session the transport would use.
 type Poster interface {
-	PostWithContext(ctx context.Context, url string, body any, timeout time.Duration) ([]byte, int, http.Header, error)
+	PostExposure(ctx context.Context, url string, body any, timeout time.Duration) ([]byte, int, http.Header, error)
 }
 
 // Start does nothing on this platform: neither endpoint is ever called.

@@ -363,3 +363,85 @@ func TestGrammar(t *testing.T) {
 	assert.False(t, validName("-x"))
 	assert.False(t, validName("$"))
 }
+
+func TestTrustUnicodeWhitespace(t *testing.T) {
+	for _, input := range []string{"\r\r\n", "\v\n", " \n", " \n", "\u0085\n", "\f\n"} {
+		for _, path := range []string{".rhosts", ".shosts", "hosts.equiv", ".k5login"} {
+			t.Run(path+input, func(t *testing.T) {
+				require.NotPanics(t, func() {
+					if path == ".k5login" {
+						e, u, limit := parseK5Login([]byte(input))
+						assert.Empty(t, e)
+						assert.Zero(t, u)
+						assert.False(t, limit)
+					} else {
+						e, u, limit := parseHostsEquiv([]byte(input))
+						assert.Empty(t, e)
+						assert.Zero(t, u)
+						assert.False(t, limit)
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestPrincipalGrammarsRejectShadow(t *testing.T) {
+	line := "root:$y$j9T$abcdefghijklmnopqrstuv$ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq:19000:0:99999:7:::"
+	k, u, _ := parseK5Login([]byte(line + "\n"))
+	assert.Empty(t, k)
+	assert.Equal(t, 1, u)
+	p, u, _, _ := parsePrincipalsFile([]byte(line + "\n"))
+	assert.Empty(t, p)
+	assert.Equal(t, 1, u)
+	_, _, ok := parseKeyOptions([]byte(`principals="` + line + `" ssh-ed25519 ` + testEd0))
+	assert.False(t, ok)
+	assert.True(t, validK5Principal(strings.Repeat("a", 256)+"@"+strings.Repeat("b", 255)))
+	assert.False(t, validK5Principal("a@b/c"))
+	assert.True(t, validPrincipal("ops+a/b-c.d_e@realm"))
+}
+
+func TestTrustEntryCaps(t *testing.T) {
+	var k5, hosts strings.Builder
+	for i := 0; k5.Len() < maxReadBytes-16; i++ {
+		fmt.Fprintf(&k5, "%x\n", i)
+		fmt.Fprintf(&hosts, "h%x\n", i)
+	}
+	entries, _, limited := parseK5Login([]byte(k5.String()))
+	assert.Len(t, entries, maxTrustEntries)
+	assert.True(t, limited)
+	hu, _, limited := parseHostsEquiv([]byte(hosts.String()))
+	assert.Len(t, hu, maxTrustEntries)
+	assert.True(t, limited)
+
+}
+
+func TestCommentsDropNonprintingBeforeCap(t *testing.T) {
+	controls := "\u202e\u2066\u2067\u2068\u2069\u200b\u2028\u2029"
+	comment, truncated := cleanComment([]byte(strings.Repeat(controls, 128) + strings.Repeat("x", 128)))
+	require.NotNil(t, comment)
+	assert.Equal(t, strings.Repeat("x", 128), *comment)
+	assert.False(t, truncated)
+}
+
+func TestSSHDIncludeRestoresMatchState(t *testing.T) {
+	src := mapSource{files: map[string]string{
+		sshdConfigPath:   "Include /etc/ssh/extra\nPasswordAuthentication no\n",
+		"/etc/ssh/extra": "Match Address 10.0.0.0/8\nPasswordAuthentication yes\n",
+	}}
+	cfg := parseSSHDConfig(src)
+	require.Len(t, cfg.blocks, 1)
+	assert.Equal(t, "yes", cfg.blocks[0].block.Sets["passwordauthentication"])
+	assert.True(t, cfg.readAll)
+}
+
+func TestSSHDIncludeRestoresParentBlockAfterReallocation(t *testing.T) {
+	cfg := parseSSHDConfig(mapSource{files: map[string]string{
+		sshdConfigPath:   "Match User alice\n Include /etc/ssh/extra\n AuthorizedKeysCommand /usr/bin/keys\n",
+		"/etc/ssh/extra": "Match Address 10.0.0.0/8\n PasswordAuthentication no\n",
+	}})
+	require.Len(t, cfg.blocks, 2)
+	assert.True(t, cfg.blocks[0].hasKeysCmd)
+	require.NotNil(t, cfg.blocks[0].keysCommand)
+	assert.Equal(t, "/usr/bin/keys", *cfg.blocks[0].keysCommand.path)
+}

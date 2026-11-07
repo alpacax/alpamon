@@ -265,6 +265,14 @@ func (f *fsReader) openRegular(p string, rule ownerRule) (*os.File, unix.Stat_t,
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || !rule.allows(f.mapOwner(p, st.Uid)) || (!rule.system && st.Nlink != 1) {
 		return nil, st, dirs, failed(statusRejected, reasonFileRejected)
 	}
+	// A root-owned orphaned hard link in an account-owned directory is
+	// trustworthy only while the kernel prevents that account creating it.
+	if !rule.system && f.mapOwner(p, st.Uid) == 0 && dirs[len(dirs)-1].uid != 0 {
+		protection := (systemFiles{f: f}).load("/proc/sys/fs/protected_hardlinks")
+		if !protection.usable() || string(protection.data) != "1\n" && string(protection.data) != "1" {
+			return nil, st, dirs, failed(statusRejected, reasonFileRejected)
+		}
+	}
 	fd, err := f.openAt(dirfd, last, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOCTTY)
 	if err != nil {
 		return nil, st, dirs, failed(statusOf(err))
@@ -312,7 +320,7 @@ func (f *fsReader) read(p string, rule ownerRule) (loaded, []pathStat) {
 	switch {
 	case len(data) > maxReadBytes:
 		l.reasons.add(reasonLimitExceeded)
-	case statErr != nil || changed(&st, &after) || int64(len(data)) != st.Size:
+	case statErr != nil || changed(&st, &after) || (int64(len(data)) != st.Size && !(rule.system && p == "/proc/sys/fs/protected_hardlinks" && st.Size == 0)):
 		l.reasons.add(reasonConcurrentChange)
 	default:
 		l.data = data

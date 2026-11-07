@@ -45,13 +45,16 @@ func defaultOptions() collectorOptions {
 // category, the next read records that category as a timeout instead of
 // starting a second worker behind it.
 type collector struct {
-	opts  collectorOptions
-	busy  map[string]*atomic.Bool
-	reads atomic.Int64
+	opts         collectorOptions
+	busy         map[string]*atomic.Bool
+	reads        atomic.Int64
+	accountMu    sync.Mutex
+	accountBusy  map[accountSlot]bool
+	accountCount int
 }
 
 func newCollector(opts collectorOptions) *collector {
-	c := &collector{opts: opts, busy: map[string]*atomic.Bool{}}
+	c := &collector{opts: opts, busy: map[string]*atomic.Bool{}, accountBusy: map[accountSlot]bool{}}
 	for _, n := range categoryNames {
 		c.busy[n] = &atomic.Bool{}
 	}
@@ -67,12 +70,19 @@ func runBudget[T any](ctx context.Context, c *collector, cat string, fn func(con
 		return zero, false
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.opts.budget)
+	defer cancel()
 	done := make(chan T, 1)
 	go func() {
-		defer cancel()
-		v := fn(ctx)
-		slot.Store(false)
-		done <- v
+		var result T
+		defer func() {
+			if recover() != nil {
+				logParserPanic(cat)
+				result = categoryFailure[T](reasonParseError)
+			}
+			slot.Store(false)
+			done <- result
+		}()
+		result = fn(ctx)
 	}()
 	select {
 	case v := <-done:
@@ -154,18 +164,18 @@ func (c *collector) collect(ctx context.Context) *Report {
 			t, cfg = b.sshd.t, b.sshd.cfg
 		}
 		start(func() {
-			b.keys, b.keysOK = runBudget(ctx, c, catKeys, func(context.Context) keysData {
-				return withFS(c, keysData{reasons: unreadable()}, func(fs *fsReader, _ systemFiles) keysData { return readKeys(fs, accounts, t, cfg) })
+			b.keys, b.keysOK = runBudget(ctx, c, catKeys, func(ctx context.Context) keysData {
+				return c.readKeysBudget(ctx, accounts, t, cfg)
 			})
 		})
 		start(func() {
-			b.certs, b.certsOK = runBudget(ctx, c, catCertificates, func(context.Context) certsData {
-				return withFS(c, certsData{reasons: unreadable()}, func(fs *fsReader, sys systemFiles) certsData { return readCerts(fs, sys, accounts, t, cfg) })
+			b.certs, b.certsOK = runBudget(ctx, c, catCertificates, func(ctx context.Context) certsData {
+				return c.readCertsBudget(ctx, accounts, t, cfg)
 			})
 		})
 		start(func() {
-			b.trust, b.trustOK = runBudget(ctx, c, catTrust, func(context.Context) trustData {
-				return withFS(c, trustData{reasons: unreadable()}, func(fs *fsReader, sys systemFiles) trustData { return readTrust(fs, sys, accounts, t, cfg) })
+			b.trust, b.trustOK = runBudget(ctx, c, catTrust, func(ctx context.Context) trustData {
+				return c.readTrustBudget(ctx, accounts, t, cfg)
 			})
 		})
 		start(func() {
@@ -450,6 +460,7 @@ type accountKeys struct {
 }
 
 type keysData struct {
+	failure string
 	byUser  map[string]accountKeys
 	reasons reasonSet
 	usable  bool
@@ -630,13 +641,14 @@ func formatMode(mode uint32) string {
 }
 
 type certsData struct {
+	failure    string
 	userCA     *UserCA
 	principals map[string][]PrincipalsFile
 	reasons    reasonSet
 	usable     bool
 }
 
-func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, cfg sshdConfig) certsData {
+func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, cfg sshdConfig, accountOnly ...bool) certsData {
 	d := certsData{principals: map[string][]PrincipalsFile{}, reasons: reasonSet{}}
 	if t == nil {
 		d.reasons.add(reasonFileUnreadable)
@@ -649,30 +661,32 @@ func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 	if setInAnyBlock(cfg, "trustedusercakeys") || setInAnyBlock(cfg, "authorizedprincipalsfile") {
 		d.reasons.add(reasonPathTokenUnresolved)
 	}
-	switch ca := sshdValue(t, "trustedusercakeys"); {
-	case ca == "":
-		d.reasons.add(reasonFileUnreadable)
-	case ca == "none":
-	case strings.Contains(ca, "%") || !validPath(ca):
-		d.userCA = &UserCA{Envelope: Envelope{Path: ca, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, CAs: []CA{}}
-		d.reasons.add(reasonPathTokenUnresolved)
-	default:
-		l := sys.load(ca)
-		u := &UserCA{Envelope: l.envelope(ca), CAs: []CA{}}
-		if l.data != nil {
-			cas, unparsed, tooLong := parseCAKeys(l.data)
-			u.CAs = cas
-			if unparsed > 0 {
-				u.Complete = false
-				u.Reasons = appendReason(u.Reasons, reasonParseError)
+	if len(accountOnly) == 0 {
+		switch ca := sshdValue(t, "trustedusercakeys"); {
+		case ca == "":
+			d.reasons.add(reasonFileUnreadable)
+		case ca == "none":
+		case strings.Contains(ca, "%") || !validPath(ca):
+			d.userCA = &UserCA{Envelope: Envelope{Path: ca, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, CAs: []CA{}}
+			d.reasons.add(reasonPathTokenUnresolved)
+		default:
+			l := sys.load(ca)
+			u := &UserCA{Envelope: l.envelope(ca), CAs: []CA{}}
+			if l.data != nil {
+				cas, unparsed, tooLong := parseCAKeys(l.data)
+				u.CAs = cas
+				if unparsed > 0 {
+					u.Complete = false
+					u.Reasons = appendReason(u.Reasons, reasonParseError)
+				}
+				if tooLong {
+					u.Complete = false
+					u.Reasons = appendReason(u.Reasons, reasonLimitExceeded)
+				}
 			}
-			if tooLong {
-				u.Complete = false
-				u.Reasons = appendReason(u.Reasons, reasonLimitExceeded)
-			}
+			d.reasons.add(u.Reasons...)
+			d.userCA = u
 		}
-		d.reasons.add(u.Reasons...)
-		d.userCA = u
 	}
 	tmpl := sshdValue(t, "authorizedprincipalsfile")
 	if tmpl == "" {
@@ -718,13 +732,14 @@ func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 }
 
 type trustData struct {
+	failure string
 	files   map[string][]TrustFile
 	system  []SystemTrustFile
 	reasons reasonSet
 	usable  bool
 }
 
-func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, cfg sshdConfig) trustData {
+func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, cfg sshdConfig, accountOnly ...bool) trustData {
 	d := trustData{files: map[string][]TrustFile{}, system: []SystemTrustFile{}, reasons: reasonSet{}}
 	if t == nil {
 		d.reasons.add(reasonFileUnreadable)
@@ -739,33 +754,35 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 		// are not opened.
 		return d
 	}
-	if kerberos {
-		if l := sys.load("/etc/krb5.conf"); l.usable() {
-			if krb5MappingUnresolved(l.data) {
+	if len(accountOnly) == 0 {
+		if kerberos {
+			if l := sys.load("/etc/krb5.conf"); l.usable() {
+				if krb5MappingUnresolved(l.data) {
+					d.reasons.add(reasonKerberosMappingUnresolv)
+				}
+			} else if l.status != statusAbsent {
 				d.reasons.add(reasonKerberosMappingUnresolv)
+				d.reasons.merge(l.reasons)
 			}
-		} else if l.status != statusAbsent {
-			d.reasons.add(reasonKerberosMappingUnresolv)
-			d.reasons.merge(l.reasons)
 		}
-	}
-	if hostbased {
-		d.reasons.add(reasonHostbasedConditional, reasonHostbasedUnassessed)
-	}
-	if rhosts {
-		for _, p := range []string{"/etc/hosts.equiv", "/etc/ssh/shosts.equiv"} {
-			l := sys.load(p)
-			st := SystemTrustFile{Envelope: l.envelope(p), Entries: []HostUser{}}
-			if l.data != nil {
-				entries, unparsed, tooLong := parseHostsEquiv(l.data)
-				st.Entries = entries
-				st.Complete, st.Reasons = markParse(st.Complete, st.Reasons, unparsed, tooLong)
+		if hostbased {
+			d.reasons.add(reasonHostbasedConditional, reasonHostbasedUnassessed)
+		}
+		if rhosts {
+			for _, p := range []string{"/etc/hosts.equiv", "/etc/ssh/shosts.equiv"} {
+				l := sys.load(p)
+				st := SystemTrustFile{Envelope: l.envelope(p), Entries: []HostUser{}}
+				if l.data != nil {
+					entries, unparsed, tooLong := parseHostsEquiv(l.data)
+					st.Entries = entries
+					st.Complete, st.Reasons = markParse(st.Complete, st.Reasons, unparsed, tooLong)
+				}
+				if st.Entries == nil {
+					st.Entries = []HostUser{}
+				}
+				d.reasons.add(st.Reasons...)
+				d.system = append(d.system, st)
 			}
-			if st.Entries == nil {
-				st.Entries = []HostUser{}
-			}
-			d.reasons.add(st.Reasons...)
-			d.system = append(d.system, st)
 		}
 	}
 	for _, acct := range accounts {
@@ -899,4 +916,8 @@ func readPTY(fs *fsReader, accounts []passwdEntry) ptyData {
 		d.byUser[a.name] = best
 	}
 	return d
+}
+
+func logParserPanic(cat string) {
+	log.Debug().Str("category", cat).Msg("Exposure category parser panicked.")
 }

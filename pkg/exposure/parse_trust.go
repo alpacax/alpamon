@@ -26,6 +26,10 @@ func parseK5Login(data []byte) ([]TrustEntry, int, bool) {
 			return true
 		}
 		if !seen[s] {
+			if len(out) >= maxTrustEntries {
+				tooLong = true
+				return false
+			}
 			seen[s] = true
 			out = append(out, TrustEntry{Principal: &s})
 		}
@@ -51,6 +55,9 @@ func parseHostsEquiv(data []byte) ([]HostUser, int, bool) {
 			return true
 		}
 		f := strings.Fields(string(line))
+		if len(f) == 0 {
+			return true
+		}
 		if len(f) > 2 || !validHostname(f[0]) {
 			unparsed++
 			return true
@@ -68,6 +75,10 @@ func parseHostsEquiv(data []byte) ([]HostUser, int, bool) {
 			key += *hu.User
 		}
 		if !seen[key] {
+			if len(out) >= maxTrustEntries {
+				tooLong = true
+				return false
+			}
 			seen[key] = true
 			out = append(out, hu)
 		}

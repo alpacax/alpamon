@@ -13,6 +13,7 @@ permissions:
 jobs:
   # A short run of every exposure parser fuzz target on each pull request
   # that touches them. The nightly workflow runs the same targets for longer.
+  # Includes HostsEquiv, K5Login, Passwd, Group and NSSwitch automatically.
   # Go fuzzes one target per invocation, so they run one after another.
   exposure-short:
     name: Fuzz exposure parsers (short)

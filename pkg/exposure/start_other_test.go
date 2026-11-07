@@ -14,7 +14,7 @@ import (
 
 type countingPoster struct{ calls atomic.Int32 }
 
-func (p *countingPoster) PostWithContext(context.Context, string, any, time.Duration) ([]byte, int, http.Header, error) {
+func (p *countingPoster) PostExposure(context.Context, string, any, time.Duration) ([]byte, int, http.Header, error) {
 	p.calls.Add(1)
 	return nil, http.StatusOK, nil, nil
 }

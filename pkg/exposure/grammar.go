@@ -91,33 +91,33 @@ func validFrom(s string) bool {
 	return true
 }
 
-// validPrincipal is a certificate principal: printable ASCII without space,
-// comma, quote or backslash, at most 256 bytes.
+// validPrincipal is an SSH certificate principal, at most 256 ASCII bytes.
 func validPrincipal(s string) bool {
-	if s == "" || len(s) > 256 {
+	if len(s) == 0 || len(s) > 256 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c <= ' ' || c > '~' || c == ',' || c == '"' || c == '\\' {
+	for i := range len(s) {
+		if !isAlnum(s[i]) && !strings.ContainsRune("._@/+-", rune(s[i])) {
 			return false
 		}
 	}
 	return true
 }
 
-// validK5Principal matches ^[^\s@]+(@[^\s@]+)?$ over printable ASCII, at
-// most 256 bytes.
+// validK5Principal permits a name of at most 256 bytes and an optional
+// realm of at most 255 bytes, each restricted to its ASCII grammar.
 func validK5Principal(s string) bool {
-	if s == "" || len(s) > 256 {
-		return false
-	}
 	name, realm, hasRealm := strings.Cut(s, "@")
-	if name == "" || (hasRealm && realm == "") || strings.Contains(realm, "@") {
+	if len(name) == 0 || len(name) > 256 || (hasRealm && (len(realm) == 0 || len(realm) > 255)) {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		if s[i] <= ' ' || s[i] > '~' {
+	for i := range len(name) {
+		if !isAlnum(name[i]) && !strings.ContainsRune("._/+-", rune(name[i])) {
+			return false
+		}
+	}
+	for i := range len(realm) {
+		if !isAlnum(realm[i]) && !strings.ContainsRune("._-", rune(realm[i])) {
 			return false
 		}
 	}

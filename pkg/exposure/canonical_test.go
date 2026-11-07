@@ -90,7 +90,7 @@ func TestHashIgnoresObservedAtOnly(t *testing.T) {
 }
 
 // TestReportCap fills a report past 2 MiB and checks that it is cut in the
-// fixed order, marked limit_exceeded, still sealed and still sent.
+// size order, marked limit_exceeded, still sealed and still sent.
 func TestReportCap(t *testing.T) {
 	r := newTestReport()
 	for i := range 400 {
@@ -119,11 +119,11 @@ func TestReportCap(t *testing.T) {
 	assert.Contains(t, r.Categories[catKeys].Reasons, reasonLimitExceeded)
 	assert.Equal(t, coverageCovered, r.Categories[catAccounts].Status, "accounts are cut only after every other category")
 	assert.Len(t, r.Accounts, 400)
-	cut := r.Accounts[len(r.Accounts)-1].KeyFiles[0]
+	cut := r.Accounts[0].KeyFiles[0]
 	assert.Empty(t, cut.Keys)
 	assert.False(t, cut.Complete)
 	assert.Contains(t, cut.Reasons, reasonLimitExceeded)
-	assert.NotEmpty(t, r.Accounts[0].KeyFiles[0].Keys, "cutting runs from the last account")
+	assert.NotEmpty(t, r.Accounts[len(r.Accounts)-1].KeyFiles[0].Keys, "equal sources retain stable path order")
 	input, err := hashInput(r)
 	require.NoError(t, err)
 	sum := sha256.Sum256(input)

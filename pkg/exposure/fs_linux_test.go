@@ -381,3 +381,55 @@ func TestStatusOfErrors(t *testing.T) {
 		assert.Equal(t, tc.status, got, tc.err.Error())
 	}
 }
+
+func TestAccountRootFileNeedsProtectedHardlinks(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		for _, value := range []string{"0\n", "1\n", "2\n", "1 \n", ""} {
+			t.Run(fmt.Sprintf("value=%q", value), func(t *testing.T) {
+				root, owners := attackRoot(t)
+				require.NoError(t, os.MkdirAll(filepath.Join(root, "proc/sys/fs"), 0o755))
+				if value != "" {
+					require.NoError(t, os.WriteFile(filepath.Join(root, "proc/sys/fs/protected_hardlinks"), []byte(value), 0o644))
+				}
+				f := readerFor(t, root, owners)
+				for _, path := range []string{"/home/u/.k5login", "/home/u/.ssh/principals", "/home/u/.ssh/authorized_keys"} {
+					// Create and orphan the link: its final link count is one.
+					original := filepath.Join(root, "etc/original")
+					require.NoError(t, os.WriteFile(original, []byte("alice@EXAMPLE.COM\n"), 0o644))
+					require.NoError(t, os.Link(original, filepath.Join(root, path)))
+					require.NoError(t, os.Remove(original))
+					l, _ := f.read(path, ownerRule{uid: 1001})
+					if value == "1\n" {
+						assert.True(t, l.complete())
+						assert.True(t, l.usable())
+					} else {
+						assert.Equal(t, statusRejected, l.status)
+						assert.True(t, l.reasons.has(reasonFileRejected))
+						assertNoContent(t, l)
+					}
+				}
+			})
+		}
+	})
+}
+
+func TestIncludeDirectoryLimitPropagates(t *testing.T) {
+	root, owners := attackRoot(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "etc/includes"), 0o755))
+	for i := 0; i <= maxDirEntries; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(root, "etc/includes", fmt.Sprint(i)), nil, 0o644))
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "etc/ssh"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "etc/ssh/sshd_config"), []byte("Include /etc/includes/*\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "etc/sudoers"), []byte("@includedir /etc/includes\n"), 0o644))
+	sys := systemFiles{f: readerFor(t, root, owners)}
+	cfg := parseSSHDConfig(sys)
+	assert.False(t, cfg.readAll)
+	assert.True(t, cfg.reasons.has(reasonLimitExceeded))
+	pol := readSudoPolicy(sys, "host")
+	for _, user := range []string{"u", "root"} {
+		s := pol.forAccount(user, func(string) bool { return false })
+		assert.False(t, s.Complete)
+		assert.Contains(t, s.Reasons, reasonLimitExceeded)
+	}
+}

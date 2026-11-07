@@ -113,8 +113,8 @@ func commandFrom(cmd, user string) *providerCommand {
 		return nil
 	}
 	pc := &providerCommand{}
-	if exe := strings.Fields(cmd)[0]; validPath(exe) {
-		pc.path = &exe
+	if fields := strings.Fields(cmd); len(fields) > 0 && validPath(fields[0]) {
+		pc.path = &fields[0]
 	}
 	if user = strings.TrimSpace(user); validName(user) {
 		pc.user = &user
@@ -225,8 +225,20 @@ func (p *sshdConfigParser) file(name string, depth int) {
 		}
 		switch kw {
 		case "include":
+			saved := -1
+			for i := range p.cfg.blocks {
+				if p.current == &p.cfg.blocks[i] {
+					saved = i
+					break
+				}
+			}
 			for _, a := range args {
 				p.include(a, depth)
+				if saved < 0 {
+					p.current = nil
+				} else {
+					p.current = &p.cfg.blocks[saved]
+				}
 			}
 		case "match":
 			p.cfg.blocks = append(p.cfg.blocks, newMatchBlock(args))
@@ -257,6 +269,10 @@ func (p *sshdConfigParser) include(arg string, depth int) {
 		return
 	}
 	names, l := p.src.list(dir)
+	p.cfg.reasons.merge(l.reasons)
+	if len(l.reasons) > 0 {
+		p.cfg.readAll = false
+	}
 	if l.status == statusAbsent {
 		return
 	}

@@ -3,6 +3,8 @@ package exposure
 import (
 	"bytes"
 	"fmt"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -188,6 +190,85 @@ func FuzzLastlog(f *testing.F) {
 		}
 		if r.tty != nil && !validTTY(*r.tty) || r.source != nil && !validHostname(*r.source) {
 			t.Fatal("field outside its grammar")
+		}
+	})
+}
+
+func FuzzHostsEquiv(f *testing.F) {
+	f.Add([]byte("host.example alice\n\v\n \n"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		skipCanary(t, data)
+		data = append(data, "\n"+fuzzCanary+":secret user\n"...)
+		entries, _, _ := parseHostsEquiv(data)
+		assertNoCanary(t, entries)
+		require.LessOrEqual(t, len(entries), maxTrustEntries)
+		for _, e := range entries {
+			assert.True(t, validHostname(e.Host))
+			if e.User != nil {
+				assert.True(t, validName(*e.User))
+			}
+		}
+	})
+}
+
+func FuzzK5Login(f *testing.F) {
+	f.Add([]byte("alice@EXAMPLE.COM\n\r\r\n"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		skipCanary(t, data)
+		data = append(data, "\nroot:$y$"+fuzzCanary+":19000:0:99999:7:::\n"...)
+		entries, _, _ := parseK5Login(data)
+		assertNoCanary(t, entries)
+		require.LessOrEqual(t, len(entries), maxTrustEntries)
+		for _, e := range entries {
+			require.NotNil(t, e.Principal)
+			assert.True(t, validK5Principal(*e.Principal))
+		}
+	})
+}
+
+func FuzzPasswd(f *testing.F) {
+	f.Add([]byte("alice:x:1000:1000::/home/alice:/bin/sh\n"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		skipCanary(t, data)
+		data = append(data, "\ncanary:"+fuzzCanary+":1:1:"+fuzzCanary+":/home/canary:/bin/sh\n"...)
+		result := parsePasswd(data)
+		require.LessOrEqual(t, len(result.entries), maxAccounts)
+		assert.NotContains(t, fmt.Sprintf("%+v", result.entries), fuzzCanary)
+		for _, e := range result.entries {
+			assert.True(t, validName(e.name))
+			assert.True(t, e.home == "" || e.home == "/" || validPath(e.home))
+			assert.True(t, e.shell == "" || validPath(e.shell))
+		}
+	})
+}
+
+func FuzzGroup(f *testing.F) {
+	f.Add([]byte("ops:x:1000:alice,bob\n"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		skipCanary(t, data)
+		data = append(data, "\ncanary:"+fuzzCanary+":1:alice\n"...)
+		result := parseGroup(data)
+		assert.NotContains(t, fmt.Sprintf("%+v", result.groups), fuzzCanary)
+		for _, e := range result.groups {
+			assert.True(t, validName(e.name))
+			for _, m := range e.members {
+				assert.True(t, validName(m))
+			}
+		}
+	})
+}
+
+func FuzzNSSwitch(f *testing.F) {
+	f.Add([]byte("passwd: files sss [NOTFOUND=return]\n"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		skipCanary(t, data)
+		data = append(data, "\npasswd: files ["+fuzzCanary+"=return]\n"...)
+		result, _ := parseNSSwitch(data)
+		assertNoCanary(t, result)
+		for _, modules := range result {
+			for _, m := range modules {
+				assert.True(t, validName(m))
+			}
 		}
 	})
 }

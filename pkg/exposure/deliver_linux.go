@@ -32,7 +32,7 @@ const (
 // bypass the request queue: its reporter logs response bodies on failure,
 // which this endpoint pair must never do.
 type Poster interface {
-	PostWithContext(ctx context.Context, url string, body any, timeout time.Duration) ([]byte, int, http.Header, error)
+	PostExposure(ctx context.Context, url string, body any, timeout time.Duration) ([]byte, int, http.Header, error)
 }
 
 // service serializes exposure reads and their delivery: one goroutine reads,
@@ -154,8 +154,8 @@ func retryable(status int) bool {
 func (s *service) send(ctx context.Context, url string, body []byte, timeout time.Duration, out any) (int, bool) {
 	backoff := firstBackoff
 	for attempt := 1; ; attempt++ {
-		resp, status, _, err := s.post.PostWithContext(ctx, url, body, timeout)
-		if err == nil && !retryable(status) {
+		resp, status, _, err := s.post.PostExposure(ctx, url, body, timeout)
+		if err == nil && len(resp) <= maxRespBytes && !(status >= 300 && status < 400) && !retryable(status) {
 			if out != nil && status == http.StatusOK {
 				if len(resp) > maxRespBytes || json.NewDecoder(bytes.NewReader(resp)).Decode(out) != nil {
 					log.Debug().Msg("Exposure check response could not be parsed.")

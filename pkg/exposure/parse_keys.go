@@ -309,13 +309,13 @@ func parseKeyLine(line []byte) (keyLine, bool) {
 }
 
 // cleanComment keeps at most maxCommentRunes runes of valid UTF-8 with
-// control characters removed.
+// non-printing characters removed.
 func cleanComment(raw []byte) (*string, bool) {
 	s := strings.TrimSpace(strings.ToValidUTF8(string(raw), ""))
 	var b strings.Builder
 	runes, truncated := 0, false
 	for _, r := range s {
-		if unicode.IsControl(r) || r == utf8.RuneError {
+		if !unicode.IsPrint(r) || r == utf8.RuneError {
 			continue
 		}
 		if runes == maxCommentRunes {

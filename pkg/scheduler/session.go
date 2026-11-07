@@ -279,3 +279,41 @@ func (session *Session) MultipartRequest(rawURL string, body io.Reader, contentT
 
 	return responseBody, resp.StatusCode, nil
 }
+
+// PostExposure posts only exposure metadata. It shares the session transport
+// (and TLS configuration) but never follows redirects or reads an unbounded
+// response. Neither body nor transport errors are logged here.
+func (session *Session) PostExposure(ctx context.Context, url string, body any, timeout time.Duration) ([]byte, int, http.Header, error) {
+	if err := checkTimeout(timeout); err != nil {
+		return nil, 0, nil, err
+	}
+	req, err := session.newRequest(http.MethodPost, url, body)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req = req.WithContext(ctx)
+	req.Header.Set("Authorization", session.Authorization)
+	req.Header.Set("User-Agent", utils.GetUserAgent("alpamon"))
+	req.Header.Set("Content-Type", "application/json")
+	client := *session.Client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return nil, resp.StatusCode, resp.Header, fmt.Errorf("exposure redirect rejected")
+	}
+	const limit = 64 << 10
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, resp.StatusCode, resp.Header, err
+	}
+	if len(data) > limit {
+		return nil, resp.StatusCode, resp.Header, fmt.Errorf("exposure response too large")
+	}
+	return data, resp.StatusCode, resp.Header, nil
+}

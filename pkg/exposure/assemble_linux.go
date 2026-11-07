@@ -151,9 +151,19 @@ func (b *assembly) report() *Report {
 	}
 	if b.certsOK && b.sshdOK && accountsUsable {
 		r.UserCA = b.certs.userCA
+		if b.certs.failure != "" {
+			if ca := sshdValue(t, "trustedusercakeys"); ca != "" && ca != "none" {
+				r.UserCA = &UserCA{Envelope: failureEnvelope(ca, b.certs.failure), CAs: []CA{}}
+			}
+		}
 	}
 	if b.trustOK && b.sshdOK && accountsUsable {
 		r.SystemTrust = b.trust.system
+		if b.trust.failure != "" && (enabledAnywhere(t, cfg, "hostbasedauthentication", "yes") || enabledAnywhere(t, cfg, "ignorerhosts", "no")) {
+			for _, p := range []string{"/etc/hosts.equiv", "/etc/ssh/shosts.equiv"} {
+				r.SystemTrust = append(r.SystemTrust, SystemTrustFile{Envelope: failureEnvelope(p, b.trust.failure), Entries: []HostUser{}})
+			}
+		}
 	}
 
 	// sudo
@@ -242,6 +252,9 @@ func (b *assembly) report() *Report {
 			a.Home = Home{Status: statusTimeout}
 			if b.keysOK && b.sshdOK {
 				ak := b.keys.byUser[e.name]
+				if b.keys.failure != "" {
+					ak = failedAccountKeys(e, t, b.keys.failure)
+				}
 				a.Home, a.KeyFiles = ak.home, ak.files
 				if a.Home.Status == "" {
 					a.Home.Status = statusUnresolved
@@ -249,9 +262,15 @@ func (b *assembly) report() *Report {
 			}
 			if b.certsOK && b.sshdOK {
 				a.PrincipalsFiles = b.certs.principals[e.name]
+				if b.certs.failure != "" {
+					a.PrincipalsFiles = failedAccountCerts(e, t, b.certs.failure)
+				}
 			}
 			if b.trustOK && b.sshdOK {
 				a.TrustFiles = b.trust.files[e.name]
+				if b.trust.failure != "" {
+					a.TrustFiles = failedAccountTrust(e, t, cfg, b.trust.failure)
+				}
 			}
 			if b.ptyOK {
 				a.LastPTYLogin = b.pty.byUser[e.name]

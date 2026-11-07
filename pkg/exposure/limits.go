@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"slices"
 	"time"
+	"unicode"
 )
 
 // Bounds on the work one read may do. Each is checked before the memory it
@@ -16,6 +17,10 @@ const (
 	maxIncludeDepth      = 8
 	maxIncludeFiles      = 128
 	maxReportBytes       = 2 << 20
+	maxAccountBytes      = 256 << 10
+	maxTrustEntries      = 256
+	maxAccountWorkers    = 16
+	accountBudget        = 2 * time.Second
 	maxDirEntries        = 4096
 	maxCommentRunes      = 128
 	maxFromBytes         = 1024
@@ -85,7 +90,7 @@ func forEachLine(data []byte, fn func(line []byte, tooLong bool) bool) {
 
 // isBlankOrComment reports whether a configuration line carries nothing.
 func isBlankOrComment(line []byte) bool {
-	t := bytes.TrimLeft(line, " \t")
+	t := bytes.TrimLeftFunc(line, unicode.IsSpace)
 	return len(t) == 0 || t[0] == '#'
 }
 

@@ -1,33 +1,158 @@
 package exposure
 
-// finalize applies the report size cap, then seals the report: it sets the
-// hash and returns the canonical body. When the body would exceed
-// maxReportBytes, categories are cut in a fixed order (keys, certificates,
-// trust, sudo, PTY history, then whole accounts) from the last account
-// backwards, each cut source marked incomplete with limit_exceeded, until it
-// fits. The report is still sent.
+import "slices"
+
+// finalize limits each account before applying the global cap. Sources are
+// cut largest first, with path order breaking ties, then the report is sealed.
 func finalize(r *Report) ([]byte, error) {
+	retainedAccounts := r.Accounts[:0]
+	for i := range r.Accounts {
+		a := &r.Accounts[i]
+		if encodedLen(a) <= maxAccountBytes {
+			retainedAccounts = append(retainedAccounts, *a)
+			continue
+		}
+		for _, source := range accountCuts(r, a) {
+			source.cut()
+			if encodedLen(a) <= maxAccountBytes {
+				break
+			}
+		}
+		if encodedLen(a) <= maxAccountBytes {
+			retainedAccounts = append(retainedAccounts, *a)
+		} else {
+			markCut(r, catAccounts)
+		}
+	}
+	r.Accounts = retainedAccounts
 	body, err := seal(r)
 	if err != nil || len(body) <= maxReportBytes {
 		return body, err
 	}
+	var sources []sourceCut
+	for i := range r.Accounts {
+		sources = append(sources, accountCuts(r, &r.Accounts[i])...)
+	}
+	if r.UserCA != nil && len(r.UserCA.CAs) > 0 {
+		u := r.UserCA
+		sources = append(sources, sourceCut{encodedLen(u), u.Path, func() { u.CAs = []CA{}; cutEnvelope(&u.Envelope); markCut(r, catCertificates) }, u})
+	}
+	for i := range r.SystemTrust {
+		s := &r.SystemTrust[i]
+		if len(s.Entries) > 0 {
+			sources = append(sources, sourceCut{encodedLen(s), s.Path, func() { s.Entries = []HostUser{}; cutEnvelope(&s.Envelope); markCut(r, catTrust) }, s})
+		}
+	}
+	sortCuts(sources)
 	size := len(body)
-	for _, cut := range cutters(r) {
+	for _, source := range sources {
+		beforeCategories := encodedLen(r.Categories)
+		source.cut()
+		size -= source.size - encodedLen(source.value)
+		size += encodedLen(r.Categories) - beforeCategories
+		if size <= maxReportBytes {
+			return seal(r)
+		}
+	}
+
+	// If source envelopes and account metadata alone exceed the wire cap,
+	// remove the largest remaining account, preserving every retained account.
+	type accountSize struct {
+		index, size int
+		name        string
+	}
+	remaining := make([]accountSize, len(r.Accounts))
+	for i := range r.Accounts {
+		remaining[i] = accountSize{i, encodedLen(r.Accounts[i]), r.Accounts[i].Username}
+	}
+	slices.SortFunc(remaining, func(a, b accountSize) int {
+		if a.size != b.size {
+			return b.size - a.size
+		}
+		if a.name < b.name {
+			return -1
+		}
+		if a.name > b.name {
+			return 1
+		}
+		return 0
+	})
+	dropped := map[int]bool{}
+	beforeCategories := encodedLen(r.Categories)
+	markCut(r, catAccounts)
+	size += encodedLen(r.Categories) - beforeCategories
+	for _, a := range remaining {
 		if size <= maxReportBytes {
 			break
 		}
-		size -= cut()
-		if size <= maxReportBytes {
-			if body, err = seal(r); err != nil {
-				return nil, err
-			}
-			size = len(body)
+		dropped[a.index] = true
+		size -= a.size + 1
+	}
+	retained := r.Accounts[:0]
+	for i, a := range r.Accounts {
+		if !dropped[i] {
+			retained = append(retained, a)
 		}
 	}
-	if body, err = seal(r); err != nil {
-		return nil, err
+	r.Accounts = retained
+	return seal(r)
+}
+
+type sourceCut struct {
+	size  int
+	path  string
+	cut   func()
+	value any
+}
+
+func sortCuts(cuts []sourceCut) {
+	slices.SortStableFunc(cuts, func(a, b sourceCut) int {
+		if a.size != b.size {
+			return b.size - a.size
+		}
+		if a.path < b.path {
+			return -1
+		}
+		if a.path > b.path {
+			return 1
+		}
+		return 0
+	})
+}
+
+func accountCuts(r *Report, a *Account) []sourceCut {
+	var cuts []sourceCut
+	for i := range a.KeyFiles {
+		s := &a.KeyFiles[i]
+		if len(s.Keys) > 0 {
+			cuts = append(cuts, sourceCut{encodedLen(s), s.Path, func() { s.Keys = []Key{}; cutEnvelope(&s.Envelope); markCut(r, catKeys) }, s})
+		}
 	}
-	return body, nil
+	for i := range a.PrincipalsFiles {
+		s := &a.PrincipalsFiles[i]
+		if len(s.Entries) > 0 {
+			cuts = append(cuts, sourceCut{encodedLen(s), s.Path, func() { s.Entries = []PrincipalEntry{}; cutEnvelope(&s.Envelope); markCut(r, catCertificates) }, s})
+		}
+	}
+	for i := range a.TrustFiles {
+		s := &a.TrustFiles[i]
+		if len(s.Entries) > 0 {
+			cuts = append(cuts, sourceCut{encodedLen(s), s.Path, func() { s.Entries = []TrustEntry{}; cutEnvelope(&s.Envelope); markCut(r, catTrust) }, s})
+		}
+	}
+	if len(a.Sudo.Grants) > 0 {
+		cuts = append(cuts, sourceCut{encodedLen(a.Sudo), "/etc/sudoers", func() {
+			a.Sudo.Grants = []Grant{}
+			a.Sudo.Complete = false
+			a.Sudo.Reasons = appendSortedUnique(a.Sudo.Reasons, reasonLimitExceeded)
+			markCut(r, catSudo)
+		}, &a.Sudo})
+	}
+	if a.LastPTYLogin != nil {
+		cuts = append(cuts, sourceCut{encodedLen(a.LastPTYLogin), "/var/log/lastlog", func() { a.LastPTYLogin = nil; markCut(r, catPTY) }, &a.LastPTYLogin})
+	}
+	sortCuts(cuts)
+	return cuts
 }
 
 func encodedLen(v any) int {
@@ -38,15 +163,9 @@ func encodedLen(v any) int {
 	return len(b)
 }
 
-// reasonCost is a generous allowance for the bytes a limit_exceeded marker
-// and a flipped complete flag add back.
-const reasonCost = len(`,"limit_exceeded"`) + 8
-
 func markCut(r *Report, cat string) {
 	c := r.Categories[cat]
-	if !containsString(c.Reasons, reasonLimitExceeded) {
-		c.Reasons = appendSorted(c.Reasons, reasonLimitExceeded)
-	}
+	c.Reasons = appendSortedUnique(c.Reasons, reasonLimitExceeded)
 	if c.Status == coverageCovered {
 		c.Status = coveragePartial
 	}
@@ -55,125 +174,20 @@ func markCut(r *Report, cat string) {
 
 func cutEnvelope(e *Envelope) {
 	e.Complete = false
-	if !containsString(e.Reasons, reasonLimitExceeded) {
-		e.Reasons = appendSorted(e.Reasons, reasonLimitExceeded)
-	}
+	e.Reasons = appendSortedUnique(e.Reasons, reasonLimitExceeded)
 }
 
-func cutters(r *Report) []func() int {
-	var out []func() int
-	n := len(r.Accounts)
-	perAccount := func(fn func(a *Account) int) {
-		for i := n - 1; i >= 0; i-- {
-			out = append(out, func() int {
-				if i >= len(r.Accounts) {
-					return 0
-				}
-				return fn(&r.Accounts[i])
-			})
-		}
-	}
-	perAccount(func(a *Account) int {
-		saved := 0
-		for j := range a.KeyFiles {
-			kf := &a.KeyFiles[j]
-			if len(kf.Keys) == 0 {
-				continue
-			}
-			saved += encodedLen(kf.Keys) - 2 - reasonCost
-			kf.Keys = []Key{}
-			cutEnvelope(&kf.Envelope)
-			markCut(r, catKeys)
-		}
-		return saved
-	})
-	out = append(out, func() int {
-		if r.UserCA == nil || len(r.UserCA.CAs) == 0 {
-			return 0
-		}
-		saved := encodedLen(r.UserCA.CAs) - 2 - reasonCost
-		r.UserCA.CAs = []CA{}
-		cutEnvelope(&r.UserCA.Envelope)
-		markCut(r, catCertificates)
-		return saved
-	})
-	perAccount(func(a *Account) int {
-		saved := 0
-		for j := range a.PrincipalsFiles {
-			pf := &a.PrincipalsFiles[j]
-			if len(pf.Entries) == 0 {
-				continue
-			}
-			saved += encodedLen(pf.Entries) - 2 - reasonCost
-			pf.Entries = []PrincipalEntry{}
-			cutEnvelope(&pf.Envelope)
-			markCut(r, catCertificates)
-		}
-		return saved
-	})
-	perAccount(func(a *Account) int {
-		saved := 0
-		for j := range a.TrustFiles {
-			tf := &a.TrustFiles[j]
-			if len(tf.Entries) == 0 {
-				continue
-			}
-			saved += encodedLen(tf.Entries) - 2 - reasonCost
-			tf.Entries = []TrustEntry{}
-			cutEnvelope(&tf.Envelope)
-			markCut(r, catTrust)
-		}
-		return saved
-	})
-	perAccount(func(a *Account) int {
-		if len(a.Sudo.Grants) == 0 {
-			return 0
-		}
-		saved := encodedLen(a.Sudo.Grants) - 2 - reasonCost
-		a.Sudo.Grants = []Grant{}
-		a.Sudo.Complete = false
-		if !containsString(a.Sudo.Reasons, reasonLimitExceeded) {
-			a.Sudo.Reasons = appendSorted(a.Sudo.Reasons, reasonLimitExceeded)
-		}
-		markCut(r, catSudo)
-		return saved
-	})
-	perAccount(func(a *Account) int {
-		if a.LastPTYLogin == nil {
-			return 0
-		}
-		saved := encodedLen(*a.LastPTYLogin) - len("null")
-		a.LastPTYLogin = nil
-		markCut(r, catPTY)
-		return saved
-	})
-	for i := n - 1; i >= 0; i-- {
-		out = append(out, func() int {
-			if i >= len(r.Accounts) {
-				return 0
-			}
-			saved := encodedLen(r.Accounts[i]) + 1
-			r.Accounts = r.Accounts[:i]
-			markCut(r, catAccounts)
-			return saved
-		})
-	}
-	return out
-}
+func containsString(list []string, s string) bool { return slices.Contains(list, s) }
 
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
+func appendSortedUnique(list []string, s string) []string {
+	if containsString(list, s) {
+		return list
 	}
-	return false
+	return appendSorted(list, s)
 }
 
 func appendSorted(list []string, s string) []string {
 	out := append(append([]string{}, list...), s)
-	for i := len(out) - 1; i > 0 && out[i] < out[i-1]; i-- {
-		out[i], out[i-1] = out[i-1], out[i]
-	}
+	slices.Sort(out)
 	return out
 }
