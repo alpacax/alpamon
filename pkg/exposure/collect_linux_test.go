@@ -238,3 +238,60 @@ func TestTrustFileEntryCapMarksSourceIncomplete(t *testing.T) {
 	assert.False(t, s.Complete)
 	assert.Contains(t, s.Reasons, reasonLimitExceeded)
 }
+
+func TestDuplicateAccountSources(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		for _, tc := range []struct {
+			name, path, duplicate, category string
+		}{
+			{"passwd", "etc/passwd", "ubuntu:hash:2002:27::/home/dropped:/bin/sh\n", catAccounts},
+			{"shadow", "etc/shadow", "ubuntu::1:0:99999:7:1:2:\n", catPasswords},
+			{"group", "etc/group", "sudo:x:2002:root\n", catAccounts},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				dir := filepath.Join(fixturesDir, "hosts", "ubuntu-default")
+				spec := loadCase(t, dir)
+				root, proc := buildHost(t, dir, spec)
+				path := filepath.Join(root, tc.path)
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(path, append(data, tc.duplicate...), 0o644))
+				require.NoError(t, os.MkdirAll(filepath.Join(root, "home/dropped/.ssh"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "home/dropped/.ssh/authorized_keys"), []byte("ssh-ed25519 "+testEd1+" dropped-key\n"), 0o644))
+				opens := recordOpens(t, nil)
+				opts := caseOptions(t, dir, spec, root, proc)
+				// Enable home trust reads so the open recorder also covers them.
+				runSSHD := opts.runSSHD
+				opts.runSSHD = func(ctx context.Context) sshdRun {
+					run := runSSHD(ctx)
+					run.out = append(run.out, "\ngssapiauthentication yes\n"...)
+					return run
+				}
+				r := newCollector(opts).collect(context.Background())
+				assert.Contains(t, r.Categories[tc.category].Reasons, reasonParseError)
+				assert.NotEqual(t, coverageCovered, r.Categories[tc.category].Status)
+				var ubuntu []Account
+				for _, a := range r.Accounts {
+					if a.Username == "ubuntu" {
+						ubuntu = append(ubuntu, a)
+					}
+				}
+				require.Len(t, ubuntu, 1)
+				assert.Equal(t, uint32(1000), ubuntu[0].UID)
+				assert.Equal(t, ptr("/bin/bash"), ubuntu[0].Shell)
+				assert.Contains(t, ubuntu[0].Groups, "sudo")
+				assert.Equal(t, passwordSet, ubuntu[0].Shadow.PasswordState)
+				assert.Equal(t, ptr(int64(20123)), ubuntu[0].Shadow.LastChangeDays)
+				body, err := finalize(r)
+				require.NoError(t, err)
+				assert.NotContains(t, string(body), "/home/dropped")
+				assert.NotContains(t, string(body), "dropped-key")
+				assert.Contains(t, opens(), "/home/ubuntu/.ssh/authorized_keys")
+				assert.Contains(t, opens(), "/home/ubuntu/.k5login")
+				for _, opened := range opens() {
+					assert.False(t, opened == "/home/dropped" || strings.HasPrefix(opened, "/home/dropped/"), opened)
+				}
+			})
+		}
+	})
+}

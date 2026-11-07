@@ -72,6 +72,57 @@ func TestParsePasswd(t *testing.T) {
 	assert.True(t, res.overLimit)
 }
 
+func TestDuplicateAccountEntries(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		passwd string
+		group  string
+		shadow string
+	}{
+		{
+			name:   "different metadata",
+			passwd: "deploy:x:1001:1001::/home/deploy:/bin/bash\ndeploy:hash:2002:2002::/home/dropped:/bin/sh\n",
+			group:  "ops:x:1001:deploy\nops:x:2002:root\n",
+			shadow: "deploy:!:20100:0:99999:7:30:20500:\ndeploy::1:0:99999:7:1:2:\n",
+		},
+		{
+			name:   "repeated duplicates",
+			passwd: "deploy:x:1001:1001::/home/deploy:/bin/bash\n" + strings.Repeat("deploy:x:2002:2002::/home/dropped:/bin/sh\n", 2),
+			group:  "ops:x:1001:deploy\n" + strings.Repeat("ops:x:2002:root\n", 2),
+			shadow: "deploy:!:20100:0:99999:7:30:20500:\n" + strings.Repeat("deploy::1:0:99999:7:1:2:\n", 2),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pw := parsePasswd([]byte(tc.passwd))
+			assert.Equal(t, []passwdEntry{{name: "deploy", uid: 1001, gid: 1001, home: "/home/deploy", shell: "/bin/bash"}}, pw.entries)
+			assert.Equal(t, strings.Count(tc.passwd, "\n")-1, pw.unparsed)
+			assert.False(t, pw.overLimit)
+			gr := parseGroup([]byte(tc.group))
+			assert.Equal(t, []groupEntry{{name: "ops", gid: 1001, members: []string{"deploy"}}}, gr.groups)
+			assert.Equal(t, strings.Count(tc.group, "\n")-1, gr.unparsed)
+			sh, unparsed := parseShadow([]byte(tc.shadow))
+			assert.Equal(t, map[string]shadowInfo{"deploy": {state: passwordNone, lastChange: ptr(int64(20100)), inactive: ptr(int64(30)), expire: ptr(int64(20500))}}, sh)
+			assert.Equal(t, strings.Count(tc.shadow, "\n")-1, unparsed)
+		})
+	}
+}
+
+func TestPasswdDuplicatesDoNotCountTowardCap(t *testing.T) {
+	for _, count := range []int{maxAccounts - 1, maxAccounts, maxAccounts + 1} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			var data strings.Builder
+			for i := range count {
+				fmt.Fprintf(&data, "u%d:x:%d:1001::/home/first:/bin/sh\n", i, i)
+				fmt.Fprintf(&data, "u%d:x:%d:1001::/home/dropped:/bin/sh\n", i, i)
+			}
+			got := parsePasswd([]byte(data.String()))
+			assert.Len(t, got.entries, min(count, maxAccounts))
+			assert.Equal(t, min(count, maxAccounts), got.unparsed)
+			assert.Equal(t, count > maxAccounts, got.overLimit)
+		})
+	}
+}
+
 func TestParseKeyOptions(t *testing.T) {
 	for _, tc := range []struct {
 		in    string
