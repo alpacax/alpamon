@@ -212,6 +212,7 @@ type shadowInfo struct {
 // parseShadow reads /etc/shadow into per-name metadata. The password field
 // is classified where it lies and its bytes are not copied anywhere.
 func parseShadow(data []byte) (map[string]shadowInfo, int) {
+	readHook("parser")
 	out := map[string]shadowInfo{}
 	unparsed := 0
 	forEachLine(data, func(line []byte, tooLong bool) bool {

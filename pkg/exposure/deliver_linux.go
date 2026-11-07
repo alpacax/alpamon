@@ -19,8 +19,9 @@ const (
 	checkURL  = "/api/servers/servers/-/exposure-check/"
 	reportURL = "/api/servers/servers/-/exposure/"
 
-	readInterval  = 3600 * time.Second
-	maxReadJitter = 5 * time.Minute
+	readInterval     = 3600 * time.Second
+	maxReadJitter    = 5 * time.Minute
+	loopRestartPause = 60 * time.Second
 
 	checkTimeout  = 10 * time.Second
 	reportTimeout = 60 * time.Second
@@ -37,8 +38,8 @@ type Poster interface {
 	PostExposure(ctx context.Context, url string, body any, timeout time.Duration) ([]byte, int, http.Header, error)
 }
 
-// service serializes exposure reads and their delivery: one goroutine reads,
-// checks and reports, so at most one read is in flight. A trigger that
+// service serializes exposure reads and their delivery. Each read has its
+// own goroutine and returns a sealed value before delivery starts. A trigger that
 // arrives during a read is held in a one-slot channel and causes exactly one
 // more read after it.
 type service struct {
@@ -51,6 +52,7 @@ type service struct {
 	// lastObserved keeps observed_at strictly increasing across reads, so a
 	// second read within the same second is never taken for a replay.
 	lastObserved time.Time
+	due          time.Time
 }
 
 func newService(p Poster, collect func(ctx context.Context) *Report, trigger chan struct{}) *service {
@@ -78,17 +80,39 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // run reads on its own due time, on every trigger, and once at start after
 // up to maxReadJitter.
 func (s *service) run(ctx context.Context) {
-	timer := time.NewTimer(s.jitter())
+	for ctx.Err() == nil {
+		if !s.runLoop(ctx) || !sleepCtx(ctx, loopRestartPause) {
+			return
+		}
+	}
+}
+
+// runLoop returns true only after a panic. due lives on the service so a
+// restart neither loses an upcoming read nor adds jitter to its deadline.
+func (s *service) runLoop(ctx context.Context) (panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+			logExposurePanic("service", "Exposure service loop panicked; restarting after 60 seconds.")
+		}
+	}()
+	if s.due.IsZero() {
+		s.due = s.now().Add(s.jitter())
+	}
+	timer := time.NewTimer(s.due.Sub(s.now()))
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-timer.C:
 		case <-s.trigger:
 		}
+		// Keep the existing deadline if delivery panics. A due read is
+		// retried after the restart pause; a trigger keeps the pending due.
 		s.readAndDeliver(ctx)
-		timer.Reset(readInterval + s.jitter())
+		s.due = s.now().Add(readInterval + s.jitter())
+		timer.Reset(s.due.Sub(s.now()))
 	}
 }
 
@@ -96,7 +120,18 @@ func (s *service) run(ctx context.Context) {
 // report only when the server asks for it. Retries resend the same
 // observed_at and body.
 func (s *service) readAndDeliver(ctx context.Context) {
-	r, body := s.buildReport(ctx)
+	// Only this goroutine delivers. No read code runs on the service loop.
+	type result struct {
+		report *Report
+		body   []byte
+	}
+	done := make(chan result, 1)
+	go func() {
+		r, body := s.buildReport(ctx)
+		done <- result{r, body}
+	}()
+	got := <-done
+	r, body := got.report, got.body
 	if r == nil {
 		return
 	}
@@ -125,13 +160,25 @@ func (s *service) readAndDeliver(ctx context.Context) {
 }
 
 func (s *service) buildReport(ctx context.Context) (report *Report, encoded []byte) {
+	stage := "collect"
+	var observed time.Time
 	defer func() {
 		if recover() != nil {
-			report, encoded = nil, nil
-			logExposurePanic("report", "Exposure report builder panicked; skipping until the next read.")
+			// Capture the original frame while its panic is still on the
+			// stack. The fallback has its own boundary and bypasses all
+			// collection, assembly and cap code, including their hooks.
+			stage, location := exposurePanicDetails(stage)
+			var fallbackSource string
+			report, encoded, fallbackSource = fallbackReport(observed)
+			message := "Exposure read panicked; recovered at read boundary."
+			if fallbackSource != "" {
+				stage, location = "fallback", fallbackSource
+				message = "Exposure fallback builder panicked; skipping until the next read."
+			}
+			logExposurePanicAt(stage, location, message)
 		}
 	}()
-	observed := s.now().UTC().Truncate(time.Second)
+	observed = s.now().UTC().Truncate(time.Second)
 	if !observed.After(s.lastObserved) {
 		observed = s.lastObserved.Add(time.Second)
 		if !s.sleep(ctx, time.Until(observed)) {
@@ -142,6 +189,7 @@ func (s *service) buildReport(ctx context.Context) (report *Report, encoded []by
 
 	r := s.collect(ctx)
 	r.ObservedAt = observed.Format(time.RFC3339)
+	stage = "finalize"
 	body, err := finalize(r)
 	if err != nil {
 		log.Debug().Msg("Exposure report could not be encoded.")
@@ -152,6 +200,35 @@ func (s *service) buildReport(ctx context.Context) (report *Report, encoded []by
 		return nil, nil
 	}
 	return r, body
+}
+
+func fallbackReport(observed time.Time) (report *Report, encoded []byte, panicSource string) {
+	defer func() {
+		if recover() != nil {
+			report, encoded = nil, nil
+			panicSource = exposurePanicSource()
+		}
+	}()
+	readHook("fallback")
+	// The contract requires an sshd object. Use its empty policy form.
+	r := &Report{
+		SchemaVersion: SchemaVersion,
+		ObservedAt:    observed.Format(time.RFC3339),
+		Scope:         Scope{OS: "linux", Protocol: "ssh"},
+		Categories:    map[string]Coverage{},
+		External:      []External{},
+		SSHD:          SSHD{MatchBlocks: []MatchBlock{}, Daemon: Daemon{Correspondence: "unresolved"}},
+		SystemTrust:   []SystemTrustFile{},
+		Accounts:      []Account{},
+	}
+	for _, name := range categoryNames {
+		r.Categories[name] = Coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}
+	}
+	body, err := seal(r)
+	if err != nil {
+		return nil, nil, ""
+	}
+	return r, body, ""
 }
 
 // checkBody is the canonical check request for a sealed report.

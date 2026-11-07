@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -19,11 +20,23 @@ import (
 
 // encodeValue returns the canonical JSON of v. Nil slices become [] unless
 // the field is tagged nullable, so an empty list is never written as null.
-func encodeValue(v any) ([]byte, error) {
+func encodeValue(v any) (encoded []byte, err error) {
+	// A custom marshaler or reflection failure must not escape the trusted
+	// encoder. Never expose its panic value in the returned error.
+	defer func() {
+		if recover() != nil {
+			encoded, err = nil, errors.New("canonical encoding failed")
+		}
+	}()
 	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return []byte("null"), nil
+	}
 	copied := reflect.New(rv.Type()).Elem()
 	copied.Set(rv)
-	fillNilSlices(copied)
+	if err := fillNilSlices(copied, 0); err != nil {
+		return nil, err
+	}
 
 	raw, err := json.Marshal(copied.Interface())
 	if err != nil {
@@ -40,11 +53,16 @@ func encodeValue(v any) ([]byte, error) {
 
 // fillNilSlices walks v and replaces nil slices with empty ones. It copies
 // nothing it does not change; v must be addressable.
-func fillNilSlices(v reflect.Value) {
+func fillNilSlices(v reflect.Value, depth int) error {
+	if depth > 256 {
+		return errors.New("canonical value exceeds nesting limit")
+	}
 	switch v.Kind() {
 	case reflect.Pointer:
 		if !v.IsNil() {
-			fillNilSlices(v.Elem())
+			if err := fillNilSlices(v.Elem(), depth+1); err != nil {
+				return err
+			}
 		}
 	case reflect.Struct:
 		t := v.Type()
@@ -61,41 +79,52 @@ func fillNilSlices(v reflect.Value) {
 				fv.Set(reflect.MakeSlice(fv.Type(), 0, 0))
 				continue
 			}
-			fillNilSlices(fv)
+			if err := fillNilSlices(fv, depth+1); err != nil {
+				return err
+			}
 		}
 	case reflect.Slice:
 		for i := range v.Len() {
-			fillNilSlices(v.Index(i))
+			if err := fillNilSlices(v.Index(i), depth+1); err != nil {
+				return err
+			}
 		}
 	case reflect.Map:
 		// Map values are not addressable, and the report's maps may be read
 		// by a worker that outlived its budget: fill a fresh map in the copy
 		// and never write to the original.
-		if v.IsNil() || !mayHoldSlice(v.Type().Elem()) || !v.CanSet() {
-			return
+		if v.IsNil() || !mayHoldSlice(v.Type().Elem(), map[reflect.Type]bool{}) || !v.CanSet() {
+			return nil
 		}
 		fresh := reflect.MakeMapWithSize(v.Type(), v.Len())
 		iter := v.MapRange()
 		for iter.Next() {
 			val := reflect.New(iter.Value().Type()).Elem()
 			val.Set(iter.Value())
-			fillNilSlices(val)
+			if err := fillNilSlices(val, depth+1); err != nil {
+				return err
+			}
 			fresh.SetMapIndex(iter.Key(), val)
 		}
 		v.Set(fresh)
 	}
+	return nil
 }
 
 // mayHoldSlice reports whether a value of type t can contain a slice.
-func mayHoldSlice(t reflect.Type) bool {
+func mayHoldSlice(t reflect.Type, seen map[reflect.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
 	switch t.Kind() {
 	case reflect.Slice:
 		return true
 	case reflect.Pointer, reflect.Map:
-		return mayHoldSlice(t.Elem())
+		return mayHoldSlice(t.Elem(), seen)
 	case reflect.Struct:
 		for i := range t.NumField() {
-			if mayHoldSlice(t.Field(i).Type) {
+			if mayHoldSlice(t.Field(i).Type, seen) {
 				return true
 			}
 		}

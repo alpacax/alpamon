@@ -926,11 +926,16 @@ func logParserPanic(cat string) {
 
 // Log only a compile-time package source location from the panicking stack.
 // The panic value, arguments and host paths are never formatted.
-func logExposurePanic(cat, message string) {
+func exposurePanicSource() string {
+	_, source := exposurePanicDetails("")
+	return source
+}
+
+func exposurePanicDetails(stage string) (string, string) {
 	var pcs [32]uintptr
 	n := runtime.Callers(2, pcs[:])
 	frames := runtime.CallersFrames(pcs[:n])
-	panicking := false
+	panicking, identified := false, false
 	location := ""
 	for {
 		frame, more := frames.Next()
@@ -938,13 +943,32 @@ func logExposurePanic(cat, message string) {
 			panicking = true
 		} else if panicking {
 			if i := strings.LastIndex(frame.File, "/pkg/exposure/"); i >= 0 {
-				location = frame.File[i+1:] + ":" + strconv.Itoa(frame.Line)
-				break
+				if location == "" {
+					location = frame.File[i+1:] + ":" + strconv.Itoa(frame.Line)
+				}
+				if !identified {
+					switch {
+					case strings.HasSuffix(frame.Function, ".serializeReport"), strings.HasSuffix(frame.Function, ".encodeValue"):
+						stage, identified = "serialize", true
+					case strings.HasSuffix(frame.Function, ".hashInput"):
+						stage, identified = "hash", true
+					case strings.HasSuffix(frame.Function, ".(*assembly).report"):
+						stage, identified = "assemble", true
+					}
+				}
 			}
 		}
 		if !more {
 			break
 		}
 	}
-	log.Debug().Str("category", cat).Str("source", location).Msg(message)
+	return stage, location
+}
+
+func logExposurePanic(cat, message string) {
+	logExposurePanicAt(cat, exposurePanicSource(), message)
+}
+
+func logExposurePanicAt(stage, location, message string) {
+	log.Debug().Str("category", stage).Str("source", location).Msg(message)
 }

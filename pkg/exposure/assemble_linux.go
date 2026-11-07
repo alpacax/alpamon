@@ -62,6 +62,7 @@ func newReport() *Report {
 func timedOut() categoryState { return categoryState{reasons: reasonSet{reasonTimeout: {}}} }
 
 func (b *assembly) report() *Report {
+	readHook("assemble")
 	r := newReport()
 	cats := map[string]categoryState{}
 	for _, n := range categoryNames {

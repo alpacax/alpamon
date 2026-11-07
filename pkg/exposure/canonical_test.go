@@ -3,6 +3,7 @@ package exposure
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -139,4 +140,54 @@ func itoa(i int) string {
 		b = append([]byte{byte('0' + i%10)}, b...)
 	}
 	return string(b)
+}
+
+type panickingMarshaler struct{}
+
+func (panickingMarshaler) MarshalJSON() ([]byte, error) { panic("LEAKCANARY marshal") }
+
+func TestCanonicalEncoderRejectsPanicsAndCycles(t *testing.T) {
+	b, err := encodeValue(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "null", string(b))
+	_, err = encodeValue(panickingMarshaler{})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "LEAKCANARY")
+	type node struct{ Next *node }
+	cycle := &node{}
+	cycle.Next = cycle
+	_, err = encodeValue(cycle)
+	assert.Error(t, err)
+	type recursive map[string]recursive
+	_, err = encodeValue(recursive{"child": {}})
+	assert.NoError(t, err)
+}
+
+func FuzzCanonicalEncoder(f *testing.F) {
+	f.Add([]byte(`{"categories":{"keys":{"reasons":null,"status":"unknown"}},"accounts":[]}`))
+	f.Add([]byte(`null`))
+	f.Add([]byte(`{"accounts":[{"username":"<>&é","trust_files":[{"entries":[null,"alice@REALM",{"host":"host"}]}]}]}`))
+	f.Add([]byte{0xff, 0, '\n', '"', '\\'})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		// Exercise arbitrary strings (including invalid UTF-8), then all report
+		// fields reachable by arbitrary JSON, including nullable values.
+		text, err := encodeValue(struct {
+			Text string   `json:"text"`
+			List []string `json:"list"`
+		}{Text: string(data)})
+		require.NoError(t, err)
+		assert.True(t, json.Valid(text))
+		var r Report
+		if json.Unmarshal(data, &r) != nil {
+			return
+		}
+		body, err := seal(&r)
+		require.NoError(t, err)
+		assert.True(t, json.Valid(body))
+		var decoded Report
+		require.NoError(t, json.Unmarshal(body, &decoded))
+		again, err := seal(&decoded)
+		require.NoError(t, err)
+		assert.Equal(t, string(body), string(again))
+	})
 }

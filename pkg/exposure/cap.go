@@ -7,6 +7,7 @@ const maxObservationRows = 20000
 // finalize limits each account before applying the row and byte caps. Sources are
 // cut largest first, with path order breaking ties, then the report is sealed.
 func finalize(r *Report) ([]byte, error) {
+	readHook("finalize")
 	retainedAccounts := r.Accounts[:0]
 	for i := range r.Accounts {
 		a := &r.Accounts[i]
@@ -28,7 +29,7 @@ func finalize(r *Report) ([]byte, error) {
 	}
 	r.Accounts = retainedAccounts
 	capObservationRows(r)
-	body, err := seal(r)
+	body, err := serializeReport(r)
 	if err != nil || len(body) <= maxReportBytes {
 		return body, err
 	}
@@ -54,7 +55,7 @@ func finalize(r *Report) ([]byte, error) {
 		size -= source.size - encodedLen(source.value)
 		size += encodedLen(r.Categories) - beforeCategories
 		if size <= maxReportBytes {
-			return seal(r)
+			return serializeReport(r)
 		}
 	}
 
@@ -98,7 +99,7 @@ func finalize(r *Report) ([]byte, error) {
 		}
 	}
 	r.Accounts = retained
-	return seal(r)
+	return serializeReport(r)
 }
 
 type sourceCut struct {
@@ -270,4 +271,9 @@ func appendSorted(list []string, s string) []string {
 	out := append(append([]string{}, list...), s)
 	slices.Sort(out)
 	return out
+}
+
+func serializeReport(r *Report) ([]byte, error) {
+	readHook("serialize")
+	return seal(r)
 }

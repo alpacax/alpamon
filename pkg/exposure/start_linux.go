@@ -12,7 +12,11 @@ const Supported = true
 // five minutes of jitter, plus one per Trigger. It does not depend on
 // alpamon-pam or on any policy setting.
 func Start(ctx context.Context, p Poster) {
-	c := newCollector(defaultOptions())
+	opts := defaultOptions()
+	if testHookStartOptions != nil {
+		opts = *testHookStartOptions
+	}
+	c := newCollector(opts)
 	s := newService(p, c.collect, triggers)
 	go s.run(ctx)
 }
@@ -30,3 +34,7 @@ func Trigger() {
 // triggers holds at most one pending read request: a request that arrives
 // while one is already pending is the same request.
 var triggers = make(chan struct{}, 1)
+
+// testHookStartOptions lets the process test use a fixture host with the
+// real Start lifecycle, regardless of the test process's privileges.
+var testHookStartOptions *collectorOptions
