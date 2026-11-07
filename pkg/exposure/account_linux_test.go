@@ -96,13 +96,14 @@ func TestAccountApplyPanicDoesNotBlockLanes(t *testing.T) {
 		for i := range accounts {
 			accounts[i].name = fmt.Sprint(i)
 		}
-		baseline := runtime.NumGoroutine()
-		for read := range 5 {
+		// A lane left blocked on its result send would outlive the bubble, and
+		// synctest.Test fails on blocked goroutines when the bubble ends; a
+		// process-wide goroutine count would also see other tests' goroutines.
+		for range 5 {
 			require.Panics(t, func() {
 				readAccountResults(context.Background(), c, catKeys, accounts, func(passwdEntry) int { return 1 }, func(passwdEntry, int, string) { panic("apply") })
 			})
 			synctest.Wait()
-			assert.Equal(t, baseline, runtime.NumGoroutine(), "read %d", read+1)
 		}
 	})
 }
