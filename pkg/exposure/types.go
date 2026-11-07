@@ -297,7 +297,7 @@ type Grant struct {
 	Source         string   `json:"source"`
 	Via            string   `json:"via"`
 	Runas          string   `json:"runas"`
-	Commands       string   `json:"commands"`
+	Commands       string   `json:"commands"` // "all" or "limited"
 	CommandPaths   []string `json:"command_paths"`
 	ArgsRestricted bool     `json:"args_restricted"`
 	NoPasswd       bool     `json:"nopasswd"`

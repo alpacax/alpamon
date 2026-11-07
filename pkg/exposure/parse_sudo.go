@@ -965,7 +965,7 @@ func (p *sudoPolicy) forAccount(name string, inGroup func(string) bool) AccountS
 			for _, g := range hg.grants {
 				gr := Grant{
 					Source: rule.source, Via: u.via(), Runas: g.runas,
-					Commands: "paths", CommandPaths: g.paths,
+					Commands: "limited", CommandPaths: g.paths,
 					ArgsRestricted: g.argsRestricted, NoPasswd: g.nopasswd,
 				}
 				if g.all {

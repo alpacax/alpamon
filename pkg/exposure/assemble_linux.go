@@ -180,10 +180,10 @@ func (b *assembly) report() *Report {
 		}
 	}
 	if b.accOK {
-		if mods := nonFilesModules(b.acc.nss["passwd"]); len(mods) > 0 {
+		if mods := nonFilesModules(b.acc.nss["passwd"], b.acc.systemdAccounts); len(mods) > 0 {
 			addExt(External{Kind: externalNSSAccounts, Scope: "global", Sources: mods}, catAccounts)
 		}
-		if mods := nonFilesModules(b.acc.nss["group"]); len(mods) > 0 {
+		if mods := nonFilesModules(b.acc.nss["group"], b.acc.systemdGroups); len(mods) > 0 {
 			addExt(External{Kind: externalNSSGroups, Scope: "global", Sources: mods}, catAccounts, catSudo)
 		}
 		for _, m := range b.acc.nss["sudoers"] {
@@ -284,10 +284,10 @@ func copySet(s reasonSet) reasonSet {
 	return out
 }
 
-func nonFilesModules(mods []string) []string {
+func nonFilesModules(mods []string, systemd bool) []string {
 	var out []string
 	for _, m := range mods {
-		if m != "files" && !slices.Contains(out, m) {
+		if m != "files" && (m != "systemd" || systemd) && !slices.Contains(out, m) {
 			out = append(out, m)
 		}
 	}

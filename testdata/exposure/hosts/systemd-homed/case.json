@@ -1,0 +1,81 @@
+{
+  "hostname": "ubuntu-noble",
+  "sshd": "sshd-T.txt",
+  "btime": 1699990000,
+  "processes": [
+    {
+      "pid": 1,
+      "ppid": 0,
+      "comm": "systemd",
+      "argv": [
+        "/sbin/init"
+      ],
+      "start": 1699990001
+    },
+    {
+      "pid": 812,
+      "ppid": 1,
+      "comm": "sshd",
+      "argv": [
+        "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"
+      ],
+      "start": 1700000000
+    },
+    {
+      "pid": 901,
+      "ppid": 812,
+      "comm": "sshd-session",
+      "argv": [
+        "sshd-session: ubuntu [priv]"
+      ],
+      "start": 1700000500
+    }
+  ],
+  "modes": {
+    "etc/shadow": "0640",
+    "home/ubuntu/.ssh": "0700",
+    "home/ubuntu/.ssh/authorized_keys": "0600",
+    "home/ubuntu": "0750",
+    "etc/sudoers": "0440",
+    "etc/sudoers.d/90-cloud-init-users": "0440"
+  },
+  "owners": {
+    "/home/ubuntu": 1000,
+    "/home/ubuntu/.ssh": 1000,
+    "/home/ubuntu/.ssh/authorized_keys": 1000
+  },
+  "unreadable": [],
+  "wtmp": [
+    {
+      "user": "ubuntu",
+      "line": "pts/0",
+      "host": "10.0.4.12",
+      "time": "2026-11-01T02:14:00Z"
+    },
+    {
+      "user": "ubuntu",
+      "line": "pts/1",
+      "host": "10.0.4.13",
+      "time": "2026-10-30T08:00:00Z"
+    }
+  ],
+  "lastlog": [
+    {
+      "uid": 1000,
+      "line": "pts/0",
+      "host": "10.0.4.12",
+      "time": "2026-10-31T01:00:00Z"
+    },
+    {
+      "uid": 0,
+      "line": "tty1",
+      "host": "",
+      "time": "2026-11-02T03:00:00Z"
+    }
+  ],
+  "canaries": [
+    "LEAKCANARY",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAOhB7/zzhC+HXDdGOdLwJln5NYwm6UNXx3chmQSVTG4"
+  ],
+  "never_opened": []
+}

@@ -85,13 +85,15 @@ func runBudget[T any](ctx context.Context, c *collector, cat string, fn func(con
 
 // accountsData is what the accounts category read.
 type accountsData struct {
-	entries   []passwdEntry
-	groups    []groupEntry
-	shells    map[string]bool
-	nss       map[string][]string
-	reasons   reasonSet
-	usable    bool
-	pwInPassw bool
+	entries         []passwdEntry
+	groups          []groupEntry
+	shells          map[string]bool
+	nss             map[string][]string
+	systemdAccounts bool
+	systemdGroups   bool
+	reasons         reasonSet
+	usable          bool
+	pwInPassw       bool
 }
 
 type shadowData struct {
@@ -237,6 +239,30 @@ func readAccounts(sys systemFiles) accountsData {
 		}
 	} else if ns.status != statusAbsent {
 		d.reasons.merge(ns.reasons)
+	}
+	if slices.Contains(d.nss["passwd"], "systemd") || slices.Contains(d.nss["group"], "systemd") {
+		for _, path := range []string{"/var/lib/systemd/home", "/etc/userdb"} {
+			names, l := sys.list(path)
+			if l.status == statusAbsent {
+				continue
+			}
+			if !l.complete() {
+				d.reasons.merge(l.reasons)
+				d.reasons.add(reasonFileUnreadable)
+				d.systemdAccounts, d.systemdGroups = true, true
+				continue
+			}
+			for _, name := range names {
+				if path == "/var/lib/systemd/home" {
+					if strings.HasSuffix(name, ".home") {
+						d.systemdAccounts, d.systemdGroups = true, true
+					}
+				} else {
+					d.systemdAccounts = d.systemdAccounts || strings.HasSuffix(name, ".user")
+					d.systemdGroups = d.systemdGroups || strings.HasSuffix(name, ".group")
+				}
+			}
+		}
 	}
 	return d
 }

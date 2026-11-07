@@ -361,6 +361,15 @@ func TestGoldenHosts(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, string(bytes.TrimSuffix(want, []byte("\n"))), string(body))
 			assert.Equal(t, goldenHash(t, want), r.Hash)
+			if name == "ubuntu-default" {
+				for _, category := range []string{catAccounts, catSudo, catKeys} {
+					assert.Equal(t, Coverage{Status: coverageCovered, Reasons: []string{}}, r.Categories[category])
+				}
+			}
+			if name == "systemd-homed" {
+				assert.Equal(t, Coverage{Status: coveragePartial, Reasons: []string{reasonExternalSource}}, r.Categories[catAccounts])
+				assert.Contains(t, r.External, External{Kind: externalNSSAccounts, Scope: "global", Sources: []string{"systemd"}})
+			}
 
 			// Leak canaries, on every case: never in the body, the hash
 			// input or the log output.

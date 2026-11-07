@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -215,6 +216,98 @@ func TestFileAttackMatrix(t *testing.T) {
 			root, owners := attackRoot(t)
 			l, _ := readerFor(t, root, owners).read("/home/u/../../etc/shadow", acct)
 			assert.Equal(t, statusUnresolved, l.status)
+			assertNoContent(t, l)
+		})
+	})
+}
+
+func TestSystemSymlinkWalk(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			target string
+		}{
+			{"relative", "usr/bin"},
+			{"absolute", "/usr/bin"},
+			{"dot components", "usr/../usr/./bin"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root, owners := attackRoot(t)
+				require.NoError(t, os.MkdirAll(filepath.Join(root, "usr/bin"), 0o755))
+				require.NoError(t, os.Symlink(tc.target, filepath.Join(root, "bin")))
+				f := readerFor(t, root, owners)
+				_, l := f.statDir("/bin", ownerRule{uid: 2})
+				assert.Equal(t, statusRead, l.status)
+				_, l = f.statDir("/bin/.ssh", ownerRule{uid: 2})
+				assert.Equal(t, statusAbsent, l.status)
+				d := readKeys(f, []passwdEntry{{name: "bin", uid: 2, home: "/bin"}},
+					&sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(".ssh/authorized_keys")}}, sshdConfig{})
+				assert.NotContains(t, d.reasons.list(), reasonHomeUnreadable)
+				require.Len(t, d.byUser["bin"].files, 1)
+				assert.Equal(t, statusAbsent, d.byUser["bin"].files[0].Status)
+			})
+		}
+		for _, tc := range []struct {
+			name   string
+			parent string
+			owner  string
+			mode   os.FileMode
+		}{
+			{"account-owned symlink", "srv", "/srv/link", 0o755},
+			{"account-owned parent", "home/u", "", 0o755},
+			{"sticky writable parent", "srv", "", os.ModeSticky | 0o777},
+			{"group-writable parent", "srv", "", 0o775},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root, owners := attackRoot(t)
+				if tc.owner != "" {
+					owners[tc.owner] = 1001
+				}
+				require.NoError(t, os.Chmod(filepath.Join(root, tc.parent), tc.mode))
+				require.NoError(t, os.Symlink("/srv/elsewhere", filepath.Join(root, tc.parent, "link")))
+				l, _ := readerFor(t, root, owners).read("/"+tc.parent+"/link/authorized_keys", ownerRule{uid: 1001})
+				assert.Equal(t, statusRejected, l.status)
+				assert.True(t, l.reasons.has(reasonFileRejected))
+				assertNoContent(t, l)
+			})
+		}
+		for _, hops := range []int{40, 41} {
+			t.Run(fmt.Sprintf("%d hops", hops), func(t *testing.T) {
+				root, owners := attackRoot(t)
+				for i := range hops {
+					target := fmt.Sprintf("link%d", i+1)
+					if i == hops-1 {
+						target = "elsewhere"
+					}
+					require.NoError(t, os.Symlink(target, filepath.Join(root, "srv", fmt.Sprintf("link%d", i))))
+				}
+				l, _ := readerFor(t, root, owners).read("/srv/link0/authorized_keys", ownerRule{uid: 1001})
+				if hops == 40 {
+					assert.True(t, l.usable())
+				} else {
+					assert.Equal(t, statusRejected, l.status)
+					assert.True(t, l.reasons.has(reasonFileRejected))
+					assertNoContent(t, l)
+				}
+			})
+		}
+		t.Run("target enters account control", func(t *testing.T) {
+			root, owners := attackRoot(t)
+			require.NoError(t, os.Symlink("/home/u/link", filepath.Join(root, "srv/link")))
+			require.NoError(t, os.Symlink("/srv/elsewhere", filepath.Join(root, "home/u/link")))
+			owners["/home/u/link"] = 1001
+			l, _ := readerFor(t, root, owners).read("/srv/link/authorized_keys", ownerRule{uid: 1001})
+			assert.Equal(t, statusRejected, l.status)
+			assert.True(t, l.reasons.has(reasonFileRejected))
+			assertNoContent(t, l)
+		})
+		t.Run("dot-dot does not restore symlink trust", func(t *testing.T) {
+			root, owners := attackRoot(t)
+			require.NoError(t, os.Symlink("/home/u/../../srv/second", filepath.Join(root, "srv/link")))
+			require.NoError(t, os.Symlink("elsewhere", filepath.Join(root, "srv/second")))
+			l, _ := readerFor(t, root, owners).read("/srv/link/authorized_keys", ownerRule{uid: 1001})
+			assert.Equal(t, statusRejected, l.status)
+			assert.True(t, l.reasons.has(reasonFileRejected))
 			assertNoContent(t, l)
 		})
 	})

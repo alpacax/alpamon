@@ -13,12 +13,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// fsReader reads files under a pinned root directory without following a
-// symlink in any component. Every component is opened relative to the
-// descriptor of its parent, with openat2(RESOLVE_NO_SYMLINKS |
-// RESOLVE_NO_MAGICLINKS | RESOLVE_BENEATH), or with O_NOFOLLOW where the
-// kernel has no openat2. The file is validated with fstat on the same
-// descriptor it is then read from.
+// fsReader reads files under a pinned root directory. Only root-owned
+// directory symlinks reached entirely through root-owned directories without
+// group/world write permission are resolved; account paths use no-follow opens.
 type fsReader struct {
 	rootFD int
 	root   unix.Stat_t
@@ -145,37 +142,92 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 	}
 	cur := f.rootFD
 	prefix := ""
-	closeCur := func() {
-		if cur != f.rootFD {
-			_ = unix.Close(cur)
+	parents := []int{cur}
+	paths := []string{""}
+	trusted := stats[0].uid == 0 && stats[0].mode&0o022 == 0
+	hops := 0
+	keepFD := -1
+	defer func() {
+		for _, fd := range parents[1:] {
+			if fd != keepFD {
+				_ = unix.Close(fd)
+			}
 		}
-	}
-	for _, c := range comps {
-		prefix += "/" + c
+	}()
+	for len(comps) > 0 {
+		c := comps[0]
+		comps = comps[1:]
+		if c == "" || c == "." {
+			continue
+		}
+		if c == ".." {
+			if len(parents) > 1 {
+				_ = unix.Close(cur)
+				parents, paths = parents[:len(parents)-1], paths[:len(paths)-1]
+				stats = stats[:len(stats)-1]
+				cur, prefix = parents[len(parents)-1], paths[len(paths)-1]
+			}
+			continue
+		}
+		next := prefix + "/" + c
 		if testHookOpen != nil {
-			if err := testHookOpen(prefix); err != nil {
-				closeCur()
+			if err := testHookOpen(next); err != nil {
 				return -1, "", nil, failed(statusOf(err)), false
 			}
 		}
+		if trusted {
+			var st unix.Stat_t
+			if err := unix.Fstatat(cur, c, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				return -1, "", nil, failed(statusOf(err)), false
+			}
+			if st.Mode&unix.S_IFMT == unix.S_IFLNK {
+				var parent unix.Stat_t
+				if err := unix.Fstat(cur, &parent); err != nil {
+					return -1, "", nil, failed(statusUnreadable, reasonFileUnreadable), false
+				}
+				hops++
+				if f.mapOwner(next, st.Uid) != 0 || f.mapOwner(stats[len(stats)-1].path, parent.Uid) != 0 || parent.Mode&0o022 != 0 || hops > 40 {
+					return -1, "", nil, failed(statusRejected, reasonFileRejected), false
+				}
+				buf := make([]byte, unix.PathMax+1)
+				n, err := unix.Readlinkat(cur, c, buf)
+				if err != nil {
+					return -1, "", nil, failed(statusOf(err)), false
+				}
+				if n == len(buf) {
+					return -1, "", nil, failed(statusRejected, reasonFileRejected), false
+				}
+				target := string(buf[:n])
+				if strings.HasPrefix(target, "/") {
+					for _, fd := range parents[1:] {
+						_ = unix.Close(fd)
+					}
+					parents, paths = parents[:1], paths[:1]
+					stats = stats[:1]
+					cur, prefix = f.rootFD, ""
+				}
+				comps = append(strings.Split(target, "/"), comps...)
+				continue
+			}
+		}
 		fd, err := f.openAt(cur, c, unix.O_RDONLY|unix.O_DIRECTORY)
-		closeCur()
 		if err != nil {
 			return -1, "", nil, failed(statusOf(err)), false
 		}
-		cur = fd
+		cur, prefix = fd, next
+		parents, paths = append(parents, cur), append(paths, prefix)
 		var st unix.Stat_t
 		if err := unix.Fstat(fd, &st); err != nil {
-			closeCur()
 			return -1, "", nil, failed(statusUnreadable, reasonFileUnreadable), false
 		}
 		ps := pathStat{path: prefix, uid: f.mapOwner(prefix, st.Uid), mode: st.Mode}
 		if rule.system && ps.uid != 0 {
-			closeCur()
 			return -1, "", nil, failed(statusRejected, reasonFileRejected), false
 		}
 		stats = append(stats, ps)
+		trusted = trusted && ps.uid == 0 && ps.mode&0o022 == 0
 	}
+	keepFD = cur
 	return cur, last, stats, loaded{status: statusRead, reasons: reasonSet{}}, true
 }
 

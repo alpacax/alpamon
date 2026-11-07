@@ -1,0 +1,2 @@
+# Created by cloud-init
+ubuntu ALL=(ALL) NOPASSWD:ALL
