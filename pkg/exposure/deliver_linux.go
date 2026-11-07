@@ -145,16 +145,20 @@ func checkBody(r *Report) []byte {
 }
 
 func retryable(status int) bool {
-	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
+	return status == http.StatusRequestTimeout || status >= 500
 }
 
 // send posts body, retrying transport errors and retryable statuses with
-// backoff. ok is false when no final answer arrived. Neither the request nor
+// backoff. ok is false when delivery is deferred. Neither the request nor
 // the response body is logged.
 func (s *service) send(ctx context.Context, url string, body []byte, timeout time.Duration, out any) (int, bool) {
 	backoff := firstBackoff
 	for attempt := 1; ; attempt++ {
 		resp, status, _, err := s.post.PostExposure(ctx, url, body, timeout)
+		if status == http.StatusTooManyRequests {
+			log.Debug().Msg("Exposure delivery throttled; skipping until the next read.")
+			return status, false
+		}
 		if err == nil && len(resp) <= maxRespBytes && !(status >= 300 && status < 400) && !retryable(status) {
 			if out != nil && status == http.StatusOK {
 				if len(resp) > maxRespBytes || json.NewDecoder(bytes.NewReader(resp)).Decode(out) != nil {

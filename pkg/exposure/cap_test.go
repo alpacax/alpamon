@@ -101,3 +101,143 @@ func TestAccountMetadataAlsoRespectsCap(t *testing.T) {
 	assert.Equal(t, "b", r.Accounts[0].Username)
 	assert.Contains(t, r.Categories[catAccounts].Reasons, reasonLimitExceeded)
 }
+
+func TestObservationRows(t *testing.T) {
+	tests := []struct {
+		name   string
+		report Report
+		want   int
+	}{
+		{"empty", Report{}, 0},
+		{"accounts", Report{Accounts: make([]Account, 2)}, 2},
+		{"authorization variants", Report{Accounts: []Account{{KeyFiles: []KeyFile{{Keys: []Key{
+			{Authorizations: []Authorization{{Count: 99}, {Count: 3}}},
+			{Authorizations: []Authorization{{Count: 7}}}, {},
+		}}}}}}, 4},
+		{"principals entries", Report{Accounts: []Account{{PrincipalsFiles: []PrincipalsFile{{Entries: []PrincipalEntry{{Principals: []string{"a", "b"}}, {}}}}}}}, 3},
+		{"trust entries", Report{Accounts: []Account{{TrustFiles: []TrustFile{{Entries: make([]TrustEntry, 2)}}}}}, 3},
+		{"system trust entries", Report{SystemTrust: []SystemTrustFile{{Entries: make([]HostUser, 2)}, {Entries: make([]HostUser, 3)}}}, 5},
+		{"user CA entries", Report{UserCA: &UserCA{CAs: make([]CA, 2)}}, 2},
+		{"sudo grants", Report{Accounts: []Account{{Sudo: AccountSudo{Grants: make([]Grant, 2)}}}}, 3},
+		{"external records", Report{External: make([]External, 2)}, 2},
+		{"metadata", Report{Accounts: []Account{{Groups: []string{"a", "b"}, LastPTYLogin: &PTYLogin{}, KeyFiles: []KeyFile{{}}, PrincipalsFiles: []PrincipalsFile{{}}, TrustFiles: []TrustFile{{}}}}, SSHD: SSHD{MatchBlocks: []MatchBlock{{}}}}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { assert.Equal(t, tt.want, observationRows(&tt.report)) })
+	}
+}
+
+func rowCapReport(rows int) *Report {
+	r := newTestReport()
+	for i := range 100 {
+		a := capAccount(fmt.Sprintf("small%03d", i), nil)
+		a.TrustFiles = []TrustFile{{Envelope: Envelope{Path: "/home/" + a.Username + "/.k5login", Complete: true}, Entries: make([]TrustEntry, 190)}}
+		r.Accounts = append(r.Accounts, a)
+	}
+	keys := make([]Key, rows-observationRows(r)-501)
+	for i := range keys {
+		keys[i].Authorizations = []Authorization{{Count: 1}}
+	}
+	a := capAccount("huge", keys)
+	a.Sudo.Grants = make([]Grant, 500)
+	r.Accounts = append(r.Accounts, a)
+	return r
+}
+
+func TestObservationRowCapBoundary(t *testing.T) {
+	for _, rows := range []int{maxObservationRows, maxObservationRows + 1} {
+		t.Run(fmt.Sprint(rows), func(t *testing.T) {
+			r := rowCapReport(rows)
+			require.Equal(t, rows, observationRows(r))
+			require.Greater(t, encodedLen(r.Accounts[100].KeyFiles[0]), encodedLen(r.Accounts[100].Sudo), "row count takes priority over source bytes")
+			before, err := seal(r)
+			require.NoError(t, err)
+			require.Less(t, len(before), maxReportBytes)
+			for _, a := range r.Accounts {
+				require.Less(t, encodedLen(a), maxAccountBytes)
+			}
+			body, err := finalize(r)
+			require.NoError(t, err)
+			assert.Len(t, r.Accounts, 101)
+			assert.LessOrEqual(t, observationRows(r), maxObservationRows)
+			if rows == maxObservationRows {
+				assert.Equal(t, before, body)
+				return
+			}
+			a := r.Accounts[100]
+			assert.Empty(t, a.Sudo.Grants)
+			assert.False(t, a.Sudo.Complete)
+			assert.Equal(t, []string{reasonLimitExceeded}, a.Sudo.Reasons)
+			assert.Equal(t, Coverage{Status: coveragePartial, Reasons: []string{reasonLimitExceeded}}, r.Categories[catSudo])
+			assert.Equal(t, rows-500, observationRows(r), "stop after one source")
+			assert.True(t, a.KeyFiles[0].Complete)
+			assert.Empty(t, a.KeyFiles[0].Reasons)
+			for _, a := range r.Accounts[:100] {
+				assert.True(t, a.KeyFiles[0].Complete)
+				assert.True(t, a.TrustFiles[0].Complete)
+				assert.Len(t, a.TrustFiles[0].Entries, 190)
+				assert.Empty(t, a.TrustFiles[0].Reasons)
+				assert.True(t, a.Sudo.Complete)
+			}
+			again, err := seal(r)
+			require.NoError(t, err)
+			assert.Equal(t, body, again, "hash covers the cut report")
+		})
+	}
+}
+
+func TestObservationRowCapSourceOrder(t *testing.T) {
+	for _, differentSize := range []bool{false, true} {
+		t.Run(fmt.Sprintf("different size=%t", differentSize), func(t *testing.T) {
+			r := rowCapReport(maxObservationRows + 1)
+			a := &r.Accounts[100]
+			// Equal-row sources use encoded size, then path order.
+			a.KeyFiles = nil
+			a.Sudo.Grants = nil
+			a.TrustFiles = []TrustFile{
+				{Envelope: Envelope{Path: "/z", Complete: true}, Entries: make([]TrustEntry, 450)},
+				{Envelope: Envelope{Path: "/a", Complete: true}, Entries: make([]TrustEntry, 450)},
+			}
+			want := 1
+			if differentSize {
+				a.TrustFiles[0].Entries[0].Principal = ptr("longer")
+				want = 0
+			}
+			require.Equal(t, maxObservationRows+1, observationRows(r))
+			_, err := finalize(r)
+			require.NoError(t, err)
+			assert.Empty(t, a.TrustFiles[want].Entries)
+			assert.False(t, a.TrustFiles[want].Complete)
+			assert.Equal(t, []string{reasonLimitExceeded}, a.TrustFiles[want].Reasons)
+			assert.True(t, a.TrustFiles[1-want].Complete)
+			assert.Len(t, a.TrustFiles[1-want].Entries, 450)
+		})
+	}
+}
+
+func TestEmptyAccountSourcesFitObservationRowCap(t *testing.T) {
+	r := newTestReport()
+	r.Accounts = make([]Account, maxAccounts)
+	// The six global provider kinds and three per-account Match providers.
+	r.External = make([]External, 6+3*maxAccounts)
+	r.UserCA = &UserCA{CAs: make([]CA, maxKeysPerAccount)}
+	r.SystemTrust = []SystemTrustFile{{Entries: make([]HostUser, maxTrustEntries)}, {Entries: make([]HostUser, maxTrustEntries)}}
+	assert.Less(t, observationRows(r), maxObservationRows)
+}
+
+func TestObservationRowCapReselectsLargestAccount(t *testing.T) {
+	r := rowCapReport(maxObservationRows + 1)
+	a := capAccount("second", []Key{{Authorizations: make([]Authorization, 390)}})
+	a.Sudo.Grants = make([]Grant, 500)
+	r.Accounts = append(r.Accounts, a)
+	_, err := finalize(r)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, observationRows(r), maxObservationRows)
+	assert.Len(t, r.Accounts, 102)
+	for _, a := range r.Accounts[100:] {
+		assert.False(t, a.Sudo.Complete)
+		assert.Empty(t, a.Sudo.Grants)
+		assert.True(t, a.KeyFiles[0].Complete, "switch accounts after the first cut")
+		assert.NotEmpty(t, a.KeyFiles[0].Keys)
+	}
+}

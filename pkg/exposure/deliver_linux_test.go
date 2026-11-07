@@ -143,6 +143,53 @@ func TestDeliverCheck404SkipsWithOneFixedLine(t *testing.T) {
 	assert.NotContains(t, logs.String(), "LEAKCANARY")
 }
 
+func TestDeliver429SkipsUntilNextDueRead(t *testing.T) {
+	for _, endpoint := range []string{checkURL, reportURL} {
+		for _, bodyError := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/body error=%t", endpoint, bodyError), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					logs := captureLogs(t)
+					throttled := fakeResponse{status: http.StatusTooManyRequests, body: strings.Repeat("LEAKCANARY-429", maxRespBytes)}
+					if bodyError {
+						throttled.err = fmt.Errorf("LEAKCANARY-body-error")
+					}
+					p := &fakePoster{answers: map[string][]fakeResponse{
+						checkURL:  {{status: 200, body: `{"required": true}`}},
+						reportURL: {{status: 200}},
+					}}
+					p.answers[endpoint] = append([]fakeResponse{throttled}, p.answers[endpoint]...)
+					s := newService(p, func(context.Context) *Report { return sampleReport() }, make(chan struct{}, 1))
+					s.jitter = func() time.Duration { return 0 }
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					go s.run(ctx)
+					synctest.Wait()
+
+					assert.Len(t, p.callsTo(checkURL), 1)
+					if endpoint == checkURL {
+						assert.Empty(t, p.callsTo(reportURL))
+					} else {
+						assert.Len(t, p.callsTo(reportURL), 1)
+					}
+					assert.Equal(t, "{\"level\":\"debug\",\"message\":\"Exposure delivery throttled; skipping until the next read.\"}\n", logs.String())
+					time.Sleep(readInterval - time.Second)
+					synctest.Wait()
+					assert.Len(t, p.callsTo(checkURL), 1, "no attempts before the next due read")
+					time.Sleep(time.Second)
+					synctest.Wait()
+					assert.Len(t, p.callsTo(checkURL), 2)
+					wantReports := 1
+					if endpoint == reportURL {
+						wantReports = 2
+					}
+					assert.Len(t, p.callsTo(reportURL), wantReports)
+					assert.Equal(t, 1, strings.Count(logs.String(), "\n"))
+				})
+			})
+		}
+	}
+}
+
 func TestDeliverRetriesResendTheSameBody(t *testing.T) {
 	logs := captureLogs(t)
 	p := &fakePoster{answers: map[string][]fakeResponse{
