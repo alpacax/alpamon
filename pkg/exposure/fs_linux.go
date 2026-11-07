@@ -322,7 +322,7 @@ func (f *fsReader) read(p string, rule ownerRule) (loaded, []pathStat) {
 	switch {
 	case len(data) > maxReadBytes:
 		l.reasons.add(reasonLimitExceeded)
-	case statErr != nil || changed(&st, &after) || (int64(len(data)) != st.Size && !(rule.system && p == "/proc/sys/fs/protected_hardlinks" && st.Size == 0)):
+	case statErr != nil || changed(&st, &after) || int64(len(data)) != st.Size:
 		l.reasons.add(reasonConcurrentChange)
 	default:
 		l.data = data

@@ -146,7 +146,8 @@ type sshdConfig struct {
 	files   []inspectedFile
 	reasons reasonSet // file and parse reasons for the sshd category
 	// readAll is set when every configuration file was read in full.
-	readAll bool
+	readAll          bool
+	configIncomplete bool
 }
 
 type inspectedFile struct {
@@ -164,6 +165,7 @@ func parseSSHDConfig(src systemSource) sshdConfig {
 	for i := range p.cfg.blocks {
 		p.cfg.blocks[i].finish()
 	}
+	p.cfg.configIncomplete = p.cfg.configIncomplete || !p.cfg.readAll
 	return p.cfg
 }
 
@@ -231,6 +233,7 @@ func (p *sshdConfigParser) file(name string, depth int) {
 		case "match":
 			if len(p.cfg.blocks) >= maxMatchBlocks {
 				p.cfg.reasons.add(reasonLimitExceeded)
+				p.cfg.configIncomplete = true
 				p.current = nil
 				return true
 			}

@@ -21,13 +21,9 @@ import (
 // encodeValue returns the canonical JSON of v. Nil slices become [] unless
 // the field is tagged nullable, so an empty list is never written as null.
 func encodeValue(v any) (encoded []byte, err error) {
-	// A custom marshaler or reflection failure must not escape the trusted
-	// encoder. Never expose its panic value in the returned error.
-	defer func() {
-		if recover() != nil {
-			encoded, err = nil, errors.New("canonical encoding failed")
-		}
-	}()
+	if testHookEncodePanic != nil && testHookEncodePanic() {
+		panic("canonical encoder test panic")
+	}
 	rv := reflect.ValueOf(v)
 	if !rv.IsValid() {
 		return []byte("null"), nil

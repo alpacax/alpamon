@@ -463,3 +463,21 @@ func TestIncludeDirectoryLimitPropagates(t *testing.T) {
 		assert.Contains(t, s.Reasons, reasonLimitExceeded)
 	}
 }
+
+func TestProtectedHardlinksReadDetectsConcurrentChange(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		root, owners := attackRoot(t)
+		p := "/proc/sys/fs/protected_hardlinks"
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(root, p)), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(root, p), []byte("1\n"), 0o644))
+		testHookAfterRead = func(name string) {
+			if name == p {
+				require.NoError(t, os.Truncate(filepath.Join(root, p), 0))
+			}
+		}
+		defer func() { testHookAfterRead = nil }()
+		l, _ := readerFor(t, root, owners).read(p, ownerRule{system: true})
+		assert.True(t, l.reasons.has(reasonConcurrentChange))
+		assertNoContent(t, l)
+	})
+}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -147,12 +148,12 @@ func TestAccountDeadlineLeavesOtherAccountsComplete(t *testing.T) {
 	<-finished
 	// Wait for the pinned reader to close before the fixture and hooks go away.
 	c.accountMu.Lock()
-	busy := c.accountCount
+	busy := len(c.accountBusy)
 	c.accountMu.Unlock()
 	for busy != 0 {
 		runtime.Gosched()
 		c.accountMu.Lock()
-		busy = c.accountCount
+		busy = len(c.accountBusy)
 		c.accountMu.Unlock()
 	}
 }
@@ -164,22 +165,22 @@ func TestAccountWorkerBoundsAcrossReads(t *testing.T) {
 		var started atomic.Int32
 		fn := func() int { started.Add(1); <-release; return 1 }
 		for i := 0; i < maxAccountWorkers; i++ {
-			_, reason := runAccountBudget(context.Background(), c, catKeys, fmt.Sprint(i), fn)
+			_, reason, _ := runAccountBudget(context.Background(), c, catKeys, fmt.Sprint(i), fn)
 			assert.Equal(t, reasonTimeout, reason)
 		}
 		for range 3 {
-			for i := 0; i <= maxAccountWorkers; i++ {
-				_, reason := runAccountBudget(context.Background(), c, catKeys, fmt.Sprint(i), fn)
+			for i := 0; i < maxAccountWorkers+maxConcurrentAccounts; i++ {
+				_, reason, _ := runAccountBudget(context.Background(), c, catKeys, fmt.Sprint(i), fn)
 				assert.Equal(t, reasonTimeout, reason)
 			}
 		}
-		assert.Equal(t, int32(maxAccountWorkers), started.Load())
+		assert.Equal(t, int32(maxAccountWorkers+maxConcurrentAccounts), started.Load())
 		c.accountMu.Lock()
 		assert.Equal(t, maxAccountWorkers, c.accountCount)
 		c.accountMu.Unlock()
 		close(release)
 		synctest.Wait()
-		_, reason := runAccountBudget(context.Background(), c, catKeys, "fresh", func() int { return 1 })
+		_, reason, _ := runAccountBudget(context.Background(), c, catKeys, "fresh", func() int { return 1 })
 		assert.Empty(t, reason)
 	})
 }
@@ -301,7 +302,7 @@ func TestDuplicateAccountSources(t *testing.T) {
 func waitAccountWorkers(c *collector) {
 	for {
 		c.accountMu.Lock()
-		count := c.accountCount
+		count := len(c.accountBusy)
 		c.accountMu.Unlock()
 		if count == 0 {
 			return
@@ -550,4 +551,171 @@ func TestSystemdRecordDirectoriesAndTypes(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestFiveHungHomesAcrossCategoriesAndReads(t *testing.T) {
+	root, owners := attackRoot(t)
+	accounts := make([]passwdEntry, 0, 205)
+	for i := range 205 {
+		user := fmt.Sprintf("u%03d", i)
+		home := "/home/" + user
+		require.NoError(t, os.MkdirAll(filepath.Join(root, home, ".ssh"), 0o755))
+		owners[home], owners[home+"/.ssh"] = 1001, 1001
+		for name, body := range map[string]string{".ssh/authorized_keys": "ssh-ed25519 " + testEd0 + "\n", ".ssh/principals": "alice\n", ".k5login": "alice@EXAMPLE.COM\n"} {
+			p := home + "/" + name
+			owners[p] = 1001
+			require.NoError(t, os.WriteFile(filepath.Join(root, p), []byte(body), 0o644))
+		}
+		accounts = append(accounts, passwdEntry{name: user, uid: 1001, home: home})
+	}
+	release := make(chan struct{})
+	testHookRead = func(p string) {
+		for _, a := range accounts[:5] {
+			if strings.HasPrefix(p, a.home+"/") {
+				<-release
+				return
+			}
+		}
+	}
+	c := newCollector(collectorOptions{root: root, budget: categoryBudget, mapOwner: func(p string, _ uint32) uint32 { return owners[p] }})
+	defer func() { close(release); waitAccountWorkers(c); testHookRead = nil }()
+	st := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(".ssh/authorized_keys"), "authorizedprincipalsfile": ptr(".ssh/principals"), "trustedusercakeys": ptr("none"), "gssapiauthentication": ptr("yes")}}
+	for range 2 {
+		var keys keysData
+		var certs certsData
+		var trust trustData
+		var wg sync.WaitGroup
+		wg.Go(func() { keys = c.readKeysBudget(context.Background(), accounts, st, sshdConfig{}) })
+		wg.Go(func() { certs = c.readCertsBudget(context.Background(), accounts, st, sshdConfig{}) })
+		wg.Go(func() { trust = c.readTrustBudget(context.Background(), accounts, st, sshdConfig{}) })
+		wg.Wait()
+		for i, a := range accounts {
+			files := []Envelope{}
+			for _, f := range keys.byUser[a.name].files {
+				files = append(files, f.Envelope)
+			}
+			for _, f := range certs.principals[a.name] {
+				files = append(files, f.Envelope)
+			}
+			for _, f := range trust.files[a.name] {
+				files = append(files, f.Envelope)
+			}
+			require.Len(t, files, 3, a.name)
+			for _, f := range files {
+				if i < 5 {
+					assert.Equal(t, statusTimeout, f.Status, f.Path)
+				} else {
+					assert.True(t, f.Complete, f.Path)
+					assert.Equal(t, statusRead, f.Status, f.Path)
+					assert.NotContains(t, f.Reasons, reasonTimeout, f.Path)
+				}
+			}
+		}
+		c.accountMu.Lock()
+		assert.Equal(t, 15, c.accountCount)
+		c.accountMu.Unlock()
+	}
+}
+
+func TestTwentyHungHomesBoundWorkersAcrossFiveReads(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newCollector(collectorOptions{budget: categoryBudget})
+		release := make(chan struct{})
+		defer close(release)
+		accounts := []passwdEntry{}
+		for i := range 24 {
+			accounts = append(accounts, passwdEntry{name: fmt.Sprint(i)})
+		}
+		baseline := runtime.NumGoroutine()
+		for read := range 5 {
+			var wg sync.WaitGroup
+			for _, cat := range []string{catKeys, catCertificates, catTrust} {
+				wg.Go(func() {
+					ctx, cancel := context.WithTimeout(context.Background(), categoryBudget)
+					defer cancel()
+					readAccountResults(ctx, c, cat, accounts, func(a passwdEntry) int {
+						if a.name != "0" && a.name != "1" && a.name != "2" && a.name != "3" {
+							<-release
+						}
+						return 1
+					}, func(a passwdEntry, value int, reason string) {
+						if read == 0 && (a.name == "0" || a.name == "1" || a.name == "2" || a.name == "3") {
+							assert.Equal(t, 1, value)
+							assert.Empty(t, reason)
+						}
+					})
+				})
+			}
+			wg.Wait()
+			synctest.Wait()
+			assert.LessOrEqual(t, runtime.NumGoroutine()-baseline, 28)
+			c.accountMu.Lock()
+			assert.Equal(t, maxAccountWorkers, c.accountCount)
+			assert.LessOrEqual(t, len(c.accountBusy), 28)
+			for _, active := range c.accountInFlight {
+				assert.LessOrEqual(t, active, 4)
+			}
+			c.accountMu.Unlock()
+		}
+	})
+}
+
+func TestIncompleteSSHDConfigPropagatesWithoutGuessingTrust(t *testing.T) {
+	for _, mode := range []string{"match cap", "unreadable include", "rejected include"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := filepath.Join(fixturesDir, "hosts", "ubuntu-default")
+			spec := loadCase(t, dir)
+			root, proc := buildHost(t, dir, spec)
+			var config strings.Builder
+			reason := reasonFileUnreadable
+			if mode == "match cap" {
+				for i := range 300 {
+					fmt.Fprintf(&config, "Match User u%d\n", i)
+					if i == 280 {
+						config.WriteString("HostbasedAuthentication yes\nPasswordAuthentication yes\n")
+					}
+				}
+				reason = reasonLimitExceeded
+			} else {
+				config.WriteString("Include /etc/ssh/hidden\n")
+				require.NoError(t, os.WriteFile(filepath.Join(root, "etc/ssh/hidden"), []byte("Match User ubuntu\nHostbasedAuthentication yes\nPasswordAuthentication yes\n"), 0o644))
+				if mode == "unreadable include" {
+					spec.Unreadable = append(spec.Unreadable, "/etc/ssh/hidden")
+				} else {
+					if spec.Owners == nil {
+						spec.Owners = map[string]uint32{}
+					}
+					spec.Owners["/etc/ssh/hidden"] = 1001
+				}
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(root, sshdConfigPath), []byte(config.String()), 0o644))
+			require.NoError(t, os.Chtimes(filepath.Join(root, sshdConfigPath), fixtureMtime, fixtureMtime))
+			opens := recordOpens(t, spec.Unreadable)
+			opts := caseOptions(t, dir, spec, root, proc)
+			run := opts.runSSHD
+			opts.runSSHD = func(ctx context.Context) sshdRun {
+				r := run(ctx)
+				r.out = append(r.out, "\npasswordauthentication no\nkbdinteractiveauthentication no\nhostbasedauthentication no\nignorerhosts yes\ngssapiauthentication no\nkerberosauthentication no\n"...)
+				return r
+			}
+			r := newCollector(opts).collect(context.Background())
+			assert.Equal(t, "unresolved", r.SSHD.Daemon.Correspondence)
+			assert.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDConfigUnresolved)
+			for _, cat := range []string{catTrust, catPasswords, catKeys, catCertificates} {
+				assert.Equal(t, coveragePartial, r.Categories[cat].Status, cat)
+				assert.Contains(t, r.Categories[cat].Reasons, reason, cat)
+			}
+			assert.Empty(t, r.SystemTrust)
+			for _, a := range r.Accounts {
+				assert.Empty(t, a.TrustFiles)
+			}
+			for _, p := range opens() {
+				assert.NotContains(t, p, ".k5login")
+				assert.NotContains(t, p, ".rhosts")
+				assert.NotContains(t, p, ".shosts")
+				assert.NotEqual(t, "/etc/hosts.equiv", p)
+				assert.NotEqual(t, "/etc/ssh/shosts.equiv", p)
+			}
+		})
+	}
 }

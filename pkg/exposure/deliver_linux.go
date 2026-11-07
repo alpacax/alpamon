@@ -106,12 +106,10 @@ func (s *service) runLoop(ctx context.Context) (panicked bool) {
 		case <-ctx.Done():
 			return false
 		case <-timer.C:
+			s.due = s.now().Add(readInterval + s.jitter())
 		case <-s.trigger:
 		}
-		// Keep the existing deadline if delivery panics. A due read is
-		// retried after the restart pause; a trigger keeps the pending due.
 		s.readAndDeliver(ctx)
-		s.due = s.now().Add(readInterval + s.jitter())
 		timer.Reset(s.due.Sub(s.now()))
 	}
 }

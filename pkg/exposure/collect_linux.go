@@ -47,16 +47,17 @@ func defaultOptions() collectorOptions {
 // category, the next read records that category as a timeout instead of
 // starting a second worker behind it.
 type collector struct {
-	opts         collectorOptions
-	busy         map[string]*atomic.Bool
-	reads        atomic.Int64
-	accountMu    sync.Mutex
-	accountBusy  map[accountSlot]bool
-	accountCount int
+	opts            collectorOptions
+	busy            map[string]*atomic.Bool
+	reads           atomic.Int64
+	accountMu       sync.Mutex
+	accountBusy     map[accountSlot]bool
+	accountCount    int // abandoned workers only
+	accountInFlight map[string]int
 }
 
 func newCollector(opts collectorOptions) *collector {
-	c := &collector{opts: opts, busy: map[string]*atomic.Bool{}, accountBusy: map[accountSlot]bool{}}
+	c := &collector{opts: opts, busy: map[string]*atomic.Bool{}, accountBusy: map[accountSlot]bool{}, accountInFlight: map[string]int{}}
 	for _, n := range categoryNames {
 		c.busy[n] = &atomic.Bool{}
 	}
@@ -132,26 +133,35 @@ func (c *collector) collect(ctx context.Context) *Report {
 	host := c.opts.hostname()
 	var b assembly
 	var wg sync.WaitGroup
-	start := func(fn func()) {
+	start := func(cat string, fn func()) {
 		wg.Add(1)
-		go func() { defer wg.Done(); fn() }()
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if recover() != nil {
+					logExposurePanic(cat, "Exposure category starter panicked.")
+				}
+			}()
+			readHook("starter:" + cat)
+			fn()
+		}()
 	}
-	start(func() {
+	start(catAccounts, func() {
 		b.acc, b.accOK = runBudget(ctx, c, catAccounts, func(context.Context) accountsData {
 			return withFS(c, accountsData{reasons: unreadable()}, func(_ *fsReader, sys systemFiles) accountsData { return readAccounts(sys) })
 		})
 	})
-	start(func() {
+	start(catPasswords, func() {
 		b.sh, b.shOK = runBudget(ctx, c, catPasswords, func(context.Context) shadowData {
 			return withFS(c, shadowData{reasons: unreadable()}, func(_ *fsReader, sys systemFiles) shadowData { return readShadow(sys) })
 		})
 	})
-	start(func() {
+	start(catSSHD, func() {
 		b.sshd, b.sshdOK = runBudget(ctx, c, catSSHD, func(ctx context.Context) sshdData {
 			return withFS(c, sshdData{reasons: unreadable(), daemon: Daemon{Correspondence: "unresolved"}}, func(fs *fsReader, sys systemFiles) sshdData { return c.readSSHD(ctx, fs, sys) })
 		})
 	})
-	start(func() {
+	start(catSudo, func() {
 		b.sudo, b.sudoOK = runBudget(ctx, c, catSudo, func(context.Context) sudoPolicy {
 			return withFS(c, sudoPolicy{global: unreadable()}, func(_ *fsReader, sys systemFiles) sudoPolicy { return readSudoPolicy(sys, host) })
 		})
@@ -165,22 +175,22 @@ func (c *collector) collect(ctx context.Context) *Report {
 		if b.sshdOK {
 			t, cfg = b.sshd.t, b.sshd.cfg
 		}
-		start(func() {
+		start(catKeys, func() {
 			b.keys, b.keysOK = runBudget(ctx, c, catKeys, func(ctx context.Context) keysData {
 				return c.readKeysBudget(ctx, accounts, t, cfg)
 			})
 		})
-		start(func() {
+		start(catCertificates, func() {
 			b.certs, b.certsOK = runBudget(ctx, c, catCertificates, func(ctx context.Context) certsData {
 				return c.readCertsBudget(ctx, accounts, t, cfg)
 			})
 		})
-		start(func() {
+		start(catTrust, func() {
 			b.trust, b.trustOK = runBudget(ctx, c, catTrust, func(ctx context.Context) trustData {
 				return c.readTrustBudget(ctx, accounts, t, cfg)
 			})
 		})
-		start(func() {
+		start(catPTY, func() {
 			b.pty, b.ptyOK = runBudget(ctx, c, catPTY, func(context.Context) ptyData {
 				return withFS(c, ptyData{reasons: unreadable()}, func(fs *fsReader, _ systemFiles) ptyData { return readPTY(fs, accounts) })
 			})
@@ -363,7 +373,7 @@ func (c *collector) correspondence(fs *fsReader, cfg sshdConfig) Daemon {
 				socket = true
 			}
 		}
-		if socket && cfg.readAll {
+		if socket && cfg.readAll && !cfg.configIncomplete {
 			// Socket activation reads the configuration per connection.
 			d.Correspondence = "established"
 		}
@@ -371,7 +381,7 @@ func (c *collector) correspondence(fs *fsReader, cfg sshdConfig) Daemon {
 		m := masters[0]
 		matches := m.args.configPath == "" || m.args.configPath == sshdConfigPath
 		d.ConfigPathMatches = &matches
-		if !matches || m.args.hasOverride || !cfg.readAll {
+		if !matches || m.args.hasOverride || !cfg.readAll || cfg.configIncomplete {
 			return d
 		}
 		for _, f := range cfg.files {

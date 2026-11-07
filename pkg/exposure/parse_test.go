@@ -505,7 +505,8 @@ func TestMatchBlockCount(t *testing.T) {
 	cfg := parseSSHDConfig(mapSource{files: map[string]string{sshdConfigPath: b.String()}})
 	assert.Len(t, cfg.blocks, 256)
 	assert.True(t, cfg.reasons.has(reasonLimitExceeded))
-	assert.True(t, cfg.readAll, "the record cap must preserve configuration correspondence")
+	assert.True(t, cfg.readAll, "all files were read despite the record cap")
+	assert.True(t, cfg.configIncomplete)
 }
 
 func TestGlobIncludeRestoresMatchStatePerFile(t *testing.T) {

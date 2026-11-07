@@ -167,6 +167,17 @@ func (b *assembly) report() *Report {
 		}
 	}
 
+	if cfg.configIncomplete {
+		for _, name := range []string{catTrust, catPasswords, catKeys, catCertificates} {
+			if cfg.reasons.has(reasonLimitExceeded) {
+				cats[name].reasons.add(reasonLimitExceeded)
+			}
+			if !cfg.readAll {
+				cats[name].reasons.add(reasonFileUnreadable)
+			}
+		}
+	}
+
 	// sudo
 	sudoState := categoryState{reasons: reasonSet{}}
 	switch {

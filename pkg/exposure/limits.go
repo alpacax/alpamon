@@ -22,7 +22,7 @@ const (
 	maxExternalRecords    = 256
 	maxConcurrentAccounts = 4
 	accountReturnMargin   = 250 * time.Millisecond
-	maxAccountWorkers     = 16
+	maxAccountWorkers     = 16 // abandoned workers, in addition to the category lanes
 	accountBudget         = 2 * time.Second
 	maxDirEntries         = 4096
 	maxCommentRunes       = 128

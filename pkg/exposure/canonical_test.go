@@ -146,13 +146,11 @@ type panickingMarshaler struct{}
 
 func (panickingMarshaler) MarshalJSON() ([]byte, error) { panic("LEAKCANARY marshal") }
 
-func TestCanonicalEncoderRejectsPanicsAndCycles(t *testing.T) {
+func TestCanonicalEncoderPropagatesPanicsAndRejectsCycles(t *testing.T) {
 	b, err := encodeValue(nil)
 	require.NoError(t, err)
 	assert.Equal(t, "null", string(b))
-	_, err = encodeValue(panickingMarshaler{})
-	require.Error(t, err)
-	assert.NotContains(t, err.Error(), "LEAKCANARY")
+	assert.Panics(t, func() { _, _ = encodeValue(panickingMarshaler{}) })
 	type node struct{ Next *node }
 	cycle := &node{}
 	cycle.Next = cycle

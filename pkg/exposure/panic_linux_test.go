@@ -5,6 +5,7 @@ package exposure
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -196,6 +197,11 @@ func TestServicePanicRestartsAfterPauseAndKeepsDueTime(t *testing.T) {
 				assert.Len(t, p.callsTo(checkURL), before)
 				time.Sleep(4 * time.Minute)
 				synctest.Wait()
+				if at == "scheduling" {
+					assert.Len(t, p.callsTo(checkURL), before)
+					time.Sleep(loopRestartPause)
+					synctest.Wait()
+				}
 				assert.Len(t, p.callsTo(checkURL), before+1)
 				assertPanicLog(t, logs.String(), "service", "Exposure service loop panicked; restarting after 60 seconds.")
 			})
@@ -282,7 +288,7 @@ func (p *notifyingPoster) PostExposure(ctx context.Context, url string, body any
 	return b, status, header, err
 }
 
-func TestServiceOverdueReadWaitsForRestartPause(t *testing.T) {
+func TestServiceDeliveryPanicKeepsAdvancedDueTime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		logs := captureLogs(t)
 		p := &panicPoster{post: acceptingPoster()}
@@ -298,7 +304,113 @@ func TestServiceOverdueReadWaitsForRestartPause(t *testing.T) {
 		assert.Equal(t, int32(1), p.calls.Load())
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
+		assert.Empty(t, p.post.callsTo(reportURL))
+		time.Sleep(readInterval - loopRestartPause)
+		synctest.Wait()
 		assert.Len(t, p.post.callsTo(reportURL), 1)
 		assertPanicLog(t, logs.String(), "service", "Exposure service loop panicked; restarting after 60 seconds.")
+	})
+}
+
+func TestEncoderPanicReachesReadBoundary(t *testing.T) {
+	logs := captureLogs(t)
+	var failed atomic.Bool
+	testHookEncodePanic = func() bool { return failed.CompareAndSwap(false, true) }
+	defer func() { testHookEncodePanic = nil }()
+	p := acceptingPoster()
+	s := testService(p, func(context.Context) *Report { return sampleReport() })
+	s.readAndDeliver(context.Background())
+	reports := p.callsTo(reportURL)
+	require.Len(t, reports, 1)
+	r := decodeReport(t, reports[0])
+	for _, cat := range categoryNames {
+		assert.Equal(t, Coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}, r.Categories[cat])
+	}
+	assertPanicLog(t, logs.String(), "serialize", "Exposure read panicked; recovered at read boundary.")
+	assert.Regexp(t, `"source":"pkg/exposure/canonical.go:[0-9]+"`, logs.String())
+}
+
+func TestCategoryStarterPanicReturnsTimeout(t *testing.T) {
+	logs := captureLogs(t)
+	dir := filepath.Join(fixturesDir, "hosts", "ubuntu-default")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	installReadHook(t, func(stage string) {
+		if stage == "starter:"+catPasswords {
+			panic("LEAKCANARY starter")
+		}
+	})
+	r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(context.Background())
+	assert.Equal(t, Coverage{Status: coverageUnknown, Reasons: []string{reasonTimeout}}, r.Categories[catPasswords])
+	assert.Equal(t, coverageCovered, r.Categories[catKeys].Status)
+	assertPanicLog(t, logs.String(), catPasswords, "Exposure category starter panicked.")
+}
+
+func TestAccountDispatcherPanicTimesOutLane(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := captureLogs(t)
+		var failed atomic.Bool
+		installReadHook(t, func(stage string) {
+			if stage == "account_dispatch:"+catKeys && failed.CompareAndSwap(false, true) {
+				panic("LEAKCANARY dispatcher")
+			}
+		})
+		accounts := make([]passwdEntry, 12)
+		for i := range accounts {
+			accounts[i].name = fmt.Sprint(i)
+		}
+		c := newCollector(collectorOptions{budget: categoryBudget})
+		results := map[string]string{}
+		readAccountResults(context.Background(), c, catKeys, accounts, func(passwdEntry) int { return 1 }, func(a passwdEntry, v int, reason string) {
+			results[a.name] = reason
+			if reason == "" {
+				assert.Equal(t, 1, v)
+			}
+		})
+		require.Len(t, results, len(accounts))
+		timedOut := 0
+		for _, reason := range results {
+			if reason != "" {
+				assert.Equal(t, reasonTimeout, reason)
+				timedOut++
+			}
+		}
+		assert.Equal(t, 3, timedOut)
+		assertPanicLog(t, logs.String(), catKeys, "Exposure account dispatcher panicked.")
+	})
+}
+
+type alwaysPanicPoster struct{}
+
+func (alwaysPanicPoster) PostExposure(context.Context, string, any, time.Duration) ([]byte, int, http.Header, error) {
+	panic("LEAKCANARY persistent delivery")
+}
+
+func TestPersistentDeliveryPanicKeepsHourlyTimerAndTriggers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := captureLogs(t)
+		var reads atomic.Int32
+		s := newService(alwaysPanicPoster{}, func(context.Context) *Report { reads.Add(1); return sampleReport() }, make(chan struct{}, 1))
+		s.jitter = func() time.Duration { return 0 }
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go s.run(ctx)
+		synctest.Wait()
+		assert.Equal(t, int32(1), reads.Load())
+		for hour := range 3 {
+			time.Sleep(5 * time.Minute)
+			synctest.Wait()
+			s.trigger <- struct{}{}
+			synctest.Wait()
+			assert.Equal(t, int32(2*hour+2), reads.Load())
+			time.Sleep(55*time.Minute - time.Nanosecond)
+			synctest.Wait()
+			assert.Equal(t, int32(2*hour+2), reads.Load())
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			assert.Equal(t, int32(2*hour+3), reads.Load())
+		}
+		assert.NotContains(t, logs.String(), "LEAKCANARY")
+		assert.Equal(t, int(reads.Load()), strings.Count(logs.String(), "Exposure service loop panicked; restarting after 60 seconds."))
 	})
 }
