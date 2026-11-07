@@ -225,22 +225,15 @@ func (p *sshdConfigParser) file(name string, depth int) {
 		}
 		switch kw {
 		case "include":
-			saved := -1
-			for i := range p.cfg.blocks {
-				if p.current == &p.cfg.blocks[i] {
-					saved = i
-					break
-				}
-			}
 			for _, a := range args {
 				p.include(a, depth)
-				if saved < 0 {
-					p.current = nil
-				} else {
-					p.current = &p.cfg.blocks[saved]
-				}
 			}
 		case "match":
+			if len(p.cfg.blocks) >= maxMatchBlocks {
+				p.cfg.reasons.add(reasonLimitExceeded)
+				p.current = nil
+				return true
+			}
 			p.cfg.blocks = append(p.cfg.blocks, newMatchBlock(args))
 			p.current = &p.cfg.blocks[len(p.cfg.blocks)-1]
 		default:
@@ -265,7 +258,7 @@ func (p *sshdConfigParser) include(arg string, depth int) {
 		return
 	}
 	if !hasGlob(base) {
-		p.file(arg, depth+1)
+		p.includedFile(arg, depth+1)
 		return
 	}
 	names, l := p.src.list(dir)
@@ -289,7 +282,24 @@ func (p *sshdConfigParser) include(arg string, depth int) {
 	}
 	slices.Sort(matched)
 	for _, n := range matched {
-		p.file(dir+"/"+n, depth+1)
+		p.includedFile(dir+"/"+n, depth+1)
+	}
+}
+
+// includedFile restores the enclosing Match after each file, including each
+// match of a glob. Save an index because appending can move the block slice.
+func (p *sshdConfigParser) includedFile(name string, depth int) {
+	saved := -1
+	for i := range p.cfg.blocks {
+		if p.current == &p.cfg.blocks[i] {
+			saved = i
+			break
+		}
+	}
+	p.file(name, depth)
+	p.current = nil
+	if saved >= 0 {
+		p.current = &p.cfg.blocks[saved]
 	}
 }
 

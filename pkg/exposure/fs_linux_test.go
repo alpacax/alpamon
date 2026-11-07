@@ -382,34 +382,64 @@ func TestStatusOfErrors(t *testing.T) {
 	}
 }
 
-func TestAccountRootFileNeedsProtectedHardlinks(t *testing.T) {
+func TestRootFilesInAccountControlledPaths(t *testing.T) {
 	forBothWalks(t, func(t *testing.T) {
-		for _, value := range []string{"0\n", "1\n", "2\n", "1 \n", ""} {
-			t.Run(fmt.Sprintf("value=%q", value), func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			mode        os.FileMode
+			parent      string
+			parentOwner uint32
+			parentMode  os.FileMode
+			fileOwner   uint32
+			accepted    bool
+		}{
+			{"public root file", 0o644, "/home/u/.ssh", 1001, 0o755, 0, true},
+			{"private root file", 0o600, "/home/u/.ssh", 1001, 0o755, 0, false},
+			{"group-readable root file", 0o640, "/home/u/.ssh", 1001, 0o755, 0, false},
+			{"account owns private file", 0o600, "/home/u/.ssh", 1001, 0o755, 1001, true},
+			{"root subdir in account home", 0o600, "/home/u/.ssh", 0, 0o755, 0, false},
+			{"root sticky writable ancestor", 0o600, "/srv", 0, os.ModeSticky | 0o777, 0, false},
+			{"root group writable ancestor", 0o640, "/srv", 0, 0o775, 0, false},
+			{"public under sticky ancestor", 0o644, "/srv", 0, os.ModeSticky | 0o777, 0, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
 				root, owners := attackRoot(t)
-				require.NoError(t, os.MkdirAll(filepath.Join(root, "proc/sys/fs"), 0o755))
-				if value != "" {
-					require.NoError(t, os.WriteFile(filepath.Join(root, "proc/sys/fs/protected_hardlinks"), []byte(value), 0o644))
+				owners[tc.parent] = tc.parentOwner
+				require.NoError(t, os.Chmod(filepath.Join(root, tc.parent), tc.parentMode))
+				path := tc.parent + "/authorized_keys"
+				if tc.parent == "/srv" {
+					path = "/srv/elsewhere/keys"
 				}
-				f := readerFor(t, root, owners)
-				for _, path := range []string{"/home/u/.k5login", "/home/u/.ssh/principals", "/home/u/.ssh/authorized_keys"} {
-					// Create and orphan the link: its final link count is one.
-					original := filepath.Join(root, "etc/original")
-					require.NoError(t, os.WriteFile(original, []byte("alice@EXAMPLE.COM\n"), 0o644))
-					require.NoError(t, os.Link(original, filepath.Join(root, path)))
-					require.NoError(t, os.Remove(original))
-					l, _ := f.read(path, ownerRule{uid: 1001})
-					if value == "1\n" {
-						assert.True(t, l.complete())
-						assert.True(t, l.usable())
-					} else {
-						assert.Equal(t, statusRejected, l.status)
-						assert.True(t, l.reasons.has(reasonFileRejected))
-						assertNoContent(t, l)
-					}
+				owners[path] = tc.fileOwner
+				original := filepath.Join(root, "etc/original")
+				require.NoError(t, os.WriteFile(original, []byte("ssh-ed25519 "+testEd0+"\n"), tc.mode))
+				require.NoError(t, os.Link(original, filepath.Join(root, path)))
+				require.NoError(t, os.Remove(original))
+				l, _ := readerFor(t, root, owners).read(path, ownerRule{uid: 1001})
+				assert.Equal(t, tc.accepted, l.complete())
+				if !tc.accepted {
+					assert.Equal(t, statusRejected, l.status)
+					assert.True(t, l.reasons.has(reasonFileRejected))
+					assertNoContent(t, l)
 				}
 			})
 		}
+	})
+}
+
+func TestK5PrivateKeyBodyRejectedBeforeParsing(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		root, owners := attackRoot(t)
+		key := "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACDx2Wv1Xq8yZ0m3sJYpQ8l7N6cYV9k2sP0pX1hT5c3a1QAAAJh0e3ZbdHt2\n-----END OPENSSH PRIVATE KEY-----\n"
+		require.NoError(t, os.WriteFile(filepath.Join(root, "home/u/.k5login"), []byte(key), 0o600))
+		st := &sshdT{effective: map[string]*string{"gssapiauthentication": ptr("yes")}}
+		fs := readerFor(t, root, owners)
+		d := readTrust(fs, systemFiles{f: fs}, []passwdEntry{{name: "u", uid: 1001, home: "/home/u"}}, st, sshdConfig{})
+		require.Len(t, d.files["u"], 1)
+		file := d.files["u"][0]
+		assert.Equal(t, statusRejected, file.Status)
+		assert.Equal(t, []string{reasonFileRejected}, file.Reasons)
+		assert.Empty(t, file.Entries)
 	})
 }
 

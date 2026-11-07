@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -240,4 +241,12 @@ func TestObservationRowCapReselectsLargestAccount(t *testing.T) {
 		assert.True(t, a.KeyFiles[0].Complete, "switch accounts after the first cut")
 		assert.NotEmpty(t, a.KeyFiles[0].Keys)
 	}
+}
+
+func TestRowCapNoAccountSources(t *testing.T) {
+	r := &Report{Categories: map[string]Coverage{}}
+	for i := 0; i <= maxObservationRows; i++ {
+		r.External = append(r.External, External{Kind: externalKeysCommand, Scope: "match:" + strconv.Itoa(i)})
+	}
+	require.NotPanics(t, func() { _, _ = finalize(r) })
 }

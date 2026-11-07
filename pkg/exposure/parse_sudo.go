@@ -19,6 +19,7 @@ const (
 
 // sudoPolicy is the parsed policy, before it is mapped onto accounts.
 type sudoPolicy struct {
+	failed bool // the category worker recovered a parser failure
 	// unresolved means the policy plugin or file could not be determined.
 	unresolved bool
 	// global reasons make every account's sudo incomplete.

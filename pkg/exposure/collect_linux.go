@@ -5,7 +5,9 @@ package exposure
 import (
 	"context"
 	"os"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -251,8 +253,8 @@ func readAccounts(sys systemFiles) accountsData {
 		d.reasons.merge(ns.reasons)
 	}
 	if slices.Contains(d.nss["passwd"], "systemd") || slices.Contains(d.nss["group"], "systemd") {
-		for _, path := range []string{"/var/lib/systemd/home", "/etc/userdb"} {
-			names, l := sys.list(path)
+		for _, path := range []string{"/var/lib/systemd/home", "/etc/userdb", "/run/userdb", "/run/host/userdb", "/usr/local/lib/userdb", "/usr/lib/userdb"} {
+			names, l := sys.f.list(path, ownerRule{system: true}, true)
 			if l.status == statusAbsent {
 				continue
 			}
@@ -264,7 +266,7 @@ func readAccounts(sys systemFiles) accountsData {
 			}
 			for _, name := range names {
 				if path == "/var/lib/systemd/home" {
-					if strings.HasSuffix(name, ".home") {
+					if strings.HasSuffix(name, ".identity") {
 						d.systemdAccounts, d.systemdGroups = true, true
 					}
 				} else {
@@ -919,5 +921,30 @@ func readPTY(fs *fsReader, accounts []passwdEntry) ptyData {
 }
 
 func logParserPanic(cat string) {
-	log.Debug().Str("category", cat).Msg("Exposure category parser panicked.")
+	logExposurePanic(cat, "Exposure category parser panicked.")
+}
+
+// Log only a compile-time package source location from the panicking stack.
+// The panic value, arguments and host paths are never formatted.
+func logExposurePanic(cat, message string) {
+	var pcs [32]uintptr
+	n := runtime.Callers(2, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	panicking := false
+	location := ""
+	for {
+		frame, more := frames.Next()
+		if frame.Function == "runtime.gopanic" {
+			panicking = true
+		} else if panicking {
+			if i := strings.LastIndex(frame.File, "/pkg/exposure/"); i >= 0 {
+				location = frame.File[i+1:] + ":" + strconv.Itoa(frame.Line)
+				break
+			}
+		}
+		if !more {
+			break
+		}
+	}
+	log.Debug().Str("category", cat).Str("source", location).Msg(message)
 }

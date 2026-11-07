@@ -423,10 +423,11 @@ func TestAbandonedWorkerSharesNothingWritable(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "home/deploy/.ssh"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "home/deploy/.ssh/authorized_keys"), []byte("\n"), 0o644))
 	opts := caseOptions(t, dir, spec, root, proc)
-	opts.budget = 200 * time.Millisecond
-	r := newCollector(opts).collect(context.Background())
+	opts.budget = 500 * time.Millisecond
+	c := newCollector(opts)
+	r := c.collect(context.Background())
 	assert.Contains(t, r.Categories[catKeys].Reasons, reasonTimeout)
-	assert.Equal(t, coverageUnknown, r.Categories[catKeys].Status)
+	assert.Equal(t, coveragePartial, r.Categories[catKeys].Status)
 
 	var wg sync.WaitGroup
 	wg.Go(func() { close(release) })
@@ -435,4 +436,5 @@ func TestAbandonedWorkerSharesNothingWritable(t *testing.T) {
 		require.NoError(t, err)
 	}
 	wg.Wait()
+	waitAccountWorkers(c)
 }

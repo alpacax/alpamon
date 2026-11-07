@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +25,10 @@ const (
 	multipartMaxRespSize  = 1 << 20          // 1 MiB; read +1 to detect over-limit explicitly
 	minTimeout            = time.Millisecond // below this, a caller passed a bare integer, which Go reads as nanoseconds
 )
+
+// ErrExposureResponseTooLarge marks a response that cannot be retried within
+// the current exposure read.
+var ErrExposureResponseTooLarge = errors.New("exposure response too large")
 
 func InitSession() *Session {
 	session := &Session{
@@ -313,7 +318,7 @@ func (session *Session) PostExposure(ctx context.Context, url string, body any, 
 		return nil, resp.StatusCode, resp.Header, err
 	}
 	if len(data) > limit {
-		return nil, resp.StatusCode, resp.Header, fmt.Errorf("exposure response too large")
+		return nil, resp.StatusCode, resp.Header, ErrExposureResponseTooLarge
 	}
 	return data, resp.StatusCode, resp.Header, nil
 }

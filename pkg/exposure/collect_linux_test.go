@@ -12,9 +12,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func TestSystemdNSSSources(t *testing.T) {
@@ -30,17 +32,17 @@ func TestSystemdNSSSources(t *testing.T) {
 			groups     bool
 		}{
 			{name: "DynamicUser only"},
-			{name: "unrelated entries", files: []string{"var/lib/systemd/home/alice.home.bak", "etc/userdb/alice.user.bak", "etc/userdb/alice.group.bak"}},
-			{name: "wrong directory", files: []string{"var/lib/systemd/home/alice.user", "var/lib/systemd/home/alice.group", "etc/userdb/alice.home"}},
-			{name: "homed", files: []string{"var/lib/systemd/home/alice.home"}, accounts: true, groups: true},
+			{name: "unrelated entries", files: []string{"var/lib/systemd/home/alice.identity.bak", "etc/userdb/alice.user.bak", "etc/userdb/alice.group.bak"}},
+			{name: "wrong directory", files: []string{"var/lib/systemd/home/alice.user", "var/lib/systemd/home/alice.group", "etc/userdb/alice.identity"}},
+			{name: "homed", files: []string{"var/lib/systemd/home/alice.identity"}, accounts: true, groups: true},
 			{name: "userdb account", files: []string{"etc/userdb/alice.user"}, accounts: true},
 			{name: "userdb group", files: []string{"etc/userdb/alice.group"}, groups: true},
 			{name: "both userdb records", files: []string{"etc/userdb/alice.user", "etc/userdb/alice.group"}, accounts: true, groups: true},
 			{name: "unreadable homes", unreadable: "/var/lib/systemd/home", accounts: true, groups: true},
 			{name: "unreadable userdb", unreadable: "/etc/userdb", accounts: true, groups: true},
 			{name: "non-root userdb", files: []string{"etc/userdb/alice.user"}, foreign: "/etc/userdb", accounts: true, groups: true},
-			{name: "passwd only", files: []string{"var/lib/systemd/home/alice.home"}, passwd: "files systemd", group: "files", accounts: true},
-			{name: "group only", files: []string{"var/lib/systemd/home/alice.home"}, passwd: "files", group: "files systemd", groups: true},
+			{name: "passwd only", files: []string{"var/lib/systemd/home/alice.identity"}, passwd: "files systemd", group: "files", accounts: true},
+			{name: "group only", files: []string{"var/lib/systemd/home/alice.identity"}, passwd: "files", group: "files systemd", groups: true},
 			{name: "unused sources are not inspected", passwd: "files", group: "files", unreadable: "/etc/userdb"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -291,6 +293,260 @@ func TestDuplicateAccountSources(t *testing.T) {
 				for _, opened := range opens() {
 					assert.False(t, opened == "/home/dropped" || strings.HasPrefix(opened, "/home/dropped/"), opened)
 				}
+			})
+		}
+	})
+}
+
+func waitAccountWorkers(c *collector) {
+	for {
+		c.accountMu.Lock()
+		count := c.accountCount
+		c.accountMu.Unlock()
+		if count == 0 {
+			return
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestSixHungHomesKeepHealthyAccounts(t *testing.T) {
+	root, owners := attackRoot(t)
+	var accounts []passwdEntry
+	for i := 0; i < 8; i++ {
+		user := fmt.Sprintf("u%d", i)
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "home", user, ".ssh"), 0o755))
+		p := "/home/" + user + "/.ssh/authorized_keys"
+		owners[p] = 1001
+		require.NoError(t, os.WriteFile(filepath.Join(root, p), []byte("ssh-ed25519 "+testEd0+"\n"), 0o644))
+		accounts = append(accounts, passwdEntry{name: user, uid: 1001, home: "/home/" + user})
+	}
+	release := make(chan struct{})
+	testHookRead = func(p string) {
+		if strings.HasPrefix(p, "/home/u") && p[7] < '6' {
+			<-release
+		}
+	}
+	c := newCollector(collectorOptions{root: root, budget: categoryBudget, mapOwner: func(p string, _ uint32) uint32 { return owners[p] }})
+	defer func() { close(release); waitAccountWorkers(c); testHookRead = nil }()
+	st := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(".ssh/authorized_keys")}}
+	d, ok := runBudget(context.Background(), c, catKeys, func(ctx context.Context) keysData { return c.readKeysBudget(ctx, accounts, st, sshdConfig{}) })
+	require.True(t, ok)
+	assert.Equal(t, coveragePartial, coverageOf(categoryState{usable: d.usable, reasons: d.reasons}).Status)
+	assert.True(t, d.reasons.has(reasonTimeout))
+	for i, a := range accounts {
+		files := d.byUser[a.name].files
+		require.Len(t, files, 1)
+		assert.Equal(t, "/home/"+a.name+"/.ssh/authorized_keys", files[0].Path)
+		if i < 6 {
+			assert.Equal(t, statusTimeout, files[0].Status)
+		} else {
+			assert.True(t, files[0].Complete)
+			assert.Len(t, files[0].Keys, 1)
+		}
+	}
+}
+
+func TestAllHungHomesReturnPartialWithoutWorkerGrowth(t *testing.T) {
+	for _, cat := range []string{catKeys, catCertificates, catTrust} {
+		t.Run(cat, func(t *testing.T) {
+			root, owners := attackRoot(t)
+			accounts := []passwdEntry{}
+			for i := 0; i < 8; i++ {
+				user := fmt.Sprintf("u%d", i)
+				home := "/home/" + user
+				require.NoError(t, os.MkdirAll(filepath.Join(root, home, ".ssh"), 0o755))
+				for _, name := range []string{".ssh/authorized_keys", ".ssh/principals", ".k5login"} {
+					p := home + "/" + name
+					owners[p] = 1001
+					require.NoError(t, os.WriteFile(filepath.Join(root, p), []byte("alice\n"), 0o644))
+				}
+				accounts = append(accounts, passwdEntry{name: user, uid: 1001, home: home})
+			}
+			release := make(chan struct{})
+			testHookRead = func(p string) {
+				if strings.HasPrefix(p, "/home/") {
+					<-release
+				}
+			}
+			c := newCollector(collectorOptions{root: root, budget: 750 * time.Millisecond, mapOwner: func(p string, _ uint32) uint32 { return owners[p] }})
+			defer func() { close(release); waitAccountWorkers(c); testHookRead = nil }()
+			st := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(".ssh/authorized_keys"), "authorizedprincipalsfile": ptr(".ssh/principals"), "trustedusercakeys": ptr("none"), "gssapiauthentication": ptr("yes")}}
+			for read := 0; read < 5; read++ {
+				var reasons reasonSet
+				var usable bool
+				var files = map[string][]Envelope{}
+				switch cat {
+				case catKeys:
+					d, ok := runBudget(context.Background(), c, cat, func(ctx context.Context) keysData { return c.readKeysBudget(ctx, accounts, st, sshdConfig{}) })
+					require.True(t, ok)
+					reasons, usable = d.reasons, d.usable
+					for user, ak := range d.byUser {
+						for _, f := range ak.files {
+							files[user] = append(files[user], f.Envelope)
+						}
+					}
+				case catCertificates:
+					d, ok := runBudget(context.Background(), c, cat, func(ctx context.Context) certsData { return c.readCertsBudget(ctx, accounts, st, sshdConfig{}) })
+					require.True(t, ok)
+					reasons, usable = d.reasons, d.usable
+					for user, fs := range d.principals {
+						for _, f := range fs {
+							files[user] = append(files[user], f.Envelope)
+						}
+					}
+				case catTrust:
+					d, ok := runBudget(context.Background(), c, cat, func(ctx context.Context) trustData { return c.readTrustBudget(ctx, accounts, st, sshdConfig{}) })
+					require.True(t, ok)
+					reasons, usable = d.reasons, d.usable
+					for user, fs := range d.files {
+						for _, f := range fs {
+							files[user] = append(files[user], f.Envelope)
+						}
+					}
+				}
+				assert.Equal(t, Coverage{Status: coveragePartial, Reasons: []string{reasonTimeout}}, coverageOf(categoryState{usable: usable, reasons: reasons}))
+				for _, a := range accounts {
+					require.Len(t, files[a.name], 1)
+					assert.Equal(t, statusTimeout, files[a.name][0].Status)
+					assert.True(t, strings.HasPrefix(files[a.name][0].Path, a.home+"/"))
+				}
+				c.accountMu.Lock()
+				assert.LessOrEqual(t, c.accountCount, maxAccountWorkers)
+				if read >= 1 {
+					assert.Equal(t, 8, c.accountCount, "occupied account slots must not grow on subsequent reads")
+				}
+				c.accountMu.Unlock()
+			}
+		})
+	}
+}
+
+func TestAccountConcurrencyAndCategoryReturnMargin(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newCollector(collectorOptions{budget: categoryBudget})
+		accounts := []passwdEntry{}
+		for i := 0; i < 24; i++ {
+			accounts = append(accounts, passwdEntry{name: fmt.Sprint(i)})
+		}
+		release := make(chan struct{})
+		var active, maximum atomic.Int32
+		results := map[string]string{}
+		ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			readAccountResults(ctx, c, catKeys, accounts, func(passwdEntry) int {
+				n := active.Add(1)
+				for old := maximum.Load(); n > old && !maximum.CompareAndSwap(old, n); old = maximum.Load() {
+				}
+				<-release
+				active.Add(-1)
+				return 1
+			}, func(a passwdEntry, _ int, reason string) { results[a.name] = reason })
+		}()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		assert.Equal(t, int32(4), active.Load())
+		<-done
+		assert.Equal(t, 3250*time.Millisecond, time.Since(start))
+		require.Len(t, results, 24)
+		for _, reason := range results {
+			assert.Equal(t, reasonTimeout, reason)
+		}
+		// Four attempts at a time, with timed-out workers retained up to 16.
+		assert.Equal(t, int32(8), maximum.Load())
+		close(release)
+		synctest.Wait()
+	})
+}
+
+func TestSudoPanicCoverageUnknown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := captureLogs(t)
+		c := newCollector(collectorOptions{budget: categoryBudget})
+		p, ok := runBudget(context.Background(), c, catSudo, func(context.Context) sudoPolicy { panic("LEAKCANARY") })
+		b := assembly{accOK: true, acc: accountsData{usable: true, entries: []passwdEntry{{name: "u"}}}, sudoOK: ok, sudo: p}
+		r := b.report()
+		assert.Equal(t, Coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}, r.Categories[catSudo])
+		assert.Equal(t, []string{reasonParseError}, r.Accounts[0].Sudo.Reasons)
+		assert.False(t, r.Accounts[0].Sudo.Complete)
+		assert.NotContains(t, logs.String(), "LEAKCANARY")
+		assert.Regexp(t, `"source":"pkg/exposure/collect_linux_test.go:[0-9]+"`, logs.String())
+	})
+}
+
+func TestFailedAccountSourcesWithoutHome(t *testing.T) {
+	a := passwdEntry{name: "svc", uid: 1002}
+	st := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(".ssh/authorized_keys"), "authorizedprincipalsfile": ptr(".ssh/principals"), "gssapiauthentication": ptr("yes"), "hostbasedauthentication": ptr("yes")}}
+	for _, reason := range []string{reasonTimeout, reasonParseError} {
+		assert.Empty(t, failedAccountKeys(a, st, reason).files)
+		assert.Empty(t, failedAccountCerts(a, st, reason))
+		assert.Empty(t, failedAccountTrust(a, st, sshdConfig{}, reason))
+	}
+}
+
+func TestExternalRecordCapPreservesCorrespondence(t *testing.T) {
+	var config strings.Builder
+	for i := 0; i < 256; i++ {
+		config.WriteString("Match User a\nAuthorizedKeysCommand /bin/true\nAuthorizedPrincipalsCommand /bin/true\nGSSAPIAuthentication yes\n")
+	}
+	cfg := parseSSHDConfig(mapSource{files: map[string]string{sshdConfigPath: config.String()}})
+	b := assembly{sshdOK: true, sshd: sshdData{usable: true, cfg: cfg, daemon: Daemon{Correspondence: "established"}}}
+	r := b.report()
+	assert.Len(t, r.External, 256)
+	assert.Equal(t, "established", r.SSHD.Daemon.Correspondence)
+	assert.Equal(t, Coverage{Status: coveragePartial, Reasons: []string{reasonLimitExceeded}}, r.Categories[catSSHD])
+}
+
+func TestSystemdRecordDirectoriesAndTypes(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		for _, dir := range []string{"/var/lib/systemd/home", "/etc/userdb", "/run/userdb", "/run/host/userdb", "/usr/local/lib/userdb", "/usr/lib/userdb"} {
+			for _, suffix := range []string{".identity", ".user", ".group", ".home"} {
+				for _, kind := range []string{"regular", "symlink", "socket", "directory"} {
+					t.Run(dir+suffix+"/"+kind, func(t *testing.T) {
+						root, owners := attackRoot(t)
+						require.NoError(t, os.WriteFile(filepath.Join(root, "etc/passwd"), []byte("u:x:1001:1001::/home/u:/bin/sh\n"), 0o644))
+						require.NoError(t, os.WriteFile(filepath.Join(root, "etc/nsswitch.conf"), []byte("passwd: files systemd\ngroup: files systemd\n"), 0o644))
+						require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
+						p := filepath.Join(root, dir, "alice"+suffix)
+						switch kind {
+						case "regular":
+							require.NoError(t, os.WriteFile(p, nil, 0o644))
+						case "symlink":
+							require.NoError(t, os.Symlink("/unread-target", p))
+						case "directory":
+							require.NoError(t, os.Mkdir(p, 0o755))
+						case "socket":
+							fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+							require.NoError(t, err)
+							defer func() { require.NoError(t, unix.Close(fd)) }()
+							parentFD, err := unix.Open(filepath.Dir(p), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+							require.NoError(t, err)
+							defer func() { require.NoError(t, unix.Close(parentFD)) }()
+							require.NoError(t, unix.Bind(fd, &unix.SockaddrUnix{Name: fmt.Sprintf("/proc/self/fd/%d/alice%s", parentFD, suffix)}))
+						}
+						d := readAccounts(systemFiles{f: readerFor(t, root, owners)})
+						record := kind == "regular" || kind == "symlink"
+						homed := dir == "/var/lib/systemd/home"
+						assert.Equal(t, record && (homed && suffix == ".identity" || !homed && suffix == ".user"), d.systemdAccounts)
+						assert.Equal(t, record && (homed && suffix == ".identity" || !homed && suffix == ".group"), d.systemdGroups)
+						assert.Empty(t, d.reasons)
+					})
+				}
+			}
+			t.Run(dir+"/unreadable", func(t *testing.T) {
+				root, owners := attackRoot(t)
+				require.NoError(t, os.WriteFile(filepath.Join(root, "etc/passwd"), []byte("u:x:1001:1001::/home/u:/bin/sh\n"), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "etc/nsswitch.conf"), []byte("passwd: files systemd\ngroup: files systemd\n"), 0o644))
+				require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
+				recordOpens(t, []string{dir})
+				d := readAccounts(systemFiles{f: readerFor(t, root, owners)})
+				assert.True(t, d.systemdAccounts)
+				assert.True(t, d.systemdGroups)
+				assert.True(t, d.reasons.has(reasonFileUnreadable))
 			})
 		}
 	})

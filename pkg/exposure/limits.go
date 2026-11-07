@@ -4,31 +4,34 @@ import (
 	"bytes"
 	"slices"
 	"time"
-	"unicode"
 )
 
 // Bounds on the work one read may do. Each is checked before the memory it
 // guards is allocated.
 const (
-	maxReadBytes         = 1 << 20 // a read stops at this plus one byte
-	maxLineBytes         = 16 << 10
-	maxKeysPerAccount    = 1000
-	maxAccounts          = 2000
-	maxIncludeDepth      = 8
-	maxIncludeFiles      = 128
-	maxReportBytes       = 2 << 20
-	maxAccountBytes      = 256 << 10
-	maxTrustEntries      = 256
-	maxAccountWorkers    = 16
-	accountBudget        = 2 * time.Second
-	maxDirEntries        = 4096
-	maxCommentRunes      = 128
-	maxFromBytes         = 1024
-	maxPrincipals        = 64
-	maxPrincipalEntries  = 256
-	maxCommandPaths      = 32
-	maxEffectiveValueLen = 8 << 10
-	maxGroupsPerAccount  = 1024
+	maxReadBytes          = 1 << 20 // a read stops at this plus one byte
+	maxLineBytes          = 16 << 10
+	maxKeysPerAccount     = 1000
+	maxAccounts           = 2000
+	maxIncludeDepth       = 8
+	maxIncludeFiles       = 128
+	maxReportBytes        = 2 << 20
+	maxAccountBytes       = 256 << 10
+	maxTrustEntries       = 256
+	maxMatchBlocks        = 256
+	maxExternalRecords    = 256
+	maxConcurrentAccounts = 4
+	accountReturnMargin   = 250 * time.Millisecond
+	maxAccountWorkers     = 16
+	accountBudget         = 2 * time.Second
+	maxDirEntries         = 4096
+	maxCommentRunes       = 128
+	maxFromBytes          = 1024
+	maxPrincipals         = 64
+	maxPrincipalEntries   = 256
+	maxCommandPaths       = 32
+	maxEffectiveValueLen  = 8 << 10
+	maxGroupsPerAccount   = 1024
 
 	categoryBudget = 10 * time.Second
 	sshdTimeout    = 5 * time.Second
@@ -90,8 +93,8 @@ func forEachLine(data []byte, fn func(line []byte, tooLong bool) bool) {
 
 // isBlankOrComment reports whether a configuration line carries nothing.
 func isBlankOrComment(line []byte) bool {
-	t := bytes.TrimLeftFunc(line, unicode.IsSpace)
-	return len(t) == 0 || t[0] == '#'
+	t := bytes.TrimLeft(line, " \t\v\f\r")
+	return len(bytes.TrimSpace(line)) == 0 || len(t) > 0 && t[0] == '#'
 }
 
 func ptr[T any](v T) *T { return &v }

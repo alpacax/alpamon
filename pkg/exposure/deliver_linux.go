@@ -6,10 +6,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"math/rand/v2"
 	"net/http"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/rs/zerolog/log"
 )
 
@@ -94,20 +96,8 @@ func (s *service) run(ctx context.Context) {
 // report only when the server asks for it. Retries resend the same
 // observed_at and body.
 func (s *service) readAndDeliver(ctx context.Context) {
-	observed := s.now().UTC().Truncate(time.Second)
-	if !observed.After(s.lastObserved) {
-		observed = s.lastObserved.Add(time.Second)
-		if !s.sleep(ctx, time.Until(observed)) {
-			return
-		}
-	}
-	s.lastObserved = observed
-
-	r := s.collect(ctx)
-	r.ObservedAt = observed.Format(time.RFC3339)
-	body, err := finalize(r)
-	if err != nil {
-		log.Debug().Msg("Exposure report could not be encoded.")
+	r, body := s.buildReport(ctx)
+	if r == nil {
 		return
 	}
 	check := checkBody(r)
@@ -132,6 +122,36 @@ func (s *service) readAndDeliver(ctx context.Context) {
 	if ok && status != http.StatusOK {
 		log.Warn().Int("status_code", status).Msg("Exposure report was not accepted.")
 	}
+}
+
+func (s *service) buildReport(ctx context.Context) (report *Report, encoded []byte) {
+	defer func() {
+		if recover() != nil {
+			report, encoded = nil, nil
+			logExposurePanic("report", "Exposure report builder panicked; skipping until the next read.")
+		}
+	}()
+	observed := s.now().UTC().Truncate(time.Second)
+	if !observed.After(s.lastObserved) {
+		observed = s.lastObserved.Add(time.Second)
+		if !s.sleep(ctx, time.Until(observed)) {
+			return nil, nil
+		}
+	}
+	s.lastObserved = observed
+
+	r := s.collect(ctx)
+	r.ObservedAt = observed.Format(time.RFC3339)
+	body, err := finalize(r)
+	if err != nil {
+		log.Debug().Msg("Exposure report could not be encoded.")
+		return nil, nil
+	}
+	if len(body) > maxReportBytes {
+		log.Debug().Msg("Exposure report exceeds the byte limit; skipping until the next read.")
+		return nil, nil
+	}
+	return r, body
 }
 
 // checkBody is the canonical check request for a sealed report.
@@ -159,9 +179,13 @@ func (s *service) send(ctx context.Context, url string, body []byte, timeout tim
 			log.Debug().Msg("Exposure delivery throttled; skipping until the next read.")
 			return status, false
 		}
-		if err == nil && len(resp) <= maxRespBytes && !(status >= 300 && status < 400) && !retryable(status) {
+		if status >= 300 && status < 400 || len(resp) > maxRespBytes || errors.Is(err, scheduler.ErrExposureResponseTooLarge) {
+			log.Debug().Msg("Exposure response rejected; skipping until the next read.")
+			return status, false
+		}
+		if err == nil && !retryable(status) {
 			if out != nil && status == http.StatusOK {
-				if len(resp) > maxRespBytes || json.NewDecoder(bytes.NewReader(resp)).Decode(out) != nil {
+				if json.NewDecoder(bytes.NewReader(resp)).Decode(out) != nil {
 					log.Debug().Msg("Exposure check response could not be parsed.")
 					return status, false
 				}

@@ -265,12 +265,14 @@ func (f *fsReader) openRegular(p string, rule ownerRule) (*os.File, unix.Stat_t,
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || !rule.allows(f.mapOwner(p, st.Uid)) || (!rule.system && st.Nlink != 1) {
 		return nil, st, dirs, failed(statusRejected, reasonFileRejected)
 	}
-	// A root-owned orphaned hard link in an account-owned directory is
-	// trustworthy only while the kernel prevents that account creating it.
-	if !rule.system && f.mapOwner(p, st.Uid) == 0 && dirs[len(dirs)-1].uid != 0 {
-		protection := (systemFiles{f: f}).load("/proc/sys/fs/protected_hardlinks")
-		if !protection.usable() || string(protection.data) != "1\n" && string(protection.data) != "1" {
-			return nil, st, dirs, failed(statusRejected, reasonFileRejected)
+	// Ownership alone cannot distinguish a root-owned orphaned hard link
+	// from its original secret. In an account-controlled parent chain only
+	// root files already readable by everyone are safe to parse.
+	if !rule.system && f.mapOwner(p, st.Uid) == 0 && st.Mode&0o004 == 0 {
+		for _, dir := range dirs {
+			if dir.uid != 0 || dir.mode&0o022 != 0 {
+				return nil, st, dirs, failed(statusRejected, reasonFileRejected)
+			}
 		}
 	}
 	fd, err := f.openAt(dirfd, last, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOCTTY)
@@ -412,7 +414,7 @@ func (f *fsReader) statDir(p string, rule ownerRule) ([]pathStat, loaded) {
 }
 
 // list returns the entry names of directory p.
-func (f *fsReader) list(p string, rule ownerRule) ([]string, loaded) {
+func (f *fsReader) list(p string, rule ownerRule, recordsOnly ...bool) ([]string, loaded) {
 	fd, _, _, l, ok := f.walkDirs(p, rule, true)
 	if !ok {
 		return nil, l
@@ -433,6 +435,19 @@ func (f *fsReader) list(p string, rule ownerRule) ([]string, loaded) {
 	if len(names) > maxDirEntries {
 		l.reasons.add(reasonLimitExceeded)
 		return nil, l
+	}
+	if len(recordsOnly) > 0 && recordsOnly[0] {
+		files := names[:0]
+		for _, name := range names {
+			var st unix.Stat_t
+			if err := unix.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				return nil, failed(statusUnreadable, reasonFileUnreadable)
+			}
+			if kind := st.Mode & unix.S_IFMT; kind == unix.S_IFREG || kind == unix.S_IFLNK {
+				files = append(files, name)
+			}
+		}
+		names = files
 	}
 	l.data = []byte{}
 	return names, l

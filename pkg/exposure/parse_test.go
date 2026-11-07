@@ -496,3 +496,40 @@ func TestSSHDIncludeRestoresParentBlockAfterReallocation(t *testing.T) {
 	require.NotNil(t, cfg.blocks[0].keysCommand)
 	assert.Equal(t, "/usr/bin/keys", *cfg.blocks[0].keysCommand.path)
 }
+
+func TestMatchBlockCount(t *testing.T) {
+	var b strings.Builder
+	for b.Len() < 1<<20-64 {
+		b.WriteString("Match User a\nAuthorizedKeysCommand /bin/true\n")
+	}
+	cfg := parseSSHDConfig(mapSource{files: map[string]string{sshdConfigPath: b.String()}})
+	assert.Len(t, cfg.blocks, 256)
+	assert.True(t, cfg.reasons.has(reasonLimitExceeded))
+	assert.True(t, cfg.readAll, "the record cap must preserve configuration correspondence")
+}
+
+func TestGlobIncludeRestoresMatchStatePerFile(t *testing.T) {
+	src := mapSource{files: map[string]string{
+		sshdConfigPath:                     "Include /etc/ssh/sshd_config.d/*.conf\n",
+		"/etc/ssh/sshd_config.d/10-a.conf": "Match User bob\n X11Forwarding no\n",
+		"/etc/ssh/sshd_config.d/20-b.conf": "PasswordAuthentication yes\nAuthorizedKeysCommand /usr/bin/x\nAuthorizedKeysCommandUser nobody\n",
+	}, dirs: map[string][]string{"/etc/ssh/sshd_config.d": {"10-a.conf", "20-b.conf"}}}
+	cfg := parseSSHDConfig(src)
+	require.Len(t, cfg.blocks, 1)
+	assert.NotContains(t, cfg.blocks[0].block.Sets, "passwordauthentication")
+	assert.False(t, cfg.blocks[0].hasKeysCmd)
+}
+
+func TestNBSPBeforeCommentIsParsed(t *testing.T) {
+	pw := parsePasswd([]byte("root:x:0:0:root:/root:/bin/bash\n\u00a0#x:x:0:0::/root:/bin/bash\n"))
+	assert.Len(t, pw.entries, 1)
+	assert.Equal(t, 1, pw.unparsed)
+	gr := parseGroup([]byte("\u00a0#x:x:0:\n"))
+	assert.Equal(t, 1, gr.unparsed)
+	_, unparsed := parseShadow([]byte("\u00a0#x:!:1::::::\n"))
+	assert.Equal(t, 1, unparsed)
+	for _, prefix := range []string{"", " ", "\t", "\v", "\f", "\r"} {
+		assert.True(t, isBlankOrComment([]byte(prefix+"# comment")))
+	}
+	assert.True(t, isBlankOrComment([]byte("\u00a0")))
+}

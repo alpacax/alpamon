@@ -222,6 +222,9 @@ func capObservationRows(r *Report) {
 				largest = i
 			}
 		}
+		if largest < 0 {
+			break
+		}
 		a := &accounts[largest]
 		source := a.sources[0]
 		source.cut()

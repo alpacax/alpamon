@@ -347,7 +347,7 @@ func TestExposureResponseLimitAndNoRedirect(t *testing.T) {
 				assert.Empty(t, body)
 				assert.Equal(t, code, status)
 				svc := newService(session, nil, nil)
-				svc.sleep = func(context.Context, time.Duration) bool { return false }
+				svc.sleep = func(context.Context, time.Duration) bool { t.Error("rejected response must not retry"); return false }
 				_, ok := svc.send(context.Background(), path, []byte(`{}`), time.Second, nil)
 				assert.False(t, ok)
 			}
@@ -385,4 +385,83 @@ func TestExposureReadsAtMostResponseCapPlusOne(t *testing.T) {
 	assert.Nil(t, data)
 	assert.Equal(t, maxRespBytes+1, body.read)
 	assert.True(t, body.closed)
+}
+
+func TestOversizedReportIsNotDelivered(t *testing.T) {
+	logs := captureLogs(t)
+	p := &fakePoster{}
+	s := testService(p, func(context.Context) *Report {
+		r := sampleReport()
+		// No account-source cut can remove oversized configuration metadata.
+		r.SSHD.Effective = map[string]*string{"allowusers": ptr(strings.Repeat("a", maxReportBytes))}
+		return r
+	})
+	s.readAndDeliver(context.Background())
+	assert.Empty(t, p.callsTo(checkURL))
+	assert.Empty(t, p.callsTo(reportURL))
+	assert.Equal(t, 1, strings.Count(logs.String(), "Exposure report exceeds the byte limit; skipping until the next read."))
+}
+
+func TestReportPanicDoesNotStopNextDueRead(t *testing.T) {
+	for _, where := range []string{"collect", "finalize"} {
+		t.Run(where, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				logs := captureLogs(t)
+				p := &fakePoster{answers: map[string][]fakeResponse{checkURL: {{status: 200, body: `{"required": false}`}}}}
+				var reads atomic.Int32
+				s := newService(p, func(context.Context) *Report {
+					if reads.Add(1) == 1 {
+						if where == "collect" {
+							panic("LEAKCANARY")
+						}
+						r := sampleReport()
+						// The byte cap calls markCut, which panics on this injected nil map.
+						r.Categories = nil
+						r.Accounts[0].Username = strings.Repeat("LEAKCANARY", maxAccountBytes)
+						return r
+					}
+					return sampleReport()
+				}, nil)
+				s.jitter = func() time.Duration { return 0 }
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				go s.run(ctx)
+				synctest.Wait()
+				require.Equal(t, int32(1), reads.Load())
+				assert.Empty(t, p.callsTo(checkURL))
+				assert.Empty(t, p.callsTo(reportURL))
+				assert.Equal(t, 1, strings.Count(logs.String(), "Exposure report builder panicked; skipping until the next read."))
+				assert.NotContains(t, logs.String(), "LEAKCANARY")
+				if where == "finalize" {
+					assert.Regexp(t, `"source":"pkg/exposure/cap.go:[0-9]+"`, logs.String())
+				} else {
+					assert.Regexp(t, `"source":"pkg/exposure/deliver_linux_test.go:[0-9]+"`, logs.String())
+				}
+				time.Sleep(readInterval)
+				synctest.Wait()
+				assert.Equal(t, int32(2), reads.Load())
+				assert.Len(t, p.callsTo(checkURL), 1)
+			})
+		})
+	}
+}
+
+func TestRejectedResponsesAreNotRetried(t *testing.T) {
+	for _, response := range []fakeResponse{
+		{status: 301, err: fmt.Errorf("LEAKCANARY redirect")},
+		{status: 307},
+		{status: 200, body: strings.Repeat("x", maxRespBytes+1)},
+		{status: 200, err: scheduler.ErrExposureResponseTooLarge},
+	} {
+		for _, url := range []string{checkURL, reportURL} {
+			logs := captureLogs(t)
+			p := &fakePoster{answers: map[string][]fakeResponse{url: {response}}}
+			s := testService(p, nil)
+			_, ok := s.send(context.Background(), url, []byte(`{}`), time.Second, nil)
+			assert.False(t, ok)
+			assert.Len(t, p.callsTo(url), 1)
+			assert.Equal(t, 1, strings.Count(logs.String(), "Exposure response rejected; skipping until the next read."))
+			assert.NotContains(t, logs.String(), "LEAKCANARY")
+		}
+	}
 }

@@ -173,6 +173,8 @@ func (b *assembly) report() *Report {
 		sudoState = depFail()
 	case !b.sudoOK:
 		sudoState = timedOut()
+	case b.sudo.failed:
+		sudoState.reasons.merge(b.sudo.global)
 	default:
 		sudoState.usable = !b.sudo.unresolved && (!b.sudo.global.has(reasonFileUnreadable) || len(b.sudo.rules) > 0)
 	}
@@ -180,7 +182,12 @@ func (b *assembly) report() *Report {
 	// external sources
 	ext := map[string]External{}
 	addExt := func(e External, cats_ ...string) {
-		ext[e.Kind+"\x00"+e.Scope] = e
+		key := e.Kind + "\x00" + e.Scope
+		if _, exists := ext[key]; !exists && len(ext) >= maxExternalRecords {
+			cats[catSSHD].reasons.add(reasonLimitExceeded)
+		} else {
+			ext[key] = e
+		}
 		for _, c := range cats_ {
 			if c == catSudo {
 				sudoState.reasons.add(reasonExternalSource)
