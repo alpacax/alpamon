@@ -280,7 +280,7 @@ func (cc *ControlClient) HandleMessage(message []byte) {
 
 	switch response.Type {
 	case "sudo_approval_response":
-		log.Debug().Msgf("Received sudo_approval_response: %+v", response)
+		log.Debug().Str("request_id", response.RequestID).Bool("approved", response.Approved).Msg("Received sudo_approval_response")
 		if authManager != nil {
 			// Each failure path logs at its own level inside the handler; a client
 			// that already left is a warning, not an error.

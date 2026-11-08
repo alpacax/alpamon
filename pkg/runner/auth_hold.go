@@ -1,18 +1,28 @@
 package runner
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
 )
+
+// storedCommandMarker is the separator the server puts before the digest in
+// its stored command form. Any command containing it is treated as possibly
+// in that form, so a change to the digest's length or alphabet keeps matching.
+const storedCommandMarker = " #k:"
 
 // A sudo request the server holds for an approval decision.
 //
@@ -40,10 +50,11 @@ const (
 	// for the final verdict. It stays below the client's 60 s, so the client
 	// hears alpamon's coded answer instead of timing out on its own.
 	holdGrace = 45 * time.Second
-	// endedHoldTTL is how long an ended wait's id stays guarded against a late
-	// verdict: past the longest hold plus an identity check that may follow
-	// an approval.
-	endedHoldTTL = 15 * time.Minute
+	// endedHoldTTL covers the server's 24-hour pending approval lifetime,
+	// its five-minute expiry sweep, and five minutes for verdict delivery.
+	endedHoldTTL       = 24*time.Hour + 10*time.Minute
+	maxEndedHoldsPerID = 64
+	maxEndedHolds      = 65536
 )
 
 var (
@@ -85,18 +96,33 @@ type sudoHold struct {
 	commandID string
 }
 
-// endedHold remembers a wait that ended without a verdict.
+// endedHold retains the identity and individual expiry of a request that ended
+// with or without a verdict. The window assumes the server stops accepting a
+// grant's verdict well within it. Each record is fixed-size: 192 bytes on 64-bit
+// targets, at most 12 MiB for 65536 records, excluding map, slice and expiry
+// queue overhead. Saturation starts at 65536 records per 24h10m, about 0.75
+// endings per second sustained. Records are capped at 64 per id. Saturation
+// keeps at most one small marker per id; ids are decimal PIDs, bounded by the
+// PID space. The expiry queue holds at most max(64, twice the live record
+// and marker count) entries, compacting stale refreshes when it exceeds that bound.
 type endedHold struct {
-	command    string
-	sessionID  string
-	commandID  string
-	rawCommand string
-	runasUser  string
+	command    [sha256.Size]byte
+	sessionID  [sha256.Size]byte
+	commandID  [sha256.Size]byte
+	identity   [sha256.Size]byte
+	rawCommand [sha256.Size]byte
 	until      time.Time
-	// unheld marks a request displaced before any hold: the server's form of
-	// its command is unknown, so a verdict counts as the new request's only
-	// when it names the new request's command and not the old one's.
+	// unheld marks an ending whose server-form command is unknown.
 	unheld bool
+}
+
+// endedExpiry identifies a detailed record or an id-wide saturation marker.
+// A zero record is used only for markers; marker distinguishes the two kinds.
+type endedExpiry struct {
+	id     string
+	record endedHold
+	until  time.Time
+	marker bool
 }
 
 // sudoWaitEnded tells the server the client stopped waiting. The approval
@@ -251,13 +277,41 @@ func prepareHold(hold *sudoHold, req SudoApprovalRequest) {
 	hold.commandID = req.CommandID
 }
 
+// bindPostAnswer keeps an attempt bound once any POST answer echoes its nonce.
+func (am *AuthManager) bindPostAnswer(sudoRequest *SudoRequest, body []byte) {
+	var answer struct {
+		ApprovalNonce json.RawMessage `json:"approval_nonce"`
+	}
+	bound := false
+	// Error pages from a proxy are not JSON objects and carry no acknowledgement.
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '{' {
+		if err := json.Unmarshal(body, &answer); err != nil {
+			log.Debug().Str("request_id", sudoRequest.Request.RequestID).Msg("Malformed sudo approval POST acknowledgement")
+		} else if len(answer.ApprovalNonce) > 0 {
+			var nonce string
+			if err := json.Unmarshal(answer.ApprovalNonce, &nonce); err == nil && nonce != "" &&
+				subtle.ConstantTimeCompare([]byte(nonce), []byte(sudoRequest.Request.ApprovalNonce)) == 1 {
+				bound = true
+			} else {
+				log.Debug().Str("request_id", sudoRequest.Request.RequestID).Msg("Sudo approval POST acknowledgement nonce does not match")
+			}
+		}
+	}
+	if bound {
+		am.mu.Lock()
+		sudoRequest.nonceBound = true
+		am.mu.Unlock()
+	}
+}
+
 // settlePost ends sudoRequest's posting state once the post is classified:
 // hold is the server's pending answer, or nil when it did not hold the request.
-// A verdict parked meanwhile is checked as it would be now: against hold's
-// command when there is one, as before otherwise. The first that fits is taken
-// with the request and returned; the rest are dropped. With none, a hold is
+// Parked verdicts are checked after applying the acknowledgement binding.
+// Unbound nonce-less verdicts use retention and the hold command. The first
+// that fits is taken with the request and returned; the rest are dropped. A hold is
 // attached in the same critical section, so no verdict slips in unchecked.
-func (am *AuthManager) settlePost(sudoRequest *SudoRequest, hold *sudoHold) (SudoApprovalResponse, bool) {
+func (am *AuthManager) settlePost(sudoRequest *SudoRequest, hold *sudoHold, body []byte) (SudoApprovalResponse, bool) {
+	am.bindPostAnswer(sudoRequest, body)
 	am.mu.Lock()
 	defer am.mu.Unlock()
 	sudoRequest.posting = false
@@ -270,12 +324,13 @@ func (am *AuthManager) settlePost(sudoRequest *SudoRequest, hold *sudoHold) (Sud
 		sudoRequest.hold = hold
 	}
 	for _, verdict := range early {
-		if reason := am.mismatchLocked(verdict, sudoRequest); reason != "" {
-			log.Warn().Str("request_id", verdict.RequestID).Str("mismatch", reason).
+		if reason := am.verdictMismatchLocked(verdict, sudoRequest); reason != "" {
+			log.WithLevel(sudoVerdictDropLevel(reason)).Str("request_id", verdict.RequestID).Str("mismatch", reason).
 				Msg("Dropped a sudo_approval response that arrived before the post was answered")
 			continue
 		}
 		am.takeInstanceLocked(sudoRequest)
+		am.rememberEndedLocked(sudoRequest)
 		return verdict, true
 	}
 	return SudoApprovalResponse{}, false
@@ -305,7 +360,7 @@ func (am *AuthManager) endDisplacedHold(sudoRequest *SudoRequest, hold *sudoHold
 	displaced := sudoRequest.displaced
 	report := displaced
 	if displaced {
-		am.rememberEndedHoldLocked(sudoRequest.Request, hold)
+		am.rememberEndedLocked(&SudoRequest{Request: sudoRequest.Request, hold: hold})
 		// The newer request's post already went out and may have joined this
 		// wait on the server, which keys it on the id and session. Ending it
 		// then would end the newer request's wait too; the server's own
@@ -390,19 +445,17 @@ func (am *AuthManager) finalizeHeldRequest(sudoRequest *SudoRequest, hold *sudoH
 	return true
 }
 
-// takeHeldLocked takes sudoRequest and, when hold is set, guards its id against
-// the wait's late verdict in the same critical section, before anything is
-// written: a newer request reusing the id can never register in between and
-// take that verdict. It reports whether it took the request.
+// takeHeldLocked takes sudoRequest and guards its id against a late verdict
+// in the same critical section, before anything is written: a newer request
+// reusing the id can never register in between and take that verdict. It
+// reports whether it took the request.
 func (am *AuthManager) takeHeldLocked(sudoRequest *SudoRequest, hold *sudoHold) bool {
 	am.mu.Lock()
 	defer am.mu.Unlock()
 	if !am.takeInstanceLocked(sudoRequest) {
 		return false
 	}
-	if hold != nil {
-		am.rememberEndedHoldLocked(sudoRequest.Request, hold)
-	}
+	am.rememberEndedLocked(&SudoRequest{Request: sudoRequest.Request, hold: hold})
 	return true
 }
 
@@ -490,15 +543,18 @@ func (am *AuthManager) findRequestLocked(requestID string) *SudoRequest {
 	return nil
 }
 
-// mismatchLocked says why response must not be applied to req, the request
-// registered under its id (nil when none), or "" when it may. Every verdict
-// must name the request's session (empty for a deploy Command), and a command
-// id when it names one: the id alone is the sudo pid, which another session may
-// reuse. A held request also takes only a verdict that names its command and,
-// for a deploy Command, its command id. A verdict that names a wait which
-// already ended is not applied to a different request that reuses the id, held
-// or not. Callers must hold am.mu.
+// mismatchLocked checks session and held-command routing, then every live ending
+// for this id in the verdict's session. Held endings compare their known server
+// command and full identity. Unheld endings require the same identity, or a
+// verdict naming the current raw command and a different ended raw command.
+// Records in other sessions do not constrain matching. A saturated id refuses
+// every verdict until its unstored endings expire. Callers must hold am.mu.
+// A refused verdict leaves the request waiting until its own timeout.
 func (am *AuthManager) mismatchLocked(response SudoApprovalResponse, req *SudoRequest) string {
+	am.pruneEndedLocked(time.Now())
+	if _, saturated := am.saturatedEndedIDs[response.RequestID]; saturated {
+		return "ended records saturated"
+	}
 	if req != nil {
 		switch {
 		case response.SessionID != req.Request.SessionID:
@@ -516,71 +572,180 @@ func (am *AuthManager) mismatchLocked(response SudoApprovalResponse, req *SudoRe
 		}
 	}
 
-	ended, ok := am.endedHolds[response.RequestID]
-	if !ok {
-		return ""
-	}
-	if time.Now().After(ended.until) {
-		delete(am.endedHolds, response.RequestID)
-		return ""
-	}
-	if response.SessionID != ended.sessionID || response.CommandID != ended.commandID {
-		return "" // Not the ended request's verdict.
-	}
-	if req != nil && req.Request.Command == ended.rawCommand &&
-		req.Request.SessionID == ended.sessionID && req.Request.CommandID == ended.commandID &&
-		req.Request.RunasUser == ended.runasUser {
-		return "" // The same command, session and run-as user: the verdict fits it too.
-	}
-	if ended.unheld {
-		// Only a verdict naming the new request's command, and not the old
-		// one's, is told apart; anything else may be the old request's.
-		if req != nil && response.Command != ended.rawCommand &&
-			(response.Command == req.Request.Command || (req.hold != nil && response.Command == req.hold.command)) {
-			return ""
+	responseCommand := sha256.Sum256([]byte(response.Command))
+	responseSession := sha256.Sum256([]byte(response.SessionID))
+	responseCommandID := sha256.Sum256([]byte(response.CommandID))
+	for _, ended := range am.endedHolds[response.RequestID] {
+		if req != nil && ended.sameIdentity(req.Request) {
+			continue
 		}
-		return "displaced request"
+		if responseSession != ended.sessionID {
+			continue
+		}
+		if response.CommandID != "" && responseCommandID != ended.commandID {
+			continue
+		}
+		command := ""
+		if req != nil {
+			command = req.Request.Command
+			if req.hold != nil {
+				command = req.hold.command
+			}
+		}
+		if response.Command == "" || response.Command != command {
+			return "ended request"
+		}
+		if ended.unheld {
+			if response.Command != req.Request.Command || ended.rawCommand == responseCommand ||
+				strings.Contains(req.Request.Command, storedCommandMarker) {
+				return "ended request"
+			}
+		} else if responseCommand == ended.command {
+			return "ended wait"
+		}
 	}
-	if response.Command != ended.command {
-		return "" // Not the ended wait's verdict.
-	}
-	return "ended wait"
+	return ""
 }
 
-// rememberEndedHoldLocked guards the id of a wait that ended without a verdict.
+func (ended endedHold) sameIdentity(req SudoApprovalRequest) bool {
+	return ended.identity == sudoIdentityHash(req)
+}
+
+func sudoIdentityHash(req SudoApprovalRequest) [sha256.Size]byte {
+	h := sha256.New()
+	for _, field := range []string{req.SessionID, req.CommandID, req.Command, req.RunasUser, req.Username, req.Groupname, strconv.FormatBool(req.IsAlpconUser)} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(field)))
+		h.Write(size[:])
+		_, _ = io.WriteString(h, field)
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], h.Sum(nil))
+	return digest
+}
+
+// rememberEndedLocked records a request's ending with or without a hold.
 // Callers must hold am.mu.
-func (am *AuthManager) rememberEndedHoldLocked(req SudoApprovalRequest, hold *sudoHold) {
-	am.rememberLocked(req.RequestID, endedHold{
-		command:    hold.command,
-		sessionID:  hold.sessionID,
-		commandID:  hold.commandID,
-		rawCommand: req.Command,
-		runasUser:  req.RunasUser,
-	})
+func (am *AuthManager) rememberEndedLocked(req *SudoRequest) {
+	r := req.Request
+	ended := endedHold{
+		rawCommand: sha256.Sum256([]byte(r.Command)),
+		unheld:     req.hold == nil,
+	}
+	if req.hold != nil {
+		ended.command = sha256.Sum256([]byte(req.hold.command))
+		r.SessionID = req.hold.sessionID
+		r.CommandID = req.hold.commandID
+	}
+	ended.sessionID = sha256.Sum256([]byte(r.SessionID))
+	ended.commandID = sha256.Sum256([]byte(r.CommandID))
+	ended.identity = sudoIdentityHash(r)
+	am.rememberLocked(r.RequestID, ended)
 }
 
-// rememberDisplacedLocked guards the id of a request displaced before any
-// hold. Callers must hold am.mu.
-func (am *AuthManager) rememberDisplacedLocked(req SudoApprovalRequest) {
-	am.rememberLocked(req.RequestID, endedHold{
-		sessionID:  req.SessionID,
-		commandID:  req.CommandID,
-		rawCommand: req.Command,
-		runasUser:  req.RunasUser,
-		unheld:     true,
-	})
-}
-
+// rememberLocked refreshes identical records and retains distinct live endings.
+// At either detail limit, an id-wide refusal covers each unstored ending's expiry.
+// Endings that fit do not extend that refusal. Callers must hold am.mu.
 func (am *AuthManager) rememberLocked(requestID string, ended endedHold) {
 	now := time.Now()
-	if am.endedHolds == nil {
-		am.endedHolds = make(map[string]endedHold)
-	}
-	for id, ended := range am.endedHolds {
-		if now.After(ended.until) {
-			delete(am.endedHolds, id)
+	am.pruneEndedLocked(now)
+	defer am.compactEndedQueueLocked()
+	ended.until = now.Add(endedHoldTTL)
+	for i, record := range am.endedHolds[requestID] {
+		record.until = ended.until
+		if record == ended {
+			am.endedHolds[requestID][i] = ended
+			am.endedExpiryQueue = append(am.endedExpiryQueue, endedExpiry{id: requestID, record: ended, until: ended.until})
+			return
 		}
 	}
-	ended.until = now.Add(endedHoldTTL)
-	am.endedHolds[requestID] = ended
+	_, saturated := am.saturatedEndedIDs[requestID]
+	limit := am.endedHoldLimit
+	if limit == 0 {
+		limit = maxEndedHolds
+	}
+	if len(am.endedHolds[requestID]) >= maxEndedHoldsPerID || am.endedCount >= limit {
+		if am.saturatedEndedIDs == nil {
+			am.saturatedEndedIDs = make(map[string]time.Time)
+		}
+		am.saturatedEndedIDs[requestID] = ended.until
+		am.endedExpiryQueue = append(am.endedExpiryQueue, endedExpiry{id: requestID, until: ended.until, marker: true})
+		if !saturated {
+			log.Warn().Str("request_id", requestID).Msg("Ended sudo request records saturated")
+		}
+		return
+	}
+	if am.endedHolds == nil {
+		am.endedHolds = make(map[string][]endedHold)
+	}
+	am.endedHolds[requestID] = append(am.endedHolds[requestID], ended)
+	am.endedCount++
+	am.endedExpiryQueue = append(am.endedExpiryQueue, endedExpiry{id: requestID, record: ended, until: ended.until})
+}
+
+// pruneEndedLocked removes expired records and refusals, returning the number
+// of queue entries visited. Callers must hold am.mu.
+func (am *AuthManager) pruneEndedLocked(now time.Time) int {
+	visits := 0
+	for len(am.endedExpiryQueue) > 0 {
+		entry := am.endedExpiryQueue[0]
+		visits++
+		if now.Before(entry.until) {
+			break
+		}
+		am.endedExpiryQueue[0] = endedExpiry{}
+		am.endedExpiryQueue = am.endedExpiryQueue[1:]
+		if entry.marker {
+			if until, ok := am.saturatedEndedIDs[entry.id]; ok && until.Equal(entry.until) {
+				delete(am.saturatedEndedIDs, entry.id)
+			}
+			continue
+		}
+		records := am.endedHolds[entry.id]
+		for i, record := range records {
+			if record != entry.record {
+				continue
+			}
+			records = append(records[:i], records[i+1:]...)
+			clear(records[len(records) : len(records)+1])
+			am.endedCount--
+			if len(records) == 0 {
+				delete(am.endedHolds, entry.id)
+			} else {
+				am.endedHolds[entry.id] = records
+			}
+			break
+		}
+	}
+	if len(am.endedExpiryQueue) == 0 {
+		am.endedExpiryQueue = nil
+	}
+	am.compactEndedQueueLocked()
+	return visits
+}
+
+// compactEndedQueueLocked discards stale entries once they outnumber live ones.
+func (am *AuthManager) compactEndedQueueLocked() {
+	live := am.endedCount + len(am.saturatedEndedIDs)
+	if len(am.endedExpiryQueue) <= 64 || len(am.endedExpiryQueue) <= 2*live {
+		return
+	}
+	current := make(map[endedExpiry]struct{}, live)
+	for id, records := range am.endedHolds {
+		for _, record := range records {
+			current[endedExpiry{id: id, record: record, until: record.until}] = struct{}{}
+		}
+	}
+	for id, until := range am.saturatedEndedIDs {
+		current[endedExpiry{id: id, until: until, marker: true}] = struct{}{}
+	}
+	// Filtering the already ordered queue keeps expiry order in linear time.
+	queue := make([]endedExpiry, 0, live)
+	for _, entry := range am.endedExpiryQueue {
+		if _, ok := current[entry]; ok {
+			queue = append(queue, entry)
+			delete(current, entry)
+		}
+	}
+	am.endedExpiryQueue = queue
 }
