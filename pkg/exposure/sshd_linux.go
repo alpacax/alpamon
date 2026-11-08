@@ -32,7 +32,8 @@ type sshdRun struct {
 var commandContext = exec.CommandContext
 
 // findSSHD returns the first candidate under root that is a root-owned
-// regular file. missing is set when no candidate exists at all.
+// regular file with no group or world write bits, in a root-owned directory
+// with the same mode restriction. missing is set when no candidate exists at all.
 func findSSHD(root string, mapOwner func(string, uint32) uint32) (string, bool) {
 	missing := true
 	for _, c := range sshdCandidates {
@@ -42,9 +43,19 @@ func findSSHD(root string, mapOwner func(string, uint32) uint32) (string, bool) 
 		}
 		missing = false
 		st, ok := fi.Sys().(*syscall.Stat_t)
-		if fi.Mode().IsRegular() && ok && mapOwner(c, st.Uid) == 0 {
-			return filepath.Join(root, c), false
+		if !fi.Mode().IsRegular() || !ok || mapOwner(c, st.Uid) != 0 || fi.Mode().Perm()&0o022 != 0 {
+			continue
 		}
+		parent := filepath.Dir(c)
+		dir, err := os.Lstat(filepath.Join(root, parent))
+		if err != nil || !dir.IsDir() || dir.Mode().Perm()&0o022 != 0 {
+			continue
+		}
+		dst, ok := dir.Sys().(*syscall.Stat_t)
+		if !ok || mapOwner(parent, dst.Uid) != 0 {
+			continue
+		}
+		return filepath.Join(root, c), false
 	}
 	return "", missing
 }

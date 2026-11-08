@@ -161,10 +161,34 @@ func TestCanonicalEncoderPropagatesPanicsAndRejectsCycles(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestTrustEntryRoundTrip(t *testing.T) {
+	for _, entry := range []TrustEntry{
+		{Principal: ptr("alice@REALM")},
+		{HostUser: &HostUser{Host: "host", User: ptr("alice")}},
+		{HostUser: &HostUser{Host: "host"}},
+	} {
+		r := newTestReport()
+		r.Accounts = []Account{{TrustFiles: []TrustFile{{Entries: []TrustEntry{entry}}}}}
+		body, err := seal(r)
+		require.NoError(t, err)
+		var decoded Report
+		require.NoError(t, json.Unmarshal(body, &decoded))
+		assert.Equal(t, entry, decoded.Accounts[0].TrustFiles[0].Entries[0])
+		again, err := seal(&decoded)
+		require.NoError(t, err)
+		assert.Equal(t, string(body), string(again))
+	}
+	for _, invalid := range []string{`null`, `true`, `123`, `[]`, `{}`, `{"host":null,"user":null}`, `{"host":"host","user":123}`, `{"host":"host","user":null,"extra":true}`} {
+		var entry TrustEntry
+		assert.Error(t, json.Unmarshal([]byte(invalid), &entry), invalid)
+	}
+}
+
 func FuzzCanonicalEncoder(f *testing.F) {
 	f.Add([]byte(`{"categories":{"keys":{"reasons":null,"status":"unknown"}},"accounts":[]}`))
 	f.Add([]byte(`null`))
 	f.Add([]byte(`{"accounts":[{"username":"<>&é","trust_files":[{"entries":[null,"alice@REALM",{"host":"host"}]}]}]}`))
+	f.Add([]byte(`{"accounts":[{"trust_files":[{"entries":["alice@REALM",{"host":"host","user":null}]}]}]}`))
 	f.Add([]byte{0xff, 0, '\n', '"', '\\'})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// Exercise arbitrary strings (including invalid UTF-8), then all report

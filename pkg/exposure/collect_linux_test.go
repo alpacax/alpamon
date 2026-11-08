@@ -682,6 +682,7 @@ func TestIncompleteSSHDConfigPropagatesWithoutGuessingTrust(t *testing.T) {
 				if mode == "unreadable include" {
 					spec.Unreadable = append(spec.Unreadable, "/etc/ssh/hidden")
 				} else {
+					reason = reasonFileRejected
 					if spec.Owners == nil {
 						spec.Owners = map[string]uint32{}
 					}
@@ -717,5 +718,142 @@ func TestIncompleteSSHDConfigPropagatesWithoutGuessingTrust(t *testing.T) {
 				assert.NotEqual(t, "/etc/ssh/shosts.equiv", p)
 			}
 		})
+	}
+}
+
+func TestIncompleteSSHDConfigFileReasons(t *testing.T) {
+	for _, reasons := range []reasonSet{
+		{reasonFileUnreadable: {}}, {reasonFileRejected: {}}, {reasonParseError: {}},
+		{reasonLimitExceeded: {}}, {reasonFileRejected: {}, reasonParseError: {}}, {},
+	} {
+		b := assembly{
+			accOK: true, acc: accountsData{usable: true}, shOK: true, sh: shadowData{usable: true},
+			sshdOK: true, sshd: sshdData{cfg: sshdConfig{configIncomplete: true, reasons: reasons}},
+			keysOK: true, keys: keysData{usable: true}, certsOK: true, certs: certsData{usable: true},
+			trustOK: true, trust: trustData{usable: true},
+		}
+		r := b.report()
+		want := reasons.list()
+		if len(want) == 0 {
+			want = []string{reasonFileUnreadable}
+		}
+		for _, cat := range []string{catTrust, catPasswords, catKeys, catCertificates} {
+			assert.Equal(t, want, r.Categories[cat].Reasons, cat)
+		}
+	}
+}
+
+func TestShadowFieldErrorsReachPasswordsCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		want       Shadow
+	}{
+		{"last change", "ubuntu:!:bad:0:99999:7:30:20500:\n", Shadow{Status: shadowRead, PasswordState: passwordNone, InactiveDays: ptr(int64(30)), ExpireDays: ptr(int64(20500))}},
+		{"inactive", "ubuntu:!:20123:0:99999:7:bad:20500:\n", Shadow{Status: shadowRead, PasswordState: passwordNone, LastChangeDays: ptr(int64(20123)), ExpireDays: ptr(int64(20500))}},
+		{"expiry", "ubuntu:!:20123:0:99999:7:30:bad:\n", Shadow{Status: shadowRead, PasswordState: passwordNone, LastChangeDays: ptr(int64(20123)), InactiveDays: ptr(int64(30))}},
+		{"password format", "ubuntu:unknown:20123:0:99999:7:30:20500:\n", Shadow{Status: shadowRead, PasswordState: passwordUnknown, LastChangeDays: ptr(int64(20123)), InactiveDays: ptr(int64(30)), ExpireDays: ptr(int64(20500))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(fixturesDir, "hosts", "ubuntu-default")
+			spec := loadCase(t, dir)
+			root, proc := buildHost(t, dir, spec)
+			require.NoError(t, os.WriteFile(filepath.Join(root, "etc/shadow"), []byte(tc.line), 0o600))
+			fs := readerFor(t, root, spec.Owners)
+			d := readShadow(systemFiles{f: fs})
+			assert.True(t, d.infos["ubuntu"].parseErr)
+			assert.Equal(t, reasonSet{reasonParseError: {}}, d.reasons)
+			r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(context.Background())
+			assert.Contains(t, r.Categories[catPasswords].Reasons, reasonParseError)
+			assert.Equal(t, coveragePartial, r.Categories[catPasswords].Status)
+			var found bool
+			for _, a := range r.Accounts {
+				if a.Username == "ubuntu" {
+					found = true
+					assert.Equal(t, tc.want, a.Shadow)
+				}
+			}
+			assert.True(t, found)
+		})
+	}
+}
+
+func TestRotatedWtmpCountsAsFound(t *testing.T) {
+	dir := filepath.Join(fixturesDir, "hosts", "ubuntu-default")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	for _, p := range []string{"var/log/wtmp", "var/log/lastlog"} {
+		require.NoError(t, os.Remove(filepath.Join(root, p)))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "var/log/wtmp.1"), encodeWtmp(t, spec.Wtmp), 0o644))
+	r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(context.Background())
+	assert.Equal(t, Coverage{Status: coverageCovered, Reasons: []string{}}, r.Categories[catPTY])
+	var found bool
+	for _, a := range r.Accounts {
+		if a.Username == "ubuntu" {
+			found = true
+			require.NotNil(t, a.LastPTYLogin)
+			assert.Equal(t, "wtmp", a.LastPTYLogin.From)
+			assert.Equal(t, spec.Wtmp[0].Time, a.LastPTYLogin.Time)
+		}
+	}
+	assert.True(t, found)
+}
+
+func TestAbsoluteAccountSourcesWithoutHome(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		for _, home := range []string{"", "relative/home", "/missing"} {
+			t.Run(home, func(t *testing.T) {
+				dir := filepath.Join(fixturesDir, "hosts", "ubuntu-default")
+				spec := loadCase(t, dir)
+				root, proc := buildHost(t, dir, spec)
+				require.NoError(t, os.WriteFile(filepath.Join(root, "etc/passwd"), []byte("ubuntu:x:1000:1000::"+home+":/bin/bash\n"), 0o644))
+				require.NoError(t, os.MkdirAll(filepath.Join(root, "etc/ssh/keys"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "etc/ssh/keys/ubuntu"), []byte("ssh-ed25519 "+testEd0+"\n"), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "etc/ssh/keys/ubuntu%principals"), []byte("alice\n"), 0o644))
+				opts := caseOptions(t, dir, spec, root, proc)
+				runSSHD := opts.runSSHD
+				opts.runSSHD = func(ctx context.Context) sshdRun {
+					run := runSSHD(ctx)
+					run.out = append(run.out, "\nauthorizedkeysfile /etc/ssh/keys/%u .ssh/authorized_keys %h/.ssh/authorized_keys\nauthorizedprincipalsfile /etc/ssh/keys/%u%%principals\n"...)
+					return run
+				}
+				r := newCollector(opts).collect(context.Background())
+				require.Len(t, r.Accounts, 1)
+				a := r.Accounts[0]
+				if home == "/missing" {
+					assert.Equal(t, statusAbsent, a.Home.Status)
+					require.Len(t, a.KeyFiles, 2)
+					assert.Equal(t, "/missing/.ssh/authorized_keys", a.KeyFiles[1].Path)
+					assert.Equal(t, statusAbsent, a.KeyFiles[1].Status)
+				} else {
+					assert.Equal(t, statusUnresolved, a.Home.Status)
+					require.Len(t, a.KeyFiles, 1)
+				}
+				assert.Equal(t, "/etc/ssh/keys/ubuntu", a.KeyFiles[0].Path)
+				assert.True(t, a.KeyFiles[0].Complete)
+				assert.Len(t, a.KeyFiles[0].Keys, 1)
+				require.Len(t, a.PrincipalsFiles, 1)
+				assert.Equal(t, "/etc/ssh/keys/ubuntu%principals", a.PrincipalsFiles[0].Path)
+				assert.True(t, a.PrincipalsFiles[0].Complete)
+				assert.Equal(t, []PrincipalEntry{{Principals: []string{"alice"}, Options: []string{}}}, a.PrincipalsFiles[0].Entries)
+				if home != "/missing" {
+					fs := readerFor(t, root, spec.Owners)
+					for _, tmpl := range []string{".ssh/principals", "%h/.ssh/principals"} {
+						st := &sshdT{effective: map[string]*string{"authorizedprincipalsfile": ptr(tmpl)}}
+						assert.Empty(t, readCerts(fs, systemFiles{f: fs}, []passwdEntry{{name: "ubuntu", uid: 1000}}, st, sshdConfig{}).principals["ubuntu"])
+					}
+				}
+			})
+		}
+	})
+	st := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr("/etc/ssh/keys/%u .ssh/authorized_keys %h/.ssh/authorized_keys"), "authorizedprincipalsfile": ptr("/etc/ssh/keys/%u%%principals")}}
+	for _, reason := range []string{reasonTimeout, reasonParseError} {
+		a := passwdEntry{name: "svc"}
+		keys := failedAccountKeys(a, st, reason).files
+		require.Len(t, keys, 1)
+		assert.Equal(t, failureEnvelope("/etc/ssh/keys/svc", reason), keys[0].Envelope)
+		certs := failedAccountCerts(a, st, reason)
+		require.Len(t, certs, 1)
+		assert.Equal(t, failureEnvelope("/etc/ssh/keys/svc%principals", reason), certs[0].Envelope)
 	}
 }

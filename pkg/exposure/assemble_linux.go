@@ -168,13 +168,17 @@ func (b *assembly) report() *Report {
 	}
 
 	if cfg.configIncomplete {
+		reasons := reasonSet{}
+		for _, reason := range []string{reasonFileUnreadable, reasonFileRejected, reasonParseError, reasonLimitExceeded} {
+			if cfg.reasons.has(reason) {
+				reasons.add(reason)
+			}
+		}
+		if len(reasons) == 0 {
+			reasons.add(reasonFileUnreadable)
+		}
 		for _, name := range []string{catTrust, catPasswords, catKeys, catCertificates} {
-			if cfg.reasons.has(reasonLimitExceeded) {
-				cats[name].reasons.add(reasonLimitExceeded)
-			}
-			if !cfg.readAll {
-				cats[name].reasons.add(reasonFileUnreadable)
-			}
+			cats[name].reasons.merge(reasons)
 		}
 	}
 

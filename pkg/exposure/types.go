@@ -1,5 +1,10 @@
 package exposure
 
+import (
+	"encoding/json"
+	"errors"
+)
+
 // SchemaVersion is the report schema this agent sends.
 const SchemaVersion = 1
 
@@ -244,6 +249,36 @@ func (e TrustEntry) MarshalJSON() ([]byte, error) {
 		return encodeValue(*e.HostUser)
 	}
 	return []byte("null"), nil
+}
+
+// UnmarshalJSON accepts a principal string or a host-user object.
+func (e *TrustEntry) UnmarshalJSON(data []byte) error {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return errors.New("invalid trust entry")
+	}
+	switch v := value.(type) {
+	case string:
+		*e = TrustEntry{Principal: &v}
+		return nil
+	case map[string]any:
+		host, ok := v["host"].(string)
+		user, hasUser := v["user"]
+		if !ok || !hasUser || len(v) != 2 {
+			break
+		}
+		pair := HostUser{Host: host}
+		switch u := user.(type) {
+		case nil:
+		case string:
+			pair.User = &u
+		default:
+			return errors.New("invalid trust entry")
+		}
+		*e = TrustEntry{HostUser: &pair}
+		return nil
+	}
+	return errors.New("invalid trust entry")
 }
 
 // HostUser is one hosts-equivalence entry.

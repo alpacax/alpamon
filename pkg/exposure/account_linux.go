@@ -129,9 +129,6 @@ func failedAccountKeys(a passwdEntry, t *sshdT, reason string) accountKeys {
 	if reason == reasonTimeout {
 		out.home.Status = statusTimeout
 	}
-	if a.home == "" {
-		return out
-	}
 	seen := map[string]bool{}
 	for _, tmpl := range strings.Fields(sshdValue(t, "authorizedkeysfile")) {
 		if tmpl == "none" {
@@ -139,6 +136,9 @@ func failedAccountKeys(a passwdEntry, t *sshdT, reason string) accountKeys {
 		}
 		p, ok := expandPath(tmpl, a.home, a.name)
 		if !ok {
+			if a.home == "" {
+				continue
+			}
 			p = tmpl
 		}
 		if seen[p] {
@@ -153,11 +153,14 @@ func failedAccountKeys(a passwdEntry, t *sshdT, reason string) accountKeys {
 
 func failedAccountCerts(a passwdEntry, t *sshdT, reason string) []PrincipalsFile {
 	tmpl := sshdValue(t, "authorizedprincipalsfile")
-	if a.home == "" || tmpl == "" || tmpl == "none" {
+	if tmpl == "" || tmpl == "none" {
 		return []PrincipalsFile{}
 	}
 	p, ok := expandPath(tmpl, a.home, a.name)
 	if !ok {
+		if a.home == "" {
+			return []PrincipalsFile{}
+		}
 		p = tmpl
 	}
 	return []PrincipalsFile{{Envelope: failureEnvelope(p, reason), Entries: []PrincipalEntry{}}}

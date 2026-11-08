@@ -79,6 +79,34 @@ func TestRunSSHDTMissingAndForeignBinary(t *testing.T) {
 	assert.Empty(t, calls())
 }
 
+func TestRunSSHDTRejectsWritableBinaryAndParent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		mode os.FileMode
+		uid  uint32
+	}{
+		{"group-writable binary", "usr/sbin/sshd", 0o775, 0},
+		{"world-writable parent", "usr/sbin", 0o777, 0},
+		{"non-root parent", "usr/sbin", 0o755, 1000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			fakeSSHD(t, root, "echo usepam yes\n")
+			require.NoError(t, os.Chmod(filepath.Join(root, tc.path), tc.mode))
+			calls := recordExec(t)
+			mapOwner := func(p string, _ uint32) uint32 {
+				if p == "/"+tc.path {
+					return tc.uid
+				}
+				return 0
+			}
+			assert.Equal(t, sshdRun{}, runSSHDT(context.Background(), root, mapOwner))
+			assert.Empty(t, calls())
+		})
+	}
+}
+
 func TestRunSSHDTFailureAndCap(t *testing.T) {
 	root := t.TempDir()
 	fakeSSHD(t, root, "echo usepam yes\nexit 1\n")
@@ -154,7 +182,7 @@ func TestOnlySSHDStartsAProcess(t *testing.T) {
 			switch sel.Sel.Name {
 			case "StartProcess", "ForkExec", "Exec", "Command", "CommandContext":
 				if f != "sshd_linux.go" {
-					t.Errorf("%s calls %s", f, sel.Sel.Name)
+					assert.Failf(t, "unexpected process call", "%s calls %s", f, sel.Sel.Name)
 				}
 			}
 			return true

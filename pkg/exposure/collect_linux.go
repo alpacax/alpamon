@@ -306,6 +306,12 @@ func readShadow(sys systemFiles) shadowData {
 	if unparsed > 0 {
 		d.reasons.add(reasonParseError)
 	}
+	for _, info := range d.infos {
+		if info.parseErr {
+			d.reasons.add(reasonParseError)
+			break
+		}
+	}
 	return d
 }
 
@@ -442,6 +448,9 @@ func expandPath(tmpl, home, user string) (string, bool) {
 		i++
 		switch tmpl[i] {
 		case 'h':
+			if home == "" {
+				return "", false
+			}
 			b.WriteString(home)
 		case 'u':
 			b.WriteString(user)
@@ -453,6 +462,9 @@ func expandPath(tmpl, home, user string) (string, bool) {
 	}
 	p := b.String()
 	if !strings.HasPrefix(p, "/") {
+		if home == "" {
+			return "", false
+		}
 		if home == "/" {
 			p = "/" + p
 		} else {
@@ -524,12 +536,11 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 		ak := accountKeys{home: Home{Status: statusUnresolved}, files: []KeyFile{}}
 		rule := ownerRule{uid: acct.uid}
 		strict, strictKnown, noHome, anyRead := true, true, false, false
-		if acct.home == "" {
-			d.reasons.add(reasonHomeUnreadable, reasonStrictModesUnresolved)
-			d.byUser[acct.name] = ak
-			continue
+		var dirs []pathStat
+		hl := loaded{status: statusUnresolved}
+		if acct.home != "" {
+			dirs, hl = fs.statDir(acct.home, rule)
 		}
-		dirs, hl := fs.statDir(acct.home, rule)
 		ak.home.Status = hl.status
 		switch hl.status {
 		case statusRead:
@@ -555,6 +566,9 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 		for _, tmpl := range tmpls {
 			p, ok := expandPath(tmpl, acct.home, acct.name)
 			if !ok {
+				if acct.home == "" {
+					continue
+				}
 				if !validValue(tmpl) || seen[tmpl] {
 					continue
 				}
@@ -710,9 +724,14 @@ func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 	for _, acct := range accounts {
 		files := []PrincipalsFile{}
 		p, ok := expandPath(tmpl, acct.home, acct.name)
-		switch {
-		case acct.home == "":
+		if acct.home == "" {
 			d.reasons.add(reasonHomeUnreadable)
+			if !ok {
+				d.principals[acct.name] = files
+				continue
+			}
+		}
+		switch {
 		case !ok:
 			files = append(files, PrincipalsFile{Envelope: Envelope{Path: tmpl, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, Entries: []PrincipalEntry{}})
 			d.reasons.add(reasonPathTokenUnresolved)
@@ -875,14 +894,12 @@ func readPTY(fs *fsReader, accounts []passwdEntry) ptyData {
 	d := ptyData{byUser: map[string]*PTYLogin{}, reasons: reasonSet{}}
 	wtmp := map[string]ptyRecord{}
 	wtmpFound := false
-	for i, p := range wtmpPaths {
+	for _, p := range wtmpPaths {
 		l := fs.readTail(p, utmpSize)
 		if l.status == statusAbsent {
 			continue
 		}
-		if i == 0 {
-			wtmpFound = true
-		}
+		wtmpFound = true
 		d.reasons.merge(l.reasons)
 		if l.data != nil {
 			d.usable = true
