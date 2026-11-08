@@ -16,7 +16,7 @@ COPY . .
 
 RUN go build -o alpamon ./cmd/alpamon/main.go
 
-FROM redhat/ubi8:latest@sha256:b76f9ead999002af783d7b7036b7b57ceee6033712ad07577240ee06489a3a40
+FROM redhat/ubi8:latest@sha256:c322aa68f2d630b36b9faab64094357f62720be2f56f7099376ca2d6c4fe389b
 
 WORKDIR /usr/local/alpamon
 
