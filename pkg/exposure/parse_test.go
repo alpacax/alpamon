@@ -534,3 +534,50 @@ func TestNBSPBeforeCommentIsParsed(t *testing.T) {
 	}
 	assert.True(t, isBlankOrComment([]byte("\u00a0")))
 }
+
+func TestSSHDQuotedArgumentPreservesEscapedSpace(t *testing.T) {
+	for _, tc := range []struct {
+		input, want string
+	}{
+		{`"a\ b"`, `a\ b`},
+		{`'a\ b'`, `a\ b`},
+		{`a\ b`, `a b`},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			args, ok := splitArgs(tc.input)
+			require.True(t, ok)
+			assert.Equal(t, []string{tc.want}, args)
+		})
+	}
+}
+
+func TestMatchFirstValueWins(t *testing.T) {
+	cfg := parseSSHDConfig(mapSource{files: map[string]string{sshdConfigPath: "Match User alice\nPasswordAuthentication yes\nPasswordAuthentication no\nAuthorizedKeysCommand /bin/first\nAuthorizedKeysCommand /bin/second\nAuthorizedKeysCommandUser root\nAuthorizedKeysCommandUser nobody\n"}})
+	require.Len(t, cfg.blocks, 1)
+	b := cfg.blocks[0]
+	assert.Equal(t, "yes", b.block.Sets["passwordauthentication"])
+	require.NotNil(t, b.keysCommand)
+	assert.Equal(t, "/bin/first", *b.keysCommand.path)
+	assert.Equal(t, "root", *b.keysCommand.user)
+}
+func TestSSHDArgumentCommentsAndQuotes(t *testing.T) {
+	kw, args, ok := splitConfigLine([]byte("PasswordAuthentication yes # note"))
+	require.True(t, ok)
+	assert.Equal(t, "passwordauthentication", kw)
+	assert.Equal(t, []string{"yes"}, args)
+	_, args, ok = splitConfigLine([]byte("Match User alice # note"))
+	require.True(t, ok)
+	assert.False(t, newMatchBlock(args).unsupported)
+	for _, tc := range []struct {
+		in   string
+		want []string
+	}{
+		{"'one two'", []string{"one two"}},
+		{`"one two"`, []string{"one two"}},
+		{`one\ two a\"b c\\d x#y # end`, []string{"one two", `a"b`, `c\d`, "x#y"}},
+	} {
+		got, ok := splitArgs(tc.in)
+		assert.True(t, ok)
+		assert.Equal(t, tc.want, got)
+	}
+}

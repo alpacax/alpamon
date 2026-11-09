@@ -322,7 +322,7 @@ func splitArgs(s string) ([]string, bool) {
 		var quote byte
 		for i < len(s) {
 			c := s[i]
-			if c == '\\' && i+1 < len(s) && strings.ContainsRune(`"' \`, rune(s[i+1])) {
+			if c == '\\' && i+1 < len(s) && (strings.ContainsRune(`"'\`, rune(s[i+1])) || quote == 0 && s[i+1] == ' ') {
 				i++
 				word.WriteByte(s[i])
 			} else if quote != 0 {

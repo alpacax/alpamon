@@ -100,6 +100,7 @@ func (s *service) runLoop(ctx context.Context) (panicked bool) {
 		case <-timer.C:
 			s.due = s.now().Add(readInterval + s.jitter())
 		case <-s.trigger:
+			s.unavailableUntil = time.Time{}
 		}
 		s.readAndDeliver(ctx)
 		timer.Reset(s.due.Sub(s.now()))

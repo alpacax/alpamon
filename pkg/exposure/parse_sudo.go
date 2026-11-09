@@ -202,9 +202,12 @@ func (r *sudoReader) file(name string, depth int, top bool) {
 				logical.Reset()
 				return true
 			}
-			s := stripSudoComment(logical.String() + string(raw))
+			s, quotedComment := stripSudoComment(logical.String() + string(raw))
 			logical.Reset()
 			if cont := trailingBackslashes(s); cont%2 == 1 {
+				if quotedComment {
+					r.pol.global.add(reasonSudoUnsupportedSyntax)
+				}
 				logical.WriteString(s[:len(s)-1])
 				if logical.Len() > maxLineBytes {
 					r.pol.global.add(reasonLimitExceeded)
@@ -225,8 +228,9 @@ func (r *sudoReader) file(name string, depth int, top bool) {
 }
 
 // Include directives and numeric uid references are not comments.
-func stripSudoComment(s string) string {
+func stripSudoComment(s string) (string, bool) {
 	quoted := false
+	quotedComment := false
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case '\\':
@@ -234,7 +238,11 @@ func stripSudoComment(s string) string {
 		case '"':
 			quoted = !quoted
 		case '#':
-			if quoted || (i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9') {
+			if i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
+				continue
+			}
+			if quoted {
+				quotedComment = true
 				continue
 			}
 			if strings.TrimSpace(s[:i]) == "" {
@@ -243,10 +251,10 @@ func stripSudoComment(s string) string {
 					continue
 				}
 			}
-			return s[:i]
+			return s[:i], quotedComment
 		}
 	}
-	return s
+	return s, quotedComment
 }
 
 func trailingBackslashes(s string) int {
@@ -465,13 +473,28 @@ func (r *sudoReader) alias(kind, rest string) {
 		}
 		switch kind {
 		case "User_Alias":
+			if _, exists := r.userAliases[name]; exists {
+				r.pol.global.add(reasonSudoUnsupportedSyntax)
+				continue
+			}
 			r.userAliases[name] = items
-
 		case "Host_Alias":
+			if _, exists := r.hostAliases[name]; exists {
+				r.pol.global.add(reasonSudoUnsupportedSyntax)
+				continue
+			}
 			r.hostAliases[name] = items
 		case "Runas_Alias":
+			if _, exists := r.runasAliases[name]; exists {
+				r.pol.global.add(reasonSudoUnsupportedSyntax)
+				continue
+			}
 			r.runasAliases[name] = items
 		default:
+			if _, exists := r.cmndAliases[name]; exists {
+				r.pol.global.add(reasonSudoUnsupportedSyntax)
+				continue
+			}
 			r.cmndAliases[name] = splitOnComma(items)
 		}
 	}
@@ -955,6 +978,11 @@ func (r *sudoReader) cmnd(spec []sudoWord, seen map[string]bool) ([]cmndItem, bo
 	}
 	args := spec[1:]
 	for _, a := range args {
+		// The empty quoted argument is sudo's no-arguments marker.
+		if (a.quoted && a.text != "") || strings.ContainsRune(a.text, '"') {
+			r.pol.global.add(reasonSudoUnsupportedSyntax)
+			return nil, false
+		}
 		if a.kind != tWord {
 			return nil, false
 		}

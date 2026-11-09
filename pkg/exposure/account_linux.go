@@ -147,7 +147,7 @@ func failedAccountKeys(a passwdEntry, t *sshdT, reason string) accountKeys {
 			continue
 		}
 		seen[p] = true
-		out.files = append(out.files, keyFile{Envelope: failureEnvelope(p, reason), Keys: []key{}})
+		out.files = append(out.files, keyFile{envelope: failureEnvelope(p, reason), Keys: []key{}})
 	}
 	slices.SortFunc(out.files, func(a, b keyFile) int { return strings.Compare(a.Path, b.Path) })
 	return out
@@ -165,7 +165,7 @@ func failedAccountCerts(a passwdEntry, t *sshdT, reason string) []principalsFile
 		}
 		p = tmpl
 	}
-	return []principalsFile{{Envelope: failureEnvelope(p, reason), Entries: []principalEntry{}}}
+	return []principalsFile{{envelope: failureEnvelope(p, reason), Entries: []principalEntry{}}}
 }
 
 func failedAccountTrust(a passwdEntry, t *sshdT, cfg sshdConfig, reason string) []trustFile {
@@ -182,7 +182,7 @@ func failedAccountTrust(a passwdEntry, t *sshdT, cfg sshdConfig, reason string) 
 	}
 	for _, kind := range kinds {
 		p, _ := expandPath("."+kind, a.home, a.name)
-		out = append(out, trustFile{Envelope: failureEnvelope(p, reason), Kind: kind, Entries: []trustEntry{}})
+		out = append(out, trustFile{envelope: failureEnvelope(p, reason), Kind: kind, Entries: []trustEntry{}})
 	}
 	return out
 }

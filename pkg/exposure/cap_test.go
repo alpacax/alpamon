@@ -14,7 +14,7 @@ import (
 )
 
 func capAccount(name string, keys []key) account {
-	return account{Username: name, KeyFiles: []keyFile{{Envelope: envelope{Path: "/home/" + name + "/.ssh/authorized_keys", Status: statusRead, Complete: true, Reasons: []string{}}, Keys: keys}}, Sudo: accountSudo{Complete: true, Grants: []grant{}, Reasons: []string{}}}
+	return account{Username: name, KeyFiles: []keyFile{{envelope: envelope{Path: "/home/" + name + "/.ssh/authorized_keys", Status: statusRead, Complete: true, Reasons: []string{}}, Keys: keys}}, Sudo: accountSudo{Complete: true, Grants: []grant{}, Reasons: []string{}}}
 }
 
 // Each source obeys the input and entry caps; encoded authorization metadata
@@ -44,13 +44,13 @@ func TestAccountCapIsolatesOtherAccounts(t *testing.T) {
 	}
 	budget := maxKeysPerAccount
 	a := capAccount("alice", parseAuthorizedKeys([]byte(files[0].String()), &budget).keys)
-	a.KeyFiles = append(a.KeyFiles, keyFile{Envelope: envelope{Path: "/home/alice/.ssh/authorized_keys2", Status: statusRead, Complete: true, Reasons: []string{}}, Keys: parseAuthorizedKeys([]byte(files[1].String()), &budget).keys})
+	a.KeyFiles = append(a.KeyFiles, keyFile{envelope: envelope{Path: "/home/alice/.ssh/authorized_keys2", Status: statusRead, Complete: true, Reasons: []string{}}, Keys: parseAuthorizedKeys([]byte(files[1].String()), &budget).keys})
 	var trust strings.Builder
 	for i := 0; i < maxTrustEntries; i++ {
 		fmt.Fprintf(&trust, "p%0250d\n", i)
 	}
 	entries, _, _ := parseK5Login([]byte(trust.String()))
-	a.TrustFiles = []trustFile{{Envelope: envelope{Path: "/home/alice/.k5login", Status: statusRead, Complete: true, Reasons: []string{}}, Kind: "k5login", Entries: entries}}
+	a.TrustFiles = []trustFile{{envelope: envelope{Path: "/home/alice/.k5login", Status: statusRead, Complete: true, Reasons: []string{}}, Kind: "k5login", Entries: entries}}
 	r := newTestReport()
 	small := parseAuthorizedKeys([]byte("ssh-ed25519 "+testEd0+" ok\n"), newBudget()).keys
 	r.Accounts = []account{a, capAccount("deploy", small), capAccount("root", small), capAccount("ubuntu", small)}
@@ -76,7 +76,7 @@ func TestAccountCapCutsLargestSourceThenStops(t *testing.T) {
 	r := newTestReport()
 	keys := parseAuthorizedKeys([]byte("ssh-ed25519 "+testEd0+" ok\n"), newBudget()).keys
 	a := capAccount("a", keys)
-	a.TrustFiles = []trustFile{{Envelope: envelope{Path: "/home/a/.k5login", Status: statusRead, Complete: true}, Entries: validTrustEntries(1200)}}
+	a.TrustFiles = []trustFile{{envelope: envelope{Path: "/home/a/.k5login", Status: statusRead, Complete: true}, Entries: validTrustEntries(1200)}}
 	for i := range a.TrustFiles[0].Entries {
 		a.TrustFiles[0].Entries[i].Principal = ptr(strings.Repeat("a", 256))
 	}
@@ -133,7 +133,7 @@ func rowCapReport(rows int) *exposureReport {
 	r := newTestReport()
 	for i := range 100 {
 		a := capAccount(fmt.Sprintf("small%03d", i), nil)
-		a.TrustFiles = []trustFile{{Envelope: envelope{Path: "/home/" + a.Username + "/.k5login", Complete: true}, Entries: validTrustEntries(190)}}
+		a.TrustFiles = []trustFile{{envelope: envelope{Path: "/home/" + a.Username + "/.k5login", Complete: true}, Entries: validTrustEntries(190)}}
 		r.Accounts = append(r.Accounts, a)
 	}
 	keys := make([]key, rows-observationRows(r)-501)
@@ -197,8 +197,8 @@ func TestObservationRowCapSourceOrder(t *testing.T) {
 			a.KeyFiles = nil
 			a.Sudo.Grants = nil
 			a.TrustFiles = []trustFile{
-				{Envelope: envelope{Path: "/z", Complete: true}, Entries: validTrustEntries(450)},
-				{Envelope: envelope{Path: "/a", Complete: true}, Entries: validTrustEntries(450)},
+				{envelope: envelope{Path: "/z", Complete: true}, Entries: validTrustEntries(450)},
+				{envelope: envelope{Path: "/a", Complete: true}, Entries: validTrustEntries(450)},
 			}
 			want := 1
 			if differentSize {

@@ -384,7 +384,7 @@ func TestAllHungHomesReturnPartialWithoutWorkerGrowth(t *testing.T) {
 					reasons, usable = d.reasons, d.usable
 					for user, ak := range d.byUser {
 						for _, f := range ak.files {
-							files[user] = append(files[user], f.Envelope)
+							files[user] = append(files[user], f.envelope)
 						}
 					}
 				case catCertificates:
@@ -393,7 +393,7 @@ func TestAllHungHomesReturnPartialWithoutWorkerGrowth(t *testing.T) {
 					reasons, usable = d.reasons, d.usable
 					for user, fs := range d.principals {
 						for _, f := range fs {
-							files[user] = append(files[user], f.Envelope)
+							files[user] = append(files[user], f.envelope)
 						}
 					}
 				case catTrust:
@@ -402,7 +402,7 @@ func TestAllHungHomesReturnPartialWithoutWorkerGrowth(t *testing.T) {
 					reasons, usable = d.reasons, d.usable
 					for user, fs := range d.files {
 						for _, f := range fs {
-							files[user] = append(files[user], f.Envelope)
+							files[user] = append(files[user], f.envelope)
 						}
 					}
 				}
@@ -592,13 +592,13 @@ func TestFiveHungHomesAcrossCategoriesAndReads(t *testing.T) {
 		for i, a := range accounts {
 			files := []envelope{}
 			for _, f := range keys.byUser[a.name].files {
-				files = append(files, f.Envelope)
+				files = append(files, f.envelope)
 			}
 			for _, f := range certs.principals[a.name] {
-				files = append(files, f.Envelope)
+				files = append(files, f.envelope)
 			}
 			for _, f := range trust.files[a.name] {
-				files = append(files, f.Envelope)
+				files = append(files, f.envelope)
 			}
 			require.Len(t, files, 3, a.name)
 			for _, f := range files {
@@ -851,9 +851,9 @@ func TestAbsoluteAccountSourcesWithoutHome(t *testing.T) {
 		a := passwdEntry{name: "svc"}
 		keys := failedAccountKeys(a, st, reason).files
 		require.Len(t, keys, 1)
-		assert.Equal(t, failureEnvelope("/etc/ssh/keys/svc", reason), keys[0].Envelope)
+		assert.Equal(t, failureEnvelope("/etc/ssh/keys/svc", reason), keys[0].envelope)
 		certs := failedAccountCerts(a, st, reason)
 		require.Len(t, certs, 1)
-		assert.Equal(t, failureEnvelope("/etc/ssh/keys/svc%principals", reason), certs[0].Envelope)
+		assert.Equal(t, failureEnvelope("/etc/ssh/keys/svc%principals", reason), certs[0].envelope)
 	}
 }

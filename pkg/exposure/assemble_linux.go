@@ -154,7 +154,7 @@ func (b *assembly) report() *exposureReport {
 		r.UserCA = b.certs.userCA
 		if b.certs.failure != "" {
 			if ca := sshdValue(t, "trustedusercakeys"); ca != "" && ca != "none" {
-				r.UserCA = &userCA{Envelope: failureEnvelope(ca, b.certs.failure), CAs: []caKey{}}
+				r.UserCA = &userCA{envelope: failureEnvelope(ca, b.certs.failure), CAs: []caKey{}}
 			}
 		}
 	}
@@ -162,7 +162,7 @@ func (b *assembly) report() *exposureReport {
 		r.SystemTrust = b.trust.system
 		if b.trust.failure != "" && (enabledAnywhere(t, cfg, "hostbasedauthentication", "yes") || enabledAnywhere(t, cfg, "ignorerhosts", "no")) {
 			for _, p := range []string{"/etc/hosts.equiv", "/etc/ssh/shosts.equiv"} {
-				r.SystemTrust = append(r.SystemTrust, systemTrustFile{Envelope: failureEnvelope(p, b.trust.failure), Entries: []hostUser{}})
+				r.SystemTrust = append(r.SystemTrust, systemTrustFile{envelope: failureEnvelope(p, b.trust.failure), Entries: []hostUser{}})
 			}
 		}
 	}

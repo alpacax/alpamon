@@ -590,7 +590,7 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 					continue
 				}
 				seen[tmpl] = true
-				ak.files = append(ak.files, keyFile{Envelope: envelope{Path: tmpl, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}})
+				ak.files = append(ak.files, keyFile{envelope: envelope{Path: tmpl, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}})
 				d.reasons.add(reasonPathTokenUnresolved)
 				strictKnown = false
 				continue
@@ -635,7 +635,7 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 // the file's own, set when fstat succeeded.
 func readKeyFile(fs *fsReader, p string, rule ownerRule, budget *int) (keyFile, *pathStat, []pathStat) {
 	l, dirs := fs.read(p, rule)
-	kf := keyFile{Envelope: l.envelope(p), Keys: []key{}}
+	kf := keyFile{envelope: l.envelope(p), Keys: []key{}}
 	if l.status != statusRead {
 		return kf, nil, dirs
 	}
@@ -701,11 +701,11 @@ func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 			d.reasons.add(reasonFileUnreadable)
 		case ca == "none":
 		case strings.Contains(ca, "%") || !validPath(ca):
-			d.userCA = &userCA{Envelope: envelope{Path: ca, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, CAs: []caKey{}}
+			d.userCA = &userCA{envelope: envelope{Path: ca, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, CAs: []caKey{}}
 			d.reasons.add(reasonPathTokenUnresolved)
 		default:
 			l := sys.load(ca)
-			u := &userCA{Envelope: l.envelope(ca), CAs: []caKey{}}
+			u := &userCA{envelope: l.envelope(ca), CAs: []caKey{}}
 			if l.data != nil {
 				cas, unparsed, tooLong := parseCAKeys(l.data)
 				u.CAs = cas
@@ -741,11 +741,11 @@ func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 		}
 		switch {
 		case !ok:
-			files = append(files, principalsFile{Envelope: envelope{Path: tmpl, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, Entries: []principalEntry{}})
+			files = append(files, principalsFile{envelope: envelope{Path: tmpl, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, Entries: []principalEntry{}})
 			d.reasons.add(reasonPathTokenUnresolved)
 		default:
 			l, _ := fs.read(p, ownerRule{uid: acct.uid})
-			pf := principalsFile{Envelope: l.envelope(p), Entries: []principalEntry{}}
+			pf := principalsFile{envelope: l.envelope(p), Entries: []principalEntry{}}
 			if l.data != nil {
 				entries, unparsed, tooLong, over := parsePrincipalsFile(l.data)
 				clear(l.data)
@@ -810,7 +810,7 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 		if rhosts {
 			for _, p := range []string{"/etc/hosts.equiv", "/etc/ssh/shosts.equiv"} {
 				l := sys.load(p)
-				st := systemTrustFile{Envelope: l.envelope(p), Entries: []hostUser{}}
+				st := systemTrustFile{envelope: l.envelope(p), Entries: []hostUser{}}
 				if l.data != nil {
 					entries, unparsed, tooLong := parseHostsEquiv(l.data)
 					st.Entries = entries
@@ -842,7 +842,7 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 		for _, kind := range kinds {
 			p, _ := expandPath("."+kind, acct.home, acct.name)
 			l, _ := fs.read(p, ownerRule{uid: acct.uid})
-			tf := trustFile{Envelope: l.envelope(p), Kind: kind, Entries: []trustEntry{}}
+			tf := trustFile{envelope: l.envelope(p), Kind: kind, Entries: []trustEntry{}}
 			if l.data != nil {
 				var unparsed int
 				var tooLong bool

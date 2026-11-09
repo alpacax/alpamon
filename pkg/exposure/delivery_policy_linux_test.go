@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
@@ -69,4 +71,37 @@ func TestUnavailableServerOversized404SkipsCollection(t *testing.T) {
 	s.readAndDeliver(context.Background())
 	s.readAndDeliver(context.Background())
 	assert.Equal(t, 1, reads)
+}
+
+func TestTriggerClearsUnavailableServerDelay(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := &fakePoster{answers: map[string][]fakeResponse{checkURL: {
+			{status: http.StatusNotFound},
+			{status: http.StatusOK, body: `{"required":false}`},
+		}}}
+		var reads atomic.Int32
+		s := testService(p, func(context.Context) *exposureReport { reads.Add(1); return sampleReport() })
+		s.now = time.Now
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() { defer close(done); s.runLoop(ctx) }()
+		synctest.Wait()
+		require.EqualValues(t, 1, reads.Load())
+
+		time.Sleep(readInterval)
+		synctest.Wait()
+		assert.EqualValues(t, 1, reads.Load(), "timer reads honor the 24-hour delay")
+		s.trigger <- struct{}{}
+		synctest.Wait()
+		assert.EqualValues(t, 2, reads.Load(), "a trigger collects during the delay")
+		assert.Len(t, p.callsTo(checkURL), 2)
+
+		time.Sleep(readInterval)
+		synctest.Wait()
+		assert.EqualValues(t, 3, reads.Load(), "the cleared delay no longer blocks timer reads")
+		cancel()
+		<-done
+		assert.True(t, s.unavailableUntil.IsZero())
+	})
 }

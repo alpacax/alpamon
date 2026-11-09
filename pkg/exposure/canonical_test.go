@@ -105,7 +105,7 @@ func TestReportCap(t *testing.T) {
 			Username: "user" + strings.Repeat("0", 3-len(strconv.Itoa(i))) + strconv.Itoa(i), UID: uint32(1000 + i),
 			Shadow: shadow{Status: shadowRead, PasswordState: passwordNone},
 			Home:   home{Status: statusRead},
-			KeyFiles: []keyFile{{Envelope: envelope{Path: "/home/u/.ssh/authorized_keys", Status: statusRead, Complete: true, Reasons: []string{}},
+			KeyFiles: []keyFile{{envelope: envelope{Path: "/home/u/.ssh/authorized_keys", Status: statusRead, Complete: true, Reasons: []string{}},
 				Keys: keys}},
 			Sudo: accountSudo{Complete: true},
 		})
@@ -202,4 +202,18 @@ func FuzzCanonicalEncoder(f *testing.F) {
 		require.NoError(t, err)
 		assert.Equal(t, string(body), string(again))
 	})
+}
+
+func TestCanonicalDoesNotMutateNestedSlices(t *testing.T) {
+	r := exposureReport{UserCA: &userCA{}, Accounts: []account{{KeyFiles: []keyFile{{Keys: []key{{Authorizations: []authorization{{}}}}}}}}}
+	_, err := encodeValue(r)
+	require.NoError(t, err)
+	assert.Nil(t, r.UserCA.CAs)
+	assert.Nil(t, r.UserCA.Reasons)
+	assert.Nil(t, r.Accounts[0].Groups)
+	assert.Nil(t, r.Accounts[0].KeyFiles[0].Keys[0].Authorizations[0].Options)
+}
+func TestZeroTrustEntryRejected(t *testing.T) {
+	_, err := json.Marshal(trustEntry{})
+	require.Error(t, err)
 }

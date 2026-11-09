@@ -188,3 +188,92 @@ func TestSudoAllUsers(t *testing.T) {
 		assert.True(t, s.Grants[0].NoPasswd)
 	}
 }
+
+func TestSudoQuotedCommandArgumentsFailClosed(t *testing.T) {
+	for _, policy := range []string{
+		"alice ALL = /usr/bin/printf \" # \\\nbob ALL=(ALL) NOPASSWD: ALL, /bin/echo \"\n",
+		"alice ALL = /bin/echo \" # \\\nbob ALL=(ALL) ALL\n",
+		`alice ALL = /bin/echo "hello world"`,
+		`alice ALL = /bin/echo a"b"c`,
+		`alice ALL = /bin/echo a\"b`,
+	} {
+		t.Run(policy, func(t *testing.T) {
+			for _, user := range []string{"alice", "bob", "carol"} {
+				s := sudoFor(t, policy, user)
+				assert.False(t, s.Complete, user)
+				assert.Contains(t, s.Reasons, reasonSudoUnsupportedSyntax, user)
+			}
+		})
+	}
+}
+
+func TestSudoRedefinedAliasesKeepFirstDefinition(t *testing.T) {
+	for _, tc := range []struct {
+		name, policy, user, runas, command string
+	}{
+		{"user", "User_Alias ADMINS = carol\nUser_Alias ADMINS = alice\nADMINS ALL=(ALL) ALL\n", "carol", "ALL", ""},
+		{"host", "Host_Alias HERE = ALL\nHost_Alias HERE = elsewhere\ncarol HERE=(ALL) ALL\n", "carol", "ALL", ""},
+		{"runas", "Runas_Alias RUN = root\nRunas_Alias RUN = nobody\ncarol ALL=(RUN) ALL\n", "carol", "root", ""},
+		{"command", "Cmnd_Alias CMD = /bin/first\nCmnd_Alias CMD = /bin/second\ncarol ALL=(ALL) CMD\n", "carol", "ALL", "/bin/first"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := sudoFor(t, tc.policy, tc.user)
+			assert.False(t, s.Complete)
+			assert.Contains(t, s.Reasons, reasonSudoUnsupportedSyntax)
+			require.Len(t, s.Grants, 1)
+			assert.Equal(t, tc.runas, s.Grants[0].Runas)
+			if tc.command != "" {
+				assert.Equal(t, []string{tc.command}, s.Grants[0].CommandPaths)
+			}
+			other := sudoFor(t, tc.policy, "alice")
+			assert.False(t, other.Complete)
+			assert.Contains(t, other.Reasons, reasonSudoUnsupportedSyntax)
+			assert.Empty(t, other.Grants)
+		})
+	}
+}
+
+func TestSudoAliasWhitespaceAndUndefined(t *testing.T) {
+	s := sudoFor(t, "User_Alias\tADMINS = alice\nADMINS ALL=(ALL) ALL\n", "alice")
+	assert.True(t, s.Complete)
+	assert.Len(t, s.Grants, 1)
+	s = sudoFor(t, "ADMINS ALL=(ALL) ALL\n", "alice")
+	assert.False(t, s.Complete)
+	assert.Contains(t, s.Reasons, reasonSudoUnsupportedSyntax)
+}
+func TestSudoCommentsNeverContinue(t *testing.T) {
+	for _, prefix := range []string{"# note \\\n", "bob ALL=(ALL) ALL # x \\\n"} {
+		s := sudoFor(t, prefix+"alice ALL=(ALL) ALL\n", "alice")
+		assert.True(t, s.Complete)
+		assert.Len(t, s.Grants, 1)
+	}
+	assert.Len(t, sudoFor(t, "bob ALL=(ALL) ALL # x \\\nalice ALL=(ALL) ALL\n", "bob").Grants, 1)
+	toks, ok := tokenizeSudo("#123 ALL=(#0) ALL")
+	require.True(t, ok)
+	assert.Equal(t, "#123", toks[0].text)
+}
+func TestSudoArgsRestrictionIntersection(t *testing.T) {
+	for _, commands := range []string{"/usr/bin/vim, /bin/systemctl restart nginx", "/bin/cat /var/log/*", "/bin/cat /var/log/?", "/bin/cat /var/log/[ab]"} {
+		s := sudoFor(t, "alice ALL="+commands, "alice")
+		require.Len(t, s.Grants, 1)
+		assert.False(t, s.Grants[0].ArgsRestricted, commands)
+	}
+}
+func TestSudoAliasRecursionPath(t *testing.T) {
+	for _, policy := range []string{
+		"User_Alias U = alice\nU, U ALL = ALL",
+		"User_Alias X = alice\nUser_Alias B = X\nUser_Alias A = B, X\nA ALL = ALL",
+		"User_Alias A = B, X\nUser_Alias B = X\nUser_Alias X = alice\nA ALL = ALL",
+		"Host_Alias X = ALL\nHost_Alias B = X\nHost_Alias A = B, X\nalice A = ALL",
+		"Runas_Alias X = root\nRunas_Alias B = X\nRunas_Alias A = B, X\nalice ALL = (A) ALL",
+		"Cmnd_Alias X = /bin/cat\nCmnd_Alias B = X\nCmnd_Alias A = B, X\nalice ALL = A",
+	} {
+		s := sudoFor(t, policy, "alice")
+		assert.True(t, s.Complete, policy)
+		assert.NotContains(t, s.Reasons, reasonSudoUnsupportedSyntax)
+		assert.NotEmpty(t, s.Grants)
+	}
+	s := sudoFor(t, "User_Alias A = B\nUser_Alias B = A\nA ALL = ALL", "alice")
+	assert.False(t, s.Complete)
+	assert.Contains(t, s.Reasons, reasonSudoUnsupportedSyntax)
+}

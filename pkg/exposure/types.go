@@ -165,12 +165,9 @@ type envelope struct {
 	Reasons  []string `json:"reasons"`
 }
 
-// Envelope preserves the embedded field name while its definition stays internal.
-type Envelope = envelope
-
 // keyFile is one AuthorizedKeysFile source.
 type keyFile struct {
-	Envelope
+	envelope
 	OwnerUID      *uint32 `json:"owner_uid"`
 	Mode          *string `json:"mode"`
 	UnparsedLines int     `json:"unparsed_lines"`
@@ -199,7 +196,7 @@ type authorization struct {
 
 // userCA is the TrustedUserCAKeys source.
 type userCA struct {
-	Envelope
+	envelope
 	CAs []caKey `json:"cas"`
 }
 
@@ -212,7 +209,7 @@ type caKey struct {
 
 // principalsFile is one AuthorizedPrincipalsFile source.
 type principalsFile struct {
-	Envelope
+	envelope
 	Entries []principalEntry `json:"entries"`
 }
 
@@ -225,14 +222,14 @@ type principalEntry struct {
 
 // trustFile is a .k5login, .rhosts or .shosts file in an account's home.
 type trustFile struct {
-	Envelope
+	envelope
 	Kind    string       `json:"kind"`
 	Entries []trustEntry `json:"entries"`
 }
 
 // systemTrustFile is /etc/hosts.equiv or /etc/ssh/shosts.equiv.
 type systemTrustFile struct {
-	Envelope
+	envelope
 	Entries []hostUser `json:"entries"`
 }
 

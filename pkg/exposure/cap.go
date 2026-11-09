@@ -39,12 +39,12 @@ func finalize(r *exposureReport) ([]byte, error) {
 	}
 	if r.UserCA != nil && len(r.UserCA.CAs) > 0 {
 		u := r.UserCA
-		sources = append(sources, sourceCut{len(u.CAs), encodedLen(u), u.Path, func() { u.CAs = []caKey{}; cutEnvelope(&u.Envelope); markCut(r, catCertificates) }, u})
+		sources = append(sources, sourceCut{len(u.CAs), encodedLen(u), u.Path, func() { u.CAs = []caKey{}; cutEnvelope(&u.envelope); markCut(r, catCertificates) }, u})
 	}
 	for i := range r.SystemTrust {
 		s := &r.SystemTrust[i]
 		if len(s.Entries) > 0 {
-			sources = append(sources, sourceCut{len(s.Entries), encodedLen(s), s.Path, func() { s.Entries = []hostUser{}; cutEnvelope(&s.Envelope); markCut(r, catTrust) }, s})
+			sources = append(sources, sourceCut{len(s.Entries), encodedLen(s), s.Path, func() { s.Entries = []hostUser{}; cutEnvelope(&s.envelope); markCut(r, catTrust) }, s})
 		}
 	}
 	sortCuts(sources)
@@ -130,19 +130,19 @@ func accountCuts(r *exposureReport, a *account) []sourceCut {
 	for i := range a.KeyFiles {
 		s := &a.KeyFiles[i]
 		if len(s.Keys) > 0 {
-			cuts = append(cuts, sourceCut{authorizationRows(s.Keys), encodedLen(s), s.Path, func() { s.Keys = []key{}; cutEnvelope(&s.Envelope); markCut(r, catKeys) }, s})
+			cuts = append(cuts, sourceCut{authorizationRows(s.Keys), encodedLen(s), s.Path, func() { s.Keys = []key{}; cutEnvelope(&s.envelope); markCut(r, catKeys) }, s})
 		}
 	}
 	for i := range a.PrincipalsFiles {
 		s := &a.PrincipalsFiles[i]
 		if len(s.Entries) > 0 {
-			cuts = append(cuts, sourceCut{len(s.Entries), encodedLen(s), s.Path, func() { s.Entries = []principalEntry{}; cutEnvelope(&s.Envelope); markCut(r, catCertificates) }, s})
+			cuts = append(cuts, sourceCut{len(s.Entries), encodedLen(s), s.Path, func() { s.Entries = []principalEntry{}; cutEnvelope(&s.envelope); markCut(r, catCertificates) }, s})
 		}
 	}
 	for i := range a.TrustFiles {
 		s := &a.TrustFiles[i]
 		if len(s.Entries) > 0 {
-			cuts = append(cuts, sourceCut{len(s.Entries), encodedLen(s), s.Path, func() { s.Entries = []trustEntry{}; cutEnvelope(&s.Envelope); markCut(r, catTrust) }, s})
+			cuts = append(cuts, sourceCut{len(s.Entries), encodedLen(s), s.Path, func() { s.Entries = []trustEntry{}; cutEnvelope(&s.envelope); markCut(r, catTrust) }, s})
 		}
 	}
 	if len(a.Sudo.Grants) > 0 {

@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -99,18 +97,14 @@ func TestInvalidFixtures(t *testing.T) {
 	assert.NotContains(t, decodeTree(t, mustRead(t, "invalid/missing-required-field.json")), "categories")
 }
 
-// TestOversizeBody builds the body over 2 MiB the server must refuse with
-// 413 before parsing. It is generated rather than committed; see
-// testdata/exposure/invalid/oversize.md.
 func TestOversizeBody(t *testing.T) {
 	body := oversizeBody(t)
-	reader := http.MaxBytesReader(nil, io.NopCloser(bytes.NewReader(body)), maxReportBytes)
-	defer func() { require.NoError(t, reader.Close()) }()
+	require.Greater(t, len(body), maxReportBytes)
 	var report exposureReport
-	err := json.NewDecoder(reader).Decode(&report)
-	var limit *http.MaxBytesError
-	require.ErrorAs(t, err, &limit)
-	assert.EqualValues(t, maxReportBytes, limit.Limit)
+	require.NoError(t, json.Unmarshal(body, &report))
+	body, err := finalize(&report)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(body), maxReportBytes)
 }
 
 func oversizeBody(t *testing.T) []byte {
