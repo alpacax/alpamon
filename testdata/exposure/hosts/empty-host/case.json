@@ -1,0 +1,23 @@
+{
+  "hostname": "empty",
+  "sshd": "missing",
+  "btime": 1699990000,
+  "processes": [
+    {
+      "pid": 1,
+      "ppid": 0,
+      "comm": "systemd",
+      "argv": [
+        "/sbin/init"
+      ],
+      "start": 1699990001
+    }
+  ],
+  "modes": {},
+  "owners": {},
+  "unreadable": [],
+  "wtmp": [],
+  "lastlog": [],
+  "canaries": [],
+  "never_opened": []
+}

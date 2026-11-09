@@ -1,0 +1,31 @@
+port 22
+addressfamily any
+listenaddress 0.0.0.0:22
+usepam yes
+logingracetime 120
+x11forwarding yes
+permitrootlogin without-password
+pubkeyauthentication yes
+kbdinteractiveauthentication no
+passwordauthentication yes
+permitemptypasswords no
+authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2
+authorizedprincipalsfile none
+trustedusercakeys none
+revokedkeys none
+strictmodes yes
+gssapiauthentication no
+kerberosauthentication no
+kerberosorlocalpasswd yes
+hostbasedauthentication no
+ignorerhosts yes
+ignoreuserknownhosts no
+authenticationmethods any
+pubkeyacceptedalgorithms ssh-ed25519-cert-v01@openssh.com,ecdsa-sha2-nistp256-cert-v01@openssh.com,ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256
+casignaturealgorithms ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256
+authorizedkeyscommand none
+authorizedkeyscommanduser none
+authorizedprincipalscommand none
+authorizedprincipalscommanduser none
+banner /etc/issue.net.LEAKCANARY-banner
+subsystem sftp /usr/lib/openssh/sftp-server

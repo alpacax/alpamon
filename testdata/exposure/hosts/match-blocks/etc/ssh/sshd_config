@@ -1,0 +1,11 @@
+PasswordAuthentication no
+Include sshd_config.d/*.conf
+Match User deploy Address 10.0.0.0/8
+    PasswordAuthentication yes
+    AuthenticationMethods publickey,password
+Match Group admins
+    AuthorizedKeysCommand /usr/local/bin/fetch-keys --token LEAKCANARY-akc %u
+    AuthorizedKeysCommandUser nobody
+    PermitRootLogin no
+Match Exec "/usr/local/bin/check LEAKCANARY-exec"
+    PasswordAuthentication yes

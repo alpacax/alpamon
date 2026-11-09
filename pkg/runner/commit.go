@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/agent"
+	"github.com/alpacax/alpamon/v2/pkg/exposure"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/alpacax/alpamon/v2/pkg/version"
@@ -133,6 +134,7 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			select {
 			case <-time.After(priorityJitter):
 				SyncSystemInfo(session, prioritySyncKeys)
+				exposure.Trigger()
 			case <-ctx.Done():
 				log.Debug().Msg("Skipping priority sync due to shutdown")
 				return
@@ -227,6 +229,11 @@ func collectEssentialData() *commitData {
 }
 
 func SyncSystemInfo(session *scheduler.Session, keys []string) {
+	keys, exposureOnly := takeExposureKey(keys)
+	if exposureOnly {
+		return
+	}
+
 	log.Debug().Msg("Start system information synchronization.")
 
 	syncMutex.Lock()
@@ -278,6 +285,26 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 	}
 
 	log.Info().Msg("Completed system information synchronization.")
+}
+
+// exposureSyncKey asks for an exposure read. It is not a sync-check
+// category: the exposure report has its own endpoints.
+const exposureSyncKey = "exposure"
+
+var triggerExposure = exposure.Trigger
+
+// takeExposureKey triggers an exposure read when keys name it and returns
+// the remaining keys. exposureOnly is set when nothing else was asked for,
+// so a sync of just "exposure" never turns into a full sync. On a platform
+// that does not report exposure the key is left in place and ignored as an
+// unknown key, as before.
+func takeExposureKey(keys []string) (rest []string, exposureOnly bool) {
+	if !exposure.Supported || !slices.Contains(keys, exposureSyncKey) {
+		return keys, false
+	}
+	triggerExposure()
+	rest = slices.DeleteFunc(slices.Clone(keys), func(k string) bool { return k == exposureSyncKey })
+	return rest, len(rest) == 0
 }
 
 func syncServerData(session *scheduler.Session) {

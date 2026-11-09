@@ -1,0 +1,17 @@
+Defaults env_reset
+Defaults:carol targetpw
+User_Alias OPS = %ops, erin
+Cmnd_Alias SERVICES = /usr/bin/systemctl restart nginx, /usr/bin/systemctl status *, /usr/bin/journalctl
+Cmnd_Alias SHELLS = /bin/sh, /bin/bash
+root ALL=(ALL:ALL) ALL
+%wheel ALL=(ALL) NOPASSWD: ALL
+OPS ALL=(root) NOPASSWD: /usr/bin/journalctl, PASSWD: /usr/bin/systemctl restart nginx
+erin db-1, db-2 = (postgres) /usr/bin/psql
+bob ALL = ALL, !/usr/bin/su LEAKCANARY-negated-arg
+alice host-1 = (root) sha256:LEAKCANARYdigestvalue /usr/bin/tool
+dave ALL=(ALL) /usr/bin/apt-get update, /usr/bin/apt-get upgrade -y, \
+    /usr/bin/ls ""
+@include /etc/sudoers.d/cycle
+@includedir /etc/sudoers.d
+
+ALL ALL=(ALL) NOPASSWD: ALL

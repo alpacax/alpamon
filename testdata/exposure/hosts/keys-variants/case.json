@@ -1,0 +1,58 @@
+{
+  "hostname": "keys-1",
+  "sshd": "sshd-T.txt",
+  "btime": 1699990000,
+  "processes": [
+    {
+      "pid": 1,
+      "ppid": 0,
+      "comm": "systemd",
+      "argv": [
+        "/sbin/init"
+      ],
+      "start": 1699990001
+    },
+    {
+      "pid": 812,
+      "ppid": 1,
+      "comm": "sshd",
+      "argv": [
+        "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"
+      ],
+      "start": 1700000000
+    },
+    {
+      "pid": 901,
+      "ppid": 812,
+      "comm": "sshd-session",
+      "argv": [
+        "sshd-session: ubuntu [priv]"
+      ],
+      "start": 1700000500
+    }
+  ],
+  "modes": {
+    "home/deploy/.ssh": "0700",
+    "home/deploy/.ssh/authorized_keys": "0600",
+    "home/deploy/.ssh/authorized_keys2": "0644",
+    "home/svc/.ssh/authorized_keys": "0664"
+  },
+  "owners": {
+    "/home/deploy": 1001,
+    "/home/deploy/.ssh": 1001,
+    "/home/deploy/.ssh/authorized_keys": 1001,
+    "/home/deploy/.ssh/authorized_keys2": 1001,
+    "/home/svc": 1002,
+    "/home/svc/.ssh": 1002,
+    "/home/svc/.ssh/authorized_keys": 1002
+  },
+  "unreadable": [],
+  "wtmp": [],
+  "lastlog": [],
+  "canaries": [
+    "LEAKCANARY",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIK89ICZPnCbvCFtc5Tf0F9QkA3oJY6Y4b/bQUOW/dzcU",
+    "AAAAB3NzaC1yc2EAAAADAQABAAABAQCu1zoDsfFFrJoRqE1HBd2S6gS6X/KZXl1RfnKgYSvdIFOsycYjWH5kJ+/1NFTNP5K3VlkXi12BPvKg3hF5EgxGqO0BmIOla/DapU/uSdOt2tRlr1psnSpP9s07WqfDzTuXa0SvgG6h2SmTM5PGdYrNGfGtSX9zAh0d7zx79lAtXwFm8Ksnr4oxKd/UUuKfD75FJgIzmZWyOOUEpZnnGkoQ+NkKSSswhckBMo45AfddLTMw8RT7iWYNVn+icYSWMhIxNnHPrGF1jzuZ8bUkEAZ0+VyUfFvOz2FhU+w7+vQQjq9Xno3Cz2RS2Hwpd2LmtmXVk/EK7k1ZVrj3xdOpaWaD"
+  ],
+  "never_opened": []
+}

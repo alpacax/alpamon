@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,12 +19,25 @@ import (
 )
 
 const (
-	checkSessionURL       = "/api/servers/servers/-/"
-	MaxRetryTimeout       = 3 * 24 * time.Hour
-	DefaultRequestTimeout = 10 * time.Second // a routine call to the console API
-	multipartMaxRespSize  = 1 << 20          // 1 MiB; read +1 to detect over-limit explicitly
-	minTimeout            = time.Millisecond // below this, a caller passed a bare integer, which Go reads as nanoseconds
+	checkSessionURL          = "/api/servers/servers/-/"
+	MaxRetryTimeout          = 3 * 24 * time.Hour
+	DefaultRequestTimeout    = 10 * time.Second // a routine call to the console API
+	MaxExposureResponseBytes = 64 << 10
+	multipartMaxRespSize     = 1 << 20          // 1 MiB; read +1 to detect over-limit explicitly
+	minTimeout               = time.Millisecond // below this, a caller passed a bare integer, which Go reads as nanoseconds
 )
+
+// ErrExposureResponseTooLarge marks a response that cannot be retried within
+// the current exposure read.
+var ErrExposureResponseTooLarge = errors.New("exposure response too large")
+
+// ErrExposureRequest marks a request that cannot be built or sent as configured.
+var ErrExposureRequest = errors.New("invalid exposure request")
+
+type responsePolicy struct {
+	limit           int64
+	rejectRedirects bool
+}
 
 func InitSession() *Session {
 	session := &Session{
@@ -114,13 +128,13 @@ func checkTimeout(timeout time.Duration) error {
 }
 
 func (session *Session) do(req *http.Request, timeout time.Duration) ([]byte, int, error) {
-	body, statusCode, _, err := session.doWithHeader(req, timeout)
+	body, statusCode, _, err := session.doWithHeader(req, timeout, responsePolicy{})
 	return body, statusCode, err
 }
 
 // doWithHeader is do that also returns the response headers. The timeout is
 // bounded by req's own context, so a caller can cancel the request early.
-func (session *Session) doWithHeader(req *http.Request, timeout time.Duration) ([]byte, int, http.Header, error) {
+func (session *Session) doWithHeader(req *http.Request, timeout time.Duration, policy responsePolicy) ([]byte, int, http.Header, error) {
 	if err := checkTimeout(timeout); err != nil {
 		return nil, 0, nil, err
 	}
@@ -136,18 +150,32 @@ func (session *Session) doWithHeader(req *http.Request, timeout time.Duration) (
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := session.Client.Do(req)
+	client := *session.Client
+	if policy.rejectRedirects {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, nil, err
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	if policy.rejectRedirects && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return nil, resp.StatusCode, resp.Header, errors.New("exposure redirect rejected")
+	}
+	var reader io.Reader = resp.Body
+	if policy.limit > 0 {
+		reader = io.LimitReader(reader, policy.limit+1)
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, resp.StatusCode, resp.Header, err
 	}
 
+	if policy.limit > 0 && int64(len(body)) > policy.limit {
+		return nil, resp.StatusCode, resp.Header, ErrExposureResponseTooLarge
+	}
 	return body, resp.StatusCode, resp.Header, nil
 }
 
@@ -160,7 +188,7 @@ func (session *Session) RequestWithHeaders(method, url string, rawBody any, time
 		req.Header.Set(k, v)
 	}
 
-	return session.doWithHeader(req, timeout)
+	return session.doWithHeader(req, timeout, responsePolicy{})
 }
 
 func (session *Session) Get(url string, timeout time.Duration) ([]byte, int, error) {
@@ -189,7 +217,7 @@ func (session *Session) PostWithContext(ctx context.Context, url string, rawBody
 		return nil, 0, nil, err
 	}
 
-	return session.doWithHeader(req.WithContext(ctx), timeout)
+	return session.doWithHeader(req.WithContext(ctx), timeout, responsePolicy{})
 }
 
 func (session *Session) Patch(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
@@ -278,4 +306,25 @@ func (session *Session) MultipartRequest(rawURL string, body io.Reader, contentT
 	}
 
 	return responseBody, resp.StatusCode, nil
+}
+
+// PostExposure posts only exposure metadata. It shares the session transport
+// (and TLS configuration) but never follows redirects or reads an unbounded
+// response. Neither body nor transport errors are logged here.
+func (session *Session) PostExposure(ctx context.Context, endpoint string, body any, timeout time.Duration) ([]byte, int, http.Header, error) {
+	if err := checkTimeout(timeout); err != nil {
+		return nil, 0, nil, errors.Join(ErrExposureRequest, err)
+	}
+	server, err := url.ParseRequestURI(session.BaseURL)
+	if err != nil {
+		return nil, 0, nil, errors.Join(ErrExposureRequest, err)
+	}
+	if server.Host == "" || (server.Scheme != "http" && server.Scheme != "https") {
+		return nil, 0, nil, ErrExposureRequest
+	}
+	req, err := session.newRequest(http.MethodPost, endpoint, body)
+	if err != nil {
+		return nil, 0, nil, errors.Join(ErrExposureRequest, err)
+	}
+	return session.doWithHeader(req.WithContext(ctx), timeout, responsePolicy{limit: MaxExposureResponseBytes, rejectRedirects: true})
 }

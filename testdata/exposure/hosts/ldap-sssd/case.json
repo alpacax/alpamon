@@ -1,0 +1,25 @@
+{
+  "hostname": "ldap-1",
+  "sshd": "sshd-T.txt",
+  "btime": 1699990000,
+  "processes": [
+    {
+      "pid": 1,
+      "ppid": 0,
+      "comm": "systemd",
+      "argv": [
+        "/sbin/init"
+      ],
+      "start": 1699990001
+    }
+  ],
+  "modes": {},
+  "owners": {},
+  "unreadable": [],
+  "wtmp": [],
+  "lastlog": [],
+  "canaries": [
+    "LEAKCANARY"
+  ],
+  "never_opened": []
+}
