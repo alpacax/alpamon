@@ -229,6 +229,12 @@ func (r *sudoReader) file(name string, depth int, top bool) {
 
 // Include directives and numeric uid references are not comments.
 func stripSudoComment(s string) (string, bool) {
+	if fields := strings.Fields(s); len(fields) > 0 {
+		switch fields[0] {
+		case "#include", "#includedir", "@include", "@includedir":
+			return s, false
+		}
+	}
 	quoted := false
 	quotedComment := false
 	for i := 0; i < len(s); i++ {
@@ -244,12 +250,6 @@ func stripSudoComment(s string) (string, bool) {
 			if quoted {
 				quotedComment = true
 				continue
-			}
-			if strings.TrimSpace(s[:i]) == "" {
-				directive := strings.Fields(s[i:])[0]
-				if directive == "#include" || directive == "#includedir" {
-					continue
-				}
 			}
 			return s[:i], quotedComment
 		}

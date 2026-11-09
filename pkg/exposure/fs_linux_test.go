@@ -7,8 +7,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +21,16 @@ import (
 )
 
 const secret = "LEAKCANARY-secret-content"
+
+type failingSizedReader struct {
+	buf []byte
+	err error
+}
+
+func (r *failingSizedReader) Read(p []byte) (int, error) {
+	r.buf = p
+	return copy(p, "secret"), r.err
+}
 
 // attackRoot builds a host root with one account, uid 1001, whose home is
 // /home/u, and a root-only file. Ownership is judged through owners: paths
@@ -78,6 +90,56 @@ func TestOpenat2IsUsedWhenAvailable(t *testing.T) {
 	if f.noOpenat2.Load() {
 		t.Skip("kernel has no openat2; the fallback is covered by the matrix")
 	}
+}
+
+func TestOpenDirectoryFlags(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		root, owners := attackRoot(t)
+		f := readerFor(t, root, owners)
+		var flags []int
+		testHookOpenFlags = func(name string, got int) {
+			assert.Equal(t, "etc", name)
+			flags = append(flags, got)
+		}
+		t.Cleanup(func() { testHookOpenFlags = nil })
+		fd, _, err := f.openDirectory(f.rootFD, "etc")
+		require.NoError(t, err)
+		require.NoError(t, unix.Close(fd))
+		require.Len(t, flags, 1)
+		assert.Equal(t, unix.O_PATH|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, flags[0])
+	})
+}
+
+func TestReadSized(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		data  string
+		size  int64
+		limit int64
+		want  string
+	}{
+		{"empty", "", 0, 8, ""},
+		{"exact", "secret", 6, 8, "secret"},
+		{"short", "secret", 7, 8, "secret"},
+		{"growth probe", "secret-more", 6, 8, "secret-"},
+		{"capped size", "secret-more", 20, 8, "secret-m"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := readSized(io.LimitReader(strings.NewReader(tc.data), tc.limit), tc.size, tc.limit)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(data))
+			assert.Equal(t, int(min(tc.size, tc.limit)+1), cap(data))
+			clear(data)
+		})
+	}
+}
+
+func TestReadSizedClearsOnError(t *testing.T) {
+	r := &failingSizedReader{err: errors.New("read failure")}
+	data, err := readSized(r, 6, 8)
+	require.ErrorIs(t, err, r.err)
+	assert.Nil(t, data)
+	assert.Equal(t, make([]byte, 7), r.buf)
 }
 
 func TestFileAttackMatrix(t *testing.T) {

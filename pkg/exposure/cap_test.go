@@ -119,7 +119,7 @@ func TestObservationRows(t *testing.T) {
 		{"principals entries", exposureReport{Accounts: []account{{PrincipalsFiles: []principalsFile{{Entries: []principalEntry{{Principals: []string{"a", "b"}}, {}}}}}}}, 3},
 		{"trust entries", exposureReport{Accounts: []account{{TrustFiles: []trustFile{{Entries: validTrustEntries(2)}}}}}, 3},
 		{"system trust entries", exposureReport{SystemTrust: []systemTrustFile{{Entries: make([]hostUser, 2)}, {Entries: make([]hostUser, 3)}}}, 5},
-		{"user caKey entries", exposureReport{UserCA: &userCA{CAs: make([]caKey, 2)}}, 2},
+		{"user-CA entries", exposureReport{UserCA: &userCA{CAs: make([]caKey, 2)}}, 2},
 		{"sudo grants", exposureReport{Accounts: []account{{Sudo: accountSudo{Grants: make([]grant, 2)}}}}, 3},
 		{"external records", exposureReport{External: make([]external, 2)}, 2},
 		{"metadata", exposureReport{Accounts: []account{{Groups: []string{"a", "b"}, LastPTYLogin: &ptyLogin{}, KeyFiles: []keyFile{{}}, PrincipalsFiles: []principalsFile{{}}, TrustFiles: []trustFile{{}}}}, SSHD: sshdPolicy{MatchBlocks: []matchSettings{{}}}}, 1},

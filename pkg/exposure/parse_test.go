@@ -244,7 +244,7 @@ func TestParsePrincipalsFile(t *testing.T) {
 func TestParseCAKeys(t *testing.T) {
 	cas, unparsed, _ := parseCAKeys([]byte("ssh-ed25519 " + testEd0 + " ca\nssh-ed25519 " + testEd0 + " dup\ncert-authority ssh-ed25519 " + testEd1 + "\n"))
 	assert.Equal(t, []caKey{{Fingerprint: fpEd0, Type: "ssh-ed25519", Bits: 256}}, cas)
-	assert.Equal(t, 1, unparsed, "options are not allowed in a caKey file")
+	assert.Equal(t, 1, unparsed, "options are not allowed in a user-CA file")
 }
 
 func TestParseTrust(t *testing.T) {

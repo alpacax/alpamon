@@ -71,7 +71,9 @@ func TestCanonicalGolden(t *testing.T) {
 	assert.Equal(t, wantHash, r.Hash)
 	assert.Equal(t, "sha256:f9c5da042e38d711af571e1184d342af310714bae5088e8f22323a3ada58e13b", wantHash, "pinned hash of the golden input")
 
-	gotInput, err := hashInput(r)
+	tree, err := canonicalTree(r)
+	require.NoError(t, err)
+	gotInput, err := hashInput(tree)
 	require.NoError(t, err)
 	assert.Equal(t, input, string(gotInput))
 }
@@ -126,7 +128,9 @@ func TestReportCap(t *testing.T) {
 	assert.False(t, cut.Complete)
 	assert.Contains(t, cut.Reasons, reasonLimitExceeded)
 	assert.NotEmpty(t, r.Accounts[len(r.Accounts)-1].KeyFiles[0].Keys, "equal sources retain stable path order")
-	input, err := hashInput(r)
+	tree, err := canonicalTree(r)
+	require.NoError(t, err)
+	input, err := hashInput(tree)
 	require.NoError(t, err)
 	sum := sha256.Sum256(input)
 	assert.Equal(t, "sha256:"+hex.EncodeToString(sum[:]), r.Hash, "the hash covers the capped report")

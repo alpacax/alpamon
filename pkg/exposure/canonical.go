@@ -233,12 +233,8 @@ func appendJSONString(dst []byte, s string) []byte {
 }
 
 // hashInput is the canonical JSON of the report with observed_at and hash
-// removed: the exact bytes the report hash covers.
-func hashInput(r *exposureReport) ([]byte, error) {
-	tree, err := canonicalTree(r)
-	if err != nil {
-		return nil, err
-	}
+// removed from tree: the exact bytes the report hash covers.
+func hashInput(tree map[string]any) ([]byte, error) {
 	delete(tree, "observed_at")
 	delete(tree, "hash")
 	return appendCanonical(nil, tree)
@@ -259,9 +255,7 @@ func seal(r *exposureReport) ([]byte, error) {
 		return nil, err
 	}
 	observed := tree["observed_at"]
-	delete(tree, "observed_at")
-	delete(tree, "hash")
-	input, err := appendCanonical(nil, tree)
+	input, err := hashInput(tree)
 	if err != nil {
 		return nil, err
 	}

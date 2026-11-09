@@ -374,7 +374,9 @@ func TestGoldenHosts(t *testing.T) {
 
 			// Leak canaries, on every case: never in the body, the hash
 			// input or the log output.
-			input, err := hashInput(r)
+			tree, err := canonicalTree(r)
+			require.NoError(t, err)
+			input, err := hashInput(tree)
 			require.NoError(t, err)
 			for _, canary := range append([]string{"LEAKCANARY"}, spec.Canaries...) {
 				assert.NotContains(t, string(body), canary)
@@ -397,9 +399,7 @@ func goldenHash(t *testing.T, body []byte) string {
 	dec.UseNumber()
 	var tree map[string]any
 	require.NoError(t, dec.Decode(&tree))
-	delete(tree, "observed_at")
-	delete(tree, "hash")
-	canon, err := appendCanonical(nil, tree)
+	canon, err := hashInput(tree)
 	require.NoError(t, err)
 	sum := sha256.Sum256(canon)
 	return "sha256:" + hex.EncodeToString(sum[:])

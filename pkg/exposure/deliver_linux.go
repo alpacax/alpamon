@@ -40,8 +40,9 @@ type service struct {
 	now     func() time.Time
 	jitter  func() time.Duration
 	sleep   func(ctx context.Context, d time.Duration) bool
-	// lastObserved keeps observed_at strictly increasing across reads, so a
-	// second read within the same second is never taken for a replay.
+	// lastObserved prevents replays within the same second. After a backward
+	// clock step of more than 2 s, an earlier observed_at is sent on purpose;
+	// the server may answer applied: false until the clock catches up.
 	lastObserved     time.Time
 	due              time.Time
 	unavailableUntil time.Time

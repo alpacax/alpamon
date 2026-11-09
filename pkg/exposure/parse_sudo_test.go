@@ -136,6 +136,30 @@ func TestSudoIncludes(t *testing.T) {
 	assert.True(t, pol.global.has(reasonLimitExceeded))
 }
 
+func TestSudoIncludeHashInPath(t *testing.T) {
+	for _, directive := range []string{"#include", "@include", "#includedir", "@includedir"} {
+		t.Run(directive, func(t *testing.T) {
+			path := "/etc/sudoers.d/a#b"
+			line := directive + " " + path
+			got, quotedComment := stripSudoComment(line)
+			assert.Equal(t, line, got)
+			assert.False(t, quotedComment)
+			src := mapSource{files: map[string]string{sudoersPath: line + "\n"}}
+			if strings.HasSuffix(directive, "dir") {
+				src.dirs = map[string][]string{path: {"rule"}}
+				path += "/rule"
+			}
+			src.files[path] = "alice ALL = /bin/id\n"
+			pol := readSudoPolicy(src, "h")
+			policy := pol.forAccount("alice", func(string) bool { return false })
+			assert.True(t, policy.Complete)
+			require.Len(t, policy.Grants, 1)
+			assert.Equal(t, path, policy.Grants[0].Source)
+			assert.Equal(t, []string{"/bin/id"}, policy.Grants[0].CommandPaths)
+		})
+	}
+}
+
 func TestSudoPolicySource(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

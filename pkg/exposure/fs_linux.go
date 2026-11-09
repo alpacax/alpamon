@@ -3,7 +3,6 @@
 package exposure
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -53,7 +52,8 @@ func retainCollectionFS(ctx context.Context) func() {
 // Test hooks; nil outside tests.
 var (
 	// testHookOpen runs before each component is opened and may fail it.
-	testHookOpen func(path string) error
+	testHookOpen      func(path string) error
+	testHookOpenFlags func(name string, flags int)
 	// testHookFstat may rewrite the fstat result of a final component.
 	testHookFstat func(path string, st *unix.Stat_t)
 	// testHookRead runs before a file's content is read; it may block.
@@ -112,6 +112,9 @@ func retryEINTR(fn func() (int, error)) (int, error) {
 
 func (f *fsReader) openAt(dirfd int, name string, flags int) (int, error) {
 	flags |= unix.O_CLOEXEC | unix.O_NOFOLLOW
+	if testHookOpenFlags != nil {
+		testHookOpenFlags(name, flags)
+	}
 	if !f.noOpenat2.Load() {
 		how := &unix.OpenHow{
 			Flags:   uint64(flags),
@@ -128,7 +131,7 @@ func (f *fsReader) openAt(dirfd int, name string, flags int) (int, error) {
 
 func (f *fsReader) openDirectory(dirfd int, name string) (int, unix.Stat_t, error) {
 	var st unix.Stat_t
-	fd, err := f.openAt(dirfd, name, unix.O_PATH)
+	fd, err := f.openAt(dirfd, name, unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
 		return -1, st, err
 	}
@@ -221,7 +224,7 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 			}
 		}
 		fd, st, err := f.openDirectory(cur, c)
-		if trusted && errors.Is(err, unix.ELOOP) {
+		if trusted && (errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR)) {
 			var st unix.Stat_t
 			if err := unix.Fstatat(cur, c, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 				return -1, "", nil, failed(statusOf(err)), false
@@ -537,8 +540,12 @@ func (s systemFiles) list(p string) ([]string, loaded) {
 }
 
 func readSized(reader io.Reader, size, limit int64) ([]byte, error) {
-	var buf bytes.Buffer
-	buf.Grow(int(max(0, min(size, limit))))
-	_, err := buf.ReadFrom(reader)
-	return buf.Bytes(), err
+	n := max(0, min(size, limit))
+	buf := make([]byte, n+1)
+	read, err := io.ReadFull(reader, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		clear(buf)
+		return nil, err
+	}
+	return buf[:read], nil
 }
