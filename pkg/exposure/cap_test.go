@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func capAccount(name string, keys []Key) Account {
-	return Account{Username: name, KeyFiles: []KeyFile{{Envelope: Envelope{Path: "/home/" + name + "/.ssh/authorized_keys", Status: statusRead, Complete: true, Reasons: []string{}}, Keys: keys}}, Sudo: AccountSudo{Complete: true, Grants: []Grant{}, Reasons: []string{}}}
+func capAccount(name string, keys []key) account {
+	return account{Username: name, KeyFiles: []keyFile{{Envelope: envelope{Path: "/home/" + name + "/.ssh/authorized_keys", Status: statusRead, Complete: true, Reasons: []string{}}, Keys: keys}}, Sudo: accountSudo{Complete: true, Grants: []grant{}, Reasons: []string{}}}
 }
 
 // Each source obeys the input and entry caps; encoded authorization metadata
@@ -43,16 +43,16 @@ func TestAccountCapIsolatesOtherAccounts(t *testing.T) {
 	}
 	budget := maxKeysPerAccount
 	a := capAccount("alice", parseAuthorizedKeys([]byte(files[0].String()), &budget).keys)
-	a.KeyFiles = append(a.KeyFiles, KeyFile{Envelope: Envelope{Path: "/home/alice/.ssh/authorized_keys2", Status: statusRead, Complete: true, Reasons: []string{}}, Keys: parseAuthorizedKeys([]byte(files[1].String()), &budget).keys})
+	a.KeyFiles = append(a.KeyFiles, keyFile{Envelope: envelope{Path: "/home/alice/.ssh/authorized_keys2", Status: statusRead, Complete: true, Reasons: []string{}}, Keys: parseAuthorizedKeys([]byte(files[1].String()), &budget).keys})
 	var trust strings.Builder
 	for i := 0; i < maxTrustEntries; i++ {
 		fmt.Fprintf(&trust, "p%0250d\n", i)
 	}
 	entries, _, _ := parseK5Login([]byte(trust.String()))
-	a.TrustFiles = []TrustFile{{Envelope: Envelope{Path: "/home/alice/.k5login", Status: statusRead, Complete: true, Reasons: []string{}}, Kind: "k5login", Entries: entries}}
+	a.TrustFiles = []trustFile{{Envelope: envelope{Path: "/home/alice/.k5login", Status: statusRead, Complete: true, Reasons: []string{}}, Kind: "k5login", Entries: entries}}
 	r := newTestReport()
 	small := parseAuthorizedKeys([]byte("ssh-ed25519 "+testEd0+" ok\n"), newBudget()).keys
-	r.Accounts = []Account{a, capAccount("deploy", small), capAccount("root", small), capAccount("ubuntu", small)}
+	r.Accounts = []account{a, capAccount("deploy", small), capAccount("root", small), capAccount("ubuntu", small)}
 	pre, err := seal(r)
 	require.NoError(t, err)
 	require.Greater(t, len(pre), maxReportBytes)
@@ -75,11 +75,11 @@ func TestAccountCapCutsLargestSourceThenStops(t *testing.T) {
 	r := newTestReport()
 	keys := parseAuthorizedKeys([]byte("ssh-ed25519 "+testEd0+" ok\n"), newBudget()).keys
 	a := capAccount("a", keys)
-	a.TrustFiles = []TrustFile{{Envelope: Envelope{Path: "/home/a/.k5login", Status: statusRead, Complete: true}, Entries: validTrustEntries(1200)}}
+	a.TrustFiles = []trustFile{{Envelope: envelope{Path: "/home/a/.k5login", Status: statusRead, Complete: true}, Entries: validTrustEntries(1200)}}
 	for i := range a.TrustFiles[0].Entries {
 		a.TrustFiles[0].Entries[i].Principal = ptr(strings.Repeat("a", 256))
 	}
-	r.Accounts = []Account{a}
+	r.Accounts = []account{a}
 	_, err := finalize(r)
 	require.NoError(t, err)
 	assert.Empty(t, r.Accounts[0].TrustFiles[0].Entries)
@@ -95,7 +95,7 @@ func TestAccountMetadataAlsoRespectsCap(t *testing.T) {
 		a.Groups = append(a.Groups, fmt.Sprintf("g%0255d", i))
 	}
 	require.Greater(t, encodedLen(a), maxAccountBytes)
-	r.Accounts = []Account{a, capAccount("b", nil)}
+	r.Accounts = []account{a, capAccount("b", nil)}
 	_, err := finalize(r)
 	require.NoError(t, err)
 	require.Len(t, r.Accounts, 1)
@@ -106,41 +106,41 @@ func TestAccountMetadataAlsoRespectsCap(t *testing.T) {
 func TestObservationRows(t *testing.T) {
 	tests := []struct {
 		name   string
-		report Report
+		report exposureReport
 		want   int
 	}{
-		{"empty", Report{}, 0},
-		{"accounts", Report{Accounts: make([]Account, 2)}, 2},
-		{"authorization variants", Report{Accounts: []Account{{KeyFiles: []KeyFile{{Keys: []Key{
-			{Authorizations: []Authorization{{Count: 99}, {Count: 3}}},
-			{Authorizations: []Authorization{{Count: 7}}}, {},
+		{"empty", exposureReport{}, 0},
+		{"accounts", exposureReport{Accounts: make([]account, 2)}, 2},
+		{"authorization variants", exposureReport{Accounts: []account{{KeyFiles: []keyFile{{Keys: []key{
+			{Authorizations: []authorization{{Count: 99}, {Count: 3}}},
+			{Authorizations: []authorization{{Count: 7}}}, {},
 		}}}}}}, 4},
-		{"principals entries", Report{Accounts: []Account{{PrincipalsFiles: []PrincipalsFile{{Entries: []PrincipalEntry{{Principals: []string{"a", "b"}}, {}}}}}}}, 3},
-		{"trust entries", Report{Accounts: []Account{{TrustFiles: []TrustFile{{Entries: validTrustEntries(2)}}}}}, 3},
-		{"system trust entries", Report{SystemTrust: []SystemTrustFile{{Entries: make([]HostUser, 2)}, {Entries: make([]HostUser, 3)}}}, 5},
-		{"user CA entries", Report{UserCA: &UserCA{CAs: make([]CA, 2)}}, 2},
-		{"sudo grants", Report{Accounts: []Account{{Sudo: AccountSudo{Grants: make([]Grant, 2)}}}}, 3},
-		{"external records", Report{External: make([]External, 2)}, 2},
-		{"metadata", Report{Accounts: []Account{{Groups: []string{"a", "b"}, LastPTYLogin: &PTYLogin{}, KeyFiles: []KeyFile{{}}, PrincipalsFiles: []PrincipalsFile{{}}, TrustFiles: []TrustFile{{}}}}, SSHD: SSHD{MatchBlocks: []MatchBlock{{}}}}, 1},
+		{"principals entries", exposureReport{Accounts: []account{{PrincipalsFiles: []principalsFile{{Entries: []principalEntry{{Principals: []string{"a", "b"}}, {}}}}}}}, 3},
+		{"trust entries", exposureReport{Accounts: []account{{TrustFiles: []trustFile{{Entries: validTrustEntries(2)}}}}}, 3},
+		{"system trust entries", exposureReport{SystemTrust: []systemTrustFile{{Entries: make([]hostUser, 2)}, {Entries: make([]hostUser, 3)}}}, 5},
+		{"user caKey entries", exposureReport{UserCA: &userCA{CAs: make([]caKey, 2)}}, 2},
+		{"sudo grants", exposureReport{Accounts: []account{{Sudo: accountSudo{Grants: make([]grant, 2)}}}}, 3},
+		{"external records", exposureReport{External: make([]external, 2)}, 2},
+		{"metadata", exposureReport{Accounts: []account{{Groups: []string{"a", "b"}, LastPTYLogin: &ptyLogin{}, KeyFiles: []keyFile{{}}, PrincipalsFiles: []principalsFile{{}}, TrustFiles: []trustFile{{}}}}, SSHD: sshdPolicy{MatchBlocks: []matchSettings{{}}}}, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) { assert.Equal(t, tt.want, observationRows(&tt.report)) })
 	}
 }
 
-func rowCapReport(rows int) *Report {
+func rowCapReport(rows int) *exposureReport {
 	r := newTestReport()
 	for i := range 100 {
 		a := capAccount(fmt.Sprintf("small%03d", i), nil)
-		a.TrustFiles = []TrustFile{{Envelope: Envelope{Path: "/home/" + a.Username + "/.k5login", Complete: true}, Entries: validTrustEntries(190)}}
+		a.TrustFiles = []trustFile{{Envelope: envelope{Path: "/home/" + a.Username + "/.k5login", Complete: true}, Entries: validTrustEntries(190)}}
 		r.Accounts = append(r.Accounts, a)
 	}
-	keys := make([]Key, rows-observationRows(r)-501)
+	keys := make([]key, rows-observationRows(r)-501)
 	for i := range keys {
-		keys[i].Authorizations = []Authorization{{Count: 1}}
+		keys[i].Authorizations = []authorization{{Count: 1}}
 	}
 	a := capAccount("huge", keys)
-	a.Sudo.Grants = make([]Grant, 500)
+	a.Sudo.Grants = make([]grant, 500)
 	r.Accounts = append(r.Accounts, a)
 	return r
 }
@@ -169,7 +169,7 @@ func TestObservationRowCapBoundary(t *testing.T) {
 			assert.Empty(t, a.Sudo.Grants)
 			assert.False(t, a.Sudo.Complete)
 			assert.Equal(t, []string{reasonLimitExceeded}, a.Sudo.Reasons)
-			assert.Equal(t, Coverage{Status: coveragePartial, Reasons: []string{reasonLimitExceeded}}, r.Categories[catSudo])
+			assert.Equal(t, coverage{Status: coveragePartial, Reasons: []string{reasonLimitExceeded}}, r.Categories[catSudo])
 			assert.Equal(t, rows-500, observationRows(r), "stop after one source")
 			assert.True(t, a.KeyFiles[0].Complete)
 			assert.Empty(t, a.KeyFiles[0].Reasons)
@@ -195,9 +195,9 @@ func TestObservationRowCapSourceOrder(t *testing.T) {
 			// Equal-row sources use encoded size, then path order.
 			a.KeyFiles = nil
 			a.Sudo.Grants = nil
-			a.TrustFiles = []TrustFile{
-				{Envelope: Envelope{Path: "/z", Complete: true}, Entries: validTrustEntries(450)},
-				{Envelope: Envelope{Path: "/a", Complete: true}, Entries: validTrustEntries(450)},
+			a.TrustFiles = []trustFile{
+				{Envelope: envelope{Path: "/z", Complete: true}, Entries: validTrustEntries(450)},
+				{Envelope: envelope{Path: "/a", Complete: true}, Entries: validTrustEntries(450)},
 			}
 			want := 1
 			if differentSize {
@@ -218,18 +218,18 @@ func TestObservationRowCapSourceOrder(t *testing.T) {
 
 func TestEmptyAccountSourcesFitObservationRowCap(t *testing.T) {
 	r := newTestReport()
-	r.Accounts = make([]Account, maxAccounts)
+	r.Accounts = make([]account, maxAccounts)
 	// The six global provider kinds and three per-account Match providers.
-	r.External = make([]External, 6+3*maxAccounts)
-	r.UserCA = &UserCA{CAs: make([]CA, maxKeysPerAccount)}
-	r.SystemTrust = []SystemTrustFile{{Entries: make([]HostUser, maxTrustEntries)}, {Entries: make([]HostUser, maxTrustEntries)}}
+	r.External = make([]external, 6+3*maxAccounts)
+	r.UserCA = &userCA{CAs: make([]caKey, maxKeysPerAccount)}
+	r.SystemTrust = []systemTrustFile{{Entries: make([]hostUser, maxTrustEntries)}, {Entries: make([]hostUser, maxTrustEntries)}}
 	assert.Less(t, observationRows(r), maxObservationRows)
 }
 
 func TestObservationRowCapReselectsLargestAccount(t *testing.T) {
 	r := rowCapReport(maxObservationRows + 1)
-	a := capAccount("second", []Key{{Authorizations: make([]Authorization, 390)}})
-	a.Sudo.Grants = make([]Grant, 500)
+	a := capAccount("second", []key{{Authorizations: make([]authorization, 390)}})
+	a.Sudo.Grants = make([]grant, 500)
 	r.Accounts = append(r.Accounts, a)
 	_, err := finalize(r)
 	require.NoError(t, err)
@@ -244,15 +244,15 @@ func TestObservationRowCapReselectsLargestAccount(t *testing.T) {
 }
 
 func TestRowCapNoAccountSources(t *testing.T) {
-	r := &Report{Categories: map[string]Coverage{}}
+	r := &exposureReport{Categories: map[string]coverage{}}
 	for i := 0; i <= maxObservationRows; i++ {
-		r.External = append(r.External, External{Kind: externalKeysCommand, Scope: "match:" + strconv.Itoa(i)})
+		r.External = append(r.External, external{Kind: externalKeysCommand, Scope: "match:" + strconv.Itoa(i)})
 	}
 	require.NotPanics(t, func() { _, _ = finalize(r) })
 }
 
-func validTrustEntries(n int) []TrustEntry {
-	entries := make([]TrustEntry, n)
+func validTrustEntries(n int) []trustEntry {
+	entries := make([]trustEntry, n)
 	for i := range entries {
 		entries[i].Principal = ptr("u")
 	}

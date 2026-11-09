@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"math/bits"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -333,8 +334,8 @@ func cleanComment(raw []byte) (*string, bool) {
 }
 
 // authorization is the permitted metadata of one line.
-func (kl keyLine) authorization() Authorization {
-	a := Authorization{
+func (kl keyLine) authorization() authorization {
+	a := authorization{
 		Count:            1,
 		Role:             "user_key",
 		Comment:          kl.comment,
@@ -356,7 +357,7 @@ func (kl keyLine) authorization() Authorization {
 }
 
 type keyFileResult struct {
-	keys      []Key
+	keys      []key
 	unparsed  int // lines outside the grammar
 	tooLong   int // lines over maxLineBytes, not looked at
 	overLimit bool
@@ -366,7 +367,7 @@ type keyFileResult struct {
 // key lines the account may still contribute; it is decremented here.
 func parseAuthorizedKeys(data []byte, budget *int) keyFileResult {
 	var res keyFileResult
-	byFP := map[string]*Key{}
+	byFP := map[string]*key{}
 	variants := map[string]map[string]int{} // fingerprint -> variant -> index
 	var order []string
 	forEachLine(data, func(line []byte, tooLong bool) bool {
@@ -389,7 +390,7 @@ func parseAuthorizedKeys(data []byte, budget *int) keyFileResult {
 		*budget--
 		k := byFP[kl.key.fingerprint]
 		if k == nil {
-			k = &Key{Fingerprint: kl.key.fingerprint, Type: kl.key.keyType, Bits: kl.key.bits}
+			k = &key{Fingerprint: kl.key.fingerprint, Type: kl.key.keyType, Bits: kl.key.bits}
 			byFP[kl.key.fingerprint] = k
 			variants[kl.key.fingerprint] = map[string]int{}
 			order = append(order, kl.key.fingerprint)
@@ -406,32 +407,41 @@ func parseAuthorizedKeys(data []byte, budget *int) keyFileResult {
 	})
 	for _, fp := range order {
 		k := byFP[fp]
-		sortAuthorizations(k.Authorizations)
+		sortAuthorizations(k.Authorizations, variants[fp])
 		res.keys = append(res.keys, *k)
 	}
-	slices.SortFunc(res.keys, func(a, b Key) int { return strings.Compare(a.Fingerprint, b.Fingerprint) })
+	slices.SortFunc(res.keys, func(a, b key) int { return strings.Compare(a.Fingerprint, b.Fingerprint) })
 	return res
 }
 
 // variantID is the canonical JSON of a variant's permitted fields alone.
-func variantID(a Authorization) string {
+func variantID(a authorization) string {
 	a.Count = 0
 	b, _ := encodeValue(a)
 	return string(b)
 }
 
-func sortAuthorizations(as []Authorization) {
-	slices.SortFunc(as, func(a, b Authorization) int {
-		ja, _ := encodeValue(a)
-		jb, _ := encodeValue(b)
-		return bytes.Compare(ja, jb)
-	})
+func sortAuthorizations(as []authorization, variants map[string]int) {
+	keys := make([]string, len(as))
+	for id, index := range variants {
+		keys[index] = strings.Replace(id, `"count":0,`, `"count":`+strconv.Itoa(as[index].Count)+",", 1)
+	}
+	order := make([]int, len(as))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortFunc(order, func(a, b int) int { return strings.Compare(keys[a], keys[b]) })
+	sorted := make([]authorization, len(as))
+	for i, index := range order {
+		sorted[i] = as[index]
+	}
+	copy(as, sorted)
 }
 
 // parseCAKeys parses a TrustedUserCAKeys file: one key per line, no options.
-func parseCAKeys(data []byte) ([]CA, int, bool) {
+func parseCAKeys(data []byte) ([]caKey, int, bool) {
 	seen := map[string]bool{}
-	var cas []CA
+	var cas []caKey
 	unparsed, tooLong := 0, false
 	forEachLine(data, func(line []byte, long bool) bool {
 		if long {
@@ -448,19 +458,19 @@ func parseCAKeys(data []byte) ([]CA, int, bool) {
 		}
 		if !seen[kl.key.fingerprint] {
 			seen[kl.key.fingerprint] = true
-			cas = append(cas, CA{Fingerprint: kl.key.fingerprint, Type: kl.key.keyType, Bits: kl.key.bits})
+			cas = append(cas, caKey{Fingerprint: kl.key.fingerprint, Type: kl.key.keyType, Bits: kl.key.bits})
 		}
 		return true
 	})
-	slices.SortFunc(cas, func(a, b CA) int { return strings.Compare(a.Fingerprint, b.Fingerprint) })
+	slices.SortFunc(cas, func(a, b caKey) int { return strings.Compare(a.Fingerprint, b.Fingerprint) })
 	return cas, unparsed, tooLong
 }
 
 // parsePrincipalsFile parses an AuthorizedPrincipalsFile: one principal per
 // line, optionally after an option list with the same grammar as keys.
-func parsePrincipalsFile(data []byte) ([]PrincipalEntry, int, bool, bool) {
-	var entries []PrincipalEntry
-	seen := map[string]bool{}
+func parsePrincipalsFile(data []byte) ([]principalEntry, int, bool, bool) {
+	var entries []principalEntry
+	seen := map[string]principalEntry{}
 	unparsed, tooLong, overLimit := 0, false, false
 	forEachLine(data, func(line []byte, long bool) bool {
 		if long {
@@ -476,43 +486,46 @@ func parsePrincipalsFile(data []byte) ([]PrincipalEntry, int, bool, bool) {
 			return true
 		}
 		id, _ := encodeValue(e)
-		if seen[string(id)] {
+		if _, exists := seen[string(id)]; exists {
 			return true
 		}
 		if len(entries) >= maxPrincipalEntries {
 			overLimit = true
 			return false
 		}
-		seen[string(id)] = true
+		seen[string(id)] = e
 		entries = append(entries, e)
 		return true
 	})
-	slices.SortFunc(entries, func(a, b PrincipalEntry) int {
-		ja, _ := encodeValue(a)
-		jb, _ := encodeValue(b)
-		return bytes.Compare(ja, jb)
-	})
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for i, id := range ids {
+		entries[i] = seen[id]
+	}
 	return entries, unparsed, tooLong, overLimit
 }
 
-func parsePrincipalLine(line []byte) (PrincipalEntry, bool) {
+func parsePrincipalLine(line []byte) (principalEntry, bool) {
 	line = bytes.TrimSpace(line)
-	e := PrincipalEntry{Options: []string{}}
+	e := principalEntry{Options: []string{}}
 	name, rest := cutField(line)
 	if len(bytes.TrimSpace(rest)) > 0 {
 		// Anything after the first field means the line starts with options.
 		opts, after, ok := parseKeyOptions(line)
 		if !ok || opts.certAuthority || opts.hasPrincipals {
-			return PrincipalEntry{}, false
+			return principalEntry{}, false
 		}
 		name, rest = cutField(after)
 		if len(bytes.TrimSpace(rest)) > 0 {
-			return PrincipalEntry{}, false
+			return principalEntry{}, false
 		}
 		e.Options, e.From = opts.names, opts.from
 	}
 	if !validPrincipal(string(name)) {
-		return PrincipalEntry{}, false
+		return principalEntry{}, false
 	}
 	e.Principals = []string{string(name)}
 	return e, true

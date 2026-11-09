@@ -8,8 +8,8 @@ import (
 )
 
 // parseK5Login returns the principals of a .k5login file.
-func parseK5Login(data []byte) ([]TrustEntry, int, bool) {
-	var out []TrustEntry
+func parseK5Login(data []byte) ([]trustEntry, int, bool) {
+	var out []trustEntry
 	seen := map[string]bool{}
 	unparsed, tooLong := 0, false
 	forEachLine(data, func(line []byte, long bool) bool {
@@ -31,19 +31,19 @@ func parseK5Login(data []byte) ([]TrustEntry, int, bool) {
 				return false
 			}
 			seen[s] = true
-			out = append(out, TrustEntry{Principal: &s})
+			out = append(out, trustEntry{Principal: &s})
 		}
 		return true
 	})
-	slices.SortFunc(out, func(a, b TrustEntry) int { return strings.Compare(*a.Principal, *b.Principal) })
+	slices.SortFunc(out, func(a, b trustEntry) int { return strings.Compare(*a.Principal, *b.Principal) })
 	return out, unparsed, tooLong
 }
 
 // parseHostsEquiv returns the host-user pairs of a .rhosts, .shosts,
 // hosts.equiv or shosts.equiv file. Wildcards (+), negation (-) and netgroups
 // (@) are outside the grammar and make the line unparsed.
-func parseHostsEquiv(data []byte) ([]HostUser, int, bool) {
-	var out []HostUser
+func parseHostsEquiv(data []byte) ([]hostUser, int, bool) {
+	var out []hostUser
 	seen := map[string]bool{}
 	unparsed, tooLong := 0, false
 	forEachLine(data, func(line []byte, long bool) bool {
@@ -62,7 +62,7 @@ func parseHostsEquiv(data []byte) ([]HostUser, int, bool) {
 			unparsed++
 			return true
 		}
-		hu := HostUser{Host: f[0]}
+		hu := hostUser{Host: f[0]}
 		if len(f) == 2 {
 			if !validName(f[1]) {
 				unparsed++
@@ -84,7 +84,7 @@ func parseHostsEquiv(data []byte) ([]HostUser, int, bool) {
 		}
 		return true
 	})
-	slices.SortFunc(out, func(a, b HostUser) int {
+	slices.SortFunc(out, func(a, b hostUser) int {
 		if c := strings.Compare(a.Host, b.Host); c != 0 {
 			return c
 		}
@@ -100,10 +100,10 @@ func deref(s *string) string {
 	return *s
 }
 
-func hostUserEntries(hu []HostUser) []TrustEntry {
-	out := make([]TrustEntry, 0, len(hu))
+func hostUserEntries(hu []hostUser) []trustEntry {
+	out := make([]trustEntry, 0, len(hu))
 	for i := range hu {
-		out = append(out, TrustEntry{HostUser: &hu[i]})
+		out = append(out, trustEntry{HostUser: &hu[i]})
 	}
 	return out
 }

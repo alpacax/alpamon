@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -26,22 +27,22 @@ func TestCanonicalForm(t *testing.T) {
 
 func TestCanonicalFillsNilSlicesInsideMaps(t *testing.T) {
 	r := newTestReport()
-	r.Categories[catKeys] = Coverage{Status: coverageCovered}
+	r.Categories[catKeys] = coverage{Status: coverageCovered}
 	body, err := encodeValue(*r)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), `"keys":{"reasons":[],"status":"covered"}`)
 }
 
-func newTestReport() *Report {
-	r := &Report{
-		SchemaVersion: SchemaVersion,
+func newTestReport() *exposureReport {
+	r := &exposureReport{
+		SchemaVersion: schemaVersion,
 		ObservedAt:    "2026-11-07T19:30:00Z",
-		Scope:         Scope{OS: "linux", Protocol: "ssh"},
-		Categories:    map[string]Coverage{},
-		SSHD:          SSHD{Daemon: Daemon{Correspondence: "unresolved"}},
+		Scope:         reportScope{OS: "linux", Protocol: "ssh"},
+		Categories:    map[string]coverage{},
+		SSHD:          sshdPolicy{Daemon: daemon{Correspondence: "unresolved"}},
 	}
 	for _, n := range categoryNames {
-		r.Categories[n] = Coverage{Status: coverageCovered}
+		r.Categories[n] = coverage{Status: coverageCovered}
 	}
 	return r
 }
@@ -50,12 +51,12 @@ func newTestReport() *Report {
 // The hash input is the body with observed_at and hash removed.
 func TestCanonicalGolden(t *testing.T) {
 	r := newTestReport()
-	r.Accounts = []Account{{
+	r.Accounts = []account{{
 		Username: "deploy", UID: 1001, Shell: ptr("/bin/bash"), LoginShell: true,
 		Groups: []string{"deploy", "wheel"},
-		Shadow: Shadow{Status: shadowRead, PasswordState: passwordLocked, LastChangeDays: ptr(int64(20123))},
-		Home:   Home{Status: statusRead, StrictModesOK: ptr(true)},
-		Sudo: AccountSudo{Complete: true, Grants: []Grant{{
+		Shadow: shadow{Status: shadowRead, PasswordState: passwordLocked, LastChangeDays: ptr(int64(20123))},
+		Home:   home{Status: statusRead, StrictModesOK: ptr(true)},
+		Sudo: accountSudo{Complete: true, Grants: []grant{{
 			Source: "/etc/sudoers", Via: "group:wheel", Runas: "ALL:ALL", Commands: "all", NoPasswd: true,
 		}}},
 	}}
@@ -84,7 +85,7 @@ func TestHashIgnoresObservedAtOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, a.Hash, b.Hash)
 
-	b.Accounts = []Account{{Username: "x"}}
+	b.Accounts = []account{{Username: "x"}}
 	_, err = finalize(b)
 	require.NoError(t, err)
 	assert.NotEqual(t, a.Hash, b.Hash)
@@ -95,18 +96,18 @@ func TestHashIgnoresObservedAtOnly(t *testing.T) {
 func TestReportCap(t *testing.T) {
 	r := newTestReport()
 	for i := range 400 {
-		var keys []Key
+		var keys []key
 		for j := range 40 {
-			keys = append(keys, Key{Fingerprint: "SHA256:" + strings.Repeat("k", 43) + string(rune('a'+j%26)), Type: "ssh-ed25519", Bits: 256,
-				Authorizations: []Authorization{{Count: 1, Role: "user_key", Comment: ptr(strings.Repeat("c", 100)), Options: []string{}}}})
+			keys = append(keys, key{Fingerprint: "SHA256:" + strings.Repeat("k", 43) + string(rune('a'+j%26)), Type: "ssh-ed25519", Bits: 256,
+				Authorizations: []authorization{{Count: 1, Role: "user_key", Comment: ptr(strings.Repeat("c", 100)), Options: []string{}}}})
 		}
-		r.Accounts = append(r.Accounts, Account{
-			Username: "user" + strings.Repeat("0", 3-len(itoa(i))) + itoa(i), UID: uint32(1000 + i),
-			Shadow: Shadow{Status: shadowRead, PasswordState: passwordNone},
-			Home:   Home{Status: statusRead},
-			KeyFiles: []KeyFile{{Envelope: Envelope{Path: "/home/u/.ssh/authorized_keys", Status: statusRead, Complete: true, Reasons: []string{}},
+		r.Accounts = append(r.Accounts, account{
+			Username: "user" + strings.Repeat("0", 3-len(strconv.Itoa(i))) + strconv.Itoa(i), UID: uint32(1000 + i),
+			Shadow: shadow{Status: shadowRead, PasswordState: passwordNone},
+			Home:   home{Status: statusRead},
+			KeyFiles: []keyFile{{Envelope: envelope{Path: "/home/u/.ssh/authorized_keys", Status: statusRead, Complete: true, Reasons: []string{}},
 				Keys: keys}},
-			Sudo: AccountSudo{Complete: true},
+			Sudo: accountSudo{Complete: true},
 		})
 	}
 	full, err := encodeValue(*r)
@@ -131,17 +132,6 @@ func TestReportCap(t *testing.T) {
 	assert.Equal(t, "sha256:"+hex.EncodeToString(sum[:]), r.Hash, "the hash covers the capped report")
 }
 
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b []byte
-	for ; i > 0; i /= 10 {
-		b = append([]byte{byte('0' + i%10)}, b...)
-	}
-	return string(b)
-}
-
 type panickingMarshaler struct{}
 
 func (panickingMarshaler) MarshalJSON() ([]byte, error) { panic("LEAKCANARY marshal") }
@@ -162,16 +152,16 @@ func TestCanonicalEncoderPropagatesPanicsAndRejectsCycles(t *testing.T) {
 }
 
 func TestTrustEntryRoundTrip(t *testing.T) {
-	for _, entry := range []TrustEntry{
+	for _, entry := range []trustEntry{
 		{Principal: ptr("alice@REALM")},
-		{HostUser: &HostUser{Host: "host", User: ptr("alice")}},
-		{HostUser: &HostUser{Host: "host"}},
+		{HostUser: &hostUser{Host: "host", User: ptr("alice")}},
+		{HostUser: &hostUser{Host: "host"}},
 	} {
 		r := newTestReport()
-		r.Accounts = []Account{{TrustFiles: []TrustFile{{Entries: []TrustEntry{entry}}}}}
+		r.Accounts = []account{{TrustFiles: []trustFile{{Entries: []trustEntry{entry}}}}}
 		body, err := seal(r)
 		require.NoError(t, err)
-		var decoded Report
+		var decoded exposureReport
 		require.NoError(t, json.Unmarshal(body, &decoded))
 		assert.Equal(t, entry, decoded.Accounts[0].TrustFiles[0].Entries[0])
 		again, err := seal(&decoded)
@@ -179,7 +169,7 @@ func TestTrustEntryRoundTrip(t *testing.T) {
 		assert.Equal(t, string(body), string(again))
 	}
 	for _, invalid := range []string{`null`, `true`, `123`, `[]`, `{}`, `{"host":null,"user":null}`, `{"host":"host","user":123}`, `{"host":"host","user":null,"extra":true}`} {
-		var entry TrustEntry
+		var entry trustEntry
 		assert.Error(t, json.Unmarshal([]byte(invalid), &entry), invalid)
 	}
 }
@@ -199,14 +189,14 @@ func FuzzCanonicalEncoder(f *testing.F) {
 		}{Text: string(data)})
 		require.NoError(t, err)
 		assert.True(t, json.Valid(text))
-		var r Report
+		var r exposureReport
 		if json.Unmarshal(data, &r) != nil {
 			return
 		}
 		body, err := seal(&r)
 		require.NoError(t, err)
 		assert.True(t, json.Valid(body))
-		var decoded Report
+		var decoded exposureReport
 		require.NoError(t, json.Unmarshal(body, &decoded))
 		again, err := seal(&decoded)
 		require.NoError(t, err)

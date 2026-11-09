@@ -98,3 +98,10 @@ func isBlankOrComment(line []byte) bool {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func appendReason(reasons []string, code string) []string {
+	set := reasonSet{}
+	set.add(reasons...)
+	set.add(code)
+	return set.list()
+}

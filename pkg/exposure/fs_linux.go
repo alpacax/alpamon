@@ -3,6 +3,8 @@
 package exposure
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -27,6 +29,27 @@ type fsReader struct {
 	noOpenat2 atomic.Bool
 }
 
+type collectionFSKey struct{}
+
+type collectionFS struct {
+	reader *fsReader
+	refs   atomic.Int64
+}
+
+func (s *collectionFS) release() {
+	if s.refs.Add(-1) == 0 && s.reader != nil {
+		s.reader.close()
+	}
+}
+
+func retainCollectionFS(ctx context.Context) func() {
+	if shared, ok := ctx.Value(collectionFSKey{}).(*collectionFS); ok {
+		shared.refs.Add(1)
+		return shared.release
+	}
+	return func() {}
+}
+
 // Test hooks; nil outside tests.
 var (
 	// testHookOpen runs before each component is opened and may fail it.
@@ -42,6 +65,7 @@ var (
 )
 
 func newFSReader(root string, mapOwner func(string, uint32) uint32) (*fsReader, error) {
+	readHook("open-root")
 	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
@@ -100,6 +124,26 @@ func (f *fsReader) openAt(dirfd int, name string, flags int) (int, error) {
 		f.noOpenat2.Store(true)
 	}
 	return retryEINTR(func() (int, error) { return unix.Openat(dirfd, name, flags, 0) })
+}
+
+func (f *fsReader) openDirectory(dirfd int, name string) (int, unix.Stat_t, error) {
+	var st unix.Stat_t
+	fd, err := f.openAt(dirfd, name, unix.O_PATH)
+	if err != nil {
+		return -1, st, err
+	}
+	if err = unix.Fstat(fd, &st); err == nil {
+		switch st.Mode & unix.S_IFMT {
+		case unix.S_IFDIR:
+			return fd, st, nil
+		case unix.S_IFLNK:
+			err = unix.ELOOP
+		default:
+			err = unix.ENOTDIR
+		}
+	}
+	_ = unix.Close(fd)
+	return -1, st, err
 }
 
 // statusOf maps an open error to a source status and its reason.
@@ -176,7 +220,8 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 				return -1, "", nil, failed(statusOf(err)), false
 			}
 		}
-		if trusted {
+		fd, st, err := f.openDirectory(cur, c)
+		if trusted && errors.Is(err, unix.ELOOP) {
 			var st unix.Stat_t
 			if err := unix.Fstatat(cur, c, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 				return -1, "", nil, failed(statusOf(err)), false
@@ -211,16 +256,11 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 				continue
 			}
 		}
-		fd, err := f.openAt(cur, c, unix.O_RDONLY|unix.O_DIRECTORY)
 		if err != nil {
 			return -1, "", nil, failed(statusOf(err)), false
 		}
 		cur, prefix = fd, next
 		parents, paths = append(parents, cur), append(paths, prefix)
-		var st unix.Stat_t
-		if err := unix.Fstat(fd, &st); err != nil {
-			return -1, "", nil, failed(statusUnreadable, reasonFileUnreadable), false
-		}
 		ps := pathStat{path: prefix, uid: f.mapOwner(prefix, st.Uid), mode: st.Mode}
 		if rule.system && ps.uid != 0 {
 			return -1, "", nil, failed(statusRejected, reasonFileRejected), false
@@ -313,7 +353,7 @@ func (f *fsReader) read(p string, rule ownerRule) (loaded, []pathStat) {
 	if testHookRead != nil {
 		testHookRead(p)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, maxReadBytes+1))
+	data, err := readSized(io.LimitReader(file, maxReadBytes+1), st.Size, maxReadBytes+1)
 	if err != nil {
 		clear(data)
 		l.status = statusUnreadable
@@ -357,7 +397,7 @@ func (f *fsReader) readTail(p string, record int64) loaded {
 	if testHookRead != nil {
 		testHookRead(p)
 	}
-	data, err := io.ReadAll(io.NewSectionReader(file, offset, window))
+	data, err := readSized(io.NewSectionReader(file, offset, window), st.Size-offset, window)
 	if err != nil {
 		l.status = statusUnreadable
 		l.reasons.add(reasonFileUnreadable)
@@ -420,18 +460,19 @@ func (f *fsReader) statDir(p string, rule ownerRule) ([]pathStat, loaded) {
 }
 
 // list returns the entry names of directory p.
-func (f *fsReader) list(p string, rule ownerRule, recordsOnly ...bool) ([]string, loaded) {
+func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) ([]string, loaded) {
 	fd, _, _, l, ok := f.walkDirs(p, rule, true)
 	if !ok {
 		return nil, l
 	}
-	if fd == f.rootFD {
-		dup, err := unix.Dup(fd)
-		if err != nil {
-			return nil, failed(statusUnreadable, reasonFileUnreadable)
-		}
-		fd = dup
+	readable, err := f.openAt(fd, ".", unix.O_RDONLY|unix.O_DIRECTORY)
+	if fd != f.rootFD {
+		_ = unix.Close(fd)
 	}
+	if err != nil {
+		return nil, failed(statusOf(err))
+	}
+	fd = readable
 	dir := os.NewFile(uintptr(fd), p)
 	defer func() { _ = dir.Close() }()
 	names, err := dir.Readdirnames(maxDirEntries + 1)
@@ -442,7 +483,7 @@ func (f *fsReader) list(p string, rule ownerRule, recordsOnly ...bool) ([]string
 		l.reasons.add(reasonLimitExceeded)
 		return nil, l
 	}
-	if len(recordsOnly) > 0 && recordsOnly[0] {
+	if recordsOnly {
 		files := names[:0]
 		for _, name := range names {
 			var st unix.Stat_t
@@ -492,5 +533,12 @@ func (s systemFiles) load(p string) loaded {
 }
 
 func (s systemFiles) list(p string) ([]string, loaded) {
-	return s.f.list(p, ownerRule{system: true})
+	return s.f.list(p, ownerRule{system: true}, false)
+}
+
+func readSized(reader io.Reader, size, limit int64) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.Grow(int(max(0, min(size, limit))))
+	_, err := buf.ReadFrom(reader)
+	return buf.Bytes(), err
 }

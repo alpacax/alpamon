@@ -70,12 +70,12 @@ func TestSystemdNSSSources(t *testing.T) {
 				d := readAccounts(systemFiles{f: readerFor(t, root, owners)})
 				b := assembly{acc: d, accOK: true}
 				r := b.report()
-				want := []External{}
+				want := []external{}
 				if tc.accounts {
-					want = append(want, External{Kind: externalNSSAccounts, Scope: "global", Sources: []string{"systemd"}})
+					want = append(want, external{Kind: externalNSSAccounts, Scope: "global", Sources: []string{"systemd"}})
 				}
 				if tc.groups {
-					want = append(want, External{Kind: externalNSSGroups, Scope: "global", Sources: []string{"systemd"}})
+					want = append(want, external{Kind: externalNSSGroups, Scope: "global", Sources: []string{"systemd"}})
 				}
 				assert.Equal(t, want, r.External)
 				assert.Equal(t, (tc.unreadable != "" || tc.foreign != "") && (tc.accounts || tc.groups), d.reasons.has(reasonFileUnreadable))
@@ -198,7 +198,7 @@ func TestUnusedAccountSourcesIgnoreOccupiedSlots(t *testing.T) {
 func TestSudoAllKeepsCategoryCovered(t *testing.T) {
 	p := readSudoPolicy(mapSource{files: map[string]string{sudoersPath: "ALL ALL=(ALL) NOPASSWD: ALL\n"}}, "host")
 	b := assembly{accOK: true, acc: accountsData{usable: true, entries: []passwdEntry{{name: "u"}, {name: "root"}}}, sudoOK: true, sudo: p}
-	assert.Equal(t, Coverage{Status: coverageCovered, Reasons: []string{}}, b.report().Categories[catSudo])
+	assert.Equal(t, coverage{Status: coverageCovered, Reasons: []string{}}, b.report().Categories[catSudo])
 }
 
 func TestCategoryPanicKeepsSystemSourceEnvelopes(t *testing.T) {
@@ -234,7 +234,7 @@ func TestTrustFileEntryCapMarksSourceIncomplete(t *testing.T) {
 	owners[p] = 1001
 	require.NoError(t, os.WriteFile(filepath.Join(root, p), []byte(data.String()), 0o644))
 	fs := readerFor(t, root, owners)
-	d := readTrust(fs, systemFiles{f: fs}, []passwdEntry{{name: "u", uid: 1001, home: "/home/u"}}, &sshdT{effective: map[string]*string{"gssapiauthentication": ptr("yes")}}, sshdConfig{})
+	d := readTrust(fs, systemFiles{f: fs}, []passwdEntry{{name: "u", uid: 1001, home: "/home/u"}}, &sshdT{effective: map[string]*string{"gssapiauthentication": ptr("yes")}}, sshdConfig{}, false)
 	require.Len(t, d.files["u"], 1)
 	s := d.files["u"][0]
 	assert.Len(t, s.Entries, maxTrustEntries)
@@ -273,7 +273,7 @@ func TestDuplicateAccountSources(t *testing.T) {
 				r := newCollector(opts).collect(context.Background())
 				assert.Contains(t, r.Categories[tc.category].Reasons, reasonParseError)
 				assert.NotEqual(t, coverageCovered, r.Categories[tc.category].Status)
-				var ubuntu []Account
+				var ubuntu []account
 				for _, a := range r.Accounts {
 					if a.Username == "ubuntu" {
 						ubuntu = append(ubuntu, a)
@@ -376,7 +376,7 @@ func TestAllHungHomesReturnPartialWithoutWorkerGrowth(t *testing.T) {
 			for read := 0; read < 5; read++ {
 				var reasons reasonSet
 				var usable bool
-				var files = map[string][]Envelope{}
+				var files = map[string][]envelope{}
 				switch cat {
 				case catKeys:
 					d, ok := runBudget(context.Background(), c, cat, func(ctx context.Context) keysData { return c.readKeysBudget(ctx, accounts, st, sshdConfig{}) })
@@ -406,7 +406,7 @@ func TestAllHungHomesReturnPartialWithoutWorkerGrowth(t *testing.T) {
 						}
 					}
 				}
-				assert.Equal(t, Coverage{Status: coveragePartial, Reasons: []string{reasonTimeout}}, coverageOf(categoryState{usable: usable, reasons: reasons}))
+				assert.Equal(t, coverage{Status: coveragePartial, Reasons: []string{reasonTimeout}}, coverageOf(categoryState{usable: usable, reasons: reasons}))
 				for _, a := range accounts {
 					require.Len(t, files[a.name], 1)
 					assert.Equal(t, statusTimeout, files[a.name][0].Status)
@@ -471,7 +471,7 @@ func TestSudoPanicCoverageUnknown(t *testing.T) {
 		p, ok := runBudget(context.Background(), c, catSudo, func(context.Context) sudoPolicy { panic("LEAKCANARY") })
 		b := assembly{accOK: true, acc: accountsData{usable: true, entries: []passwdEntry{{name: "u"}}}, sudoOK: ok, sudo: p}
 		r := b.report()
-		assert.Equal(t, Coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}, r.Categories[catSudo])
+		assert.Equal(t, coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}, r.Categories[catSudo])
 		assert.Equal(t, []string{reasonParseError}, r.Accounts[0].Sudo.Reasons)
 		assert.False(t, r.Accounts[0].Sudo.Complete)
 		assert.NotContains(t, logs.String(), "LEAKCANARY")
@@ -495,11 +495,11 @@ func TestExternalRecordCapPreservesCorrespondence(t *testing.T) {
 		config.WriteString("Match User a\nAuthorizedKeysCommand /bin/true\nAuthorizedPrincipalsCommand /bin/true\nGSSAPIAuthentication yes\n")
 	}
 	cfg := parseSSHDConfig(mapSource{files: map[string]string{sshdConfigPath: config.String()}})
-	b := assembly{sshdOK: true, sshd: sshdData{usable: true, cfg: cfg, daemon: Daemon{Correspondence: "established"}}}
+	b := assembly{sshdOK: true, sshd: sshdData{usable: true, cfg: cfg, daemon: daemon{Correspondence: "established"}}}
 	r := b.report()
 	assert.Len(t, r.External, 256)
 	assert.Equal(t, "established", r.SSHD.Daemon.Correspondence)
-	assert.Equal(t, Coverage{Status: coveragePartial, Reasons: []string{reasonLimitExceeded}}, r.Categories[catSSHD])
+	assert.Equal(t, coverage{Status: coveragePartial, Reasons: []string{reasonLimitExceeded}}, r.Categories[catSSHD])
 }
 
 func TestSystemdRecordDirectoriesAndTypes(t *testing.T) {
@@ -590,7 +590,7 @@ func TestFiveHungHomesAcrossCategoriesAndReads(t *testing.T) {
 		wg.Go(func() { trust = c.readTrustBudget(context.Background(), accounts, st, sshdConfig{}) })
 		wg.Wait()
 		for i, a := range accounts {
-			files := []Envelope{}
+			files := []envelope{}
 			for _, f := range keys.byUser[a.name].files {
 				files = append(files, f.Envelope)
 			}
@@ -746,12 +746,12 @@ func TestIncompleteSSHDConfigFileReasons(t *testing.T) {
 func TestShadowFieldErrorsReachPasswordsCoverage(t *testing.T) {
 	for _, tc := range []struct {
 		name, line string
-		want       Shadow
+		want       shadow
 	}{
-		{"last change", "ubuntu:!:bad:0:99999:7:30:20500:\n", Shadow{Status: shadowRead, PasswordState: passwordNone, InactiveDays: ptr(int64(30)), ExpireDays: ptr(int64(20500))}},
-		{"inactive", "ubuntu:!:20123:0:99999:7:bad:20500:\n", Shadow{Status: shadowRead, PasswordState: passwordNone, LastChangeDays: ptr(int64(20123)), ExpireDays: ptr(int64(20500))}},
-		{"expiry", "ubuntu:!:20123:0:99999:7:30:bad:\n", Shadow{Status: shadowRead, PasswordState: passwordNone, LastChangeDays: ptr(int64(20123)), InactiveDays: ptr(int64(30))}},
-		{"password format", "ubuntu:unknown:20123:0:99999:7:30:20500:\n", Shadow{Status: shadowRead, PasswordState: passwordUnknown, LastChangeDays: ptr(int64(20123)), InactiveDays: ptr(int64(30)), ExpireDays: ptr(int64(20500))}},
+		{"last change", "ubuntu:!:bad:0:99999:7:30:20500:\n", shadow{Status: shadowRead, PasswordState: passwordNone, InactiveDays: ptr(int64(30)), ExpireDays: ptr(int64(20500))}},
+		{"inactive", "ubuntu:!:20123:0:99999:7:bad:20500:\n", shadow{Status: shadowRead, PasswordState: passwordNone, LastChangeDays: ptr(int64(20123)), ExpireDays: ptr(int64(20500))}},
+		{"expiry", "ubuntu:!:20123:0:99999:7:30:bad:\n", shadow{Status: shadowRead, PasswordState: passwordNone, LastChangeDays: ptr(int64(20123)), InactiveDays: ptr(int64(30))}},
+		{"password format", "ubuntu:unknown:20123:0:99999:7:30:20500:\n", shadow{Status: shadowRead, PasswordState: passwordUnknown, LastChangeDays: ptr(int64(20123)), InactiveDays: ptr(int64(30)), ExpireDays: ptr(int64(20500))}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := filepath.Join(fixturesDir, "hosts", "ubuntu-default")
@@ -786,7 +786,7 @@ func TestRotatedWtmpCountsAsFound(t *testing.T) {
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(root, "var/log/wtmp.1"), encodeWtmp(t, spec.Wtmp), 0o644))
 	r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(context.Background())
-	assert.Equal(t, Coverage{Status: coverageCovered, Reasons: []string{}}, r.Categories[catPTY])
+	assert.Equal(t, coverage{Status: coverageCovered, Reasons: []string{}}, r.Categories[catPTY])
 	var found bool
 	for _, a := range r.Accounts {
 		if a.Username == "ubuntu" {
@@ -835,12 +835,12 @@ func TestAbsoluteAccountSourcesWithoutHome(t *testing.T) {
 				require.Len(t, a.PrincipalsFiles, 1)
 				assert.Equal(t, "/etc/ssh/keys/ubuntu%principals", a.PrincipalsFiles[0].Path)
 				assert.True(t, a.PrincipalsFiles[0].Complete)
-				assert.Equal(t, []PrincipalEntry{{Principals: []string{"alice"}, Options: []string{}}}, a.PrincipalsFiles[0].Entries)
+				assert.Equal(t, []principalEntry{{Principals: []string{"alice"}, Options: []string{}}}, a.PrincipalsFiles[0].Entries)
 				if home != "/missing" {
 					fs := readerFor(t, root, spec.Owners)
 					for _, tmpl := range []string{".ssh/principals", "%h/.ssh/principals"} {
 						st := &sshdT{effective: map[string]*string{"authorizedprincipalsfile": ptr(tmpl)}}
-						assert.Empty(t, readCerts(fs, systemFiles{f: fs}, []passwdEntry{{name: "ubuntu", uid: 1000}}, st, sshdConfig{}).principals["ubuntu"])
+						assert.Empty(t, readCerts(fs, systemFiles{f: fs}, []passwdEntry{{name: "ubuntu", uid: 1000}}, st, sshdConfig{}, false).principals["ubuntu"])
 					}
 				}
 			})

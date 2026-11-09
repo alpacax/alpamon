@@ -47,6 +47,7 @@ func runAccountBudget[T any](ctx context.Context, c *collector, cat, user string
 	defer cancel()
 
 	done := make(chan accountResult[T], 1)
+	releaseFS := retainCollectionFS(ctx)
 	go func() {
 		result := accountResult[T]{}
 		defer func() {
@@ -54,6 +55,7 @@ func runAccountBudget[T any](ctx context.Context, c *collector, cat, user string
 				result.reason = reasonParseError
 				logParserPanic(cat)
 			}
+			releaseFS()
 			c.accountMu.Lock()
 			completed = true
 			delete(c.accountBusy, key)
@@ -116,16 +118,16 @@ func categoryFailure[T any](reason string) T {
 	return out
 }
 
-func failureEnvelope(path, reason string) Envelope {
+func failureEnvelope(path, reason string) envelope {
 	status := statusUnresolved
 	if reason == reasonTimeout {
 		status = statusTimeout
 	}
-	return Envelope{Path: path, Status: status, Reasons: []string{reason}}
+	return envelope{Path: path, Status: status, Reasons: []string{reason}}
 }
 
 func failedAccountKeys(a passwdEntry, t *sshdT, reason string) accountKeys {
-	out := accountKeys{home: Home{Status: statusUnresolved}, files: []KeyFile{}}
+	out := accountKeys{home: home{Status: statusUnresolved}, files: []keyFile{}}
 	if reason == reasonTimeout {
 		out.home.Status = statusTimeout
 	}
@@ -145,29 +147,29 @@ func failedAccountKeys(a passwdEntry, t *sshdT, reason string) accountKeys {
 			continue
 		}
 		seen[p] = true
-		out.files = append(out.files, KeyFile{Envelope: failureEnvelope(p, reason), Keys: []Key{}})
+		out.files = append(out.files, keyFile{Envelope: failureEnvelope(p, reason), Keys: []key{}})
 	}
-	slices.SortFunc(out.files, func(a, b KeyFile) int { return strings.Compare(a.Path, b.Path) })
+	slices.SortFunc(out.files, func(a, b keyFile) int { return strings.Compare(a.Path, b.Path) })
 	return out
 }
 
-func failedAccountCerts(a passwdEntry, t *sshdT, reason string) []PrincipalsFile {
+func failedAccountCerts(a passwdEntry, t *sshdT, reason string) []principalsFile {
 	tmpl := sshdValue(t, "authorizedprincipalsfile")
 	if tmpl == "" || tmpl == "none" {
-		return []PrincipalsFile{}
+		return []principalsFile{}
 	}
 	p, ok := expandPath(tmpl, a.home, a.name)
 	if !ok {
 		if a.home == "" {
-			return []PrincipalsFile{}
+			return []principalsFile{}
 		}
 		p = tmpl
 	}
-	return []PrincipalsFile{{Envelope: failureEnvelope(p, reason), Entries: []PrincipalEntry{}}}
+	return []principalsFile{{Envelope: failureEnvelope(p, reason), Entries: []principalEntry{}}}
 }
 
-func failedAccountTrust(a passwdEntry, t *sshdT, cfg sshdConfig, reason string) []TrustFile {
-	out := []TrustFile{}
+func failedAccountTrust(a passwdEntry, t *sshdT, cfg sshdConfig, reason string) []trustFile {
+	out := []trustFile{}
 	if a.home == "" {
 		return out
 	}
@@ -180,7 +182,7 @@ func failedAccountTrust(a passwdEntry, t *sshdT, cfg sshdConfig, reason string) 
 	}
 	for _, kind := range kinds {
 		p, _ := expandPath("."+kind, a.home, a.name)
-		out = append(out, TrustFile{Envelope: failureEnvelope(p, reason), Kind: kind, Entries: []TrustEntry{}})
+		out = append(out, trustFile{Envelope: failureEnvelope(p, reason), Kind: kind, Entries: []trustEntry{}})
 	}
 	return out
 }
@@ -249,12 +251,12 @@ func readAccountResults[T any](ctx context.Context, c *collector, cat string, ac
 }
 
 func (c *collector) readKeysBudget(ctx context.Context, accounts []passwdEntry, t *sshdT, cfg sshdConfig) keysData {
-	d := withFS(c, categoryFailure[keysData](reasonFileUnreadable), func(fs *fsReader, _ systemFiles) keysData { return readKeys(fs, nil, t, cfg) })
+	d := withFS(ctx, c, categoryFailure[keysData](reasonFileUnreadable), func(fs *fsReader, _ systemFiles) keysData { return readKeys(fs, nil, t, cfg) })
 	if !d.usable {
 		return d
 	}
 	readAccountResults(ctx, c, catKeys, accounts, func(a passwdEntry) keysData {
-		return withFS(c, categoryFailure[keysData](reasonFileUnreadable), func(fs *fsReader, sys systemFiles) keysData { return readKeys(fs, []passwdEntry{a}, t, cfg) })
+		return withFS(ctx, c, categoryFailure[keysData](reasonFileUnreadable), func(fs *fsReader, _ systemFiles) keysData { return readKeys(fs, []passwdEntry{a}, t, cfg) })
 	}, func(a passwdEntry, one keysData, reason string) {
 		if reason == "" {
 			reason = one.failure
@@ -271,7 +273,7 @@ func (c *collector) readKeysBudget(ctx context.Context, accounts []passwdEntry, 
 }
 
 func (c *collector) readCertsBudget(ctx context.Context, accounts []passwdEntry, t *sshdT, cfg sshdConfig) certsData {
-	d := withFS(c, categoryFailure[certsData](reasonFileUnreadable), func(fs *fsReader, sys systemFiles) certsData { return readCerts(fs, sys, nil, t, cfg) })
+	d := withFS(ctx, c, categoryFailure[certsData](reasonFileUnreadable), func(fs *fsReader, sys systemFiles) certsData { return readCerts(fs, sys, nil, t, cfg, false) })
 	if !d.usable {
 		return d
 	}
@@ -279,7 +281,7 @@ func (c *collector) readCertsBudget(ctx context.Context, accounts []passwdEntry,
 		return d
 	}
 	readAccountResults(ctx, c, catCertificates, accounts, func(a passwdEntry) certsData {
-		return withFS(c, categoryFailure[certsData](reasonFileUnreadable), func(fs *fsReader, sys systemFiles) certsData {
+		return withFS(ctx, c, categoryFailure[certsData](reasonFileUnreadable), func(fs *fsReader, sys systemFiles) certsData {
 			return readCerts(fs, sys, []passwdEntry{a}, t, cfg, true)
 		})
 	}, func(a passwdEntry, one certsData, reason string) {
@@ -298,7 +300,7 @@ func (c *collector) readCertsBudget(ctx context.Context, accounts []passwdEntry,
 }
 
 func (c *collector) readTrustBudget(ctx context.Context, accounts []passwdEntry, t *sshdT, cfg sshdConfig) trustData {
-	d := withFS(c, categoryFailure[trustData](reasonFileUnreadable), func(fs *fsReader, sys systemFiles) trustData { return readTrust(fs, sys, nil, t, cfg) })
+	d := withFS(ctx, c, categoryFailure[trustData](reasonFileUnreadable), func(fs *fsReader, sys systemFiles) trustData { return readTrust(fs, sys, nil, t, cfg, false) })
 	if !d.usable {
 		return d
 	}
@@ -306,7 +308,7 @@ func (c *collector) readTrustBudget(ctx context.Context, accounts []passwdEntry,
 		return d
 	}
 	readAccountResults(ctx, c, catTrust, accounts, func(a passwdEntry) trustData {
-		return withFS(c, categoryFailure[trustData](reasonFileUnreadable), func(fs *fsReader, sys systemFiles) trustData {
+		return withFS(ctx, c, categoryFailure[trustData](reasonFileUnreadable), func(fs *fsReader, sys systemFiles) trustData {
 			return readTrust(fs, sys, []passwdEntry{a}, t, cfg, true)
 		})
 	}, func(a passwdEntry, one trustData, reason string) {

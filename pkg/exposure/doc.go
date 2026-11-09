@@ -1,6 +1,6 @@
 // Package exposure reports a Linux host's access-path metadata to the Alpacon
 // server: local accounts and their password state, SSH authorized keys and
-// user-CA trust, Kerberos and host-based trust files, sudo grants, the
+// user-caKey trust, Kerberos and host-based trust files, sudo grants, the
 // effective sshd policy and each account's last PTY login.
 //
 // # What leaves the host

@@ -5,6 +5,7 @@ package exposure
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -57,16 +58,16 @@ func TestMasterArgsFromListenerTitle(t *testing.T) {
 
 // correspondenceFor builds a proc tree with the given sshd masters and
 // returns the daemon record for a configuration last changed at mtime.
-func correspondenceFor(t *testing.T, masters [][]string, mtime time.Time, socket bool) Daemon {
+func correspondenceFor(t *testing.T, masters [][]string, mtime time.Time, socket bool) daemon {
 	t.Helper()
 	root := t.TempDir()
 	proc := filepath.Join(root, "proc")
 	require.NoError(t, os.MkdirAll(proc, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(proc, "stat"), []byte("btime 1700000000\n"), 0o644))
 	for i, argv := range masters {
-		pd := filepath.Join(proc, itoa(100+i))
+		pd := filepath.Join(proc, strconv.Itoa(100+i))
 		require.NoError(t, os.MkdirAll(pd, 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(pd, "stat"), []byte(itoa(100+i)+" (sshd) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 100000 1 1\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(pd, "stat"), []byte(strconv.Itoa(100+i)+" (sshd) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 100000 1 1\n"), 0o644))
 		cmd := ""
 		for _, a := range argv {
 			cmd += a + "\x00"
@@ -92,11 +93,11 @@ func TestCorrespondence(t *testing.T) {
 	newer := time.Unix(1800000000, 0) // after the master started at btime+1000s
 	yes, no := true, false
 	plain := []string{"/usr/sbin/sshd", "-D"}
-	assert.Equal(t, Daemon{ConfigPathMatches: &yes, Correspondence: "established"}, correspondenceFor(t, [][]string{plain}, old, false))
-	assert.Equal(t, Daemon{ConfigPathMatches: &yes, Correspondence: "unresolved"}, correspondenceFor(t, [][]string{plain}, newer, false), "config changed after the master started")
-	assert.Equal(t, Daemon{ConfigPathMatches: &yes, Correspondence: "unresolved"}, correspondenceFor(t, [][]string{{"/usr/sbin/sshd", "-o", "UsePAM=no"}}, old, false))
-	assert.Equal(t, Daemon{ConfigPathMatches: &no, Correspondence: "unresolved"}, correspondenceFor(t, [][]string{{"/usr/sbin/sshd", "-f", "/etc/ssh/alt"}}, old, false))
-	assert.Equal(t, Daemon{Correspondence: "unresolved"}, correspondenceFor(t, [][]string{plain, plain}, old, false), "two listeners")
-	assert.Equal(t, Daemon{Correspondence: "unresolved"}, correspondenceFor(t, nil, old, false))
-	assert.Equal(t, Daemon{Correspondence: "established"}, correspondenceFor(t, nil, newer, true), "socket activation reads the configuration per connection")
+	assert.Equal(t, daemon{ConfigPathMatches: &yes, Correspondence: "established"}, correspondenceFor(t, [][]string{plain}, old, false))
+	assert.Equal(t, daemon{ConfigPathMatches: &yes, Correspondence: "unresolved"}, correspondenceFor(t, [][]string{plain}, newer, false), "config changed after the master started")
+	assert.Equal(t, daemon{ConfigPathMatches: &yes, Correspondence: "unresolved"}, correspondenceFor(t, [][]string{{"/usr/sbin/sshd", "-o", "UsePAM=no"}}, old, false))
+	assert.Equal(t, daemon{ConfigPathMatches: &no, Correspondence: "unresolved"}, correspondenceFor(t, [][]string{{"/usr/sbin/sshd", "-f", "/etc/ssh/alt"}}, old, false))
+	assert.Equal(t, daemon{Correspondence: "unresolved"}, correspondenceFor(t, [][]string{plain, plain}, old, false), "two listeners")
+	assert.Equal(t, daemon{Correspondence: "unresolved"}, correspondenceFor(t, nil, old, false))
+	assert.Equal(t, daemon{Correspondence: "established"}, correspondenceFor(t, nil, newer, true), "socket activation reads the configuration per connection")
 }

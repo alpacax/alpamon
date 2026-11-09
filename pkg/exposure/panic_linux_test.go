@@ -42,9 +42,9 @@ func assertPanicLog(t *testing.T, logs string, stage, message string) {
 	assert.Regexp(t, `"source":"pkg/exposure/[a-z_]+\.go:[0-9]+"`, logs)
 }
 
-func decodeReport(t *testing.T, call postCall) *Report {
+func decodeReport(t *testing.T, call postCall) *exposureReport {
 	t.Helper()
-	var r Report
+	var r exposureReport
 	require.NoError(t, json.Unmarshal(call.body, &r))
 	sealed, err := seal(&r)
 	require.NoError(t, err)
@@ -74,11 +74,11 @@ func TestReadParserPanicKeepsOtherCategoriesAndNextRead(t *testing.T) {
 	first, next := decodeReport(t, reports[0]), decodeReport(t, reports[1])
 	for _, name := range categoryNames {
 		if name == catPasswords {
-			assert.Equal(t, Coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}, first.Categories[name])
+			assert.Equal(t, coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}, first.Categories[name])
 		} else {
-			assert.Equal(t, Coverage{Status: coverageCovered, Reasons: []string{}}, first.Categories[name], name)
+			assert.Equal(t, coverage{Status: coverageCovered, Reasons: []string{}}, first.Categories[name], name)
 		}
-		assert.Equal(t, Coverage{Status: coverageCovered, Reasons: []string{}}, next.Categories[name], name)
+		assert.Equal(t, coverage{Status: coverageCovered, Reasons: []string{}}, next.Categories[name], name)
 	}
 	assertPanicLog(t, logs.String(), catPasswords, "Exposure category parser panicked.")
 }
@@ -99,7 +99,7 @@ func TestReadBoundaryFallbackAndNextRead(t *testing.T) {
 					}
 				})
 				p := acceptingPoster()
-				s := newService(p, func(context.Context) *Report {
+				s := newService(p, func(context.Context) *exposureReport {
 					readHook("collect")
 					readHook("assemble")
 					return sampleReport()
@@ -120,16 +120,16 @@ func TestReadBoundaryFallbackAndNextRead(t *testing.T) {
 					r := decodeReport(t, reports[0])
 					require.Len(t, r.Categories, 8)
 					for _, name := range categoryNames {
-						assert.Equal(t, Coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}, r.Categories[name], name)
+						assert.Equal(t, coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}, r.Categories[name], name)
 					}
-					assert.Equal(t, SchemaVersion, r.SchemaVersion)
-					assert.Equal(t, Scope{OS: "linux", Protocol: "ssh"}, r.Scope)
+					assert.Equal(t, schemaVersion, r.SchemaVersion)
+					assert.Equal(t, reportScope{OS: "linux", Protocol: "ssh"}, r.Scope)
 					assert.Equal(t, time.Now().UTC().Format(time.RFC3339), r.ObservedAt)
 					assert.Empty(t, r.External)
 					assert.Empty(t, r.Accounts)
 					assert.Empty(t, r.SystemTrust)
 					assert.Nil(t, r.UserCA)
-					assert.Equal(t, SSHD{MatchBlocks: []MatchBlock{}, Daemon: Daemon{Correspondence: "unresolved"}}, r.SSHD)
+					assert.Equal(t, sshdPolicy{MatchBlocks: []matchSettings{}, Daemon: daemon{Correspondence: "unresolved"}}, r.SSHD)
 					// assemble is injected before the fixture's assembly stand-in.
 					logStage := stage
 					if stage == "assemble" {
@@ -166,7 +166,7 @@ func TestServicePanicRestartsAfterPauseAndKeepsDueTime(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				logs := captureLogs(t)
 				p := acceptingPoster()
-				s := newService(p, func(context.Context) *Report { return sampleReport() }, make(chan struct{}, 1))
+				s := newService(p, func(context.Context) *exposureReport { return sampleReport() }, make(chan struct{}, 1))
 				var jitters int
 				s.jitter = func() time.Duration {
 					jitters++
@@ -292,7 +292,7 @@ func TestServiceDeliveryPanicKeepsAdvancedDueTime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		logs := captureLogs(t)
 		p := &panicPoster{post: acceptingPoster()}
-		s := newService(p, func(context.Context) *Report { return sampleReport() }, nil)
+		s := newService(p, func(context.Context) *exposureReport { return sampleReport() }, nil)
 		s.jitter = func() time.Duration { return 0 }
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -318,13 +318,13 @@ func TestEncoderPanicReachesReadBoundary(t *testing.T) {
 	testHookEncodePanic = func() bool { return failed.CompareAndSwap(false, true) }
 	defer func() { testHookEncodePanic = nil }()
 	p := acceptingPoster()
-	s := testService(p, func(context.Context) *Report { return sampleReport() })
+	s := testService(p, func(context.Context) *exposureReport { return sampleReport() })
 	s.readAndDeliver(context.Background())
 	reports := p.callsTo(reportURL)
 	require.Len(t, reports, 1)
 	r := decodeReport(t, reports[0])
 	for _, cat := range categoryNames {
-		assert.Equal(t, Coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}, r.Categories[cat])
+		assert.Equal(t, coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}, r.Categories[cat])
 	}
 	assertPanicLog(t, logs.String(), "serialize", "Exposure read panicked; recovered at read boundary.")
 	assert.Regexp(t, `"source":"pkg/exposure/canonical.go:[0-9]+"`, logs.String())
@@ -341,7 +341,7 @@ func TestCategoryStarterPanicReturnsTimeout(t *testing.T) {
 		}
 	})
 	r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(context.Background())
-	assert.Equal(t, Coverage{Status: coverageUnknown, Reasons: []string{reasonTimeout}}, r.Categories[catPasswords])
+	assert.Equal(t, coverage{Status: coverageUnknown, Reasons: []string{reasonTimeout}}, r.Categories[catPasswords])
 	assert.Equal(t, coverageCovered, r.Categories[catKeys].Status)
 	assertPanicLog(t, logs.String(), catPasswords, "Exposure category starter panicked.")
 }
@@ -390,7 +390,7 @@ func TestPersistentDeliveryPanicKeepsHourlyTimerAndTriggers(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		logs := captureLogs(t)
 		var reads atomic.Int32
-		s := newService(alwaysPanicPoster{}, func(context.Context) *Report { reads.Add(1); return sampleReport() }, make(chan struct{}, 1))
+		s := newService(alwaysPanicPoster{}, func(context.Context) *exposureReport { reads.Add(1); return sampleReport() }, make(chan struct{}, 1))
 		s.jitter = func() time.Duration { return 0 }
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

@@ -86,6 +86,9 @@ func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) ui
 		return sshdRun{}
 	}
 	var buf bytes.Buffer
+	if st, err := stdout.(*os.File).Stat(); err == nil {
+		buf.Grow(int(max(0, min(st.Size(), int64(sshdStdoutCap+1)))))
+	}
 	_, readErr := io.Copy(&buf, io.LimitReader(stdout, sshdStdoutCap+1))
 	over := buf.Len() > sshdStdoutCap
 	if over {

@@ -197,7 +197,7 @@ func TestParseAuthorizedKeysVariants(t *testing.T) {
 	assert.Equal(t, 1, res.unparsed)
 	assert.Equal(t, 1, res.tooLong)
 	require.Len(t, res.keys, 2)
-	var ed0 Key
+	var ed0 key
 	for _, k := range res.keys {
 		if k.Fingerprint == fpEd0 {
 			ed0 = k
@@ -243,8 +243,8 @@ func TestParsePrincipalsFile(t *testing.T) {
 
 func TestParseCAKeys(t *testing.T) {
 	cas, unparsed, _ := parseCAKeys([]byte("ssh-ed25519 " + testEd0 + " ca\nssh-ed25519 " + testEd0 + " dup\ncert-authority ssh-ed25519 " + testEd1 + "\n"))
-	assert.Equal(t, []CA{{Fingerprint: fpEd0, Type: "ssh-ed25519", Bits: 256}}, cas)
-	assert.Equal(t, 1, unparsed, "options are not allowed in a CA file")
+	assert.Equal(t, []caKey{{Fingerprint: fpEd0, Type: "ssh-ed25519", Bits: 256}}, cas)
+	assert.Equal(t, 1, unparsed, "options are not allowed in a caKey file")
 }
 
 func TestParseTrust(t *testing.T) {
@@ -253,7 +253,7 @@ func TestParseTrust(t *testing.T) {
 	assert.Len(t, k5, 2)
 	hu, unparsed, _ := parseHostsEquiv([]byte("host.example.com\nhost2 root\n+\n-host\n@netgroup\nh u extra\n"))
 	assert.Equal(t, 4, unparsed)
-	assert.Equal(t, []HostUser{{Host: "host.example.com"}, {Host: "host2", User: ptr("root")}}, hu)
+	assert.Equal(t, []hostUser{{Host: "host.example.com"}, {Host: "host2", User: ptr("root")}}, hu)
 	assert.True(t, krb5MappingUnresolved([]byte("[libdefaults]\n k5login_directory = /etc/k5\n")))
 	assert.True(t, krb5MappingUnresolved([]byte("includedir /etc/krb5.conf.d/\n")))
 	assert.False(t, krb5MappingUnresolved([]byte("[libdefaults]\n default_realm = EXAMPLE.COM\n=\n")))
@@ -385,7 +385,7 @@ func TestParseWtmp(t *testing.T) {
 	assert.Equal(t, 2, parseWtmp(data, got), "one invalid user, one partial record")
 	require.Contains(t, got, "alice")
 	assert.Equal(t, ptyRecord{time: 200, tty: ptr("pts/1")}, got["alice"], "a source outside the grammar is null")
-	assert.Equal(t, &PTYLogin{Time: "1970-01-01T00:03:20Z", TTY: ptr("pts/1"), From: "wtmp"}, got["alice"].login("wtmp"))
+	assert.Equal(t, &ptyLogin{Time: "1970-01-01T00:03:20Z", TTY: ptr("pts/1"), From: "wtmp"}, got["alice"].login("wtmp"))
 }
 
 func TestParseLastlog(t *testing.T) {

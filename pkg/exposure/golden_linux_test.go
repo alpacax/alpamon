@@ -318,7 +318,7 @@ func recordOpens(t *testing.T, unreadable []string) func() []string {
 }
 
 // collectCase reads a case and returns the sealed body with the report.
-func collectCase(t *testing.T, name string) ([]byte, *Report, caseSpec, string, []string) {
+func collectCase(t *testing.T, name string) ([]byte, *exposureReport, caseSpec, string, []string) {
 	t.Helper()
 	dir := filepath.Join(fixturesDir, "hosts", name)
 	spec := loadCase(t, dir)
@@ -364,12 +364,12 @@ func TestGoldenHosts(t *testing.T) {
 			assert.Equal(t, goldenHash(t, want), r.Hash)
 			if name == "ubuntu-default" {
 				for _, category := range []string{catAccounts, catSudo, catKeys} {
-					assert.Equal(t, Coverage{Status: coverageCovered, Reasons: []string{}}, r.Categories[category])
+					assert.Equal(t, coverage{Status: coverageCovered, Reasons: []string{}}, r.Categories[category])
 				}
 			}
 			if name == "systemd-homed" {
-				assert.Equal(t, Coverage{Status: coveragePartial, Reasons: []string{reasonExternalSource}}, r.Categories[catAccounts])
-				assert.Contains(t, r.External, External{Kind: externalNSSAccounts, Scope: "global", Sources: []string{"systemd"}})
+				assert.Equal(t, coverage{Status: coveragePartial, Reasons: []string{reasonExternalSource}}, r.Categories[catAccounts])
+				assert.Contains(t, r.External, external{Kind: externalNSSAccounts, Scope: "global", Sources: []string{"systemd"}})
 			}
 
 			// Leak canaries, on every case: never in the body, the hash

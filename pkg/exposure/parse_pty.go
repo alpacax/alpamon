@@ -81,8 +81,8 @@ func parseLastlog(rec []byte) (ptyRecord, bool) {
 	return reduceLogin(sec, rec[4:36], rec[36:292]), true
 }
 
-func (p ptyRecord) login(from string) *PTYLogin {
-	return &PTYLogin{
+func (p ptyRecord) login(from string) *ptyLogin {
+	return &ptyLogin{
 		Time:   time.Unix(p.time, 0).UTC().Format(time.RFC3339),
 		Source: p.source,
 		TTY:    p.tty,

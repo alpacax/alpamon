@@ -28,34 +28,26 @@ const (
 	maxAttempts   = 5
 	firstBackoff  = 5 * time.Second
 	maxBackoff    = 5 * time.Minute
-	maxRespBytes  = 64 << 10
 )
 
-// Poster is the part of scheduler.Session the transport uses. These calls
-// bypass the request queue: its reporter logs response bodies on failure,
-// which this endpoint pair must never do.
-type Poster interface {
-	PostExposure(ctx context.Context, url string, body any, timeout time.Duration) ([]byte, int, http.Header, error)
-}
-
-// service serializes exposure reads and their delivery. Each read has its
-// own goroutine and returns a sealed value before delivery starts. A trigger that
+// service serializes exposure reads and their delivery. A trigger that
 // arrives during a read is held in a one-slot channel and causes exactly one
 // more read after it.
 type service struct {
 	post    Poster
-	collect func(ctx context.Context) *Report
+	collect func(ctx context.Context) *exposureReport
 	trigger chan struct{}
 	now     func() time.Time
 	jitter  func() time.Duration
 	sleep   func(ctx context.Context, d time.Duration) bool
 	// lastObserved keeps observed_at strictly increasing across reads, so a
 	// second read within the same second is never taken for a replay.
-	lastObserved time.Time
-	due          time.Time
+	lastObserved     time.Time
+	due              time.Time
+	unavailableUntil time.Time
 }
 
-func newService(p Poster, collect func(ctx context.Context) *Report, trigger chan struct{}) *service {
+func newService(p Poster, collect func(ctx context.Context) *exposureReport, trigger chan struct{}) *service {
 	return &service{
 		post:    p,
 		collect: collect,
@@ -118,18 +110,10 @@ func (s *service) runLoop(ctx context.Context) (panicked bool) {
 // report only when the server asks for it. Retries resend the same
 // observed_at and body.
 func (s *service) readAndDeliver(ctx context.Context) {
-	// Only this goroutine delivers. No read code runs on the service loop.
-	type result struct {
-		report *Report
-		body   []byte
+	if s.now().Before(s.unavailableUntil) {
+		return
 	}
-	done := make(chan result, 1)
-	go func() {
-		r, body := s.buildReport(ctx)
-		done <- result{r, body}
-	}()
-	got := <-done
-	r, body := got.report, got.body
+	r, body := s.buildReport(ctx)
 	if r == nil {
 		return
 	}
@@ -140,10 +124,11 @@ func (s *service) readAndDeliver(ctx context.Context) {
 	}
 	status, ok := s.send(ctx, checkURL, check, checkTimeout, &res)
 	switch {
-	case !ok:
-		return
 	case status == http.StatusNotFound:
-		log.Debug().Msg("Exposure check endpoint not available on this server; skipping until the next read.")
+		s.unavailableUntil = s.now().Add(24 * time.Hour)
+		log.Debug().Msg("Exposure check endpoint not available on this server; skipping for 24 hours.")
+		return
+	case !ok:
 		return
 	case status != http.StatusOK || res.Required == nil:
 		log.Debug().Int("status_code", status).Msg("Exposure check was not accepted.")
@@ -157,7 +142,7 @@ func (s *service) readAndDeliver(ctx context.Context) {
 	}
 }
 
-func (s *service) buildReport(ctx context.Context) (report *Report, encoded []byte) {
+func (s *service) buildReport(ctx context.Context) (report *exposureReport, encoded []byte) {
 	stage := "collect"
 	var observed time.Time
 	defer func() {
@@ -204,7 +189,7 @@ func (s *service) buildReport(ctx context.Context) (report *Report, encoded []by
 	return r, body
 }
 
-func fallbackReport(observed time.Time) (report *Report, encoded []byte, panicSource string) {
+func fallbackReport(observed time.Time) (report *exposureReport, encoded []byte, panicSource string) {
 	defer func() {
 		if recover() != nil {
 			report, encoded = nil, nil
@@ -213,18 +198,18 @@ func fallbackReport(observed time.Time) (report *Report, encoded []byte, panicSo
 	}()
 	readHook("fallback")
 	// The contract requires an sshd object. Use its empty policy form.
-	r := &Report{
-		SchemaVersion: SchemaVersion,
+	r := &exposureReport{
+		SchemaVersion: schemaVersion,
 		ObservedAt:    observed.Format(time.RFC3339),
-		Scope:         Scope{OS: "linux", Protocol: "ssh"},
-		Categories:    map[string]Coverage{},
-		External:      []External{},
-		SSHD:          SSHD{MatchBlocks: []MatchBlock{}, Daemon: Daemon{Correspondence: "unresolved"}},
-		SystemTrust:   []SystemTrustFile{},
-		Accounts:      []Account{},
+		Scope:         reportScope{OS: "linux", Protocol: "ssh"},
+		Categories:    map[string]coverage{},
+		External:      []external{},
+		SSHD:          sshdPolicy{MatchBlocks: []matchSettings{}, Daemon: daemon{Correspondence: "unresolved"}},
+		SystemTrust:   []systemTrustFile{},
+		Accounts:      []account{},
 	}
 	for _, name := range categoryNames {
-		r.Categories[name] = Coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}
+		r.Categories[name] = coverage{Status: coverageUnknown, Reasons: []string{reasonParseError}}
 	}
 	body, err := seal(r)
 	if err != nil {
@@ -234,7 +219,7 @@ func fallbackReport(observed time.Time) (report *Report, encoded []byte, panicSo
 }
 
 // checkBody is the canonical check request for a sealed report.
-func checkBody(r *Report) []byte {
+func checkBody(r *exposureReport) []byte {
 	b := []byte(`{"hash":`)
 	b = appendJSONString(b, r.Hash)
 	b = append(b, `,"observed_at":`...)
@@ -254,13 +239,20 @@ func (s *service) send(ctx context.Context, url string, body []byte, timeout tim
 	backoff := firstBackoff
 	for attempt := 1; ; attempt++ {
 		resp, status, _, err := s.post.PostExposure(ctx, url, body, timeout)
+		if errors.Is(err, scheduler.ErrExposureRequest) {
+			log.Debug().Msg("Exposure request could not be built; skipping until the next read.")
+			return status, false
+		}
 		if status == http.StatusTooManyRequests {
 			log.Debug().Msg("Exposure delivery throttled; skipping until the next read.")
 			return status, false
 		}
-		if status >= 300 && status < 400 || len(resp) > maxRespBytes || errors.Is(err, scheduler.ErrExposureResponseTooLarge) {
+		if status >= 300 && status < 400 || len(resp) > scheduler.MaxExposureResponseBytes || errors.Is(err, scheduler.ErrExposureResponseTooLarge) {
 			log.Debug().Msg("Exposure response rejected; skipping until the next read.")
 			return status, false
+		}
+		if status >= 400 && status < 500 && status != http.StatusRequestTimeout {
+			return status, true
 		}
 		if err == nil && !retryable(status) {
 			if out != nil && status == http.StatusOK {
@@ -275,7 +267,7 @@ func (s *service) send(ctx context.Context, url string, body []byte, timeout tim
 			log.Debug().Int("status_code", status).Int("attempts", attempt).Msg("Exposure delivery gave up until the next read.")
 			return status, false
 		}
-		if !s.sleep(ctx, backoff) {
+		if !s.sleep(ctx, backoff*8/10+rand.N(backoff*4/10+1)) {
 			return 0, false
 		}
 		backoff = min(backoff*3, maxBackoff)

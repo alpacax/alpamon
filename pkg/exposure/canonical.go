@@ -20,13 +20,21 @@ import (
 
 // encodeValue returns the canonical JSON of v. Nil slices become [] unless
 // the field is tagged nullable, so an empty list is never written as null.
-func encodeValue(v any) (encoded []byte, err error) {
+func encodeValue(v any) ([]byte, error) {
+	tree, err := valueTree(v)
+	if err != nil {
+		return nil, err
+	}
+	return appendCanonical(nil, tree)
+}
+
+func valueTree(v any) (any, error) {
 	if testHookEncodePanic != nil && testHookEncodePanic() {
 		panic("canonical encoder test panic")
 	}
 	rv := reflect.ValueOf(v)
 	if !rv.IsValid() {
-		return []byte("null"), nil
+		return nil, nil
 	}
 	copied := reflect.New(rv.Type()).Elem()
 	copied.Set(rv)
@@ -44,7 +52,7 @@ func encodeValue(v any) (encoded []byte, err error) {
 	if err := dec.Decode(&tree); err != nil {
 		return nil, err
 	}
-	return appendCanonical(nil, tree)
+	return tree, nil
 }
 
 // fillNilSlices walks v and replaces nil slices with empty ones. It copies
@@ -67,7 +75,7 @@ func fillNilSlices(v reflect.Value, depth int) error {
 		t := v.Type()
 		for i := range v.NumField() {
 			f := t.Field(i)
-			if !f.IsExported() {
+			if !f.IsExported() && !f.Anonymous {
 				continue
 			}
 			fv := v.Field(i)
@@ -226,7 +234,7 @@ func appendJSONString(dst []byte, s string) []byte {
 
 // hashInput is the canonical JSON of the report with observed_at and hash
 // removed: the exact bytes the report hash covers.
-func hashInput(r *Report) ([]byte, error) {
+func hashInput(r *exposureReport) ([]byte, error) {
 	tree, err := canonicalTree(r)
 	if err != nil {
 		return nil, err
@@ -236,27 +244,30 @@ func hashInput(r *Report) ([]byte, error) {
 	return appendCanonical(nil, tree)
 }
 
-func canonicalTree(r *Report) (map[string]any, error) {
-	raw, err := encodeValue(*r)
+func canonicalTree(r *exposureReport) (map[string]any, error) {
+	tree, err := valueTree(*r)
 	if err != nil {
 		return nil, err
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var tree map[string]any
-	if err := dec.Decode(&tree); err != nil {
-		return nil, err
-	}
-	return tree, nil
+	return tree.(map[string]any), nil
 }
 
 // seal sets r.Hash from the hash input and returns the canonical body.
-func seal(r *Report) ([]byte, error) {
-	input, err := hashInput(r)
+func seal(r *exposureReport) ([]byte, error) {
+	tree, err := canonicalTree(r)
+	if err != nil {
+		return nil, err
+	}
+	observed := tree["observed_at"]
+	delete(tree, "observed_at")
+	delete(tree, "hash")
+	input, err := appendCanonical(nil, tree)
 	if err != nil {
 		return nil, err
 	}
 	sum := sha256.Sum256(input)
 	r.Hash = "sha256:" + hex.EncodeToString(sum[:])
-	return encodeValue(*r)
+	tree["hash"] = r.Hash
+	tree["observed_at"] = observed
+	return appendCanonical(nil, tree)
 }

@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +16,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,19 +72,19 @@ func (f *fakePoster) callsTo(url string) []postCall {
 	return out
 }
 
-func sampleReport() *Report {
+func sampleReport() *exposureReport {
 	r := newReport()
 	for _, n := range categoryNames {
-		r.Categories[n] = Coverage{Status: coverageCovered, Reasons: []string{}}
+		r.Categories[n] = coverage{Status: coverageCovered, Reasons: []string{}}
 	}
-	r.Accounts = append(r.Accounts, Account{Username: "deploy", UID: 1001, Groups: []string{"deploy"},
-		Shadow: Shadow{Status: shadowRead, PasswordState: passwordLocked},
-		Home:   Home{Status: statusRead, StrictModesOK: ptr(true)},
-		Sudo:   AccountSudo{Complete: true}})
+	r.Accounts = append(r.Accounts, account{Username: "deploy", UID: 1001, Groups: []string{"deploy"},
+		Shadow: shadow{Status: shadowRead, PasswordState: passwordLocked},
+		Home:   home{Status: statusRead, StrictModesOK: ptr(true)},
+		Sudo:   accountSudo{Complete: true}})
 	return r
 }
 
-func testService(p *fakePoster, collect func(context.Context) *Report) *service {
+func testService(p *fakePoster, collect func(context.Context) *exposureReport) *service {
 	s := newService(p, collect, make(chan struct{}, 1))
 	s.now = func() time.Time { return time.Date(2026, 11, 7, 19, 30, 0, 0, time.UTC) }
 	s.sleep = func(context.Context, time.Duration) bool { return true }
@@ -96,7 +97,7 @@ func TestDeliverReportsOnlyWhenRequired(t *testing.T) {
 	p := &fakePoster{answers: map[string][]fakeResponse{
 		checkURL: {{status: 200, body: `{"required": false, "applied": true}`}},
 	}}
-	s := testService(p, func(context.Context) *Report { return sampleReport() })
+	s := testService(p, func(context.Context) *exposureReport { return sampleReport() })
 	s.readAndDeliver(context.Background())
 
 	checks := p.callsTo(checkURL)
@@ -114,7 +115,7 @@ func TestDeliverSendsTheSealedBodyWhenRequired(t *testing.T) {
 		checkURL:  {{status: 200, body: `{"required": true, "applied": false}`}},
 		reportURL: {{status: 200, body: `{"accepted_hash": "x", "applied": true}`}},
 	}}
-	s := testService(p, func(context.Context) *Report { return sampleReport() })
+	s := testService(p, func(context.Context) *exposureReport { return sampleReport() })
 	s.readAndDeliver(context.Background())
 
 	reports := p.callsTo(reportURL)
@@ -134,7 +135,7 @@ func TestDeliverCheck404SkipsWithOneFixedLine(t *testing.T) {
 	p := &fakePoster{answers: map[string][]fakeResponse{
 		checkURL: {{status: 404, body: `<html>LEAKCANARY-404-page</html>`}},
 	}}
-	s := testService(p, func(context.Context) *Report { return sampleReport() })
+	s := testService(p, func(context.Context) *exposureReport { return sampleReport() })
 	s.readAndDeliver(context.Background())
 
 	assert.Len(t, p.callsTo(checkURL), 1, "a 404 is not retried")
@@ -149,7 +150,7 @@ func TestDeliver429SkipsUntilNextDueRead(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/body error=%t", endpoint, bodyError), func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					logs := captureLogs(t)
-					throttled := fakeResponse{status: http.StatusTooManyRequests, body: strings.Repeat("LEAKCANARY-429", maxRespBytes)}
+					throttled := fakeResponse{status: http.StatusTooManyRequests, body: strings.Repeat("LEAKCANARY-429", scheduler.MaxExposureResponseBytes)}
 					if bodyError {
 						throttled.err = fmt.Errorf("LEAKCANARY-body-error")
 					}
@@ -158,7 +159,7 @@ func TestDeliver429SkipsUntilNextDueRead(t *testing.T) {
 						reportURL: {{status: 200}},
 					}}
 					p.answers[endpoint] = append([]fakeResponse{throttled}, p.answers[endpoint]...)
-					s := newService(p, func(context.Context) *Report { return sampleReport() }, make(chan struct{}, 1))
+					s := newService(p, func(context.Context) *exposureReport { return sampleReport() }, make(chan struct{}, 1))
 					s.jitter = func() time.Duration { return 0 }
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
@@ -197,7 +198,7 @@ func TestDeliverRetriesResendTheSameBody(t *testing.T) {
 		reportURL: {{status: 502, body: "LEAKCANARY-502"}, {status: 200, body: `{}`}},
 	}}
 	reads := 0
-	s := testService(p, func(context.Context) *Report { reads++; return sampleReport() })
+	s := testService(p, func(context.Context) *exposureReport { reads++; return sampleReport() })
 	s.readAndDeliver(context.Background())
 
 	assert.Equal(t, 1, reads, "a retry never re-reads the host")
@@ -217,7 +218,7 @@ func TestDeliverRejectedReportLogsNoBody(t *testing.T) {
 		checkURL:  {{status: 200, body: `{"required": true, "applied": false}`}},
 		reportURL: {{status: 400, body: `{"errors": [{"field": "/accounts/0/username", "code": "LEAKCANARY"}]}`}},
 	}}
-	s := testService(p, func(context.Context) *Report { return sampleReport() })
+	s := testService(p, func(context.Context) *exposureReport { return sampleReport() })
 	s.readAndDeliver(context.Background())
 
 	assert.Len(t, p.callsTo(reportURL), 1, "a 400 is not retried")
@@ -228,14 +229,14 @@ func TestDeliverRejectedReportLogsNoBody(t *testing.T) {
 
 func TestDeliverGivesUpAfterBoundedAttempts(t *testing.T) {
 	p := &fakePoster{answers: map[string][]fakeResponse{checkURL: {{status: 500}}}}
-	s := testService(p, func(context.Context) *Report { return sampleReport() })
+	s := testService(p, func(context.Context) *exposureReport { return sampleReport() })
 	s.readAndDeliver(context.Background())
 	assert.Len(t, p.callsTo(checkURL), maxAttempts)
 }
 
 func TestObservedAtStrictlyIncreases(t *testing.T) {
 	p := &fakePoster{answers: map[string][]fakeResponse{checkURL: {{status: 200, body: `{"required": false}`}}}}
-	s := testService(p, func(context.Context) *Report { return sampleReport() })
+	s := testService(p, func(context.Context) *exposureReport { return sampleReport() })
 	s.readAndDeliver(context.Background())
 	s.readAndDeliver(context.Background())
 	checks := p.callsTo(checkURL)
@@ -257,7 +258,7 @@ func TestTriggersDuringAReadCoalesce(t *testing.T) {
 		var mu sync.Mutex
 		reads := 0
 		trig := make(chan struct{}, 1)
-		s := newService(p, func(context.Context) *Report {
+		s := newService(p, func(context.Context) *exposureReport {
 			mu.Lock()
 			reads++
 			n := reads
@@ -296,7 +297,7 @@ func TestHourlyDueTime(t *testing.T) {
 		p := &fakePoster{answers: map[string][]fakeResponse{checkURL: {{status: 200, body: `{"required": false}`}}}}
 		var mu sync.Mutex
 		reads := 0
-		s := newService(p, func(context.Context) *Report {
+		s := newService(p, func(context.Context) *exposureReport {
 			mu.Lock()
 			reads++
 			mu.Unlock()
@@ -327,13 +328,13 @@ func TestExposureResponseLimitAndNoRedirect(t *testing.T) {
 	for _, code := range []int{200, 307, 308} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, `id="test", key="test"`, r.Header.Get("Authorization"))
+				assert.Equal(t, `id="test", key="test"`, r.Header.Get("authorization"))
 				if code != 200 {
 					w.Header().Set("Location", other.URL)
 					w.WriteHeader(code)
 					return
 				}
-				_, err := io.WriteString(w, strings.Repeat("LEAKCANARY", maxRespBytes))
+				_, err := io.WriteString(w, strings.Repeat("LEAKCANARY", scheduler.MaxExposureResponseBytes))
 				if err != nil {
 					return
 				}
@@ -347,7 +348,10 @@ func TestExposureResponseLimitAndNoRedirect(t *testing.T) {
 				assert.Empty(t, body)
 				assert.Equal(t, code, status)
 				svc := newService(session, nil, nil)
-				svc.sleep = func(context.Context, time.Duration) bool { t.Error("rejected response must not retry"); return false }
+				svc.sleep = func(context.Context, time.Duration) bool {
+					assert.Fail(t, "rejected response must not retry")
+					return false
+				}
 				_, ok := svc.send(context.Background(), path, []byte(`{}`), time.Second, nil)
 				assert.False(t, ok)
 			}
@@ -383,14 +387,14 @@ func TestExposureReadsAtMostResponseCapPlusOne(t *testing.T) {
 	data, _, _, err := session.PostExposure(context.Background(), checkURL, []byte(`{}`), time.Second)
 	assert.Error(t, err)
 	assert.Nil(t, data)
-	assert.Equal(t, maxRespBytes+1, body.read)
+	assert.Equal(t, scheduler.MaxExposureResponseBytes+1, body.read)
 	assert.True(t, body.closed)
 }
 
 func TestOversizedReportIsNotDelivered(t *testing.T) {
 	logs := captureLogs(t)
 	p := &fakePoster{}
-	s := testService(p, func(context.Context) *Report {
+	s := testService(p, func(context.Context) *exposureReport {
 		r := sampleReport()
 		// No account-source cut can remove oversized configuration metadata.
 		r.SSHD.Effective = map[string]*string{"allowusers": ptr(strings.Repeat("a", maxReportBytes))}
@@ -406,7 +410,7 @@ func TestRejectedResponsesAreNotRetried(t *testing.T) {
 	for _, response := range []fakeResponse{
 		{status: 301, err: fmt.Errorf("LEAKCANARY redirect")},
 		{status: 307},
-		{status: 200, body: strings.Repeat("x", maxRespBytes+1)},
+		{status: 200, body: strings.Repeat("x", scheduler.MaxExposureResponseBytes+1)},
 		{status: 200, err: scheduler.ErrExposureResponseTooLarge},
 	} {
 		for _, url := range []string{checkURL, reportURL} {

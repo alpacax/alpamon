@@ -111,7 +111,7 @@ func readSudoPolicy(src systemSource, hostname string) sudoPolicy {
 		pol.unresolved = true
 		return pol
 	}
-	r := &sudoReader{src: src, pol: &pol, host: hostname, onStack: map[string]bool{},
+	r := &sudoReader{src: src, pol: &pol, host: hostname, walker: includeWalker{src: src},
 		userAliases: map[string][]sudoWord{}, hostAliases: map[string][]sudoWord{},
 		runasAliases: map[string][]sudoWord{}, cmndAliases: map[string][][]sudoWord{},
 		userMemo: map[string][]sudoUser{}, hostMemo: map[string][2]bool{},
@@ -170,8 +170,7 @@ type sudoReader struct {
 	src          systemSource
 	pol          *sudoPolicy
 	host         string
-	onStack      map[string]bool
-	nfiles       int
+	walker       includeWalker
 	lines        []sudoLine
 	userAliases  map[string][]sudoWord
 	hostAliases  map[string][]sudoWord
@@ -184,55 +183,45 @@ type sudoReader struct {
 }
 
 func (r *sudoReader) file(name string, depth int, top bool) {
-	if depth > maxIncludeDepth || r.nfiles >= maxIncludeFiles {
-		r.pol.global.add(reasonLimitExceeded)
-		return
-	}
-	if r.onStack[name] {
-		r.pol.global.add(reasonParseError)
-		return
-	}
-	r.nfiles++
-	l := r.src.load(name)
-	if l.status == statusAbsent && top {
-		return // no sudoers file: sudo grants nothing
-	}
-	if !l.usable() {
-		r.pol.global.merge(l.reasons)
-		if len(l.reasons) == 0 || l.status == statusAbsent {
-			r.pol.global.add(reasonFileUnreadable)
+	r.walker.file(name, depth, func(l loaded) {
+		if l.status == statusAbsent && top {
+			return // no sudoers file: sudo grants nothing
 		}
-		return
-	}
-	r.onStack[name] = true
-	defer delete(r.onStack, name)
+		if !l.usable() {
+			r.pol.global.merge(l.reasons)
+			if len(l.reasons) == 0 || l.status == statusAbsent {
+				r.pol.global.add(reasonFileUnreadable)
+			}
+			return
+		}
 
-	var logical strings.Builder
-	forEachLine(l.data, func(raw []byte, tooLong bool) bool {
-		if tooLong {
-			r.pol.global.add(reasonLimitExceeded)
-			logical.Reset()
-			return true
-		}
-		s := stripSudoComment(logical.String() + string(raw))
-		logical.Reset()
-		if cont := trailingBackslashes(s); cont%2 == 1 {
-			logical.WriteString(s[:len(s)-1])
-			if logical.Len() > maxLineBytes {
+		var logical strings.Builder
+		forEachLine(l.data, func(raw []byte, tooLong bool) bool {
+			if tooLong {
 				r.pol.global.add(reasonLimitExceeded)
 				logical.Reset()
+				return true
 			}
+			s := stripSudoComment(logical.String() + string(raw))
+			logical.Reset()
+			if cont := trailingBackslashes(s); cont%2 == 1 {
+				logical.WriteString(s[:len(s)-1])
+				if logical.Len() > maxLineBytes {
+					r.pol.global.add(reasonLimitExceeded)
+					logical.Reset()
+				}
+				return true
+			}
+			logical.WriteString(s)
+			text := logical.String()
+			logical.Reset()
+			r.line(name, text, depth)
 			return true
+		})
+		if logical.Len() > 0 {
+			r.line(name, logical.String(), depth)
 		}
-		logical.WriteString(s)
-		text := logical.String()
-		logical.Reset()
-		r.line(name, text, depth)
-		return true
-	})
-	if logical.Len() > 0 {
-		r.line(name, logical.String(), depth)
-	}
+	}, func(code string) { r.pol.global.add(code) })
 }
 
 // Include directives and numeric uid references are not comments.
@@ -309,7 +298,6 @@ func (r *sudoReader) includeDir(dir string, depth int) {
 		return
 	}
 	if l.status != statusRead {
-		r.pol.global.merge(l.reasons)
 		return
 	}
 	var keep []string
@@ -505,6 +493,15 @@ func splitOnComma(toks []sudoWord) [][]sudoWord {
 // supported grammar, which means the affected accounts cannot be named.
 func (r *sudoReader) users(toks []sudoWord, seen map[string]bool) ([]sudoUser, bool) {
 	var out []sudoUser
+	unique := map[sudoUser]bool{}
+	add := func(values ...sudoUser) {
+		for _, value := range values {
+			if !unique[value] {
+				unique[value] = true
+				out = append(out, value)
+			}
+		}
+	}
 	for _, item := range splitOnComma(toks) {
 		if len(item) != 1 || item[0].kind != tWord || item[0].escaped || item[0].quoted {
 			return nil, false
@@ -515,7 +512,7 @@ func (r *sudoReader) users(toks []sudoWord, seen map[string]bool) ([]sudoUser, b
 			if !validName(w[1:]) {
 				return nil, false
 			}
-			out = append(out, sudoUser{group: true, name: w[1:]})
+			add(sudoUser{group: true, name: w[1:]})
 		case isAliasName(w) && r.userAliases[w] != nil:
 			if seen[w] {
 				return nil, false
@@ -532,9 +529,9 @@ func (r *sudoReader) users(toks []sudoWord, seen map[string]bool) ([]sudoUser, b
 			if !ok {
 				return nil, false
 			}
-			out = append(out, sub...)
+			add(sub...)
 		case validName(w) && !isAliasName(w):
-			out = append(out, sudoUser{name: w})
+			add(sudoUser{name: w})
 		default:
 			return nil, false
 		}
@@ -803,6 +800,15 @@ func (r *sudoReader) runasList(toks []sudoWord, seen map[string]bool) ([]string,
 		return nil, true
 	}
 	var out []string
+	unique := map[string]bool{}
+	add := func(values ...string) {
+		for _, value := range values {
+			if !unique[value] {
+				unique[value] = true
+				out = append(out, value)
+			}
+		}
+	}
 	for _, item := range splitOnComma(toks) {
 		if len(item) != 1 || item[0].kind != tWord || item[0].escaped || item[0].quoted {
 			return nil, false
@@ -810,7 +816,7 @@ func (r *sudoReader) runasList(toks []sudoWord, seen map[string]bool) ([]string,
 		w := item[0].text
 		switch {
 		case w == "ALL":
-			out = append(out, w)
+			add(w)
 		case isAliasName(w) && r.runasAliases[w] != nil:
 			if seen[w] {
 				return nil, false
@@ -827,11 +833,11 @@ func (r *sudoReader) runasList(toks []sudoWord, seen map[string]bool) ([]string,
 			if !ok {
 				return nil, false
 			}
-			out = append(out, sub...)
+			add(sub...)
 		case strings.HasPrefix(w, "%") && validName(w[1:]):
-			out = append(out, w)
+			add(w)
 		case validName(w) && !isAliasName(w):
-			out = append(out, w)
+			add(w)
 		default:
 			return nil, false
 		}
@@ -970,12 +976,21 @@ func (r *sudoReader) cmnd(spec []sudoWord, seen map[string]bool) ([]cmndItem, bo
 		seen[w.text] = true
 		defer delete(seen, w.text)
 		var out []cmndItem
+		unique := map[cmndItem]bool{}
+		add := func(values ...cmndItem) {
+			for _, value := range values {
+				if !unique[value] {
+					unique[value] = true
+					out = append(out, value)
+				}
+			}
+		}
 		for _, item := range alias {
 			sub, ok := r.cmnd(item, seen)
 			if !ok {
 				return nil, false
 			}
-			out = append(out, sub...)
+			add(sub...)
 		}
 		r.cmndMemo[w.text] = out
 		return out, true
@@ -990,9 +1005,9 @@ func (r *sudoReader) cmnd(spec []sudoWord, seen map[string]bool) ([]cmndItem, bo
 }
 
 // forAccount maps the policy onto one account.
-func (p *sudoPolicy) forAccount(name string, inGroup func(string) bool) AccountSudo {
+func (p *sudoPolicy) forAccount(name string, inGroup func(string) bool) accountSudo {
 	reasons := reasonSet{}
-	out := AccountSudo{Grants: []Grant{}}
+	out := accountSudo{Grants: []grant{}}
 	if p.unresolved {
 		reasons.add(reasonSudoPolicyUnresolved)
 		out.Reasons = reasons.list()
@@ -1032,7 +1047,7 @@ func (p *sudoPolicy) forAccount(name string, inGroup func(string) bool) AccountS
 				continue
 			}
 			for _, g := range hg.grants {
-				gr := Grant{
+				gr := grant{
 					Source: rule.source, Via: u.via(), Runas: g.runas,
 					Commands: "limited", CommandPaths: g.paths,
 					ArgsRestricted: g.argsRestricted, NoPasswd: g.nopasswd,

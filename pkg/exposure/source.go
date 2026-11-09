@@ -22,10 +22,10 @@ func (l loaded) complete() bool {
 	return l.status == statusAbsent || (l.status == statusRead && len(l.reasons) == 0)
 }
 
-func (l loaded) envelope(path string) Envelope {
+func (l loaded) envelope(path string) envelope {
 	r := reasonSet{}
 	r.merge(l.reasons)
-	return Envelope{Path: path, Status: l.status, Complete: l.complete(), Reasons: r.list()}
+	return envelope{Path: path, Status: l.status, Complete: l.complete(), Reasons: r.list()}
 }
 
 // systemSource reads root-owned system files and directories. The Linux
@@ -35,4 +35,29 @@ type systemSource interface {
 	load(path string) loaded
 	// list returns the entry names of a root-owned directory.
 	list(path string) ([]string, loaded)
+}
+
+// includeWalker shares the traversal bounds and active include stack.
+type includeWalker struct {
+	src   systemSource
+	stack map[string]bool
+	files int
+}
+
+func (w *includeWalker) file(name string, depth int, visit func(loaded), fail func(string)) {
+	if depth > maxIncludeDepth || w.files >= maxIncludeFiles {
+		fail(reasonLimitExceeded)
+		return
+	}
+	if w.stack[name] {
+		fail(reasonParseError)
+		return
+	}
+	if w.stack == nil {
+		w.stack = map[string]bool{}
+	}
+	w.files++
+	w.stack[name] = true
+	defer delete(w.stack, name)
+	visit(w.src.load(name))
 }

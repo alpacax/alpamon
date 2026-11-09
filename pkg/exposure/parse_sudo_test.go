@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func sudoFor(t *testing.T, sudoers string, user string, groups ...string) AccountSudo {
+func sudoFor(t *testing.T, sudoers string, user string, groups ...string) accountSudo {
 	t.Helper()
 	pol := readSudoPolicy(mapSource{files: map[string]string{sudoersPath: sudoers}}, "web-1.example.com")
 	member := map[string]bool{}
@@ -25,35 +25,35 @@ func TestSudoSupportedGrammar(t *testing.T) {
 		sudoers string
 		user    string
 		groups  []string
-		want    []Grant
+		want    []grant
 	}{
 		{"user ALL", "alice ALL=(ALL:ALL) ALL\n", "alice", nil,
-			[]Grant{{Source: sudoersPath, Via: "user:alice", Runas: "ALL:ALL", Commands: "all", CommandPaths: []string{}}}},
+			[]grant{{Source: sudoersPath, Via: "user:alice", Runas: "ALL:ALL", Commands: "all", CommandPaths: []string{}}}},
 		{"group NOPASSWD", "%wheel ALL=(ALL) NOPASSWD: ALL\n", "bob", []string{"wheel"},
-			[]Grant{{Source: sudoersPath, Via: "group:wheel", Runas: "ALL", Commands: "all", CommandPaths: []string{}, NoPasswd: true}}},
+			[]grant{{Source: sudoersPath, Via: "group:wheel", Runas: "ALL", Commands: "all", CommandPaths: []string{}, NoPasswd: true}}},
 		{"default runas", "alice ALL = /usr/bin/id\n", "alice", nil,
-			[]Grant{{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/usr/bin/id"}}}},
+			[]grant{{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/usr/bin/id"}}}},
 		{"own short hostname", "alice web-1 = (root) /usr/bin/id --verbose\n", "alice", nil,
-			[]Grant{{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/usr/bin/id"}, ArgsRestricted: true}}},
+			[]grant{{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/usr/bin/id"}, ArgsRestricted: true}}},
 		{"tags carry and split", "alice ALL = (root) NOPASSWD: /bin/a, /bin/b, PASSWD: /bin/c\n", "alice", nil,
-			[]Grant{
+			[]grant{
 				{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/bin/a", "/bin/b"}, NoPasswd: true},
 				{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/bin/c"}},
 			}},
 		{"aliases", "User_Alias ADMINS = alice, %ops\nRunas_Alias DB = postgres\nHost_Alias HERE = web-1\nCmnd_Alias PSQL = /usr/bin/psql\nADMINS HERE = (DB) PSQL\n", "carol", []string{"ops"},
-			[]Grant{{Source: sudoersPath, Via: "group:ops", Runas: "postgres", Commands: "limited", CommandPaths: []string{"/usr/bin/psql"}}}},
+			[]grant{{Source: sudoersPath, Via: "group:ops", Runas: "postgres", Commands: "limited", CommandPaths: []string{"/usr/bin/psql"}}}},
 		{"alias used before its definition", "ADMINS ALL = ALL\nUser_Alias ADMINS = alice\n", "alice", nil,
-			[]Grant{{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "all", CommandPaths: []string{}}}},
+			[]grant{{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "all", CommandPaths: []string{}}}},
 		{"second host group", "alice ALL = /bin/a : web-1 = (postgres) /usr/bin/id\n", "alice", nil,
-			[]Grant{
+			[]grant{
 				{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/bin/a"}},
 				{Source: sudoersPath, Via: "user:alice", Runas: "postgres", Commands: "limited", CommandPaths: []string{"/usr/bin/id"}},
 			}},
 		{"empty args", `alice ALL = /usr/bin/ls ""` + "\n", "alice", nil,
-			[]Grant{{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/usr/bin/ls"}, ArgsRestricted: true}}},
+			[]grant{{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/usr/bin/ls"}, ArgsRestricted: true}}},
 		{"continuation line", "alice ALL = /bin/a, \\\n  /bin/b\n", "alice", nil,
-			[]Grant{{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/bin/a", "/bin/b"}}}},
-		{"comment and other users", "# alice ALL = ALL\nbob ALL = ALL # trailing\n", "alice", nil, []Grant{}},
+			[]grant{{Source: sudoersPath, Via: "user:alice", Runas: "root", Commands: "limited", CommandPaths: []string{"/bin/a", "/bin/b"}}}},
+		{"comment and other users", "# alice ALL = ALL\nbob ALL = ALL # trailing\n", "alice", nil, []grant{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := sudoFor(t, tc.sudoers, tc.user, tc.groups...)
@@ -152,7 +152,7 @@ func TestSudoPolicySource(t *testing.T) {
 			assert.Equal(t, tc.unresolved, pol.unresolved)
 			got := pol.forAccount("alice", func(string) bool { return false })
 			if tc.unresolved {
-				assert.Equal(t, AccountSudo{Reasons: []string{reasonSudoPolicyUnresolved}, Grants: []Grant{}}, got)
+				assert.Equal(t, accountSudo{Reasons: []string{reasonSudoPolicyUnresolved}, Grants: []grant{}}, got)
 			} else {
 				assert.True(t, got.Complete)
 				assert.Len(t, got.Grants, 1)

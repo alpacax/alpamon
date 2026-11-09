@@ -17,7 +17,7 @@ import (
 
 func TestObservedAtClockStep(t *testing.T) {
 	logs := captureLogs(t)
-	s := testService(nil, func(context.Context) *Report { return sampleReport() })
+	s := testService(nil, func(context.Context) *exposureReport { return sampleReport() })
 	now := s.now()
 	s.lastObserved = now.Add(24 * time.Hour)
 	var sleeps []time.Duration

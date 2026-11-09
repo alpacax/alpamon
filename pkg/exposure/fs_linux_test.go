@@ -337,7 +337,7 @@ func TestHungReadIsAbandonedAndCounted(t *testing.T) {
 	c := newCollector(opts)
 
 	r := c.collect(context.Background())
-	assert.Equal(t, Coverage{Status: coverageUnknown, Reasons: []string{reasonTimeout}}, r.Categories[catPasswords])
+	assert.Equal(t, coverage{Status: coverageUnknown, Reasons: []string{reasonTimeout}}, r.Categories[catPasswords])
 	assert.Equal(t, coverageCovered, r.Categories[catAccounts].Status, "one failed category never blocks the others")
 	require.Len(t, r.Accounts, 1)
 	assert.Equal(t, shadowUnreadable, r.Accounts[0].Shadow.Status)
@@ -434,7 +434,7 @@ func TestK5PrivateKeyBodyRejectedBeforeParsing(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(root, "home/u/.k5login"), []byte(key), 0o600))
 		st := &sshdT{effective: map[string]*string{"gssapiauthentication": ptr("yes")}}
 		fs := readerFor(t, root, owners)
-		d := readTrust(fs, systemFiles{f: fs}, []passwdEntry{{name: "u", uid: 1001, home: "/home/u"}}, st, sshdConfig{})
+		d := readTrust(fs, systemFiles{f: fs}, []passwdEntry{{name: "u", uid: 1001, home: "/home/u"}}, st, sshdConfig{}, false)
 		require.Len(t, d.files["u"], 1)
 		file := d.files["u"][0]
 		assert.Equal(t, statusRejected, file.Status)

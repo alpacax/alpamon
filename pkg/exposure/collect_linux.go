@@ -49,7 +49,6 @@ func defaultOptions() collectorOptions {
 type collector struct {
 	opts            collectorOptions
 	busy            map[string]*atomic.Bool
-	reads           atomic.Int64
 	accountMu       sync.Mutex
 	accountBusy     map[accountSlot]bool
 	accountCount    int // abandoned workers only
@@ -75,6 +74,7 @@ func runBudget[T any](ctx context.Context, c *collector, cat string, fn func(con
 	ctx, cancel := context.WithTimeout(ctx, c.opts.budget)
 	defer cancel()
 	done := make(chan T, 1)
+	releaseFS := retainCollectionFS(ctx)
 	go func() {
 		var result T
 		defer func() {
@@ -82,6 +82,7 @@ func runBudget[T any](ctx context.Context, c *collector, cat string, fn func(con
 				logParserPanic(cat)
 				result = categoryFailure[T](reasonParseError)
 			}
+			releaseFS()
 			slot.Store(false)
 			done <- result
 		}()
@@ -119,17 +120,20 @@ type sshdData struct {
 	installed  bool
 	t          *sshdT // nil when sshd -T was not usable
 	cfg        sshdConfig
-	daemon     Daemon
+	daemon     daemon
 	reasons    reasonSet
 	usable     bool
 	configRead bool
 }
 
-// collect reads the host once. Every category worker opens its own root
-// descriptor and closes it when it ends, so a worker abandoned on a hung
-// mount never walks from a descriptor the next read has closed or reused.
-func (c *collector) collect(ctx context.Context) *Report {
-	c.reads.Add(1)
+// collect pins one root for the read. Abandoned workers retain that root
+// until they exit, so no later collection can close or reuse their descriptor.
+func (c *collector) collect(ctx context.Context) *exposureReport {
+	fs, _ := newFSReader(c.opts.root, c.opts.mapOwner)
+	shared := &collectionFS{reader: fs}
+	shared.refs.Store(1)
+	ctx = context.WithValue(ctx, collectionFSKey{}, shared)
+	defer shared.release()
 	host := c.opts.hostname()
 	var b assembly
 	var wg, phaseOne sync.WaitGroup
@@ -155,22 +159,22 @@ func (c *collector) collect(ctx context.Context) *Report {
 	}
 	start(catAccounts, func() {
 		b.acc, b.accOK = runBudget(ctx, c, catAccounts, func(context.Context) accountsData {
-			return withFS(c, accountsData{reasons: unreadable()}, func(_ *fsReader, sys systemFiles) accountsData { return readAccounts(sys) })
+			return withFS(ctx, c, accountsData{reasons: unreadable()}, func(_ *fsReader, sys systemFiles) accountsData { return readAccounts(sys) })
 		})
 	})
 	start(catPasswords, func() {
 		b.sh, b.shOK = runBudget(ctx, c, catPasswords, func(context.Context) shadowData {
-			return withFS(c, shadowData{reasons: unreadable()}, func(_ *fsReader, sys systemFiles) shadowData { return readShadow(sys) })
+			return withFS(ctx, c, shadowData{reasons: unreadable()}, func(_ *fsReader, sys systemFiles) shadowData { return readShadow(sys) })
 		})
 	})
 	start(catSSHD, func() {
 		b.sshd, b.sshdOK = runBudget(ctx, c, catSSHD, func(ctx context.Context) sshdData {
-			return withFS(c, sshdData{reasons: unreadable(), daemon: Daemon{Correspondence: "unresolved"}}, func(fs *fsReader, sys systemFiles) sshdData { return c.readSSHD(ctx, fs, sys) })
+			return withFS(ctx, c, sshdData{reasons: unreadable(), daemon: daemon{Correspondence: "unresolved"}}, func(fs *fsReader, sys systemFiles) sshdData { return c.readSSHD(ctx, fs, sys) })
 		})
 	})
 	start(catSudo, func() {
 		b.sudo, b.sudoOK = runBudget(ctx, c, catSudo, func(context.Context) sudoPolicy {
-			return withFS(c, sudoPolicy{global: unreadable()}, func(_ *fsReader, sys systemFiles) sudoPolicy { return readSudoPolicy(sys, host) })
+			return withFS(ctx, c, sudoPolicy{global: unreadable()}, func(_ *fsReader, sys systemFiles) sudoPolicy { return readSudoPolicy(sys, host) })
 		})
 	})
 	phaseOne.Wait()
@@ -199,7 +203,7 @@ func (c *collector) collect(ctx context.Context) *Report {
 		})
 		start(catPTY, func() {
 			b.pty, b.ptyOK = runBudget(ctx, c, catPTY, func(context.Context) ptyData {
-				return withFS(c, ptyData{reasons: unreadable()}, func(fs *fsReader, _ systemFiles) ptyData { return readPTY(fs, accounts) })
+				return withFS(ctx, c, ptyData{reasons: unreadable()}, func(fs *fsReader, _ systemFiles) ptyData { return readPTY(fs, accounts) })
 			})
 		})
 	}
@@ -209,8 +213,14 @@ func (c *collector) collect(ctx context.Context) *Report {
 
 func unreadable() reasonSet { return reasonSet{reasonFileUnreadable: {}} }
 
-// withFS runs fn with a reader of its own over the collector's root.
-func withFS[T any](c *collector, fail T, fn func(*fsReader, systemFiles) T) T {
+// withFS uses the collection root, or a private root for standalone readers.
+func withFS[T any](ctx context.Context, c *collector, fail T, fn func(*fsReader, systemFiles) T) T {
+	if shared, ok := ctx.Value(collectionFSKey{}).(*collectionFS); ok {
+		if shared.reader == nil {
+			return fail
+		}
+		return fn(shared.reader, systemFiles{f: shared.reader})
+	}
 	fs, err := newFSReader(c.opts.root, c.opts.mapOwner)
 	if err != nil {
 		return fail
@@ -323,7 +333,7 @@ func readShadow(sys systemFiles) shadowData {
 }
 
 func (c *collector) readSSHD(ctx context.Context, fs *fsReader, sys systemFiles) sshdData {
-	d := sshdData{reasons: reasonSet{}, daemon: Daemon{Correspondence: "unresolved"}}
+	d := sshdData{reasons: reasonSet{}, daemon: daemon{Correspondence: "unresolved"}}
 	run := c.opts.runSSHD(ctx)
 	d.installed = !run.notInstalled
 	switch {
@@ -372,8 +382,8 @@ var socketUnits = []string{
 	"/etc/systemd/system/sockets.target.wants/sshd.socket",
 }
 
-func (c *collector) correspondence(fs *fsReader, cfg sshdConfig) Daemon {
-	d := Daemon{Correspondence: "unresolved"}
+func (c *collector) correspondence(fs *fsReader, cfg sshdConfig) daemon {
+	d := daemon{Correspondence: "unresolved"}
 	masters, ok := findSSHDMasters(c.opts.procRoot)
 	if !ok {
 		return d
@@ -486,8 +496,8 @@ func underHome(p, home string) bool {
 }
 
 type accountKeys struct {
-	home  Home
-	files []KeyFile
+	home  home
+	files []keyFile
 }
 
 type keysData struct {
@@ -540,7 +550,7 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 		d.reasons.add(reasonFileUnreadable)
 	}
 	for _, acct := range accounts {
-		ak := accountKeys{home: Home{Status: statusUnresolved}, files: []KeyFile{}}
+		ak := accountKeys{home: home{Status: statusUnresolved}, files: []keyFile{}}
 		rule := ownerRule{uid: acct.uid}
 		strict, strictKnown, noHome, anyRead := true, true, false, false
 		var dirs []pathStat
@@ -580,7 +590,7 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 					continue
 				}
 				seen[tmpl] = true
-				ak.files = append(ak.files, KeyFile{Envelope: Envelope{Path: tmpl, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}})
+				ak.files = append(ak.files, keyFile{Envelope: envelope{Path: tmpl, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}})
 				d.reasons.add(reasonPathTokenUnresolved)
 				strictKnown = false
 				continue
@@ -608,7 +618,7 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 			}
 			ak.files = append(ak.files, kf)
 		}
-		slices.SortFunc(ak.files, func(a, b KeyFile) int { return strings.Compare(a.Path, b.Path) })
+		slices.SortFunc(ak.files, func(a, b keyFile) int { return strings.Compare(a.Path, b.Path) })
 		switch {
 		case noHome && strictKnown && !anyRead:
 		case strictKnown:
@@ -621,20 +631,11 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 	return d
 }
 
-func appendReason(rs []string, r string) []string {
-	if slices.Contains(rs, r) {
-		return rs
-	}
-	rs = append(rs, r)
-	slices.Sort(rs)
-	return rs
-}
-
 // readKeyFile reads one authorized_keys source. The returned pathStat is
 // the file's own, set when fstat succeeded.
-func readKeyFile(fs *fsReader, p string, rule ownerRule, budget *int) (KeyFile, *pathStat, []pathStat) {
+func readKeyFile(fs *fsReader, p string, rule ownerRule, budget *int) (keyFile, *pathStat, []pathStat) {
 	l, dirs := fs.read(p, rule)
-	kf := KeyFile{Envelope: l.envelope(p), Keys: []Key{}}
+	kf := keyFile{Envelope: l.envelope(p), Keys: []key{}}
 	if l.status != statusRead {
 		return kf, nil, dirs
 	}
@@ -662,7 +663,7 @@ func readKeyFile(fs *fsReader, p string, rule ownerRule, budget *int) (KeyFile, 
 		}
 	}
 	if kf.Keys == nil {
-		kf.Keys = []Key{}
+		kf.Keys = []key{}
 	}
 	return kf, file, dirs
 }
@@ -675,14 +676,14 @@ func formatMode(mode uint32) string {
 
 type certsData struct {
 	failure    string
-	userCA     *UserCA
-	principals map[string][]PrincipalsFile
+	userCA     *userCA
+	principals map[string][]principalsFile
 	reasons    reasonSet
 	usable     bool
 }
 
-func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, cfg sshdConfig, accountOnly ...bool) certsData {
-	d := certsData{principals: map[string][]PrincipalsFile{}, reasons: reasonSet{}}
+func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, cfg sshdConfig, accountOnly bool) certsData {
+	d := certsData{principals: map[string][]principalsFile{}, reasons: reasonSet{}}
 	if t == nil {
 		d.reasons.add(reasonFileUnreadable)
 		return d
@@ -694,17 +695,17 @@ func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 	if setInAnyBlock(cfg, "trustedusercakeys") || setInAnyBlock(cfg, "authorizedprincipalsfile") {
 		d.reasons.add(reasonPathTokenUnresolved)
 	}
-	if len(accountOnly) == 0 {
+	if !accountOnly {
 		switch ca := sshdValue(t, "trustedusercakeys"); {
 		case ca == "":
 			d.reasons.add(reasonFileUnreadable)
 		case ca == "none":
 		case strings.Contains(ca, "%") || !validPath(ca):
-			d.userCA = &UserCA{Envelope: Envelope{Path: ca, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, CAs: []CA{}}
+			d.userCA = &userCA{Envelope: envelope{Path: ca, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, CAs: []caKey{}}
 			d.reasons.add(reasonPathTokenUnresolved)
 		default:
 			l := sys.load(ca)
-			u := &UserCA{Envelope: l.envelope(ca), CAs: []CA{}}
+			u := &userCA{Envelope: l.envelope(ca), CAs: []caKey{}}
 			if l.data != nil {
 				cas, unparsed, tooLong := parseCAKeys(l.data)
 				u.CAs = cas
@@ -729,7 +730,7 @@ func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 		return d
 	}
 	for _, acct := range accounts {
-		files := []PrincipalsFile{}
+		files := []principalsFile{}
 		p, ok := expandPath(tmpl, acct.home, acct.name)
 		if acct.home == "" {
 			d.reasons.add(reasonHomeUnreadable)
@@ -740,11 +741,11 @@ func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 		}
 		switch {
 		case !ok:
-			files = append(files, PrincipalsFile{Envelope: Envelope{Path: tmpl, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, Entries: []PrincipalEntry{}})
+			files = append(files, principalsFile{Envelope: envelope{Path: tmpl, Status: statusUnresolved, Reasons: []string{reasonPathTokenUnresolved}}, Entries: []principalEntry{}})
 			d.reasons.add(reasonPathTokenUnresolved)
 		default:
 			l, _ := fs.read(p, ownerRule{uid: acct.uid})
-			pf := PrincipalsFile{Envelope: l.envelope(p), Entries: []PrincipalEntry{}}
+			pf := principalsFile{Envelope: l.envelope(p), Entries: []principalEntry{}}
 			if l.data != nil {
 				entries, unparsed, tooLong, over := parsePrincipalsFile(l.data)
 				clear(l.data)
@@ -759,7 +760,7 @@ func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 				}
 			}
 			if pf.Entries == nil {
-				pf.Entries = []PrincipalEntry{}
+				pf.Entries = []principalEntry{}
 			}
 			d.reasons.add(pf.Reasons...)
 			files = append(files, pf)
@@ -771,14 +772,14 @@ func readCerts(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 
 type trustData struct {
 	failure string
-	files   map[string][]TrustFile
-	system  []SystemTrustFile
+	files   map[string][]trustFile
+	system  []systemTrustFile
 	reasons reasonSet
 	usable  bool
 }
 
-func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, cfg sshdConfig, accountOnly ...bool) trustData {
-	d := trustData{files: map[string][]TrustFile{}, system: []SystemTrustFile{}, reasons: reasonSet{}}
+func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, cfg sshdConfig, accountOnly bool) trustData {
+	d := trustData{files: map[string][]trustFile{}, system: []systemTrustFile{}, reasons: reasonSet{}}
 	if t == nil {
 		d.reasons.add(reasonFileUnreadable)
 		return d
@@ -792,14 +793,14 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 		// are not opened.
 		return d
 	}
-	if len(accountOnly) == 0 {
+	if !accountOnly {
 		if kerberos {
 			if l := sys.load("/etc/krb5.conf"); l.usable() {
 				if krb5MappingUnresolved(l.data) {
-					d.reasons.add(reasonKerberosMappingUnresolv)
+					d.reasons.add(reasonKerberosMappingUnresolved)
 				}
 			} else if l.status != statusAbsent {
-				d.reasons.add(reasonKerberosMappingUnresolv)
+				d.reasons.add(reasonKerberosMappingUnresolved)
 				d.reasons.merge(l.reasons)
 			}
 		}
@@ -809,14 +810,14 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 		if rhosts {
 			for _, p := range []string{"/etc/hosts.equiv", "/etc/ssh/shosts.equiv"} {
 				l := sys.load(p)
-				st := SystemTrustFile{Envelope: l.envelope(p), Entries: []HostUser{}}
+				st := systemTrustFile{Envelope: l.envelope(p), Entries: []hostUser{}}
 				if l.data != nil {
 					entries, unparsed, tooLong := parseHostsEquiv(l.data)
 					st.Entries = entries
 					st.Complete, st.Reasons = markParse(st.Complete, st.Reasons, unparsed, tooLong)
 				}
 				if st.Entries == nil {
-					st.Entries = []HostUser{}
+					st.Entries = []hostUser{}
 				}
 				d.reasons.add(st.Reasons...)
 				d.system = append(d.system, st)
@@ -824,7 +825,7 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 		}
 	}
 	for _, acct := range accounts {
-		files := []TrustFile{}
+		files := []trustFile{}
 		if acct.home == "" {
 			d.reasons.add(reasonHomeUnreadable)
 			d.files[acct.name] = files
@@ -837,17 +838,18 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 		if rhosts {
 			kinds = append(kinds, "rhosts", "shosts")
 		}
+		homeChecked, homeUnreadable := false, false
 		for _, kind := range kinds {
 			p, _ := expandPath("."+kind, acct.home, acct.name)
 			l, _ := fs.read(p, ownerRule{uid: acct.uid})
-			tf := TrustFile{Envelope: l.envelope(p), Kind: kind, Entries: []TrustEntry{}}
+			tf := trustFile{Envelope: l.envelope(p), Kind: kind, Entries: []trustEntry{}}
 			if l.data != nil {
 				var unparsed int
 				var tooLong bool
 				if kind == "k5login" {
 					tf.Entries, unparsed, tooLong = parseK5Login(l.data)
 				} else {
-					var hu []HostUser
+					var hu []hostUser
 					hu, unparsed, tooLong = parseHostsEquiv(l.data)
 					tf.Entries = hostUserEntries(hu)
 				}
@@ -855,17 +857,21 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 				tf.Complete, tf.Reasons = markParse(tf.Complete, tf.Reasons, unparsed, tooLong)
 			}
 			if tf.Entries == nil {
-				tf.Entries = []TrustEntry{}
+				tf.Entries = []trustEntry{}
 			}
 			if l.status == statusUnreadable || l.status == statusRejected {
-				if _, hl := fs.statDir(acct.home, ownerRule{uid: acct.uid}); hl.status != statusRead {
+				if !homeChecked {
+					_, hl := fs.statDir(acct.home, ownerRule{uid: acct.uid})
+					homeChecked, homeUnreadable = true, hl.status != statusRead
+				}
+				if homeUnreadable {
 					tf.Reasons = appendReason(tf.Reasons, reasonHomeUnreadable)
 				}
 			}
 			d.reasons.add(tf.Reasons...)
 			files = append(files, tf)
 		}
-		slices.SortFunc(files, func(a, b TrustFile) int { return strings.Compare(a.Path, b.Path) })
+		slices.SortFunc(files, func(a, b trustFile) int { return strings.Compare(a.Path, b.Path) })
 		d.files[acct.name] = files
 	}
 	return d
@@ -884,7 +890,7 @@ func markParse(complete bool, reasons []string, unparsed int, tooLong bool) (boo
 }
 
 type ptyData struct {
-	byUser  map[string]*PTYLogin
+	byUser  map[string]*ptyLogin
 	reasons reasonSet
 	usable  bool
 }
@@ -898,7 +904,7 @@ var (
 )
 
 func readPTY(fs *fsReader, accounts []passwdEntry) ptyData {
-	d := ptyData{byUser: map[string]*PTYLogin{}, reasons: reasonSet{}}
+	d := ptyData{byUser: map[string]*ptyLogin{}, reasons: reasonSet{}}
 	wtmp := map[string]ptyRecord{}
 	wtmpFound := false
 	for _, p := range wtmpPaths {
@@ -938,7 +944,7 @@ func readPTY(fs *fsReader, accounts []passwdEntry) ptyData {
 		d.reasons.add(reasonPTYSourceUnsupported)
 	}
 	for _, a := range accounts {
-		var best *PTYLogin
+		var best *ptyLogin
 		var bestTime int64
 		if rec, ok := wtmp[a.name]; ok {
 			best, bestTime = rec.login("wtmp"), rec.time

@@ -34,34 +34,34 @@ type categoryState struct {
 	usable  bool
 }
 
-func coverageOf(s categoryState) Coverage {
+func coverageOf(s categoryState) coverage {
 	if !s.usable && len(s.reasons) == 0 {
 		s.reasons = reasonSet{reasonFileUnreadable: {}}
 	}
 	switch {
 	case len(s.reasons) == 0:
-		return Coverage{Status: coverageCovered, Reasons: []string{}}
+		return coverage{Status: coverageCovered, Reasons: []string{}}
 	case s.usable:
-		return Coverage{Status: coveragePartial, Reasons: s.reasons.list()}
+		return coverage{Status: coveragePartial, Reasons: s.reasons.list()}
 	}
-	return Coverage{Status: coverageUnknown, Reasons: s.reasons.list()}
+	return coverage{Status: coverageUnknown, Reasons: s.reasons.list()}
 }
 
-func newReport() *Report {
-	return &Report{
-		SchemaVersion: SchemaVersion,
-		Scope:         Scope{OS: "linux", Protocol: "ssh"},
-		Categories:    map[string]Coverage{},
-		External:      []External{},
-		SSHD:          SSHD{MatchBlocks: []MatchBlock{}, Daemon: Daemon{Correspondence: "unresolved"}},
-		SystemTrust:   []SystemTrustFile{},
-		Accounts:      []Account{},
+func newReport() *exposureReport {
+	return &exposureReport{
+		SchemaVersion: schemaVersion,
+		Scope:         reportScope{OS: "linux", Protocol: "ssh"},
+		Categories:    map[string]coverage{},
+		External:      []external{},
+		SSHD:          sshdPolicy{MatchBlocks: []matchSettings{}, Daemon: daemon{Correspondence: "unresolved"}},
+		SystemTrust:   []systemTrustFile{},
+		Accounts:      []account{},
 	}
 }
 
 func timedOut() categoryState { return categoryState{reasons: reasonSet{reasonTimeout: {}}} }
 
-func (b *assembly) report() *Report {
+func (b *assembly) report() *exposureReport {
 	readHook("assemble")
 	r := newReport()
 	cats := map[string]categoryState{}
@@ -154,7 +154,7 @@ func (b *assembly) report() *Report {
 		r.UserCA = b.certs.userCA
 		if b.certs.failure != "" {
 			if ca := sshdValue(t, "trustedusercakeys"); ca != "" && ca != "none" {
-				r.UserCA = &UserCA{Envelope: failureEnvelope(ca, b.certs.failure), CAs: []CA{}}
+				r.UserCA = &userCA{Envelope: failureEnvelope(ca, b.certs.failure), CAs: []caKey{}}
 			}
 		}
 	}
@@ -162,7 +162,7 @@ func (b *assembly) report() *Report {
 		r.SystemTrust = b.trust.system
 		if b.trust.failure != "" && (enabledAnywhere(t, cfg, "hostbasedauthentication", "yes") || enabledAnywhere(t, cfg, "ignorerhosts", "no")) {
 			for _, p := range []string{"/etc/hosts.equiv", "/etc/ssh/shosts.equiv"} {
-				r.SystemTrust = append(r.SystemTrust, SystemTrustFile{Envelope: failureEnvelope(p, b.trust.failure), Entries: []HostUser{}})
+				r.SystemTrust = append(r.SystemTrust, systemTrustFile{Envelope: failureEnvelope(p, b.trust.failure), Entries: []hostUser{}})
 			}
 		}
 	}
@@ -196,8 +196,8 @@ func (b *assembly) report() *Report {
 	}
 
 	// external sources
-	ext := map[string]External{}
-	addExt := func(e External, cats_ ...string) {
+	ext := map[string]external{}
+	addExt := func(e external, cats_ ...string) {
 		key := e.Kind + "\x00" + e.Scope
 		if _, exists := ext[key]; !exists && len(ext) >= maxExternalRecords {
 			cats[catSSHD].reasons.add(reasonLimitExceeded)
@@ -214,44 +214,44 @@ func (b *assembly) report() *Report {
 	}
 	if b.accOK {
 		if mods := nonFilesModules(b.acc.nss["passwd"], b.acc.systemdAccounts); len(mods) > 0 {
-			addExt(External{Kind: externalNSSAccounts, Scope: "global", Sources: mods}, catAccounts)
+			addExt(external{Kind: externalNSSAccounts, Scope: "global", Sources: mods}, catAccounts)
 		}
 		if mods := nonFilesModules(b.acc.nss["group"], b.acc.systemdGroups); len(mods) > 0 {
-			addExt(External{Kind: externalNSSGroups, Scope: "global", Sources: mods}, catAccounts, catSudo)
+			addExt(external{Kind: externalNSSGroups, Scope: "global", Sources: mods}, catAccounts, catSudo)
 		}
 		for _, m := range b.acc.nss["sudoers"] {
 			if m == "sss" || m == "ldap" {
-				addExt(External{Kind: externalLDAPSudo, Scope: "global"}, catSudo)
+				addExt(external{Kind: externalLDAPSudo, Scope: "global"}, catSudo)
 			}
 		}
 	}
 	if t != nil {
 		if pc := t.keysCommand; pc != nil {
-			addExt(External{Kind: externalKeysCommand, Scope: "global", Path: pc.path, User: pc.user}, catKeys)
+			addExt(external{Kind: externalKeysCommand, Scope: "global", Path: pc.path, User: pc.user}, catKeys)
 		}
 		if pc := t.principalsCommand; pc != nil {
-			addExt(External{Kind: externalPrincipalsComand, Scope: "global", Path: pc.path, User: pc.user}, catCertificates)
+			addExt(external{Kind: externalPrincipalsCommand, Scope: "global", Path: pc.path, User: pc.user}, catCertificates)
 		}
 		if sshdValue(t, "gssapiauthentication") == "yes" || sshdValue(t, "kerberosauthentication") == "yes" {
-			addExt(External{Kind: externalKerberos, Scope: "global"}, catTrust, catPasswords)
+			addExt(external{Kind: externalKerberos, Scope: "global"}, catTrust, catPasswords)
 		}
 	}
 	for i, mb := range cfg.blocks {
 		scope := "match:" + strconv.Itoa(i)
 		if mb.hasKeysCmd {
-			addExt(External{Kind: externalKeysCommand, Scope: scope, Path: mb.keysCommand.path, User: mb.keysCommand.user}, catKeys)
+			addExt(external{Kind: externalKeysCommand, Scope: scope, Path: mb.keysCommand.path, User: mb.keysCommand.user}, catKeys)
 		}
 		if mb.hasPrincipalsCmd {
-			addExt(External{Kind: externalPrincipalsComand, Scope: scope, Path: mb.principalsCommand.path, User: mb.principalsCommand.user}, catCertificates)
+			addExt(external{Kind: externalPrincipalsCommand, Scope: scope, Path: mb.principalsCommand.path, User: mb.principalsCommand.user}, catCertificates)
 		}
 		if mb.block.Sets["gssapiauthentication"] == "yes" || mb.block.Sets["kerberosauthentication"] == "yes" {
-			addExt(External{Kind: externalKerberos, Scope: scope}, catTrust, catPasswords)
+			addExt(external{Kind: externalKerberos, Scope: scope}, catTrust, catPasswords)
 		}
 	}
 	for _, e := range ext {
 		r.External = append(r.External, e)
 	}
-	slices.SortFunc(r.External, func(a, b External) int {
+	slices.SortFunc(r.External, func(a, b external) int {
 		if c := strings.Compare(a.Kind, b.Kind); c != 0 {
 			return c
 		}
@@ -262,7 +262,7 @@ func (b *assembly) report() *Report {
 	if accountsUsable {
 		groupsOf := membership(b.acc.entries, b.acc.groups)
 		for _, e := range b.acc.entries {
-			a := Account{Username: e.name, UID: e.uid, Groups: groupsOf[e.name]}
+			a := account{Username: e.name, UID: e.uid, Groups: groupsOf[e.name]}
 			if e.shell != "" {
 				a.Shell = ptr(e.shell)
 			}
@@ -272,7 +272,7 @@ func (b *assembly) report() *Report {
 			}
 			a.LoginShell = b.acc.shells[shell] && !isNoLoginShell(shell)
 			a.Shadow = b.shadowFor(e.name)
-			a.Home = Home{Status: statusTimeout}
+			a.Home = home{Status: statusTimeout}
 			if b.keysOK && b.sshdOK {
 				ak := b.keys.byUser[e.name]
 				if b.keys.failure != "" {
@@ -305,12 +305,12 @@ func (b *assembly) report() *Report {
 				}
 				a.Sudo = b.sudo.forAccount(e.name, func(g string) bool { return member[g] })
 			} else {
-				a.Sudo = AccountSudo{Reasons: []string{reasonTimeout}, Grants: []Grant{}}
+				a.Sudo = accountSudo{Reasons: []string{reasonTimeout}, Grants: []grant{}}
 			}
 			sudoState.reasons.add(a.Sudo.Reasons...)
 			r.Accounts = append(r.Accounts, a)
 		}
-		slices.SortFunc(r.Accounts, func(x, y Account) int { return strings.Compare(x.Username, y.Username) })
+		slices.SortFunc(r.Accounts, func(x, y account) int { return strings.Compare(x.Username, y.Username) })
 	}
 	set(catSudo, sudoState)
 
@@ -373,8 +373,8 @@ func membership(entries []passwdEntry, groups []groupEntry) map[string][]string 
 	return out
 }
 
-func (b *assembly) shadowFor(name string) Shadow {
-	s := Shadow{Status: shadowUnreadable, PasswordState: passwordUnknown}
+func (b *assembly) shadowFor(name string) shadow {
+	s := shadow{Status: shadowUnreadable, PasswordState: passwordUnknown}
 	if !b.shOK || !b.sh.usable {
 		return s
 	}
@@ -383,7 +383,7 @@ func (b *assembly) shadowFor(name string) Shadow {
 		s.Status = shadowNoEntry
 		return s
 	}
-	return Shadow{
+	return shadow{
 		Status:         shadowRead,
 		PasswordState:  info.state,
 		LastChangeDays: info.lastChange,

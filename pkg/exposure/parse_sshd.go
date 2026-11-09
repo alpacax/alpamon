@@ -131,7 +131,7 @@ var matchCriteria = map[string]string{
 
 type matchBlock struct {
 	seen              map[string]bool
-	block             MatchBlock
+	block             matchSettings
 	unsupported       bool
 	parseErr          bool
 	keysCommand       *providerCommand
@@ -161,7 +161,7 @@ const sshdConfigPath = "/etc/ssh/sshd_config"
 // parseSSHDConfig reads sshd_config and its includes for Match blocks. Lines
 // before the first Match are ignored: sshd -T already reports them.
 func parseSSHDConfig(src systemSource) sshdConfig {
-	p := &sshdConfigParser{src: src, cfg: sshdConfig{reasons: reasonSet{}, readAll: true}, onStack: map[string]bool{}}
+	p := &sshdConfigParser{src: src, cfg: sshdConfig{reasons: reasonSet{}, readAll: true}, walker: includeWalker{src: src}}
 	p.file(sshdConfigPath, 0)
 	for i := range p.cfg.blocks {
 		p.cfg.blocks[i].finish()
@@ -173,8 +173,7 @@ func parseSSHDConfig(src systemSource) sshdConfig {
 type sshdConfigParser struct {
 	src     systemSource
 	cfg     sshdConfig
-	onStack map[string]bool
-	nfiles  int
+	walker  includeWalker
 	current *matchBlock
 }
 
@@ -184,69 +183,59 @@ func (p *sshdConfigParser) fail(code string) {
 }
 
 func (p *sshdConfigParser) file(name string, depth int) {
-	if depth > maxIncludeDepth || p.nfiles >= maxIncludeFiles {
-		p.fail(reasonLimitExceeded)
-		return
-	}
-	if p.onStack[name] {
-		p.fail(reasonParseError)
-		return
-	}
-	p.nfiles++
-	l := p.src.load(name)
-	if l.status == statusAbsent && depth > 0 {
-		// sshd skips an Include that matches nothing.
-		return
-	}
-	if !l.usable() {
-		if l.status == statusAbsent {
-			p.cfg.files = append(p.cfg.files, inspectedFile{path: name})
+	p.walker.file(name, depth, func(l loaded) {
+		if l.status == statusAbsent && depth > 0 {
+			// sshd skips an Include that matches nothing.
 			return
 		}
-		p.cfg.reasons.merge(l.reasons)
-		if len(l.reasons) == 0 {
-			p.cfg.reasons.add(reasonFileUnreadable)
-		}
-		p.cfg.readAll = false
-		return
-	}
-	p.cfg.files = append(p.cfg.files, inspectedFile{path: name, mtime: l.mtime})
-	p.onStack[name] = true
-	defer delete(p.onStack, name)
-	forEachLine(l.data, func(line []byte, tooLong bool) bool {
-		if tooLong {
-			p.fail(reasonLimitExceeded)
-			return true
-		}
-		if isBlankOrComment(line) {
-			return true
-		}
-		kw, args, ok := splitConfigLine(line)
-		if !ok {
-			p.fail(reasonParseError)
-			return true
-		}
-		switch kw {
-		case "include":
-			for _, a := range args {
-				p.include(a, depth)
+		if !l.usable() {
+			if l.status == statusAbsent {
+				p.cfg.files = append(p.cfg.files, inspectedFile{path: name})
+				return
 			}
-		case "match":
-			if len(p.cfg.blocks) >= maxMatchBlocks {
-				p.cfg.reasons.add(reasonLimitExceeded)
-				p.cfg.configIncomplete = true
-				p.current = nil
+			p.cfg.reasons.merge(l.reasons)
+			if len(l.reasons) == 0 {
+				p.cfg.reasons.add(reasonFileUnreadable)
+			}
+			p.cfg.readAll = false
+			return
+		}
+		p.cfg.files = append(p.cfg.files, inspectedFile{path: name, mtime: l.mtime})
+		forEachLine(l.data, func(line []byte, tooLong bool) bool {
+			if tooLong {
+				p.fail(reasonLimitExceeded)
 				return true
 			}
-			p.cfg.blocks = append(p.cfg.blocks, newMatchBlock(args))
-			p.current = &p.cfg.blocks[len(p.cfg.blocks)-1]
-		default:
-			if p.current != nil {
-				p.current.set(kw, args)
+			if isBlankOrComment(line) {
+				return true
 			}
-		}
-		return true
-	})
+			kw, args, ok := splitConfigLine(line)
+			if !ok {
+				p.fail(reasonParseError)
+				return true
+			}
+			switch kw {
+			case "include":
+				for _, a := range args {
+					p.include(a, depth)
+				}
+			case "match":
+				if len(p.cfg.blocks) >= maxMatchBlocks {
+					p.cfg.reasons.add(reasonLimitExceeded)
+					p.cfg.configIncomplete = true
+					p.current = nil
+					return true
+				}
+				p.cfg.blocks = append(p.cfg.blocks, newMatchBlock(args))
+				p.current = &p.cfg.blocks[len(p.cfg.blocks)-1]
+			default:
+				if p.current != nil {
+					p.current.set(kw, args)
+				}
+			}
+			return true
+		})
+	}, p.fail)
 }
 
 func hasGlob(s string) bool { return strings.ContainsAny(s, "*?[") }
@@ -274,7 +263,6 @@ func (p *sshdConfigParser) include(arg string, depth int) {
 		return
 	}
 	if l.status != statusRead {
-		p.cfg.reasons.merge(l.reasons)
 		p.cfg.readAll = false
 		return
 	}
@@ -374,7 +362,7 @@ func validCriterionValue(v string) bool {
 }
 
 func newMatchBlock(args []string) matchBlock {
-	mb := matchBlock{block: MatchBlock{Sets: map[string]string{}}}
+	mb := matchBlock{block: matchSettings{Sets: map[string]string{}}}
 	var parts []string
 	for i := 0; i < len(args); i++ {
 		name, ok := matchCriteria[strings.ToLower(args[i])]

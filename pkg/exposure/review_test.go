@@ -82,7 +82,7 @@ func TestSSHDArgumentCommentsAndQuotes(t *testing.T) {
 	}
 }
 func TestCanonicalDoesNotMutateNestedSlices(t *testing.T) {
-	r := Report{UserCA: &UserCA{}, Accounts: []Account{{KeyFiles: []KeyFile{{Keys: []Key{{Authorizations: []Authorization{{}}}}}}}}}
+	r := exposureReport{UserCA: &userCA{}, Accounts: []account{{KeyFiles: []keyFile{{Keys: []key{{Authorizations: []authorization{{}}}}}}}}}
 	_, err := encodeValue(r)
 	require.NoError(t, err)
 	assert.Nil(t, r.UserCA.CAs)
@@ -91,6 +91,6 @@ func TestCanonicalDoesNotMutateNestedSlices(t *testing.T) {
 	assert.Nil(t, r.Accounts[0].KeyFiles[0].Keys[0].Authorizations[0].Options)
 }
 func TestZeroTrustEntryRejected(t *testing.T) {
-	_, err := json.Marshal(TrustEntry{})
+	_, err := json.Marshal(trustEntry{})
 	require.Error(t, err)
 }
