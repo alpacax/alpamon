@@ -178,9 +178,13 @@ func (s *service) buildReport(ctx context.Context) (report *Report, encoded []by
 	}()
 	observed = s.now().UTC().Truncate(time.Second)
 	if !observed.After(s.lastObserved) {
-		observed = s.lastObserved.Add(time.Second)
-		if !s.sleep(ctx, time.Until(observed)) {
-			return nil, nil
+		if s.lastObserved.Sub(observed) > 2*time.Second {
+			log.Warn().Msg("Exposure observed a backward clock step.")
+		} else {
+			observed = s.lastObserved.Add(time.Second)
+			if !s.sleep(ctx, observed.Sub(s.now())) {
+				return nil, nil
+			}
 		}
 	}
 	s.lastObserved = observed

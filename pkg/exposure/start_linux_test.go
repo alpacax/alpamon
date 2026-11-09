@@ -71,6 +71,7 @@ func correspondenceFor(t *testing.T, masters [][]string, mtime time.Time, socket
 		for _, a := range argv {
 			cmd += a + "\x00"
 		}
+		require.NoError(t, os.WriteFile(filepath.Join(pd, "status"), []byte("Uid:\t0\t0\t0\t0\n"), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(pd, "cmdline"), []byte(cmd), 0o644))
 	}
 	if socket {

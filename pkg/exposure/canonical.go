@@ -48,7 +48,7 @@ func encodeValue(v any) (encoded []byte, err error) {
 }
 
 // fillNilSlices walks v and replaces nil slices with empty ones. It copies
-// nothing it does not change; v must be addressable.
+// pointer, slice and map storage before walking it; v must be addressable.
 func fillNilSlices(v reflect.Value, depth int) error {
 	if depth > 256 {
 		return errors.New("canonical value exceeds nesting limit")
@@ -56,6 +56,9 @@ func fillNilSlices(v reflect.Value, depth int) error {
 	switch v.Kind() {
 	case reflect.Pointer:
 		if !v.IsNil() {
+			fresh := reflect.New(v.Type().Elem())
+			fresh.Elem().Set(v.Elem())
+			v.Set(fresh)
 			if err := fillNilSlices(v.Elem(), depth+1); err != nil {
 				return err
 			}
@@ -80,6 +83,11 @@ func fillNilSlices(v reflect.Value, depth int) error {
 			}
 		}
 	case reflect.Slice:
+		if !v.IsNil() {
+			fresh := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+			reflect.Copy(fresh, v)
+			v.Set(fresh)
+		}
 		for i := range v.Len() {
 			if err := fillNilSlices(v.Index(i), depth+1); err != nil {
 				return err

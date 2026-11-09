@@ -75,7 +75,7 @@ func TestAccountCapCutsLargestSourceThenStops(t *testing.T) {
 	r := newTestReport()
 	keys := parseAuthorizedKeys([]byte("ssh-ed25519 "+testEd0+" ok\n"), newBudget()).keys
 	a := capAccount("a", keys)
-	a.TrustFiles = []TrustFile{{Envelope: Envelope{Path: "/home/a/.k5login", Status: statusRead, Complete: true}, Entries: make([]TrustEntry, 1200)}}
+	a.TrustFiles = []TrustFile{{Envelope: Envelope{Path: "/home/a/.k5login", Status: statusRead, Complete: true}, Entries: validTrustEntries(1200)}}
 	for i := range a.TrustFiles[0].Entries {
 		a.TrustFiles[0].Entries[i].Principal = ptr(strings.Repeat("a", 256))
 	}
@@ -116,7 +116,7 @@ func TestObservationRows(t *testing.T) {
 			{Authorizations: []Authorization{{Count: 7}}}, {},
 		}}}}}}, 4},
 		{"principals entries", Report{Accounts: []Account{{PrincipalsFiles: []PrincipalsFile{{Entries: []PrincipalEntry{{Principals: []string{"a", "b"}}, {}}}}}}}, 3},
-		{"trust entries", Report{Accounts: []Account{{TrustFiles: []TrustFile{{Entries: make([]TrustEntry, 2)}}}}}, 3},
+		{"trust entries", Report{Accounts: []Account{{TrustFiles: []TrustFile{{Entries: validTrustEntries(2)}}}}}, 3},
 		{"system trust entries", Report{SystemTrust: []SystemTrustFile{{Entries: make([]HostUser, 2)}, {Entries: make([]HostUser, 3)}}}, 5},
 		{"user CA entries", Report{UserCA: &UserCA{CAs: make([]CA, 2)}}, 2},
 		{"sudo grants", Report{Accounts: []Account{{Sudo: AccountSudo{Grants: make([]Grant, 2)}}}}, 3},
@@ -132,7 +132,7 @@ func rowCapReport(rows int) *Report {
 	r := newTestReport()
 	for i := range 100 {
 		a := capAccount(fmt.Sprintf("small%03d", i), nil)
-		a.TrustFiles = []TrustFile{{Envelope: Envelope{Path: "/home/" + a.Username + "/.k5login", Complete: true}, Entries: make([]TrustEntry, 190)}}
+		a.TrustFiles = []TrustFile{{Envelope: Envelope{Path: "/home/" + a.Username + "/.k5login", Complete: true}, Entries: validTrustEntries(190)}}
 		r.Accounts = append(r.Accounts, a)
 	}
 	keys := make([]Key, rows-observationRows(r)-501)
@@ -196,8 +196,8 @@ func TestObservationRowCapSourceOrder(t *testing.T) {
 			a.KeyFiles = nil
 			a.Sudo.Grants = nil
 			a.TrustFiles = []TrustFile{
-				{Envelope: Envelope{Path: "/z", Complete: true}, Entries: make([]TrustEntry, 450)},
-				{Envelope: Envelope{Path: "/a", Complete: true}, Entries: make([]TrustEntry, 450)},
+				{Envelope: Envelope{Path: "/z", Complete: true}, Entries: validTrustEntries(450)},
+				{Envelope: Envelope{Path: "/a", Complete: true}, Entries: validTrustEntries(450)},
 			}
 			want := 1
 			if differentSize {
@@ -249,4 +249,12 @@ func TestRowCapNoAccountSources(t *testing.T) {
 		r.External = append(r.External, External{Kind: externalKeysCommand, Scope: "match:" + strconv.Itoa(i)})
 	}
 	require.NotPanics(t, func() { _, _ = finalize(r) })
+}
+
+func validTrustEntries(n int) []TrustEntry {
+	entries := make([]TrustEntry, n)
+	for i := range entries {
+		entries[i].Principal = ptr("u")
+	}
+	return entries
 }

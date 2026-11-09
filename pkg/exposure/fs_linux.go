@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -275,7 +276,12 @@ func (f *fsReader) openRegular(p string, rule ownerRule) (*os.File, unix.Stat_t,
 			}
 		}
 	}
-	fd, err := f.openAt(dirfd, last, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOCTTY)
+	fd, err := retryEINTR(func() (int, error) {
+		return unix.Open("/proc/self/fd/"+strconv.Itoa(pathFD), unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+	})
+	if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
+		fd, err = f.openAt(dirfd, last, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOCTTY)
+	}
 	if err != nil {
 		return nil, st, dirs, failed(statusOf(err))
 	}

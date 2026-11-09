@@ -219,6 +219,7 @@ func buildHost(t *testing.T, dir string, spec caseSpec) (string, string) {
 		stat := strconv.Itoa(p.PID) + " (" + p.Comm + ") S " + strconv.Itoa(p.PPID) +
 			" 1 1 0 -1 4194560 100 0 0 0 1 1 0 0 20 0 1 0 " + strconv.FormatInt(ticks, 10) + " 1000 100\n"
 		require.NoError(t, os.WriteFile(filepath.Join(pd, "stat"), []byte(stat), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(pd, "status"), []byte("Uid:\t0\t0\t0\t0\n"), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(pd, "cmdline"), []byte(strings.Join(p.Argv, "\x00")+"\x00"), 0o644))
 	}
 	return root, proc

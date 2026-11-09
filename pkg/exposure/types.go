@@ -248,7 +248,7 @@ func (e TrustEntry) MarshalJSON() ([]byte, error) {
 	if e.HostUser != nil {
 		return encodeValue(*e.HostUser)
 	}
-	return []byte("null"), nil
+	return nil, errors.New("invalid trust entry")
 }
 
 // UnmarshalJSON accepts a principal string or a host-user object.

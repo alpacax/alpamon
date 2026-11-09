@@ -5,6 +5,7 @@ package exposure
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -140,7 +141,28 @@ func findSSHDMasters(procRoot string) ([]sshdMaster, bool) {
 		if ps.comm != "sshd" || stats[ps.ppid].comm == "sshd" {
 			continue
 		}
+		status, err := readProcFile(filepath.Join(procRoot, strconv.Itoa(pid), "status"))
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			continue
+		}
+		if err != nil {
+			return nil, false
+		}
+		root := false
+		for line := range strings.SplitSeq(string(status), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && fields[0] == "Uid:" {
+				root = fields[1] == "0" && fields[2] == "0"
+				break
+			}
+		}
+		if !root {
+			continue
+		}
 		raw, err := readProcFile(filepath.Join(procRoot, strconv.Itoa(pid), "cmdline"))
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			continue
+		}
 		if err != nil {
 			return nil, false
 		}

@@ -113,7 +113,9 @@ func readSudoPolicy(src systemSource, hostname string) sudoPolicy {
 	}
 	r := &sudoReader{src: src, pol: &pol, host: hostname, onStack: map[string]bool{},
 		userAliases: map[string][]sudoWord{}, hostAliases: map[string][]sudoWord{},
-		runasAliases: map[string][]sudoWord{}, cmndAliases: map[string][][]sudoWord{}}
+		runasAliases: map[string][]sudoWord{}, cmndAliases: map[string][][]sudoWord{},
+		userMemo: map[string][]sudoUser{}, hostMemo: map[string][2]bool{},
+		runasMemo: map[string][]string{}, cmndMemo: map[string][]cmndItem{}}
 	r.file(file, 0, true)
 	r.resolve()
 	return pol
@@ -175,6 +177,10 @@ type sudoReader struct {
 	hostAliases  map[string][]sudoWord
 	runasAliases map[string][]sudoWord
 	cmndAliases  map[string][][]sudoWord
+	userMemo     map[string][]sudoUser
+	hostMemo     map[string][2]bool
+	runasMemo    map[string][]string
+	cmndMemo     map[string][]cmndItem
 }
 
 func (r *sudoReader) file(name string, depth int, top bool) {
@@ -208,7 +214,8 @@ func (r *sudoReader) file(name string, depth int, top bool) {
 			logical.Reset()
 			return true
 		}
-		s := string(raw)
+		s := stripSudoComment(logical.String() + string(raw))
+		logical.Reset()
 		if cont := trailingBackslashes(s); cont%2 == 1 {
 			logical.WriteString(s[:len(s)-1])
 			if logical.Len() > maxLineBytes {
@@ -226,6 +233,31 @@ func (r *sudoReader) file(name string, depth int, top bool) {
 	if logical.Len() > 0 {
 		r.line(name, logical.String(), depth)
 	}
+}
+
+// Include directives and numeric uid references are not comments.
+func stripSudoComment(s string) string {
+	quoted := false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '"':
+			quoted = !quoted
+		case '#':
+			if quoted || (i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9') {
+				continue
+			}
+			if strings.TrimSpace(s[:i]) == "" {
+				directive := strings.Fields(s[i:])[0]
+				if directive == "#include" || directive == "#includedir" {
+					continue
+				}
+			}
+			return s[:i]
+		}
+	}
+	return s
 }
 
 func trailingBackslashes(s string) int {
@@ -392,7 +424,7 @@ func isAliasName(s string) bool {
 func (r *sudoReader) resolve() {
 	var specs []sudoLine
 	for _, ln := range r.lines {
-		word, _, _ := strings.Cut(ln.text, " ")
+		word := strings.Fields(ln.text)[0]
 		switch {
 		case strings.HasPrefix(ln.text, "Defaults"):
 			specs = append(specs, ln)
@@ -400,6 +432,11 @@ func (r *sudoReader) resolve() {
 			r.alias(word, ln.text[len(word):])
 		default:
 			specs = append(specs, ln)
+		}
+	}
+	for _, items := range r.userAliases {
+		if _, ok := r.users(items, map[string]bool{}); !ok {
+			r.pol.global.add(reasonSudoUnsupportedSyntax)
 		}
 	}
 	for _, ln := range specs {
@@ -441,11 +478,7 @@ func (r *sudoReader) alias(kind, rest string) {
 		switch kind {
 		case "User_Alias":
 			r.userAliases[name] = items
-			// An alias whose members cannot be resolved hides which accounts
-			// it covers: every account is incomplete.
-			if _, ok := r.users(items, map[string]bool{}); !ok {
-				r.pol.global.add(reasonSudoUnsupportedSyntax)
-			}
+
 		case "Host_Alias":
 			r.hostAliases[name] = items
 		case "Runas_Alias":
@@ -487,13 +520,20 @@ func (r *sudoReader) users(toks []sudoWord, seen map[string]bool) ([]sudoUser, b
 			if seen[w] {
 				return nil, false
 			}
-			seen[w] = true
-			sub, ok := r.users(r.userAliases[w], seen)
+			sub, ok := r.userMemo[w]
+			if !ok {
+				seen[w] = true
+				sub, ok = r.users(r.userAliases[w], seen)
+				delete(seen, w)
+				if ok {
+					r.userMemo[w] = sub
+				}
+			}
 			if !ok {
 				return nil, false
 			}
 			out = append(out, sub...)
-		case validName(w):
+		case validName(w) && !isAliasName(w):
 			out = append(out, sudoUser{name: w})
 		default:
 			return nil, false
@@ -707,8 +747,16 @@ func (r *sudoReader) hosts(toks []sudoWord, seen map[string]bool) (applies, cond
 			if seen[w] {
 				return false, false, false
 			}
-			seen[w] = true
-			a, c, ok := r.hosts(r.hostAliases[w], seen)
+			cached, ok := r.hostMemo[w]
+			a, c := cached[0], cached[1]
+			if !ok {
+				seen[w] = true
+				a, c, ok = r.hosts(r.hostAliases[w], seen)
+				delete(seen, w)
+				if ok {
+					r.hostMemo[w] = [2]bool{a, c}
+				}
+			}
 			if !ok {
 				return false, false, false
 			}
@@ -767,8 +815,15 @@ func (r *sudoReader) runasList(toks []sudoWord, seen map[string]bool) ([]string,
 			if seen[w] {
 				return nil, false
 			}
-			seen[w] = true
-			sub, ok := r.runasList(r.runasAliases[w], seen)
+			sub, ok := r.runasMemo[w]
+			if !ok {
+				seen[w] = true
+				sub, ok = r.runasList(r.runasAliases[w], seen)
+				delete(seen, w)
+				if ok {
+					r.runasMemo[w] = sub
+				}
+			}
 			if !ok {
 				return nil, false
 			}
@@ -838,7 +893,7 @@ func (r *sudoReader) cmnds(toks []sudoWord) ([]grantTemplate, bool, bool) {
 			if n := len(grants); n > 0 && grants[n-1].runas == runas && grants[n-1].nopasswd == nopasswd {
 				g = &grants[n-1]
 			} else {
-				grants = append(grants, grantTemplate{runas: runas, nopasswd: nopasswd})
+				grants = append(grants, grantTemplate{runas: runas, nopasswd: nopasswd, argsRestricted: true})
 				g = &grants[len(grants)-1]
 			}
 			switch {
@@ -853,7 +908,7 @@ func (r *sudoReader) cmnds(toks []sudoWord) ([]grantTemplate, bool, bool) {
 						g.paths = append(g.paths, it.path)
 					}
 				}
-				g.argsRestricted = g.argsRestricted || it.argsRestricted
+				g.argsRestricted = g.argsRestricted && it.argsRestricted
 			}
 		}
 	}
@@ -909,7 +964,11 @@ func (r *sudoReader) cmnd(spec []sudoWord, seen map[string]bool) ([]cmndItem, bo
 		if !ok || len(args) > 0 || seen[w.text] {
 			return nil, false
 		}
+		if cached, ok := r.cmndMemo[w.text]; ok {
+			return cached, true
+		}
 		seen[w.text] = true
+		defer delete(seen, w.text)
 		var out []cmndItem
 		for _, item := range alias {
 			sub, ok := r.cmnd(item, seen)
@@ -918,9 +977,14 @@ func (r *sudoReader) cmnd(spec []sudoWord, seen map[string]bool) ([]cmndItem, bo
 			}
 			out = append(out, sub...)
 		}
+		r.cmndMemo[w.text] = out
 		return out, true
 	case validPath(w.text) && !hasGlob(w.text):
-		return []cmndItem{{path: w.text, argsRestricted: len(args) > 0}}, true
+		restricted := len(args) > 0
+		for _, arg := range args {
+			restricted = restricted && !hasGlob(arg.text)
+		}
+		return []cmndItem{{path: w.text, argsRestricted: restricted}}, true
 	}
 	return nil, false
 }

@@ -132,11 +132,18 @@ func (c *collector) collect(ctx context.Context) *Report {
 	c.reads.Add(1)
 	host := c.opts.hostname()
 	var b assembly
-	var wg sync.WaitGroup
+	var wg, phaseOne sync.WaitGroup
 	start := func(cat string, fn func()) {
 		wg.Add(1)
+		dependency := cat == catAccounts || cat == catSSHD
+		if dependency {
+			phaseOne.Add(1)
+		}
 		go func() {
 			defer wg.Done()
+			if dependency {
+				defer phaseOne.Done()
+			}
 			defer func() {
 				if recover() != nil {
 					logExposurePanic(cat, "Exposure category starter panicked.")
@@ -166,7 +173,7 @@ func (c *collector) collect(ctx context.Context) *Report {
 			return withFS(c, sudoPolicy{global: unreadable()}, func(_ *fsReader, sys systemFiles) sudoPolicy { return readSudoPolicy(sys, host) })
 		})
 	})
-	wg.Wait()
+	phaseOne.Wait()
 
 	if b.accOK && b.acc.usable {
 		accounts := b.acc.entries
@@ -195,8 +202,8 @@ func (c *collector) collect(ctx context.Context) *Report {
 				return withFS(c, ptyData{reasons: unreadable()}, func(fs *fsReader, _ systemFiles) ptyData { return readPTY(fs, accounts) })
 			})
 		})
-		wg.Wait()
 	}
+	wg.Wait()
 	return b.report()
 }
 

@@ -130,6 +130,7 @@ var matchCriteria = map[string]string{
 }
 
 type matchBlock struct {
+	seen              map[string]bool
 	block             MatchBlock
 	unsupported       bool
 	parseErr          bool
@@ -322,28 +323,41 @@ func splitConfigLine(line []byte) (string, []string, bool) {
 
 func splitArgs(s string) ([]string, bool) {
 	var out []string
-	for {
-		s = strings.TrimLeft(s, " \t")
-		if s == "" {
-			return out, true
+	for i := 0; i < len(s); {
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+			i++
 		}
-		if s[0] == '"' {
-			end := strings.IndexByte(s[1:], '"')
-			if end < 0 {
-				return nil, false
+		if i == len(s) || s[i] == '#' {
+			break
+		}
+		var word strings.Builder
+		var quote byte
+		for i < len(s) {
+			c := s[i]
+			if c == '\\' && i+1 < len(s) && strings.ContainsRune(`"' \`, rune(s[i+1])) {
+				i++
+				word.WriteByte(s[i])
+			} else if quote != 0 {
+				if c == quote {
+					quote = 0
+				} else {
+					word.WriteByte(c)
+				}
+			} else if c == '"' || c == '\'' {
+				quote = c
+			} else if c == ' ' || c == '\t' {
+				break
+			} else {
+				word.WriteByte(c)
 			}
-			out = append(out, s[1:1+end])
-			s = s[2+end:]
-			continue
+			i++
 		}
-		end := strings.IndexAny(s, " \t")
-		if end < 0 {
-			out = append(out, s)
-			return out, true
+		if quote != 0 {
+			return nil, false
 		}
-		out = append(out, s[:end])
-		s = s[end:]
+		out = append(out, word.String())
 	}
+	return out, true
 }
 
 func validCriterionValue(v string) bool {
@@ -385,6 +399,13 @@ func newMatchBlock(args []string) matchBlock {
 }
 
 func (mb *matchBlock) set(kw string, args []string) {
+	if mb.seen == nil {
+		mb.seen = map[string]bool{}
+	}
+	if mb.seen[kw] && !multiLineKeywords[kw] {
+		return
+	}
+	mb.seen[kw] = true
 	val := strings.Join(args, " ")
 	switch kw {
 	case kwKeysCommand, kwPrincipalsCommand:
