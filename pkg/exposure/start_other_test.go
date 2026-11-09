@@ -29,6 +29,5 @@ func TestOtherPlatformsNeverCallTheEndpoints(t *testing.T) {
 	for range 10 {
 		Trigger()
 	}
-	time.Sleep(100 * time.Millisecond)
 	assert.Zero(t, p.calls.Load())
 }

@@ -3,6 +3,7 @@ package exposure
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -248,7 +249,15 @@ func TestRowCapNoAccountSources(t *testing.T) {
 	for i := 0; i <= maxObservationRows; i++ {
 		r.External = append(r.External, external{Kind: externalKeysCommand, Scope: "match:" + strconv.Itoa(i)})
 	}
-	require.NotPanics(t, func() { _, _ = finalize(r) })
+	body, err := finalize(r)
+	require.NoError(t, err)
+	var decoded exposureReport
+	require.NoError(t, json.Unmarshal(body, &decoded))
+	// This synthetic input exceeds the collector's external-record cap and
+	// has no account sources to cut. Do not claim any source was truncated.
+	assert.Equal(t, maxObservationRows+1, observationRows(&decoded))
+	assert.Empty(t, decoded.Accounts)
+	assert.Empty(t, decoded.Categories)
 }
 
 func validTrustEntries(n int) []trustEntry {

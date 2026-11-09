@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,7 +104,13 @@ func TestInvalidFixtures(t *testing.T) {
 // testdata/exposure/invalid/oversize.md.
 func TestOversizeBody(t *testing.T) {
 	body := oversizeBody(t)
-	assert.Greater(t, len(body), maxReportBytes)
+	reader := http.MaxBytesReader(nil, io.NopCloser(bytes.NewReader(body)), maxReportBytes)
+	defer func() { require.NoError(t, reader.Close()) }()
+	var report exposureReport
+	err := json.NewDecoder(reader).Decode(&report)
+	var limit *http.MaxBytesError
+	require.ErrorAs(t, err, &limit)
+	assert.EqualValues(t, maxReportBytes, limit.Limit)
 }
 
 func oversizeBody(t *testing.T) []byte {

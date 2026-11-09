@@ -10,43 +10,71 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # A short run of every exposure parser fuzz target on each pull request
-  # that touches them. The nightly workflow runs the same targets for longer.
-  # Includes HostsEquiv, K5Login, Passwd, Group and NSSwitch automatically.
-  # Go fuzzes one target per invocation, so they run one after another.
-  exposure-short:
-    name: Fuzz exposure parsers (short)
+  setup:
+    name: List exposure fuzz targets
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          # pkg/exposure needs no generated code; do not claim the cache key
-          # the setup-go-generate jobs compute.
           cache: false
-
-      - name: Fuzz each target for 10 seconds
+      - name: Build the target matrix
+        id: targets
+        shell: bash
         run: |
           set -euo pipefail
-          targets="$(go test -list '^Fuzz' ./pkg/exposure | grep '^Fuzz')"
-          if [ -z "$targets" ]; then
-            echo "::error::no fuzz targets found in pkg/exposure"
-            exit 1
-          fi
-          for target in $targets; do
-            echo "fuzzing $target"
-            go test ./pkg/exposure -run '^$' -fuzz "^${target}\$" -fuzztime=10s
-          done
+          targets="$(go test -list '^Fuzz' ./pkg/exposure | sed -n '/^Fuzz/p' | jq -R . | jq -sc .)"
+          jq -e 'length > 0' <<< "$targets" >/dev/null
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
+  exposure-short:
+    name: Fuzz ${{ matrix.target }}
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.setup.outputs.targets) }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Locate the corpus cache
+        id: corpus
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: echo "path=$(go env GOCACHE)/fuzz/github.com/alpacax/alpamon/v2/pkg/exposure/$FUZZ_TARGET" >> "$GITHUB_OUTPUT"
+      - name: Keep the corpus
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ steps.corpus.outputs.path }}
+          key: ${{ runner.os }}-exposure-fuzz-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-exposure-fuzz-${{ matrix.target }}-
+      - name: Fuzz for 10 seconds
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: go test ./pkg/exposure -run '^$' -fuzz "^${FUZZ_TARGET}$" -fuzztime=10s
       - name: Keep a failing input
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: exposure-fuzz-short
+          name: exposure-fuzz-short-${{ matrix.target }}
           path: pkg/exposure/testdata/fuzz
           if-no-files-found: ignore

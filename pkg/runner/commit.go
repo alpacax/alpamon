@@ -291,6 +291,8 @@ func SyncSystemInfo(session *scheduler.Session, keys []string) {
 // category: the exposure report has its own endpoints.
 const exposureSyncKey = "exposure"
 
+var triggerExposure = exposure.Trigger
+
 // takeExposureKey triggers an exposure read when keys name it and returns
 // the remaining keys. exposureOnly is set when nothing else was asked for,
 // so a sync of just "exposure" never turns into a full sync. On a platform
@@ -300,7 +302,7 @@ func takeExposureKey(keys []string) (rest []string, exposureOnly bool) {
 	if !exposure.Supported || !slices.Contains(keys, exposureSyncKey) {
 		return keys, false
 	}
-	exposure.Trigger()
+	triggerExposure()
 	rest = slices.DeleteFunc(slices.Clone(keys), func(k string) bool { return k == exposureSyncKey })
 	return rest, len(rest) == 0
 }

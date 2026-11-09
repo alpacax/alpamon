@@ -7,58 +7,71 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  exposure-long:
-    name: Fuzz ${{ matrix.target }} (long)
+  setup:
+    name: List exposure fuzz targets
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Keep in step with the Fuzz functions in pkg/exposure/fuzz_test.go;
-        # the list step below fails when one is missing here.
-        target:
-          - FuzzShadow
-          - FuzzAuthorizedKeys
-          - FuzzPrincipals
-          - FuzzSudoers
-          - FuzzSSHDT
-          - FuzzMatch
-          - FuzzWtmp
-          - FuzzLastlog
-          - FuzzHostsEquiv
-          - FuzzK5Login
-          - FuzzPasswd
-          - FuzzGroup
-          - FuzzNSSwitch
+    timeout-minutes: 10
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: false
-
-      - name: Check the target list
-        env:
-          LISTED: FuzzShadow FuzzAuthorizedKeys FuzzPrincipals FuzzSudoers FuzzSSHDT FuzzMatch FuzzWtmp FuzzLastlog FuzzHostsEquiv FuzzK5Login FuzzPasswd FuzzGroup FuzzNSSwitch
+      - name: Build the target matrix
+        id: targets
+        shell: bash
         run: |
           set -euo pipefail
-          for target in $(go test -list '^Fuzz' ./pkg/exposure | grep '^Fuzz'); do
-            case " $LISTED " in
-              *" $target "*) ;;
-              *) echo "::error file=.github/workflows/fuzz-nightly.yml::$target is not in the nightly matrix"; exit 1 ;;
-            esac
-          done
+          targets="$(go test -list '^Fuzz' ./pkg/exposure | sed -n '/^Fuzz/p' | jq -R . | jq -sc .)"
+          jq -e 'length > 0' <<< "$targets" >/dev/null
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
+  exposure-long:
+    name: Fuzz ${{ matrix.target }}
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.setup.outputs.targets) }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Locate the corpus cache
+        id: corpus
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: echo "path=$(go env GOCACHE)/fuzz/github.com/alpacax/alpamon/v2/pkg/exposure/$FUZZ_TARGET" >> "$GITHUB_OUTPUT"
+      - name: Keep the corpus
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ steps.corpus.outputs.path }}
+          key: ${{ runner.os }}-exposure-fuzz-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-exposure-fuzz-${{ matrix.target }}-
       - name: Fuzz for 15 minutes
-        run: go test ./pkg/exposure -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime=15m
-
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: go test ./pkg/exposure -run '^$' -fuzz "^${FUZZ_TARGET}$" -fuzztime=15m
       - name: Keep a failing input
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: exposure-fuzz-${{ matrix.target }}
+          name: exposure-fuzz-long-${{ matrix.target }}
           path: pkg/exposure/testdata/fuzz
           if-no-files-found: ignore

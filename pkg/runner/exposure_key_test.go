@@ -27,3 +27,15 @@ func TestTakeExposureKey(t *testing.T) {
 	assert.Nil(t, rest)
 	assert.False(t, only)
 }
+
+func TestSyncSystemInfoExposureTriggersRead(t *testing.T) {
+	if !exposure.Supported {
+		t.Skip("exposure collection is Linux-only")
+	}
+	previous := triggerExposure
+	t.Cleanup(func() { triggerExposure = previous })
+	calls := 0
+	triggerExposure = func() { calls++ }
+	SyncSystemInfo(nil, []string{"exposure"})
+	assert.Equal(t, 1, calls)
+}

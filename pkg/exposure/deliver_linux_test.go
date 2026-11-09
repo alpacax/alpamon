@@ -425,3 +425,23 @@ func TestRejectedResponsesAreNotRetried(t *testing.T) {
 		}
 	}
 }
+
+func TestTriggerReadPreservesDueTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := &fakePoster{answers: map[string][]fakeResponse{checkURL: {{status: 200, body: `{"required":false}`}}}}
+		s := testService(p, func(context.Context) *exposureReport { return sampleReport() })
+		s.now = time.Now
+		due := time.Now().Add(time.Hour)
+		s.due = due
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() { s.runLoop(ctx); close(done) }()
+		s.trigger <- struct{}{}
+		synctest.Wait()
+		assert.Len(t, p.callsTo(checkURL), 1)
+		assert.Equal(t, due, s.due)
+		cancel()
+		<-done
+	})
+}
