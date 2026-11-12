@@ -253,3 +253,22 @@ func TestHandleMessage_LogsOnlyAPreviewOfAnUnknownQuery(t *testing.T) {
 	assert.Equal(t, "Invalid query type", entry["message"])
 	assert.Equal(t, protocol.Preview(query), entry["query"])
 }
+
+func TestHandleMessage_LogsOnlyAPreviewOfTheReconnectReason(t *testing.T) {
+	previous, previousLevel := log.Logger, zerolog.GlobalLevel()
+	t.Cleanup(func() { log.Logger = previous; zerolog.SetGlobalLevel(previousLevel) })
+	var logs bytes.Buffer
+	log.Logger = zerolog.New(&logs)
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	reason := "oops\n[ERROR] forged" + strings.Repeat("r", 1<<20)
+	msg, err := json.Marshal(map[string]string{"query": "reconnect", "reason": reason})
+	require.NoError(t, err)
+
+	outcome := (&Client{WsClient: &runner.WebsocketClient{}}).handleMessage(context.Background(), msg)
+
+	assert.Equal(t, outcomeReconnect, outcome)
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &entry))
+	assert.Equal(t, protocol.Preview(reason), entry["reason"])
+	assert.Less(t, logs.Len(), 4*protocol.PreviewBytes, "the log carried the reason whole")
+}

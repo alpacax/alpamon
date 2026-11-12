@@ -190,10 +190,10 @@ func (c *Client) handleMessage(ctx context.Context, message []byte) handlerOutco
 			log.Error().Err(err).Msg("Failed to send pong response")
 		}
 	case "quit":
-		log.Debug().Msgf("Quit requested for reason: %s.", cmd.Reason)
+		log.Debug().Str("reason", protocol.Preview(cmd.Reason)).Msg("Quit requested.")
 		c.WsClient.ShutDown()
 	case "reconnect":
-		log.Debug().Msgf("Reconnect requested for reason: %s.", cmd.Reason)
+		log.Debug().Str("reason", protocol.Preview(cmd.Reason)).Msg("Reconnect requested.")
 		return outcomeReconnect
 	case "restart":
 		log.Info().Msgf("%s will restart in 1 second.", c.PluginName)

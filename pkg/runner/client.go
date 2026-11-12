@@ -679,10 +679,10 @@ func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome 
 			)
 		}
 	case protocol.MessageTypeQuit:
-		log.Debug().Msgf("Quit requested for reason: %s.", msg.Reason)
+		log.Debug().Str("reason", protocol.Preview(msg.Reason)).Msg("Quit requested.")
 		wc.ShutDown()
 	case protocol.MessageTypeReconnect:
-		log.Debug().Msgf("Reconnect requested for reason: %s.", msg.Reason)
+		log.Debug().Str("reason", protocol.Preview(msg.Reason)).Msg("Reconnect requested.")
 		return outcomeReconnect
 	default:
 		log.Warn().Int("size", len(message)).Str("query", protocol.Preview(msg.Query)).Msg("Not implemented query.")

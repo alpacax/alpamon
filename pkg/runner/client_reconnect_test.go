@@ -10,6 +10,7 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/internal/testutil"
 	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -81,6 +82,28 @@ func TestCommandRequestHandler_LogsOnlyAPreviewOfARejectedMessage(t *testing.T) 
 				assert.LessOrEqual(t, len(entry["error"].(string)), protocol.PreviewBytes+len("..."), "the error quoted the message whole")
 			}
 			assert.Less(t, len(logs.String()), 4*protocol.PreviewBytes, "the log carried more than the previews")
+		})
+	}
+}
+
+func TestCommandRequestHandler_LogsOnlyAPreviewOfTheReason(t *testing.T) {
+	reason := "oops\n[ERROR] forged" + strings.Repeat("r", 1<<20)
+	for _, query := range []string{"quit", "reconnect"} {
+		t.Run(query, func(t *testing.T) {
+			wc := &WebsocketClient{ShutDownChan: make(chan struct{})} // quit closes it
+			logs := captureLogsSync(t)
+			zerolog.SetGlobalLevel(zerolog.DebugLevel)
+			msg, err := json.Marshal(map[string]string{"query": query, "reason": reason})
+			require.NoError(t, err)
+
+			wc.commandRequestHandler(msg)
+
+			lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+			require.Len(t, lines, 1, "a line break in the reason started a new log line")
+			var entry map[string]any
+			require.NoError(t, json.Unmarshal([]byte(lines[0]), &entry))
+			assert.Equal(t, protocol.Preview(reason), entry["reason"])
+			assert.Less(t, len(logs.String()), 4*protocol.PreviewBytes, "the log carried the reason whole")
 		})
 	}
 }
