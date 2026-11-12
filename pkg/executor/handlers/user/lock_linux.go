@@ -21,6 +21,7 @@ import (
 type linuxAccountLocker struct {
 	handler             *UserHandler
 	store               lockStateStore
+	files               lockFiles
 	readFile            func(string) ([]byte, error)
 	systemd             func() bool
 	stat                func(string) (os.FileInfo, error)
@@ -33,6 +34,7 @@ type linuxAccountLocker struct {
 func newAccountLocker(h *UserHandler) accountLocker {
 	l := &linuxAccountLocker{
 		handler:   h,
+		files:     lockFiles{markerDir: "/var/lib/alpamon/user-locks.d", unitDirs: []string{"/run/systemd/system", "/etc/systemd/system"}},
 		store:     lockStateStore{path: filepath.Join(utils.DataDir(), "user-locks.json"), owner: 0},
 		readFile:  os.ReadFile,
 		stat:      os.Stat,
@@ -107,7 +109,7 @@ func (l *linuxAccountLocker) change(ctx context.Context, cmd string, args *commo
 		}
 		delete(states, data.Username)
 		found = false
-		state = accountLockState{}
+		state = accountLockState{DropIns: state.DropIns}
 	}
 	if cmd == common.UnlockUser.String() {
 		if !found {
@@ -120,9 +122,8 @@ func (l *linuxAccountLocker) change(ctx context.Context, cmd string, args *commo
 			}
 		}
 		if stale {
-			if err := l.store.save(states); err != nil {
-				return "", fmt.Errorf("lock_state_failed: %w", err)
-			}
+			state.UID, state.StateLost = uid, true
+			found = true
 		}
 		return l.unlock(ctx, data.Username, states, state, found)
 	}
@@ -133,12 +134,14 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 	alreadyLocked := found && state.Locked
 	if !found {
 		var err error
+		previousPaths := state.DropIns
 		state, err = l.snapshot(name, uid)
+		state.DropIns = previousPaths
 		if err != nil {
 			return "", err
 		}
 	}
-	var units []string
+	var units []accountUnit
 	lingerEnabled := false
 	if l.systemctl != "" {
 		_, err := l.readFile(filepath.Join("/var/lib/systemd/linger", name))
@@ -150,19 +153,22 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 		if err != nil {
 			return "", err
 		}
-		for _, unit := range units {
-			enabled, err := l.run(ctx, l.systemctl, "show", "--property=UnitFileState", "--value", "--", unit)
-			if err != nil {
-				return "", err
-			}
-			unitState := strings.TrimSpace(enabled)
-			if (unitState == "enabled" || unitState == "enabled-runtime") && !slices.Contains(state.EnabledUnits, unit) {
-				state.EnabledUnits = append(state.EnabledUnits, unit)
+	}
+	for _, unit := range units {
+		if unit.transient {
+			continue
+		}
+		for _, root := range l.files.unitDirs {
+			path := filepath.Join(root, serviceTemplate(unit.name)+".d", lockDropInName)
+			for other, saved := range states {
+				if other != name && slices.Contains(saved.DropIns, path) {
+					return "", fmt.Errorf("unit_lock_conflict: %s", unit.name)
+				}
 			}
 		}
 	}
 	states[name] = state
-	// Persist restore data before changing the account or disabling units.
+	// Persist restore data before changing the account.
 	if err := l.store.save(states); err != nil {
 		return "", fmt.Errorf("lock_state_failed: %w", err)
 	}
@@ -172,6 +178,16 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 	if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-e", "1", "--", name); err != nil {
 		return "", err
 	}
+	if err := l.files.marker(name, true); err != nil {
+		return "", fmt.Errorf("lock_marker_failed: %w", err)
+	}
+	var unitErr error
+	if l.systemctl != "" {
+		unitErr = l.installDropIns(name, units, states, &state)
+		_, reloadErr := l.run(ctx, l.systemctl, "daemon-reload")
+		unitErr = errors.Join(unitErr, reloadErr)
+	}
+
 	if lingerEnabled {
 		if err := l.runForAccount(ctx, name, state.UID, l.loginctl, "disable-linger", "--", strconv.FormatUint(state.UID, 10)); err != nil {
 			return "", err
@@ -191,7 +207,7 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 		}
 	}
 	count, err := l.terminate(ctx, uid, terminateSessions)
-	if err != nil {
+	if err = errors.Join(unitErr, err); err != nil {
 		return "", fmt.Errorf("process_termination_incomplete: %w", err)
 	}
 	state.Locked = true
@@ -209,27 +225,44 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 }
 
 func (l *linuxAccountLocker) unlock(ctx context.Context, name string, states map[string]accountLockState, state accountLockState, found bool) (string, error) {
+	alreadyUnlocked := !found
 	if found && state.StateLost {
-		return "", missingLockState()
-	}
-	if found {
-		if !state.PasswordLocked {
-			if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-U", "--", name); err != nil {
-				return "", err
-			}
-		}
-		expiry := state.Expiry
-		if expiry == "" {
-			expiry = "-1"
-		}
-		if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-e", expiry, "--", name); err != nil {
+		snapshot, err := l.snapshot(name, state.UID)
+		if err != nil {
 			return "", err
 		}
+		if snapshot.StateLost {
+			return "", missingLockState()
+		}
+		alreadyUnlocked = true
+	}
+
+	var left []string
+	var reloadErr error
+	if found {
+		if err := l.files.marker(name, false); err != nil {
+			return "", fmt.Errorf("lock_marker_failed: %w", err)
+		}
 		if l.systemctl != "" {
-			for _, unit := range state.EnabledUnits {
-				if err := l.runForAccount(ctx, name, state.UID, l.systemctl, "enable", "--", unit); err != nil {
+			for _, path := range state.DropIns {
+				if err := l.files.removeDropIn(path); err != nil {
+					left = append(left, path)
+				}
+			}
+			_, reloadErr = l.run(ctx, l.systemctl, "daemon-reload")
+		}
+		if !alreadyUnlocked {
+			if !state.PasswordLocked {
+				if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-U", "--", name); err != nil {
 					return "", err
 				}
+			}
+			expiry := state.Expiry
+			if expiry == "" {
+				expiry = "-1"
+			}
+			if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-e", expiry, "--", name); err != nil {
+				return "", err
 			}
 		}
 		delete(states, name)
@@ -237,12 +270,16 @@ func (l *linuxAccountLocker) unlock(ctx context.Context, name string, states map
 			return "", fmt.Errorf("lock_state_failed: %w", err)
 		}
 	}
+	if reloadErr != nil {
+		return "", reloadErr
+	}
 	result, err := json.Marshal(struct {
-		Username           string `json:"username"`
-		Locked             bool   `json:"locked"`
-		AlreadyUnlocked    bool   `json:"already_unlocked"`
-		LingerLeftDisabled bool   `json:"linger_left_disabled,omitempty"`
-	}{name, false, !found, found && state.Linger})
+		DropInsLeft        []string `json:"drop_ins_left,omitempty"`
+		Username           string   `json:"username"`
+		Locked             bool     `json:"locked"`
+		AlreadyUnlocked    bool     `json:"already_unlocked"`
+		LingerLeftDisabled bool     `json:"linger_left_disabled,omitempty"`
+	}{left, name, false, alreadyUnlocked, found && !alreadyUnlocked && state.Linger})
 	return string(result), err
 }
 
@@ -311,59 +348,6 @@ func (l *linuxAccountLocker) terminateSessions(ctx context.Context, name string,
 	return nil
 }
 
-func (l *linuxAccountLocker) accountUnits(ctx context.Context, name string, uid uint64) ([]string, error) {
-	output, err := l.run(ctx, l.systemctl, "list-units", "--all", "--type=service,timer,socket,path", "--no-legend", "--no-pager", "--plain")
-	if err != nil {
-		return nil, err
-	}
-	var units []string
-	for line := range strings.SplitSeq(output, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		unit := fields[0]
-		services := []string{unit}
-		if !strings.HasSuffix(unit, ".service") {
-			triggers, err := l.run(ctx, l.systemctl, "show", "--property=Triggers", "--value", "--", unit)
-			if err != nil {
-				return nil, err
-			}
-			services = strings.Fields(triggers)
-		}
-		for _, service := range services {
-			if !strings.HasSuffix(service, ".service") {
-				continue
-			}
-			owner, err := l.run(ctx, l.systemctl, "show", "--property=User", "--value", "--", service)
-			if err != nil {
-				return nil, err
-			}
-			owner = strings.TrimSpace(owner)
-			if owner == name || owner == strconv.FormatUint(uid, 10) {
-				if !slices.Contains(units, unit) {
-					units = append(units, unit)
-				}
-				break
-			}
-		}
-	}
-	return units, nil
-}
-
-func (l *linuxAccountLocker) stopServices(ctx context.Context, name string, uid uint64, units []string) error {
-	for _, unit := range units {
-		// Queue the stop before killing frozen tasks so systemd suppresses restarts.
-		if err := l.runForAccount(ctx, name, uid, l.systemctl, "stop", "--no-block", "--job-mode=ignore-dependencies", "--", unit); err != nil {
-			return err
-		}
-		if err := l.runForAccount(ctx, name, uid, l.systemctl, "disable", "--", unit); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (l *linuxAccountLocker) resolveTool(name string) (string, error) {
 	for _, dir := range []string{"/usr/bin", "/bin"} {
 		path := filepath.Join(dir, name)
@@ -380,11 +364,21 @@ func (l *linuxAccountLocker) forget(name string) error {
 	if err != nil {
 		return err
 	}
-	if _, found := states[name]; !found {
+	state, found := states[name]
+	if !found {
 		return nil
 	}
+	var errs []error
+	if err := l.files.marker(name, false); err != nil {
+		return err
+	}
+	for _, path := range state.DropIns {
+		if err := l.files.removeDropIn(path); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	delete(states, name)
-	return l.store.save(states)
+	return errors.Join(append(errs, l.store.save(states))...)
 }
 
 func missingLockState() error {

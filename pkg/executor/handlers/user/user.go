@@ -474,7 +474,7 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 	}
 
 	if err := h.accountLocker.forget(data.Username); err != nil {
-		return 1, fmt.Sprintf("lock_state_failed: %v", err), nil
+		log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
 	}
 
 	log.Info().

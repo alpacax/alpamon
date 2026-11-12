@@ -20,7 +20,7 @@ type accountLockState struct {
 	Linger         bool     `json:"linger"`
 	Locked         bool     `json:"locked"`
 	StateLost      bool     `json:"state_lost,omitempty"`
-	EnabledUnits   []string `json:"enabled_units,omitempty"`
+	DropIns        []string `json:"drop_ins,omitempty"`
 }
 
 type lockStateStore struct {
@@ -66,16 +66,19 @@ func (s lockStateStore) load() (map[string]accountLockState, error) {
 		return nil, fmt.Errorf("state file must be a root-owned regular file with mode 0600")
 	}
 	decoder := json.NewDecoder(io.LimitReader(f, 1024*1024))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&states); err != nil {
-		return s.quarantine()
+		var syntax *json.SyntaxError
+		if errors.As(err, &syntax) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+			return s.quarantine()
+		}
+		return nil, err
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return s.quarantine()
 	}
 	if states == nil {
-		return s.quarantine()
+		states = make(map[string]accountLockState)
 	}
 	return states, nil
 }

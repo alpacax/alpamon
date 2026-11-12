@@ -335,7 +335,14 @@ func systemServiceUnit(cgroups string) string {
 func probeProcessHandles(open func(int, int) (int, error)) error {
 	fd, err := open(os.Getpid(), 0)
 	if err != nil {
-		return fmt.Errorf("unsupported_kernel: process handles require Linux 5.3 or later")
+		switch {
+		case errors.Is(err, unix.ENOSYS):
+			return fmt.Errorf("unsupported_kernel: process handles require Linux 5.3 or later")
+		case errors.Is(err, unix.EPERM):
+			return fmt.Errorf("unsupported_kernel: process handles are blocked (%v)", err)
+		default:
+			return fmt.Errorf("process_probe_failed: %w", err)
+		}
 	}
 	return unix.Close(fd)
 }

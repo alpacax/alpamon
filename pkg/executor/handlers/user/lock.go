@@ -20,7 +20,11 @@ func validateLockUser(args *common.CommandArgs) error {
 	if args == nil || args.Username == "" {
 		return fmt.Errorf("invalid_username: username is required")
 	}
-	if strings.HasPrefix(args.Username, "-") || strings.ContainsAny(args.Username, "/:\x00\r\n\t ") || args.Username == "." || args.Username == ".." {
+	return validateLockUserName(args.Username)
+}
+
+func validateLockUserName(name string) error {
+	if name == "" || strings.ContainsAny(name, "%\\\"") || strings.HasPrefix(name, "-") || strings.ContainsAny(name, "/:\x00\r\n\t ") || name == "." || name == ".." {
 		return fmt.Errorf("invalid_username: invalid local account name")
 	}
 	return nil

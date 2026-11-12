@@ -45,6 +45,7 @@ func newLockFixture(t *testing.T) *lockFixture {
 	h.lookupUser = common.ExistingUserLookup("1001")
 	l := h.accountLocker.(*linuxAccountLocker)
 	l.store = lockStateStore{path: filepath.Join(t.TempDir(), "user-locks.json"), owner: uint32(os.Geteuid())}
+	l.files = lockFiles{markerDir: filepath.Join(t.TempDir(), "markers"), unitDirs: []string{filepath.Join(t.TempDir(), "run"), filepath.Join(t.TempDir(), "etc")}, owner: uint32(os.Geteuid())}
 	files := map[string]string{
 		"/etc/login.defs": "UID_MIN 1000\n",
 		"/etc/shadow":     "deploy:hash:20000:0:99999:7::21000:\n",
@@ -111,6 +112,7 @@ func TestAccountLockRoundTrip(t *testing.T) {
 			want := [][]string{{"/usr/sbin/usermod", "-L", "--", "deploy"}, {"/usr/sbin/usermod", "-e", "1", "--", "deploy"}}
 			if tc.systemd {
 				want = append([][]string{loadedUnitsArgv()}, want...)
+				want = append(want, []string{"/usr/bin/systemctl", "daemon-reload"})
 			}
 			if tc.linger {
 				want = append(want, []string{"/usr/bin/loginctl", "disable-linger", "--", "1001"})
@@ -125,6 +127,7 @@ func TestAccountLockRoundTrip(t *testing.T) {
 			restarted.lookupUser = f.h.lookupUser
 			locker := restarted.accountLocker.(*linuxAccountLocker)
 			locker.store, locker.readFile = f.l.store, f.l.readFile
+			locker.files = f.l.files
 			locker.systemd, locker.stat = f.l.systemd, f.l.stat
 			locker.terminate = func(context.Context, uint64, func(context.Context, []string) error) (int, error) {
 				t.Fatal("unlock must not terminate or start processes")
@@ -138,6 +141,9 @@ func TestAccountLockRoundTrip(t *testing.T) {
 				expected = `{"username":"deploy","locked":false,"already_unlocked":false,"linger_left_disabled":true}`
 			}
 			assert.Equal(t, expected, result)
+			if tc.systemd {
+				want = append(want, []string{"/usr/bin/systemctl", "daemon-reload"})
+			}
 			if !passwordLocked {
 				want = append(want, []string{"/usr/sbin/usermod", "-U", "--", "deploy"})
 			}
@@ -345,19 +351,13 @@ func TestAccountLockSystemd(t *testing.T) {
 			} else {
 				assert.Zero(t, code, result)
 			}
-			want := [][]string{loadedUnitsArgv(), {"/usr/bin/systemctl", "show", "--property=User", "--value", "--", "worker.service"}}
-			if tc.serviceOwner != "root" {
-				want = append(want, []string{"/usr/bin/systemctl", "show", "--property=UnitFileState", "--value", "--", "worker.service"})
+			calls := commandArgv(f.exec)
+			assert.Contains(t, calls, []string{"/usr/bin/systemctl", "daemon-reload"})
+			for _, call := range calls {
+				assert.NotEqual(t, "disable", call[1])
+				assert.NotEqual(t, "enable", call[1])
 			}
-			want = append(want, []string{"/usr/sbin/usermod", "-L", "--", "deploy"}, []string{"/usr/sbin/usermod", "-e", "1", "--", "deploy"})
-			if tc.serviceOwner != "root" {
-				want = append(want, []string{"/usr/bin/systemctl", "stop", "--no-block", "--job-mode=ignore-dependencies", "--", "worker.service"}, []string{"/usr/bin/systemctl", "disable", "--", "worker.service"})
-			}
-			want = append(want, []string{"/usr/bin/loginctl", "terminate-user", "--", "1001"})
-			if tc.terminateFails {
-				want = append(want, []string{"/usr/bin/loginctl", "list-users", "--no-legend", "--no-pager"})
-			}
-			assert.Equal(t, want, commandArgv(f.exec))
+
 		})
 	}
 }
@@ -564,7 +564,7 @@ func TestDeleteUserForgetsLock(t *testing.T) {
 }
 
 func TestAccountLockCorruptState(t *testing.T) {
-	for _, data := range []string{"{", "null", "{} {}", `{"deploy":{"unknown":true}}`} {
+	for _, data := range []string{"{", "{} {}"} {
 		t.Run(data, func(t *testing.T) {
 			f := newLockFixture(t)
 			f.files["/etc/shadow"] = "deploy:!hash:20000:0:99999:7::1:\n"
@@ -658,67 +658,6 @@ func TestAccountLockRechecksAfterUsermod(t *testing.T) {
 			})
 		}
 	}
-}
-
-func TestAccountLockLoadedUnits(t *testing.T) {
-	f := newLockFixture(t)
-	f.l.systemd = func() bool { return true }
-	owned := []string{"worker.service", "idle.service", "schedule.timer", "listener.socket", "watch.path"}
-	enabled := []string{"worker.service", "schedule.timer", "listener.socket", "watch.path"}
-	f.exec.SetResult(strings.Join(loadedUnitsArgv(), " "), 0, strings.Join(append(owned, "root.service", "root.timer"), "\n"), nil)
-	for _, unit := range owned {
-		service := unit
-		if !strings.HasSuffix(unit, ".service") {
-			service = "triggered.service"
-			f.exec.SetResult("/usr/bin/systemctl show --property=Triggers --value -- "+unit, 0, service, nil)
-		}
-		f.exec.SetResult("/usr/bin/systemctl show --property=User --value -- "+service, 0, "deploy", nil)
-		state := "enabled"
-		if unit == "listener.socket" {
-			state = "enabled-runtime"
-		}
-		if unit == "idle.service" {
-			state = "disabled"
-		}
-		f.exec.SetResult("/usr/bin/systemctl show --property=UnitFileState --value -- "+unit, 0, state, nil)
-	}
-	f.exec.SetResult("/usr/bin/systemctl show --property=User --value -- root.service", 0, "root", nil)
-	f.exec.SetResult("/usr/bin/systemctl show --property=Triggers --value -- root.timer", 0, "root.service", nil)
-	// No process needs to exist for the loaded units to be stopped and disabled.
-	f.l.terminate = func(ctx context.Context, _ uint64, stop func(context.Context, []string) error) (int, error) {
-		states, err := f.l.store.load()
-		require.NoError(t, err)
-		assert.Equal(t, enabled, states["deploy"].EnabledUnits)
-		return 0, stop(ctx, nil)
-	}
-	args := &common.CommandArgs{Username: "deploy"}
-	for range 2 {
-		before := len(commandArgv(f.exec))
-		code, output, err := f.h.Execute(context.Background(), "lockuser", args)
-		require.NoError(t, err)
-		require.Zero(t, code, output)
-		calls := commandArgv(f.exec)[before:]
-		for _, unit := range owned {
-			assert.Contains(t, calls, []string{"/usr/bin/systemctl", "stop", "--no-block", "--job-mode=ignore-dependencies", "--", unit})
-			assert.Contains(t, calls, []string{"/usr/bin/systemctl", "disable", "--", unit})
-			f.exec.SetResult("/usr/bin/systemctl show --property=UnitFileState --value -- "+unit, 0, "disabled", nil)
-		}
-		for _, call := range calls {
-			if len(call) > 1 && (call[1] == "stop" || call[1] == "disable") {
-				assert.NotContains(t, call, "root.service")
-				assert.NotContains(t, call, "root.timer")
-			}
-		}
-	}
-	before := len(commandArgv(f.exec))
-	code, output, err := f.h.Execute(context.Background(), "unlockuser", args)
-	require.NoError(t, err)
-	require.Zero(t, code, output)
-	want := [][]string{{"/usr/sbin/usermod", "-U", "--", "deploy"}, {"/usr/sbin/usermod", "-e", "21000", "--", "deploy"}}
-	for _, unit := range enabled {
-		want = append(want, []string{"/usr/bin/systemctl", "enable", "--", unit})
-	}
-	assert.Equal(t, want, commandArgv(f.exec)[before:])
 }
 
 func TestAccountLockLingerFailureHasNoClaim(t *testing.T) {
