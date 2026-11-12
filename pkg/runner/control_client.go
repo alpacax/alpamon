@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/gorilla/websocket"
@@ -166,8 +165,7 @@ func (cc *ControlClient) Connect(ctx context.Context) error {
 		cc.connected = true
 		cc.mu.Unlock()
 
-		interval := keepaliveInterval // read before the goroutine starts: tests reassign it
-		safego.Go("control keepalive", func() { pingConn(ctx, conn, ka, interval, cc.conn) }, nil)
+		goPingConn(ctx, "control keepalive", conn, ka, cc.conn)
 
 		log.Info().Msg("Control WebSocket connection established.")
 		return nil

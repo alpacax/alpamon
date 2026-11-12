@@ -287,8 +287,7 @@ func (pc *PtyClient) installConn(ctx context.Context, conn *websocket.Conn) *web
 	pc.recoveryMu.Unlock()
 
 	oldKeepalive.stop()
-	interval := keepaliveInterval // read before the goroutine starts: tests reassign it
-	safego.Go("Websh keepalive", func() { pingConn(ctx, conn, ka, interval, pc.getConn) }, nil)
+	goPingConn(ctx, "Websh keepalive", conn, ka, pc.getConn)
 	return old
 }
 

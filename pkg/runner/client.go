@@ -431,6 +431,12 @@ func watchPongs(conn *websocket.Conn, ka *connKeepalive) {
 	})
 }
 
+// goPingConn runs pingConn on its own goroutine under name.
+func goPingConn(ctx context.Context, name string, conn *websocket.Conn, ka *connKeepalive, current func() *websocket.Conn) {
+	interval := keepaliveInterval // read before the goroutine starts: tests reassign it
+	safego.Go(name, func() { pingConn(ctx, conn, ka, interval, current) }, nil)
+}
+
 // pingConn pings conn every interval until ka is stopped, current no longer
 // returns conn, or ctx ends. A failed ping, such as a write that timed out
 // behind a long data write, needs no handling here: the pong it did not earn
