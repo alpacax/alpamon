@@ -211,9 +211,14 @@ func (tc *TunnelClient) open(ctx context.Context) error {
 // Serve relays streams until the session ends, then unregisters and closes
 // the tunnel. Call it only after Open succeeds.
 func (tc *TunnelClient) Serve() {
+	tc.serve(tc.handleStreams)
+}
+
+// serve runs loop, then unregisters and closes the tunnel, even when loop panics.
+func (tc *TunnelClient) serve(loop func()) {
 	defer safego.Recover("tunnel session", nil)
 	defer tc.unregisterAndClose()
-	tc.handleStreams()
+	loop()
 	log.Info().Msgf("Tunnel session %s ended.", tc.sessionID)
 }
 
@@ -435,19 +440,19 @@ func (tc *TunnelClient) handleStreams() {
 			return
 		}
 
-		tc.serveStream(stream)
+		tc.serveStream(stream, tc.handleStream)
 	}
 }
 
-// serveStream handles stream on its own goroutine and then frees the two slots
-// handleStreams took for it, even when the handler panics.
-func (tc *TunnelClient) serveStream(stream *smux.Stream) {
+// serveStream runs handle on stream on its own goroutine and then frees the two
+// slots handleStreams took for it, even when handle panics.
+func (tc *TunnelClient) serveStream(stream *smux.Stream, handle func(*smux.Stream)) {
 	safego.Go("tunnel stream", func() {
 		defer func() {
 			<-globalStreamSem
 			<-tc.streamSem
 		}()
-		tc.handleStream(stream)
+		handle(stream)
 	}, nil)
 }
 

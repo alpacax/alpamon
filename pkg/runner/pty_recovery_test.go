@@ -279,7 +279,7 @@ func TestPtyPumpThatPanicsCancelsTheSession(t *testing.T) {
 	ptyOut, ptyIn, err := os.Pipe() // stands in for the PTY, so its reader blocks rather than ending the session itself
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ptyOut.Close(); _ = ptyIn.Close() })
-	pc := &PtyClient{ // no channel conn, so the channel reader dereferences nil
+	pc := &PtyClient{
 		ptmx:         ptyOut,
 		wsToPty:      make(chan []byte, channelCapacity),
 		ptyToWs:      make(chan []byte, channelCapacity),
@@ -289,7 +289,11 @@ func TestPtyPumpThatPanicsCancelsTheSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pc.startPumps(ctx, cancel, make(chan struct{}, 1))
+	pumps := pc.pumps(ctx, cancel, make(chan struct{}, 1))
+	require.Contains(t, pumps, "Websh channel reader")
+	pumps["Websh channel reader"] = func() { panic("injected pump panic") }
+
+	goPumps(cancel, pumps)
 
 	waitFor(t, ctx.Done(), "a panicking pump to cancel the Websh session")
 	assert.Contains(t, logs.String(), `"goroutine":"Websh channel reader"`)

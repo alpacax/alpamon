@@ -21,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xtaci/smux"
 )
 
 func TestIsValidSessionID(t *testing.T) {
@@ -507,10 +508,10 @@ func TestTunnelUnregisterAndClose_LeavesANewerTunnelUnderTheSameID(t *testing.T)
 }
 
 func TestTunnelServe_UnregistersWhenTheStreamLoopPanics(t *testing.T) {
-	tc := registeredTunnel(t, "panicking-session", relayMustNotStart) // never opened, so AcceptStream dereferences a nil session
+	tc := registeredTunnel(t, "panicking-session", relayMustNotStart)
 	logs := captureLogs(t)
 
-	tc.Serve()
+	tc.serve(func() { panic("injected stream loop panic") })
 
 	_, registered := GetActiveTunnel("panicking-session")
 	assert.False(t, registered)
@@ -526,7 +527,7 @@ func TestTunnelServeStream_FreesItsSlotsWhenTheHandlerPanics(t *testing.T) {
 		globalStreamSem <- struct{}{}
 		globalBefore := len(globalStreamSem)
 
-		tc.serveStream(nil) // a nil stream makes handleStream dereference nil
+		tc.serveStream(nil, func(*smux.Stream) { panic("injected stream handler panic") })
 
 		synctest.Wait()
 		assert.Empty(t, tc.streamSem)

@@ -211,12 +211,17 @@ func (pc *PtyClient) RunPtyBackground() {
 
 // startPumps starts the four copy loops.
 func (pc *PtyClient) startPumps(ctx context.Context, cancel context.CancelFunc, recoveryChan chan struct{}) {
-	goPumps(cancel, map[string]func(){
+	goPumps(cancel, pc.pumps(ctx, cancel, recoveryChan))
+}
+
+// pumps names the four copy loops startPumps runs.
+func (pc *PtyClient) pumps(ctx context.Context, cancel context.CancelFunc, recoveryChan chan struct{}) map[string]func() {
+	return map[string]func(){
 		"Websh PTY reader":     func() { pc.readFromPty(ctx, cancel) },
 		"Websh channel writer": func() { pc.writeToWebsocket(ctx, cancel, recoveryChan) },
 		"Websh channel reader": func() { pc.readFromWebsocket(ctx, cancel, recoveryChan) },
 		"Websh PTY writer":     func() { pc.writeToPty(ctx, cancel) },
-	})
+	}
 }
 
 // runRecoveryLoop serializes recovery attempts; completion is broadcast by closing recoveryDone so sides that were not waiting cannot stall the next cycle.
