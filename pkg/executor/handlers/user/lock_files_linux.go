@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/sys/unix"
 )
 
-const lockDropInName = "50-alpamon-user-lock.conf"
+const lockDropInName = "zz-alpamon-user-lock.conf"
+const oldLockDropInName = "50-alpamon-user-lock.conf"
 
 type lockFiles struct {
 	markerDir string
@@ -128,8 +130,23 @@ func (f lockFiles) remove(path string, mode uint32) error {
 func (f lockFiles) removeDropIn(path string) error {
 	for _, root := range f.unitDirs {
 		rel, err := filepath.Rel(root, path)
-		if err == nil && len(strings.Split(rel, string(os.PathSeparator))) == 2 && filepath.Base(path) == lockDropInName && validService(strings.TrimSuffix(filepath.Dir(rel), ".d")) {
-			return f.remove(path, 0755)
+		if err == nil && len(strings.Split(rel, string(os.PathSeparator))) == 2 && (filepath.Base(path) == lockDropInName || filepath.Base(path) == oldLockDropInName) && validService(strings.TrimSuffix(filepath.Dir(rel), ".d")) {
+			if err := f.remove(path, 0755); err != nil {
+				return err
+			}
+			fd, err := f.directory(root, false, 0755)
+			if errors.Is(err, unix.ENOENT) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			defer func() { _ = unix.Close(fd) }()
+			err = unix.Unlinkat(fd, filepath.Dir(rel), unix.AT_REMOVEDIR)
+			if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTEMPTY) {
+				return nil
+			}
+			return err
 		}
 	}
 	return fmt.Errorf("invalid drop-in path: %s", path)
@@ -137,4 +154,20 @@ func (f lockFiles) removeDropIn(path string) error {
 
 func validService(unit string) bool {
 	return strings.HasSuffix(unit, ".service") && !strings.HasPrefix(unit, "-") && !strings.ContainsAny(unit, "/\x00\r\n\t ")
+}
+
+func lockDropInPaths(paths []string) []string {
+	var result []string
+	for _, path := range paths {
+		candidates := []string{path}
+		if base := filepath.Base(path); base == lockDropInName || base == oldLockDropInName {
+			candidates = []string{filepath.Join(filepath.Dir(path), oldLockDropInName), filepath.Join(filepath.Dir(path), lockDropInName)}
+		}
+		for _, candidate := range candidates {
+			if !slices.Contains(result, candidate) {
+				result = append(result, candidate)
+			}
+		}
+	}
+	return result
 }

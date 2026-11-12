@@ -20,6 +20,7 @@ type accountLockState struct {
 	Linger         bool     `json:"linger"`
 	Locked         bool     `json:"locked"`
 	StateLost      bool     `json:"state_lost,omitempty"`
+	Triggers       []string `json:"triggers,omitempty"`
 	DropIns        []string `json:"drop_ins,omitempty"`
 }
 

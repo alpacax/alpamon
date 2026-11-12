@@ -97,6 +97,7 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 		t.Log(output)
 	}
 	enablement()
+	run("/usr/bin/systemctl", "stop", "alpamon-lock-foo.timer")
 	change("lockuser")
 	enablement()
 	require.NoError(t, os.Chmod(home, 0755))
@@ -123,8 +124,100 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 	// The runner destroys this container, including all fixture users and units.
 	for _, root := range []string{"/run/systemd/system", "/etc/systemd/system"} {
 		for _, unit := range []string{"alpamon-lock-foo.service", "alpamon-lock-listener@.service", "alpamon-lock-custom-worker@.service", "alpamon-lock-runtime.service"} {
-			_, err := os.Stat(filepath.Join(root, unit+".d", "50-alpamon-user-lock.conf"))
+			_, err := os.Stat(filepath.Join(root, unit+".d", "zz-alpamon-user-lock.conf"))
 			assert.ErrorIs(t, err, os.ErrNotExist, fmt.Sprint(root, unit))
 		}
 	}
+	changeAccount := func(command, username string) string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		code, output, err := h.Execute(ctx, command, &common.CommandArgs{Username: username})
+		require.NoError(t, err)
+		require.Zero(t, code, output)
+		return output
+	}
+	property := func(unit, key string) string {
+		return run("/usr/bin/systemctl", "show", "--property="+key, "--value", unit)
+	}
+	t.Run("lingering instances", func(t *testing.T) {
+		var managers []string
+		for _, username := range []string{"alice", "bob"} {
+			run("/usr/sbin/useradd", "-m", "-s", "/bin/sh", username)
+			run("/usr/sbin/usermod", "-p", "synthetic-test-hash", username)
+			run("/usr/bin/loginctl", "enable-linger", username)
+			managers = append(managers, "user@"+run("/usr/bin/id", "-u", username)+".service")
+		}
+		run("/usr/bin/loginctl", "enable-linger", "root")
+		managers = append(managers, "user@0.service")
+		for _, unit := range managers {
+			require.Eventually(t, func() bool { return property(unit, "ActiveState") == "active" }, 5*time.Second, 50*time.Millisecond)
+		}
+		changeAccount("lockuser", "alice")
+		for _, root := range []string{"/run/systemd/system", "/etc/systemd/system"} {
+			assert.FileExists(t, filepath.Join(root, managers[0]+".d", "zz-alpamon-user-lock.conf"))
+			_, err := os.Stat(filepath.Join(root, "user@.service.d", "zz-alpamon-user-lock.conf"))
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		}
+		for _, unit := range managers[1:] {
+			assert.Equal(t, "active", property(unit, "ActiveState"))
+			run("/usr/bin/systemctl", "restart", unit)
+			assert.Equal(t, "active", property(unit, "ActiveState"))
+			assert.Equal(t, "yes", property(unit, "ConditionResult"))
+		}
+		changeAccount("lockuser", "bob")
+		assert.Equal(t, "active", property(managers[2], "ActiveState"))
+		changeAccount("unlockuser", "alice")
+		changeAccount("unlockuser", "bob")
+		t.Log("locking alice left bob and root user@ instances active and restartable; locking bob afterwards succeeded")
+	})
+	t.Run("trigger recovery", func(t *testing.T) {
+		socket := "alpamon-lock-recover.socket"
+		path := "alpamon-lock-recover.path"
+		socketFile := "/run/alpamon-lock-recover.sock"
+		pathFile := "/run/alpamon-lock-recover-event"
+		services := []string{"alpamon-lock-socket-worker.service", "alpamon-lock-path-worker.service"}
+		fixtures := map[string]string{
+			socket: "[Socket]\nListenStream=" + socketFile + "\nAccept=no\nService=" + services[0] + "\nTriggerLimitIntervalSec=10s\nTriggerLimitBurst=2\n",
+			path:   "[Path]\nPathExists=" + pathFile + "\nUnit=" + services[1] + "\nTriggerLimitIntervalSec=10s\nTriggerLimitBurst=2\n",
+		}
+		for _, service := range services {
+			fixtures[service] = "[Service]\nUser=" + name + "\nExecStart=/usr/bin/sleep infinity\n"
+			// The lock condition must sort after a conventional condition reset.
+			dir := filepath.Join("/etc/systemd/system", service+".d")
+			require.NoError(t, os.MkdirAll(dir, 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "override.conf"), []byte("[Unit]\nConditionPathExists=\n"), 0644))
+		}
+		for unit, body := range fixtures {
+			require.NoError(t, os.WriteFile(filepath.Join("/etc/systemd/system", unit), []byte(body), 0644))
+		}
+		run("/usr/bin/systemctl", "daemon-reload")
+		run("/usr/bin/systemctl", "start", socket, path)
+		changeAccount("lockuser", name)
+		conn, err := net.DialTimeout("unix", socketFile, time.Second)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(pathFile, nil, 0600))
+		for _, unit := range []string{socket, path} {
+			require.Eventually(t, func() bool { return property(unit, "Result") == "trigger-limit-hit" }, 5*time.Second, 50*time.Millisecond)
+		}
+		require.NoError(t, conn.Close())
+		require.NoError(t, os.Remove(pathFile))
+		output := changeAccount("unlockuser", name)
+		assert.NotContains(t, output, "triggers_not_restored")
+		for _, unit := range []string{socket, path} {
+			assert.Equal(t, "active", property(unit, "ActiveState"))
+		}
+		for _, service := range services {
+			assert.Equal(t, "inactive", property(service, "ActiveState"))
+		}
+		conn, err = net.DialTimeout("unix", socketFile, time.Second)
+		require.NoError(t, err)
+		defer func() { assert.NoError(t, conn.Close()) }()
+		require.NoError(t, os.WriteFile(pathFile, nil, 0600))
+		for _, service := range services {
+			require.Eventually(t, func() bool { return property(service, "ActiveState") == "active" }, 3*time.Second, 50*time.Millisecond)
+		}
+		t.Log("Accept=no socket and path reached trigger-limit-hit while locked; unlock restored both to active and services stayed inactive until the next trigger")
+	})
+
 }

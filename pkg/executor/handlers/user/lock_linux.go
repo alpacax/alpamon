@@ -15,6 +15,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
 )
 
@@ -155,13 +156,18 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 		}
 	}
 	for _, unit := range units {
-		if unit.transient {
+		for _, trigger := range unit.triggers {
+			if !slices.Contains(state.Triggers, trigger) {
+				state.Triggers = append(state.Triggers, trigger)
+			}
+		}
+		if unit.transient || !unit.acceptTemplate {
 			continue
 		}
 		for _, root := range l.files.unitDirs {
-			path := filepath.Join(root, serviceTemplate(unit.name)+".d", lockDropInName)
+			path := filepath.Join(root, unit.name+".d", lockDropInName)
 			for other, saved := range states {
-				if other != name && slices.Contains(saved.DropIns, path) {
+				if other != name && slices.Contains(lockDropInPaths(saved.DropIns), path) {
 					return "", fmt.Errorf("unit_lock_conflict: %s", unit.name)
 				}
 			}
@@ -207,8 +213,14 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 		}
 	}
 	count, err := l.terminate(ctx, uid, terminateSessions)
+	if err != nil {
+		err = fmt.Errorf("process_termination_incomplete: %w", err)
+	}
+	if unitErr != nil {
+		unitErr = fmt.Errorf("unit_block_failed: %w", unitErr)
+	}
 	if err = errors.Join(unitErr, err); err != nil {
-		return "", fmt.Errorf("process_termination_incomplete: %w", err)
+		return "", err
 	}
 	state.Locked = true
 	states[name] = state
@@ -237,20 +249,8 @@ func (l *linuxAccountLocker) unlock(ctx context.Context, name string, states map
 		alreadyUnlocked = true
 	}
 
-	var left []string
-	var reloadErr error
+	var left, triggersLeft []string
 	if found {
-		if err := l.files.marker(name, false); err != nil {
-			return "", fmt.Errorf("lock_marker_failed: %w", err)
-		}
-		if l.systemctl != "" {
-			for _, path := range state.DropIns {
-				if err := l.files.removeDropIn(path); err != nil {
-					left = append(left, path)
-				}
-			}
-			_, reloadErr = l.run(ctx, l.systemctl, "daemon-reload")
-		}
 		if !alreadyUnlocked {
 			if !state.PasswordLocked {
 				if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-U", "--", name); err != nil {
@@ -265,21 +265,33 @@ func (l *linuxAccountLocker) unlock(ctx context.Context, name string, states map
 				return "", err
 			}
 		}
+		if err := l.files.marker(name, false); err != nil {
+			return "", fmt.Errorf("lock_marker_failed: %w", err)
+		}
+		if l.systemctl != "" {
+			for _, path := range lockDropInPaths(state.DropIns) {
+				if err := l.files.removeDropIn(path); err != nil {
+					left = append(left, path)
+				}
+			}
+			if _, err := l.run(ctx, l.systemctl, "daemon-reload"); err != nil {
+				log.Warn().Err(err).Str("username", name).Msg("Failed to reload units after account unlock")
+			}
+			triggersLeft = l.restoreTriggers(ctx, state.Triggers)
+		}
 		delete(states, name)
 		if err := l.store.save(states); err != nil {
 			return "", fmt.Errorf("lock_state_failed: %w", err)
 		}
 	}
-	if reloadErr != nil {
-		return "", reloadErr
-	}
 	result, err := json.Marshal(struct {
-		DropInsLeft        []string `json:"drop_ins_left,omitempty"`
-		Username           string   `json:"username"`
-		Locked             bool     `json:"locked"`
-		AlreadyUnlocked    bool     `json:"already_unlocked"`
-		LingerLeftDisabled bool     `json:"linger_left_disabled,omitempty"`
-	}{left, name, false, alreadyUnlocked, found && !alreadyUnlocked && state.Linger})
+		TriggersNotRestored []string `json:"triggers_not_restored,omitempty"`
+		DropInsLeft         []string `json:"drop_ins_left,omitempty"`
+		Username            string   `json:"username"`
+		Locked              bool     `json:"locked"`
+		AlreadyUnlocked     bool     `json:"already_unlocked"`
+		LingerLeftDisabled  bool     `json:"linger_left_disabled,omitempty"`
+	}{triggersLeft, left, name, false, alreadyUnlocked, found && !alreadyUnlocked && state.Linger})
 	return string(result), err
 }
 
@@ -370,9 +382,9 @@ func (l *linuxAccountLocker) forget(name string) error {
 	}
 	var errs []error
 	if err := l.files.marker(name, false); err != nil {
-		return err
+		errs = append(errs, err)
 	}
-	for _, path := range state.DropIns {
+	for _, path := range lockDropInPaths(state.DropIns) {
 		if err := l.files.removeDropIn(path); err != nil {
 			errs = append(errs, err)
 		}

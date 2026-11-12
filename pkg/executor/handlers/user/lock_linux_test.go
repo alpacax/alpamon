@@ -141,9 +141,6 @@ func TestAccountLockRoundTrip(t *testing.T) {
 				expected = `{"username":"deploy","locked":false,"already_unlocked":false,"linger_left_disabled":true}`
 			}
 			assert.Equal(t, expected, result)
-			if tc.systemd {
-				want = append(want, []string{"/usr/bin/systemctl", "daemon-reload"})
-			}
 			if !passwordLocked {
 				want = append(want, []string{"/usr/sbin/usermod", "-U", "--", "deploy"})
 			}
@@ -152,6 +149,9 @@ func TestAccountLockRoundTrip(t *testing.T) {
 				expiry = "-1"
 			}
 			want = append(want, []string{"/usr/sbin/usermod", "-e", expiry, "--", "deploy"})
+			if tc.systemd {
+				want = append(want, []string{"/usr/bin/systemctl", "daemon-reload"})
+			}
 			assert.Equal(t, want, commandArgv(f.exec))
 			states, err = f.l.store.load()
 			require.NoError(t, err)

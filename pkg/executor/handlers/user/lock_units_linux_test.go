@@ -60,7 +60,7 @@ func TestAccountLockDropIns(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, states["deploy"].DropIns, 8)
 	for _, root := range f.l.files.unitDirs {
-		for _, unit := range []string{"foo.service", "listener@.service", "custom-worker@.service", "worker@.service"} {
+		for _, unit := range []string{"foo.service", "listener@.service", "custom-worker@.service", "worker@one.service"} {
 			path := filepath.Join(root, unit+".d", lockDropInName)
 			assert.Contains(t, states["deploy"].DropIns, path)
 			data, err := os.ReadFile(path)
@@ -103,7 +103,7 @@ func TestAccountLockDropIns(t *testing.T) {
 		_, err := os.Stat(path)
 		assert.ErrorIs(t, err, os.ErrNotExist)
 	}
-	assert.Equal(t, [][]string{{"/usr/bin/systemctl", "daemon-reload"}, {"/usr/sbin/usermod", "-U", "--", "deploy"}, {"/usr/sbin/usermod", "-e", "21000", "--", "deploy"}}, commandArgv(f.exec)[before:])
+	assert.Equal(t, [][]string{{"/usr/sbin/usermod", "-U", "--", "deploy"}, {"/usr/sbin/usermod", "-e", "21000", "--", "deploy"}, {"/usr/bin/systemctl", "daemon-reload"}}, commandArgv(f.exec)[before:])
 }
 
 func TestAccountLockUnitUnresolved(t *testing.T) {
@@ -140,7 +140,7 @@ func TestAccountLockUnitUnresolved(t *testing.T) {
 func TestAccountStopTransientFailure(t *testing.T) {
 	f := newLockFixture(t)
 	f.l.systemctl = "/usr/bin/systemctl"
-	units := []accountUnit{{"gone.service", true, true}, {"worker.service", false, true}}
+	units := []accountUnit{{name: "gone.service", transient: true, running: true}, {name: "worker.service", running: true}}
 	f.exec.SetResult("/usr/bin/systemctl stop --no-block --job-mode=ignore-dependencies -- gone.service worker.service", 1, "gone", nil)
 	setUnitProperty(f, "worker.service", "ActiveState", "deactivating")
 	require.NoError(t, f.l.stopServices(context.Background(), "deploy", 1001, units))
@@ -152,16 +152,19 @@ func TestAccountStopTransientFailure(t *testing.T) {
 func TestAccountUnlockDropInsLeft(t *testing.T) {
 	f := newLockFixture(t)
 	f.l.systemd = func() bool { return true }
+	f.exec.SetResult("/usr/bin/systemctl daemon-reload", 1, "reload failed", nil)
+	setUnitProperty(f, "foo.socket", "ActiveState", "inactive")
+	f.exec.SetResult("/usr/bin/systemctl start -- foo.socket", 1, "failed", nil)
 	path := filepath.Join(f.l.files.unitDirs[0], "worker.service.d", lockDropInName)
 	// A directory at the file path makes unlink fail even as root.
 	require.NoError(t, os.MkdirAll(path, 0755))
 	require.NoError(t, f.l.files.marker("deploy", true))
-	require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, DropIns: []string{path, filepath.Join(f.l.files.unitDirs[1], "gone.service.d", lockDropInName)}}}))
+	require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, Triggers: []string{"foo.socket"}, DropIns: []string{path, filepath.Join(f.l.files.unitDirs[1], "gone.service.d", lockDropInName)}}}))
 	code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy"})
 	require.NoError(t, err)
 	require.Zero(t, code, output)
 	quoted, _ := json.Marshal(path)
-	assert.JSONEq(t, `{"username":"deploy","locked":false,"already_unlocked":false,"drop_ins_left":[`+string(quoted)+`]}`, output)
+	assert.JSONEq(t, `{"username":"deploy","locked":false,"already_unlocked":false,"drop_ins_left":[`+string(quoted)+`],"triggers_not_restored":["foo.socket"]}`, output)
 	states, err := f.l.store.load()
 	require.NoError(t, err)
 	assert.Empty(t, states)
@@ -275,18 +278,34 @@ func TestAccountUnlockRecoveredArtifacts(t *testing.T) {
 }
 
 func TestAccountLockTemplateCollision(t *testing.T) {
-	f := newLockFixture(t)
-	f.l.systemd = func() bool { return true }
-	f.exec.SetResult(strings.Join(loadedUnitsArgv(), " "), 0, "worker@deploy.service", nil)
-	setUnitProperty(f, "worker@deploy.service", "User", "deploy")
-	path := filepath.Join(f.l.files.unitDirs[0], "worker@.service.d", lockDropInName)
-	require.NoError(t, f.l.store.save(map[string]accountLockState{"other": {UID: 1002, DropIns: []string{path}}}))
-	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy"})
-	require.NoError(t, err)
-	assert.Equal(t, 1, code)
-	assert.Equal(t, "unit_lock_conflict: worker@deploy.service", output)
-	for _, call := range commandArgv(f.exec) {
-		assert.NotEqual(t, "/usr/sbin/usermod", call[0])
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprint(shared), func(t *testing.T) {
+			f := newLockFixture(t)
+			f.l.systemd = func() bool { return true }
+			listed := "worker@deploy.service"
+			setUnitProperty(f, listed, "User", "deploy")
+			if shared {
+				listed = "worker.socket"
+				setUnitProperty(f, listed, "Triggers", "")
+				setUnitProperty(f, listed, "Accept", "yes")
+				f.exec.SetResult("/usr/bin/systemctl cat -- worker.socket", 0, "[Socket]\n", nil)
+				setUnitProperty(f, "worker@alpamon-lock-probe.service", "User", "deploy")
+			}
+			f.exec.SetResult(strings.Join(loadedUnitsArgv(), " "), 0, listed, nil)
+			path := filepath.Join(f.l.files.unitDirs[0], "worker@.service.d", oldLockDropInName)
+			require.NoError(t, f.l.store.save(map[string]accountLockState{"other": {UID: 1002, DropIns: []string{path}}}))
+			code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy"})
+			require.NoError(t, err)
+			if shared {
+				assert.Equal(t, 1, code)
+				assert.Equal(t, "unit_lock_conflict: worker@.service", output)
+				for _, call := range commandArgv(f.exec) {
+					assert.NotEqual(t, "/usr/sbin/usermod", call[0])
+				}
+			} else {
+				assert.Zero(t, code, output)
+			}
+		})
 	}
 }
 
@@ -326,8 +345,140 @@ func TestAccountLockContinuesAfterDropInError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, code, output)
 	assert.True(t, ended)
+	assert.Contains(t, output, "unit_block_failed:")
+	assert.NotContains(t, output, "process_termination_incomplete:")
 	states, err := f.l.store.load()
 	require.NoError(t, err)
 	assert.Len(t, states["deploy"].DropIns, 3)
 	assert.Contains(t, commandArgv(f.exec), []string{"/usr/bin/systemctl", "stop", "--no-block", "--job-mode=ignore-dependencies", "--", "one.service", "two.service"})
+}
+
+func TestAccountUnlockRestoresTriggers(t *testing.T) {
+	f := newLockFixture(t)
+	f.l.systemd = func() bool { return true }
+	f.exec.SetResult(strings.Join(loadedUnitsArgv(), " "), 0, "foo.socket\nfoo.path\nfoo.timer\nidle.timer\nroot.socket", nil)
+	for _, unit := range []string{"foo.socket", "foo.path", "foo.timer", "idle.timer", "root.socket"} {
+		setUnitProperty(f, unit, "Triggers", "foo.service")
+		setUnitProperty(f, unit, "ActiveState", "active")
+		setUnitProperty(f, unit, "Accept", "no")
+	}
+	setUnitProperty(f, "idle.timer", "ActiveState", "inactive")
+	setUnitProperty(f, "root.socket", "Triggers", "root.service")
+	setUnitProperty(f, "root.service", "User", "root")
+	setUnitProperty(f, "foo.service", "User", "deploy")
+	setUnitProperty(f, "foo.service", "ActiveState", "inactive")
+	args := &common.CommandArgs{Username: "deploy"}
+	code, output, err := f.h.Execute(context.Background(), "lockuser", args)
+	require.NoError(t, err)
+	require.Zero(t, code, output)
+	states, err := f.l.store.load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"foo.socket", "foo.path", "foo.timer"}, states["deploy"].Triggers)
+	// Re-locking while triggers are failed preserves the original active set.
+	setUnitProperty(f, "foo.socket", "ActiveState", "failed")
+	code, output, err = f.h.Execute(context.Background(), "lockuser", args)
+	require.NoError(t, err)
+	require.Zero(t, code, output)
+	setUnitProperty(f, "foo.socket", "Result", "trigger-limit-hit")
+	setUnitProperty(f, "foo.path", "ActiveState", "inactive")
+	f.exec.SetResult("/usr/bin/systemctl start -- foo.socket", 1, "cannot start", nil)
+	f.exec.SetResult("/usr/bin/systemctl start -- foo.path", 1, "cannot start", nil)
+	before := len(commandArgv(f.exec))
+	code, output, err = f.h.Execute(context.Background(), "unlockuser", args)
+	require.NoError(t, err)
+	require.Zero(t, code, output)
+	assert.JSONEq(t, `{"username":"deploy","locked":false,"already_unlocked":false,"triggers_not_restored":["foo.socket","foo.path"]}`, output)
+	calls := commandArgv(f.exec)[before:]
+	assert.Contains(t, calls, []string{"/usr/bin/systemctl", "reset-failed", "--", "foo.socket", "foo.path", "foo.timer"})
+	assert.Contains(t, calls, []string{"/usr/bin/systemctl", "start", "--", "foo.socket"})
+	assert.Contains(t, calls, []string{"/usr/bin/systemctl", "start", "--", "foo.path"})
+	for _, call := range calls {
+		if call[1] == "start" {
+			assert.Contains(t, []string{"foo.socket", "foo.path"}, call[3])
+		}
+	}
+}
+
+func TestAccountUnlockKeepsArtifactsOnRestoreFailure(t *testing.T) {
+	for _, command := range []string{"-U -- deploy", "-e 21000 -- deploy"} {
+		t.Run(command, func(t *testing.T) {
+			f := newLockFixture(t)
+			f.l.systemd = func() bool { return true }
+			path := filepath.Join(f.l.files.unitDirs[0], "foo.service.d", lockDropInName)
+			require.NoError(t, f.l.files.write(path, "[Unit]\n", 0644, 0755))
+			require.NoError(t, f.l.files.marker("deploy", true))
+			require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, Expiry: "21000", DropIns: []string{path}}}))
+			f.exec.SetResult("/usr/sbin/usermod "+command, 1, "failed", nil)
+			code, _, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy"})
+			require.NoError(t, err)
+			assert.Equal(t, 1, code)
+			assert.FileExists(t, path)
+			assert.FileExists(t, filepath.Join(f.l.files.markerDir, "deploy"))
+			states, err := f.l.store.load()
+			require.NoError(t, err)
+			assert.Contains(t, states, "deploy")
+			for _, call := range commandArgv(f.exec) {
+				assert.NotEqual(t, "/usr/bin/systemctl", call[0])
+			}
+		})
+	}
+}
+
+func TestAccountUnlockRemovesBothDropInNames(t *testing.T) {
+	assert.Greater(t, lockDropInName, "override.conf")
+	for _, recorded := range []string{oldLockDropInName, lockDropInName} {
+		for _, keepOverride := range []bool{false, true} {
+			t.Run(fmt.Sprint(recorded, keepOverride), func(t *testing.T) {
+				f := newLockFixture(t)
+				f.l.systemd = func() bool { return true }
+				dir := filepath.Join(f.l.files.unitDirs[0], "foo.service.d")
+				for _, base := range []string{oldLockDropInName, lockDropInName} {
+					require.NoError(t, f.l.files.write(filepath.Join(dir, base), "[Unit]\n", 0644, 0755))
+				}
+				if keepOverride {
+					require.NoError(t, os.WriteFile(filepath.Join(dir, "override.conf"), []byte("[Service]\n"), 0644))
+				}
+				require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, DropIns: []string{filepath.Join(dir, recorded)}}}))
+				code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy"})
+				require.NoError(t, err)
+				require.Zero(t, code, output)
+				assert.NotContains(t, output, "drop_ins_left")
+				for _, base := range []string{oldLockDropInName, lockDropInName} {
+					_, err := os.Stat(filepath.Join(dir, base))
+					assert.ErrorIs(t, err, os.ErrNotExist)
+				}
+				if keepOverride {
+					assert.FileExists(t, filepath.Join(dir, "override.conf"))
+				} else {
+					_, err := os.Stat(dir)
+					assert.ErrorIs(t, err, os.ErrNotExist)
+				}
+			})
+		}
+	}
+}
+
+func TestAccountForgetContinuesAfterMarkerError(t *testing.T) {
+	f := newLockFixture(t)
+	path := filepath.Join(f.l.files.unitDirs[0], "foo.service.d", lockDropInName)
+	require.NoError(t, f.l.files.write(path, "[Unit]\n", 0644, 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(f.l.files.markerDir, "deploy"), 0700))
+	require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, DropIns: []string{path}}}))
+	require.Error(t, f.l.forget("deploy"))
+	_, err := os.Stat(path)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	states, err := f.l.store.load()
+	require.NoError(t, err)
+	assert.Empty(t, states)
+}
+
+func TestAccountLockReloadFailure(t *testing.T) {
+	f := newLockFixture(t)
+	f.l.systemd = func() bool { return true }
+	f.exec.SetResult("/usr/bin/systemctl daemon-reload", 1, "reload failed", nil)
+	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, output, "unit_block_failed:")
+	assert.NotContains(t, output, "process_termination_incomplete:")
 }
