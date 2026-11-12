@@ -16,6 +16,8 @@ import (
 )
 
 // UserHandler handles user management commands.
+// Unlock starts nothing, including triggers. Rate-limited triggers are reported
+// and left for the owner to start.
 // The server must refuse Websh, exec and file access for locked accounts because Alpamon switches users without PAM.
 type UserHandler struct {
 	*common.BaseHandler
@@ -433,9 +435,8 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 
 	if _, exists, lookupErr := common.UserExists(h.lookupUser, data.Username); lookupErr == nil && !exists {
 		if err := h.accountLocker.forget(data.Username); err != nil {
-			return 1, fmt.Sprintf("lock_cleanup_failed: %v", err), nil
+			log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
 		}
-		return 0, fmt.Sprintf("User '%s' deleted successfully", data.Username), nil
 	}
 
 	log.Info().

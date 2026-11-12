@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
@@ -19,7 +20,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const unitWorkTimeout = 60 * time.Second
+
+var errUserNotFound = errors.New("user_not_found")
+
 type linuxAccountLocker struct {
+	toolsOnce           sync.Once
+	toolsErr            error
 	handler             *UserHandler
 	store               lockStateStore
 	files               lockFiles
@@ -29,7 +36,7 @@ type linuxAccountLocker struct {
 	lookupUID           func(string) (*user.User, error)
 	pidfdOpen           func(int, int) (int, error)
 	loginctl, systemctl string
-	terminate           func(context.Context, uint64, func(context.Context, []string) error) (int, error)
+	terminate           func(context.Context, uint64, func(context.Context) error) (int, error)
 }
 
 func newAccountLocker(h *UserHandler) accountLocker {
@@ -65,13 +72,14 @@ func (l *linuxAccountLocker) change(ctx context.Context, cmd string, args *commo
 		return "", fmt.Errorf("user_lookup_failed: %w", err)
 	}
 	if !exists {
-		return "", fmt.Errorf("user_not_found: %q does not exist", data.Username)
+		return "", fmt.Errorf("%w: %q does not exist", errUserNotFound, data.Username)
 	}
 	uid, err := strconv.ParseUint(account.Uid, 10, 32)
 	if err != nil {
 		return "", fmt.Errorf("user_lookup_failed: invalid account uid")
 	}
-	if data.Username == "root" || uid == 0 || uid < l.uidBound("UID_MIN", 1000) || uid > l.uidBound("UID_MAX", 60000) || uid == 65534 || uid == 4294967294 || data.Username == "nobody" || data.Username == "nfsnobody" {
+	minUID, maxUID := l.uidBounds()
+	if isProtectedAccount(data.Username, uid) || uid < minUID || uid > maxUID {
 		return "", fmt.Errorf("refused_system_account: %q has protected uid %d", data.Username, uid)
 	}
 	if *data.UID != uid {
@@ -82,17 +90,20 @@ func (l *linuxAccountLocker) change(ctx context.Context, cmd string, args *commo
 			return "", err
 		}
 	}
-	l.loginctl, l.systemctl = "", ""
-	if l.systemd() {
-		l.loginctl, err = l.resolveTool("loginctl")
-		if err != nil {
-			return "", err
+	l.toolsOnce.Do(func() {
+		if !l.systemd() {
+			return
 		}
-		l.systemctl, err = l.resolveTool("systemctl")
-		if err != nil {
-			return "", err
+		l.loginctl, l.toolsErr = l.resolveTool("loginctl")
+		if l.toolsErr != nil {
+			return
 		}
+		l.systemctl, l.toolsErr = l.resolveTool("systemctl")
+	})
+	if l.toolsErr != nil {
+		return "", l.toolsErr
 	}
+
 	states, stateErr := l.store.load()
 	if stateErr != nil && cmd == common.UnlockUser.String() {
 		return "", fmt.Errorf("lock_state_failed: %w", stateErr)
@@ -140,7 +151,7 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 		state, err = l.snapshot(name, uid)
 		state.DropIns = previousPaths
 		if err != nil {
-			if strings.HasPrefix(err.Error(), "user_not_found:") {
+			if errors.Is(err, errUserNotFound) {
 				return "", err
 			}
 			state.StateLost = true
@@ -187,7 +198,8 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 				save()
 			}
 		}
-		units, unitErr = l.accountUnits(ctx, name, uid)
+		unitCtx, cancelUnits := context.WithTimeout(ctx, unitWorkTimeout)
+		units, unitErr = l.accountUnits(unitCtx, name, uid)
 		for _, unit := range units {
 			for _, trigger := range unit.triggers {
 				if !slices.Contains(state.Triggers, trigger) {
@@ -195,15 +207,17 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 				}
 			}
 		}
-		if stateErr == nil {
-			unitErr = errors.Join(unitErr, l.installDropIns(name, units, states, &state))
+		if stateErr == nil && unitCtx.Err() == nil {
+			unitErr = errors.Join(unitErr, l.installDropIns(unitCtx, name, units, states, &state))
 		}
-		_, reloadErr := l.run(ctx, l.systemctl, "daemon-reload")
-		unitErr = errors.Join(unitErr, reloadErr, l.stopServices(ctx, name, uid, units))
+		_, reloadErr := l.run(unitCtx, l.systemctl, "daemon-reload")
+		unitErr = errors.Join(unitErr, unitCtx.Err(), reloadErr, l.stopServices(unitCtx, name, uid, units))
+		cancelUnits()
 	}
-	var terminateSessions func(context.Context, []string) error
+
+	var terminateSessions func(context.Context) error
 	if l.systemctl != "" {
-		terminateSessions = func(ctx context.Context, _ []string) error {
+		terminateSessions = func(ctx context.Context) error {
 			return l.terminateSessions(ctx, name, uid)
 		}
 	}
@@ -269,7 +283,7 @@ func (l *linuxAccountLocker) unlock(ctx context.Context, name string, states map
 			log.Warn().Err(err).Str("username", name).Msg("Failed to reload units after account unlock")
 		}
 		if !state.CleanupPending {
-			triggersLeft = l.restoreTriggers(ctx, state.Triggers)
+			triggersLeft = l.stoppedTriggers(ctx, state.Triggers)
 		}
 	}
 	if cleanupErr != nil {
@@ -280,7 +294,7 @@ func (l *linuxAccountLocker) unlock(ctx context.Context, name string, states map
 	}
 	result, err := json.Marshal(struct {
 		DropInsRemoved      []string `json:"drop_ins_removed,omitempty"`
-		TriggersNotRestored []string `json:"triggers_not_restored,omitempty"`
+		TriggersLeftStopped []string `json:"triggers_left_stopped,omitempty"`
 		DropInsLeft         []string `json:"drop_ins_left,omitempty"`
 		Username            string   `json:"username"`
 		Locked              bool     `json:"locked"`
@@ -296,7 +310,7 @@ func (l *linuxAccountLocker) verifyUID(name string, uid uint64) error {
 		return fmt.Errorf("user_lookup_failed: %w", err)
 	}
 	if !found {
-		return fmt.Errorf("user_not_found: %q does not exist", name)
+		return fmt.Errorf("%w: %q does not exist", errUserNotFound, name)
 	}
 	current, err := strconv.ParseUint(account.Uid, 10, 32)
 	if err != nil || current != uid {
@@ -384,9 +398,6 @@ func (l *linuxAccountLocker) forget(name string) error {
 
 func (l *linuxAccountLocker) cleanup(name string, states map[string]accountLockState, state accountLockState) (removed, left []string, err error) {
 	paths := state.DropIns
-	if !state.CleanupPending {
-		paths = lockDropInPaths(paths)
-	}
 	// A retry must only remove artifacts, never restore a deleted account's shadow data.
 	state = accountLockState{UID: state.UID, CleanupPending: true, MarkerPending: true, DropIns: paths}
 	states[name] = state
@@ -423,22 +434,38 @@ func missingLockState() error {
 	return fmt.Errorf("lock_state_missing: the account is locked but its original state is unknown")
 }
 
-func (l *linuxAccountLocker) uidBound(key string, fallback uint64) uint64 {
+func isProtectedAccount(name string, uid uint64) bool {
+	return name == "root" || name == "nobody" || name == "nfsnobody" || uid == 0 || uid == 65534 || uid == 4294967294
+}
+
+func (l *linuxAccountLocker) uidBounds() (uint64, uint64) {
+	minUID, maxUID := uint64(1000), uint64(60000)
 	data, err := l.readFile("/etc/login.defs")
 	if err != nil {
-		return fallback
+		return minUID, maxUID
 	}
+	seen := make(map[string]bool)
 	for line := range strings.SplitSeq(string(data), "\n") {
 		fields := strings.Fields(strings.SplitN(line, "#", 2)[0])
-		if len(fields) >= 2 && fields[0] == key {
-			uid, err := strconv.ParseUint(fields[1], 10, 32)
-			if err == nil && uid > 0 {
-				return uid
-			}
-			return fallback
+		if len(fields) < 2 || seen[fields[0]] {
+			continue
+		}
+		key := fields[0]
+		if key != "UID_MIN" && key != "UID_MAX" {
+			continue
+		}
+		seen[key] = true
+		uid, err := strconv.ParseUint(fields[1], 10, 32)
+		if err != nil || uid == 0 {
+			continue
+		}
+		if key == "UID_MIN" {
+			minUID = uid
+		} else {
+			maxUID = uid
 		}
 	}
-	return fallback
+	return minUID, maxUID
 }
 
 func (l *linuxAccountLocker) snapshot(name string, uid uint64) (accountLockState, error) {
@@ -464,7 +491,7 @@ func (l *linuxAccountLocker) snapshot(name string, uid uint64) (accountLockState
 		break
 	}
 	if !found {
-		return state, fmt.Errorf("user_not_found: no local shadow entry for %q", name)
+		return state, fmt.Errorf("%w: no local shadow entry for %q", errUserNotFound, name)
 	}
 	if state.PasswordLocked && state.Expiry == "1" {
 		// The pre-lock password and expiry cannot be recovered from this snapshot.

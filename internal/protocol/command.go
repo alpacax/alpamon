@@ -40,55 +40,53 @@ type File struct {
 
 // CommandData holds additional command parameters
 type CommandData struct {
-	SessionID               string           `json:"session_id"`
-	URL                     string           `json:"url"`
-	Rows                    uint16           `json:"rows"`
-	Cols                    uint16           `json:"cols"`
-	Username                string           `json:"username"`
-	Groupname               string           `json:"groupname"`
-	Groupnames              []string         `json:"groupnames"`
-	ManagedGroupnames       []string         `json:"managed_groupnames"`
-	HomeDirectory           string           `json:"home_directory"`
-	HomeDirectoryPermission string           `json:"home_directory_permission"`
-	PurgeHomeDirectory      bool             `json:"purge_home"`
-	UID                     uint64           `json:"uid"`
-	UIDPresent              bool             `json:"-"`
-	UIDNull                 bool             `json:"-"`
-	GID                     uint64           `json:"gid"`
-	Comment                 string           `json:"comment"`
-	Shell                   string           `json:"shell"`
-	Groups                  []uint64         `json:"groups"`
-	IsServiceAccount        bool             `json:"is_service_account,omitempty"`
-	Type                    string           `json:"type"`
-	Content                 string           `json:"content"`
-	Path                    string           `json:"path"`
-	Paths                   []string         `json:"paths"`
-	Files                   []File           `json:"files,omitempty"`
-	AllowOverwrite          bool             `json:"allow_overwrite,omitempty"`
-	AllowUnzip              bool             `json:"allow_unzip,omitempty"`
-	UseBlob                 bool             `json:"use_blob,omitempty"`
-	Keys                    []string         `json:"keys"`
-	ChainName               string           `json:"chain_name"`
-	Method                  string           `json:"method"`
-	Chain                   string           `json:"chain"`
-	Protocol                string           `json:"protocol"`
-	PortStart               int              `json:"port_start"`
-	PortEnd                 int              `json:"port_end"`
-	DPorts                  []int            `json:"dports"`
-	ICMPType                string           `json:"icmp_type"`
-	Source                  string           `json:"source"`
-	Destination             string           `json:"destination"`
-	Target                  string           `json:"target"`
-	Description             string           `json:"description"`
-	Priority                int              `json:"priority"`
-	RuleType                string           `json:"rule_type"`
-	Rules                   []map[string]any `json:"rules"`
-	Operation               string           `json:"operation"`
-	RuleID                  string           `json:"rule_id"`
-	OldRuleID               string           `json:"old_rule_id"`
-	AssignmentID            string           `json:"assignment_id"`
-	ServerID                string           `json:"server_id"`
-	ChainNames              []string         `json:"chain_names"`
+	SessionID               string                `json:"session_id"`
+	URL                     string                `json:"url"`
+	Rows                    uint16                `json:"rows"`
+	Cols                    uint16                `json:"cols"`
+	Username                string                `json:"username"`
+	Groupname               string                `json:"groupname"`
+	Groupnames              []string              `json:"groupnames"`
+	ManagedGroupnames       []string              `json:"managed_groupnames"`
+	HomeDirectory           string                `json:"home_directory"`
+	HomeDirectoryPermission string                `json:"home_directory_permission"`
+	PurgeHomeDirectory      bool                  `json:"purge_home"`
+	UID                     common.OptionalUint64 `json:"uid"`
+	GID                     uint64                `json:"gid"`
+	Comment                 string                `json:"comment"`
+	Shell                   string                `json:"shell"`
+	Groups                  []uint64              `json:"groups"`
+	IsServiceAccount        bool                  `json:"is_service_account,omitempty"`
+	Type                    string                `json:"type"`
+	Content                 string                `json:"content"`
+	Path                    string                `json:"path"`
+	Paths                   []string              `json:"paths"`
+	Files                   []File                `json:"files,omitempty"`
+	AllowOverwrite          bool                  `json:"allow_overwrite,omitempty"`
+	AllowUnzip              bool                  `json:"allow_unzip,omitempty"`
+	UseBlob                 bool                  `json:"use_blob,omitempty"`
+	Keys                    []string              `json:"keys"`
+	ChainName               string                `json:"chain_name"`
+	Method                  string                `json:"method"`
+	Chain                   string                `json:"chain"`
+	Protocol                string                `json:"protocol"`
+	PortStart               int                   `json:"port_start"`
+	PortEnd                 int                   `json:"port_end"`
+	DPorts                  []int                 `json:"dports"`
+	ICMPType                string                `json:"icmp_type"`
+	Source                  string                `json:"source"`
+	Destination             string                `json:"destination"`
+	Target                  string                `json:"target"`
+	Description             string                `json:"description"`
+	Priority                int                   `json:"priority"`
+	RuleType                string                `json:"rule_type"`
+	Rules                   []map[string]any      `json:"rules"`
+	Operation               string                `json:"operation"`
+	RuleID                  string                `json:"rule_id"`
+	OldRuleID               string                `json:"old_rule_id"`
+	AssignmentID            string                `json:"assignment_id"`
+	ServerID                string                `json:"server_id"`
+	ChainNames              []string              `json:"chain_names"`
 
 	// Backend information
 	Backend string `json:"backend"`
@@ -127,25 +125,6 @@ type CommandData struct {
 	HealthGraceSeconds int    `json:"health_grace_seconds,omitempty"`
 }
 
-// UnmarshalJSON preserves an explicitly supplied zero UID for identity checks.
-func (c *CommandData) UnmarshalJSON(data []byte) error {
-	type plain CommandData
-	var decoded plain
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	var presence struct {
-		UID json.RawMessage `json:"uid"`
-	}
-	if err := json.Unmarshal(data, &presence); err != nil {
-		return err
-	}
-	decoded.UIDPresent = presence.UID != nil
-	decoded.UIDNull = string(presence.UID) == "null"
-	*c = CommandData(decoded)
-	return nil
-}
-
 // ParseCommandData parses the Data field of a Command into CommandData
 func (c *Command) ParseCommandData() (*CommandData, error) {
 	if c.Data == "" {
@@ -173,9 +152,8 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 		HomeDirectory:           c.HomeDirectory,
 		HomeDirectoryPermission: c.HomeDirectoryPermission,
 		PurgeHomeDirectory:      c.PurgeHomeDirectory,
-		UID:                     c.UID,
-		UIDPresent:              c.UIDPresent,
-		UIDNull:                 c.UIDNull,
+		UID:                     c.UID.Value,
+		LockUID:                 c.UID,
 		GID:                     c.GID,
 		Comment:                 c.Comment,
 		Shell:                   c.Shell,

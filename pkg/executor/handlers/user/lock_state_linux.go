@@ -71,7 +71,8 @@ func (s lockStateStore) load() (map[string]accountLockState, error) {
 	decoder := json.NewDecoder(io.LimitReader(f, 1024*1024))
 	if err := decoder.Decode(&states); err != nil {
 		var syntax *json.SyntaxError
-		if errors.As(err, &syntax) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		var typeError *json.UnmarshalTypeError
+		if errors.As(err, &syntax) || errors.As(err, &typeError) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 			return s.quarantine()
 		}
 		return nil, err
@@ -87,41 +88,11 @@ func (s lockStateStore) load() (map[string]accountLockState, error) {
 }
 
 func (s lockStateStore) save(states map[string]accountLockState) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
-		return err
-	}
-	if err := s.checkDirectory(); err != nil {
-		return err
-	}
 	data, err := json.Marshal(states)
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(s.path), ".user-locks-*")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(f.Name()) }()
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(f.Name(), s.path); err != nil {
-		return err
-	}
-	dir, err := os.Open(filepath.Dir(s.path))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dir.Close() }()
-	return dir.Sync()
+	return (lockFiles{owner: s.owner}).write(s.path, string(data), 0600, 0700)
 }
 
 func (s lockStateStore) quarantine() (map[string]accountLockState, error) {

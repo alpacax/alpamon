@@ -2,9 +2,29 @@ package common
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"time"
 )
+
+// OptionalUint64 distinguishes an explicit zero from an absent or null value.
+type OptionalUint64 struct {
+	Value   uint64
+	Present bool
+}
+
+func (v *OptionalUint64) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*v = OptionalUint64{}
+		return nil
+	}
+	var value uint64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*v = OptionalUint64{Value: value, Present: true}
+	return nil
+}
 
 // CommandArgs is a strongly-typed struct for all command arguments
 type CommandArgs struct {
@@ -32,8 +52,7 @@ type CommandArgs struct {
 	HomeDirectoryPermission string
 	PurgeHomeDirectory      bool
 	UID                     uint64
-	UIDPresent              bool
-	UIDNull                 bool
+	LockUID                 OptionalUint64
 	GID                     uint64
 	Comment                 string
 	Shell                   string

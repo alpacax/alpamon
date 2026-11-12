@@ -30,7 +30,7 @@ func validateLockUser(args *common.CommandArgs) error {
 }
 
 func validateLockUserName(name string) error {
-	if name == "" || strings.ContainsAny(name, "%\\\"") || strings.HasPrefix(name, "-") || strings.ContainsAny(name, "/:\x00\r\n\t ") || name == "." || name == ".." {
+	if name == "" || strings.HasPrefix(name, "-") || strings.ContainsAny(name, "%\\\"/:\x00\r\n\t ") || name == "." || name == ".." {
 		return fmt.Errorf("invalid_username: invalid local account name")
 	}
 	return nil

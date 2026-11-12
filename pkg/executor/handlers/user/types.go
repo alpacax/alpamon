@@ -74,14 +74,14 @@ type ModUserData struct {
 
 // LockUserData keeps an omitted UID distinct from an explicit zero.
 type LockUserData struct {
-	Username string `validate:"required"`
+	Username string
 	UID      *uint64
 }
 
 func lockUserDataFromArgs(args *common.CommandArgs) LockUserData {
 	data := LockUserData{Username: args.Username}
-	if !args.UIDNull && (args.UIDPresent || args.UID != 0) {
-		uid := args.UID
+	if args.LockUID.Present {
+		uid := args.LockUID.Value
 		data.UID = &uid
 	}
 	return data

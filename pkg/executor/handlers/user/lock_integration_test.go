@@ -69,7 +69,7 @@ func TestAccountLockIntegration(t *testing.T) {
 			}()
 
 			h := userhandler.NewUserHandler(runner, nil, nil)
-			args := &common.CommandArgs{Username: name, UID: uid, UIDPresent: true}
+			args := &common.CommandArgs{Username: name, UID: uid, LockUID: common.OptionalUint64{Value: uid, Present: true}}
 			code, output, err = h.Execute(ctx, "lockuser", args)
 			require.NoError(t, err)
 			require.Zero(t, code, output)

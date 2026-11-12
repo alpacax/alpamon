@@ -29,3 +29,15 @@ func TestAccountLockUnsupported(t *testing.T) {
 		})
 	}
 }
+
+func TestUnsupportedAccountLockGuard(t *testing.T) {
+	h := NewUnsupportedAccountLockHandler(common.NewMockCommandExecutor(t))
+	args := &common.CommandArgs{Username: "deploy", LockUID: common.OptionalUint64{Value: 1001, Present: true}}
+	for _, command := range []string{"lockuser", "unlockuser"} {
+		require.EqualError(t, h.Validate(command, args), "unsupported_platform: account locking requires Linux")
+		code, output, err := h.accountLocker.execute(context.Background(), command, args)
+		require.NoError(t, err)
+		assert.Equal(t, 1, code)
+		assert.Equal(t, "unsupported_platform: account locking requires Linux", output)
+	}
+}

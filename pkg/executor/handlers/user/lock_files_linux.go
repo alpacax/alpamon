@@ -7,14 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"golang.org/x/sys/unix"
 )
 
 const lockDropInName = "zz-alpamon-user-lock.conf"
-const oldLockDropInName = "50-alpamon-user-lock.conf"
 
 type lockFiles struct {
 	markerDir string
@@ -52,8 +50,9 @@ func (f lockFiles) directory(path string, create bool, mode uint32) (int, error)
 		}
 		fd = next
 	}
+	// State may share Alpamon's data directory; the marker directory is private.
 	var st unix.Stat_t
-	if err = unix.Fstat(fd, &st); err == nil && (st.Uid != f.owner || st.Mode&0022 != 0 || (mode == 0700 && st.Mode&0777 != mode)) {
+	if err = unix.Fstat(fd, &st); err == nil && (st.Uid != f.owner || st.Mode&0022 != 0 || (path == f.markerDir && mode == 0700 && st.Mode&0777 != mode)) {
 		err = fmt.Errorf("lock directory must be root-owned with safe permissions")
 	}
 	if err != nil {
@@ -131,7 +130,7 @@ func (f lockFiles) remove(path string, mode uint32) error {
 func (f lockFiles) removeDropIn(path string) error {
 	for _, root := range f.unitDirs {
 		rel, err := filepath.Rel(root, path)
-		if err == nil && len(strings.Split(rel, string(os.PathSeparator))) == 2 && (filepath.Base(path) == lockDropInName || filepath.Base(path) == oldLockDropInName) && strings.HasSuffix(filepath.Dir(rel), ".d") {
+		if err == nil && len(strings.Split(rel, string(os.PathSeparator))) == 2 && filepath.Base(path) == lockDropInName && strings.HasSuffix(filepath.Dir(rel), ".d") {
 			if err := f.remove(path, 0755); err != nil {
 				return err
 			}
@@ -157,22 +156,6 @@ func validService(unit string) bool {
 	return strings.HasSuffix(unit, ".service") && !strings.HasPrefix(unit, "-") && !strings.ContainsAny(unit, "/\x00\r\n\t ")
 }
 
-func lockDropInPaths(paths []string) []string {
-	var result []string
-	for _, path := range paths {
-		candidates := []string{path}
-		if base := filepath.Base(path); base == lockDropInName || base == oldLockDropInName {
-			candidates = []string{filepath.Join(filepath.Dir(path), oldLockDropInName), filepath.Join(filepath.Dir(path), lockDropInName)}
-		}
-		for _, candidate := range candidates {
-			if !slices.Contains(result, candidate) {
-				result = append(result, candidate)
-			}
-		}
-	}
-	return result
-}
-
 func (f lockFiles) findDropIns(name string) ([]string, error) {
 	var paths []string
 	condition := "!" + filepath.Join(f.markerDir, name)
@@ -194,15 +177,13 @@ func (f lockFiles) findDropIns(name string) ([]string, error) {
 			if !strings.HasSuffix(entry.Name(), ".d") {
 				continue
 			}
-			for _, base := range []string{oldLockDropInName, lockDropInName} {
-				path := filepath.Join(root, entry.Name(), base)
-				matches, err := f.dropInNamesMarker(path, condition)
-				if err != nil {
-					return nil, err
-				}
-				if matches {
-					paths = append(paths, path)
-				}
+			path := filepath.Join(root, entry.Name(), lockDropInName)
+			matches, err := f.dropInNamesMarker(path, condition)
+			if err != nil {
+				return nil, err
+			}
+			if matches {
+				paths = append(paths, path)
 			}
 		}
 	}

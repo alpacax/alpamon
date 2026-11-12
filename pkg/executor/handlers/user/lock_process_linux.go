@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +17,6 @@ const processTerminationBound = 5 * time.Second
 
 type accountProcess interface {
 	pid() int
-	serviceUnit() string
 	stop() error
 	stopped() (bool, error)
 	kill() error
@@ -29,16 +27,14 @@ type accountProcess interface {
 type processScanner func(uint64, map[int]accountProcess) ([]accountProcess, error)
 
 type pidfdProcess struct {
-	id   int
-	fd   int
-	unit string
+	id int
+	fd int
 }
 
-func (p *pidfdProcess) serviceUnit() string { return p.unit }
-func (p *pidfdProcess) pid() int            { return p.id }
-func (p *pidfdProcess) close()              { _ = unix.Close(p.fd) }
-func (p *pidfdProcess) stop() error         { return p.signal(unix.SIGSTOP) }
-func (p *pidfdProcess) kill() error         { return p.signal(unix.SIGKILL) }
+func (p *pidfdProcess) pid() int    { return p.id }
+func (p *pidfdProcess) close()      { _ = unix.Close(p.fd) }
+func (p *pidfdProcess) stop() error { return p.signal(unix.SIGSTOP) }
+func (p *pidfdProcess) kill() error { return p.signal(unix.SIGKILL) }
 
 func (p *pidfdProcess) signal(signal unix.Signal) error {
 	err := unix.PidfdSendSignal(p.fd, signal, nil, 0)
@@ -97,11 +93,11 @@ func (p *pidfdProcess) stopped() (bool, error) {
 	return stopped || !live, err
 }
 
-func terminateAccountProcesses(ctx context.Context, uid uint64, terminateSessions func(context.Context, []string) error) (int, error) {
+func terminateAccountProcesses(ctx context.Context, uid uint64, terminateSessions func(context.Context) error) (int, error) {
 	return endAccountProcesses(ctx, uid, terminateSessions, scanAccountProcesses)
 }
 
-func endAccountProcesses(ctx context.Context, uid uint64, terminateSessions func(context.Context, []string) error, scan processScanner) (int, error) {
+func endAccountProcesses(ctx context.Context, uid uint64, terminateSessions func(context.Context) error, scan processScanner) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, processTerminationBound)
 	defer cancel()
 	tracked := make(map[int]accountProcess)
@@ -155,14 +151,7 @@ func endAccountProcesses(ctx context.Context, uid uint64, terminateSessions func
 			// Leave time for pidfd cleanup when logind fails or stalls. A user
 			// without a logind record can still have processes to terminate.
 			sessionCtx, sessionCancel := context.WithTimeout(ctx, time.Second)
-			var units []string
-			for _, p := range tracked {
-				if unit := p.serviceUnit(); unit != "" && !slices.Contains(units, unit) {
-					units = append(units, unit)
-				}
-			}
-			slices.Sort(units)
-			sessionErr = terminateSessions(sessionCtx, units)
+			sessionErr = terminateSessions(sessionCtx)
 			sessionCancel()
 			terminateSessions = nil
 		}
@@ -259,12 +248,6 @@ func scanAccountProcesses(uid uint64, tracked map[int]accountProcess) (result []
 		// Re-read identity after acquiring the handle, then prove it remained
 		// live through the read. Signals only ever use this pidfd.
 		data, readErr = os.ReadFile(path)
-		cgroup, cgroupErr := os.ReadFile(filepath.Join("/proc", entry.Name(), "cgroup"))
-		if cgroupErr != nil && !errors.Is(cgroupErr, os.ErrNotExist) && !errors.Is(cgroupErr, unix.ESRCH) {
-			p.close()
-			return result, cgroupErr
-		}
-		p.unit = systemServiceUnit(string(cgroup))
 		live, liveErr := p.alive()
 		if readErr != nil || liveErr != nil || !live || !matchesAccountProcess(string(data), uid, tracked) {
 			p.close()
@@ -308,25 +291,6 @@ func statusField(status, key string) string {
 	for line := range strings.SplitSeq(status, "\n") {
 		if strings.HasPrefix(line, key) {
 			return strings.TrimSpace(strings.TrimPrefix(line, key))
-		}
-	}
-	return ""
-}
-
-func systemServiceUnit(cgroups string) string {
-	for line := range strings.SplitSeq(cgroups, "\n") {
-		fields := strings.SplitN(line, ":", 3)
-		if len(fields) != 3 {
-			continue
-		}
-		parts := strings.Split(fields[2], "/")
-		if len(parts) < 2 || parts[1] == "user.slice" {
-			continue
-		}
-		for _, part := range parts[1:] {
-			if strings.HasSuffix(part, ".service") && !strings.HasPrefix(part, "-") {
-				return part
-			}
 		}
 	}
 	return ""

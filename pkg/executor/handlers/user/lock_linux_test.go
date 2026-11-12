@@ -30,14 +30,14 @@ func (s *lockSyncRecorder) SyncSystemInfo(keys []string) { s.calls = append(s.ca
 type lockFixture struct {
 	h     *UserHandler
 	l     *linuxAccountLocker
-	exec  *common.MockCommandExecutor
+	exec  *lockCommandExecutor
 	sync  *lockSyncRecorder
 	files map[string]string
 }
 
 func newLockFixture(t *testing.T) *lockFixture {
 	t.Helper()
-	mock := common.NewMockCommandExecutor(t)
+	mock := &lockCommandExecutor{MockCommandExecutor: common.NewMockCommandExecutor(t), properties: make(map[string]map[string]string), sockets: make(map[string]string)}
 	mock.SetResult(strings.Join(loadedUnitsArgv(), " "), 0, "", nil)
 	mock.SetResult("/usr/bin/systemctl list-unit-files --type=service --no-legend", 0, "", nil)
 	mock.SetResult("/bin/systemctl list-unit-files --type=service --no-legend", 0, "", nil)
@@ -61,17 +61,19 @@ func newLockFixture(t *testing.T) *lockFixture {
 	l.systemd = func() bool { return false }
 	l.stat = func(string) (os.FileInfo, error) { return os.Stat("/bin/sh") }
 	l.lookupUID = func(uid string) (*user.User, error) { return &user.User{Uid: uid}, nil }
-	l.terminate = func(ctx context.Context, uid uint64, terminate func(context.Context, []string) error) (int, error) {
+	l.terminate = func(ctx context.Context, uid uint64, terminate func(context.Context) error) (int, error) {
 		assert.Equal(t, uint64(1001), uid)
 		if terminate != nil {
-			require.NoError(t, terminate(ctx, nil))
+			require.NoError(t, terminate(ctx))
 		}
 		return 7, nil
 	}
 	return &lockFixture{h, l, mock, sync, files}
 }
 
-func commandArgv(mock *common.MockCommandExecutor) [][]string {
+func commandArgv(mock interface {
+	GetExecutedCommands() []common.ExecutedCommand
+}) [][]string {
 	var result [][]string
 	for _, c := range mock.GetExecutedCommands() {
 		result = append(result, append([]string{c.Name}, c.Args...))
@@ -99,7 +101,7 @@ func TestAccountLockRoundTrip(t *testing.T) {
 			if tc.linger {
 				f.files["/var/lib/systemd/linger/deploy"] = ""
 			}
-			args := &common.CommandArgs{Username: "deploy", UID: 1001, UIDPresent: true}
+			args := &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}}
 			code, result, err := f.h.Execute(context.Background(), "lockuser", args)
 			require.NoError(t, err)
 			require.Zero(t, code, result)
@@ -128,7 +130,7 @@ func TestAccountLockRoundTrip(t *testing.T) {
 			locker.store, locker.readFile = f.l.store, f.l.readFile
 			locker.files = f.l.files
 			locker.systemd, locker.stat = f.l.systemd, f.l.stat
-			locker.terminate = func(context.Context, uint64, func(context.Context, []string) error) (int, error) {
+			locker.terminate = func(context.Context, uint64, func(context.Context) error) (int, error) {
 				t.Fatal("unlock must not terminate or start processes")
 				return 0, nil
 			}
@@ -199,7 +201,7 @@ func TestAccountLockRefusals(t *testing.T) {
 				if tc.defs != "" {
 					f.files["/etc/login.defs"] = tc.defs
 				}
-				code, result, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: tc.username, UID: tc.requested, UIDPresent: true})
+				code, result, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: tc.username, UID: tc.requested, LockUID: common.OptionalUint64{Value: tc.requested, Present: true}})
 				require.NoError(t, err)
 				assert.Equal(t, 1, code)
 				assert.True(t, strings.HasPrefix(result, tc.reason+":"), result)
@@ -214,7 +216,7 @@ func TestAccountLockRefusals(t *testing.T) {
 
 func TestAccountLockIdempotency(t *testing.T) {
 	f := newLockFixture(t)
-	args := &common.CommandArgs{Username: "deploy", UID: 1001}
+	args := &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}}
 	for _, tc := range []struct{ cmd, expected string }{
 		{"unlockuser", `{"username":"deploy","locked":false,"already_unlocked":true}`},
 		{"lockuser", `{"username":"deploy","locked":true,"already_locked":false,"processes_ended":7}`},
@@ -257,7 +259,7 @@ func TestAccountLockPartialFailure(t *testing.T) {
 				require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, Expiry: "21000", Linger: true, Locked: true}}))
 			}
 			f.exec.SetResult(failed, 1, "failed", errors.New("exit status 1"))
-			code, result, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy", UID: 1001})
+			code, result, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code)
 			assert.Contains(t, result, "account_command_failed:")
@@ -282,7 +284,7 @@ func TestAccountLockStateSafety(t *testing.T) {
 			case "stale uid":
 				require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1002}}))
 			}
-			code, result, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+			code, result, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code, result)
 			assert.Empty(t, commandArgv(f.exec))
@@ -292,7 +294,7 @@ func TestAccountLockStateSafety(t *testing.T) {
 
 func TestAccountLockTerminationFailure(t *testing.T) {
 	f := newLockFixture(t)
-	f.l.terminate = func(ctx context.Context, uid uint64, terminate func(context.Context, []string) error) (int, error) {
+	f.l.terminate = func(ctx context.Context, uid uint64, terminate func(context.Context) error) (int, error) {
 		var count int
 		var err error
 		synctest.Test(t, func(t *testing.T) {
@@ -309,7 +311,7 @@ func TestAccountLockTerminationFailure(t *testing.T) {
 		})
 		return count, err
 	}
-	code, result, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+	code, result, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 	require.NoError(t, err)
 	assert.Equal(t, 1, code)
 	assert.Contains(t, result, "process_termination_incomplete:")
@@ -335,15 +337,15 @@ func TestAccountLockSystemd(t *testing.T) {
 			f := newLockFixture(t)
 			f.l.systemd = func() bool { return true }
 			f.exec.SetResult(strings.Join(loadedUnitsArgv(), " "), 0, "worker.service loaded active running worker\n", nil)
-			f.exec.SetResult("/usr/bin/systemctl show --property=User --value -- worker.service", 0, tc.serviceOwner, nil)
+			setUnitProperty(f, "worker.service", "User", tc.serviceOwner)
 			if tc.terminateFails {
 				f.exec.SetResult("/usr/bin/loginctl terminate-user -- 1001", 1, "failed", errors.New("exit status 1"))
 				f.exec.SetResult("/usr/bin/loginctl list-users --no-legend --no-pager", 0, tc.users, nil)
 			}
-			f.l.terminate = func(ctx context.Context, _ uint64, terminate func(context.Context, []string) error) (int, error) {
-				return 1, terminate(ctx, []string{"worker.service"})
+			f.l.terminate = func(ctx context.Context, _ uint64, terminate func(context.Context) error) (int, error) {
+				return 1, terminate(ctx)
 			}
-			code, result, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+			code, result, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 			require.NoError(t, err)
 			if tc.wantFailure {
 				assert.Equal(t, 1, code, result)
@@ -371,7 +373,7 @@ func TestAccountLockRechecksIdentity(t *testing.T) {
 		}
 		return common.ExistingUserLookup("1002")(name)
 	}
-	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 	require.NoError(t, err)
 	assert.Equal(t, 1, code)
 	assert.Contains(t, output, "uid_mismatch:")
@@ -384,7 +386,7 @@ func TestNumericAccountLingerUsesVerifiedUID(t *testing.T) {
 	f.files["/etc/shadow"] = "2000:hash:20000:0:99999:7::21000:\n"
 	f.files["/var/lib/systemd/linger/2000"] = ""
 	for _, cmd := range []string{"lockuser", "unlockuser"} {
-		code, output, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "2000", UID: 1001})
+		code, output, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "2000", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 		require.NoError(t, err)
 		require.Zero(t, code, output)
 	}
@@ -403,7 +405,7 @@ func TestAccountLockProbeBeforeMutation(t *testing.T) {
 		assert.Zero(t, flags)
 		return -1, unix.ENOSYS
 	}
-	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 	require.NoError(t, err)
 	assert.Equal(t, 1, code)
 	assert.Equal(t, "unsupported_kernel: process handles require Linux 5.3 or later", output)
@@ -443,7 +445,7 @@ func TestAccountLockToolPaths(t *testing.T) {
 			}
 			t.Setenv("PATH", t.TempDir())
 			f.files["/var/lib/systemd/linger/deploy"] = ""
-			code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+			code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 			require.NoError(t, err)
 			if tc.running && tc.prefix == "" {
 				assert.Equal(t, 1, code)
@@ -472,7 +474,7 @@ func TestAccountLockLostState(t *testing.T) {
 			if entry {
 				require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, StateLost: true}}))
 			}
-			code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+			code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code)
 			expected := missingLockState().Error()
@@ -481,7 +483,7 @@ func TestAccountLockLostState(t *testing.T) {
 			}
 			assert.Equal(t, expected, output)
 			assert.Empty(t, commandArgv(f.exec))
-			code, output, err = f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+			code, output, err = f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 			require.NoError(t, err)
 			require.Zero(t, code, output)
 			assert.Contains(t, output, `"processes_ended":7`)
@@ -489,7 +491,7 @@ func TestAccountLockLostState(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, accountLockState{UID: 1001, StateLost: true, Locked: true}, states["deploy"])
 			before := len(commandArgv(f.exec))
-			code, output, err = f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+			code, output, err = f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code)
 			assert.Equal(t, missingLockState().Error(), output)
@@ -513,7 +515,7 @@ func TestAccountLockRecreatedAccount(t *testing.T) {
 						}
 						return nil, user.UnknownUserIdError(1002)
 					}
-					code, output, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy", UID: requested})
+					code, output, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy", UID: requested, LockUID: common.OptionalUint64{Value: requested, Present: true}})
 					require.NoError(t, err)
 					states, err := f.l.store.load()
 					require.NoError(t, err)
@@ -572,7 +574,7 @@ func TestAccountLockCorruptState(t *testing.T) {
 			f := newLockFixture(t)
 			f.files["/etc/shadow"] = "deploy:!hash:20000:0:99999:7::1:\n"
 			require.NoError(t, os.WriteFile(f.l.store.path, []byte(data), 0600))
-			code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+			code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code)
 			assert.Equal(t, "lock_not_owned: the account is locked, but not by alpamon", output)
@@ -597,7 +599,7 @@ func TestAccountLockCorruptState(t *testing.T) {
 func TestAccountLockRechecksLinger(t *testing.T) {
 	f := newLockFixture(t)
 	f.l.systemd = func() bool { return true }
-	args := &common.CommandArgs{Username: "deploy", UID: 1001}
+	args := &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}}
 	for _, linger := range []bool{false, true, false} {
 		if linger {
 			f.files["/var/lib/systemd/linger/deploy"] = ""
@@ -654,7 +656,7 @@ func TestAccountLockRechecksAfterUsermod(t *testing.T) {
 					}
 					return common.ExistingUserLookup(uid)(name)
 				}
-				code, output, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy", UID: 1001})
+				code, output, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 				require.NoError(t, err)
 				assert.Equal(t, 1, code)
 				assert.Contains(t, output, "uid_mismatch:")
@@ -672,7 +674,7 @@ func TestAccountLockLingerFailureHasNoClaim(t *testing.T) {
 			f.l.systemd = func() bool { return true }
 			f.files["/var/lib/systemd/linger/deploy"] = ""
 			f.exec.SetResult(failed, 1, "failed", nil)
-			args := &common.CommandArgs{Username: "deploy", UID: 1001}
+			args := &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}}
 			code, output, err := f.h.Execute(context.Background(), "lockuser", args)
 			require.NoError(t, err)
 			require.Equal(t, 1, code, output)
@@ -722,7 +724,7 @@ func TestAccountLockCollectsFailuresBeforeTermination(t *testing.T) {
 	f.exec.SetResult("/usr/bin/loginctl disable-linger -- 1001", 1, "linger failed", nil)
 	f.exec.SetResult("/usr/bin/systemctl daemon-reload", 1, "reload failed", nil)
 	ended := false
-	f.l.terminate = func(context.Context, uint64, func(context.Context, []string) error) (int, error) {
+	f.l.terminate = func(context.Context, uint64, func(context.Context) error) (int, error) {
 		ended = true
 		calls := commandArgv(f.exec)
 		require.GreaterOrEqual(t, len(calls), 3)
@@ -731,7 +733,7 @@ func TestAccountLockCollectsFailuresBeforeTermination(t *testing.T) {
 		assert.Equal(t, []string{"/usr/bin/loginctl", "disable-linger", "--", "1001"}, calls[2])
 		return 1, errors.New("termination failed")
 	}
-	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 	require.NoError(t, err)
 	assert.Equal(t, 1, code)
 	assert.True(t, ended)
@@ -746,7 +748,7 @@ func TestAccountLockContainsDespiteBookkeepingFailure(t *testing.T) {
 			f := newLockFixture(t)
 			switch failure {
 			case "load":
-				require.NoError(t, os.WriteFile(f.l.store.path, []byte(`{"deploy":{"uid":"bad"}}`), 0600))
+				require.NoError(t, os.WriteFile(f.l.store.path, []byte(`{}`), 0644))
 			case "save":
 				f.l.store.path = filepath.Join(t.TempDir(), "missing", "state.json")
 				read := f.l.readFile
@@ -767,11 +769,11 @@ func TestAccountLockContainsDespiteBookkeepingFailure(t *testing.T) {
 				}
 			}
 			ended := false
-			f.l.terminate = func(context.Context, uint64, func(context.Context, []string) error) (int, error) {
+			f.l.terminate = func(context.Context, uint64, func(context.Context) error) (int, error) {
 				ended = true
 				return 1, nil
 			}
-			code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+			code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code, output)
 			assert.True(t, ended)
@@ -791,7 +793,7 @@ func TestAccountUnlockDoesNotOwnExternalLock(t *testing.T) {
 					require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, StateLost: true}}))
 				}
 				require.NoError(t, f.l.files.marker("deploy", true))
-				code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+				code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 				require.NoError(t, err)
 				assert.Equal(t, 1, code)
 				if lost {
@@ -804,4 +806,134 @@ func TestAccountUnlockDoesNotOwnExternalLock(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestDeleteMissingUserKeepsFailure(t *testing.T) {
+	for _, purge := range []bool{false, true} {
+		t.Run(map[bool]string{false: "backup", true: "purge"}[purge], func(t *testing.T) {
+			f := newLockFixture(t)
+			old := utils.PlatformLike
+			utils.PlatformLike = "debian"
+			t.Cleanup(func() { utils.PlatformLike = old })
+			f.h.lookupUser = common.AbsentUserLookup
+			require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001}}))
+			command := "/usr/sbin/deluser deploy"
+			if purge {
+				command = "/usr/sbin/deluser --remove-home deploy"
+			}
+			f.exec.SetResult(command, 6, "user does not exist", nil)
+			code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy", PurgeHomeDirectory: purge})
+			require.NoError(t, err)
+			if purge {
+				assert.Equal(t, 6, code)
+				assert.Equal(t, "user does not exist", output)
+				assert.Contains(t, commandArgv(f.exec), []string{"/usr/sbin/deluser", "--remove-home", "deploy"})
+			} else {
+				assert.Equal(t, 1, code)
+				assert.Contains(t, output, "/home/deploy not exist:")
+				assert.Empty(t, commandArgv(f.exec))
+			}
+			states, err := f.l.store.load()
+			require.NoError(t, err)
+			assert.Empty(t, states)
+		})
+	}
+}
+
+func TestAccountStateTypeErrorQuarantined(t *testing.T) {
+	f := newLockFixture(t)
+	require.NoError(t, os.WriteFile(f.l.store.path, []byte(`{"deploy":{"uid":1001,"expiry":19000}}`), 0600))
+	states, err := f.l.store.load()
+	require.NoError(t, err)
+	assert.Empty(t, states)
+	paths, err := filepath.Glob(f.l.store.path + ".corrupt-*")
+	require.NoError(t, err)
+	require.Len(t, paths, 1)
+	f.files["/etc/shadow"] = "deploy:!hash:20000:0:99999:7::1:\n"
+	code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+	assert.Equal(t, "lock_not_owned: the account is locked, but not by alpamon", output)
+	assert.Empty(t, commandArgv(f.exec))
+}
+
+func TestAccountToolsResolvedOnce(t *testing.T) {
+	for _, systemd := range []bool{false, true} {
+		t.Run(fmt.Sprint(systemd), func(t *testing.T) {
+			f := newLockFixture(t)
+			var probes, stats int
+			f.l.systemd = func() bool { probes++; return systemd }
+			f.l.stat = func(string) (os.FileInfo, error) { stats++; return os.Stat("/bin/sh") }
+			args := &common.CommandArgs{Username: "deploy", LockUID: common.OptionalUint64{Value: 1001, Present: true}}
+			for _, command := range []string{"lockuser", "unlockuser", "lockuser"} {
+				code, output, err := f.h.Execute(context.Background(), command, args)
+				require.NoError(t, err)
+				require.Zero(t, code, output)
+			}
+			assert.Equal(t, 1, probes)
+			if systemd {
+				assert.Equal(t, 2, stats)
+			} else {
+				assert.Zero(t, stats)
+			}
+		})
+	}
+}
+
+func TestAccountMissingUserSentinel(t *testing.T) {
+	f := newLockFixture(t)
+	delete(f.files, "/etc/shadow")
+	f.files["/etc/shadow"] = "other:hash:20000:0:99999:7::21000:\n"
+	_, err := f.l.snapshot("deploy", 1001)
+	require.ErrorIs(t, err, errUserNotFound)
+	assert.EqualError(t, err, `user_not_found: no local shadow entry for "deploy"`)
+	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", LockUID: common.OptionalUint64{Value: 1001, Present: true}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+	assert.Equal(t, `user_not_found: no local shadow entry for "deploy"`, output)
+	assert.Empty(t, commandArgv(f.exec))
+}
+
+func TestAccountUIDBoundsReadOnce(t *testing.T) {
+	f := newLockFixture(t)
+	reads := 0
+	readFile := f.l.readFile
+	f.l.readFile = func(path string) ([]byte, error) {
+		if path == "/etc/login.defs" {
+			reads++
+		}
+		return readFile(path)
+	}
+	f.files["/etc/login.defs"] = "UID_MIN 1000\nUID_MAX 2000\n"
+	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", LockUID: common.OptionalUint64{Value: 1001, Present: true}})
+	require.NoError(t, err)
+	require.Zero(t, code, output)
+	assert.Equal(t, 1, reads)
+}
+
+func TestAccountStateWriterKeepsDirectoryPermissions(t *testing.T) {
+	for _, mode := range []os.FileMode{0700, 0750, 0755, 0770, 0777} {
+		t.Run(fmt.Sprintf("%o", mode), func(t *testing.T) {
+			f := newLockFixture(t)
+			dir := filepath.Dir(f.l.store.path)
+			require.NoError(t, os.Chmod(dir, mode))
+			err := f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001}})
+			if mode&0022 != 0 {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			info, err := os.Stat(dir)
+			require.NoError(t, err)
+			assert.Equal(t, mode, info.Mode().Perm())
+			info, err = os.Stat(f.l.store.path)
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+			_, err = f.l.store.load()
+			require.NoError(t, err)
+		})
+	}
+	f := newLockFixture(t)
+	require.NoError(t, os.Mkdir(f.l.files.markerDir, 0750))
+	require.ErrorContains(t, f.l.files.marker("deploy", true), "safe permissions")
 }

@@ -4,6 +4,7 @@ package user_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -101,7 +102,7 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 	accountArgs := func(username string) *common.CommandArgs {
 		uid, err := strconv.ParseUint(run("/usr/bin/id", "-u", username), 10, 32)
 		require.NoError(t, err)
-		return &common.CommandArgs{Username: username, UID: uid, UIDPresent: true}
+		return &common.CommandArgs{Username: username, UID: uid, LockUID: common.OptionalUint64{Value: uid, Present: true}}
 	}
 	change := func(command string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -199,7 +200,7 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 		changeAccount("unlockuser", "bob")
 		t.Log("locking alice left bob and root user@ instances active and restartable; locking bob afterwards succeeded")
 	})
-	t.Run("trigger recovery", func(t *testing.T) {
+	t.Run("rate-limited triggers stay stopped", func(t *testing.T) {
 		socket := "alpamon-lock-recover.socket"
 		path := "alpamon-lock-recover.path"
 		socketFile := "/run/alpamon-lock-recover.sock"
@@ -228,24 +229,22 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 		for _, unit := range []string{socket, path} {
 			require.Eventually(t, func() bool { return property(unit, "Result") == "trigger-limit-hit" }, 5*time.Second, 50*time.Millisecond)
 		}
-		require.NoError(t, conn.Close())
-		require.NoError(t, os.Remove(pathFile))
+		defer func() { assert.NoError(t, conn.Close()) }()
+		// Keep the path condition present and socket event pending through unlock.
 		output := changeAccount("unlockuser", name)
-		assert.NotContains(t, output, "triggers_not_restored")
+		var result struct {
+			TriggersLeftStopped []string `json:"triggers_left_stopped"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(output), &result))
+		assert.ElementsMatch(t, []string{socket, path}, result.TriggersLeftStopped)
 		for _, unit := range []string{socket, path} {
-			assert.Equal(t, "active", property(unit, "ActiveState"))
+			assert.NotEqual(t, "active", property(unit, "ActiveState"))
+			assert.Equal(t, "trigger-limit-hit", property(unit, "Result"))
 		}
 		for _, service := range services {
 			assert.Equal(t, "inactive", property(service, "ActiveState"))
 		}
-		conn, err = net.DialTimeout("unix", socketFile, time.Second)
-		require.NoError(t, err)
-		defer func() { assert.NoError(t, conn.Close()) }()
-		require.NoError(t, os.WriteFile(pathFile, nil, 0600))
-		for _, service := range services {
-			require.Eventually(t, func() bool { return property(service, "ActiveState") == "active" }, 3*time.Second, 50*time.Millisecond)
-		}
-		t.Log("Accept=no socket and path reached trigger-limit-hit while locked; unlock restored both to active and services stayed inactive until the next trigger")
+		t.Log("Accept=no socket and path stayed stopped after trigger-limit-hit; unlock reported both and started no service")
 	})
 
 	t.Run("unresolvable unit still contains account", func(t *testing.T) {

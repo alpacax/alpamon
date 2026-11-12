@@ -17,8 +17,7 @@ type fakeAccountProcess struct {
 	events                           *[]string
 }
 
-func (p *fakeAccountProcess) serviceUnit() string { return "" }
-func (p *fakeAccountProcess) pid() int            { return p.id }
+func (p *fakeAccountProcess) pid() int { return p.id }
 func (p *fakeAccountProcess) stop() error {
 	p.frozen = true
 	if p.events != nil {
@@ -62,7 +61,7 @@ func TestEndAccountProcessTree(t *testing.T) {
 					}
 					return nil, nil
 				}
-				count, err := endAccountProcesses(context.Background(), 1001, func(context.Context, []string) error {
+				count, err := endAccountProcesses(context.Background(), 1001, func(context.Context) error {
 					assert.True(t, parent.frozen && child.frozen)
 					events = append(events, "terminate-user")
 					if tc == "session failure" {
@@ -114,16 +113,4 @@ func TestStopFailureClosesAllHandles(t *testing.T) {
 	require.ErrorContains(t, err, "stop failed")
 	assert.True(t, first.closed)
 	assert.True(t, second.closed)
-}
-
-func TestSystemServiceUnit(t *testing.T) {
-	for _, tc := range []struct{ path, unit string }{
-		{"0::/system.slice/worker.service", "worker.service"},
-		{"0::/workload.slice/worker.service/child", "worker.service"},
-		{"1:name=systemd:/system.slice/nested.slice/worker.service", "worker.service"},
-		{"0::/user.slice/user-1001.slice/user@1001.service/app.slice/worker.service", ""},
-		{"0::/system.slice/session.scope", ""},
-	} {
-		t.Run(tc.path, func(t *testing.T) { assert.Equal(t, tc.unit, systemServiceUnit(tc.path)) })
-	}
 }

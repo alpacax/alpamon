@@ -222,7 +222,8 @@ func TestAccountLockUIDPresence(t *testing.T) {
 		{"uid", `{"username":"deploy","uid":1001}`, 1001, true, false},
 		{"negative", `{"username":"deploy","uid":-1}`, 0, false, true},
 		{"fraction", `{"username":"deploy","uid":1.5}`, 0, false, true},
-		{"null", `{"username":"deploy","uid":null}`, 0, true, false},
+		{"null", `{"username":"deploy","uid":null}`, 0, false, false},
+		{"string", `{"username":"deploy","uid":"1001"}`, 0, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := (&Command{Data: tc.data}).ParseCommandData()
@@ -232,7 +233,7 @@ func TestAccountLockUIDPresence(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.uid, data.ToArgs().UID)
-			assert.Equal(t, tc.present, data.ToArgs().UIDPresent)
+			assert.Equal(t, tc.present, data.ToArgs().LockUID.Present)
 		})
 	}
 }
@@ -244,10 +245,31 @@ func TestNullUIDPreservesCommandParsing(t *testing.T) {
 			require.NoError(t, err)
 			args := data.ToArgs()
 			assert.Zero(t, args.UID)
-			assert.True(t, args.UIDNull)
-			assert.True(t, args.UIDPresent)
+			assert.False(t, args.LockUID.Present)
 			assert.Equal(t, uint64(1001), args.GID)
 			assert.Equal(t, "deploy", args.Username)
+		})
+	}
+}
+
+// Expected values pin the command arguments at 7b7bd90e; LockUID replaces
+// that revision's UIDPresent/UIDNull bookkeeping without changing UID.
+func TestCommandPayloadsPreserveArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload string
+		want          common.CommandArgs
+	}{
+		{"shell", `{"session_id":"s1","url":"https://example.com/run"}`, common.CommandArgs{SessionID: "s1", URL: "https://example.com/run"}},
+		{"upload content", `{"username":"deploy","type":"file","path":"/home/deploy/a","content":"YmluYXJ5AA==","allow_overwrite":true,"allow_unzip":true,"use_blob":true}`, common.CommandArgs{Username: "deploy", Type: "file", Path: "/home/deploy/a", Content: "YmluYXJ5AA==", AllowOverwrite: true, AllowUnzip: true, UseBlob: true}},
+		{"upload files", `{"files":[{"username":"deploy","groupname":"users","type":"file","content":"YWJj","path":"/tmp/a","allow_overwrite":true,"allow_unzip":false,"url":"https://example.com/a"},{"type":"directory","path":"/tmp/b"}],"paths":["/tmp/a","/tmp/b"]}`, common.CommandArgs{Paths: []string{"/tmp/a", "/tmp/b"}, Files: []common.File{{Username: "deploy", Groupname: "users", Type: "file", Content: "YWJj", Path: "/tmp/a", AllowOverwrite: true, URL: "https://example.com/a"}, {Type: "directory", Path: "/tmp/b"}}}},
+		{"adduser", `{"username":"deploy","uid":1001,"gid":1002,"comment":"Developer","home_directory":"/home/deploy","home_directory_permission":"0700","shell":"/bin/sh","groupname":"users","groups":[1002,1003],"is_service_account":true}`, common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}, GID: 1002, Comment: "Developer", HomeDirectory: "/home/deploy", HomeDirectoryPermission: "0700", Shell: "/bin/sh", Groupname: "users", Groups: []uint64{1002, 1003}, IsServiceAccount: true}},
+		{"moduser", `{"username":"deploy","groupnames":["users","devs"],"managed_groupnames":[],"comment":"Developer"}`, common.CommandArgs{Username: "deploy", Groupnames: []string{"users", "devs"}, ManagedGroupnames: []string{}, Comment: "Developer"}},
+		{"deluser", `{"username":"deploy","purge_home":true}`, common.CommandArgs{Username: "deploy", PurgeHomeDirectory: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := (&Command{Data: tc.payload}).ParseCommandData()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, *parsed.ToArgs())
 		})
 	}
 }
