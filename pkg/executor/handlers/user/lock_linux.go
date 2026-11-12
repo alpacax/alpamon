@@ -74,7 +74,7 @@ func (l *linuxAccountLocker) change(ctx context.Context, cmd string, args *commo
 	if data.Username == "root" || uid == 0 || uid < l.uidBound("UID_MIN", 1000) || uid > l.uidBound("UID_MAX", 60000) || uid == 65534 || uid == 4294967294 || data.Username == "nobody" || data.Username == "nfsnobody" {
 		return "", fmt.Errorf("refused_system_account: %q has protected uid %d", data.Username, uid)
 	}
-	if data.UID != nil && *data.UID != uid {
+	if *data.UID != uid {
 		return "", fmt.Errorf("uid_mismatch: %q has uid %d, expected %d", data.Username, uid, *data.UID)
 	}
 	if cmd == common.LockUser.String() {
@@ -93,13 +93,13 @@ func (l *linuxAccountLocker) change(ctx context.Context, cmd string, args *commo
 			return "", err
 		}
 	}
-	states, err := l.store.load()
-	if err != nil {
-		return "", fmt.Errorf("lock_state_failed: %w", err)
+	states, stateErr := l.store.load()
+	if stateErr != nil && cmd == common.UnlockUser.String() {
+		return "", fmt.Errorf("lock_state_failed: %w", stateErr)
 	}
 	state, found := states[data.Username]
-	stale := found && state.UID != uid
-	if found && state.UID != uid {
+	stale := found && state.UID != uid && !state.CleanupPending
+	if stale {
 		_, lookupErr := l.lookupUID(strconv.FormatUint(state.UID, 10))
 		var absent user.UnknownUserIdError
 		if !errors.As(lookupErr, &absent) {
@@ -118,8 +118,8 @@ func (l *linuxAccountLocker) change(ctx context.Context, cmd string, args *commo
 			if err != nil {
 				return "", err
 			}
-			if snapshot.StateLost {
-				return "", missingLockState()
+			if snapshot.StateLost || snapshot.PasswordLocked || snapshot.Expiry == "1" {
+				return "", fmt.Errorf("lock_not_owned: the account is locked, but not by alpamon")
 			}
 		}
 		if stale {
@@ -128,104 +128,96 @@ func (l *linuxAccountLocker) change(ctx context.Context, cmd string, args *commo
 		}
 		return l.unlock(ctx, data.Username, states, state, found)
 	}
-	return l.lock(ctx, data.Username, uid, states, state, found)
+	return l.lock(ctx, data.Username, uid, states, state, found, stateErr)
 }
 
-func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, states map[string]accountLockState, state accountLockState, found bool) (string, error) {
+func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, states map[string]accountLockState, state accountLockState, found bool, stateErr error) (string, error) {
 	alreadyLocked := found && state.Locked
-	if !found {
-		var err error
+	var errs []error
+	if !found || state.CleanupPending {
 		previousPaths := state.DropIns
+		var err error
 		state, err = l.snapshot(name, uid)
 		state.DropIns = previousPaths
 		if err != nil {
-			return "", err
+			if strings.HasPrefix(err.Error(), "user_not_found:") {
+				return "", err
+			}
+			state.StateLost = true
+			errs = append(errs, err)
 		}
 	}
+	save := func() {
+		if stateErr != nil {
+			return
+		}
+		states[name] = state
+		if err := l.store.save(states); err != nil {
+			errs = append(errs, fmt.Errorf("lock_state_failed: %w", err))
+		}
+	}
+	if stateErr != nil {
+		errs = append(errs, fmt.Errorf("lock_state_failed: %w", stateErr))
+	}
+	// Preserve restore data when possible, but bookkeeping cannot prevent containment.
+	save()
+	for _, args := range [][]string{{"-L", "--", name}, {"-e", "1", "--", name}} {
+		if err := l.runForAccount(ctx, name, uid, "/usr/sbin/usermod", args...); err != nil {
+			errs = append(errs, err)
+			if identityErr := l.verifyUID(name, uid); identityErr != nil {
+				return "", errors.Join(append(errs, identityErr)...)
+			}
+		}
+	}
+	if err := l.files.marker(name, true); err != nil {
+		errs = append(errs, fmt.Errorf("lock_marker_failed: %w", err))
+	}
 	var units []accountUnit
-	lingerEnabled := false
+	var unitErr error
 	if l.systemctl != "" {
 		_, err := l.readFile(filepath.Join("/var/lib/systemd/linger", name))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("account_state_failed: cannot read lingering: %w", err)
+			errs = append(errs, fmt.Errorf("account_state_failed: cannot read lingering: %w", err))
 		}
-		lingerEnabled = err == nil
-		units, err = l.accountUnits(ctx, name, uid)
-		if err != nil {
-			return "", err
-		}
-	}
-	for _, unit := range units {
-		for _, trigger := range unit.triggers {
-			if !slices.Contains(state.Triggers, trigger) {
-				state.Triggers = append(state.Triggers, trigger)
+		if !errors.Is(err, os.ErrNotExist) {
+			if err := l.runForAccount(ctx, name, uid, l.loginctl, "disable-linger", "--", strconv.FormatUint(uid, 10)); err != nil {
+				errs = append(errs, err)
+			} else {
+				state.Linger = true
+				save()
 			}
 		}
-		if unit.transient || !unit.acceptTemplate {
-			continue
-		}
-		for _, root := range l.files.unitDirs {
-			path := filepath.Join(root, unit.name+".d", lockDropInName)
-			for other, saved := range states {
-				if other != name && slices.Contains(lockDropInPaths(saved.DropIns), path) {
-					return "", fmt.Errorf("unit_lock_conflict: %s", unit.name)
+		units, unitErr = l.accountUnits(ctx, name, uid)
+		for _, unit := range units {
+			for _, trigger := range unit.triggers {
+				if !slices.Contains(state.Triggers, trigger) {
+					state.Triggers = append(state.Triggers, trigger)
 				}
 			}
 		}
-	}
-	states[name] = state
-	// Persist restore data before changing the account.
-	if err := l.store.save(states); err != nil {
-		return "", fmt.Errorf("lock_state_failed: %w", err)
-	}
-	if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-L", "--", name); err != nil {
-		return "", err
-	}
-	if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-e", "1", "--", name); err != nil {
-		return "", err
-	}
-	if err := l.files.marker(name, true); err != nil {
-		return "", fmt.Errorf("lock_marker_failed: %w", err)
-	}
-	var unitErr error
-	if l.systemctl != "" {
-		unitErr = l.installDropIns(name, units, states, &state)
+		if stateErr == nil {
+			unitErr = errors.Join(unitErr, l.installDropIns(name, units, states, &state))
+		}
 		_, reloadErr := l.run(ctx, l.systemctl, "daemon-reload")
-		unitErr = errors.Join(unitErr, reloadErr)
-	}
-
-	if lingerEnabled {
-		if err := l.runForAccount(ctx, name, state.UID, l.loginctl, "disable-linger", "--", strconv.FormatUint(state.UID, 10)); err != nil {
-			return "", err
-		}
-		state.Linger = true
-		states[name] = state
-		if err := l.store.save(states); err != nil {
-			return "", fmt.Errorf("lock_state_failed: %w", err)
-		}
+		unitErr = errors.Join(unitErr, reloadErr, l.stopServices(ctx, name, uid, units))
 	}
 	var terminateSessions func(context.Context, []string) error
 	if l.systemctl != "" {
 		terminateSessions = func(ctx context.Context, _ []string) error {
-			serviceErr := l.stopServices(ctx, name, uid, units)
-			sessionErr := l.terminateSessions(ctx, name, uid)
-			return errors.Join(serviceErr, sessionErr)
+			return l.terminateSessions(ctx, name, uid)
 		}
 	}
 	count, err := l.terminate(ctx, uid, terminateSessions)
 	if err != nil {
-		err = fmt.Errorf("process_termination_incomplete: %w", err)
+		errs = append(errs, fmt.Errorf("process_termination_incomplete: %w", err))
 	}
 	if unitErr != nil {
-		unitErr = fmt.Errorf("unit_block_failed: %w", unitErr)
+		errs = append(errs, fmt.Errorf("unit_block_failed: %w", unitErr))
 	}
-	if err = errors.Join(unitErr, err); err != nil {
+	state.Locked = len(errs) == 0
+	save()
+	if err := errors.Join(errs...); err != nil {
 		return "", err
-	}
-	state.Locked = true
-	states[name] = state
-	if err := l.store.save(states); err != nil {
-		return "", fmt.Errorf("lock_state_failed: %w", err)
 	}
 	result, err := json.Marshal(struct {
 		Username       string `json:"username"`
@@ -237,61 +229,64 @@ func (l *linuxAccountLocker) lock(ctx context.Context, name string, uid uint64, 
 }
 
 func (l *linuxAccountLocker) unlock(ctx context.Context, name string, states map[string]accountLockState, state accountLockState, found bool) (string, error) {
-	alreadyUnlocked := !found
-	if found && state.StateLost {
+	alreadyUnlocked := !found || state.CleanupPending
+	if found && state.StateLost && !state.CleanupPending {
 		snapshot, err := l.snapshot(name, state.UID)
 		if err != nil {
 			return "", err
 		}
-		if snapshot.StateLost {
+		if snapshot.StateLost || snapshot.PasswordLocked || snapshot.Expiry == "1" {
 			return "", missingLockState()
 		}
 		alreadyUnlocked = true
 	}
-
-	var left, triggersLeft []string
-	if found {
-		if !alreadyUnlocked {
-			if !state.PasswordLocked {
-				if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-U", "--", name); err != nil {
-					return "", err
-				}
-			}
-			expiry := state.Expiry
-			if expiry == "" {
-				expiry = "-1"
-			}
-			if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-e", expiry, "--", name); err != nil {
+	if !found {
+		paths, err := l.files.findDropIns(name)
+		if err != nil {
+			return "", fmt.Errorf("lock_cleanup_failed: %w", err)
+		}
+		state.DropIns = paths
+		state.CleanupPending = true
+	}
+	if !alreadyUnlocked {
+		if !state.PasswordLocked {
+			if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-U", "--", name); err != nil {
 				return "", err
 			}
 		}
-		if err := l.files.marker(name, false); err != nil {
-			return "", fmt.Errorf("lock_marker_failed: %w", err)
+		expiry := state.Expiry
+		if expiry == "" {
+			expiry = "-1"
 		}
-		if l.systemctl != "" {
-			for _, path := range lockDropInPaths(state.DropIns) {
-				if err := l.files.removeDropIn(path); err != nil {
-					left = append(left, path)
-				}
-			}
-			if _, err := l.run(ctx, l.systemctl, "daemon-reload"); err != nil {
-				log.Warn().Err(err).Str("username", name).Msg("Failed to reload units after account unlock")
-			}
-			triggersLeft = l.restoreTriggers(ctx, state.Triggers)
-		}
-		delete(states, name)
-		if err := l.store.save(states); err != nil {
-			return "", fmt.Errorf("lock_state_failed: %w", err)
+		if err := l.runForAccount(ctx, name, state.UID, "/usr/sbin/usermod", "-e", expiry, "--", name); err != nil {
+			return "", err
 		}
 	}
+	removed, left, cleanupErr := l.cleanup(name, states, state)
+	var triggersLeft []string
+	if l.systemctl != "" {
+		if _, err := l.run(ctx, l.systemctl, "daemon-reload"); err != nil {
+			log.Warn().Err(err).Str("username", name).Msg("Failed to reload units after account unlock")
+		}
+		if !state.CleanupPending {
+			triggersLeft = l.restoreTriggers(ctx, state.Triggers)
+		}
+	}
+	if cleanupErr != nil {
+		return "", cleanupErr
+	}
+	if found {
+		removed = nil
+	}
 	result, err := json.Marshal(struct {
+		DropInsRemoved      []string `json:"drop_ins_removed,omitempty"`
 		TriggersNotRestored []string `json:"triggers_not_restored,omitempty"`
 		DropInsLeft         []string `json:"drop_ins_left,omitempty"`
 		Username            string   `json:"username"`
 		Locked              bool     `json:"locked"`
 		AlreadyUnlocked     bool     `json:"already_unlocked"`
 		LingerLeftDisabled  bool     `json:"linger_left_disabled,omitempty"`
-	}{triggersLeft, left, name, false, alreadyUnlocked, found && !alreadyUnlocked && state.Linger})
+	}{removed, triggersLeft, left, name, false, alreadyUnlocked, found && !alreadyUnlocked && state.Linger})
 	return string(result), err
 }
 
@@ -380,17 +375,48 @@ func (l *linuxAccountLocker) forget(name string) error {
 	if !found {
 		return nil
 	}
+	_, left, err := l.cleanup(name, states, state)
+	if len(left) > 0 {
+		err = errors.Join(err, fmt.Errorf("lock_cleanup_failed: drop-ins remain: %v", left))
+	}
+	return err
+}
+
+func (l *linuxAccountLocker) cleanup(name string, states map[string]accountLockState, state accountLockState) (removed, left []string, err error) {
+	paths := state.DropIns
+	if !state.CleanupPending {
+		paths = lockDropInPaths(paths)
+	}
+	// A retry must only remove artifacts, never restore a deleted account's shadow data.
+	state = accountLockState{UID: state.UID, CleanupPending: true, MarkerPending: true, DropIns: paths}
+	states[name] = state
+	if err := l.store.save(states); err != nil {
+		return nil, paths, fmt.Errorf("lock_state_failed: %w", err)
+	}
 	var errs []error
 	if err := l.files.marker(name, false); err != nil {
-		errs = append(errs, err)
+		errs = append(errs, fmt.Errorf("lock_marker_failed: %w", err))
+	} else {
+		state.MarkerPending = false
 	}
-	for _, path := range lockDropInPaths(state.DropIns) {
+	for _, path := range paths {
+		_, statErr := os.Lstat(path)
 		if err := l.files.removeDropIn(path); err != nil {
-			errs = append(errs, err)
+			left = append(left, path)
+		} else if statErr == nil {
+			removed = append(removed, path)
 		}
 	}
-	delete(states, name)
-	return errors.Join(append(errs, l.store.save(states))...)
+	state.DropIns = left
+	if state.MarkerPending || len(left) > 0 {
+		states[name] = state
+	} else {
+		delete(states, name)
+	}
+	if err := l.store.save(states); err != nil {
+		errs = append(errs, fmt.Errorf("lock_state_failed: %w", err))
+	}
+	return removed, left, errors.Join(errs...)
 }
 
 func missingLockState() error {

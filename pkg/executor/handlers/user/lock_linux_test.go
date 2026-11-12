@@ -39,6 +39,8 @@ func newLockFixture(t *testing.T) *lockFixture {
 	t.Helper()
 	mock := common.NewMockCommandExecutor(t)
 	mock.SetResult(strings.Join(loadedUnitsArgv(), " "), 0, "", nil)
+	mock.SetResult("/usr/bin/systemctl list-unit-files --type=service --no-legend", 0, "", nil)
+	mock.SetResult("/bin/systemctl list-unit-files --type=service --no-legend", 0, "", nil)
 	mock.SetResult("/bin/systemctl list-units --all --type=service,timer,socket,path --no-legend --no-pager --plain", 0, "", nil)
 	sync := &lockSyncRecorder{}
 	h := NewUserHandler(mock, nil, sync)
@@ -110,14 +112,11 @@ func TestAccountLockRoundTrip(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 			want := [][]string{{"/usr/sbin/usermod", "-L", "--", "deploy"}, {"/usr/sbin/usermod", "-e", "1", "--", "deploy"}}
-			if tc.systemd {
-				want = append([][]string{loadedUnitsArgv()}, want...)
-				want = append(want, []string{"/usr/bin/systemctl", "daemon-reload"})
-			}
 			if tc.linger {
 				want = append(want, []string{"/usr/bin/loginctl", "disable-linger", "--", "1001"})
 			}
 			if tc.systemd {
+				want = append(want, loadedUnitsArgv(), []string{"/usr/bin/systemctl", "list-unit-files", "--type=service", "--no-legend"}, []string{"/usr/bin/systemctl", "daemon-reload"})
 				want = append(want, []string{"/usr/bin/loginctl", "terminate-user", "--", "1001"})
 			}
 			assert.Equal(t, want, commandArgv(f.exec))
@@ -200,7 +199,7 @@ func TestAccountLockRefusals(t *testing.T) {
 				if tc.defs != "" {
 					f.files["/etc/login.defs"] = tc.defs
 				}
-				code, result, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: tc.username, UID: tc.requested, UIDPresent: tc.present})
+				code, result, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: tc.username, UID: tc.requested, UIDPresent: true})
 				require.NoError(t, err)
 				assert.Equal(t, 1, code)
 				assert.True(t, strings.HasPrefix(result, tc.reason+":"), result)
@@ -215,7 +214,7 @@ func TestAccountLockRefusals(t *testing.T) {
 
 func TestAccountLockIdempotency(t *testing.T) {
 	f := newLockFixture(t)
-	args := &common.CommandArgs{Username: "deploy"}
+	args := &common.CommandArgs{Username: "deploy", UID: 1001}
 	for _, tc := range []struct{ cmd, expected string }{
 		{"unlockuser", `{"username":"deploy","locked":false,"already_unlocked":true}`},
 		{"lockuser", `{"username":"deploy","locked":true,"already_locked":false,"processes_ended":7}`},
@@ -258,7 +257,7 @@ func TestAccountLockPartialFailure(t *testing.T) {
 				require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, Expiry: "21000", Linger: true, Locked: true}}))
 			}
 			f.exec.SetResult(failed, 1, "failed", errors.New("exit status 1"))
-			code, result, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy"})
+			code, result, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy", UID: 1001})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code)
 			assert.Contains(t, result, "account_command_failed:")
@@ -283,7 +282,7 @@ func TestAccountLockStateSafety(t *testing.T) {
 			case "stale uid":
 				require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1002}}))
 			}
-			code, result, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy"})
+			code, result, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code, result)
 			assert.Empty(t, commandArgv(f.exec))
@@ -310,7 +309,7 @@ func TestAccountLockTerminationFailure(t *testing.T) {
 		})
 		return count, err
 	}
-	code, result, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy"})
+	code, result, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
 	require.NoError(t, err)
 	assert.Equal(t, 1, code)
 	assert.Contains(t, result, "process_termination_incomplete:")
@@ -344,7 +343,7 @@ func TestAccountLockSystemd(t *testing.T) {
 			f.l.terminate = func(ctx context.Context, _ uint64, terminate func(context.Context, []string) error) (int, error) {
 				return 1, terminate(ctx, []string{"worker.service"})
 			}
-			code, result, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy"})
+			code, result, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
 			require.NoError(t, err)
 			if tc.wantFailure {
 				assert.Equal(t, 1, code, result)
@@ -404,7 +403,7 @@ func TestAccountLockProbeBeforeMutation(t *testing.T) {
 		assert.Zero(t, flags)
 		return -1, unix.ENOSYS
 	}
-	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy"})
+	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
 	require.NoError(t, err)
 	assert.Equal(t, 1, code)
 	assert.Equal(t, "unsupported_kernel: process handles require Linux 5.3 or later", output)
@@ -444,7 +443,7 @@ func TestAccountLockToolPaths(t *testing.T) {
 			}
 			t.Setenv("PATH", t.TempDir())
 			f.files["/var/lib/systemd/linger/deploy"] = ""
-			code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy"})
+			code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
 			require.NoError(t, err)
 			if tc.running && tc.prefix == "" {
 				assert.Equal(t, 1, code)
@@ -456,7 +455,7 @@ func TestAccountLockToolPaths(t *testing.T) {
 				require.Zero(t, code, output)
 				if tc.running {
 					assert.Contains(t, commandArgv(f.exec), []string{tc.prefix + "/loginctl", "disable-linger", "--", "1001"})
-					assert.Equal(t, tc.prefix+"/systemctl", commandArgv(f.exec)[0][0])
+					assert.Contains(t, commandArgv(f.exec), []string{tc.prefix + "/systemctl", "list-unit-files", "--type=service", "--no-legend"})
 				} else {
 					assert.Len(t, commandArgv(f.exec), 2)
 				}
@@ -473,12 +472,16 @@ func TestAccountLockLostState(t *testing.T) {
 			if entry {
 				require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, StateLost: true}}))
 			}
-			code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy"})
+			code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code)
-			assert.Equal(t, missingLockState().Error(), output)
+			expected := missingLockState().Error()
+			if !entry {
+				expected = "lock_not_owned: the account is locked, but not by alpamon"
+			}
+			assert.Equal(t, expected, output)
 			assert.Empty(t, commandArgv(f.exec))
-			code, output, err = f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy"})
+			code, output, err = f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
 			require.NoError(t, err)
 			require.Zero(t, code, output)
 			assert.Contains(t, output, `"processes_ended":7`)
@@ -486,7 +489,7 @@ func TestAccountLockLostState(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, accountLockState{UID: 1001, StateLost: true, Locked: true}, states["deploy"])
 			before := len(commandArgv(f.exec))
-			code, output, err = f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy"})
+			code, output, err = f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code)
 			assert.Equal(t, missingLockState().Error(), output)
@@ -497,7 +500,7 @@ func TestAccountLockLostState(t *testing.T) {
 
 func TestAccountLockRecreatedAccount(t *testing.T) {
 	for _, cmd := range []string{"lockuser", "unlockuser"} {
-		for _, requested := range []uint64{0, 1001, 1002} {
+		for _, requested := range []uint64{1001, 1002} {
 			for _, held := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%d/held=%t", cmd, requested, held), func(t *testing.T) {
 					f := newLockFixture(t)
@@ -569,10 +572,10 @@ func TestAccountLockCorruptState(t *testing.T) {
 			f := newLockFixture(t)
 			f.files["/etc/shadow"] = "deploy:!hash:20000:0:99999:7::1:\n"
 			require.NoError(t, os.WriteFile(f.l.store.path, []byte(data), 0600))
-			code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy"})
+			code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
 			require.NoError(t, err)
 			assert.Equal(t, 1, code)
-			assert.Equal(t, missingLockState().Error(), output)
+			assert.Equal(t, "lock_not_owned: the account is locked, but not by alpamon", output)
 			assert.Empty(t, commandArgv(f.exec))
 			paths, err := filepath.Glob(f.l.store.path + ".corrupt-*")
 			require.NoError(t, err)
@@ -594,7 +597,7 @@ func TestAccountLockCorruptState(t *testing.T) {
 func TestAccountLockRechecksLinger(t *testing.T) {
 	f := newLockFixture(t)
 	f.l.systemd = func() bool { return true }
-	args := &common.CommandArgs{Username: "deploy"}
+	args := &common.CommandArgs{Username: "deploy", UID: 1001}
 	for _, linger := range []bool{false, true, false} {
 		if linger {
 			f.files["/var/lib/systemd/linger/deploy"] = ""
@@ -627,10 +630,12 @@ func TestAccountLockNullUID(t *testing.T) {
 		f := newLockFixture(t)
 		var data protocol.CommandData
 		require.NoError(t, json.Unmarshal([]byte(`{"username":"deploy","uid":null}`), &data))
-		require.NoError(t, f.h.Validate(cmd, data.ToArgs()))
+		require.ErrorContains(t, f.h.Validate(cmd, data.ToArgs()), "uid_required:")
 		code, output, err := f.h.Execute(context.Background(), cmd, data.ToArgs())
 		require.NoError(t, err)
-		assert.Zero(t, code, output)
+		assert.Equal(t, 1, code)
+		assert.Contains(t, output, "uid_required:")
+		assert.Empty(t, commandArgv(f.exec))
 	}
 }
 
@@ -649,7 +654,7 @@ func TestAccountLockRechecksAfterUsermod(t *testing.T) {
 					}
 					return common.ExistingUserLookup(uid)(name)
 				}
-				code, output, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy"})
+				code, output, err := f.h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy", UID: 1001})
 				require.NoError(t, err)
 				assert.Equal(t, 1, code)
 				assert.Contains(t, output, "uid_mismatch:")
@@ -667,14 +672,136 @@ func TestAccountLockLingerFailureHasNoClaim(t *testing.T) {
 			f.l.systemd = func() bool { return true }
 			f.files["/var/lib/systemd/linger/deploy"] = ""
 			f.exec.SetResult(failed, 1, "failed", nil)
-			args := &common.CommandArgs{Username: "deploy"}
+			args := &common.CommandArgs{Username: "deploy", UID: 1001}
 			code, output, err := f.h.Execute(context.Background(), "lockuser", args)
 			require.NoError(t, err)
 			require.Equal(t, 1, code, output)
 			code, output, err = f.h.Execute(context.Background(), "unlockuser", args)
 			require.NoError(t, err)
 			require.Zero(t, code, output)
-			assert.Equal(t, `{"username":"deploy","locked":false,"already_unlocked":false}`, output)
+			expected := `{"username":"deploy","locked":false,"already_unlocked":false}`
+			if strings.Contains(failed, "usermod") {
+				expected = `{"username":"deploy","locked":false,"already_unlocked":false,"linger_left_disabled":true}`
+			}
+			assert.Equal(t, expected, output)
 		})
+	}
+}
+
+func TestAccountLockRequiresUID(t *testing.T) {
+	for _, command := range []string{"lockuser", "unlockuser"} {
+		t.Run(command, func(t *testing.T) {
+			f := newLockFixture(t)
+			args := &common.CommandArgs{Username: "deploy"}
+			require.ErrorContains(t, f.h.Validate(command, args), "uid_required:")
+			code, output, err := f.h.Execute(context.Background(), command, args)
+			require.NoError(t, err)
+			assert.Equal(t, 1, code)
+			assert.Contains(t, output, "uid_required:")
+			assert.Empty(t, commandArgv(f.exec))
+			_, err = os.Stat(f.l.store.path)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
+func TestAccountLockCollectsFailuresBeforeTermination(t *testing.T) {
+	f := newLockFixture(t)
+	f.l.systemd = func() bool { return true }
+	require.NoError(t, os.MkdirAll(filepath.Join(f.l.files.markerDir, "deploy"), 0700))
+	read := f.l.readFile
+	f.l.readFile = func(path string) ([]byte, error) {
+		if path == "/var/lib/systemd/linger/deploy" {
+			// Fail saves after the original shadow data has been persisted.
+			require.NoError(t, os.Remove(f.l.store.path))
+			require.NoError(t, os.Mkdir(f.l.store.path, 0700))
+			return nil, nil
+		}
+		return read(path)
+	}
+	f.exec.SetResult("/usr/bin/loginctl disable-linger -- 1001", 1, "linger failed", nil)
+	f.exec.SetResult("/usr/bin/systemctl daemon-reload", 1, "reload failed", nil)
+	ended := false
+	f.l.terminate = func(context.Context, uint64, func(context.Context, []string) error) (int, error) {
+		ended = true
+		calls := commandArgv(f.exec)
+		require.GreaterOrEqual(t, len(calls), 3)
+		assert.Equal(t, []string{"/usr/sbin/usermod", "-L", "--", "deploy"}, calls[0])
+		assert.Equal(t, []string{"/usr/sbin/usermod", "-e", "1", "--", "deploy"}, calls[1])
+		assert.Equal(t, []string{"/usr/bin/loginctl", "disable-linger", "--", "1001"}, calls[2])
+		return 1, errors.New("termination failed")
+	}
+	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+	assert.True(t, ended)
+	for _, reason := range []string{"lock_marker_failed:", "account_command_failed:", "lock_state_failed:", "unit_block_failed:", "process_termination_incomplete:"} {
+		assert.Contains(t, output, reason)
+	}
+}
+
+func TestAccountLockContainsDespiteBookkeepingFailure(t *testing.T) {
+	for _, failure := range []string{"load", "save", "snapshot", "linger"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newLockFixture(t)
+			switch failure {
+			case "load":
+				require.NoError(t, os.WriteFile(f.l.store.path, []byte(`{"deploy":{"uid":"bad"}}`), 0600))
+			case "save":
+				f.l.store.path = filepath.Join(t.TempDir(), "missing", "state.json")
+				read := f.l.readFile
+				f.l.readFile = func(path string) ([]byte, error) {
+					if path == "/etc/shadow" {
+						require.NoError(t, os.WriteFile(filepath.Dir(f.l.store.path), nil, 0600))
+					}
+					return read(path)
+				}
+			case "snapshot", "linger":
+				f.l.systemd = func() bool { return true }
+				read := f.l.readFile
+				f.l.readFile = func(path string) ([]byte, error) {
+					if (failure == "snapshot" && path == "/etc/shadow") || (failure == "linger" && strings.Contains(path, "/linger/")) {
+						return nil, os.ErrPermission
+					}
+					return read(path)
+				}
+			}
+			ended := false
+			f.l.terminate = func(context.Context, uint64, func(context.Context, []string) error) (int, error) {
+				ended = true
+				return 1, nil
+			}
+			code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+			require.NoError(t, err)
+			assert.Equal(t, 1, code, output)
+			assert.True(t, ended)
+			assert.Contains(t, commandArgv(f.exec), []string{"/usr/sbin/usermod", "-L", "--", "deploy"})
+			assert.Contains(t, commandArgv(f.exec), []string{"/usr/sbin/usermod", "-e", "1", "--", "deploy"})
+		})
+	}
+}
+
+func TestAccountUnlockDoesNotOwnExternalLock(t *testing.T) {
+	for _, shadow := range []string{"!hash:20000:0:99999:7:::", "!hash:20000:0:99999:7::1:", "hash:20000:0:99999:7::1:"} {
+		for _, lost := range []bool{false, true} {
+			t.Run(fmt.Sprint(shadow, lost), func(t *testing.T) {
+				f := newLockFixture(t)
+				f.files["/etc/shadow"] = "deploy:" + shadow + "\n"
+				if lost {
+					require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001, StateLost: true}}))
+				}
+				require.NoError(t, f.l.files.marker("deploy", true))
+				code, output, err := f.h.Execute(context.Background(), "unlockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+				require.NoError(t, err)
+				assert.Equal(t, 1, code)
+				if lost {
+					assert.Equal(t, missingLockState().Error(), output)
+				} else {
+					assert.Equal(t, "lock_not_owned: the account is locked, but not by alpamon", output)
+				}
+				assert.Empty(t, commandArgv(f.exec))
+				assert.FileExists(t, filepath.Join(f.l.files.markerDir, "deploy"))
+			})
+		}
 	}
 }

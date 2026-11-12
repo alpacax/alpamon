@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -51,6 +53,8 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 		"alpamon-lock-listener@.service":      "[Service]\nUser=" + name + "\nExecStart=/usr/bin/touch " + socketStarted + "\nStandardInput=socket\n",
 		"alpamon-lock-custom.socket":          "[Socket]\nListenStream=/run/alpamon-lock-custom.sock\nAccept=yes\nService=alpamon-lock-custom-worker@.service\n",
 		"alpamon-lock-custom-worker@.service": "[Service]\nUser=" + name + "\nExecStart=/usr/bin/touch " + customStarted + "\nStandardInput=socket\n",
+		"alpamon-lock-never-loaded.service":   "[Service]\nUser=" + name + "\nExecStart=/usr/bin/touch " + home + "/never-loaded-started\n",
+		"alpamon-lock-stopped.timer":          "[Timer]\nOnActiveSec=1h\nUnit=alpamon-lock-foo.service\n",
 		"alpamon-lock-root.service":           "[Service]\nExecStart=/usr/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target\n",
 		"alpamon-lock-runtime.service":        "[Service]\nUser=" + name + "\nExecStart=/usr/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target\n",
 	}
@@ -88,17 +92,29 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 	require.NoError(t, os.Remove(foo))
 	require.NoError(t, os.Remove(socketStarted))
 	h := userhandler.NewUserHandler(executor.NewExecutor(), nil, nil)
+	accountArgs := func(username string) *common.CommandArgs {
+		uid, err := strconv.ParseUint(run("/usr/bin/id", "-u", username), 10, 32)
+		require.NoError(t, err)
+		return &common.CommandArgs{Username: username, UID: uid, UIDPresent: true}
+	}
 	change := func(command string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		code, output, err := h.Execute(ctx, command, &common.CommandArgs{Username: name})
+		code, output, err := h.Execute(ctx, command, accountArgs(name))
 		require.NoError(t, err)
 		require.Zero(t, code, output)
 		t.Log(output)
 	}
 	enablement()
 	run("/usr/bin/systemctl", "stop", "alpamon-lock-foo.timer")
+	run("/usr/bin/systemctl", "start", "alpamon-lock-stopped.timer")
+	assert.NotContains(t, run("/usr/bin/systemctl", "list-units", "--all", "--no-legend"), "alpamon-lock-never-loaded.service")
 	change("lockuser")
+	run("/usr/bin/systemctl", "stop", "alpamon-lock-stopped.timer")
+	run("/usr/bin/systemctl", "start", "alpamon-lock-never-loaded.service")
+	assert.Equal(t, "no", run("/usr/bin/systemctl", "show", "--property=ConditionResult", "--value", "alpamon-lock-never-loaded.service"))
+	_, err = os.Stat(filepath.Join(home, "never-loaded-started"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
 	enablement()
 	require.NoError(t, os.Chmod(home, 0755))
 	triggerTimer()
@@ -112,6 +128,7 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 	assert.Never(t, func() bool { return exists(foo) || exists(socketStarted) || exists(customStarted) }, 500*time.Millisecond, 10*time.Millisecond)
 	run("/usr/bin/systemctl", "stop", "alpamon-lock-foo.timer")
 	change("unlockuser")
+	assert.Equal(t, "inactive", run("/usr/bin/systemctl", "show", "--property=ActiveState", "--value", "alpamon-lock-stopped.timer"))
 	enablement()
 	linkAfter, err := os.Readlink(runtimeLink)
 	require.NoError(t, err)
@@ -123,7 +140,7 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 	t.Log("timer blocked while locked and ran after unlock; Accept=yes socket blocked; Also= root unit and enabled-runtime preserved; unlock started nothing")
 	// The runner destroys this container, including all fixture users and units.
 	for _, root := range []string{"/run/systemd/system", "/etc/systemd/system"} {
-		for _, unit := range []string{"alpamon-lock-foo.service", "alpamon-lock-listener@.service", "alpamon-lock-custom-worker@.service", "alpamon-lock-runtime.service"} {
+		for _, unit := range []string{"alpamon-lock-foo.service", "alpamon-lock-listener@.service", "alpamon-lock-custom-worker@.service", "alpamon-lock-runtime.service", "alpamon-lock-never-loaded.service"} {
 			_, err := os.Stat(filepath.Join(root, unit+".d", "zz-alpamon-user-lock.conf"))
 			assert.ErrorIs(t, err, os.ErrNotExist, fmt.Sprint(root, unit))
 		}
@@ -132,7 +149,7 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		code, output, err := h.Execute(ctx, command, &common.CommandArgs{Username: username})
+		code, output, err := h.Execute(ctx, command, accountArgs(username))
 		require.NoError(t, err)
 		require.Zero(t, code, output)
 		return output
@@ -218,6 +235,47 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 			require.Eventually(t, func() bool { return property(service, "ActiveState") == "active" }, 3*time.Second, 50*time.Millisecond)
 		}
 		t.Log("Accept=no socket and path reached trigger-limit-hit while locked; unlock restored both to active and services stayed inactive until the next trigger")
+	})
+
+	t.Run("unresolvable unit still contains account", func(t *testing.T) {
+		args := accountArgs(name)
+		gid, err := strconv.ParseUint(run("/usr/bin/id", "-g", name), 10, 32)
+		require.NoError(t, err)
+		child := exec.Command("/usr/bin/sleep", "infinity")
+		child.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(args.UID), Gid: uint32(gid)}}
+		require.NoError(t, child.Start())
+		wait := make(chan error, 1)
+		go func() { wait <- child.Wait() }()
+		waited := false
+		defer func() {
+			if !waited {
+				_ = child.Process.Kill()
+				<-wait
+			}
+		}()
+		path := "/etc/systemd/system/alpamon-lock-unresolved.service"
+		require.NoError(t, os.WriteFile(path, []byte("[Service]\nUser=alpamon-nonexistent-user\nExecStart=/usr/bin/sleep infinity\n"), 0644))
+		run("/usr/bin/systemctl", "daemon-reload")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		code, output, err := h.Execute(ctx, "lockuser", args)
+		require.NoError(t, err)
+		assert.Equal(t, 1, code)
+		assert.Contains(t, output, "unit_block_failed:")
+		assert.Contains(t, output, "unit_unresolved: alpamon-lock-unresolved.service")
+		assert.Equal(t, "L", strings.Fields(run("/usr/bin/passwd", "-S", name))[1])
+		assert.Contains(t, run("/usr/bin/chage", "-l", name), "Jan 02, 1970")
+		select {
+		case err := <-wait:
+			waited = true
+			assert.Error(t, err)
+		case <-ctx.Done():
+			t.Fatal("account process survived unit discovery failure")
+		}
+		require.NoError(t, os.Remove(path))
+		run("/usr/bin/systemctl", "daemon-reload")
+		changeAccount("unlockuser", name)
+		t.Log("unresolvable installed unit reported; password locked, account expired, and process ended")
 	})
 
 }

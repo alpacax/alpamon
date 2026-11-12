@@ -19,6 +19,8 @@ type accountLockState struct {
 	PasswordLocked bool     `json:"password_locked"`
 	Linger         bool     `json:"linger"`
 	Locked         bool     `json:"locked"`
+	CleanupPending bool     `json:"cleanup_pending,omitempty"`
+	MarkerPending  bool     `json:"marker_pending,omitempty"`
 	StateLost      bool     `json:"state_lost,omitempty"`
 	Triggers       []string `json:"triggers,omitempty"`
 	DropIns        []string `json:"drop_ins,omitempty"`

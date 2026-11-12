@@ -431,6 +431,13 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 		return 1, err.Error(), nil
 	}
 
+	if _, exists, lookupErr := common.UserExists(h.lookupUser, data.Username); lookupErr == nil && !exists {
+		if err := h.accountLocker.forget(data.Username); err != nil {
+			return 1, fmt.Sprintf("lock_cleanup_failed: %v", err), nil
+		}
+		return 0, fmt.Sprintf("User '%s' deleted successfully", data.Username), nil
+	}
+
 	log.Info().
 		Str("username", data.Username).
 		Bool("purge", data.PurgeHomeDirectory).

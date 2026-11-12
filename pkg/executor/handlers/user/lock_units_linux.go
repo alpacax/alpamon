@@ -8,8 +8,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-
-	"github.com/rs/zerolog/log"
 )
 
 type accountUnit struct {
@@ -32,9 +30,10 @@ func (l *linuxAccountLocker) unitProperty(ctx context.Context, unit, property st
 
 func (l *linuxAccountLocker) accountUnits(ctx context.Context, name string, uid uint64) ([]accountUnit, error) {
 	var names []string
+	var errs []error
 	output, err := l.run(ctx, l.systemctl, "list-units", "--all", "--type=service,timer,socket,path", "--no-legend", "--no-pager", "--plain")
 	if err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	for line := range strings.SplitSeq(output, "\n") {
 		fields := strings.Fields(line)
@@ -45,27 +44,43 @@ func (l *linuxAccountLocker) accountUnits(ctx context.Context, name string, uid 
 			names = append(names, fields[0])
 		}
 	}
+	output, err = l.run(ctx, l.systemctl, "list-unit-files", "--type=service", "--no-legend")
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for line := range strings.SplitSeq(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && validService(fields[0]) && !strings.HasSuffix(fields[0], "@.service") && !slices.Contains(names, fields[0]) {
+			names = append(names, fields[0])
+		}
+	}
 	var services []string
 	templates := make(map[string]bool)
 	serviceTriggers := make(map[string][]string)
 	for _, unit := range names {
-		if validService(unit) {
+		if validService(unit) && !strings.HasSuffix(unit, "@.service") {
 			services = append(services, unit)
+			continue
+		}
+		if strings.HasSuffix(unit, "@.service") {
 			continue
 		}
 		triggers, err := l.unitProperty(ctx, unit, "Triggers")
 		if err != nil {
-			return nil, fmt.Errorf("unit_unresolved: %s: %w", unit, err)
+			errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", unit, err))
+			continue
 		}
 		if strings.HasSuffix(unit, ".socket") {
 			accept, err := l.unitProperty(ctx, unit, "Accept")
 			if err != nil {
-				return nil, fmt.Errorf("unit_unresolved: %s: %w", unit, err)
+				errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", unit, err))
+				continue
 			}
 			if accept == "yes" {
 				triggers, err = l.socketService(ctx, unit)
 				if err != nil {
-					return nil, fmt.Errorf("unit_unresolved: %s: %w", unit, err)
+					errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", unit, err))
+					continue
 				}
 				if triggers == "" {
 					triggers = strings.TrimSuffix(unit, ".socket") + "@.service"
@@ -74,7 +89,7 @@ func (l *linuxAccountLocker) accountUnits(ctx context.Context, name string, uid 
 			}
 		}
 		for _, service := range strings.Fields(triggers) {
-			if validService(service) {
+			if validService(service) && (!strings.HasSuffix(service, "@.service") || templates[service]) {
 				services = append(services, service)
 				serviceTriggers[service] = append(serviceTriggers[service], unit)
 			}
@@ -89,12 +104,14 @@ func (l *linuxAccountLocker) accountUnits(ctx context.Context, name string, uid 
 		seen[service] = true
 		owner, err := l.unitProperty(ctx, service, "User")
 		if err != nil {
-			return nil, fmt.Errorf("unit_unresolved: %s: %w", service, err)
+			errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", service, err))
+			continue
 		}
 		if owner == "" {
 			loadState, err := l.unitProperty(ctx, service, "LoadState")
 			if err != nil || (loadState != "loaded" && loadState != "masked") {
-				return nil, fmt.Errorf("unit_unresolved: %s", service)
+				errs = append(errs, fmt.Errorf("unit_unresolved: %s", service))
+				continue
 			}
 		}
 		matches := owner == name || owner == strconv.FormatUint(uid, 10)
@@ -104,7 +121,8 @@ func (l *linuxAccountLocker) accountUnits(ctx context.Context, name string, uid 
 			} else {
 				account, err := l.handler.lookupUser(owner)
 				if err != nil || account == nil {
-					return nil, fmt.Errorf("unit_unresolved: %s", service)
+					errs = append(errs, fmt.Errorf("unit_unresolved: %s", service))
+					continue
 				}
 				matches = account.Uid == strconv.FormatUint(uid, 10)
 			}
@@ -114,17 +132,20 @@ func (l *linuxAccountLocker) accountUnits(ctx context.Context, name string, uid 
 		}
 		transient, err := l.unitProperty(ctx, service, "Transient")
 		if err != nil {
-			return nil, fmt.Errorf("unit_unresolved: %s: %w", service, err)
+			errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", service, err))
+			continue
 		}
 		active, err := l.unitProperty(ctx, service, "ActiveState")
 		if err != nil {
-			return nil, fmt.Errorf("unit_unresolved: %s: %w", service, err)
+			errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", service, err))
+			continue
 		}
 		unit := accountUnit{name: service, transient: transient == "yes", running: active != "inactive" && active != "failed" && active != "", acceptTemplate: templates[service]}
 		for _, trigger := range serviceTriggers[service] {
 			active, err := l.unitProperty(ctx, trigger, "ActiveState")
 			if err != nil {
-				return nil, fmt.Errorf("unit_unresolved: %s: %w", trigger, err)
+				errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", trigger, err))
+				continue
 			}
 			if active == "active" {
 				unit.triggers = append(unit.triggers, trigger)
@@ -132,7 +153,7 @@ func (l *linuxAccountLocker) accountUnits(ctx context.Context, name string, uid 
 		}
 		units = append(units, unit)
 	}
-	return units, nil
+	return units, errors.Join(errs...)
 }
 
 func (l *linuxAccountLocker) installDropIns(name string, units []accountUnit, states map[string]accountLockState, state *accountLockState) error {
@@ -149,9 +170,16 @@ func (l *linuxAccountLocker) installDropIns(name string, units []accountUnit, st
 				continue
 			}
 			written[path] = true
-			content := "[Unit]\nConditionPathExists=!" + filepath.Join(l.files.markerDir, name) + "\n"
-			if err := l.files.write(path, content, 0644, 0755); err != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", path, err))
+			conflict := false
+			if unit.acceptTemplate {
+				for other, saved := range states {
+					if other != name && slices.Contains(lockDropInPaths(saved.DropIns), path) {
+						errs = append(errs, fmt.Errorf("unit_lock_conflict: %s", unit.name))
+						conflict = true
+					}
+				}
+			}
+			if conflict {
 				continue
 			}
 			if !slices.Contains(state.DropIns, path) {
@@ -159,7 +187,12 @@ func (l *linuxAccountLocker) installDropIns(name string, units []accountUnit, st
 			}
 			states[name] = *state
 			if err := l.store.save(states); err != nil {
-				errs = append(errs, err)
+				errs = append(errs, fmt.Errorf("lock_state_failed: %w", err))
+				continue
+			}
+			content := "[Unit]\nConditionPathExists=!" + filepath.Join(l.files.markerDir, name) + "\n"
+			if err := l.files.write(path, content, 0644, 0755); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", path, err))
 			}
 		}
 	}
@@ -243,28 +276,26 @@ func (l *linuxAccountLocker) socketService(ctx context.Context, unit string) (st
 }
 
 func (l *linuxAccountLocker) restoreTriggers(ctx context.Context, triggers []string) []string {
-	if len(triggers) == 0 {
-		return nil
-	}
-	if _, err := l.run(ctx, l.systemctl, append([]string{"reset-failed", "--"}, triggers...)...); err != nil {
-		log.Warn().Err(err).Msg("Failed to reset account trigger units")
-	}
 	var left []string
 	for _, unit := range triggers {
-		result, resultErr := l.unitProperty(ctx, unit, "Result")
-		active, activeErr := l.unitProperty(ctx, unit, "ActiveState")
-		if resultErr != nil || activeErr != nil {
+		result, err := l.unitProperty(ctx, unit, "Result")
+		if err != nil {
 			left = append(left, unit)
 			continue
 		}
-		if result == "trigger-limit-hit" || active == "inactive" || active == "failed" {
-			if _, err := l.run(ctx, l.systemctl, "start", "--", unit); err != nil {
-				left = append(left, unit)
-				continue
-			}
-			active, activeErr = l.unitProperty(ctx, unit, "ActiveState")
+		if result != "trigger-limit-hit" {
+			continue
 		}
-		if activeErr != nil || active != "active" {
+		if _, err := l.run(ctx, l.systemctl, "reset-failed", "--", unit); err != nil {
+			left = append(left, unit)
+			continue
+		}
+		if _, err := l.run(ctx, l.systemctl, "start", "--", unit); err != nil {
+			left = append(left, unit)
+			continue
+		}
+		active, err := l.unitProperty(ctx, unit, "ActiveState")
+		if err != nil || active != "active" {
 			left = append(left, unit)
 		}
 	}

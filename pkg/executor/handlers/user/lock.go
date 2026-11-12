@@ -20,7 +20,13 @@ func validateLockUser(args *common.CommandArgs) error {
 	if args == nil || args.Username == "" {
 		return fmt.Errorf("invalid_username: username is required")
 	}
-	return validateLockUserName(args.Username)
+	if err := validateLockUserName(args.Username); err != nil {
+		return err
+	}
+	if lockUserDataFromArgs(args).UID == nil {
+		return fmt.Errorf("uid_required: uid is required")
+	}
+	return nil
 }
 
 func validateLockUserName(name string) error {
