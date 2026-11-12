@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +15,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// UserHandler handles user management commands
+// UserHandler handles user management commands.
+// Unlock starts nothing, including triggers. Rate-limited triggers are reported
+// and left for the owner to start.
+// The server must refuse Websh, exec and file access for locked accounts because Alpamon switches users without PAM.
 type UserHandler struct {
 	*common.BaseHandler
 	groupService services.GroupService
@@ -26,6 +30,7 @@ type UserHandler struct {
 	lookupUser          common.UserLookupFunc
 	lookupGroup         common.GroupLookupFunc
 	supplementaryGroups common.SupplementaryGroupsFunc
+	accountLocker       accountLocker
 }
 
 // NewUserHandler creates a new user handler
@@ -37,6 +42,8 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 				common.AddUser,
 				common.DelUser,
 				common.ModUser,
+				common.LockUser,
+				common.UnlockUser,
 			},
 			cmdExecutor,
 		),
@@ -46,6 +53,7 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 		lookupGroup:         common.DefaultGroupLookup,
 		supplementaryGroups: common.DefaultSupplementaryGroups,
 	}
+	h.accountLocker = newAccountLocker(h)
 	return h
 }
 
@@ -59,6 +67,13 @@ func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 	ctx, cancel := common.WithHandlerTimeout(ctx, timeout)
 	defer cancel()
 
+	select {
+	case accountLockGate <- struct{}{}:
+		defer func() { <-accountLockGate }()
+	case <-ctx.Done():
+		return 1, "account_command_failed: " + ctx.Err().Error(), nil
+	}
+
 	var exitCode int
 	var output string
 	var err error
@@ -68,6 +83,8 @@ func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 		exitCode, output, err = h.handleAddUser(ctx, args)
 	case common.DelUser.String():
 		exitCode, output, err = h.handleDelUser(ctx, args)
+	case common.LockUser.String(), common.UnlockUser.String():
+		exitCode, output, err = h.accountLocker.execute(ctx, cmd, args)
 	case common.ModUser.String():
 		exitCode, output, err = h.handleModUser(ctx, args)
 	default:
@@ -89,6 +106,11 @@ func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 // Validate checks if the arguments are valid for the command
 func (h *UserHandler) Validate(cmd string, args *common.CommandArgs) error {
 	switch cmd {
+	case common.LockUser.String(), common.UnlockUser.String():
+		if runtime.GOOS != "linux" {
+			return fmt.Errorf("unsupported_platform: account locking requires Linux")
+		}
+		return validateLockUser(args)
 	case common.AddUser.String():
 		return h.ValidateStruct(userDataFromArgs(args))
 
@@ -399,16 +421,23 @@ func (h *UserHandler) backupHomeDirectory(username string) error {
 }
 
 // handleDelUser handles the deluser command
-func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArgs) (int, string, error) {
+func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArgs) (exitCode int, output string, err error) {
 	// Extract and validate arguments
 	data := DeleteUserData{
 		Username:           args.Username,
 		PurgeHomeDirectory: args.PurgeHomeDirectory,
 	}
 
-	err := h.Validate(common.DelUser.String(), args)
+	err = h.Validate(common.DelUser.String(), args)
 	if err != nil {
 		return 1, err.Error(), nil
+	}
+
+	if _, exists, lookupErr := common.UserExists(h.lookupUser, data.Username); lookupErr == nil && !exists {
+		if err := h.accountLocker.forget(data.Username); err != nil {
+			log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
+			defer func() { output += "\nlock_cleanup_failed: " + err.Error() }()
+		}
 	}
 
 	log.Info().
@@ -423,8 +452,6 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 		}
 	}
 
-	var exitCode int
-	var output string
 	cmdArgs := []string{}
 
 	// Platform-specific user deletion
@@ -451,6 +478,10 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 	)
 	if exitCode != 0 {
 		return exitCode, output, err
+	}
+
+	if err := h.accountLocker.forget(data.Username); err != nil {
+		log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
 	}
 
 	log.Info().

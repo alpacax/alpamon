@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,7 +72,7 @@ func TestCommand_ParseCommandData(t *testing.T) {
 	data, err := cmd.ParseCommandData()
 	require.NoError(t, err)
 	assert.Equal(t, "testuser", data.Username)
-	assert.Equal(t, uint64(1000), data.UID)
+	assert.Equal(t, common.OptionalUint64{Value: 1000, Present: true}, data.UID)
 	assert.Equal(t, uint64(1000), data.GID)
 }
 

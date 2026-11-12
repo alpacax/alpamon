@@ -100,7 +100,7 @@ func TestInfoHandler_Help(t *testing.T) {
 	// Verify key commands are documented
 	expectedCommands := []string{
 		"upgrade", "restart", "quit", "reboot", "shutdown",
-		"adduser", "deluser", "moduser",
+		"adduser", "deluser", "moduser", "lockuser", "unlockuser",
 		"addgroup", "delgroup",
 		"firewall", "upload", "download",
 		"openpty", "openftp",
