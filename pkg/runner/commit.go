@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -159,12 +160,17 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			case <-ctx.Done():
 				log.Debug().Msg("Skipping deferred sync due to shutdown")
 			}
-		}, func() {
-			if !committed { // only this commit sets commissioned, and nothing else retries it
-				CommitSystemInfo()
-			}
-		})
+		}, func() { retryInitialCommit(ctxManager.Root(), committed, CommitSystemInfo) })
 	}
+}
+
+// retryInitialCommit reruns the commit only this goroutine sends, unless it landed or shutdown began.
+// The rerun hits the same collectors, so only a transient panic recovers here.
+func retryInitialCommit(ctx context.Context, committed bool, commit func()) {
+	if committed || ctx.Err() != nil {
+		return
+	}
+	commit()
 }
 
 func CommitSystemInfo() {

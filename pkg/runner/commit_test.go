@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -847,4 +848,30 @@ func TestFileExecCapabilityMatchesTheLane(t *testing.T) {
 	_, err := common.VerifiedFilePath()
 	assert.Equal(t, err == nil, fileExecCompiled,
 		"fileExecCompiled must follow the platforms where VerifiedFilePath succeeds")
+}
+
+func TestRetryInitialCommit_CommitsWhenTheLightweightCommitNeverLanded(t *testing.T) {
+	calls := 0
+
+	retryInitialCommit(t.Context(), false, func() { calls++ })
+
+	assert.Equal(t, 1, calls)
+}
+
+func TestRetryInitialCommit_SkipsWhenTheLightweightCommitLanded(t *testing.T) {
+	calls := 0
+
+	retryInitialCommit(t.Context(), true, func() { calls++ })
+
+	assert.Zero(t, calls)
+}
+
+func TestRetryInitialCommit_SkipsDuringShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	calls := 0
+
+	retryInitialCommit(ctx, false, func() { calls++ })
+
+	assert.Zero(t, calls)
 }
