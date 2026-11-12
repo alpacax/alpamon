@@ -466,6 +466,45 @@ func TestAccountLockToolPaths(t *testing.T) {
 	}
 }
 
+func TestAccountLockRetriesMissingTool(t *testing.T) {
+	for _, missing := range []string{"loginctl", "systemctl"} {
+		t.Run(missing, func(t *testing.T) {
+			f := newLockFixture(t)
+			var systemdProbes int
+			f.l.systemd = func() bool { systemdProbes++; return true }
+			available := false
+			f.l.stat = func(path string) (os.FileInfo, error) {
+				if !available && filepath.Base(path) == missing {
+					return nil, os.ErrNotExist
+				}
+				return os.Stat("/bin/sh")
+			}
+			args := &common.CommandArgs{Username: "deploy", LockUID: common.OptionalUint64{Value: 1001, Present: true}}
+			code, output, err := f.h.Execute(context.Background(), "lockuser", args)
+			require.NoError(t, err)
+			require.Equal(t, 1, code)
+			assert.Equal(t, "missing_tool: "+missing, output)
+			assert.Empty(t, commandArgv(f.exec))
+			assert.Empty(t, f.l.loginctl)
+			assert.Empty(t, f.l.systemctl)
+			available = true
+			code, output, err = f.h.Execute(context.Background(), "lockuser", args)
+			require.NoError(t, err)
+			require.Zero(t, code, output)
+			assert.Contains(t, commandArgv(f.exec), loadedUnitsArgv())
+			assert.Equal(t, 2, systemdProbes)
+			f.l.stat = func(string) (os.FileInfo, error) {
+				t.Fatal("successful tool resolution must be cached")
+				return nil, os.ErrNotExist
+			}
+			code, output, err = f.h.Execute(context.Background(), "lockuser", args)
+			require.NoError(t, err)
+			require.Zero(t, code, output)
+			assert.Equal(t, 2, systemdProbes)
+		})
+	}
+}
+
 func TestAccountLockLostState(t *testing.T) {
 	for _, entry := range []bool{false, true} {
 		t.Run(fmt.Sprint(entry), func(t *testing.T) {
@@ -810,33 +849,50 @@ func TestAccountUnlockDoesNotOwnExternalLock(t *testing.T) {
 
 func TestDeleteMissingUserKeepsFailure(t *testing.T) {
 	for _, purge := range []bool{false, true} {
-		t.Run(map[bool]string{false: "backup", true: "purge"}[purge], func(t *testing.T) {
-			f := newLockFixture(t)
-			old := utils.PlatformLike
-			utils.PlatformLike = "debian"
-			t.Cleanup(func() { utils.PlatformLike = old })
-			f.h.lookupUser = common.AbsentUserLookup
-			require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001}}))
-			command := "/usr/sbin/deluser deploy"
-			if purge {
-				command = "/usr/sbin/deluser --remove-home deploy"
-			}
-			f.exec.SetResult(command, 6, "user does not exist", nil)
-			code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy", PurgeHomeDirectory: purge})
-			require.NoError(t, err)
-			if purge {
-				assert.Equal(t, 6, code)
-				assert.Equal(t, "user does not exist", output)
-				assert.Contains(t, commandArgv(f.exec), []string{"/usr/sbin/deluser", "--remove-home", "deploy"})
-			} else {
-				assert.Equal(t, 1, code)
-				assert.Contains(t, output, "/home/deploy not exist:")
-				assert.Empty(t, commandArgv(f.exec))
-			}
-			states, err := f.l.store.load()
-			require.NoError(t, err)
-			assert.Empty(t, states)
-		})
+		for _, cleanupFails := range []bool{false, true} {
+			t.Run(fmt.Sprintf("purge=%t/cleanupFails=%t", purge, cleanupFails), func(t *testing.T) {
+				f := newLockFixture(t)
+				old := utils.PlatformLike
+				utils.PlatformLike = "debian"
+				t.Cleanup(func() { utils.PlatformLike = old })
+				f.h.lookupUser = common.AbsentUserLookup
+				var cleanupLine string
+				if cleanupFails {
+					require.NoError(t, os.Mkdir(f.l.store.path, 0700))
+					err := f.l.forget("deploy")
+					require.Error(t, err)
+					cleanupLine = "\nlock_cleanup_failed: " + err.Error()
+				} else {
+					require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001}}))
+				}
+				command := "/usr/sbin/deluser deploy"
+				if purge {
+					command = "/usr/sbin/deluser --remove-home deploy"
+				}
+				f.exec.SetResult(command, 6, "user does not exist", nil)
+				code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy", PurgeHomeDirectory: purge})
+				require.NoError(t, err)
+				if purge {
+					assert.Equal(t, 6, code)
+					assert.Equal(t, "user does not exist"+cleanupLine, output)
+					assert.Contains(t, commandArgv(f.exec), []string{"/usr/sbin/deluser", "--remove-home", "deploy"})
+				} else {
+					assert.Equal(t, 1, code)
+					assert.Contains(t, output, "/home/deploy not exist:")
+					assert.Empty(t, commandArgv(f.exec))
+					if cleanupFails {
+						assert.True(t, strings.HasSuffix(output, cleanupLine), output)
+					} else {
+						assert.NotContains(t, output, "lock_cleanup_failed:")
+					}
+				}
+				if !cleanupFails {
+					states, err := f.l.store.load()
+					require.NoError(t, err)
+					assert.Empty(t, states)
+				}
+			})
+		}
 	}
 }
 

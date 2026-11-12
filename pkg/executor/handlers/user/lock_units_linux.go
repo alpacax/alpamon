@@ -43,10 +43,6 @@ func (l *linuxAccountLocker) unitProperties(ctx context.Context, names []string)
 			args = append(args, name)
 		}
 		output, err := l.run(ctx, l.systemctl, args...)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", chunk[0], err))
-			continue
-		}
 		var blocks []map[string]string
 		block := make(map[string]string)
 		for line := range strings.SplitSeq(output, "\n") {
@@ -64,8 +60,22 @@ func (l *linuxAccountLocker) unitProperties(ctx context.Context, names []string)
 		if len(block) > 0 {
 			blocks = append(blocks, block)
 		}
-		if len(blocks) != len(chunk) {
-			errs = append(errs, fmt.Errorf("unit_unresolved: %s", chunk[0]))
+		if err != nil || len(blocks) != len(chunk) {
+			if len(chunk) == 1 {
+				if err != nil {
+					errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", chunk[0], err))
+				} else {
+					errs = append(errs, fmt.Errorf("unit_unresolved: %s", chunk[0]))
+				}
+				continue
+			}
+			for _, name := range chunk {
+				resolved, err := l.unitProperties(ctx, []string{name})
+				errs = append(errs, err)
+				if props, ok := resolved[name]; ok {
+					properties[name] = props
+				}
+			}
 			continue
 		}
 		for i, name := range chunk {
@@ -307,41 +317,23 @@ func (l *linuxAccountLocker) stopServices(ctx context.Context, name string, uid 
 	return errors.Join(errs...)
 }
 
-// Service= is not a socket D-Bus property. Batch the fragments and drop-ins,
-// preserving systemd's merge order within each socket's configuration.
+// Service= is not a socket D-Bus property. Read each socket separately because
+// its content can include comments that resemble systemctl's unit headers.
 func (l *linuxAccountLocker) socketServices(ctx context.Context, names []string) (map[string]string, error) {
 	result := make(map[string]string)
 	var errs []error
-	for chunk := range slices.Chunk(names, unitBatchSize) {
-		output, err := l.run(ctx, l.systemctl, append([]string{"cat", "--"}, chunk...)...)
+	for _, name := range names {
+		output, err := l.run(ctx, l.systemctl, "cat", "--", name)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", chunk[0], err))
+			errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", name, err))
 			continue
 		}
-		var bodies []string
-		for line := range strings.SplitSeq(output, "\n") {
-			// Each fragment begins a unit block; inherited and instance drop-ins
-			// remain part of that block even when their filenames name another unit.
-			if strings.HasPrefix(line, "# /") && strings.HasSuffix(line, ".socket") {
-				bodies = append(bodies, "")
-			}
-			if len(bodies) > 0 {
-				bodies[len(bodies)-1] += line + "\n"
-			}
-		}
-		if len(bodies) != len(chunk) {
-			errs = append(errs, fmt.Errorf("unit_unresolved: %s", chunk[0]))
+		service, err := socketService(output)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", name, err))
 			continue
 		}
-		for i, name := range chunk {
-			body := bodies[i]
-			service, err := socketService(body)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("unit_unresolved: %s: %w", name, err))
-				continue
-			}
-			result[name] = service
-		}
+		result[name] = service
 	}
 	return result, errors.Join(errs...)
 }

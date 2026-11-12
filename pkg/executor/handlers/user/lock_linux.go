@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
@@ -25,8 +24,7 @@ const unitWorkTimeout = 60 * time.Second
 var errUserNotFound = errors.New("user_not_found")
 
 type linuxAccountLocker struct {
-	toolsOnce           sync.Once
-	toolsErr            error
+	toolsResolved       bool
 	handler             *UserHandler
 	store               lockStateStore
 	files               lockFiles
@@ -90,18 +88,19 @@ func (l *linuxAccountLocker) change(ctx context.Context, cmd string, args *commo
 			return "", err
 		}
 	}
-	l.toolsOnce.Do(func() {
-		if !l.systemd() {
-			return
+	if !l.toolsResolved {
+		if l.systemd() {
+			loginctl, err := l.resolveTool("loginctl")
+			if err != nil {
+				return "", err
+			}
+			systemctl, err := l.resolveTool("systemctl")
+			if err != nil {
+				return "", err
+			}
+			l.loginctl, l.systemctl = loginctl, systemctl
 		}
-		l.loginctl, l.toolsErr = l.resolveTool("loginctl")
-		if l.toolsErr != nil {
-			return
-		}
-		l.systemctl, l.toolsErr = l.resolveTool("systemctl")
-	})
-	if l.toolsErr != nil {
-		return "", l.toolsErr
+		l.toolsResolved = true
 	}
 
 	states, stateErr := l.store.load()

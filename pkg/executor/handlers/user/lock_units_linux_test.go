@@ -757,22 +757,29 @@ func TestAccountUnitDiscoveryBadChunk(t *testing.T) {
 		t.Run(fmt.Sprint(fails), func(t *testing.T) {
 			f := newLockFixture(t)
 			f.l.systemctl = "/usr/bin/systemctl"
-			var names []string
-			for i := 0; i < 129; i++ {
-				names = append(names, fmt.Sprintf("worker-%03d.service", i))
-			}
+			names := []string{"one.service", "broken.service", "three.service"}
 			f.exec.SetResult(strings.Join(loadedUnitsArgv(), " "), 0, strings.Join(names, "\n"), nil)
-			command := "/usr/bin/systemctl show --property=" + unitShowProperties + " -- " + strings.Join(names[:128], " ")
+			command := "/usr/bin/systemctl show --property=" + unitShowProperties + " -- "
 			if fails {
-				f.exec.SetResult(command, 1, "failed", nil)
+				f.exec.SetResult(command+strings.Join(names, " "), 1, "failed", nil)
 			} else {
-				f.exec.SetResult(command, 0, "Id=only-one.service\nUser=deploy\n", nil)
+				f.exec.SetResult(command+strings.Join(names, " "), 0, "Id=only-one.service\nUser=deploy\n", nil)
 			}
-			setUnitProperty(f, names[128], "User", "deploy")
+			f.exec.SetResult(command+names[1], 1, "single failed", nil)
+			for _, name := range []string{names[0], names[2]} {
+				setUnitProperty(f, name, "User", "deploy")
+				setUnitProperty(f, name, "ActiveState", "active")
+			}
 			units, err := f.l.accountUnits(context.Background(), "deploy", 1001)
-			require.ErrorContains(t, err, "unit_unresolved: "+names[0])
-			require.Len(t, units, 1)
-			assert.Equal(t, names[128], units[0].name)
+			require.EqualError(t, err, "unit_unresolved: broken.service: account_command_failed: systemctl exited 1: single failed (<nil>)")
+			assert.Equal(t, []accountUnit{{name: names[0], running: true}, {name: names[2], running: true}}, units)
+			var shows [][]string
+			for _, call := range commandArgv(f.exec) {
+				if call[1] == "show" {
+					shows = append(shows, call[4:])
+				}
+			}
+			assert.Equal(t, [][]string{names, {names[0]}, {names[1]}, {names[2]}}, shows)
 		})
 	}
 }
@@ -853,14 +860,15 @@ func TestAccountDropInsSaveOnceBeforeWriting(t *testing.T) {
 	assert.Equal(t, 1, saves)
 }
 
-func TestAccountSocketBatchesKeepInheritedOverrides(t *testing.T) {
+func TestAccountSocketsKeepInheritedOverrides(t *testing.T) {
 	f := newLockFixture(t)
 	f.l.systemctl = "/usr/bin/systemctl"
+	f.l.systemd = func() bool { return true }
 	f.exec.SetResult(strings.Join(loadedUnitsArgv(), " "), 0, "foo-one.socket\nworker@one.socket", nil)
 	for _, unit := range []string{"foo-one.socket", "worker@one.socket"} {
 		setUnitProperty(f, unit, "Accept", "yes")
 	}
-	f.exec.SetResult("/usr/bin/systemctl cat -- foo-one.socket worker@one.socket", 0, `# /usr/lib/systemd/system/foo-one.socket
+	f.exec.SetResult("/usr/bin/systemctl cat -- foo-one.socket", 0, `# /usr/lib/systemd/system/foo-one.socket
 [Socket]
 Service=default@.service
 # /etc/systemd/system/socket.d/global.conf
@@ -868,8 +876,10 @@ Service=default@.service
 Service=global@.service
 # /etc/systemd/system/foo-.socket.d/override.conf
 [Socket]
+# /usr/lib/systemd/system/x.socket
 Service=actual@.service
-# /usr/lib/systemd/system/worker@.socket
+`, nil)
+	f.exec.SetResult("/usr/bin/systemctl cat -- worker@one.socket", 0, `# /usr/lib/systemd/system/worker@.socket
 [Socket]
 Service=wrong@.service
 # /etc/systemd/system/worker@.socket.d/override.conf
@@ -888,7 +898,16 @@ Service=worker-actual@.service
 	for _, call := range commandArgv(f.exec) {
 		if call[1] == "cat" {
 			cats++
+			assert.Len(t, call, 4)
 		}
 	}
-	assert.Equal(t, 1, cats)
+	assert.Equal(t, 2, cats)
+	code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", LockUID: common.OptionalUint64{Value: 1001, Present: true}})
+	require.NoError(t, err)
+	require.Zero(t, code, output)
+	for _, root := range f.l.files.unitDirs {
+		for _, service := range []string{"actual@.service", "worker-actual@.service"} {
+			assert.FileExists(t, filepath.Join(root, service+".d", lockDropInName))
+		}
+	}
 }

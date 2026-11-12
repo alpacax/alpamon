@@ -252,8 +252,7 @@ func TestNullUIDPreservesCommandParsing(t *testing.T) {
 	}
 }
 
-// Expected values pin the command arguments at 7b7bd90e; LockUID replaces
-// that revision's UIDPresent/UIDNull bookkeeping without changing UID.
+// Other commands' arguments are unaffected by the lock uid type.
 func TestCommandPayloadsPreserveArguments(t *testing.T) {
 	for _, tc := range []struct {
 		name, payload string

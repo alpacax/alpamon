@@ -2,8 +2,9 @@ package protocol
 
 import (
 	"encoding/json"
-	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"testing"
+
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

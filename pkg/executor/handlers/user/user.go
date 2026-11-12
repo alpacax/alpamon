@@ -421,14 +421,14 @@ func (h *UserHandler) backupHomeDirectory(username string) error {
 }
 
 // handleDelUser handles the deluser command
-func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArgs) (int, string, error) {
+func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArgs) (exitCode int, output string, err error) {
 	// Extract and validate arguments
 	data := DeleteUserData{
 		Username:           args.Username,
 		PurgeHomeDirectory: args.PurgeHomeDirectory,
 	}
 
-	err := h.Validate(common.DelUser.String(), args)
+	err = h.Validate(common.DelUser.String(), args)
 	if err != nil {
 		return 1, err.Error(), nil
 	}
@@ -436,6 +436,7 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 	if _, exists, lookupErr := common.UserExists(h.lookupUser, data.Username); lookupErr == nil && !exists {
 		if err := h.accountLocker.forget(data.Username); err != nil {
 			log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
+			defer func() { output += "\nlock_cleanup_failed: " + err.Error() }()
 		}
 	}
 
@@ -451,8 +452,6 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 		}
 	}
 
-	var exitCode int
-	var output string
 	cmdArgs := []string{}
 
 	// Platform-specific user deletion
