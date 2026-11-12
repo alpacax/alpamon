@@ -146,6 +146,65 @@ func TestAccountLockUnitUnresolved(t *testing.T) {
 	}
 }
 
+func TestAccountLockDynamicUser(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		ownerUID       string
+		dynamicUser    string
+		showFails      bool
+		wantUnresolved bool
+		wantDropIn     bool
+	}{
+		{name: "unknown dynamic user", dynamicUser: "yes"},
+		{name: "dynamic property fails", dynamicUser: "yes", showFails: true, wantUnresolved: true},
+		{name: "unknown static user", dynamicUser: "no", wantUnresolved: true},
+		{name: "existing matching account", ownerUID: "1001", dynamicUser: "yes", wantDropIn: true},
+		{name: "existing unrelated account", ownerUID: "1002", dynamicUser: "yes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLockFixture(t)
+			f.l.systemd = func() bool { return true }
+			f.exec.SetResult(strings.Join(loadedUnitsArgv(), " "), 0, "dynamic.service", nil)
+			setUnitProperty(f, "dynamic.service", "User", "service-account")
+			setUnitProperty(f, "dynamic.service", "DynamicUser", tc.dynamicUser)
+			setUnitProperty(f, "dynamic.service", "ActiveState", "inactive")
+			f.h.lookupUser = func(name string) (*user.User, error) {
+				if name == "deploy" {
+					return &user.User{Uid: "1001"}, nil
+				}
+				if tc.ownerUID != "" {
+					return &user.User{Uid: tc.ownerUID}, nil
+				}
+				return nil, user.UnknownUserError(name)
+			}
+			if tc.showFails {
+				f.exec.SetResult("/usr/bin/systemctl show --property=DynamicUser --value -- dynamic.service", 1, "yes", errors.New("show failed"))
+			}
+			code, output, err := f.h.Execute(context.Background(), "lockuser", &common.CommandArgs{Username: "deploy", UID: 1001})
+			require.NoError(t, err)
+			if tc.wantUnresolved {
+				assert.Equal(t, 1, code, output)
+				assert.Contains(t, output, "unit_unresolved: dynamic.service")
+			} else {
+				assert.Zero(t, code, output)
+				assert.NotContains(t, output, "unit_unresolved")
+			}
+			for _, root := range f.l.files.unitDirs {
+				path := filepath.Join(root, "dynamic.service.d", lockDropInName)
+				if tc.wantDropIn {
+					assert.FileExists(t, path)
+				} else {
+					_, err := os.Stat(path)
+					assert.ErrorIs(t, err, os.ErrNotExist)
+				}
+			}
+			if tc.ownerUID != "" {
+				assert.NotContains(t, commandArgv(f.exec), []string{"/usr/bin/systemctl", "show", "--property=DynamicUser", "--value", "--", "dynamic.service"})
+			}
+		})
+	}
+}
+
 func TestAccountStopTransientFailure(t *testing.T) {
 	f := newLockFixture(t)
 	f.l.systemctl = "/usr/bin/systemctl"

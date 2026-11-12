@@ -121,6 +121,10 @@ func (l *linuxAccountLocker) accountUnits(ctx context.Context, name string, uid 
 			} else {
 				account, err := l.handler.lookupUser(owner)
 				if err != nil || account == nil {
+					dynamicUser, err := l.unitProperty(ctx, service, "DynamicUser")
+					if err == nil && dynamicUser == "yes" {
+						continue
+					}
 					errs = append(errs, fmt.Errorf("unit_unresolved: %s", service))
 					continue
 				}

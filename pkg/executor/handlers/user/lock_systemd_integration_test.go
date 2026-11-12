@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -39,6 +40,10 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 		return strings.TrimSpace(string(output))
 	}
 	name := "alpamon-systemd-test"
+	dynamicName := "alpamon-lock-dynamic"
+	_, err = user.Lookup(dynamicName)
+	var unknownUser user.UnknownUserError
+	require.ErrorAs(t, err, &unknownUser)
 	run("/usr/sbin/useradd", "-m", "-s", "/bin/sh", name)
 	run("/usr/sbin/usermod", "-p", "synthetic-test-hash", name)
 	home := "/home/" + name
@@ -57,6 +62,7 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 		"alpamon-lock-stopped.timer":          "[Timer]\nOnActiveSec=1h\nUnit=alpamon-lock-foo.service\n",
 		"alpamon-lock-root.service":           "[Service]\nExecStart=/usr/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target\n",
 		"alpamon-lock-runtime.service":        "[Service]\nUser=" + name + "\nExecStart=/usr/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target\n",
+		"alpamon-lock-dynamic.service":        "[Service]\nDynamicUser=yes\nUser=" + dynamicName + "\nExecStart=/usr/bin/sleep infinity\n",
 	}
 	for unit, body := range units {
 		require.NoError(t, os.WriteFile(filepath.Join("/etc/systemd/system", unit), []byte(body), 0644))
@@ -110,6 +116,11 @@ func TestAccountLockSystemdIntegration(t *testing.T) {
 	run("/usr/bin/systemctl", "start", "alpamon-lock-stopped.timer")
 	assert.NotContains(t, run("/usr/bin/systemctl", "list-units", "--all", "--no-legend"), "alpamon-lock-never-loaded.service")
 	change("lockuser")
+	assert.Equal(t, "inactive", run("/usr/bin/systemctl", "show", "--property=ActiveState", "--value", "alpamon-lock-dynamic.service"))
+	for _, root := range []string{"/run/systemd/system", "/etc/systemd/system"} {
+		_, err := os.Stat(filepath.Join(root, "alpamon-lock-dynamic.service.d", "zz-alpamon-user-lock.conf"))
+		assert.ErrorIs(t, err, os.ErrNotExist)
+	}
 	run("/usr/bin/systemctl", "stop", "alpamon-lock-stopped.timer")
 	run("/usr/bin/systemctl", "start", "alpamon-lock-never-loaded.service")
 	assert.Equal(t, "no", run("/usr/bin/systemctl", "show", "--property=ConditionResult", "--value", "alpamon-lock-never-loaded.service"))
