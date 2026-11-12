@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -49,25 +48,21 @@ func TestCommandRequestHandler_EmptyMessageSkipsParsingWithoutLogging(t *testing
 	assert.Empty(t, logs.String(), "an empty message should return before ParseMessage ever logs")
 }
 
-func TestCommandRequestHandler_LogsOnlyAQuotedPreviewOfARejectedMessage(t *testing.T) {
+func TestCommandRequestHandler_LogsOnlyAPreviewOfARejectedMessage(t *testing.T) {
 	longQuery := strings.Repeat("q", 1<<20)
+	badData := `{"query":"command","command":{"id":"c1","shell":"internal","data":"{\"rows\":` + strings.Repeat("9", 1<<20) + `}"}}`
 	cases := []struct {
-		name     string
-		message  string
-		logged   string // the format the handler logs the preview with
-		preview  string
-		withSize bool
+		name         string
+		message      string
+		wantMsg      string
+		field        string // the field that carries the preview
+		preview      string
+		wantCutError bool // the error quotes the input, so it must be cut too
 	}{
-		{"not JSON", strings.Repeat("x", 1<<20), "Inappropriate message: %q.", strings.Repeat("x", 1<<20), true},
-		{"a line break that would forge a log line", "oops\n[ERROR] forged", "Inappropriate message: %q.", "oops\n[ERROR] forged", true},
-		{
-			"command data whose overflowing number the error quotes",
-			`{"query":"command","command":{"id":"c1","shell":"internal","data":"{\"rows\":` + strings.Repeat("9", 1<<20) + `}"}}`,
-			"Failed to parse command data: %q.",
-			`{"query":"command","command":{"id":"c1","shell":"internal","data":"{\"rows\":` + strings.Repeat("9", 1<<20) + `}"}}`,
-			true,
-		},
-		{"an unknown query", `{"query":"` + longQuery + `"}`, "Not implemented query: %q.", longQuery, false},
+		{"not JSON", strings.Repeat("x", 1<<20), "Inappropriate message.", "preview", strings.Repeat("x", 1<<20), false},
+		{"a line break that would forge a log line", "oops\n[ERROR] forged", "Inappropriate message.", "preview", "oops\n[ERROR] forged", false},
+		{"command data whose overflowing number the error quotes", badData, "Failed to parse command data.", "preview", badData, true},
+		{"an unknown query", `{"query":"` + longQuery + `"}`, "Not implemented query.", "query", longQuery, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,12 +73,11 @@ func TestCommandRequestHandler_LogsOnlyAQuotedPreviewOfARejectedMessage(t *testi
 
 			assert.Equal(t, outcomeContinue, outcome)
 			entry := warnEntry(t, logs.String())
-			assert.Equal(t, fmt.Sprintf(tc.logged, protocol.Preview(tc.preview)), entry["message"])
-			if tc.withSize {
-				assert.EqualValues(t, len(tc.message), entry["size"])
-			}
-			if tc.logged == "Failed to parse command data: %q." { // only this path's error quotes the input
-				require.Contains(t, entry, "error")
+			assert.Equal(t, tc.wantMsg, entry["message"])
+			assert.Equal(t, protocol.Preview(tc.preview), entry[tc.field])
+			assert.EqualValues(t, len(tc.message), entry["size"])
+			if tc.wantCutError {
+				require.IsType(t, "", entry["error"])
 				assert.LessOrEqual(t, len(entry["error"].(string)), protocol.PreviewBytes+len("..."), "the error quoted the message whole")
 			}
 			assert.Less(t, len(logs.String()), 4*protocol.PreviewBytes, "the log carried more than the previews")

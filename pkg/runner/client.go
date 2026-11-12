@@ -605,7 +605,8 @@ func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome 
 
 	msg, err := protocol.ParseMessage(message)
 	if err != nil {
-		log.Warn().Err(err).Int("size", len(message)).Msgf("Inappropriate message: %q.", protocol.Preview(message))
+		log.Warn().Err(err).Int("size", len(message)).Str("preview", protocol.Preview(message)).
+			Msg("Inappropriate message.")
 		return outcomeContinue
 	}
 
@@ -660,7 +661,7 @@ func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome 
 		if err != nil {
 			// An overflowing number makes the error quote the literal whole, so it is cut too.
 			log.Warn().Str("error", protocol.Preview(err.Error())).Int("size", len(message)).
-				Msgf("Failed to parse command data: %q.", protocol.Preview(message))
+				Str("preview", protocol.Preview(message)).Msg("Failed to parse command data.")
 			return outcomeContinue
 		}
 
@@ -684,7 +685,7 @@ func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome 
 		log.Debug().Msgf("Reconnect requested for reason: %s.", msg.Reason)
 		return outcomeReconnect
 	default:
-		log.Warn().Msgf("Not implemented query: %q.", protocol.Preview(msg.Query))
+		log.Warn().Int("size", len(message)).Str("query", protocol.Preview(msg.Query)).Msg("Not implemented query.")
 	}
 
 	return outcomeContinue
