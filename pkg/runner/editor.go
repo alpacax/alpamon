@@ -591,6 +591,10 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 	ticker := time.NewTicker(codeServerReadyPollInterval)
 	defer ticker.Stop()
 
+	dial := m.dialSocket
+	if m.dialReady != nil {
+		dial = m.dialReady
+	}
 	for {
 		// A completed process cannot be ready, even if its socket still answers.
 		select {
@@ -599,10 +603,6 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 		default:
 		}
 
-		dial := m.dialSocket
-		if m.dialReady != nil {
-			dial = m.dialReady
-		}
 		conn, err := dial()
 		if err == nil {
 			_ = conn.Close()
