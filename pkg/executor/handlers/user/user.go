@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +15,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// UserHandler handles user management commands
+// UserHandler handles user management commands.
+// The server must refuse Websh, exec and file access for locked accounts because Alpamon switches users without PAM.
 type UserHandler struct {
 	*common.BaseHandler
 	groupService services.GroupService
@@ -103,6 +105,9 @@ func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 func (h *UserHandler) Validate(cmd string, args *common.CommandArgs) error {
 	switch cmd {
 	case common.LockUser.String(), common.UnlockUser.String():
+		if runtime.GOOS != "linux" {
+			return fmt.Errorf("unsupported_platform: account locking requires Linux")
+		}
 		return validateLockUser(args)
 	case common.AddUser.String():
 		return h.ValidateStruct(userDataFromArgs(args))
@@ -466,6 +471,10 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 	)
 	if exitCode != 0 {
 		return exitCode, output, err
+	}
+
+	if err := h.accountLocker.forget(data.Username); err != nil {
+		return 1, fmt.Sprintf("lock_state_failed: %v", err), nil
 	}
 
 	log.Info().

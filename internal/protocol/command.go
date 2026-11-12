@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +53,7 @@ type CommandData struct {
 	PurgeHomeDirectory      bool             `json:"purge_home"`
 	UID                     uint64           `json:"uid"`
 	UIDPresent              bool             `json:"-"`
+	UIDNull                 bool             `json:"-"`
 	GID                     uint64           `json:"gid"`
 	Comment                 string           `json:"comment"`
 	Shell                   string           `json:"shell"`
@@ -141,9 +141,7 @@ func (c *CommandData) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	decoded.UIDPresent = presence.UID != nil
-	if decoded.UIDPresent && string(presence.UID) == "null" {
-		return fmt.Errorf("uid must be an integer")
-	}
+	decoded.UIDNull = string(presence.UID) == "null"
 	*c = CommandData(decoded)
 	return nil
 }
@@ -177,6 +175,7 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 		PurgeHomeDirectory:      c.PurgeHomeDirectory,
 		UID:                     c.UID,
 		UIDPresent:              c.UIDPresent,
+		UIDNull:                 c.UIDNull,
 		GID:                     c.GID,
 		Comment:                 c.Comment,
 		Shell:                   c.Shell,

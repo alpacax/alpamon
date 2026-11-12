@@ -16,11 +16,15 @@ func TestAccountLockUnsupported(t *testing.T) {
 		t.Run(cmd, func(t *testing.T) {
 			mock := common.NewMockCommandExecutor(t)
 			h := NewUnsupportedAccountLockHandler(mock)
+			assert.ErrorContains(t, h.Validate(cmd, nil), "unsupported_platform:")
+			assert.ErrorContains(t, h.Validate(cmd, &common.CommandArgs{Username: "--invalid"}), "unsupported_platform:")
 			assert.ElementsMatch(t, []string{"lockuser", "unlockuser"}, h.Commands())
-			code, result, err := h.Execute(context.Background(), cmd, &common.CommandArgs{Username: "deploy"})
-			require.NoError(t, err)
-			assert.Equal(t, 1, code)
-			assert.Equal(t, "unsupported_platform: account locking requires Linux", result)
+			for _, args := range []*common.CommandArgs{nil, {Username: "--invalid"}, {Username: "deploy"}} {
+				code, result, err := h.Execute(context.Background(), cmd, args)
+				require.NoError(t, err)
+				assert.Equal(t, 1, code)
+				assert.Equal(t, "unsupported_platform: account locking requires Linux", result)
+			}
 			assert.Empty(t, mock.GetExecutedCommands())
 		})
 	}

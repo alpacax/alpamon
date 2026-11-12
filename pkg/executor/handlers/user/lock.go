@@ -13,6 +13,7 @@ var accountLockGate = make(chan struct{}, 1)
 
 type accountLocker interface {
 	execute(context.Context, string, *common.CommandArgs) (int, string, error)
+	forget(string) error
 }
 
 func validateLockUser(args *common.CommandArgs) error {

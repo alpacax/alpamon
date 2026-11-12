@@ -92,7 +92,9 @@ func TestProcessIdentityMatching(t *testing.T) {
 		want         bool
 	}{
 		{"real uid", "Uid:\t1001 0 0 0\nState:\tS\nPPid:\t1\n", true},
-		{"effective uid", "Uid:\t0 1001 0 0\nState:\tS\nPPid:\t1\n", true},
+		{"effective uid", "Uid:\t0 1001 0 0\nState:\tS\nPPid:\t1\n", false},
+		{"saved uid", "Uid:\t0 0 1001 0\nPPid:\t1\n", true},
+		{"filesystem uid", "Uid:\t0 0 0 1001\nPPid:\t1\n", false},
 		{"descendant", "Uid:\t0 0 0 0\nState:\tS\nPPid:\t10\n", true},
 		{"unrelated", "Uid:\t0 0 0 0\nState:\tS\nPPid:\t1\n", false},
 		{"zombie leader with live threads", "Uid:\t1001 1001 1001 1001\nState:\tZ\nPPid:\t1\n", true},

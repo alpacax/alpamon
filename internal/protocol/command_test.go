@@ -222,7 +222,7 @@ func TestAccountLockUIDPresence(t *testing.T) {
 		{"uid", `{"username":"deploy","uid":1001}`, 1001, true, false},
 		{"negative", `{"username":"deploy","uid":-1}`, 0, false, true},
 		{"fraction", `{"username":"deploy","uid":1.5}`, 0, false, true},
-		{"null", `{"username":"deploy","uid":null}`, 0, false, true},
+		{"null", `{"username":"deploy","uid":null}`, 0, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := (&Command{Data: tc.data}).ParseCommandData()
@@ -233,6 +233,21 @@ func TestAccountLockUIDPresence(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.uid, data.ToArgs().UID)
 			assert.Equal(t, tc.present, data.ToArgs().UIDPresent)
+		})
+	}
+}
+
+func TestNullUIDPreservesCommandParsing(t *testing.T) {
+	for _, line := range []string{"adduser", "moduser", "deluser", "lockuser", "unlockuser"} {
+		t.Run(line, func(t *testing.T) {
+			data, err := (&Command{Line: line, Data: `{"username":"deploy","uid":null,"gid":1001}`}).ParseCommandData()
+			require.NoError(t, err)
+			args := data.ToArgs()
+			assert.Zero(t, args.UID)
+			assert.True(t, args.UIDNull)
+			assert.True(t, args.UIDPresent)
+			assert.Equal(t, uint64(1001), args.GID)
+			assert.Equal(t, "deploy", args.Username)
 		})
 	}
 }

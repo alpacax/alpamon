@@ -8,16 +8,19 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
 type accountLockState struct {
-	UID            uint64 `json:"uid"`
-	Expiry         string `json:"expiry"`
-	PasswordLocked bool   `json:"password_locked"`
-	Linger         bool   `json:"linger"`
-	Locked         bool   `json:"locked"`
+	UID            uint64   `json:"uid"`
+	Expiry         string   `json:"expiry"`
+	PasswordLocked bool     `json:"password_locked"`
+	Linger         bool     `json:"linger"`
+	Locked         bool     `json:"locked"`
+	StateLost      bool     `json:"state_lost,omitempty"`
+	EnabledUnits   []string `json:"enabled_units,omitempty"`
 }
 
 type lockStateStore struct {
@@ -65,14 +68,14 @@ func (s lockStateStore) load() (map[string]accountLockState, error) {
 	decoder := json.NewDecoder(io.LimitReader(f, 1024*1024))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&states); err != nil {
-		return nil, err
+		return s.quarantine()
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return nil, fmt.Errorf("invalid trailing state data")
+		return s.quarantine()
 	}
 	if states == nil {
-		return nil, fmt.Errorf("invalid null lock state")
+		return s.quarantine()
 	}
 	return states, nil
 }
@@ -113,4 +116,11 @@ func (s lockStateStore) save(states map[string]accountLockState) error {
 	}
 	defer func() { _ = dir.Close() }()
 	return dir.Sync()
+}
+
+func (s lockStateStore) quarantine() (map[string]accountLockState, error) {
+	if err := os.Rename(s.path, fmt.Sprintf("%s.corrupt-%d", s.path, time.Now().Unix())); err != nil {
+		return nil, err
+	}
+	return make(map[string]accountLockState), nil
 }

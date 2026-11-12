@@ -22,3 +22,5 @@ func NewUnsupportedAccountLockHandler(executor common.CommandExecutor) *UserHand
 	h.BaseHandler = common.NewBaseHandler(common.User, []common.CommandType{common.LockUser, common.UnlockUser}, executor)
 	return h
 }
+
+func (unsupportedAccountLocker) forget(string) error { return nil }

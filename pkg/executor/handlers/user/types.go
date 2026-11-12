@@ -80,7 +80,7 @@ type LockUserData struct {
 
 func lockUserDataFromArgs(args *common.CommandArgs) LockUserData {
 	data := LockUserData{Username: args.Username}
-	if args.UIDPresent || args.UID != 0 {
+	if !args.UIDNull && (args.UIDPresent || args.UID != 0) {
 		uid := args.UID
 		data.UID = &uid
 	}

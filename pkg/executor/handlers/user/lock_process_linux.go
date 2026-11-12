@@ -282,7 +282,12 @@ func scanAccountProcesses(uid uint64, tracked map[int]accountProcess) (result []
 }
 
 func matchesAccountProcess(status string, uid uint64, tracked map[int]accountProcess) bool {
-	for _, field := range strings.Fields(statusField(status, "Uid:")) {
+	// Real and saved UIDs identify the account; effective and filesystem UIDs
+	// can belong to root daemon workers temporarily impersonating the user.
+	for index, field := range strings.Fields(statusField(status, "Uid:")) {
+		if index != 0 && index != 2 {
+			continue
+		}
 		value, err := strconv.ParseUint(field, 10, 32)
 		if err == nil && value == uid {
 			return true
@@ -325,4 +330,12 @@ func systemServiceUnit(cgroups string) string {
 		}
 	}
 	return ""
+}
+
+func probeProcessHandles(open func(int, int) (int, error)) error {
+	fd, err := open(os.Getpid(), 0)
+	if err != nil {
+		return fmt.Errorf("unsupported_kernel: process handles require Linux 5.3 or later")
+	}
+	return unix.Close(fd)
 }
