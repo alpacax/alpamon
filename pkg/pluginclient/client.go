@@ -5,8 +5,8 @@
 //
 //  1. Connect via the shared runner.WebsocketClient, whose read loop
 //     pings the connection and redials one that goes silent.
-//  2. Enforce a 10 MiB read limit.
-//  3. Decode each frame, reject anything outside the whitelist of
+//  2. Enforce the backhaul read limit (runner.MaxMessageSize).
+//  3. Decode each message, reject anything outside the whitelist of
 //     stock queries (ping, config_updated, reconfigure, quit,
 //     reconnect, restart).
 //  4. Dispatch config_updated to configreceiver.Receiver (modern
@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/pkg/configreceiver"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
@@ -88,10 +89,9 @@ type Client struct {
 	configWorkerStarted sync.Once
 }
 
-// MaxMessageSize is the maximum allowed WebSocket message size (10 MiB)
-// enforced both at the gorilla connection layer (SetReadLimit) and as a
-// secondary guard inside the handler.
-const MaxMessageSize = 10 * 1024 * 1024
+// MaxMessageSize is the backhaul message cap (runner.MaxMessageSize), enforced
+// at the connection (SetReadLimit) and again inside the handler.
+const MaxMessageSize = runner.MaxMessageSize
 
 // validQueries is the whitelist of WS command query types the shared
 // dispatcher knows about. Anything else is rejected with a log line
@@ -123,7 +123,7 @@ func New(
 	}
 }
 
-// handleMessage runs the shared dispatch for one inbound frame. It
+// handleMessage runs the shared dispatch for one inbound message. It
 // never panics for arbitrary inputs — the readers above feed it
 // whatever the WebSocket produces.
 func (c *Client) handleMessage(ctx context.Context, message []byte) handlerOutcome {
@@ -138,26 +138,16 @@ func (c *Client) handleMessage(ctx context.Context, message []byte) handlerOutco
 
 	var cmd command
 	if err := json.Unmarshal(message, &cmd); err != nil {
-		// Slice the byte buffer FIRST, then convert — converting
-		// the whole ``message`` to string on a 10 MiB frame would
-		// allocate 10 MiB just to render a log preview.
-		const previewBytes = 200
-		previewLen := len(message)
-		ellipsis := ""
-		if previewLen > previewBytes {
-			previewLen = previewBytes
-			ellipsis = "..."
-		}
 		log.Error().
 			Err(err).
 			Int("messageSize", len(message)).
-			Str("messagePreview", string(message[:previewLen])+ellipsis).
+			Str("messagePreview", protocol.Preview(message)).
 			Msg("Failed to unmarshal command")
 		return outcomeContinue
 	}
 
 	if !validQueries[cmd.Query] {
-		log.Warn().Str("query", cmd.Query).Msg("Invalid query type")
+		log.Warn().Str("query", protocol.Preview(cmd.Query)).Msg("Invalid query type")
 		return outcomeContinue
 	}
 
@@ -200,10 +190,10 @@ func (c *Client) handleMessage(ctx context.Context, message []byte) handlerOutco
 			log.Error().Err(err).Msg("Failed to send pong response")
 		}
 	case "quit":
-		log.Debug().Msgf("Quit requested for reason: %s.", cmd.Reason)
+		log.Debug().Str("reason", protocol.Preview(cmd.Reason)).Msg("Quit requested.")
 		c.WsClient.ShutDown()
 	case "reconnect":
-		log.Debug().Msgf("Reconnect requested for reason: %s.", cmd.Reason)
+		log.Debug().Str("reason", protocol.Preview(cmd.Reason)).Msg("Reconnect requested.")
 		return outcomeReconnect
 	case "restart":
 		log.Info().Msgf("%s will restart in 1 second.", c.PluginName)
@@ -264,7 +254,7 @@ func (c *Client) configWorker(ctx context.Context) {
 }
 
 // RunForever maintains the WebSocket connection and dispatches every
-// inbound frame through handleMessage until ctx is cancelled.
+// inbound message through handleMessage until ctx is cancelled.
 func (c *Client) RunForever(ctx context.Context) {
 	if c.WsClient == nil {
 		log.Error().Msg("Cannot run: WsClient is nil")

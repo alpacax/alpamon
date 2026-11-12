@@ -49,7 +49,7 @@ type WebsocketClient struct {
 	// as only its loop acts on a timeout. Owned by the read loop goroutine.
 	keepaliveEnabled bool
 
-	// readLimit caps one inbound frame on every connection; zero means no cap.
+	// readLimit caps one inbound message on every connection; zero means no cap.
 	readLimit int64
 
 	// lastPeerReconnect is owned by the read loop goroutine alone: one read
@@ -99,6 +99,10 @@ const (
 	eventCommandRejectURL = "/api/events/commands/%s/reject/"
 	eventCommandChunkURL  = "/api/events/commands/%s/chunk/"
 )
+
+// MaxMessageSize caps one inbound backhaul message. Console messages are command envelopes
+// (file bodies go by URL); 10 MiB matches what the backhaul server takes from the agent.
+const MaxMessageSize = 10 << 20
 
 // Keepalive timings. keepaliveInterval is how often the agent pings the
 // current connection; keepaliveTimeout is how long it waits for any frame,
@@ -186,6 +190,7 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		signingMode:          config.GlobalSettings.SigningMode,
 		serverID:             config.GlobalSettings.ID,
 		connectBackoff:       newAuthBackoff(minConnectInterval, maxConnectInterval),
+		readLimit:            MaxMessageSize,
 	}
 
 	// Local environments (localhost) have no AI signing server, so enforce
@@ -260,7 +265,7 @@ func (wc *WebsocketClient) installConn(conn *websocket.Conn, ka *connKeepalive) 
 	return old
 }
 
-// SetReadLimit caps one inbound frame on the current connection and on every
+// SetReadLimit caps one inbound message on the current connection and on every
 // connection after it. Call it before Serve: gorilla reads the limit without a lock.
 func (wc *WebsocketClient) SetReadLimit(limit int64) {
 	wc.mu.Lock()
@@ -269,6 +274,12 @@ func (wc *WebsocketClient) SetReadLimit(limit int64) {
 	if wc.Conn != nil {
 		wc.Conn.SetReadLimit(limit)
 	}
+}
+
+func (wc *WebsocketClient) currentReadLimit() int64 {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	return wc.readLimit
 }
 
 // SetReadDeadline arms the read timeout for the current connection. It reports
@@ -288,7 +299,7 @@ func (wc *WebsocketClient) RunForever(ctx context.Context) {
 	})
 }
 
-// Serve passes each inbound frame to handle until ctx ends, pinging and
+// Serve passes each inbound message to handle until ctx ends, pinging and
 // redialling a silent connection; handle returns true to ask for a paced
 // reconnect. Run one Serve per client.
 func (wc *WebsocketClient) Serve(
@@ -319,6 +330,9 @@ func (wc *WebsocketClient) Serve(
 			}
 			_, message, err := conn.ReadMessage()
 			if err != nil {
+				if errors.Is(err, websocket.ErrReadLimit) {
+					log.Warn().Int64("read_limit", wc.currentReadLimit()).Msg("Backhaul message exceeded the read limit; reconnecting.")
+				}
 				if ka.expired(err) {
 					err = wc.reconnectAfterSilence(ctx, conn, ka)
 				} else {
@@ -364,7 +378,7 @@ func (wc *WebsocketClient) SendPongResponse() error {
 	return wc.WriteJSON(pongResponse)
 }
 
-// ReadMessage reads the next frame on the current connection. It reports
+// ReadMessage reads the next message on the current connection. It reports
 // net.ErrClosed when there is no connection to read.
 func (wc *WebsocketClient) ReadMessage() (messageType int, message []byte, err error) {
 	conn := wc.conn()
@@ -591,7 +605,8 @@ func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome 
 
 	msg, err := protocol.ParseMessage(message)
 	if err != nil {
-		log.Warn().Err(err).Msgf("Inappropriate message: %s.", string(message))
+		log.Warn().Err(err).Int("size", len(message)).Str("preview", protocol.Preview(message)).
+			Msg("Inappropriate message.")
 		return outcomeContinue
 	}
 
@@ -644,7 +659,9 @@ func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome 
 
 		data, err := msg.Command.ParseCommandData()
 		if err != nil {
-			log.Warn().Err(err).Msgf("Failed to parse command data: %s.", string(message))
+			// An overflowing number makes the error quote the literal whole, so it is cut too.
+			log.Warn().Str("error", protocol.Preview(err.Error())).Int("size", len(message)).
+				Str("preview", protocol.Preview(message)).Msg("Failed to parse command data.")
 			return outcomeContinue
 		}
 
@@ -662,13 +679,13 @@ func (wc *WebsocketClient) commandRequestHandler(message []byte) handlerOutcome 
 			)
 		}
 	case protocol.MessageTypeQuit:
-		log.Debug().Msgf("Quit requested for reason: %s.", msg.Reason)
+		log.Debug().Str("reason", protocol.Preview(msg.Reason)).Msg("Quit requested.")
 		wc.ShutDown()
 	case protocol.MessageTypeReconnect:
-		log.Debug().Msgf("Reconnect requested for reason: %s.", msg.Reason)
+		log.Debug().Str("reason", protocol.Preview(msg.Reason)).Msg("Reconnect requested.")
 		return outcomeReconnect
 	default:
-		log.Warn().Msgf("Not implemented query: %s.", msg.Query)
+		log.Warn().Int("size", len(message)).Str("query", protocol.Preview(msg.Query)).Msg("Not implemented query.")
 	}
 
 	return outcomeContinue

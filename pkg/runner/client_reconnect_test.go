@@ -2,11 +2,15 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/internal/testutil"
 	"github.com/alpacax/alpamon/v2/pkg/config"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,6 +47,80 @@ func TestCommandRequestHandler_EmptyMessageSkipsParsingWithoutLogging(t *testing
 
 	assert.Equal(t, outcomeContinue, outcome)
 	assert.Empty(t, logs.String(), "an empty message should return before ParseMessage ever logs")
+}
+
+func TestCommandRequestHandler_LogsOnlyAPreviewOfARejectedMessage(t *testing.T) {
+	longQuery := strings.Repeat("q", 1<<20)
+	badData := `{"query":"command","command":{"id":"c1","shell":"internal","data":"{\"rows\":` + strings.Repeat("9", 1<<20) + `}"}}`
+	cases := []struct {
+		name         string
+		message      string
+		wantMsg      string
+		field        string // the field that carries the preview
+		preview      string
+		wantCutError bool // the error quotes the input, so it must be cut too
+	}{
+		{"not JSON", strings.Repeat("x", 1<<20), "Inappropriate message.", "preview", strings.Repeat("x", 1<<20), false},
+		{"a line break that would forge a log line", "oops\n[ERROR] forged", "Inappropriate message.", "preview", "oops\n[ERROR] forged", false},
+		{"command data whose overflowing number the error quotes", badData, "Failed to parse command data.", "preview", badData, true},
+		{"an unknown query", `{"query":"` + longQuery + `"}`, "Not implemented query.", "query", longQuery, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wc, _ := cancelTestClient(t, &cancelTestDispatcher{}) // the command data path posts an ack first
+			logs := captureLogsSync(t)
+
+			outcome := wc.commandRequestHandler([]byte(tc.message))
+
+			assert.Equal(t, outcomeContinue, outcome)
+			entry := warnEntry(t, logs.String())
+			assert.Equal(t, tc.wantMsg, entry["message"])
+			assert.Equal(t, protocol.Preview(tc.preview), entry[tc.field])
+			assert.EqualValues(t, len(tc.message), entry["size"])
+			if tc.wantCutError {
+				require.IsType(t, "", entry["error"])
+				assert.LessOrEqual(t, len(entry["error"].(string)), protocol.PreviewBytes+len("..."), "the error quoted the message whole")
+			}
+			assert.Less(t, len(logs.String()), 4*protocol.PreviewBytes, "the log carried more than the previews")
+		})
+	}
+}
+
+func TestCommandRequestHandler_LogsOnlyAPreviewOfTheReason(t *testing.T) {
+	reason := "oops\n[ERROR] forged" + strings.Repeat("r", 1<<20)
+	for _, query := range []string{"quit", "reconnect"} {
+		t.Run(query, func(t *testing.T) {
+			wc := &WebsocketClient{ShutDownChan: make(chan struct{})} // quit closes it
+			logs := captureLogsSync(t)
+			zerolog.SetGlobalLevel(zerolog.DebugLevel)
+			msg, err := json.Marshal(map[string]string{"query": query, "reason": reason})
+			require.NoError(t, err)
+
+			wc.commandRequestHandler(msg)
+
+			lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+			require.Len(t, lines, 1, "a line break in the reason started a new log line")
+			var entry map[string]any
+			require.NoError(t, json.Unmarshal([]byte(lines[0]), &entry))
+			assert.Equal(t, protocol.Preview(reason), entry["reason"])
+			assert.Less(t, len(logs.String()), 4*protocol.PreviewBytes, "the log carried the reason whole")
+		})
+	}
+}
+
+// warnEntry decodes the one warn-level line in logs.
+func warnEntry(t *testing.T, logs string) map[string]any {
+	t.Helper()
+	var warns []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &entry))
+		if entry["level"] == "warn" {
+			warns = append(warns, entry)
+		}
+	}
+	require.Len(t, warns, 1)
+	return warns[0]
 }
 
 func TestCloseAndReconnect_DoesNotReconnectAfterContextCancel(t *testing.T) {

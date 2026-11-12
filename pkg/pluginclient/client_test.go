@@ -1,6 +1,7 @@
 package pluginclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -11,10 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/internal/testutil"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
 	"github.com/gorilla/websocket"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -231,4 +235,41 @@ func TestRunForever_BacksOffWhenTheServerDropsEachConnectionAtOnce(t *testing.T)
 	// initial backoff, several seconds, before the next dial.
 	assert.Never(t, func() bool { return connections.Load() >= 2 }, time.Second, 10*time.Millisecond,
 		"the client redialled a dropped connection without waiting")
+}
+
+func TestHandleMessage_LogsOnlyAPreviewOfAnUnknownQuery(t *testing.T) {
+	previous := log.Logger
+	t.Cleanup(func() { log.Logger = previous })
+	var logs bytes.Buffer
+	log.Logger = zerolog.New(&logs)
+	query := strings.Repeat("q", 1<<20)
+	msg, err := json.Marshal(map[string]string{"query": query})
+	require.NoError(t, err)
+
+	outcome := (&Client{}).handleMessage(context.Background(), msg)
+
+	assert.Equal(t, outcomeContinue, outcome)
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &entry))
+	assert.Equal(t, "Invalid query type", entry["message"])
+	assert.Equal(t, protocol.Preview(query), entry["query"])
+}
+
+func TestHandleMessage_LogsOnlyAPreviewOfTheReconnectReason(t *testing.T) {
+	previous, previousLevel := log.Logger, zerolog.GlobalLevel()
+	t.Cleanup(func() { log.Logger = previous; zerolog.SetGlobalLevel(previousLevel) })
+	var logs bytes.Buffer
+	log.Logger = zerolog.New(&logs)
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	reason := "oops\n[ERROR] forged" + strings.Repeat("r", 1<<20)
+	msg, err := json.Marshal(map[string]string{"query": "reconnect", "reason": reason})
+	require.NoError(t, err)
+
+	outcome := (&Client{WsClient: &runner.WebsocketClient{}}).handleMessage(context.Background(), msg)
+
+	assert.Equal(t, outcomeReconnect, outcome)
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &entry))
+	assert.Equal(t, protocol.Preview(reason), entry["reason"])
+	assert.Less(t, logs.Len(), 4*protocol.PreviewBytes, "the log carried the reason whole")
 }
