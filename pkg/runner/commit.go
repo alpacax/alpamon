@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/safego"
@@ -107,7 +106,7 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			}
 		}, nil)
 	} else {
-		var committed atomic.Bool
+		committed := false // read only by onPanic, which runs on this goroutine
 		safego.Go("initial system commit", func() {
 			ctx := ctxManager.Root()
 
@@ -123,7 +122,7 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			log.Info().Msg("Committing essential system information (lightweight).")
 			if essentialData := collectEssentialData(); essentialData != nil {
 				commitAndNotify(essentialData)
-				committed.Store(true)
+				committed = true
 				log.Info().Msg("Essential system information committed.")
 			} else {
 				// Essential collection failed; fall back to full commit.
@@ -161,7 +160,7 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 				log.Debug().Msg("Skipping deferred sync due to shutdown")
 			}
 		}, func() {
-			if !committed.Load() { // only this commit sets commissioned, and nothing else retries it
+			if !committed { // only this commit sets commissioned, and nothing else retries it
 				CommitSystemInfo()
 			}
 		})
