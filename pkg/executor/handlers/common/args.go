@@ -32,6 +32,7 @@ type CommandArgs struct {
 	HomeDirectoryPermission string
 	PurgeHomeDirectory      bool
 	UID                     uint64
+	UIDPresent              bool
 	GID                     uint64
 	Comment                 string
 	Shell                   string

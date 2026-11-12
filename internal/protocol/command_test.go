@@ -209,3 +209,30 @@ func TestParseCommandData_ManagedGroupnames(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountLockUIDPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name, data       string
+		uid              uint64
+		present, invalid bool
+	}{
+		{"omitted", `{"username":"deploy"}`, 0, false, false},
+		{"zero", `{"username":"deploy","uid":0}`, 0, true, false},
+		{"case-insensitive zero", `{"username":"deploy","UID":0}`, 0, true, false},
+		{"uid", `{"username":"deploy","uid":1001}`, 1001, true, false},
+		{"negative", `{"username":"deploy","uid":-1}`, 0, false, true},
+		{"fraction", `{"username":"deploy","uid":1.5}`, 0, false, true},
+		{"null", `{"username":"deploy","uid":null}`, 0, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := (&Command{Data: tc.data}).ParseCommandData()
+			if tc.invalid {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.uid, data.ToArgs().UID)
+			assert.Equal(t, tc.present, data.ToArgs().UIDPresent)
+		})
+	}
+}

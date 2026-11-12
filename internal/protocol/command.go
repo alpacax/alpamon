@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +53,7 @@ type CommandData struct {
 	HomeDirectoryPermission string           `json:"home_directory_permission"`
 	PurgeHomeDirectory      bool             `json:"purge_home"`
 	UID                     uint64           `json:"uid"`
+	UIDPresent              bool             `json:"-"`
 	GID                     uint64           `json:"gid"`
 	Comment                 string           `json:"comment"`
 	Shell                   string           `json:"shell"`
@@ -125,6 +127,27 @@ type CommandData struct {
 	HealthGraceSeconds int    `json:"health_grace_seconds,omitempty"`
 }
 
+// UnmarshalJSON preserves an explicitly supplied zero UID for identity checks.
+func (c *CommandData) UnmarshalJSON(data []byte) error {
+	type plain CommandData
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var presence struct {
+		UID json.RawMessage `json:"uid"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return err
+	}
+	decoded.UIDPresent = presence.UID != nil
+	if decoded.UIDPresent && string(presence.UID) == "null" {
+		return fmt.Errorf("uid must be an integer")
+	}
+	*c = CommandData(decoded)
+	return nil
+}
+
 // ParseCommandData parses the Data field of a Command into CommandData
 func (c *Command) ParseCommandData() (*CommandData, error) {
 	if c.Data == "" {
@@ -153,6 +176,7 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 		HomeDirectoryPermission: c.HomeDirectoryPermission,
 		PurgeHomeDirectory:      c.PurgeHomeDirectory,
 		UID:                     c.UID,
+		UIDPresent:              c.UIDPresent,
 		GID:                     c.GID,
 		Comment:                 c.Comment,
 		Shell:                   c.Shell,

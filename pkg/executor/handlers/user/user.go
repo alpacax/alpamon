@@ -26,6 +26,7 @@ type UserHandler struct {
 	lookupUser          common.UserLookupFunc
 	lookupGroup         common.GroupLookupFunc
 	supplementaryGroups common.SupplementaryGroupsFunc
+	accountLocker       accountLocker
 }
 
 // NewUserHandler creates a new user handler
@@ -37,6 +38,8 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 				common.AddUser,
 				common.DelUser,
 				common.ModUser,
+				common.LockUser,
+				common.UnlockUser,
 			},
 			cmdExecutor,
 		),
@@ -46,6 +49,7 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 		lookupGroup:         common.DefaultGroupLookup,
 		supplementaryGroups: common.DefaultSupplementaryGroups,
 	}
+	h.accountLocker = newAccountLocker(h)
 	return h
 }
 
@@ -59,6 +63,13 @@ func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 	ctx, cancel := common.WithHandlerTimeout(ctx, timeout)
 	defer cancel()
 
+	select {
+	case accountLockGate <- struct{}{}:
+		defer func() { <-accountLockGate }()
+	case <-ctx.Done():
+		return 1, "account_command_failed: " + ctx.Err().Error(), nil
+	}
+
 	var exitCode int
 	var output string
 	var err error
@@ -68,6 +79,8 @@ func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 		exitCode, output, err = h.handleAddUser(ctx, args)
 	case common.DelUser.String():
 		exitCode, output, err = h.handleDelUser(ctx, args)
+	case common.LockUser.String(), common.UnlockUser.String():
+		exitCode, output, err = h.accountLocker.execute(ctx, cmd, args)
 	case common.ModUser.String():
 		exitCode, output, err = h.handleModUser(ctx, args)
 	default:
@@ -89,6 +102,8 @@ func (h *UserHandler) Execute(ctx context.Context, cmd string, args *common.Comm
 // Validate checks if the arguments are valid for the command
 func (h *UserHandler) Validate(cmd string, args *common.CommandArgs) error {
 	switch cmd {
+	case common.LockUser.String(), common.UnlockUser.String():
+		return validateLockUser(args)
 	case common.AddUser.String():
 		return h.ValidateStruct(userDataFromArgs(args))
 
