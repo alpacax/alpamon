@@ -243,7 +243,8 @@ func TestHandleMessage_LogsOnlyAPreviewOfAnUnknownQuery(t *testing.T) {
 	var logs bytes.Buffer
 	log.Logger = zerolog.New(&logs)
 	query := strings.Repeat("q", 1<<20)
-	msg, _ := json.Marshal(map[string]string{"query": query})
+	msg, err := json.Marshal(map[string]string{"query": query})
+	require.NoError(t, err)
 
 	outcome := (&Client{}).handleMessage(context.Background(), msg)
 
