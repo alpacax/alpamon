@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
@@ -270,6 +271,7 @@ type CodeServerManager struct {
 	stopGrace        time.Duration
 	terminateFn      func(*os.Process) error        // signals the process group while its leader remains unreaped
 	prepareSocketDir func(*CodeServerManager) error // prepares an agent-owned base and editor-owned session directory
+	dialReady        func() (net.Conn, error)       // probes readiness; nil dials the socket
 }
 
 // NewCodeServerManager runs the editor as the requested user for root agents.
@@ -324,7 +326,7 @@ func (m *CodeServerManager) StartAsync() {
 	}
 	m.mu.Unlock()
 
-	go func() {
+	safego.Go("code-server async start", func() {
 		if err := m.Start(); err != nil {
 			m.mu.Lock()
 			if m.setStatusLocked(CodeServerStatusError) {
@@ -333,7 +335,7 @@ func (m *CodeServerManager) StartAsync() {
 			m.mu.Unlock()
 			log.Error().Err(err).Msg("code-server startup failed.")
 		}
-	}()
+	}, nil)
 }
 
 // Start installs (if needed) and starts code-server on its private socket.
@@ -341,6 +343,11 @@ func (m *CodeServerManager) StartAsync() {
 // long-running install/startup operations.
 func (m *CodeServerManager) Start() error {
 	m.startOnce.Do(func() {
+		defer safego.Recover("code-server start", func() {
+			m.startErr = errCodeServerPanicked // the Once is spent; without this, later Start calls report success
+			_ = m.stopProcess()
+			m.removeSocketDir() // stopProcess removes it only after a reap, and launch may have panicked before one
+		})
 		m.startErr = m.doStart()
 	})
 	return m.startErr
@@ -370,30 +377,11 @@ func (m *CodeServerManager) doStart() error {
 		return fmt.Errorf("failed to setup user data dir: %w", err)
 	}
 
-	// Serialize directory creation and process publication against Stop.
-	m.mu.Lock()
-	if m.status == CodeServerStatusStopped || m.ctx.Err() != nil {
-		m.mu.Unlock()
-		return errCodeServerStopped
-	}
-	prepare := m.prepareSocketDir
-	if prepare == nil {
-		prepare = prepareEditorSocketDir
-	}
-	if err := prepare(m); err != nil {
-		m.mu.Unlock()
-		return fmt.Errorf("failed to prepare editor socket: %w", err)
-	}
-	cmd, err := startCodeServerProcess(m.ctx, m, userDataDir)
+	proc, err := m.launch(userDataDir)
 	if err != nil {
-		m.removeSocketDir()
-		m.mu.Unlock()
 		return err
 	}
-	proc := startReaper(cmd, waitExit)
-	m.proc = proc
-	m.mu.Unlock()
-	go func() {
+	safego.Go("code-server exit watcher", func() {
 		<-proc.done
 		m.mu.Lock()
 		if m.status == CodeServerStatusReady {
@@ -402,7 +390,7 @@ func (m *CodeServerManager) doStart() error {
 		}
 		m.mu.Unlock()
 		m.removeSocketDir()
-	}()
+	}, nil)
 
 	// Wait for code-server to be ready (no lock needed)
 	if err := m.waitForReady(proc.done); err != nil {
@@ -430,7 +418,34 @@ func (m *CodeServerManager) doStart() error {
 	return nil
 }
 
-var errCodeServerStopped = errors.New("code-server was stopped while starting")
+var (
+	errCodeServerStopped  = errors.New("code-server was stopped while starting")
+	errCodeServerPanicked = errors.New("code-server startup panicked")
+)
+
+// launch prepares the socket directory and starts code-server under m.mu, so
+// Stop cannot slip in between; the deferred unlock keeps a panic from leaving m.mu held.
+func (m *CodeServerManager) launch(userDataDir string) (*codeServerProcess, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.status == CodeServerStatusStopped || m.ctx.Err() != nil {
+		return nil, errCodeServerStopped
+	}
+	prepare := m.prepareSocketDir
+	if prepare == nil {
+		prepare = prepareEditorSocketDir
+	}
+	if err := prepare(m); err != nil {
+		return nil, fmt.Errorf("failed to prepare editor socket: %w", err)
+	}
+	cmd, err := startCodeServerProcess(m.ctx, m, userDataDir)
+	if err != nil {
+		m.removeSocketDir()
+		return nil, err
+	}
+	m.proc = startReaper(cmd, waitExit)
+	return m.proc, nil
+}
 
 // setStatusLocked moves m to status unless Stop got there first, so a start racing
 // Stop cannot report a code-server that is gone. The caller holds m.mu.
@@ -455,7 +470,8 @@ type codeServerProcess struct {
 // cmd must lead its own process group.
 func startReaper(cmd *exec.Cmd, watchExit func(pid int) error) *codeServerProcess {
 	p := &codeServerProcess{cmd: cmd, done: make(chan struct{})}
-	go p.reap(watchExit)
+	// A reaper that panics falls back to the unswept wait, so done still closes once the leader exits.
+	safego.Go("code-server reaper", func() { p.reap(watchExit) }, p.waitUnwatched)
 	return p
 }
 
@@ -463,10 +479,7 @@ func (p *codeServerProcess) reap(watchExit func(pid int) error) {
 	if err := watchExit(p.cmd.Process.Pid); err != nil {
 		// The leader may still be running, so the reap cannot hold p.mu against Stop.
 		log.Debug().Err(err).Msg("Could not watch code-server exit, so its group is not swept.")
-		p.mu.Lock()
-		p.unwatched = true
-		p.mu.Unlock()
-		p.wait()
+		p.waitUnwatched()
 		return
 	}
 	p.mu.Lock()
@@ -475,6 +488,14 @@ func (p *codeServerProcess) reap(watchExit func(pid int) error) {
 	if err := killProcess(p.cmd.Process); err != nil && !errors.Is(err, syscall.ESRCH) {
 		log.Debug().Err(err).Msg("Failed to kill what code-server left in its process group.")
 	}
+	p.wait()
+}
+
+// waitUnwatched reaps the leader without holding p.mu, so Stop can still kill it.
+func (p *codeServerProcess) waitUnwatched() {
+	p.mu.Lock()
+	p.unwatched = true
+	p.mu.Unlock()
 	p.wait()
 }
 
@@ -570,6 +591,10 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 	ticker := time.NewTicker(codeServerReadyPollInterval)
 	defer ticker.Stop()
 
+	dial := m.dialSocket
+	if m.dialReady != nil {
+		dial = m.dialReady
+	}
 	for {
 		// A completed process cannot be ready, even if its socket still answers.
 		select {
@@ -578,7 +603,7 @@ func (m *CodeServerManager) waitForReady(waitDone <-chan struct{}) error {
 		default:
 		}
 
-		conn, err := m.dialSocket()
+		conn, err := dial()
 		if err == nil {
 			_ = conn.Close()
 			return nil

@@ -6,6 +6,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/rs/zerolog/log"
 )
 
@@ -51,7 +52,7 @@ func RegisterFtpWorker(sessionID string, cmd *exec.Cmd) chan struct{} {
 	if stale != nil {
 		log.Warn().Str("sessionID", sessionID).
 			Msg("Replacing an already-tracked FTP worker; stopping the stale one.")
-		go stopFtpWorker(stale)
+		safego.Go("stale FTP worker stop", func() { stopFtpWorker(stale) }, nil)
 	}
 
 	return done

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/exposure"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
@@ -90,7 +92,7 @@ var deferredSyncKeys = []string{
 func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agent.ContextManager) {
 	if commissioned {
 		// Use a goroutine with delayed execution for commissioned systems
-		go func() {
+		safego.Go("delayed system sync", func() {
 			// Get application-level context for shutdown coordination
 			ctx := ctxManager.Root()
 
@@ -103,9 +105,10 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 				// Shutdown occurred before timeout, skip sync
 				log.Debug().Msg("Skipping syncSystemInfo due to shutdown")
 			}
-		}()
+		}, nil)
 	} else {
-		go func() {
+		committed := false // read only by onPanic, which runs on this goroutine
+		safego.Go("initial system commit", func() {
 			ctx := ctxManager.Root()
 
 			// Step 1: Immediate lightweight commit (no delay).
@@ -120,6 +123,7 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			log.Info().Msg("Committing essential system information (lightweight).")
 			if essentialData := collectEssentialData(); essentialData != nil {
 				commitAndNotify(essentialData)
+				committed = true
 				log.Info().Msg("Essential system information committed.")
 			} else {
 				// Essential collection failed; fall back to full commit.
@@ -156,8 +160,17 @@ func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agen
 			case <-ctx.Done():
 				log.Debug().Msg("Skipping deferred sync due to shutdown")
 			}
-		}()
+		}, func() { retryInitialCommit(ctxManager.Root(), committed, CommitSystemInfo) })
 	}
+}
+
+// retryInitialCommit reruns the commit only this goroutine sends, unless it landed or shutdown began.
+// The rerun hits the same collectors, so only a transient panic recovers here.
+func retryInitialCommit(ctx context.Context, committed bool, commit func()) {
+	if committed || ctx.Err() != nil {
+		return
+	}
+	commit()
 }
 
 func CommitSystemInfo() {

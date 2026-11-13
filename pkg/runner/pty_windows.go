@@ -15,6 +15,7 @@ import (
 	"github.com/UserExistsError/conpty"
 	"github.com/alpacax/alpamon/v2/internal/commandcancel"
 	"github.com/alpacax/alpamon/v2/internal/protocol"
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -78,6 +79,7 @@ func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, mana
 
 func (pc *PtyClient) RunPtyBackground() {
 	log.Debug().Msg("Starting Websh session in background (Windows ConPTY).")
+	defer safego.Recover("Websh session", nil)
 	defer pc.close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -106,12 +108,14 @@ func (pc *PtyClient) RunPtyBackground() {
 		return
 	}
 
-	go pc.readFromPty(ctx, cancel, pc.cpty)
-	go pc.writeToWebsocket(ctx, cancel)
-	go pc.readFromWebsocket(ctx, cancel)
-	go pc.writeToPty(ctx, cancel)
-	go pc.waitForChildExit(ctx, cancel)
-
+	cpty := pc.cpty
+	goPumps(cancel, map[string]func(){
+		"Websh PTY reader":     func() { pc.readFromPty(ctx, cancel, cpty) },
+		"Websh channel writer": func() { pc.writeToWebsocket(ctx, cancel) },
+		"Websh channel reader": func() { pc.readFromWebsocket(ctx, cancel) },
+		"Websh PTY writer":     func() { pc.writeToPty(ctx, cancel) },
+		"Websh child watcher":  func() { pc.waitForChildExit(ctx, cancel) },
+	})
 	<-ctx.Done()
 }
 

@@ -271,3 +271,24 @@ func TestRelayBidirectionalEndsBothDirectionsOnCopyError(t *testing.T) {
 	waitRelayDone(t, done)
 	assert.Empty(t, readAllWithin(t, peer))
 }
+
+type panickingReader struct{}
+
+func (panickingReader) Read([]byte) (int, error) { panic("relay source panicked") }
+
+func TestRelayBidirectionalClosesBothConnsWhenACopyPanics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, aPeer := net.Pipe()
+		b, bPeer := net.Pipe()
+		defer func() { _ = aPeer.Close() }()
+		defer func() { _ = bPeer.Close() }()
+
+		cut := relayBidirectional(a, panickingReader{}, b, b, time.Hour)
+
+		assert.False(t, cut)
+		_, err := aPeer.Read(make([]byte, 1))
+		assert.ErrorIs(t, err, io.EOF)
+		_, err = bPeer.Read(make([]byte, 1))
+		assert.ErrorIs(t, err, io.EOF)
+	})
+}

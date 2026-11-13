@@ -23,6 +23,7 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/commandcancel"
 	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/internal/retry"
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -172,6 +173,7 @@ func (pc *PtyClient) TrackCommand(ctx context.Context, id string) {
 
 func (pc *PtyClient) RunPtyBackground() {
 	log.Debug().Msg("Starting Websh session in background.")
+	defer safego.Recover("Websh session", nil)
 	defer pc.close()
 
 	// Deferred after close, so it runs first: the keepalive pings stop before close tears the channel down.
@@ -203,14 +205,23 @@ func (pc *PtyClient) RunPtyBackground() {
 	}
 
 	recoveryChan := make(chan struct{}, 1)
-
-	go pc.readFromPty(ctx, cancel)
-	go pc.writeToWebsocket(ctx, cancel, recoveryChan)
-
-	go pc.readFromWebsocket(ctx, cancel, recoveryChan)
-	go pc.writeToPty(ctx, cancel)
-
+	pc.startPumps(ctx, cancel, recoveryChan)
 	pc.runRecoveryLoop(ctx, cancel, recoveryChan)
+}
+
+// startPumps starts the four copy loops.
+func (pc *PtyClient) startPumps(ctx context.Context, cancel context.CancelFunc, recoveryChan chan struct{}) {
+	goPumps(cancel, pc.pumps(ctx, cancel, recoveryChan))
+}
+
+// pumps names the four copy loops startPumps runs.
+func (pc *PtyClient) pumps(ctx context.Context, cancel context.CancelFunc, recoveryChan chan struct{}) map[string]func() {
+	return map[string]func(){
+		"Websh PTY reader":     func() { pc.readFromPty(ctx, cancel) },
+		"Websh channel writer": func() { pc.writeToWebsocket(ctx, cancel, recoveryChan) },
+		"Websh channel reader": func() { pc.readFromWebsocket(ctx, cancel, recoveryChan) },
+		"Websh PTY writer":     func() { pc.writeToPty(ctx, cancel) },
+	}
 }
 
 // runRecoveryLoop serializes recovery attempts; completion is broadcast by closing recoveryDone so sides that were not waiting cannot stall the next cycle.
@@ -276,7 +287,7 @@ func (pc *PtyClient) installConn(ctx context.Context, conn *websocket.Conn) *web
 	pc.recoveryMu.Unlock()
 
 	oldKeepalive.stop()
-	go pingConn(ctx, conn, ka, keepaliveInterval, pc.getConn)
+	goPingConn(ctx, "Websh keepalive", conn, ka, pc.getConn)
 	return old
 }
 

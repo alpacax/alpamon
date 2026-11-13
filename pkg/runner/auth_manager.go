@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/retry"
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/accessoutbox"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -451,15 +452,10 @@ func (am *AuthManager) lookupSessionLocked(sid int, sidOK bool, parentPID int) (
 }
 
 func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
-	// Panic recovery per the repo convention (internal/pool/pool.go,
-	// pkg/executor/executor.go). This runs on every PAM session open, so an
-	// unrecovered panic here would take the whole agent down from the login path.
-	defer func() {
-		if r := recover(); r != nil {
-			log.Error().Interface("panic", r).Msg("Auth socket request handler panicked")
-		}
-		_ = unixConn.Close() // Closing on every exit lets PAM read EOF and fail open at once.
-	}()
+	// This runs on every PAM session open, so an unrecovered panic here would
+	// take the whole agent down from the login path.
+	defer safego.Recover("auth socket request", nil)
+	defer func() { _ = unixConn.Close() }() // Closing on every exit lets PAM read EOF and fail open at once.
 
 	peer, ok := am.verifyPeer(unixConn)
 	if !ok {
@@ -1204,13 +1200,9 @@ func (am *AuthManager) denyPendingRequestsWithCode(pending []*SudoRequest, reaso
 			// handleSudoRequest's recover used to cover this work, back when
 			// finalizeRequest ran it on the waiter's own stack. Off that stack, an
 			// unrecovered panic takes the whole agent down instead of one request.
-			defer func() {
-				if r := recover(); r != nil {
-					log.Error().Interface("panic", r).
-						Str("request_id", req.Request.RequestID).
-						Msg("Denying a pending sudo request panicked")
-				}
-			}()
+			defer safego.Recover("sudo request denial", func() {
+				log.Error().Str("request_id", req.Request.RequestID).Msg("Sudo request denial panicked")
+			})
 			// Registered last so it runs first on the way out: after the write and the
 			// close on the ordinary path, and during unwinding on the panic path, where
 			// the write has already failed and the waiter would otherwise park out the

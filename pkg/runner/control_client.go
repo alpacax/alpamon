@@ -165,7 +165,7 @@ func (cc *ControlClient) Connect(ctx context.Context) error {
 		cc.connected = true
 		cc.mu.Unlock()
 
-		go pingConn(ctx, conn, ka, keepaliveInterval, cc.conn)
+		goPingConn(ctx, "control keepalive", conn, ka, cc.conn)
 
 		log.Info().Msg("Control WebSocket connection established.")
 		return nil

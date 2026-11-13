@@ -12,6 +12,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/internal/pool"
 	"github.com/alpacax/alpamon/v2/internal/protocol"
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/agent"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
@@ -418,7 +419,8 @@ func (wc *WebsocketClient) Connect(ctx context.Context) error {
 			}
 		}
 		if ka != nil {
-			go wc.sendPings(ctx, conn, ka, keepaliveInterval)
+			interval := keepaliveInterval // read before the goroutine starts: tests reassign it
+			safego.Go("backhaul keepalive", func() { wc.sendPings(ctx, conn, ka, interval) }, nil)
 		}
 		log.Debug().Msg("Backhaul connection established.")
 		return nil
@@ -441,6 +443,12 @@ func watchPongs(conn *websocket.Conn, ka *connKeepalive) {
 		ka.pongSeen.Store(true)
 		return conn.SetReadDeadline(time.Now().Add(keepaliveTimeout))
 	})
+}
+
+// goPingConn runs pingConn on its own goroutine under name.
+func goPingConn(ctx context.Context, name string, conn *websocket.Conn, ka *connKeepalive, current func() *websocket.Conn) {
+	interval := keepaliveInterval // read before the goroutine starts: tests reassign it
+	safego.Go(name, func() { pingConn(ctx, conn, ka, interval, current) }, nil)
 }
 
 // pingConn pings conn every interval until ka is stopped, current no longer

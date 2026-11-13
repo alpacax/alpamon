@@ -61,13 +61,14 @@ func startKeepalivePty(t *testing.T, s *wshServer) (pc *PtyClient, ctx context.C
 	return pc, ctx, stop
 }
 
-// ptyPingGoroutines counts the ping goroutines that installConn started and that are still running.
-func ptyPingGoroutines() int {
+// pingGoroutines counts the running ping goroutines that goPingConn started, Websh and control alike.
+func pingGoroutines() int {
 	buf := make([]byte, 1<<20)
 	for {
 		n := runtime.Stack(buf, true)
 		if n < len(buf) {
-			return strings.Count(string(buf[:n]), "created by github.com/alpacax/alpamon/v2/pkg/runner.(*PtyClient).installConn")
+			// safego.Go is the creator, so match the frame of the closure goPingConn hands it.
+			return strings.Count(string(buf[:n]), "github.com/alpacax/alpamon/v2/pkg/runner.goPingConn.func")
 		}
 		buf = make([]byte, 2*len(buf))
 	}
@@ -195,10 +196,12 @@ func TestPtyKeepalive_PeerFramesKeepChannelUp(t *testing.T) {
 func TestPtyKeepalive_RecoveryStopsReplacedPings(t *testing.T) {
 	shrinkKeepalive(t, 20*time.Millisecond, time.Second, 0)
 
+	require.Eventually(t, func() bool { return pingGoroutines() == 0 }, 5*time.Second, 10*time.Millisecond,
+		"a ping goroutine from an earlier test is still running, so the counts below would include it")
 	s := newWshServer(t)
 	pc, _, stop := startKeepalivePty(t, s)
 
-	require.Eventually(t, func() bool { return ptyPingGoroutines() == 1 }, 5*time.Second, 10*time.Millisecond,
+	require.Eventually(t, func() bool { return pingGoroutines() == 1 }, 5*time.Second, 10*time.Millisecond,
 		"installConn did not start exactly one ping goroutine")
 
 	const cycles = 3
@@ -206,12 +209,12 @@ func TestPtyKeepalive_RecoveryStopsReplacedPings(t *testing.T) {
 		done := pc.awaitRecovery()
 		s.killConn(t, cycle)
 		waitRecovered(t, done, cycle+1)
-		require.Eventually(t, func() bool { return ptyPingGoroutines() == 1 }, 5*time.Second, 10*time.Millisecond,
+		require.Eventually(t, func() bool { return pingGoroutines() == 1 }, 5*time.Second, 10*time.Millisecond,
 			"recovery #%d left the replaced connection's ping goroutine running", cycle+1)
 	}
 
 	stop()
-	require.Eventually(t, func() bool { return ptyPingGoroutines() == 0 }, 5*time.Second, 10*time.Millisecond,
+	require.Eventually(t, func() bool { return pingGoroutines() == 0 }, 5*time.Second, 10*time.Millisecond,
 		"the ping goroutine outlived the session")
 }
 
