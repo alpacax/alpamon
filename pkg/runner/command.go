@@ -142,6 +142,19 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		return nil
 	}
 
+	// The caller's env is checked here, once, before anything is opened or
+	// started. Only the "system" and "file" lanes hand it to the executor; the
+	// "internal" lane never applies it, so it is not refused there.
+	if refusal := checkCommandEnv(callerEnv(cr.command)); refusal != envAdmitted {
+		log.Warn().
+			Str("command_id", cr.command.ID).
+			Str("kind", string(refusal)).
+			Msg("Refused command environment")
+		exitCode = 1
+		result = commandEnvRefusedResult
+		return nil
+	}
+
 	var command string
 	var args *common.CommandArgs
 
