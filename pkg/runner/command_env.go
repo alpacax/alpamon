@@ -215,14 +215,15 @@ func checkCommandEnv(env map[string]string) envRefusal {
 	return refusal
 }
 
-// callerEnv is the env a command's lane hands to the executor: the "system"
-// and "file" lanes apply the caller's env, and every other lane applies none.
+// callerEnv is the env to check for a command. The "internal" lane never
+// applies a caller env, so nothing is checked there; every other lane,
+// including one added later, is checked.
 func callerEnv(command protocol.Command) map[string]string {
 	switch command.Shell {
-	case "system", "file":
-		return command.Env
-	default:
+	case "internal":
 		return nil
+	default:
+		return command.Env
 	}
 }
 

@@ -128,7 +128,8 @@ func TestCheckCommandEnv_AdmitsOtherValues(t *testing.T) {
 func TestCommandRunner_Run_ListedEnvKeyFinishesRefusedBeforeAnyShellRuns(t *testing.T) {
 	// "file" carries no payload: had the env check not come first, the result
 	// would be a file refusal instead of the env one.
-	for _, shell := range []string{"system", "file"} {
+	// "future" stands for a lane added later: it is checked by default.
+	for _, shell := range []string{"system", "file", "future"} {
 		t.Run(shell, func(t *testing.T) {
 			d := &cancelTestDispatcher{}
 			wc, reports := cancelTestClient(t, d)
