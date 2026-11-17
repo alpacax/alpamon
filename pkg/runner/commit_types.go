@@ -125,7 +125,7 @@ type UserData struct {
 	Directory        string   `json:"directory"`
 	Shell            string   `json:"shell"`
 	ShadowExpireDate *int64   `json:"shadow_expire_date,omitempty"` // /etc/shadow: raw expiration date (days since epoch)
-	ValidShells      []string `json:"valid_shells,omitempty"`       // /etc/shells: full list of valid login shells
+	ValidShells      []string `json:"valid_shells,omitzero"`        // /etc/shells list; nil (unreadable) is omitted, empty is sent
 }
 
 type GroupData struct {

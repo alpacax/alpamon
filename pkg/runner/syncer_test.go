@@ -121,6 +121,25 @@ func TestUserSyncSendsEveryUserWithTheShellListWhenNoUserChanged(t *testing.T) {
 	}
 }
 
+func TestUserSyncSendsEveryUserWithAnEmptyListWhenEtcShellsListsNoShell(t *testing.T) {
+	session, fake := startUserSync(t, []UserData{
+		remoteUser("1", "alice", "/bin/zsh"),
+		remoteUser("2", "bob", "/bin/bash"),
+	})
+
+	writes := syncUsers(t, session, fake, []UserData{
+		hostUser("alice", "/bin/zsh", []string{}),
+		hostUser("bob", "/bin/bash", []string{}),
+	})
+
+	assert.ElementsMatch(t, []string{"/api/proc/users/1/", "/api/proc/users/2/"}, patchedPaths(writes))
+	for _, w := range writes {
+		require.Contains(t, w.body, "valid_shells", w.path)
+		assert.Empty(t, w.body["valid_shells"], w.path)
+		assert.Equal(t, userSyncHash, w.syncHash, w.path)
+	}
+}
+
 func TestUserSyncSendsEveryUserWhenOneUserChangedAlongsideTheShellList(t *testing.T) {
 	session, fake := startUserSync(t, []UserData{
 		remoteUser("1", "alice", "/bin/zsh"),
