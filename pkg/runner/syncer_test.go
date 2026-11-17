@@ -18,12 +18,16 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 )
 
-const userSyncSentinelURL = "/sentinel/"
+const (
+	userSyncSentinelURL = "/sentinel/"
+	userSyncHash        = "sha256:test"
+)
 
 type userWrite struct {
-	method string
-	path   string
-	body   map[string]any
+	method   string
+	path     string
+	syncHash string
+	body     map[string]any
 }
 
 // fakeUserServer serves remote as the users sync projection and records every write.
@@ -48,7 +52,7 @@ func startUserSync(t *testing.T, remote []UserData) (*scheduler.Session, *fakeUs
 			var body map[string]any
 			_ = json.Unmarshal(raw, &body)
 			fake.mu.Lock()
-			fake.writes = append(fake.writes, userWrite{method: r.Method, path: r.URL.Path, body: body})
+			fake.writes = append(fake.writes, userWrite{method: r.Method, path: r.URL.Path, syncHash: r.Header.Get("X-Sync-Hash"), body: body})
 			fake.mu.Unlock()
 		}
 		w.WriteHeader(http.StatusOK)
@@ -68,7 +72,7 @@ func startUserSync(t *testing.T, remote []UserData) (*scheduler.Session, *fakeUs
 // syncUsers runs the users sync and returns the writes it sent once the queue has drained.
 func syncUsers(t *testing.T, session *scheduler.Session, fake *fakeUserServer, current []UserData) []userWrite {
 	t.Helper()
-	syncerMap["users"].syncData(session, current, "sha256:test")
+	syncerMap["users"].syncData(session, current, userSyncHash)
 	scheduler.Rqueue.Post(userSyncSentinelURL, nil, 80, time.Now().Add(10*time.Millisecond))
 	select {
 	case <-fake.sentinel:
@@ -113,6 +117,7 @@ func TestUserSyncSendsEveryUserWithTheShellListWhenNoUserChanged(t *testing.T) {
 	assert.ElementsMatch(t, []string{"/api/proc/users/1/", "/api/proc/users/2/"}, patchedPaths(writes))
 	for _, w := range writes {
 		assert.ElementsMatch(t, []any{"/bin/sh", "/bin/bash"}, w.body["valid_shells"], w.path)
+		assert.Equal(t, userSyncHash, w.syncHash, w.path)
 	}
 }
 
@@ -144,6 +149,7 @@ func TestUserSyncSendsOnlyChangedUsersWhenTheShellListIsUnreadable(t *testing.T)
 
 	require.Equal(t, []string{"/api/proc/users/2/"}, patchedPaths(writes))
 	assert.NotContains(t, writes[0].body, "valid_shells")
+	assert.Equal(t, userSyncHash, writes[0].syncHash)
 }
 
 func TestUserSyncSendsNothingWhenTheShellListIsUnreadableAndNoUserChanged(t *testing.T) {
