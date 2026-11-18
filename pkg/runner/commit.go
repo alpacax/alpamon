@@ -825,7 +825,6 @@ func getPartitions() ([]Partition, error) {
 			MountPoints: []string{partition.Mountpoint},
 			DiskName:    disk,
 			Fstype:      partition.Fstype,
-			IsVirtual:   utils.IsVirtualFileSystem(partition.Device, partition.Fstype, partition.Mountpoint),
 		}
 	}
 
