@@ -556,6 +556,67 @@ func TestGuardScript(t *testing.T) {
 			"--setopt=alpacax_alpamon-source.skip_if_unavailable=False\n"+
 			"downgrade\n-y\nalpamon-2.4.0\n", fileContent(t, yumLog))
 	})
+
+	t.Run("first yum guard skips the repos the install disabled when the re-arm fails", func(t *testing.T) {
+		p, bin, _, env := setup(t)
+		usePackageManager(t, utils.PkgYum)
+		p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
+		p.PackageManager, p.PreviousPackageVersion = utils.PkgYum, "2.4.0"
+		writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
+		yumLog := filepath.Join(bin, "yum.log")
+		require.NoError(t, os.WriteFile(filepath.Join(bin, "yum"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+shellQuote(yumLog)+"\n"), 0755))
+		sm := &fakeServiceManager{}
+		now := time.Now()
+		_, err := BeginTransition(p, sm, time.Minute, time.Minute, now)
+		require.NoError(t, err)
+		p.DisabledYumRepos = []string{"base", "epel-7_x86.64:a"}
+		sm.guardErr = errors.New("systemd-run failed")
+		require.Error(t, Rearm(p, sm, time.Minute, now.Add(time.Minute)))
+		_, guards, _ := sm.snapshot()
+		require.Len(t, guards, 1)
+
+		cmd := exec.Command(sh, "-c", guards[0].script)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+
+		require.NoError(t, err, string(out))
+		assert.Equal(t, "--setopt=*.skip_if_unavailable=True\n"+
+			"--setopt=alpacax_alpamon.skip_if_unavailable=False\n"+
+			"--setopt=alpacax_alpamon-source.skip_if_unavailable=False\n"+
+			"--disablerepo=base\n--disablerepo=epel-7_x86.64:a\n"+
+			"downgrade\n-y\nalpamon-2.4.0\n", fileContent(t, yumLog))
+	})
+
+	t.Run("yum guard passes only repo ids from the marker to yum", func(t *testing.T) {
+		p, bin, _, env := setup(t)
+		usePackageManager(t, utils.PkgYum)
+		p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
+		p.PackageManager, p.PreviousPackageVersion, p.GuardUnit = utils.PkgYum, "2.4.0", "alpamon-upgrade-guard-7"
+		cwd := t.TempDir()
+		p.DisabledYumRepos = []string{"base", "x $(touch pwned)", "*", ""}
+		p.Note = "    \"note-line\","
+		data, err := json.MarshalIndent(p, "", "  ") // WritePending refuses these ids; the guard must too
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(MarkerPath(), data, 0600))
+		writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile})
+		yumLog := filepath.Join(bin, "yum.log")
+		require.NoError(t, os.WriteFile(filepath.Join(bin, "yum"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+shellQuote(yumLog)+"\n"), 0755))
+		script, err := guardScript(p)
+		require.NoError(t, err)
+
+		cmd := exec.Command(sh, "-c", script)
+		cmd.Env, cmd.Dir = env, cwd
+		out, err := cmd.CombinedOutput()
+
+		require.NoError(t, err, string(out))
+		assert.Equal(t, "--setopt=*.skip_if_unavailable=True\n"+
+			"--setopt=alpacax_alpamon.skip_if_unavailable=False\n"+
+			"--setopt=alpacax_alpamon-source.skip_if_unavailable=False\n"+
+			"--disablerepo=base\n"+
+			"downgrade\n-y\nalpamon-2.4.0\n", fileContent(t, yumLog))
+		_, err = os.Stat(filepath.Join(cwd, "pwned"))
+		assert.ErrorIs(t, err, os.ErrNotExist)
+	})
 }
 
 func yumPackageMarker(t *testing.T) *PendingUpgrade {
