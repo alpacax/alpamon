@@ -863,7 +863,28 @@ func TestGetPartitionsLeavesOutAPartitionWithNoDevice(t *testing.T) {
 	partitions, err := getPartitions()
 
 	require.NoError(t, err)
-	require.Len(t, partitions, 1)
-	assert.Equal(t, `C:\`, partitions[0].Name)
-	assert.Equal(t, []string{`C:\`}, partitions[0].MountPoints)
+	assert.Equal(t, []Partition{
+		{Name: `C:\`, MountPoints: []string{`C:\`}, DiskName: "C", Fstype: "NTFS"},
+	}, partitions)
+}
+
+func TestGetPartitionsGroupsMountPointsByDeviceAndSortsByName(t *testing.T) {
+	original := listPartitions
+	t.Cleanup(func() { listPartitions = original })
+	listPartitions = func(bool) ([]disk.PartitionStat, error) {
+		return []disk.PartitionStat{
+			{Device: "/dev/sdb1", Mountpoint: "/data", Fstype: "xfs"},
+			{Device: "/dev/sda1", Mountpoint: "/home", Fstype: "ext4"},
+			{Device: "/dev/sda1", Mountpoint: "/", Fstype: "ext4"},
+			{Device: "tmpfs", Mountpoint: "/run", Fstype: "tmpfs"},
+		}, nil
+	}
+
+	partitions, err := getPartitions()
+
+	require.NoError(t, err)
+	assert.Equal(t, []Partition{
+		{Name: "/dev/sda1", MountPoints: []string{"/", "/home"}, DiskName: "sda", Fstype: "ext4"},
+		{Name: "/dev/sdb1", MountPoints: []string{"/data"}, DiskName: "sdb", Fstype: "xfs"},
+	}, partitions)
 }
