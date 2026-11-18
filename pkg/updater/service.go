@@ -231,13 +231,26 @@ func guardScript(p *PendingUpgrade) (string, error) {
 		return fmt.Sprintf("if %s && [ -f %s ]; then %s; fi",
 			pending, shellQuote(p.RollbackPath), outcome("mv -f "+shellQuote(p.RollbackPath)+" "+shellQuote(p.BinaryPath))), nil
 	case MethodPackage:
-		argv, err := PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion, p.ToVersion, p.DisabledYumRepos)
+		argv, err := PackageRollbackCommand(p.PackageManager, p.PreviousPackageVersion, p.ToVersion, nil)
 		if err != nil {
 			return "", err
+		}
+		if p.PackageManager == utils.PkgYum {
+			return fmt.Sprintf("if %s; then %s; fi", pending, yumGuardRollback(argv, marker, outcome)), nil
 		}
 		return fmt.Sprintf("if %s; then %s; fi", pending, outcome(shellJoin(argv))), nil
 	}
 	return "", fmt.Errorf("unknown upgrade method %q", p.Method)
+}
+
+// yumGuardRollback runs argv with --disablerepo for each repo the marker lists when the guard fires: a guard
+// armed before the install cannot know them, and stays in charge when the re-arm after it fails.
+func yumGuardRollback(argv []string, marker string, outcome func(string) string) string {
+	// Only ids in yum 3's charset match, on the exact lines MarshalIndent writes for the array.
+	ids := shellQuote(`/^  "disabled_yum_repos": \[$/,/^  ]/s/^    "\([A-Za-z0-9_.:-]\{1,\}\)",\{0,1\}$/\1/p`)
+	verb := len(argv) - 3 // verb, -y, package
+	return fmt.Sprintf(`set --; for id in $(sed -n %s %s); do set -- "$@" "--disablerepo=$id"; done; %s`,
+		ids, marker, outcome(shellJoin(argv[:verb])+` "$@" `+shellJoin(argv[verb:])))
 }
 
 // PackageRollbackCommand is the pinned reinstall of the outgoing version

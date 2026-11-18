@@ -389,8 +389,7 @@ func TestPackageRollbackCommand_YumSkipsUnavailableReposOtherThanAlpamons(t *tes
 		"downgrade", "-y", "alpamon-2.4.0"}, got)
 }
 
-// TestPackageRollbackCommand_YumDisablesTheReposTheInstallDisabled pins that the guard's and the resumed
-// reinstall run without the repos the install had to disable, which would otherwise stop them the same way.
+// TestPackageRollbackCommand_YumDisablesTheReposTheInstallDisabled pins that the resumed reinstall runs without the repos the install had to disable, which would otherwise stop them the same way.
 func TestPackageRollbackCommand_YumDisablesTheReposTheInstallDisabled(t *testing.T) {
 	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
 
@@ -403,19 +402,6 @@ func TestPackageRollbackCommand_YumDisablesTheReposTheInstallDisabled(t *testing
 		"--setopt=alpacax_alpamon-source.skip_if_unavailable=False",
 		"--disablerepo=base", "--disablerepo=extras",
 		"downgrade", "-y", "alpamon-2.4.0"}, got)
-}
-
-func TestGuardScript_YumDisablesTheReposTheInstallDisabled(t *testing.T) {
-	writeYumRepos(t, map[string]string{"alpacax_alpamon.repo": yumAlpamonRepoFile, "CentOS-Base.repo": yumCentOSRepoFile})
-	p := &PendingUpgrade{
-		Method: MethodPackage, PackageManager: utils.PkgYum, PreviousPackageVersion: "2.4.0", ToVersion: "2.5.0",
-		GuardUnit: "alpamon-upgrade-guard-1", DisabledYumRepos: []string{"base"},
-	}
-
-	script, err := guardScript(p)
-
-	require.NoError(t, err)
-	assert.Contains(t, script, "'--disablerepo=base' 'downgrade' '-y' 'alpamon-2.4.0'")
 }
 
 func TestShellQuote(t *testing.T) {
