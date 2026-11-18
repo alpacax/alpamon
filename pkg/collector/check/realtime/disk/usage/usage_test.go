@@ -138,7 +138,8 @@ func (suite *DiskUsageCheckSuite) TestCollectDiskPartitionsLeavesOutAPartitionWi
 	partitions, err := suite.check.collectDiskPartitions()
 
 	suite.Require().NoError(err)
-	assert.NotContains(suite.T(), partitions, disk.PartitionStat{})
+	suite.Require().Len(partitions, 1)
+	assert.Equal(suite.T(), "/dev/sda1", partitions[0].Device)
 }
 
 func TestDiskUsageCheckSuite(t *testing.T) {
