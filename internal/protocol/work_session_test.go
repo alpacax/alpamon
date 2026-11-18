@@ -92,9 +92,8 @@ func TestWorkSessionRejectsDisagreeingAttribution(t *testing.T) {
 
 func TestWorkSessionRejectsMalformedAttribution(t *testing.T) {
 	cases := map[string]*Command{
-		"not a uuid":     {WorkSessionID: "../servers", WorkSessionExpiresAt: "2026-11-18T10:00:00Z"},
-		"missing expiry": {WorkSessionID: testWorkSessionID},
-		"bad expiry":     {WorkSessionID: testWorkSessionID, WorkSessionExpiresAt: "tomorrow"},
+		"not a uuid": {WorkSessionID: "../servers", WorkSessionExpiresAt: "2026-11-18T10:00:00Z"},
+		"bad expiry": {WorkSessionID: testWorkSessionID, WorkSessionExpiresAt: "tomorrow"},
 	}
 	for name, cmd := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -109,4 +108,10 @@ func TestUint64StringRejectsNegativeAndFraction(t *testing.T) {
 		var v Uint64String
 		assert.Error(t, json.Unmarshal([]byte(raw), &v), raw)
 	}
+}
+
+func TestWorkSessionWithoutExpiryHasNone(t *testing.T) {
+	ws, err := (&Command{WorkSessionID: testWorkSessionID, WorkSessionRevision: 2}).WorkSession(&CommandData{})
+	require.NoError(t, err)
+	assert.Equal(t, WorkSession{ID: testWorkSessionID, Revision: 2}, ws)
 }

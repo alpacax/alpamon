@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -425,4 +426,195 @@ func TestControlResultWireShape(t *testing.T) {
 	assert.JSONEq(t, `{"type":"work_session_control_result","work_session_id":"`+wsID+`","transition_id":"t",
 		"revision":"18446744073709551615","state":"paused","result":"confirmed","observed_at":"2026-11-18T09:00:00Z",
 		"affected_trees":0,"survivors":[]}`, string(encoded))
+}
+
+// recordingControl records the process actions it is asked for and answers
+// each End with the next queued effect.
+type recordingControl struct {
+	mu         sync.Mutex
+	ends       []OwnedWork
+	endEffects []ProcessEffect
+	endErr     error
+	stopErr    error
+}
+
+func (c *recordingControl) Stop(string, OwnedWork) (ProcessEffect, error) {
+	return ProcessEffect{}, c.stopErr
+}
+
+func (c *recordingControl) Continue(string, OwnedWork) (ProcessEffect, error) {
+	return ProcessEffect{}, nil
+}
+
+func (c *recordingControl) End(_ string, owned OwnedWork) (ProcessEffect, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ends = append(c.ends, owned)
+	var effect ProcessEffect
+	if len(c.endEffects) > 0 {
+		effect, c.endEffects = c.endEffects[0], c.endEffects[1:]
+	}
+	return effect, c.endErr
+}
+
+func (c *recordingControl) endCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.ends)
+}
+
+func TestReconcileToEndedEndsTheOwnedProcesses(t *testing.T) {
+	server := &fakeControlServer{}
+	server.set(workSessionActive, 0)
+	r := newTestRegistry(server)
+	control := &recordingControl{endEffects: []ProcessEffect{{AffectedTrees: 1}}}
+	r.processes = control
+	cc := &ControlClient{workSessions: r}
+
+	release, err := r.admit(context.Background(), attribution(0), "cmd-1")
+	require.NoError(t, err)
+	defer release()
+
+	// The End was missed while the control socket was down.
+	server.set(workSessionEnded, 2)
+	r.reconcileAll(context.Background())
+	require.Eventually(t, func() bool { return control.endCount() == 1 }, time.Second, 5*time.Millisecond,
+		"a session the server reports ended has its processes ended")
+	assert.Equal(t, []string{"cmd-1"}, control.ends[0].Commands)
+
+	// The server resends the End until it gets a receipt.
+	cc.HandleMessage(controlFrame(t, "work_session_end", 2, "ended", "human_end"))
+	ended := server.lastResult(t)
+	assert.Equal(t, workSessionEnded, ended.State)
+	assert.Equal(t, controlResultConfirmed, ended.Result)
+	assert.Empty(t, ended.Error)
+	assert.Equal(t, uint32(1), ended.AffectedTrees, "the receipt counts what the reconciled End reached")
+}
+
+func TestStaleStopOnAnUntrackedSessionReportsAValidState(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newTestRegistry(server)
+	cc := &ControlClient{workSessions: r}
+
+	cc.HandleMessage(stopProcessesFrame(t, 1))
+	stale := server.lastResult(t)
+	assert.Equal(t, controlResultFailed, stale.Result)
+	assert.Equal(t, "stale", stale.Error)
+	assert.Contains(t, []string{workSessionActive, workSessionPaused, workSessionEnded}, stale.State)
+}
+
+func TestProcessActionErrorIsAShortCode(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newTestRegistry(server)
+	long := errors.New(strings.Repeat("operation not permitted; ", 10))
+	r.processes = &recordingControl{
+		stopErr: errors.Join(long, errProcessSurvivors),
+		endErr:  long,
+	}
+	cc := &ControlClient{workSessions: r}
+
+	cc.HandleMessage(pauseFrame(t, 1))
+	cc.HandleMessage(stopProcessesFrame(t, 1))
+	stop := server.lastResult(t)
+	assert.Equal(t, controlResultFailed, stop.Result)
+	assert.Equal(t, "survivors", stop.Error)
+
+	cc.HandleMessage(controlFrame(t, "work_session_end", 2, "ended", "human_end"))
+	end := server.lastResult(t)
+	assert.Equal(t, controlResultFailed, end.Result)
+	assert.Equal(t, "process_control_failed", end.Error)
+}
+
+// frameWithoutExpiry is a control frame for a session that has no expiry:
+// the server leaves expires_at out.
+func frameWithoutExpiry(t *testing.T, kind string, revision uint64, state string) []byte {
+	t.Helper()
+	frame, err := json.Marshal(map[string]any{"query": "control", "data": map[string]any{
+		"type": kind, "protocol_version": 1, "client_id": "server-1", "work_session_id": wsID,
+		"transition_id": fmt.Sprintf(transition, revision), "revision": fmt.Sprint(revision),
+		"state": state, "reason": "human_end",
+	}})
+	require.NoError(t, err)
+	return frame
+}
+
+func TestControlWithoutExpiryApplies(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newTestRegistry(server)
+	control := &recordingControl{}
+	r.processes = control
+	cc := &ControlClient{workSessions: r}
+
+	cc.HandleMessage(frameWithoutExpiry(t, "work_session_pause", 1, workSessionPaused))
+	assert.Equal(t, controlResultConfirmed, server.lastResult(t).Result)
+	cc.HandleMessage(frameWithoutExpiry(t, "work_session_resume", 2, workSessionActive))
+	assert.Equal(t, controlResultConfirmed, server.lastResult(t).Result)
+	assert.True(t, r.inputAllowed(wsID), "a session without expiry never expires")
+
+	cc.HandleMessage(frameWithoutExpiry(t, "work_session_end", 3, workSessionEnded))
+	assert.Equal(t, controlResultConfirmed, server.lastResult(t).Result)
+	assert.Equal(t, 1, control.endCount(), "an End without expiry still ends the processes")
+}
+
+func TestEndWithAMalformedExpiryStillEnds(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newTestRegistry(server)
+	control := &recordingControl{}
+	r.processes = control
+	cc := &ControlClient{workSessions: r}
+
+	frame, err := json.Marshal(map[string]any{"query": "control", "data": map[string]any{
+		"type": "work_session_end", "protocol_version": 1, "client_id": "server-1", "work_session_id": wsID,
+		"transition_id": fmt.Sprintf(transition, 1), "revision": "1", "state": workSessionEnded, "expires_at": "soon",
+	}})
+	require.NoError(t, err)
+	cc.HandleMessage(frame)
+	assert.Equal(t, 1, control.endCount())
+	_, err = r.admit(context.Background(), attribution(1), "cmd-1")
+	assert.ErrorIs(t, err, errWorkSessionEnded)
+}
+
+func TestCommandOfASessionWithoutExpiryIsAdmitted(t *testing.T) {
+	server := &fakeControlServer{}
+	server.set(workSessionActive, 0)
+	server.state.ExpiresAt = time.Time{}
+	r := newTestRegistry(server)
+	dispatcher := &contextDispatcher{}
+	command := governedCommand(0)
+	command.WorkSessionExpiresAt = ""
+	cr := NewCommandRunner(nil, nil, command, protocol.CommandData{}, dispatcher)
+	cr.workSessions = r
+
+	require.NoError(t, cr.Run(context.Background()))
+	assert.Len(t, dispatcher.ctxs, 1)
+}
+
+func TestEndedSessionsAreForgottenOnceTornDown(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newTestRegistry(server)
+	r.processes = &recordingControl{}
+	cc := &ControlClient{workSessions: r}
+
+	for i := range workSessionEndedLimit + 10 {
+		id := fmt.Sprintf("11111111-1111-4111-8111-%012d", i)
+		frame, err := json.Marshal(map[string]any{"query": "control", "data": map[string]any{
+			"type": "work_session_end", "protocol_version": 1, "client_id": "server-1", "work_session_id": id,
+			"transition_id": fmt.Sprintf(transition, 1), "revision": "1", "state": workSessionEnded,
+		}})
+		require.NoError(t, err)
+		cc.HandleMessage(frame)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	assert.LessOrEqual(t, len(r.sessions), workSessionEndedLimit)
+}
+
+func TestEndedSessionStaysFencedAfterItIsForgotten(t *testing.T) {
+	server := &fakeControlServer{}
+	server.set(workSessionEnded, 1)
+	r := newTestRegistry(server)
+	r.processes = &recordingControl{}
+
+	_, err := r.admit(context.Background(), attribution(1), "cmd-1")
+	assert.ErrorIs(t, err, errWorkSessionEnded)
 }

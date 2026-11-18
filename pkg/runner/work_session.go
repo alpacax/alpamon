@@ -33,6 +33,9 @@ const (
 	workSessionInventoryLimit = 100
 	// workSessionArgsLimit caps the argument bytes of one entry.
 	workSessionArgsLimit = 1024
+	// workSessionEndedLimit caps the ended sessions kept to answer a resent
+	// End with its receipt. An older one is read from the server again.
+	workSessionEndedLimit = 256
 )
 
 // Kinds of owned work.
@@ -60,6 +63,12 @@ const (
 	controlResultConfirmed   = "confirmed"
 	controlResultFailed      = "failed"
 	controlResultUnsupported = "unsupported"
+)
+
+// Error codes of a process action's result.
+const (
+	errorCodeSurvivors      = "survivors"
+	errorCodeProcessControl = "process_control_failed"
 )
 
 var (
@@ -284,6 +293,11 @@ type trackedWorkSession struct {
 
 	// stopInventory ends the periodic inventory while the session is paused.
 	stopInventory chan struct{}
+
+	// ending is set while an End found by reconciliation is still to run.
+	ending bool
+	// reconciledEnd is what that End reached, until an End receipt counts it.
+	reconciledEnd *ProcessEffect
 }
 
 func (s *trackedWorkSession) owned() OwnedWork {
@@ -314,6 +328,8 @@ func (s *trackedWorkSession) idle() bool {
 type WorkSessionRegistry struct {
 	mu       sync.Mutex
 	sessions map[string]*trackedWorkSession
+	// ended lists the tracked ended sessions, oldest first.
+	ended []string
 
 	// actions serializes control handling, so process actions never
 	// interleave. A process action runs without r.mu, which leaves admission
@@ -417,11 +433,44 @@ func (r *WorkSessionRegistry) session(id string) *trackedWorkSession {
 }
 
 // forget drops an idle active session, whose state the server can give
-// again. A paused or ended one stays, so its fence outlives its work.
+// again. A paused one stays, so its fence and inventory outlive its work. An
+// ended one stays to answer a resent End until workSessionEndedLimit newer
+// ones push it out; dropped, it is fenced again by reading the server.
 func (r *WorkSessionRegistry) forget(id string, s *trackedWorkSession) {
 	if s.idle() && s.state == workSessionActive {
 		delete(r.sessions, id)
 	}
+	r.trimEnded()
+}
+
+// markEnded records that the session just reached ended. Call it under r.mu.
+func (r *WorkSessionRegistry) markEnded(id string) {
+	r.ended = append(r.ended, id)
+	r.trimEnded()
+}
+
+// trimEnded drops the oldest ended sessions whose processes are torn down
+// while more than workSessionEndedLimit are kept. Call it under r.mu.
+func (r *WorkSessionRegistry) trimEnded() {
+	excess := len(r.ended) - workSessionEndedLimit
+	if excess <= 0 {
+		return
+	}
+	kept := r.ended[:0]
+	for _, id := range r.ended {
+		s, ok := r.sessions[id]
+		switch {
+		case !ok || s.state != workSessionEnded:
+			continue
+		case excess > 0 && s.idle() && !s.ending:
+			delete(r.sessions, id)
+			excess--
+			continue
+		}
+		kept = append(kept, id)
+	}
+	clear(r.ended[len(kept):])
+	r.ended = kept
 }
 
 // admit registers commandID under its Work Session when the session's
@@ -471,7 +520,7 @@ func (r *WorkSessionRegistry) admissible(s *trackedWorkSession, ws protocol.Work
 		return errWorkSessionStale
 	case s.state != workSessionActive:
 		return errWorkSessionPaused
-	case !r.now().Before(ws.ExpiresAt), !s.expiresAt.IsZero() && !r.now().Before(s.expiresAt):
+	case !ws.ExpiresAt.IsZero() && !r.now().Before(ws.ExpiresAt), !s.expiresAt.IsZero() && !r.now().Before(s.expiresAt):
 		return errWorkSessionExpired
 	}
 	return nil
@@ -564,8 +613,51 @@ func (r *WorkSessionRegistry) reconcile(ctx context.Context, id string) error {
 		}
 		s.state, s.revision, s.expiresAt, s.known = snapshot.State, revision, snapshot.ExpiresAt, true
 		r.syncInventoryLoop(id, s)
+		if s.state == workSessionEnded {
+			r.markEnded(id)
+			// The End may have been missed; end the processes now rather
+			// than when it is resent.
+			s.ending = true
+			go r.endReconciled(id, s)
+		}
 	}
 	return nil
+}
+
+// endReconciled ends the processes of a session reconciliation found ended,
+// unless an End message ended them first.
+func (r *WorkSessionRegistry) endReconciled(id string, s *trackedWorkSession) {
+	r.actions.Lock()
+	defer r.actions.Unlock()
+	r.mu.Lock()
+	done := s.lastResult != nil
+	r.mu.Unlock()
+	var effect ProcessEffect
+	var err error
+	if !done {
+		effect, err = r.endProcesses(id, s)
+		if err != nil && !errors.Is(err, errProcessControlUnsupported) {
+			log.Warn().Err(err).Str("work_session_id", id).Msg("Could not end every process of an ended work session.")
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s.ending = false
+	if !done {
+		s.reconciledEnd = &effect
+	}
+	r.forget(id, s)
+}
+
+// endProcesses runs End on every process the session owns. The sessions are
+// not tracked further: End reports what survived. Call it without r.mu.
+func (r *WorkSessionRegistry) endProcesses(id string, s *trackedWorkSession) (ProcessEffect, error) {
+	r.pruneProcesses(id)
+	r.mu.Lock()
+	owned := s.owned()
+	clear(s.processes)
+	r.mu.Unlock()
+	return r.processes.End(id, owned)
 }
 
 // reconcileAll marks every tracked session unknown, which fences it, and
@@ -647,38 +739,51 @@ func (r *WorkSessionRegistry) applyTransition(msg workSessionControl) (WorkSessi
 	}
 	r.mu.Unlock()
 
-	if target != workSessionPaused {
-		r.pruneProcesses(msg.WorkSessionID)
-	}
-	r.mu.Lock()
-	owned := s.owned()
-	if target == workSessionEnded {
-		// End reports what survived; the sessions are not tracked further.
-		clear(s.processes)
-	}
-	r.mu.Unlock()
-
 	var effect ProcessEffect
 	var err error
 	switch target {
 	case workSessionActive:
+		r.pruneProcesses(msg.WorkSessionID)
+		r.mu.Lock()
+		owned := s.owned()
+		r.mu.Unlock()
 		effect, err = r.processes.Continue(msg.WorkSessionID, owned)
 	case workSessionEnded:
-		effect, err = r.processes.End(msg.WorkSessionID, owned)
+		effect, err = r.endProcesses(msg.WorkSessionID, s)
 	}
 	result := r.newResult(msg, target, processResult(err))
 	result.AffectedTrees = effect.AffectedTrees
 	if effect.Survivors != nil {
 		result.Survivors = effect.Survivors
 	}
-	if err != nil && !errors.Is(err, errProcessControlUnsupported) {
-		result.Error = err.Error()
-	}
+	result.Error = processErrorCode(msg, err)
 
 	r.mu.Lock()
+	if target == workSessionEnded && s.reconciledEnd != nil {
+		// The processes were ended when reconciliation found the session
+		// ended; this End reached only what was left.
+		result.AffectedTrees += s.reconciledEnd.AffectedTrees
+		s.reconciledEnd = nil
+	}
 	s.lastResult = &result
+	if target == workSessionEnded {
+		r.forget(msg.WorkSessionID, s)
+	}
 	r.mu.Unlock()
 	return result, true
+}
+
+// processErrorCode is the short error code of a process action's result.
+// The detail goes to the log: the result's error is a code, not a message.
+func processErrorCode(msg workSessionControl, err error) string {
+	if err == nil || errors.Is(err, errProcessControlUnsupported) {
+		return ""
+	}
+	log.Warn().Err(err).Str("work_session_id", msg.WorkSessionID).Str("type", msg.Type).Msg("A work session process action did not reach its full effect.")
+	if errors.Is(err, errProcessSurvivors) {
+		return errorCodeSurvivors
+	}
+	return errorCodeProcessControl
 }
 
 // decideTransition checks msg against the applied state under r.mu. It
@@ -692,9 +797,10 @@ func (r *WorkSessionRegistry) decideTransition(msg workSessionControl, s *tracke
 		r.forget(msg.WorkSessionID, s)
 		return result, true, true
 	}
+	end := target == workSessionEnded
 
 	switch {
-	case revision < s.revision:
+	case revision < s.revision && !end:
 		log.Debug().Str("work_session_id", msg.WorkSessionID).Uint64("revision", revision).Msg("Ignored a work session control older than the applied revision")
 		r.forget(msg.WorkSessionID, s)
 		return WorkSessionControlResult{}, false, true
@@ -707,19 +813,29 @@ func (r *WorkSessionRegistry) decideTransition(msg workSessionControl, s *tracke
 		result := r.newResult(msg, s.state, controlResultFailed)
 		result.Error = "conflict"
 		return result, true, true
-	case s.state == workSessionEnded:
+	case s.state == workSessionEnded && !end:
 		result := r.newResult(msg, s.state, controlResultFailed)
 		result.Error = "ended"
 		return result, true, true
 	}
 
-	expiresAt, err := time.Parse(time.RFC3339Nano, msg.ExpiresAt)
-	if err != nil {
+	// A session without an expiry carries none. An End is applied whatever
+	// its expiry says, and so is a Pause, which only fences.
+	expiresAt := s.expiresAt
+	if msg.ExpiresAt == "" {
+		expiresAt = time.Time{}
+	} else if parsed, err := time.Parse(time.RFC3339Nano, msg.ExpiresAt); err == nil {
+		expiresAt = parsed
+	} else if target == workSessionActive {
 		result := r.newResult(msg, s.state, controlResultFailed)
 		result.Error = "invalid_message"
 		return result, true, true
 	}
-	s.state, s.revision, s.expiresAt, s.known, s.transitionID = target, revision, expiresAt, true, msg.TransitionID
+	newlyEnded := end && s.state != workSessionEnded
+	s.state, s.revision, s.expiresAt, s.known, s.transitionID = target, max(s.revision, revision), expiresAt, true, msg.TransitionID
+	if newlyEnded {
+		r.markEnded(msg.WorkSessionID)
+	}
 	s.lastResult = nil
 	r.syncInventoryLoop(msg.WorkSessionID, s)
 	return WorkSessionControlResult{}, false, false
@@ -752,9 +868,7 @@ func (r *WorkSessionRegistry) handleStop(msg workSessionControl) {
 	if effect.Survivors != nil {
 		result.Survivors = effect.Survivors
 	}
-	if err != nil && !errors.Is(err, errProcessControlUnsupported) {
-		result.Error = err.Error()
-	}
+	result.Error = processErrorCode(msg, err)
 
 	r.mu.Lock()
 	s.stopResults[msg.ActionID] = result
@@ -773,7 +887,9 @@ func (r *WorkSessionRegistry) decideStop(msg workSessionControl) (WorkSessionCon
 		}
 	}
 	if !ok || !s.known || s.state != workSessionPaused || s.revision != uint64(msg.Revision) {
-		state := ""
+		// An untracked session has applied no control: it reports the
+		// state a session starts in.
+		state := workSessionActive
 		if ok {
 			state = s.state
 		}

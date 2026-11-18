@@ -38,8 +38,9 @@ func (v Uint64String) MarshalJSON() ([]byte, error) {
 // WorkSession is the Work Session attribution of one command or terminal
 // open. An empty ID means genuinely session-less work.
 type WorkSession struct {
-	ID        string
-	Revision  uint64
+	ID       string
+	Revision uint64
+	// ExpiresAt is zero for a session without an expiry.
 	ExpiresAt time.Time
 }
 
@@ -76,9 +77,14 @@ func (f workSessionFields) parse() (WorkSession, error) {
 	if err := ValidateWorkSessionID(f.id); err != nil {
 		return WorkSession{}, err
 	}
-	expiresAt, err := time.Parse(time.RFC3339Nano, f.expiresAt)
-	if err != nil {
-		return WorkSession{}, fmt.Errorf("invalid work session expiry: %w", err)
+	// A session without an expiry carries none.
+	var expiresAt time.Time
+	if f.expiresAt != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, f.expiresAt)
+		if err != nil {
+			return WorkSession{}, fmt.Errorf("invalid work session expiry: %w", err)
+		}
+		expiresAt = parsed
 	}
 	return WorkSession{ID: f.id, Revision: uint64(f.revision), ExpiresAt: expiresAt}, nil
 }
