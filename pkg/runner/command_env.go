@@ -4,37 +4,22 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-
-	"github.com/alpacax/alpamon/v2/internal/protocol"
 )
 
-// commandEnvRefusedResult is the whole result of a command refused for its
-// env. It names neither the variable nor its value: a value can carry a
-// credential, and the requester already knows what it sent.
+// commandEnvRefusedResult names neither the variable nor its value: a value
+// can carry a credential, and the requester already knows what it sent.
 const commandEnvRefusedResult = "Command refused: its environment sets a variable the agent does not accept"
 
-// envRefusal says why checkCommandEnv refused an env. It never carries a key
-// or a value, so it is safe to log.
-type envRefusal string
-
-const (
-	envAdmitted  envRefusal = ""
-	envDangerous envRefusal = "dangerous"
-	envMalformed envRefusal = "malformed"
-)
-
-// posixEnvName is the only key shape a command's env may use.
 var posixEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // commandEnvPrefixes and commandEnvExactNames are the platform environment
 // list: variables that decide which program a fixed command runs, or what it
-// loads, configures or hands control to. The server refuses them when a
-// command is created and again before delivery; this copy keeps a server that
-// skipped its check from delivering one. Both are uppercase and sorted to
-// match testdata/command_env_policy_vectors.json, which the tests read. The
-// server's copy is tested against an identical file; keeping the two files
-// identical is a review step, since neither repository's tests can see the
-// other's.
+// loads, configures or hands control to. The server refuses them too; this
+// copy keeps a server that skipped its check from delivering one. Both are
+// uppercase and sorted to match testdata/command_env_policy_vectors.json,
+// which the tests read. The server's copy is tested against an identical
+// file; keeping the two files identical is a review step, since neither
+// repository's tests can see the other's.
 //
 // The list is a floor, not an inventory of every dangerous variable. Proxy,
 // trust and resolver variables (HTTPS_PROXY, SSL_CERT_FILE, PIP_INDEX_URL)
@@ -192,43 +177,25 @@ var (
 	}
 )
 
-// checkCommandEnv decides whether a command's caller-supplied env may be
-// applied. A key that is not a POSIX name is malformed. A key on the platform
-// list is dangerous; keys are compared uppercased, which also covers Windows,
-// where they are case-insensitive. A value that begins with "()" is dangerous
-// whatever its key: an unpatched bash imports that form as a function from any
-// variable. A malformed key wins over a dangerous one, so the kind does not
-// depend on map order.
+// commandEnvRefused reports whether a command's caller-supplied env must not be
+// applied: a key that is not a POSIX variable name, a key on the platform list,
+// or a value that begins with "()", whatever its key, since an unpatched bash
+// imports that form as a function from any variable. Keys are compared
+// uppercased, which also covers Windows, where they are case-insensitive.
 //
 // Only the caller's env is checked. The agent's own defaults are not, so the
 // list may name PATH or HOME without refusing a command that sets neither.
-func checkCommandEnv(env map[string]string) envRefusal {
-	refusal := envAdmitted
+func commandEnvRefused(env map[string]string) bool {
 	for key, value := range env {
-		if !posixEnvName.MatchString(key) {
-			return envMalformed
-		}
-		if strings.HasPrefix(value, "()") || isListedEnvName(strings.ToUpper(key)) {
-			refusal = envDangerous
+		if !posixEnvName.MatchString(key) ||
+			strings.HasPrefix(value, "()") ||
+			isListedEnvName(strings.ToUpper(key)) {
+			return true
 		}
 	}
-	return refusal
+	return false
 }
 
-// callerEnv is the env to check for a command. The "internal" lane never
-// applies a caller env, so nothing is checked there; every other lane,
-// including one added later, is checked.
-func callerEnv(command protocol.Command) map[string]string {
-	switch command.Shell {
-	case "internal":
-		return nil
-	default:
-		return command.Env
-	}
-}
-
-// isListedEnvName reports whether an uppercased key is on the platform
-// environment list. A prefix also matches the bare prefix.
 func isListedEnvName(upper string) bool {
 	if slices.Contains(commandEnvExactNames, upper) {
 		return true

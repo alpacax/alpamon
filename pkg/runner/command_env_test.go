@@ -18,8 +18,6 @@ import (
 // a refusal is shown to come from that key and not from the env as a whole.
 const benignEnvKey = "FOO_BAR"
 
-// commandEnvVectors mirrors testdata/command_env_policy_vectors.json. The
-// server's copy of the list is tested against the same file.
 type commandEnvVectors struct {
 	Source         string   `json:"source"`
 	Matching       string   `json:"matching"`
@@ -33,7 +31,7 @@ type commandEnvVectors struct {
 }
 
 // loadCommandEnvVectors decodes the shared vector file. Unknown fields fail the
-// load, so a vector class added to the file cannot go unchecked here.
+// load, so a vector class added to the file needs a commandEnvVectors field.
 func loadCommandEnvVectors(t *testing.T) commandEnvVectors {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", "command_env_policy_vectors.json"))
@@ -58,11 +56,7 @@ func loadCommandEnvVectors(t *testing.T) commandEnvVectors {
 	return vectors
 }
 
-// titleCase uppercases the first byte of an ASCII key and lowercases the rest.
 func titleCase(key string) string {
-	if key == "" {
-		return key
-	}
 	return strings.ToUpper(key[:1]) + strings.ToLower(key[1:])
 }
 
@@ -73,103 +67,103 @@ func TestCommandEnvList_MatchesSharedVectors(t *testing.T) {
 	assert.Equal(t, vectors.ExactNames, commandEnvExactNames)
 }
 
-func TestCheckCommandEnv_RefusesListedKeysInAnyCase(t *testing.T) {
+func TestCommandEnvRefused_RefusesListedKeysInAnyCase(t *testing.T) {
 	vectors := loadCommandEnvVectors(t)
 
 	for _, key := range vectors.RefusedKeys {
 		for _, variant := range []string{strings.ToUpper(key), strings.ToLower(key), titleCase(key)} {
 			env := map[string]string{benignEnvKey: "value", variant: "value"}
-			assert.Equalf(t, envDangerous, checkCommandEnv(env), "key %q", variant)
+			assert.Truef(t, commandEnvRefused(env), "key %q", variant)
 		}
 	}
 }
 
-func TestCheckCommandEnv_AdmitsUnlistedKeys(t *testing.T) {
+func TestCommandEnvRefused_AdmitsUnlistedKeys(t *testing.T) {
 	vectors := loadCommandEnvVectors(t)
 
-	assert.Equal(t, envAdmitted, checkCommandEnv(nil))
+	assert.False(t, commandEnvRefused(nil))
 	for _, key := range vectors.AdmittedKeys {
 		env := map[string]string{benignEnvKey: "value", key: "value"}
-		assert.Equalf(t, envAdmitted, checkCommandEnv(env), "key %q", key)
+		assert.Falsef(t, commandEnvRefused(env), "key %q", key)
 	}
 }
 
-func TestCheckCommandEnv_RefusesMalformedKeys(t *testing.T) {
+func TestCommandEnvRefused_RefusesMalformedKeys(t *testing.T) {
 	vectors := loadCommandEnvVectors(t)
 
 	for _, key := range vectors.MalformedKeys {
 		env := map[string]string{benignEnvKey: "value", key: "value"}
-		assert.Equalf(t, envMalformed, checkCommandEnv(env), "key %q", key)
-
-		// A listed key alongside does not change the kind, whatever the map order.
-		env["LD_PRELOAD"] = "value"
-		assert.Equalf(t, envMalformed, checkCommandEnv(env), "key %q beside a listed key", key)
+		assert.Truef(t, commandEnvRefused(env), "key %q", key)
 	}
 }
 
-func TestCheckCommandEnv_RefusesFunctionValuesUnderAnyKey(t *testing.T) {
+func TestCommandEnvRefused_RefusesFunctionValuesUnderAnyKey(t *testing.T) {
 	vectors := loadCommandEnvVectors(t)
 
 	for _, value := range vectors.RefusedValues {
 		env := map[string]string{benignEnvKey: value}
-		assert.Equalf(t, envDangerous, checkCommandEnv(env), "value %q", value)
+		assert.Truef(t, commandEnvRefused(env), "value %q", value)
 	}
 }
 
-func TestCheckCommandEnv_AdmitsOtherValues(t *testing.T) {
+func TestCommandEnvRefused_AdmitsOtherValues(t *testing.T) {
 	vectors := loadCommandEnvVectors(t)
 
 	for _, value := range vectors.AdmittedValues {
 		env := map[string]string{benignEnvKey: value}
-		assert.Equalf(t, envAdmitted, checkCommandEnv(env), "value %q", value)
+		assert.Falsef(t, commandEnvRefused(env), "value %q", value)
 	}
 }
 
-func TestCommandRunner_Run_ListedEnvKeyFinishesRefusedBeforeAnyShellRuns(t *testing.T) {
-	// "file" carries no payload: had the env check not come first, the result
-	// would be a file refusal instead of the env one.
-	// "future" stands for a lane added later: it is checked by default.
+func TestCommandRunner_Run_RefusedEnvFinishesBeforeAnyShellRuns(t *testing.T) {
+	envs := map[string]map[string]string{
+		"listed key":     {benignEnvKey: "value", "LD_PRELOAD": "/tmp/preload.so"},
+		"malformed key":  {benignEnvKey: "value", "FOO-BAR": "value"},
+		"function value": {benignEnvKey: "() { :; }"},
+	}
+	// "file" carries no payload, so it yields the env refusal only if the env
+	// check comes first. "future" stands for a lane added later.
 	for _, shell := range []string{"system", "file", "future"} {
-		t.Run(shell, func(t *testing.T) {
-			d := &cancelTestDispatcher{}
-			wc, reports := cancelTestClient(t, d)
+		for name, env := range envs {
+			t.Run(shell+"/"+name, func(t *testing.T) {
+				d := &cancelTestDispatcher{}
+				wc, reports := cancelTestClient(t, d)
 
-			wc.handleCommand(protocol.Command{
-				ID:    "env-refused-" + shell,
-				Shell: shell,
-				Line:  "ping",
-				User:  "root",
-				Group: "root",
-				Env:   map[string]string{benignEnvKey: "value", "LD_PRELOAD": "/tmp/preload.so"},
-			}, protocol.CommandData{})
+				wc.handleCommand(protocol.Command{
+					ID:    "env-refused-" + shell,
+					Shell: shell,
+					Line:  "ping",
+					User:  "root",
+					Group: "root",
+					Env:   env,
+				}, protocol.CommandData{})
 
-			report := receiveCancelReport(t, reports)
-			assert.Equal(t, int32(0), d.calls.Load(), "a refused env must never reach a handler")
-			assert.Equal(t, false, report["success"])
-			assert.Equal(t, float64(1), report["exit_code"])
-			assert.Equal(t, commandEnvRefusedResult, report["result"])
-		})
+				report := receiveCancelReport(t, reports)
+				assert.Equal(t, int32(0), d.calls.Load(), "a refused env must never reach a handler")
+				assert.Equal(t, false, report["success"])
+				assert.Equal(t, float64(1), report["exit_code"])
+				assert.Equal(t, commandEnvRefusedResult, report["result"])
+			})
+		}
 	}
 }
 
-func TestCommandRunner_Run_InternalLaneIgnoresEnv(t *testing.T) {
-	// The internal lane never applies a caller env, so a listed key there is
-	// not refused: an older server that attaches one must not block the command.
-	d := &cancelTestDispatcher{}
-	wc, reports := cancelTestClient(t, d)
-
-	wc.handleCommand(protocol.Command{
-		ID:    "env-internal",
+func TestCommandRunner_Run_InternalLaneNeitherRefusesNorAppliesEnv(t *testing.T) {
+	// An older server that attaches a listed key must not block the command,
+	// and the exemption holds only while this lane hands no env to a handler.
+	command := protocol.Command{
 		Shell: "internal",
 		Line:  "ping",
 		User:  "root",
 		Group: "root",
 		Env:   map[string]string{"LD_PRELOAD": "/tmp/preload.so"},
-	}, protocol.CommandData{})
+	}
 
-	report := receiveCancelReport(t, reports)
-	assert.Equal(t, int32(1), d.calls.Load())
-	assert.NotEqual(t, commandEnvRefusedResult, report["result"])
+	dispatcher := &fakeDispatcher{}
+	require.NoError(t, NewCommandRunner(nil, nil, command, protocol.CommandData{}, dispatcher).Run(context.Background()))
+	require.Len(t, dispatcher.calls, 1)
+	assert.Equal(t, "ping", dispatcher.calls[0].command)
+	assert.Empty(t, dispatcher.calls[0].args.Env)
 }
 
 func TestCommandRunner_Run_AdmittedEnvRunsAsBefore(t *testing.T) {
@@ -192,10 +186,13 @@ func TestCommandRunner_Run_AdmittedEnvRunsAsBefore(t *testing.T) {
 	assert.Equal(t, true, report["success"])
 	assert.Equal(t, "unchanged", report["result"])
 
-	// The handler receives the caller's env exactly as sent.
 	command.ID = ""
 	dispatcher := &fakeDispatcher{}
 	require.NoError(t, NewCommandRunner(nil, nil, command, protocol.CommandData{}, dispatcher).Run(context.Background()))
 	require.Len(t, dispatcher.calls, 1)
-	assert.Equal(t, env, dispatcher.calls[0].args.Env)
+	assert.Equal(t, map[string]string{
+		benignEnvKey:  "value",
+		"LANG":        "C.UTF-8",
+		"HTTPS_PROXY": "http://proxy.example:3128",
+	}, dispatcher.calls[0].args.Env)
 }
