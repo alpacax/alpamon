@@ -51,6 +51,10 @@ type PtyClient struct {
 	cancelDone         <-chan struct{}
 	finishCancellation func() (bool, []int)
 	closeOnce          sync.Once
+	// workSession fences this terminal's input while its Work Session is
+	// paused; nil for a session-less terminal.
+	workSession        *workSessionBinding
+	releaseWorkSession func()
 }
 
 func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, manager *TerminalManager) *PtyClient {
@@ -218,14 +222,24 @@ func (pc *PtyClient) readFromPty(ctx context.Context, cancel context.CancelFunc,
 	}
 }
 
+// writeInput writes one input message to the terminal, or drops it while
+// the terminal's Work Session is fenced. Dropped input is never replayed.
+func (pc *PtyClient) writeInput(msg []byte) error {
+	if !pc.workSession.inputAllowed() {
+		log.Debug().Str("session_id", pc.sessionID).Int("size", len(msg)).Msg("Dropped terminal input of a fenced work session.")
+		return nil
+	}
+	_, err := pc.cpty.Write(msg)
+	return err
+}
+
 func (pc *PtyClient) writeToPty(ctx context.Context, cancel context.CancelFunc) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case msg := <-pc.wsToPty:
-			_, err := pc.cpty.Write(msg)
-			if err != nil {
+			if err := pc.writeInput(msg); err != nil {
 				cancel()
 				return
 			}
@@ -311,6 +325,9 @@ func (pc *PtyClient) close() {
 
 func (pc *PtyClient) closeSession() {
 	remote := pc.cancelState != nil && pc.cancelState.StopRequests()
+	if pc.releaseWorkSession != nil {
+		defer pc.releaseWorkSession()
+	}
 	defer func() {
 		if pc.finishCancellation != nil {
 			cancelled, survivors := pc.finishCancellation()
@@ -364,6 +381,8 @@ func (pc *PtyClient) Refresh() error {
 // TrackCommand retains the openpty command ID until the terminal closes.
 func (pc *PtyClient) TrackCommand(ctx context.Context, id string) {
 	pc.commandID = id
+	pc.workSession = workSessionFromContext(ctx)
+	pc.releaseWorkSession = pc.workSession.registerTerminal(pc.sessionID, id)
 	registry, _ := ctx.Value(cancellationRegistryKey{}).(*commandCancellations)
 	if registry == nil || id == "" || len(id) > 128 {
 		return
