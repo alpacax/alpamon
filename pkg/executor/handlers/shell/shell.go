@@ -139,6 +139,7 @@ func (h *ShellHandler) handleExecFile(ctx context.Context, args *common.CommandA
 	if args.CommandID != "" {
 		pidHook = func(pid int) {
 			cleanup = runner.RegisterCommandPID(pid, args.CommandID, username)
+			runner.TrackWorkSessionProcess(ctx, args.CommandID, pid)
 		}
 	}
 
@@ -256,6 +257,7 @@ func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, use
 	if commandID != "" {
 		pidHook = func(pid int) {
 			cleanup = runner.RegisterCommandPID(pid, commandID, username)
+			runner.TrackWorkSessionProcess(ctx, commandID, pid)
 		}
 	}
 	exitCode, output, _ := h.Executor.ExecWithStreamingHook(ctx, cmdArgs, username, groupname, env, timeout, commandID, pidHook, chunkCallback)

@@ -157,6 +157,9 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 	}
 
 	pc.manager.trackPID(pid, sessionInfo)
+	// The shell leads its own session, so every job-control group it starts
+	// stays owned by the terminal's Work Session.
+	pc.workSession.trackTerminalProcess(pc.commandID, pid)
 
 	return nil
 }

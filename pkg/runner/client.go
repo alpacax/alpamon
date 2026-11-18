@@ -194,8 +194,8 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		serverID:             config.GlobalSettings.ID,
 		connectBackoff:       newAuthBackoff(minConnectInterval, maxConnectInterval),
 		readLimit:            MaxMessageSize,
-		workSessions:         NewWorkSessionRegistry(session, config.GlobalSettings.ID),
 	}
+	wc.workSessions = NewWorkSessionRegistry(session, config.GlobalSettings.ID, wc.cancellations.cancel)
 
 	// Local environments (localhost) have no AI signing server, so enforce
 	// mode would reject all commands. Auto-downgrade to monitor mode.

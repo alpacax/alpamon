@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alpacax/alpamon/v2/internal/protocol"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
@@ -23,6 +24,27 @@ const (
 	workSessionControlStateURL   = "/api/work-sessions/sessions/%s/control-state/"
 	workSessionControlResultsURL = "/api/servers/%s/work-session-control-results/"
 	workSessionControlStateWait  = 10 * time.Second
+
+	workSessionProcessInventoryURL = "/api/servers/%s/work-session-process-inventory/"
+	// workSessionInventoryInterval is how often a paused session's processes
+	// are reported again.
+	workSessionInventoryInterval = 30 * time.Second
+	// workSessionInventoryLimit caps the entries of one report.
+	workSessionInventoryLimit = 100
+	// workSessionArgsLimit caps the argument bytes of one entry.
+	workSessionArgsLimit = 1024
+)
+
+// Kinds of owned work.
+const (
+	ownedKindCommand  = "command"
+	ownedKindTerminal = "terminal"
+)
+
+// Process states in an inventory entry.
+const (
+	processRunning = "running"
+	processStopped = "stopped"
 )
 
 // Applied states of a Work Session on this host. "ended" covers every
@@ -52,6 +74,9 @@ var (
 	// errProcessControlUnsupported is what a WorkSessionProcessController
 	// returns for a process action this host cannot perform.
 	errProcessControlUnsupported = errors.New("process control is not supported")
+	// errProcessSurvivors is what a process action returns when an owned
+	// process did not reach the requested effect.
+	errProcessSurvivors = errors.New("survivors")
 )
 
 // WorkSessionSnapshot is the server's authoritative control state of one
@@ -137,6 +162,67 @@ type WorkSessionProcessController interface {
 type OwnedWork struct {
 	Commands  []string
 	Terminals []string
+	// Sessions are the process sessions the session's commands and terminals
+	// started, kept after a command finishes while its children live on.
+	Sessions []OwnedSession
+}
+
+// OwnedSession is one process session a command or terminal started: its
+// leader has PID SID. StartedAt is the leader's start time in Unix
+// milliseconds, which tells a reused SID apart.
+type OwnedSession struct {
+	Kind      string
+	CommandID string
+	SID       int
+	StartedAt int64
+}
+
+// WorkSessionProcess is one entry of a process inventory.
+type WorkSessionProcess struct {
+	Kind      string   `json:"kind"`
+	CommandID string   `json:"command_id"`
+	PID       int      `json:"pid"`
+	PGID      int      `json:"pgid"`
+	StartedAt string   `json:"started_at"`
+	State     string   `json:"state"`
+	Args      []string `json:"args"`
+}
+
+// WorkSessionProcessInventory reports the processes one paused session owns
+// on this host.
+type WorkSessionProcessInventory struct {
+	WorkSessionID string                `json:"work_session_id"`
+	Revision      protocol.Uint64String `json:"revision"`
+	ObservedAt    string                `json:"observed_at"`
+	Truncated     bool                  `json:"truncated"`
+	Processes     []WorkSessionProcess  `json:"processes"`
+}
+
+// processInventory is implemented by a WorkSessionProcessController that can
+// list the processes a session owns.
+type processInventory interface {
+	Inventory(owned OwnedWork) ([]WorkSessionProcess, error)
+}
+
+// cutArgs keeps the leading arguments whose bytes fit limit, cutting the
+// last one at a UTF-8 boundary.
+func cutArgs(args []string, limit int) []string {
+	cut := []string{}
+	for _, arg := range args {
+		if len(arg) > limit {
+			end := limit
+			for end > 0 && !utf8.RuneStart(arg[end]) {
+				end--
+			}
+			if end > 0 {
+				cut = append(cut, arg[:end])
+			}
+			break
+		}
+		cut = append(cut, arg)
+		limit -= len(arg)
+	}
+	return cut
 }
 
 // noProcessControl performs no process action. Nothing was stopped, so
@@ -155,6 +241,32 @@ func (noProcessControl) End(string, OwnedWork) (ProcessEffect, error) {
 	return ProcessEffect{}, errProcessControlUnsupported
 }
 
+// cancelProcessControl serves a host that cannot suspend a process group.
+// Stop is unsupported. End applies the existing command cancel to every
+// owned command and terminal, which on Windows terminates its job object,
+// and reports unsupported: it does not observe the whole tree end.
+type cancelProcessControl struct {
+	cancel func(commandID string)
+}
+
+func (cancelProcessControl) Stop(string, OwnedWork) (ProcessEffect, error) {
+	return ProcessEffect{}, errProcessControlUnsupported
+}
+
+func (cancelProcessControl) Continue(string, OwnedWork) (ProcessEffect, error) {
+	return ProcessEffect{}, nil
+}
+
+func (c cancelProcessControl) End(_ string, owned OwnedWork) (ProcessEffect, error) {
+	commands := slices.Concat(owned.Commands, owned.Terminals)
+	if c.cancel != nil {
+		for _, commandID := range commands {
+			c.cancel(commandID)
+		}
+	}
+	return ProcessEffect{AffectedTrees: uint32(len(commands))}, errProcessControlUnsupported
+}
+
 type trackedWorkSession struct {
 	state     string
 	revision  uint64
@@ -168,6 +280,10 @@ type trackedWorkSession struct {
 
 	commands  map[string]struct{}
 	terminals map[string]string // terminal session ID -> opening command ID
+	processes map[int]OwnedSession
+
+	// stopInventory ends the periodic inventory while the session is paused.
+	stopInventory chan struct{}
 }
 
 func (s *trackedWorkSession) owned() OwnedWork {
@@ -180,11 +296,15 @@ func (s *trackedWorkSession) owned() OwnedWork {
 	}
 	slices.Sort(work.Commands)
 	slices.Sort(work.Terminals)
+	for _, process := range s.processes {
+		work.Sessions = append(work.Sessions, process)
+	}
+	slices.SortFunc(work.Sessions, func(a, b OwnedSession) int { return a.SID - b.SID })
 	return work
 }
 
 func (s *trackedWorkSession) idle() bool {
-	return len(s.commands) == 0 && len(s.terminals) == 0
+	return len(s.commands) == 0 && len(s.terminals) == 0 && len(s.processes) == 0
 }
 
 // WorkSessionRegistry indexes commands and terminals by Work Session and
@@ -195,10 +315,23 @@ type WorkSessionRegistry struct {
 	mu       sync.Mutex
 	sessions map[string]*trackedWorkSession
 
-	readState  func(ctx context.Context, id string) (WorkSessionSnapshot, error)
-	postResult func(result WorkSessionControlResult)
-	processes  WorkSessionProcessController
-	now        func() time.Time
+	// actions serializes control handling, so process actions never
+	// interleave. A process action runs without r.mu, which leaves admission
+	// and terminal input unblocked while an End waits out its grace period.
+	actions sync.Mutex
+	// reports serializes inventory reports.
+	reports sync.Mutex
+
+	readState     func(ctx context.Context, id string) (WorkSessionSnapshot, error)
+	postResult    func(result WorkSessionControlResult)
+	postInventory func(inventory WorkSessionProcessInventory)
+	processes     WorkSessionProcessController
+	// sessionAlive reports whether an owned process session still has a
+	// live member.
+	sessionAlive func(OwnedSession) bool
+	now          func() time.Time
+	// inventoryInterval is how often a paused session is reported again.
+	inventoryInterval time.Duration
 }
 
 func newWorkSessionRegistry(
@@ -210,14 +343,20 @@ func newWorkSessionRegistry(
 		readState:  readState,
 		postResult: postResult,
 		processes:  noProcessControl{},
-		now:        time.Now,
+		sessionAlive: func(OwnedSession) bool {
+			return false
+		},
+		now:               time.Now,
+		inventoryInterval: workSessionInventoryInterval,
 	}
 }
 
 // NewWorkSessionRegistry builds the registry that reads control state with
-// session and posts results through the request queue.
-func NewWorkSessionRegistry(session *scheduler.Session, serverID string) *WorkSessionRegistry {
-	return newWorkSessionRegistry(
+// session and posts results and inventories through the request queue.
+// cancelCommand is the existing command cancel, which End applies to every
+// owned command and terminal.
+func NewWorkSessionRegistry(session *scheduler.Session, serverID string, cancelCommand func(id string)) *WorkSessionRegistry {
+	r := newWorkSessionRegistry(
 		func(ctx context.Context, id string) (WorkSessionSnapshot, error) {
 			return readWorkSessionControlState(ctx, session, id)
 		},
@@ -225,6 +364,12 @@ func NewWorkSessionRegistry(session *scheduler.Session, serverID string) *WorkSe
 			scheduler.Rqueue.Post(fmt.Sprintf(workSessionControlResultsURL, serverID), result, 10, time.Time{})
 		},
 	)
+	r.processes = newProcessControl(cancelCommand)
+	r.sessionAlive = ownedSessionAlive
+	r.postInventory = func(inventory WorkSessionProcessInventory) {
+		scheduler.Rqueue.Post(fmt.Sprintf(workSessionProcessInventoryURL, serverID), inventory, 10, time.Time{})
+	}
+	return r
 }
 
 func readWorkSessionControlState(_ context.Context, session *scheduler.Session, id string) (WorkSessionSnapshot, error) {
@@ -264,6 +409,7 @@ func (r *WorkSessionRegistry) session(id string) *trackedWorkSession {
 			stopResults: map[string]WorkSessionControlResult{},
 			commands:    map[string]struct{}{},
 			terminals:   map[string]string{},
+			processes:   map[int]OwnedSession{},
 		}
 		r.sessions[id] = s
 	}
@@ -333,9 +479,20 @@ func (r *WorkSessionRegistry) admissible(s *trackedWorkSession, ws protocol.Work
 
 func (r *WorkSessionRegistry) releaseCommand(id, commandID string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if s, ok := r.sessions[id]; ok {
 		delete(s.commands, commandID)
+	}
+	r.mu.Unlock()
+	r.releaseIdle(id)
+}
+
+// releaseIdle drops the process sessions finished work left empty, then
+// forgets the session when nothing of it remains.
+func (r *WorkSessionRegistry) releaseIdle(id string) {
+	r.pruneProcesses(id)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok := r.sessions[id]; ok {
 		r.forget(id, s)
 	}
 }
@@ -348,11 +505,11 @@ func (r *WorkSessionRegistry) registerTerminal(id, terminalID, commandID string)
 	r.session(id).terminals[terminalID] = commandID
 	return func() {
 		r.mu.Lock()
-		defer r.mu.Unlock()
 		if s, ok := r.sessions[id]; ok {
 			delete(s.terminals, terminalID)
-			r.forget(id, s)
 		}
+		r.mu.Unlock()
+		r.releaseIdle(id)
 	}
 }
 
@@ -406,6 +563,7 @@ func (r *WorkSessionRegistry) reconcile(ctx context.Context, id string) error {
 			s.lastResult = nil
 		}
 		s.state, s.revision, s.expiresAt, s.known = snapshot.State, revision, snapshot.ExpiresAt, true
+		r.syncInventoryLoop(id, s)
 	}
 	return nil
 }
@@ -425,11 +583,14 @@ func (r *WorkSessionRegistry) reconcileAll(ctx context.Context) {
 	for _, id := range ids {
 		if err := r.reconcile(ctx, id); err != nil {
 			log.Warn().Err(err).Str("work_session_id", id).Msg("Could not read work session control state after reconnect; the session stays fenced.")
+			continue
 		}
+		r.reportInventory(id, true)
 	}
 }
 
 // handleControl applies one Work Session control frame and posts its result.
+// Control frames are handled one at a time.
 func (r *WorkSessionRegistry) handleControl(raw json.RawMessage) {
 	var msg workSessionControl
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -440,12 +601,21 @@ func (r *WorkSessionRegistry) handleControl(raw json.RawMessage) {
 		log.Warn().Err(err).Str("type", msg.Type).Msg("Invalid work session control message")
 		return
 	}
+	r.actions.Lock()
+	defer r.actions.Unlock()
 	if msg.Type == workSessionStopProcesses {
 		r.handleStop(msg)
 		return
 	}
-	if result, ok := r.applyTransition(msg); ok {
-		r.postResult(result)
+	result, ok := r.applyTransition(msg)
+	if !ok {
+		return
+	}
+	r.postResult(result)
+	// A paused session is reported until it resumes; a resume reports once
+	// more so the console stops showing processes as stopped.
+	if result.TransitionID != "" && result.Error == "" && (result.State == workSessionPaused || result.State == workSessionActive) {
+		r.reportInventory(msg.WorkSessionID, false)
 	}
 }
 
@@ -463,57 +633,38 @@ func (r *WorkSessionRegistry) newResult(msg workSessionControl, state, result st
 	}
 }
 
-// applyTransition applies a pause, resume or end under r.mu and returns the
-// result to post, or false when the message is ignored.
+// applyTransition applies a pause, resume or end and returns the result to
+// post, or false when the message is ignored. The state changes under r.mu;
+// the process action runs after r.mu is released.
 func (r *WorkSessionRegistry) applyTransition(msg workSessionControl) (WorkSessionControlResult, bool) {
 	target := controlTargetState[msg.Type]
-	revision := uint64(msg.Revision)
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	s := r.session(msg.WorkSessionID)
-
-	if msg.ProtocolVersion != 1 || msg.TransitionID == "" || msg.State != target {
-		result := r.newResult(msg, s.state, controlResultUnsupported)
-		result.Error = "invalid_message"
-		r.forget(msg.WorkSessionID, s)
-		return result, true
+	if result, ok, done := r.decideTransition(msg, s, target); done {
+		r.mu.Unlock()
+		return result, ok
 	}
+	r.mu.Unlock()
 
-	switch {
-	case revision < s.revision:
-		log.Debug().Str("work_session_id", msg.WorkSessionID).Uint64("revision", revision).Msg("Ignored a work session control older than the applied revision")
-		r.forget(msg.WorkSessionID, s)
-		return WorkSessionControlResult{}, false
-	case revision == s.revision && s.transitionID == msg.TransitionID && s.state == target && s.lastResult != nil:
-		return *s.lastResult, true
-	case revision == s.revision && s.known && (s.state != target || s.transitionID != "" && s.transitionID != msg.TransitionID):
-		// One revision with two payloads: apply neither, and read the server
-		// before starting anything more.
-		s.known = false
-		result := r.newResult(msg, s.state, controlResultFailed)
-		result.Error = "conflict"
-		return result, true
-	case s.state == workSessionEnded:
-		result := r.newResult(msg, s.state, controlResultFailed)
-		result.Error = "ended"
-		return result, true
+	if target != workSessionPaused {
+		r.pruneProcesses(msg.WorkSessionID)
 	}
-
-	expiresAt, err := time.Parse(time.RFC3339Nano, msg.ExpiresAt)
-	if err != nil {
-		result := r.newResult(msg, s.state, controlResultFailed)
-		result.Error = "invalid_message"
-		return result, true
+	r.mu.Lock()
+	owned := s.owned()
+	if target == workSessionEnded {
+		// End reports what survived; the sessions are not tracked further.
+		clear(s.processes)
 	}
-	s.state, s.revision, s.expiresAt, s.known, s.transitionID = target, revision, expiresAt, true, msg.TransitionID
+	r.mu.Unlock()
 
 	var effect ProcessEffect
+	var err error
 	switch target {
 	case workSessionActive:
-		effect, err = r.processes.Continue(msg.WorkSessionID, s.owned())
+		effect, err = r.processes.Continue(msg.WorkSessionID, owned)
 	case workSessionEnded:
-		effect, err = r.processes.End(msg.WorkSessionID, s.owned())
+		effect, err = r.processes.End(msg.WorkSessionID, owned)
 	}
 	result := r.newResult(msg, target, processResult(err))
 	result.AffectedTrees = effect.AffectedTrees
@@ -523,25 +674,98 @@ func (r *WorkSessionRegistry) applyTransition(msg workSessionControl) (WorkSessi
 	if err != nil && !errors.Is(err, errProcessControlUnsupported) {
 		result.Error = err.Error()
 	}
+
+	r.mu.Lock()
 	s.lastResult = &result
+	r.mu.Unlock()
 	return result, true
 }
 
-// handleStop applies a person's Stop to a session paused at its revision.
-func (r *WorkSessionRegistry) handleStop(msg workSessionControl) {
-	r.mu.Lock()
-	result, ok := r.applyStop(msg)
-	r.mu.Unlock()
-	if ok {
-		r.postResult(result)
+// decideTransition checks msg against the applied state under r.mu. It
+// returns done with the result to post, or applies the target state and
+// returns not done when the process action is still to run.
+func (r *WorkSessionRegistry) decideTransition(msg workSessionControl, s *trackedWorkSession, target string) (WorkSessionControlResult, bool, bool) {
+	revision := uint64(msg.Revision)
+	if msg.ProtocolVersion != 1 || msg.TransitionID == "" || msg.State != target {
+		result := r.newResult(msg, s.state, controlResultUnsupported)
+		result.Error = "invalid_message"
+		r.forget(msg.WorkSessionID, s)
+		return result, true, true
 	}
+
+	switch {
+	case revision < s.revision:
+		log.Debug().Str("work_session_id", msg.WorkSessionID).Uint64("revision", revision).Msg("Ignored a work session control older than the applied revision")
+		r.forget(msg.WorkSessionID, s)
+		return WorkSessionControlResult{}, false, true
+	case revision == s.revision && s.transitionID == msg.TransitionID && s.state == target && s.lastResult != nil:
+		return *s.lastResult, true, true
+	case revision == s.revision && s.known && (s.state != target || s.transitionID != "" && s.transitionID != msg.TransitionID):
+		// One revision with two payloads: apply neither, and read the server
+		// before starting anything more.
+		s.known = false
+		result := r.newResult(msg, s.state, controlResultFailed)
+		result.Error = "conflict"
+		return result, true, true
+	case s.state == workSessionEnded:
+		result := r.newResult(msg, s.state, controlResultFailed)
+		result.Error = "ended"
+		return result, true, true
+	}
+
+	expiresAt, err := time.Parse(time.RFC3339Nano, msg.ExpiresAt)
+	if err != nil {
+		result := r.newResult(msg, s.state, controlResultFailed)
+		result.Error = "invalid_message"
+		return result, true, true
+	}
+	s.state, s.revision, s.expiresAt, s.known, s.transitionID = target, revision, expiresAt, true, msg.TransitionID
+	s.lastResult = nil
+	r.syncInventoryLoop(msg.WorkSessionID, s)
+	return WorkSessionControlResult{}, false, false
 }
 
-func (r *WorkSessionRegistry) applyStop(msg workSessionControl) (WorkSessionControlResult, bool) {
+// handleStop applies a person's Stop to a session paused at its revision
+// and reports the inventory it left.
+func (r *WorkSessionRegistry) handleStop(msg workSessionControl) {
 	msg.TransitionID = ""
 	if msg.ActionID == "" {
-		return WorkSessionControlResult{}, false
+		return
 	}
+	r.mu.Lock()
+	result, done := r.decideStop(msg)
+	r.mu.Unlock()
+	if done {
+		r.postResult(result)
+		return
+	}
+
+	r.pruneProcesses(msg.WorkSessionID)
+	r.mu.Lock()
+	s := r.session(msg.WorkSessionID)
+	owned, state := s.owned(), s.state
+	r.mu.Unlock()
+
+	effect, err := r.processes.Stop(msg.WorkSessionID, owned)
+	result = r.newResult(msg, state, processResult(err))
+	result.AffectedTrees = effect.AffectedTrees
+	if effect.Survivors != nil {
+		result.Survivors = effect.Survivors
+	}
+	if err != nil && !errors.Is(err, errProcessControlUnsupported) {
+		result.Error = err.Error()
+	}
+
+	r.mu.Lock()
+	s.stopResults[msg.ActionID] = result
+	r.mu.Unlock()
+	r.postResult(result)
+	r.reportInventory(msg.WorkSessionID, true)
+}
+
+// decideStop returns done with the result to post when the Stop is a
+// duplicate or stale, under r.mu.
+func (r *WorkSessionRegistry) decideStop(msg workSessionControl) (WorkSessionControlResult, bool) {
 	s, ok := r.sessions[msg.WorkSessionID]
 	if ok {
 		if previous, seen := s.stopResults[msg.ActionID]; seen {
@@ -557,18 +781,7 @@ func (r *WorkSessionRegistry) applyStop(msg workSessionControl) (WorkSessionCont
 		result.Error = "stale"
 		return result, true
 	}
-
-	effect, err := r.processes.Stop(msg.WorkSessionID, s.owned())
-	result := r.newResult(msg, s.state, processResult(err))
-	result.AffectedTrees = effect.AffectedTrees
-	if effect.Survivors != nil {
-		result.Survivors = effect.Survivors
-	}
-	if err != nil && !errors.Is(err, errProcessControlUnsupported) {
-		result.Error = err.Error()
-	}
-	s.stopResults[msg.ActionID] = result
-	return result, true
+	return WorkSessionControlResult{}, false
 }
 
 func processResult(err error) string {
@@ -580,6 +793,122 @@ func processResult(err error) string {
 	default:
 		return controlResultFailed
 	}
+}
+
+// trackProcess records a process session a command or terminal of the
+// session started, so its children stay owned after the command finishes.
+func (r *WorkSessionRegistry) trackProcess(id, kind, commandID string, pid int) {
+	if pid <= 1 {
+		return
+	}
+	startedAt := processStartedAt(pid)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.session(id).processes[pid] = OwnedSession{Kind: kind, CommandID: commandID, SID: pid, StartedAt: startedAt}
+}
+
+// pruneProcesses drops the owned process sessions that no longer have a
+// live member. It reads the process table without r.mu.
+func (r *WorkSessionRegistry) pruneProcesses(id string) {
+	r.mu.Lock()
+	s, ok := r.sessions[id]
+	if !ok || len(s.processes) == 0 {
+		r.mu.Unlock()
+		return
+	}
+	candidates := s.owned().Sessions
+	r.mu.Unlock()
+
+	var dead []int
+	for _, process := range candidates {
+		if !r.sessionAlive(process) {
+			dead = append(dead, process.SID)
+		}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok := r.sessions[id]; ok {
+		for _, sid := range dead {
+			delete(s.processes, sid)
+		}
+	}
+}
+
+// syncInventoryLoop starts the periodic inventory of a paused session and
+// stops it once the session leaves paused. Call it under r.mu.
+func (r *WorkSessionRegistry) syncInventoryLoop(id string, s *trackedWorkSession) {
+	switch {
+	case s.state == workSessionPaused && s.stopInventory == nil && r.postInventory != nil:
+		stop := make(chan struct{})
+		s.stopInventory = stop
+		go r.runInventoryLoop(id, stop)
+	case s.state != workSessionPaused && s.stopInventory != nil:
+		close(s.stopInventory)
+		s.stopInventory = nil
+	}
+}
+
+func (r *WorkSessionRegistry) runInventoryLoop(id string, stop <-chan struct{}) {
+	ticker := time.NewTicker(r.inventoryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			r.reportInventory(id, true)
+		}
+	}
+}
+
+// reportInventory posts the processes the session owns. With whilePaused it
+// posts only when the session is still paused at the revision it read.
+func (r *WorkSessionRegistry) reportInventory(id string, whilePaused bool) {
+	if r.postInventory == nil {
+		return
+	}
+	lister, ok := r.processes.(processInventory)
+	if !ok {
+		return
+	}
+	r.reports.Lock()
+	defer r.reports.Unlock()
+
+	r.pruneProcesses(id)
+	r.mu.Lock()
+	s, ok := r.sessions[id]
+	if !ok || whilePaused && s.state != workSessionPaused {
+		r.mu.Unlock()
+		return
+	}
+	owned, revision := s.owned(), s.revision
+	r.mu.Unlock()
+
+	processes, err := lister.Inventory(owned)
+	if err != nil {
+		log.Warn().Err(err).Str("work_session_id", id).Msg("Could not list the processes of a work session.")
+		return
+	}
+
+	r.mu.Lock()
+	current, ok := r.sessions[id]
+	stillPaused := ok && current.state == workSessionPaused && current.revision == revision
+	r.mu.Unlock()
+	if whilePaused && !stillPaused {
+		return
+	}
+
+	inventory := WorkSessionProcessInventory{
+		WorkSessionID: id,
+		Revision:      protocol.Uint64String(revision),
+		ObservedAt:    r.now().UTC().Format(time.RFC3339Nano),
+		Processes:     processes,
+	}
+	if len(inventory.Processes) > workSessionInventoryLimit {
+		inventory.Processes, inventory.Truncated = inventory.Processes[:workSessionInventoryLimit], true
+	}
+	r.postInventory(inventory)
 }
 
 // workSessionBinding ties work running in a context to its Work Session.
@@ -604,6 +933,23 @@ func workSessionFromContext(ctx context.Context) *workSessionBinding {
 // inputAllowed is nil-safe: session-less terminals always take input.
 func (b *workSessionBinding) inputAllowed() bool {
 	return b == nil || b.registry.inputAllowed(b.id)
+}
+
+// trackTerminalProcess is nil-safe and records the process session of a
+// terminal's shell.
+func (b *workSessionBinding) trackTerminalProcess(commandID string, pid int) {
+	if b != nil {
+		b.registry.trackProcess(b.id, ownedKindTerminal, commandID, pid)
+	}
+}
+
+// TrackWorkSessionProcess records the process session a command started,
+// keyed by its leader pid, when the command runs under a Work Session. Its
+// children then stay owned after the command finishes.
+func TrackWorkSessionProcess(ctx context.Context, commandID string, pid int) {
+	if b := workSessionFromContext(ctx); b != nil {
+		b.registry.trackProcess(b.id, ownedKindCommand, commandID, pid)
+	}
 }
 
 // registerTerminal is nil-safe and returns a no-op for session-less terminals.

@@ -130,7 +130,8 @@ Commands from the Alpacon console flow through:
 - `terminal_manager.go`: PTY session lifecycle
 - `tunnel_client.go`, `tunnel_daemon.go`: Tunnel operations
 - `auth_manager.go`: PAM authentication and sudo approval
-- `work_session.go`: Indexes commands and terminals by `work_session_id`, applies Work Session pause and resume from the control socket (highest revision wins), fences new commands and terminal input of a paused session without signalling its processes, reads `control-state` before starting work for a session whose state is unknown (start, reconnect) and posts each control result over HTTP
+- `work_session.go`: Indexes commands and terminals by `work_session_id`, applies Work Session pause and resume from the control socket (highest revision wins), fences new commands and terminal input of a paused session without signalling its processes, reads `control-state` before starting work for a session whose state is unknown (start, reconnect) and posts each control result over HTTP; tracks the process sessions its commands and terminals start, so a finished command's children stay owned
+- `work_session_process_unix.go`: Carries out a person's Stop (SIGSTOP to every owned process group), Resume (SIGCONT only to the groups Stop suspended) and End (SIGCONT, then the command cancel's TERM and KILL after 5 seconds, reporting survivors), and lists owned processes for the inventory posted while a session is paused; Windows reports `unsupported` and End cancels each owned command's job object
 - `auth_session_event.go`: Non-Alpacon access detection (PAM session events via auth.sock, gated by `detect_local_access` policy)
 - `access_event_outbox.go`: Holds detected access events in the local database (`access_event_outbox` table) and delivers due events oldest first, subject to capacity and retention limits; it reaches the database only through `pkg/accessoutbox.Store`, which `pkg/db` implements
 
