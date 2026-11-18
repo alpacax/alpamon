@@ -4,12 +4,14 @@ package runner
 
 import (
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/commandcancel"
+	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/process"
 )
 
@@ -21,10 +23,13 @@ const stopSettle = time.Second
 // the process sessions a Work Session owns. Commands and terminals lead
 // their own session, so a session holds a command's group, the children a
 // finished command left in it and every job-control group of a terminal.
+// Every signal goes through commandcancel, which reads a member's SID and
+// PGID again right before it signals the member's group.
 type groupProcessControl struct {
 	mu sync.Mutex
-	// stopped holds the groups a Stop suspended, per Work Session.
-	stopped map[string]map[int]struct{}
+	// stopped holds the groups a Stop suspended, per Work Session, each with
+	// the members that pin its identity until Resume.
+	stopped map[string]map[groupKey]*stoppedGroup
 	// cancel is the existing command cancel, applied by End to every owned
 	// command and terminal.
 	cancel func(commandID string)
@@ -32,7 +37,77 @@ type groupProcessControl struct {
 }
 
 func newProcessControl(cancel func(commandID string)) WorkSessionProcessController {
-	return &groupProcessControl{stopped: map[string]map[int]struct{}{}, cancel: cancel, grace: commandcancel.GracePeriod}
+	return &groupProcessControl{stopped: map[string]map[groupKey]*stoppedGroup{}, cancel: cancel, grace: commandcancel.GracePeriod}
+}
+
+// sessionKey names one owned process session: its SID and its leader's
+// start time.
+type sessionKey struct {
+	sid       int
+	startedAt int64
+}
+
+func keyOf(session OwnedSession) sessionKey {
+	return sessionKey{sid: session.SID, startedAt: session.StartedAt}
+}
+
+// groupKey names one process group inside an owned process session.
+type groupKey struct {
+	session sessionKey
+	pgid    int
+}
+
+// stoppedGroup is a group a Stop suspended. Resume continues it only while
+// one of members, by PID and start time, is still in it: a live member keeps
+// the PGID from being handed to another group.
+type stoppedGroup struct {
+	members map[int]int64
+}
+
+// sessionPin is what proves an owned process session is still the one
+// recorded once its leader is gone: the members last seen in it, by PID and
+// start time. A SID with a live member is never handed to a new session, so
+// a pinned member still in the session proves the SID was never reused.
+type sessionPin struct {
+	members map[int]int64
+	// adopted is set once the members the finished leader left behind were
+	// taken in.
+	adopted bool
+}
+
+// sessionPins holds the pin of every tracked process session.
+var sessionPins = struct {
+	mu sync.Mutex
+	m  map[sessionKey]*sessionPin
+}{m: map[sessionKey]*sessionPin{}}
+
+// pinSession starts tracking session while its leader runs. A session whose
+// leader start time is unknown is never owned.
+func pinSession(session OwnedSession) {
+	if session.SID <= 1 || session.StartedAt == 0 {
+		return
+	}
+	sessionPins.mu.Lock()
+	defer sessionPins.mu.Unlock()
+	if _, ok := sessionPins.m[keyOf(session)]; !ok {
+		sessionPins.m[keyOf(session)] = &sessionPin{members: map[int]int64{session.SID: session.StartedAt}}
+	}
+}
+
+// unpinSession stops tracking session.
+func unpinSession(session OwnedSession) {
+	sessionPins.mu.Lock()
+	defer sessionPins.mu.Unlock()
+	delete(sessionPins.m, keyOf(session))
+}
+
+// adoptSession takes in the members a finished leader left in its session.
+// Call it once the command or terminal that led the session has finished:
+// its leader was reaped moments before, so its SID still names this session
+// unless every member exited and the number was reused within that moment.
+// Only members that started no earlier than the leader are taken in.
+func adoptSession(session OwnedSession) {
+	verifiedMembers(session, true)
 }
 
 // ownedMember is one live process of an owned session.
@@ -40,43 +115,80 @@ type ownedMember struct {
 	session OwnedSession
 	pid     int
 	pgid    int
+	started int64
 }
 
-// ownedMembers lists the live processes of the owned sessions. A session
-// whose leader PID now belongs to a process started later is not ours.
+// ownedMembers lists the live processes of the owned sessions whose identity
+// is proven, and fails closed for any other: a session is ours while its
+// recorded leader runs, or while a member it was last seen with is still in
+// it.
 func ownedMembers(sessions []OwnedSession) []ownedMember {
 	self := syscall.Getpgrp()
 	var members []ownedMember
 	for _, session := range sessions {
-		if session.SID <= 1 || !sessionIdentity(session) {
-			continue
-		}
-		pids, err := commandcancel.SessionMembers(session.SID)
-		if err != nil {
-			continue
-		}
-		for _, pid := range pids {
+		starts := verifiedMembers(session, false)
+		for _, pid := range slices.Sorted(maps.Keys(starts)) {
 			pgid, err := syscall.Getpgid(pid)
 			if err != nil || pgid <= 1 || pgid == self {
 				continue
 			}
-			if state, err := processState(pid); err != nil || state == procZombie {
-				continue
-			}
-			members = append(members, ownedMember{session: session, pid: pid, pgid: pgid})
+			members = append(members, ownedMember{session: session, pid: pid, pgid: pgid, started: starts[pid]})
 		}
 	}
 	return members
 }
 
-// sessionIdentity reports whether the PID of the session's leader still
-// names the leader the session was recorded with.
-func sessionIdentity(session OwnedSession) bool {
-	if session.StartedAt == 0 {
-		return true
+// verifiedMembers returns the live members of session by start time when
+// its identity is proven, and pins them for the next check. With adopt it
+// also takes in, once, the members a finished leader left behind.
+func verifiedMembers(session OwnedSession, adopt bool) map[int]int64 {
+	if session.SID <= 1 || session.StartedAt == 0 {
+		return nil
 	}
-	started := processStartedAt(session.SID)
-	return started == 0 || started == session.StartedAt
+	pids, err := commandcancel.SessionMembers(session.SID)
+	if err != nil {
+		return nil
+	}
+	starts := map[int]int64{}
+	for _, pid := range pids {
+		if state, err := processState(pid); err != nil || state == procZombie {
+			continue
+		}
+		if started := processStartedAt(pid); started != 0 {
+			starts[pid] = started
+		}
+	}
+
+	key := keyOf(session)
+	sessionPins.mu.Lock()
+	defer sessionPins.mu.Unlock()
+	// The recorded leader, by PID and start time, proves itself.
+	verified := starts[session.SID] == session.StartedAt
+	pin, ok := sessionPins.m[key]
+	if !ok {
+		if !verified {
+			return nil
+		}
+		pin = &sessionPin{}
+		sessionPins.m[key] = pin
+	}
+	for pid, started := range starts {
+		if verified {
+			break
+		}
+		verified = pin.members[pid] == started
+	}
+	if !verified && adopt && !pin.adopted {
+		maps.DeleteFunc(starts, func(_ int, started int64) bool { return started < session.StartedAt })
+		verified = len(starts) > 0
+	}
+	if !verified {
+		delete(sessionPins.m, key)
+		return nil
+	}
+	pin.members = starts
+	pin.adopted = pin.adopted || adopt
+	return starts
 }
 
 func ownedSessionAlive(session OwnedSession) bool {
@@ -96,15 +208,6 @@ func processStartedAt(pid int) int64 {
 	return started
 }
 
-func groupsOf(members []ownedMember) []int {
-	var groups []int
-	for _, member := range members {
-		groups = append(groups, member.pgid)
-	}
-	slices.Sort(groups)
-	return slices.Compact(groups)
-}
-
 func treesOf(members []ownedMember) uint32 {
 	var sids []int
 	for _, member := range members {
@@ -114,11 +217,15 @@ func treesOf(members []ownedMember) uint32 {
 	return uint32(len(slices.Compact(sids)))
 }
 
-func signalGroup(pgid int, sig syscall.Signal) error {
-	if err := syscall.Kill(-pgid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
+// sessionsOf lists the sessions that have a member, once each.
+func sessionsOf(members []ownedMember) []OwnedSession {
+	var sessions []OwnedSession
+	for _, member := range members {
+		if !slices.Contains(sessions, member.session) {
+			sessions = append(sessions, member.session)
+		}
 	}
-	return nil
+	return sessions
 }
 
 func survivorOf(member ownedMember) WorkSessionSurvivor {
@@ -132,7 +239,7 @@ func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, e
 	defer c.mu.Unlock()
 	stopped := c.stopped[id]
 	if stopped == nil {
-		stopped = map[int]struct{}{}
+		stopped = map[groupKey]*stoppedGroup{}
 		c.stopped[id] = stopped
 	}
 
@@ -160,19 +267,37 @@ func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, e
 			}
 			return effect, errors.Join(append(errs, errProcessSurvivors)...)
 		}
-		for _, pgid := range groupsOf(running) {
-			if err := signalGroup(pgid, syscall.SIGSTOP); err != nil {
-				errs = append(errs, err)
-				continue
+		for _, session := range sessionsOf(running) {
+			pending := map[int]bool{}
+			for _, member := range running {
+				if member.session == session {
+					pending[member.pgid] = true
+				}
 			}
-			stopped[pgid] = struct{}{}
+			signalled, err := commandcancel.SignalSessionGroups(session.SID, syscall.SIGSTOP, func(pgid int) bool { return pending[pgid] })
+			if err != nil {
+				errs = append(errs, err)
+			}
+			for _, pgid := range signalled {
+				key := groupKey{session: keyOf(session), pgid: pgid}
+				group := stopped[key]
+				if group == nil {
+					group = &stoppedGroup{members: map[int]int64{}}
+					stopped[key] = group
+				}
+				for _, member := range members {
+					if member.session == session && member.pgid == pgid {
+						group.members[member.pid] = member.started
+					}
+				}
+			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 }
 
-// Continue sends SIGCONT to the groups a Stop suspended that are still
-// owned, and to no other group.
+// Continue sends SIGCONT to the groups a Stop suspended that are still owned
+// and still the groups it suspended, and to no other group.
 func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffect, error) {
 	c.mu.Lock()
 	stopped := c.stopped[id]
@@ -185,18 +310,27 @@ func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffec
 	var continued []ownedMember
 	var errs []error
 	members := ownedMembers(owned.Sessions)
-	for _, pgid := range groupsOf(members) {
-		if _, ok := stopped[pgid]; !ok {
-			continue
-		}
-		if err := signalGroup(pgid, syscall.SIGCONT); err != nil {
-			errs = append(errs, err)
-			continue
-		}
+	for key, group := range stopped {
+		var current []ownedMember
+		pinned := false
 		for _, member := range members {
-			if member.pgid == pgid {
-				continued = append(continued, member)
+			if keyOf(member.session) == key.session && member.pgid == key.pgid {
+				current = append(current, member)
+				pinned = pinned || group.members[member.pid] == member.started
 			}
+		}
+		if !pinned {
+			if len(current) > 0 {
+				log.Warn().Str("work_session_id", id).Int("pgid", key.pgid).Msg("Left a stopped process group stopped: it is no longer the group a Stop suspended.")
+			}
+			continue
+		}
+		signalled, err := commandcancel.SignalSessionGroups(key.session.sid, syscall.SIGCONT, func(pgid int) bool { return pgid == key.pgid })
+		if err != nil {
+			errs = append(errs, err)
+		}
+		if len(signalled) > 0 {
+			continued = append(continued, current...)
 		}
 	}
 	return ProcessEffect{AffectedTrees: treesOf(continued)}, errors.Join(errs...)
@@ -204,16 +338,23 @@ func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffec
 
 // End cancels every owned command and terminal, then continues every owned
 // group so a stopped process can act on TERM, and terminates each owned
-// session with TERM and, after the grace period, KILL.
+// session with TERM and, after the grace period, KILL. The sessions are not
+// tracked afterwards.
 func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, error) {
 	c.mu.Lock()
 	delete(c.stopped, id)
 	c.mu.Unlock()
+	defer func() {
+		for _, session := range owned.Sessions {
+			unpinSession(session)
+		}
+	}()
 
 	members := ownedMembers(owned.Sessions)
+	sessions := sessionsOf(members)
 	var errs []error
-	for _, pgid := range groupsOf(members) {
-		if err := signalGroup(pgid, syscall.SIGCONT); err != nil {
+	for _, session := range sessions {
+		if _, err := commandcancel.SignalSessionGroups(session.SID, syscall.SIGCONT, nil); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -226,10 +367,7 @@ func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, er
 	effect := ProcessEffect{AffectedTrees: treesOf(members), Survivors: []WorkSessionSurvivor{}}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	for _, session := range owned.Sessions {
-		if !slices.ContainsFunc(members, func(m ownedMember) bool { return m.session.SID == session.SID }) {
-			continue
-		}
+	for _, session := range sessions {
 		wg.Go(func() {
 			survivors, _, err := commandcancel.TerminateSession(session.SID, c.grace)
 			mu.Lock()

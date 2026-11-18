@@ -70,14 +70,25 @@ func startSession(t *testing.T, name string, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// liveMembers lists the processes of session sid that are not zombies.
+func liveMembers(t *testing.T, sid int) []int {
+	t.Helper()
+	pids, err := commandcancel.SessionMembers(sid)
+	require.NoError(t, err)
+	var live []int
+	for _, pid := range pids {
+		if state, err := processState(pid); err == nil && state != procZombie {
+			live = append(live, pid)
+		}
+	}
+	return live
+}
+
 func sessionMembers(t *testing.T, sid int, count int) []int {
 	t.Helper()
 	var members []int
 	require.Eventually(t, func() bool {
-		members = nil
-		for _, member := range ownedMembers([]OwnedSession{{SID: sid}}) {
-			members = append(members, member.pid)
-		}
+		members = liveMembers(t, sid)
 		return len(members) == count
 	}, 5*time.Second, 20*time.Millisecond)
 	return members
@@ -126,18 +137,24 @@ func TestStopSuspendsEveryOwnedGroupAndResumeContinuesOnlyThem(t *testing.T) {
 	running := startSession(t, "perl", "-e", `if (fork() == 0) { setpgrp(0, 0); sleep 60; exit } sleep 60`)
 	runningPIDs := sessionMembers(t, running.Process.Pid, 2)
 	require.Len(t, pgids(t, runningPIDs), 2)
-	// A finished command that left a child behind in its group.
-	finished := startSession(t, "sh", "-c", "sleep 60 & exit 0")
+	// A finished command that left a child behind in its group. It is
+	// tracked while its leader runs and released once it finishes, as the
+	// executor does.
+	server.set(workSessionActive, 0)
+	release, err := r.admit(t.Context(), attribution(0), "cmd-finished")
+	require.NoError(t, err)
+	finished := startSession(t, "sh", "-c", "sleep 60 & sleep 0.5; exit 0")
+	r.trackProcess(wsID, ownedKindCommand, "cmd-finished", finished.Process.Pid)
 	var leftover []int
 	require.Eventually(t, func() bool {
 		leftover = sessionMembers(t, finished.Process.Pid, 1)
 		return leftover[0] != finished.Process.Pid
 	}, 5*time.Second, 20*time.Millisecond, "the command finishes and its child lives on")
+	release()
 	// Work the session does not own.
 	unrelated := startSession(t, "sleep", "60")
 
 	r.trackProcess(wsID, ownedKindCommand, "cmd-running", running.Process.Pid)
-	r.trackProcess(wsID, ownedKindCommand, "cmd-finished", finished.Process.Pid)
 
 	cc.HandleMessage(pauseFrame(t, 1))
 	requireState(t, procRunning, slices.Concat(runningPIDs, leftover)...)
@@ -220,8 +237,8 @@ func TestEndContinuesThenTerminatesEveryOwnedSession(t *testing.T) {
 	assert.Equal(t, uint32(2), ended.AffectedTrees)
 	assert.Empty(t, ended.Survivors)
 	assert.Equal(t, []string{"cmd-stubborn"}, cancelled, "End reuses the command cancel for running commands")
-	assert.False(t, ownedSessionAlive(OwnedSession{SID: stubborn.Process.Pid}), "KILL follows the ignored TERM")
-	assert.False(t, ownedSessionAlive(OwnedSession{SID: stopped.Process.Pid}))
+	assert.Empty(t, liveMembers(t, stubborn.Process.Pid), "KILL follows the ignored TERM")
+	assert.Empty(t, liveMembers(t, stopped.Process.Pid))
 	assert.FileExists(t, marker, "a stopped process is continued, so it acts on TERM")
 }
 
@@ -240,4 +257,64 @@ func TestReconnectWhilePausedReportsTheInventory(t *testing.T) {
 	r.reconcileAll(t.Context())
 	assert.Len(t, inventories.reports, before+1)
 	assert.Equal(t, leader.Process.Pid, inventories.last(t).Processes[0].PID)
+}
+
+func TestSessionIdentityFailsClosed(t *testing.T) {
+	leader := startSession(t, "sleep", "60")
+	sid := leader.Process.Pid
+	started := processStartedAt(sid)
+	require.NotZero(t, started)
+
+	assert.NotEmpty(t, ownedMembers([]OwnedSession{{SID: sid, StartedAt: started}}), "the recorded leader is ours")
+	assert.Empty(t, ownedMembers([]OwnedSession{{SID: sid}}), "an unknown start time proves nothing")
+	assert.Empty(t, ownedMembers([]OwnedSession{{SID: sid, StartedAt: started - 1000}}), "a PID now naming another process is not ours")
+}
+
+func TestSessionWhoseLeaderExitedIsOwnedOnlyThroughAPin(t *testing.T) {
+	finished := startSession(t, "sh", "-c", "sleep 60 & sleep 0.5; exit 0")
+	sid := finished.Process.Pid
+	session := OwnedSession{Kind: ownedKindCommand, CommandID: "cmd-1", SID: sid, StartedAt: processStartedAt(sid)}
+	require.NotZero(t, session.StartedAt)
+	require.Eventually(t, func() bool {
+		members := liveMembers(t, sid)
+		return len(members) == 1 && members[0] != sid
+	}, 5*time.Second, 20*time.Millisecond)
+
+	assert.Empty(t, ownedMembers([]OwnedSession{session}), "with its leader gone, nothing pins the SID to this session")
+
+	server := &fakeControlServer{}
+	server.set(workSessionActive, 0)
+	r := newProcessRegistry(server, &inventoryLog{}, nil)
+	release, err := r.admit(t.Context(), attribution(0), "cmd-2")
+	require.NoError(t, err)
+	r.trackProcess(wsID, ownedKindCommand, "cmd-2", sid)
+	release()
+	_, tracked := r.sessions[wsID]
+	assert.False(t, tracked, "a session tracked after its leader exited is never owned")
+}
+
+func TestResumeDoesNotContinueARetainedGroupThatChangedIdentity(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newProcessRegistry(server, &inventoryLog{}, nil)
+	cc := &ControlClient{workSessions: r}
+	leader := startSession(t, "sleep", "60")
+	r.trackProcess(wsID, ownedKindCommand, "cmd-1", leader.Process.Pid)
+
+	cc.HandleMessage(pauseFrame(t, 1))
+	cc.HandleMessage(stopFrame(t, 1))
+	requireState(t, procStopped, leader.Process.Pid)
+
+	// The group a Stop retained no longer has the member it was pinned by.
+	control := r.processes.(*groupProcessControl)
+	control.mu.Lock()
+	for _, group := range control.stopped[wsID] {
+		for pid := range group.members {
+			group.members[pid]--
+		}
+	}
+	control.mu.Unlock()
+
+	cc.HandleMessage(resumeFrame(t, 2))
+	time.Sleep(100 * time.Millisecond)
+	requireState(t, procStopped, leader.Process.Pid)
 }

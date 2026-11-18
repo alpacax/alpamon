@@ -98,8 +98,10 @@ func matchingProcesses(matches func(int) bool) ([]int, error) {
 }
 
 // TerminateSession includes job-control groups created by an interactive shell.
-// The caller retains the unreaped session leader, pinning its SID. Each signal
-// takes a fresh membership snapshot; PGIDs are never retained across the grace period.
+// The caller pins the SID: it retains the unreaped session leader, or it holds
+// a live member it verified by start time, since a SID with a live member is
+// never handed to a new session. Each signal takes a fresh membership snapshot;
+// PGIDs are never retained across the grace period.
 // Unix has no atomic session signal: a job can exit between revalidation and
 // kill, leaving a narrow PGID-reuse window, as in normal command exit cleanup.
 func TerminateSession(sid int, grace time.Duration) ([]int, bool, error) {
@@ -130,16 +132,30 @@ func SessionMembers(sid int) ([]int, error) {
 }
 
 func signalSession(sid int, sig syscall.Signal) (bool, error) {
+	groups, err := SignalSessionGroups(sid, sig, nil)
+	return len(groups) > 0, err
+}
+
+// SignalSessionGroups sends sig to each process group of session sid that
+// include admits, or to every group when include is nil, and returns the
+// groups it signalled. The caller pins sid as TerminateSession requires. Each
+// group is taken from a fresh membership snapshot and its member's SID and
+// PGID are read again right before the signal, so a group that left the
+// session is never signalled.
+func SignalSessionGroups(sid int, sig syscall.Signal, include func(pgid int) bool) ([]int, error) {
+	if sid <= 1 {
+		return nil, fmt.Errorf("invalid owned session %d", sid)
+	}
 	pids, err := SessionMembers(sid)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	signalled := false
+	var signalled []int
 	groups := make(map[int]bool)
 	var errs []error
 	for _, pid := range pids {
 		pgid, err := syscall.Getpgid(pid)
-		if err != nil || pgid <= 1 || groups[pgid] {
+		if err != nil || pgid <= 1 || groups[pgid] || include != nil && !include(pgid) {
 			continue
 		}
 		session, err := unix.Getsid(pid)
@@ -152,7 +168,7 @@ func signalSession(sid int, sig syscall.Signal) (bool, error) {
 		}
 		groups[pgid] = true
 		if err := syscall.Kill(-pgid, sig); err == nil {
-			signalled = true
+			signalled = append(signalled, pgid)
 		} else if !errors.Is(err, syscall.ESRCH) {
 			errs = append(errs, err)
 		}

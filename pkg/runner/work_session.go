@@ -533,6 +533,7 @@ func (r *WorkSessionRegistry) releaseCommand(id, commandID string) {
 		delete(s.commands, commandID)
 	}
 	r.mu.Unlock()
+	r.adoptProcesses(id, ownedKindCommand, commandID)
 	r.releaseIdle(id)
 }
 
@@ -559,6 +560,7 @@ func (r *WorkSessionRegistry) registerTerminal(id, terminalID, commandID string)
 			delete(s.terminals, terminalID)
 		}
 		r.mu.Unlock()
+		r.adoptProcesses(id, ownedKindTerminal, commandID)
 		r.releaseIdle(id)
 	}
 }
@@ -918,10 +920,30 @@ func (r *WorkSessionRegistry) trackProcess(id, kind, commandID string, pid int) 
 	if pid <= 1 {
 		return
 	}
-	startedAt := processStartedAt(pid)
+	session := OwnedSession{Kind: kind, CommandID: commandID, SID: pid, StartedAt: processStartedAt(pid)}
+	pinSession(session)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.session(id).processes[pid] = OwnedSession{Kind: kind, CommandID: commandID, SID: pid, StartedAt: startedAt}
+	r.session(id).processes[pid] = session
+}
+
+// adoptProcesses takes in what the finished command or terminal commandID
+// left in the process sessions it led. Call it once that work has finished.
+func (r *WorkSessionRegistry) adoptProcesses(id, kind, commandID string) {
+	r.mu.Lock()
+	s, ok := r.sessions[id]
+	var finished []OwnedSession
+	if ok {
+		for _, session := range s.processes {
+			if session.Kind == kind && session.CommandID == commandID {
+				finished = append(finished, session)
+			}
+		}
+	}
+	r.mu.Unlock()
+	for _, session := range finished {
+		adoptSession(session)
+	}
 }
 
 // pruneProcesses drops the owned process sessions that no longer have a

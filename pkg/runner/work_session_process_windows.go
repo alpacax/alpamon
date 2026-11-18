@@ -12,3 +12,9 @@ func ownedSessionAlive(OwnedSession) bool {
 func processStartedAt(int) int64 {
 	return 0
 }
+
+// pinSession does nothing: Windows tracks no process sessions.
+func pinSession(OwnedSession) {}
+
+// adoptSession does nothing: Windows tracks no process sessions.
+func adoptSession(OwnedSession) {}
