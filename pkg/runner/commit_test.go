@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/shirou/gopsutil/v4/disk"
 	gopsutilnet "github.com/shirou/gopsutil/v4/net"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -847,4 +848,22 @@ func TestFileExecCapabilityMatchesTheLane(t *testing.T) {
 	_, err := common.VerifiedFilePath()
 	assert.Equal(t, err == nil, fileExecCompiled,
 		"fileExecCompiled must follow the platforms where VerifiedFilePath succeeds")
+}
+
+func TestGetPartitionsLeavesOutAPartitionWithNoDevice(t *testing.T) {
+	original := listPartitions
+	t.Cleanup(func() { listPartitions = original })
+	listPartitions = func(bool) ([]disk.PartitionStat, error) {
+		return []disk.PartitionStat{
+			{Device: `C:\`, Mountpoint: `C:\`, Fstype: "NTFS"},
+			{}, // what gopsutil returns for a Windows drive that is not ready
+		}, nil
+	}
+
+	partitions, err := getPartitions()
+
+	require.NoError(t, err)
+	require.Len(t, partitions, 1)
+	assert.Equal(t, `C:\`, partitions[0].Name)
+	assert.Equal(t, []string{`C:\`}, partitions[0].MountPoints)
 }

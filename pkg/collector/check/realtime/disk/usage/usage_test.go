@@ -125,6 +125,22 @@ func (suite *DiskUsageCheckSuite) TestParseDiskUsageFlagsAgentVolume() {
 	assert.Equal(suite.T(), "/dev/sdb1", flaggedDevice, "the entry backing the nested mountpoint should be flagged, not the root entry")
 }
 
+func (suite *DiskUsageCheckSuite) TestCollectDiskPartitionsLeavesOutAPartitionWithNoDevice() {
+	originalListPartitions := listPartitions
+	defer func() { listPartitions = originalListPartitions }()
+	listPartitions = func(bool) ([]disk.PartitionStat, error) {
+		return []disk.PartitionStat{
+			{Device: "/dev/sda1", Mountpoint: "/", Fstype: "ext4"},
+			{}, // what gopsutil returns for a Windows drive that is not ready
+		}, nil
+	}
+
+	partitions, err := suite.check.collectDiskPartitions()
+
+	suite.Require().NoError(err)
+	assert.NotContains(suite.T(), partitions, disk.PartitionStat{})
+}
+
 func TestDiskUsageCheckSuite(t *testing.T) {
 	suite.Run(t, new(DiskUsageCheckSuite))
 }
