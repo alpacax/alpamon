@@ -147,9 +147,9 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 	}
 
 	ctx, releaseWorkSession, refusal := cr.admitWorkSession(ctx)
-	if refusal != "" {
+	if refusal != nil {
 		exitCode = 1
-		result = refusal
+		result = fmt.Sprintf("Refused: %v.", refusal)
 		return nil
 	}
 	defer releaseWorkSession()
@@ -232,16 +232,16 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 }
 
 // admitWorkSession admits a command attributed to a Work Session, binding
-// it to the session in the returned context. A non-empty refusal means the
-// command must not start.
-func (cr *CommandRunner) admitWorkSession(ctx context.Context) (context.Context, func(), string) {
+// it to the session in the returned context. An error means the command
+// must not start.
+func (cr *CommandRunner) admitWorkSession(ctx context.Context) (context.Context, func(), error) {
 	ws, err := cr.command.WorkSession(&cr.data)
 	if err != nil {
 		log.Warn().Err(err).Str("command_id", cr.command.ID).Msg("Refused a command with invalid work session attribution")
-		return ctx, nil, "Refused: invalid work session attribution."
+		return ctx, nil, errWorkSessionAttribution
 	}
 	if ws.ID == "" {
-		return ctx, func() {}, ""
+		return ctx, func() {}, nil
 	}
 	if cr.workSessions == nil {
 		err = errWorkSessionNoRegistry
@@ -252,7 +252,7 @@ func (cr *CommandRunner) admitWorkSession(ctx context.Context) (context.Context,
 	}
 	if err != nil {
 		log.Info().Err(err).Str("command_id", cr.command.ID).Str("work_session_id", ws.ID).Msg("Refused a work session command")
-		return ctx, nil, fmt.Sprintf("Refused: %v.", err)
+		return ctx, nil, err
 	}
-	return withWorkSession(ctx, &workSessionBinding{registry: cr.workSessions, id: ws.ID}), release, ""
+	return withWorkSession(ctx, &workSessionBinding{registry: cr.workSessions, id: ws.ID}), release, nil
 }

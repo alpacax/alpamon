@@ -79,6 +79,7 @@ var (
 	errWorkSessionExpired      = errors.New("work session has expired")
 	errWorkSessionStale        = errors.New("work session revision is stale")
 	errWorkSessionNoRegistry   = errors.New("work session control is not available")
+	errWorkSessionAttribution  = errors.New("invalid work session attribution")
 
 	// errProcessControlUnsupported is what a WorkSessionProcessController
 	// returns for a process action this host cannot perform.
