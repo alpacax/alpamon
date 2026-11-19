@@ -78,6 +78,9 @@ Assert with [testify](https://github.com/stretchr/testify): `require` when a fai
 ```bash
 # Run the static checks used by CI
 go vet ./...
+
+# Run the additional lint CI checks for the Linux target
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 golangci-lint run --timeout=5m
 ```
 
 ### Running locally

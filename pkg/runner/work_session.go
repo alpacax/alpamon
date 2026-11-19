@@ -852,7 +852,7 @@ func (r *WorkSessionRegistry) decideTransition(msg workSessionControl, s *tracke
 		r.forget(msg.WorkSessionID, s)
 		return WorkSessionControlResult{}, false, true
 	case revision == s.revision && s.transitionID == msg.TransitionID && s.state == target && s.lastResult != nil &&
-		!(end && len(s.lastResult.Survivors) > 0 && len(s.processes) > 0):
+		(!end || len(s.lastResult.Survivors) == 0 || len(s.processes) == 0):
 		// A resent End whose receipt reported survivors still tracked runs
 		// again to reach them.
 		return *s.lastResult, true, true
