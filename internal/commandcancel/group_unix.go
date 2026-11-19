@@ -5,6 +5,8 @@ package commandcancel
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"os"
 	"runtime"
 	"slices"
 	"syscall"
@@ -65,17 +67,25 @@ func terminate(signal func(syscall.Signal) error, members func() ([]int, error),
 }
 
 func GroupMembers(pgid int) ([]int, error) {
-	return matchingProcesses(func(pid int) bool { group, err := syscall.Getpgid(pid); return err == nil && group == pgid })
+	return matchingProcesses(func(pid int) (bool, error) { group, err := syscall.Getpgid(pid); return group == pgid, err })
 }
 
-func matchingProcesses(matches func(int) bool) ([]int, error) {
+func matchingProcesses(matches func(int) (bool, error)) ([]int, error) {
 	pids, err := process.Pids()
 	if err != nil {
 		return nil, err
 	}
 	var alive []int
+	var errs []error
 	for _, pid := range pids {
-		if !matches(int(pid)) {
+		matched, err := matches(int(pid))
+		if err != nil {
+			if !processGone(err) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		if !matched {
 			continue
 		}
 		if runtime.GOOS == "darwin" {
@@ -84,17 +94,27 @@ func matchingProcesses(matches func(int) bool) ([]int, error) {
 		}
 		p, err := process.NewProcess(pid)
 		if err != nil {
+			if processGone(err) {
+				continue
+			}
+			errs = append(errs, err)
 			alive = append(alive, int(pid))
 			continue
 		}
 		statuses, err := p.Status()
+		if err != nil {
+			if processGone(err) {
+				continue
+			}
+			errs = append(errs, err)
+		}
 		if err == nil && slices.Contains(statuses, process.Zombie) {
 			continue
 		}
 		alive = append(alive, int(pid))
 	}
 	slices.Sort(alive)
-	return alive, nil
+	return alive, errors.Join(errs...)
 }
 
 // TerminateSession includes job-control groups created by an interactive shell.
@@ -171,7 +191,151 @@ func HangupSession(sid int) error {
 }
 
 func SessionMembers(sid int) ([]int, error) {
-	return matchingProcesses(func(pid int) bool { session, err := unix.Getsid(pid); return err == nil && session == sid })
+	return matchingProcesses(func(pid int) (bool, error) { session, err := unix.Getsid(pid); return session == sid, err })
+}
+
+func processGone(err error) bool {
+	return errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrNotExist) || errors.Is(err, process.ErrorProcessNotRunning)
+}
+
+// SessionMember records a process identity and its observed process group.
+type SessionMember struct {
+	StartedAt int64
+	PGID      int
+}
+
+type pinnedSignalOps struct {
+	started func(int) (int64, error)
+	sid     func(int) (int, error)
+	pgid    func(int) (int, error)
+	signal  func(int, syscall.Signal) error
+}
+
+func memberStartedAt(pid int) (int64, error) {
+	p, err := process.NewProcess(int32(pid))
+	if err != nil {
+		return 0, err
+	}
+	return p.CreateTime()
+}
+
+// SignalPinnedSessionGroups signals the supplied groups after checking each member.
+func SignalPinnedSessionGroups(sid int, members map[int]SessionMember, sig syscall.Signal) ([]int, error) {
+	return signalPinnedSessionGroups(sid, members, sig, pinnedSignalOps{started: memberStartedAt, sid: unix.Getsid, pgid: syscall.Getpgid, signal: syscall.Kill})
+}
+
+func signalPinnedSessionGroups(sid int, members map[int]SessionMember, sig syscall.Signal, ops pinnedSignalOps) ([]int, error) {
+	if sid <= 1 {
+		return nil, fmt.Errorf("invalid owned session %d", sid)
+	}
+	var groups []int
+	var errs []error
+	for _, pid := range slices.Sorted(maps.Keys(members)) {
+		member := members[pid]
+		if slices.Contains(groups, member.PGID) {
+			continue
+		}
+		if pid <= 1 || member.StartedAt == 0 || member.PGID <= 1 {
+			errs = append(errs, ErrSessionUnverified)
+			continue
+		}
+		valid := true
+		for range 2 {
+			if err := checkPinnedMember(sid, pid, member, ops); err != nil {
+				if !processGone(err) {
+					errs = append(errs, err)
+				}
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			continue
+		}
+		if err := ops.signal(-member.PGID, sig); err != nil {
+			if !processGone(err) {
+				errs = append(errs, err)
+			}
+		} else {
+			groups = append(groups, member.PGID)
+		}
+	}
+	return groups, errors.Join(errs...)
+}
+
+func checkPinnedMember(sid, pid int, member SessionMember, ops pinnedSignalOps) error {
+	started, err := ops.started(pid)
+	if err != nil {
+		return err
+	}
+	if started != member.StartedAt {
+		return ErrSessionUnverified
+	}
+	current, err := ops.sid(pid)
+	if err != nil {
+		return err
+	}
+	if current != sid {
+		return ErrSessionUnverified
+	}
+	current, err = ops.pgid(pid)
+	if err != nil {
+		return err
+	}
+	if current != member.PGID {
+		return ErrSessionUnverified
+	}
+	return nil
+}
+
+// TerminatePinnedSession refreshes identities before each termination signal.
+func TerminatePinnedSession(sid int, grace time.Duration, verified func() (map[int]SessionMember, error)) ([]int, bool, error) {
+	return terminatePinnedSession(sid, grace, verified, SignalPinnedSessionGroups, SessionMembers)
+}
+
+func terminatePinnedSession(sid int, grace time.Duration, verified func() (map[int]SessionMember, error), signal func(int, map[int]SessionMember, syscall.Signal) ([]int, error), list func(int) ([]int, error)) ([]int, bool, error) {
+	if sid <= 1 {
+		return nil, false, fmt.Errorf("invalid owned session %d", sid)
+	}
+	sent, lost := false, false
+	var errs []error
+	lookup := func() (map[int]SessionMember, error) {
+		members, err := verified()
+		if err == nil && members == nil {
+			err = ErrSessionUnverified
+		}
+		if err != nil {
+			lost = true
+			errs = append(errs, err)
+		}
+		return members, err
+	}
+	survivors, err := terminate(func(sig syscall.Signal) error {
+		if lost {
+			return nil
+		}
+		members, err := lookup()
+		if err != nil {
+			return err
+		}
+		groups, err := signal(sid, members, sig)
+		sent = sent || len(groups) > 0
+		if err != nil {
+			errs = append(errs, err)
+			lost = true
+		}
+		return err
+	}, func() ([]int, error) {
+		if !lost {
+			members, err := lookup()
+			if err == nil {
+				return slices.Sorted(maps.Keys(members)), nil
+			}
+		}
+		members, err := list(sid)
+		return members, errors.Join(append(errs, err)...)
+	}, grace)
+	return survivors, sent, errors.Join(append(errs, err)...)
 }
 
 func signalSession(sid int, sig syscall.Signal) (bool, error) {

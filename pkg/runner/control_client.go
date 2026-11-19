@@ -135,6 +135,9 @@ func (cc *ControlClient) reconnectAfterSilence(ctx context.Context, conn *websoc
 
 	cc.mu.Lock()
 	if cc.Conn == conn {
+		if cc.workSessions != nil {
+			cc.workSessions.invalidateAll()
+		}
 		cc.Conn = nil
 		cc.keepalive = nil
 		cc.connected = false
@@ -167,6 +170,10 @@ func (cc *ControlClient) Connect(ctx context.Context) error {
 
 		ka := newConnKeepalive()
 		watchPongs(conn, ka)
+		var reconcileIDs []string
+		if cc.workSessions != nil {
+			reconcileIDs = cc.workSessions.invalidateAll()
+		}
 
 		cc.mu.Lock()
 		cc.Conn = conn
@@ -180,7 +187,7 @@ func (cc *ControlClient) Connect(ctx context.Context) error {
 		// Control messages sent while the socket was down are lost, so every
 		// tracked session is fenced until the server's state is read again.
 		if cc.workSessions != nil {
-			go cc.workSessions.reconcileAll(ctx)
+			go cc.workSessions.reconcileIDs(ctx, reconcileIDs)
 		}
 		return nil
 	})
@@ -211,6 +218,9 @@ func (cc *ControlClient) CloseAndReconnect(ctx context.Context) error {
 
 // Close cleanly closes the WebSocket connection
 func (cc *ControlClient) Close() {
+	if cc.workSessions != nil {
+		cc.workSessions.invalidateAll()
+	}
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 

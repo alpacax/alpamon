@@ -190,12 +190,21 @@ func (pc *PtyClient) initializeSession(ctx context.Context) error {
 		opts = append(opts, conpty.ConPtyWorkDir(pc.homeDirectory))
 	}
 
+	releaseStart, err := pc.workSession.beginProcessStart()
+	if err != nil {
+		return fmt.Errorf("work session refused terminal start: %w", err)
+	}
+	defer releaseStart()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	pc.cpty, err = conpty.Start(commandLine, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to start ConPTY: %w", err)
 	}
 
 	pc.manager.Register(pc.sessionID, pc)
+	pc.workSession.trackTerminalProcess(pc.commandID, pc.cpty.Pid())
 
 	log.Info().Str("sessionID", pc.sessionID).Int("pid", pc.cpty.Pid()).
 		Msg("ConPTY session started.")
@@ -233,20 +242,6 @@ func (pc *PtyClient) writeInput(msg []byte) error {
 	return err
 }
 
-func (pc *PtyClient) writeToPty(ctx context.Context, cancel context.CancelFunc) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case msg := <-pc.wsToPty:
-			if err := pc.writeInput(msg); err != nil {
-				cancel()
-				return
-			}
-		}
-	}
-}
-
 func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.CancelFunc) {
 	for {
 		select {
@@ -267,9 +262,7 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 				cancel()
 				return
 			}
-			select {
-			case pc.wsToPty <- msg:
-			case <-ctx.Done():
+			if !pc.enqueueInput(ctx, msg) {
 				return
 			}
 		}

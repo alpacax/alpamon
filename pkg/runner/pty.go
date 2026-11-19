@@ -138,6 +138,14 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 	}
 
 	initialSize := &pty.Winsize{Rows: pc.rows, Cols: pc.cols}
+	releaseStart, err := pc.workSession.beginProcessStart()
+	if err != nil {
+		return fmt.Errorf("work session refused terminal start: %w", err)
+	}
+	defer releaseStart()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	pc.ptmx, err = pty.StartWithSize(pc.cmd, initialSize)
 	if err != nil {
 		return fmt.Errorf("failed to start pty: %w", err)
@@ -359,9 +367,7 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 				}
 				continue
 			}
-			select {
-			case pc.wsToPty <- msg:
-			case <-ctx.Done():
+			if !pc.enqueueInput(ctx, msg) {
 				return
 			}
 		}
@@ -377,20 +383,6 @@ func (pc *PtyClient) writeInput(msg []byte) error {
 	}
 	_, err := pc.ptmx.Write(msg)
 	return err
-}
-
-func (pc *PtyClient) writeToPty(ctx context.Context, cancel context.CancelFunc) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case msg := <-pc.wsToPty:
-			if err := pc.writeInput(msg); err != nil {
-				cancel()
-				return
-			}
-		}
-	}
 }
 
 func (pc *PtyClient) readFromPty(ctx context.Context, cancel context.CancelFunc) {

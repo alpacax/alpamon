@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"sync"
 	"syscall"
@@ -36,10 +37,41 @@ type groupProcessControl struct {
 	cancel    func(commandID string)
 	grace     time.Duration
 	readState func(int) (procState, error)
+	readArgs  func(int) ([]string, error)
+	table     sessionProcessTable
 }
 
 func newProcessControl(cancel func(commandID string)) WorkSessionProcessController {
-	return &groupProcessControl{stopped: map[string]map[groupKey]*stoppedGroup{}, cancel: cancel, grace: commandcancel.GracePeriod, readState: processState}
+	return &groupProcessControl{
+		stopped:   map[string]map[groupKey]*stoppedGroup{},
+		cancel:    cancel,
+		grace:     commandcancel.GracePeriod,
+		readState: processState,
+		readArgs:  processArgs,
+		table:     systemProcessTable(),
+	}
+}
+
+func processArgs(pid int) ([]string, error) {
+	p, err := process.NewProcess(int32(pid))
+	if err != nil {
+		return nil, err
+	}
+	return p.CmdlineSlice()
+}
+
+type sessionProcessTable struct {
+	members func(int) ([]int, error)
+	started func(int) (int64, error)
+	pgid    func(int) (int, error)
+}
+
+func systemProcessTable() sessionProcessTable {
+	return sessionProcessTable{members: commandcancel.SessionMembers, started: processStartTime, pgid: syscall.Getpgid}
+}
+
+func processGone(err error) bool {
+	return errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrNotExist) || errors.Is(err, process.ErrorProcessNotRunning)
 }
 
 // sessionKey names one owned process session: its SID and its leader's
@@ -85,22 +117,30 @@ var sessionPins = struct {
 // pinSession starts tracking session while its leader runs. A session whose
 // leader start time is unknown is never owned.
 func pinSession(session OwnedSession) {
-	if len(verifiedMembers(session)) == 0 {
+	pinSessionWithTable(session, systemProcessTable(), processState)
+}
+
+func pinSessionWithTable(session OwnedSession, table sessionProcessTable, readState func(int) (procState, error)) {
+	if session.SID <= 1 || session.StartedAt == 0 {
 		return
 	}
 	sessionPins.mu.Lock()
 	pin := sessionPins.m[keyOf(session)]
-	if pin == nil || pin.stop != nil {
+	if pin != nil && pin.stop != nil {
 		sessionPins.mu.Unlock()
 		return
 	}
+	if pin == nil {
+		pin = &sessionPin{members: map[int]int64{session.SID: session.StartedAt}}
+		sessionPins.m[keyOf(session)] = pin
+	}
 	pin.stop, pin.done = make(chan struct{}), make(chan struct{})
 	sessionPins.mu.Unlock()
-	go observeSession(session, pin)
+	_, _ = refreshSessionPinWithTable(session, pin, table)
+	go observeSessionWithTable(session, pin, table, readState)
 }
 
-// observeSession samples membership until the recorded leader exits.
-func observeSession(session OwnedSession, pin *sessionPin) {
+func observeSessionWithTable(session OwnedSession, pin *sessionPin, table sessionProcessTable, readState func(int) (procState, error)) {
 	defer close(pin.done)
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -109,13 +149,27 @@ func observeSession(session OwnedSession, pin *sessionPin) {
 		case <-pin.stop:
 			return
 		case <-ticker.C:
-			if processStartedAt(session.SID) != session.StartedAt {
+			started, err := table.started(session.SID)
+			if err != nil {
+				if processGone(err) {
+					return
+				}
+				continue
+			}
+			if started == 0 {
+				continue
+			}
+			if started != session.StartedAt {
 				return
 			}
-			if refreshSessionPin(session, pin) == nil {
+			members, err := refreshSessionPinWithTable(session, pin, table)
+			if err != nil {
+				continue
+			}
+			if len(members) == 0 {
 				return
 			}
-			if state, err := processState(session.SID); err == nil && state == procZombie {
+			if state, err := readState(session.SID); (err == nil && state == procZombie) || processGone(err) {
 				return
 			}
 		}
@@ -158,22 +212,68 @@ func ownedMembers(sessions []OwnedSession) []ownedMember {
 }
 
 func ownedMembersWithState(sessions []OwnedSession, readState func(int) (procState, error)) []ownedMember {
-	self := syscall.Getpgrp()
+	members, _ := lookupOwnedMembers(sessions, readState, systemProcessTable())
+	return members
+}
+
+func lookupOwnedMembers(sessions []OwnedSession, readState func(int) (procState, error), table sessionProcessTable) ([]ownedMember, error) {
 	var members []ownedMember
+	var errs []error
 	for _, session := range sessions {
-		starts := verifiedMembers(session)
-		for _, pid := range slices.Sorted(maps.Keys(starts)) {
-			if state, err := readState(pid); err == nil && state == procZombie {
-				continue
-			}
-			pgid, err := syscall.Getpgid(pid)
-			if err != nil || pgid <= 1 || pgid == self {
-				continue
-			}
-			members = append(members, ownedMember{session: session, pid: pid, pgid: pgid, started: starts[pid]})
+		observed, err := observedSessionMembers(session, readState, table)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		for _, pid := range slices.Sorted(maps.Keys(observed)) {
+			member := observed[pid]
+			members = append(members, ownedMember{session: session, pid: pid, pgid: member.PGID, started: member.StartedAt})
 		}
 	}
-	return members
+	return members, errors.Join(errs...)
+}
+
+func observedSessionMembers(session OwnedSession, readState func(int) (procState, error), table sessionProcessTable) (map[int]commandcancel.SessionMember, error) {
+	starts, err := refreshSessionPinWithTable(session, nil, table)
+	if err != nil || starts == nil {
+		return nil, err
+	}
+	self := syscall.Getpgrp()
+	members := map[int]commandcancel.SessionMember{}
+	var errs []error
+	for _, pid := range slices.Sorted(maps.Keys(starts)) {
+		state, err := readState(pid)
+		if err != nil {
+			if processGone(err) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("read process %d state: %w", pid, err))
+		} else if state == procZombie {
+			continue
+		}
+		pgid, err := table.pgid(pid)
+		if err != nil {
+			if !processGone(err) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		if pgid <= 1 || pgid == self {
+			continue
+		}
+		members[pid] = commandcancel.SessionMember{StartedAt: starts[pid], PGID: pgid}
+	}
+	if len(members) == 0 && len(starts) > 0 && len(errs) == 0 {
+		remaining, err := table.members(session.SID)
+		if err != nil {
+			return nil, err
+		}
+		for _, pid := range remaining {
+			if _, known := starts[pid]; !known {
+				return nil, commandcancel.ErrSessionUnverified
+			}
+		}
+	}
+	return members, errors.Join(errs...)
 }
 
 // State reads do not establish identity; an unreaped member can still pin it.
@@ -184,17 +284,40 @@ func verifiedMembers(session OwnedSession) map[int]int64 {
 // refreshSessionPin lets an observer update only the pin it started with;
 // an in-flight observation cannot recreate a pin removed by unpinSession.
 func refreshSessionPin(session OwnedSession, expected *sessionPin) map[int]int64 {
+	starts, _ := refreshSessionPinWithTable(session, expected, systemProcessTable())
+	return starts
+}
+
+func refreshSessionPinWithTable(session OwnedSession, expected *sessionPin, table sessionProcessTable) (map[int]int64, error) {
 	if session.SID <= 1 || session.StartedAt == 0 {
-		return nil
+		return nil, nil
 	}
-	pids, err := commandcancel.SessionMembers(session.SID)
+	pids, err := table.members(session.SID)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	starts := map[int]int64{}
 	for _, pid := range pids {
-		if started := processStartedAt(pid); started != 0 {
+		started, err := table.started(pid)
+		if err != nil {
+			if processGone(err) {
+				continue
+			}
+			return nil, err
+		}
+		if started != 0 {
 			starts[pid] = started
+		} else {
+			return nil, fmt.Errorf("process %d start time unavailable", pid)
+		}
+	}
+	if len(starts) == 0 {
+		remaining, err := table.members(session.SID)
+		if err != nil {
+			return nil, err
+		}
+		if len(remaining) > 0 {
+			return nil, commandcancel.ErrSessionUnverified
 		}
 	}
 
@@ -205,11 +328,15 @@ func refreshSessionPin(session OwnedSession, expected *sessionPin) map[int]int64
 	verified := starts[session.SID] == session.StartedAt
 	pin, ok := sessionPins.m[key]
 	if expected != nil && pin != expected {
-		return nil
+		return nil, nil
+	}
+	if len(starts) == 0 {
+		removeSessionPin(key)
+		return starts, nil
 	}
 	if !ok {
 		if !verified {
-			return nil
+			return nil, nil
 		}
 		pin = &sessionPin{}
 		sessionPins.m[key] = pin
@@ -222,27 +349,42 @@ func refreshSessionPin(session OwnedSession, expected *sessionPin) map[int]int64
 	}
 	if !verified {
 		removeSessionPin(key)
-		return nil
+		return nil, nil
 	}
 	pin.members = starts
-	return starts
+	return starts, nil
 }
 
 func ownedSessionAlive(session OwnedSession) bool {
-	return len(ownedMembers([]OwnedSession{session})) > 0
+	alive, err := ownedSessionStatus(session)
+	return alive || err != nil
+}
+
+func ownedSessionStatus(session OwnedSession) (bool, error) {
+	return ownedSessionStatusWithTable(session, systemProcessTable())
+}
+
+func ownedSessionStatusWithTable(session OwnedSession, table sessionProcessTable) (bool, error) {
+	members, err := lookupOwnedMembers([]OwnedSession{session}, processState, table)
+	return len(members) > 0, err
 }
 
 // processStartedAt returns the start time of pid in Unix milliseconds, or 0.
 func processStartedAt(pid int) int64 {
+	started, _ := processStartTime(pid)
+	return started
+}
+
+func processStartTime(pid int) (int64, error) {
 	p, err := process.NewProcess(int32(pid))
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	started, err := p.CreateTime()
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return started
+	return started, nil
 }
 
 func treesOf(members []ownedMember) uint32 {
@@ -284,9 +426,15 @@ func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, e
 	var errs []error
 	deadline := time.Now().Add(stopSettle)
 	for {
-		members := ownedMembersWithState(owned.Sessions, c.readState)
+		members, lookupErr := lookupOwnedMembers(owned.Sessions, c.readState, c.table)
 		if effect.AffectedTrees == 0 {
 			effect.AffectedTrees = treesOf(members)
+		}
+		if lookupErr != nil {
+			for _, member := range members {
+				effect.Survivors = append(effect.Survivors, survivorOf(member))
+			}
+			return effect, errors.Join(errors.Join(errs...), lookupErr, errProcessSurvivors)
 		}
 		var running []ownedMember
 		var unreadable []ownedMember
@@ -323,7 +471,8 @@ func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, e
 					pending[member.pgid] = true
 				}
 			}
-			signalled, err := commandcancel.SignalSessionGroups(session.SID, syscall.SIGSTOP, func(pgid int) bool { return pending[pgid] })
+			pins := memberPins(members, session, func(member ownedMember) bool { return pending[member.pgid] })
+			signalled, err := commandcancel.SignalPinnedSessionGroups(session.SID, pins, syscall.SIGSTOP)
 			if err != nil {
 				errs = append(errs, err)
 			}
@@ -349,16 +498,18 @@ func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, e
 // and still the groups it suspended, and to no other group.
 func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffect, error) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	stopped := c.stopped[id]
-	delete(c.stopped, id)
-	c.mu.Unlock()
 	if len(stopped) == 0 {
 		return ProcessEffect{}, nil
 	}
 
 	var continued []ownedMember
 	var errs []error
-	members := ownedMembers(owned.Sessions)
+	members, lookupErr := lookupOwnedMembers(owned.Sessions, c.readState, c.table)
+	if lookupErr != nil {
+		return ProcessEffect{}, lookupErr
+	}
 	for key, group := range stopped {
 		var current []ownedMember
 		pinned := false
@@ -374,7 +525,13 @@ func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffec
 			}
 			continue
 		}
-		signalled, err := commandcancel.SignalSessionGroups(key.session.sid, syscall.SIGCONT, func(pgid int) bool { return pgid == key.pgid })
+		pins := map[int]commandcancel.SessionMember{}
+		for _, member := range current {
+			if group.members[member.pid] == member.started {
+				pins[member.pid] = commandcancel.SessionMember{StartedAt: member.started, PGID: member.pgid}
+			}
+		}
+		signalled, err := commandcancel.SignalPinnedSessionGroups(key.session.sid, pins, syscall.SIGCONT)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -382,7 +539,20 @@ func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffec
 			continued = append(continued, current...)
 		}
 	}
+	if len(errs) == 0 {
+		delete(c.stopped, id)
+	}
 	return ProcessEffect{AffectedTrees: treesOf(continued)}, errors.Join(errs...)
+}
+
+func memberPins(members []ownedMember, session OwnedSession, include func(ownedMember) bool) map[int]commandcancel.SessionMember {
+	pins := map[int]commandcancel.SessionMember{}
+	for _, member := range members {
+		if member.session == session && (include == nil || include(member)) {
+			pins[member.pid] = commandcancel.SessionMember{StartedAt: member.started, PGID: member.pgid}
+		}
+	}
+	return pins
 }
 
 // End cancels every owned command and terminal, then continues every owned
@@ -405,12 +575,19 @@ func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, er
 		}
 	}()
 
-	members := ownedMembers(owned.Sessions)
+	members, lookupErr := lookupOwnedMembers(owned.Sessions, c.readState, c.table)
 	sessions := sessionsOf(members)
 	var errs []error
+	if lookupErr != nil {
+		errs = append(errs, lookupErr)
+		for _, session := range owned.Sessions {
+			survived[keyOf(session)] = true
+		}
+	}
 	for _, session := range sessions {
-		if _, err := commandcancel.SignalSessionGroups(session.SID, syscall.SIGCONT, nil); err != nil {
+		if _, err := commandcancel.SignalPinnedSessionGroups(session.SID, memberPins(members, session, nil), syscall.SIGCONT); err != nil {
 			errs = append(errs, err)
+			survived[keyOf(session)] = true
 		}
 	}
 	if c.cancel != nil {
@@ -423,23 +600,17 @@ func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, er
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	for _, session := range sessions {
+		baseline := memberPins(members, session, nil)
 		wg.Go(func() {
-			survivors, _, err := commandcancel.TerminateVerifiedSession(session.SID, c.grace, func() ([]int, bool) {
-				starts := verifiedMembers(session)
-				var live []int
-				for _, pid := range slices.Sorted(maps.Keys(starts)) {
-					if state, err := processState(pid); err != nil || state != procZombie {
-						live = append(live, pid)
-					}
-				}
-				return live, starts != nil
+			survivors, _, err := commandcancel.TerminatePinnedSession(session.SID, c.grace, func() (map[int]commandcancel.SessionMember, error) {
+				return terminationSessionMembers(session, baseline, c.readState, c.table)
 			})
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
 				errs = append(errs, err)
 			}
-			survived[keyOf(session)] = len(survivors) > 0
+			survived[keyOf(session)] = survived[keyOf(session)] || len(survivors) > 0 || err != nil
 			for _, pid := range survivors {
 				pgid, _ := syscall.Getpgid(pid)
 				effect.Survivors = append(effect.Survivors, WorkSessionSurvivor{CommandID: session.CommandID, PID: pid, PGID: pgid})
@@ -453,12 +624,37 @@ func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, er
 	return effect, errors.Join(errs...)
 }
 
-// Inventory lists every live process of the owned sessions.
+func terminationSessionMembers(session OwnedSession, baseline map[int]commandcancel.SessionMember, readState func(int) (procState, error), table sessionProcessTable) (map[int]commandcancel.SessionMember, error) {
+	members, err := observedSessionMembers(session, readState, table)
+	if err != nil || len(members) == 0 {
+		return members, err
+	}
+	for pid, initial := range baseline {
+		if current, ok := members[pid]; ok && current.StartedAt == initial.StartedAt {
+			return members, nil
+		}
+	}
+	return nil, nil
+}
+
+// Inventory includes metadata for at most workSessionInventoryLimit entries,
+// followed by one basic entry when the caller must mark the report truncated.
 func (c *groupProcessControl) Inventory(owned OwnedWork) ([]WorkSessionProcess, error) {
 	entries := []WorkSessionProcess{}
-	for _, member := range ownedMembers(owned.Sessions) {
-		state, err := processState(member.pid)
-		if err != nil || state == procZombie {
+	members, lookupErr := lookupOwnedMembers(owned.Sessions, c.readState, c.table)
+	for _, member := range members {
+		if len(entries) == workSessionInventoryLimit {
+			entries = append(entries, WorkSessionProcess{Kind: member.session.Kind, CommandID: member.session.CommandID, PID: member.pid})
+			break
+		}
+		state, err := c.readState(member.pid)
+		if err != nil {
+			if !processGone(err) {
+				lookupErr = errors.Join(lookupErr, err)
+			}
+			continue
+		}
+		if state == procZombie {
 			continue
 		}
 		entry := WorkSessionProcess{
@@ -472,17 +668,15 @@ func (c *groupProcessControl) Inventory(owned OwnedWork) ([]WorkSessionProcess, 
 		if state == procStopped {
 			entry.State = processStopped
 		}
-		if started := processStartedAt(member.pid); started != 0 {
-			entry.StartedAt = time.UnixMilli(started).UTC().Format(time.RFC3339Nano)
+		if member.started != 0 {
+			entry.StartedAt = time.UnixMilli(member.started).UTC().Format(time.RFC3339Nano)
 		}
-		if p, err := process.NewProcess(int32(member.pid)); err == nil {
-			if args, err := p.CmdlineSlice(); err == nil {
-				entry.Args = cutArgs(args, workSessionArgsLimit)
-			}
+		if args, err := c.readArgs(member.pid); err == nil {
+			entry.Args = cutArgs(args, workSessionArgsLimit)
 		}
 		entries = append(entries, entry)
 	}
-	return entries, nil
+	return entries, lookupErr
 }
 
 // procState is what processState observed of one process.

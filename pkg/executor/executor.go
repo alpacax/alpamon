@@ -321,11 +321,27 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 // runCommand uses Start/Wait so platform cleanup can attach process groups or jobs. ctx is the one
 // cmd was built with; its error names why the Cancel hook fired.
 func (e *Executor) runCommand(ctx context.Context, cmd *exec.Cmd, commandID string, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
-	if observer := common.ProcessObserverFromContext(ctx); observer != nil {
+	releaseStart := func() {}
+	guard := common.ProcessStartGuardFromContext(ctx)
+	if guard != nil {
+		release, err := guard()
+		if err != nil {
+			return nil, err
+		}
+		if release != nil {
+			releaseStart = sync.OnceFunc(release)
+		}
+		defer releaseStart()
+	}
+	observer := common.ProcessObserverFromContext(ctx)
+	if observer != nil || guard != nil {
 		originalHook := pidHook
 		pidHook = func(pid int) {
+			defer releaseStart()
 			invokePIDHook(originalHook, pid)
-			observer(commandID, pid)
+			if observer != nil {
+				observer(commandID, pid)
+			}
 		}
 	}
 	cleanup, err := configureProcessTreeCleanup(cmd, pidHook != nil)

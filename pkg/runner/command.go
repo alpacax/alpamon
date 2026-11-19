@@ -254,12 +254,14 @@ func (cr *CommandRunner) admitWorkSession(ctx context.Context) (context.Context,
 		log.Info().Err(err).Str("command_id", cr.command.ID).Str("work_session_id", ws.ID).Msg("Refused a work session command")
 		return ctx, nil, err
 	}
-	ctx = withWorkSession(ctx, &workSessionBinding{registry: cr.workSessions, id: ws.ID})
+	binding := &workSessionBinding{registry: cr.workSessions, id: ws.ID}
+	ctx = withWorkSession(ctx, binding)
+	ctx = common.WithProcessStartGuard(ctx, binding.beginProcessStart)
 	admittedCommandID := cr.command.ID
 	return common.WithProcessObserver(ctx, func(commandID string, pid int) {
 		if commandID == "" {
 			commandID = admittedCommandID
 		}
-		TrackWorkSessionProcess(ctx, commandID, pid)
+		binding.registry.trackProcess(binding.id, ownedKindCommand, commandID, pid)
 	}), release, nil
 }
