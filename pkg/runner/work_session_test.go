@@ -491,6 +491,33 @@ func TestReconcileToEndedEndsTheOwnedProcesses(t *testing.T) {
 	assert.Equal(t, uint32(1), ended.AffectedTrees, "the receipt counts what the reconciled End reached")
 }
 
+func TestResentEndRetriesTheSurvivorsItReported(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newTestRegistry(server)
+	survivor := WorkSessionSurvivor{CommandID: "cmd-1", PID: 4242, PGID: 4242}
+	control := &recordingControl{endEffects: []ProcessEffect{
+		{AffectedTrees: 1, Survivors: []WorkSessionSurvivor{survivor}},
+		{AffectedTrees: 1, Survivors: []WorkSessionSurvivor{}},
+	}}
+	r.processes = control
+	r.sessionAlive = func(OwnedSession) bool { return true }
+	cc := &ControlClient{workSessions: r}
+	r.trackProcess(wsID, ownedKindCommand, "cmd-1", 4242)
+
+	end := controlFrame(t, "work_session_end", 2, "ended", "human_end")
+	cc.HandleMessage(end)
+	require.Equal(t, []WorkSessionSurvivor{survivor}, server.lastResult(t).Survivors)
+
+	cc.HandleMessage(end)
+	require.Equal(t, 2, control.endCount(), "a resent End reaches the survivors the last one reported")
+	require.Len(t, control.ends[1].Sessions, 1)
+	assert.Equal(t, 4242, control.ends[1].Sessions[0].SID)
+	assert.Empty(t, server.lastResult(t).Survivors)
+
+	cc.HandleMessage(end)
+	assert.Equal(t, 2, control.endCount(), "an End that left no survivor is answered from its receipt")
+}
+
 func TestStaleStopOnAnUntrackedSessionReportsAValidState(t *testing.T) {
 	server := &fakeControlServer{}
 	r := newTestRegistry(server)

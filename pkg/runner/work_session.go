@@ -680,15 +680,17 @@ func (r *WorkSessionRegistry) endReconciled(id string, s *trackedWorkSession) {
 	r.forget(id, s)
 }
 
-// endProcesses runs End on every process the session owns. The sessions are
-// not tracked further: End reports what survived. Call it without r.mu.
+// endProcesses runs End on every process the session owns. A process
+// session that still has a live member afterwards stays tracked, so a resent
+// End retries the survivors this one reported. Call it without r.mu.
 func (r *WorkSessionRegistry) endProcesses(id string, s *trackedWorkSession) (ProcessEffect, error) {
 	r.pruneProcesses(id)
 	r.mu.Lock()
 	owned := s.owned()
-	clear(s.processes)
 	r.mu.Unlock()
-	return r.processes.End(id, owned)
+	effect, err := r.processes.End(id, owned)
+	r.pruneProcesses(id)
+	return effect, err
 }
 
 // reconcileAll marks every tracked session unknown, which fences it, and
@@ -835,7 +837,10 @@ func (r *WorkSessionRegistry) decideTransition(msg workSessionControl, s *tracke
 		log.Debug().Str("work_session_id", msg.WorkSessionID).Uint64("revision", revision).Msg("Ignored a work session control older than the applied revision")
 		r.forget(msg.WorkSessionID, s)
 		return WorkSessionControlResult{}, false, true
-	case revision == s.revision && s.transitionID == msg.TransitionID && s.state == target && s.lastResult != nil:
+	case revision == s.revision && s.transitionID == msg.TransitionID && s.state == target && s.lastResult != nil &&
+		!(end && len(s.lastResult.Survivors) > 0 && len(s.processes) > 0):
+		// A resent End whose receipt reported survivors still tracked runs
+		// again to reach them.
 		return *s.lastResult, true, true
 	case revision == s.revision && s.known && (s.state != target || s.transitionID != "" && s.transitionID != msg.TransitionID):
 		// One revision with two payloads: apply neither, and read the server

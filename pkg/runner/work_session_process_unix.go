@@ -340,15 +340,19 @@ func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffec
 // group so a stopped process can act on TERM, and terminates each owned
 // session with TERM and, after the grace period, KILL. Each signal is sent
 // only while a pinned member still proves the session: TERM can end the
-// member that pinned it, and what is left is reported, not killed. The
-// sessions are not tracked afterwards.
+// member that pinned it, and what is left is reported, not killed. A
+// session with a survivor keeps its pin, so a resent End can retry it; the
+// others are not tracked afterwards.
 func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, error) {
 	c.mu.Lock()
 	delete(c.stopped, id)
 	c.mu.Unlock()
+	survived := map[sessionKey]bool{}
 	defer func() {
 		for _, session := range owned.Sessions {
-			unpinSession(session)
+			if !survived[keyOf(session)] {
+				unpinSession(session)
+			}
 		}
 	}()
 
@@ -380,6 +384,7 @@ func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, er
 			if err != nil {
 				errs = append(errs, err)
 			}
+			survived[keyOf(session)] = len(survivors) > 0
 			for _, pid := range survivors {
 				pgid, _ := syscall.Getpgid(pid)
 				effect.Survivors = append(effect.Survivors, WorkSessionSurvivor{CommandID: session.CommandID, PID: pid, PGID: pgid})
