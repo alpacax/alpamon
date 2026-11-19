@@ -6,12 +6,13 @@ import "time"
 // data is set only when status is read and the content is usable: a file
 // that hit a cap or changed during the read comes back with no data.
 type loaded struct {
-	status  string
-	reasons reasonSet
-	data    []byte
-	mtime   time.Time
-	uid     uint32
-	mode    uint32
+	status   string
+	reasons  reasonSet
+	data     []byte
+	mtime    time.Time
+	statTime time.Time
+	uid      uint32
+	mode     uint32
 }
 
 func (l loaded) usable() bool { return l.status == statusRead && l.data != nil }
