@@ -117,6 +117,49 @@ func TerminateSession(sid int, grace time.Duration) ([]int, bool, error) {
 	return survivors, signalled, err
 }
 
+// ErrSessionUnverified reports members left in a session whose identity
+// could no longer be proven, so they were not signalled.
+var ErrSessionUnverified = errors.New("session identity no longer verified")
+
+// TerminateVerifiedSession is TerminateSession for a caller that pins sid by
+// a live member rather than by the unreaped leader, which TERM can end.
+// verified lists the members that still prove the session's identity, and
+// false once none does; every signal and every poll checks it first. Once it
+// fails no signal is sent, and the members still in the session are reported
+// as survivors with ErrSessionUnverified.
+func TerminateVerifiedSession(sid int, grace time.Duration, verified func() ([]int, bool)) ([]int, bool, error) {
+	if sid <= 1 {
+		return nil, false, fmt.Errorf("invalid owned session %d", sid)
+	}
+	signalled, lost := false, false
+	members := func() ([]int, error) {
+		if !lost {
+			alive, ok := verified()
+			if ok {
+				return alive, nil
+			}
+			lost = true
+		}
+		return SessionMembers(sid)
+	}
+	survivors, err := terminate(func(sig syscall.Signal) error {
+		if lost {
+			return nil
+		}
+		if _, ok := verified(); !ok {
+			lost = true
+			return nil
+		}
+		sent, err := signalSession(sid, sig)
+		signalled = signalled || sent
+		return err
+	}, members, grace)
+	if lost && len(survivors) > 0 {
+		err = errors.Join(err, ErrSessionUnverified)
+	}
+	return survivors, signalled, err
+}
+
 // HangupSession sends only SIGHUP. Jobs that ignore it may outlive the terminal.
 // The caller retains the unreaped session leader until this returns.
 func HangupSession(sid int) error {

@@ -338,8 +338,10 @@ func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffec
 
 // End cancels every owned command and terminal, then continues every owned
 // group so a stopped process can act on TERM, and terminates each owned
-// session with TERM and, after the grace period, KILL. The sessions are not
-// tracked afterwards.
+// session with TERM and, after the grace period, KILL. Each signal is sent
+// only while a pinned member still proves the session: TERM can end the
+// member that pinned it, and what is left is reported, not killed. The
+// sessions are not tracked afterwards.
 func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, error) {
 	c.mu.Lock()
 	delete(c.stopped, id)
@@ -369,7 +371,10 @@ func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, er
 	var mu sync.Mutex
 	for _, session := range sessions {
 		wg.Go(func() {
-			survivors, _, err := commandcancel.TerminateSession(session.SID, c.grace)
+			survivors, _, err := commandcancel.TerminateVerifiedSession(session.SID, c.grace, func() ([]int, bool) {
+				starts := verifiedMembers(session, false)
+				return slices.Sorted(maps.Keys(starts)), starts != nil
+			})
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {

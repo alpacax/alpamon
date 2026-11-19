@@ -5,6 +5,7 @@ package runner
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -258,6 +259,31 @@ func TestReconnectToActiveContinuesWhatAStopSuspended(t *testing.T) {
 	r.reconcileAll(t.Context())
 	assert.True(t, r.inputAllowed(wsID))
 	requireState(t, procRunning, leader.Process.Pid)
+}
+
+func TestEndSendsNoKillOnceNothingPinsTheSession(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newProcessRegistry(server, &inventoryLog{}, nil)
+	cc := &ControlClient{workSessions: r}
+
+	// On TERM the leader leaves a TERM-ignoring child no check has seen and
+	// exits, so nothing proves the SID still names this session.
+	dir := t.TempDir()
+	ready, marker := filepath.Join(dir, "ready"), filepath.Join(dir, "child")
+	leader := startSession(t, "perl", "-e", `$SIG{TERM} = sub { if (fork() == 0) { $SIG{TERM} = "IGNORE"; open(my $f, ">", $ARGV[1]); close($f); sleep 60; exit } exit 0 }; open(my $f, ">", $ARGV[0]); close($f); sleep 60`, ready, marker)
+	sid := leader.Process.Pid
+	require.Eventually(t, func() bool { _, err := os.Stat(ready); return err == nil }, 5*time.Second, 20*time.Millisecond)
+	r.trackProcess(wsID, ownedKindCommand, "cmd-1", sid)
+
+	cc.HandleMessage(controlFrame(t, "work_session_end", 2, "ended", "human_end"))
+	ended := server.lastResult(t)
+	require.FileExists(t, marker)
+	child := sessionMembers(t, sid, 1)
+	assert.NotEqual(t, sid, child[0])
+	assert.Equal(t, controlResultFailed, ended.Result)
+	assert.Equal(t, errorCodeSurvivors, ended.Error)
+	require.Len(t, ended.Survivors, 1)
+	assert.Equal(t, child[0], ended.Survivors[0].PID, "a process End could not prove is reported, not killed")
 }
 
 func TestReconnectWhilePausedReportsTheInventory(t *testing.T) {
