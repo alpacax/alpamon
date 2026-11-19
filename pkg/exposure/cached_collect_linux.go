@@ -70,7 +70,11 @@ func readKeyFile(fs *fsReader, p string, rule ownerRule, budget *int) (keyFile, 
 }
 
 func readParsedFile[T any](fs *fsReader, p string, rule ownerRule, kind string, parse func(loaded) T, complete func(T) bool) T {
-	return cachedSource(fs, kind+":"+p, rule, func(f *fsReader) T {
+	key := kind + ":" + p
+	if !rule.system {
+		key = kind + ":" + strconv.FormatUint(uint64(rule.uid), 10) + ":" + p
+	}
+	return cachedSource(fs, key, rule, func(f *fsReader) T {
 		l, _ := f.read(p, rule)
 		defer clear(l.data)
 		return parse(l)

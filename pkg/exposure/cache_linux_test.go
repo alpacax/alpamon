@@ -580,3 +580,63 @@ func TestSharedHomeKeyCacheIncludesAccountUID(t *testing.T) {
 	assert.Contains(t, fs.cache.entries, "keys:1001:"+p)
 	assert.Contains(t, fs.cache.entries, "keys:1002:"+p)
 }
+
+func TestSharedHomeParsedSourcesIncludeAccountUID(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		root, owners := attackRoot(t)
+		for p, data := range map[string]string{
+			"/home/u/.ssh/principals": "operator\n",
+			"/home/u/.k5login":        "shared@EXAMPLE.COM\n",
+			"/home/u/.rhosts":         "example.com shared\n",
+			"/home/u/.shosts":         "example.com shared\n",
+			"/etc/ssh/ca":             "ssh-ed25519 " + testEd0 + "\n",
+		} {
+			require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(root, p)), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(root, p), []byte(data), 0o644))
+		}
+		fs := cacheReader(t, root, owners)
+		opens := countSourceOpens(t)
+		accounts := []passwdEntry{{name: "first", uid: 1001, home: "/home/u"}, {name: "second", uid: 1002, home: "/home/u"}}
+		st := &sshdT{effective: map[string]*string{
+			"authorizedprincipalsfile": ptr(".ssh/principals"),
+			"trustedusercakeys":        ptr("/etc/ssh/ca"),
+			"gssapiauthentication":     ptr("yes"),
+			"ignorerhosts":             ptr("no"),
+		}}
+		paths := []string{"/home/u/.ssh/principals", "/home/u/.k5login", "/home/u/.rhosts", "/home/u/.shosts", "/etc/ssh/ca"}
+		fs.collection = fs.cache.beginCollection()
+		certs := readCerts(fs, systemFiles{f: fs}, accounts, st, sshdConfig{}, false)
+		trust := readTrust(fs, systemFiles{f: fs}, accounts, st, sshdConfig{}, false)
+		fs.cache.finishCollection(fs.collection, fs.epoch)
+		assert.Empty(t, certs.reasons)
+		assert.Empty(t, trust.reasons)
+		for _, user := range []string{"first", "second"} {
+			require.Len(t, certs.principals[user], 1)
+			assert.True(t, certs.principals[user][0].Complete)
+			assert.Equal(t, []principalEntry{{Principals: []string{"operator"}, Options: []string{}}}, certs.principals[user][0].Entries)
+			require.Len(t, trust.files[user], 3)
+			for _, file := range trust.files[user] {
+				assert.Equal(t, statusRead, file.Status)
+				assert.True(t, file.Complete)
+				assert.Len(t, file.Entries, 1)
+			}
+		}
+		require.NotNil(t, certs.userCA)
+		assert.True(t, certs.userCA.Complete)
+		assert.Len(t, certs.userCA.CAs, 1)
+		assert.Equal(t, []int{2, 2, 2, 2, 1}, opens.take(paths...))
+
+		fs.collection = fs.cache.beginCollection()
+		assert.Equal(t, certs, readCerts(fs, systemFiles{f: fs}, accounts, st, sshdConfig{}, false))
+		assert.Equal(t, trust, readTrust(fs, systemFiles{f: fs}, accounts, st, sshdConfig{}, false))
+		fs.cache.finishCollection(fs.collection, fs.epoch)
+		assert.Equal(t, []int{0, 0, 0, 0, 0}, opens.take(paths...))
+		for _, uid := range []string{"1001", "1002"} {
+			assert.Contains(t, fs.cache.entries, "principals:"+uid+":/home/u/.ssh/principals")
+			assert.Contains(t, fs.cache.entries, "trust-k5login:"+uid+":/home/u/.k5login")
+			assert.Contains(t, fs.cache.entries, "trust-rhosts:"+uid+":/home/u/.rhosts")
+			assert.Contains(t, fs.cache.entries, "trust-shosts:"+uid+":/home/u/.shosts")
+		}
+		assert.Contains(t, fs.cache.entries, "ca:/etc/ssh/ca")
+	})
+}
