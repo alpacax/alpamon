@@ -614,8 +614,14 @@ func (r *WorkSessionRegistry) reconcile(ctx context.Context, id string) error {
 			s.transitionID = ""
 			s.lastResult = nil
 		}
+		resumed := s.state == workSessionPaused && snapshot.State == workSessionActive
 		s.state, s.revision, s.expiresAt, s.known = snapshot.State, revision, snapshot.ExpiresAt, true
 		r.syncInventoryLoop(id, s)
+		if resumed {
+			// The Resume may have been missed; continue what a Stop suspended
+			// now, as the Resume would have.
+			go r.continueReconciled(id, s, revision)
+		}
 		if s.state == workSessionEnded {
 			r.markEnded(id)
 			// The End may have been missed; end the processes now rather
@@ -625,6 +631,28 @@ func (r *WorkSessionRegistry) reconcile(ctx context.Context, id string) error {
 		}
 	}
 	return nil
+}
+
+// continueReconciled continues the process groups a Stop suspended in a
+// session reconciliation found active after paused, unless a newer control
+// changed the session first.
+func (r *WorkSessionRegistry) continueReconciled(id string, s *trackedWorkSession, revision uint64) {
+	r.actions.Lock()
+	defer r.actions.Unlock()
+	r.mu.Lock()
+	current := s.state == workSessionActive && s.revision == revision
+	r.mu.Unlock()
+	if !current {
+		return
+	}
+	r.pruneProcesses(id)
+	r.mu.Lock()
+	owned := s.owned()
+	r.mu.Unlock()
+	if _, err := r.processes.Continue(id, owned); err != nil {
+		log.Warn().Err(err).Str("work_session_id", id).Msg("Could not continue every stopped process of a resumed work session.")
+	}
+	r.reportInventory(id, false)
 }
 
 // endReconciled ends the processes of a session reconciliation found ended,

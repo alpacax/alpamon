@@ -242,6 +242,24 @@ func TestEndContinuesThenTerminatesEveryOwnedSession(t *testing.T) {
 	assert.FileExists(t, marker, "a stopped process is continued, so it acts on TERM")
 }
 
+func TestReconnectToActiveContinuesWhatAStopSuspended(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newProcessRegistry(server, &inventoryLog{}, nil)
+	cc := &ControlClient{workSessions: r}
+	leader := startSession(t, "sleep", "60")
+	r.trackProcess(wsID, ownedKindCommand, "cmd-1", leader.Process.Pid)
+
+	cc.HandleMessage(pauseFrame(t, 1))
+	cc.HandleMessage(stopFrame(t, 1))
+	requireState(t, procStopped, leader.Process.Pid)
+
+	// The Resume was missed while the control socket was down.
+	server.set(workSessionActive, 2)
+	r.reconcileAll(t.Context())
+	assert.True(t, r.inputAllowed(wsID))
+	requireState(t, procRunning, leader.Process.Pid)
+}
+
 func TestReconnectWhilePausedReportsTheInventory(t *testing.T) {
 	server := &fakeControlServer{}
 	inventories := &inventoryLog{}
