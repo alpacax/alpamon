@@ -16,7 +16,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const fullReadInterval = 24 * time.Hour
+const (
+	fullReadInterval = 24 * time.Hour
+	racyCleanWindow  = 2 * time.Second
+)
 
 type sourceIdentity struct {
 	dev, ino, nlink uint64
@@ -37,6 +40,7 @@ type sourceDependency struct {
 	directory bool
 	names     []string
 	dirs      []pathStat
+	statTime  time.Time
 }
 
 type sourceTrace struct {
@@ -50,15 +54,44 @@ type sourceCacheEntry struct {
 	input        any
 	value        any
 	dependencies []sourceDependency
+	touched      uint64
 }
 
 type sourceCache struct {
-	mu      sync.Mutex
-	entries map[string]sourceCacheEntry
+	mu         sync.Mutex
+	entries    map[string]sourceCacheEntry
+	collection uint64
+	finished   bool
 }
 
 func newSourceCache() *sourceCache {
 	return &sourceCache{entries: map[string]sourceCacheEntry{}}
+}
+
+func (c *sourceCache) beginCollection() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.collection++
+	c.finished = false
+	return c.collection
+}
+
+func (c *sourceCache) finishCollection(collection uint64, epoch int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.collection != collection {
+		return
+	}
+	for key, entry := range c.entries {
+		if entry.epoch < epoch || entry.touched != collection {
+			delete(c.entries, key)
+		}
+	}
+	c.finished = true
+}
+
+func (c *sourceCache) acceptsCollection(collection uint64) bool {
+	return c.collection == collection && !c.finished
 }
 
 // Each collection carries its own epoch so an abandoned worker cannot publish
@@ -69,24 +102,31 @@ func cachedSource[T any](f *fsReader, key string, input any, read func(*fsReader
 	}
 	f.cache.mu.Lock()
 	entry, found := f.cache.entries[key]
+	if !f.cache.acceptsCollection(f.collection) {
+		found = false
+	}
+	if found {
+		entry.touched = f.collection
+		f.cache.entries[key] = entry
+	}
 	f.cache.mu.Unlock()
 	if found && entry.epoch == f.epoch && reflect.DeepEqual(entry.input, input) && f.unchanged(entry.dependencies) {
 		return clone(entry.value.(T))
 	}
-	local := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, trace: &sourceTrace{}}
+	local := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, trace: &sourceTrace{}, now: f.now, cacheStat: f.cacheStat}
 	local.noOpenat2.Store(f.noOpenat2.Load())
 	value := read(local)
 	if !local.trace.failed && local.trace.read && complete(value) && local.unchanged(local.trace.dependencies) {
-		stored := sourceCacheEntry{epoch: f.epoch, input: input, value: clone(value), dependencies: local.trace.dependencies}
+		stored := sourceCacheEntry{epoch: f.epoch, input: input, value: clone(value), dependencies: local.trace.dependencies, touched: f.collection}
 		f.cache.mu.Lock()
 		// A late worker must not replace a newer epoch's entry.
-		if previous, ok := f.cache.entries[key]; !ok || previous.epoch <= f.epoch {
+		if previous, ok := f.cache.entries[key]; f.cache.acceptsCollection(f.collection) && (!ok || previous.epoch <= f.epoch) {
 			f.cache.entries[key] = stored
 		}
 		f.cache.mu.Unlock()
 	} else {
 		f.cache.mu.Lock()
-		if previous, ok := f.cache.entries[key]; ok && previous.epoch <= f.epoch {
+		if previous, ok := f.cache.entries[key]; f.cache.acceptsCollection(f.collection) && ok && previous.epoch <= f.epoch {
 			delete(f.cache.entries, key)
 		}
 		f.cache.mu.Unlock()
@@ -119,7 +159,11 @@ func (f *fsReader) rememberFile(p string, rule ownerRule, st unix.Stat_t, dirs [
 		return
 	}
 	f.trace.read = f.trace.read || l.status == statusRead
-	f.trace.dependencies = append(f.trace.dependencies, sourceDependency{path: p, rule: rule, id: identityOf(st, f.mapOwner(p, st.Uid)), absent: l.status == statusAbsent, dirs: dirs})
+	dep := sourceDependency{path: p, rule: rule, id: f.cacheIdentity(p, st), absent: l.status == statusAbsent, dirs: dirs, statTime: l.statTime}
+	if !dep.absent && !timestampsOldEnough(dep.id, dep.statTime) {
+		f.trace.failed = true
+	}
+	f.trace.dependencies = append(f.trace.dependencies, dep)
 }
 
 func directoryNames(f *fsReader, fd int) ([]string, bool) {
@@ -146,6 +190,7 @@ func (f *fsReader) rememberDirectory(p string, fd int, rule ownerRule) {
 	}
 	p = path.Dir(p)
 	var st unix.Stat_t
+	statTime := f.now()
 	if unix.Fstat(fd, &st) != nil {
 		f.trace.failed = true
 		return
@@ -155,11 +200,18 @@ func (f *fsReader) rememberDirectory(p string, fd int, rule ownerRule) {
 		f.trace.failed = true
 		return
 	}
-	f.trace.dependencies = append(f.trace.dependencies, sourceDependency{path: p, rule: rule, id: identityOf(st, f.mapOwner(p, st.Uid)), directory: true, names: names})
+	dep := sourceDependency{path: p, rule: rule, id: f.cacheIdentity(p, st), directory: true, names: names, statTime: statTime}
+	if !timestampsOldEnough(dep.id, dep.statTime) {
+		f.trace.failed = true
+	}
+	f.trace.dependencies = append(f.trace.dependencies, dep)
 }
 
 func (f *fsReader) unchanged(dependencies []sourceDependency) bool {
 	for _, dep := range dependencies {
+		if !dep.absent && !timestampsOldEnough(dep.id, dep.statTime) {
+			return false
+		}
 		fd, name, dirs, l, ok := f.walkDirs(dep.path, dep.rule, dep.directory)
 		if !ok {
 			if dep.absent && l.status == statusAbsent {
@@ -172,11 +224,16 @@ func (f *fsReader) unchanged(dependencies []sourceDependency) bool {
 				defer func() { _ = unix.Close(fd) }()
 			}
 			var st unix.Stat_t
+			statTime := f.now()
 			if dep.directory {
 				if dep.absent {
 					return false
 				}
-				if unix.Fstat(fd, &st) != nil || identityOf(st, f.mapOwner(dep.path, st.Uid)) != dep.id {
+				if unix.Fstat(fd, &st) != nil {
+					return false
+				}
+				id := f.cacheIdentity(dep.path, st)
+				if id != dep.id || !timestampsOldEnough(id, statTime) {
 					return false
 				}
 				names, ok := directoryNames(f, fd)
@@ -186,11 +243,28 @@ func (f *fsReader) unchanged(dependencies []sourceDependency) bool {
 			if dep.absent {
 				return err == unix.ENOENT
 			}
-			return err == nil && slices.Equal(dirs, dep.dirs) && f.acceptsRegular(dep.path, dep.rule, &st, dirs) && identityOf(st, f.mapOwner(dep.path, st.Uid)) == dep.id
+			if err != nil {
+				return false
+			}
+			id := f.cacheIdentity(dep.path, st)
+			return slices.Equal(dirs, dep.dirs) && f.acceptsRegular(dep.path, dep.rule, &st, dirs) && id == dep.id && timestampsOldEnough(id, statTime)
 		}()
 		if !matches {
 			return false
 		}
 	}
 	return true
+}
+
+func (f *fsReader) cacheIdentity(p string, st unix.Stat_t) sourceIdentity {
+	if f.cacheStat != nil {
+		f.cacheStat(p, &st)
+	}
+	return identityOf(st, f.mapOwner(p, st.Uid))
+}
+
+func timestampsOldEnough(id sourceIdentity, statTime time.Time) bool {
+	cutoff := statTime.Add(-racyCleanWindow)
+	return time.Unix(id.mtime.Sec, id.mtime.Nsec).Before(cutoff) &&
+		time.Unix(id.ctime.Sec, id.ctime.Nsec).Before(cutoff)
 }

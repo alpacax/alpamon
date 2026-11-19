@@ -2,6 +2,8 @@
 
 package exposure
 
+import "strconv"
+
 func readAccounts(sys systemFiles) accountsData {
 	return cachedSource(sys.f, "accounts:/etc/passwd", nil, func(f *fsReader) accountsData {
 		return readAccountsUncached(systemFiles{f: f})
@@ -58,7 +60,7 @@ func readKeyFile(fs *fsReader, p string, rule ownerRule, budget *int) (keyFile, 
 		Rule   ownerRule
 		Budget int
 	}{rule, *budget}
-	v := cachedSource(fs, "keys:"+p, input, func(f *fsReader) cachedKeyFile {
+	v := cachedSource(fs, "keys:"+strconv.FormatUint(uint64(rule.uid), 10)+":"+p, input, func(f *fsReader) cachedKeyFile {
 		remaining := *budget
 		file, stat, dirs := readKeyFileUncached(f, p, rule, &remaining)
 		return cachedKeyFile{file, stat, dirs, remaining}
@@ -154,6 +156,7 @@ func readTrustSource(fs *fsReader, p string, rule ownerRule, kind string) trustF
 }
 
 type kerberosSource struct {
+	usable  bool
 	status  string
 	reasons reasonSet
 	mapping bool
@@ -163,8 +166,8 @@ func readKerberosSource(fs *fsReader) kerberosSource {
 	return cachedSource(fs, "kerberos:/etc/krb5.conf", nil, func(f *fsReader) kerberosSource {
 		l, _ := f.read("/etc/krb5.conf", ownerRule{system: true})
 		defer clear(l.data)
-		return kerberosSource{l.status, l.reasons, l.usable() && krb5MappingUnresolved(l.data)}
-	}, func(v kerberosSource) bool { return v.status == statusRead && len(v.reasons) == 0 && !v.mapping }, immutable[kerberosSource])
+		return kerberosSource{l.usable(), l.status, l.reasons, l.usable() && krb5MappingUnresolved(l.data)}
+	}, func(v kerberosSource) bool { return v.usable && len(v.reasons) == 0 && !v.mapping }, immutable[kerberosSource])
 }
 
 type wtmpSource struct {

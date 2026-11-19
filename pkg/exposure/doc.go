@@ -33,8 +33,11 @@
 //
 // Successful, complete parsed results are cached in memory for this process
 // only. Unchanged sources are stat-ed but not opened; their facts, reasons and
-// completeness are reused. Failed and partial reads are retried. The first
-// collection reads every applicable source, and each fixed 24-hour deadline
+// completeness are reused. File and directory timestamps must both be more
+// than two seconds older than the stat time before results can be stored or
+// reused, avoiding missed changes on filesystems with coarse clocks. Failed
+// and partial reads are retried. The first collection reads every applicable
+// source, and each fixed 24-hour deadline
 // from collector start forces another full read on the next collection.
 // Restarting always starts with full reads. This reduces endpoint-detection
 // alert noise from repeated opens of unchanged sensitive files.
@@ -54,7 +57,10 @@
 // AuthorizedPrincipalsFile and TrustedUserCAKeys paths, /etc/krb5.conf,
 // /etc/hosts.equiv, /etc/ssh/shosts.equiv, and each applicable account's
 // .k5login, .rhosts and .shosts. Account homes, .ssh directories and all source
-// parent directories are inspected as part of the descriptor walk.
+// parent directories are inspected as part of the descriptor walk. Each
+// collection opens and lists the parent directory of every source, including
+// /etc, /var/log, each applicable home and each .ssh directory, with
+// O_RDONLY|O_DIRECTORY. Unchanged files are stat-ed but not opened.
 //
 // PTY sources are /var/log/wtmp, /var/log/wtmp.1 and /var/log/lastlog;
 // /var/lib/wtmpdb/wtmp.db and /var/lib/lastlog/lastlog2.db are checked for

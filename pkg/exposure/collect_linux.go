@@ -135,10 +135,15 @@ type sshdData struct {
 // collect pins one root for the read. Abandoned workers retain that root
 // until they exit, so no later collection can close or reuse their descriptor.
 func (c *collector) collect(ctx context.Context) *exposureReport {
+	epoch := int64(c.opts.now().Sub(c.started) / fullReadInterval)
+	collection := c.cache.beginCollection()
+	defer c.cache.finishCollection(collection, epoch)
 	fs, _ := newFSReader(c.opts.root, c.opts.mapOwner)
 	if fs != nil {
 		fs.cache = c.cache
-		fs.epoch = int64(c.opts.now().Sub(c.started) / fullReadInterval)
+		fs.epoch = epoch
+		fs.collection = collection
+		fs.now = c.opts.now
 	}
 	shared := &collectionFS{reader: fs}
 	shared.refs.Store(1)
@@ -237,6 +242,7 @@ func withFS[T any](ctx context.Context, c *collector, fail T, fn func(*fsReader,
 	}
 	defer fs.close()
 	fs.cache = c.cache
+	fs.now = c.opts.now
 	fs.epoch = int64(c.opts.now().Sub(c.started) / fullReadInterval)
 	return fn(fs, systemFiles{f: fs})
 }
@@ -778,7 +784,7 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 	if !accountOnly {
 		if kerberos {
 			krb := readKerberosSource(fs)
-			if krb.mapping || (krb.status != statusRead && krb.status != statusAbsent) {
+			if krb.mapping || (!krb.usable && krb.status != statusAbsent) {
 				d.reasons.add(reasonKerberosMappingUnresolved)
 			}
 			d.reasons.merge(krb.reasons)

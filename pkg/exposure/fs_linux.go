@@ -24,11 +24,15 @@ type fsReader struct {
 	// mapOwner turns a file's uid into the uid ownership is judged by. It is
 	// the identity in production; tests, which run unprivileged, map their
 	// own uid to root or to an account.
-	mapOwner  func(path string, uid uint32) uint32
-	noOpenat2 atomic.Bool
-	cache     *sourceCache
-	epoch     int64
-	trace     *sourceTrace
+	mapOwner   func(path string, uid uint32) uint32
+	noOpenat2  atomic.Bool
+	cache      *sourceCache
+	epoch      int64
+	trace      *sourceTrace
+	now        func() time.Time
+	collection uint64
+	// cacheStat is nil in production; tests can model coarse filesystem clocks.
+	cacheStat func(string, *unix.Stat_t)
 }
 
 type collectionFSKey struct{}
@@ -73,7 +77,7 @@ func newFSReader(root string, mapOwner func(string, uint32) uint32) (*fsReader, 
 	if err != nil {
 		return nil, err
 	}
-	f := &fsReader{rootFD: fd, mapOwner: mapOwner}
+	f := &fsReader{rootFD: fd, mapOwner: mapOwner, now: time.Now}
 	if err := unix.Fstat(fd, &f.root); err != nil {
 		_ = unix.Close(fd)
 		return nil, err
@@ -310,6 +314,7 @@ func (f *fsReader) openRegular(p string, rule ownerRule) (*os.File, unix.Stat_t,
 		return nil, st, dirs, failed(statusOf(err))
 	}
 	defer func() { _ = unix.Close(pathFD) }()
+	statTime := f.now()
 	if err := unix.Fstat(pathFD, &st); err != nil {
 		return nil, st, dirs, failed(statusUnreadable, reasonFileUnreadable)
 	}
@@ -333,7 +338,7 @@ func (f *fsReader) openRegular(p string, rule ownerRule) (*os.File, unix.Stat_t,
 		_ = unix.Close(fd)
 		return nil, st, dirs, failed(statusRead, reasonConcurrentChange)
 	}
-	return os.NewFile(uintptr(fd), p), st, dirs, loaded{status: statusRead, reasons: reasonSet{}}
+	return os.NewFile(uintptr(fd), p), st, dirs, loaded{status: statusRead, reasons: reasonSet{}, statTime: statTime}
 }
 
 func (f *fsReader) acceptsRegular(p string, rule ownerRule, st *unix.Stat_t, dirs []pathStat) bool {

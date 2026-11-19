@@ -52,6 +52,8 @@ func cacheReader(t *testing.T, root string, owners map[string]uint32) *fsReader 
 	t.Helper()
 	fs := readerFor(t, root, owners)
 	fs.cache = newSourceCache()
+	now := time.Now().Add(10 * time.Second)
+	fs.now = func() time.Time { return now }
 	return fs
 }
 
@@ -63,6 +65,14 @@ func TestShadowCacheReadsOnlyChanges(t *testing.T) {
 				p := filepath.Join(root, "etc/shadow")
 				require.NoError(t, os.WriteFile(p, []byte("u:!:1::::::\n"), 0o640))
 				fs := cacheReader(t, root, owners)
+				ctime := unix.NsecToTimespec(fs.now().Add(-10 * time.Second).UnixNano())
+				if change == "ctime" {
+					fs.cacheStat = func(p string, st *unix.Stat_t) {
+						if p == "/etc/shadow" {
+							st.Ctim = ctime
+						}
+					}
+				}
 				opens := countSourceOpens(t)
 				first := readShadow(systemFiles{f: fs})
 				assert.True(t, first.usable)
@@ -75,6 +85,7 @@ func TestShadowCacheReadsOnlyChanges(t *testing.T) {
 				require.NoError(t, err)
 				var beforeStat unix.Stat_t
 				require.NoError(t, unix.Stat(p, &beforeStat))
+				originalID := fs.cacheIdentity("/etc/shadow", beforeStat)
 				switch change {
 				case "size":
 					require.NoError(t, os.WriteFile(p, []byte("u::123::::::\n"), 0o640))
@@ -88,10 +99,8 @@ func TestShadowCacheReadsOnlyChanges(t *testing.T) {
 				case "permissions":
 					require.NoError(t, os.Chmod(p, 0o600))
 				case "ctime":
-					// Restore mode and mtime so only ctime distinguishes the read.
-					require.NoError(t, os.Chmod(p, 0o600))
-					require.NoError(t, os.Chmod(p, 0o640))
-					require.NoError(t, os.Chtimes(p, before.ModTime(), before.ModTime()))
+					// Set the cache's ctime explicitly, independent of kernel ticks.
+					ctime = unix.NsecToTimespec(fs.now().Add(-9 * time.Second).UnixNano())
 				case "owner":
 					owners["/etc/shadow"] = 2000
 				}
@@ -105,7 +114,10 @@ func TestShadowCacheReadsOnlyChanges(t *testing.T) {
 				if change == "ctime" {
 					assert.Equal(t, beforeStat.Mode, afterStat.Mode)
 					assert.Equal(t, beforeStat.Mtim, afterStat.Mtim)
-					assert.NotEqual(t, beforeStat.Ctim, afterStat.Ctim)
+					afterID := fs.cacheIdentity("/etc/shadow", afterStat)
+					assert.NotEqual(t, originalID.ctime, afterID.ctime)
+					afterID.ctime = originalID.ctime
+					assert.Equal(t, originalID, afterID)
 				}
 				var reads int
 				testHookRead = func(string) { reads++ }
@@ -237,7 +249,7 @@ func TestCollectionCacheStartAndDailyFullRead(t *testing.T) {
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(root, p), []byte(data), 0o644))
 	}
-	now := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	now := time.Now().Add(10 * time.Second)
 	opts.now = func() time.Time { return now }
 	var runs int
 	run := opts.runSSHD
@@ -381,4 +393,190 @@ func TestLastlogCacheIncludesRequestedOffsets(t *testing.T) {
 	require.Len(t, two.records, 2)
 	assert.Equal(t, ptr("pts/2"), two.records[2*lastlogSize].tty)
 	assert.Equal(t, []int{1}, opens.take(lastlogPath))
+}
+
+func TestSourceCacheRejectsRecentTimestamps(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		for _, source := range []string{"file", "directory"} {
+			for _, timestamp := range []string{"mtime", "ctime"} {
+				t.Run(source+" "+timestamp, func(t *testing.T) {
+					root, owners := attackRoot(t)
+					p := "/home/u/.ssh/principals"
+					require.NoError(t, os.WriteFile(filepath.Join(root, p), []byte("first\n"), 0o644))
+					fs := cacheReader(t, root, owners)
+					now := time.Unix(2000000000, int64(250*time.Millisecond))
+					fs.now = func() time.Time { return now }
+					old := unix.Timespec{Sec: 1999999990}
+					recent := unix.Timespec{Sec: 2000000000}
+					target := p
+					if source == "directory" {
+						target = "/home/u/.ssh"
+					}
+					fs.cacheStat = func(name string, st *unix.Stat_t) {
+						st.Mtim, st.Ctim = old, old
+						if name == target {
+							if timestamp == "mtime" {
+								st.Mtim = recent
+							} else {
+								st.Ctim = recent
+							}
+						}
+					}
+					opens := countSourceOpens(t)
+					read := func() principalsFile { return readPrincipalsSource(fs, p, ownerRule{uid: 1001}) }
+					first := read()
+					assert.True(t, first.Complete)
+					assert.Equal(t, []principalEntry{{Principals: []string{"first"}, Options: []string{}}}, first.Entries)
+					assert.Equal(t, []int{1}, opens.take(p))
+					assert.Empty(t, fs.cache.entries)
+					// Model a same-size rewrite in the same coarse timestamp tick.
+					require.NoError(t, os.WriteFile(filepath.Join(root, p), []byte("other\n"), 0o644))
+					now = now.Add(250 * time.Millisecond)
+					second := read()
+					assert.True(t, second.Complete)
+					assert.Equal(t, []principalEntry{{Principals: []string{"other"}, Options: []string{}}}, second.Entries)
+					assert.Equal(t, []int{1}, opens.take(p))
+					assert.Empty(t, fs.cache.entries)
+					// Crossing the window needs one real read before reuse is allowed.
+					now = time.Unix(2000000002, 0)
+					assert.Equal(t, second, read())
+					assert.Equal(t, []int{1}, opens.take(p))
+					assert.Empty(t, fs.cache.entries, "the two-second boundary is still too recent")
+					now = now.Add(time.Nanosecond)
+					assert.Equal(t, second, read())
+					assert.Equal(t, []int{1}, opens.take(p))
+					require.Len(t, fs.cache.entries, 1)
+					assert.Equal(t, second, read())
+					assert.Equal(t, []int{0}, opens.take(p))
+				})
+			}
+		}
+	})
+}
+
+func TestSourceCacheRejectsRecentRecordedStat(t *testing.T) {
+	root, owners := attackRoot(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "etc/shadow"), []byte("u:!:1::::::\n"), 0o640))
+	fs := cacheReader(t, root, owners)
+	opens := countSourceOpens(t)
+	first := readShadow(systemFiles{f: fs})
+	assert.True(t, first.usable)
+	assert.Equal(t, []int{1}, opens.take("/etc/shadow"))
+	entry := fs.cache.entries["shadow:/etc/shadow"]
+	require.NotEmpty(t, entry.dependencies)
+	for i := range entry.dependencies {
+		dep := &entry.dependencies[i]
+		if !dep.absent {
+			dep.statTime = time.Unix(dep.id.ctime.Sec, dep.id.ctime.Nsec).Add(time.Second)
+		}
+	}
+	fs.cache.entries["shadow:/etc/shadow"] = entry
+	assert.Equal(t, first, readShadow(systemFiles{f: fs}))
+	assert.Equal(t, []int{1}, opens.take("/etc/shadow"))
+}
+
+func TestKerberosReasonsMatchWithoutCache(t *testing.T) {
+	for _, failure := range []string{"limit", "concurrent"} {
+		t.Run(failure, func(t *testing.T) {
+			var outcomes [][]string
+			for _, cached := range []bool{false, true} {
+				root, owners := attackRoot(t)
+				p := filepath.Join(root, "etc/krb5.conf")
+				require.NoError(t, os.WriteFile(p, []byte("[libdefaults]\n"), 0o644))
+				if failure == "limit" {
+					require.NoError(t, os.Truncate(p, maxReadBytes+1))
+				}
+				if failure == "concurrent" {
+					testHookAfterRead = func(name string) {
+						if name == "/etc/krb5.conf" {
+							require.NoError(t, os.Truncate(p, 0))
+						}
+					}
+					t.Cleanup(func() { testHookAfterRead = nil })
+				}
+				fs := readerFor(t, root, owners)
+				if cached {
+					fs = cacheReader(t, root, owners)
+				}
+				st := &sshdT{effective: map[string]*string{"gssapiauthentication": ptr("yes")}}
+				d := readTrust(fs, systemFiles{f: fs}, nil, st, sshdConfig{}, false)
+				outcomes = append(outcomes, d.reasons.list())
+				testHookAfterRead = nil
+			}
+			if failure == "limit" {
+				assert.Equal(t, []string{reasonKerberosMappingUnresolved, reasonLimitExceeded}, outcomes[0])
+			} else {
+				assert.Equal(t, []string{reasonConcurrentChange, reasonKerberosMappingUnresolved}, outcomes[0])
+			}
+			assert.Equal(t, outcomes[0], outcomes[1])
+		})
+	}
+}
+
+func TestCollectionPrunesRemovedAccounts(t *testing.T) {
+	dir := filepath.Join(fixturesDir, "hosts/ubuntu-default")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	opts := caseOptions(t, dir, spec, root, proc)
+	now := time.Now().Add(10 * time.Second)
+	opts.now = func() time.Time { return now }
+	c := newCollector(opts)
+	first := c.collect(context.Background())
+	assert.NotEmpty(t, first.Accounts)
+	key := "keys:1000:/home/ubuntu/.ssh/authorized_keys"
+	c.cache.mu.Lock()
+	_, found := c.cache.entries[key]
+	c.cache.mu.Unlock()
+	require.True(t, found)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "etc/passwd"), []byte("root:x:0:0::/root:/bin/bash\n"), 0o644))
+	second := c.collect(context.Background())
+	require.Len(t, second.Accounts, 1)
+	assert.Equal(t, "root", second.Accounts[0].Username)
+	c.cache.mu.Lock()
+	assert.NotContains(t, c.cache.entries, key)
+	c.cache.mu.Unlock()
+}
+
+func TestCollectionPrunesOldEpochAndLateWorkers(t *testing.T) {
+	root, owners := attackRoot(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "etc/shadow"), []byte("u:!:1::::::\n"), 0o640))
+	fs := cacheReader(t, root, owners)
+	fs.collection = fs.cache.beginCollection()
+	readShadow(systemFiles{f: fs})
+	require.Contains(t, fs.cache.entries, "shadow:/etc/shadow")
+	// An old entry touched by the new collection is still discarded.
+	collection := fs.cache.beginCollection()
+	entry := fs.cache.entries["shadow:/etc/shadow"]
+	entry.touched = collection
+	fs.cache.entries["shadow:/etc/shadow"] = entry
+	fs.cache.finishCollection(collection, 1)
+	assert.Empty(t, fs.cache.entries)
+	readShadow(systemFiles{f: fs})
+	assert.Empty(t, fs.cache.entries, "an abandoned worker cannot refill a pruned cache")
+}
+
+func TestSharedHomeKeyCacheIncludesAccountUID(t *testing.T) {
+	root, owners := attackRoot(t)
+	p := "/home/u/.ssh/authorized_keys"
+	require.NoError(t, os.WriteFile(filepath.Join(root, p), []byte("ssh-ed25519 "+testEd0+"\n"), 0o644))
+	fs := cacheReader(t, root, owners)
+	opens := countSourceOpens(t)
+	accounts := []passwdEntry{{name: "first", uid: 1001, home: "/home/u"}, {name: "second", uid: 1002, home: "/home/u"}}
+	st := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(".ssh/authorized_keys")}}
+	fs.collection = fs.cache.beginCollection()
+	first := readKeys(fs, accounts, st, sshdConfig{})
+	fs.cache.finishCollection(fs.collection, fs.epoch)
+	require.Len(t, first.byUser["first"].files, 1)
+	require.Len(t, first.byUser["second"].files, 1)
+	assert.True(t, first.byUser["first"].files[0].Complete)
+	assert.True(t, first.byUser["second"].files[0].Complete)
+	assert.Len(t, first.byUser["first"].files[0].Keys, 1)
+	assert.Len(t, first.byUser["second"].files[0].Keys, 1)
+	assert.Equal(t, []int{2}, opens.take(p))
+	fs.collection = fs.cache.beginCollection()
+	assert.Equal(t, first, readKeys(fs, accounts, st, sshdConfig{}))
+	fs.cache.finishCollection(fs.collection, fs.epoch)
+	assert.Equal(t, []int{0}, opens.take(p))
+	assert.Contains(t, fs.cache.entries, "keys:1001:"+p)
+	assert.Contains(t, fs.cache.entries, "keys:1002:"+p)
 }
