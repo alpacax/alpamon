@@ -26,6 +26,9 @@ type fsReader struct {
 	// own uid to root or to an account.
 	mapOwner  func(path string, uid uint32) uint32
 	noOpenat2 atomic.Bool
+	cache     *sourceCache
+	epoch     int64
+	trace     *sourceTrace
 }
 
 type collectionFSKey struct{}
@@ -290,10 +293,17 @@ func (f *fsReader) openRegular(p string, rule ownerRule) (*os.File, unix.Stat_t,
 			_ = unix.Close(dirfd)
 		}
 	}()
+	f.rememberDirectory(p, dirfd, rule)
 	if testHookOpen != nil {
 		if err := testHookOpen(p); err != nil {
 			return nil, st, dirs, failed(statusOf(err))
 		}
+	}
+	if err := unix.Fstatat(dirfd, last, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil, st, dirs, failed(statusOf(err))
+	}
+	if !f.acceptsRegular(p, rule, &st, dirs) {
+		return nil, st, dirs, failed(statusRejected, reasonFileRejected)
 	}
 	pathFD, err := f.openAt(dirfd, last, unix.O_PATH)
 	if err != nil {
@@ -306,18 +316,8 @@ func (f *fsReader) openRegular(p string, rule ownerRule) (*os.File, unix.Stat_t,
 	if testHookFstat != nil {
 		testHookFstat(p, &st)
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG || !rule.allows(f.mapOwner(p, st.Uid)) || (!rule.system && st.Nlink != 1) {
+	if !f.acceptsRegular(p, rule, &st, dirs) {
 		return nil, st, dirs, failed(statusRejected, reasonFileRejected)
-	}
-	// Ownership alone cannot distinguish a root-owned orphaned hard link
-	// from its original secret. In an account-controlled parent chain only
-	// root files already readable by everyone are safe to parse.
-	if !rule.system && f.mapOwner(p, st.Uid) == 0 && st.Mode&0o004 == 0 {
-		for _, dir := range dirs {
-			if dir.uid != 0 || dir.mode&0o022 != 0 {
-				return nil, st, dirs, failed(statusRejected, reasonFileRejected)
-			}
-		}
 	}
 	fd, err := retryEINTR(func() (int, error) {
 		return unix.Open("/proc/self/fd/"+strconv.Itoa(pathFD), unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
@@ -336,6 +336,23 @@ func (f *fsReader) openRegular(p string, rule ownerRule) (*os.File, unix.Stat_t,
 	return os.NewFile(uintptr(fd), p), st, dirs, loaded{status: statusRead, reasons: reasonSet{}}
 }
 
+func (f *fsReader) acceptsRegular(p string, rule ownerRule, st *unix.Stat_t, dirs []pathStat) bool {
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || !rule.allows(f.mapOwner(p, st.Uid)) || (!rule.system && st.Nlink != 1) {
+		return false
+	}
+	// Ownership alone cannot distinguish a root-owned orphaned hard link
+	// from its original secret. In an account-controlled parent chain only
+	// root files already readable by everyone are safe to parse.
+	if !rule.system && f.mapOwner(p, st.Uid) == 0 && st.Mode&0o004 == 0 {
+		for _, dir := range dirs {
+			if dir.uid != 0 || dir.mode&0o022 != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func mtimeOf(st *unix.Stat_t) time.Time {
 	return time.Unix(st.Mtim.Sec, st.Mtim.Nsec)
 }
@@ -348,6 +365,7 @@ func changed(a, b *unix.Stat_t) bool {
 // its end within maxReadBytes and did not change while it was read.
 func (f *fsReader) read(p string, rule ownerRule) (loaded, []pathStat) {
 	file, st, dirs, l := f.openRegular(p, rule)
+	defer func() { f.rememberFile(p, rule, st, dirs, l) }()
 	if file == nil {
 		return l, dirs
 	}
@@ -385,7 +403,8 @@ func (f *fsReader) read(p string, rule ownerRule) (loaded, []pathStat) {
 // root-owned file. A file longer than that is marked limit_exceeded and its
 // tail is still returned: the newest records are at the end.
 func (f *fsReader) readTail(p string, record int64) loaded {
-	file, st, _, l := f.openRegular(p, ownerRule{system: true})
+	file, st, dirs, l := f.openRegular(p, ownerRule{system: true})
+	defer func() { f.rememberFile(p, ownerRule{system: true}, st, dirs, l) }()
 	if file == nil {
 		return l
 	}
@@ -419,7 +438,8 @@ func (f *fsReader) readTail(p string, record int64) loaded {
 // readRecords reads fixed-size records at the given offsets of a root-owned
 // file, for lastlog, which is indexed by uid and usually sparse.
 func (f *fsReader) readRecords(p string, size int64, offsets []int64) (loaded, map[int64][]byte) {
-	file, st, _, l := f.openRegular(p, ownerRule{system: true})
+	file, st, dirs, l := f.openRegular(p, ownerRule{system: true})
+	defer func() { f.rememberFile(p, ownerRule{system: true}, st, dirs, l) }()
 	if file == nil {
 		return l, nil
 	}
@@ -463,11 +483,21 @@ func (f *fsReader) statDir(p string, rule ownerRule) ([]pathStat, loaded) {
 }
 
 // list returns the entry names of directory p.
-func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) ([]string, loaded) {
+func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) (names []string, result loaded) {
+	defer func() {
+		if f.trace != nil {
+			if !result.complete() {
+				f.trace.failed = true
+			} else if result.status == statusAbsent {
+				f.trace.dependencies = append(f.trace.dependencies, sourceDependency{path: p, rule: rule, directory: true, absent: true})
+			}
+		}
+	}()
 	fd, _, _, l, ok := f.walkDirs(p, rule, true)
 	if !ok {
 		return nil, l
 	}
+	f.rememberDirectory(p+"/", fd, rule)
 	readable, err := f.openAt(fd, ".", unix.O_RDONLY|unix.O_DIRECTORY)
 	if fd != f.rootFD {
 		_ = unix.Close(fd)
@@ -478,7 +508,7 @@ func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) ([]string, l
 	fd = readable
 	dir := os.NewFile(uintptr(fd), p)
 	defer func() { _ = dir.Close() }()
-	names, err := dir.Readdirnames(maxDirEntries + 1)
+	names, err = dir.Readdirnames(maxDirEntries + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, failed(statusUnreadable, reasonFileUnreadable)
 	}
