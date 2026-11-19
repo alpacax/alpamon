@@ -4,6 +4,7 @@ package runner
 
 import (
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -32,12 +33,13 @@ type groupProcessControl struct {
 	stopped map[string]map[groupKey]*stoppedGroup
 	// cancel is the existing command cancel, applied by End to every owned
 	// command and terminal.
-	cancel func(commandID string)
-	grace  time.Duration
+	cancel    func(commandID string)
+	grace     time.Duration
+	readState func(int) (procState, error)
 }
 
 func newProcessControl(cancel func(commandID string)) WorkSessionProcessController {
-	return &groupProcessControl{stopped: map[string]map[groupKey]*stoppedGroup{}, cancel: cancel, grace: commandcancel.GracePeriod}
+	return &groupProcessControl{stopped: map[string]map[groupKey]*stoppedGroup{}, cancel: cancel, grace: commandcancel.GracePeriod, readState: processState}
 }
 
 // sessionKey names one owned process session: its SID and its leader's
@@ -70,9 +72,8 @@ type stoppedGroup struct {
 // a pinned member still in the session proves the SID was never reused.
 type sessionPin struct {
 	members map[int]int64
-	// adopted is set once the members the finished leader left behind were
-	// taken in.
-	adopted bool
+	stop    chan struct{}
+	done    chan struct{}
 }
 
 // sessionPins holds the pin of every tracked process session.
@@ -84,13 +85,40 @@ var sessionPins = struct {
 // pinSession starts tracking session while its leader runs. A session whose
 // leader start time is unknown is never owned.
 func pinSession(session OwnedSession) {
-	if session.SID <= 1 || session.StartedAt == 0 {
+	if len(verifiedMembers(session)) == 0 {
 		return
 	}
 	sessionPins.mu.Lock()
-	defer sessionPins.mu.Unlock()
-	if _, ok := sessionPins.m[keyOf(session)]; !ok {
-		sessionPins.m[keyOf(session)] = &sessionPin{members: map[int]int64{session.SID: session.StartedAt}}
+	pin := sessionPins.m[keyOf(session)]
+	if pin == nil || pin.stop != nil {
+		sessionPins.mu.Unlock()
+		return
+	}
+	pin.stop, pin.done = make(chan struct{}), make(chan struct{})
+	sessionPins.mu.Unlock()
+	go observeSession(session, pin)
+}
+
+// observeSession samples membership until the recorded leader exits.
+func observeSession(session OwnedSession, pin *sessionPin) {
+	defer close(pin.done)
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-pin.stop:
+			return
+		case <-ticker.C:
+			if processStartedAt(session.SID) != session.StartedAt {
+				return
+			}
+			if refreshSessionPin(session, pin) == nil {
+				return
+			}
+			if state, err := processState(session.SID); err == nil && state == procZombie {
+				return
+			}
+		}
 	}
 }
 
@@ -98,16 +126,19 @@ func pinSession(session OwnedSession) {
 func unpinSession(session OwnedSession) {
 	sessionPins.mu.Lock()
 	defer sessionPins.mu.Unlock()
-	delete(sessionPins.m, keyOf(session))
+	removeSessionPin(keyOf(session))
 }
 
-// adoptSession takes in the members a finished leader left in its session.
-// Call it once the command or terminal that led the session has finished:
-// its leader was reaped moments before, so its SID still names this session
-// unless every member exited and the number was reused within that moment.
-// Only members that started no earlier than the leader are taken in.
+// removeSessionPin requires sessionPins.mu.
+func removeSessionPin(key sessionKey) {
+	if pin := sessionPins.m[key]; pin != nil && pin.stop != nil {
+		close(pin.stop)
+	}
+	delete(sessionPins.m, key)
+}
+
 func adoptSession(session OwnedSession) {
-	verifiedMembers(session, true)
+	verifiedMembers(session)
 }
 
 // ownedMember is one live process of an owned session.
@@ -123,11 +154,18 @@ type ownedMember struct {
 // recorded leader runs, or while a member it was last seen with is still in
 // it.
 func ownedMembers(sessions []OwnedSession) []ownedMember {
+	return ownedMembersWithState(sessions, processState)
+}
+
+func ownedMembersWithState(sessions []OwnedSession, readState func(int) (procState, error)) []ownedMember {
 	self := syscall.Getpgrp()
 	var members []ownedMember
 	for _, session := range sessions {
-		starts := verifiedMembers(session, false)
+		starts := verifiedMembers(session)
 		for _, pid := range slices.Sorted(maps.Keys(starts)) {
+			if state, err := readState(pid); err == nil && state == procZombie {
+				continue
+			}
 			pgid, err := syscall.Getpgid(pid)
 			if err != nil || pgid <= 1 || pgid == self {
 				continue
@@ -138,10 +176,14 @@ func ownedMembers(sessions []OwnedSession) []ownedMember {
 	return members
 }
 
-// verifiedMembers returns the live members of session by start time when
-// its identity is proven, and pins them for the next check. With adopt it
-// also takes in, once, the members a finished leader left behind.
-func verifiedMembers(session OwnedSession, adopt bool) map[int]int64 {
+// State reads do not establish identity; an unreaped member can still pin it.
+func verifiedMembers(session OwnedSession) map[int]int64 {
+	return refreshSessionPin(session, nil)
+}
+
+// refreshSessionPin lets an observer update only the pin it started with;
+// an in-flight observation cannot recreate a pin removed by unpinSession.
+func refreshSessionPin(session OwnedSession, expected *sessionPin) map[int]int64 {
 	if session.SID <= 1 || session.StartedAt == 0 {
 		return nil
 	}
@@ -151,9 +193,6 @@ func verifiedMembers(session OwnedSession, adopt bool) map[int]int64 {
 	}
 	starts := map[int]int64{}
 	for _, pid := range pids {
-		if state, err := processState(pid); err != nil || state == procZombie {
-			continue
-		}
 		if started := processStartedAt(pid); started != 0 {
 			starts[pid] = started
 		}
@@ -165,6 +204,9 @@ func verifiedMembers(session OwnedSession, adopt bool) map[int]int64 {
 	// The recorded leader, by PID and start time, proves itself.
 	verified := starts[session.SID] == session.StartedAt
 	pin, ok := sessionPins.m[key]
+	if expected != nil && pin != expected {
+		return nil
+	}
 	if !ok {
 		if !verified {
 			return nil
@@ -178,16 +220,11 @@ func verifiedMembers(session OwnedSession, adopt bool) map[int]int64 {
 		}
 		verified = pin.members[pid] == started
 	}
-	if !verified && adopt && !pin.adopted {
-		maps.DeleteFunc(starts, func(_ int, started int64) bool { return started < session.StartedAt })
-		verified = len(starts) > 0
-	}
 	if !verified {
-		delete(sessionPins.m, key)
+		removeSessionPin(key)
 		return nil
 	}
 	pin.members = starts
-	pin.adopted = pin.adopted || adopt
 	return starts
 }
 
@@ -247,15 +284,27 @@ func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, e
 	var errs []error
 	deadline := time.Now().Add(stopSettle)
 	for {
-		members := ownedMembers(owned.Sessions)
+		members := ownedMembersWithState(owned.Sessions, c.readState)
 		if effect.AffectedTrees == 0 {
 			effect.AffectedTrees = treesOf(members)
 		}
 		var running []ownedMember
+		var unreadable []ownedMember
+		var stateErrs []error
 		for _, member := range members {
-			if state, err := processState(member.pid); err == nil && state != procStopped {
+			state, err := c.readState(member.pid)
+			if err != nil {
+				unreadable = append(unreadable, member)
+				stateErrs = append(stateErrs, fmt.Errorf("read process %d state: %w", member.pid, err))
+			} else if state != procStopped && state != procZombie {
 				running = append(running, member)
 			}
+		}
+		if len(unreadable) > 0 {
+			for _, member := range slices.Concat(running, unreadable) {
+				effect.Survivors = append(effect.Survivors, survivorOf(member))
+			}
+			return effect, errors.Join(append(slices.Concat(errs, stateErrs), errProcessSurvivors)...)
 		}
 		if len(running) == 0 {
 			return effect, errors.Join(errs...)
@@ -376,8 +425,14 @@ func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, er
 	for _, session := range sessions {
 		wg.Go(func() {
 			survivors, _, err := commandcancel.TerminateVerifiedSession(session.SID, c.grace, func() ([]int, bool) {
-				starts := verifiedMembers(session, false)
-				return slices.Sorted(maps.Keys(starts)), starts != nil
+				starts := verifiedMembers(session)
+				var live []int
+				for _, pid := range slices.Sorted(maps.Keys(starts)) {
+					if state, err := processState(pid); err != nil || state != procZombie {
+						live = append(live, pid)
+					}
+				}
+				return live, starts != nil
 			})
 			mu.Lock()
 			defer mu.Unlock()

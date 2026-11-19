@@ -321,6 +321,13 @@ func (e *Executor) Execute(ctx context.Context, opts CommandOptions) (int, strin
 // runCommand uses Start/Wait so platform cleanup can attach process groups or jobs. ctx is the one
 // cmd was built with; its error names why the Cancel hook fired.
 func (e *Executor) runCommand(ctx context.Context, cmd *exec.Cmd, commandID string, pidHook func(pid int), cw *chunkWriter) ([]byte, error) {
+	if observer := common.ProcessObserverFromContext(ctx); observer != nil {
+		originalHook := pidHook
+		pidHook = func(pid int) {
+			invokePIDHook(originalHook, pid)
+			observer(commandID, pid)
+		}
+	}
 	cleanup, err := configureProcessTreeCleanup(cmd, pidHook != nil)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to configure process tree cleanup")
@@ -407,7 +414,7 @@ type CommandOptions struct {
 	ChunkCallback func(ctx context.Context, content string)
 
 	// CommandID, when set, is the console command this execution belongs to.
-	// It is used only to correlate the process-tree cleanup log line.
+	// It correlates process ownership and the process-tree cleanup log line.
 	CommandID string
 }
 

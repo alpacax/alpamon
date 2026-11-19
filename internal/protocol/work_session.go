@@ -44,15 +44,18 @@ type WorkSession struct {
 	ExpiresAt time.Time
 }
 
-// WorkSession resolves the command's Work Session attribution. A command
-// execute carries it on the command; a terminal open carries it in its data.
-// When both carry one they must agree, so a governed command can never pick
-// the attribution that suits it.
+// WorkSession resolves attribution from the command and terminal data.
+// Each attributed envelope requires an ID; two attributed envelopes must agree.
 func (c *Command) WorkSession(data *CommandData) (WorkSession, error) {
 	fromCommand := workSessionFields{c.WorkSessionID, c.WorkSessionRevision, c.WorkSessionExpiresAt}
 	var fromData workSessionFields
 	if data != nil {
 		fromData = workSessionFields{data.WorkSessionID, data.WorkSessionRevision, data.WorkSessionExpiresAt}
+	}
+	for _, fields := range []workSessionFields{fromCommand, fromData} {
+		if fields.id == "" && (fields.revision != 0 || fields.expiresAt != "") {
+			return WorkSession{}, errors.New("work session attribution requires a work session ID")
+		}
 	}
 
 	fields := fromCommand

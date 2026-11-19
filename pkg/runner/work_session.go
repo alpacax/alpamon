@@ -284,6 +284,8 @@ type trackedWorkSession struct {
 	// known is true once the state is authoritative for this connection: read
 	// from the server or set by a control message. Unknown state starts nothing.
 	known        bool
+	hasState     bool
+	conflicted   bool
 	transitionID string
 	lastResult   *WorkSessionControlResult
 	stopResults  map[string]WorkSessionControlResult
@@ -332,9 +334,8 @@ type WorkSessionRegistry struct {
 	// ended lists the tracked ended sessions, oldest first.
 	ended []string
 
-	// actions serializes control handling, so process actions never
-	// interleave. A process action runs without r.mu, which leaves admission
-	// and terminal input unblocked while an End waits out its grace period.
+	// actions serializes control, reconciliation and release/adoption.
+	// Process actions leave r.mu free for admission to check the session fence.
 	actions sync.Mutex
 	// reports serializes inventory reports.
 	reports sync.Mutex
@@ -528,6 +529,8 @@ func (r *WorkSessionRegistry) admissible(s *trackedWorkSession, ws protocol.Work
 }
 
 func (r *WorkSessionRegistry) releaseCommand(id, commandID string) {
+	r.actions.Lock()
+	defer r.actions.Unlock()
 	r.mu.Lock()
 	if s, ok := r.sessions[id]; ok {
 		delete(s.commands, commandID)
@@ -555,6 +558,8 @@ func (r *WorkSessionRegistry) registerTerminal(id, terminalID, commandID string)
 	defer r.mu.Unlock()
 	r.session(id).terminals[terminalID] = commandID
 	return func() {
+		r.actions.Lock()
+		defer r.actions.Unlock()
 		r.mu.Lock()
 		if s, ok := r.sessions[id]; ok {
 			delete(s.terminals, terminalID)
@@ -592,6 +597,8 @@ func (r *WorkSessionRegistry) owned(id string) (commands, terminals []string) {
 
 // reconcile reads the server's control state of one session and applies it.
 func (r *WorkSessionRegistry) reconcile(ctx context.Context, id string) error {
+	r.actions.Lock()
+	defer r.actions.Unlock()
 	snapshot, err := r.readState(ctx, id)
 	if err != nil {
 		return err
@@ -604,18 +611,23 @@ func (r *WorkSessionRegistry) reconcile(ctx context.Context, id string) error {
 	switch {
 	case s.state == workSessionEnded:
 		// A terminal fence is never lifted.
+		if snapshot.State == workSessionEnded && revision >= s.revision {
+			s.known, s.conflicted = true, false
+		}
 	case revision < s.revision:
 		// A control message applied a newer revision while the read was in flight.
 		if !s.known {
 			return errWorkSessionStale
 		}
 	default:
-		if revision != s.revision {
+		if revision != s.revision || snapshot.State != s.state {
 			s.transitionID = ""
 			s.lastResult = nil
 		}
 		resumed := s.state == workSessionPaused && snapshot.State == workSessionActive
 		s.state, s.revision, s.expiresAt, s.known = snapshot.State, revision, snapshot.ExpiresAt, true
+		s.hasState = true
+		s.conflicted = false
 		r.syncInventoryLoop(id, s)
 		if resumed {
 			// The Resume may have been missed; continue what a Stop suspended
@@ -697,6 +709,7 @@ func (r *WorkSessionRegistry) endProcesses(id string, s *trackedWorkSession) (Pr
 // reads each one's control state again. Call it on every reconnect of the
 // control socket, which may have missed control messages.
 func (r *WorkSessionRegistry) reconcileAll(ctx context.Context) {
+	r.actions.Lock()
 	r.mu.Lock()
 	ids := make([]string, 0, len(r.sessions))
 	for id, s := range r.sessions {
@@ -704,6 +717,7 @@ func (r *WorkSessionRegistry) reconcileAll(ctx context.Context) {
 		ids = append(ids, id)
 	}
 	r.mu.Unlock()
+	r.actions.Unlock()
 
 	for _, id := range ids {
 		if err := r.reconcile(ctx, id); err != nil {
@@ -842,10 +856,11 @@ func (r *WorkSessionRegistry) decideTransition(msg workSessionControl, s *tracke
 		// A resent End whose receipt reported survivors still tracked runs
 		// again to reach them.
 		return *s.lastResult, true, true
-	case revision == s.revision && s.known && (s.state != target || s.transitionID != "" && s.transitionID != msg.TransitionID):
+	case revision == s.revision && (s.conflicted || (s.known || s.hasState) && (s.state != target || s.transitionID != "" && s.transitionID != msg.TransitionID)):
 		// One revision with two payloads: apply neither, and read the server
 		// before starting anything more.
 		s.known = false
+		s.conflicted = true
 		result := r.newResult(msg, s.state, controlResultFailed)
 		result.Error = "conflict"
 		return result, true, true
@@ -869,6 +884,8 @@ func (r *WorkSessionRegistry) decideTransition(msg workSessionControl, s *tracke
 	}
 	newlyEnded := end && s.state != workSessionEnded
 	s.state, s.revision, s.expiresAt, s.known, s.transitionID = target, max(s.revision, revision), expiresAt, true, msg.TransitionID
+	s.hasState = true
+	s.conflicted = false
 	if newlyEnded {
 		r.markEnded(msg.WorkSessionID)
 	}
@@ -917,6 +934,15 @@ func (r *WorkSessionRegistry) handleStop(msg workSessionControl) {
 // duplicate or stale, under r.mu.
 func (r *WorkSessionRegistry) decideStop(msg workSessionControl) (WorkSessionControlResult, bool) {
 	s, ok := r.sessions[msg.WorkSessionID]
+	state := workSessionActive
+	if ok {
+		state = s.state
+	}
+	if msg.ProtocolVersion != 1 {
+		result := r.newResult(msg, state, controlResultUnsupported)
+		result.Error = "invalid_message"
+		return result, true
+	}
 	if ok {
 		if previous, seen := s.stopResults[msg.ActionID]; seen {
 			return previous, true
@@ -925,10 +951,6 @@ func (r *WorkSessionRegistry) decideStop(msg workSessionControl) (WorkSessionCon
 	if !ok || !s.known || s.state != workSessionPaused || s.revision != uint64(msg.Revision) {
 		// An untracked session has applied no control: it reports the
 		// state a session starts in.
-		state := workSessionActive
-		if ok {
-			state = s.state
-		}
 		result := r.newResult(msg, state, controlResultFailed)
 		result.Error = "stale"
 		return result, true

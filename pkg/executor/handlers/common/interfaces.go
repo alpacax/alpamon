@@ -55,7 +55,7 @@ type CommandExecutor interface {
 	// ExecWithStreamingHook is like ExecWithHook plus a chunkCallback receiving
 	// streamed stdout/stderr chunks with the command's own deadline-bearing ctx;
 	// sequencing is the caller's responsibility. commandID, when non-empty,
-	// names the console command in the executor's process-tree cleanup log.
+	// names the console command in process ownership and process-tree cleanup logs.
 	ExecWithStreamingHook(ctx context.Context, args []string, username, groupname string, env map[string]string, timeout time.Duration, commandID string, pidHook func(pid int), chunkCallback func(ctx context.Context, content string)) (int, string, error)
 
 	// ExecFileWithStreamingHook is ExecWithStreamingHook for a digest-verified
