@@ -96,6 +96,8 @@ User Management:
   adduser              - Add a new user
   deluser              - Delete a user
   moduser              - Modify user settings
+  lockuser             - Lock a local Linux account and end its processes
+  unlockuser           - Restore a local Linux account after locking
 
 Group Management:
   addgroup             - Add a new group

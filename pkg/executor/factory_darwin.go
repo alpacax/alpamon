@@ -4,11 +4,13 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/system"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/tunnel"
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/user"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
 func platformHandlers(deps platformHandlerDeps) []common.Handler {
 	return []common.Handler{
+		user.NewUnsupportedAccountLockHandler(deps.cmdExec),
 		system.NewSystemHandler(deps.cmdExec, deps.wsClient, deps.ctxManager, deps.pool, utils.NewDefaultVersionResolver(), deps.apiSession),
 		tunnel.NewTunnelHandler(deps.cmdExec),
 	}

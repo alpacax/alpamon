@@ -31,19 +31,19 @@ func TestPlatformHandlers(t *testing.T) {
 		assertHasHandler(t, names, string(common.Firewall))
 		assertHasHandler(t, names, string(common.Tunnel))
 	case "darwin":
-		// macOS: system, tunnel (no user, group, firewall)
-		assertHandlerCount(t, handlers, 2, names)
+		// macOS: system, tunnel, and account-lock refusals.
+		assertHandlerCount(t, handlers, 3, names)
 		assertHasHandler(t, names, string(common.System))
 		assertHasHandler(t, names, string(common.Tunnel))
-		assertNoHandler(t, names, string(common.User))
+		assertHasHandler(t, names, string(common.User))
 		assertNoHandler(t, names, string(common.Group))
 		assertNoHandler(t, names, string(common.Firewall))
 	case "windows":
-		// Windows: system, tunnel (no user, group, firewall)
-		assertHandlerCount(t, handlers, 2, names)
+		// Windows: system, tunnel, and account-lock refusals.
+		assertHandlerCount(t, handlers, 3, names)
 		assertHasHandler(t, names, string(common.System))
 		assertHasHandler(t, names, string(common.Tunnel))
-		assertNoHandler(t, names, string(common.User))
+		assertHasHandler(t, names, string(common.User))
 		assertNoHandler(t, names, string(common.Group))
 		assertNoHandler(t, names, string(common.Firewall))
 	default:

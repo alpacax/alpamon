@@ -45,3 +45,53 @@ func TestWebsocketClientSetReadDeadline_ReturnsErrorWhenThereIsNoConnection(t *t
 
 	assert.ErrorIs(t, err, net.ErrClosed)
 }
+
+func TestSendPingQuery_WritesThePingQueryAsOneTextFrame(t *testing.T) {
+	type frame struct {
+		kind int
+		data []byte
+	}
+	received := make(chan frame, 1)
+	url := newKeepaliveServer(t, func(_ int, c *websocket.Conn) {
+		kind, data, err := c.ReadMessage()
+		if err == nil {
+			received <- frame{kind, data}
+		}
+		_ = readUntilError(c)
+	})
+	useWSPath(t, url)
+	wc := &WebsocketClient{connectBackoff: newAuthBackoff(minConnectInterval, maxConnectInterval)}
+	require.NoError(t, wc.Connect(context.Background()))
+	t.Cleanup(wc.Close)
+
+	err := wc.SendPingQuery()
+
+	require.NoError(t, err)
+	select {
+	case got := <-received:
+		assert.Equal(t, websocket.TextMessage, got.kind)
+		assert.JSONEq(t, `{"query":"ping"}`, string(got.data))
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server never received the ping query")
+	}
+}
+
+func TestSendPingQuery_ReturnsErrorWhenThereIsNoConnection(t *testing.T) {
+	wc := &WebsocketClient{}
+
+	err := wc.SendPingQuery()
+
+	assert.ErrorIs(t, err, net.ErrClosed)
+}
+
+func TestSendPingQuery_ReturnsErrCloseSentAfterTheConnectionIsClosed(t *testing.T) {
+	url := newKeepaliveServer(t, func(_ int, c *websocket.Conn) { _ = readUntilError(c) })
+	useWSPath(t, url)
+	wc := &WebsocketClient{connectBackoff: newAuthBackoff(minConnectInterval, maxConnectInterval)}
+	require.NoError(t, wc.Connect(context.Background()))
+	wc.Close()
+
+	err := wc.SendPingQuery()
+
+	assert.ErrorIs(t, err, websocket.ErrCloseSent)
+}

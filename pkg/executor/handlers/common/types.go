@@ -47,9 +47,11 @@ const (
 	ExecFile CommandType = "execfile"
 
 	// User commands
-	AddUser CommandType = "adduser"
-	DelUser CommandType = "deluser"
-	ModUser CommandType = "moduser"
+	AddUser    CommandType = "adduser"
+	DelUser    CommandType = "deluser"
+	ModUser    CommandType = "moduser"
+	LockUser   CommandType = "lockuser"
+	UnlockUser CommandType = "unlockuser"
 
 	// Firewall commands
 	FirewallCmd           CommandType = "firewall"

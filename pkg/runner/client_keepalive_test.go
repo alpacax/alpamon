@@ -572,3 +572,41 @@ func TestServe_KeepsTheReadLimitAcrossAReconnect(t *testing.T) {
 	assert.Equal(t, websocket.CloseMessageTooBig, closeErr.Code)
 	assert.Equal(t, int32(1), handled.Load(), "a frame over the read limit reached the handler")
 }
+
+func TestServe_DefaultLimitPassesAMessageAtMaxMessageSizeAndClosesOnOneByteMore(t *testing.T) {
+	serverEnd := make(chan error, 1)
+	url := newKeepaliveServer(t, func(n int, c *websocket.Conn) {
+		if n > 0 {
+			_ = readUntilError(c)
+			return
+		}
+		_ = c.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("a", MaxMessageSize)))
+		_ = c.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("b", MaxMessageSize+1)))
+		serverEnd <- readUntilError(c)
+	})
+	useWSPath(t, url)
+	logs := captureLogsSync(t)
+	wc := NewWebsocketClient(nil, nil, nil)
+	handled := make(chan int, 2)
+
+	stop := startReadLoop(t, wc, func(ctx context.Context) {
+		wc.Serve(ctx, func(message []byte) bool {
+			handled <- len(message)
+			return false
+		})
+	})
+
+	var err error
+	select {
+	case err = <-serverEnd:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the connection never closed after the oversized message")
+	}
+	stop() // the read loop logs after gorilla sends 1009, so read the log once it returned
+	var closeErr *websocket.CloseError
+	require.ErrorAs(t, err, &closeErr)
+	assert.Equal(t, websocket.CloseMessageTooBig, closeErr.Code)
+	require.Len(t, handled, 1, "only the message at the limit should reach the handler")
+	assert.Equal(t, MaxMessageSize, <-handled)
+	assert.Contains(t, logs.String(), `"read_limit":10485760`)
+}
