@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/archiveopen"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/stretchr/testify/assert"
@@ -992,4 +993,60 @@ exec "$3" -test.run '^TestHomeOwnersDeduplicatesBindMount$' -test.v`, "sh", pare
 		t.Skipf("unprivileged bind mount unavailable: %s (%v)", output, err)
 	}
 	require.NoError(t, err, "%s", output)
+}
+
+func TestDeleteArchiveRefusedWithoutOpenat2(t *testing.T) {
+	h, executor := newHomeTestHandler(t, "rhel")
+	home := filepath.Join(h.homeRoot, "alice")
+	require.NoError(t, os.Mkdir(home, 0700))
+	uid := setArchiveTestAccount(t, h, home)
+	original, err := os.Stat(home)
+	require.NoError(t, err)
+
+	openat2 := archiveopen.Openat2
+	t.Cleanup(func() { archiveopen.Openat2 = openat2 })
+	var opened []string
+	archiveopen.Openat2 = func(_ int, name string, _ *unix.OpenHow) (int, error) {
+		opened = append(opened, name)
+		return -1, unix.ENOSYS
+	}
+	h.accountLocker.(*linuxAccountLocker).renameAt = func(int, string, int, string, uint) error {
+		t.Fatal("archive attempted to rename the home without openat2")
+		return unix.ENOSYS
+	}
+
+	archive := "archive"
+	const destination = archivePrefix + "alice_2026-11-20T01:02:03Z"
+	code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{
+		Username: "alice", Home: &archive, ArchiveTo: destination,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, output, "archive_refused: archiving needs Linux 5.6 or later (openat2)")
+	assert.Equal(t, []string{"."}, opened)
+	_, err = os.Lstat(filepath.Join(h.homeRoot, "deleted_users"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	assert.Empty(t, commandArgv(executor))
+
+	current, err := os.Stat(home)
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(original, current))
+	currentUID, err := fileOwnerUID(current)
+	require.NoError(t, err)
+	assert.Equal(t, uid, currentUID)
+	code, output, err = h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "alice"})
+	require.NoError(t, err)
+	assert.Zero(t, code, output)
+	assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
+	assert.Equal(t, []string{"."}, opened)
+
+	h.lookupUser = common.AbsentUserLookup
+	code, output, err = h.Execute(context.Background(), "deluser", &common.CommandArgs{
+		Username: "alice", Home: &archive, ArchiveTo: destination,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, output, "archive_refused: archiving needs Linux 5.6 or later (openat2)")
+	assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor), "only the keep request should call userdel")
+	assert.Equal(t, []string{".", "."}, opened)
 }

@@ -64,9 +64,7 @@ func TestChownArchiveRefusesBindMount(t *testing.T) {
 	const rootEnv = "ALPAMON_TEST_CHOWN_ARCHIVE_ROOT"
 	if root := os.Getenv(rootEnv); root != "" {
 		fd := openChownArchiveTestRoot(t, root)
-		_, err := openArchiveEntryFallback(fd, "mounted", openDirFlags)
-		assert.ErrorIs(t, err, unix.EXDEV)
-		_, err = ChownArchive(context.Background(), fd, root, -1, -1, -1)
+		_, err := ChownArchive(context.Background(), fd, root, -1, -1, -1)
 		assert.ErrorIs(t, err, unix.EXDEV)
 		return
 	}
@@ -94,33 +92,4 @@ exec "$3" -test.run '^TestChownArchiveRefusesBindMount$' -test.v`,
 	if strings.Contains(string(output), "--- SKIP:") {
 		t.Skipf("mount test skipped in namespace: %s", output)
 	}
-}
-
-func TestOpenArchiveEntryFallback(t *testing.T) {
-	root := t.TempDir()
-	require.NoError(t, os.Mkdir(filepath.Join(root, "child"), 0700))
-	require.NoError(t, os.Symlink("child", filepath.Join(root, "link")))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "file"), nil, 0600))
-	fd := openChownArchiveTestRoot(t, root)
-
-	for _, tc := range []struct {
-		name  string
-		flags int
-	}{
-		{"child", openDirFlags},
-		{"file", openFileFlags},
-		{"link", unix.O_PATH | unix.O_NOFOLLOW | unix.O_CLOEXEC},
-	} {
-		child, err := openArchiveEntryFallback(fd, tc.name, tc.flags)
-		require.NoError(t, err)
-		assert.NoError(t, unix.Close(child))
-	}
-	_, err := openArchiveEntryFallback(fd, "link", openFileFlags)
-	assert.ErrorIs(t, err, unix.ELOOP)
-
-	proc, err := unix.Open("/", openDirFlags, 0)
-	require.NoError(t, err)
-	defer func() { assert.NoError(t, unix.Close(proc)) }()
-	_, err = openArchiveEntryFallback(proc, "proc", openDirFlags)
-	assert.ErrorIs(t, err, unix.EXDEV)
 }
