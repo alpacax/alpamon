@@ -61,8 +61,26 @@ func userDataFromArgs(args *common.CommandArgs) UserData {
 
 // DeleteUserData contains data for user deletion
 type DeleteUserData struct {
-	Username           string `validate:"required"`
-	PurgeHomeDirectory bool   `validate:"omitempty"`
+	Username    string `validate:"required"`
+	Home        string `validate:"oneof=keep archive"`
+	ArchiveTo   string
+	LegacyPurge bool
+}
+
+func deleteUserDataFromArgs(args *common.CommandArgs) DeleteUserData {
+	data := DeleteUserData{
+		Username:    args.Username,
+		Home:        "keep",
+		ArchiveTo:   args.ArchiveTo,
+		LegacyPurge: args.PurgeHomeDirectory,
+	}
+	if args.Home != nil {
+		data.Home = *args.Home
+	}
+	if data.LegacyPurge {
+		data.Home = "archive"
+	}
+	return data
 }
 
 // ModUserData contains data for modifying user

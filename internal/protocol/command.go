@@ -50,6 +50,8 @@ type CommandData struct {
 	ManagedGroupnames       []string              `json:"managed_groupnames"`
 	HomeDirectory           string                `json:"home_directory"`
 	HomeDirectoryPermission string                `json:"home_directory_permission"`
+	Home                    *string               `json:"home"`
+	ArchiveTo               string                `json:"archive_to"`
 	PurgeHomeDirectory      bool                  `json:"purge_home"`
 	UID                     common.OptionalUint64 `json:"uid"`
 	GID                     uint64                `json:"gid"`
@@ -151,6 +153,8 @@ func (c *CommandData) ToArgs() *common.CommandArgs {
 		ManagedGroupnames:       c.ManagedGroupnames,
 		HomeDirectory:           c.HomeDirectory,
 		HomeDirectoryPermission: c.HomeDirectoryPermission,
+		Home:                    c.Home,
+		ArchiveTo:               c.ArchiveTo,
 		PurgeHomeDirectory:      c.PurgeHomeDirectory,
 		UID:                     c.UID.Value,
 		LockUID:                 c.UID,

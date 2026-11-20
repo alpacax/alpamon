@@ -589,9 +589,9 @@ func TestDeleteUserForgetsLock(t *testing.T) {
 			t.Cleanup(func() { utils.PlatformLike = savedPlatform })
 			require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001}, "other": {UID: 1002}}))
 			if fail {
-				f.exec.SetResult("/usr/sbin/deluser --remove-home deploy", 1, "failed", nil)
+				f.exec.SetResult("/usr/sbin/userdel deploy", 1, "failed", nil)
 			}
-			code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy", PurgeHomeDirectory: true})
+			code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy"})
 			require.NoError(t, err)
 			if fail {
 				assert.Equal(t, 1, code)
@@ -865,27 +865,12 @@ func TestDeleteMissingUserKeepsFailure(t *testing.T) {
 				} else {
 					require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001}}))
 				}
-				command := "/usr/sbin/deluser deploy"
-				if purge {
-					command = "/usr/sbin/deluser --remove-home deploy"
-				}
-				f.exec.SetResult(command, 6, "user does not exist", nil)
+				f.exec.SetResult("/usr/sbin/userdel deploy", 6, "user does not exist", nil)
 				code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy", PurgeHomeDirectory: purge})
 				require.NoError(t, err)
-				if purge {
-					assert.Equal(t, 6, code)
-					assert.Equal(t, "user does not exist"+cleanupLine, output)
-					assert.Contains(t, commandArgv(f.exec), []string{"/usr/sbin/deluser", "--remove-home", "deploy"})
-				} else {
-					assert.Equal(t, 1, code)
-					assert.Contains(t, output, "/home/deploy not exist:")
-					assert.Empty(t, commandArgv(f.exec))
-					if cleanupFails {
-						assert.True(t, strings.HasSuffix(output, cleanupLine), output)
-					} else {
-						assert.NotContains(t, output, "lock_cleanup_failed:")
-					}
-				}
+				assert.Equal(t, 6, code)
+				assert.Equal(t, "user does not exist"+cleanupLine, output)
+				assert.Contains(t, commandArgv(f.exec), []string{"/usr/sbin/userdel", "deploy"})
 				if !cleanupFails {
 					states, err := f.l.store.load()
 					require.NoError(t, err)

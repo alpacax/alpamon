@@ -109,11 +109,10 @@ func TestUserHandler_Execute(t *testing.T) {
 			name: "deluser success",
 			cmd:  "deluser",
 			args: &common.CommandArgs{
-				Username:           "testuser",
-				PurgeHomeDirectory: true,
+				Username: "testuser",
 			},
 			setupMock: func(mock *common.MockCommandExecutor) {
-				mock.SetResult("/usr/sbin/deluser --remove-home testuser", 0, "User deleted", nil)
+				mock.SetResult("/usr/sbin/userdel testuser", 0, "User deleted", nil)
 			},
 			groupService: &MockGroupService{},
 			wantCode:     0,
@@ -1028,30 +1027,6 @@ func TestUserHandler_AddUser_ExistingUser_GroupAddSoftFailMessage(t *testing.T) 
 	assert.False(t, mock.Invoked("/usr/sbin/adduser"), "adduser must not run for an existing user")
 }
 
-func TestUserHandler_HomeOwnerUID(t *testing.T) {
-	for name, tc := range map[string]struct {
-		lookup common.UserLookupFunc
-		want   int
-	}{
-		"existing user":   {lookup: common.ExistingUserLookup("1001"), want: 1001},
-		"absent user":     {lookup: common.AbsentUserLookup, want: -1},
-		"non-numeric uid": {lookup: common.ExistingUserLookup("not-a-uid"), want: -1},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newTestUserHandler(nil, nil)
-			h.lookupUser = tc.lookup
-
-			got := h.homeOwnerUID("alice")
-
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
-// TestUserHandler_ModUser_ManagedGroupnames pins the reconcile mode: with
-// managed_groupnames present, moduser keeps every current supplementary group
-// Alpacon does not manage and replaces only the managed ones. Without the key
-// it stays the legacy whole-list replace.
 func TestUserHandler_ModUser_ManagedGroupnames(t *testing.T) {
 	current := func(string) ([]string, error) { return []string{"docker", "devs", "oldteam"}, nil }
 

@@ -31,6 +31,8 @@ type UserHandler struct {
 	lookupGroup         common.GroupLookupFunc
 	supplementaryGroups common.SupplementaryGroupsFunc
 	accountLocker       accountLocker
+	homeRoot            string
+	chownHome           func(string, int, int, int) (int, error)
 }
 
 // NewUserHandler creates a new user handler
@@ -52,6 +54,8 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 		lookupUser:          common.DefaultUserLookup,
 		lookupGroup:         common.DefaultGroupLookup,
 		supplementaryGroups: common.DefaultSupplementaryGroups,
+		homeRoot:            "/home",
+		chownHome:           utils.ChownRecursive,
 	}
 	h.accountLocker = newAccountLocker(h)
 	return h
@@ -115,11 +119,7 @@ func (h *UserHandler) Validate(cmd string, args *common.CommandArgs) error {
 		return h.ValidateStruct(userDataFromArgs(args))
 
 	case common.DelUser.String():
-		data := DeleteUserData{
-			Username:           args.Username,
-			PurgeHomeDirectory: args.PurgeHomeDirectory,
-		}
-		return h.ValidateStruct(data)
+		return h.ValidateStruct(deleteUserDataFromArgs(args))
 
 	case common.ModUser.String():
 		data := ModUserData{
@@ -217,6 +217,12 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		}
 		if existingUID != data.UID {
 			return 1, common.UserUIDConflictMessage(data.Username, existingUID, data.UID), nil
+		}
+	}
+
+	if !userExists && !omitUIDFlag && (utils.PlatformLike == "debian" || utils.PlatformLike == "rhel") {
+		if err := h.checkHomeOwner(data.Username, data.UID); err != nil {
+			return 1, err.Error(), nil
 		}
 	}
 
@@ -368,128 +374,72 @@ func (h *UserHandler) runUserCreate(ctx context.Context, tool string, cmdArgs []
 	return createCode != 0, 0, out, err
 }
 
-// homeOwnerUID returns the uid of the user being deleted, whose hard-linked files in the
-// backup may change hands, or -1 when it cannot be looked up.
-func (h *UserHandler) homeOwnerUID(username string) int {
-	u, err := h.lookupUser(username)
-	if err != nil {
-		return -1
-	}
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		return -1
-	}
-	return uid
-}
-
-// backupHomeDirectory backs up the user's home directory before deletion
-func (h *UserHandler) backupHomeDirectory(username string) error {
-	homeDir := fmt.Sprintf("/home/%s", username)
-	timestamp := time.Now().UTC().Format(time.RFC3339)
-	backupDir := fmt.Sprintf("/home/deleted_users/%s_%s", username, timestamp)
-
-	// Create backup parent directory
-	if err := os.MkdirAll("/home/deleted_users", 0700); err != nil {
-		return fmt.Errorf("failed to create backup directory: %w", err)
-	}
-
-	// Check if home directory exists
-	// codeql[go/path-injection]: Intentional - User home directory for backup
-	if _, err := os.Stat(homeDir); err != nil { // lgtm[go/path-injection]
-		return fmt.Errorf("%s not exist: %w", homeDir, err)
-	}
-
-	// Move home directory to backup location
-	// codeql[go/path-injection]: Intentional - Backup destination path
-	if err := os.Rename(homeDir, backupDir); err != nil { // lgtm[go/path-injection]
-		return fmt.Errorf("failed to move home directory: %w", err)
-	}
-
-	// Change ownership to root
-	skipped, err := utils.ChownRecursive(backupDir, 0, 0, h.homeOwnerUID(username))
-	if err != nil {
-		return fmt.Errorf("failed to chown backup directory: %w", err)
-	}
-
-	log.Info().
-		Str("username", username).
-		Str("backupDir", backupDir).
-		Int("hardLinksLeftUnchanged", skipped).
-		Msg("Home directory backed up")
-
-	return nil
-}
-
-// handleDelUser handles the deluser command
 func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArgs) (exitCode int, output string, err error) {
-	// Extract and validate arguments
-	data := DeleteUserData{
-		Username:           args.Username,
-		PurgeHomeDirectory: args.PurgeHomeDirectory,
-	}
-
-	err = h.Validate(common.DelUser.String(), args)
-	if err != nil {
+	data := deleteUserDataFromArgs(args)
+	if err := h.ValidateStruct(data); err != nil {
 		return 1, err.Error(), nil
 	}
-
-	if _, exists, lookupErr := common.UserExists(h.lookupUser, data.Username); lookupErr == nil && !exists {
-		if err := h.accountLocker.forget(data.Username); err != nil {
-			log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
-			defer func() { output += "\nlock_cleanup_failed: " + err.Error() }()
-		}
+	if !validHomeUsername(data.Username) || strings.HasPrefix(data.Username, "-") {
+		return 1, fmt.Sprintf("invalid username %q", data.Username), nil
 	}
 
-	log.Info().
-		Str("username", data.Username).
-		Bool("purge", data.PurgeHomeDirectory).
-		Msg("Deleting user")
+	if utils.PlatformLike != "debian" && utils.PlatformLike != "rhel" {
+		return 1, fmt.Sprintf("Platform '%s' not supported for user management", utils.PlatformLike), nil
+	}
 
-	// Backup home directory if not purging
-	if !data.PurgeHomeDirectory {
-		if err := h.backupHomeDirectory(data.Username); err != nil {
+	log.Info().Str("username", data.Username).Str("home", data.Home).Msg("Deleting user")
+
+	var destination string
+	if data.Home == "archive" {
+		if data.LegacyPurge {
+			data.ArchiveTo = archivePrefix + data.Username + "_" + time.Now().UTC().Format(time.RFC3339)
+		}
+		destination, err = h.archiveDestination(data.Username, data.ArchiveTo)
+		if err != nil {
 			return 1, err.Error(), nil
 		}
 	}
 
-	cmdArgs := []string{}
-
-	// Platform-specific user deletion
-	switch utils.PlatformLike {
-	case "debian":
-		cmdArgs = append(cmdArgs, "/usr/sbin/deluser")
-		if data.PurgeHomeDirectory {
-			cmdArgs = append(cmdArgs, "--remove-home")
-		}
-		cmdArgs = append(cmdArgs, data.Username)
-	case "rhel":
-		cmdArgs = append(cmdArgs, "/usr/sbin/userdel")
-		if data.PurgeHomeDirectory {
-			cmdArgs = append(cmdArgs, "-r")
-		}
-		cmdArgs = append(cmdArgs, data.Username)
-	default:
-		return 1, fmt.Sprintf("Platform '%s' not supported for user management", utils.PlatformLike), nil
+	account, exists, lookupErr := common.UserExists(h.lookupUser, data.Username)
+	if lookupErr != nil {
+		return 1, fmt.Sprintf("unable to look up user %q: %v", data.Username, lookupErr), lookupErr
+	}
+	var home string
+	if exists {
+		home = account.HomeDir
+	} else if err := h.accountLocker.forget(data.Username); err != nil {
+		log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
+		defer func() { output += "\nlock_cleanup_failed: " + err.Error() }()
 	}
 
-	exitCode, output, err = h.Executor.Run(
-		ctx,
-		cmdArgs[0], cmdArgs[1:]...,
-	)
-	if exitCode != 0 {
+	result := "home directory kept at " + home
+	if data.Home == "archive" && exists {
+		uid, err := strconv.Atoi(account.Uid)
+		if err != nil {
+			uid = -1
+		}
+		archived, err := h.backupHomeDirectory(home, destination, uid)
+		if err != nil {
+			return 1, err.Error(), nil
+		}
+		result = "home directory " + home + " not found; nothing archived"
+		if archived {
+			result = "home directory archived to " + data.ArchiveTo
+		}
+	}
+	if data.LegacyPurge {
+		result += " (legacy purge_home=true treated as archive)"
+	}
+
+	// Debian's deluser can remove files based on local configuration alone.
+	exitCode, output, err = h.Executor.Run(ctx, "/usr/sbin/userdel", data.Username)
+	if exitCode != 0 || err != nil {
 		return exitCode, output, err
 	}
-
 	if err := h.accountLocker.forget(data.Username); err != nil {
 		log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
 	}
-
-	log.Info().
-		Str("username", data.Username).
-		Int("exitCode", exitCode).
-		Msg("User deleted successfully")
-
-	return exitCode, fmt.Sprintf("User '%s' deleted successfully", data.Username), nil
+	return 0, fmt.Sprintf("User '%s' deleted; %s", data.Username, result), nil
 }
 
 // handleModUser handles the moduser command
