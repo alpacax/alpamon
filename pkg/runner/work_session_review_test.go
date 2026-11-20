@@ -225,7 +225,7 @@ func TestControlTerminalReceiptReconciliation(t *testing.T) {
 	control := &recordingControl{endEffects: []ProcessEffect{
 		{Survivors: []WorkSessionSurvivor{survivor}},
 		{Survivors: []WorkSessionSurvivor{}},
-	}}
+	}, endErr: errProcessSurvivors}
 	r.processes = control
 	r.sessionAlive = func(OwnedSession) bool { return true }
 	r.trackProcess(wsID, ownedKindCommand, "cmd-1", 4242)
@@ -233,12 +233,13 @@ func TestControlTerminalReceiptReconciliation(t *testing.T) {
 	end := controlFrame(t, "work_session_end", 2, workSessionEnded, "human_end")
 	cc.HandleMessage(end)
 	require.Equal(t, 1, control.endCount())
+	original := server.lastResult(t)
 	cc.HandleMessage(resumeFrame(t, 2))
 	server.set(workSessionEnded, 2)
 	require.NoError(t, r.reconcile(t.Context(), wsID))
 	cc.HandleMessage(end)
-	assert.Equal(t, 2, control.endCount())
-	assert.Empty(t, server.lastResult(t).Survivors)
+	assert.Equal(t, 1, control.endCount())
+	assert.Equal(t, original, server.lastResult(t))
 }
 
 func TestControlSnapshotUpdatesReceipts(t *testing.T) {

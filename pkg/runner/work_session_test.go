@@ -560,31 +560,54 @@ func TestReconcileToEndedWithoutTheFieldEndsThem(t *testing.T) {
 	require.Eventually(t, func() bool { return control.endCount() == 1 }, time.Second, 5*time.Millisecond)
 }
 
-func TestResentEndRetriesTheSurvivorsItReported(t *testing.T) {
+func TestResentEndReturnsTheOriginalReceipt(t *testing.T) {
 	server := &fakeControlServer{}
 	r := newTestRegistry(server)
 	survivor := WorkSessionSurvivor{CommandID: "cmd-1", PID: 4242, PGID: 4242}
 	control := &recordingControl{endEffects: []ProcessEffect{
 		{AffectedTrees: 1, Survivors: []WorkSessionSurvivor{survivor}},
-		{AffectedTrees: 1, Survivors: []WorkSessionSurvivor{}},
-	}}
+	}, endErr: errProcessSurvivors}
 	r.processes = control
 	r.sessionAlive = func(OwnedSession) bool { return true }
 	cc := &ControlClient{workSessions: r}
 	r.trackProcess(wsID, ownedKindCommand, "cmd-1", 4242)
-
 	end := controlFrame(t, "work_session_end", 2, "ended", "human_end")
 	cc.HandleMessage(end)
-	require.Equal(t, []WorkSessionSurvivor{survivor}, server.lastResult(t).Survivors)
+	original := server.lastResult(t)
+	require.Equal(t, []WorkSessionSurvivor{survivor}, original.Survivors)
+	require.Equal(t, controlResultFailed, original.Result)
+	require.Equal(t, errorCodeSurvivors, original.Error)
+	control.mu.Lock()
+	control.endErr = nil
+	control.mu.Unlock()
+	for range 2 {
+		cc.HandleMessage(end)
+		assert.Equal(t, 1, control.endCount())
+		assert.Equal(t, original, server.lastResult(t))
+	}
+}
 
+func TestResentOlderEndReturnsTheOriginalReceipt(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newTestRegistry(server)
+	survivor := WorkSessionSurvivor{CommandID: "cmd-1", PID: 4242, PGID: 4242}
+	control := &recordingControl{
+		endEffects: []ProcessEffect{{AffectedTrees: 1, Survivors: []WorkSessionSurvivor{survivor}}},
+		endErr:     errProcessSurvivors,
+	}
+	r.processes = control
+	r.sessionAlive = func(OwnedSession) bool { return true }
+	r.trackProcess(wsID, ownedKindCommand, "cmd-1", 4242)
+	cc := &ControlClient{workSessions: r}
+	cc.HandleMessage(pauseFrame(t, 3))
+	end := controlFrame(t, "work_session_end", 2, workSessionEnded, "human_end")
 	cc.HandleMessage(end)
-	require.Equal(t, 2, control.endCount(), "a resent End reaches the survivors the last one reported")
-	require.Len(t, control.ends[1].Sessions, 1)
-	assert.Equal(t, 4242, control.ends[1].Sessions[0].SID)
-	assert.Empty(t, server.lastResult(t).Survivors)
-
+	original := server.lastResult(t)
+	require.Equal(t, controlResultFailed, original.Result)
+	require.Equal(t, errorCodeSurvivors, original.Error)
 	cc.HandleMessage(end)
-	assert.Equal(t, 2, control.endCount(), "an End that left no survivor is answered from its receipt")
+	assert.Equal(t, 1, control.endCount())
+	assert.Equal(t, original, server.lastResult(t))
 }
 
 func TestStaleStopOnAnUntrackedSessionReportsAValidState(t *testing.T) {

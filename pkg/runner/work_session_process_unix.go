@@ -575,8 +575,8 @@ func memberPins(members []ownedMember, session OwnedSession, include func(ownedM
 // session with TERM and, after the grace period, KILL. Each signal is sent
 // only while a pinned member still proves the session: TERM can end the
 // member that pinned it, and what is left is reported, not killed. A
-// session with a survivor keeps its pin, so a resent End can retry it; the
-// others are not tracked afterwards.
+// session with a survivor keeps its pin for later control; the others are
+// not tracked afterwards.
 func (c *groupProcessControl) End(id string, owned OwnedWork) (ProcessEffect, error) {
 	c.mu.Lock()
 	delete(c.stopped, id)
