@@ -247,9 +247,10 @@ func guardScript(p *PendingUpgrade) (string, error) {
 // armed before the install cannot know them, and stays in charge when the re-arm after it fails.
 func yumGuardRollback(argv []string, marker string, outcome func(string) string) string {
 	// Only ids in yum 3's charset match, on the exact lines MarshalIndent writes for the array.
+	// LC_ALL=C keeps the ranges ASCII: other locales drop valid ids or admit non-ASCII ones.
 	ids := shellQuote(`/^  "disabled_yum_repos": \[$/,/^  ]/s/^    "\([A-Za-z0-9_.:-]\{1,\}\)",\{0,1\}$/\1/p`)
 	verb := len(argv) - 3 // verb, -y, package
-	return fmt.Sprintf(`set --; for id in $(sed -n %s %s); do set -- "$@" "--disablerepo=$id"; done; %s`,
+	return fmt.Sprintf(`set --; for id in $(LC_ALL=C sed -n %s %s); do set -- "$@" "--disablerepo=$id"; done; %s`,
 		ids, marker, outcome(shellJoin(argv[:verb])+` "$@" `+shellJoin(argv[verb:])))
 }
 

@@ -603,6 +603,32 @@ func TestGuardScript(t *testing.T) {
 		_, err = os.Stat(filepath.Join(cwd, "pwned"))
 		assert.ErrorIs(t, err, os.ErrNotExist)
 	})
+
+	t.Run("yum guard reads the same repo ids in any locale", func(t *testing.T) {
+		for _, locale := range []string{"et_EE.UTF-8", "en_US.UTF-8"} { // et_EE sorts t-y after z; en_US ranges may take non-ASCII
+			t.Run(locale, func(t *testing.T) {
+				p, bin, _, env := setup(t)
+				usePackageManager(t, utils.PkgYum)
+				p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
+				p.PackageManager, p.PreviousPackageVersion, p.GuardUnit = utils.PkgYum, "2.4.0", "alpamon-upgrade-guard-7"
+				p.DisabledYumRepos = []string{"updates", "extras", "bäse"}
+				data, err := json.MarshalIndent(p, "", "  ")
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(MarkerPath(), data, 0600))
+				yumLog := filepath.Join(bin, "yum.log")
+				require.NoError(t, os.WriteFile(filepath.Join(bin, "yum"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+shellQuote(yumLog)+"\n"), 0755))
+				script, err := guardScript(p)
+				require.NoError(t, err)
+
+				cmd := exec.Command(sh, "-c", script)
+				cmd.Env = append(env, "LC_ALL="+locale)
+				out, err := cmd.CombinedOutput()
+
+				require.NoError(t, err, string(out))
+				assert.Equal(t, "--disablerepo=updates\n--disablerepo=extras\ndowngrade\n-y\nalpamon-2.4.0\n", fileContent(t, yumLog))
+			})
+		}
+	})
 }
 
 func yumPackageMarker(t *testing.T) *PendingUpgrade {
