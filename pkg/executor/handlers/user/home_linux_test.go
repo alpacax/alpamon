@@ -995,44 +995,68 @@ exec "$3" -test.run '^TestHomeOwnersDeduplicatesBindMount$' -test.v`, "sh", pare
 	require.NoError(t, err, "%s", output)
 }
 
-func TestDeleteArchiveWithoutOpenat2(t *testing.T) {
+func TestDeleteHomeWithoutOpenat2(t *testing.T) {
 	openat2 := archiveopen.Openat2
 	t.Cleanup(func() { archiveopen.Openat2 = openat2 })
+	var openCalls int
 	archiveopen.Openat2 = func(int, string, *unix.OpenHow) (int, error) {
+		openCalls++
 		return -1, unix.ENOSYS
 	}
 
-	for _, mode := range []string{"explicit", "legacy"} {
-		t.Run(mode, func(t *testing.T) {
+	archive := "archive"
+	for _, tc := range []struct {
+		name   string
+		home   *string
+		legacy bool
+	}{
+		{name: "explicit archive", home: &archive},
+		{name: "legacy purge", legacy: true},
+		{name: "default keep"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			h, executor := newHomeTestHandler(t, "rhel")
-			h.accountLocker.(*linuxAccountLocker).store = lockStateStore{path: filepath.Join(t.TempDir(), "state.json"), owner: uint32(os.Geteuid())}
+			locker := h.accountLocker.(*linuxAccountLocker)
+			locker.store = lockStateStore{path: filepath.Join(t.TempDir(), "state.json"), owner: uint32(os.Geteuid())}
+			locker.renameAt = func(int, string, int, string, uint) error {
+				assert.Fail(t, "unexpected archive rename")
+				return unix.EIO
+			}
 			home := filepath.Join(h.homeRoot, "alice")
 			require.NoError(t, os.Mkdir(home, 0700))
-			setArchiveTestAccount(t, h, home)
-			require.NoError(t, os.WriteFile(filepath.Join(home, "profile"), []byte("saved"), 0600))
-			h.chownHome = func(ctx context.Context, fd int, path string, _, _, linkOwner int) (int, error) {
-				return utils.ChownArchive(ctx, fd, path, os.Geteuid(), os.Getegid(), linkOwner)
+			owner := setArchiveTestAccount(t, h, home)
+			before, err := os.Stat(home)
+			require.NoError(t, err)
+			h.chownHome = func(context.Context, int, string, int, int, int) (int, error) {
+				assert.Fail(t, "unexpected archive chown")
+				return 0, nil
 			}
-			archive := "archive"
-			args := &common.CommandArgs{Username: "alice", PurgeHomeDirectory: mode == "legacy"}
-			if mode == "explicit" {
-				args.Home = &archive
+			args := &common.CommandArgs{Username: "alice", Home: tc.home, PurgeHomeDirectory: tc.legacy}
+			if tc.home != nil {
 				args.ArchiveTo = archivePrefix + "alice_2026-11-20T01:02:03Z"
 			}
+
+			openCalls = 0
 			code, output, err := h.Execute(context.Background(), "deluser", args)
 			require.NoError(t, err)
-			require.Zero(t, code, output)
-			assert.Contains(t, output, "home directory archived to "+archivePrefix)
-			assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
-			_, err = os.Stat(home)
+			if tc.home != nil || tc.legacy {
+				assert.Equal(t, 1, code)
+				assert.Equal(t, "archive_refused: archiving needs Linux 5.6 or later (openat2)", output)
+				assert.Equal(t, 1, openCalls)
+				assert.Empty(t, commandArgv(executor))
+			} else {
+				assert.Zero(t, code, output)
+				assert.Zero(t, openCalls)
+				assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
+			}
+			after, err := os.Stat(home)
+			require.NoError(t, err)
+			assert.True(t, os.SameFile(before, after))
+			afterOwner, err := fileOwnerUID(after)
+			require.NoError(t, err)
+			assert.Equal(t, owner, afterOwner)
+			_, err = os.Stat(filepath.Join(h.homeRoot, "deleted_users"))
 			assert.ErrorIs(t, err, os.ErrNotExist)
-			archiveDir := filepath.Join(h.homeRoot, "deleted_users")
-			entries, err := os.ReadDir(archiveDir)
-			require.NoError(t, err)
-			require.Len(t, entries, 1)
-			content, err := os.ReadFile(filepath.Join(archiveDir, entries[0].Name(), "profile"))
-			require.NoError(t, err)
-			assert.Equal(t, "saved", string(content))
 		})
 	}
 }

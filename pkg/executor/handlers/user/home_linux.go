@@ -66,6 +66,16 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 
 	var archiveFD int
 	if statErr == nil {
+		// Check kernel support before creating the archive parent.
+		probeFD, probeErr := utils.OpenArchiveEntry(homeFD, ".", archiveDirFlags)
+		if errors.Is(probeErr, unix.ENOSYS) {
+			return "", errors.New("archive_refused: archiving needs Linux 5.6 or later (openat2)")
+		}
+		if probeErr != nil {
+			return "", fmt.Errorf("archive_refused: cannot open archive root with openat2: %w", probeErr)
+		}
+		_ = unix.Close(probeFD)
+
 		archiveFD, err = l.openArchiveParent(homeFD)
 	} else {
 		archiveFD, err = unix.Openat(homeFD, "deleted_users", archiveDirFlags, 0)
