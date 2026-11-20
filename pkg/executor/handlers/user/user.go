@@ -396,6 +396,18 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 
 	log.Info().Str("username", data.Username).Str("home", data.Home).Msg("Deleting user")
 
+	var destination string
+	if data.Home == "archive" {
+		if data.LegacyPurge {
+			data.ArchiveTo = archivePrefix + data.Username + "_" + time.Now().UTC().Format(time.RFC3339)
+		}
+		var err error
+		destination, err = archiveDestination(data.Username, data.ArchiveTo)
+		if err != nil {
+			return 1, err.Error(), nil
+		}
+	}
+
 	account, exists, lookupErr := common.UserExists(h.lookupUser, data.Username)
 	if lookupErr != nil {
 		if data.Home == "archive" {
@@ -422,21 +434,14 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 		case statErr != nil:
 			return 1, fmt.Sprintf("archive_refused: cannot stat home %s: %v", home, statErr), nil
 		default:
-			if data.LegacyPurge {
-				data.ArchiveTo = archivePrefix + data.Username + "_" + time.Now().UTC().Format(time.RFC3339)
-			}
-			destination, err := archiveDestination(data.Username, data.ArchiveTo)
-			if err != nil {
-				return 1, err.Error(), nil
-			}
 			if err := h.accountLocker.backupHomeDirectory(ctx, data.Username, account, destination, data.ArchiveTo); err != nil {
 				return 1, err.Error(), nil
 			}
 			archived = true
 			result = "home directory archived to " + data.ArchiveTo
-			if data.LegacyPurge {
-				result += " (legacy purge_home=true treated as archive)"
-			}
+		}
+		if data.LegacyPurge {
+			result += " (legacy purge_home=true treated as archive)"
 		}
 	}
 

@@ -189,6 +189,24 @@ func TestDeleteRejectsInvalidArchivePath(t *testing.T) {
 	}
 }
 
+func TestInvalidArchivePathRefusedBeforeLookup(t *testing.T) {
+	archive := "archive"
+	for _, state := range []string{"missing home", "missing account"} {
+		t.Run(state, func(t *testing.T) {
+			h, executor := newHomeTestHandler(t, "debian")
+			setArchiveTestAccount(t, h, filepath.Join(h.homeRoot, "alice"))
+			if state == "missing account" {
+				h.lookupUser = func(name string) (*user.User, error) { return nil, user.UnknownUserError(name) }
+			}
+			code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "alice", Home: &archive, ArchiveTo: "/etc/x"})
+			require.NoError(t, err)
+			assert.Equal(t, 1, code)
+			assert.True(t, strings.HasPrefix(output, "invalid_archive_path:"), output)
+			assert.Empty(t, commandArgv(executor))
+		})
+	}
+}
+
 func TestFirstAddUserHomeOwnership(t *testing.T) {
 	for _, platform := range []string{"debian", "rhel"} {
 		for _, state := range []string{"another UID", "same UID", "missing", "symlink", "dangling symlink", "custom home"} {
