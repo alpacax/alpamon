@@ -513,7 +513,7 @@ func TestGuardScript(t *testing.T) {
 		require.NoError(t, err)
 		m := shellQuote(MarkerPath())
 		res := shellQuote(guardResultPath())
-		assert.Equal(t, "if [ -f "+m+" ] && grep -qxF '  \"guard_unit\": \"g1\",' "+m+"; then "+
+		assert.Equal(t, "if [ -f "+m+" ] && marker_json=$(cat "+m+") && printf '%s\\n' \"$marker_json\" | grep -qxF '  \"guard_unit\": \"g1\",'; then "+
 			"if 'apt-get' 'install' '-y' '--allow-downgrades' '-o' '"+utils.AptLockTimeout+"' 'alpamon=2.4.0'; then echo 'g1' 0 > "+res+"; systemctl restart alpamon; "+
 			"else echo 'g1' 1 > "+res+"; fi; fi", script)
 	})
@@ -628,6 +628,29 @@ func TestGuardScript(t *testing.T) {
 				assert.Equal(t, "--disablerepo=updates\n--disablerepo=extras\ndowngrade\n-y\nalpamon-2.4.0\n", fileContent(t, yumLog))
 			})
 		}
+	})
+
+	t.Run("yum guard still rolls back when it cannot read the repo ids", func(t *testing.T) {
+		p, bin, _, env := setup(t)
+		usePackageManager(t, utils.PkgYum)
+		p.Method, p.BinaryPath, p.RollbackPath = MethodPackage, "", ""
+		p.PackageManager, p.PreviousPackageVersion, p.GuardUnit = utils.PkgYum, "2.4.0", "alpamon-upgrade-guard-7"
+		p.DisabledYumRepos = []string{"base"}
+		require.NoError(t, WritePending(p))
+		yumLog := filepath.Join(bin, "yum.log")
+		require.NoError(t, os.WriteFile(filepath.Join(bin, "yum"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+shellQuote(yumLog)+"\n"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(bin, "sed"), []byte("#!/bin/sh\nexit 4\n"), 0755))
+		script, err := guardScript(p)
+		require.NoError(t, err)
+
+		cmd := exec.Command(sh, "-c", script)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+
+		require.NoError(t, err, string(out))
+		assert.Equal(t, "downgrade\n-y\nalpamon-2.4.0\n", fileContent(t, yumLog))
+		assert.Contains(t, string(out), "could not read the disabled yum repos")
+		assert.Equal(t, GuardRestored, readGuardResult(p.GuardUnit))
 	})
 }
 

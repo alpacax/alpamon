@@ -216,8 +216,9 @@ func shellJoin(argv []string) string {
 func guardScript(p *PendingUpgrade) (string, error) {
 	marker := shellQuote(MarkerPath())
 	// The exact "guard_unit" line MarshalIndent writes, so a unit name that
-	// appears in another field cannot match.
-	pending := fmt.Sprintf("[ -f %s ] && grep -qxF %s %s", marker, shellQuote(`  "guard_unit": "`+p.GuardUnit+`",`), marker)
+	// appears in another field cannot match. Read once, so later checks see the same marker.
+	pending := fmt.Sprintf(`[ -f %s ] && marker_json=$(cat %s) && printf '%%s\n' "$marker_json" | grep -qxF %s`,
+		marker, marker, shellQuote(`  "guard_unit": "`+p.GuardUnit+`",`))
 	// Record the outcome before restarting, so a later process knows the
 	// guard ran even after systemd has collected its unit.
 	result := shellQuote(guardResultPath())
@@ -236,7 +237,7 @@ func guardScript(p *PendingUpgrade) (string, error) {
 			return "", err
 		}
 		if p.PackageManager == utils.PkgYum {
-			return fmt.Sprintf("if %s; then %s; fi", pending, yumGuardRollback(argv, marker, outcome)), nil
+			return fmt.Sprintf("if %s; then %s; fi", pending, yumGuardRollback(argv, outcome)), nil
 		}
 		return fmt.Sprintf("if %s; then %s; fi", pending, outcome(shellJoin(argv))), nil
 	}
@@ -245,13 +246,16 @@ func guardScript(p *PendingUpgrade) (string, error) {
 
 // yumGuardRollback runs argv with --disablerepo for each repo the marker lists when the guard fires: a guard
 // armed before the install cannot know them, and stays in charge when the re-arm after it fails.
-func yumGuardRollback(argv []string, marker string, outcome func(string) string) string {
+func yumGuardRollback(argv []string, outcome func(string) string) string {
 	// Only ids in yum 3's charset match, on the exact lines MarshalIndent writes for the array.
 	// LC_ALL=C keeps the ranges ASCII: other locales drop valid ids or admit non-ASCII ones.
 	ids := shellQuote(`/^  "disabled_yum_repos": \[$/,/^  ]/s/^    "\([A-Za-z0-9_.:-]\{1,\}\)",\{0,1\}$/\1/p`)
 	verb := len(argv) - 3 // verb, -y, package
-	return fmt.Sprintf(`set --; for id in $(LC_ALL=C sed -n %s %s); do set -- "$@" "--disablerepo=$id"; done; %s`,
-		ids, marker, outcome(shellJoin(argv[:verb])+` "$@" `+shellJoin(argv[verb:])))
+	// A failed read still rolls back, without the flags, rather than leave the new version in place.
+	return fmt.Sprintf(`ids=$(printf '%%s\n' "$marker_json" | LC_ALL=C sed -n %s) || echo %s >&2; `+
+		`set --; for id in $ids; do set -- "$@" "--disablerepo=$id"; done; %s`,
+		ids, shellQuote("alpamon upgrade guard: could not read the disabled yum repos; rolling back without them"),
+		outcome(shellJoin(argv[:verb])+` "$@" `+shellJoin(argv[verb:])))
 }
 
 // PackageRollbackCommand is the pinned reinstall of the outgoing version
