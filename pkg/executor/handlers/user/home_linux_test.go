@@ -995,58 +995,82 @@ exec "$3" -test.run '^TestHomeOwnersDeduplicatesBindMount$' -test.v`, "sh", pare
 	require.NoError(t, err, "%s", output)
 }
 
-func TestDeleteArchiveRefusedWithoutOpenat2(t *testing.T) {
+func TestDeleteArchiveWithoutOpenat2(t *testing.T) {
+	openat2 := archiveopen.Openat2
+	t.Cleanup(func() { archiveopen.Openat2 = openat2 })
+	archiveopen.Openat2 = func(int, string, *unix.OpenHow) (int, error) {
+		return -1, unix.ENOSYS
+	}
+
+	for _, mode := range []string{"explicit", "legacy"} {
+		t.Run(mode, func(t *testing.T) {
+			h, executor := newHomeTestHandler(t, "rhel")
+			h.accountLocker.(*linuxAccountLocker).store = lockStateStore{path: filepath.Join(t.TempDir(), "state.json"), owner: uint32(os.Geteuid())}
+			home := filepath.Join(h.homeRoot, "alice")
+			require.NoError(t, os.Mkdir(home, 0700))
+			setArchiveTestAccount(t, h, home)
+			require.NoError(t, os.WriteFile(filepath.Join(home, "profile"), []byte("saved"), 0600))
+			h.chownHome = func(ctx context.Context, fd int, path string, _, _, linkOwner int) (int, error) {
+				return utils.ChownArchive(ctx, fd, path, os.Geteuid(), os.Getegid(), linkOwner)
+			}
+			archive := "archive"
+			args := &common.CommandArgs{Username: "alice", PurgeHomeDirectory: mode == "legacy"}
+			if mode == "explicit" {
+				args.Home = &archive
+				args.ArchiveTo = archivePrefix + "alice_2026-11-20T01:02:03Z"
+			}
+			code, output, err := h.Execute(context.Background(), "deluser", args)
+			require.NoError(t, err)
+			require.Zero(t, code, output)
+			assert.Contains(t, output, "home directory archived to "+archivePrefix)
+			assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
+			_, err = os.Stat(home)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+			archiveDir := filepath.Join(h.homeRoot, "deleted_users")
+			entries, err := os.ReadDir(archiveDir)
+			require.NoError(t, err)
+			require.Len(t, entries, 1)
+			content, err := os.ReadFile(filepath.Join(archiveDir, entries[0].Name(), "profile"))
+			require.NoError(t, err)
+			assert.Equal(t, "saved", string(content))
+		})
+	}
+}
+
+func TestDeleteAbsentAccountCleansState(t *testing.T) {
 	h, executor := newHomeTestHandler(t, "rhel")
-	home := filepath.Join(h.homeRoot, "alice")
-	require.NoError(t, os.Mkdir(home, 0700))
-	uid := setArchiveTestAccount(t, h, home)
-	original, err := os.Stat(home)
+	l := h.accountLocker.(*linuxAccountLocker)
+	l.store = lockStateStore{path: filepath.Join(t.TempDir(), "state.json"), owner: uint32(os.Geteuid())}
+	l.files = lockFiles{markerDir: filepath.Join(t.TempDir(), "markers"), owner: uint32(os.Geteuid())}
+	require.NoError(t, l.store.save(map[string]accountLockState{"alice": {UID: 1001}}))
+	require.NoError(t, l.files.marker("alice", true))
+
+	archiveDir := filepath.Join(h.homeRoot, "deleted_users")
+	require.NoError(t, os.Mkdir(archiveDir, 0700))
+	fd, err := unix.Open(archiveDir, archiveDirFlags, 0)
 	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, unix.Close(fd)) })
+	record := archiveRecordPath(fd, "alice")
+	require.NoError(t, os.WriteFile(record, nil, 0600))
 
 	openat2 := archiveopen.Openat2
 	t.Cleanup(func() { archiveopen.Openat2 = openat2 })
-	var opened []string
-	archiveopen.Openat2 = func(_ int, name string, _ *unix.OpenHow) (int, error) {
-		opened = append(opened, name)
+	archiveopen.Openat2 = func(int, string, *unix.OpenHow) (int, error) {
+		t.Error("absent-account cleanup unexpectedly called openat2")
 		return -1, unix.ENOSYS
 	}
-	h.accountLocker.(*linuxAccountLocker).renameAt = func(int, string, int, string, uint) error {
-		t.Fatal("archive attempted to rename the home without openat2")
-		return unix.ENOSYS
-	}
-
+	executor.SetResult("/usr/sbin/userdel alice", 6, "account does not exist", nil)
 	archive := "archive"
-	const destination = archivePrefix + "alice_2026-11-20T01:02:03Z"
 	code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{
-		Username: "alice", Home: &archive, ArchiveTo: destination,
+		Username: "alice", Home: &archive, ArchiveTo: archivePrefix + "alice_2026-11-20T01:02:03Z",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 1, code)
-	assert.Contains(t, output, "archive_refused: archiving needs Linux 5.6 or later (openat2)")
-	assert.Equal(t, []string{"."}, opened)
-	_, err = os.Lstat(filepath.Join(h.homeRoot, "deleted_users"))
-	assert.ErrorIs(t, err, os.ErrNotExist)
-	assert.Empty(t, commandArgv(executor))
-
-	current, err := os.Stat(home)
-	require.NoError(t, err)
-	assert.True(t, os.SameFile(original, current))
-	currentUID, err := fileOwnerUID(current)
-	require.NoError(t, err)
-	assert.Equal(t, uid, currentUID)
-	code, output, err = h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "alice"})
-	require.NoError(t, err)
-	assert.Zero(t, code, output)
+	assert.Equal(t, 6, code)
+	assert.Equal(t, "account does not exist", output)
 	assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
-	assert.Equal(t, []string{"."}, opened)
-
-	h.lookupUser = common.AbsentUserLookup
-	code, output, err = h.Execute(context.Background(), "deluser", &common.CommandArgs{
-		Username: "alice", Home: &archive, ArchiveTo: destination,
-	})
+	_, err = os.Stat(record)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	states, err := l.store.load()
 	require.NoError(t, err)
-	assert.Equal(t, 1, code)
-	assert.Contains(t, output, "archive_refused: archiving needs Linux 5.6 or later (openat2)")
-	assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor), "only the keep request should call userdel")
-	assert.Equal(t, []string{".", "."}, opened)
+	assert.Empty(t, states)
 }

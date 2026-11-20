@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/archiveopen"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
@@ -30,19 +31,6 @@ type pendingArchive struct {
 
 func archiveRecordPath(fd int, name string) string {
 	return filepath.Join("/proc/self/fd", strconv.Itoa(fd), fmt.Sprintf(".pending-%x", sha256.Sum256([]byte(name))))
-}
-
-func verifyArchiveSupport() error {
-	// Probe before creating an archive directory or recording a pending move.
-	probe, err := utils.OpenArchiveEntry(unix.AT_FDCWD, ".", unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC)
-	if errors.Is(err, unix.ENOSYS) {
-		return errors.New("archive_refused: archiving needs Linux 5.6 or later (openat2)")
-	}
-	if err != nil {
-		return fmt.Errorf("archive_refused: cannot verify openat2 support: %w", err)
-	}
-	_ = unix.Close(probe)
-	return nil
 }
 
 func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User, data DeleteUserData) (string, error) {
@@ -517,4 +505,8 @@ func archiveRenameError(destination string, err error) error {
 	default:
 		return fmt.Errorf("archive_refused: failed to move home directory: %w", err)
 	}
+}
+
+func homeRootMountID(dir *os.File) (uint64, error) {
+	return archiveopen.MountID(int(dir.Fd()))
 }

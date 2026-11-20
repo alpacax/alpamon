@@ -18,6 +18,11 @@ const archivePrefix = "/home/deleted_users/"
 
 var homeScanSlot = make(chan struct{}, 1)
 
+type homeRootIdentity struct {
+	info    os.FileInfo
+	mountID uint64
+}
+
 type homeScanResult struct {
 	owners map[uint64]string
 	target os.FileInfo
@@ -75,7 +80,7 @@ func scanHomeOwners(ctx context.Context, path, homeRoot, configuredRoot string, 
 		return homeScanResult{err: fmt.Errorf("failed to stat home directory: %w", err)}
 	}
 	owners := make(map[uint64]string)
-	var seen []os.FileInfo
+	var seen []homeRootIdentity
 	for _, root := range []string{filepath.Dir(path), homeRoot, configuredRoot} {
 		if err := scanHomeRoot(ctx, root, target, includeTarget, &seen, owners); err != nil {
 			return homeScanResult{err: fmt.Errorf("failed to scan home root %s: %w", root, err)}
@@ -91,7 +96,7 @@ func scanHomeOwners(ctx context.Context, path, homeRoot, configuredRoot string, 
 	return homeScanResult{owners: owners, target: current}
 }
 
-func scanHomeRoot(ctx context.Context, root string, target os.FileInfo, includeTarget bool, seen *[]os.FileInfo, owners map[uint64]string) error {
+func scanHomeRoot(ctx context.Context, root string, target os.FileInfo, includeTarget bool, seen *[]homeRootIdentity, owners map[uint64]string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -103,21 +108,24 @@ func scanHomeRoot(ctx context.Context, root string, target os.FileInfo, includeT
 		return err
 	}
 	defer func() { _ = opened.Close() }()
-	info, err := opened.Stat(".")
-	if err != nil {
-		return err
-	}
-	for _, prior := range *seen {
-		if os.SameFile(prior, info) {
-			return nil
-		}
-	}
-	*seen = append(*seen, info)
 	dir, err := opened.Open(".")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = dir.Close() }()
+	info, err := dir.Stat()
+	if err != nil {
+		return err
+	}
+	mountID, err := homeRootMountID(dir)
+	if err == nil {
+		for _, prior := range *seen {
+			if prior.mountID == mountID && os.SameFile(prior.info, info) {
+				return nil
+			}
+		}
+		*seen = append(*seen, homeRootIdentity{info: info, mountID: mountID})
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err

@@ -405,11 +405,6 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 		}
 		return 1, fmt.Sprintf("unable to look up user %q: %v", data.Username, lookupErr), lookupErr
 	}
-	if data.Home == "archive" {
-		if err := verifyArchiveSupport(); err != nil {
-			return 1, err.Error(), nil
-		}
-	}
 	if !exists {
 		if err := h.accountLocker.clearPendingArchive(data.Username); err != nil {
 			defer func() { output += "\npending_record_cleanup_failed: " + err.Error() }()
