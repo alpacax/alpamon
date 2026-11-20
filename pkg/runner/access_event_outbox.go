@@ -3,13 +3,13 @@ package runner
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/accessoutbox"
 	"github.com/rs/zerolog/log"
 )
@@ -419,22 +419,11 @@ func (o *accessEventOutbox) supervise(name string, stopped <-chan struct{}, loop
 	}
 }
 
-// runRecovered runs loop and reports whether it panicked. The log names only
-// the panic's type, never its value, which could carry event data.
+// runRecovered runs loop and reports whether it panicked.
 func runRecovered(name string, loop func()) (panicked bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			panicked = true
-			log.Error().Str("loop", name).Str("panic", describePanic(r)).
-				Msg("Access event outbox loop panicked; restarting it")
-		}
-	}()
+	defer safego.Recover("access event outbox "+name, func() { panicked = true })
 	loop()
 	return false
-}
-
-func describePanic(r any) string {
-	return fmt.Sprintf("%T", r)
 }
 
 func (o *accessEventOutbox) writeLoop() {

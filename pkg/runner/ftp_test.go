@@ -316,12 +316,10 @@ func newWiredFtpClient(t *testing.T) (*FtpClient, *websocket.Conn, func()) {
 	return fc, serverConn, cleanup
 }
 
-// startPumps launches the read/handleCommands/write goroutines; call it after any fc.execute override so the worker can't race the assignment.
-func startPumps(fc *FtpClient) (context.Context, context.CancelFunc) {
+// startWiredPumps launches the read/handleCommands/write goroutines; call it after any fc.execute override so the worker can't race the assignment.
+func startWiredPumps(fc *FtpClient) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
-	go fc.read(ctx, cancel)
-	go fc.handleCommands(ctx, cancel)
-	go fc.write(ctx, cancel)
+	fc.startPumps(ctx, cancel)
 	return ctx, cancel
 }
 
@@ -339,7 +337,7 @@ func TestFtpReadLoopStaysResponsiveDuringLongCommand(t *testing.T) {
 		return CommandResult{}, nil
 	}
 
-	ctx, cancel := startPumps(fc)
+	ctx, cancel := startWiredPumps(fc)
 	defer cancel()
 
 	msg, err := json.Marshal(FtpContent{Command: Pwd})
@@ -374,7 +372,7 @@ func TestFtpWriteDeadlineCancelsOnStalledPeer(t *testing.T) {
 	// WriteMessage blocks; a short deadline must turn that into an error.
 	fc.writeTimeout = 200 * time.Millisecond
 
-	ctx, cancel := startPumps(fc)
+	ctx, cancel := startWiredPumps(fc)
 	defer cancel()
 
 	// Feed large payloads until the write blocks past the deadline and cancels.
@@ -403,7 +401,7 @@ func TestFtpCommandsAreSerializedInOrder(t *testing.T) {
 	base := fc.workingDirectory
 	names := []string{"dir_a", "dir_b", "dir_c", "dir_d"}
 
-	_, cancel := startPumps(fc)
+	_, cancel := startWiredPumps(fc)
 	defer cancel()
 
 	for _, name := range names {
@@ -468,4 +466,18 @@ func TestFtpChown_ReportsNoHardLinksWhenAllWereChowned(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "Changed owner of "+root+" to UID: -1, GID: -1 recursively", res.Message)
+}
+
+func TestFtpCommandThatPanicsEndsTheSession(t *testing.T) {
+	fc, serverConn, cleanup := newWiredFtpClient(t)
+	defer cleanup()
+	fc.execute = func(FtpCommand, FtpData) (CommandResult, error) { panic("command handler panicked") }
+	ctx, cancel := startWiredPumps(fc)
+	defer cancel()
+	msg, err := json.Marshal(FtpContent{Command: Pwd})
+	require.NoError(t, err)
+
+	require.NoError(t, serverConn.WriteMessage(websocket.TextMessage, msg))
+
+	waitFor(t, ctx.Done(), "a panicking command to end the WebFTP session")
 }

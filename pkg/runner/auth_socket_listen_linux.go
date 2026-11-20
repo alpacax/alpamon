@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
@@ -88,7 +89,14 @@ func listenUnixLabeled(path string, l sockcreateLabeler) (net.Listener, error) {
 		err      error
 	}
 	results := make(chan result, 1)
-	go func() {
+	var listener net.Listener
+	panicked := func() { // the caller waits on results, and a labeled listener would leak
+		if listener != nil {
+			_ = listener.Close()
+		}
+		results <- result{err: errors.New("labeling the auth socket panicked")}
+	}
+	safego.Go("auth socket labeling", func() {
 		// The thread is unlocked only after a clear that succeeded. On any
 		// failure the goroutine returns still locked, so the runtime ends its
 		// OS thread along with whatever socket context a failed write left.
@@ -98,13 +106,14 @@ func listenUnixLabeled(path string, l sockcreateLabeler) (net.Listener, error) {
 			return
 		}
 
-		listener, listenErr := l.listen("unix", path)
+		var listenErr error
+		listener, listenErr = l.listen("unix", path)
 		clearErr := l.write("")
 		if clearErr == nil {
 			runtime.UnlockOSThread()
 		}
 		results <- result{listener: listener, err: errors.Join(listenErr, clearErr)}
-	}()
+	}, panicked)
 
 	res := <-results
 	if res.listener != nil {

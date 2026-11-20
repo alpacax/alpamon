@@ -1096,3 +1096,108 @@ func TestLookupCodeServerPath_OthersSearchPATH(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, path)
 }
+
+func TestStartThatPanicsReportsAnErrorAndFreesTheManager(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getuid() == 0 {
+		t.Skip("a root macOS host only runs code-server from its own install")
+	}
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "code-server"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+	t.Setenv("PATH", bin)
+	usr, err := user.Current()
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	m := &CodeServerManager{
+		username:    usr.Username,
+		homeDir:     t.TempDir(),
+		ctx:         ctx,
+		cancel:      cancel,
+		status:      CodeServerStatusIdle,
+		stopGrace:   codeServerStopGrace,
+		terminateFn: terminateProcess,
+	}
+	m.socketPath = filepath.Join(t.TempDir(), "session", "cs.sock")
+	m.prepareSocketDir = func(m *CodeServerManager) error { // runs under m.mu
+		require.NoError(t, prepareTestEditorSocketDir(m, os.Getuid(), os.Getgid(), func(string, int, int) error { return nil }))
+		panic("socket setup panicked") // after the directory exists, before any process does
+	}
+	t.Cleanup(func() { _ = m.Stop() })
+
+	m.StartAsync()
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		status, lastError := m.Status()
+		assert.Equal(c, CodeServerStatusError, status)
+		assert.Equal(c, errCodeServerPanicked.Error(), lastError)
+	}, 10*time.Second, 50*time.Millisecond, "a start that panicked must report it, not stay starting")
+	assert.ErrorIs(t, m.Start(), errCodeServerPanicked, "the Once never reruns, so the error must stick")
+	_, err = os.Stat(filepath.Dir(m.socketPath))
+	assert.ErrorIs(t, err, os.ErrNotExist, "a start that panicked left the socket directory behind")
+}
+
+func TestStartThatPanicsAfterLaunchReapsCodeServerAndRemovesItsSocketDir(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getuid() == 0 {
+		t.Skip("a root macOS host only runs code-server from its own install")
+	}
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "code-server"), []byte("#!/bin/sh\nexec sleep 300\n"), 0o755))
+	t.Setenv("PATH", bin)
+	usr, err := user.Current()
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	m := &CodeServerManager{
+		username:    usr.Username,
+		homeDir:     t.TempDir(),
+		ctx:         ctx,
+		cancel:      cancel,
+		status:      CodeServerStatusIdle,
+		stopGrace:   codeServerStopGrace,
+		terminateFn: terminateProcess,
+	}
+	m.socketPath = filepath.Join(t.TempDir(), "session", "cs.sock")
+	m.prepareSocketDir = func(m *CodeServerManager) error {
+		return prepareTestEditorSocketDir(m, os.Getuid(), os.Getgid(), func(string, int, int) error { return nil })
+	}
+	var proc *codeServerProcess
+	m.dialReady = func() (net.Conn, error) {
+		m.mu.Lock()
+		proc = m.proc
+		m.mu.Unlock()
+		panic("readiness probe panicked") // code-server is running by now
+	}
+	t.Cleanup(func() { _ = m.Stop() })
+
+	err = m.Start()
+
+	assert.ErrorIs(t, err, errCodeServerPanicked)
+	require.NotNil(t, proc, "the probe ran before code-server started")
+	select {
+	case <-proc.done:
+	default:
+		t.Fatal("a start that panicked left code-server running")
+	}
+	_, err = os.Stat(filepath.Dir(m.socketPath))
+	assert.ErrorIs(t, err, os.ErrNotExist, "a start that panicked left the socket directory behind")
+}
+
+func TestStopReapsTheLeaderWhenTheReaperPanics(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cmd := exec.CommandContext(ctx, "sleep", "300")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, cmd.Start())
+	proc := startReaper(cmd, func(int) error { panic("exit watch panicked") })
+	killGroupOnCleanup(t, proc)
+	m := &CodeServerManager{
+		proc:        proc,
+		ctx:         ctx,
+		cancel:      cancel,
+		status:      CodeServerStatusStarting,
+		stopGrace:   codeServerStopGrace,
+		terminateFn: terminateProcess,
+	}
+
+	err := m.Stop()
+
+	require.NoError(t, err, "a reaper that panicked must still close done, or Stop runs out its grace")
+	assert.NotNil(t, cmd.ProcessState, "the fallback must still collect the leader")
+}
