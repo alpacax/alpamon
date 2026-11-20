@@ -4,10 +4,11 @@ package exposure
 
 import "strconv"
 
+// The read trace gates storage; account and sudo results depend only on tracked bytes and the host name.
 func readAccounts(sys systemFiles) accountsData {
 	return cachedSource(sys.f, "accounts:/etc/passwd", nil, func(f *fsReader) accountsData {
 		return readAccountsUncached(systemFiles{f: f})
-	}, func(d accountsData) bool { return d.usable && len(d.reasons) == 0 }, immutable[accountsData])
+	}, func(accountsData) bool { return true }, immutable[accountsData])
 }
 
 func readShadow(sys systemFiles) shadowData {
@@ -19,22 +20,7 @@ func readShadow(sys systemFiles) shadowData {
 func readCachedSudo(sys systemFiles, host string) sudoPolicy {
 	return cachedSource(sys.f, "sudo:/etc/sudoers", host, func(f *fsReader) sudoPolicy {
 		return readSudoPolicy(systemFiles{f: f}, host)
-	}, func(d sudoPolicy) bool {
-		if d.failed || d.unresolved || len(d.global) != 0 || len(d.userReasons) != 0 {
-			return false
-		}
-		for _, rule := range d.rules {
-			if rule.unsupported {
-				return false
-			}
-			for _, host := range rule.hosts {
-				if host.conditional || host.overPaths {
-					return false
-				}
-			}
-		}
-		return true
-	}, immutable[sudoPolicy])
+	}, func(sudoPolicy) bool { return true }, immutable[sudoPolicy])
 }
 
 func readCachedSSHDConfig(sys systemFiles) sshdConfig {

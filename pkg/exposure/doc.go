@@ -31,8 +31,11 @@
 // change times, and the set of entry names. Adding, removing or renaming an
 // entry causes a fresh read.
 //
-// Successful, complete parsed results are cached in memory for this process
-// only. Unchanged sources are stat-ed but not opened; their facts, reasons and
+// A result is cached in memory for this process only, and only when its source
+// read succeeded completely. Most sources are cached only without reasons. The
+// sudo policy and account list are also cached with reasons, because those
+// reasons depend only on tracked files and the host name.
+// Unchanged sources are stat-ed but not opened; their facts, reasons and
 // completeness are reused. File and directory timestamps must both be more
 // than two seconds older than the stat time before results can be stored or
 // reused, avoiding missed changes on filesystems with coarse clocks. Failed

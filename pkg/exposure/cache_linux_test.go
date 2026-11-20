@@ -232,6 +232,81 @@ func TestDirectorySourceCacheTracksEntrySet(t *testing.T) {
 	}
 }
 
+func TestSudoCachePreservesReasonsAndTracksIncludes(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		for _, change := range []string{"unchanged", "includedir", "missing include"} {
+			t.Run(change, func(t *testing.T) {
+				dir := filepath.Join(fixturesDir, "hosts/ubuntu-default")
+				spec := loadCase(t, dir)
+				root, proc := buildHost(t, dir, spec)
+				opts := caseOptions(t, dir, spec, root, proc)
+				now := time.Now().Add(10 * time.Second)
+				opts.now = func() time.Time { return now }
+				sudoers := "Defaults targetpw\n@includedir /etc/sudoers.d\n"
+				added := "/etc/sudoers.d/extra"
+				if change == "missing include" {
+					require.NoError(t, os.Mkdir(filepath.Join(root, "srv"), 0o755))
+					added = "/srv/acme/sudoers"
+					sudoers += "@include " + added + "\n"
+				}
+				require.NoError(t, os.Chmod(filepath.Join(root, "etc/sudoers"), 0o640))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "etc/sudoers"), []byte(sudoers), 0o640))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "etc/passwd"), []byte("ubuntu:x:1000:1000::/home/ubuntu:/bin/bash\n"), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "etc/nsswitch.conf"), []byte("passwd: files\ngroup: files\n"), 0o644))
+				c := newCollector(opts)
+				opens := countSourceOpens(t)
+				paths := []string{sudoConfPath, sudoersRSPath, sudoersPath, "/etc/sudoers.d/90-cloud-init-users", "/etc/sudoers.d/README"}
+				wantOpens := []int{1, 1, 1, 1, 1}
+				wantCached := []int{0, 0, 0, 0, 0}
+				first := c.collect(context.Background())
+				assert.Contains(t, first.Categories[catSudo].Reasons, reasonSudoUnsupportedSyntax)
+				require.Len(t, first.Accounts, 1)
+				require.Len(t, first.Accounts[0].Sudo.Grants, 1)
+				assert.Equal(t, wantOpens, opens.take(paths...))
+				assert.Equal(t, []int{0}, opens.take(added))
+				assert.Equal(t, first, c.collect(context.Background()))
+				assert.Equal(t, wantCached, opens.take(paths...))
+				assert.Equal(t, []int{0}, opens.take(added))
+				if change == "unchanged" {
+					return
+				}
+				if change == "missing include" {
+					require.NoError(t, os.Mkdir(filepath.Join(root, "srv/acme"), 0o755))
+				}
+				require.NoError(t, os.WriteFile(filepath.Join(root, added), []byte("ubuntu ALL=(root) /usr/bin/id\n"), 0o640))
+				got := c.collect(context.Background())
+				assert.Equal(t, wantOpens, opens.take(paths...))
+				assert.Equal(t, []int{1}, opens.take(added))
+				require.Len(t, got.Accounts, 1)
+				assert.Contains(t, got.Accounts[0].Sudo.Grants, grant{
+					Source: added, Via: "user:ubuntu", Runas: "root", Commands: "limited", CommandPaths: []string{"/usr/bin/id"},
+				})
+			})
+		}
+	})
+}
+
+func TestAccountsCachePreservesReasons(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		dir := filepath.Join(fixturesDir, "hosts/ubuntu-default")
+		spec := loadCase(t, dir)
+		root, proc := buildHost(t, dir, spec)
+		opts := caseOptions(t, dir, spec, root, proc)
+		now := time.Now().Add(10 * time.Second)
+		opts.now = func() time.Time { return now }
+		passwd := "ubuntu:x:1000:1000::/home/ubuntu:/bin/bash\ninvalid\n"
+		require.NoError(t, os.WriteFile(filepath.Join(root, "etc/passwd"), []byte(passwd), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(root, "etc/nsswitch.conf"), []byte("passwd: files\ngroup: files\n"), 0o644))
+		c := newCollector(opts)
+		opens := countSourceOpens(t)
+		first := c.collect(context.Background())
+		assert.Contains(t, first.Categories[catAccounts].Reasons, reasonParseError)
+		assert.Equal(t, []int{1}, opens.take("/etc/passwd"))
+		assert.Equal(t, first, c.collect(context.Background()))
+		assert.Equal(t, []int{0}, opens.take("/etc/passwd"))
+	})
+}
+
 func TestCollectionCacheStartAndDailyFullRead(t *testing.T) {
 	dir := filepath.Join(fixturesDir, "hosts/ubuntu-default")
 	spec := loadCase(t, dir)
