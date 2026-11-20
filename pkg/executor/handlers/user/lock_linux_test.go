@@ -869,7 +869,7 @@ func TestDeleteMissingUserKeepsFailure(t *testing.T) {
 				args := &common.CommandArgs{Username: "deploy", PurgeHomeDirectory: mode == "legacy purge"}
 				if mode == "archive" {
 					args.Home = &mode
-					args.ArchiveTo = archivePrefix + "deploy_2026-11-20T01:02:03Z"
+					args.ArchiveTo = "/invalid"
 				}
 				code, output, err := f.h.Execute(context.Background(), "deluser", args)
 				require.NoError(t, err)

@@ -41,6 +41,7 @@ type linuxAccountLocker struct {
 }
 
 func newAccountLocker(h *UserHandler) accountLocker {
+	h.chownHome = utils.ChownArchive
 	l := &linuxAccountLocker{
 		handler:       h,
 		files:         lockFiles{markerDir: "/var/lib/alpamon/user-locks.d", unitDirs: []string{"/run/systemd/system", "/etc/systemd/system"}},
@@ -53,6 +54,7 @@ func newAccountLocker(h *UserHandler) accountLocker {
 		renameAt:      unix.Renameat2,
 		terminate:     terminateAccountProcesses,
 	}
+	h.chooseHomeUID = l.chooseHomeUID
 	l.systemd = func() bool { _, err := l.stat("/run/systemd/system"); return err == nil }
 	return l
 }

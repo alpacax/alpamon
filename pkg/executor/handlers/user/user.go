@@ -2,14 +2,12 @@ package user
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/executor/services"
@@ -34,7 +32,9 @@ type UserHandler struct {
 	supplementaryGroups common.SupplementaryGroupsFunc
 	accountLocker       accountLocker
 	homeRoot            string
-	chownHome           func(string, int, int, int) (int, error)
+	chooseHomeUID       func(context.Context, map[uint64]string) (uint64, error)
+	readHomeDefaults    func(string) ([]byte, error)
+	chownHome           func(context.Context, int, string, int, int, int) (int, error)
 }
 
 // NewUserHandler creates a new user handler
@@ -57,7 +57,7 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 		lookupGroup:         common.DefaultGroupLookup,
 		supplementaryGroups: common.DefaultSupplementaryGroups,
 		homeRoot:            "/home",
-		chownHome:           utils.ChownRecursive,
+		readHomeDefaults:    os.ReadFile,
 	}
 	h.accountLocker = newAccountLocker(h)
 	return h
@@ -200,9 +200,40 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		}
 	}
 
-	if !userExists && !omitUIDFlag && (utils.PlatformLike == "debian" || utils.PlatformLike == "rhel") {
-		if err := h.checkHomeOwner(data.Username, data.HomeDirectory, data.UID); err != nil {
+	if !userExists && (utils.PlatformLike == "debian" || utils.PlatformLike == "rhel") {
+		if !validHomeUsername(data.Username) {
+			return 1, fmt.Sprintf("invalid username %q", data.Username), nil
+		}
+		home := data.HomeDirectory
+		if omitHomeFlag {
+			root, err := h.defaultHomeRoot()
+			if err != nil {
+				return 1, err.Error(), nil
+			}
+			home = filepath.Join(root, data.Username)
+		}
+		owners, err := h.homeOwners(data.Username, filepath.Clean(home))
+		if err != nil {
 			return 1, err.Error(), nil
+		}
+		if omitUIDFlag && h.chooseHomeUID != nil {
+			uid, err := h.chooseHomeUID(ctx, owners)
+			if err != nil {
+				return 1, err.Error(), nil
+			}
+			if uid != 0 {
+				data.UID, omitUIDFlag = uid, false
+			}
+		}
+		if !omitUIDFlag {
+			home = filepath.Clean(home)
+			if path, found := owners[data.UID]; found {
+				return 1, fmt.Sprintf("system_home_conflict: %s is owned by requested uid %d; refusing to create the account", path, data.UID), nil
+			}
+			if err := h.checkHomeOwner(data.Username, home, data.UID); err != nil {
+				return 1, err.Error(), nil
+			}
+			data.HomeDirectory, omitHomeFlag = home, false
 		}
 	}
 
@@ -396,18 +427,6 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 
 	log.Info().Str("username", data.Username).Str("home", data.Home).Msg("Deleting user")
 
-	var destination string
-	if data.Home == "archive" {
-		if data.LegacyPurge {
-			data.ArchiveTo = archivePrefix + data.Username + "_" + time.Now().UTC().Format(time.RFC3339)
-		}
-		var err error
-		destination, err = archiveDestination(data.Username, data.ArchiveTo)
-		if err != nil {
-			return 1, err.Error(), nil
-		}
-	}
-
 	account, exists, lookupErr := common.UserExists(h.lookupUser, data.Username)
 	if lookupErr != nil {
 		if data.Home == "archive" {
@@ -426,26 +445,16 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 	result := "home directory kept at " + account.HomeDir
 	archived := false
 	if data.Home == "archive" {
-		home := filepath.Clean(account.HomeDir)
-		_, statErr := os.Lstat(home)
-		switch {
-		case errors.Is(statErr, os.ErrNotExist):
-			_, archiveErr := os.Lstat(filepath.Join(h.homeRoot, "deleted_users", destination))
-			if archiveErr == nil {
-				return 1, archivedDeleteFailure(data.ArchiveTo, errors.New("archive already exists; verify its ownership and permissions before deleting the account")).Error(), nil
-			}
-			if !errors.Is(archiveErr, os.ErrNotExist) {
-				return 1, fmt.Sprintf("archive_refused: cannot stat archive %s: %v", data.ArchiveTo, archiveErr), nil
-			}
-			result = fmt.Sprintf("home directory %s not found; nothing archived", home)
-		case statErr != nil:
-			return 1, fmt.Sprintf("archive_refused: cannot stat home %s: %v", home, statErr), nil
-		default:
-			if err := h.accountLocker.backupHomeDirectory(ctx, data.Username, account, destination, data.ArchiveTo); err != nil {
-				return 1, err.Error(), nil
-			}
+		destination, archiveErr := h.accountLocker.archiveHome(ctx, account, data)
+		if archiveErr != nil {
+			return 1, archiveErr.Error(), nil
+		}
+		if destination == "" {
+			result = fmt.Sprintf("home directory %s not found; nothing archived", filepath.Clean(account.HomeDir))
+		} else {
+			data.ArchiveTo = destination
 			archived = true
-			result = "home directory archived to " + data.ArchiveTo
+			result = "home directory archived to " + destination
 		}
 		if data.LegacyPurge {
 			result += " (legacy purge_home=true treated as archive)"
@@ -459,6 +468,11 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 			return 1, archivedDeleteFailure(data.ArchiveTo, fmt.Errorf("userdel exited %d: %s (%v)", exitCode, output, err)).Error(), nil
 		}
 		return exitCode, output, err
+	}
+	if archived {
+		if cleanupErr := h.accountLocker.clearPendingArchive(data.Username); cleanupErr != nil {
+			log.Warn().Err(cleanupErr).Str("username", data.Username).Msg("Failed to clear pending home archive")
+		}
 	}
 	if err := h.accountLocker.forget(data.Username); err != nil {
 		log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")

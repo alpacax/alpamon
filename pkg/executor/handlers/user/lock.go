@@ -15,7 +15,8 @@ var accountLockGate = make(chan struct{}, 1)
 type accountLocker interface {
 	execute(context.Context, string, *common.CommandArgs) (int, string, error)
 	forget(string) error
-	backupHomeDirectory(context.Context, string, *user.User, string, string) error
+	clearPendingArchive(string) error
+	archiveHome(context.Context, *user.User, DeleteUserData) (string, error)
 }
 
 func validateLockUser(args *common.CommandArgs) error {

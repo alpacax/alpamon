@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"time"
 )
 
@@ -16,27 +18,84 @@ func (h *UserHandler) checkHomeOwner(username, home string, requestedUID uint64)
 		return fmt.Errorf("invalid username %q", username)
 	}
 	path := home
-	if home == "" {
-		path = filepath.Join(h.homeRoot, username)
-	}
 	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("system_home_conflict: %s is a symlink; refusing to create the account", path)
-	}
-	if err != nil {
+	switch {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("system_home_conflict: %s is a symlink; refusing to create the account", path)
+		}
+		uid, err := fileOwnerUID(info)
+		if err != nil {
+			return err
+		}
+		if uid != requestedUID {
+			return fmt.Errorf("system_home_conflict: %s is owned by uid %d, not %d; refusing to create the account", path, uid, requestedUID)
+		}
+	case !errors.Is(err, os.ErrNotExist):
 		return fmt.Errorf("failed to stat home directory: %w", err)
 	}
-	uid, err := fileOwnerUID(info)
-	if err != nil {
-		return err
-	}
-	if uid != requestedUID {
-		return fmt.Errorf("system_home_conflict: %s is owned by uid %d, not %d; refusing to create the account", path, uid, requestedUID)
-	}
+
 	return nil
+}
+
+func (h *UserHandler) homeOwners(username, path string) (map[uint64]string, error) {
+	owners := make(map[uint64]string)
+	entries, err := os.ReadDir(h.homeRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return owners, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to list home directories: %w", err)
+	}
+	for _, entry := range entries {
+		child := filepath.Join(h.homeRoot, entry.Name())
+		if !entry.IsDir() || entry.Name() == username && child == path {
+			continue
+		}
+		info, err := entry.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat home directory: %w", err)
+		}
+		uid, err := fileOwnerUID(info)
+		if err != nil {
+			return nil, err
+		}
+		owners[uid] = child
+	}
+	return owners, nil
+}
+
+func (h *UserHandler) defaultHomeRoot() (string, error) {
+	path, key := "/etc/default/useradd", "HOME"
+	if utils.PlatformLike == "debian" {
+		path, key = "/etc/adduser.conf", "DHOME"
+	}
+	data, err := h.readHomeDefaults(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return h.homeRoot, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	root := h.homeRoot
+	for line := range strings.SplitSeq(string(data), "\n") {
+		name, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(name) != key {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && (value[0] == '"' || value[0] == 39) && value[len(value)-1] == value[0] {
+			value = value[1 : len(value)-1]
+		}
+		if !filepath.IsAbs(value) {
+			return "", fmt.Errorf("invalid %s in %s: expected an absolute home root", key, path)
+		}
+		root = filepath.Clean(value)
+	}
+	return root, nil
 }
 
 func validHomeUsername(username string) bool {
