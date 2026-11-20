@@ -95,6 +95,18 @@ type WorkSessionSnapshot struct {
 	State     string                `json:"state"`
 	Revision  protocol.Uint64String `json:"revision"`
 	ExpiresAt time.Time             `json:"expires_at"`
+	// EndProcesses says whether an ended session's processes are ended. The
+	// server sends false for a session that ended without an End to this
+	// host, such as one that expired while active: it is fenced and its
+	// processes keep running. A server that predates the field leaves it out.
+	EndProcesses *bool `json:"end_processes,omitempty"`
+}
+
+// endsProcesses reports whether reconciling to this snapshot ends the
+// session's processes. A missing field keeps the older behavior: ended ends
+// them.
+func (s WorkSessionSnapshot) endsProcesses() bool {
+	return s.EndProcesses == nil || *s.EndProcesses
 }
 
 // WorkSessionSurvivor names one owned process that outlived a Stop or End.
@@ -674,9 +686,12 @@ func (r *WorkSessionRegistry) applySnapshot(id string, s *trackedWorkSession, sn
 		if s.state == workSessionEnded {
 			r.markEnded(id)
 			// The End may have been missed; end the processes now rather
-			// than when it is resent.
-			s.ending = true
-			go r.endReconciled(id, s)
+			// than when it is resent. A session the server ended without an
+			// End to this host keeps its processes behind the fence.
+			if snapshot.endsProcesses() {
+				s.ending = true
+				go r.endReconciled(id, s)
+			}
 		}
 	}
 }

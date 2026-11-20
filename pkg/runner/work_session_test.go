@@ -417,6 +417,19 @@ func TestControlStateReadUsesAgentAuthAndFailsClosedOnNotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestControlStateReadParsesEndProcesses(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"state":"ended","revision":"4","expires_at":"2026-11-18T10:00:00Z","end_processes":false}`))
+	}))
+	defer origin.Close()
+	session := &scheduler.Session{BaseURL: origin.URL, Authorization: `id="server-1", key="k"`, Client: origin.Client()}
+
+	snapshot, err := readWorkSessionControlState(context.Background(), session, wsID)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot.EndProcesses)
+	assert.False(t, *snapshot.EndProcesses)
+}
+
 func TestControlResultWireShape(t *testing.T) {
 	encoded, err := json.Marshal(WorkSessionControlResult{
 		Type: "work_session_control_result", WorkSessionID: wsID, TransitionID: "t", Revision: 18446744073709551615,
@@ -489,6 +502,62 @@ func TestReconcileToEndedEndsTheOwnedProcesses(t *testing.T) {
 	assert.Equal(t, controlResultConfirmed, ended.Result)
 	assert.Empty(t, ended.Error)
 	assert.Equal(t, uint32(1), ended.AffectedTrees, "the receipt counts what the reconciled End reached")
+}
+
+// reconcileToEnded admits one command, then reconciles the session to an
+// ended state carrying endProcesses (nil leaves the field out).
+func reconcileToEnded(t *testing.T, endProcesses *bool) (*WorkSessionRegistry, *recordingControl, *fakeControlServer) {
+	t.Helper()
+	server := &fakeControlServer{}
+	server.set(workSessionActive, 0)
+	r := newTestRegistry(server)
+	control := &recordingControl{endEffects: []ProcessEffect{{AffectedTrees: 1}}}
+	r.processes = control
+
+	release, err := r.admit(context.Background(), attribution(0), "cmd-1")
+	require.NoError(t, err)
+	t.Cleanup(release)
+
+	server.set(workSessionEnded, 2)
+	server.mu.Lock()
+	server.state.EndProcesses = endProcesses
+	server.mu.Unlock()
+	require.NoError(t, r.reconcile(context.Background(), wsID))
+	return r, control, server
+}
+
+func TestReconcileToEndedWithEndProcessesEndsThem(t *testing.T) {
+	endProcesses := true
+	_, control, _ := reconcileToEnded(t, &endProcesses)
+
+	require.Eventually(t, func() bool { return control.endCount() == 1 }, time.Second, 5*time.Millisecond)
+	assert.Equal(t, []string{"cmd-1"}, control.ends[0].Commands)
+}
+
+func TestReconcileToEndedWithoutEndProcessesOnlyFences(t *testing.T) {
+	endProcesses := false
+	r, control, server := reconcileToEnded(t, &endProcesses)
+
+	_, err := r.admit(context.Background(), attribution(2), "cmd-2")
+	assert.ErrorIs(t, err, errWorkSessionEnded, "the terminal fence still applies")
+	assert.False(t, r.inputAllowed(wsID))
+	assert.Never(t, func() bool { return control.endCount() > 0 }, 50*time.Millisecond, 5*time.Millisecond,
+		"the processes keep running")
+	commands, _ := r.owned(wsID)
+	assert.Equal(t, []string{"cmd-1"}, commands, "the running command stays owned")
+
+	// A later End still ends them.
+	cc := &ControlClient{workSessions: r}
+	cc.HandleMessage(controlFrame(t, "work_session_end", 3, "ended", "expired"))
+	assert.Equal(t, 1, control.endCount())
+	assert.Equal(t, controlResultConfirmed, server.lastResult(t).Result)
+}
+
+func TestReconcileToEndedWithoutTheFieldEndsThem(t *testing.T) {
+	// A server that predates end_processes leaves it out.
+	_, control, _ := reconcileToEnded(t, nil)
+
+	require.Eventually(t, func() bool { return control.endCount() == 1 }, time.Second, 5*time.Millisecond)
 }
 
 func TestResentEndRetriesTheSurvivorsItReported(t *testing.T) {
