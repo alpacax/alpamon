@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/shirou/gopsutil/v4/disk"
 	gopsutilnet "github.com/shirou/gopsutil/v4/net"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -847,4 +848,43 @@ func TestFileExecCapabilityMatchesTheLane(t *testing.T) {
 	_, err := common.VerifiedFilePath()
 	assert.Equal(t, err == nil, fileExecCompiled,
 		"fileExecCompiled must follow the platforms where VerifiedFilePath succeeds")
+}
+
+func TestGetPartitionsLeavesOutAPartitionWithNoDevice(t *testing.T) {
+	original := listPartitions
+	t.Cleanup(func() { listPartitions = original })
+	listPartitions = func(bool) ([]disk.PartitionStat, error) {
+		return []disk.PartitionStat{
+			{Device: `C:\`, Mountpoint: `C:\`, Fstype: "NTFS"},
+			{}, // what gopsutil returns for a Windows drive that is not ready
+		}, nil
+	}
+
+	partitions, err := getPartitions()
+
+	require.NoError(t, err)
+	assert.Equal(t, []Partition{
+		{Name: `C:\`, MountPoints: []string{`C:\`}, DiskName: "C", Fstype: "NTFS"},
+	}, partitions)
+}
+
+func TestGetPartitionsGroupsMountPointsByDeviceAndSortsByName(t *testing.T) {
+	original := listPartitions
+	t.Cleanup(func() { listPartitions = original })
+	listPartitions = func(bool) ([]disk.PartitionStat, error) {
+		return []disk.PartitionStat{
+			{Device: "/dev/sdb1", Mountpoint: "/data", Fstype: "xfs"},
+			{Device: "/dev/sda1", Mountpoint: "/home", Fstype: "ext4"},
+			{Device: "/dev/sda1", Mountpoint: "/", Fstype: "ext4"},
+			{Device: "tmpfs", Mountpoint: "/run", Fstype: "tmpfs"},
+		}, nil
+	}
+
+	partitions, err := getPartitions()
+
+	require.NoError(t, err)
+	assert.Equal(t, []Partition{
+		{Name: "/dev/sda1", MountPoints: []string{"/", "/home"}, DiskName: "sda", Fstype: "ext4"},
+		{Name: "/dev/sdb1", MountPoints: []string{"/data"}, DiskName: "sdb", Fstype: "xfs"},
+	}, partitions)
 }

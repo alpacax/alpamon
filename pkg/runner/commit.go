@@ -85,6 +85,8 @@ var deferredSyncKeys = []string{
 	"disks", "partitions",
 }
 
+var listPartitions = disk.Partitions // swapped by tests for a fixture list
+
 // CommitAsync commits system information asynchronously
 // Uses ContextManager for coordinated lifecycle management
 func CommitAsync(session *scheduler.Session, commissioned bool, ctxManager *agent.ContextManager) {
@@ -799,12 +801,15 @@ func getDisks() ([]Disk, error) {
 
 func getPartitions() ([]Partition, error) {
 	seen := make(map[string]Partition)
-	partitions, err := disk.Partitions(true)
+	partitions, err := listPartitions(true)
 	if err != nil {
 		return []Partition{}, nil
 	}
 
 	for _, partition := range partitions {
+		if partition.Device == "" { // gopsutil's entry for a Windows drive that is not ready
+			continue
+		}
 		if utils.IsVirtualFileSystem(partition.Device, partition.Fstype, partition.Mountpoint) {
 			continue
 		}
@@ -820,7 +825,6 @@ func getPartitions() ([]Partition, error) {
 			MountPoints: []string{partition.Mountpoint},
 			DiskName:    disk,
 			Fstype:      partition.Fstype,
-			IsVirtual:   utils.IsVirtualFileSystem(partition.Device, partition.Fstype, partition.Mountpoint),
 		}
 	}
 
