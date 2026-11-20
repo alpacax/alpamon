@@ -308,6 +308,7 @@ func TestArchiveRefusesUnsafeHome(t *testing.T) {
 		{"wrong owner", "expected UID"},
 		{"shared", "another account's home is inside"},
 		{"shared descendant", "another account's home is inside"},
+		{"shared symlink descendant", "another account's home is inside"},
 		{"mounted home", "a filesystem is mounted inside"},
 		{"mounted descendant", "a filesystem is mounted inside"},
 		{"writable /home", "/home must be root-owned and writable only by root"},
@@ -353,10 +354,16 @@ func TestArchiveRefusesUnsafeHome(t *testing.T) {
 				require.NoError(t, os.Symlink(h.homeRoot, link))
 				h.homeRoot = link
 				home = filepath.Join(link, "alice")
-			case "shared", "shared descendant":
+			case "shared", "shared descendant", "shared symlink descendant":
 				otherHome := home + "/./"
 				if tc.state == "shared descendant" {
 					otherHome += "bob"
+				}
+				if tc.state == "shared symlink descendant" {
+					require.NoError(t, os.Mkdir(filepath.Join(home, "bob"), 0700))
+					alias := filepath.Join(t.TempDir(), "alias")
+					require.NoError(t, os.Symlink(home, alias))
+					otherHome = filepath.Join(alias, "bob")
 				}
 				readFile := l.readFile
 				l.readFile = func(path string) ([]byte, error) {
@@ -536,6 +543,14 @@ func TestArchiveReportsDeleteFailureWithPath(t *testing.T) {
 			_, err = os.Lstat(home)
 			assert.ErrorIs(t, err, os.ErrNotExist)
 			if fail == "chown" {
+				assert.Empty(t, commandArgv(executor))
+				code, output, err = h.Execute(context.Background(), "deluser", &common.CommandArgs{
+					Username: "alice", Home: &archive, ArchiveTo: destination,
+				})
+				require.NoError(t, err)
+				assert.Equal(t, 1, code)
+				assert.Contains(t, output, "archive already exists")
+				assert.Contains(t, output, destination)
 				assert.Empty(t, commandArgv(executor))
 			} else {
 				assert.Equal(t, [][]string{{"/usr/sbin/userdel", "alice"}}, commandArgv(executor))

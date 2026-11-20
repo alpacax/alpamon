@@ -430,6 +430,13 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 		_, statErr := os.Lstat(home)
 		switch {
 		case errors.Is(statErr, os.ErrNotExist):
+			_, archiveErr := os.Lstat(filepath.Join(h.homeRoot, "deleted_users", destination))
+			if archiveErr == nil {
+				return 1, archivedDeleteFailure(data.ArchiveTo, errors.New("archive already exists; verify its ownership and permissions before deleting the account")).Error(), nil
+			}
+			if !errors.Is(archiveErr, os.ErrNotExist) {
+				return 1, fmt.Sprintf("archive_refused: cannot stat archive %s: %v", data.ArchiveTo, archiveErr), nil
+			}
 			result = fmt.Sprintf("home directory %s not found; nothing archived", home)
 		case statErr != nil:
 			return 1, fmt.Sprintf("archive_refused: cannot stat home %s: %v", home, statErr), nil

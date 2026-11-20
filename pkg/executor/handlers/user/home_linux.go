@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -29,6 +30,9 @@ func (l *linuxAccountLocker) backupHomeDirectory(ctx context.Context, name strin
 	uid, err := strconv.ParseUint(account.Uid, 10, 32)
 	if err != nil {
 		return fmt.Errorf("archive_refused: invalid account UID: %w", err)
+	}
+	if uid > math.MaxInt {
+		return fmt.Errorf("archive_refused: account UID %d cannot be represented as an int", uid)
 	}
 	minUID, maxUID := l.uidBounds()
 	if isProtectedAccount(name, uid) || uid < minUID || uid > maxUID {
@@ -114,6 +118,19 @@ func (l *linuxAccountLocker) checkSharedHome(name, home string) error {
 			continue
 		}
 		if path := filepath.Clean(fields[5]); path == home || strings.HasPrefix(path, home+"/") {
+			return fmt.Errorf("archive_refused: another account's home is inside %s", home)
+		}
+		if !filepath.IsAbs(fields[5]) {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(fields[5])
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("archive_refused: cannot resolve home for account %q: %w", fields[0], err)
+		}
+		if resolved == home || strings.HasPrefix(resolved, home+"/") {
 			return fmt.Errorf("archive_refused: another account's home is inside %s", home)
 		}
 	}
