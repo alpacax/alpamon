@@ -24,6 +24,11 @@ type Command struct {
 	Signature  string `json:"signature,omitempty"`
 	AnalyzedAt string `json:"analyzed_at,omitempty"`
 	KeyID      string `json:"key_id,omitempty"`
+
+	// Work Session attribution of a command execute; see WorkSession.
+	WorkSessionID        string       `json:"work_session_id,omitempty"`
+	WorkSessionRevision  Uint64String `json:"work_session_revision,omitempty"`
+	WorkSessionExpiresAt string       `json:"work_session_expires_at,omitempty"`
 }
 
 // File represents a file in command data
@@ -123,6 +128,12 @@ type CommandData struct {
 	SignatureURL       string `json:"signature_url,omitempty"`
 	AttemptID          string `json:"attempt_id,omitempty"`
 	HealthGraceSeconds int    `json:"health_grace_seconds,omitempty"`
+
+	// Work Session attribution of a terminal open, which travels in the
+	// command's data; see Command.WorkSession.
+	WorkSessionID        string       `json:"work_session_id,omitempty"`
+	WorkSessionRevision  Uint64String `json:"work_session_revision,omitempty"`
+	WorkSessionExpiresAt string       `json:"work_session_expires_at,omitempty"`
 }
 
 // ParseCommandData parses the Data field of a Command into CommandData

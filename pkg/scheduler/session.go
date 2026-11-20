@@ -200,6 +200,15 @@ func (session *Session) Get(url string, timeout time.Duration) ([]byte, int, err
 	return session.do(req, timeout)
 }
 
+// GetWithContext binds a GET request to the caller's cancellation.
+func (session *Session) GetWithContext(ctx context.Context, url string, timeout time.Duration) ([]byte, int, error) {
+	req, err := session.newRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	return session.do(req.WithContext(ctx), timeout)
+}
+
 func (session *Session) Post(url string, rawBody any, timeout time.Duration) ([]byte, int, error) {
 	req, err := session.newRequest(http.MethodPost, url, rawBody)
 	if err != nil {

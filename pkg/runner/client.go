@@ -72,6 +72,9 @@ type WebsocketClient struct {
 	// repeated rejections is only visible across reconnects.
 	connectBackoff *authBackoff
 
+	// workSessions admits governed commands and fences paused sessions.
+	workSessions *WorkSessionRegistry
+
 	// onAuthenticated holds a callback invoked from Serve after the
 	// first successful ReadMessage on each new connection. Used by the
 	// workspace-migration watchdog to detect that the new workspace's
@@ -192,6 +195,7 @@ func NewWebsocketClient(session *scheduler.Session, ctxManager *agent.ContextMan
 		connectBackoff:       newAuthBackoff(minConnectInterval, maxConnectInterval),
 		readLimit:            MaxMessageSize,
 	}
+	wc.workSessions = NewWorkSessionRegistry(session, config.GlobalSettings.ID, wc.cancellations.cancel)
 
 	// Local environments (localhost) have no AI signing server, so enforce
 	// mode would reject all commands. Auto-downgrade to monitor mode.
@@ -726,9 +730,16 @@ func writeJSONWithin(conn *websocket.Conn, data any) error {
 	return err
 }
 
+// WorkSessions returns the registry that admits this client's governed
+// commands; hand it to the ControlClient so control messages reach it.
+func (wc *WebsocketClient) WorkSessions() *WorkSessionRegistry {
+	return wc.workSessions
+}
+
 func (wc *WebsocketClient) handleCommand(command protocol.Command, data protocol.CommandData) {
 	// Create CommandRunner with dispatcher for direct execution
 	commandRunner := NewCommandRunner(wc, wc.apiSession, command, data, wc.dispatcher)
+	commandRunner.workSessions = wc.workSessions
 
 	// Each handler manages its own timeout; safety net prevents leaked goroutines.
 	// When PoolDefaultTimeout > 0, ensure it always exceeds the longest handler

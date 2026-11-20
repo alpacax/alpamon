@@ -35,6 +35,15 @@ type ControlClient struct {
 	// connectBackoff outlives a single Connect call: the escalation after
 	// repeated rejections is only visible across reconnects.
 	connectBackoff *authBackoff
+
+	// workSessions applies Work Session control messages; nil drops them.
+	workSessions *WorkSessionRegistry
+}
+
+// SetWorkSessions routes Work Session control messages to registry. Call it
+// before RunForever.
+func (cc *ControlClient) SetWorkSessions(registry *WorkSessionRegistry) {
+	cc.workSessions = registry
 }
 
 // NewControlClient creates a new ControlClient
@@ -126,6 +135,9 @@ func (cc *ControlClient) reconnectAfterSilence(ctx context.Context, conn *websoc
 
 	cc.mu.Lock()
 	if cc.Conn == conn {
+		if cc.workSessions != nil {
+			cc.workSessions.invalidateAll()
+		}
 		cc.Conn = nil
 		cc.keepalive = nil
 		cc.connected = false
@@ -158,6 +170,10 @@ func (cc *ControlClient) Connect(ctx context.Context) error {
 
 		ka := newConnKeepalive()
 		watchPongs(conn, ka)
+		var reconcileIDs []string
+		if cc.workSessions != nil {
+			reconcileIDs = cc.workSessions.invalidateAll()
+		}
 
 		cc.mu.Lock()
 		cc.Conn = conn
@@ -168,6 +184,11 @@ func (cc *ControlClient) Connect(ctx context.Context) error {
 		go pingConn(ctx, conn, ka, keepaliveInterval, cc.conn)
 
 		log.Info().Msg("Control WebSocket connection established.")
+		// Control messages sent while the socket was down are lost, so every
+		// tracked session is fenced until the server's state is read again.
+		if cc.workSessions != nil {
+			go cc.workSessions.reconcileIDs(ctx, reconcileIDs)
+		}
 		return nil
 	})
 }
@@ -197,6 +218,9 @@ func (cc *ControlClient) CloseAndReconnect(ctx context.Context) error {
 
 // Close cleanly closes the WebSocket connection
 func (cc *ControlClient) Close() {
+	if cc.workSessions != nil {
+		cc.workSessions.invalidateAll()
+	}
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 
@@ -267,6 +291,18 @@ func (cc *ControlClient) HandleMessage(message []byte) {
 
 	if ctrlMsg.Query != "control" {
 		log.Debug().Str("query", ctrlMsg.Query).Msg("Unknown control message query type")
+		return
+	}
+
+	var kind struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(ctrlMsg.Data, &kind); err == nil && isWorkSessionControl(kind.Type) {
+		if cc.workSessions == nil {
+			log.Warn().Str("type", kind.Type).Msg("Work session control is not available")
+			return
+		}
+		cc.workSessions.handleControl(ctrlMsg.Data)
 		return
 	}
 

@@ -78,6 +78,9 @@ Assert with [testify](https://github.com/stretchr/testify): `require` when a fai
 ```bash
 # Run the static checks used by CI
 go vet ./...
+
+# Run the additional lint CI checks for the Linux target
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 golangci-lint run --timeout=5m
 ```
 
 ### Running locally
@@ -130,6 +133,8 @@ Commands from the Alpacon console flow through:
 - `terminal_manager.go`: PTY session lifecycle
 - `tunnel_client.go`, `tunnel_daemon.go`: Tunnel operations
 - `auth_manager.go`: PAM authentication and sudo approval
+- `work_session.go`: Indexes commands and terminals by `work_session_id`, applies Work Session pause and resume from the control socket (highest revision wins), fences new commands and terminal input of a paused session without signalling its processes, and reads `control-state` before starting work for a session whose state is unknown. For ended snapshots, true or absent `end_processes` ends processes. False continues only Stop-suspended groups when the host was active or a higher revision proves a missed Resume; a paused expiry at the same revision leaves them stopped. It posts control results over HTTP, retains uncertain process identities, and prunes ended ownership once processes finish while keeping the terminal fence and bounded receipt retention.
+- `work_session_process_unix.go`: Carries out a person's Stop (SIGSTOP to every owned process group), Resume (SIGCONT only to the groups Stop suspended) and End (SIGCONT, then the command cancel's TERM and KILL after 5 seconds, each sent only while a pinned member still proves the session, reporting survivors and retaining verified tracking until process exit) to the process sessions it can prove are still the ones it tracked, and lists owned processes for the inventory posted while a session is paused; Windows reports `unsupported` and End cancels each owned command's job object. Duplicate End messages replay the original receipt without acting again, including a failed receipt or an End older than the terminal fence.
 - `auth_session_event.go`: Non-Alpacon access detection (PAM session events via auth.sock, gated by `detect_local_access` policy)
 - `access_event_outbox.go`: Holds detected access events in the local database (`access_event_outbox` table) and delivers due events oldest first, subject to capacity and retention limits; it reaches the database only through `pkg/accessoutbox.Store`, which `pkg/db` implements
 
@@ -224,6 +229,8 @@ cpu := client.CPU.Create().SetUsage(usage).SetTimestamp(time.Now()).SaveX(ctx)
 
 **Database migrations**: Migration system uses direct SQL execution via Go's `database/sql` package. Migration files in `pkg/db/migration/` are pure SQLite SQL. The `RunMigration()` function tracks applied migrations in the `atlas_schema_revisions` table and executes unapplied migrations in transactions. No external tools required.
 
-**Process termination**: Terminate only through a handle, a job object or a process group you created; never by PID or image name. Open a PID only while something you hold pins it. Any change to a kill path gets a security review. The executor kills each command's tree on every exit path (`pkg/executor/process_tree_*.go`), and `TestKillPrimitivesStayInTheirHomes` confines the Windows primitives that find or kill processes by PID; work that must outlive its command goes through `StartDetached`.
+**Process termination**: Terminate only through a handle, a job object or a process group you created; never by PID or image name. Open a PID only while something you hold pins it. Any change to a kill path gets a security review. Work Session control (`pkg/runner/work_session_process_unix.go`) signals groups only through `commandcancel.SignalPinnedSessionGroups` and `TerminatePinnedSession`, which carry each member's PID, start time and PGID through the signal check. A Stop keeps the members of each suspended group; Resume continues only those groups. End rechecks identity before TERM and KILL. Lookup failures retain tracking and leave the process action unconfirmed. The executor kills each command's tree on every exit path (`pkg/executor/process_tree_*.go`), and `TestKillPrimitivesStayInTheirHomes` confines the Windows primitives that find or kill processes by PID; work that must outlive its command goes through `StartDetached`.
+
+**Work Session synchronization**: Hold the admitted context's process-start guard from Start through ownership registration, releasing it before Wait; handler PID hooks still serve PAM lookup. State application and release/adoption acquire the action lock before the registry mutex. Control-state HTTP reads use the caller's context without the action lock and apply only to the captured state generation. Connection changes fence tracked sessions synchronously. Terminal input carries an internal generation token checked at enqueue and consumption, so queued data cannot cross a fence. Process control covers command execution and Websh shells; FTP workers, tunnel daemons and code-server services have separate lifetimes outside that scope.
 
 **Timeout handling**: Commands that exceed their timeout return exit code 124 with an elapsed time message, matching the GNU `timeout` convention. Default shell command timeout is 30 minutes.

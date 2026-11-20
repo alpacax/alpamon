@@ -5,6 +5,7 @@ package commandcancel
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -66,4 +67,61 @@ func TestTerminationPollsEvery50Milliseconds(t *testing.T) {
 		require.Len(t, scans, 6) // three grace scans and three post-KILL scans
 		assert.Equal(t, 50*time.Millisecond, scans[1].Sub(scans[0]))
 	})
+}
+
+func TestVerifiedSessionTerminationSkipsKillOnceThePinIsGone(t *testing.T) {
+	_, sent, err := TerminateVerifiedSession(1, 0, func() ([]int, bool) { return []int{1}, true })
+	assert.Error(t, err)
+	assert.False(t, sent)
+
+	ready := filepath.Join(t.TempDir(), "ready")
+	cmd := exec.Command("perl", "-e", `$SIG{TERM} = "IGNORE"; open(my $f, ">", $ARGV[0]); close($f); sleep 10`, ready)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, cmd.Start())
+	sid := cmd.Process.Pid
+	defer func() { _, _, _ = TerminateSession(sid, 0); _ = cmd.Wait() }()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(ready)
+		return err == nil
+	}, 5*time.Second, 20*time.Millisecond, "the session ignores TERM")
+
+	// The pin holds for the TERM and is gone by the KILL.
+	checks := 0
+	survivors, sent, err := TerminateVerifiedSession(sid, 100*time.Millisecond, func() ([]int, bool) {
+		checks++
+		if checks > 1 {
+			return nil, false
+		}
+		return []int{sid}, true
+	})
+	assert.ErrorIs(t, err, ErrSessionUnverified)
+	assert.True(t, sent, "the TERM was sent while the pin held")
+	assert.Equal(t, []int{sid}, survivors, "what the KILL could not prove is reported")
+	members, err := SessionMembers(sid)
+	require.NoError(t, err)
+	assert.Contains(t, members, sid, "no KILL reaches a session whose pin is gone")
+}
+
+func TestSignalSessionGroupsSignalsOnlyTheAdmittedGroups(t *testing.T) {
+	for _, id := range []int{-1, 0, 1} {
+		groups, err := SignalSessionGroups(id, syscall.SIGCONT, nil)
+		assert.Error(t, err)
+		assert.Empty(t, groups)
+	}
+
+	// A session leader with a child in a group of its own.
+	cmd := exec.Command("perl", "-e", `if (fork() == 0) { setpgrp(0, 0); sleep 10; exit } sleep 10`)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, cmd.Start())
+	sid := cmd.Process.Pid
+	defer func() { _, _, _ = TerminateSession(sid, 0); _ = cmd.Wait() }()
+	require.Eventually(t, func() bool {
+		members, err := SessionMembers(sid)
+		return err == nil && len(members) == 2
+	}, 5*time.Second, 20*time.Millisecond)
+
+	groups, err := SignalSessionGroups(sid, syscall.SIGCONT, func(pgid int) bool { return pgid != sid })
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+	assert.NotEqual(t, sid, groups[0])
 }

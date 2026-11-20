@@ -43,6 +43,10 @@ type CommandRunner struct {
 	postChunk  func(ctx context.Context, url string, chunk *protocol.CommandChunk, priority int, expiry time.Time) // nil posts to scheduler.Rqueue
 
 	finishCancellation func() (bool, []int)
+
+	// workSessions admits commands attributed to a Work Session; with none,
+	// governed commands are refused.
+	workSessions *WorkSessionRegistry
 }
 
 func NewCommandRunner(wsClient *WebsocketClient, apiSession *scheduler.Session, command protocol.Command, data protocol.CommandData, dispatcher CommandDispatcher) *CommandRunner {
@@ -142,6 +146,14 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		return nil
 	}
 
+	ctx, releaseWorkSession, refusal := cr.admitWorkSession(ctx)
+	if refusal != nil {
+		exitCode = 1
+		result = fmt.Sprintf("Refused: %v.", refusal)
+		return nil
+	}
+	defer releaseWorkSession()
+
 	var command string
 	var args *common.CommandArgs
 
@@ -217,4 +229,39 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// admitWorkSession admits a command attributed to a Work Session, binding
+// it to the session in the returned context. An error means the command
+// must not start.
+func (cr *CommandRunner) admitWorkSession(ctx context.Context) (context.Context, func(), error) {
+	ws, err := cr.command.WorkSession(&cr.data)
+	if err != nil {
+		log.Warn().Err(err).Str("command_id", cr.command.ID).Msg("Refused a command with invalid work session attribution")
+		return ctx, nil, errWorkSessionAttribution
+	}
+	if ws.ID == "" {
+		return ctx, func() {}, nil
+	}
+	if cr.workSessions == nil {
+		err = errWorkSessionNoRegistry
+	}
+	var release func()
+	if err == nil {
+		release, err = cr.workSessions.admit(ctx, ws, cr.command.ID)
+	}
+	if err != nil {
+		log.Info().Err(err).Str("command_id", cr.command.ID).Str("work_session_id", ws.ID).Msg("Refused a work session command")
+		return ctx, nil, err
+	}
+	binding := &workSessionBinding{registry: cr.workSessions, id: ws.ID}
+	ctx = withWorkSession(ctx, binding)
+	ctx = common.WithProcessStartGuard(ctx, binding.beginProcessStart)
+	admittedCommandID := cr.command.ID
+	return common.WithProcessObserver(ctx, func(commandID string, pid int) {
+		if commandID == "" {
+			commandID = admittedCommandID
+		}
+		binding.registry.trackProcess(binding.id, ownedKindCommand, commandID, pid)
+	}), release, nil
 }
