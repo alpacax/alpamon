@@ -121,7 +121,7 @@ func pinSession(session OwnedSession) {
 }
 
 func pinSessionWithTable(session OwnedSession, table sessionProcessTable, readState func(int) (procState, error)) {
-	if session.SID <= 1 || session.StartedAt == 0 {
+	if session.missing || session.SID <= 1 || session.StartedAt == 0 {
 		return
 	}
 	sessionPins.mu.Lock()
@@ -289,8 +289,23 @@ func refreshSessionPin(session OwnedSession, expected *sessionPin) map[int]int64
 }
 
 func refreshSessionPinWithTable(session OwnedSession, expected *sessionPin, table sessionProcessTable) (map[int]int64, error) {
-	if session.SID <= 1 || session.StartedAt == 0 {
+	if session.missing {
+		return map[int]int64{}, nil
+	}
+	if session.SID <= 1 {
 		return nil, nil
+	}
+	if session.StartedAt == 0 {
+		for range 2 {
+			members, err := table.members(session.SID)
+			if err != nil {
+				return nil, err
+			}
+			if len(members) > 0 {
+				return nil, fmt.Errorf("session %d start time unavailable: %w", session.SID, commandcancel.ErrSessionUnverified)
+			}
+		}
+		return map[int]int64{}, nil
 	}
 	pids, err := table.members(session.SID)
 	if err != nil {

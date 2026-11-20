@@ -1,5 +1,10 @@
 package runner
 
+import (
+	"errors"
+	"os"
+)
+
 func newProcessControl(cancel func(commandID string)) WorkSessionProcessController {
 	return cancelProcessControl{cancel: cancel}
 }
@@ -15,6 +20,14 @@ func ownedSessionStatus(session OwnedSession) (bool, error) {
 
 func processStartedAt(int) int64 {
 	return 0
+}
+
+func processStartTime(int) (int64, error) {
+	return 0, nil
+}
+
+func processGone(err error) bool {
+	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, os.ErrNotExist)
 }
 
 // pinSession does nothing: Windows tracks no process sessions.

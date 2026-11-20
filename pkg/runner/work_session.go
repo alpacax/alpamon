@@ -197,6 +197,7 @@ type OwnedSession struct {
 	CommandID string
 	SID       int
 	StartedAt int64
+	missing   bool // preserves a confirmed-absence observation until pruning
 }
 
 // WorkSessionProcess is one entry of a process inventory.
@@ -303,6 +304,8 @@ type trackedWorkSession struct {
 	known          bool
 	hasState       bool
 	conflicted     bool
+	keepProcesses  bool
+	resumeOnExpiry bool
 	transitionID   string
 	lastResult     *WorkSessionControlResult
 	stopResults    map[string]WorkSessionControlResult
@@ -314,7 +317,7 @@ type trackedWorkSession struct {
 	terminals map[string]string // terminal session ID -> opening command ID
 	processes map[int]OwnedSession
 
-	// stopInventory ends the periodic inventory while the session is paused.
+	// stopInventory ends paused inventory or ended-session ownership cleanup.
 	stopInventory chan struct{}
 
 	// ending is set while an End found by reconciliation is still to run.
@@ -662,8 +665,26 @@ func (r *WorkSessionRegistry) applySnapshot(id string, s *trackedWorkSession, sn
 	case s.state == workSessionEnded:
 		// A terminal fence is never lifted.
 		if snapshot.State == workSessionEnded && revision >= s.revision {
+			wasKeeping := s.keepProcesses
+			newer := revision > s.revision
 			s.known, s.conflicted = true, false
+			s.keepProcesses = !snapshot.endsProcesses()
 			s.controlVersion++
+			if !s.keepProcesses {
+				s.resumeOnExpiry = false
+			} else if wasKeeping && newer && s.lastResult == nil && s.reconciledEnd == nil && !s.ending {
+				s.resumeOnExpiry = true
+			}
+			if newer && s.lastResult == nil {
+				s.revision = revision
+				s.transitionID = ""
+			}
+			if s.keepProcesses && s.resumeOnExpiry {
+				go r.continueReconciled(id, s, s.revision)
+			} else if wasKeeping && !s.keepProcesses && !s.ending {
+				s.ending = true
+				go r.endReconciled(id, s)
+			}
 		}
 	case revision < s.revision:
 		// A control message applied a newer revision while the read was in flight.
@@ -673,9 +694,12 @@ func (r *WorkSessionRegistry) applySnapshot(id string, s *trackedWorkSession, sn
 			s.lastResult = nil
 		}
 		resumed := s.state == workSessionPaused && snapshot.State == workSessionActive
+		s.resumeOnExpiry = snapshot.State == workSessionEnded && !snapshot.endsProcesses() &&
+			(s.state == workSessionActive || s.state == workSessionPaused && revision > s.revision)
 		s.state, s.revision, s.expiresAt, s.known = snapshot.State, revision, snapshot.ExpiresAt, true
 		s.hasState = true
 		s.conflicted = false
+		s.keepProcesses = snapshot.State == workSessionEnded && !snapshot.endsProcesses()
 		s.controlVersion++
 		r.syncInventoryLoop(id, s)
 		if resumed {
@@ -691,19 +715,22 @@ func (r *WorkSessionRegistry) applySnapshot(id string, s *trackedWorkSession, sn
 			if snapshot.endsProcesses() {
 				s.ending = true
 				go r.endReconciled(id, s)
+			} else if s.resumeOnExpiry {
+				go r.continueReconciled(id, s, revision)
 			}
 		}
 	}
 }
 
-// continueReconciled continues the process groups a Stop suspended in a
-// session reconciliation found active after paused, unless a newer control
-// changed the session first.
+// continueReconciled continues Stop-suspended groups only while the recovered
+// Resume remains current, including one proved by an ended snapshot.
 func (r *WorkSessionRegistry) continueReconciled(id string, s *trackedWorkSession, revision uint64) {
 	r.actions.Lock()
 	defer r.actions.Unlock()
 	r.mu.Lock()
-	current := s.state == workSessionActive && s.revision == revision
+	active := s.state == workSessionActive
+	current := r.sessions[id] == s && s.revision == revision &&
+		(active || s.state == workSessionEnded && s.keepProcesses && s.resumeOnExpiry)
 	r.mu.Unlock()
 	if !current {
 		return
@@ -713,9 +740,11 @@ func (r *WorkSessionRegistry) continueReconciled(id string, s *trackedWorkSessio
 	owned := s.owned()
 	r.mu.Unlock()
 	if _, err := r.processes.Continue(id, owned); err != nil {
-		log.Warn().Err(err).Str("work_session_id", id).Msg("Could not continue every stopped process of a resumed work session.")
+		log.Warn().Err(err).Str("work_session_id", id).Msg("Could not continue every stopped process of a reconciled work session.")
 	}
-	r.reportInventory(id, false)
+	if active {
+		r.reportInventory(id, false)
+	}
 }
 
 // endReconciled ends the processes of a session reconciliation found ended,
@@ -1004,6 +1033,10 @@ func (r *WorkSessionRegistry) decideTransition(msg workSessionControl, s *tracke
 	s.state, s.revision, s.expiresAt, s.known, s.transitionID = target, max(s.revision, revision), expiresAt, true, msg.TransitionID
 	s.hasState = true
 	s.conflicted = false
+	if end {
+		s.keepProcesses = false
+		s.resumeOnExpiry = false
+	}
 	s.controlVersion++
 	if newlyEnded {
 		r.markEnded(msg.WorkSessionID)
@@ -1089,8 +1122,11 @@ func (r *WorkSessionRegistry) trackProcess(id, kind, commandID string, pid int) 
 	if pid <= 1 {
 		return
 	}
-	session := OwnedSession{Kind: kind, CommandID: commandID, SID: pid, StartedAt: processStartedAt(pid)}
-	pinSession(session)
+	started, err := processStartTime(pid)
+	session := OwnedSession{Kind: kind, CommandID: commandID, SID: pid, StartedAt: started, missing: processGone(err)}
+	if !session.missing {
+		pinSession(session)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.session(id).processes[pid] = session
@@ -1156,15 +1192,16 @@ func (r *WorkSessionRegistry) pruneProcesses(id string) {
 	}
 }
 
-// syncInventoryLoop starts the periodic inventory of a paused session and
-// stops it once the session leaves paused. Call it under r.mu.
+// syncInventoryLoop reports paused sessions and checks ended sessions until
+// their owned work is gone. Call it under r.mu.
 func (r *WorkSessionRegistry) syncInventoryLoop(id string, s *trackedWorkSession) {
+	needed := s.state == workSessionPaused && r.postInventory != nil || s.state == workSessionEnded && !s.idle()
 	switch {
-	case s.state == workSessionPaused && s.stopInventory == nil && r.postInventory != nil:
+	case needed && s.stopInventory == nil:
 		stop := make(chan struct{})
 		s.stopInventory = stop
 		go r.runInventoryLoop(id, stop)
-	case s.state != workSessionPaused && s.stopInventory != nil:
+	case !needed && s.stopInventory != nil:
 		close(s.stopInventory)
 		s.stopInventory = nil
 	}
@@ -1178,9 +1215,38 @@ func (r *WorkSessionRegistry) runInventoryLoop(id string, stop <-chan struct{}) 
 		case <-stop:
 			return
 		case <-ticker.C:
-			r.reportInventory(id, true)
+			if !r.refreshInventoryLoop(id, stop) {
+				return
+			}
 		}
 	}
+}
+
+func (r *WorkSessionRegistry) refreshInventoryLoop(id string, stop <-chan struct{}) bool {
+	r.mu.Lock()
+	s, ok := r.sessions[id]
+	if !ok || s.stopInventory != stop {
+		r.mu.Unlock()
+		return false
+	}
+	ended := s.state == workSessionEnded
+	r.mu.Unlock()
+	if ended {
+		r.pruneProcesses(id)
+	} else {
+		r.reportInventory(id, true)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sessions[id] != s || s.stopInventory != stop {
+		return false
+	}
+	r.syncInventoryLoop(id, s)
+	if s.state == workSessionEnded {
+		r.forget(id, s)
+	}
+	return r.sessions[id] == s && s.stopInventory == stop
 }
 
 // reportInventory posts the processes the session owns. With whilePaused it
