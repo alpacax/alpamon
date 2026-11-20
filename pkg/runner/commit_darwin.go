@@ -9,7 +9,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// loadValidShells returns the host's valid login shells from /etc/shells,
+// loadReportedShells reads /etc/shells for the user report, without the PTY fallback list.
+var loadReportedShells = utils.LoadValidShells
+
+// loadValidShells returns the login shells a PTY may start, from /etc/shells,
 // falling back to the common macOS defaults when the list is empty or unavailable.
 func loadValidShells() []string {
 	shells := utils.LoadValidShells()
@@ -40,7 +43,7 @@ func getUserData() ([]UserData, error) {
 
 // usersFromDscl warns on a parse failure because callers log collection errors at Debug only.
 func usersFromDscl(out []byte) ([]UserData, error) {
-	users, err := parseDsclUsers(string(out), loadValidShells())
+	users, err := parseDsclUsers(string(out), loadReportedShells())
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to parse dscl user records; users will not be reported.")
 		return nil, err
