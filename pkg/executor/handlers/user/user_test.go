@@ -472,12 +472,12 @@ func TestUserHandler_Validate(t *testing.T) {
 			cmd:  "adduser",
 			args: &common.CommandArgs{
 				Username: "testuser",
-				// IsServiceAccount=false (default), so UID/GID/HomeDirectory
+				// IsServiceAccount=false (default), so UID/GID
 				// are required_unless and also missing. Comment/Groupname are
 				// required unconditionally. Shell carries `validate:"required"`
-				// and is deliberately not defaulted (types.go:52), so it fails too.
+				// and is deliberately not defaulted, so it fails too.
 			},
-			wantErrFields: []string{"UID", "GID", "Comment", "HomeDirectory", "Shell", "Groupname"},
+			wantErrFields: []string{"UID", "GID", "Comment", "Shell", "Groupname"},
 		},
 		{
 			name: "adduser uid-less service account valid",
@@ -492,7 +492,7 @@ func TestUserHandler_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "adduser IAM User path must still require uid, gid and home",
+			name: "adduser IAM User path requires UID and GID",
 			cmd:  "adduser",
 			args: &common.CommandArgs{
 				Username:  "john",
@@ -500,9 +500,9 @@ func TestUserHandler_Validate(t *testing.T) {
 				Shell:     "/bin/bash",
 				Groupname: "alpacon",
 				// IsServiceAccount=false (default)
-				// UID/GID/HomeDirectory missing: must fail
+				// UID/GID missing: must fail
 			},
-			wantErrFields: []string{"UID", "GID", "HomeDirectory"},
+			wantErrFields: []string{"UID", "GID"},
 		},
 		{
 			name: "adduser IAM User with uid=0 must fail (cannot silently auto-assign)",
@@ -1027,6 +1027,10 @@ func TestUserHandler_AddUser_ExistingUser_GroupAddSoftFailMessage(t *testing.T) 
 	assert.False(t, mock.Invoked("/usr/sbin/adduser"), "adduser must not run for an existing user")
 }
 
+// TestUserHandler_ModUser_ManagedGroupnames pins the reconcile mode: with
+// managed_groupnames present, moduser keeps every current supplementary group
+// Alpacon does not manage and replaces only the managed ones. Without the key
+// it stays the legacy whole-list replace.
 func TestUserHandler_ModUser_ManagedGroupnames(t *testing.T) {
 	current := func(string) ([]string, error) { return []string{"docker", "devs", "oldteam"}, nil }
 

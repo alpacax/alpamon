@@ -24,29 +24,34 @@ const unitWorkTimeout = 60 * time.Second
 var errUserNotFound = errors.New("user_not_found")
 
 type linuxAccountLocker struct {
-	toolsResolved       bool
-	handler             *UserHandler
-	store               lockStateStore
-	files               lockFiles
-	readFile            func(string) ([]byte, error)
-	systemd             func() bool
-	stat                func(string) (os.FileInfo, error)
-	lookupUID           func(string) (*user.User, error)
-	pidfdOpen           func(int, int) (int, error)
-	loginctl, systemctl string
-	terminate           func(context.Context, uint64, func(context.Context) error) (int, error)
+	toolsResolved          bool
+	handler                *UserHandler
+	store                  lockStateStore
+	files                  lockFiles
+	readFile               func(string) ([]byte, error)
+	systemd                func() bool
+	stat                   func(string) (os.FileInfo, error)
+	lookupUID              func(string) (*user.User, error)
+	pidfdOpen              func(int, int) (int, error)
+	scanProcesses          processScanner
+	archiveUID, archiveGID int
+	renameAt               func(int, string, int, string, uint) error
+	loginctl, systemctl    string
+	terminate              func(context.Context, uint64, func(context.Context) error) (int, error)
 }
 
 func newAccountLocker(h *UserHandler) accountLocker {
 	l := &linuxAccountLocker{
-		handler:   h,
-		files:     lockFiles{markerDir: "/var/lib/alpamon/user-locks.d", unitDirs: []string{"/run/systemd/system", "/etc/systemd/system"}},
-		store:     lockStateStore{path: filepath.Join(utils.DataDir(), "user-locks.json"), owner: 0},
-		readFile:  os.ReadFile,
-		stat:      os.Stat,
-		lookupUID: user.LookupId,
-		pidfdOpen: unix.PidfdOpen,
-		terminate: terminateAccountProcesses,
+		handler:       h,
+		files:         lockFiles{markerDir: "/var/lib/alpamon/user-locks.d", unitDirs: []string{"/run/systemd/system", "/etc/systemd/system"}},
+		store:         lockStateStore{path: filepath.Join(utils.DataDir(), "user-locks.json"), owner: 0},
+		readFile:      os.ReadFile,
+		stat:          os.Stat,
+		lookupUID:     user.LookupId,
+		pidfdOpen:     unix.PidfdOpen,
+		scanProcesses: scanAccountProcesses,
+		renameAt:      unix.Renameat2,
+		terminate:     terminateAccountProcesses,
 	}
 	l.systemd = func() bool { _, err := l.stat("/run/systemd/system"); return err == nil }
 	return l
@@ -351,9 +356,17 @@ func (l *linuxAccountLocker) terminateSessions(ctx context.Context, name string,
 	}
 	// logind forgets a user after its final session and linger are removed.
 	// Verify absence rather than matching localized error messages.
-	output, err := l.run(ctx, l.loginctl, "list-users", "--no-legend", "--no-pager")
-	if err != nil {
+	active, err := l.hasLoginUser(ctx, l.loginctl, uid)
+	if err != nil || active {
 		return errors.Join(terminateErr, err)
+	}
+	return nil
+}
+
+func (l *linuxAccountLocker) hasLoginUser(ctx context.Context, loginctl string, uid uint64) (bool, error) {
+	output, err := l.run(ctx, loginctl, "list-users", "--no-legend", "--no-pager")
+	if err != nil {
+		return false, err
 	}
 	for line := range strings.SplitSeq(output, "\n") {
 		fields := strings.Fields(line)
@@ -361,11 +374,14 @@ func (l *linuxAccountLocker) terminateSessions(ctx context.Context, name string,
 			continue
 		}
 		listedUID, err := strconv.ParseUint(fields[0], 10, 32)
-		if err != nil || listedUID == uid {
-			return terminateErr
+		if err != nil {
+			return false, fmt.Errorf("invalid UID from loginctl: %w", err)
+		}
+		if listedUID == uid {
+			return true, nil
 		}
 	}
-	return nil
+	return false, nil
 }
 
 func (l *linuxAccountLocker) resolveTool(name string) (string, error) {

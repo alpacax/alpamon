@@ -868,6 +868,12 @@ func TestDeleteMissingUserKeepsFailure(t *testing.T) {
 				f.exec.SetResult("/usr/sbin/userdel deploy", 6, "user does not exist", nil)
 				code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy", PurgeHomeDirectory: purge})
 				require.NoError(t, err)
+				if purge {
+					assert.Equal(t, 1, code)
+					assert.Equal(t, "archive_refused: account does not exist", output)
+					assert.Empty(t, commandArgv(f.exec))
+					return
+				}
 				assert.Equal(t, 6, code)
 				assert.Equal(t, "user does not exist"+cleanupLine, output)
 				assert.Contains(t, commandArgv(f.exec), []string{"/usr/sbin/userdel", "deploy"})

@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"fmt"
+	"os/user"
 	"strings"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
@@ -14,6 +15,7 @@ var accountLockGate = make(chan struct{}, 1)
 type accountLocker interface {
 	execute(context.Context, string, *common.CommandArgs) (int, string, error)
 	forget(string) error
+	backupHomeDirectory(context.Context, string, *user.User, string, string) error
 }
 
 func validateLockUser(args *common.CommandArgs) error {

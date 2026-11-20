@@ -1,14 +1,18 @@
 package user
 
-import "github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+import (
+	"path/filepath"
+
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+)
 
 // UserData contains data for user operations.
 //
 // IsServiceAccount discriminates IAM User provisioning from Application
 // service-account provisioning:
-//   - IsServiceAccount=false (default, IAM User): UID/GID/HomeDirectory are
+//   - IsServiceAccount=false (default, IAM User): UID/GID are
 //     required. alpacon-server centrally assigns these for cross-server
-//     consistency. Missing values indicate a server-side bug and must fail
+//     consistency. The home defaults to /home/<username>. Missing UID or GID must fail
 //     validation rather than silently fall back to OS auto-assignment.
 //   - IsServiceAccount=true (Application): UID/GID/HomeDirectory are optional.
 //     When omitted, the numeric --uid / --gid / --home flag is skipped:
@@ -17,11 +21,11 @@ import "github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 //     primary group is set by name. Cross-server consistency is not required
 //     because alpacon-server matches service accounts by username.
 type UserData struct {
-	Username                string   `validate:"required"`
-	UID                     uint64   `validate:"required_unless=IsServiceAccount true"`
-	GID                     uint64   `validate:"required_unless=IsServiceAccount true"`
-	Comment                 string   `validate:"required"`
-	HomeDirectory           string   `validate:"required_unless=IsServiceAccount true"`
+	Username                string `validate:"required"`
+	UID                     uint64 `validate:"required_unless=IsServiceAccount true"`
+	GID                     uint64 `validate:"required_unless=IsServiceAccount true"`
+	Comment                 string `validate:"required"`
+	HomeDirectory           string
 	HomeDirectoryPermission string   `validate:"omitempty"`
 	Shell                   string   `validate:"required"`
 	Groupname               string   `validate:"required"`
@@ -45,6 +49,9 @@ func userDataFromArgs(args *common.CommandArgs) UserData {
 		Groupname:               args.Groupname,
 		Groups:                  args.Groups,
 		IsServiceAccount:        args.IsServiceAccount,
+	}
+	if !data.IsServiceAccount && data.HomeDirectory != "" {
+		data.HomeDirectory = filepath.Clean(data.HomeDirectory)
 	}
 	if data.HomeDirectoryPermission == "" {
 		data.HomeDirectoryPermission = "0755"
@@ -72,7 +79,7 @@ func deleteUserDataFromArgs(args *common.CommandArgs) DeleteUserData {
 		Username:    args.Username,
 		Home:        "keep",
 		ArchiveTo:   args.ArchiveTo,
-		LegacyPurge: args.PurgeHomeDirectory,
+		LegacyPurge: args.Home == nil && args.PurgeHomeDirectory,
 	}
 	if args.Home != nil {
 		data.Home = *args.Home

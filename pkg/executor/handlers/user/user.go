@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -141,6 +142,9 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	if err := h.ValidateStruct(data); err != nil {
 		return 1, err.Error(), nil
 	}
+	if !data.IsServiceAccount && data.HomeDirectory == "" {
+		data.HomeDirectory = filepath.Join(h.homeRoot, data.Username)
+	}
 
 	log.Info().
 		Str("username", data.Username).
@@ -221,7 +225,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	}
 
 	if !userExists && !omitUIDFlag && (utils.PlatformLike == "debian" || utils.PlatformLike == "rhel") {
-		if err := h.checkHomeOwner(data.Username, data.UID); err != nil {
+		if err := h.checkHomeOwner(data.Username, data.HomeDirectory, data.UID, data.IsServiceAccount); err != nil {
 			return 1, err.Error(), nil
 		}
 	}
@@ -394,7 +398,7 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 		if data.LegacyPurge {
 			data.ArchiveTo = archivePrefix + data.Username + "_" + time.Now().UTC().Format(time.RFC3339)
 		}
-		destination, err = h.archiveDestination(data.Username, data.ArchiveTo)
+		destination, err = archiveDestination(data.Username, data.ArchiveTo)
 		if err != nil {
 			return 1, err.Error(), nil
 		}
@@ -402,9 +406,15 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 
 	account, exists, lookupErr := common.UserExists(h.lookupUser, data.Username)
 	if lookupErr != nil {
+		if data.Home == "archive" {
+			return 1, fmt.Sprintf("archive_refused: unable to look up user %q: %v", data.Username, lookupErr), nil
+		}
 		return 1, fmt.Sprintf("unable to look up user %q: %v", data.Username, lookupErr), lookupErr
 	}
 	var home string
+	if data.Home == "archive" && !exists {
+		return 1, "archive_refused: account does not exist", nil
+	}
 	if exists {
 		home = account.HomeDir
 	} else if err := h.accountLocker.forget(data.Username); err != nil {
@@ -413,19 +423,11 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 	}
 
 	result := "home directory kept at " + home
-	if data.Home == "archive" && exists {
-		uid, err := strconv.Atoi(account.Uid)
-		if err != nil {
-			uid = -1
-		}
-		archived, err := h.backupHomeDirectory(home, destination, uid)
-		if err != nil {
+	if data.Home == "archive" {
+		if err := h.accountLocker.backupHomeDirectory(ctx, data.Username, account, destination, data.ArchiveTo); err != nil {
 			return 1, err.Error(), nil
 		}
-		result = "home directory " + home + " not found; nothing archived"
-		if archived {
-			result = "home directory archived to " + data.ArchiveTo
-		}
+		result = "home directory archived to " + data.ArchiveTo
 	}
 	if data.LegacyPurge {
 		result += " (legacy purge_home=true treated as archive)"
@@ -434,6 +436,9 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 	// Debian's deluser can remove files based on local configuration alone.
 	exitCode, output, err = h.Executor.Run(ctx, "/usr/sbin/userdel", data.Username)
 	if exitCode != 0 || err != nil {
+		if data.Home == "archive" {
+			return 1, archivedDeleteFailure(data.ArchiveTo, fmt.Errorf("userdel exited %d: %s (%v)", exitCode, output, err)).Error(), nil
+		}
 		return exitCode, output, err
 	}
 	if err := h.accountLocker.forget(data.Username); err != nil {
