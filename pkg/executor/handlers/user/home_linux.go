@@ -21,14 +21,6 @@ import (
 
 const archiveDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
-func fileOwnerUID(info os.FileInfo) (uint64, error) {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, fmt.Errorf("failed to read owner of %s", info.Name())
-	}
-	return uint64(stat.Uid), nil
-}
-
 type pendingArchive struct {
 	UID           uint64
 	Home, Base    string
