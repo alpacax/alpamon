@@ -167,9 +167,12 @@ func (h *UserHandler) nextServiceUID(owners map[uint64]string) (uint64, error) {
 		return 0, fmt.Errorf("reading UID bounds: %w", err)
 	}
 	minUID, maxUID := parseUIDBounds(defs)
-	var highest uint64
+	// Only UIDs inside the regular range compete; system IDs and nobody (65534) do not.
+	highest := minUID - 1
 	for uid := range owners {
-		highest = max(highest, uid)
+		if uid >= minUID && uid <= maxUID {
+			highest = max(highest, uid)
+		}
 	}
 	passwd, err := h.readAccountFile("/etc/passwd")
 	if err != nil {
@@ -187,9 +190,11 @@ func (h *UserHandler) nextServiceUID(owners map[uint64]string) (uint64, error) {
 		if err != nil {
 			return 0, fmt.Errorf("invalid passwd UID: %w", err)
 		}
-		highest = max(highest, uid)
+		if uid >= minUID && uid <= maxUID {
+			highest = max(highest, uid)
+		}
 	}
-	if highest >= maxUID || highest+1 < minUID {
+	if highest >= maxUID {
 		return 0, fmt.Errorf("no service account UID available above %d within range %d to %d", highest, minUID, maxUID)
 	}
 	return highest + 1, nil

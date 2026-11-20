@@ -874,20 +874,47 @@ func TestServiceAccountDefaultHomeMode(t *testing.T) {
 }
 
 func TestServiceAccountUIDRange(t *testing.T) {
-	for _, uid := range []int{500, 65534} {
-		t.Run(strconv.Itoa(uid), func(t *testing.T) {
+	passwd := func(uids ...int) []byte {
+		var b []byte
+		for i, uid := range uids {
+			b = fmt.Appendf(b, "u%d:x:%d:%d::/:/bin/false\n", i, uid, uid)
+		}
+		return b
+	}
+	for _, tc := range []struct {
+		name string
+		uids []int
+		want string
+	}{
+		{"system and nobody IDs do not compete", []int{0, 500, 65534}, "1000"},
+		{"above the highest regular UID", []int{65534, 1000, 1004}, "1005"},
+		{"range exhausted", []int{60000}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			h, executor := newHomeTestHandler(t, "debian")
 			h.readAccountFile = func(path string) ([]byte, error) {
 				if path == "/etc/passwd" {
-					return fmt.Appendf(nil, "user:x:%d:1000::/:/bin/false", uid), nil
+					return passwd(tc.uids...), nil
 				}
 				return nil, os.ErrNotExist
 			}
 			code, out, err := h.Execute(context.Background(), "adduser", &common.CommandArgs{Username: "bob", IsServiceAccount: true, Groupname: "bob", Shell: "/bin/bash", Comment: "Bob"})
 			require.NoError(t, err)
-			require.Equal(t, 1, code, out)
-			assert.Contains(t, out, "no service account UID available")
-			assert.Empty(t, executor.GetExecutedCommands())
+			if tc.want == "" {
+				require.Equal(t, 1, code, out)
+				assert.Contains(t, out, "no service account UID available")
+				assert.Empty(t, executor.GetExecutedCommands())
+				return
+			}
+			require.Zero(t, code, out)
+			var adduser []string
+			for _, c := range executor.GetExecutedCommands() {
+				if c.Name == "/usr/sbin/adduser" {
+					adduser = c.Args
+				}
+			}
+			require.NotNil(t, adduser)
+			assert.Contains(t, strings.Join(adduser, " "), "--uid "+tc.want)
 		})
 	}
 }
