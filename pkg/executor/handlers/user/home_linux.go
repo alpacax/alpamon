@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
 )
@@ -80,42 +81,56 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 	}
 
 	recordPath := archiveRecordPath(archiveFD, name)
-	if statErr != nil {
-		record, err := os.ReadFile(recordPath)
-		if errors.Is(err, os.ErrNotExist) {
-			if base != "" {
-				var st unix.Stat_t
-				if err := unix.Fstatat(archiveFD, base, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
-					return "", errors.New("invalid_archive_path: destination exists")
-				} else if !errors.Is(err, unix.ENOENT) {
-					return "", fmt.Errorf("archive_refused: cannot check destination: %w", err)
-				}
-			}
-			return "", nil
-		}
-		if err != nil {
-			return "", fmt.Errorf("archive_refused: cannot read pending archive: %w", err)
-		}
+	record, err := os.ReadFile(recordPath)
+	switch {
+	case err == nil:
 		var pending pendingArchive
 		if err := json.Unmarshal(record, &pending); err != nil {
 			return "", fmt.Errorf("archive_refused: cannot read pending archive: %w", err)
 		}
 		destination := archivePrefix + pending.Base
 		if _, err := archiveDestination(name, destination); err != nil || pending.UID != uid || pending.Home != home {
-			return "", fmt.Errorf("archive_refused: pending archive does not match the request")
+			return "", errors.New("archive_refused: pending archive does not match the request")
 		}
 		var st unix.Stat_t
-		if err := unix.Fstatat(archiveFD, pending.Base, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
-			st.Mode&unix.S_IFMT != unix.S_IFDIR || uint64(st.Dev) != pending.Device || st.Ino != pending.Inode {
+		err := unix.Fstatat(archiveFD, pending.Base, &st, unix.AT_SYMLINK_NOFOLLOW)
+		switch {
+		case err == nil && st.Mode&unix.S_IFMT == unix.S_IFDIR && uint64(st.Dev) == pending.Device && st.Ino == pending.Inode:
+			if err := l.checkArchiveActivity(ctx, uid); err != nil {
+				return "", archivedDeleteFailure(destination, err)
+			}
+			if err := l.finishArchive(ctx, homeFD, archiveFD, pending.Base, destination, uid); err != nil {
+				return destination, err
+			}
+			if _, err := os.Lstat(home); err == nil {
+				return destination, archivedDeleteFailure(destination, fmt.Errorf("source home %s exists again; move it aside before retrying", home))
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return destination, archivedDeleteFailure(destination, fmt.Errorf("cannot recheck source home: %w", err))
+			}
+			return destination, nil
+		case errors.Is(err, unix.ENOENT) && statErr == nil:
+			source, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || uint64(source.Dev) != pending.Device || source.Ino != pending.Inode {
+				return "", errors.New("archive_refused: pending archive source identity could not be verified")
+			}
+			base = pending.Base
+		default:
 			return "", archivedDeleteFailure(destination, errors.New("pending archive identity could not be verified"))
 		}
-		if base != "" && base != pending.Base {
-			return "", archivedDeleteFailure(destination, errors.New("archive_to differs from pending archive"))
+	case !errors.Is(err, os.ErrNotExist):
+		return "", fmt.Errorf("archive_refused: cannot read pending archive: %w", err)
+	}
+
+	if statErr != nil {
+		if base != "" {
+			var st unix.Stat_t
+			if err := unix.Fstatat(archiveFD, base, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+				return "", errors.New("invalid_archive_path: destination exists")
+			} else if !errors.Is(err, unix.ENOENT) {
+				return "", fmt.Errorf("archive_refused: cannot check destination: %w", err)
+			}
 		}
-		if err := l.checkArchiveActivity(ctx, uid); err != nil {
-			return "", archivedDeleteFailure(destination, err)
-		}
-		return destination, l.finishArchive(ctx, homeFD, archiveFD, pending.Base, destination, uid)
+		return "", nil
 	}
 
 	if !info.IsDir() {
@@ -134,7 +149,7 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 	if err := l.checkSharedHome(ctx, name, home); err != nil {
 		return "", err
 	}
-	if data.LegacyPurge {
+	if base == "" {
 		base = name + "_" + time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	destination := archivePrefix + base
@@ -144,11 +159,7 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 	} else if !errors.Is(err, unix.ENOENT) {
 		return "", fmt.Errorf("archive_refused: cannot check destination: %w", err)
 	}
-	// Verify that this kernel can enforce the mount boundary before moving the home.
-	sourceFD, err := unix.Openat2(homeFD, filepath.Base(home), &unix.OpenHow{
-		Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC,
-		Resolve: unix.RESOLVE_NO_XDEV,
-	})
+	sourceFD, err := utils.OpenArchiveEntry(homeFD, filepath.Base(home), unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC)
 	if err != nil {
 		return "", fmt.Errorf("archive_refused: cannot open source without crossing a mount: %w", err)
 	}
@@ -175,7 +186,7 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 	if err := probeArchiveRename(archiveFD); err != nil {
 		return "", archiveRenameError(destination, err)
 	}
-	record, err := json.Marshal(pendingArchive{UID: uid, Home: home, Base: base, Device: uint64(st.Dev), Inode: st.Ino})
+	record, err = json.Marshal(pendingArchive{UID: uid, Home: home, Base: base, Device: uint64(st.Dev), Inode: st.Ino})
 	if err != nil {
 		return "", err
 	}
@@ -194,7 +205,6 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 	return destination, l.finishArchive(ctx, homeFD, archiveFD, base, destination, uid)
 }
 
-// Probe a directory rename on the destination filesystem before recording the move.
 func probeArchiveRename(fd int) error {
 	dir, err := os.MkdirTemp(filepath.Join("/proc/self/fd", strconv.Itoa(fd)), ".rename-probe-")
 	if err != nil {
@@ -261,7 +271,7 @@ func (l *linuxAccountLocker) finishArchive(ctx context.Context, homeFD, archiveF
 	if err := errors.Join(unix.Fsync(homeFD), unix.Fsync(archiveFD)); err != nil {
 		return archivedDeleteFailure(destination, fmt.Errorf("cannot sync archive move: %w", err))
 	}
-	fd, err := unix.Openat2(archiveFD, base, &unix.OpenHow{Flags: uint64(archiveDirFlags), Resolve: unix.RESOLVE_NO_XDEV})
+	fd, err := utils.OpenArchiveEntry(archiveFD, base, archiveDirFlags)
 	if err != nil {
 		return archivedDeleteFailure(destination, err)
 	}

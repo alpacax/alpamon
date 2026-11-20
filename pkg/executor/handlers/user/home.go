@@ -1,13 +1,14 @@
 package user
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/utils"
@@ -15,57 +16,121 @@ import (
 
 const archivePrefix = "/home/deleted_users/"
 
-func (h *UserHandler) checkHomeOwner(home string, requestedUID uint64) error {
-	path := home
-	info, err := os.Lstat(path)
-	switch {
-	case err == nil:
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("system_home_conflict: %s is a symlink; refusing to create the account", path)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("system_home_conflict: %s is not a directory", path)
-		}
-		uid, err := fileOwnerUID(info)
-		if err != nil {
-			return err
-		}
-		if uid != requestedUID {
-			return fmt.Errorf("system_home_conflict: %s is owned by uid %d, not %d; refusing to create the account", path, uid, requestedUID)
-		}
-	case !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("failed to stat home directory: %w", err)
-	}
+var homeScanSlot = make(chan struct{}, 1)
 
+type homeScanResult struct {
+	owners map[uint64]string
+	target os.FileInfo
+	err    error
+}
+
+func checkHomeOwner(path string, info os.FileInfo, requestedUID uint64) error {
+	if info == nil {
+		return nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("system_home_conflict: %s is a symlink; refusing to create the account", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("system_home_conflict: %s is not a directory", path)
+	}
+	uid, err := fileOwnerUID(info)
+	if err != nil {
+		return err
+	}
+	if uid != requestedUID {
+		return fmt.Errorf("system_home_conflict: %s is owned by uid %d, not %d; refusing to create the account", path, uid, requestedUID)
+	}
 	return nil
 }
 
-func (h *UserHandler) homeOwners(path, configuredRoot string, includeTarget bool) (map[uint64]string, error) {
+func (h *UserHandler) homeOwners(ctx context.Context, path, configuredRoot string, includeTarget bool) homeScanResult {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	select {
+	case homeScanSlot <- struct{}{}:
+	default:
+		return homeScanResult{err: errors.New("a previous home ownership scan is still running")}
+	}
+	root, scan := h.homeRoot, h.scanHomeOwners
+	result := make(chan homeScanResult, 1)
+	go func() {
+		r := scan(ctx, path, root, configuredRoot, includeTarget)
+		<-homeScanSlot
+		result <- r
+	}()
+	select {
+	case r := <-result:
+		if ctx.Err() == nil {
+			return r
+		}
+	case <-ctx.Done():
+	}
+	return homeScanResult{err: fmt.Errorf("cannot verify home ownership: %w", ctx.Err())}
+}
+
+func scanHomeOwners(ctx context.Context, path, homeRoot, configuredRoot string, includeTarget bool) homeScanResult {
+	target, err := os.Lstat(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return homeScanResult{err: fmt.Errorf("failed to stat home directory: %w", err)}
+	}
 	owners := make(map[uint64]string)
-	seen := make(map[string]bool)
-	// Scan the target parent first so aliases of it cannot count the target twice.
-	for _, candidate := range []string{filepath.Dir(path), h.homeRoot, configuredRoot} {
-		root, err := filepath.EvalSymlinks(candidate)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
+	var seen []os.FileInfo
+	for _, root := range []string{filepath.Dir(path), homeRoot, configuredRoot} {
+		if err := scanHomeRoot(ctx, root, target, includeTarget, &seen, owners); err != nil {
+			return homeScanResult{err: fmt.Errorf("failed to scan home root %s: %w", root, err)}
+		}
+	}
+	current, err := os.Lstat(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return homeScanResult{err: fmt.Errorf("failed to recheck home directory: %w", err)}
+	}
+	if (current != nil || target != nil) && (current == nil || target == nil || !os.SameFile(current, target)) {
+		return homeScanResult{err: fmt.Errorf("system_home_conflict: %s changed during the scan", path)}
+	}
+	return homeScanResult{owners: owners, target: current}
+}
+
+func scanHomeRoot(ctx context.Context, root string, target os.FileInfo, includeTarget bool, seen *[]os.FileInfo, owners map[uint64]string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	opened, err := os.OpenRoot(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = opened.Close() }()
+	info, err := opened.Stat(".")
+	if err != nil {
+		return err
+	}
+	for _, prior := range *seen {
+		if os.SameFile(prior, info) {
+			return nil
+		}
+	}
+	*seen = append(*seen, info)
+	dir, err := opened.Open(".")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries, err := dir.ReadDir(64)
+		if errors.Is(err, io.EOF) {
+			return nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve home root %s: %w", candidate, err)
-		}
-		if seen[root] {
-			continue
-		}
-		seen[root] = true
-		entries, err := os.ReadDir(root)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to list home directories: %w", err)
+			return err
 		}
 		for _, entry := range entries {
-			child := filepath.Join(candidate, entry.Name())
-			if !entry.IsDir() || (!includeTarget && child == path) {
+			if !entry.IsDir() {
 				continue
 			}
 			info, err := entry.Info()
@@ -73,16 +138,18 @@ func (h *UserHandler) homeOwners(path, configuredRoot string, includeTarget bool
 				continue
 			}
 			if err != nil {
-				return nil, fmt.Errorf("failed to stat home directory: %w", err)
+				return err
+			}
+			if !info.IsDir() || (!includeTarget && target != nil && os.SameFile(info, target)) {
+				continue
 			}
 			uid, err := fileOwnerUID(info)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			owners[uid] = child
+			owners[uid] = filepath.Join(root, entry.Name())
 		}
 	}
-	return owners, nil
 }
 
 func (h *UserHandler) defaultHomeRoot() (string, error) {

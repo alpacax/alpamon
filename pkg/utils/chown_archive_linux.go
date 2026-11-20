@@ -2,7 +2,11 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -20,10 +24,66 @@ func openChownChild(fd int, name string, flags int, archive bool) (int, error) {
 	if !archive {
 		return unix.Openat(fd, name, flags, 0)
 	}
-	return unix.Openat2(fd, name, &unix.OpenHow{
-		Flags:   uint64(flags),
-		Resolve: unix.RESOLVE_NO_XDEV | unix.RESOLVE_NO_SYMLINKS,
+	return OpenArchiveEntry(fd, name, flags)
+}
+
+// OpenArchiveEntry opens one entry relative to a directory without crossing a mount.
+func OpenArchiveEntry(fd int, name string, flags int) (int, error) {
+	if name == "" || strings.ContainsRune(name, '/') || flags&unix.O_NOFOLLOW == 0 {
+		return -1, unix.EINVAL
+	}
+	child, err := unix.Openat2(fd, name, &unix.OpenHow{
+		Flags: uint64(flags), Resolve: unix.RESOLVE_NO_XDEV | unix.RESOLVE_NO_SYMLINKS,
 	})
+	if !errors.Is(err, unix.ENOSYS) {
+		return child, err
+	}
+	return openArchiveEntryFallback(fd, name, flags)
+}
+
+func openArchiveEntryFallback(fd int, name string, flags int) (int, error) {
+	pinned, err := unix.Openat(fd, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC|flags&unix.O_DIRECTORY, 0)
+	if err != nil {
+		return -1, err
+	}
+	defer func() { _ = unix.Close(pinned) }()
+
+	parentMount, err := descriptorMountID(fd)
+	if err != nil {
+		return -1, err
+	}
+	childMount, err := descriptorMountID(pinned)
+	if err != nil {
+		return -1, err
+	}
+	// Mount IDs distinguish bind mounts that share the parent's device number.
+	if parentMount != childMount {
+		return -1, unix.EXDEV
+	}
+	if flags&unix.O_PATH != 0 {
+		return unix.FcntlInt(uintptr(pinned), unix.F_DUPFD_CLOEXEC, 0)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(pinned, &st); err != nil {
+		return -1, err
+	}
+	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return -1, unix.ELOOP
+	}
+	return unix.Open(filepath.Join("/proc/self/fd", strconv.Itoa(pinned)), flags&^unix.O_NOFOLLOW, 0)
+}
+
+func descriptorMountID(fd int) (uint64, error) {
+	info, err := os.ReadFile(filepath.Join("/proc/self/fdinfo", strconv.Itoa(fd)))
+	if err != nil {
+		return 0, err
+	}
+	for line := range strings.SplitSeq(string(info), "\n") {
+		if value, ok := strings.CutPrefix(line, "mnt_id:"); ok {
+			return strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+		}
+	}
+	return 0, errors.New("descriptor mount ID unavailable")
 }
 
 func statChownChild(fd int, name string, stat *unix.Stat_t, archive bool) error {

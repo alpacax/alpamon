@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -533,7 +534,7 @@ func TestArchiveRefusesActiveUser(t *testing.T) {
 
 func TestArchiveRetriesAfterPartialDelete(t *testing.T) {
 	const destination = archivePrefix + "alice_2026-11-20T01:02:03Z"
-	for _, failure := range []string{"chown", "userdel", "legacy chown"} {
+	for _, failure := range []string{"chown", "userdel", "legacy chown", "recreated home"} {
 		t.Run(failure, func(t *testing.T) {
 			h, executor := newHomeTestHandler(t, "debian")
 			home := filepath.Join(h.homeRoot, "alice")
@@ -555,7 +556,7 @@ func TestArchiveRetriesAfterPartialDelete(t *testing.T) {
 				}
 				return 0, nil
 			}
-			if failure == "userdel" {
+			if failure == "userdel" || failure == "recreated home" {
 				executor.SetResult("/usr/sbin/userdel alice", 8, "account still active", nil)
 			}
 			archive := "archive"
@@ -570,28 +571,37 @@ func TestArchiveRetriesAfterPartialDelete(t *testing.T) {
 			assert.DirExists(t, filepath.Join(h.homeRoot, "deleted_users", archived))
 			_, err = os.Lstat(home)
 			assert.ErrorIs(t, err, os.ErrNotExist)
-			if failure == "userdel" {
+			if failure == "userdel" || failure == "recreated home" {
 				assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
 			} else {
 				assert.Empty(t, commandArgv(executor))
 			}
 
-			if failure == "userdel" {
+			if failure == "userdel" || failure == "recreated home" {
 				args.ArchiveTo = archivePrefix + "alice_2026-11-20T01:02:04Z"
+
+			}
+
+			if failure == "recreated home" {
+				require.NoError(t, os.Mkdir(home, 0700))
 				code, output, err = h.Execute(context.Background(), "deluser", args)
 				require.NoError(t, err)
 				require.Equal(t, 1, code)
-				assert.Contains(t, output, "account_delete_failed: home archived to "+destination+"; ")
-				assert.Equal(t, 1, attempts)
-				args.ArchiveTo = destination
+				assert.Contains(t, output, "source home "+home+" exists again")
+				assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
+				assert.DirExists(t, home)
+				require.NoError(t, os.Remove(home))
 			}
-
 			executor.SetResult("/usr/sbin/userdel alice", 0, "", nil)
 			code, output, err = h.Execute(context.Background(), "deluser", args)
 			require.NoError(t, err)
 			require.Zero(t, code, output)
 			assert.Contains(t, output, archivePrefix+archived)
-			assert.Equal(t, 2, attempts)
+			if failure == "recreated home" {
+				assert.Equal(t, 3, attempts)
+			} else {
+				assert.Equal(t, 2, attempts)
+			}
 			entries, err := os.ReadDir(filepath.Join(h.homeRoot, "deleted_users"))
 			require.NoError(t, err)
 			require.Len(t, entries, 1)
@@ -917,4 +927,69 @@ func TestServiceAccountUIDRange(t *testing.T) {
 			assert.Contains(t, strings.Join(adduser, " "), "--uid "+tc.want)
 		})
 	}
+}
+
+func TestHomeScanReleasesAccountGate(t *testing.T) {
+	h, _ := newHomeTestHandler(t, "debian")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release := make(chan struct{})
+	h.scanHomeOwners = func(context.Context, string, string, string, bool) homeScanResult {
+		cancel()
+		<-release
+		return homeScanResult{}
+	}
+	defer func() {
+		close(release)
+		homeScanSlot <- struct{}{}
+		<-homeScanSlot
+	}()
+
+	code, output, err := h.Execute(ctx, "adduser", &common.CommandArgs{
+		Username: "alice", UID: 1001, GID: 1001, HomeDirectory: filepath.Join(h.homeRoot, "alice"),
+		Shell: "/bin/bash", Groupname: "alice", Comment: "Alice",
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, code)
+	require.Contains(t, output, "cannot verify home ownership: context canceled")
+
+	ctx, deadline := context.WithTimeout(context.Background(), time.Second)
+	defer deadline()
+	code, output, err = h.Execute(ctx, "deluser", &common.CommandArgs{Username: "alice"})
+	require.NoError(t, err)
+	require.Zero(t, code, output)
+}
+
+func TestHomeOwnersDeduplicatesBindMount(t *testing.T) {
+	const rootEnv = "ALPAMON_TEST_HOME_OWNER_ROOT"
+	if root := os.Getenv(rootEnv); root != "" {
+		parent, alias := filepath.Join(root, "parent"), filepath.Join(root, "alias")
+		path := filepath.Join(parent, "alice")
+		result := scanHomeOwners(context.Background(), path, parent, alias, false)
+		require.NoError(t, result.err)
+		assert.Empty(t, result.owners)
+		assert.NotNil(t, result.target)
+		return
+	}
+
+	unshare, err := exec.LookPath("unshare")
+	if err != nil {
+		t.Skip("unshare unavailable")
+	}
+	root := t.TempDir()
+	parent, alias := filepath.Join(root, "parent"), filepath.Join(root, "alias")
+	require.NoError(t, os.MkdirAll(filepath.Join(parent, "alice"), 0700))
+	require.NoError(t, os.Mkdir(alias, 0700))
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	cmd := exec.Command(unshare, "--user", "--map-root-user", "--mount", "--", "sh", "-c",
+		`mount --bind "$1" "$2" || exit 1
+printf 'bind mounted\n'
+exec "$3" -test.run '^TestHomeOwnersDeduplicatesBindMount$' -test.v`, "sh", parent, alias, exe)
+	cmd.Env = append(os.Environ(), rootEnv+"="+root)
+	output, err := cmd.CombinedOutput()
+	if !strings.Contains(string(output), "bind mounted\n") {
+		t.Skipf("unprivileged bind mount unavailable: %s (%v)", output, err)
+	}
+	require.NoError(t, err, "%s", output)
 }

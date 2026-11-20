@@ -32,6 +32,7 @@ type UserHandler struct {
 	supplementaryGroups common.SupplementaryGroupsFunc
 	accountLocker       accountLocker
 	homeRoot            string
+	scanHomeOwners      func(context.Context, string, string, string, bool) homeScanResult
 	readAccountFile     func(string) ([]byte, error)
 	chownHome           func(context.Context, int, string, int, int, int) (int, error)
 }
@@ -56,6 +57,7 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 		lookupGroup:         common.DefaultGroupLookup,
 		supplementaryGroups: common.DefaultSupplementaryGroups,
 		homeRoot:            "/home",
+		scanHomeOwners:      scanHomeOwners,
 		readAccountFile:     os.ReadFile,
 	}
 	h.accountLocker = newAccountLocker(h)
@@ -198,20 +200,20 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 			home = filepath.Join(root, data.Username)
 		}
 		home = filepath.Clean(home)
-		owners, err := h.homeOwners(home, root, !uidRequested)
-		if err != nil {
-			return 1, err.Error(), nil
+		scan := h.homeOwners(ctx, home, root, !uidRequested)
+		if scan.err != nil {
+			return 1, scan.err.Error(), nil
 		}
 		if !uidRequested {
-			data.UID, err = h.nextServiceUID(owners)
+			data.UID, err = h.nextServiceUID(scan.owners)
 			if err != nil {
 				return 1, err.Error(), nil
 			}
 		}
-		if err := h.checkHomeOwner(home, data.UID); err != nil {
+		if err := checkHomeOwner(home, scan.target, data.UID); err != nil {
 			return 1, err.Error(), nil
 		}
-		if path, found := owners[data.UID]; found {
+		if path, found := scan.owners[data.UID]; found {
 			return 1, fmt.Sprintf("system_home_conflict: %s is owned by requested uid %d; refusing to create the account", path, data.UID), nil
 		}
 		data.HomeDirectory = home
