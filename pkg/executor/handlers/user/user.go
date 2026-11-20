@@ -32,7 +32,7 @@ type UserHandler struct {
 	supplementaryGroups common.SupplementaryGroupsFunc
 	accountLocker       accountLocker
 	homeRoot            string
-	readHomeDefaults    func(string) ([]byte, error)
+	readAccountFile     func(string) ([]byte, error)
 	chownHome           func(context.Context, int, string, int, int, int) (int, error)
 }
 
@@ -56,7 +56,7 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 		lookupGroup:         common.DefaultGroupLookup,
 		supplementaryGroups: common.DefaultSupplementaryGroups,
 		homeRoot:            "/home",
-		readHomeDefaults:    os.ReadFile,
+		readAccountFile:     os.ReadFile,
 	}
 	h.accountLocker = newAccountLocker(h)
 	return h
@@ -144,7 +144,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	}
 
 	// Check the same explicit path that the create command will use.
-	if data.UID != 0 && data.HomeDirectory != "" {
+	if data.HomeDirectory != "" {
 		data.HomeDirectory = filepath.Clean(data.HomeDirectory)
 	}
 
@@ -155,23 +155,9 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		Str("home", data.HomeDirectory).
 		Msg("Adding user")
 
-	// The omit*Flag booleans govern *flag emission* on adduser/useradd,
-	// NOT whether the underlying entity exists. When a flag is omitted:
-	//   - omitUIDFlag  → OS auto-assigns a uid (the user still gets a uid).
-	//   - omitGIDFlag  → no numeric --gid; we set the primary group by
-	//                    name via --ingroup / --gid <Groupname> below.
-	//   - omitHomeFlag → no explicit --home/--home-dir; the OS default
-	//                    path (typically /home/<username>) is used and
-	//                    the directory IS still created.
-	//
-	// We omit a flag only when IsServiceAccount=true AND the value is
-	// zero/empty. For IAM User payloads (IsServiceAccount=false), these
-	// fields are validated as required upstream; if we ever reach this
-	// point with zero values we still pass whatever was provided rather
-	// than silently rewriting the command (defense-in-depth is cheap).
-	omitUIDFlag := data.IsServiceAccount && data.UID == 0
+	uidRequested := data.UID != 0
 	omitGIDFlag := data.IsServiceAccount && data.GID == 0
-	omitHomeFlag := data.IsServiceAccount && data.HomeDirectory == ""
+	homeOmitted := data.HomeDirectory == ""
 
 	// Idempotency gate (M8): verify by lookup whether the user already exists
 	// before attempting creation, so re-provisioning an already-present account
@@ -181,15 +167,14 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	// to the CGO_ENABLED=0 pure-Go resolver.
 	//
 	// A same-name/different-uid account is real drift and is surfaced as a
-	// failure, never masked. When the uid is omitted (service account, OS
-	// auto-assigns), name presence alone marks the account as provisioned.
+	// failure, never masked. When the uid is omitted (service account), name presence alone marks the account as provisioned.
 	existing, userExists, lookupErr := common.UserExists(h.lookupUser, data.Username)
 	if lookupErr != nil {
 		// We cannot confirm the current state; do not blind-create over a
 		// possibly-shadowed entry. Fail loud so the drift is visible.
 		return 1, fmt.Sprintf("unable to verify whether user %q exists: %v", data.Username, lookupErr), lookupErr
 	}
-	if userExists && !omitUIDFlag {
+	if userExists && uidRequested {
 		existingUID, perr := strconv.ParseUint(existing.Uid, 10, 64)
 		if perr != nil {
 			return 1, fmt.Sprintf("user %q exists but its uid %q is not a valid number; refusing to modify an existing account", data.Username, existing.Uid), nil
@@ -199,27 +184,37 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		}
 	}
 
-	if !userExists && !omitUIDFlag && (utils.PlatformLike == "debian" || utils.PlatformLike == "rhel") {
+	if !userExists && !validHomeUsername(data.Username) {
+		return 1, fmt.Sprintf("invalid username %q", data.Username), nil
+	}
+
+	if !userExists && (utils.PlatformLike == "debian" || utils.PlatformLike == "rhel") {
 		root, err := h.defaultHomeRoot()
 		if err != nil {
 			return 1, err.Error(), nil
 		}
 		home := data.HomeDirectory
-		if omitHomeFlag {
+		if homeOmitted {
 			home = filepath.Join(root, data.Username)
 		}
 		home = filepath.Clean(home)
-		if err := h.checkHomeOwner(data.Username, home, data.UID); err != nil {
+		owners, err := h.homeOwners(home, root, !uidRequested)
+		if err != nil {
 			return 1, err.Error(), nil
 		}
-		owners, err := h.homeOwners(home, root)
-		if err != nil {
+		if !uidRequested {
+			data.UID, err = h.nextServiceUID(owners)
+			if err != nil {
+				return 1, err.Error(), nil
+			}
+		}
+		if err := h.checkHomeOwner(home, data.UID); err != nil {
 			return 1, err.Error(), nil
 		}
 		if path, found := owners[data.UID]; found {
 			return 1, fmt.Sprintf("system_home_conflict: %s is owned by requested uid %d; refusing to create the account", path, data.UID), nil
 		}
-		data.HomeDirectory, omitHomeFlag = home, false
+		data.HomeDirectory = home
 	}
 
 	// Service-account primary-group bootstrap (load-bearing).
@@ -252,14 +247,9 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	switch utils.PlatformLike {
 	case "debian":
 		if !userExists {
-			cmdArgs := []string{}
-			if !omitHomeFlag {
-				cmdArgs = append(cmdArgs, "--home", data.HomeDirectory)
-			}
+			cmdArgs := []string{"--home", data.HomeDirectory}
 			cmdArgs = append(cmdArgs, "--shell", data.Shell)
-			if !omitUIDFlag {
-				cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
-			}
+			cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
 			switch {
 			case omitGIDFlag && data.Groupname != "":
 				// Service-account path: set primary group by name so the user
@@ -269,7 +259,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 				cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
 			}
 			cmdArgs = append(cmdArgs, "--gecos", data.Comment, "--disabled-password", data.Username)
-			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/adduser", cmdArgs, data, !omitUIDFlag)
+			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/adduser", cmdArgs, data, uidRequested)
 			if code != 0 {
 				return code, out, cerr
 			}
@@ -306,14 +296,9 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		}
 
 		if !userExists {
-			cmdArgs := []string{}
-			if !omitHomeFlag {
-				cmdArgs = append(cmdArgs, "--home-dir", data.HomeDirectory)
-			}
+			cmdArgs := []string{"--home-dir", data.HomeDirectory}
 			cmdArgs = append(cmdArgs, "--shell", data.Shell)
-			if !omitUIDFlag {
-				cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
-			}
+			cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
 			switch {
 			case omitGIDFlag && data.Groupname != "":
 				// Service-account path: useradd accepts a group name for --gid.
@@ -322,7 +307,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 				cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
 			}
 			cmdArgs = append(cmdArgs, "--comment", data.Comment, "--create-home", data.Username)
-			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/useradd", cmdArgs, data, !omitUIDFlag)
+			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/useradd", cmdArgs, data, uidRequested)
 			if code != 0 {
 				return code, out, cerr
 			}
@@ -342,10 +327,9 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	// follow a symlink an existing—possibly hostile—local user could plant at
 	// their home path.
 	//
-	// Skip when HomeDirectory was omitted (OS default path), since the caller
-	// didn't specify a target and we would otherwise chmod an empty path.
+	// Apply an explicit mode only to a caller-supplied home path.
 	// codeql[go/path-injection]: Intentional - Admin-specified home directory permission
-	if !userExists && data.HomeDirectory != "" && data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
+	if !userExists && !homeOmitted && data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
 		mode, err := strconv.ParseUint(data.HomeDirectoryPermission, 8, 32)
 		if err == nil {
 			_ = os.Chmod(data.HomeDirectory, os.FileMode(mode)) // lgtm[go/path-injection]

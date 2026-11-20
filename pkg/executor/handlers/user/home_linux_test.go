@@ -28,7 +28,7 @@ func newHomeTestHandler(t *testing.T, platform string) (*UserHandler, *common.Mo
 	h := NewUserHandler(executor, &MockGroupService{}, nil)
 	h.lookupUser = common.AbsentUserLookup
 	h.homeRoot = t.TempDir()
-	h.readHomeDefaults = func(string) ([]byte, error) { return nil, os.ErrNotExist }
+	h.readAccountFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
 	locker := h.accountLocker.(*linuxAccountLocker)
 	locker.archiveUID, locker.archiveGID = os.Geteuid(), os.Getegid()
 	locker.readFile = func(string) ([]byte, error) { return nil, nil }
@@ -239,7 +239,7 @@ func TestFirstAddUserHomeOwnership(t *testing.T) {
 					custom = filepath.Dir(path) + "/./" + filepath.Base(path)
 					alias := filepath.Join(t.TempDir(), "alias")
 					require.NoError(t, os.Symlink(filepath.Dir(path), alias))
-					h.readHomeDefaults = func(string) ([]byte, error) {
+					h.readAccountFile = func(string) ([]byte, error) {
 						key := "HOME"
 						if platform == "debian" {
 							key = "DHOME"
@@ -605,6 +605,11 @@ func TestKeptHomeBlocksUIDReuse(t *testing.T) {
 	home := filepath.Join(h.homeRoot, "alice")
 	require.NoError(t, os.Mkdir(home, 0700))
 	uid := setArchiveTestAccount(t, h, home)
+	profile := filepath.Join(home, "profile")
+	require.NoError(t, os.WriteFile(profile, nil, 0600))
+	if os.Geteuid() == 0 {
+		require.NoError(t, os.Chown(profile, int(uid), -1))
+	}
 	code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "alice"})
 	require.NoError(t, err)
 	require.Zero(t, code, output)
@@ -662,7 +667,7 @@ func TestConfiguredDefaultHomeConflict(t *testing.T) {
 			root := t.TempDir()
 			path := filepath.Join(root, "alice")
 			require.NoError(t, os.Symlink(filepath.Join(root, "missing"), path))
-			h.readHomeDefaults = func(config string) ([]byte, error) {
+			h.readAccountFile = func(config string) ([]byte, error) {
 				if platform == "debian" {
 					assert.Equal(t, "/etc/adduser.conf", config)
 					return fmt.Appendf(nil, "DHOME = %q\n", root), nil
@@ -719,7 +724,9 @@ func TestCreateServiceAccountWithHomeEntries(t *testing.T) {
 	h, executor := newHomeTestHandler(t, "debian")
 	home := filepath.Join(h.homeRoot, "alice")
 	require.NoError(t, os.Mkdir(home, 0700))
-	setArchiveTestAccount(t, h, home)
+	uid := setArchiveTestAccount(t, h, home)
+	h.readAccountFile = h.accountLocker.(*linuxAccountLocker).readFile
+	require.NoError(t, os.WriteFile(filepath.Join(home, "profile"), nil, 0600))
 	code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "alice"})
 	require.NoError(t, err)
 	require.Zero(t, code, output)
@@ -738,8 +745,8 @@ func TestCreateServiceAccountWithHomeEntries(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, creation)
-	assert.NotContains(t, creation, "--uid")
-	assert.NotContains(t, creation, "--home")
+	assert.Contains(t, strings.Join(creation, " "), fmt.Sprintf("--uid %d", uid+1))
+	assert.Contains(t, creation, filepath.Join(h.homeRoot, "bob"))
 }
 
 func TestArchiveMissingHomeEligibility(t *testing.T) {
@@ -823,7 +830,7 @@ func TestKeptHomeBlocksUIDReuseOutsideHomeRoot(t *testing.T) {
 		t.Run(scope, func(t *testing.T) {
 			h, executor := newHomeTestHandler(t, "debian")
 			configuredRoot, targetParent := t.TempDir(), t.TempDir()
-			h.readHomeDefaults = func(string) ([]byte, error) {
+			h.readAccountFile = func(string) ([]byte, error) {
 				return fmt.Appendf(nil, "DHOME=%s\n", configuredRoot), nil
 			}
 			parent := configuredRoot
@@ -843,6 +850,44 @@ func TestKeptHomeBlocksUIDReuseOutsideHomeRoot(t *testing.T) {
 			assert.Equal(t, 1, code)
 			assert.Contains(t, output, "system_home_conflict: "+retained)
 			assert.Empty(t, commandArgv(executor))
+		})
+	}
+}
+
+func TestServiceAccountDefaultHomeMode(t *testing.T) {
+	h, executor := newHomeTestHandler(t, "debian")
+	target := filepath.Join(t.TempDir(), "profile")
+	require.NoError(t, os.WriteFile(target, nil, 0600))
+	home := filepath.Join(h.homeRoot, "bob")
+	h.Executor = &lockCommandExecutor{MockCommandExecutor: executor, beforeRun: func(_ context.Context, name string, args []string) {
+		if name == "/usr/sbin/adduser" {
+			require.Contains(t, args, home)
+			require.NoError(t, os.Symlink(target, home))
+		}
+	}}
+	code, out, err := h.Execute(context.Background(), "adduser", &common.CommandArgs{Username: "bob", UID: 1001, IsServiceAccount: true, HomeDirectoryPermission: "0711", Groupname: "bob", Shell: "/bin/bash", Comment: "Bob"})
+	require.NoError(t, err)
+	require.Zero(t, code, out)
+	info, err := os.Stat(home)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}
+
+func TestServiceAccountUIDRange(t *testing.T) {
+	for _, uid := range []int{500, 65534} {
+		t.Run(strconv.Itoa(uid), func(t *testing.T) {
+			h, executor := newHomeTestHandler(t, "debian")
+			h.readAccountFile = func(path string) ([]byte, error) {
+				if path == "/etc/passwd" {
+					return fmt.Appendf(nil, "user:x:%d:1000::/:/bin/false", uid), nil
+				}
+				return nil, os.ErrNotExist
+			}
+			code, out, err := h.Execute(context.Background(), "adduser", &common.CommandArgs{Username: "bob", IsServiceAccount: true, Groupname: "bob", Shell: "/bin/bash", Comment: "Bob"})
+			require.NoError(t, err)
+			require.Equal(t, 1, code, out)
+			assert.Contains(t, out, "no service account UID available")
+			assert.Empty(t, executor.GetExecutedCommands())
 		})
 	}
 }

@@ -444,33 +444,11 @@ func isProtectedAccount(name string, uid uint64) bool {
 }
 
 func (l *linuxAccountLocker) uidBounds() (uint64, uint64) {
-	minUID, maxUID := uint64(1000), uint64(60000)
 	data, err := l.readFile("/etc/login.defs")
 	if err != nil {
-		return minUID, maxUID
+		return parseUIDBounds(nil)
 	}
-	seen := make(map[string]bool)
-	for line := range strings.SplitSeq(string(data), "\n") {
-		fields := strings.Fields(strings.SplitN(line, "#", 2)[0])
-		if len(fields) < 2 || seen[fields[0]] {
-			continue
-		}
-		key := fields[0]
-		if key != "UID_MIN" && key != "UID_MAX" {
-			continue
-		}
-		seen[key] = true
-		uid, err := strconv.ParseUint(fields[1], 10, 32)
-		if err != nil || uid == 0 {
-			continue
-		}
-		if key == "UID_MIN" {
-			minUID = uid
-		} else {
-			maxUID = uid
-		}
-	}
-	return minUID, maxUID
+	return parseUIDBounds(data)
 }
 
 func (l *linuxAccountLocker) snapshot(name string, uid uint64) (accountLockState, error) {

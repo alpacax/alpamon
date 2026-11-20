@@ -69,6 +69,12 @@ func newTestUserHandler(exec common.CommandExecutor, gs *MockGroupService) *User
 	h := NewUserHandler(exec, gs, nil)
 	h.lookupUser = common.AbsentUserLookup
 	h.lookupGroup = common.AbsentGroupLookup
+	h.readAccountFile = func(path string) ([]byte, error) {
+		if path == "/etc/passwd" {
+			return []byte("user:x:1000:1000::/:/bin/sh"), nil
+		}
+		return nil, nil
+	}
 	return h
 }
 
@@ -209,7 +215,7 @@ func TestUserHandler_Execute(t *testing.T) {
 
 // TestUserHandler_AddUser_UidLess verifies that Application service account
 // provisioning (no uid/gid/home_directory) results in adduser/useradd commands
-// without the corresponding flags, letting the OS auto-assign.
+// with a locally allocated UID and the configured default home.
 func TestUserHandler_AddUser_UidLess(t *testing.T) {
 	baseArgs := &common.CommandArgs{
 		Username:         "gitlab-runner",
@@ -217,7 +223,6 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 		Shell:            "/usr/sbin/nologin",
 		Groupname:        "alpacon",
 		IsServiceAccount: true,
-		// UID, GID, HomeDirectory intentionally omitted: OS auto-assigns
 	}
 
 	tests := []struct {
@@ -231,19 +236,19 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			name:        "debian uid-less adduser",
 			platform:    "debian",
 			wantProgram: "/usr/sbin/adduser",
-			wantFlags:   []string{"--shell", "/usr/sbin/nologin", "--gecos", "--disabled-password", "gitlab-runner"},
-			forbidFlags: []string{"--uid", "--gid", "--home"},
+			wantFlags:   []string{"--uid 1001", "--home /home/gitlab-runner", "--shell", "/usr/sbin/nologin", "--gecos", "--disabled-password", "gitlab-runner"},
+			forbidFlags: []string{"--gid"},
 		},
 		{
 			name:        "rhel uid-less useradd",
 			platform:    "rhel",
 			wantProgram: "/usr/sbin/useradd",
-			wantFlags:   []string{"--shell", "/usr/sbin/nologin", "--comment", "--create-home", "gitlab-runner"},
+			wantFlags:   []string{"--uid 1001", "--home-dir /home/gitlab-runner", "--shell", "/usr/sbin/nologin", "--comment", "--create-home", "gitlab-runner"},
 			// `--gid` is allowed on RHEL because the service-account path
 			// now passes `--gid alpacon` (by name) to set the primary
 			// group. The "no numeric gid leak" invariant is enforced by
 			// the explicit `--gid alpacon` check below.
-			forbidFlags: []string{"--uid", "--home-dir"},
+			forbidFlags: nil,
 		},
 	}
 
@@ -257,6 +262,7 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 
 			mock := common.NewMockCommandExecutor(t)
 			handler := newTestUserHandler(mock, &MockGroupService{})
+			handler.homeRoot = t.TempDir()
 
 			exitCode, _, err := handler.Execute(context.Background(), "adduser", baseArgs)
 			require.NoError(t, err)
@@ -281,7 +287,7 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			require.NotNil(t, target, "%s must be invoked, got: %+v", tt.wantProgram, executed)
 			joined := strings.Join(target.Args, " ")
 			for _, want := range tt.wantFlags {
-				assert.Contains(t, joined, want, "flag %q must be present", want)
+				assert.Contains(t, joined, strings.ReplaceAll(want, "/home/", handler.homeRoot+"/"), "flag %q must be present", want)
 			}
 			for _, forbid := range tt.forbidFlags {
 				assert.NotContains(t, joined, forbid, "args: %s", joined)
@@ -488,7 +494,6 @@ func TestUserHandler_Validate(t *testing.T) {
 				Shell:            "/usr/sbin/nologin",
 				Groupname:        "alpacon",
 				IsServiceAccount: true,
-				// UID/GID/HomeDirectory intentionally omitted (OS auto-assign)
 			},
 		},
 		{
@@ -720,7 +725,7 @@ func TestUserHandler_AddUser_Idempotent_UIDConflict(t *testing.T) {
 }
 
 // TestUserHandler_AddUser_Idempotent_ServiceAccountNameExists verifies that a
-// service account (uid omitted, OS auto-assigns) treats name presence alone as
+// service account (uid omitted) treats name presence alone as
 // "already provisioned" — no uid comparison, no useradd, success — AND that the
 // load-bearing `groupadd -f` primary-group bootstrap STILL runs for the existing
 // account (design intent #3: needed for utils.Demote(ValidateGroup=true)).

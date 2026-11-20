@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"time"
@@ -14,16 +15,16 @@ import (
 
 const archivePrefix = "/home/deleted_users/"
 
-func (h *UserHandler) checkHomeOwner(username, home string, requestedUID uint64) error {
-	if !validHomeUsername(username) {
-		return fmt.Errorf("invalid username %q", username)
-	}
+func (h *UserHandler) checkHomeOwner(home string, requestedUID uint64) error {
 	path := home
 	info, err := os.Lstat(path)
 	switch {
 	case err == nil:
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("system_home_conflict: %s is a symlink; refusing to create the account", path)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("system_home_conflict: %s is not a directory", path)
 		}
 		uid, err := fileOwnerUID(info)
 		if err != nil {
@@ -39,7 +40,7 @@ func (h *UserHandler) checkHomeOwner(username, home string, requestedUID uint64)
 	return nil
 }
 
-func (h *UserHandler) homeOwners(path, configuredRoot string) (map[uint64]string, error) {
+func (h *UserHandler) homeOwners(path, configuredRoot string, includeTarget bool) (map[uint64]string, error) {
 	owners := make(map[uint64]string)
 	seen := make(map[string]bool)
 	// Scan the target parent first so aliases of it cannot count the target twice.
@@ -64,7 +65,7 @@ func (h *UserHandler) homeOwners(path, configuredRoot string) (map[uint64]string
 		}
 		for _, entry := range entries {
 			child := filepath.Join(candidate, entry.Name())
-			if !entry.IsDir() || child == path {
+			if !entry.IsDir() || (!includeTarget && child == path) {
 				continue
 			}
 			info, err := entry.Info()
@@ -89,7 +90,7 @@ func (h *UserHandler) defaultHomeRoot() (string, error) {
 	if utils.PlatformLike == "debian" {
 		path, key = "/etc/adduser.conf", "DHOME"
 	}
-	data, err := h.readHomeDefaults(path)
+	data, err := h.readAccountFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return h.homeRoot, nil
 	}
@@ -132,4 +133,64 @@ func archiveDestination(username, archiveTo string) (string, error) {
 
 func archivedDeleteFailure(destination string, cause error) error {
 	return fmt.Errorf("account_delete_failed: home archived to %s; %w", destination, cause)
+}
+
+func parseUIDBounds(data []byte) (uint64, uint64) {
+	minUID, maxUID := uint64(1000), uint64(60000)
+	seen := make(map[string]bool)
+	for line := range strings.SplitSeq(string(data), "\n") {
+		fields := strings.Fields(strings.SplitN(line, "#", 2)[0])
+		if len(fields) < 2 || seen[fields[0]] {
+			continue
+		}
+		key := fields[0]
+		if key != "UID_MIN" && key != "UID_MAX" {
+			continue
+		}
+		seen[key] = true
+		uid, err := strconv.ParseUint(fields[1], 10, 32)
+		if err != nil || uid == 0 {
+			continue
+		}
+		if key == "UID_MIN" {
+			minUID = uid
+		} else {
+			maxUID = uid
+		}
+	}
+	return minUID, maxUID
+}
+
+func (h *UserHandler) nextServiceUID(owners map[uint64]string) (uint64, error) {
+	defs, err := h.readAccountFile("/etc/login.defs")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, fmt.Errorf("reading UID bounds: %w", err)
+	}
+	minUID, maxUID := parseUIDBounds(defs)
+	var highest uint64
+	for uid := range owners {
+		highest = max(highest, uid)
+	}
+	passwd, err := h.readAccountFile("/etc/passwd")
+	if err != nil {
+		return 0, fmt.Errorf("reading passwd: %w", err)
+	}
+	for line := range strings.SplitSeq(string(passwd), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) != 7 {
+			return 0, fmt.Errorf("invalid passwd entry")
+		}
+		uid, err := strconv.ParseUint(fields[2], 10, 32)
+		if err != nil {
+			return 0, fmt.Errorf("invalid passwd UID: %w", err)
+		}
+		highest = max(highest, uid)
+	}
+	if highest >= maxUID || highest+1 < minUID {
+		return 0, fmt.Errorf("no service account UID available above %d within range %d to %d", highest, minUID, maxUID)
+	}
+	return highest + 1, nil
 }
