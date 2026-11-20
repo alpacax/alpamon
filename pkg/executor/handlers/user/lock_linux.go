@@ -356,17 +356,9 @@ func (l *linuxAccountLocker) terminateSessions(ctx context.Context, name string,
 	}
 	// logind forgets a user after its final session and linger are removed.
 	// Verify absence rather than matching localized error messages.
-	active, err := l.hasLoginUser(ctx, l.loginctl, uid)
-	if err != nil || active {
-		return errors.Join(terminateErr, err)
-	}
-	return nil
-}
-
-func (l *linuxAccountLocker) hasLoginUser(ctx context.Context, loginctl string, uid uint64) (bool, error) {
-	output, err := l.run(ctx, loginctl, "list-users", "--no-legend", "--no-pager")
+	output, err := l.run(ctx, l.loginctl, "list-users", "--no-legend", "--no-pager")
 	if err != nil {
-		return false, err
+		return errors.Join(terminateErr, err)
 	}
 	for line := range strings.SplitSeq(output, "\n") {
 		fields := strings.Fields(line)
@@ -374,14 +366,11 @@ func (l *linuxAccountLocker) hasLoginUser(ctx context.Context, loginctl string, 
 			continue
 		}
 		listedUID, err := strconv.ParseUint(fields[0], 10, 32)
-		if err != nil {
-			return false, fmt.Errorf("invalid UID from loginctl: %w", err)
-		}
-		if listedUID == uid {
-			return true, nil
+		if err != nil || listedUID == uid {
+			return terminateErr
 		}
 	}
-	return false, nil
+	return nil
 }
 
 func (l *linuxAccountLocker) resolveTool(name string) (string, error) {

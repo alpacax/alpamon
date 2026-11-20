@@ -45,6 +45,14 @@ func setArchiveTestAccount(t *testing.T, h *UserHandler, home string) uint64 {
 	if info, err := os.Lstat(home); err == nil && info.IsDir() && os.Geteuid() == 0 {
 		require.NoError(t, os.Chown(home, int(uid), -1))
 	}
+	locker := h.accountLocker.(*linuxAccountLocker)
+	readFile := locker.readFile
+	locker.readFile = func(path string) ([]byte, error) {
+		if path == "/etc/login.defs" {
+			return fmt.Appendf(nil, "UID_MIN %d\nUID_MAX %d\n", uid, uid+1), nil
+		}
+		return readFile(path)
+	}
 	h.lookupUser = func(name string) (*user.User, error) {
 		return &user.User{Username: name, Uid: strconv.FormatUint(uid, 10), HomeDir: home}, nil
 	}
@@ -55,20 +63,28 @@ func TestDeleteHomeDisposition(t *testing.T) {
 	const archiveTo = archivePrefix + "alice_2026-11-20T01:02:03Z"
 	archive, keep := "archive", "keep"
 	for _, tc := range []struct {
-		name, platform string
-		home           *string
-		dest           string
-		legacy, absent bool
+		name, platform                  string
+		home                            *string
+		dest                            string
+		legacy, absent, outside, setgid bool
 	}{
 		{name: "default keep", platform: "debian"},
 		{name: "explicit keep", platform: "rhel", home: &keep, dest: "ignored", legacy: true},
 		{name: "archive passwd home", platform: "rhel", home: &archive, dest: archiveTo, legacy: true},
 		{name: "missing passwd home", platform: "debian", home: &archive, dest: archiveTo, absent: true},
+		{name: "missing passwd home outside /home", platform: "debian", home: &archive, dest: archiveTo, absent: true, outside: true},
+		{name: "archive with setgid /home", platform: "rhel", home: &archive, dest: archiveTo, setgid: true},
 		{name: "legacy purge archives", platform: "debian", legacy: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, executor := newHomeTestHandler(t, tc.platform)
 			home := filepath.Join(h.homeRoot, "custom-home")
+			if tc.outside {
+				home = filepath.Join(t.TempDir(), "missing")
+			}
+			if tc.setgid {
+				require.NoError(t, os.Chmod(h.homeRoot, os.ModeSetgid|0700))
+			}
 			if !tc.absent {
 				require.NoError(t, os.Mkdir(home, 0755))
 				require.NoError(t, os.WriteFile(filepath.Join(home, "file"), []byte("saved"), 0600))
@@ -89,15 +105,15 @@ func TestDeleteHomeDisposition(t *testing.T) {
 				Username: "alice", Home: tc.home, ArchiveTo: tc.dest, PurgeHomeDirectory: tc.legacy,
 			})
 			require.NoError(t, err)
-			if tc.absent {
-				assert.Equal(t, 1, code)
-				assert.True(t, strings.HasPrefix(output, "archive_refused:"), output)
-				assert.Empty(t, commandArgv(executor))
-				assert.Empty(t, chowned)
-				return
-			}
 			require.Zero(t, code, output)
 			assert.Equal(t, [][]string{{"/usr/sbin/userdel", "alice"}}, commandArgv(executor))
+			if tc.absent {
+				assert.Equal(t, "User 'alice' deleted; home directory "+home+" not found; nothing archived", output)
+				assert.Empty(t, chowned)
+				_, err := os.Lstat(filepath.Join(h.homeRoot, "deleted_users"))
+				assert.ErrorIs(t, err, os.ErrNotExist)
+				return
+			}
 			parent := filepath.Join(h.homeRoot, "deleted_users")
 			switch {
 			case tc.home == nil && !tc.legacy || tc.home != nil && *tc.home == keep:
@@ -129,7 +145,7 @@ func TestDeleteHomeDisposition(t *testing.T) {
 				for _, path := range []string{parent, archived} {
 					info, err := os.Stat(path)
 					require.NoError(t, err)
-					assert.Equal(t, os.FileMode(0700), info.Mode().Perm())
+					assert.Equal(t, os.FileMode(0700), info.Mode()&(os.ModeSetgid|os.ModePerm))
 				}
 			}
 		})
@@ -183,7 +199,7 @@ func TestFirstAddUserHomeOwnership(t *testing.T) {
 					uid = 1001
 				}
 				path := filepath.Join(h.homeRoot, "alice")
-				var custom string
+				custom := path
 				switch state {
 				case "symlink":
 					require.NoError(t, os.Symlink(t.TempDir(), path))
@@ -239,6 +255,29 @@ func TestFirstAddUserHomeOwnership(t *testing.T) {
 	}
 }
 
+func TestFirstServiceAccountHomeConflict(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
+			h, executor := newHomeTestHandler(t, "debian")
+			path := filepath.Join(h.homeRoot, "alice")
+			args := &common.CommandArgs{
+				Username: "alice", UID: 1001, IsServiceAccount: true,
+				Shell: "/bin/bash", Groupname: "alice", Comment: "Alice",
+			}
+			if explicit {
+				path = filepath.Join(t.TempDir(), "custom")
+				args.HomeDirectory = path + "/"
+			}
+			require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "missing"), path))
+			code, output, err := h.Execute(context.Background(), "adduser", args)
+			require.NoError(t, err)
+			assert.Equal(t, 1, code)
+			assert.Equal(t, "system_home_conflict: "+path+" is a symlink; refusing to create the account", output)
+			assert.Empty(t, commandArgv(executor))
+		})
+	}
+}
+
 func TestArchiveRefusesUnsafeHome(t *testing.T) {
 	const destination = archivePrefix + "alice_2026-11-20T01:02:03Z"
 	archive := "archive"
@@ -249,7 +288,12 @@ func TestArchiveRefusesUnsafeHome(t *testing.T) {
 		{"nested", "must be a direct child"},
 		{"reserved", "must be a direct child"},
 		{"wrong owner", "expected UID"},
-		{"shared", "also used by"},
+		{"shared", "another account's home is inside"},
+		{"shared descendant", "another account's home is inside"},
+		{"mounted home", "a filesystem is mounted inside"},
+		{"mounted descendant", "a filesystem is mounted inside"},
+		{"writable /home", "/home must be root-owned and writable only by root"},
+		{"symlinked /home", "/home must be a real directory, symlinks are refused"},
 		{"system", "protected or system UID"},
 		{"protected", "protected or system UID"},
 	} {
@@ -268,6 +312,8 @@ func TestArchiveRefusesUnsafeHome(t *testing.T) {
 					home = filepath.Join(t.TempDir(), "alice")
 				case "nested":
 					home = filepath.Join(home, "nested")
+				case "mounted descendant":
+					home += " with space"
 				case "reserved":
 					home = filepath.Join(h.homeRoot, "deleted_users")
 				}
@@ -279,15 +325,39 @@ func TestArchiveRefusesUnsafeHome(t *testing.T) {
 			case "wrong owner":
 				uid++
 			case "system":
-				uid = 999
+				uid += 2
 			case "protected":
 				name = "nobody"
-			case "shared":
+			case "writable /home":
+				require.NoError(t, os.Chmod(h.homeRoot, 0770))
+			case "symlinked /home":
+				link := filepath.Join(t.TempDir(), "home")
+				require.NoError(t, os.Symlink(h.homeRoot, link))
+				h.homeRoot = link
+				home = filepath.Join(link, "alice")
+			case "shared", "shared descendant":
+				otherHome := home + "/./"
+				if tc.state == "shared descendant" {
+					otherHome += "bob"
+				}
+				readFile := l.readFile
 				l.readFile = func(path string) ([]byte, error) {
 					if path == "/etc/passwd" {
-						return fmt.Appendf(nil, "bob:x:1234:1234::%s/./:/bin/sh\n", home), nil
+						return fmt.Appendf(nil, "bob:x:1234:1234::%s:/bin/sh\n", otherHome), nil
 					}
-					return nil, nil
+					return readFile(path)
+				}
+			case "mounted home", "mounted descendant":
+				point := strings.ReplaceAll(home, " ", `\040`)
+				if tc.state == "mounted descendant" {
+					point += `/with\040space`
+				}
+				readFile := l.readFile
+				l.readFile = func(path string) ([]byte, error) {
+					if path == "/proc/self/mountinfo" {
+						return fmt.Appendf(nil, "40 30 0:35 / %s rw - tmpfs tmpfs rw\n", point), nil
+					}
+					return readFile(path)
 				}
 			}
 			h.lookupUser = func(string) (*user.User, error) {
@@ -347,7 +417,7 @@ func TestArchiveRefusesUnsafeParent(t *testing.T) {
 }
 
 func TestArchiveRefusesActiveUser(t *testing.T) {
-	for _, activity := range []string{"live processes", "active sessions"} {
+	for _, activity := range []string{"live processes", "active sessions", "session probe fails", "session probe skips text", "process probe fails"} {
 		t.Run(activity, func(t *testing.T) {
 			h, executor := newHomeTestHandler(t, "debian")
 			home := filepath.Join(h.homeRoot, "alice")
@@ -355,17 +425,31 @@ func TestArchiveRefusesActiveUser(t *testing.T) {
 			uid := setArchiveTestAccount(t, h, home)
 			l := h.accountLocker.(*linuxAccountLocker)
 			process := &fakeAccountProcess{}
-			if activity == "live processes" {
+			switch activity {
+			case "process probe fails":
+				l.scanProcesses = func(uint64, map[int]accountProcess) ([]accountProcess, error) {
+					return nil, errors.New("process probe failed")
+				}
+			case "live processes":
 				l.scanProcesses = func(gotUID uint64, _ map[int]accountProcess) ([]accountProcess, error) {
 					assert.Equal(t, uid, gotUID)
 					return []accountProcess{process}, nil
 				}
-			} else {
+			default:
 				tool := filepath.Join(t.TempDir(), "loginctl")
 				require.NoError(t, os.WriteFile(tool, nil, 0700))
 				l.systemd = func() bool { return true }
 				l.stat = func(string) (os.FileInfo, error) { return os.Stat(tool) }
-				executor.SetResult("/usr/bin/loginctl list-users --no-legend --no-pager", 0, fmt.Sprintf("%d alice\n", uid), nil)
+				const probe = "/usr/bin/loginctl list-users --no-legend --no-pager"
+				switch activity {
+				case "session probe fails":
+					executor.SetResult(probe, 1, "", errors.New("probe failed"))
+				case "session probe skips text":
+					executor.SetResult(probe, 0, "No users.\n", nil)
+					h.chownHome = func(string, int, int, int) (int, error) { return 0, nil }
+				default:
+					executor.SetResult(probe, 0, fmt.Sprintf("UID USER\n%d alice\n", uid), nil)
+				}
 			}
 
 			archive := "archive"
@@ -373,13 +457,27 @@ func TestArchiveRefusesActiveUser(t *testing.T) {
 				Username: "alice", Home: &archive, ArchiveTo: archivePrefix + "alice_2026-11-20T01:02:03Z",
 			})
 			require.NoError(t, err)
+			probeArgv := []string{"/usr/bin/loginctl", "list-users", "--no-legend", "--no-pager"}
+			if activity == "session probe skips text" {
+				require.Zero(t, code, output)
+				assert.Equal(t, [][]string{probeArgv, {"/usr/sbin/userdel", "alice"}}, commandArgv(executor))
+				return
+			}
 			assert.Equal(t, 1, code)
-			assert.Equal(t, fmt.Sprintf("user_in_use: UID %d has %s", uid, activity), output)
-			if activity == "live processes" {
+			switch activity {
+			case "live processes":
 				assert.True(t, process.closed)
 				assert.Empty(t, commandArgv(executor))
-			} else {
-				assert.Equal(t, [][]string{{"/usr/bin/loginctl", "list-users", "--no-legend", "--no-pager"}}, commandArgv(executor))
+				assert.Equal(t, fmt.Sprintf("user_in_use: UID %d has live processes", uid), output)
+			case "process probe fails":
+				assert.Contains(t, output, "user_in_use: cannot verify processes")
+				assert.Empty(t, commandArgv(executor))
+			case "session probe fails":
+				assert.Contains(t, output, "user_in_use: cannot verify sessions")
+				assert.Equal(t, [][]string{probeArgv}, commandArgv(executor))
+			default:
+				assert.Equal(t, fmt.Sprintf("user_in_use: UID %d has active sessions", uid), output)
+				assert.Equal(t, [][]string{probeArgv}, commandArgv(executor))
 			}
 			assert.DirExists(t, home)
 			_, err = os.Lstat(filepath.Join(h.homeRoot, "deleted_users"))

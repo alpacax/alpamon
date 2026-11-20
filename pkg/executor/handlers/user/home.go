@@ -11,23 +11,20 @@ import (
 
 const archivePrefix = "/home/deleted_users/"
 
-func (h *UserHandler) checkHomeOwner(username, home string, requestedUID uint64, serviceAccount bool) error {
+func (h *UserHandler) checkHomeOwner(username, home string, requestedUID uint64) error {
 	if !validHomeUsername(username) {
 		return fmt.Errorf("invalid username %q", username)
 	}
-	path := filepath.Join(h.homeRoot, username)
-	if !serviceAccount {
-		path = home
+	path := home
+	if home == "" {
+		path = filepath.Join(h.homeRoot, username)
 	}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err == nil && info.Mode()&os.ModeSymlink != 0 {
-		if !serviceAccount {
-			return fmt.Errorf("system_home_conflict: %s is a symlink; refusing to create the account", path)
-		}
-		info, err = os.Stat(path)
+		return fmt.Errorf("system_home_conflict: %s is a symlink; refusing to create the account", path)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to stat home directory: %w", err)

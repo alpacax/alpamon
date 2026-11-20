@@ -40,6 +40,9 @@ func (l *linuxAccountLocker) backupHomeDirectory(ctx context.Context, name strin
 		return fmt.Errorf("archive_refused: home %q must be a direct child of /home other than deleted_users", home)
 	}
 	homeFD, err := unix.Open(homeRoot, archiveDirFlags, 0)
+	if errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
+		return errors.New("archive_refused: /home must be a real directory, symlinks are refused")
+	}
 	if err != nil {
 		return fmt.Errorf("archive_refused: cannot open /home: %w", err)
 	}
@@ -76,6 +79,9 @@ func (l *linuxAccountLocker) backupHomeDirectory(ctx context.Context, name strin
 	if err := l.checkArchiveActivity(ctx, uid); err != nil {
 		return err
 	}
+	if err := l.checkHomeMounts(home); err != nil {
+		return err
+	}
 	archiveFD, err := l.openArchiveParent(homeFD)
 	if err != nil {
 		return fmt.Errorf("archive_refused: %w", err)
@@ -104,8 +110,33 @@ func (l *linuxAccountLocker) checkSharedHome(name, home string) error {
 	}
 	for line := range strings.SplitSeq(string(passwd), "\n") {
 		fields := strings.SplitN(line, ":", 7)
-		if len(fields) == 7 && fields[0] != name && filepath.Clean(fields[5]) == home {
-			return fmt.Errorf("archive_refused: home %s is also used by %q", home, fields[0])
+		if len(fields) != 7 || fields[0] == name {
+			continue
+		}
+		if path := filepath.Clean(fields[5]); path == home || strings.HasPrefix(path, home+"/") {
+			return fmt.Errorf("archive_refused: another account's home is inside %s", home)
+		}
+	}
+	return nil
+}
+
+func (l *linuxAccountLocker) checkHomeMounts(home string) error {
+	data, err := l.readFile("/proc/self/mountinfo")
+	if err != nil {
+		return fmt.Errorf("archive_refused: cannot read mountinfo: %w", err)
+	}
+	// mountinfo escapes whitespace and backslashes within path fields.
+	unescape := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			return errors.New("archive_refused: malformed mountinfo")
+		}
+		if point := unescape.Replace(fields[4]); point == home || strings.HasPrefix(point, home+"/") {
+			return fmt.Errorf("archive_refused: a filesystem is mounted inside %s", home)
 		}
 	}
 	return nil
@@ -139,6 +170,27 @@ func (l *linuxAccountLocker) checkArchiveActivity(ctx context.Context, uid uint6
 	return nil
 }
 
+func (l *linuxAccountLocker) hasLoginUser(ctx context.Context, loginctl string, uid uint64) (bool, error) {
+	output, err := l.run(ctx, loginctl, "list-users", "--no-legend", "--no-pager")
+	if err != nil {
+		return false, err
+	}
+	for line := range strings.SplitSeq(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		listedUID, err := strconv.ParseUint(fields[0], 10, 32)
+		if err != nil {
+			continue
+		}
+		if listedUID == uid {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (l *linuxAccountLocker) openArchiveParent(homeFD int) (int, error) {
 	const parent = "deleted_users"
 	mkdirErr := unix.Mkdirat(homeFD, parent, 0700)
@@ -148,6 +200,12 @@ func (l *linuxAccountLocker) openArchiveParent(homeFD int) (int, error) {
 	fd, err := unix.Openat(homeFD, parent, archiveDirFlags, 0)
 	if err != nil {
 		return -1, fmt.Errorf("cannot open archive parent: %w", err)
+	}
+	if mkdirErr == nil {
+		if err := unix.Fchmod(fd, 0700); err != nil {
+			_ = unix.Close(fd)
+			return -1, fmt.Errorf("cannot set archive parent mode: %w", err)
+		}
 	}
 	if err := l.validateArchiveParent(fd, mkdirErr == nil); err != nil {
 		_ = unix.Close(fd)

@@ -848,9 +848,9 @@ func TestAccountUnlockDoesNotOwnExternalLock(t *testing.T) {
 }
 
 func TestDeleteMissingUserKeepsFailure(t *testing.T) {
-	for _, purge := range []bool{false, true} {
+	for _, mode := range []string{"keep", "archive", "legacy purge"} {
 		for _, cleanupFails := range []bool{false, true} {
-			t.Run(fmt.Sprintf("purge=%t/cleanupFails=%t", purge, cleanupFails), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/cleanupFails=%t", mode, cleanupFails), func(t *testing.T) {
 				f := newLockFixture(t)
 				old := utils.PlatformLike
 				utils.PlatformLike = "debian"
@@ -866,21 +866,20 @@ func TestDeleteMissingUserKeepsFailure(t *testing.T) {
 					require.NoError(t, f.l.store.save(map[string]accountLockState{"deploy": {UID: 1001}}))
 				}
 				f.exec.SetResult("/usr/sbin/userdel deploy", 6, "user does not exist", nil)
-				code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy", PurgeHomeDirectory: purge})
-				require.NoError(t, err)
-				if purge {
-					assert.Equal(t, 1, code)
-					assert.Equal(t, "archive_refused: account does not exist", output)
-					assert.Empty(t, commandArgv(f.exec))
-					return
+				args := &common.CommandArgs{Username: "deploy", PurgeHomeDirectory: mode == "legacy purge"}
+				if mode == "archive" {
+					args.Home = &mode
+					args.ArchiveTo = archivePrefix + "deploy_2026-11-20T01:02:03Z"
 				}
+				code, output, err := f.h.Execute(context.Background(), "deluser", args)
+				require.NoError(t, err)
 				assert.Equal(t, 6, code)
 				assert.Equal(t, "user does not exist"+cleanupLine, output)
 				assert.Contains(t, commandArgv(f.exec), []string{"/usr/sbin/userdel", "deploy"})
 				if !cleanupFails {
 					states, err := f.l.store.load()
 					require.NoError(t, err)
-					assert.Empty(t, states)
+					assert.NotContains(t, states, "deploy")
 				}
 			})
 		}

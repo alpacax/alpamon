@@ -2,6 +2,7 @@ package user
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -142,8 +143,10 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	if err := h.ValidateStruct(data); err != nil {
 		return 1, err.Error(), nil
 	}
-	if !data.IsServiceAccount && data.HomeDirectory == "" {
-		data.HomeDirectory = filepath.Join(h.homeRoot, data.Username)
+
+	// Check the same explicit path that the create command will use.
+	if data.UID != 0 && data.HomeDirectory != "" {
+		data.HomeDirectory = filepath.Clean(data.HomeDirectory)
 	}
 
 	log.Info().
@@ -170,33 +173,6 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	omitUIDFlag := data.IsServiceAccount && data.UID == 0
 	omitGIDFlag := data.IsServiceAccount && data.GID == 0
 	omitHomeFlag := data.IsServiceAccount && data.HomeDirectory == ""
-
-	// Service-account primary-group bootstrap (load-bearing).
-	//
-	// When the payload omits a numeric GID, we want the user's primary
-	// group to be `Groupname` (e.g. "alpacon") so that later
-	// `utils.Demote(..., ValidateGroup=true)` succeeds. Setting it as a
-	// post-fact supplementary membership via `usermod -aG` is fragile
-	// on systems with USERGROUPS_ENAB=no / Debian USERGROUPS=no.
-	//
-	// Instead, ensure the named group exists up front, then pass it as
-	// the primary group to adduser/useradd via `--ingroup` (Debian) or
-	// `--gid <name>` (RHEL: useradd accepts a group name as well as a
-	// numeric id). If `groupadd -f` fails here, fail loudly so the
-	// caller does not see a "succeeded" provisioning that breaks at
-	// runtime.
-	// `omitGIDFlag` already implies `data.IsServiceAccount` per its definition.
-	if omitGIDFlag && data.Groupname != "" {
-		if code, out, gerr := h.Executor.Run(ctx, "/usr/sbin/groupadd", "-f", data.Groupname); code != 0 {
-			log.Error().
-				Str("group", data.Groupname).
-				Int("exitCode", code).
-				Str("output", out).
-				Err(gerr).
-				Msg("Failed to ensure service-account primary group exists")
-			return code, fmt.Sprintf("Failed to ensure group %q for service account: %s", data.Groupname, out), gerr
-		}
-	}
 
 	// Idempotency gate (M8): verify by lookup whether the user already exists
 	// before attempting creation, so re-provisioning an already-present account
@@ -225,8 +201,35 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	}
 
 	if !userExists && !omitUIDFlag && (utils.PlatformLike == "debian" || utils.PlatformLike == "rhel") {
-		if err := h.checkHomeOwner(data.Username, data.HomeDirectory, data.UID, data.IsServiceAccount); err != nil {
+		if err := h.checkHomeOwner(data.Username, data.HomeDirectory, data.UID); err != nil {
 			return 1, err.Error(), nil
+		}
+	}
+
+	// Service-account primary-group bootstrap (load-bearing).
+	//
+	// When the payload omits a numeric GID, we want the user's primary
+	// group to be `Groupname` (e.g. "alpacon") so that later
+	// `utils.Demote(..., ValidateGroup=true)` succeeds. Setting it as a
+	// post-fact supplementary membership via `usermod -aG` is fragile
+	// on systems with USERGROUPS_ENAB=no / Debian USERGROUPS=no.
+	//
+	// Instead, ensure the named group exists up front, then pass it as
+	// the primary group to adduser/useradd via `--ingroup` (Debian) or
+	// `--gid <name>` (RHEL: useradd accepts a group name as well as a
+	// numeric id). If `groupadd -f` fails here, fail loudly so the
+	// caller does not see a "succeeded" provisioning that breaks at
+	// runtime.
+	// `omitGIDFlag` already implies `data.IsServiceAccount` per its definition.
+	if omitGIDFlag && data.Groupname != "" {
+		if code, out, gerr := h.Executor.Run(ctx, "/usr/sbin/groupadd", "-f", data.Groupname); code != 0 {
+			log.Error().
+				Str("group", data.Groupname).
+				Int("exitCode", code).
+				Str("output", out).
+				Err(gerr).
+				Msg("Failed to ensure service-account primary group exists")
+			return code, fmt.Sprintf("Failed to ensure group %q for service account: %s", data.Groupname, out), gerr
 		}
 	}
 
@@ -393,17 +396,6 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 
 	log.Info().Str("username", data.Username).Str("home", data.Home).Msg("Deleting user")
 
-	var destination string
-	if data.Home == "archive" {
-		if data.LegacyPurge {
-			data.ArchiveTo = archivePrefix + data.Username + "_" + time.Now().UTC().Format(time.RFC3339)
-		}
-		destination, err = archiveDestination(data.Username, data.ArchiveTo)
-		if err != nil {
-			return 1, err.Error(), nil
-		}
-	}
-
 	account, exists, lookupErr := common.UserExists(h.lookupUser, data.Username)
 	if lookupErr != nil {
 		if data.Home == "archive" {
@@ -411,32 +403,47 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 		}
 		return 1, fmt.Sprintf("unable to look up user %q: %v", data.Username, lookupErr), lookupErr
 	}
-	var home string
-	if data.Home == "archive" && !exists {
-		return 1, "archive_refused: account does not exist", nil
-	}
-	if exists {
-		home = account.HomeDir
-	} else if err := h.accountLocker.forget(data.Username); err != nil {
-		log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
-		defer func() { output += "\nlock_cleanup_failed: " + err.Error() }()
+	if !exists {
+		if err := h.accountLocker.forget(data.Username); err != nil {
+			log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
+			defer func() { output += "\nlock_cleanup_failed: " + err.Error() }()
+		}
+		return h.Executor.Run(ctx, "/usr/sbin/userdel", data.Username)
 	}
 
-	result := "home directory kept at " + home
+	result := "home directory kept at " + account.HomeDir
+	archived := false
 	if data.Home == "archive" {
-		if err := h.accountLocker.backupHomeDirectory(ctx, data.Username, account, destination, data.ArchiveTo); err != nil {
-			return 1, err.Error(), nil
+		home := filepath.Clean(account.HomeDir)
+		_, statErr := os.Lstat(home)
+		switch {
+		case errors.Is(statErr, os.ErrNotExist):
+			result = fmt.Sprintf("home directory %s not found; nothing archived", home)
+		case statErr != nil:
+			return 1, fmt.Sprintf("archive_refused: cannot stat home %s: %v", home, statErr), nil
+		default:
+			if data.LegacyPurge {
+				data.ArchiveTo = archivePrefix + data.Username + "_" + time.Now().UTC().Format(time.RFC3339)
+			}
+			destination, err := archiveDestination(data.Username, data.ArchiveTo)
+			if err != nil {
+				return 1, err.Error(), nil
+			}
+			if err := h.accountLocker.backupHomeDirectory(ctx, data.Username, account, destination, data.ArchiveTo); err != nil {
+				return 1, err.Error(), nil
+			}
+			archived = true
+			result = "home directory archived to " + data.ArchiveTo
+			if data.LegacyPurge {
+				result += " (legacy purge_home=true treated as archive)"
+			}
 		}
-		result = "home directory archived to " + data.ArchiveTo
-	}
-	if data.LegacyPurge {
-		result += " (legacy purge_home=true treated as archive)"
 	}
 
 	// Debian's deluser can remove files based on local configuration alone.
 	exitCode, output, err = h.Executor.Run(ctx, "/usr/sbin/userdel", data.Username)
 	if exitCode != 0 || err != nil {
-		if data.Home == "archive" {
+		if archived {
 			return 1, archivedDeleteFailure(data.ArchiveTo, fmt.Errorf("userdel exited %d: %s (%v)", exitCode, output, err)).Error(), nil
 		}
 		return exitCode, output, err

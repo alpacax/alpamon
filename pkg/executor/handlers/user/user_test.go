@@ -472,12 +472,12 @@ func TestUserHandler_Validate(t *testing.T) {
 			cmd:  "adduser",
 			args: &common.CommandArgs{
 				Username: "testuser",
-				// IsServiceAccount=false (default), so UID/GID
+				// IsServiceAccount=false (default), so UID/GID/HomeDirectory
 				// are required_unless and also missing. Comment/Groupname are
 				// required unconditionally. Shell carries `validate:"required"`
 				// and is deliberately not defaulted, so it fails too.
 			},
-			wantErrFields: []string{"UID", "GID", "Comment", "Shell", "Groupname"},
+			wantErrFields: []string{"UID", "GID", "Comment", "HomeDirectory", "Shell", "Groupname"},
 		},
 		{
 			name: "adduser uid-less service account valid",
@@ -492,7 +492,7 @@ func TestUserHandler_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "adduser IAM User path requires UID and GID",
+			name: "adduser IAM User path requires UID, GID and home",
 			cmd:  "adduser",
 			args: &common.CommandArgs{
 				Username:  "john",
@@ -500,9 +500,9 @@ func TestUserHandler_Validate(t *testing.T) {
 				Shell:     "/bin/bash",
 				Groupname: "alpacon",
 				// IsServiceAccount=false (default)
-				// UID/GID missing: must fail
+				// UID/GID/HomeDirectory missing: must fail
 			},
-			wantErrFields: []string{"UID", "GID"},
+			wantErrFields: []string{"UID", "GID", "HomeDirectory"},
 		},
 		{
 			name: "adduser IAM User with uid=0 must fail (cannot silently auto-assign)",
