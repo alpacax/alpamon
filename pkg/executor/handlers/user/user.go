@@ -32,7 +32,6 @@ type UserHandler struct {
 	supplementaryGroups common.SupplementaryGroupsFunc
 	accountLocker       accountLocker
 	homeRoot            string
-	chooseHomeUID       func(context.Context, map[uint64]string) (uint64, error)
 	readHomeDefaults    func(string) ([]byte, error)
 	chownHome           func(context.Context, int, string, int, int, int) (int, error)
 }
@@ -200,41 +199,27 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		}
 	}
 
-	if !userExists && (utils.PlatformLike == "debian" || utils.PlatformLike == "rhel") {
-		if !validHomeUsername(data.Username) {
-			return 1, fmt.Sprintf("invalid username %q", data.Username), nil
-		}
-		home := data.HomeDirectory
-		if omitHomeFlag {
-			root, err := h.defaultHomeRoot()
-			if err != nil {
-				return 1, err.Error(), nil
-			}
-			home = filepath.Join(root, data.Username)
-		}
-		owners, err := h.homeOwners(data.Username, filepath.Clean(home))
+	if !userExists && !omitUIDFlag && (utils.PlatformLike == "debian" || utils.PlatformLike == "rhel") {
+		root, err := h.defaultHomeRoot()
 		if err != nil {
 			return 1, err.Error(), nil
 		}
-		if omitUIDFlag && h.chooseHomeUID != nil {
-			uid, err := h.chooseHomeUID(ctx, owners)
-			if err != nil {
-				return 1, err.Error(), nil
-			}
-			if uid != 0 {
-				data.UID, omitUIDFlag = uid, false
-			}
+		home := data.HomeDirectory
+		if omitHomeFlag {
+			home = filepath.Join(root, data.Username)
 		}
-		if !omitUIDFlag {
-			home = filepath.Clean(home)
-			if path, found := owners[data.UID]; found {
-				return 1, fmt.Sprintf("system_home_conflict: %s is owned by requested uid %d; refusing to create the account", path, data.UID), nil
-			}
-			if err := h.checkHomeOwner(data.Username, home, data.UID); err != nil {
-				return 1, err.Error(), nil
-			}
-			data.HomeDirectory, omitHomeFlag = home, false
+		home = filepath.Clean(home)
+		if err := h.checkHomeOwner(data.Username, home, data.UID); err != nil {
+			return 1, err.Error(), nil
 		}
+		owners, err := h.homeOwners(home, root)
+		if err != nil {
+			return 1, err.Error(), nil
+		}
+		if path, found := owners[data.UID]; found {
+			return 1, fmt.Sprintf("system_home_conflict: %s is owned by requested uid %d; refusing to create the account", path, data.UID), nil
+		}
+		data.HomeDirectory, omitHomeFlag = home, false
 	}
 
 	// Service-account primary-group bootstrap (load-bearing).
@@ -435,6 +420,9 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 		return 1, fmt.Sprintf("unable to look up user %q: %v", data.Username, lookupErr), lookupErr
 	}
 	if !exists {
+		if err := h.accountLocker.clearPendingArchive(data.Username); err != nil {
+			defer func() { output += "\npending_record_cleanup_failed: " + err.Error() }()
+		}
 		if err := h.accountLocker.forget(data.Username); err != nil {
 			log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
 			defer func() { output += "\nlock_cleanup_failed: " + err.Error() }()
@@ -471,7 +459,7 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 	}
 	if archived {
 		if cleanupErr := h.accountLocker.clearPendingArchive(data.Username); cleanupErr != nil {
-			log.Warn().Err(cleanupErr).Str("username", data.Username).Msg("Failed to clear pending home archive")
+			defer func() { output += "\npending_record_cleanup_failed: " + cleanupErr.Error() }()
 		}
 	}
 	if err := h.accountLocker.forget(data.Username); err != nil {

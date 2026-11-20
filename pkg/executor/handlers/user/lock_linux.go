@@ -54,7 +54,6 @@ func newAccountLocker(h *UserHandler) accountLocker {
 		renameAt:      unix.Renameat2,
 		terminate:     terminateAccountProcesses,
 	}
-	h.chooseHomeUID = l.chooseHomeUID
 	l.systemd = func() bool { _, err := l.stat("/run/systemd/system"); return err == nil }
 	return l
 }

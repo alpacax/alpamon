@@ -60,7 +60,6 @@ func setArchiveTestAccount(t *testing.T, h *UserHandler, home string) uint64 {
 	return uid
 }
 
-var expireAlice = []string{"/usr/sbin/usermod", "-e", "1", "--", "alice"}
 var deleteAlice = []string{"/usr/sbin/userdel", "alice"}
 
 func TestDeleteHomeDisposition(t *testing.T) {
@@ -102,7 +101,7 @@ func TestDeleteHomeDisposition(t *testing.T) {
 				resolved, err := filepath.EvalSymlinks(path)
 				require.NoError(t, err)
 				chowned = append(chowned, resolved)
-				assert.Equal(t, [][]string{expireAlice}, commandArgv(executor), "archive ownership must be set before deletion")
+				assert.Empty(t, commandArgv(executor), "archive ownership must be set before deletion")
 				return 0, nil
 			}
 			code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{
@@ -111,7 +110,7 @@ func TestDeleteHomeDisposition(t *testing.T) {
 			require.NoError(t, err)
 			require.Zero(t, code, output)
 			if len(chowned) > 0 {
-				assert.Equal(t, [][]string{expireAlice, deleteAlice}, commandArgv(executor))
+				assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
 			} else {
 				assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
 			}
@@ -221,7 +220,7 @@ func TestInvalidArchivePathWithMissingHomeOrAccount(t *testing.T) {
 
 func TestFirstAddUserHomeOwnership(t *testing.T) {
 	for _, platform := range []string{"debian", "rhel"} {
-		for _, state := range []string{"another UID", "same UID", "missing", "symlink", "dangling symlink", "custom home"} {
+		for _, state := range []string{"another UID", "same UID", "missing", "symlink", "dangling symlink", "custom home", "same UID custom home"} {
 			t.Run(platform+"/"+state, func(t *testing.T) {
 				h, executor := newHomeTestHandler(t, platform)
 				uid := uint64(os.Getuid())
@@ -235,9 +234,18 @@ func TestFirstAddUserHomeOwnership(t *testing.T) {
 					require.NoError(t, os.Symlink(t.TempDir(), path))
 				case "dangling symlink":
 					require.NoError(t, os.Symlink(filepath.Join(h.homeRoot, "missing"), path))
-				case "custom home":
+				case "custom home", "same UID custom home":
 					path = filepath.Join(t.TempDir(), "custom-home")
 					custom = filepath.Dir(path) + "/./" + filepath.Base(path)
+					alias := filepath.Join(t.TempDir(), "alias")
+					require.NoError(t, os.Symlink(filepath.Dir(path), alias))
+					h.readHomeDefaults = func(string) ([]byte, error) {
+						key := "HOME"
+						if platform == "debian" {
+							key = "DHOME"
+						}
+						return fmt.Appendf(nil, "%s=%s\n", key, alias), nil
+					}
 					fallthrough
 				case "another UID", "same UID":
 					require.NoError(t, os.Mkdir(path, 0755))
@@ -246,7 +254,7 @@ func TestFirstAddUserHomeOwnership(t *testing.T) {
 					}
 				}
 				requested := uid
-				if state != "same UID" {
+				if !strings.HasPrefix(state, "same UID") {
 					requested++
 				}
 				args := &common.CommandArgs{
@@ -497,24 +505,24 @@ func TestArchiveRefusesActiveUser(t *testing.T) {
 			probeArgv := []string{"/usr/bin/loginctl", "list-users", "--no-legend", "--no-pager"}
 			if activity == "session probe skips text" {
 				require.Zero(t, code, output)
-				assert.Equal(t, [][]string{expireAlice, probeArgv, deleteAlice}, commandArgv(executor))
+				assert.Equal(t, [][]string{probeArgv, deleteAlice}, commandArgv(executor))
 				return
 			}
 			assert.Equal(t, 1, code)
 			switch activity {
 			case "live processes":
 				assert.True(t, process.closed)
-				assert.Equal(t, [][]string{expireAlice}, commandArgv(executor))
+				assert.Empty(t, commandArgv(executor))
 				assert.Equal(t, fmt.Sprintf("user_in_use: UID %d has live processes", uid), output)
 			case "process probe fails":
 				assert.Contains(t, output, "user_in_use: cannot verify processes")
-				assert.Equal(t, [][]string{expireAlice}, commandArgv(executor))
+				assert.Empty(t, commandArgv(executor))
 			case "session probe fails":
 				assert.Contains(t, output, "user_in_use: cannot verify sessions")
-				assert.Equal(t, [][]string{expireAlice, probeArgv}, commandArgv(executor))
+				assert.Equal(t, [][]string{probeArgv}, commandArgv(executor))
 			default:
 				assert.Equal(t, fmt.Sprintf("user_in_use: UID %d has active sessions", uid), output)
-				assert.Equal(t, [][]string{expireAlice, probeArgv}, commandArgv(executor))
+				assert.Equal(t, [][]string{probeArgv}, commandArgv(executor))
 			}
 			assert.DirExists(t, home)
 			_, err = os.Lstat(filepath.Join(h.homeRoot, "deleted_users", "alice_2026-11-20T01:02:03Z"))
@@ -563,9 +571,19 @@ func TestArchiveRetriesAfterPartialDelete(t *testing.T) {
 			_, err = os.Lstat(home)
 			assert.ErrorIs(t, err, os.ErrNotExist)
 			if failure == "userdel" {
-				assert.Equal(t, [][]string{expireAlice, deleteAlice}, commandArgv(executor))
+				assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
 			} else {
-				assert.Equal(t, [][]string{expireAlice}, commandArgv(executor))
+				assert.Empty(t, commandArgv(executor))
+			}
+
+			if failure == "userdel" {
+				args.ArchiveTo = archivePrefix + "alice_2026-11-20T01:02:04Z"
+				code, output, err = h.Execute(context.Background(), "deluser", args)
+				require.NoError(t, err)
+				require.Equal(t, 1, code)
+				assert.Contains(t, output, "account_delete_failed: home archived to "+destination+"; ")
+				assert.Equal(t, 1, attempts)
+				args.ArchiveTo = destination
 			}
 
 			executor.SetResult("/usr/sbin/userdel alice", 0, "", nil)
@@ -631,7 +649,7 @@ func TestArchiveRenameRefusals(t *testing.T) {
 			assert.Equal(t, 1, code)
 			assert.True(t, strings.HasPrefix(output, "archive_refused:"), output)
 			assert.Contains(t, output, tc.reason)
-			assert.Equal(t, [][]string{expireAlice}, commandArgv(executor))
+			assert.Empty(t, commandArgv(executor))
 			assert.DirExists(t, home)
 		})
 	}
@@ -681,7 +699,11 @@ func TestSharedHomeLookupCanReleaseCaller(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	release := make(chan struct{})
-	defer close(release)
+	defer func() {
+		close(release)
+		sharedHomeLookup <- struct{}{}
+		<-sharedHomeLookup
+	}()
 	l.readFile = func(string) ([]byte, error) {
 		cancel()
 		<-release
@@ -697,17 +719,11 @@ func TestCreateServiceAccountWithHomeEntries(t *testing.T) {
 	h, executor := newHomeTestHandler(t, "debian")
 	home := filepath.Join(h.homeRoot, "alice")
 	require.NoError(t, os.Mkdir(home, 0700))
-	uid := setArchiveTestAccount(t, h, home)
+	setArchiveTestAccount(t, h, home)
 	code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "alice"})
 	require.NoError(t, err)
 	require.Zero(t, code, output)
 	h.lookupUser = common.AbsentUserLookup
-	l := h.accountLocker.(*linuxAccountLocker)
-	l.lookupUID = func(id string) (*user.User, error) {
-		value, err := strconv.Atoi(id)
-		require.NoError(t, err)
-		return nil, user.UnknownUserIdError(value)
-	}
 	code, output, err = h.Execute(context.Background(), "adduser", &common.CommandArgs{
 		Username: "bob", IsServiceAccount: true,
 		Shell: "/usr/sbin/nologin", Groupname: "bob", Comment: "Bob",
@@ -721,8 +737,9 @@ func TestCreateServiceAccountWithHomeEntries(t *testing.T) {
 			break
 		}
 	}
-	assert.Contains(t, strings.Join(creation, " "), "--uid "+strconv.FormatUint(uid+1, 10))
-	assert.Contains(t, strings.Join(creation, " "), "--home "+filepath.Join(h.homeRoot, "bob"))
+	require.NotEmpty(t, creation)
+	assert.NotContains(t, creation, "--uid")
+	assert.NotContains(t, creation, "--home")
 }
 
 func TestArchiveMissingHomeEligibility(t *testing.T) {
@@ -744,6 +761,87 @@ func TestArchiveMissingHomeEligibility(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, 1, code)
 			assert.Contains(t, output, "archive_refused:")
+			assert.Empty(t, commandArgv(executor))
+		})
+	}
+}
+
+func TestMissingHomeWithOccupiedArchiveDestination(t *testing.T) {
+	h, executor := newHomeTestHandler(t, "debian")
+	setArchiveTestAccount(t, h, filepath.Join(h.homeRoot, "alice"))
+	const base = "alice_2026-11-20T01:02:03Z"
+	parent := filepath.Join(h.homeRoot, "deleted_users")
+	require.NoError(t, os.Mkdir(parent, 0700))
+	require.NoError(t, os.Mkdir(filepath.Join(parent, base), 0700))
+
+	mode := "archive"
+	code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{
+		Username: "alice", Home: &mode, ArchiveTo: archivePrefix + base,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+	assert.Equal(t, "invalid_archive_path: destination exists", output)
+	assert.Empty(t, commandArgv(executor))
+}
+
+func TestDeleteRetriesPendingRecordCleanup(t *testing.T) {
+	h, executor := newHomeTestHandler(t, "debian")
+	home := filepath.Join(h.homeRoot, "alice")
+	require.NoError(t, os.Mkdir(home, 0700))
+	setArchiveTestAccount(t, h, home)
+	parent := filepath.Join(h.homeRoot, "deleted_users")
+	record := filepath.Join(parent, filepath.Base(archiveRecordPath(0, "alice")))
+	h.chownHome = func(context.Context, int, string, int, int, int) (int, error) {
+		require.NoError(t, os.Remove(record))
+		require.NoError(t, os.Mkdir(record, 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(record, "child"), nil, 0600))
+		return 0, nil
+	}
+
+	mode := "archive"
+	args := &common.CommandArgs{
+		Username: "alice", Home: &mode, ArchiveTo: archivePrefix + "alice_2026-11-20T01:02:03Z",
+	}
+	code, output, err := h.Execute(context.Background(), "deluser", args)
+	require.NoError(t, err)
+	require.Zero(t, code, output)
+	assert.Contains(t, output, "\npending_record_cleanup_failed: ")
+
+	require.NoError(t, os.Remove(filepath.Join(record, "child")))
+	h.lookupUser = common.AbsentUserLookup
+	executor.SetResult("/usr/sbin/userdel alice", 6, "user does not exist", nil)
+	code, output, err = h.Execute(context.Background(), "deluser", args)
+	require.NoError(t, err)
+	assert.Equal(t, 6, code)
+	assert.NotContains(t, output, "pending_record_cleanup_failed")
+	_, err = os.Stat(record)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestKeptHomeBlocksUIDReuseOutsideHomeRoot(t *testing.T) {
+	for _, scope := range []string{"configured root", "target parent"} {
+		t.Run(scope, func(t *testing.T) {
+			h, executor := newHomeTestHandler(t, "debian")
+			configuredRoot, targetParent := t.TempDir(), t.TempDir()
+			h.readHomeDefaults = func(string) ([]byte, error) {
+				return fmt.Appendf(nil, "DHOME=%s\n", configuredRoot), nil
+			}
+			parent := configuredRoot
+			if scope == "target parent" {
+				parent = targetParent
+			}
+			retained := filepath.Join(parent, "alice")
+			require.NoError(t, os.Mkdir(retained, 0700))
+			uid := setArchiveTestAccount(t, h, retained)
+			h.lookupUser = common.AbsentUserLookup
+
+			code, output, err := h.Execute(context.Background(), "adduser", &common.CommandArgs{
+				Username: "bob", UID: uid, GID: 1001, HomeDirectory: filepath.Join(targetParent, "bob"),
+				Shell: "/bin/bash", Groupname: "bob", Comment: "Bob",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 1, code)
+			assert.Contains(t, output, "system_home_conflict: "+retained)
 			assert.Empty(t, commandArgv(executor))
 		})
 	}

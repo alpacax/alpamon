@@ -44,6 +44,7 @@ func newLockFixture(t *testing.T) *lockFixture {
 	mock.SetResult("/bin/systemctl list-units --all --type=service,timer,socket,path --no-legend --no-pager --plain", 0, "", nil)
 	sync := &lockSyncRecorder{}
 	h := NewUserHandler(mock, nil, sync)
+	h.homeRoot = t.TempDir()
 	h.lookupUser = common.ExistingUserLookup("1001")
 	l := h.accountLocker.(*linuxAccountLocker)
 	l.store = lockStateStore{path: filepath.Join(t.TempDir(), "user-locks.json"), owner: uint32(os.Geteuid())}

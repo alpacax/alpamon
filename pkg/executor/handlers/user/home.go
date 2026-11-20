@@ -7,8 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"time"
+
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 )
 
 const archivePrefix = "/home/deleted_users/"
@@ -38,32 +39,47 @@ func (h *UserHandler) checkHomeOwner(username, home string, requestedUID uint64)
 	return nil
 }
 
-func (h *UserHandler) homeOwners(username, path string) (map[uint64]string, error) {
+func (h *UserHandler) homeOwners(path, configuredRoot string) (map[uint64]string, error) {
 	owners := make(map[uint64]string)
-	entries, err := os.ReadDir(h.homeRoot)
-	if errors.Is(err, os.ErrNotExist) {
-		return owners, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to list home directories: %w", err)
-	}
-	for _, entry := range entries {
-		child := filepath.Join(h.homeRoot, entry.Name())
-		if !entry.IsDir() || entry.Name() == username && child == path {
-			continue
-		}
-		info, err := entry.Info()
+	seen := make(map[string]bool)
+	// Scan the target parent first so aliases of it cannot count the target twice.
+	for _, candidate := range []string{filepath.Dir(path), h.homeRoot, configuredRoot} {
+		root, err := filepath.EvalSymlinks(candidate)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to stat home directory: %w", err)
+			return nil, fmt.Errorf("failed to resolve home root %s: %w", candidate, err)
 		}
-		uid, err := fileOwnerUID(info)
+		if seen[root] {
+			continue
+		}
+		seen[root] = true
+		entries, err := os.ReadDir(root)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to list home directories: %w", err)
 		}
-		owners[uid] = child
+		for _, entry := range entries {
+			child := filepath.Join(candidate, entry.Name())
+			if !entry.IsDir() || child == path {
+				continue
+			}
+			info, err := entry.Info()
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to stat home directory: %w", err)
+			}
+			uid, err := fileOwnerUID(info)
+			if err != nil {
+				return nil, err
+			}
+			owners[uid] = child
+		}
 	}
 	return owners, nil
 }

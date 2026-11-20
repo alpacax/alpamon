@@ -39,47 +39,6 @@ func archiveRecordPath(fd int, name string) string {
 	return filepath.Join("/proc/self/fd", strconv.Itoa(fd), fmt.Sprintf(".pending-%x", sha256.Sum256([]byte(name))))
 }
 
-func (l *linuxAccountLocker) chooseHomeUID(ctx context.Context, owners map[uint64]string) (uint64, error) {
-	minUID, maxUID := l.uidBounds()
-	isFree := func(uid uint64) (bool, error) {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		_, err := l.lookupUID(strconv.FormatUint(uid, 10))
-		var absent user.UnknownUserIdError
-		if errors.As(err, &absent) {
-			return true, nil
-		}
-		return false, err
-	}
-	for uid := range owners {
-		if uid == 0 {
-			continue
-		}
-		free, err := isFree(uid)
-		if err != nil {
-			return 0, fmt.Errorf("failed to check home owner UID %d: %w", uid, err)
-		}
-		if !free {
-			continue
-		}
-		for candidate := minUID; candidate <= maxUID; candidate++ {
-			if _, reserved := owners[candidate]; reserved {
-				continue
-			}
-			available, err := isFree(candidate)
-			if err != nil {
-				return 0, fmt.Errorf("failed to check available UID %d: %w", candidate, err)
-			}
-			if available {
-				return candidate, nil
-			}
-		}
-		return 0, errors.New("system_home_conflict: no available UID outside retained home ownership")
-	}
-	return 0, nil
-}
-
 func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User, data DeleteUserData) (string, error) {
 	name, home := data.Username, filepath.Clean(account.HomeDir)
 	var base string
@@ -99,10 +58,7 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 		return "", fmt.Errorf("archive_refused: cannot stat home %s: %w", home, statErr)
 	}
 	homeRoot := l.handler.homeRoot
-	if filepath.Dir(home) != homeRoot || filepath.Base(home) == "deleted_users" {
-		if statErr != nil {
-			return "", nil
-		}
+	if statErr == nil && (filepath.Dir(home) != homeRoot || filepath.Base(home) == "deleted_users") {
 		return "", fmt.Errorf("archive_refused: home %q must be a direct child of /home other than deleted_users", home)
 	}
 	homeFD, err := openArchiveRoot(homeRoot)
@@ -137,8 +93,10 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 		if errors.Is(err, os.ErrNotExist) {
 			if base != "" {
 				var st unix.Stat_t
-				if err := unix.Fstatat(archiveFD, base, &st, unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, unix.ENOENT) {
-					return "", archivedDeleteFailure(data.ArchiveTo, errors.New("destination exists or cannot be verified without a pending archive record"))
+				if err := unix.Fstatat(archiveFD, base, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+					return "", errors.New("invalid_archive_path: destination exists")
+				} else if !errors.Is(err, unix.ENOENT) {
+					return "", fmt.Errorf("archive_refused: cannot check destination: %w", err)
 				}
 			}
 			return "", nil
@@ -151,7 +109,7 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 			return "", fmt.Errorf("archive_refused: cannot read pending archive: %w", err)
 		}
 		destination := archivePrefix + pending.Base
-		if _, err := archiveDestination(name, destination); err != nil || pending.UID != uid || pending.Home != home || (base != "" && base != pending.Base) {
+		if _, err := archiveDestination(name, destination); err != nil || pending.UID != uid || pending.Home != home {
 			return "", fmt.Errorf("archive_refused: pending archive does not match the request")
 		}
 		var st unix.Stat_t
@@ -159,8 +117,8 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 			st.Mode&unix.S_IFMT != unix.S_IFDIR || uint64(st.Dev) != pending.Device || st.Ino != pending.Inode {
 			return "", archivedDeleteFailure(destination, errors.New("pending archive identity could not be verified"))
 		}
-		if err := l.expireArchiveAccount(ctx, name, uid); err != nil {
-			return "", archivedDeleteFailure(destination, err)
+		if base != "" && base != pending.Base {
+			return "", archivedDeleteFailure(destination, errors.New("archive_to differs from pending archive"))
 		}
 		if err := l.checkArchiveActivity(ctx, uid); err != nil {
 			return "", archivedDeleteFailure(destination, err)
@@ -203,9 +161,6 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 		return "", fmt.Errorf("archive_refused: cannot open source without crossing a mount: %w", err)
 	}
 	defer func() { _ = unix.Close(sourceFD) }()
-	if err := l.expireArchiveAccount(ctx, name, uid); err != nil {
-		return "", err
-	}
 	if err := l.checkArchiveActivity(ctx, uid); err != nil {
 		return "", err
 	}
@@ -217,6 +172,16 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 	original, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || uint64(st.Dev) != uint64(original.Dev) || st.Ino != original.Ino {
 		return "", errors.New("archive_refused: home changed before archive")
+	}
+	var parent unix.Stat_t
+	if err := unix.Fstat(archiveFD, &parent); err != nil {
+		return "", fmt.Errorf("archive_refused: cannot verify archive parent: %w", err)
+	}
+	if parent.Dev != st.Dev {
+		return "", archiveRenameError(destination, unix.EXDEV)
+	}
+	if err := probeArchiveRename(archiveFD); err != nil {
+		return "", archiveRenameError(destination, err)
 	}
 	record, err := json.Marshal(pendingArchive{UID: uid, Home: home, Base: base, Device: uint64(st.Dev), Inode: st.Ino})
 	if err != nil {
@@ -235,6 +200,20 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 		return "", archiveRenameError(destination, err)
 	}
 	return destination, l.finishArchive(ctx, homeFD, archiveFD, base, destination, uid)
+}
+
+// Probe a directory rename on the destination filesystem before recording the move.
+func probeArchiveRename(fd int) error {
+	dir, err := os.MkdirTemp(filepath.Join("/proc/self/fd", strconv.Itoa(fd)), ".rename-probe-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	source, destination := filepath.Join(dir, "source"), filepath.Join(dir, "destination")
+	if err := os.Mkdir(source, 0700); err != nil {
+		return err
+	}
+	return unix.Renameat2(unix.AT_FDCWD, source, unix.AT_FDCWD, destination, unix.RENAME_NOREPLACE)
 }
 
 func writeArchiveRecord(path string, record []byte) error {
@@ -286,13 +265,6 @@ func (l *linuxAccountLocker) archiveUIDForAccount(name string, account *user.Use
 	return uid, nil
 }
 
-func (l *linuxAccountLocker) expireArchiveAccount(ctx context.Context, name string, uid uint64) error {
-	if err := l.runForAccount(ctx, name, uid, "/usr/sbin/usermod", "-e", "1", "--", name); err != nil {
-		return fmt.Errorf("archive_refused: cannot expire account: %w", err)
-	}
-	return nil
-}
-
 func (l *linuxAccountLocker) finishArchive(ctx context.Context, homeFD, archiveFD int, base, destination string, uid uint64) error {
 	if err := errors.Join(unix.Fsync(homeFD), unix.Fsync(archiveFD)); err != nil {
 		return archivedDeleteFailure(destination, fmt.Errorf("cannot sync archive move: %w", err))
@@ -319,11 +291,17 @@ func (l *linuxAccountLocker) finishArchive(ctx context.Context, homeFD, archiveF
 
 func (l *linuxAccountLocker) clearPendingArchive(name string) error {
 	homeFD, err := openArchiveRoot(l.handler.homeRoot)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	defer func() { _ = unix.Close(homeFD) }()
 	archiveFD, err := unix.Openat(homeFD, "deleted_users", archiveDirFlags, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
