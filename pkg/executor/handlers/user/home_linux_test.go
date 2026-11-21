@@ -75,7 +75,7 @@ func TestDeleteHomeDisposition(t *testing.T) {
 		dest                            string
 		legacy, absent, outside, setgid bool
 	}{
-		{name: "default keep", platform: "debian"},
+		{name: "omitted home and purge_home", platform: "debian"},
 		{name: "explicit keep", platform: "rhel", home: &keep, dest: "ignored", legacy: true},
 		{name: "archive passwd home", platform: "rhel", home: &archive, dest: archiveTo, legacy: true},
 		{name: "missing passwd home", platform: "debian", home: &archive, dest: archiveTo, absent: true},
@@ -127,7 +127,7 @@ func TestDeleteHomeDisposition(t *testing.T) {
 			}
 			parent := filepath.Join(h.homeRoot, "deleted_users")
 			switch {
-			case tc.home == nil && !tc.legacy || tc.home != nil && *tc.home == keep:
+			case tc.home != nil && *tc.home == keep:
 				assert.Equal(t, "User 'alice' deleted; home directory kept at "+home, output)
 				assert.FileExists(t, filepath.Join(home, "file"))
 				assert.Empty(t, chowned)
@@ -136,14 +136,16 @@ func TestDeleteHomeDisposition(t *testing.T) {
 				archived := chowned[0]
 				name := filepath.Base(archived)
 				want := "User 'alice' deleted; home directory archived to " + archivePrefix + name
-				if tc.home == nil && tc.legacy {
+				if tc.home == nil {
 					stamp, found := strings.CutPrefix(name, "alice_")
 					require.True(t, found)
 					when, err := time.Parse(time.RFC3339, stamp)
 					require.NoError(t, err)
 					assert.True(t, strings.HasSuffix(stamp, "Z"))
 					assert.WithinDuration(t, time.Now(), when, 5*time.Second)
-					want += " (legacy purge_home=true treated as archive)"
+					if tc.legacy {
+						want += " (legacy purge_home=true treated as archive)"
+					}
 				} else {
 					assert.Equal(t, filepath.Base(archiveTo), name)
 				}
@@ -326,22 +328,24 @@ func TestArchiveIneligibleHome(t *testing.T) {
 	for _, tc := range []struct {
 		state, reason string
 		skip          bool
+		omitHome      bool
 	}{
-		{"symlink", "not a real directory", false},
-		{"file", "not a real directory", false},
-		{"outside", "must be a direct child", true},
-		{"nested", "must be a direct child", true},
-		{"reserved", "must be a direct child", true},
-		{"wrong owner", "expected UID", false},
-		{"shared", "another account's home is inside", true},
-		{"shared descendant", "another account's home is inside", true},
-		{"shared symlink descendant", "another account's home is inside", true},
-		{"mounted home", "a filesystem is mounted inside", false},
-		{"mounted descendant", "a filesystem is mounted inside", false},
-		{"writable /home", "/home must be root-owned and writable only by root", false},
-		{"symlinked /home", "/home must be a real directory, symlinks are refused", false},
-		{"system", "protected or system UID", false},
-		{"protected", "protected or system UID", false},
+		{"symlink", "not a real directory", false, false},
+		{"file", "not a real directory", false, false},
+		{"outside", "must be a direct child", true, false},
+		{"nested", "must be a direct child", true, false},
+		{"reserved", "must be a direct child", true, false},
+		{"wrong owner", "expected UID", false, false},
+		{"shared", "another account's home is inside", true, false},
+		{"shared descendant", "another account's home is inside", true, false},
+		{"shared symlink descendant", "another account's home is inside", true, false},
+		{"mounted home", "a filesystem is mounted inside", false, false},
+		{"mounted descendant", "a filesystem is mounted inside", false, false},
+		{"writable /home", "/home must be root-owned and writable only by root", false, false},
+		{"symlinked /home", "/home must be a real directory, symlinks are refused", false, false},
+		{"system", "protected or system UID", false, false},
+		{"protected", "protected or system UID", false, false},
+		{"omitted home with unsafe /home", "/home must be root-owned and writable only by root", false, true},
 	} {
 		t.Run(tc.state, func(t *testing.T) {
 			h, executor := newHomeTestHandler(t, "debian")
@@ -374,7 +378,7 @@ func TestArchiveIneligibleHome(t *testing.T) {
 				uid += 2
 			case "protected":
 				name = "nobody"
-			case "writable /home":
+			case "writable /home", "omitted home with unsafe /home":
 				require.NoError(t, os.Chmod(h.homeRoot, 0770))
 			case "symlinked /home":
 				link := filepath.Join(t.TempDir(), "home")
@@ -417,9 +421,12 @@ func TestArchiveIneligibleHome(t *testing.T) {
 			}
 			before, err := os.Lstat(home)
 			require.NoError(t, err)
-			code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{
-				Username: name, Home: &archive, ArchiveTo: strings.Replace(destination, "alice_", name+"_", 1),
-			})
+			args := &common.CommandArgs{Username: name}
+			if !tc.omitHome {
+				args.Home = &archive
+				args.ArchiveTo = strings.Replace(destination, "alice_", name+"_", 1)
+			}
+			code, output, err := h.Execute(context.Background(), "deluser", args)
 			require.NoError(t, err)
 			if tc.skip {
 				assert.Zero(t, code)
@@ -632,7 +639,8 @@ func TestKeptHomeBlocksUIDReuse(t *testing.T) {
 	if os.Geteuid() == 0 {
 		require.NoError(t, os.Chown(profile, int(uid), -1))
 	}
-	code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "alice"})
+	keep := "keep"
+	code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "alice", Home: &keep})
 	require.NoError(t, err)
 	require.Zero(t, code, output)
 	h.lookupUser = common.AbsentUserLookup
@@ -749,7 +757,8 @@ func TestCreateServiceAccountWithHomeEntries(t *testing.T) {
 	uid := setArchiveTestAccount(t, h, home)
 	h.readAccountFile = h.accountLocker.(*linuxAccountLocker).readFile
 	require.NoError(t, os.WriteFile(filepath.Join(home, "profile"), nil, 0600))
-	code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "alice"})
+	keep := "keep"
+	code, output, err := h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "alice", Home: &keep})
 	require.NoError(t, err)
 	require.Zero(t, code, output)
 	h.lookupUser = common.AbsentUserLookup
@@ -1024,7 +1033,7 @@ func TestDeleteHomeWithoutOpenat2(t *testing.T) {
 	}{
 		{name: "explicit archive", home: &archive, probeErr: unix.ENOSYS, detail: oldKernel},
 		{name: "legacy purge", legacy: true, probeErr: unix.ENOSYS, detail: oldKernel},
-		{name: "default keep"},
+		{name: "omitted home", probeErr: unix.ENOSYS, detail: oldKernel},
 		{name: "root probe failed", home: &archive, probeErr: unix.EACCES, detail: "cannot open archive root with openat2: permission denied"},
 		{name: "lock cleanup failed", home: &archive, probeErr: unix.ENOSYS, detail: oldKernel, cleanupFails: true},
 		{name: "userdel failed", home: &archive, probeErr: unix.ENOSYS, deleteFails: true},
@@ -1072,20 +1081,16 @@ func TestDeleteHomeWithoutOpenat2(t *testing.T) {
 				assert.Zero(t, code, output)
 			}
 			assert.Equal(t, [][]string{deleteAlice}, commandArgv(executor))
-			if tc.home != nil || tc.legacy {
-				if !tc.deleteFails {
-					first, trailing, _ := strings.Cut(output, "\n")
-					assert.Equal(t, "archive_skipped: "+tc.detail, first)
-					if tc.cleanupFails {
-						assert.True(t, strings.HasPrefix(trailing, "lock_cleanup_failed:"), output)
-					} else {
-						assert.Empty(t, trailing)
-					}
+			if !tc.deleteFails {
+				first, trailing, _ := strings.Cut(output, "\n")
+				assert.Equal(t, "archive_skipped: "+tc.detail, first)
+				if tc.cleanupFails {
+					assert.True(t, strings.HasPrefix(trailing, "lock_cleanup_failed:"), output)
+				} else {
+					assert.Empty(t, trailing)
 				}
-				assert.Equal(t, 1, openCalls)
-			} else {
-				assert.Zero(t, openCalls)
 			}
+			assert.Equal(t, 1, openCalls)
 			after, err := os.Stat(home)
 			require.NoError(t, err)
 			assert.True(t, os.SameFile(before, after))

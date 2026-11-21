@@ -40,13 +40,9 @@ func archiveRecordPath(fd int, name string) string {
 
 func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User, data DeleteUserData) (string, error) {
 	name, home := data.Username, filepath.Clean(account.HomeDir)
-	var base string
-	if !data.LegacyPurge {
-		var err error
-		base, err = archiveDestination(name, data.ArchiveTo)
-		if err != nil {
-			return "", err
-		}
+	base, err := archiveDestination(name, data.ArchiveTo)
+	if err != nil {
+		return "", err
 	}
 	uid, err := l.archiveUIDForAccount(name, account)
 	if err != nil {
@@ -147,13 +143,11 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 	}
 
 	if statErr != nil {
-		if base != "" {
-			var st unix.Stat_t
-			if err := unix.Fstatat(archiveFD, base, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
-				return "", errors.New("invalid_archive_path: destination exists")
-			} else if !errors.Is(err, unix.ENOENT) {
-				return "", fmt.Errorf("archive_refused: cannot check destination: %w", err)
-			}
+		var st unix.Stat_t
+		if err := unix.Fstatat(archiveFD, base, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+			return "", errors.New("invalid_archive_path: destination exists")
+		} else if !errors.Is(err, unix.ENOENT) {
+			return "", fmt.Errorf("archive_refused: cannot check destination: %w", err)
 		}
 		return "", nil
 	}
@@ -177,9 +171,6 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 			return skip(shared.detail)
 		}
 		return "", err
-	}
-	if base == "" {
-		base = name + "_" + time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	destination := archivePrefix + base
 	var target unix.Stat_t

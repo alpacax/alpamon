@@ -355,7 +355,8 @@ func TestDeleteUserForgetFailure(t *testing.T) {
 	utils.PlatformLike = "debian"
 	t.Cleanup(func() { utils.PlatformLike = saved })
 	require.NoError(t, os.Mkdir(f.l.store.path, 0700))
-	code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy"})
+	keep := "keep"
+	code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy", Home: &keep})
 	require.NoError(t, err)
 	assert.Zero(t, code, output)
 	assert.Contains(t, output, "deleted; home directory kept at")

@@ -1,6 +1,10 @@
 package user
 
-import "github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+import (
+	"time"
+
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+)
 
 // UserData contains data for user operations.
 //
@@ -70,15 +74,15 @@ type DeleteUserData struct {
 func deleteUserDataFromArgs(args *common.CommandArgs) DeleteUserData {
 	data := DeleteUserData{
 		Username:    args.Username,
-		Home:        "keep",
+		Home:        "archive",
 		ArchiveTo:   args.ArchiveTo,
 		LegacyPurge: args.Home == nil && args.PurgeHomeDirectory,
 	}
 	if args.Home != nil {
 		data.Home = *args.Home
-	}
-	if data.LegacyPurge {
-		data.Home = "archive"
+	} else {
+		// Older servers can reuse the deleted UID, so an omitted home choice archives.
+		data.ArchiveTo = archivePrefix + data.Username + "_" + time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	return data
 }
