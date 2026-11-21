@@ -50,6 +50,8 @@ type CommandArgs struct {
 	ManagedGroupnames       []string
 	HomeDirectory           string
 	HomeDirectoryPermission string
+	Home                    *string
+	ArchiveTo               string
 	PurgeHomeDirectory      bool
 	UID                     uint64
 	LockUID                 OptionalUint64

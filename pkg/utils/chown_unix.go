@@ -3,6 +3,7 @@
 package utils
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -45,7 +46,7 @@ func ChownRecursive(path string, uid, gid, linkOwner int) (skipped int, err erro
 	// Open first: a stat before it would leave a window to swap the root.
 	fd, err := unix.Open(path, openDirFlags, 0)
 	if err == nil {
-		return chownTree(fd, path, uid, gid, linkOwner)
+		return chownTree(context.Background(), fd, path, uid, gid, linkOwner, false)
 	}
 	if !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.ELOOP) {
 		return 0, &os.PathError{Op: "open", Path: path, Err: err}
@@ -61,7 +62,7 @@ func ChownRecursive(path string, uid, gid, linkOwner int) (skipped int, err erro
 	case unix.S_IFDIR:
 		return 0, &os.PathError{Op: "open", Path: path, Err: err} // became a directory after the open
 	}
-	left, err := chownFile(unix.AT_FDCWD, path, &st, uid, gid, linkOwner)
+	left, err := chownFile(unix.AT_FDCWD, path, &st, uid, gid, linkOwner, false)
 	if err != nil {
 		return 0, &os.PathError{Op: "chown", Path: path, Err: err}
 	}
@@ -73,19 +74,25 @@ func ChownRecursive(path string, uid, gid, linkOwner int) (skipped int, err erro
 
 // chownTree takes ownership of fd, the open root. It holds one directory fd at a time so depth
 // cannot hit the fd limit, and fails closed when ".." is not the directory it left.
-func chownTree(fd int, root string, uid, gid, linkOwner int) (skipped int, err error) {
+func chownTree(ctx context.Context, fd int, root string, uid, gid, linkOwner int, archive bool) (skipped int, err error) {
 	defer func() {
 		if cerr := unix.Close(fd); cerr != nil && err == nil {
 			err = fmt.Errorf("close %s: %w", root, cerr) // only a finished walk is back at root
 		}
 	}()
 
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	top, err := enterDir(fd, root, uid, gid)
 	if err != nil {
 		return 0, err
 	}
 	stack := []*dirFrame{top}
 	for {
+		if err := ctx.Err(); err != nil {
+			return skipped, err
+		}
 		cur := stack[len(stack)-1]
 		if len(cur.names) == 0 {
 			stack = stack[:len(stack)-1]
@@ -93,7 +100,7 @@ func chownTree(fd int, root string, uid, gid, linkOwner int) (skipped int, err e
 				return skipped, nil
 			}
 			parent := stack[len(stack)-1]
-			pfd, err := unix.Openat(fd, "..", openDirFlags, 0)
+			pfd, err := openChownChild(fd, "..", openDirFlags, archive)
 			if err != nil {
 				return skipped, fmt.Errorf("open %s: %w", parent.path, err)
 			}
@@ -114,7 +121,7 @@ func chownTree(fd int, root string, uid, gid, linkOwner int) (skipped int, err e
 		child := filepath.Join(cur.path, name)
 
 		var st unix.Stat_t
-		if err := unix.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if err := statChownChild(fd, name, &st, archive); err != nil {
 			if errors.Is(err, unix.ENOENT) {
 				continue
 			}
@@ -125,7 +132,7 @@ func chownTree(fd int, root string, uid, gid, linkOwner int) (skipped int, err e
 			continue
 		case unix.S_IFDIR:
 			beforeOpen(child)
-			cfd, err := unix.Openat(fd, name, openDirFlags, 0)
+			cfd, err := openChownChild(fd, name, openDirFlags, archive)
 			if err != nil {
 				if errors.Is(err, unix.ENOENT) {
 					continue
@@ -141,7 +148,7 @@ func chownTree(fd int, root string, uid, gid, linkOwner int) (skipped int, err e
 			stack = append(stack, frame)
 		default:
 			beforeOpen(child)
-			left, err := chownFile(fd, name, &st, uid, gid, linkOwner)
+			left, err := chownFile(fd, name, &st, uid, gid, linkOwner, archive)
 			if err != nil {
 				return skipped, fmt.Errorf("chown %s: %w", child, err)
 			}
@@ -155,8 +162,8 @@ func chownTree(fd int, root string, uid, gid, linkOwner int) (skipped int, err e
 // chownFile chowns a non-directory through its own descriptor, so the inode whose link
 // count was checked is the one chowned. st holds the walk's stat of name. left reports a
 // hard-linked file left alone.
-func chownFile(dirfd int, name string, st *unix.Stat_t, uid, gid, linkOwner int) (left bool, err error) {
-	fd, err := unix.Openat(dirfd, name, openFileFlags, 0)
+func chownFile(dirfd int, name string, st *unix.Stat_t, uid, gid, linkOwner int, archive bool) (left bool, err error) {
+	fd, err := openChownChild(dirfd, name, openFileFlags, archive)
 	switch {
 	case err == nil:
 		defer func() { _ = unix.Close(fd) }()
@@ -171,7 +178,7 @@ func chownFile(dirfd int, name string, st *unix.Stat_t, uid, gid, linkOwner int)
 		return false, nil // removed, or swapped for a symlink
 	case errors.Is(err, unix.ENXIO), errors.Is(err, unix.EOPNOTSUPP):
 		return false, nil // a socket: Linux and macOS refuse to open one with these
-	case errors.Is(err, unix.EACCES) && unix.Geteuid() != 0:
+	case errors.Is(err, unix.EACCES) && !archive && unix.Geteuid() != 0:
 		// By name, but a non-root walk can chown nothing but its own files.
 		if !mayChown(st, linkOwner) {
 			return true, nil
