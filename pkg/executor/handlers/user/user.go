@@ -2,6 +2,7 @@ package user
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -383,6 +384,12 @@ func (h *UserHandler) runUserCreate(ctx context.Context, tool string, cmdArgs []
 	return createCode != 0, 0, out, err
 }
 
+type archiveSkip struct {
+	detail string
+}
+
+func (s *archiveSkip) Error() string { return "archive_skipped: " + s.detail }
+
 func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArgs) (exitCode int, output string, err error) {
 	data := deleteUserDataFromArgs(args)
 	if err := h.ValidateStruct(data); err != nil {
@@ -418,19 +425,22 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 
 	result := "home directory kept at " + account.HomeDir
 	archived := false
+	var skipped *archiveSkip
 	if data.Home == "archive" {
 		destination, archiveErr := h.accountLocker.archiveHome(ctx, account, data)
-		if archiveErr != nil {
+		switch {
+		case errors.As(archiveErr, &skipped):
+			result = skipped.Error()
+		case archiveErr != nil:
 			return 1, archiveErr.Error(), nil
-		}
-		if destination == "" {
+		case destination == "":
 			result = fmt.Sprintf("home directory %s not found; nothing archived", filepath.Clean(account.HomeDir))
-		} else {
+		default:
 			data.ArchiveTo = destination
 			archived = true
 			result = "home directory archived to " + destination
 		}
-		if data.LegacyPurge {
+		if data.LegacyPurge && skipped == nil {
 			result += " (legacy purge_home=true treated as archive)"
 		}
 	}
@@ -450,6 +460,12 @@ func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArg
 	}
 	if err := h.accountLocker.forget(data.Username); err != nil {
 		log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
+		if skipped != nil {
+			result += "\nlock_cleanup_failed: " + err.Error()
+		}
+	}
+	if skipped != nil {
+		return 0, result, nil
 	}
 	return 0, fmt.Sprintf("User '%s' deleted; %s", data.Username, result), nil
 }

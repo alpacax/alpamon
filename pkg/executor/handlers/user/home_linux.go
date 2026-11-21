@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/user"
@@ -29,8 +30,12 @@ type pendingArchive struct {
 	Device, Inode uint64
 }
 
+func archiveRecordName(name string) string {
+	return fmt.Sprintf(".pending-%x", sha256.Sum256([]byte(name)))
+}
+
 func archiveRecordPath(fd int, name string) string {
-	return filepath.Join("/proc/self/fd", strconv.Itoa(fd), fmt.Sprintf(".pending-%x", sha256.Sum256([]byte(name))))
+	return filepath.Join("/proc/self/fd", strconv.Itoa(fd), archiveRecordName(name))
 }
 
 func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User, data DeleteUserData) (string, error) {
@@ -47,15 +52,25 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 	if err != nil {
 		return "", err
 	}
+	homeFD, archiveFD := -1, -1
+	skip := func(detail string) (string, error) {
+		if err := l.checkArchiveActivity(ctx, uid); err != nil {
+			return "", err
+		}
+		if err := l.checkPendingBeforeSkip(homeFD, archiveFD, name); err != nil {
+			return "", err
+		}
+		return "", &archiveSkip{detail: detail}
+	}
 	info, statErr := os.Lstat(home)
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return "", fmt.Errorf("archive_refused: cannot stat home %s: %w", home, statErr)
+		return skip(fmt.Sprintf("cannot stat home %s: %v", home, statErr))
 	}
 	homeRoot := l.handler.homeRoot
 	if statErr == nil && (filepath.Dir(home) != homeRoot || filepath.Base(home) == "deleted_users") {
-		return "", fmt.Errorf("archive_refused: home %q must be a direct child of /home other than deleted_users", home)
+		return skip(fmt.Sprintf("home %q must be a direct child of /home other than deleted_users", home))
 	}
-	homeFD, err := openArchiveRoot(homeRoot)
+	homeFD, err = openArchiveRoot(homeRoot)
 	if statErr != nil && errors.Is(err, unix.ENOENT) {
 		return "", nil
 	}
@@ -64,15 +79,14 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 	}
 	defer func() { _ = unix.Close(homeFD) }()
 
-	var archiveFD int
 	if statErr == nil {
 		// Check kernel support before creating the archive parent.
 		probeFD, probeErr := utils.OpenArchiveEntry(homeFD, ".", archiveDirFlags)
 		if errors.Is(probeErr, unix.ENOSYS) {
-			return "", errors.New("archive_refused: archiving needs Linux 5.6 or later (openat2)")
+			return skip("archiving needs Linux 5.6 or later (openat2)")
 		}
 		if probeErr != nil {
-			return "", fmt.Errorf("archive_refused: cannot open archive root with openat2: %w", probeErr)
+			return skip(fmt.Sprintf("cannot open archive root with openat2: %v", probeErr))
 		}
 		_ = unix.Close(probeFD)
 
@@ -84,15 +98,15 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 		}
 	}
 	if err != nil {
-		return "", fmt.Errorf("archive_refused: %w", err)
+		return skip(err.Error())
 	}
 	defer func() { _ = unix.Close(archiveFD) }()
 	if err := l.validateArchiveParent(archiveFD, false); err != nil {
-		return "", fmt.Errorf("archive_refused: %w", err)
+		return skip(err.Error())
 	}
 
 	recordPath := archiveRecordPath(archiveFD, name)
-	record, err := os.ReadFile(recordPath)
+	record, err := readPendingArchive(archiveFD, name)
 	switch {
 	case err == nil:
 		var pending pendingArchive
@@ -126,7 +140,7 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 			}
 			base = pending.Base
 		default:
-			return "", archivedDeleteFailure(destination, errors.New("pending archive identity could not be verified"))
+			return "", errors.New("archive_refused: pending archive identity could not be verified")
 		}
 	case !errors.Is(err, os.ErrNotExist):
 		return "", fmt.Errorf("archive_refused: cannot read pending archive: %w", err)
@@ -158,6 +172,10 @@ func (l *linuxAccountLocker) archiveHome(ctx context.Context, account *user.User
 		return "", err
 	}
 	if err := l.checkSharedHome(ctx, name, home); err != nil {
+		var shared *archiveSkip
+		if errors.As(err, &shared) {
+			return skip(shared.detail)
+		}
 		return "", err
 	}
 	if base == "" {
@@ -302,6 +320,59 @@ func (l *linuxAccountLocker) finishArchive(ctx context.Context, homeFD, archiveF
 	return nil
 }
 
+func readPendingArchive(archiveFD int, name string) ([]byte, error) {
+	recordName := archiveRecordName(name)
+	fd, err := unix.Openat(archiveFD, recordName, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), recordName)
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("pending archive record is not a regular file")
+	}
+	return io.ReadAll(file)
+}
+
+// A fallback must not bypass an existing archive transaction.
+func (l *linuxAccountLocker) checkPendingBeforeSkip(homeFD, archiveFD int, name string) error {
+	var err error
+	if homeFD < 0 {
+		homeFD, err = openArchiveRoot(l.handler.homeRoot)
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		defer func() { _ = unix.Close(homeFD) }()
+	}
+	if archiveFD < 0 {
+		archiveFD, err = unix.Openat(homeFD, "deleted_users", archiveDirFlags, 0)
+		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("archive_refused: cannot check pending archive: %w", err)
+		}
+		defer func() { _ = unix.Close(archiveFD) }()
+	}
+
+	var stat unix.Stat_t
+	err = unix.Fstatat(archiveFD, archiveRecordName(name), &stat, unix.AT_SYMLINK_NOFOLLOW)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("archive_refused: cannot check pending archive: %w", err)
+	}
+	return errors.New("archive_refused: a pending archive exists")
+}
+
 func (l *linuxAccountLocker) clearPendingArchive(name string) error {
 	homeFD, err := openArchiveRoot(l.handler.homeRoot)
 	if errors.Is(err, unix.ENOENT) {
@@ -368,7 +439,7 @@ func (l *linuxAccountLocker) resolveSharedHome(ctx context.Context, name, home s
 			continue
 		}
 		if path := filepath.Clean(fields[5]); path == home || strings.HasPrefix(path, home+"/") {
-			return fmt.Errorf("archive_refused: another account's home is inside %s", home)
+			return &archiveSkip{detail: fmt.Sprintf("another account's home is inside %s", home)}
 		}
 		if !filepath.IsAbs(fields[5]) {
 			continue
@@ -386,7 +457,7 @@ func (l *linuxAccountLocker) resolveSharedHome(ctx context.Context, name, home s
 			return fmt.Errorf("archive_refused: cannot read resolved home for account %q: %w", fields[0], err)
 		}
 		if resolved == home || strings.HasPrefix(resolved, home+"/") {
-			return fmt.Errorf("archive_refused: another account's home is inside %s", home)
+			return &archiveSkip{detail: fmt.Sprintf("another account's home is inside %s", home)}
 		}
 	}
 	return nil
