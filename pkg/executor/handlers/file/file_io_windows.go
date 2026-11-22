@@ -43,6 +43,11 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 }
 
 func validateTransferDestination(string, *syscall.SysProcAttr) error { return nil }
+
+func fileIsDirAs(_ context.Context, path string, _ *syscall.SysProcAttr) (bool, error) {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir(), err
+}
 func fileExistsAs(_ context.Context, path string, _ *syscall.SysProcAttr) (bool, error) {
 	return utils.FileExists(path), nil
 }

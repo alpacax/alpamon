@@ -164,7 +164,7 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		return 1, err.Error()
 	}
 
-	paths, bulk, recursive, err := h.parsePaths(homeDirectory, args.Paths)
+	paths, bulk, recursive, err := h.parsePaths(ctx, homeDirectory, args.Paths, sysProcAttr)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to parse paths")
 		return 1, err.Error()
@@ -406,7 +406,7 @@ func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGrou
 // and Alpacon RBAC (both platforms) handle access control. Returns
 // the sanitized native paths plus bulk/recursive flags inferred from
 // the input.
-func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]string, bool, bool, error) {
+func (h *FileHandler) parsePaths(ctx context.Context, homeDirectory string, pathList []string, attr *syscall.SysProcAttr) ([]string, bool, bool, error) {
 	paths := make([]string, len(pathList))
 	for i, path := range pathList {
 		// Paths from the web client arrive in wire format (POSIX-like
@@ -435,11 +435,11 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 	isRecursive := false
 
 	if !isBulk {
-		fileInfo, err := os.Stat(paths[0])
+		dir, err := fileIsDirAs(ctx, paths[0], attr)
 		if err != nil {
 			return nil, false, false, err
 		}
-		isRecursive = fileInfo.IsDir()
+		isRecursive = dir
 	}
 
 	return paths, isBulk, isRecursive, nil

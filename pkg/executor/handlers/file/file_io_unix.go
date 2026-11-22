@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -49,21 +50,33 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 		}
 		return f, st.Size(), nil
 	}
-	st, err := os.Stat(path)
+	env, err := fileHelperEnvironment(sysProcAttr)
 	if err != nil {
 		return nil, 0, err
 	}
-	cmd := fileHelperCommand(ctx, "/bin/cat", path)
+	statArgs := []string{"-L", "-c", "%s", "--", path}
+	if runtime.GOOS == "darwin" || runtime.GOOS == "freebsd" {
+		statArgs = []string{"-L", "-f", "%z", "--", path}
+	}
+	stat := fileHelperCommand(ctx, "/usr/bin/stat", statArgs...)
+	stat.SysProcAttr = sysProcAttr
+	stat.Env = env
+	output, err := stat.Output()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to stat source file: %w", err)
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to parse source file size: %w", err)
+	}
+	cmd := fileHelperCommand(ctx, "/bin/cat", "--", path)
 	cmd.SysProcAttr = sysProcAttr
-	cmd.Env, err = fileHelperEnvironment(sysProcAttr)
-	if err != nil {
-		return nil, 0, err
-	}
+	cmd.Env = env
 	rc, err := newCmdReadCloser(cmd)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to start cat: %w", err)
 	}
-	return rc, st.Size(), nil
+	return rc, size, nil
 }
 
 // firstMissingAncestor returns the highest ancestor of dir that mkdir -p would create,
@@ -195,6 +208,9 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 			if !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != 0 || info.Mode().Perm()&0022 != 0 {
 				return fmt.Errorf("root transfer requires a root-owned regular file: %s", path)
 			}
+			if info.Sys().(*syscall.Stat_t).Nlink != 1 {
+				return fmt.Errorf("root transfer requires a file with one link: %s", path)
+			}
 		}
 	}
 	if sysProcAttr == nil {
@@ -290,7 +306,24 @@ func fileExistsAs(ctx context.Context, path string, attr *syscall.SysProcAttr) (
 	if attr == nil {
 		return utils.FileExists(path), nil
 	}
-	cmd := fileHelperCommand(ctx, "/bin/test", "-e", path)
+	return fileTestAs(ctx, path, attr, `test -e "$1"`)
+}
+
+func fileIsDirAs(ctx context.Context, path string, attr *syscall.SysProcAttr) (bool, error) {
+	if attr == nil {
+		info, err := os.Stat(path)
+		return err == nil && info.IsDir(), err
+	}
+	dir, err := fileTestAs(ctx, path, attr, `test -e "$1" || exit 2; test -d "$1"`)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 2 {
+		return false, fmt.Errorf("source path is missing or inaccessible: %s", path)
+	}
+	return dir, err
+}
+
+func fileTestAs(ctx context.Context, path string, attr *syscall.SysProcAttr, script string) (bool, error) {
+	cmd := fileHelperCommand(ctx, "/bin/sh", "-c", script, "sh", path)
 	cmd.SysProcAttr = attr
 	env, err := fileHelperEnvironment(attr)
 	if err != nil {
@@ -339,6 +372,9 @@ func validateTransferDestination(path string, attr *syscall.SysProcAttr) error {
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || st.Uid != 0 || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("root transfer requires a root-owned destination without symbolic links: %s", current)
+		}
+		if current == path && info.Mode().IsRegular() && st.Nlink != 1 {
+			return fmt.Errorf("root transfer requires a file with one link: %s", current)
 		}
 		stickyParent = info.IsDir() && info.Mode()&os.ModeSticky != 0 && info.Mode().Perm()&0022 != 0
 		if info.Mode().Perm()&0022 != 0 && !stickyParent {

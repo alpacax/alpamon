@@ -663,13 +663,16 @@ func getCodeServerPath() (string, error) {
 // Homebrew may be one another account can change.
 func lookupCodeServerPath(goos string, isRoot bool) (string, error) {
 	if prefix, err := editorInstallPrefix(); err == nil {
-		candidate := filepath.Join(prefix, "v"+editorReleaseVersion, "bin", "code-server")
-		if _, err := os.Stat(candidate); err == nil {
-			if isRoot {
-				if err := verifyEditorRelease(filepath.Dir(filepath.Dir(candidate))); err != nil {
+		release := filepath.Join(prefix, "v"+editorReleaseVersion)
+		candidate := filepath.Join(release, "bin", "code-server")
+		if isRoot {
+			if _, err := os.Lstat(release); !errors.Is(err, os.ErrNotExist) {
+				if err := checkEditorRelease(release); err != nil {
 					return "", err
 				}
+				return candidate, nil
 			}
+		} else if _, err := os.Stat(candidate); err == nil {
 			return candidate, nil
 		}
 	}
@@ -717,6 +720,18 @@ func ensureCodeServerInstalled(ctx context.Context) error {
 }
 
 const editorReleaseVersion = "4.146.0"
+const editorReleaseMarker = ".alpamon-verified"
+
+var tarBinaries = []string{"/usr/bin/tar", "/bin/tar"}
+
+func findEditorTar(candidates []string) (string, error) {
+	for _, path := range candidates {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("code-server installation requires tar at one of %v", candidates)
+}
 
 var editorReleaseDigests = map[string]string{
 	"linux-amd64": "cf7e82ca5fe1df664d43a43d900c3c9710f8f3403a5e8d0e18f6a12d10d7401b",
@@ -748,6 +763,10 @@ func installCodeServer(parentCtx context.Context) error {
 	if !ok {
 		return fmt.Errorf("no pinned code-server release for %s", platform)
 	}
+	tar, err := findEditorTar(tarBinaries)
+	if err != nil {
+		return err
+	}
 	prefix, err := editorInstallPrefix()
 	if err != nil {
 		return err
@@ -774,7 +793,7 @@ func installCodeServer(parentCtx context.Context) error {
 		if _, err := archive.Seek(0, io.SeekStart); err != nil {
 			return err
 		}
-		cmd := exec.CommandContext(ctx, "/usr/bin/tar", "-xzf", "-", "--no-same-owner", "--strip-components=1", "-C", stage)
+		cmd := exec.CommandContext(ctx, tar, "-xzf", "-", "--no-same-owner", "--strip-components=1", "-C", stage)
 		cmd.Stdin = archive
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("extract code-server archive: %w", err)
@@ -788,7 +807,8 @@ func installCodeServer(parentCtx context.Context) error {
 		}
 		return nil
 	}
-	if os.Geteuid() == 0 {
+	isRoot := os.Geteuid() == 0
+	if isRoot {
 		err = installRootOwnedCodeServer(stage, 0, 0, install)
 	} else {
 		err = install()
@@ -796,7 +816,32 @@ func installCodeServer(parentCtx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(stage, filepath.Join(prefix, "v"+editorReleaseVersion))
+	return publishEditorRelease(stage, filepath.Join(prefix, "v"+editorReleaseVersion), isRoot)
+}
+
+func publishEditorRelease(stage, release string, isRoot bool) error {
+	if isRoot {
+		if err := verifyEditorRelease(stage); err != nil {
+			return err
+		}
+		marker, err := os.OpenFile(filepath.Join(stage, editorReleaseMarker), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		if err := marker.Close(); err != nil {
+			return err
+		}
+		if err := checkEditorRelease(stage); err != nil {
+			return err
+		}
+		if err := checkEditorRelease(release); err == nil {
+			return nil
+		}
+		if err := os.RemoveAll(release); err != nil {
+			return fmt.Errorf("remove incomplete code-server release: %w", err)
+		}
+	}
+	return os.Rename(stage, release)
 }
 
 func downloadEditorArchive(ctx context.Context, location, digest string, dst io.Writer, transport http.RoundTripper) error {

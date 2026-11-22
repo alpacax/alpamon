@@ -28,6 +28,20 @@ func TestEditorRequiresGroup(t *testing.T) {
 	assert.Nil(t, manager)
 }
 
+func TestFindEditorTar(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing")
+	binary := filepath.Join(dir, "tar")
+	require.NoError(t, os.WriteFile(binary, nil, 0700))
+	found, err := findEditorTar([]string{missing, binary})
+	if runtime.GOOS != "windows" {
+		require.NoError(t, err)
+		assert.Equal(t, binary, found)
+	}
+	_, err = findEditorTar([]string{missing, dir})
+	assert.ErrorContains(t, err, "requires tar")
+}
+
 func TestEditorDarwinNonRootKeepsCurrentUser(t *testing.T) {
 	if runtime.GOOS != "darwin" || os.Getuid() == 0 {
 		t.Skip("macOS editor behavior without root")

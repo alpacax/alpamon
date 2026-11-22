@@ -151,7 +151,7 @@ func TestExcludeVirtualFromInventoryDefault(t *testing.T) {
 }
 
 func TestExplicitTLSVerification(t *testing.T) {
-	const warning = "TLS verification is off because [ssl] verify is not set; set verify = true and ca_cert, or verify = false explicitly"
+	const warning = "TLS verification is off because [ssl] verify is not set or is not valid; set verify = true and ca_cert, or verify = false explicitly"
 	original := log.Logger
 	t.Cleanup(func() { log.Logger = original })
 	for _, tc := range []struct {

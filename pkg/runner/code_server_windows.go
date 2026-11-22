@@ -29,3 +29,5 @@ func prepareEditorReleaseParent(string) error {
 }
 
 func verifyEditorRelease(string) error { return fmt.Errorf("code-server is not supported on Windows") }
+
+func checkEditorRelease(string) error { return fmt.Errorf("code-server is not supported on Windows") }

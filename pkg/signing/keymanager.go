@@ -76,7 +76,7 @@ type KeyManager struct {
 	publicKey   ed25519.PublicKey
 	keyID       string
 	lastFetch   time.Time
-	expiresAt   time.Time
+	expiresAt   *time.Time
 	refreshSecs int
 	aiBaseURL   string
 	authEnv     string // "dev" or "" (prod); derived from alpacon server URL
@@ -105,7 +105,7 @@ func NewKeyManager(aiBaseURL string, refreshSecs int, authEnv string, client *ht
 // GetPublicKey returns a copy of the cached public key, refreshing if stale.
 func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 	m.mu.RLock()
-	if m.publicKey != nil && !m.isExpired() {
+	if m.publicKey != nil && !m.needsRefresh() {
 		key := copyKey(m.publicKey)
 		m.mu.RUnlock()
 		return key, nil
@@ -115,7 +115,7 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 	if err := m.Refresh(); err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
-		if m.publicKey != nil && !m.isExpired() {
+		if m.canUseCachedKey() {
 			return copyKey(m.publicKey), nil
 		}
 		return nil, fmt.Errorf("public key expired and refresh failed: %w", err)
@@ -123,7 +123,7 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.fetchedKey()
+	return copyKey(m.publicKey), nil
 }
 
 // GetPublicKeyForKID returns the cached key if its kid matches.
@@ -133,7 +133,7 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 // a compromised relay cannot direct alpamon to fetch an arbitrary key.
 func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	m.mu.RLock()
-	if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
+	if m.publicKey != nil && m.keyID == kid && !m.needsRefresh() {
 		key := copyKey(m.publicKey)
 		m.mu.RUnlock()
 		return key, nil
@@ -144,7 +144,7 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	if err := m.fetchKey(); err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
-		if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
+		if m.keyID == kid && m.canUseCachedKey() {
 			return copyKey(m.publicKey), nil
 		}
 		return nil, fmt.Errorf("failed to refresh key for kid %q: %w", kid, err)
@@ -153,17 +153,29 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.publicKey != nil && m.keyID == kid {
-		return m.fetchedKey()
+		return copyKey(m.publicKey), nil
 	}
 	return nil, fmt.Errorf("key %q is not the active key for this environment (active: %q)", kid, m.keyID)
 }
 
-// isExpired reports whether the cached key should be refreshed.
+// A key that expired before we fetched it is refreshed on the usual cadence.
 // Must be called with m.mu held (read or write).
-func (m *KeyManager) isExpired() bool {
+func (m *KeyManager) needsRefresh() bool {
 	now := time.Now()
-	return (!m.expiresAt.IsZero() && !now.Before(m.expiresAt)) ||
+	return (m.expiresAt != nil && m.lastFetch.Before(*m.expiresAt) && !now.Before(*m.expiresAt)) ||
 		now.Sub(m.lastFetch) >= min(time.Duration(m.refreshSecs)*time.Second, time.Hour)
+}
+
+// The configured TTL still limits fallback for keys without a server expiry.
+// Must be called with m.mu held.
+func (m *KeyManager) canUseCachedKey() bool {
+	if m.publicKey == nil {
+		return false
+	}
+	if m.expiresAt == nil {
+		return time.Since(m.lastFetch) < time.Duration(m.refreshSecs)*time.Second
+	}
+	return time.Now().Before(*m.expiresAt)
 }
 
 func copyKey(key ed25519.PublicKey) ed25519.PublicKey {
@@ -181,7 +193,7 @@ func (m *KeyManager) Refresh() error {
 
 	// Double-check: another goroutine may have refreshed while we waited
 	m.mu.RLock()
-	if m.publicKey != nil && !m.isExpired() {
+	if m.publicKey != nil && !m.needsRefresh() {
 		m.mu.RUnlock()
 		return nil
 	}
@@ -200,7 +212,7 @@ func (m *KeyManager) RefreshAndGet() (ed25519.PublicKey, error) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.fetchedKey()
+	return copyKey(m.publicKey), nil
 }
 
 // fetchKey acquires the refresh lock and fetches unconditionally.
@@ -276,13 +288,13 @@ func (m *KeyManager) fetchKeyLocked() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
-	var expiry time.Time
+	var expiry *time.Time
 	if keyResp.Expiry != nil {
 		if err := json.Unmarshal(keyResp.Expiry, &expiry); err != nil {
 			return fmt.Errorf("invalid signing key expiry: %w", err)
 		}
-		if !expiry.After(now) {
-			return errors.New("signing key has expired")
+		if expiry != nil && !expiry.After(now) {
+			log.Warn().Msgf("signing key expired at %s; the server has not rotated it", expiry.Format(time.RFC3339))
 		}
 	}
 	m.publicKey = ed25519.PublicKey(keyBytes)
@@ -292,12 +304,4 @@ func (m *KeyManager) fetchKeyLocked() error {
 	log.Debug().Str("key_id", keyResp.KeyID).Msg("Public signing key refreshed.")
 
 	return nil
-}
-
-// fetchedKey checks the server expiry again under the read lock after refresh.
-func (m *KeyManager) fetchedKey() (ed25519.PublicKey, error) {
-	if !m.expiresAt.IsZero() && !time.Now().Before(m.expiresAt) {
-		return nil, errors.New("signing key has expired")
-	}
-	return copyKey(m.publicKey), nil
 }

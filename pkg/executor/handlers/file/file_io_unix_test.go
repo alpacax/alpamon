@@ -303,9 +303,46 @@ func TestFileExistsAsRequester(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file")
 	require.NoError(t, os.WriteFile(path, nil, 0600))
 	uid, gid := nobodyIDs(t)
-	exists, err := fileExistsAs(t.Context(), path, &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}})
+	attr := &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
+	exists, err := fileExistsAs(t.Context(), path, attr)
 	require.NoError(t, err)
 	assert.False(t, exists)
+	reader, _, err := readFileAs(t.Context(), path, attr)
+	require.ErrorContains(t, err, "failed to stat source file")
+	assert.Nil(t, reader)
+	_, _, _, err = (&FileHandler{}).parsePaths(t.Context(), filepath.Dir(path), []string{path}, attr)
+	assert.ErrorContains(t, err, "missing or inaccessible")
+}
+
+func TestFileExistsAsUsesShellBuiltin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file with spaces")
+	require.NoError(t, os.WriteFile(path, nil, 0600))
+	original := fileHelperCommand
+	t.Cleanup(func() { fileHelperCommand = original })
+	fileHelperCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		assert.Equal(t, "/bin/sh", name)
+		assert.Equal(t, []string{"-c", `test -e "$1"`, "sh", path}, args)
+		return original(ctx, name, args...)
+	}
+	exists, err := fileExistsAs(t.Context(), path, &syscall.SysProcAttr{})
+	require.NoError(t, err)
+	assert.True(t, exists)
+}
+
+func TestRootTransferRejectsMultipleLinks(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root transfer")
+	}
+	parent := t.TempDir()
+	path := filepath.Join(parent, "existing")
+	require.NoError(t, os.WriteFile(path, []byte("original"), 0600))
+	require.NoError(t, os.Link(path, filepath.Join(parent, "second-link")))
+	require.ErrorContains(t, validateTransferDestination(path, nil), "one link")
+	require.NoError(t, os.Chmod(parent, os.ModeSticky|0777))
+	require.ErrorContains(t, writeFileAs(t.Context(), path, strings.NewReader("updated"), nil, true), "one link")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "original", string(data))
 }
 
 func TestRootOnly_StickyDestinationHonorsOverwrite(t *testing.T) {

@@ -104,7 +104,7 @@ func LoadConfig(configFiles []string, wsPath string, controlWsPath string) Setti
 	}
 
 	if !hasExplicitTLSVerification(iniData) {
-		log.Warn().Msg("TLS verification is off because [ssl] verify is not set; set verify = true and ca_cert, or verify = false explicitly")
+		log.Warn().Msg("TLS verification is off because [ssl] verify is not set or is not valid; set verify = true and ca_cert, or verify = false explicitly")
 	}
 
 	var config Config

@@ -415,18 +415,18 @@ func prepareEditorReleaseParent(prefix string) error {
 	if os.Geteuid() != 0 {
 		return os.MkdirAll(prefix, 0700)
 	}
-	return ensureRootReleaseDir(prefix)
+	return checkRootReleaseDir(prefix, true)
 }
 
 // Validate the existing parent before creating each missing component.
-func ensureRootReleaseDir(dir string) error {
+func checkRootReleaseDir(dir string, create bool) error {
 	if parent := filepath.Dir(dir); parent != dir {
-		if err := ensureRootReleaseDir(parent); err != nil {
+		if err := checkRootReleaseDir(parent, create); err != nil {
 			return err
 		}
 	}
 	info, err := os.Lstat(dir)
-	if errors.Is(err, os.ErrNotExist) {
+	if create && errors.Is(err, os.ErrNotExist) {
 		if err := os.Mkdir(dir, 0755); err == nil {
 			if err := os.Chmod(dir, 0755); err != nil {
 				return err
@@ -446,7 +446,7 @@ func ensureRootReleaseDir(dir string) error {
 }
 
 func verifyEditorRelease(dir string) error {
-	if err := ensureRootReleaseDir(dir); err != nil {
+	if err := checkRootReleaseDir(dir, false); err != nil {
 		return err
 	}
 	root, err := os.OpenRoot(dir)
@@ -477,4 +477,24 @@ func verifyEditorRelease(dir string) error {
 		}
 		return nil
 	})
+}
+
+func checkEditorRelease(dir string) error {
+	bin := filepath.Join(dir, "bin")
+	if err := checkRootReleaseDir(bin, false); err != nil {
+		return err
+	}
+	for _, path := range []string{filepath.Join(dir, editorReleaseMarker), filepath.Join(bin, "code-server")} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != 0 || info.Mode().Perm()&0022 != 0 {
+			return fmt.Errorf("invalid code-server release file: %s", path)
+		}
+		if filepath.Base(path) == "code-server" && info.Mode().Perm()&0111 == 0 {
+			return fmt.Errorf("code-server binary is not executable: %s", path)
+		}
+	}
+	return nil
 }

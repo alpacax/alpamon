@@ -22,6 +22,7 @@ func TestFileReaderDoesNotInheritAgentEnvironment(t *testing.T) {
 	t.Setenv(secretName, "synthetic-service-secret")
 	// A harmless stand-in observes only this test's synthetic environment value.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "cat"), []byte("#!/bin/sh\nprintf '%s' \"$ALPAMON_HELPER_SENTINEL\"\n"), 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "stat"), []byte("#!/bin/sh\ntest -z \"$ALPAMON_HELPER_SENTINEL\" && printf '0\\n'\n"), 0700))
 	t.Setenv("PATH", dir)
 	stubFileHelpers(t, dir)
 	input := filepath.Join(dir, "input")
@@ -103,8 +104,9 @@ func TestFileHelpersIgnoreInheritedCommandPath(t *testing.T) {
 	path := filepath.Join(dir, "new", "output")
 	attr := &syscall.SysProcAttr{}
 	require.NoError(t, writeFileAs(t.Context(), path, strings.NewReader("content"), attr, true))
-	reader, _, err := readFileAs(t.Context(), path, attr)
+	reader, size, err := readFileAs(t.Context(), path, attr)
 	require.NoError(t, err)
+	assert.EqualValues(t, len("content"), size)
 	got, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	require.NoError(t, reader.Close())
