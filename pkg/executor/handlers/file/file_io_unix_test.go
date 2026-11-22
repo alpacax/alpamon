@@ -358,3 +358,44 @@ func TestRootOnly_StickyDestinationHonorsOverwrite(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "one", string(data))
 }
+
+func TestWriteFileAsConcurrentExclusiveCreates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "download")
+	attr := &syscall.SysProcAttr{}
+	ready := make(chan struct{}, 2)
+	start := make(chan struct{})
+	original := fileHelperCommand
+	t.Cleanup(func() { fileHelperCommand = original })
+	fileHelperCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if name == "/bin/sh" && len(args) >= 2 && strings.HasPrefix(args[1], "mkdir -p") {
+			ready <- struct{}{}
+			<-start
+		}
+		return original(ctx, name, args...)
+	}
+
+	type result struct {
+		payload string
+		err     error
+	}
+	results := make(chan result, 2)
+	for _, payload := range []string{"first download", "second download"} {
+		go func() {
+			err := writeFileAs(t.Context(), path, strings.NewReader(payload), attr, false)
+			results <- result{payload: payload, err: err}
+		}()
+	}
+	<-ready
+	<-ready
+	close(start)
+
+	winner, loser := <-results, <-results
+	if winner.err != nil {
+		winner, loser = loser, winner
+	}
+	require.NoError(t, winner.err)
+	require.ErrorIs(t, loser.err, os.ErrExist)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, winner.payload, string(data))
+}

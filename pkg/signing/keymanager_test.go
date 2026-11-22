@@ -256,6 +256,9 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, pub2, key2)
 	assert.Equal(t, int32(2), fetchCount.Load())
+	_, err = km.GetPublicKeyForKID("unknown")
+	require.ErrorContains(t, err, `active: "key-v2"`)
+	assert.EqualValues(t, 2, fetchCount.Load())
 }
 
 // The AI server's public-key endpoint reads `env`; a name it does not know is
@@ -424,4 +427,38 @@ func TestConcurrentSigningKeyLookupsShareFailedRefresh(t *testing.T) {
 		require.ErrorContains(t, err, "signing key service unavailable")
 		assert.Nil(t, key)
 	})
+}
+
+func TestKeyManagerRefreshesAnExpiredServerKey(t *testing.T) {
+	oldKey, _ := testKey(t)
+	newKey, _ := testKey(t)
+	var fetches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if fetches.Add(1) == 1 {
+			response := testKeyResponse(oldKey, "old")
+			response.ExpiresAt = time.Now().Add(-time.Hour).Format(time.RFC3339)
+			writeKeyResponse(t, w, response)
+			return
+		}
+		writeKeyResponse(t, w, testKeyResponse(newKey, "new"))
+	}))
+	t.Cleanup(server.Close)
+
+	var logs bytes.Buffer
+	original := log.Logger
+	log.Logger = zerolog.New(&logs)
+	t.Cleanup(func() { log.Logger = original })
+	manager := NewKeyManager(server.URL, 3600, "", server.Client())
+
+	key, err := manager.GetPublicKeyForKID("old")
+	require.NoError(t, err)
+	assert.Equal(t, oldKey, key)
+	assert.Contains(t, logs.String(), "signing key expired")
+
+	_, err = manager.GetPublicKeyForKID("old")
+	require.ErrorContains(t, err, `active: "new"`)
+	key, err = manager.GetPublicKeyForKID("new")
+	require.NoError(t, err)
+	assert.Equal(t, newKey, key)
+	assert.EqualValues(t, 2, fetches.Load())
 }

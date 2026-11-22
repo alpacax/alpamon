@@ -3,6 +3,7 @@
 package file
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -174,7 +175,7 @@ done`, "sh", dir)
 	}
 }
 
-// writeFileAs streams src to a file, demoting via tee when sysProcAttr is set. Caller owns src.
+// writeFileAs streams src to a file under the requested credentials. Caller owns src.
 // path must already be absolute: callers sanitize it via utils.SanitizePath, which rejects
 // null bytes, UNC/device prefixes, and literal ".." after cleaning.
 func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr, allowOverwrite bool) error {
@@ -240,8 +241,27 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		script = fmt.Sprintf("mkdir -p %s && { tee %s > /dev/null || { rm -f %s; exit 1; }; }",
 			utils.Quote(parentDir), utils.Quote(path), utils.Quote(path))
 	}
+	var args []string
+	if !allowOverwrite {
+		// Noclobber protects file creation. Report success opening the file
+		// before copying so cleanup can distinguish the writer from a contender.
+		script = `mkdir -p -- "$1" || exit 1
+if test -e "$2" || test -L "$2"; then exit 17; fi
+set -C
+(
+    printf 'created\n'
+    cat >&3
+) 3> "$2" && exit 0
+if test -e "$2" || test -L "$2"; then exit 17; fi
+exit 1`
+		args = []string{"sh", parentDir, path}
+	}
 	// Create parents as the requesting user to preserve filesystem permissions.
-	cmd := fileHelperCommand(ctx, "/bin/sh", "-c", script)
+	cmd := fileHelperCommand(ctx, "/bin/sh", append([]string{"-c", script}, args...)...)
+	var status bytes.Buffer
+	if !allowOverwrite {
+		cmd.Stdout = &status
+	}
 	cmd.SysProcAttr = sysProcAttr
 	env, err := fileHelperEnvironment(sysProcAttr)
 	if err != nil {
@@ -260,6 +280,19 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	// erc.err is only ever non-nil alongside a non-nil runErr: cmd.Wait returns the stdin-copy
 	// goroutine's error on a clean exit, and the process's own exit error otherwise. The
 	// fallback after this block guards that invariant instead of relying on it silently.
+	if !allowOverwrite {
+		createdTarget = status.String() == "created\n"
+		var exitErr *exec.ExitError
+		if !createdTarget && errors.As(runErr, &exitErr) && exitErr.ExitCode() == 17 {
+			removeCreatedDirsAsRequester(ctx, parentDir, createdRoot, sysProcAttr)
+			return &os.PathError{Op: "create", Path: path, Err: os.ErrExist}
+		}
+		if runErr != nil && createdTarget {
+			removeAsRequester(ctx, path, sysProcAttr)
+			createdTarget = false
+		}
+	}
+
 	if runErr != nil {
 		// erc.err alone does not prove tee opened path: a tee that cannot open a pre-existing
 		// file still drains stdin to EOF and exits nonzero, so a source read failure can arrive

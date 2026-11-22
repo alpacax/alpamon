@@ -82,8 +82,9 @@ type KeyManager struct {
 	authEnv     string // "dev" or "" (prod); derived from alpacon server URL
 	client      *http.Client
 
-	refreshMu sync.Mutex
-	inFlight  *keyRefresh
+	refreshMu           sync.Mutex
+	inFlight            *keyRefresh
+	lastRotationAttempt time.Time
 }
 
 type keyRefresh struct {
@@ -162,11 +163,10 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	return nil, fmt.Errorf("key %q is not the active key for this environment (active: %q)", kid, m.keyID)
 }
 
-// A key that expired before we fetched it is refreshed on the usual cadence.
 // Must be called with m.mu held (read or write).
 func (m *KeyManager) needsRefresh() bool {
 	now := time.Now()
-	return (m.expiresAt != nil && m.lastFetch.Before(*m.expiresAt) && !now.Before(*m.expiresAt)) ||
+	return (m.expiresAt != nil && !now.Before(*m.expiresAt)) ||
 		now.Sub(m.lastFetch) >= min(time.Duration(m.refreshSecs)*time.Second, time.Hour)
 }
 
@@ -212,9 +212,10 @@ func (m *KeyManager) refresh(kid string, force bool) error {
 	m.refreshMu.Lock()
 
 	m.mu.RLock()
-	fresh := m.publicKey != nil && (kid == "" || m.keyID == kid) && !m.needsRefresh()
+	fresh := m.publicKey != nil && !m.needsRefresh()
+	rotation := kid != "" && m.keyID != kid
 	m.mu.RUnlock()
-	if !force && fresh {
+	if !force && fresh && !rotation {
 		m.refreshMu.Unlock()
 		return nil
 	}
@@ -224,6 +225,16 @@ func (m *KeyManager) refresh(kid string, force bool) error {
 		return current.err
 	}
 
+	// Limit requests made solely to discover a new KID. Cache expiry still
+	// requires a refresh, and concurrent callers can share an in-flight fetch.
+	if fresh && rotation {
+		now := time.Now()
+		if now.Sub(m.lastRotationAttempt) < time.Second {
+			m.refreshMu.Unlock()
+			return nil
+		}
+		m.lastRotationAttempt = now
+	}
 	current := &keyRefresh{done: make(chan struct{})}
 	m.inFlight = current
 	m.refreshMu.Unlock()

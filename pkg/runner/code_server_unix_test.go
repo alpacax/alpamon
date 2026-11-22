@@ -297,6 +297,22 @@ func TestManagedEditorReleasePermissions(t *testing.T) {
 	require.NoError(t, os.MkdirAll(nested, 0755))
 	require.NoError(t, os.Chmod(nested, 0777))
 	assert.ErrorContains(t, checkEditorRelease(release), "only by root")
+	require.NoError(t, os.Chmod(nested, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "node"), nil, 0755))
+	require.NoError(t, checkEditorRelease(release))
 	require.NoError(t, os.Remove(filepath.Join(release, editorReleaseMarker)))
 	assert.ErrorIs(t, checkEditorRelease(release), os.ErrNotExist)
+}
+
+func TestLookupCodeServerPathFindsPerUserInstall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	path := filepath.Join(home, ".local", "bin", "code-server")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	require.NoError(t, os.WriteFile(path, nil, 0755))
+
+	found, err := lookupCodeServerPath("linux", false)
+	require.NoError(t, err)
+	assert.Equal(t, path, found)
 }

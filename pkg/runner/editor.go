@@ -671,10 +671,12 @@ func lookupCodeServerPath(goos string, isRoot bool) (string, error) {
 			} else {
 				err = checkEditorRuntime(release)
 			}
-			if err != nil {
+			if err == nil {
+				return candidate, nil
+			}
+			if isRoot {
 				return "", err
 			}
-			return candidate, nil
 		}
 	}
 	if goos == "darwin" && isRoot {
@@ -687,6 +689,15 @@ func lookupCodeServerPath(goos string, isRoot bool) (string, error) {
 
 	if path, err := exec.LookPath("code-server"); err == nil {
 		return path, nil
+	}
+
+	if !isRoot {
+		if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+			path := filepath.Join(home, ".local", "bin", "code-server")
+			if _, err := os.Stat(path); err == nil {
+				return path, nil
+			}
+		}
 	}
 
 	for _, path := range codeServerPaths {
