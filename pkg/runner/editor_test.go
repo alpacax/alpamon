@@ -223,6 +223,10 @@ func TestWaitForReadyChecksTheExitBeforeTheDial(t *testing.T) {
 
 func TestDownloadEditorArchive(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/blocked" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 		if r.URL.Path == "/redirect" {
 			http.Redirect(w, r, "http://example.invalid/", http.StatusFound)
 			return
@@ -233,6 +237,7 @@ func TestDownloadEditorArchive(t *testing.T) {
 	sum := sha256.Sum256([]byte("editor"))
 	for _, tc := range []struct{ url, digest, want string }{
 		{server.URL, fmt.Sprintf("%x", sum), ""}, {server.URL, "wrong", "SHA-256 mismatch"},
+		{server.URL + "/blocked", "", "outbound HTTPS to github.com and release-assets.githubusercontent.com"},
 		{server.URL + "/redirect", "", "requires HTTPS"}, {"http://example.invalid", "", "requires HTTPS"},
 	} {
 		err := downloadEditorArchive(t.Context(), tc.url, tc.digest, io.Discard, server.Client().Transport)
@@ -283,4 +288,34 @@ func TestEditorNonRootRefusesAnotherAccount(t *testing.T) {
 	id, err := lookupUserForCodeServer(other, "root")
 	assert.ErrorContains(t, err, "agent must run as the requested account or root")
 	assert.Nil(t, id)
+}
+
+func writeEditorRuntimeFixture(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range []string{"bin/code-server", "lib/node", "package.json", "out/node/entry.js"} {
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, nil, 0755))
+	}
+}
+
+func TestPublishEditorReleaseRepairsMissingRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("code-server is unavailable on Windows")
+	}
+	parent := t.TempDir()
+	release := filepath.Join(parent, "release")
+	stage := filepath.Join(parent, "stage")
+	writeEditorRuntimeFixture(t, release)
+	writeEditorRuntimeFixture(t, stage)
+
+	for _, name := range []string{"lib/node", "package.json", "out/node/entry.js"} {
+		path := filepath.Join(release, name)
+		require.NoError(t, os.Remove(path))
+		assert.ErrorIs(t, checkEditorRuntime(release), os.ErrNotExist)
+		require.NoError(t, os.WriteFile(path, nil, 0755))
+	}
+	require.NoError(t, os.Remove(filepath.Join(release, "lib", "node")))
+	require.NoError(t, publishEditorRelease(stage, release, false))
+	require.NoError(t, checkEditorRuntime(release))
 }

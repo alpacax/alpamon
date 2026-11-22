@@ -82,8 +82,13 @@ type KeyManager struct {
 	authEnv     string // "dev" or "" (prod); derived from alpacon server URL
 	client      *http.Client
 
-	// refreshMu serializes refresh calls to prevent concurrent fetch bursts
 	refreshMu sync.Mutex
+	inFlight  *keyRefresh
+}
+
+type keyRefresh struct {
+	done chan struct{}
+	err  error
 }
 
 // NewKeyManager creates a key manager that fetches from the AI server.
@@ -140,8 +145,7 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	}
 	m.mu.RUnlock()
 
-	// kid mismatch or expired: refresh the active key for this environment
-	if err := m.fetchKey(); err != nil {
+	if err := m.refresh(kid, kid == ""); err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
 		if m.keyID == kid && m.canUseCachedKey() {
@@ -188,18 +192,7 @@ func copyKey(key ed25519.PublicKey) ed25519.PublicKey {
 // Only one refresh runs at a time; concurrent callers wait for the in-flight result.
 // If the cache is still valid (another goroutine refreshed), this is a no-op.
 func (m *KeyManager) Refresh() error {
-	m.refreshMu.Lock()
-	defer m.refreshMu.Unlock()
-
-	// Double-check: another goroutine may have refreshed while we waited
-	m.mu.RLock()
-	if m.publicKey != nil && !m.needsRefresh() {
-		m.mu.RUnlock()
-		return nil
-	}
-	m.mu.RUnlock()
-
-	return m.fetchKeyLocked()
+	return m.refresh("", false)
 }
 
 // RefreshAndGet fetches the active key unconditionally (ignoring cache TTL)
@@ -207,7 +200,7 @@ func (m *KeyManager) Refresh() error {
 // command has no key_id. This is env-scoped and does not accept any
 // relay-provided key identifier.
 func (m *KeyManager) RefreshAndGet() (ed25519.PublicKey, error) {
-	if err := m.fetchKey(); err != nil {
+	if err := m.refresh("", true); err != nil {
 		return nil, err
 	}
 	m.mu.RLock()
@@ -215,20 +208,36 @@ func (m *KeyManager) RefreshAndGet() (ed25519.PublicKey, error) {
 	return copyKey(m.publicKey), nil
 }
 
-// fetchKey acquires the refresh lock and fetches unconditionally.
-// Used by GetPublicKeyForKID when kid doesn't match (key may not be expired).
-func (m *KeyManager) fetchKey() error {
+func (m *KeyManager) refresh(kid string, force bool) error {
 	m.refreshMu.Lock()
-	defer m.refreshMu.Unlock()
-	return m.fetchKeyLocked()
+
+	m.mu.RLock()
+	fresh := m.publicKey != nil && (kid == "" || m.keyID == kid) && !m.needsRefresh()
+	m.mu.RUnlock()
+	if !force && fresh {
+		m.refreshMu.Unlock()
+		return nil
+	}
+	if current := m.inFlight; current != nil {
+		m.refreshMu.Unlock()
+		<-current.done
+		return current.err
+	}
+
+	current := &keyRefresh{done: make(chan struct{})}
+	m.inFlight = current
+	m.refreshMu.Unlock()
+
+	current.err = m.fetchKey()
+
+	m.refreshMu.Lock()
+	m.inFlight = nil
+	close(current.done)
+	m.refreshMu.Unlock()
+	return current.err
 }
 
-// fetchKeyLocked performs the actual HTTP fetch. Must be called with refreshMu held.
-// When authEnv is set, it scopes the request to that environment so alpamon
-// only receives keys valid for its own environment. The parameter is `env`,
-// which is what the AI server's public-key endpoint reads; a name it does not
-// know is ignored and answers with the prod key.
-func (m *KeyManager) fetchKeyLocked() error {
+func (m *KeyManager) fetchKey() error {
 	fetchURL := m.aiBaseURL + "/api/commands/public-key/"
 	if m.authEnv != "" {
 		fetchURL += "?env=" + url.QueryEscape(m.authEnv)

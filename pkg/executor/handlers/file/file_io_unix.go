@@ -183,7 +183,6 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	}
 	// No-op for the absolute path SanitizePath produces; it is the sanitizer shape CodeQL recognizes.
 	path = filepath.Clean("/" + path)
-	// Write new files in shared sticky directories through an exclusive descriptor.
 	if os.Geteuid() == 0 && (sysProcAttr == nil || sysProcAttr.Credential == nil || sysProcAttr.Credential.Uid == 0) {
 		parent, err := os.Stat(filepath.Dir(path))
 		if err == nil && parent.Mode()&os.ModeSticky != 0 && parent.Mode().Perm()&0022 != 0 {
@@ -338,7 +337,6 @@ func fileTestAs(ctx context.Context, path string, attr *syscall.SysProcAttr, scr
 	return err == nil, err
 }
 
-// Check each existing component before allowing a root write.
 func validateTransferDestination(path string, attr *syscall.SysProcAttr) error {
 	uid := uint32(os.Geteuid())
 	if attr != nil && attr.Credential != nil {

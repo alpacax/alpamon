@@ -665,14 +665,15 @@ func lookupCodeServerPath(goos string, isRoot bool) (string, error) {
 	if prefix, err := editorInstallPrefix(); err == nil {
 		release := filepath.Join(prefix, "v"+editorReleaseVersion)
 		candidate := filepath.Join(release, "bin", "code-server")
-		if isRoot {
-			if _, err := os.Lstat(release); !errors.Is(err, os.ErrNotExist) {
-				if err := checkEditorRelease(release); err != nil {
-					return "", err
-				}
-				return candidate, nil
+		if _, err := os.Lstat(release); !errors.Is(err, os.ErrNotExist) {
+			if isRoot {
+				err = checkEditorRelease(release)
+			} else {
+				err = checkEditorRuntime(release)
 			}
-		} else if _, err := os.Stat(candidate); err == nil {
+			if err != nil {
+				return "", err
+			}
 			return candidate, nil
 		}
 	}
@@ -798,14 +799,7 @@ func installCodeServer(parentCtx context.Context) error {
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("extract code-server archive: %w", err)
 		}
-		info, err := os.Stat(filepath.Join(stage, "bin", "code-server"))
-		if err != nil {
-			return fmt.Errorf("missing code-server executable: %w", err)
-		}
-		if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
-			return errors.New("code-server release is missing its executable")
-		}
-		return nil
+		return checkEditorRuntime(stage)
 	}
 	isRoot := os.Geteuid() == 0
 	if isRoot {
@@ -837,11 +831,27 @@ func publishEditorRelease(stage, release string, isRoot bool) error {
 		if err := checkEditorRelease(release); err == nil {
 			return nil
 		}
-		if err := os.RemoveAll(release); err != nil {
-			return fmt.Errorf("remove incomplete code-server release: %w", err)
-		}
+	} else if err := checkEditorRuntime(release); err == nil {
+		return nil
+	}
+	if err := os.RemoveAll(release); err != nil {
+		return fmt.Errorf("remove incomplete code-server release: %w", err)
 	}
 	return os.Rename(stage, release)
+}
+
+func checkEditorRuntime(dir string) error {
+	for _, name := range []string{"bin/code-server", "lib/node", "package.json", "out/node/entry.js"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			return err
+		}
+		executable := name == "bin/code-server" || name == "lib/node"
+		if !info.Mode().IsRegular() || (executable && info.Mode().Perm()&0111 == 0) {
+			return fmt.Errorf("invalid code-server runtime file: %s", name)
+		}
+	}
+	return nil
 }
 
 func downloadEditorArchive(ctx context.Context, location, digest string, dst io.Writer, transport http.RoundTripper) error {
@@ -863,11 +873,11 @@ func downloadEditorArchive(ctx context.Context, location, digest string, dst io.
 	}}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("download code-server: %w", err)
+		return fmt.Errorf("download code-server (automatic installation requires outbound HTTPS to github.com and release-assets.githubusercontent.com): %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download code-server: HTTP %d", resp.StatusCode)
+		return fmt.Errorf("download code-server: HTTP %d (automatic installation requires outbound HTTPS to github.com and release-assets.githubusercontent.com)", resp.StatusCode)
 	}
 	hash := sha256.New()
 	const maxArchiveSize = 512 << 20

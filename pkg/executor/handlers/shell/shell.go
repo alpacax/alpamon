@@ -38,8 +38,10 @@ func NewShellHandler(cmdExecutor common.CommandExecutor) *ShellHandler {
 // Execute runs the shell command
 func (h *ShellHandler) Execute(ctx context.Context, cmd string, args *common.CommandArgs) (int, string, error) {
 	if err := validateEnvironment(args.Env); err != nil {
-		log.Warn().Err(err).Msg("Command environment refused")
-		return 1, "", err
+		if args.ChunkCallback != nil {
+			args.ChunkCallback(ctx, "alpamon: "+err.Error()+"\n")
+		}
+		return 1, err.Error(), err
 	}
 	switch cmd {
 	case common.ShellCmd.String(), common.Exec.String():

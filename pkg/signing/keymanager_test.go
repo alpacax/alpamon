@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -373,4 +374,54 @@ func TestSigningKeyServerExpiry(t *testing.T) {
 			}
 		})
 	}
+}
+
+type signingRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f signingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestConcurrentSigningKeyLookupsShareFailedRefresh(t *testing.T) {
+	pub, _ := testKey(t)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var attempts atomic.Int32
+		client := &http.Client{Transport: signingRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if attempts.Add(1) == 1 {
+				close(started)
+			}
+			<-release
+			return nil, fmt.Errorf("signing key service unavailable")
+		})}
+		manager := NewKeyManager("https://example.invalid", 3600, "", client)
+		manager.publicKey, manager.keyID = pub, "test"
+		manager.lastFetch = time.Now().Add(-time.Hour)
+		manager.expiresAt = new(time.Now().Add(time.Hour))
+
+		first := make(chan ed25519.PublicKey, 1)
+		second := make(chan ed25519.PublicKey, 1)
+		go func() {
+			key, err := manager.GetPublicKey()
+			assert.NoError(t, err)
+			first <- key
+		}()
+		<-started
+		go func() {
+			key, err := manager.GetPublicKeyForKID("test")
+			assert.NoError(t, err)
+			second <- key
+		}()
+		synctest.Wait()
+		close(release)
+		assert.Equal(t, pub, <-first)
+		assert.Equal(t, pub, <-second)
+		assert.EqualValues(t, 1, attempts.Load())
+
+		time.Sleep(time.Hour)
+		key, err := manager.GetPublicKeyForKID("test")
+		require.ErrorContains(t, err, "signing key service unavailable")
+		assert.Nil(t, key)
+	})
 }

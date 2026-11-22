@@ -418,7 +418,6 @@ func prepareEditorReleaseParent(prefix string) error {
 	return checkRootReleaseDir(prefix, true)
 }
 
-// Validate the existing parent before creating each missing component.
 func checkRootReleaseDir(dir string, create bool) error {
 	if parent := filepath.Dir(dir); parent != dir {
 		if err := checkRootReleaseDir(parent, create); err != nil {
@@ -480,11 +479,13 @@ func verifyEditorRelease(dir string) error {
 }
 
 func checkEditorRelease(dir string) error {
-	bin := filepath.Join(dir, "bin")
-	if err := checkRootReleaseDir(bin, false); err != nil {
-		return err
+	for _, subdir := range []string{"bin", "lib", "out/node"} {
+		if err := checkRootReleaseDir(filepath.Join(dir, subdir), false); err != nil {
+			return err
+		}
 	}
-	for _, path := range []string{filepath.Join(dir, editorReleaseMarker), filepath.Join(bin, "code-server")} {
+	for _, name := range []string{editorReleaseMarker, "bin/code-server", "lib/node", "package.json", "out/node/entry.js"} {
+		path := filepath.Join(dir, name)
 		info, err := os.Lstat(path)
 		if err != nil {
 			return err
@@ -492,9 +493,6 @@ func checkEditorRelease(dir string) error {
 		if !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != 0 || info.Mode().Perm()&0022 != 0 {
 			return fmt.Errorf("invalid code-server release file: %s", path)
 		}
-		if filepath.Base(path) == "code-server" && info.Mode().Perm()&0111 == 0 {
-			return fmt.Errorf("code-server binary is not executable: %s", path)
-		}
 	}
-	return nil
+	return checkEditorRuntime(dir)
 }
