@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -76,14 +77,26 @@ type KeyManager struct {
 	publicKey   ed25519.PublicKey
 	keyID       string
 	lastFetch   time.Time
-	expiresAt   time.Time
+	expiresAt   *time.Time
 	refreshSecs int
 	aiBaseURL   string
 	authEnv     string // "dev" or "" (prod); derived from alpacon server URL
 	client      *http.Client
 
-	// refreshMu serializes refresh calls to prevent concurrent fetch bursts
-	refreshMu sync.Mutex
+	refreshMu       sync.Mutex
+	inFlight        *keyRefresh
+	lastRefresh     *keyRefresh
+	refreshSequence atomic.Uint64
+	rotationMisses  map[string]time.Time
+}
+
+type keyRefresh struct {
+	done     chan struct{}
+	sequence uint64
+	finished time.Time
+	key      ed25519.PublicKey
+	keyID    string
+	err      error
 }
 
 // NewKeyManager creates a key manager that fetches from the AI server.
@@ -105,7 +118,7 @@ func NewKeyManager(aiBaseURL string, refreshSecs int, authEnv string, client *ht
 // GetPublicKey returns a copy of the cached public key, refreshing if stale.
 func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 	m.mu.RLock()
-	if m.publicKey != nil && !m.isExpired() {
+	if m.publicKey != nil && !m.needsRefresh() {
 		key := copyKey(m.publicKey)
 		m.mu.RUnlock()
 		return key, nil
@@ -115,7 +128,7 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 	if err := m.Refresh(); err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
-		if m.publicKey != nil && !m.isExpired() {
+		if m.canUseCachedKey() {
 			return copyKey(m.publicKey), nil
 		}
 		return nil, fmt.Errorf("public key expired and refresh failed: %w", err)
@@ -132,22 +145,31 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 // used only as a cache-staleness hint — never as a query parameter — so that
 // a compromised relay cannot direct alpamon to fetch an arbitrary key.
 func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
+	started := m.refreshSequence.Load()
 	m.mu.RLock()
-	if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
+	if m.publicKey != nil && m.keyID == kid && !m.needsRefresh() {
 		key := copyKey(m.publicKey)
 		m.mu.RUnlock()
 		return key, nil
 	}
+	unknown := kid != "" && m.keyID != kid
 	m.mu.RUnlock()
 
-	// kid mismatch or expired: refresh the active key for this environment
-	if err := m.fetchKey(); err != nil {
+	result, err := m.refreshForLookup(kid, kid == "", started, unknown)
+	if err != nil {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
-		if m.publicKey != nil && m.keyID == kid && !m.isExpired() {
+		if m.keyID == kid && m.canUseCachedKey() {
 			return copyKey(m.publicKey), nil
 		}
 		return nil, fmt.Errorf("failed to refresh key for kid %q: %w", kid, err)
+	}
+
+	if result != nil {
+		if result.keyID == kid {
+			return copyKey(result.key), nil
+		}
+		return nil, inactiveKeyError(kid, result.keyID)
 	}
 
 	m.mu.RLock()
@@ -155,18 +177,30 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	if m.publicKey != nil && m.keyID == kid {
 		return copyKey(m.publicKey), nil
 	}
-	return nil, fmt.Errorf("key %q is not the active key for this environment (active: %q)", kid, m.keyID)
+	return nil, inactiveKeyError(kid, m.keyID)
 }
 
-// isExpired reports whether the cached key should be refreshed.
+func inactiveKeyError(kid, active string) error {
+	return fmt.Errorf("key %q is not the active key for this environment (active: %q)", kid, active)
+}
+
 // Must be called with m.mu held (read or write).
-func (m *KeyManager) isExpired() bool {
-	// If AI server provided expires_at, use it
-	if !m.expiresAt.IsZero() {
-		return time.Now().After(m.expiresAt)
+func (m *KeyManager) needsRefresh() bool {
+	now := time.Now()
+	return (m.expiresAt != nil && !now.Before(*m.expiresAt)) ||
+		now.Sub(m.lastFetch) >= min(time.Duration(m.refreshSecs)*time.Second, time.Hour)
+}
+
+// The configured TTL still limits fallback for keys without a server expiry.
+// Must be called with m.mu held.
+func (m *KeyManager) canUseCachedKey() bool {
+	if m.publicKey == nil {
+		return false
 	}
-	// Fall back to TTL-based refresh
-	return time.Since(m.lastFetch) >= time.Duration(m.refreshSecs)*time.Second
+	if m.expiresAt == nil {
+		return time.Since(m.lastFetch) < time.Duration(m.refreshSecs)*time.Second
+	}
+	return time.Now().Before(*m.expiresAt)
 }
 
 func copyKey(key ed25519.PublicKey) ed25519.PublicKey {
@@ -179,18 +213,8 @@ func copyKey(key ed25519.PublicKey) ed25519.PublicKey {
 // Only one refresh runs at a time; concurrent callers wait for the in-flight result.
 // If the cache is still valid (another goroutine refreshed), this is a no-op.
 func (m *KeyManager) Refresh() error {
-	m.refreshMu.Lock()
-	defer m.refreshMu.Unlock()
-
-	// Double-check: another goroutine may have refreshed while we waited
-	m.mu.RLock()
-	if m.publicKey != nil && !m.isExpired() {
-		m.mu.RUnlock()
-		return nil
-	}
-	m.mu.RUnlock()
-
-	return m.fetchKeyLocked()
+	_, err := m.refreshForLookup("", false, 0, false)
+	return err
 }
 
 // RefreshAndGet fetches the active key unconditionally (ignoring cache TTL)
@@ -198,28 +222,99 @@ func (m *KeyManager) Refresh() error {
 // command has no key_id. This is env-scoped and does not accept any
 // relay-provided key identifier.
 func (m *KeyManager) RefreshAndGet() (ed25519.PublicKey, error) {
-	if err := m.fetchKey(); err != nil {
+	result, err := m.refreshForLookup("", true, 0, false)
+	if err != nil {
 		return nil, err
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return copyKey(m.publicKey), nil
+	return copyKey(result.key), nil
 }
 
-// fetchKey acquires the refresh lock and fetches unconditionally.
-// Used by GetPublicKeyForKID when kid doesn't match (key may not be expired).
+func (m *KeyManager) refreshForLookup(kid string, force bool, started uint64, unknown bool) (*keyRefresh, error) {
+	var retryAfter uint64
+	for {
+		m.refreshMu.Lock()
+		m.mu.RLock()
+		fresh := m.publicKey != nil && !m.needsRefresh()
+		m.mu.RUnlock()
+		if !force && fresh && !unknown {
+			m.refreshMu.Unlock()
+			return nil, nil
+		}
+
+		if retryAfter != 0 && m.lastRefresh.sequence > retryAfter {
+			current := m.lastRefresh
+			m.recordRotationMiss(kid, current)
+			m.refreshMu.Unlock()
+			return current, current.err
+		}
+
+		if current := m.inFlight; current != nil {
+			m.refreshMu.Unlock()
+			<-current.done
+			// An earlier fetch may have captured the key before rotation.
+			if unknown && (current.sequence <= started || (retryAfter == 0 && current.keyID != kid)) {
+				retryAfter = current.sequence
+				continue
+			}
+			if unknown {
+				m.refreshMu.Lock()
+				m.recordRotationMiss(kid, current)
+				m.refreshMu.Unlock()
+			}
+			return current, current.err
+		}
+
+		if fresh && unknown && retryAfter == 0 && time.Since(m.rotationMisses[kid]) < time.Second {
+			m.refreshMu.Unlock()
+			return nil, nil
+		}
+
+		current := &keyRefresh{done: make(chan struct{}), sequence: m.refreshSequence.Add(1)}
+		m.inFlight = current
+		m.refreshMu.Unlock()
+
+		current.err = m.fetchKey()
+
+		m.refreshMu.Lock()
+		m.mu.RLock()
+		current.keyID, current.key = m.keyID, m.publicKey
+		m.mu.RUnlock()
+		current.finished = time.Now()
+		if current.err == nil {
+			delete(m.rotationMisses, current.keyID)
+		}
+		if unknown {
+			m.recordRotationMiss(kid, current)
+		}
+		m.inFlight, m.lastRefresh = nil, current
+		close(current.done)
+		m.refreshMu.Unlock()
+		return current, current.err
+	}
+}
+
+// recordRotationMiss bounds the cache because the caller supplies the KID.
+// refreshMu must be held.
+func (m *KeyManager) recordRotationMiss(kid string, refresh *keyRefresh) {
+	if refresh.err != nil || refresh.keyID == kid || !refresh.finished.After(m.rotationMisses[kid]) {
+		return
+	}
+	if m.rotationMisses == nil {
+		m.rotationMisses = make(map[string]time.Time)
+	}
+	if _, ok := m.rotationMisses[kid]; !ok && len(m.rotationMisses) == 128 {
+		var oldest string
+		for id, at := range m.rotationMisses {
+			if oldest == "" || at.Before(m.rotationMisses[oldest]) {
+				oldest = id
+			}
+		}
+		delete(m.rotationMisses, oldest)
+	}
+	m.rotationMisses[kid] = refresh.finished
+}
+
 func (m *KeyManager) fetchKey() error {
-	m.refreshMu.Lock()
-	defer m.refreshMu.Unlock()
-	return m.fetchKeyLocked()
-}
-
-// fetchKeyLocked performs the actual HTTP fetch. Must be called with refreshMu held.
-// When authEnv is set, it scopes the request to that environment so alpamon
-// only receives keys valid for its own environment. The parameter is `env`,
-// which is what the AI server's public-key endpoint reads; a name it does not
-// know is ignored and answers with the prod key.
-func (m *KeyManager) fetchKeyLocked() error {
 	fetchURL := m.aiBaseURL + "/api/commands/public-key/"
 	if m.authEnv != "" {
 		fetchURL += "?env=" + url.QueryEscape(m.authEnv)
@@ -251,7 +346,10 @@ func (m *KeyManager) fetchKeyLocked() error {
 		return fmt.Errorf("public key response too large (>%d bytes)", maxResponseSize)
 	}
 
-	var keyResp publicKeyResponse
+	var keyResp struct {
+		publicKeyResponse
+		Expiry json.RawMessage `json:"expires_at"`
+	}
 	if err := json.Unmarshal(body, &keyResp); err != nil {
 		return fmt.Errorf("failed to parse public key response: %w", err)
 	}
@@ -275,22 +373,21 @@ func (m *KeyManager) fetchKeyLocked() error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := time.Now()
+	var expiry *time.Time
+	if keyResp.Expiry != nil {
+		if err := json.Unmarshal(keyResp.Expiry, &expiry); err != nil {
+			return fmt.Errorf("invalid signing key expiry: %w", err)
+		}
+		if expiry != nil && !expiry.After(now) {
+			log.Warn().Msgf("signing key expired at %s; the server has not rotated it", expiry.Format(time.RFC3339))
+		}
+	}
 	m.publicKey = ed25519.PublicKey(keyBytes)
 	m.keyID = keyResp.KeyID
-	m.lastFetch = time.Now()
-
-	if keyResp.ExpiresAt != "" {
-		if t, err := time.Parse(time.RFC3339, keyResp.ExpiresAt); err == nil {
-			m.expiresAt = t
-			log.Debug().Str("key_id", keyResp.KeyID).Time("expires_at", t).Msg("Public signing key refreshed.")
-		} else {
-			log.Warn().Str("expires_at", keyResp.ExpiresAt).Msg("Failed to parse expires_at, falling back to TTL-based refresh.")
-			m.expiresAt = time.Time{}
-		}
-	} else {
-		m.expiresAt = time.Time{}
-		log.Debug().Str("key_id", keyResp.KeyID).Msg("Public signing key refreshed.")
-	}
+	m.lastFetch = now
+	m.expiresAt = expiry
+	log.Debug().Str("key_id", keyResp.KeyID).Msg("Public signing key refreshed.")
 
 	return nil
 }

@@ -262,6 +262,7 @@ func readCACertLimited(r io.Reader) ([]byte, error) {
 
 // FtpConnectionConfig carries resolved agent connection settings over stdin.
 type FtpConnectionConfig struct {
+	ProxySocket    bool `json:",omitempty"`
 	ProxyURL       string
 	UseEnvironment bool `json:"-"`
 }

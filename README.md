@@ -15,6 +15,10 @@ Installed on each managed server, Alpamon establishes an outbound-only connectio
 
 **System requirements**: 128MB RAM, 150MB free disk, outbound HTTPS to your Alpacon workspace.
 
+On Linux and macOS, automatic editor setup requires outbound HTTPS to
+`github.com` and `release-assets.githubusercontent.com` to download the
+pinned code-server release.
+
 ## Installation
 
 All platforms share the same second step: `alpamon register` writes the config, sets up the service, and starts it. Only the first step (getting the binary onto the machine) differs.

@@ -4,11 +4,14 @@ package file
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -47,21 +50,33 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 		}
 		return f, st.Size(), nil
 	}
-	st, err := os.Stat(path)
+	env, err := fileHelperEnvironment(sysProcAttr)
 	if err != nil {
 		return nil, 0, err
 	}
-	cmd := fileHelperCommand(ctx, "/bin/cat", path)
+	statArgs := []string{"-L", "-c", "%s", "--", path}
+	if runtime.GOOS == "darwin" || runtime.GOOS == "freebsd" {
+		statArgs = []string{"-L", "-f", "%z", "--", path}
+	}
+	stat := fileHelperCommand(ctx, "/usr/bin/stat", statArgs...)
+	stat.SysProcAttr = sysProcAttr
+	stat.Env = env
+	output, err := stat.Output()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to stat source file: %w", err)
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to parse source file size: %w", err)
+	}
+	cmd := fileHelperCommand(ctx, "/bin/cat", "--", path)
 	cmd.SysProcAttr = sysProcAttr
-	cmd.Env, err = fileHelperEnvironment(sysProcAttr)
-	if err != nil {
-		return nil, 0, err
-	}
+	cmd.Env = env
 	rc, err := newCmdReadCloser(cmd)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to start cat: %w", err)
 	}
-	return rc, st.Size(), nil
+	return rc, size, nil
 }
 
 // firstMissingAncestor returns the highest ancestor of dir that mkdir -p would create,
@@ -159,20 +174,49 @@ done`, "sh", dir)
 	}
 }
 
-// writeFileAs streams src to a file, demoting via tee when sysProcAttr is set. Caller owns src.
+// writeFileAs streams src to a file under the requested credentials. Caller owns src.
 // path must already be absolute: callers sanitize it via utils.SanitizePath, which rejects
 // null bytes, UNC/device prefixes, and literal ".." after cleaning.
-func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr) error {
+func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr, allowOverwrite bool) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("invalid argument: path must be absolute: %s", path)
 	}
 	// No-op for the absolute path SanitizePath produces; it is the sanitizer shape CodeQL recognizes.
 	path = filepath.Clean("/" + path)
+	if os.Geteuid() == 0 && (sysProcAttr == nil || sysProcAttr.Credential == nil || sysProcAttr.Credential.Uid == 0) {
+		parent, err := os.Stat(filepath.Dir(path))
+		if err == nil && parent.Mode()&os.ModeSticky != 0 && parent.Mode().Perm()&0022 != 0 {
+			f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+			if err == nil {
+				_, writeErr := io.Copy(f, src)
+				closeErr := f.Close()
+				if err := errors.Join(writeErr, closeErr); err != nil {
+					_ = os.Remove(path)
+					return err
+				}
+				return nil
+			}
+			if !allowOverwrite || !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			// A root-owned regular entry cannot be replaced by another account in this parent.
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != 0 || info.Mode().Perm()&0022 != 0 {
+				return fmt.Errorf("root transfer requires a root-owned regular file: %s", path)
+			}
+			if info.Sys().(*syscall.Stat_t).Nlink != 1 {
+				return fmt.Errorf("root transfer requires a file with one link: %s", path)
+			}
+		}
+	}
 	if sysProcAttr == nil {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return err
 		}
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		f, err := os.OpenFile(path, transferOpenFlags(allowOverwrite), 0644)
 		if err != nil {
 			return err
 		}
@@ -213,9 +257,6 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 	cmd.Stderr = errW
 	runErr := cmd.Run()
 
-	// erc.err is only ever non-nil alongside a non-nil runErr: cmd.Wait returns the stdin-copy
-	// goroutine's error on a clean exit, and the process's own exit error otherwise. The
-	// fallback after this block guards that invariant instead of relying on it silently.
 	if runErr != nil {
 		// erc.err alone does not prove tee opened path: a tee that cannot open a pre-existing
 		// file still drains stdin to EOF and exits nonzero, so a source read failure can arrive
@@ -255,4 +296,138 @@ func fileHelperEnvironment(attr *syscall.SysProcAttr) ([]string, error) {
 		}
 	}
 	return env, err
+}
+
+func fileExistsAs(ctx context.Context, path string, attr *syscall.SysProcAttr) (bool, error) {
+	if attr == nil {
+		return utils.FileExists(path), nil
+	}
+	return fileTestAs(ctx, path, attr, `test -e "$1" || test -L "$1"`)
+}
+
+func fileIsDirAs(ctx context.Context, path string, attr *syscall.SysProcAttr) (bool, error) {
+	if attr == nil {
+		info, err := os.Stat(path)
+		return err == nil && info.IsDir(), err
+	}
+	dir, err := fileTestAs(ctx, path, attr, `test -e "$1" || exit 2; test -d "$1"`)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 2 {
+		return false, fmt.Errorf("source path is missing or inaccessible: %s", path)
+	}
+	return dir, err
+}
+
+func fileTestAs(ctx context.Context, path string, attr *syscall.SysProcAttr, script string) (bool, error) {
+	cmd := fileHelperCommand(ctx, "/bin/sh", "-c", script, "sh", path)
+	cmd.SysProcAttr = attr
+	env, err := fileHelperEnvironment(attr)
+	if err != nil {
+		return false, err
+	}
+	cmd.Env = env
+	err = cmd.Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func validateTransferDestination(path string, attr *syscall.SysProcAttr) error {
+	uid := uint32(os.Geteuid())
+	if attr != nil && attr.Credential != nil {
+		uid = attr.Credential.Uid
+	}
+	if uid != 0 {
+		return nil
+	}
+	return validateRootTransferPath(path)
+}
+
+func validateRootTransferPath(path string) error {
+	pending := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	current := "/"
+	sticky := []bool{false}
+	links := 0
+	followsFinalLink := false
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if current != "/" {
+				current = filepath.Dir(current)
+				sticky = sticky[:len(sticky)-1]
+			}
+			continue
+		}
+
+		next := filepath.Join(current, part)
+		onProcfs, err := rootTransferOnProcfs(next)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("cannot verify root transfer destination filesystem %s: %w", next, err)
+		}
+		if onProcfs {
+			return fmt.Errorf("root transfer destination cannot use procfs: %s", next)
+		}
+		stickyParent := sticky[len(sticky)-1]
+		final := len(pending) == 0
+		info, err := os.Lstat(next)
+		// Only a direct destination in a sticky directory gets an exclusive create.
+		if errors.Is(err, os.ErrNotExist) && (!stickyParent || final && !followsFinalLink) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("cannot verify root transfer destination %s: %w", next, err)
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || st.Uid != 0 {
+			if info.IsDir() {
+				return fmt.Errorf("root transfer requires a root-owned directory: %s; run the transfer as the directory's owner", next)
+			}
+			return fmt.Errorf("root transfer requires a root-owned destination: %s", next)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if stickyParent {
+				return fmt.Errorf("root transfer requires a symbolic link in a directory writable only by root: %s", next)
+			}
+			links++
+			if links > 40 {
+				return fmt.Errorf("too many symbolic links in root transfer destination: %s", path)
+			}
+			followsFinalLink = followsFinalLink || final
+			target, err := os.Readlink(next)
+			if err != nil {
+				return fmt.Errorf("cannot read symbolic link %s: %w", next, err)
+			}
+			if filepath.IsAbs(target) {
+				current = "/"
+				sticky = sticky[:1]
+			}
+			// Resolve components in order. Cleaning a link target first could skip
+			// directories or links the kernel traverses before processing "..".
+			pending = append(strings.Split(target, "/"), pending...)
+			continue
+		}
+		if final && stickyParent && followsFinalLink && !info.Mode().IsRegular() {
+			return fmt.Errorf("root transfer requires a regular file in a shared sticky directory: %s", next)
+		}
+		if final && info.Mode().IsRegular() && st.Nlink != 1 {
+			return fmt.Errorf("root transfer requires a file with one link: %s", next)
+		}
+		writable := info.Mode().Perm()&0022 != 0
+		stickyDir := info.IsDir() && info.Mode()&os.ModeSticky != 0 && writable
+		if writable && !stickyDir {
+			return fmt.Errorf("root transfer requires a destination writable only by root: %s", next)
+		}
+		if !final && !info.IsDir() {
+			return fmt.Errorf("root transfer destination component is not a directory: %s", next)
+		}
+		current = next
+		sticky = append(sticky, stickyDir)
+	}
+	return nil
 }

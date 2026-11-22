@@ -1,7 +1,12 @@
 package runner
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -21,6 +26,20 @@ func TestEditorRequiresGroup(t *testing.T) {
 	manager, err := NewCodeServerManager(t.Context(), "account", "")
 	assert.EqualError(t, err, "groupname is required")
 	assert.Nil(t, manager)
+}
+
+func TestFindEditorTar(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing")
+	binary := filepath.Join(dir, "tar")
+	require.NoError(t, os.WriteFile(binary, nil, 0700))
+	found, err := findEditorTar([]string{missing, binary})
+	if runtime.GOOS != "windows" {
+		require.NoError(t, err)
+		assert.Equal(t, binary, found)
+	}
+	_, err = findEditorTar([]string{missing, dir})
+	assert.ErrorContains(t, err, "requires tar")
 }
 
 func TestEditorDarwinNonRootKeepsCurrentUser(t *testing.T) {
@@ -202,29 +221,37 @@ func TestWaitForReadyChecksTheExitBeforeTheDial(t *testing.T) {
 	assert.ErrorContains(t, m.waitForReady(waitDone), "exited unexpectedly")
 }
 
-func TestCodeServerInstallArgs(t *testing.T) {
-	cases := []struct {
-		name   string
-		goos   string
-		isRoot bool
-		want   []string
-	}{
-		{"root macOS installs standalone under its own prefix", "darwin", true, []string{"-s", "--", "--method", "standalone", "--prefix", "/opt/alpamon/code-server"}},
-		{"non-root macOS keeps the script defaults", "darwin", false, nil},
-		{"root Linux keeps the package manager install", "linux", true, nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := codeServerInstallArgs(tc.goos, tc.isRoot)
-
-			assert.Equal(t, tc.want, got)
-		})
+func TestDownloadEditorArchive(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/blocked" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, "http://example.invalid/", http.StatusFound)
+			return
+		}
+		_, _ = io.WriteString(w, "editor")
+	}))
+	defer server.Close()
+	sum := sha256.Sum256([]byte("editor"))
+	for _, tc := range []struct{ url, digest, want string }{
+		{server.URL, fmt.Sprintf("%x", sum), ""}, {server.URL, "wrong", "SHA-256 mismatch"},
+		{server.URL + "/blocked", "", "outbound HTTPS to github.com and release-assets.githubusercontent.com"},
+		{server.URL + "/redirect", "", "requires HTTPS"}, {"http://example.invalid", "", "requires HTTPS"},
+	} {
+		err := downloadEditorArchive(t.Context(), tc.url, tc.digest, io.Discard, server.Client().Transport)
+		if tc.want == "" {
+			require.NoError(t, err)
+		} else {
+			require.ErrorContains(t, err, tc.want)
+		}
 	}
 }
 
 func TestEditorSocketBasePaths(t *testing.T) {
 	assert.Equal(t, "/run/alpamon-editor", editorSocketBase("linux", 0, "/run/alpamon"))
-	assert.Equal(t, "/var/run/alpamon-editor", editorSocketBase("darwin", 0, "/var/run/alpamon"))
+	assert.Equal(t, "/private/var/alpamon-editor", editorSocketBase("darwin", 0, "/var/run/alpamon"))
 	assert.Equal(t, filepath.Join("/tmp/alpamon", "editor"), editorSocketBase("linux", 1000, "/tmp/alpamon"))
 }
 
@@ -261,4 +288,34 @@ func TestEditorNonRootRefusesAnotherAccount(t *testing.T) {
 	id, err := lookupUserForCodeServer(other, "root")
 	assert.ErrorContains(t, err, "agent must run as the requested account or root")
 	assert.Nil(t, id)
+}
+
+func writeEditorRuntimeFixture(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range []string{"bin/code-server", "lib/node", "package.json", "out/node/entry.js"} {
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, nil, 0755))
+	}
+}
+
+func TestPublishEditorReleaseRepairsMissingRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("code-server is unavailable on Windows")
+	}
+	parent := t.TempDir()
+	release := filepath.Join(parent, "release")
+	stage := filepath.Join(parent, "stage")
+	writeEditorRuntimeFixture(t, release)
+	writeEditorRuntimeFixture(t, stage)
+
+	for _, name := range []string{"lib/node", "package.json", "out/node/entry.js"} {
+		path := filepath.Join(release, name)
+		require.NoError(t, os.Remove(path))
+		assert.ErrorIs(t, checkEditorRuntime(release), os.ErrNotExist)
+		require.NoError(t, os.WriteFile(path, nil, 0755))
+	}
+	require.NoError(t, os.Remove(filepath.Join(release, "lib", "node")))
+	require.NoError(t, publishEditorRelease(stage, release, false))
+	require.NoError(t, checkEditorRuntime(release))
 }

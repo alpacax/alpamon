@@ -164,7 +164,7 @@ func (h *FileHandler) handleUpload(ctx context.Context, args *common.CommandArgs
 		return 1, err.Error()
 	}
 
-	paths, bulk, recursive, err := h.parsePaths(homeDirectory, args.Paths)
+	paths, bulk, recursive, err := h.parsePaths(ctx, homeDirectory, args.Paths, sysProcAttr)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to parse paths")
 		return 1, err.Error()
@@ -284,12 +284,24 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	}
 	args.Path = downloadPath
 
-	if !args.AllowOverwrite && utils.FileExists(args.Path) {
-		return 1, fmt.Sprintf("%s already exists.", args.Path)
+	if err := validateTransferDestination(args.Path, sysProcAttr); err != nil {
+		return 1, err.Error()
+	}
+	if !args.AllowOverwrite {
+		exists, err := fileExistsAs(ctx, args.Path, sysProcAttr)
+		if err != nil {
+			return 1, err.Error()
+		}
+		if exists {
+			return 1, fmt.Sprintf("%s already exists.", args.Path)
+		}
 	}
 
 	// Write file, preserving privilege demotion on Unix when available.
-	if err := writeFileAs(ctx, args.Path, src, sysProcAttr); err != nil {
+	if err := writeFileAs(ctx, args.Path, src, sysProcAttr, args.AllowOverwrite); err != nil {
+		if !args.AllowOverwrite && errors.Is(err, os.ErrExist) {
+			return 1, fmt.Sprintf("%s already exists.", args.Path)
+		}
 		log.Error().Err(err).Msg("Failed to write file.")
 		if os.IsPermission(err) || errors.Is(err, syscall.EACCES) {
 			return 1, "You do not have permission to write to the directory, or directory does not exist"
@@ -397,7 +409,7 @@ func (h *FileHandler) demoteWithHomeDir(username, groupname string, validateGrou
 // and Alpacon RBAC (both platforms) handle access control. Returns
 // the sanitized native paths plus bulk/recursive flags inferred from
 // the input.
-func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]string, bool, bool, error) {
+func (h *FileHandler) parsePaths(ctx context.Context, homeDirectory string, pathList []string, attr *syscall.SysProcAttr) ([]string, bool, bool, error) {
 	paths := make([]string, len(pathList))
 	for i, path := range pathList {
 		// Paths from the web client arrive in wire format (POSIX-like
@@ -426,11 +438,11 @@ func (h *FileHandler) parsePaths(homeDirectory string, pathList []string) ([]str
 	isRecursive := false
 
 	if !isBulk {
-		fileInfo, err := os.Stat(paths[0])
+		dir, err := fileIsDirAs(ctx, paths[0], attr)
 		if err != nil {
 			return nil, false, false, err
 		}
-		isRecursive = fileInfo.IsDir()
+		isRecursive = dir
 	}
 
 	return paths, isBulk, isRecursive, nil
@@ -636,4 +648,11 @@ func (l *limitedReadCloser) Read(p []byte) (int, error) {
 
 func (l *limitedReadCloser) Close() error {
 	return l.rc.Close()
+}
+
+func transferOpenFlags(overwrite bool) int {
+	if overwrite {
+		return os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	return os.O_WRONLY | os.O_CREATE | os.O_EXCL
 }

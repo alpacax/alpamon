@@ -1,14 +1,21 @@
 package signing
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -128,7 +135,8 @@ func TestKeyManager_ExpiresAt(t *testing.T) {
 
 	// Simulate expires_at having passed
 	km.mu.Lock()
-	km.expiresAt = time.Now().Add(-1 * time.Second)
+	km.expiresAt = new(time.Now().Add(-time.Second))
+	km.lastFetch = km.expiresAt.Add(-time.Second)
 	km.mu.Unlock()
 
 	_, err = km.GetPublicKey()
@@ -248,6 +256,9 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, pub2, key2)
 	assert.Equal(t, int32(2), fetchCount.Load())
+	_, err = km.GetPublicKeyForKID("unknown")
+	require.ErrorContains(t, err, `active: "key-v2"`)
+	assert.EqualValues(t, 3, fetchCount.Load())
 }
 
 // The AI server's public-key endpoint reads `env`; a name it does not know is
@@ -279,4 +290,255 @@ func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	q = lastQuery.Load()
 	require.NotNil(t, q)
 	assert.NotContains(t, *q, "env")
+}
+
+func TestSigningKeyExpiryBounds(t *testing.T) {
+	pub, _ := testKey(t)
+	resp := testKeyResponse(pub, "test")
+	resp.ExpiresAt = "invalid"
+	server, _ := keyServer(t, resp)
+	invalid := NewKeyManager(server.URL, 7200, "", server.Client())
+	_, err := invalid.GetPublicKey()
+	require.ErrorContains(t, err, "invalid signing key expiry")
+	assert.Nil(t, invalid.publicKey)
+	manager := KeyManager{refreshSecs: 7200, lastFetch: time.Now().Add(-time.Hour), expiresAt: new(time.Now().Add(time.Hour))}
+	assert.True(t, manager.needsRefresh())
+}
+
+func TestSigningKeyRefreshFailure(t *testing.T) {
+	pub, _ := testKey(t)
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	now := time.Now()
+	for _, tc := range []struct {
+		name    string
+		expiry  *time.Time
+		wantKey bool
+	}{
+		{"valid", new(now.Add(30 * 24 * time.Hour)), true},
+		{"expired", new(now.Add(-time.Minute)), false},
+		{"no expiry", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewKeyManager(server.URL, 3*3600, "", server.Client())
+			manager.publicKey, manager.keyID = pub, "test"
+			manager.lastFetch, manager.expiresAt = now.Add(-2*time.Hour), tc.expiry
+			before := attempts.Load()
+			for _, get := range []func() (ed25519.PublicKey, error){
+				manager.GetPublicKey,
+				func() (ed25519.PublicKey, error) { return manager.GetPublicKeyForKID("test") },
+			} {
+				key, err := get()
+				if tc.wantKey {
+					require.NoError(t, err)
+					assert.Equal(t, pub, key)
+				} else {
+					require.ErrorContains(t, err, "503")
+					assert.Nil(t, key)
+				}
+			}
+			assert.Equal(t, before+2, attempts.Load())
+		})
+	}
+}
+
+func TestSigningKeyServerExpiry(t *testing.T) {
+	pub, _ := testKey(t)
+	var logs bytes.Buffer
+	original := log.Logger
+	log.Logger = zerolog.New(&logs)
+	t.Cleanup(func() { log.Logger = original })
+	for _, expiry := range []string{`"2000-01-01T00:00:00Z"`, `"0001-01-01T00:00:00Z"`, "null", ""} {
+		t.Run(expiry, func(t *testing.T) {
+			logs.Reset()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				field := ""
+				if expiry != "" {
+					field = `,"expires_at":` + expiry
+				}
+				_, err := fmt.Fprintf(w, `{"algorithm":"Ed25519","key_id":"test","public_key":%q%s}`, base64.StdEncoding.EncodeToString(pub), field)
+				assert.NoError(t, err)
+			}))
+			t.Cleanup(server.Close)
+			manager := NewKeyManager(server.URL, 3600, "", server.Client())
+			key, err := manager.GetPublicKey()
+			require.NoError(t, err)
+			assert.Equal(t, pub, key)
+			if expiry == "" || expiry == "null" {
+				assert.Nil(t, manager.expiresAt)
+				assert.NotContains(t, logs.String(), "signing key expired")
+			} else {
+				require.NotNil(t, manager.expiresAt)
+				assert.Contains(t, logs.String(), "signing key expired at "+strings.Trim(expiry, `"`)+"; the server has not rotated it")
+			}
+		})
+	}
+}
+
+type signingRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f signingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestConcurrentSigningKeyLookupsShareFailedRefresh(t *testing.T) {
+	pub, _ := testKey(t)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var attempts atomic.Int32
+		client := &http.Client{Transport: signingRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if attempts.Add(1) == 1 {
+				close(started)
+			}
+			<-release
+			return nil, fmt.Errorf("signing key service unavailable")
+		})}
+		manager := NewKeyManager("https://example.invalid", 3600, "", client)
+		manager.publicKey, manager.keyID = pub, "test"
+		manager.lastFetch = time.Now().Add(-time.Hour)
+		manager.expiresAt = new(time.Now().Add(time.Hour))
+
+		first := make(chan ed25519.PublicKey, 1)
+		second := make(chan ed25519.PublicKey, 1)
+		go func() {
+			key, err := manager.GetPublicKey()
+			assert.NoError(t, err)
+			first <- key
+		}()
+		<-started
+		go func() {
+			key, err := manager.GetPublicKeyForKID("test")
+			assert.NoError(t, err)
+			second <- key
+		}()
+		synctest.Wait()
+		close(release)
+		assert.Equal(t, pub, <-first)
+		assert.Equal(t, pub, <-second)
+		assert.EqualValues(t, 1, attempts.Load())
+
+		time.Sleep(time.Hour)
+		key, err := manager.GetPublicKeyForKID("test")
+		require.ErrorContains(t, err, "signing key service unavailable")
+		assert.Nil(t, key)
+	})
+}
+
+func TestKeyManagerRefreshesAnExpiredServerKey(t *testing.T) {
+	oldKey, _ := testKey(t)
+	newKey, _ := testKey(t)
+	var fetches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if fetches.Add(1) == 1 {
+			response := testKeyResponse(oldKey, "old")
+			response.ExpiresAt = time.Now().Add(-time.Hour).Format(time.RFC3339)
+			writeKeyResponse(t, w, response)
+			return
+		}
+		writeKeyResponse(t, w, testKeyResponse(newKey, "new"))
+	}))
+	t.Cleanup(server.Close)
+
+	var logs bytes.Buffer
+	original := log.Logger
+	log.Logger = zerolog.New(&logs)
+	t.Cleanup(func() { log.Logger = original })
+	manager := NewKeyManager(server.URL, 3600, "", server.Client())
+
+	key, err := manager.GetPublicKeyForKID("old")
+	require.NoError(t, err)
+	assert.Equal(t, oldKey, key)
+	assert.Contains(t, logs.String(), "signing key expired")
+
+	_, err = manager.GetPublicKeyForKID("old")
+	require.ErrorContains(t, err, `active: "new"`)
+	key, err = manager.GetPublicKeyForKID("new")
+	require.NoError(t, err)
+	assert.Equal(t, newKey, key)
+	assert.EqualValues(t, 2, fetches.Load())
+}
+
+func TestKeyManagerRotationLookupAfterInFlightRefresh(t *testing.T) {
+	oldKey, _ := testKey(t)
+	newKey, _ := testKey(t)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var fetches atomic.Int32
+		newResponse := signingKeyHTTPResponse(newKey, "new")
+		client := &http.Client{Transport: signingRoundTripper(func(*http.Request) (*http.Response, error) {
+			if fetches.Add(1) == 1 {
+				response := signingKeyHTTPResponse(oldKey, "old")
+				close(started)
+				<-release
+				return response, nil
+			}
+			return newResponse, nil
+		})}
+		manager := NewKeyManager("https://example.invalid", 3600, "", client)
+		manager.publicKey, manager.keyID, manager.lastFetch = oldKey, "old", time.Now()
+		refreshed := make(chan error, 1)
+		go func() {
+			_, err := manager.RefreshAndGet()
+			refreshed <- err
+		}()
+		<-started
+		lookedUp := make(chan error, 1)
+		go func() {
+			key, err := manager.GetPublicKeyForKID("new")
+			assert.Equal(t, newKey, key)
+			lookedUp <- err
+		}()
+		synctest.Wait()
+		close(release)
+
+		require.NoError(t, <-refreshed)
+		require.NoError(t, <-lookedUp)
+		assert.EqualValues(t, 2, fetches.Load())
+	})
+}
+
+func TestKeyManagerRotationCooldownIsPerKID(t *testing.T) {
+	oldKey, _ := testKey(t)
+	newKey, _ := testKey(t)
+	synctest.Test(t, func(t *testing.T) {
+		fetches := 0
+		activeKey, activeKID := oldKey, "old"
+		client := &http.Client{Transport: signingRoundTripper(func(*http.Request) (*http.Response, error) {
+			fetches++
+			return signingKeyHTTPResponse(activeKey, activeKID), nil
+		})}
+		manager := NewKeyManager("https://example.invalid", 3600, "", client)
+		manager.publicKey, manager.keyID, manager.lastFetch = oldKey, "old", time.Now()
+
+		_, err := manager.GetPublicKeyForKID("unknown")
+		require.ErrorContains(t, err, `active: "old"`)
+		assert.Equal(t, 1, fetches)
+
+		activeKey, activeKID = newKey, "new"
+		key, err := manager.GetPublicKeyForKID("new")
+		require.NoError(t, err)
+		assert.Equal(t, newKey, key)
+		for range 5 {
+			_, err := manager.GetPublicKeyForKID("unknown")
+			require.ErrorContains(t, err, `active: "new"`)
+		}
+		assert.Equal(t, 2, fetches)
+
+		time.Sleep(time.Second)
+		_, err = manager.GetPublicKeyForKID("unknown")
+		require.ErrorContains(t, err, `active: "new"`)
+		assert.Equal(t, 3, fetches)
+	})
+}
+
+func signingKeyHTTPResponse(key ed25519.PublicKey, kid string) *http.Response {
+	recorder := httptest.NewRecorder()
+	_, _ = fmt.Fprintf(recorder, `{"algorithm":"Ed25519","key_id":%q,"public_key":%q}`, kid, base64.StdEncoding.EncodeToString(key))
+	return recorder.Result()
 }

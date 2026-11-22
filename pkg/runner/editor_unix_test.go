@@ -1072,14 +1072,14 @@ func TestEditorDarwinRootDemotesToPrimaryGroup(t *testing.T) {
 }
 
 func TestLookupCodeServerPath_DarwinRootIgnoresPATH(t *testing.T) {
-	if _, err := os.Stat(darwinRootCodeServerPrefix); err == nil {
+	if _, err := os.Stat(rootCodeServerPrefix); err == nil {
 		t.Skip("this host has the root macOS install")
 	}
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "code-server"), []byte("#!/bin/sh\n"), 0755))
 	t.Setenv("PATH", bin)
 
-	path, err := lookupCodeServerPath("darwin", true)
+	path, err := lookupCodeServerPath("darwin", true, func() (string, error) { return bin, nil })
 
 	assert.ErrorContains(t, err, "code-server not found")
 	assert.Empty(t, path)
@@ -1091,7 +1091,7 @@ func TestLookupCodeServerPath_OthersSearchPATH(t *testing.T) {
 	require.NoError(t, os.WriteFile(want, []byte("#!/bin/sh\n"), 0755))
 	t.Setenv("PATH", bin)
 
-	path, err := lookupCodeServerPath("linux", true)
+	path, err := lookupCodeServerPath("linux", true, func() (string, error) { return bin, nil })
 
 	require.NoError(t, err)
 	assert.Equal(t, want, path)

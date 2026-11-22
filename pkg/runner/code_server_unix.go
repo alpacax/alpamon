@@ -410,3 +410,89 @@ func validateEditorRunDir(parent *os.Root, euid uint32) error {
 	}
 	return nil
 }
+
+func prepareEditorReleaseParent(prefix string) error {
+	if os.Geteuid() != 0 {
+		return os.MkdirAll(prefix, 0700)
+	}
+	return checkRootReleaseDir(prefix, true)
+}
+
+func checkRootReleaseDir(dir string, create bool) error {
+	if parent := filepath.Dir(dir); parent != dir {
+		if err := checkRootReleaseDir(parent, create); err != nil {
+			return err
+		}
+	}
+	info, err := os.Lstat(dir)
+	if create && errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir(dir, 0755); err == nil {
+			if err := os.Chmod(dir, 0755); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		info, err = os.Lstat(dir)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0022 != 0 || info.Mode().Perm()&0001 == 0 || info.Sys().(*syscall.Stat_t).Uid != 0 {
+		return fmt.Errorf("editor install directory must be owned and writable only by root: %s", dir)
+	}
+	return nil
+}
+
+func verifyEditorRelease(dir string) error {
+	if err := checkRootReleaseDir(dir, false); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			rel, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			if _, err := root.Stat(rel); err != nil {
+				return fmt.Errorf("invalid editor release link %s: %w", rel, err)
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0022 != 0 || info.Sys().(*syscall.Stat_t).Uid != 0 {
+			return fmt.Errorf("editor release entry must be owned and writable only by root: %s", path)
+		}
+		return nil
+	})
+}
+
+func checkEditorRelease(dir string) error {
+	for _, subdir := range []string{"bin", "lib", "out/node"} {
+		if err := checkRootReleaseDir(filepath.Join(dir, subdir), false); err != nil {
+			return err
+		}
+	}
+	for _, name := range []string{editorReleaseMarker, "bin/code-server", "lib/node", "package.json", "out/node/entry.js"} {
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != 0 || info.Mode().Perm()&0022 != 0 {
+			return fmt.Errorf("invalid code-server release file: %s", path)
+		}
+	}
+	return checkEditorRuntime(dir)
+}

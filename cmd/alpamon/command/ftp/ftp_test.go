@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/runner"
@@ -150,4 +151,10 @@ func TestConfigDataRejectsURLArgumentWithCurrentPayload(t *testing.T) {
 	args := []string{"--ca-cert-stdin", "--", "wss://console.invalid/argv", "https://console.invalid", "/home/u"}
 	_, err := parseWorkerArgs(t, args, strings.NewReader(`{"URL":"wss://console.invalid/stdin"}`))
 	assert.ErrorContains(t, err, "invalid worker configuration arguments")
+}
+
+func TestWorkerInputReadFailure(t *testing.T) {
+	args := runner.FtpWorkerArgs("https://console.invalid", "/home/u", true)
+	_, err := parseWorkerArgs(t, args[1:], iotest.ErrReader(io.ErrUnexpectedEOF))
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
