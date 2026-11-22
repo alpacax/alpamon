@@ -355,10 +355,11 @@ func TestDeleteUserForgetFailure(t *testing.T) {
 	utils.PlatformLike = "debian"
 	t.Cleanup(func() { utils.PlatformLike = saved })
 	require.NoError(t, os.Mkdir(f.l.store.path, 0700))
-	code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy", PurgeHomeDirectory: true})
+	keep := "keep"
+	code, output, err := f.h.Execute(context.Background(), "deluser", &common.CommandArgs{Username: "deploy", Home: &keep})
 	require.NoError(t, err)
 	assert.Zero(t, code, output)
-	assert.Contains(t, output, "deleted successfully")
+	assert.Contains(t, output, "deleted; home directory kept at")
 }
 
 func TestLockFilesRejectSymlinks(t *testing.T) {
@@ -662,9 +663,9 @@ func TestAccountCleanupRetries(t *testing.T) {
 			require.NoError(t, f.l.files.write(path, "[Unit]\n", 0644, 0755))
 			if command == "deluser" {
 				f.h.lookupUser = common.AbsentUserLookup
-				f.exec.SetResult("/usr/sbin/deluser --remove-home deploy", 6, "user does not exist", nil)
+				f.exec.SetResult("/usr/sbin/userdel deploy", 6, "user does not exist", nil)
 			}
-			code, output, err := f.h.Execute(context.Background(), command, &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}, PurgeHomeDirectory: true})
+			code, output, err := f.h.Execute(context.Background(), command, &common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}})
 			require.NoError(t, err)
 			if command == "deluser" {
 				assert.Equal(t, 6, code)
