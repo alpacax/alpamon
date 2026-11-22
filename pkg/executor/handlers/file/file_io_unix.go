@@ -229,9 +229,6 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		}
 		return err
 	}
-	if !allowOverwrite && runtime.GOOS != "darwin" {
-		return writeFileExclusiveAs(ctx, path, src, sysProcAttr)
-	}
 	parentDir := filepath.Dir(path)
 	createdRoot := firstMissingAncestor(parentDir)
 	// Only a target this call created may be removed on failure, and only under the
@@ -287,70 +284,6 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		return fmt.Errorf("failed to read source: %w", erc.err)
 	}
 	return nil
-}
-
-// writeFileExclusiveAs publishes a complete download by linking its temporary
-// file into place. Both the staging and publication run as the requester.
-func writeFileExclusiveAs(ctx context.Context, path string, src io.Reader, attr *syscall.SysProcAttr) error {
-	env, err := fileHelperEnvironment(attr)
-	if err != nil {
-		return err
-	}
-	run := func(stdin io.Reader, script string, args ...string) ([]byte, error) {
-		cmd := fileHelperCommand(ctx, "/bin/sh", append([]string{"-c", script, "sh"}, args...)...)
-		cmd.SysProcAttr = attr
-		cmd.Env = env
-		cmd.Stdin = stdin
-		stderr := &stderrCap{cap: stderrCapSize}
-		cmd.Stderr = stderr
-		output, err := cmd.Output()
-		if err != nil && strings.TrimSpace(stderr.buf.String()) != "" {
-			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.buf.String()))
-		}
-		return output, err
-	}
-
-	parent := filepath.Dir(path)
-	output, err := run(nil, `mkdir -p -- "$1" && umask 077 && mktemp "$1/.alpamon-download.XXXXXXXXXX"`, parent)
-	temp := strings.TrimSuffix(string(output), "\n")
-	if temp != "" {
-		defer removeAsRequester(ctx, temp, attr)
-	}
-	if err != nil {
-		return err
-	}
-	if temp == "" {
-		return errors.New("mktemp returned no path")
-	}
-
-	// Wait for both the input copy and the writer before publishing.
-	reader := &errCapReader{r: src}
-	_, err = run(reader, `cat > "$1"`, temp)
-	if reader.err != nil {
-		return fmt.Errorf("failed to read source: %w", reader.err)
-	}
-	if err != nil {
-		return err
-	}
-
-	_, err = run(nil, exclusiveLinkScript(), temp, path)
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 17 {
-		return &os.PathError{Op: "create", Path: path, Err: os.ErrExist}
-	}
-	return err
-}
-
-func exclusiveLinkScript() string {
-	command := "link"
-	if runtime.GOOS == "linux" {
-		command = "ln -T --"
-	}
-	return `export LC_ALL=C
-if message=$(` + command + ` "$1" "$2" 2>&1); then exit 0; fi
-case "$message" in *": File exists") exit 17;; esac
-printf '%s\n' "$message" >&2
-exit 1`
 }
 
 // fileHelperEnvironment pins PATH to the system directories, so the mkdir, tee and rm

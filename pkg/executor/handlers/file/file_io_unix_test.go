@@ -5,18 +5,17 @@ package file
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"testing/iotest"
 
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -220,9 +219,6 @@ func TestRootOnly_WriteFileAsCreatesParentsAsUser(t *testing.T) {
 		got, err := os.ReadFile(path)
 		require.NoError(t, err)
 		assert.Equal(t, "payload", string(got))
-		if !overwrite && runtime.GOOS != "darwin" {
-			require.ErrorIs(t, writeFileAs(t.Context(), path, strings.NewReader("other"), attr, false), os.ErrExist)
-		}
 	}
 }
 
@@ -365,123 +361,20 @@ func TestRootOnly_StickyDestinationHonorsOverwrite(t *testing.T) {
 	assert.Equal(t, "one", string(data))
 }
 
-func TestWriteFileAsConcurrentExclusiveCreates(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("macOS uses the requester tee path")
-	}
-	path := filepath.Join(t.TempDir(), "download")
+func TestFileDownloadAsRequesterWithoutOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "download")
+	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
 	attr := &syscall.SysProcAttr{}
-	ready := make(chan struct{}, 2)
-	start := make(chan struct{})
-	original := fileHelperCommand
-	t.Cleanup(func() { fileHelperCommand = original })
-	fileHelperCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		if name == "/bin/sh" && len(args) >= 2 && strings.HasPrefix(args[1], "mkdir -p") {
-			ready <- struct{}{}
-			<-start
-		}
-		return original(ctx, name, args...)
-	}
+	args := &common.CommandArgs{Type: "text", Path: path, Content: "payload"}
 
-	type result struct {
-		payload string
-		err     error
-	}
-	results := make(chan result, 2)
-	for _, payload := range []string{"first download", "second download"} {
-		go func() {
-			err := writeFileAs(t.Context(), path, strings.NewReader(payload), attr, false)
-			results <- result{payload: payload, err: err}
-		}()
-	}
-	<-ready
-	<-ready
-	close(start)
+	code, msg := handler.fileDownload(t.Context(), args, attr)
+	require.Zero(t, code, "%s", msg)
 
-	winner, loser := <-results, <-results
-	if winner.err != nil {
-		winner, loser = loser, winner
-	}
-	require.NoError(t, winner.err)
-	require.ErrorIs(t, loser.err, os.ErrExist)
+	args.Content = "replacement"
+	code, msg = handler.fileDownload(t.Context(), args, attr)
+	require.Equal(t, 1, code)
+	assert.Equal(t, path+" already exists.", msg)
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.Equal(t, winner.payload, string(data))
-	info, err := os.Stat(path)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
-	entries, err := os.ReadDir(filepath.Dir(path))
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.Equal(t, "download", entries[0].Name())
-}
-
-func TestWriteFileAsExclusiveDestinationAppears(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("macOS uses the requester tee path")
-	}
-	for _, entry := range []string{"fifo", "directory", "symlink"} {
-		t.Run(entry, func(t *testing.T) {
-			parent := t.TempDir()
-			path := filepath.Join(parent, "download")
-			original := fileHelperCommand
-			t.Cleanup(func() { fileHelperCommand = original })
-			var fifo *os.File
-			fileHelperCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-				if name == "/bin/sh" && len(args) >= 2 && args[1] == exclusiveLinkScript() {
-					switch entry {
-					case "fifo":
-						require.NoError(t, syscall.Mkfifo(path, 0600))
-						fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
-						require.NoError(t, err)
-						fifo = os.NewFile(uintptr(fd), path)
-						t.Cleanup(func() { assert.NoError(t, fifo.Close()) })
-					case "directory":
-						require.NoError(t, os.Mkdir(path, 0700))
-					case "symlink":
-						require.NoError(t, os.Symlink("missing", path))
-					}
-				}
-				return original(ctx, name, args...)
-			}
-
-			err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{}, false)
-			require.ErrorIs(t, err, os.ErrExist)
-			if fifo != nil {
-				var buf [32]byte
-				n, err := syscall.Read(int(fifo.Fd()), buf[:])
-				require.NoError(t, err)
-				assert.Zero(t, n)
-			}
-			if entry == "directory" {
-				children, err := os.ReadDir(path)
-				require.NoError(t, err)
-				assert.Empty(t, children)
-			}
-			entries, err := os.ReadDir(parent)
-			require.NoError(t, err)
-			require.Len(t, entries, 1)
-			assert.Equal(t, "download", entries[0].Name())
-		})
-	}
-}
-
-func TestWriteFileAsExclusiveReadFailurePreservesDestination(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("macOS uses the requester tee path")
-	}
-	parent := t.TempDir()
-	path := filepath.Join(parent, "download")
-	require.NoError(t, os.WriteFile(path, []byte("original"), 0600))
-	sourceErr := errors.New("interrupted download")
-	src := io.MultiReader(strings.NewReader("partial payload"), iotest.ErrReader(sourceErr))
-	err := writeFileAs(t.Context(), path, src, &syscall.SysProcAttr{}, false)
-	require.ErrorIs(t, err, sourceErr)
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	assert.Equal(t, "original", string(data))
-	entries, err := os.ReadDir(parent)
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.Equal(t, "download", entries[0].Name())
+	assert.Equal(t, "payload", string(data))
 }
