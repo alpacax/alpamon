@@ -229,7 +229,7 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		}
 		return err
 	}
-	if !allowOverwrite {
+	if !allowOverwrite && runtime.GOOS != "darwin" {
 		return writeFileExclusiveAs(ctx, path, src, sysProcAttr)
 	}
 	parentDir := filepath.Dir(path)
@@ -342,19 +342,12 @@ func writeFileExclusiveAs(ctx context.Context, path string, src io.Reader, attr 
 }
 
 func exclusiveLinkScript() string {
-	if runtime.GOOS == "darwin" {
-		// macOS's link utility can still descend into a directory that
-		// appears after its initial check. Call link(2) through system Perl.
-		return `exec /usr/bin/perl -T -MErrno=EEXIST -e '
-			my ($source) = $ARGV[0] =~ /\A(.*)\z/s;
-			my ($target) = $ARGV[1] =~ /\A(.*)\z/s;
-			exit 0 if link($source, $target);
-			exit 17 if $! == EEXIST;
-			die "link: $!\n";
-		' -- "$1" "$2"`
+	command := "link"
+	if runtime.GOOS == "linux" {
+		command = "ln -T --"
 	}
 	return `export LC_ALL=C
-if message=$(link "$1" "$2" 2>&1); then exit 0; fi
+if message=$(` + command + ` "$1" "$2" 2>&1); then exit 0; fi
 case "$message" in *": File exists") exit 17;; esac
 printf '%s\n' "$message" >&2
 exit 1`

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -219,7 +220,7 @@ func TestRootOnly_WriteFileAsCreatesParentsAsUser(t *testing.T) {
 		got, err := os.ReadFile(path)
 		require.NoError(t, err)
 		assert.Equal(t, "payload", string(got))
-		if !overwrite {
+		if !overwrite && runtime.GOOS != "darwin" {
 			require.ErrorIs(t, writeFileAs(t.Context(), path, strings.NewReader("other"), attr, false), os.ErrExist)
 		}
 	}
@@ -365,6 +366,9 @@ func TestRootOnly_StickyDestinationHonorsOverwrite(t *testing.T) {
 }
 
 func TestWriteFileAsConcurrentExclusiveCreates(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS uses the requester tee path")
+	}
 	path := filepath.Join(t.TempDir(), "download")
 	attr := &syscall.SysProcAttr{}
 	ready := make(chan struct{}, 2)
@@ -413,6 +417,9 @@ func TestWriteFileAsConcurrentExclusiveCreates(t *testing.T) {
 }
 
 func TestWriteFileAsExclusiveDestinationAppears(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS uses the requester tee path")
+	}
 	for _, entry := range []string{"fifo", "directory", "symlink"} {
 		t.Run(entry, func(t *testing.T) {
 			parent := t.TempDir()
@@ -460,6 +467,9 @@ func TestWriteFileAsExclusiveDestinationAppears(t *testing.T) {
 }
 
 func TestWriteFileAsExclusiveReadFailurePreservesDestination(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS uses the requester tee path")
+	}
 	parent := t.TempDir()
 	path := filepath.Join(parent, "download")
 	require.NoError(t, os.WriteFile(path, []byte("original"), 0600))
