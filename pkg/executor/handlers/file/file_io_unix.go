@@ -302,7 +302,7 @@ func fileExistsAs(ctx context.Context, path string, attr *syscall.SysProcAttr) (
 	if attr == nil {
 		return utils.FileExists(path), nil
 	}
-	return fileTestAs(ctx, path, attr, `test -e "$1"`)
+	return fileTestAs(ctx, path, attr, `test -e "$1" || test -L "$1"`)
 }
 
 func fileIsDirAs(ctx context.Context, path string, attr *syscall.SysProcAttr) (bool, error) {

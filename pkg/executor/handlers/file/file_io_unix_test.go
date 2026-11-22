@@ -323,12 +323,34 @@ func TestFileExistsAsUsesShellBuiltin(t *testing.T) {
 	t.Cleanup(func() { fileHelperCommand = original })
 	fileHelperCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		assert.Equal(t, "/bin/sh", name)
-		assert.Equal(t, []string{"-c", `test -e "$1"`, "sh", path}, args)
+		assert.Equal(t, []string{"-c", `test -e "$1" || test -L "$1"`, "sh", path}, args)
 		return original(ctx, name, args...)
 	}
 	exists, err := fileExistsAs(t.Context(), path, &syscall.SysProcAttr{})
 	require.NoError(t, err)
 	assert.True(t, exists)
+}
+
+func TestFileDownloadRejectsDanglingDestinationSymlink(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires a non-root requester")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "destination")
+	target := filepath.Join(dir, "target")
+	require.NoError(t, os.Symlink(target, path))
+
+	args := &common.CommandArgs{
+		Path:           path,
+		Type:           "text",
+		Content:        "payload",
+		AllowOverwrite: false,
+	}
+	code, message := (&FileHandler{}).fileDownload(t.Context(), args, &syscall.SysProcAttr{})
+	assert.Equal(t, 1, code)
+	assert.Equal(t, args.Path+" already exists.", message)
+	_, err := os.Lstat(target)
+	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestRootTransferRejectsMultipleLinks(t *testing.T) {
