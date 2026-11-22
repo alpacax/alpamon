@@ -342,39 +342,85 @@ func validateTransferDestination(path string, attr *syscall.SysProcAttr) error {
 	if uid != 0 {
 		return nil
 	}
+	return validateRootTransferPath(path)
+}
+
+func validateRootTransferPath(path string) error {
+	pending := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	current := "/"
-	if runtime.GOOS == "darwin" {
-		for _, alias := range []string{"/tmp", "/var", "/etc"} {
-			if strings.HasPrefix(path, alias+"/") {
-				target, err := os.Readlink(alias)
-				if err == nil && (target == "private"+alias || target == "/private"+alias) {
-					path = "/private" + path
-				}
-				break
+	sticky := []bool{false}
+	links := 0
+	followsFinalLink := false
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if current != "/" {
+				current = filepath.Dir(current)
+				sticky = sticky[:len(sticky)-1]
 			}
+			continue
 		}
-	}
-	stickyParent := false
-	for _, part := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) && (!stickyParent || current == path) {
+
+		next := filepath.Join(current, part)
+		stickyParent := sticky[len(sticky)-1]
+		final := len(pending) == 0
+		info, err := os.Lstat(next)
+		// Only a direct destination in a sticky directory gets an exclusive create.
+		if errors.Is(err, os.ErrNotExist) && (!stickyParent || final && !followsFinalLink) {
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("cannot verify root transfer destination %s: %w", current, err)
+			return fmt.Errorf("cannot verify root transfer destination %s: %w", next, err)
 		}
 		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || st.Uid != 0 || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("root transfer requires a root-owned destination without symbolic links: %s", current)
+		if !ok || st.Uid != 0 {
+			if info.IsDir() {
+				return fmt.Errorf("root transfer requires a root-owned directory: %s; run the transfer as the directory's owner", next)
+			}
+			return fmt.Errorf("root transfer requires a root-owned destination: %s", next)
 		}
-		if current == path && info.Mode().IsRegular() && st.Nlink != 1 {
-			return fmt.Errorf("root transfer requires a file with one link: %s", current)
+		if info.Mode()&os.ModeSymlink != 0 {
+			if stickyParent {
+				return fmt.Errorf("root transfer requires a symbolic link in a directory writable only by root: %s", next)
+			}
+			links++
+			if links > 40 {
+				return fmt.Errorf("too many symbolic links in root transfer destination: %s", path)
+			}
+			followsFinalLink = followsFinalLink || final
+			target, err := os.Readlink(next)
+			if err != nil {
+				return fmt.Errorf("cannot read symbolic link %s: %w", next, err)
+			}
+			if filepath.IsAbs(target) {
+				current = "/"
+				sticky = sticky[:1]
+			}
+			// Resolve components in order. Cleaning a link target first could skip
+			// directories or links the kernel traverses before processing "..".
+			pending = append(strings.Split(target, "/"), pending...)
+			continue
 		}
-		stickyParent = info.IsDir() && info.Mode()&os.ModeSticky != 0 && info.Mode().Perm()&0022 != 0
-		if info.Mode().Perm()&0022 != 0 && !stickyParent {
-			return fmt.Errorf("root transfer requires a destination writable only by root: %s", current)
+		if final && stickyParent && followsFinalLink && !info.Mode().IsRegular() {
+			return fmt.Errorf("root transfer requires a regular file in a shared sticky directory: %s", next)
 		}
+		if final && info.Mode().IsRegular() && st.Nlink != 1 {
+			return fmt.Errorf("root transfer requires a file with one link: %s", next)
+		}
+		writable := info.Mode().Perm()&0022 != 0
+		stickyDir := info.IsDir() && info.Mode()&os.ModeSticky != 0 && writable
+		if writable && !stickyDir {
+			return fmt.Errorf("root transfer requires a destination writable only by root: %s", next)
+		}
+		if !final && !info.IsDir() {
+			return fmt.Errorf("root transfer destination component is not a directory: %s", next)
+		}
+		current = next
+		sticky = append(sticky, stickyDir)
 	}
 	return nil
 }

@@ -681,7 +681,7 @@ func lookupCodeServerPath(goos string, isRoot bool) (string, error) {
 	}
 	if goos == "darwin" && isRoot {
 		path := filepath.Join(rootCodeServerPrefix, "bin", "code-server")
-		if _, err := os.Stat(path); err != nil {
+		if !isExecutableFile(path) {
 			return "", fmt.Errorf("code-server not found")
 		}
 		return path, nil
@@ -694,19 +694,24 @@ func lookupCodeServerPath(goos string, isRoot bool) (string, error) {
 	if !isRoot {
 		if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
 			path := filepath.Join(home, ".local", "bin", "code-server")
-			if _, err := os.Stat(path); err == nil {
+			if isExecutableFile(path) {
 				return path, nil
 			}
 		}
 	}
 
 	for _, path := range codeServerPaths {
-		if _, err := os.Stat(path); err == nil {
+		if isExecutableFile(path) {
 			return path, nil
 		}
 	}
 
 	return "", fmt.Errorf("code-server not found")
+}
+
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0
 }
 
 // codeServerInstallMu serializes installs across editor sessions, which share one install dir.
@@ -806,6 +811,8 @@ func installCodeServer(parentCtx context.Context) error {
 			return err
 		}
 		cmd := exec.CommandContext(ctx, tar, "-xzf", "-", "--no-same-owner", "--strip-components=1", "-C", stage)
+		// GNU tar resolves gzip through PATH. Use the same system directories as tar lookup.
+		cmd.Env = append(cmd.Environ(), "PATH=/usr/bin:/bin")
 		cmd.Stdin = archive
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("extract code-server archive: %w", err)

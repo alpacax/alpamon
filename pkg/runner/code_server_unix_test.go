@@ -5,7 +5,10 @@ package runner
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -315,4 +318,60 @@ func TestLookupCodeServerPathFindsPerUserInstall(t *testing.T) {
 	found, err := lookupCodeServerPath("linux", false)
 	require.NoError(t, err)
 	assert.Equal(t, path, found)
+}
+
+func TestLookupCodeServerPathSkipsInvalidPerUserInstall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	path := filepath.Join(home, ".local", "bin", "code-server")
+	system := filepath.Join(t.TempDir(), "code-server")
+	require.NoError(t, os.WriteFile(system, nil, 0755))
+	saved := codeServerPaths
+	codeServerPaths = []string{system}
+	t.Cleanup(func() { codeServerPaths = saved })
+	require.NoError(t, os.MkdirAll(path, 0755))
+
+	found, err := lookupCodeServerPath("linux", false)
+	require.NoError(t, err)
+	assert.Equal(t, system, found)
+
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.WriteFile(path, nil, 0644))
+	found, err = lookupCodeServerPath("linux", false)
+	require.NoError(t, err)
+	assert.Equal(t, system, found)
+}
+
+func TestCodeServerKeepsInheritedUmask(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getuid() == 0 {
+		t.Skip("root on macOS uses a fixed code-server install")
+	}
+	home := t.TempDir()
+	bin := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", bin)
+	output := filepath.Join(home, "umask")
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "code-server"), []byte("#!/bin/sh\numask > umask\n"), 0755))
+
+	want, err := exec.CommandContext(t.Context(), "/bin/sh", "-c", "umask").Output()
+	require.NoError(t, err)
+	userDataDir, err := setupUserDataDir(t.Context(), home, "", "")
+	require.NoError(t, err)
+	socketDir := filepath.Join(home, "sockets", "session")
+	m := &CodeServerManager{homeDir: home, socketPath: filepath.Join(socketDir, "editor.sock")}
+	require.NoError(t, prepareEditorSocketDir(m))
+	t.Cleanup(func() { _ = m.socketRoot.Close() })
+
+	cmd, err := startCodeServerProcess(t.Context(), m, userDataDir)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Wait())
+	got, err := os.ReadFile(output)
+	require.NoError(t, err)
+	assert.Equal(t, strings.TrimSpace(string(want)), strings.TrimSpace(string(got)))
+	for _, dir := range []string{socketDir, userDataDir} {
+		info, err := os.Stat(dir)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0700), info.Mode().Perm(), dir)
+	}
 }

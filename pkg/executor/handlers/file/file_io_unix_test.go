@@ -298,6 +298,42 @@ func TestRootTransferDestinationOwnership(t *testing.T) {
 	require.ErrorContains(t, validateTransferDestination(target, root), "root-owned")
 }
 
+func TestRootTransferFollowsTrustedDirectoryLinks(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root-owned fixtures")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"usr/lib", "usr/bin", "run", "var", "srv", "data/link", "writable", "sticky"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, name), 0755))
+	}
+	for name, target := range map[string]string{
+		"lib": "usr/lib", "bin": "usr/bin", "var/run": "../run",
+		"srv/link":      filepath.Join(dir, "data/link"),
+		"writable/link": "../run", "sticky/link": "../run",
+		"srv/dangling": "../sticky/missing",
+		"srv/loop":     "loop",
+	} {
+		require.NoError(t, os.Symlink(target, filepath.Join(dir, name)))
+	}
+	for _, name := range []string{"lib/x", "var/run/x", "bin/x", "srv/link/x"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name)
+			require.NoError(t, validateTransferDestination(path, nil))
+			require.NoError(t, writeFileAs(t.Context(), path, strings.NewReader(name), nil, false))
+		})
+	}
+	require.NoError(t, os.Chmod(filepath.Join(dir, "writable"), 0777))
+	require.NoError(t, os.Chmod(filepath.Join(dir, "sticky"), os.ModeSticky|0777))
+	assert.ErrorContains(t, validateTransferDestination(filepath.Join(dir, "writable/link/x"), nil), "writable only by root")
+	assert.ErrorContains(t, validateTransferDestination(filepath.Join(dir, "sticky/link/x"), nil), "writable only by root")
+	assert.ErrorIs(t, validateTransferDestination(filepath.Join(dir, "srv/dangling"), nil), os.ErrNotExist)
+	assert.ErrorContains(t, validateTransferDestination(filepath.Join(dir, "srv/loop"), nil), "too many symbolic links")
+
+	uid, gid := nobodyIDs(t)
+	require.NoError(t, os.Chown(filepath.Join(dir, "data/link"), uid, gid))
+	assert.ErrorContains(t, validateTransferDestination(filepath.Join(dir, "srv/link/x"), nil), "run the transfer as the directory's owner")
+}
+
 func TestFileExistsAsRequester(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires credential switching")

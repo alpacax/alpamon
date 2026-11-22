@@ -39,7 +39,7 @@ func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataD
 	}
 
 	args := getCodeServerArgs(m.socketPath, userDataDir)
-	cmd := exec.CommandContext(ctx, "/bin/sh", append([]string{"-c", `umask 077; exec "$@"`, "sh", codeServerPath}, args...)...)
+	cmd := exec.CommandContext(ctx, codeServerPath, args...)
 	cmd.Dir = m.homeDir
 
 	cmd.Env = getCodeServerEnv(m.homeDir, runtime.GOOS != "darwin", m.username)
