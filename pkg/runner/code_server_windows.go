@@ -23,3 +23,9 @@ func prepareEditorSocketDir(m *CodeServerManager) error {
 func validateEditorPeer(conn *net.UnixConn, attr *syscall.SysProcAttr) error {
 	return fmt.Errorf("code-server is not supported on Windows")
 }
+
+func prepareEditorReleaseParent(string) error {
+	return fmt.Errorf("code-server is not supported on Windows")
+}
+
+func verifyEditorRelease(string) error { return fmt.Errorf("code-server is not supported on Windows") }

@@ -266,3 +266,23 @@ func TestLockCodeServerPrefix_RefusesAGroupWritableParent(t *testing.T) {
 	_, statErr := os.Stat(prefix)
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
 }
+
+func TestManagedEditorReleasePermissions(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root-owned install directory")
+	}
+	// Use a directory on the same trust boundary as the production install.
+	parent, err := os.MkdirTemp("/opt", "alpamon-editor-test-")
+	if err != nil {
+		t.Skipf("no writable install location: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(parent) }()
+	require.NoError(t, os.Chmod(parent, 0755))
+	release := filepath.Join(parent, "release")
+	require.NoError(t, prepareEditorReleaseParent(release))
+	require.NoError(t, verifyEditorRelease(release))
+	nested := filepath.Join(release, "lib")
+	require.NoError(t, os.Mkdir(nested, 0755))
+	require.NoError(t, os.Chmod(nested, os.ModeSticky|0777))
+	require.ErrorContains(t, verifyEditorRelease(release), "only by root")
+}

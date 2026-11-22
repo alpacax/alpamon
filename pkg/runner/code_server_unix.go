@@ -39,7 +39,7 @@ func startCodeServerProcess(ctx context.Context, m *CodeServerManager, userDataD
 	}
 
 	args := getCodeServerArgs(m.socketPath, userDataDir)
-	cmd := exec.CommandContext(ctx, codeServerPath, args...)
+	cmd := exec.CommandContext(ctx, "/bin/sh", append([]string{"-c", `umask 077; exec "$@"`, "sh", codeServerPath}, args...)...)
 	cmd.Dir = m.homeDir
 
 	cmd.Env = getCodeServerEnv(m.homeDir, runtime.GOOS != "darwin", m.username)
@@ -409,4 +409,72 @@ func validateEditorRunDir(parent *os.Root, euid uint32) error {
 		return fmt.Errorf("editor RunDir must be owned by the agent or root and not writable by group or other")
 	}
 	return nil
+}
+
+func prepareEditorReleaseParent(prefix string) error {
+	if os.Geteuid() != 0 {
+		return os.MkdirAll(prefix, 0700)
+	}
+	return ensureRootReleaseDir(prefix)
+}
+
+// Validate the existing parent before creating each missing component.
+func ensureRootReleaseDir(dir string) error {
+	if parent := filepath.Dir(dir); parent != dir {
+		if err := ensureRootReleaseDir(parent); err != nil {
+			return err
+		}
+	}
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir(dir, 0755); err == nil {
+			if err := os.Chmod(dir, 0755); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		info, err = os.Lstat(dir)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0022 != 0 || info.Mode().Perm()&0001 == 0 || info.Sys().(*syscall.Stat_t).Uid != 0 {
+		return fmt.Errorf("editor install directory must be owned and writable only by root: %s", dir)
+	}
+	return nil
+}
+
+func verifyEditorRelease(dir string) error {
+	if err := ensureRootReleaseDir(dir); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			rel, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			if _, err := root.Stat(rel); err != nil {
+				return fmt.Errorf("invalid editor release link %s: %w", rel, err)
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0022 != 0 || info.Sys().(*syscall.Stat_t).Uid != 0 {
+			return fmt.Errorf("editor release entry must be owned and writable only by root: %s", path)
+		}
+		return nil
+	})
 }

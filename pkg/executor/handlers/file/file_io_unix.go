@@ -4,11 +4,13 @@ package file
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -162,17 +164,44 @@ done`, "sh", dir)
 // writeFileAs streams src to a file, demoting via tee when sysProcAttr is set. Caller owns src.
 // path must already be absolute: callers sanitize it via utils.SanitizePath, which rejects
 // null bytes, UNC/device prefixes, and literal ".." after cleaning.
-func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr) error {
+func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr, allowOverwrite bool) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("invalid argument: path must be absolute: %s", path)
 	}
 	// No-op for the absolute path SanitizePath produces; it is the sanitizer shape CodeQL recognizes.
 	path = filepath.Clean("/" + path)
+	// Write new files in shared sticky directories through an exclusive descriptor.
+	if os.Geteuid() == 0 && (sysProcAttr == nil || sysProcAttr.Credential == nil || sysProcAttr.Credential.Uid == 0) {
+		parent, err := os.Stat(filepath.Dir(path))
+		if err == nil && parent.Mode()&os.ModeSticky != 0 && parent.Mode().Perm()&0022 != 0 {
+			f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+			if err == nil {
+				_, writeErr := io.Copy(f, src)
+				closeErr := f.Close()
+				if err := errors.Join(writeErr, closeErr); err != nil {
+					_ = os.Remove(path)
+					return err
+				}
+				return nil
+			}
+			if !allowOverwrite || !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			// A root-owned regular entry cannot be replaced by another account in this parent.
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != 0 || info.Mode().Perm()&0022 != 0 {
+				return fmt.Errorf("root transfer requires a root-owned regular file: %s", path)
+			}
+		}
+	}
 	if sysProcAttr == nil {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return err
 		}
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		f, err := os.OpenFile(path, transferOpenFlags(allowOverwrite), 0644)
 		if err != nil {
 			return err
 		}
@@ -255,4 +284,66 @@ func fileHelperEnvironment(attr *syscall.SysProcAttr) ([]string, error) {
 		}
 	}
 	return env, err
+}
+
+func fileExistsAs(ctx context.Context, path string, attr *syscall.SysProcAttr) (bool, error) {
+	if attr == nil {
+		return utils.FileExists(path), nil
+	}
+	cmd := fileHelperCommand(ctx, "/bin/test", "-e", path)
+	cmd.SysProcAttr = attr
+	env, err := fileHelperEnvironment(attr)
+	if err != nil {
+		return false, err
+	}
+	cmd.Env = env
+	err = cmd.Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// Check each existing component before allowing a root write.
+func validateTransferDestination(path string, attr *syscall.SysProcAttr) error {
+	uid := uint32(os.Geteuid())
+	if attr != nil && attr.Credential != nil {
+		uid = attr.Credential.Uid
+	}
+	if uid != 0 {
+		return nil
+	}
+	current := "/"
+	if runtime.GOOS == "darwin" {
+		for _, alias := range []string{"/tmp", "/var", "/etc"} {
+			if strings.HasPrefix(path, alias+"/") {
+				target, err := os.Readlink(alias)
+				if err == nil && (target == "private"+alias || target == "/private"+alias) {
+					path = "/private" + path
+				}
+				break
+			}
+		}
+	}
+	stickyParent := false
+	for _, part := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) && (!stickyParent || current == path) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("cannot verify root transfer destination %s: %w", current, err)
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || st.Uid != 0 || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("root transfer requires a root-owned destination without symbolic links: %s", current)
+		}
+		stickyParent = info.IsDir() && info.Mode()&os.ModeSticky != 0 && info.Mode().Perm()&0022 != 0
+		if info.Mode().Perm()&0022 != 0 && !stickyParent {
+			return fmt.Errorf("root transfer requires a destination writable only by root: %s", current)
+		}
+	}
+	return nil
 }

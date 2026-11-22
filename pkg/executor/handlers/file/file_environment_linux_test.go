@@ -42,7 +42,7 @@ func TestFileWriterDoesNotInheritAgentEnvironment(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "sh"), []byte("#!/bin/sh\nprintf '%s' \"$ALPAMON_HELPER_SENTINEL\" > \""+filepath.Join(dir, "observed")+"\"\n"), 0700))
 	t.Setenv("PATH", dir)
 	stubFileHelpers(t, dir)
-	require.NoError(t, writeFileAs(t.Context(), filepath.Join(dir, "output"), strings.NewReader("content"), &syscall.SysProcAttr{}))
+	require.NoError(t, writeFileAs(t.Context(), filepath.Join(dir, "output"), strings.NewReader("content"), &syscall.SysProcAttr{}, true))
 	got, err := os.ReadFile(filepath.Join(dir, "observed"))
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -102,7 +102,7 @@ func TestFileHelpersIgnoreInheritedCommandPath(t *testing.T) {
 	t.Setenv("PATH", dir)
 	path := filepath.Join(dir, "new", "output")
 	attr := &syscall.SysProcAttr{}
-	require.NoError(t, writeFileAs(t.Context(), path, strings.NewReader("content"), attr))
+	require.NoError(t, writeFileAs(t.Context(), path, strings.NewReader("content"), attr, true))
 	reader, _, err := readFileAs(t.Context(), path, attr)
 	require.NoError(t, err)
 	got, err := io.ReadAll(reader)

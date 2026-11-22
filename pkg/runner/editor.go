@@ -1,9 +1,9 @@
 package runner
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,8 +36,7 @@ type CodeServerConfig struct {
 	IdleTimeout    time.Duration
 
 	// Paths
-	UserDataDirName  string
-	InstallScriptURL string
+	UserDataDirName string
 
 	// Daemon settings (config.yaml)
 	Auth               string
@@ -84,8 +83,7 @@ var defaultConfig = &CodeServerConfig{
 	IdleTimeout:    1 * time.Hour,
 
 	// Paths
-	UserDataDirName:  ".alpamon-editor",
-	InstallScriptURL: "https://code-server.dev/install.sh",
+	UserDataDirName: ".alpamon-editor",
 
 	// Daemon settings
 	Auth:               "none",
@@ -224,9 +222,9 @@ func (c *CodeServerConfig) ToEnv(homeDir string, includeXDG bool, username strin
 	return env
 }
 
-// darwinRootCodeServerPrefix is where a root macOS Alpamon installs code-server: a root-owned tree
+// rootCodeServerPrefix is where a root agent installs code-server, in a root-owned tree
 // outside /usr/local, whose subdirs Homebrew hands to an admin account on Intel Macs.
-const darwinRootCodeServerPrefix = "/opt/alpamon/code-server"
+const rootCodeServerPrefix = "/opt/alpamon/code-server"
 
 // Common installation paths for code-server
 var codeServerPaths = []string{
@@ -273,7 +271,7 @@ type CodeServerManager struct {
 }
 
 // NewCodeServerManager runs the editor as the requested user for root agents.
-// A non-root agent runs the editor as itself, whatever user was requested.
+// A non-root agent can start an editor only for its own account.
 func NewCodeServerManager(parentCtx context.Context, username, groupname string) (*CodeServerManager, error) {
 	id, err := lookupUserForCodeServer(username, groupname)
 	if err != nil {
@@ -664,8 +662,19 @@ func getCodeServerPath() (string, error) {
 // lookupCodeServerPath limits a root macOS host to its own install, since a binary on PATH or under
 // Homebrew may be one another account can change.
 func lookupCodeServerPath(goos string, isRoot bool) (string, error) {
+	if prefix, err := editorInstallPrefix(); err == nil {
+		candidate := filepath.Join(prefix, "v"+editorReleaseVersion, "bin", "code-server")
+		if _, err := os.Stat(candidate); err == nil {
+			if isRoot {
+				if err := verifyEditorRelease(filepath.Dir(filepath.Dir(candidate))); err != nil {
+					return "", err
+				}
+			}
+			return candidate, nil
+		}
+	}
 	if goos == "darwin" && isRoot {
-		path := filepath.Join(darwinRootCodeServerPrefix, "bin", "code-server")
+		path := filepath.Join(rootCodeServerPrefix, "bin", "code-server")
 		if _, err := os.Stat(path); err != nil {
 			return "", fmt.Errorf("code-server not found")
 		}
@@ -683,15 +692,6 @@ func lookupCodeServerPath(goos string, isRoot bool) (string, error) {
 	}
 
 	return "", fmt.Errorf("code-server not found")
-}
-
-// codeServerInstallArgs keeps a root macOS install out of /var/root, which demoted users cannot read,
-// and off Homebrew, which refuses to run as root.
-func codeServerInstallArgs(goos string, isRoot bool) []string {
-	if goos == "darwin" && isRoot {
-		return []string{"-s", "--", "--method", "standalone", "--prefix", darwinRootCodeServerPrefix}
-	}
-	return nil
 }
 
 // codeServerInstallMu serializes installs across editor sessions, which share one install dir.
@@ -716,75 +716,127 @@ func ensureCodeServerInstalled(ctx context.Context) error {
 	return nil
 }
 
-// installCodeServer installs code-server using the official install script.
-func installCodeServer(parentCtx context.Context) error {
-	cfg := GetCodeServerConfig()
-	ctx, cancel := context.WithTimeout(parentCtx, cfg.InstallTimeout)
-	defer cancel()
+const editorReleaseVersion = "4.146.0"
 
-	script, err := downloadInstallScript(cfg.InstallScriptURL)
+var editorReleaseDigests = map[string]string{
+	"linux-amd64": "cf7e82ca5fe1df664d43a43d900c3c9710f8f3403a5e8d0e18f6a12d10d7401b",
+	"linux-arm64": "3df88f7f1feecce3583ab0109c5f6bf14f90ae3a44939b4257ccd9850ef37a6e",
+	"macos-amd64": "57f4df733efc49651c7174eb32cf165c355e56aa96d307bfec5b482d33bfcbb3",
+	"macos-arm64": "aaf5fc548965bf9d9142951083877ac7391e13d1b4df3d2dbcfd739231250ea3",
+}
+
+func editorInstallPrefix() (string, error) {
+	if os.Geteuid() == 0 {
+		return rootCodeServerPrefix, nil
+	}
+	usr, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(usr.HomeDir, ".local", "lib", "alpamon", "code-server"), nil
+}
+
+func installCodeServer(parentCtx context.Context) error {
+	ctx, cancel := context.WithTimeout(parentCtx, GetCodeServerConfig().InstallTimeout)
+	defer cancel()
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	platform += "-" + runtime.GOARCH
+	digest, ok := editorReleaseDigests[platform]
+	if !ok {
+		return fmt.Errorf("no pinned code-server release for %s", platform)
+	}
+	prefix, err := editorInstallPrefix()
 	if err != nil {
 		return err
 	}
-
-	cmd := exec.CommandContext(ctx, "sh", codeServerInstallArgs(runtime.GOOS, os.Getuid() == 0)...)
-	cmd.Stdin = bytes.NewReader(script)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// HOME is required by install script but not set in systemd service
-	homeDir := "/root"
-	if runtime.GOOS == "darwin" {
-		usr, err := user.Current()
-		if err != nil {
-			log.Error().Err(err).Msg("failed to determine current user on macOS")
-			return fmt.Errorf("failed to determine current user on macOS: %w", err)
-		}
-		homeDir = usr.HomeDir
+	archive, err := os.CreateTemp("", "alpamon-editor-*.tar.gz")
+	if err != nil {
+		return err
 	}
-
-	env := os.Environ()
-	cmd.Env = make([]string, 0, len(env)+1)
-	for _, e := range env {
-		if !strings.HasPrefix(e, "HOME=") {
-			cmd.Env = append(cmd.Env, e)
-		}
+	defer func() { _ = os.Remove(archive.Name()) }()
+	defer func() { _ = archive.Close() }()
+	asset := "code-server-" + editorReleaseVersion + "-" + platform + ".tar.gz"
+	if err := downloadEditorArchive(ctx, "https://github.com/coder/code-server/releases/download/v"+editorReleaseVersion+"/"+asset, digest, archive, http.DefaultTransport); err != nil {
+		return err
 	}
-	cmd.Env = append(cmd.Env, fmt.Sprintf("HOME=%s", homeDir))
-
-	run := func() error {
+	if err := prepareEditorReleaseParent(prefix); err != nil {
+		return err
+	}
+	stage, err := os.MkdirTemp(prefix, "release-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(stage) }()
+	install := func() error {
+		if _, err := archive.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		cmd := exec.CommandContext(ctx, "/usr/bin/tar", "-xzf", "-", "--no-same-owner", "--strip-components=1", "-C", stage)
+		cmd.Stdin = archive
 		if err := cmd.Run(); err != nil {
-			log.Error().Err(err).Msg("code-server install script failed.")
-			return fmt.Errorf("install script failed: %w", err)
+			return fmt.Errorf("extract code-server archive: %w", err)
+		}
+		info, err := os.Stat(filepath.Join(stage, "bin", "code-server"))
+		if err != nil {
+			return fmt.Errorf("missing code-server executable: %w", err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+			return errors.New("code-server release is missing its executable")
 		}
 		return nil
 	}
-	if runtime.GOOS == "darwin" && os.Getuid() == 0 {
-		return installRootOwnedCodeServer(darwinRootCodeServerPrefix, 0, 0, run)
+	if os.Geteuid() == 0 {
+		err = installRootOwnedCodeServer(stage, 0, 0, install)
+	} else {
+		err = install()
 	}
-	return run()
+	if err != nil {
+		return err
+	}
+	return os.Rename(stage, filepath.Join(prefix, "v"+editorReleaseVersion))
 }
 
-func downloadInstallScript(url string) ([]byte, error) {
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-	resp, err := client.Get(url)
+func downloadEditorArchive(ctx context.Context, location, digest string, dst io.Writer, transport http.RoundTripper) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, location, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download install script: %w", err)
+		return err
+	}
+	if req.URL.Scheme != "https" {
+		return errors.New("code-server download requires HTTPS")
+	}
+	client := http.Client{Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" {
+			return errors.New("code-server redirect requires HTTPS")
+		}
+		if len(via) >= 10 {
+			return errors.New("too many code-server redirects")
+		}
+		return nil
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("download code-server: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to download install script: HTTP %d", resp.StatusCode)
+		return fmt.Errorf("download code-server: HTTP %d", resp.StatusCode)
 	}
-
-	script, err := io.ReadAll(resp.Body)
+	hash := sha256.New()
+	const maxArchiveSize = 512 << 20
+	n, err := io.Copy(io.MultiWriter(dst, hash), io.LimitReader(resp.Body, maxArchiveSize+1))
+	if n > maxArchiveSize {
+		return fmt.Errorf("code-server archive exceeds %d bytes", maxArchiveSize)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to read install script: %w", err)
+		return fmt.Errorf("read code-server archive: %w", err)
 	}
-
-	return script, nil
+	if fmt.Sprintf("%x", hash.Sum(nil)) != digest {
+		return errors.New("code-server archive SHA-256 mismatch")
+	}
+	return nil
 }
 
 // getCodeServerArgs returns the command line arguments for code-server.
@@ -922,7 +974,7 @@ func editorSocketBase(goos string, euid int, runDir string) string {
 		return filepath.Join(runDir, "editor")
 	}
 	if goos == "darwin" {
-		return "/var/run/alpamon-editor"
+		return "/private/var/alpamon-editor"
 	}
 	return "/run/alpamon-editor"
 }

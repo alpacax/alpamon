@@ -24,14 +24,14 @@ func TestWriteFileAs_TeePath_CreatesParentDir(t *testing.T) {
 		t.Run(strings.ReplaceAll(dir, "/", "_"), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), dir, "out 'file'.bin")
 			// Select the subprocess branch without changing credentials or requiring root.
-			err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{})
+			err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{}, true)
 			require.NoError(t, err)
 			assert.DirExists(t, filepath.Dir(path))
 			got, err := os.ReadFile(path)
 			require.NoError(t, err)
 			assert.Equal(t, "payload", string(got))
 
-			err = writeFileAs(t.Context(), path, strings.NewReader("next"), &syscall.SysProcAttr{})
+			err = writeFileAs(t.Context(), path, strings.NewReader("next"), &syscall.SysProcAttr{}, true)
 			require.NoError(t, err)
 			got, err = os.ReadFile(path)
 			require.NoError(t, err)
@@ -41,7 +41,7 @@ func TestWriteFileAs_TeePath_CreatesParentDir(t *testing.T) {
 }
 
 func TestWriteFileAs_RejectsNonAbsolutePath(t *testing.T) {
-	err := writeFileAs(t.Context(), "relative/x", strings.NewReader("payload"), nil)
+	err := writeFileAs(t.Context(), "relative/x", strings.NewReader("payload"), nil, true)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "absolute")
 }
@@ -55,7 +55,7 @@ func TestWriteFileAs_TeePath_RejectsUnwritableParent(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, os.Chmod(dir, 0700)) })
 	path := filepath.Join(dir, "missing", "out.bin")
 
-	err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{})
+	err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{}, true)
 	require.Error(t, err)
 	_, err = os.Stat(filepath.Dir(path))
 	assert.ErrorIs(t, err, os.ErrNotExist)
@@ -68,7 +68,7 @@ func TestWriteFileAs_TeePath_SurfacesTeeFailureAfterMkdirSucceeds(t *testing.T) 
 	path := filepath.Join(dir, "target")
 	require.NoError(t, os.Mkdir(path, 0755))
 
-	err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{})
+	err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{}, true)
 	require.Error(t, err)
 	// tee's "Is a directory" message is locale-dependent; the path it names is not.
 	assert.ErrorContains(t, err, path)
@@ -82,7 +82,7 @@ func TestWriteFileAs_TeePath_KeepsUnwritableTargetOnTeeFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "precious.conf")
 	require.NoError(t, os.WriteFile(path, []byte("ORIGINAL"), 0444))
 
-	err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{})
+	err := writeFileAs(t.Context(), path, strings.NewReader("payload"), &syscall.SysProcAttr{}, true)
 	require.Error(t, err)
 	got, readErr := os.ReadFile(path)
 	require.NoError(t, readErr)
@@ -96,7 +96,7 @@ func TestWriteFileAs_TeePath_KeepsUnwritableTargetOnSourceReadFailure(t *testing
 	path := filepath.Join(t.TempDir(), "precious.conf")
 	require.NoError(t, os.WriteFile(path, []byte("ORIGINAL"), 0444))
 
-	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("connection reset")), &syscall.SysProcAttr{})
+	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("connection reset")), &syscall.SysProcAttr{}, true)
 	require.Error(t, err)
 	got, readErr := os.ReadFile(path)
 	require.NoError(t, readErr)
@@ -107,7 +107,7 @@ func TestWriteFileAs_TeePath_LeavesTruncatedPreexistingTargetOnSourceReadFailure
 	path := filepath.Join(t.TempDir(), "out.bin")
 	require.NoError(t, os.WriteFile(path, []byte("ORIGINAL"), 0644))
 
-	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("boom")), &syscall.SysProcAttr{})
+	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("boom")), &syscall.SysProcAttr{}, true)
 	require.Error(t, err)
 	// tee opened and truncated it before the read failed, so the old content is gone either
 	// way; what matters is that createdTarget stays false and the file itself is not unlinked.
@@ -120,7 +120,7 @@ func TestWriteFileAs_TeePath_RemovesFreshTargetOnSourceReadFailure(t *testing.T)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
 
-	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("boom")), &syscall.SysProcAttr{})
+	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("boom")), &syscall.SysProcAttr{}, true)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "boom")
 	_, statErr := os.Stat(path)
@@ -171,7 +171,7 @@ func TestWriteFileAs_TeePath_RemovesDirsItCreatedOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "new", "nested", "out.bin")
 
-	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("boom")), &syscall.SysProcAttr{})
+	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("boom")), &syscall.SysProcAttr{}, true)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "boom")
 	_, statErr := os.Stat(filepath.Join(dir, "new"))
@@ -184,7 +184,7 @@ func TestWriteFileAs_TeePath_KeepsPreexistingParentOnFailure(t *testing.T) {
 	require.NoError(t, os.Mkdir(sub, 0755))
 	path := filepath.Join(sub, "out.bin")
 
-	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("boom")), &syscall.SysProcAttr{})
+	err := writeFileAs(t.Context(), path, iotest.ErrReader(errors.New("boom")), &syscall.SysProcAttr{}, true)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "boom")
 	assert.DirExists(t, sub)
@@ -206,7 +206,7 @@ func TestRootOnly_WriteFileAsCreatesParentsAsUser(t *testing.T) {
 	attr := &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
 	path := filepath.Join(dir, "nested", "deep", "out.bin")
 
-	require.NoError(t, writeFileAs(t.Context(), path, strings.NewReader("payload"), attr))
+	require.NoError(t, writeFileAs(t.Context(), path, strings.NewReader("payload"), attr, true))
 	for _, created := range []string{filepath.Join(dir, "nested"), filepath.Dir(path), path} {
 		st, err := os.Stat(created)
 		require.NoError(t, err)
@@ -255,7 +255,7 @@ func TestRootOnly_WriteFileAsCleanupCannotRemoveRootOwnedDirectory(t *testing.T)
 		return os.Symlink(otherParent, userParent)
 	}}
 	attr := &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
-	err = writeFileAs(t.Context(), filepath.Join(userParent, "new", "output"), source, attr)
+	err = writeFileAs(t.Context(), filepath.Join(userParent, "new", "output"), source, attr, true)
 	require.Error(t, err)
 	require.NoError(t, source.err)
 	require.Nil(t, source.swap, "ancestor swap must run")
@@ -280,4 +280,44 @@ func nobodyIDs(t *testing.T) (int, int) {
 	gid, err := strconv.ParseUint(usr.Gid, 10, 32)
 	require.NoError(t, err)
 	return int(uid), int(gid)
+}
+
+func TestRootTransferDestinationOwnership(t *testing.T) {
+	dir := t.TempDir()
+	root := &syscall.SysProcAttr{Credential: &syscall.Credential{}}
+	target := filepath.Join(dir, "file")
+	if os.Geteuid() != 0 {
+		require.ErrorContains(t, validateTransferDestination(target, root), "root-owned")
+		return
+	}
+	require.NoError(t, validateTransferDestination(target, root))
+	uid, gid := nobodyIDs(t)
+	require.NoError(t, os.Chown(dir, uid, gid))
+	require.ErrorContains(t, validateTransferDestination(target, root), "root-owned")
+}
+
+func TestFileExistsAsRequester(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires credential switching")
+	}
+	path := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(path, nil, 0600))
+	uid, gid := nobodyIDs(t)
+	exists, err := fileExistsAs(t.Context(), path, &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}})
+	require.NoError(t, err)
+	assert.False(t, exists)
+}
+
+func TestRootOnly_StickyDestinationHonorsOverwrite(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root transfer")
+	}
+	parent := t.TempDir()
+	require.NoError(t, os.Chmod(parent, os.ModeSticky|0777))
+	path := filepath.Join(parent, "staged")
+	require.NoError(t, writeFileAs(t.Context(), path, strings.NewReader("one"), nil, false))
+	require.ErrorIs(t, writeFileAs(t.Context(), path, strings.NewReader("two"), nil, false), os.ErrExist)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "one", string(data))
 }

@@ -280,3 +280,18 @@ func TestKeyManager_AuthEnvQueryParam(t *testing.T) {
 	require.NotNil(t, q)
 	assert.NotContains(t, *q, "env")
 }
+
+func TestSigningKeyExpiryBounds(t *testing.T) {
+	pub, _ := testKey(t)
+	for _, expiry := range []string{"invalid", "2000-01-01T00:00:00Z"} {
+		resp := testKeyResponse(pub, "test")
+		resp.ExpiresAt = expiry
+		server, _ := keyServer(t, resp)
+		manager := NewKeyManager(server.URL, 7200, "", server.Client())
+		_, err := manager.GetPublicKey()
+		require.Error(t, err)
+		assert.Nil(t, manager.publicKey)
+	}
+	manager := KeyManager{refreshSecs: 7200, lastFetch: time.Now().Add(-time.Hour), expiresAt: time.Now().Add(time.Hour)}
+	assert.True(t, manager.isExpired())
+}

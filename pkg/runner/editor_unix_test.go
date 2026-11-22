@@ -1072,7 +1072,7 @@ func TestEditorDarwinRootDemotesToPrimaryGroup(t *testing.T) {
 }
 
 func TestLookupCodeServerPath_DarwinRootIgnoresPATH(t *testing.T) {
-	if _, err := os.Stat(darwinRootCodeServerPrefix); err == nil {
+	if _, err := os.Stat(rootCodeServerPrefix); err == nil {
 		t.Skip("this host has the root macOS install")
 	}
 	bin := t.TempDir()

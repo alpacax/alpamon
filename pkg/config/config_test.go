@@ -5,6 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"bytes"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -144,4 +148,29 @@ func TestExcludeVirtualFromInventoryDefault(t *testing.T) {
 
 	assert.False(t, settings.ExcludeVirtualFromInventory,
 		"the interface inventory reports what it always has unless the setting asks otherwise")
+}
+
+func TestExplicitTLSVerification(t *testing.T) {
+	const warning = "TLS verification is off because [ssl] verify is not set; set verify = true and ca_cert, or verify = false explicitly"
+	original := log.Logger
+	t.Cleanup(func() { log.Logger = original })
+	for _, tc := range []struct {
+		section      string
+		warn, verify bool
+	}{
+		{"", true, false}, {"[ssl]", true, false}, {"[ssl]\nverify = invalid", true, false},
+		{"[ssl]\nverify = true", false, true}, {"[ssl]\nverify = false", false, false},
+	} {
+		var output bytes.Buffer
+		log.Logger = zerolog.New(&output)
+		path := filepath.Join(t.TempDir(), "agent.conf")
+		require.NoError(t, os.WriteFile(path, []byte("[server]\nurl = http://example.invalid\nid = id\nkey = key\n"+tc.section), 0600))
+		settings := LoadConfig([]string{path}, "/ws", "/control")
+		assert.Equal(t, tc.verify, settings.SSLVerify, tc.section)
+		if tc.warn {
+			assert.Contains(t, output.String(), warning)
+		} else {
+			assert.NotContains(t, output.String(), warning)
+		}
+	}
 }

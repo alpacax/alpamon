@@ -1,7 +1,12 @@
 package runner
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -202,29 +207,32 @@ func TestWaitForReadyChecksTheExitBeforeTheDial(t *testing.T) {
 	assert.ErrorContains(t, m.waitForReady(waitDone), "exited unexpectedly")
 }
 
-func TestCodeServerInstallArgs(t *testing.T) {
-	cases := []struct {
-		name   string
-		goos   string
-		isRoot bool
-		want   []string
-	}{
-		{"root macOS installs standalone under its own prefix", "darwin", true, []string{"-s", "--", "--method", "standalone", "--prefix", "/opt/alpamon/code-server"}},
-		{"non-root macOS keeps the script defaults", "darwin", false, nil},
-		{"root Linux keeps the package manager install", "linux", true, nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := codeServerInstallArgs(tc.goos, tc.isRoot)
-
-			assert.Equal(t, tc.want, got)
-		})
+func TestDownloadEditorArchive(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, "http://example.invalid/", http.StatusFound)
+			return
+		}
+		_, _ = io.WriteString(w, "editor")
+	}))
+	defer server.Close()
+	sum := sha256.Sum256([]byte("editor"))
+	for _, tc := range []struct{ url, digest, want string }{
+		{server.URL, fmt.Sprintf("%x", sum), ""}, {server.URL, "wrong", "SHA-256 mismatch"},
+		{server.URL + "/redirect", "", "requires HTTPS"}, {"http://example.invalid", "", "requires HTTPS"},
+	} {
+		err := downloadEditorArchive(t.Context(), tc.url, tc.digest, io.Discard, server.Client().Transport)
+		if tc.want == "" {
+			require.NoError(t, err)
+		} else {
+			require.ErrorContains(t, err, tc.want)
+		}
 	}
 }
 
 func TestEditorSocketBasePaths(t *testing.T) {
 	assert.Equal(t, "/run/alpamon-editor", editorSocketBase("linux", 0, "/run/alpamon"))
-	assert.Equal(t, "/var/run/alpamon-editor", editorSocketBase("darwin", 0, "/var/run/alpamon"))
+	assert.Equal(t, "/private/var/alpamon-editor", editorSocketBase("darwin", 0, "/var/run/alpamon"))
 	assert.Equal(t, filepath.Join("/tmp/alpamon", "editor"), editorSocketBase("linux", 1000, "/tmp/alpamon"))
 }
 

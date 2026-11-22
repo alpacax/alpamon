@@ -123,7 +123,7 @@ func (m *KeyManager) GetPublicKey() (ed25519.PublicKey, error) {
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return copyKey(m.publicKey), nil
+	return m.fetchedKey()
 }
 
 // GetPublicKeyForKID returns the cached key if its kid matches.
@@ -153,7 +153,7 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.publicKey != nil && m.keyID == kid {
-		return copyKey(m.publicKey), nil
+		return m.fetchedKey()
 	}
 	return nil, fmt.Errorf("key %q is not the active key for this environment (active: %q)", kid, m.keyID)
 }
@@ -161,12 +161,9 @@ func (m *KeyManager) GetPublicKeyForKID(kid string) (ed25519.PublicKey, error) {
 // isExpired reports whether the cached key should be refreshed.
 // Must be called with m.mu held (read or write).
 func (m *KeyManager) isExpired() bool {
-	// If AI server provided expires_at, use it
-	if !m.expiresAt.IsZero() {
-		return time.Now().After(m.expiresAt)
-	}
-	// Fall back to TTL-based refresh
-	return time.Since(m.lastFetch) >= time.Duration(m.refreshSecs)*time.Second
+	now := time.Now()
+	return (!m.expiresAt.IsZero() && !now.Before(m.expiresAt)) ||
+		now.Sub(m.lastFetch) >= min(time.Duration(m.refreshSecs)*time.Second, time.Hour)
 }
 
 func copyKey(key ed25519.PublicKey) ed25519.PublicKey {
@@ -203,7 +200,7 @@ func (m *KeyManager) RefreshAndGet() (ed25519.PublicKey, error) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return copyKey(m.publicKey), nil
+	return m.fetchedKey()
 }
 
 // fetchKey acquires the refresh lock and fetches unconditionally.
@@ -251,7 +248,10 @@ func (m *KeyManager) fetchKeyLocked() error {
 		return fmt.Errorf("public key response too large (>%d bytes)", maxResponseSize)
 	}
 
-	var keyResp publicKeyResponse
+	var keyResp struct {
+		publicKeyResponse
+		Expiry json.RawMessage `json:"expires_at"`
+	}
 	if err := json.Unmarshal(body, &keyResp); err != nil {
 		return fmt.Errorf("failed to parse public key response: %w", err)
 	}
@@ -275,22 +275,29 @@ func (m *KeyManager) fetchKeyLocked() error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := time.Now()
+	var expiry time.Time
+	if keyResp.Expiry != nil {
+		if err := json.Unmarshal(keyResp.Expiry, &expiry); err != nil {
+			return fmt.Errorf("invalid signing key expiry: %w", err)
+		}
+		if !expiry.After(now) {
+			return errors.New("signing key has expired")
+		}
+	}
 	m.publicKey = ed25519.PublicKey(keyBytes)
 	m.keyID = keyResp.KeyID
-	m.lastFetch = time.Now()
-
-	if keyResp.ExpiresAt != "" {
-		if t, err := time.Parse(time.RFC3339, keyResp.ExpiresAt); err == nil {
-			m.expiresAt = t
-			log.Debug().Str("key_id", keyResp.KeyID).Time("expires_at", t).Msg("Public signing key refreshed.")
-		} else {
-			log.Warn().Str("expires_at", keyResp.ExpiresAt).Msg("Failed to parse expires_at, falling back to TTL-based refresh.")
-			m.expiresAt = time.Time{}
-		}
-	} else {
-		m.expiresAt = time.Time{}
-		log.Debug().Str("key_id", keyResp.KeyID).Msg("Public signing key refreshed.")
-	}
+	m.lastFetch = now
+	m.expiresAt = expiry
+	log.Debug().Str("key_id", keyResp.KeyID).Msg("Public signing key refreshed.")
 
 	return nil
+}
+
+// fetchedKey checks the server expiry again under the read lock after refresh.
+func (m *KeyManager) fetchedKey() (ed25519.PublicKey, error) {
+	if !m.expiresAt.IsZero() && !time.Now().Before(m.expiresAt) {
+		return nil, errors.New("signing key has expired")
+	}
+	return copyKey(m.publicKey), nil
 }

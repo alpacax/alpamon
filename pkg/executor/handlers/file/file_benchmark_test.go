@@ -194,7 +194,7 @@ func BenchmarkDownload_E2E(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				err = writeFileAs(context.Background(), outPath, body, nil)
+				err = writeFileAs(context.Background(), outPath, body, nil, true)
 				_ = body.Close()
 				if err != nil {
 					b.Fatal(err)

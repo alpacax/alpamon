@@ -284,12 +284,21 @@ func (h *FileHandler) fileDownload(ctx context.Context, args *common.CommandArgs
 	}
 	args.Path = downloadPath
 
-	if !args.AllowOverwrite && utils.FileExists(args.Path) {
-		return 1, fmt.Sprintf("%s already exists.", args.Path)
+	if err := validateTransferDestination(args.Path, sysProcAttr); err != nil {
+		return 1, err.Error()
+	}
+	if !args.AllowOverwrite {
+		exists, err := fileExistsAs(ctx, args.Path, sysProcAttr)
+		if err != nil {
+			return 1, err.Error()
+		}
+		if exists {
+			return 1, fmt.Sprintf("%s already exists.", args.Path)
+		}
 	}
 
 	// Write file, preserving privilege demotion on Unix when available.
-	if err := writeFileAs(ctx, args.Path, src, sysProcAttr); err != nil {
+	if err := writeFileAs(ctx, args.Path, src, sysProcAttr, args.AllowOverwrite); err != nil {
 		log.Error().Err(err).Msg("Failed to write file.")
 		if os.IsPermission(err) || errors.Is(err, syscall.EACCES) {
 			return 1, "You do not have permission to write to the directory, or directory does not exist"
@@ -636,4 +645,11 @@ func (l *limitedReadCloser) Read(p []byte) (int, error) {
 
 func (l *limitedReadCloser) Close() error {
 	return l.rc.Close()
+}
+
+func transferOpenFlags(overwrite bool) int {
+	if overwrite {
+		return os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	return os.O_WRONLY | os.O_CREATE | os.O_EXCL
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,6 +35,7 @@ type FtpClient struct {
 	workingDirectory string
 	log              logger.FtpLogger
 	tlsConfig        *tls.Config
+	proxySocket      bool
 	proxy            func(*http.Request) (*url.URL, error)
 	commandChan      chan []byte
 	responseChan     chan []byte
@@ -65,6 +67,7 @@ func NewFtpClient(data FtpConfigData) *FtpClient {
 		return nil
 	}
 	client := &FtpClient{
+		proxySocket:      data.Connection.ProxySocket,
 		requestHeader:    headers,
 		url:              data.URL,
 		serverURL:        data.ServerURL,
@@ -124,6 +127,14 @@ func (fc *FtpClient) connect() error {
 		Proxy:            proxy,
 		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig:  fc.tlsConfig,
+	}
+	if fc.proxySocket {
+		file := os.NewFile(3, "ftp-proxy")
+		if file == nil {
+			return errors.New("missing inherited FTP socket")
+		}
+		defer func() { _ = file.Close() }()
+		dialer.NetDialContext = func(context.Context, string, string) (net.Conn, error) { return net.FileConn(file) }
 	}
 	conn, _, err := dialer.Dial(target, fc.requestHeader)
 	if err != nil {

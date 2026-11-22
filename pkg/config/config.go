@@ -103,6 +103,10 @@ func LoadConfig(configFiles []string, wsPath string, controlWsPath string) Setti
 		log.Fatal().Err(err).Msgf("failed to load config file %s.", validConfigFile)
 	}
 
+	if !hasExplicitTLSVerification(iniData) {
+		log.Warn().Msg("TLS verification is off because [ssl] verify is not set; set verify = true and ca_cert, or verify = false explicitly")
+	}
+
 	var config Config
 	err = iniData.MapTo(&config)
 	if err != nil {
@@ -298,4 +302,17 @@ func Files(name string) []string {
 		filepath.Join(configDir(), fmt.Sprintf("%s.conf", name)),
 		filepath.Join(os.Getenv("HOME"), fmt.Sprintf(".%s.conf", name)),
 	}
+}
+
+func hasExplicitTLSVerification(data *ini.File) bool {
+	section, err := data.GetSection("ssl")
+	if err != nil {
+		return false
+	}
+	key, err := section.GetKey("verify")
+	if err != nil {
+		return false
+	}
+	_, err = key.Bool()
+	return err == nil
 }
