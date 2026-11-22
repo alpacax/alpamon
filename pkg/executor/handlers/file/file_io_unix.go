@@ -3,7 +3,6 @@
 package file
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -230,6 +229,9 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		}
 		return err
 	}
+	if !allowOverwrite {
+		return writeFileExclusiveAs(ctx, path, src, sysProcAttr)
+	}
 	parentDir := filepath.Dir(path)
 	createdRoot := firstMissingAncestor(parentDir)
 	// Only a target this call created may be removed on failure, and only under the
@@ -241,27 +243,8 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		script = fmt.Sprintf("mkdir -p %s && { tee %s > /dev/null || { rm -f %s; exit 1; }; }",
 			utils.Quote(parentDir), utils.Quote(path), utils.Quote(path))
 	}
-	var args []string
-	if !allowOverwrite {
-		// Noclobber protects file creation. Report success opening the file
-		// before copying so cleanup can distinguish the writer from a contender.
-		script = `mkdir -p -- "$1" || exit 1
-if test -e "$2" || test -L "$2"; then exit 17; fi
-set -C
-(
-    printf 'created\n'
-    cat >&3
-) 3> "$2" && exit 0
-if test -e "$2" || test -L "$2"; then exit 17; fi
-exit 1`
-		args = []string{"sh", parentDir, path}
-	}
 	// Create parents as the requesting user to preserve filesystem permissions.
-	cmd := fileHelperCommand(ctx, "/bin/sh", append([]string{"-c", script}, args...)...)
-	var status bytes.Buffer
-	if !allowOverwrite {
-		cmd.Stdout = &status
-	}
+	cmd := fileHelperCommand(ctx, "/bin/sh", "-c", script)
 	cmd.SysProcAttr = sysProcAttr
 	env, err := fileHelperEnvironment(sysProcAttr)
 	if err != nil {
@@ -276,22 +259,6 @@ exit 1`
 	errW := &stderrCap{cap: stderrCapSize}
 	cmd.Stderr = errW
 	runErr := cmd.Run()
-
-	// erc.err is only ever non-nil alongside a non-nil runErr: cmd.Wait returns the stdin-copy
-	// goroutine's error on a clean exit, and the process's own exit error otherwise. The
-	// fallback after this block guards that invariant instead of relying on it silently.
-	if !allowOverwrite {
-		createdTarget = status.String() == "created\n"
-		var exitErr *exec.ExitError
-		if !createdTarget && errors.As(runErr, &exitErr) && exitErr.ExitCode() == 17 {
-			removeCreatedDirsAsRequester(ctx, parentDir, createdRoot, sysProcAttr)
-			return &os.PathError{Op: "create", Path: path, Err: os.ErrExist}
-		}
-		if runErr != nil && createdTarget {
-			removeAsRequester(ctx, path, sysProcAttr)
-			createdTarget = false
-		}
-	}
 
 	if runErr != nil {
 		// erc.err alone does not prove tee opened path: a tee that cannot open a pre-existing
@@ -320,6 +287,77 @@ exit 1`
 		return fmt.Errorf("failed to read source: %w", erc.err)
 	}
 	return nil
+}
+
+// writeFileExclusiveAs publishes a complete download by linking its temporary
+// file into place. Both the staging and publication run as the requester.
+func writeFileExclusiveAs(ctx context.Context, path string, src io.Reader, attr *syscall.SysProcAttr) error {
+	env, err := fileHelperEnvironment(attr)
+	if err != nil {
+		return err
+	}
+	run := func(stdin io.Reader, script string, args ...string) ([]byte, error) {
+		cmd := fileHelperCommand(ctx, "/bin/sh", append([]string{"-c", script, "sh"}, args...)...)
+		cmd.SysProcAttr = attr
+		cmd.Env = env
+		cmd.Stdin = stdin
+		stderr := &stderrCap{cap: stderrCapSize}
+		cmd.Stderr = stderr
+		output, err := cmd.Output()
+		if err != nil && strings.TrimSpace(stderr.buf.String()) != "" {
+			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.buf.String()))
+		}
+		return output, err
+	}
+
+	parent := filepath.Dir(path)
+	output, err := run(nil, `mkdir -p -- "$1" && umask 077 && mktemp "$1/.alpamon-download.XXXXXXXXXX"`, parent)
+	temp := strings.TrimSuffix(string(output), "\n")
+	if temp != "" {
+		defer removeAsRequester(ctx, temp, attr)
+	}
+	if err != nil {
+		return err
+	}
+	if temp == "" {
+		return errors.New("mktemp returned no path")
+	}
+
+	// Wait for both the input copy and the writer before publishing.
+	reader := &errCapReader{r: src}
+	_, err = run(reader, `cat > "$1"`, temp)
+	if reader.err != nil {
+		return fmt.Errorf("failed to read source: %w", reader.err)
+	}
+	if err != nil {
+		return err
+	}
+
+	_, err = run(nil, exclusiveLinkScript(), temp, path)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 17 {
+		return &os.PathError{Op: "create", Path: path, Err: os.ErrExist}
+	}
+	return err
+}
+
+func exclusiveLinkScript() string {
+	if runtime.GOOS == "darwin" {
+		// macOS's link utility can still descend into a directory that
+		// appears after its initial check. Call link(2) through system Perl.
+		return `exec /usr/bin/perl -T -MErrno=EEXIST -e '
+			my ($source) = $ARGV[0] =~ /\A(.*)\z/s;
+			my ($target) = $ARGV[1] =~ /\A(.*)\z/s;
+			exit 0 if link($source, $target);
+			exit 17 if $! == EEXIST;
+			die "link: $!\n";
+		' -- "$1" "$2"`
+	}
+	return `export LC_ALL=C
+if message=$(link "$1" "$2" 2>&1); then exit 0; fi
+case "$message" in *": File exists") exit 17;; esac
+printf '%s\n' "$message" >&2
+exit 1`
 }
 
 // fileHelperEnvironment pins PATH to the system directories, so the mkdir, tee and rm

@@ -258,7 +258,7 @@ func TestKeyManager_GetPublicKeyForKID_KeyRotation(t *testing.T) {
 	assert.Equal(t, int32(2), fetchCount.Load())
 	_, err = km.GetPublicKeyForKID("unknown")
 	require.ErrorContains(t, err, `active: "key-v2"`)
-	assert.EqualValues(t, 2, fetchCount.Load())
+	assert.EqualValues(t, 3, fetchCount.Load())
 }
 
 // The AI server's public-key endpoint reads `env`; a name it does not know is
@@ -461,4 +461,84 @@ func TestKeyManagerRefreshesAnExpiredServerKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, newKey, key)
 	assert.EqualValues(t, 2, fetches.Load())
+}
+
+func TestKeyManagerRotationLookupAfterInFlightRefresh(t *testing.T) {
+	oldKey, _ := testKey(t)
+	newKey, _ := testKey(t)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var fetches atomic.Int32
+		newResponse := signingKeyHTTPResponse(newKey, "new")
+		client := &http.Client{Transport: signingRoundTripper(func(*http.Request) (*http.Response, error) {
+			if fetches.Add(1) == 1 {
+				response := signingKeyHTTPResponse(oldKey, "old")
+				close(started)
+				<-release
+				return response, nil
+			}
+			return newResponse, nil
+		})}
+		manager := NewKeyManager("https://example.invalid", 3600, "", client)
+		manager.publicKey, manager.keyID, manager.lastFetch = oldKey, "old", time.Now()
+		refreshed := make(chan error, 1)
+		go func() {
+			_, err := manager.RefreshAndGet()
+			refreshed <- err
+		}()
+		<-started
+		lookedUp := make(chan error, 1)
+		go func() {
+			key, err := manager.GetPublicKeyForKID("new")
+			assert.Equal(t, newKey, key)
+			lookedUp <- err
+		}()
+		synctest.Wait()
+		close(release)
+
+		require.NoError(t, <-refreshed)
+		require.NoError(t, <-lookedUp)
+		assert.EqualValues(t, 2, fetches.Load())
+	})
+}
+
+func TestKeyManagerRotationCooldownIsPerKID(t *testing.T) {
+	oldKey, _ := testKey(t)
+	newKey, _ := testKey(t)
+	synctest.Test(t, func(t *testing.T) {
+		fetches := 0
+		activeKey, activeKID := oldKey, "old"
+		client := &http.Client{Transport: signingRoundTripper(func(*http.Request) (*http.Response, error) {
+			fetches++
+			return signingKeyHTTPResponse(activeKey, activeKID), nil
+		})}
+		manager := NewKeyManager("https://example.invalid", 3600, "", client)
+		manager.publicKey, manager.keyID, manager.lastFetch = oldKey, "old", time.Now()
+
+		_, err := manager.GetPublicKeyForKID("unknown")
+		require.ErrorContains(t, err, `active: "old"`)
+		assert.Equal(t, 1, fetches)
+
+		activeKey, activeKID = newKey, "new"
+		key, err := manager.GetPublicKeyForKID("new")
+		require.NoError(t, err)
+		assert.Equal(t, newKey, key)
+		for range 5 {
+			_, err := manager.GetPublicKeyForKID("unknown")
+			require.ErrorContains(t, err, `active: "new"`)
+		}
+		assert.Equal(t, 2, fetches)
+
+		time.Sleep(time.Second)
+		_, err = manager.GetPublicKeyForKID("unknown")
+		require.ErrorContains(t, err, `active: "new"`)
+		assert.Equal(t, 3, fetches)
+	})
+}
+
+func signingKeyHTTPResponse(key ed25519.PublicKey, kid string) *http.Response {
+	recorder := httptest.NewRecorder()
+	_, _ = fmt.Fprintf(recorder, `{"algorithm":"Ed25519","key_id":%q,"public_key":%q}`, kid, base64.StdEncoding.EncodeToString(key))
+	return recorder.Result()
 }
