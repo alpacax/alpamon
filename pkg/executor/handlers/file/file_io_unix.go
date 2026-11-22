@@ -366,6 +366,13 @@ func validateRootTransferPath(path string) error {
 		}
 
 		next := filepath.Join(current, part)
+		onProcfs, err := rootTransferOnProcfs(next)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("cannot verify root transfer destination filesystem %s: %w", next, err)
+		}
+		if onProcfs {
+			return fmt.Errorf("root transfer destination cannot use procfs: %s", next)
+		}
 		stickyParent := sticky[len(sticky)-1]
 		final := len(pending) == 0
 		info, err := os.Lstat(next)

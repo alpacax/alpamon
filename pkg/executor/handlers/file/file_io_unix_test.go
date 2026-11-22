@@ -298,6 +298,15 @@ func TestRootTransferDestinationOwnership(t *testing.T) {
 	require.ErrorContains(t, validateTransferDestination(target, root), "root-owned")
 }
 
+func TestRootTransferRejectsProcfs(t *testing.T) {
+	root := &syscall.SysProcAttr{Credential: &syscall.Credential{}}
+	for _, path := range []string{"/proc", "/proc/self/root/transfer-test", "/proc/" + strconv.Itoa(os.Getpid()) + "/cwd/transfer-test"} {
+		t.Run(path, func(t *testing.T) {
+			require.ErrorContains(t, validateTransferDestination(path, root), "cannot use procfs")
+		})
+	}
+}
+
 func TestRootTransferFollowsTrustedDirectoryLinks(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root-owned fixtures")

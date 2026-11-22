@@ -656,13 +656,13 @@ func isCodeServerInstalled() bool {
 }
 
 func getCodeServerPath() (string, error) {
-	return lookupCodeServerPath(runtime.GOOS, os.Getuid() == 0)
+	return lookupCodeServerPath(runtime.GOOS, os.Getuid() == 0, editorInstallPrefix)
 }
 
 // lookupCodeServerPath limits a root macOS host to its own install, since a binary on PATH or under
 // Homebrew may be one another account can change.
-func lookupCodeServerPath(goos string, isRoot bool) (string, error) {
-	if prefix, err := editorInstallPrefix(); err == nil {
+func lookupCodeServerPath(goos string, isRoot bool, installPrefix func() (string, error)) (string, error) {
+	if prefix, err := installPrefix(); err == nil {
 		release := filepath.Join(prefix, "v"+editorReleaseVersion)
 		candidate := filepath.Join(release, "bin", "code-server")
 		if _, err := os.Lstat(release); !errors.Is(err, os.ErrNotExist) {

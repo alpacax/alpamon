@@ -315,7 +315,7 @@ func TestLookupCodeServerPathFindsPerUserInstall(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 	require.NoError(t, os.WriteFile(path, nil, 0755))
 
-	found, err := lookupCodeServerPath("linux", false)
+	found, err := lookupCodeServerPath("linux", false, func() (string, error) { return home, nil })
 	require.NoError(t, err)
 	assert.Equal(t, path, found)
 }
@@ -332,13 +332,14 @@ func TestLookupCodeServerPathSkipsInvalidPerUserInstall(t *testing.T) {
 	t.Cleanup(func() { codeServerPaths = saved })
 	require.NoError(t, os.MkdirAll(path, 0755))
 
-	found, err := lookupCodeServerPath("linux", false)
+	installPrefix := func() (string, error) { return home, nil }
+	found, err := lookupCodeServerPath("linux", false, installPrefix)
 	require.NoError(t, err)
 	assert.Equal(t, system, found)
 
 	require.NoError(t, os.Remove(path))
 	require.NoError(t, os.WriteFile(path, nil, 0644))
-	found, err = lookupCodeServerPath("linux", false)
+	found, err = lookupCodeServerPath("linux", false, installPrefix)
 	require.NoError(t, err)
 	assert.Equal(t, system, found)
 }
