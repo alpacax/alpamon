@@ -221,7 +221,7 @@ cpu := client.CPU.Create().SetUsage(usage).SetTimestamp(time.Now()).SaveX(ctx)
 
 **Ent code generation**: Always run Ent code generation after schema changes. The generated code in `pkg/db/ent/` should not be manually edited.
 
-**Testing constraints**: Tests run with `-p 1` (sequential execution) due to SQLite database file locking and system resource measurement conflicts.
+**Testing constraints**: Tests run with `-p 1` (sequential execution) due to SQLite database file locking and system resource measurement conflicts. Work Session Stop/End regression fixtures wait for their process groups and TERM handlers to be ready before sending controls.
 
 **Platform compatibility**: Codebase includes platform-specific implementations (darwin, linux, and windows) for PTY and PID file operations.
 

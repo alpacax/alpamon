@@ -137,6 +137,14 @@ func TestStopSuspendsEveryOwnedGroupAndResumeContinuesOnlyThem(t *testing.T) {
 	// job-control shell does for a background job.
 	running := startSession(t, "perl", "-e", `if (fork() == 0) { setpgrp(0, 0); sleep 60; exit } sleep 60`)
 	runningPIDs := sessionMembers(t, running.Process.Pid, 2)
+	require.Eventually(t, func() bool {
+		firstGroup, err := syscall.Getpgid(runningPIDs[0])
+		if err != nil {
+			return false
+		}
+		secondGroup, err := syscall.Getpgid(runningPIDs[1])
+		return err == nil && firstGroup != secondGroup
+	}, 5*time.Second, 20*time.Millisecond, "the child creates its own process group")
 	require.Len(t, pgids(t, runningPIDs), 2)
 	// A finished command that left a child behind in its group. It is
 	// tracked while its leader runs and released once it finishes, as the
@@ -218,9 +226,19 @@ func TestEndContinuesThenTerminatesEveryOwnedSession(t *testing.T) {
 	r := newProcessRegistry(server, &inventoryLog{}, func(id string) { cancelled = append(cancelled, id) })
 	cc := &ControlClient{workSessions: r}
 
-	stubborn := startSession(t, "perl", "-e", `$SIG{TERM} = "IGNORE"; sleep 60`)
-	marker := filepath.Join(t.TempDir(), "term")
-	stopped := startSession(t, "perl", "-e", `$SIG{TERM} = sub { open(my $f, ">", $ARGV[0]); exit 0 }; sleep 60`, marker)
+	dir := t.TempDir()
+	stubbornReady := filepath.Join(dir, "stubborn-ready")
+	stoppedReady := filepath.Join(dir, "stopped-ready")
+	marker := filepath.Join(dir, "term")
+	stubborn := startSession(t, "perl", "-e", `$SIG{TERM} = "IGNORE"; open(my $ready, ">", $ARGV[0]) or die $!; close($ready); sleep 60`, stubbornReady)
+	stopped := startSession(t, "perl", "-e", `$SIG{TERM} = sub { open(my $f, ">", $ARGV[0]); exit 0 }; open(my $ready, ">", $ARGV[1]) or die $!; close($ready); sleep 60`, marker, stoppedReady)
+	require.Eventually(t, func() bool {
+		if _, err := os.Stat(stubbornReady); err != nil {
+			return false
+		}
+		_, err := os.Stat(stoppedReady)
+		return err == nil
+	}, 5*time.Second, 20*time.Millisecond, "both TERM handlers are installed before Stop")
 	server.set(workSessionActive, 0)
 	release, err := r.admit(t.Context(), attribution(0), "cmd-stubborn")
 	require.NoError(t, err)
