@@ -33,7 +33,7 @@ func TestFileHandler_parsePaths_Windows_OutsideHome(t *testing.T) {
 	require.NoError(t, os.WriteFile(outsideFile, []byte("data"), 0644))
 
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
-	paths, bulk, recursive, err := handler.parsePaths(homeDir, []string{outsideFile})
+	paths, bulk, recursive, err := handler.parsePaths(t.Context(), homeDir, []string{outsideFile}, nil)
 	require.NoError(t, err, "parsePaths returned error after guard removal")
 	assert.False(t, bulk, "bulk = true, want false for single path")
 	assert.False(t, recursive, "recursive = true, want false for file")
@@ -49,7 +49,7 @@ func TestFileHandler_parsePaths_Windows_InsideHome(t *testing.T) {
 	require.NoError(t, os.WriteFile(insideFile, []byte("data"), 0644))
 
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
-	paths, bulk, _, err := handler.parsePaths(homeDir, []string{insideFile})
+	paths, bulk, _, err := handler.parsePaths(t.Context(), homeDir, []string{insideFile}, nil)
 	require.NoError(t, err, "parsePaths returned error")
 	assert.False(t, bulk, "bulk = true, want false")
 	require.Len(t, paths, 1)
@@ -64,7 +64,7 @@ func TestFileHandler_parsePaths_Windows_Tilde(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, []byte("data"), 0644))
 
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
-	paths, _, _, err := handler.parsePaths(homeDir, []string{"~/tilde.txt"})
+	paths, _, _, err := handler.parsePaths(t.Context(), homeDir, []string{"~/tilde.txt"}, nil)
 	require.NoError(t, err, "parsePaths returned error")
 	require.Len(t, paths, 1)
 	assert.Equal(t, filepath.Clean(target), paths[0], "path")
@@ -86,7 +86,7 @@ func TestFileHandler_parsePaths_Windows_SystemRoot(t *testing.T) {
 
 	homeDir := t.TempDir()
 	handler := NewFileHandler(common.NewMockCommandExecutor(t), nil)
-	paths, _, _, err := handler.parsePaths(homeDir, []string{hostsPath})
+	paths, _, _, err := handler.parsePaths(t.Context(), homeDir, []string{hostsPath}, nil)
 	require.NoError(t, err, "parsePaths failed for system path %q", hostsPath)
 	require.Len(t, paths, 1)
 	assert.Equal(t, filepath.Clean(hostsPath), paths[0], "path")
@@ -119,7 +119,7 @@ func TestFileHandler_parsePaths_Windows_RejectsUnsafeShapes(t *testing.T) {
 
 	for _, tc := range rejected {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, err := handler.parsePaths(homeDir, []string{tc.path})
+			_, _, _, err := handler.parsePaths(t.Context(), homeDir, []string{tc.path}, nil)
 			require.Error(t, err, "parsePaths(%q) expected error, got nil", tc.path)
 		})
 	}

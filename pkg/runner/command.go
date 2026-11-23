@@ -146,6 +146,17 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 		return nil
 	}
 
+	// Check caller env before admission, file opening or process start.
+	// Internal commands never pass caller env to their handlers.
+	if cr.command.Shell != "internal" && commandEnvRefused(cr.command.Env) {
+		log.Warn().
+			Str("command_id", cr.command.ID).
+			Msg("Refused command environment")
+		exitCode = 1
+		result = commandEnvRefusedResult
+		return nil
+	}
+
 	ctx, releaseWorkSession, refusal := cr.admitWorkSession(ctx)
 	if refusal != nil {
 		exitCode = 1

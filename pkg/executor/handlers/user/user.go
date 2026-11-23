@@ -2,12 +2,13 @@ package user
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/executor/services"
@@ -31,6 +32,10 @@ type UserHandler struct {
 	lookupGroup         common.GroupLookupFunc
 	supplementaryGroups common.SupplementaryGroupsFunc
 	accountLocker       accountLocker
+	homeRoot            string
+	scanHomeOwners      func(context.Context, string, string, string, bool) homeScanResult
+	readAccountFile     func(string) ([]byte, error)
+	chownHome           func(context.Context, int, string, int, int, int) (int, error)
 }
 
 // NewUserHandler creates a new user handler
@@ -52,6 +57,9 @@ func NewUserHandler(cmdExecutor common.CommandExecutor, groupService services.Gr
 		lookupUser:          common.DefaultUserLookup,
 		lookupGroup:         common.DefaultGroupLookup,
 		supplementaryGroups: common.DefaultSupplementaryGroups,
+		homeRoot:            "/home",
+		scanHomeOwners:      scanHomeOwners,
+		readAccountFile:     os.ReadFile,
 	}
 	h.accountLocker = newAccountLocker(h)
 	return h
@@ -115,11 +123,7 @@ func (h *UserHandler) Validate(cmd string, args *common.CommandArgs) error {
 		return h.ValidateStruct(userDataFromArgs(args))
 
 	case common.DelUser.String():
-		data := DeleteUserData{
-			Username:           args.Username,
-			PurgeHomeDirectory: args.PurgeHomeDirectory,
-		}
-		return h.ValidateStruct(data)
+		return h.ValidateStruct(deleteUserDataFromArgs(args))
 
 	case common.ModUser.String():
 		data := ModUserData{
@@ -142,6 +146,11 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		return 1, err.Error(), nil
 	}
 
+	// Check the same explicit path that the create command will use.
+	if data.HomeDirectory != "" {
+		data.HomeDirectory = filepath.Clean(data.HomeDirectory)
+	}
+
 	log.Info().
 		Str("username", data.Username).
 		Uint64("uid", data.UID).
@@ -149,23 +158,67 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		Str("home", data.HomeDirectory).
 		Msg("Adding user")
 
-	// The omit*Flag booleans govern *flag emission* on adduser/useradd,
-	// NOT whether the underlying entity exists. When a flag is omitted:
-	//   - omitUIDFlag  → OS auto-assigns a uid (the user still gets a uid).
-	//   - omitGIDFlag  → no numeric --gid; we set the primary group by
-	//                    name via --ingroup / --gid <Groupname> below.
-	//   - omitHomeFlag → no explicit --home/--home-dir; the OS default
-	//                    path (typically /home/<username>) is used and
-	//                    the directory IS still created.
-	//
-	// We omit a flag only when IsServiceAccount=true AND the value is
-	// zero/empty. For IAM User payloads (IsServiceAccount=false), these
-	// fields are validated as required upstream; if we ever reach this
-	// point with zero values we still pass whatever was provided rather
-	// than silently rewriting the command (defense-in-depth is cheap).
-	omitUIDFlag := data.IsServiceAccount && data.UID == 0
+	uidRequested := data.UID != 0
 	omitGIDFlag := data.IsServiceAccount && data.GID == 0
-	omitHomeFlag := data.IsServiceAccount && data.HomeDirectory == ""
+	homeOmitted := data.HomeDirectory == ""
+
+	// Idempotency gate (M8): verify by lookup whether the user already exists
+	// before attempting creation, so re-provisioning an already-present account
+	// is a no-op instead of a hard adduser/useradd "already exists" failure
+	// (the #344 root cause). The lookup is the PRIMARY decision; a create-time
+	// secondary net (below) covers TOCTOU races and NSS-backed names invisible
+	// to the CGO_ENABLED=0 pure-Go resolver.
+	//
+	// A same-name/different-uid account is real drift and is surfaced as a
+	// failure, never masked. When the uid is omitted (service account), name presence alone marks the account as provisioned.
+	existing, userExists, lookupErr := common.UserExists(h.lookupUser, data.Username)
+	if lookupErr != nil {
+		// We cannot confirm the current state; do not blind-create over a
+		// possibly-shadowed entry. Fail loud so the drift is visible.
+		return 1, fmt.Sprintf("unable to verify whether user %q exists: %v", data.Username, lookupErr), lookupErr
+	}
+	if userExists && uidRequested {
+		existingUID, perr := strconv.ParseUint(existing.Uid, 10, 64)
+		if perr != nil {
+			return 1, fmt.Sprintf("user %q exists but its uid %q is not a valid number; refusing to modify an existing account", data.Username, existing.Uid), nil
+		}
+		if existingUID != data.UID {
+			return 1, common.UserUIDConflictMessage(data.Username, existingUID, data.UID), nil
+		}
+	}
+
+	if !userExists && !validHomeUsername(data.Username) {
+		return 1, fmt.Sprintf("invalid username %q", data.Username), nil
+	}
+
+	if !userExists && (utils.PlatformLike == "debian" || utils.PlatformLike == "rhel") {
+		root, err := h.defaultHomeRoot()
+		if err != nil {
+			return 1, err.Error(), nil
+		}
+		home := data.HomeDirectory
+		if homeOmitted {
+			home = filepath.Join(root, data.Username)
+		}
+		home = filepath.Clean(home)
+		scan := h.homeOwners(ctx, home, root, !uidRequested)
+		if scan.err != nil {
+			return 1, scan.err.Error(), nil
+		}
+		if !uidRequested {
+			data.UID, err = h.nextServiceUID(scan.owners)
+			if err != nil {
+				return 1, err.Error(), nil
+			}
+		}
+		if err := checkHomeOwner(home, scan.target, data.UID); err != nil {
+			return 1, err.Error(), nil
+		}
+		if path, found := scan.owners[data.UID]; found {
+			return 1, fmt.Sprintf("system_home_conflict: %s is owned by requested uid %d; refusing to create the account", path, data.UID), nil
+		}
+		data.HomeDirectory = home
+	}
 
 	// Service-account primary-group bootstrap (load-bearing).
 	//
@@ -194,43 +247,12 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		}
 	}
 
-	// Idempotency gate (M8): verify by lookup whether the user already exists
-	// before attempting creation, so re-provisioning an already-present account
-	// is a no-op instead of a hard adduser/useradd "already exists" failure
-	// (the #344 root cause). The lookup is the PRIMARY decision; a create-time
-	// secondary net (below) covers TOCTOU races and NSS-backed names invisible
-	// to the CGO_ENABLED=0 pure-Go resolver.
-	//
-	// A same-name/different-uid account is real drift and is surfaced as a
-	// failure, never masked. When the uid is omitted (service account, OS
-	// auto-assigns), name presence alone marks the account as provisioned.
-	existing, userExists, lookupErr := common.UserExists(h.lookupUser, data.Username)
-	if lookupErr != nil {
-		// We cannot confirm the current state; do not blind-create over a
-		// possibly-shadowed entry. Fail loud so the drift is visible.
-		return 1, fmt.Sprintf("unable to verify whether user %q exists: %v", data.Username, lookupErr), lookupErr
-	}
-	if userExists && !omitUIDFlag {
-		existingUID, perr := strconv.ParseUint(existing.Uid, 10, 64)
-		if perr != nil {
-			return 1, fmt.Sprintf("user %q exists but its uid %q is not a valid number; refusing to modify an existing account", data.Username, existing.Uid), nil
-		}
-		if existingUID != data.UID {
-			return 1, common.UserUIDConflictMessage(data.Username, existingUID, data.UID), nil
-		}
-	}
-
 	switch utils.PlatformLike {
 	case "debian":
 		if !userExists {
-			cmdArgs := []string{}
-			if !omitHomeFlag {
-				cmdArgs = append(cmdArgs, "--home", data.HomeDirectory)
-			}
+			cmdArgs := []string{"--home", data.HomeDirectory}
 			cmdArgs = append(cmdArgs, "--shell", data.Shell)
-			if !omitUIDFlag {
-				cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
-			}
+			cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
 			switch {
 			case omitGIDFlag && data.Groupname != "":
 				// Service-account path: set primary group by name so the user
@@ -240,7 +262,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 				cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
 			}
 			cmdArgs = append(cmdArgs, "--gecos", data.Comment, "--disabled-password", data.Username)
-			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/adduser", cmdArgs, data, !omitUIDFlag)
+			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/adduser", cmdArgs, data, uidRequested)
 			if code != 0 {
 				return code, out, cerr
 			}
@@ -277,14 +299,9 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 		}
 
 		if !userExists {
-			cmdArgs := []string{}
-			if !omitHomeFlag {
-				cmdArgs = append(cmdArgs, "--home-dir", data.HomeDirectory)
-			}
+			cmdArgs := []string{"--home-dir", data.HomeDirectory}
 			cmdArgs = append(cmdArgs, "--shell", data.Shell)
-			if !omitUIDFlag {
-				cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
-			}
+			cmdArgs = append(cmdArgs, "--uid", strconv.FormatUint(data.UID, 10))
 			switch {
 			case omitGIDFlag && data.Groupname != "":
 				// Service-account path: useradd accepts a group name for --gid.
@@ -293,7 +310,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 				cmdArgs = append(cmdArgs, "--gid", strconv.FormatUint(data.GID, 10))
 			}
 			cmdArgs = append(cmdArgs, "--comment", data.Comment, "--create-home", data.Username)
-			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/useradd", cmdArgs, data, !omitUIDFlag)
+			existed, code, out, cerr := h.runUserCreate(ctx, "/usr/sbin/useradd", cmdArgs, data, uidRequested)
 			if code != 0 {
 				return code, out, cerr
 			}
@@ -313,10 +330,9 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	// follow a symlink an existing—possibly hostile—local user could plant at
 	// their home path.
 	//
-	// Skip when HomeDirectory was omitted (OS default path), since the caller
-	// didn't specify a target and we would otherwise chmod an empty path.
+	// Apply an explicit mode only to a caller-supplied home path.
 	// codeql[go/path-injection]: Intentional - Admin-specified home directory permission
-	if !userExists && data.HomeDirectory != "" && data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
+	if !userExists && !homeOmitted && data.HomeDirectoryPermission != "" && data.HomeDirectoryPermission != "0755" {
 		mode, err := strconv.ParseUint(data.HomeDirectoryPermission, 8, 32)
 		if err == nil {
 			_ = os.Chmod(data.HomeDirectory, os.FileMode(mode)) // lgtm[go/path-injection]
@@ -368,128 +384,90 @@ func (h *UserHandler) runUserCreate(ctx context.Context, tool string, cmdArgs []
 	return createCode != 0, 0, out, err
 }
 
-// homeOwnerUID returns the uid of the user being deleted, whose hard-linked files in the
-// backup may change hands, or -1 when it cannot be looked up.
-func (h *UserHandler) homeOwnerUID(username string) int {
-	u, err := h.lookupUser(username)
-	if err != nil {
-		return -1
-	}
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		return -1
-	}
-	return uid
+type archiveSkip struct {
+	detail string
 }
 
-// backupHomeDirectory backs up the user's home directory before deletion
-func (h *UserHandler) backupHomeDirectory(username string) error {
-	homeDir := fmt.Sprintf("/home/%s", username)
-	timestamp := time.Now().UTC().Format(time.RFC3339)
-	backupDir := fmt.Sprintf("/home/deleted_users/%s_%s", username, timestamp)
+func (s *archiveSkip) Error() string { return "archive_skipped: " + s.detail }
 
-	// Create backup parent directory
-	if err := os.MkdirAll("/home/deleted_users", 0700); err != nil {
-		return fmt.Errorf("failed to create backup directory: %w", err)
-	}
-
-	// Check if home directory exists
-	// codeql[go/path-injection]: Intentional - User home directory for backup
-	if _, err := os.Stat(homeDir); err != nil { // lgtm[go/path-injection]
-		return fmt.Errorf("%s not exist: %w", homeDir, err)
-	}
-
-	// Move home directory to backup location
-	// codeql[go/path-injection]: Intentional - Backup destination path
-	if err := os.Rename(homeDir, backupDir); err != nil { // lgtm[go/path-injection]
-		return fmt.Errorf("failed to move home directory: %w", err)
-	}
-
-	// Change ownership to root
-	skipped, err := utils.ChownRecursive(backupDir, 0, 0, h.homeOwnerUID(username))
-	if err != nil {
-		return fmt.Errorf("failed to chown backup directory: %w", err)
-	}
-
-	log.Info().
-		Str("username", username).
-		Str("backupDir", backupDir).
-		Int("hardLinksLeftUnchanged", skipped).
-		Msg("Home directory backed up")
-
-	return nil
-}
-
-// handleDelUser handles the deluser command
 func (h *UserHandler) handleDelUser(ctx context.Context, args *common.CommandArgs) (exitCode int, output string, err error) {
-	// Extract and validate arguments
-	data := DeleteUserData{
-		Username:           args.Username,
-		PurgeHomeDirectory: args.PurgeHomeDirectory,
-	}
-
-	err = h.Validate(common.DelUser.String(), args)
-	if err != nil {
+	data := deleteUserDataFromArgs(args)
+	if err := h.ValidateStruct(data); err != nil {
 		return 1, err.Error(), nil
 	}
+	if !validHomeUsername(data.Username) || strings.HasPrefix(data.Username, "-") {
+		return 1, fmt.Sprintf("invalid username %q", data.Username), nil
+	}
 
-	if _, exists, lookupErr := common.UserExists(h.lookupUser, data.Username); lookupErr == nil && !exists {
+	if utils.PlatformLike != "debian" && utils.PlatformLike != "rhel" {
+		return 1, fmt.Sprintf("Platform '%s' not supported for user management", utils.PlatformLike), nil
+	}
+
+	log.Info().Str("username", data.Username).Str("home", data.Home).Msg("Deleting user")
+
+	account, exists, lookupErr := common.UserExists(h.lookupUser, data.Username)
+	if lookupErr != nil {
+		if data.Home == "archive" {
+			return 1, fmt.Sprintf("archive_refused: unable to look up user %q: %v", data.Username, lookupErr), nil
+		}
+		return 1, fmt.Sprintf("unable to look up user %q: %v", data.Username, lookupErr), lookupErr
+	}
+	if !exists {
+		if err := h.accountLocker.clearPendingArchive(data.Username); err != nil {
+			defer func() { output += "\npending_record_cleanup_failed: " + err.Error() }()
+		}
 		if err := h.accountLocker.forget(data.Username); err != nil {
 			log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
 			defer func() { output += "\nlock_cleanup_failed: " + err.Error() }()
 		}
+		return h.Executor.Run(ctx, "/usr/sbin/userdel", data.Username)
 	}
 
-	log.Info().
-		Str("username", data.Username).
-		Bool("purge", data.PurgeHomeDirectory).
-		Msg("Deleting user")
-
-	// Backup home directory if not purging
-	if !data.PurgeHomeDirectory {
-		if err := h.backupHomeDirectory(data.Username); err != nil {
-			return 1, err.Error(), nil
+	result := "home directory kept at " + account.HomeDir
+	archived := false
+	var skipped *archiveSkip
+	if data.Home == "archive" {
+		destination, archiveErr := h.accountLocker.archiveHome(ctx, account, data)
+		switch {
+		case errors.As(archiveErr, &skipped):
+			result = skipped.Error()
+		case archiveErr != nil:
+			return 1, archiveErr.Error(), nil
+		case destination == "":
+			result = fmt.Sprintf("home directory %s not found; nothing archived", filepath.Clean(account.HomeDir))
+		default:
+			data.ArchiveTo = destination
+			archived = true
+			result = "home directory archived to " + destination
+		}
+		if data.LegacyPurge && skipped == nil {
+			result += " (legacy purge_home=true treated as archive)"
 		}
 	}
 
-	cmdArgs := []string{}
-
-	// Platform-specific user deletion
-	switch utils.PlatformLike {
-	case "debian":
-		cmdArgs = append(cmdArgs, "/usr/sbin/deluser")
-		if data.PurgeHomeDirectory {
-			cmdArgs = append(cmdArgs, "--remove-home")
+	// Debian's deluser can remove files based on local configuration alone.
+	exitCode, output, err = h.Executor.Run(ctx, "/usr/sbin/userdel", data.Username)
+	if exitCode != 0 || err != nil {
+		if archived {
+			return 1, archivedDeleteFailure(data.ArchiveTo, fmt.Errorf("userdel exited %d: %s (%v)", exitCode, output, err)).Error(), nil
 		}
-		cmdArgs = append(cmdArgs, data.Username)
-	case "rhel":
-		cmdArgs = append(cmdArgs, "/usr/sbin/userdel")
-		if data.PurgeHomeDirectory {
-			cmdArgs = append(cmdArgs, "-r")
-		}
-		cmdArgs = append(cmdArgs, data.Username)
-	default:
-		return 1, fmt.Sprintf("Platform '%s' not supported for user management", utils.PlatformLike), nil
-	}
-
-	exitCode, output, err = h.Executor.Run(
-		ctx,
-		cmdArgs[0], cmdArgs[1:]...,
-	)
-	if exitCode != 0 {
 		return exitCode, output, err
 	}
-
+	if archived {
+		if cleanupErr := h.accountLocker.clearPendingArchive(data.Username); cleanupErr != nil {
+			defer func() { output += "\npending_record_cleanup_failed: " + cleanupErr.Error() }()
+		}
+	}
 	if err := h.accountLocker.forget(data.Username); err != nil {
 		log.Warn().Err(err).Str("username", data.Username).Msg("Failed to forget deleted user lock state")
+		if skipped != nil {
+			result += "\nlock_cleanup_failed: " + err.Error()
+		}
 	}
-
-	log.Info().
-		Str("username", data.Username).
-		Int("exitCode", exitCode).
-		Msg("User deleted successfully")
-
-	return exitCode, fmt.Sprintf("User '%s' deleted successfully", data.Username), nil
+	if skipped != nil {
+		return 0, result, nil
+	}
+	return 0, fmt.Sprintf("User '%s' deleted; %s", data.Username, result), nil
 }
 
 // handleModUser handles the moduser command

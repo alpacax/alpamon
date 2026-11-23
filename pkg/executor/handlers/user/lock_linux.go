@@ -24,29 +24,35 @@ const unitWorkTimeout = 60 * time.Second
 var errUserNotFound = errors.New("user_not_found")
 
 type linuxAccountLocker struct {
-	toolsResolved       bool
-	handler             *UserHandler
-	store               lockStateStore
-	files               lockFiles
-	readFile            func(string) ([]byte, error)
-	systemd             func() bool
-	stat                func(string) (os.FileInfo, error)
-	lookupUID           func(string) (*user.User, error)
-	pidfdOpen           func(int, int) (int, error)
-	loginctl, systemctl string
-	terminate           func(context.Context, uint64, func(context.Context) error) (int, error)
+	toolsResolved          bool
+	handler                *UserHandler
+	store                  lockStateStore
+	files                  lockFiles
+	readFile               func(string) ([]byte, error)
+	systemd                func() bool
+	stat                   func(string) (os.FileInfo, error)
+	lookupUID              func(string) (*user.User, error)
+	pidfdOpen              func(int, int) (int, error)
+	scanProcesses          processScanner
+	archiveUID, archiveGID int
+	renameAt               func(int, string, int, string, uint) error
+	loginctl, systemctl    string
+	terminate              func(context.Context, uint64, func(context.Context) error) (int, error)
 }
 
 func newAccountLocker(h *UserHandler) accountLocker {
+	h.chownHome = utils.ChownArchive
 	l := &linuxAccountLocker{
-		handler:   h,
-		files:     lockFiles{markerDir: "/var/lib/alpamon/user-locks.d", unitDirs: []string{"/run/systemd/system", "/etc/systemd/system"}},
-		store:     lockStateStore{path: filepath.Join(utils.DataDir(), "user-locks.json"), owner: 0},
-		readFile:  os.ReadFile,
-		stat:      os.Stat,
-		lookupUID: user.LookupId,
-		pidfdOpen: unix.PidfdOpen,
-		terminate: terminateAccountProcesses,
+		handler:       h,
+		files:         lockFiles{markerDir: "/var/lib/alpamon/user-locks.d", unitDirs: []string{"/run/systemd/system", "/etc/systemd/system"}},
+		store:         lockStateStore{path: filepath.Join(utils.DataDir(), "user-locks.json"), owner: 0},
+		readFile:      os.ReadFile,
+		stat:          os.Stat,
+		lookupUID:     user.LookupId,
+		pidfdOpen:     unix.PidfdOpen,
+		scanProcesses: scanAccountProcesses,
+		renameAt:      unix.Renameat2,
+		terminate:     terminateAccountProcesses,
 	}
 	l.systemd = func() bool { _, err := l.stat("/run/systemd/system"); return err == nil }
 	return l
@@ -438,33 +444,11 @@ func isProtectedAccount(name string, uid uint64) bool {
 }
 
 func (l *linuxAccountLocker) uidBounds() (uint64, uint64) {
-	minUID, maxUID := uint64(1000), uint64(60000)
 	data, err := l.readFile("/etc/login.defs")
 	if err != nil {
-		return minUID, maxUID
+		return parseUIDBounds(nil)
 	}
-	seen := make(map[string]bool)
-	for line := range strings.SplitSeq(string(data), "\n") {
-		fields := strings.Fields(strings.SplitN(line, "#", 2)[0])
-		if len(fields) < 2 || seen[fields[0]] {
-			continue
-		}
-		key := fields[0]
-		if key != "UID_MIN" && key != "UID_MAX" {
-			continue
-		}
-		seen[key] = true
-		uid, err := strconv.ParseUint(fields[1], 10, 32)
-		if err != nil || uid == 0 {
-			continue
-		}
-		if key == "UID_MIN" {
-			minUID = uid
-		} else {
-			maxUID = uid
-		}
-	}
-	return minUID, maxUID
+	return parseUIDBounds(data)
 }
 
 func (l *linuxAccountLocker) snapshot(name string, uid uint64) (accountLockState, error) {

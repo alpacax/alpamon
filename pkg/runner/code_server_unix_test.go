@@ -5,7 +5,10 @@ package runner
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -265,4 +268,111 @@ func TestLockCodeServerPrefix_RefusesAGroupWritableParent(t *testing.T) {
 	assert.ErrorContains(t, err, "writable by group or other")
 	_, statErr := os.Stat(prefix)
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestManagedEditorReleasePermissions(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root-owned install directory")
+	}
+	// Use a directory on the same trust boundary as the production install.
+	parent, err := os.MkdirTemp("/opt", "alpamon-editor-test-")
+	if err != nil {
+		t.Skipf("no writable install location: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(parent) }()
+	require.NoError(t, os.Chmod(parent, 0755))
+	release := filepath.Join(parent, "release")
+	require.NoError(t, prepareEditorReleaseParent(release))
+	require.NoError(t, verifyEditorRelease(release))
+	nested := filepath.Join(release, "lib")
+	require.NoError(t, os.Mkdir(nested, 0755))
+	require.NoError(t, os.Chmod(nested, os.ModeSticky|0777))
+	require.ErrorContains(t, verifyEditorRelease(release), "only by root")
+	stage := filepath.Join(parent, "stage")
+	bin := filepath.Join(stage, "bin")
+	require.NoError(t, prepareEditorReleaseParent(bin))
+	writeEditorRuntimeFixture(t, stage)
+	require.Error(t, checkEditorRelease(stage))
+	require.NoError(t, publishEditorRelease(stage, release, true))
+	require.NoError(t, checkEditorRelease(release))
+	require.NoError(t, os.Remove(filepath.Join(release, "lib", "node")))
+	assert.ErrorIs(t, checkEditorRelease(release), os.ErrNotExist)
+	require.NoError(t, os.MkdirAll(nested, 0755))
+	require.NoError(t, os.Chmod(nested, 0777))
+	assert.ErrorContains(t, checkEditorRelease(release), "only by root")
+	require.NoError(t, os.Chmod(nested, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "node"), nil, 0755))
+	require.NoError(t, checkEditorRelease(release))
+	require.NoError(t, os.Remove(filepath.Join(release, editorReleaseMarker)))
+	assert.ErrorIs(t, checkEditorRelease(release), os.ErrNotExist)
+}
+
+func TestLookupCodeServerPathFindsPerUserInstall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	path := filepath.Join(home, ".local", "bin", "code-server")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	require.NoError(t, os.WriteFile(path, nil, 0755))
+
+	found, err := lookupCodeServerPath("linux", false, func() (string, error) { return home, nil })
+	require.NoError(t, err)
+	assert.Equal(t, path, found)
+}
+
+func TestLookupCodeServerPathSkipsInvalidPerUserInstall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	path := filepath.Join(home, ".local", "bin", "code-server")
+	system := filepath.Join(t.TempDir(), "code-server")
+	require.NoError(t, os.WriteFile(system, nil, 0755))
+	saved := codeServerPaths
+	codeServerPaths = []string{system}
+	t.Cleanup(func() { codeServerPaths = saved })
+	require.NoError(t, os.MkdirAll(path, 0755))
+
+	installPrefix := func() (string, error) { return home, nil }
+	found, err := lookupCodeServerPath("linux", false, installPrefix)
+	require.NoError(t, err)
+	assert.Equal(t, system, found)
+
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.WriteFile(path, nil, 0644))
+	found, err = lookupCodeServerPath("linux", false, installPrefix)
+	require.NoError(t, err)
+	assert.Equal(t, system, found)
+}
+
+func TestCodeServerKeepsInheritedUmask(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getuid() == 0 {
+		t.Skip("root on macOS uses a fixed code-server install")
+	}
+	home := t.TempDir()
+	bin := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", bin)
+	output := filepath.Join(home, "umask")
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "code-server"), []byte("#!/bin/sh\numask > umask\n"), 0755))
+
+	want, err := exec.CommandContext(t.Context(), "/bin/sh", "-c", "umask").Output()
+	require.NoError(t, err)
+	userDataDir, err := setupUserDataDir(t.Context(), home, "", "")
+	require.NoError(t, err)
+	socketDir := filepath.Join(home, "sockets", "session")
+	m := &CodeServerManager{homeDir: home, socketPath: filepath.Join(socketDir, "editor.sock")}
+	require.NoError(t, prepareEditorSocketDir(m))
+	t.Cleanup(func() { _ = m.socketRoot.Close() })
+
+	cmd, err := startCodeServerProcess(t.Context(), m, userDataDir)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Wait())
+	got, err := os.ReadFile(output)
+	require.NoError(t, err)
+	assert.Equal(t, strings.TrimSpace(string(want)), strings.TrimSpace(string(got)))
+	for _, dir := range []string{socketDir, userDataDir} {
+		info, err := os.Stat(dir)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0700), info.Mode().Perm(), dir)
+	}
 }

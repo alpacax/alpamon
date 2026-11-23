@@ -594,3 +594,53 @@ func TestEditorSocketBaseAllowsParentSymlink(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, os.SameFile(pinned, actual))
 }
+
+func TestEditorListenerUnderRequestedAccount(t *testing.T) {
+	if path := os.Getenv("ALPAMON_TEST_PEER_SOCKET"); path != "" {
+		listener, err := net.Listen("unix", path)
+		require.NoError(t, err)
+		defer func() { _ = listener.Close() }()
+		_, err = os.Stdout.WriteString("ready\n")
+		require.NoError(t, err)
+		for range 2 {
+			conn, err := listener.Accept()
+			require.NoError(t, err)
+			require.NoError(t, conn.Close())
+		}
+		return
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("requires credential switching")
+	}
+	dir, err := os.MkdirTemp("", "editor-peer-")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(dir) }()
+	uid, gid := lookupNobodyIDs(t)
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	data, err := os.ReadFile(exe)
+	require.NoError(t, err)
+	child := filepath.Join(dir, "peer.test")
+	require.NoError(t, os.WriteFile(child, data, 0755))
+	require.NoError(t, os.Chown(dir, int(uid), int(gid)))
+	path := filepath.Join(dir, "cs.sock")
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, child, "-test.run=^TestEditorListenerUnderRequestedAccount$")
+	attr := &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid}}
+	cmd.SysProcAttr = attr
+	cmd.Env = []string{"ALPAMON_TEST_PEER_SOCKET=" + path}
+	ready, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	defer func() { cancel(); _ = cmd.Wait() }()
+	_, err = bufio.NewReader(ready).ReadString('\n')
+	require.NoError(t, err)
+	manager := CodeServerManager{ctx: ctx, socketPath: path}
+	_, err = manager.dialSocket()
+	require.ErrorContains(t, err, "differs from editor uid")
+	manager.procAttr = attr
+	conn, err := manager.dialSocket()
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+}

@@ -254,6 +254,7 @@ func TestNullUIDPreservesCommandParsing(t *testing.T) {
 
 // Other commands' arguments are unaffected by the lock uid type.
 func TestCommandPayloadsPreserveArguments(t *testing.T) {
+	archive := "archive"
 	for _, tc := range []struct {
 		name, payload string
 		want          common.CommandArgs
@@ -263,7 +264,9 @@ func TestCommandPayloadsPreserveArguments(t *testing.T) {
 		{"upload files", `{"files":[{"username":"deploy","groupname":"users","type":"file","content":"YWJj","path":"/tmp/a","allow_overwrite":true,"allow_unzip":false,"url":"https://example.com/a"},{"type":"directory","path":"/tmp/b"}],"paths":["/tmp/a","/tmp/b"]}`, common.CommandArgs{Paths: []string{"/tmp/a", "/tmp/b"}, Files: []common.File{{Username: "deploy", Groupname: "users", Type: "file", Content: "YWJj", Path: "/tmp/a", AllowOverwrite: true, URL: "https://example.com/a"}, {Type: "directory", Path: "/tmp/b"}}}},
 		{"adduser", `{"username":"deploy","uid":1001,"gid":1002,"comment":"Developer","home_directory":"/home/deploy","home_directory_permission":"0700","shell":"/bin/sh","groupname":"users","groups":[1002,1003],"is_service_account":true}`, common.CommandArgs{Username: "deploy", UID: 1001, LockUID: common.OptionalUint64{Value: 1001, Present: true}, GID: 1002, Comment: "Developer", HomeDirectory: "/home/deploy", HomeDirectoryPermission: "0700", Shell: "/bin/sh", Groupname: "users", Groups: []uint64{1002, 1003}, IsServiceAccount: true}},
 		{"moduser", `{"username":"deploy","groupnames":["users","devs"],"managed_groupnames":[],"comment":"Developer"}`, common.CommandArgs{Username: "deploy", Groupnames: []string{"users", "devs"}, ManagedGroupnames: []string{}, Comment: "Developer"}},
+		{"deluser", `{"username":"deploy","purge_home":false}`, common.CommandArgs{Username: "deploy"}},
 		{"deluser", `{"username":"deploy","purge_home":true}`, common.CommandArgs{Username: "deploy", PurgeHomeDirectory: true}},
+		{"deluser archive", `{"username":"deploy","home":"archive","archive_to":"/home/deleted_users/deploy_2026-11-20T01:02:03Z"}`, common.CommandArgs{Username: "deploy", Home: &archive, ArchiveTo: "/home/deleted_users/deploy_2026-11-20T01:02:03Z"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parsed, err := (&Command{Data: tc.payload}).ParseCommandData()

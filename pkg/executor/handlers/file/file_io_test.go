@@ -38,7 +38,7 @@ func TestWriteFileAs_DirectPath_Success(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.bin")
 	payload := []byte("hello world")
 
-	require.NoError(t, writeFileAs(context.Background(), path, bytes.NewReader(payload), nil), "writeFileAs")
+	require.NoError(t, writeFileAs(context.Background(), path, bytes.NewReader(payload), nil, true), "writeFileAs")
 
 	got, err := os.ReadFile(path)
 	require.NoError(t, err, "ReadFile")
@@ -55,7 +55,7 @@ func TestWriteFileAs_DirectPath_RemovesPartialOnReadError(t *testing.T) {
 		err:     errors.New("simulated stream failure"),
 	}
 
-	err := writeFileAs(context.Background(), path, src, nil)
+	err := writeFileAs(context.Background(), path, src, nil, true)
 	require.Error(t, err, "expected writeFileAs to return error")
 
 	_, statErr := os.Stat(path)
@@ -66,7 +66,7 @@ func TestWriteFileAs_DirectPath_RemovesPartialOnReadError(t *testing.T) {
 func TestWriteFileAs_DirectPath_CreatesParentDir(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "deep", "out.bin")
 
-	require.NoError(t, writeFileAs(context.Background(), path, bytes.NewReader([]byte("ok")), nil), "writeFileAs")
+	require.NoError(t, writeFileAs(context.Background(), path, bytes.NewReader([]byte("ok")), nil, true), "writeFileAs")
 	_, err := os.Stat(path)
 	require.NoError(t, err, "expected file at %s", path)
 }

@@ -392,3 +392,19 @@ func TestDispatcherReportsMissingGroup(t *testing.T) {
 		})
 	}
 }
+
+func TestDispatcherReturnsCommandEnvironmentRefusal(t *testing.T) {
+	dispatcher := NewCommandDispatcher(nil, nil)
+	require.NoError(t, dispatcher.RegisterHandler(shell.NewShellHandler(nil)))
+	var streamed string
+	code, output, err := dispatcher.Execute(t.Context(), common.Exec.String(), &common.CommandArgs{
+		Command:       "echo ok",
+		Groupname:     "group",
+		Env:           map[string]string{"PATH": "ignored"},
+		ChunkCallback: func(_ context.Context, content string) { streamed += content },
+	})
+	require.ErrorContains(t, err, "command environment name is restricted")
+	assert.Equal(t, 1, code)
+	assert.Equal(t, "command environment name is restricted", output)
+	assert.Equal(t, "alpamon: "+output+"\n", streamed)
+}

@@ -43,7 +43,7 @@ func TestWriteFileAs_CleanupLeavesNonEmptyUnrelatedDirectory(t *testing.T) {
 		}
 		return os.Symlink(otherParent, userParent)
 	}}
-	err := writeFileAs(t.Context(), filepath.Join(userParent, "new", "output"), source, &syscall.SysProcAttr{})
+	err := writeFileAs(t.Context(), filepath.Join(userParent, "new", "output"), source, &syscall.SysProcAttr{}, true)
 	require.Error(t, err)
 	require.NoError(t, source.err)
 	assert.DirExists(t, unrelated, "cleanup removes only empty directories, one rmdir at a time")
@@ -58,7 +58,7 @@ func TestWriteFileAs_CleanupKeepsNonEmptyCreatedDirectory(t *testing.T) {
 		}
 		return os.WriteFile(kept, []byte("keep"), 0644)
 	}}
-	err := writeFileAs(t.Context(), path, source, &syscall.SysProcAttr{})
+	err := writeFileAs(t.Context(), path, source, &syscall.SysProcAttr{}, true)
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	require.NoError(t, source.err)
 	got, err := os.ReadFile(kept)

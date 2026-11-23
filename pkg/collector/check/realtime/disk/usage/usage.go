@@ -187,6 +187,9 @@ func (c *Check) collectDiskPartitions() ([]disk.PartitionStat, error) {
 
 	var filteredPartitions []disk.PartitionStat
 	for _, partition := range partitions {
+		if partition.Device == "" { // gopsutil's entry for a Windows drive that is not ready
+			continue
+		}
 		if utils.IsVirtualFileSystem(partition.Device, partition.Fstype, partition.Mountpoint) {
 			continue
 		}

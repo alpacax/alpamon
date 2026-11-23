@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/user"
 	"runtime"
+	"strconv"
 
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/runner"
@@ -15,8 +18,9 @@ import (
 // TunnelHandler handles tunnel connection commands (opentunnel, closetunnel)
 type TunnelHandler struct {
 	*common.BaseHandler
-	demote         func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error)
-	checkResources func() error
+	demote             func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error)
+	checkEditorAccount func(string) error
+	checkResources     func() error
 }
 
 // NewTunnelHandler creates a new tunnel handler
@@ -30,8 +34,9 @@ func NewTunnelHandler(cmdExecutor common.CommandExecutor) *TunnelHandler {
 			},
 			cmdExecutor,
 		),
-		demote:         utils.Demote,
-		checkResources: runner.CheckSystemResources,
+		demote:             utils.Demote,
+		checkEditorAccount: validateEditorAccount,
+		checkResources:     runner.CheckSystemResources,
 	}
 	return h
 }
@@ -104,6 +109,7 @@ func (h *TunnelHandler) validateClientTypeRequirements(clientType string, data O
 				return err
 			}
 		}
+		return h.checkEditorAccount(data.Username)
 	}
 	return nil
 }
@@ -205,4 +211,15 @@ func (h *TunnelHandler) handleCloseTunnel(args *common.CommandArgs) (int, string
 	}
 
 	return 0, fmt.Sprintf("Tunnel closed for session %s.", args.SessionID), nil
+}
+
+func validateEditorAccount(username string) error {
+	if os.Geteuid() == 0 {
+		return nil
+	}
+	requested, err := user.Lookup(username)
+	if err != nil || requested.Uid != strconv.Itoa(os.Geteuid()) {
+		return fmt.Errorf("cannot start editor for %s: agent must run as the requested account or root", username)
+	}
+	return nil
 }

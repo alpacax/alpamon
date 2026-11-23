@@ -1,6 +1,10 @@
 package user
 
-import "github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+import (
+	"time"
+
+	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
+)
 
 // UserData contains data for user operations.
 //
@@ -11,8 +15,8 @@ import "github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 //     consistency. Missing values indicate a server-side bug and must fail
 //     validation rather than silently fall back to OS auto-assignment.
 //   - IsServiceAccount=true (Application): UID/GID/HomeDirectory are optional.
-//     When omitted, the numeric --uid / --gid / --home flag is skipped:
-//     UID and HomeDirectory fall back to OS defaults; GID is replaced with
+//     Alpamon allocates an omitted UID and resolves the default home.
+//     An omitted GID is replaced with
 //     `--ingroup <Groupname>` (Debian) or `--gid <Groupname>` (RHEL) so the
 //     primary group is set by name. Cross-server consistency is not required
 //     because alpacon-server matches service accounts by username.
@@ -61,8 +65,26 @@ func userDataFromArgs(args *common.CommandArgs) UserData {
 
 // DeleteUserData contains data for user deletion
 type DeleteUserData struct {
-	Username           string `validate:"required"`
-	PurgeHomeDirectory bool   `validate:"omitempty"`
+	Username    string `validate:"required"`
+	Home        string `validate:"oneof=keep archive"`
+	ArchiveTo   string
+	LegacyPurge bool
+}
+
+func deleteUserDataFromArgs(args *common.CommandArgs) DeleteUserData {
+	data := DeleteUserData{
+		Username:    args.Username,
+		Home:        "archive",
+		ArchiveTo:   args.ArchiveTo,
+		LegacyPurge: args.Home == nil && args.PurgeHomeDirectory,
+	}
+	if args.Home != nil {
+		data.Home = *args.Home
+	} else {
+		// Older servers can reuse the deleted UID, so an omitted home choice archives.
+		data.ArchiveTo = archivePrefix + data.Username + "_" + time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return data
 }
 
 // ModUserData contains data for modifying user

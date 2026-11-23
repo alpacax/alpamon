@@ -2,6 +2,7 @@ package file
 
 import (
 	"context"
+	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"io"
 	"os"
 	"path/filepath"
@@ -23,11 +24,11 @@ func readFileAs(ctx context.Context, path string, sysProcAttr *syscall.SysProcAt
 }
 
 // writeFileAs streams src into a file directly on Windows (no privilege demotion available).
-func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr) error {
+func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *syscall.SysProcAttr, allowOverwrite bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	f, err := os.OpenFile(path, transferOpenFlags(allowOverwrite), 0644)
 	if err != nil {
 		return err
 	}
@@ -39,4 +40,14 @@ func writeFileAs(ctx context.Context, path string, src io.Reader, sysProcAttr *s
 		_ = os.Remove(path) // drop partial write so retry isn't blocked by AllowOverwrite=false
 	}
 	return err
+}
+
+func validateTransferDestination(string, *syscall.SysProcAttr) error { return nil }
+
+func fileIsDirAs(_ context.Context, path string, _ *syscall.SysProcAttr) (bool, error) {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir(), err
+}
+func fileExistsAs(_ context.Context, path string, _ *syscall.SysProcAttr) (bool, error) {
+	return utils.FileExists(path), nil
 }

@@ -53,7 +53,7 @@ func (h *TerminalHandler) Execute(ctx context.Context, cmd string, args *common.
 	case common.OpenPty.String():
 		return h.handleOpenPTY(ctx, args)
 	case common.OpenFtp.String():
-		return h.handleOpenFTP(args)
+		return h.handleOpenFTP(ctx, args)
 	case common.ResizePty.String():
 		return h.handleResizePTY(args)
 	case common.RefreshPty.String():
@@ -141,7 +141,7 @@ func (h *TerminalHandler) handleOpenPTY(ctx context.Context, args *common.Comman
 }
 
 // handleOpenFTP opens a new FTP session
-func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, error) {
+func (h *TerminalHandler) handleOpenFTP(ctx context.Context, args *common.CommandArgs) (int, string, error) {
 	err := h.Validate(common.OpenFtp.String(), args)
 	if err != nil {
 		return 1, fmt.Sprintf("openftp: Not enough information. %s", err.Error()), nil
@@ -193,6 +193,15 @@ func (h *TerminalHandler) handleOpenFTP(args *common.CommandArgs) (int, string, 
 		homeDirectory,
 		config.GlobalSettings.SSLVerify,
 	))
+	if runtime.GOOS != "windows" && settings.Connection.ProxyURL != "" {
+		socket, err := runner.OpenFtpProxySocket(ctx, settings.URL, config.GlobalSettings.ServerURL, settings.Connection.ProxyURL)
+		if err != nil {
+			return 1, fmt.Sprintf("openftp: %v", err), nil
+		}
+		defer func() { _ = socket.Close() }()
+		cmd.ExtraFiles = []*os.File{socket}
+		settings.Connection = runner.FtpConnectionConfig{ProxySocket: true}
+	}
 	payload, _ := json.Marshal(settings)
 	cmd.Stdin = bytes.NewReader(payload)
 	cmd.SysProcAttr = sysProcAttr

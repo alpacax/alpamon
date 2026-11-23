@@ -69,6 +69,12 @@ func newTestUserHandler(exec common.CommandExecutor, gs *MockGroupService) *User
 	h := NewUserHandler(exec, gs, nil)
 	h.lookupUser = common.AbsentUserLookup
 	h.lookupGroup = common.AbsentGroupLookup
+	h.readAccountFile = func(path string) ([]byte, error) {
+		if path == "/etc/passwd" {
+			return []byte("user:x:1000:1000::/:/bin/sh"), nil
+		}
+		return nil, nil
+	}
 	return h
 }
 
@@ -109,11 +115,10 @@ func TestUserHandler_Execute(t *testing.T) {
 			name: "deluser success",
 			cmd:  "deluser",
 			args: &common.CommandArgs{
-				Username:           "testuser",
-				PurgeHomeDirectory: true,
+				Username: "testuser",
 			},
 			setupMock: func(mock *common.MockCommandExecutor) {
-				mock.SetResult("/usr/sbin/deluser --remove-home testuser", 0, "User deleted", nil)
+				mock.SetResult("/usr/sbin/userdel testuser", 0, "User deleted", nil)
 			},
 			groupService: &MockGroupService{},
 			wantCode:     0,
@@ -210,7 +215,7 @@ func TestUserHandler_Execute(t *testing.T) {
 
 // TestUserHandler_AddUser_UidLess verifies that Application service account
 // provisioning (no uid/gid/home_directory) results in adduser/useradd commands
-// without the corresponding flags, letting the OS auto-assign.
+// with a locally allocated UID and the configured default home.
 func TestUserHandler_AddUser_UidLess(t *testing.T) {
 	baseArgs := &common.CommandArgs{
 		Username:         "gitlab-runner",
@@ -218,7 +223,6 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 		Shell:            "/usr/sbin/nologin",
 		Groupname:        "alpacon",
 		IsServiceAccount: true,
-		// UID, GID, HomeDirectory intentionally omitted: OS auto-assigns
 	}
 
 	tests := []struct {
@@ -232,19 +236,19 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			name:        "debian uid-less adduser",
 			platform:    "debian",
 			wantProgram: "/usr/sbin/adduser",
-			wantFlags:   []string{"--shell", "/usr/sbin/nologin", "--gecos", "--disabled-password", "gitlab-runner"},
-			forbidFlags: []string{"--uid", "--gid", "--home"},
+			wantFlags:   []string{"--uid 1001", "--home /home/gitlab-runner", "--shell", "/usr/sbin/nologin", "--gecos", "--disabled-password", "gitlab-runner"},
+			forbidFlags: []string{"--gid"},
 		},
 		{
 			name:        "rhel uid-less useradd",
 			platform:    "rhel",
 			wantProgram: "/usr/sbin/useradd",
-			wantFlags:   []string{"--shell", "/usr/sbin/nologin", "--comment", "--create-home", "gitlab-runner"},
+			wantFlags:   []string{"--uid 1001", "--home-dir /home/gitlab-runner", "--shell", "/usr/sbin/nologin", "--comment", "--create-home", "gitlab-runner"},
 			// `--gid` is allowed on RHEL because the service-account path
 			// now passes `--gid alpacon` (by name) to set the primary
 			// group. The "no numeric gid leak" invariant is enforced by
 			// the explicit `--gid alpacon` check below.
-			forbidFlags: []string{"--uid", "--home-dir"},
+			forbidFlags: nil,
 		},
 	}
 
@@ -258,6 +262,7 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 
 			mock := common.NewMockCommandExecutor(t)
 			handler := newTestUserHandler(mock, &MockGroupService{})
+			handler.homeRoot = t.TempDir()
 
 			exitCode, _, err := handler.Execute(context.Background(), "adduser", baseArgs)
 			require.NoError(t, err)
@@ -282,7 +287,7 @@ func TestUserHandler_AddUser_UidLess(t *testing.T) {
 			require.NotNil(t, target, "%s must be invoked, got: %+v", tt.wantProgram, executed)
 			joined := strings.Join(target.Args, " ")
 			for _, want := range tt.wantFlags {
-				assert.Contains(t, joined, want, "flag %q must be present", want)
+				assert.Contains(t, joined, strings.ReplaceAll(want, "/home/", handler.homeRoot+"/"), "flag %q must be present", want)
 			}
 			for _, forbid := range tt.forbidFlags {
 				assert.NotContains(t, joined, forbid, "args: %s", joined)
@@ -476,7 +481,7 @@ func TestUserHandler_Validate(t *testing.T) {
 				// IsServiceAccount=false (default), so UID/GID/HomeDirectory
 				// are required_unless and also missing. Comment/Groupname are
 				// required unconditionally. Shell carries `validate:"required"`
-				// and is deliberately not defaulted (types.go:52), so it fails too.
+				// and is deliberately not defaulted, so it fails too.
 			},
 			wantErrFields: []string{"UID", "GID", "Comment", "HomeDirectory", "Shell", "Groupname"},
 		},
@@ -489,11 +494,10 @@ func TestUserHandler_Validate(t *testing.T) {
 				Shell:            "/usr/sbin/nologin",
 				Groupname:        "alpacon",
 				IsServiceAccount: true,
-				// UID/GID/HomeDirectory intentionally omitted (OS auto-assign)
 			},
 		},
 		{
-			name: "adduser IAM User path must still require uid, gid and home",
+			name: "adduser IAM User path requires UID, GID and home",
 			cmd:  "adduser",
 			args: &common.CommandArgs{
 				Username:  "john",
@@ -721,7 +725,7 @@ func TestUserHandler_AddUser_Idempotent_UIDConflict(t *testing.T) {
 }
 
 // TestUserHandler_AddUser_Idempotent_ServiceAccountNameExists verifies that a
-// service account (uid omitted, OS auto-assigns) treats name presence alone as
+// service account (uid omitted) treats name presence alone as
 // "already provisioned" — no uid comparison, no useradd, success — AND that the
 // load-bearing `groupadd -f` primary-group bootstrap STILL runs for the existing
 // account (design intent #3: needed for utils.Demote(ValidateGroup=true)).
@@ -1026,26 +1030,6 @@ func TestUserHandler_AddUser_ExistingUser_GroupAddSoftFailMessage(t *testing.T) 
 	assert.NotContains(t, output, "created", "the soft-failure message must not claim the user was created")
 	assert.Contains(t, output, "already exists but failed to add to groups")
 	assert.False(t, mock.Invoked("/usr/sbin/adduser"), "adduser must not run for an existing user")
-}
-
-func TestUserHandler_HomeOwnerUID(t *testing.T) {
-	for name, tc := range map[string]struct {
-		lookup common.UserLookupFunc
-		want   int
-	}{
-		"existing user":   {lookup: common.ExistingUserLookup("1001"), want: 1001},
-		"absent user":     {lookup: common.AbsentUserLookup, want: -1},
-		"non-numeric uid": {lookup: common.ExistingUserLookup("not-a-uid"), want: -1},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newTestUserHandler(nil, nil)
-			h.lookupUser = tc.lookup
-
-			got := h.homeOwnerUID("alice")
-
-			assert.Equal(t, tc.want, got)
-		})
-	}
 }
 
 // TestUserHandler_ModUser_ManagedGroupnames pins the reconcile mode: with

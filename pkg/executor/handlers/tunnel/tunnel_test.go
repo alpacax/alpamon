@@ -25,6 +25,7 @@ func TestEditorTunnelSupported(t *testing.T) {
 
 func TestTunnelHandler_ValidateClientTypeRequirements(t *testing.T) {
 	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+	h.checkEditorAccount = func(string) error { return nil }
 	h.demote = func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error) { return nil, nil }
 	data := OpenTunnelData{SessionID: "s1", URL: "wss://tunnel.example.com", ClientType: runner.ClientTypeEditor, Username: "u", Groupname: "g"}
 
@@ -39,6 +40,7 @@ func TestTunnelHandler_ValidateClientTypeRequirements(t *testing.T) {
 
 func TestTunnelHandler_Validate(t *testing.T) {
 	handler := NewTunnelHandler(common.NewMockCommandExecutor(t))
+	handler.checkEditorAccount = func(string) error { return nil }
 	handler.demote = func(_, groupname string, _ utils.DemoteOptions) (*utils.DemoteResult, error) {
 		if groupname == "" {
 			return nil, fmt.Errorf("groupname is required")
@@ -266,6 +268,7 @@ func TestTunnelHandler_EditorValidatesGroup(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+			h.checkEditorAccount = func(string) error { return nil }
 			called := false
 			h.demote = func(username, groupname string, opts utils.DemoteOptions) (*utils.DemoteResult, error) {
 				called = true
@@ -302,6 +305,7 @@ func TestTunnelHandler_DarwinEditorSkipsGroupValidation(t *testing.T) {
 	for _, groupname := range []string{"alpacon", "account", ""} {
 		t.Run(groupname, func(t *testing.T) {
 			h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+			h.checkEditorAccount = func(string) error { return nil }
 			h.demote = func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error) {
 				t.Fatal("macOS editor must not look up the requested identity")
 				return nil, nil
@@ -350,6 +354,7 @@ func TestOpenTunnel_ReportsAnEditorWhoseCodeServerCannotBePrepared(t *testing.T)
 		t.Skip("only Linux resolves the editor user when the code-server manager is created")
 	}
 	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+	h.checkEditorAccount = func(string) error { return nil }
 	h.checkResources = func() error { return nil }
 	h.demote = func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error) { return nil, nil }
 	args := &common.CommandArgs{
@@ -386,4 +391,15 @@ func TestOpenTunnel_RefusesWhenResourcesAreExhausted(t *testing.T) {
 	assert.Equal(t, "opentunnel: CPU usage 100.0% exceeds limit 90%", result)
 	_, registered := runner.GetActiveTunnel(args.SessionID)
 	assert.False(t, registered)
+}
+
+func TestEditorAccountRefusalDuringValidation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("editor unavailable")
+	}
+	h := NewTunnelHandler(common.NewMockCommandExecutor(t))
+	h.demote = func(string, string, utils.DemoteOptions) (*utils.DemoteResult, error) { return nil, nil }
+	h.checkEditorAccount = func(string) error { return fmt.Errorf("account mismatch") }
+	err := h.validateClientTypeRequirements(runner.ClientTypeEditor, OpenTunnelData{Username: "other", Groupname: "group"})
+	require.ErrorContains(t, err, "account mismatch")
 }
