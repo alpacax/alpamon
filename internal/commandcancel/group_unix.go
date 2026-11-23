@@ -212,11 +212,7 @@ type pinnedSignalOps struct {
 }
 
 func memberStartedAt(pid int) (int64, error) {
-	p, err := process.NewProcess(int32(pid))
-	if err != nil {
-		return 0, err
-	}
-	return p.CreateTime()
+	return ProcessStartTime(pid)
 }
 
 // SignalPinnedSessionGroups signals the supplied groups after checking each member.

@@ -391,15 +391,7 @@ func processStartedAt(pid int) int64 {
 }
 
 func processStartTime(pid int) (int64, error) {
-	p, err := process.NewProcess(int32(pid))
-	if err != nil {
-		return 0, err
-	}
-	started, err := p.CreateTime()
-	if err != nil {
-		return 0, err
-	}
-	return started, nil
+	return commandcancel.ProcessStartTime(pid)
 }
 
 func treesOf(members []ownedMember) uint32 {
