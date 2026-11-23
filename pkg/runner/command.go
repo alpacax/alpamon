@@ -147,7 +147,7 @@ func (cr *CommandRunner) Run(ctx context.Context) error {
 	}
 
 	// Check caller env before admission, file opening or process start.
-	// Internal commands never pass caller env to their handlers.
+	// Only internal is exempt; new lanes are checked by default.
 	if cr.command.Shell != "internal" && commandEnvRefused(cr.command.Env) {
 		log.Warn().
 			Str("command_id", cr.command.ID).
