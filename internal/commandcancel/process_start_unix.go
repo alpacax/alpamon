@@ -37,7 +37,7 @@ func (r *processStartReader) startTime(pid int) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	started, err := parseProcessStartTicks(data)
+	started, err := parseProcessStartTicks(data, pid)
 	if err != nil {
 		return 0, err
 	}
@@ -81,7 +81,7 @@ func (r *processStartReader) loadMetadata() (processStartMetadata, error) {
 	return r.metadata, nil
 }
 
-func parseProcessStartTicks(data []byte) (uint64, error) {
+func parseProcessStartTicks(data []byte, expectedPID int) (uint64, error) {
 	open, close := bytes.IndexByte(data, '('), bytes.LastIndexByte(data, ')')
 	if open < 1 || close <= open {
 		return 0, fmt.Errorf("malformed process stat command")
@@ -89,6 +89,9 @@ func parseProcessStartTicks(data []byte) (uint64, error) {
 	pid, err := strconv.ParseUint(string(bytes.TrimSpace(data[:open])), 10, 64)
 	if err != nil || pid == 0 {
 		return 0, fmt.Errorf("malformed process stat PID")
+	}
+	if expectedPID <= 0 || pid != uint64(expectedPID) {
+		return 0, fmt.Errorf("process stat PID does not match process %d", expectedPID)
 	}
 	fields := bytes.Fields(data[close+1:])
 	if len(fields) < 20 {

@@ -42,6 +42,16 @@ func TestProcessStartReaderUsesClockTicks(t *testing.T) {
 	}
 }
 
+func TestProcessStartReaderChecksPID(t *testing.T) {
+	reader := startReaderFixture(t, 100)
+	data := strings.Replace(processStatFixture, "42 (sleep)", "43 (sleep)", 1)
+	require.NoError(t, os.WriteFile(filepath.Join(reader.procRoot, "42", "stat"), []byte(data), 0600))
+	started, err := reader.startTime(42)
+	require.ErrorContains(t, err, "PID")
+	assert.Zero(t, started)
+	assert.False(t, processGone(err))
+}
+
 func TestProcessStartReaderKeepsItsCapturedBootTime(t *testing.T) {
 	reader := startReaderFixture(t, 100)
 	first, err := reader.startTime(42)
@@ -134,12 +144,12 @@ func TestProcessStartReaderRejectsInvalidMetadata(t *testing.T) {
 func TestProcessStartTickParser(t *testing.T) {
 	for _, name := range []string{"sleep", "a process (with) parentheses)", "line\nbreak"} {
 		data := strings.Replace(processStatFixture, "(sleep)", "("+name+")", 1)
-		ticks, err := parseProcessStartTicks([]byte(data))
+		ticks, err := parseProcessStartTicks([]byte(data), 42)
 		require.NoError(t, err)
 		assert.Equal(t, uint64(250), ticks)
 	}
 	data := strings.Replace(processStatFixture, " 250 ", " 0 ", 1)
-	ticks, err := parseProcessStartTicks([]byte(data))
+	ticks, err := parseProcessStartTicks([]byte(data), 42)
 	require.NoError(t, err)
 	assert.Zero(t, ticks)
 }
@@ -151,7 +161,7 @@ func TestProcessStartTickParserRejectsMalformedInput(t *testing.T) {
 		strings.Replace(processStatFixture, " 250 ", " -1 ", 1),
 		strings.Replace(processStatFixture, " 250 ", " 18446744073709551616 ", 1),
 	} {
-		_, err := parseProcessStartTicks([]byte(data))
+		_, err := parseProcessStartTicks([]byte(data), 42)
 		assert.Error(t, err)
 	}
 }
