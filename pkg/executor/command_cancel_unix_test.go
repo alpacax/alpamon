@@ -29,9 +29,15 @@ func TestRemoteCancelProcessGroup(t *testing.T) {
 			dir := t.TempDir()
 			ready := filepath.Join(dir, "ready")
 			term := filepath.Join(dir, "term")
-			script := `trap 'echo term > "$2"; exit 0' TERM; echo $$ > "$1"; while :; do sleep 1; done`
+			// The shell runs a trap only after its foreground child exits, so the
+			// loop waits on a background sleep, which a trapped TERM interrupts.
+			script := `trap 'echo term > "$2"; exit 0' TERM; echo $$ > "$1"; while :; do sleep 1 & wait $!; done`
+			// The group leaves as soon as the trap exits, so a long grace costs
+			// nothing here and spares a loaded runner the race with SIGKILL.
+			grace := 2 * time.Second
 			if ignore {
 				script = `trap '' TERM; echo $$ > "$1"; while :; do sleep 1; done`
+				grace = 100 * time.Millisecond
 			}
 			ctx, state := commandcancel.NewContext(context.Background())
 			defer state.Cancel()
@@ -40,7 +46,7 @@ func TestRemoteCancelProcessGroup(t *testing.T) {
 			require.NoError(t, err)
 			done := make(chan error, 1)
 			go func() {
-				_, err := runTrackedProcessCommand(ctx, cmd, cleanup, nil, nil, "test", state, 100*time.Millisecond)
+				_, err := runTrackedProcessCommand(ctx, cmd, cleanup, nil, nil, "test", state, grace)
 				done <- err
 			}()
 			pid := readCancelPID(t, ready)
