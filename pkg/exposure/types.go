@@ -5,6 +5,7 @@ import (
 	"errors"
 )
 
+// The agent sends version 2 and falls back to version 1 on unsupported_schema_version.
 const (
 	legacySchemaVersion = 1
 	schemaVersion       = 2

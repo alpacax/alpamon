@@ -385,6 +385,14 @@ func TestGoldenHosts(t *testing.T) {
 				assert.Equal(t, coverage{Status: coveragePartial, Reasons: []string{reasonExternalSource}}, r.Categories[catAccounts])
 				assert.Contains(t, r.External, external{Kind: externalNSSAccounts, Scope: "global", Sources: []string{"systemd"}})
 			}
+			if name == "symlinked-home" {
+				require.Len(t, r.Accounts, 1)
+				account := r.Accounts[0]
+				assert.Equal(t, ptr(true), account.Home.StrictModesOK)
+				require.Len(t, account.KeyFiles, 1)
+				assert.Equal(t, statusRead, account.KeyFiles[0].Status)
+				assert.Equal(t, ptr(true), account.KeyFiles[0].StrictModesOK)
+			}
 
 			// Leak canaries, on every case: never in the body, the hash
 			// input or the log output.

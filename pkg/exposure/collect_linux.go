@@ -653,12 +653,11 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 	return d
 }
 
-// readKeyFile reads one authorized_keys source. The returned pathStat is
-// the file's own, set when fstat succeeded.
+// readKeyFileUncached returns metadata only after the read descriptor is verified.
 func readKeyFileUncached(fs *fsReader, p string, rule ownerRule, budget *int) (keyFile, *pathStat, []pathStat) {
 	l, dirs := fs.read(p, rule)
 	kf := keyFile{envelope: l.envelope(p), Keys: []key{}}
-	if l.status != statusRead {
+	if l.status != statusRead || l.mode == 0 {
 		return kf, nil, dirs
 	}
 	file := &pathStat{path: p, uid: l.uid, mode: l.mode}

@@ -1,0 +1,4 @@
+UsePAM yes
+PasswordAuthentication no
+StrictModes yes
+AuthorizedKeysFile .ssh/authorized_keys
