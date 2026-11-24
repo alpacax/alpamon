@@ -32,8 +32,9 @@ func TestRemoteCancelProcessGroup(t *testing.T) {
 			// The shell runs a trap only after its foreground child exits, so the
 			// loop waits on a background sleep, which a trapped TERM interrupts.
 			script := `trap 'echo term > "$2"; exit 0' TERM; echo $$ > "$1"; while :; do sleep 1 & wait $!; done`
-			// The group leaves as soon as the trap exits, so a long grace costs
-			// nothing here and spares a loaded runner the race with SIGKILL.
+			// The grace is only the limit before SIGKILL: cancellation returns as
+			// soon as the group has no live members, so a long one costs nothing
+			// here and spares a loaded runner the race with SIGKILL.
 			grace := 2 * time.Second
 			if ignore {
 				script = `trap '' TERM; echo $$ > "$1"; while :; do sleep 1; done`
@@ -59,7 +60,7 @@ func TestRemoteCancelProcessGroup(t *testing.T) {
 			}
 			assert.True(t, waitForProcessGone(pid, time.Second), "root survived cancellation")
 			if ignore {
-				assert.GreaterOrEqual(t, time.Since(start), 100*time.Millisecond)
+				assert.GreaterOrEqual(t, time.Since(start), grace)
 				_, err := os.Stat(term)
 				assert.ErrorIs(t, err, os.ErrNotExist)
 			} else {
