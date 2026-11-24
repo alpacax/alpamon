@@ -70,7 +70,7 @@ type caseSpec struct {
 }
 
 // metaFiles are case files that are not part of the host root.
-var metaFiles = map[string]bool{"case.json": true, "expected.json": true, "sshd-T.txt": true}
+var metaFiles = map[string]bool{"case.json": true, "expected.json": true, "expected-v2.json": true, "sshd-T.txt": true}
 
 func loadCase(t *testing.T, dir string) caseSpec {
 	t.Helper()
@@ -354,14 +354,28 @@ func TestGoldenHosts(t *testing.T) {
 	for _, name := range caseNames(t) {
 		t.Run(name, func(t *testing.T) {
 			body, r, spec, logs, opened := collectCase(t, name)
-			expectedPath := filepath.Join(fixturesDir, "hosts", name, "expected.json")
-			if updateGolden {
-				require.NoError(t, os.WriteFile(expectedPath, append(slices.Clone(body), '\n'), 0o644))
-			}
-			want, err := os.ReadFile(expectedPath)
+			legacy := *r
+			legacy.SchemaVersion = legacySchemaVersion
+			legacyBody, err := seal(&legacy)
 			require.NoError(t, err)
-			assert.Equal(t, string(bytes.TrimSuffix(want, []byte("\n"))), string(body))
-			assert.Equal(t, goldenHash(t, want), r.Hash)
+			assertVersionedReports(t, legacyBody, body)
+			for _, version := range []struct {
+				filename string
+				body     []byte
+				hash     string
+			}{
+				{"expected.json", legacyBody, legacy.Hash},
+				{"expected-v2.json", body, r.Hash},
+			} {
+				expectedPath := filepath.Join(fixturesDir, "hosts", name, version.filename)
+				if updateGolden {
+					require.NoError(t, os.WriteFile(expectedPath, append(slices.Clone(version.body), '\n'), 0o644))
+				}
+				want, err := os.ReadFile(expectedPath)
+				require.NoError(t, err)
+				assert.Equal(t, string(bytes.TrimSuffix(want, []byte("\n"))), string(version.body), version.filename)
+				assert.Equal(t, goldenHash(t, want), version.hash, version.filename)
+			}
 			if name == "ubuntu-default" {
 				for _, category := range []string{catAccounts, catSudo, catKeys} {
 					assert.Equal(t, coverage{Status: coverageCovered, Reasons: []string{}}, r.Categories[category])
@@ -389,6 +403,33 @@ func TestGoldenHosts(t *testing.T) {
 			assertClosedReasons(t, body)
 		})
 	}
+}
+
+func assertVersionedReports(t *testing.T, legacyBody, currentBody []byte) {
+	t.Helper()
+	legacy, current := decodeTree(t, legacyBody), decodeTree(t, currentBody)
+	assert.Equal(t, json.Number("1"), legacy["schema_version"])
+	assert.Equal(t, json.Number("2"), current["schema_version"])
+	assert.Equal(t, goldenHash(t, legacyBody), legacy["hash"])
+	assert.Equal(t, goldenHash(t, currentBody), current["hash"])
+	assert.NotEqual(t, legacy["hash"], current["hash"])
+	delete(legacy, "schema_version")
+	delete(legacy, "hash")
+	delete(current, "schema_version")
+	delete(current, "hash")
+	for _, account := range current["accounts"].([]any) {
+		for _, source := range account.(map[string]any)["key_files"].([]any) {
+			file := source.(map[string]any)
+			require.Contains(t, file, "strict_modes_ok")
+			switch file["strict_modes_ok"].(type) {
+			case nil, bool:
+			default:
+				assert.Fail(t, "StrictModes must be a boolean or null")
+			}
+			delete(file, "strict_modes_ok")
+		}
+	}
+	assert.Equal(t, legacy, current)
 }
 
 // goldenHash recomputes the hash from a golden body: canonical JSON with

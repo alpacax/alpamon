@@ -241,11 +241,19 @@ func hashInput(tree map[string]any) ([]byte, error) {
 }
 
 func canonicalTree(r *exposureReport) (map[string]any, error) {
-	tree, err := valueTree(*r)
+	value, err := valueTree(*r)
 	if err != nil {
 		return nil, err
 	}
-	return tree.(map[string]any), nil
+	tree := value.(map[string]any)
+	if r.SchemaVersion == legacySchemaVersion {
+		for _, account := range tree["accounts"].([]any) {
+			for _, file := range account.(map[string]any)["key_files"].([]any) {
+				delete(file.(map[string]any), "strict_modes_ok")
+			}
+		}
+	}
+	return tree, nil
 }
 
 // seal sets r.Hash from the hash input and returns the canonical body.

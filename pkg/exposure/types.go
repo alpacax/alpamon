@@ -5,8 +5,10 @@ import (
 	"errors"
 )
 
-// schemaVersion is the report schema this agent sends.
-const schemaVersion = 1
+const (
+	legacySchemaVersion = 1
+	schemaVersion       = 2
+)
 
 // Category names: the eight keys of the report's categories object.
 const (

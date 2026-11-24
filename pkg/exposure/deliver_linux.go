@@ -9,6 +9,9 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
@@ -30,6 +33,9 @@ const (
 	maxBackoff    = 5 * time.Minute
 )
 
+// schemaV1ByServer retains the negotiated version across services for each configured URL.
+var schemaV1ByServer sync.Map // string to *atomic.Bool
+
 // service serializes exposure reads and their delivery. A trigger that
 // arrives during a read is held in a one-slot channel and causes exactly one
 // more read after it.
@@ -40,6 +46,7 @@ type service struct {
 	now     func() time.Time
 	jitter  func() time.Duration
 	sleep   func(ctx context.Context, d time.Duration) bool
+	useV1   *atomic.Bool
 	// lastObserved prevents replays within the same second. After a backward
 	// clock step of more than 2 s, an earlier observed_at is sent on purpose;
 	// the server may answer applied: false until the clock catches up.
@@ -49,6 +56,11 @@ type service struct {
 }
 
 func newService(p Poster, collect func(ctx context.Context) *exposureReport, trigger chan struct{}) *service {
+	useV1 := new(atomic.Bool)
+	if session, ok := p.(*scheduler.Session); ok && session.BaseURL != "" {
+		state, _ := schemaV1ByServer.LoadOrStore(session.BaseURL, useV1)
+		useV1 = state.(*atomic.Bool)
+	}
 	return &service{
 		post:    p,
 		collect: collect,
@@ -56,6 +68,7 @@ func newService(p Poster, collect func(ctx context.Context) *exposureReport, tri
 		now:     time.Now,
 		jitter:  func() time.Duration { return rand.N(maxReadJitter) },
 		sleep:   sleepCtx,
+		useV1:   useV1,
 	}
 }
 
@@ -119,29 +132,53 @@ func (s *service) readAndDeliver(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	check := checkBody(r)
+	if !s.useV1.Load() {
+		if !s.deliver(ctx, r, body) {
+			return
+		}
+		if s.useV1.CompareAndSwap(false, true) {
+			log.Info().Msg("Exposure schema version 2 was refused; using version 1 for this server until restart.")
+		}
+	}
+	legacy := *r
+	legacy.SchemaVersion = legacySchemaVersion
+	body, err := seal(&legacy)
+	if err != nil {
+		log.Debug().Msg("Exposure report could not be encoded.")
+		return
+	}
+	s.deliver(ctx, &legacy, body)
+}
 
+// deliver returns true when the same snapshot needs a new check using the v1 hash.
+func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) bool {
 	var res struct {
 		Required *bool `json:"required"`
 	}
-	status, ok := s.send(ctx, checkURL, check, checkTimeout, &res)
+	check := s.send(ctx, checkURL, checkBody(r), checkTimeout, &res)
 	switch {
-	case status == http.StatusNotFound:
+	case check.unsupportedVersion && r.SchemaVersion == schemaVersion:
+		return true
+	case check.status == http.StatusNotFound:
 		s.unavailableUntil = s.now().Add(24 * time.Hour)
 		log.Debug().Msg("Exposure check endpoint not available on this server; skipping for 24 hours.")
-		return
-	case !ok:
-		return
-	case status != http.StatusOK || res.Required == nil:
-		log.Debug().Int("status_code", status).Msg("Exposure check was not accepted.")
-		return
+		return false
+	case !check.ok:
+		return false
+	case check.status != http.StatusOK || res.Required == nil:
+		log.Debug().Int("status_code", check.status).Msg("Exposure check was not accepted.")
+		return false
 	case !*res.Required:
-		return
+		return false
 	}
-	status, ok = s.send(ctx, reportURL, body, reportTimeout, nil)
-	if ok && status != http.StatusOK {
-		log.Warn().Int("status_code", status).Msg("Exposure report was not accepted.")
+	report := s.send(ctx, reportURL, body, reportTimeout, nil)
+	if report.unsupportedVersion && r.SchemaVersion == schemaVersion {
+		return true
 	}
+	if report.ok && report.status != http.StatusOK {
+		log.Warn().Int("status_code", report.status).Msg("Exposure report was not accepted.")
+	}
+	return false
 }
 
 func (s *service) buildReport(ctx context.Context) (report *exposureReport, encoded []byte) {
@@ -226,51 +263,76 @@ func checkBody(r *exposureReport) []byte {
 	b = appendJSONString(b, r.Hash)
 	b = append(b, `,"observed_at":`...)
 	b = appendJSONString(b, r.ObservedAt)
-	b = append(b, `,"schema_version":1}`...)
-	return b
+	b = append(b, `,"schema_version":`...)
+	b = strconv.AppendInt(b, int64(r.SchemaVersion), 10)
+	return append(b, '}')
 }
 
 func retryable(status int) bool {
 	return status == http.StatusRequestTimeout || status >= 500
 }
 
+type deliveryResponse struct {
+	status             int
+	ok                 bool
+	unsupportedVersion bool
+}
+
+func unsupportedSchemaVersion(body []byte) bool {
+	var response struct {
+		Errors []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(body, &response) != nil {
+		return false
+	}
+	for _, failure := range response.Errors {
+		if failure.Code == "unsupported_schema_version" {
+			return true
+		}
+	}
+	return false
+}
+
 // send posts body, retrying transport errors and retryable statuses with
 // backoff. ok is false when delivery is deferred. Neither the request nor
 // the response body is logged.
-func (s *service) send(ctx context.Context, url string, body []byte, timeout time.Duration, out any) (int, bool) {
+func (s *service) send(ctx context.Context, url string, body []byte, timeout time.Duration, out any) deliveryResponse {
 	backoff := firstBackoff
 	for attempt := 1; ; attempt++ {
 		resp, status, _, err := s.post.PostExposure(ctx, url, body, timeout)
 		if errors.Is(err, scheduler.ErrExposureRequest) {
 			log.Debug().Msg("Exposure request could not be built; skipping until the next read.")
-			return status, false
+			return deliveryResponse{status: status}
 		}
 		if status == http.StatusTooManyRequests {
 			log.Debug().Msg("Exposure delivery throttled; skipping until the next read.")
-			return status, false
+			return deliveryResponse{status: status}
 		}
 		if status >= 300 && status < 400 || len(resp) > scheduler.MaxExposureResponseBytes || errors.Is(err, scheduler.ErrExposureResponseTooLarge) {
 			log.Debug().Msg("Exposure response rejected; skipping until the next read.")
-			return status, false
+			return deliveryResponse{status: status}
 		}
 		if status >= 400 && status < 500 && status != http.StatusRequestTimeout {
-			return status, true
+			return deliveryResponse{status: status, ok: true,
+				unsupportedVersion: status == http.StatusBadRequest && err == nil && unsupportedSchemaVersion(resp)}
 		}
 		if err == nil && !retryable(status) {
 			if out != nil && status == http.StatusOK {
 				if json.NewDecoder(bytes.NewReader(resp)).Decode(out) != nil {
 					log.Debug().Msg("Exposure check response could not be parsed.")
-					return status, false
+					return deliveryResponse{status: status}
 				}
 			}
-			return status, true
+			return deliveryResponse{status: status, ok: true}
 		}
 		if attempt >= maxAttempts || ctx.Err() != nil {
 			log.Debug().Int("status_code", status).Int("attempts", attempt).Msg("Exposure delivery gave up until the next read.")
-			return status, false
+			return deliveryResponse{status: status}
 		}
 		if !s.sleep(ctx, backoff*8/10+rand.N(backoff*4/10+1)) {
-			return 0, false
+			return deliveryResponse{}
 		}
 		backoff = min(backoff*3, maxBackoff)
 	}
