@@ -128,26 +128,25 @@ func (s *service) readAndDeliver(ctx context.Context) {
 	if s.now().Before(s.unavailableUntil) {
 		return
 	}
-	r, body := s.buildReport(ctx)
-	if r == nil {
+	version := schemaVersion
+	if s.useV1.Load() {
+		version = legacySchemaVersion
+	}
+	r, body, snapshot := s.buildReport(ctx, version)
+	if r == nil || !s.deliver(ctx, r, body) {
 		return
 	}
-	if !s.useV1.Load() {
-		if !s.deliver(ctx, r, body) {
-			return
-		}
-		if s.useV1.CompareAndSwap(false, true) {
-			log.Info().Msg("Exposure schema version 2 was refused; using version 1 for this server until restart.")
-		}
+	if s.useV1.CompareAndSwap(false, true) {
+		log.Info().Msg("Exposure schema version 2 was refused; using version 1 for this server until restart.")
 	}
-	legacy := *r
-	legacy.SchemaVersion = legacySchemaVersion
-	body, err := seal(&legacy)
-	if err != nil {
-		log.Debug().Msg("Exposure report could not be encoded.")
-		return
+	if snapshot == nil {
+		r, body, _ = fallbackReport(r.ObservedAt, legacySchemaVersion)
+	} else {
+		r, body = prepareReport(snapshot, legacySchemaVersion)
 	}
-	s.deliver(ctx, &legacy, body)
+	if r != nil {
+		s.deliver(ctx, r, body)
+	}
 }
 
 // deliver returns true when the same snapshot needs a new check using the v1 hash.
@@ -181,7 +180,7 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 	return false
 }
 
-func (s *service) buildReport(ctx context.Context) (report *exposureReport, encoded []byte) {
+func (s *service) buildReport(ctx context.Context, version int) (report *exposureReport, encoded []byte, snapshot *exposureReport) {
 	stage := "collect"
 	var observed time.Time
 	defer func() {
@@ -191,7 +190,8 @@ func (s *service) buildReport(ctx context.Context) (report *exposureReport, enco
 			// collection, assembly and cap code, including their hooks.
 			stage, location := exposurePanicDetails(stage)
 			var fallbackSource string
-			report, encoded, fallbackSource = fallbackReport(observed)
+			report, encoded, fallbackSource = fallbackReport(observed.Format(time.RFC3339), version)
+			snapshot = nil
 			message := "Exposure read panicked; recovered at read boundary."
 			if fallbackSource != "" {
 				stage, location = "fallback", fallbackSource
@@ -207,15 +207,21 @@ func (s *service) buildReport(ctx context.Context) (report *exposureReport, enco
 		} else {
 			observed = s.lastObserved.Add(time.Second)
 			if !s.sleep(ctx, observed.Sub(s.now())) {
-				return nil, nil
+				return nil, nil, nil
 			}
 		}
 	}
 	s.lastObserved = observed
 
-	r := s.collect(ctx)
-	r.ObservedAt = observed.Format(time.RFC3339)
+	snapshot = s.collect(ctx)
+	snapshot.ObservedAt = observed.Format(time.RFC3339)
 	stage = "finalize"
+	report, encoded = prepareReport(snapshot, version)
+	return report, encoded, snapshot
+}
+
+func prepareReport(snapshot *exposureReport, version int) (*exposureReport, []byte) {
+	r := reportForVersion(snapshot, version)
 	body, err := finalize(r)
 	if err != nil {
 		log.Debug().Msg("Exposure report could not be encoded.")
@@ -228,7 +234,7 @@ func (s *service) buildReport(ctx context.Context) (report *exposureReport, enco
 	return r, body
 }
 
-func fallbackReport(observed time.Time) (report *exposureReport, encoded []byte, panicSource string) {
+func fallbackReport(observed string, version int) (report *exposureReport, encoded []byte, panicSource string) {
 	defer func() {
 		if recover() != nil {
 			report, encoded = nil, nil
@@ -238,8 +244,8 @@ func fallbackReport(observed time.Time) (report *exposureReport, encoded []byte,
 	readHook("fallback")
 	// The contract requires an sshd object. Use its empty policy form.
 	r := &exposureReport{
-		SchemaVersion: schemaVersion,
-		ObservedAt:    observed.Format(time.RFC3339),
+		SchemaVersion: version,
+		ObservedAt:    observed,
 		Scope:         reportScope{OS: "linux", Protocol: "ssh"},
 		Categories:    map[string]coverage{},
 		External:      []external{},

@@ -241,19 +241,36 @@ func hashInput(tree map[string]any) ([]byte, error) {
 }
 
 func canonicalTree(r *exposureReport) (map[string]any, error) {
-	value, err := valueTree(*r)
+	value, err := wireTree(*r, r.SchemaVersion)
 	if err != nil {
 		return nil, err
 	}
-	tree := value.(map[string]any)
-	if r.SchemaVersion == legacySchemaVersion {
-		for _, account := range tree["accounts"].([]any) {
-			for _, file := range account.(map[string]any)["key_files"].([]any) {
-				delete(file.(map[string]any), "strict_modes_ok")
-			}
-		}
+	return value.(map[string]any), nil
+}
+
+func wireTree(v any, version int) (any, error) {
+	value, err := valueTree(v)
+	if err != nil || version != legacySchemaVersion {
+		return value, err
 	}
-	return tree, nil
+	switch v.(type) {
+	case exposureReport:
+		tree := value.(map[string]any)
+		for _, account := range tree["accounts"].([]any) {
+			omitKeyFileStrictModes(account.(map[string]any))
+		}
+	case account, *account:
+		omitKeyFileStrictModes(value.(map[string]any))
+	case keyFile, *keyFile:
+		delete(value.(map[string]any), "strict_modes_ok")
+	}
+	return value, nil
+}
+
+func omitKeyFileStrictModes(account map[string]any) {
+	for _, file := range account["key_files"].([]any) {
+		delete(file.(map[string]any), "strict_modes_ok")
+	}
 }
 
 // seal sets r.Hash from the hash input and returns the canonical body.

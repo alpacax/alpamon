@@ -500,12 +500,9 @@ func expandPath(tmpl, home, user string) (string, bool) {
 		if home == "" {
 			return "", false
 		}
-		if home == "/" {
-			p = "/" + p
-		} else {
-			p = home + "/" + p
-		}
+		p = home + "/" + p
 	}
+	p = collapseSlashes(p)
 	return p, validPath(p)
 }
 
@@ -568,7 +565,7 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 		d.reasons.add(reasonFileUnreadable)
 	}
 	for _, acct := range accounts {
-		homePath := acct.homeForKeys()
+		homePath := homeDirectory(acct.home)
 		ak := accountKeys{home: home{Status: statusUnresolved}, files: []keyFile{}}
 		rule := ownerRule{uid: acct.uid}
 		strict, strictKnown, noHome, anyRead := true, true, false, false
@@ -603,7 +600,7 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 		budget := maxKeysPerAccount
 		seen := map[string]bool{}
 		for _, tmpl := range tmpls {
-			p, ok := expandPath(tmpl, homePath, acct.name)
+			p, ok := expandPath(tmpl, acct.home, acct.name)
 			if !ok {
 				if homePath == "" {
 					continue
@@ -820,7 +817,7 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 			tf := readTrustSource(fs, p, ownerRule{uid: acct.uid}, kind)
 			if tf.Status == statusUnreadable || tf.Status == statusRejected {
 				if !homeChecked {
-					_, hl := fs.statDir(acct.home, ownerRule{uid: acct.uid})
+					_, hl := fs.statDir(homeDirectory(acct.home), ownerRule{uid: acct.uid})
 					homeChecked, homeUnreadable = true, hl.status != statusRead
 				}
 				if homeUnreadable {
@@ -942,7 +939,9 @@ func exposurePanicDetails(stage string) (string, string) {
 				}
 				if !identified {
 					switch {
-					case strings.HasSuffix(frame.Function, ".serializeReport"), strings.HasSuffix(frame.Function, ".encodeValue"):
+					case strings.HasSuffix(frame.Function, ".serializeReport"),
+						strings.HasSuffix(frame.Function, ".encodeValue"),
+						strings.HasSuffix(frame.Function, ".wireTree"):
 						stage, identified = "serialize", true
 					case strings.HasSuffix(frame.Function, ".hashInput"):
 						stage, identified = "hash", true

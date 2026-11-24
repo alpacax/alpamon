@@ -60,7 +60,7 @@ func TestAccountCapIsolatesOtherAccounts(t *testing.T) {
 	body, err := finalize(r)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(body), maxReportBytes)
-	assert.LessOrEqual(t, encodedLen(r.Accounts[0]), maxAccountBytes)
+	assert.LessOrEqual(t, r.encodedLen(r.Accounts[0]), maxAccountBytes)
 	for _, a := range r.Accounts[1:] {
 		require.Len(t, a.KeyFiles, 1)
 		assert.True(t, a.KeyFiles[0].Complete)
@@ -95,7 +95,7 @@ func TestAccountMetadataAlsoRespectsCap(t *testing.T) {
 	for i := 0; i < maxGroupsPerAccount; i++ {
 		a.Groups = append(a.Groups, fmt.Sprintf("g%0255d", i))
 	}
-	require.Greater(t, encodedLen(a), maxAccountBytes)
+	require.Greater(t, r.encodedLen(a), maxAccountBytes)
 	r.Accounts = []account{a, capAccount("b", nil)}
 	_, err := finalize(r)
 	require.NoError(t, err)
@@ -151,12 +151,12 @@ func TestObservationRowCapBoundary(t *testing.T) {
 		t.Run(fmt.Sprint(rows), func(t *testing.T) {
 			r := rowCapReport(rows)
 			require.Equal(t, rows, observationRows(r))
-			require.Greater(t, encodedLen(r.Accounts[100].KeyFiles[0]), encodedLen(r.Accounts[100].Sudo), "row count takes priority over source bytes")
+			require.Greater(t, r.encodedLen(r.Accounts[100].KeyFiles[0]), r.encodedLen(r.Accounts[100].Sudo), "row count takes priority over source bytes")
 			before, err := seal(r)
 			require.NoError(t, err)
 			require.Less(t, len(before), maxReportBytes)
 			for _, a := range r.Accounts {
-				require.Less(t, encodedLen(a), maxAccountBytes)
+				require.Less(t, r.encodedLen(a), maxAccountBytes)
 			}
 			body, err := finalize(r)
 			require.NoError(t, err)

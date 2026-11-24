@@ -124,6 +124,13 @@ func validK5Principal(s string) bool {
 	return true
 }
 
+func collapseSlashes(path string) string {
+	for strings.Contains(path, "//") {
+		path = strings.ReplaceAll(path, "//", "/")
+	}
+	return path
+}
+
 // validPath is an absolute path of printable ASCII without whitespace,
 // quotes or backslashes, with no empty, "." or ".." component.
 func validPath(s string) bool {

@@ -22,13 +22,13 @@ func TestObservedAtClockStep(t *testing.T) {
 	s.lastObserved = now.Add(24 * time.Hour)
 	var sleeps []time.Duration
 	s.sleep = func(_ context.Context, d time.Duration) bool { sleeps = append(sleeps, d); return true }
-	r, _ := s.buildReport(context.Background())
+	r, _, _ := s.buildReport(context.Background(), schemaVersion)
 	require.NotNil(t, r)
 	assert.Empty(t, sleeps)
 	assert.Equal(t, now.Format(time.RFC3339), r.ObservedAt)
 	assert.Equal(t, now, s.lastObserved)
 	assert.Equal(t, 1, strings.Count(logs.String(), `"level":"warn"`))
-	s.buildReport(context.Background())
+	s.buildReport(context.Background(), schemaVersion)
 	assert.Equal(t, []time.Duration{time.Second}, sleeps)
 	assert.Equal(t, now.Add(time.Second), s.lastObserved)
 	assert.Equal(t, 1, strings.Count(logs.String(), `"level":"warn"`))

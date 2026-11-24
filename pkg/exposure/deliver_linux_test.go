@@ -273,6 +273,63 @@ func TestDeliverFallsBackToVersionOneFromEitherEndpoint(t *testing.T) {
 	}
 }
 
+func TestVersionOneDeliveryUsesItsOwnByteLimit(t *testing.T) {
+	const accountCount, keysPerAccount = 16, 400
+	r := sampleReport()
+	r.Accounts = nil
+	r.ObservedAt = goldenObservedAt
+	var comment, padding string
+	keys := make([]key, keysPerAccount)
+	for i := range keys {
+		keys[i] = key{
+			Fingerprint: fmt.Sprintf("SHA256:%043d", i), Type: "ssh-ed25519", Bits: 256,
+			Authorizations: []authorization{{Count: 1, Role: "user_key", Comment: &comment}},
+		}
+	}
+	for i := range accountCount {
+		r.Accounts = append(r.Accounts, capAccount(fmt.Sprintf("user%02d", i), keys))
+	}
+	r.SSHD.Effective = map[string]*string{"allowusers": &padding}
+	legacy := *r
+	legacy.SchemaVersion = legacySchemaVersion
+	base, err := seal(&legacy)
+	require.NoError(t, err)
+	require.Less(t, len(base), maxReportBytes)
+	available := maxReportBytes - len(base)
+	comment = strings.Repeat("x", available/(accountCount*keysPerAccount))
+	padding = strings.Repeat("x", available%(accountCount*keysPerAccount))
+	v1, err := seal(&legacy)
+	require.NoError(t, err)
+	require.Len(t, v1, maxReportBytes)
+	v2, err := seal(r)
+	require.NoError(t, err)
+	require.Greater(t, len(v2), maxReportBytes)
+
+	p := acceptingPoster()
+	p.answers[reportURL] = append([]fakeResponse{{
+		status: http.StatusBadRequest,
+		body:   `{"errors":[{"field":"/schema_version","code":"unsupported_schema_version"}]}`,
+	}}, p.answers[reportURL]...)
+	reads := 0
+	s := testService(p, func(context.Context) *exposureReport { reads++; return r })
+	s.readAndDeliver(context.Background())
+
+	assert.Equal(t, 1, reads)
+	reports := p.callsTo(reportURL)
+	require.Len(t, reports, 2)
+	assert.LessOrEqual(t, len(reports[0].body), maxReportBytes)
+	assert.Equal(t, maxReportBytes, len(reports[1].body))
+	var delivered exposureReport
+	require.NoError(t, json.Unmarshal(reports[1].body, &delivered))
+	assert.Equal(t, legacySchemaVersion, delivered.SchemaVersion)
+	assert.Equal(t, legacy.Hash, delivered.Hash)
+	require.Len(t, delivered.Accounts, accountCount)
+	for _, account := range delivered.Accounts {
+		require.Len(t, account.KeyFiles, 1)
+		assert.Len(t, account.KeyFiles[0].Keys, keysPerAccount, account.Username)
+	}
+}
+
 func TestDeliverFallbackIsRememberedByServerURL(t *testing.T) {
 	logs := captureLogs(t)
 	const legacyURL = "https://example.test/legacy"

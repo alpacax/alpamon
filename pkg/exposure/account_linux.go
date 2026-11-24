@@ -128,7 +128,6 @@ func failureEnvelope(path, reason string) envelope {
 
 func failedAccountKeys(a passwdEntry, t *sshdT, reason string) accountKeys {
 	out := accountKeys{home: home{Status: statusUnresolved}, files: []keyFile{}}
-	homePath := a.homeForKeys()
 	if reason == reasonTimeout {
 		out.home.Status = statusTimeout
 	}
@@ -137,9 +136,9 @@ func failedAccountKeys(a passwdEntry, t *sshdT, reason string) accountKeys {
 		if tmpl == "none" {
 			continue
 		}
-		p, ok := expandPath(tmpl, homePath, a.name)
+		p, ok := expandPath(tmpl, a.home, a.name)
 		if !ok {
-			if homePath == "" {
+			if a.home == "" {
 				continue
 			}
 			p = tmpl

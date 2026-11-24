@@ -10,20 +10,19 @@ type passwdEntry struct {
 	name  string
 	uid   uint32
 	gid   uint32
-	home  string // "" when the field is not a usable absolute path
+	home  string // passwd spelling, or "" when the field is not a usable absolute path
 	shell string // "" for an empty shell field
-	// trailingSlashHome is the normalized home for key collection only.
-	trailingSlashHome string
 	// passwordInPasswd is set when field 2 is not "x": the password lives in
 	// /etc/passwd itself, so the shadow-derived state may not be the one used.
 	passwordInPasswd bool
 }
 
-func (e passwdEntry) homeForKeys() string {
-	if e.trailingSlashHome != "" {
-		return e.trailingSlashHome
+func homeDirectory(path string) string {
+	path = collapseSlashes(path)
+	if path == "/" {
+		return path
 	}
-	return e.home
+	return strings.TrimSuffix(path, "/")
 }
 
 type passwdResult struct {
@@ -82,10 +81,9 @@ func parsePasswdLine(line []byte) (passwdEntry, bool) {
 		gid:              uint32(gid),
 		passwordInPasswd: !bytes.Equal(f[1], []byte("x")),
 	}
-	if home := string(f[5]); home == "/" || validPath(home) {
+	home := string(f[5])
+	if dir := homeDirectory(home); dir == "/" || validPath(dir) {
 		e.home = home
-	} else if trimmed := strings.TrimRight(home, "/"); validPath(trimmed) {
-		e.trailingSlashHome = trimmed
 	}
 	if shell := string(f[6]); shell != "" {
 		if !validPath(shell) {

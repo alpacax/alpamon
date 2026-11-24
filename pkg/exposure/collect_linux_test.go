@@ -134,6 +134,40 @@ func TestKeyFileStrictModes(t *testing.T) {
 	})
 }
 
+func TestAuthorizedKeyPathsFromPasswdHome(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		for _, tc := range []struct {
+			name, home, template, path string
+		}{
+			{"trailing slash", "/home/u/", "%hkeys/authorized_keys", "/home/u/keys/authorized_keys"},
+			{"no trailing slash", "/home/u", "%hkeys/authorized_keys", "/home/ukeys/authorized_keys"},
+			{"adjacent slashes", "/home/u/", "%h/keys//authorized_keys", "/home/u/keys/authorized_keys"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root, owners := attackRoot(t)
+				file := filepath.Join(root, tc.path)
+				require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+				require.NoError(t, os.WriteFile(file, []byte("ssh-ed25519 "+testEd0+"\n"), 0o600))
+				owners[tc.path] = 1001
+				accounts := parsePasswd([]byte("u:x:1001:1001::" + tc.home + ":/bin/sh\n"))
+				require.Len(t, accounts.entries, 1)
+				policy := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(tc.template)}}
+
+				read := readKeys(readerFor(t, root, owners), accounts.entries, policy, sshdConfig{}).byUser["u"].files
+				require.Len(t, read, 1)
+				assert.Equal(t, tc.path, read[0].Path)
+				assert.Equal(t, statusRead, read[0].Status)
+				assert.Len(t, read[0].Keys, 1)
+
+				timed := failedAccountKeys(accounts.entries[0], policy, reasonTimeout).files
+				require.Len(t, timed, 1)
+				assert.Equal(t, tc.path, timed[0].Path)
+				assert.Equal(t, statusTimeout, timed[0].Status)
+			})
+		}
+	})
+}
+
 func TestUnverifiedKeyFileReadHasNoMetadata(t *testing.T) {
 	const keyPath = "/home/u/.ssh/authorized_keys"
 	forBothWalks(t, func(t *testing.T) {
