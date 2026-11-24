@@ -20,6 +20,88 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestKeyFileStrictModes(t *testing.T) {
+	const homePath = "/data/home/u"
+	const keyPath = homePath + "/.ssh/authorized_keys"
+	const externalPath = "/etc/keys/u"
+	forBothWalks(t, func(t *testing.T) {
+		for _, tc := range []struct {
+			name, home, paths, writable, unreadable string
+			wantHome                                *bool
+			wantFiles                               map[string]*bool
+		}{
+			{
+				name: "symlinked home", home: "/home/u", paths: ".ssh/authorized_keys " + keyPath,
+				writable: "/data", wantHome: ptr(true),
+				wantFiles: map[string]*bool{"/home/u/.ssh/authorized_keys": ptr(true), keyPath: ptr(true)},
+			},
+			{
+				name: "trailing slash on home", home: homePath + "/", paths: "%h/.ssh/authorized_keys",
+				writable: "/data", wantHome: ptr(true), wantFiles: map[string]*bool{keyPath: ptr(true)},
+			},
+			{
+				name: "outside source checks root", home: homePath, paths: ".ssh/authorized_keys " + externalPath,
+				writable: "/", wantHome: ptr(false), wantFiles: map[string]*bool{keyPath: ptr(true), externalPath: ptr(false)},
+			},
+			{
+				name: "writable key file", home: homePath, paths: ".ssh/authorized_keys " + externalPath,
+				writable: keyPath, wantHome: ptr(false), wantFiles: map[string]*bool{keyPath: ptr(false), externalPath: ptr(true)},
+			},
+			{
+				name: "absent source", home: homePath, paths: ".ssh/authorized_keys .ssh/missing",
+				wantHome: ptr(true), wantFiles: map[string]*bool{keyPath: ptr(true), homePath + "/.ssh/missing": nil},
+			},
+			{
+				name: "unreadable source", home: homePath, paths: ".ssh/authorized_keys " + externalPath,
+				unreadable: externalPath, wantFiles: map[string]*bool{keyPath: ptr(true), externalPath: nil},
+			},
+			{
+				name: "unreadable parent", home: homePath, paths: ".ssh/authorized_keys " + externalPath,
+				unreadable: homePath + "/.ssh", wantFiles: map[string]*bool{keyPath: nil, externalPath: ptr(true)},
+			},
+			{
+				name: "unreadable home", home: homePath, paths: ".ssh/authorized_keys " + externalPath,
+				unreadable: homePath, wantFiles: map[string]*bool{keyPath: nil, externalPath: nil},
+			},
+			{
+				name: "outside source with absent home", home: "/missing", paths: externalPath,
+				wantHome: ptr(true), wantFiles: map[string]*bool{externalPath: ptr(true)},
+			},
+			{
+				name: "unresolved path token", home: homePath, paths: ".ssh/authorized_keys %x",
+				wantFiles: map[string]*bool{keyPath: ptr(true), "%x": nil},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root := t.TempDir()
+				for _, p := range []string{keyPath, externalPath} {
+					file := filepath.Join(root, p)
+					require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+					require.NoError(t, os.WriteFile(file, nil, 0o644))
+				}
+				require.NoError(t, os.Symlink("/data/home", filepath.Join(root, "home")))
+				if tc.writable != "" {
+					require.NoError(t, os.Chmod(filepath.Join(root, tc.writable), 0o775))
+				}
+				if tc.unreadable != "" {
+					recordOpens(t, []string{tc.unreadable})
+				}
+				accounts := parsePasswd([]byte("u:x:1001:1001::" + tc.home + ":/bin/sh\n"))
+				require.Len(t, accounts.entries, 1)
+				policy := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(tc.paths)}}
+				result := readKeys(readerFor(t, root, nil), accounts.entries, policy, sshdConfig{}).byUser["u"]
+				assert.Equal(t, tc.wantHome, result.home.StrictModesOK)
+				got := make(map[string]*bool, len(result.files))
+				for _, file := range result.files {
+					got[file.Path] = file.StrictModesOK
+				}
+				assert.Len(t, result.files, len(tc.wantFiles))
+				assert.Equal(t, tc.wantFiles, got)
+			})
+		}
+	})
+}
+
 func TestSystemdNSSSources(t *testing.T) {
 	forBothWalks(t, func(t *testing.T) {
 		for _, tc := range []struct {

@@ -172,6 +172,7 @@ type keyFile struct {
 	Mode          *string `json:"mode"`
 	UnparsedLines int     `json:"unparsed_lines"`
 	Keys          []key   `json:"keys"`
+	StrictModesOK *bool   `json:"strict_modes_ok"`
 }
 
 // key is one public key, identified by its fingerprint.

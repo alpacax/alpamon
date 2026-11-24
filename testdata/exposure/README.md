@@ -2,6 +2,10 @@
 
 These files are the goldens of the wire contract between alpamon and the Alpacon server for the host access-path exposure report (`POST /api/servers/servers/-/exposure-check/` and `POST /api/servers/servers/-/exposure/`, `schema_version: 1`). The server's tests copy them. A change here must land together with the matching server change.
 
+## Key-file StrictModes
+
+Each `accounts[].key_files[].strict_modes_ok` is `true` if the file and its parent directories pass the StrictModes ownership and mode checks, or `false` if any fails. The check includes the canonical home when it is an ancestor of the file and reaches `/` otherwise. The value is `null` when the collector cannot judge the source, such as when the file is absent or the home is unreadable. `accounts[].home.strict_modes_ok` is the separate account-level result.
+
 ## Layout
 
 - `hosts/<case>/`: a fake Linux host root (`etc/passwd`, `etc/shadow`, `etc/group`, `etc/sudoers*`, `etc/sudo.conf`, `etc/nsswitch.conf`, `etc/ssh/...`, homes, `var/log/wtmp`, `var/log/lastlog`) plus:
