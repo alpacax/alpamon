@@ -326,7 +326,6 @@ const (
 func newTunnelDialer() websocket.Dialer {
 	return websocket.Dialer{
 		Proxy:           utils.WebsocketProxy,
-		NetDialContext:  utils.BoundWebsocketDial(nil),
 		ReadBufferSize:  tunnelWSBufferSize,
 		WriteBufferSize: tunnelWSBufferSize,
 		TLSClientConfig: &tls.Config{
@@ -353,14 +352,14 @@ func (tc *TunnelClient) connect(ctx context.Context) error {
 	// gorilla reads the handshake response without watching ctx, so a
 	// canceled dial would otherwise wait out HandshakeTimeout.
 	unwatch := func() bool { return true }
-	dialer.NetDialContext = func(dctx context.Context, network, addr string) (net.Conn, error) {
+	dialer.NetDialContext = utils.BoundWebsocketDial(func(dctx context.Context, network, addr string) (net.Conn, error) {
 		c, err := (&net.Dialer{}).DialContext(dctx, network, addr)
 		if err != nil {
 			return nil, err
 		}
 		unwatch = context.AfterFunc(dialCtx, func() { _ = c.Close() })
 		return c, nil
-	}
+	})
 
 	conn, resp, err := dialer.DialContext(dialCtx, target, tc.requestHeader)
 	if !unwatch() || dialCtx.Err() != nil {
