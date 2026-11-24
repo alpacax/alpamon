@@ -630,7 +630,7 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 			case kf.Status == statusAbsent:
 			case file != nil:
 				fileStrict := strictChain(*file, fdirs, canonicalHome, acct.uid)
-				if (canonicalHome != "" || noHome) && !slices.Contains(kf.Reasons, reasonConcurrentChange) {
+				if canonicalHome != "" || noHome {
 					kf.StrictModesOK = ptr(fileStrict)
 				}
 				strict = strict && fileStrict
@@ -653,19 +653,16 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 	return d
 }
 
-// readKeyFileUncached returns metadata only after the read descriptor is verified.
+// readKeyFileUncached returns metadata only for a verified read.
 func readKeyFileUncached(fs *fsReader, p string, rule ownerRule, budget *int) (keyFile, *pathStat, []pathStat) {
 	l, dirs := fs.read(p, rule)
 	kf := keyFile{envelope: l.envelope(p), Keys: []key{}}
-	if l.status != statusRead || l.mode == 0 {
+	if !l.usable() {
 		return kf, nil, dirs
 	}
 	file := &pathStat{path: p, uid: l.uid, mode: l.mode}
 	kf.OwnerUID = ptr(l.uid)
 	kf.Mode = ptr(formatMode(l.mode))
-	if l.data == nil {
-		return kf, file, dirs
-	}
 	res := parseAuthorizedKeys(l.data, budget)
 	clear(l.data)
 	kf.Keys = res.keys

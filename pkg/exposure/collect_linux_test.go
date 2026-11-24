@@ -134,34 +134,67 @@ func TestKeyFileStrictModes(t *testing.T) {
 	})
 }
 
-func TestKeyFileWithUnverifiedReadDescriptorHasNoMetadata(t *testing.T) {
+func TestUnverifiedKeyFileReadHasNoMetadata(t *testing.T) {
+	const keyPath = "/home/u/.ssh/authorized_keys"
 	forBothWalks(t, func(t *testing.T) {
-		const keyPath = "/home/u/.ssh/authorized_keys"
-		root, owners := attackRoot(t)
-		owners[keyPath] = 1001
-		require.NoError(t, os.WriteFile(filepath.Join(root, keyPath), nil, 0o600))
-		testHookFstat = func(path string, st *unix.Stat_t) {
-			if path == keyPath {
-				st.Ino++
-			}
-		}
-		t.Cleanup(func() { testHookFstat = nil })
+		for _, tc := range []struct {
+			name, reason string
+			setup        func(t *testing.T, file string)
+		}{
+			{
+				name: "read descriptor differs", reason: reasonConcurrentChange,
+				setup: func(t *testing.T, _ string) {
+					testHookFstat = func(path string, st *unix.Stat_t) {
+						if path == keyPath {
+							st.Ino++
+						}
+					}
+					t.Cleanup(func() { testHookFstat = nil })
+				},
+			},
+			{
+				name: "file changes after read", reason: reasonConcurrentChange,
+				setup: func(t *testing.T, file string) {
+					testHookAfterRead = func(path string) {
+						if path == keyPath {
+							require.NoError(t, os.Truncate(file, 0))
+						}
+					}
+					t.Cleanup(func() { testHookAfterRead = nil })
+				},
+			},
+			{
+				name: "file exceeds read limit", reason: reasonLimitExceeded,
+				setup: func(t *testing.T, file string) {
+					require.NoError(t, os.Truncate(file, maxReadBytes+1))
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root, owners := attackRoot(t)
+				owners[keyPath] = 1001
+				keyFilePath := filepath.Join(root, keyPath)
+				require.NoError(t, os.WriteFile(keyFilePath, []byte("ssh-ed25519 "+testEd0+"\n"), 0o600))
+				tc.setup(t, keyFilePath)
 
-		policy := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(".ssh/authorized_keys")}}
-		accounts := []passwdEntry{{name: "u", uid: 1001, home: "/home/u"}}
-		keys := readKeys(readerFor(t, root, owners), accounts, policy, sshdConfig{})
-		result := keys.byUser["u"]
-		require.Len(t, result.files, 1)
-		file := result.files[0]
-		assert.Equal(t, statusRead, file.Status)
-		assert.False(t, file.Complete)
-		assert.Equal(t, []string{reasonConcurrentChange}, file.Reasons)
-		assert.Nil(t, file.OwnerUID)
-		assert.Nil(t, file.Mode)
-		assert.Nil(t, file.StrictModesOK)
-		assert.Equal(t, statusRead, result.home.Status)
-		assert.Nil(t, result.home.StrictModesOK)
-		assert.Contains(t, keys.reasons.list(), reasonStrictModesUnresolved)
+				policy := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(".ssh/authorized_keys")}}
+				accounts := []passwdEntry{{name: "u", uid: 1001, home: "/home/u"}}
+				keys := readKeys(readerFor(t, root, owners), accounts, policy, sshdConfig{})
+				result := keys.byUser["u"]
+				require.Len(t, result.files, 1)
+				file := result.files[0]
+				assert.Equal(t, statusRead, file.Status)
+				assert.False(t, file.Complete)
+				assert.Equal(t, []string{tc.reason}, file.Reasons)
+				assert.Empty(t, file.Keys)
+				assert.Nil(t, file.OwnerUID)
+				assert.Nil(t, file.Mode)
+				assert.Nil(t, file.StrictModesOK)
+				assert.Equal(t, statusRead, result.home.Status)
+				assert.Nil(t, result.home.StrictModesOK)
+				assert.Contains(t, keys.reasons.list(), reasonStrictModesUnresolved)
+			})
+		}
 	})
 }
 
