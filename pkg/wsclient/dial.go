@@ -34,7 +34,7 @@ func Dial(ctx context.Context, cfg Config) (*websocket.Conn, *http.Response, err
 
 // dial opens one connection with the handshake headers and read limit.
 func (s dialSettings) dial(ctx context.Context) (conn *websocket.Conn, resp *http.Response, err error) {
-	dialer, finish := abortable(ctx, s.dialer)
+	dialer, finish := Abortable(ctx, s.dialer)
 	defer finish()
 
 	// gorilla/websocket (v1.5.3 through d67f418) reads the reason phrase out
@@ -111,16 +111,17 @@ func unofferedExtension(values []string, compression bool) (string, bool) {
 	return "", false
 }
 
-// abortable copies d with its dial hooks wrapped so that every socket they
-// open is unblocked once ctx ends, and returns a function to call when the
-// dial is over.
+// Abortable copies d with its dial hooks wrapped so that every socket they
+// open is unblocked once ctx ends or the dial's own context times out, and
+// returns a function to call when the dial is over.
 //
 // gorilla/websocket stops watching ctx as soon as the socket is up: the HTTP
 // upgrade exchange, and a proxy CONNECT before it, are bounded only by
 // HandshakeTimeout. Without this a Shutdown would wait that timeout out on a
 // peer that has stopped answering, 30 seconds by default, which for an agent
-// in a pod is the whole termination grace period.
-func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, func()) {
+// in a pod is the whole termination grace period. The timeout half covers
+// SOCKS5, whose dialer clears the deadline HandshakeTimeout set.
+func Abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, func()) {
 	dialer := *d
 	state := &abortState{}
 	wrap := func(dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
@@ -129,12 +130,11 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 			if err != nil {
 				return nil, err
 			}
-			// x/net's SOCKS5 dialer clears gorilla's handshake deadline, so a timeout must end the dial itself.
-			context.AfterFunc(ctx, func() {
-				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			state.watch(context.AfterFunc(ctx, func() {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) { // gorilla cancels it on success too
 					state.abort()
 				}
-			})
+			}))
 			return state.track(c), nil
 		}
 	}
@@ -174,8 +174,16 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 type abortState struct {
 	mu       sync.Mutex
 	opened   []net.Conn
+	watchers []func() bool
 	aborted  bool
 	finished bool
+}
+
+// watch keeps a timeout watcher so finish can stop it.
+func (s *abortState) watch(stop func() bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.watchers = append(s.watchers, stop)
 }
 
 // track records a socket the dial hook just opened, aborting it on the spot
@@ -220,6 +228,9 @@ func (s *abortState) finish() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.finished = true
+	for _, stop := range s.watchers {
+		stop()
+	}
 	if !s.aborted {
 		return
 	}

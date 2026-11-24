@@ -1,13 +1,9 @@
 package utils
 
 import (
-	"context"
-	"errors"
-	"net"
 	"net/http"
 	"net/url"
 	"sync"
-	"time"
 
 	"github.com/rs/zerolog/log"
 )
@@ -45,24 +41,4 @@ func (p *websocketProxy) proxy(req *http.Request) (*url.URL, error) {
 		log.Warn().Msgf("%s uses the %s scheme, which WebSocket connections do not support; WebSocket connections dial directly.", name, proxyURL.Scheme)
 	})
 	return nil, nil
-}
-
-// BoundWebsocketDial wraps dial (a net.Dialer when nil) so a timed-out dial unblocks its sockets, because
-// x/net's SOCKS5 dialer clears gorilla's handshake deadline. The Dialer must set HandshakeTimeout.
-func BoundWebsocketDial(dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	if dial == nil {
-		dial = (&net.Dialer{}).DialContext
-	}
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		c, err := dial(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		context.AfterFunc(ctx, func() {
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				_ = c.SetDeadline(time.Unix(1, 0)) // a past deadline fails the blocked read at once
-			}
-		})
-		return c, nil
-	}
 }

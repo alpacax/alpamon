@@ -19,6 +19,7 @@ import (
 
 	"github.com/alpacax/alpamon/v2/pkg/logger"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/wsclient"
 	"github.com/gorilla/websocket"
 )
 
@@ -125,7 +126,6 @@ func (fc *FtpClient) connect() error {
 	}
 	dialer := websocket.Dialer{
 		Proxy:            proxy,
-		NetDialContext:   utils.BoundWebsocketDial(nil),
 		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig:  fc.tlsConfig,
 	}
@@ -135,9 +135,11 @@ func (fc *FtpClient) connect() error {
 			return errors.New("missing inherited FTP socket")
 		}
 		defer func() { _ = file.Close() }()
-		dialer.NetDialContext = utils.BoundWebsocketDial(func(context.Context, string, string) (net.Conn, error) { return net.FileConn(file) })
+		dialer.NetDialContext = func(context.Context, string, string) (net.Conn, error) { return net.FileConn(file) }
 	}
-	conn, _, err := dialer.Dial(target, fc.requestHeader)
+	bounded, finish := wsclient.Abortable(context.Background(), &dialer)
+	conn, _, err := bounded.Dial(target, fc.requestHeader)
+	finish()
 	if err != nil {
 		return sanitizeURLError(err)
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/wsclient"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
@@ -150,13 +151,14 @@ func (pc *PtyClient) initializeSession(ctx context.Context) error {
 
 	dialer := websocket.Dialer{
 		Proxy:            utils.WebsocketProxy,
-		NetDialContext:   utils.BoundWebsocketDial(nil),
 		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
 	}
-	pc.conn, _, err = dialer.DialContext(ctx, sanitizedURL, pc.requestHeader)
+	bounded, finish := wsclient.Abortable(ctx, &dialer)
+	pc.conn, _, err = bounded.DialContext(ctx, sanitizedURL, pc.requestHeader)
+	finish()
 	if err != nil {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}

@@ -21,6 +21,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/tunnel"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/wsclient"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -352,16 +353,18 @@ func (tc *TunnelClient) connect(ctx context.Context) error {
 	// gorilla reads the handshake response without watching ctx, so a
 	// canceled dial would otherwise wait out HandshakeTimeout.
 	unwatch := func() bool { return true }
-	dialer.NetDialContext = utils.BoundWebsocketDial(func(dctx context.Context, network, addr string) (net.Conn, error) {
+	dialer.NetDialContext = func(dctx context.Context, network, addr string) (net.Conn, error) {
 		c, err := (&net.Dialer{}).DialContext(dctx, network, addr)
 		if err != nil {
 			return nil, err
 		}
 		unwatch = context.AfterFunc(dialCtx, func() { _ = c.Close() })
 		return c, nil
-	})
+	}
 
-	conn, resp, err := dialer.DialContext(dialCtx, target, tc.requestHeader)
+	bounded, finish := wsclient.Abortable(dialCtx, &dialer)
+	conn, resp, err := bounded.DialContext(dialCtx, target, tc.requestHeader)
+	finish()
 	if !unwatch() || dialCtx.Err() != nil {
 		if conn != nil {
 			_ = conn.Close()

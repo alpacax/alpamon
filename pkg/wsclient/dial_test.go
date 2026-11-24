@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -285,19 +286,23 @@ func TestDial_SurvivesAProxyWithoutAReasonPhrase(t *testing.T) {
 		"the socket the proxy dial opened must be closed before the panic is turned into an error")
 }
 
-func TestDial_HandshakeTimeoutCoversTheUpgradeBehindSOCKS5(t *testing.T) {
-	// Given a SOCKS5 proxy that grants the CONNECT and then never answers through the tunnel
+// silentSOCKS5 runs a SOCKS5 proxy that grants every CONNECT and then never answers through the
+// tunnel. The channel closes once the WebSocket upgrade request has come through.
+func silentSOCKS5(t *testing.T) (*url.URL, <-chan struct{}) {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
+	upgrade := make(chan struct{})
+	var once sync.Once
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			t.Cleanup(func() { _ = conn.Close() })
 			go func() {
+				defer func() { _ = conn.Close() }()
 				buf := make([]byte, 262)
 				if _, err := io.ReadFull(conn, buf[:2]); err != nil { // version, method count
 					return
@@ -313,26 +318,47 @@ func TestDial_HandshakeTimeoutCoversTheUpgradeBehindSOCKS5(t *testing.T) {
 					return
 				}
 				_, _ = conn.Write([]byte{5, 0, 0, 1, 127, 0, 0, 1, 0, 80})
+				line, err := bufio.NewReader(conn).ReadString('\n')
+				if err == nil && strings.HasPrefix(line, "GET ") {
+					once.Do(func() { close(upgrade) })
+				}
 				_, _ = io.Copy(io.Discard, conn)
 			}()
 		}
 	}()
+	return &url.URL{Scheme: "socks5", Host: listener.Addr().String()}, upgrade
+}
+
+// dialBehindSOCKS5 starts a dial through a silent SOCKS5 proxy and returns its result channel.
+func dialBehindSOCKS5(t *testing.T, ctx context.Context, timeout time.Duration) (<-chan error, <-chan struct{}) {
+	t.Helper()
+	proxyURL, upgrade := silentSOCKS5(t)
 	cfg := testConfig("ws://backhaul.example.com/ws/")
 	cfg.Dialer = DefaultDialer()
-	cfg.Dialer.Proxy = http.ProxyURL(&url.URL{Scheme: "socks5", Host: listener.Addr().String()})
-	cfg.Dialer.HandshakeTimeout = 200 * time.Millisecond
-
-	// When it dials with a context that never ends
+	cfg.Dialer.Proxy = http.ProxyURL(proxyURL)
+	cfg.Dialer.HandshakeTimeout = timeout
 	done := make(chan error, 1)
 	go func() {
-		conn, _, err := Dial(context.Background(), cfg)
+		conn, _, err := Dial(ctx, cfg)
 		if conn != nil {
 			_ = conn.Close()
 		}
 		done <- err
 	}()
+	return done, upgrade
+}
 
-	// Then the dial gives up once HandshakeTimeout has passed
+func TestDial_HandshakeTimeoutCoversTheUpgradeBehindSOCKS5(t *testing.T) {
+	// Given a dial through a SOCKS5 proxy whose backhaul never answers the upgrade
+	// When it runs with a context that never ends
+	done, upgrade := dialBehindSOCKS5(t, context.Background(), 500*time.Millisecond)
+
+	// Then the upgrade is sent, and the dial gives up once HandshakeTimeout has passed
+	select {
+	case <-upgrade:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the upgrade request never reached the proxy, so the timeout below would prove nothing")
+	}
 	select {
 	case err := <-done:
 		var netErr net.Error
@@ -340,5 +366,28 @@ func TestDial_HandshakeTimeoutCoversTheUpgradeBehindSOCKS5(t *testing.T) {
 		assert.True(t, netErr.Timeout(), "want a timeout, got %v", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the dial outlived HandshakeTimeout: the SOCKS5 dialer cleared the socket deadline")
+	}
+}
+
+func TestDial_CancelEndsTheUpgradeBehindSOCKS5(t *testing.T) {
+	// Given a dial through a SOCKS5 proxy, waiting on an upgrade the backhaul never answers
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done, upgrade := dialBehindSOCKS5(t, ctx, time.Minute)
+	select {
+	case <-upgrade:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the upgrade request never reached the proxy")
+	}
+
+	// When the caller cancels
+	cancel()
+
+	// Then the dial ends well before HandshakeTimeout
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("a canceled dial stayed blocked: the SOCKS5 dialer cleared the socket deadline")
 	}
 }
