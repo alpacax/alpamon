@@ -150,6 +150,7 @@ func (pc *PtyClient) initializeSession(ctx context.Context) error {
 
 	dialer := websocket.Dialer{
 		Proxy:            utils.WebsocketProxy,
+		NetDialContext:   utils.BoundWebsocketDial(nil),
 		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,

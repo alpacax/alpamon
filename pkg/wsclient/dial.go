@@ -2,6 +2,7 @@ package wsclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -36,12 +37,12 @@ func (s dialSettings) dial(ctx context.Context) (conn *websocket.Conn, resp *htt
 	dialer, finish := abortable(ctx, s.dialer)
 	defer finish()
 
-	// gorilla/websocket v1.5.3 reads the reason phrase out of a proxy's
-	// CONNECT status line without checking there is one (proxy.go), so a
-	// proxy answering "HTTP/1.1 407" panics whichever goroutine dialed. For
-	// an agent that goroutine is the one keeping the process alive, and a
-	// proxy is reachable by default through the environment, so turn it into
-	// the error it should have been.
+	// gorilla/websocket (v1.5.3 through d67f418) reads the reason phrase out
+	// of a proxy's CONNECT status line without checking there is one
+	// (proxy.go), so a proxy answering "HTTP/1.1 407" panics whichever
+	// goroutine dialed. For an agent that goroutine is the one keeping the
+	// process alive, and a proxy is reachable by default through the
+	// environment, so turn it into the error it should have been.
 	defer func() {
 		if r := recover(); r != nil {
 			conn, resp, err = nil, nil, fmt.Errorf("wsclient: dial panicked, most likely on a malformed proxy response: %v", r)
@@ -128,6 +129,12 @@ func abortable(ctx context.Context, d *websocket.Dialer) (*websocket.Dialer, fun
 			if err != nil {
 				return nil, err
 			}
+			// x/net's SOCKS5 dialer clears gorilla's handshake deadline, so a timeout must end the dial itself.
+			context.AfterFunc(ctx, func() {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					state.abort()
+				}
+			})
 			return state.track(c), nil
 		}
 	}

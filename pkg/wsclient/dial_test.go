@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -237,8 +238,8 @@ func TestDial_HandsTheProxyAnHTTPScheme(t *testing.T) {
 }
 
 // TestDial_SurvivesAProxyWithoutAReasonPhrase covers gorilla/websocket
-// v1.5.3 reading the reason phrase out of a CONNECT status line that has
-// none, which panics the dialing goroutine. For an agent that goroutine is
+// (v1.5.3 through d67f418) reading the reason phrase out of a CONNECT status
+// line that has none, which panics the dialing goroutine. For an agent that goroutine is
 // the process, and a proxy is reachable by default through the environment,
 // so this has to come back as an error.
 func TestDial_SurvivesAProxyWithoutAReasonPhrase(t *testing.T) {
@@ -282,4 +283,62 @@ func TestDial_SurvivesAProxyWithoutAReasonPhrase(t *testing.T) {
 	// leak an fd per attempt.
 	assert.True(t, tracker.allClosed(),
 		"the socket the proxy dial opened must be closed before the panic is turned into an error")
+}
+
+func TestDial_HandshakeTimeoutCoversTheUpgradeBehindSOCKS5(t *testing.T) {
+	// Given a SOCKS5 proxy that grants the CONNECT and then never answers through the tunnel
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			go func() {
+				buf := make([]byte, 262)
+				if _, err := io.ReadFull(conn, buf[:2]); err != nil { // version, method count
+					return
+				}
+				if _, err := io.ReadFull(conn, buf[:buf[1]]); err != nil {
+					return
+				}
+				_, _ = conn.Write([]byte{5, 0})                       // no authentication
+				if _, err := io.ReadFull(conn, buf[:5]); err != nil { // up to the domain name's length
+					return
+				}
+				if _, err := io.ReadFull(conn, buf[:int(buf[4])+2]); err != nil { // domain name, port
+					return
+				}
+				_, _ = conn.Write([]byte{5, 0, 0, 1, 127, 0, 0, 1, 0, 80})
+				_, _ = io.Copy(io.Discard, conn)
+			}()
+		}
+	}()
+	cfg := testConfig("ws://backhaul.example.com/ws/")
+	cfg.Dialer = DefaultDialer()
+	cfg.Dialer.Proxy = http.ProxyURL(&url.URL{Scheme: "socks5", Host: listener.Addr().String()})
+	cfg.Dialer.HandshakeTimeout = 200 * time.Millisecond
+
+	// When it dials with a context that never ends
+	done := make(chan error, 1)
+	go func() {
+		conn, _, err := Dial(context.Background(), cfg)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		done <- err
+	}()
+
+	// Then the dial gives up once HandshakeTimeout has passed
+	select {
+	case err := <-done:
+		var netErr net.Error
+		require.ErrorAs(t, err, &netErr)
+		assert.True(t, netErr.Timeout(), "want a timeout, got %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the dial outlived HandshakeTimeout: the SOCKS5 dialer cleared the socket deadline")
+	}
 }

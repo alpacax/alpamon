@@ -326,6 +326,7 @@ const (
 func newTunnelDialer() websocket.Dialer {
 	return websocket.Dialer{
 		Proxy:           utils.WebsocketProxy,
+		NetDialContext:  utils.BoundWebsocketDial(nil),
 		ReadBufferSize:  tunnelWSBufferSize,
 		WriteBufferSize: tunnelWSBufferSize,
 		TLSClientConfig: &tls.Config{

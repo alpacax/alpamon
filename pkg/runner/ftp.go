@@ -125,6 +125,7 @@ func (fc *FtpClient) connect() error {
 	}
 	dialer := websocket.Dialer{
 		Proxy:            proxy,
+		NetDialContext:   utils.BoundWebsocketDial(nil),
 		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig:  fc.tlsConfig,
 	}
@@ -134,7 +135,7 @@ func (fc *FtpClient) connect() error {
 			return errors.New("missing inherited FTP socket")
 		}
 		defer func() { _ = file.Close() }()
-		dialer.NetDialContext = func(context.Context, string, string) (net.Conn, error) { return net.FileConn(file) }
+		dialer.NetDialContext = utils.BoundWebsocketDial(func(context.Context, string, string) (net.Conn, error) { return net.FileConn(file) })
 	}
 	conn, _, err := dialer.Dial(target, fc.requestHeader)
 	if err != nil {

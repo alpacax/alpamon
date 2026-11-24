@@ -93,7 +93,7 @@ func isAuthRejection(err error) bool {
 func dialWebsocket(ctx context.Context, url string, header http.Header) (*websocket.Conn, error) {
 	dialer := websocket.Dialer{
 		Proxy:            utils.WebsocketProxy,
-		NetDialContext:   (&net.Dialer{Control: setTCPUserTimeout}).DialContext,
+		NetDialContext:   utils.BoundWebsocketDial((&net.Dialer{Control: setTCPUserTimeout}).DialContext),
 		HandshakeTimeout: handshakeTimeout,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
