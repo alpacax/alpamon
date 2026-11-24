@@ -256,6 +256,11 @@ func (c abortableConn) SetDeadline(t time.Time) error {
 	return c.state.setDeadline(c.Conn, t)
 }
 
+// NetConn returns the socket the dial hook opened, as tls.Conn.NetConn does.
+func (c abortableConn) NetConn() net.Conn {
+	return c.Conn
+}
+
 // forceAbort unblocks a dial on c. A deadline in the past is the ordinary
 // way, but a caller-supplied net.Conn may refuse deadlines, and then closing
 // it is what is left.
