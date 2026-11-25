@@ -24,8 +24,10 @@
 //
 // # Dependencies
 //
-// This package may import the standard library, github.com/gorilla/websocket,
-// and alpamon's pkg/tunnel and pkg/version, and nothing else. The leaf-guard
+// This package may import the standard library, github.com/gorilla/websocket
+// with the golang.org/x/net/proxy and golang.org/x/net/internal/socks
+// packages it dials SOCKS5 through, and alpamon's pkg/tunnel and pkg/version,
+// and nothing else. The leaf-guard
 // job in .github/workflows/build-and-test.yml fails the build if its
 // dependency graph reaches any other package.
 //

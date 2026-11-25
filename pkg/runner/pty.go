@@ -26,6 +26,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/scheduler"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/wsclient"
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
@@ -113,7 +114,9 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 			InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 		},
 	}
-	conn, _, err := dialer.DialContext(ctx, sanitizedURL, pc.requestHeader)
+	bounded, finish := wsclient.Abortable(ctx, &dialer)
+	conn, _, err := bounded.DialContext(ctx, sanitizedURL, pc.requestHeader)
+	finish()
 	if err != nil {
 		return fmt.Errorf("failed to connect Websh server: %w", err)
 	}
@@ -195,7 +198,7 @@ func (pc *PtyClient) RunPtyBackground() {
 
 	err := pc.initializePtySession(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		if ctx.Err() != nil { // an aborted upgrade fails with a socket timeout, not context.Canceled
 			pc.cancelState.Observe()
 		}
 		log.Error().Err(err).Str("sessionID", pc.sessionID).Str("username", pc.username).Msg("Failed to initialize PTY session.")
@@ -620,7 +623,9 @@ func (pc *PtyClient) recovery(ctx context.Context) error {
 				InsecureSkipVerify: !config.GlobalSettings.SSLVerify,
 			},
 		}
-		conn, _, err := dialer.Dial(sanitizedURL, pc.requestHeader)
+		bounded, finish := wsclient.Abortable(retryCtx, &dialer) // the recovery deadline also ends a handshake in flight
+		conn, _, err := bounded.DialContext(retryCtx, sanitizedURL, pc.requestHeader)
+		finish()
 		if err != nil {
 			log.Warn().Err(err).Msg("Websh reconnect failed.")
 			return err

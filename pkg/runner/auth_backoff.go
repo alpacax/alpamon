@@ -13,6 +13,7 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/retry"
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/wsclient"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
@@ -86,10 +87,8 @@ func isAuthRejection(err error) bool {
 // the response also carries the request, and with it the Authorization
 // header, which has no business travelling with an error.
 //
-// ctx bounds the TCP and TLS phases. gorilla/websocket stops watching it
-// once the socket is up, so HandshakeTimeout bounds the HTTP upgrade
-// exchange after that; without one, a peer that accepts the connection and
-// then says nothing parks this call, and with it a shutdown, indefinitely.
+// wsclient.Abortable ends the whole dial, HTTP upgrade included, when ctx ends
+// or HandshakeTimeout passes, even behind a SOCKS5 proxy that cleared the deadline.
 func dialWebsocket(ctx context.Context, url string, header http.Header) (*websocket.Conn, error) {
 	dialer := websocket.Dialer{
 		Proxy:            utils.WebsocketProxy,
@@ -100,7 +99,9 @@ func dialWebsocket(ctx context.Context, url string, header http.Header) (*websoc
 		},
 	}
 
-	conn, resp, err := dialer.DialContext(ctx, url, header)
+	bounded, finish := wsclient.Abortable(ctx, &dialer)
+	conn, resp, err := bounded.DialContext(ctx, url, header)
+	finish()
 	if err != nil {
 		if resp == nil {
 			return nil, err

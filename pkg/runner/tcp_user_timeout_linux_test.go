@@ -32,7 +32,13 @@ func TestDialWebsocket_BoundsUnacknowledgedSends(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	// Then the socket gives up on unacknowledged data after tcpUserTimeout, not tcp_retries2
-	raw, err := conn.UnderlyingConn().(*net.TCPConn).SyscallConn()
+	underlying := conn.UnderlyingConn()
+	if wrapped, ok := underlying.(interface{ NetConn() net.Conn }); ok { // wsclient.Abortable's wrapper
+		underlying = wrapped.NetConn()
+	}
+	tcp, ok := underlying.(*net.TCPConn)
+	require.True(t, ok, "dialWebsocket must hand back a TCP socket, got %T", underlying)
+	raw, err := tcp.SyscallConn()
 	require.NoError(t, err)
 	var got int
 	var sockErr error
