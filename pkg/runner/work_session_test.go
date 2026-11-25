@@ -377,7 +377,7 @@ func TestCommandRunnerRunsAnActiveSessionsCommandBound(t *testing.T) {
 	require.Len(t, dispatcher.ctxs, 1)
 	binding := workSessionFromContext(dispatcher.ctxs[0])
 	require.NotNil(t, binding)
-	assert.Equal(t, wsID, binding.id)
+	assert.Equal(t, wsID, binding.attribution.ID)
 }
 
 func TestCommandRunnerFailsClosedWithoutARegistry(t *testing.T) {

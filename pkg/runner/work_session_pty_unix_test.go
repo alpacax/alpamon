@@ -24,7 +24,7 @@ func TestPausedTerminalDropsInputWithoutBufferingIt(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
 	pc := &PtyClient{sessionID: "websh-1", ptmx: writer, wsToPty: make(chan []byte, channelCapacity)}
-	pc.TrackCommand(withWorkSession(context.Background(), &workSessionBinding{registry: r, id: wsID}), "cmd-open")
+	pc.TrackCommand(withWorkSession(context.Background(), &workSessionBinding{registry: r, attribution: attribution(0)}), "cmd-open")
 	release()
 	_, terminals := r.owned(wsID)
 	require.Equal(t, []string{"cmd-open"}, terminals)

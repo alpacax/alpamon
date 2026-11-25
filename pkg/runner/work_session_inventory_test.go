@@ -171,7 +171,7 @@ func TestHostWithoutGroupStopReportsUnsupportedAndCancelsOnEnd(t *testing.T) {
 func TestCommandProcessSessionIsOwnedThroughItsContext(t *testing.T) {
 	server := &fakeControlServer{}
 	r := newTestRegistry(server)
-	ctx := withWorkSession(t.Context(), &workSessionBinding{registry: r, id: wsID})
+	ctx := withWorkSession(t.Context(), &workSessionBinding{registry: r, attribution: attribution(0)})
 
 	TrackWorkSessionProcess(ctx, "cmd-1", 4242)
 	TrackWorkSessionProcess(t.Context(), "cmd-2", 4343)

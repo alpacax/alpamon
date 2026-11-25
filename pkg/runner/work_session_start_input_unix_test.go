@@ -39,6 +39,43 @@ func TestAdmittedCommandCannotStartAfterPause(t *testing.T) {
 	assert.ErrorIs(t, err, errWorkSessionPaused)
 }
 
+func TestAdmittedCommandRechecksOriginalAttributionAtStartup(t *testing.T) {
+	for _, name := range []string{"new revision", "request expiry"} {
+		t.Run(name, func(t *testing.T) {
+			server := &fakeControlServer{}
+			server.set(workSessionActive, 0)
+			r := newTestRegistry(server)
+			now := wsNow
+			r.now = func() time.Time { return now }
+			expiresAt := now.Add(time.Minute)
+			cr := &CommandRunner{command: protocol.Command{
+				ID: "command-start", WorkSessionID: wsID, WorkSessionExpiresAt: expiresAt.Format(time.RFC3339),
+			}, workSessions: r}
+			ctx, release, err := cr.admitWorkSession(t.Context())
+			require.NoError(t, err)
+			defer release()
+			guard := common.ProcessStartGuardFromContext(ctx)
+			require.NotNil(t, guard)
+
+			want := errWorkSessionExpired
+			if name == "new revision" {
+				control := &ControlClient{workSessions: r}
+				control.HandleMessage(pauseFrame(t, 1))
+				control.HandleMessage(resumeFrame(t, 2))
+				want = errWorkSessionStale
+			} else {
+				now = expiresAt
+			}
+
+			finish, err := guard()
+			if finish != nil {
+				finish()
+			}
+			assert.ErrorIs(t, err, want)
+		})
+	}
+}
+
 func TestPendingWebshStartIsFencedAfterPause(t *testing.T) {
 	control := &fakeControlServer{}
 	control.set(workSessionActive, 0)
@@ -71,7 +108,7 @@ func TestPendingWebshStartIsFencedAfterPause(t *testing.T) {
 	pc := NewPtyClient(protocol.CommandData{
 		URL: strings.Replace(s.URL, "http", "ws", 1), SessionID: "pending-websh", Shell: "/bin/sh", Rows: 24, Cols: 80,
 	}, nil, NewTerminalManager(nil))
-	pc.TrackCommand(withWorkSession(t.Context(), &workSessionBinding{registry: r, id: wsID}), "open-pending")
+	pc.TrackCommand(withWorkSession(t.Context(), &workSessionBinding{registry: r, attribution: attribution(0)}), "open-pending")
 	t.Cleanup(pc.close)
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
@@ -105,7 +142,7 @@ func TestTerminalQueuedInputCannotCrossPauseAndResume(t *testing.T) {
 	peer := make(chan *websocket.Conn, 1)
 	s := newWshServerWith(t, func(_ int, conn *websocket.Conn) { peer <- conn })
 	pc := newTestPtyClient(t, s)
-	pc.TrackCommand(withWorkSession(t.Context(), &workSessionBinding{registry: r, id: wsID}), "open-queued")
+	pc.TrackCommand(withWorkSession(t.Context(), &workSessionBinding{registry: r, attribution: attribution(0)}), "open-queued")
 	reader, writer, err := os.Pipe()
 	require.NoError(t, err)
 	pc.ptmx = writer

@@ -15,6 +15,6 @@ func (r *WorkSessionRegistry) owned(id string) (commands, terminals []string) {
 
 func TrackWorkSessionProcess(ctx context.Context, commandID string, pid int) {
 	if b := workSessionFromContext(ctx); b != nil {
-		b.registry.trackProcess(b.id, ownedKindCommand, commandID, pid)
+		b.registry.trackProcess(b.attribution.ID, ownedKindCommand, commandID, pid)
 	}
 }

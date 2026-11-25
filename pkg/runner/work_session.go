@@ -1297,8 +1297,8 @@ func (r *WorkSessionRegistry) reportInventory(id string, whilePaused bool) {
 
 // workSessionBinding ties work running in a context to its Work Session.
 type workSessionBinding struct {
-	registry *WorkSessionRegistry
-	id       string
+	registry    *WorkSessionRegistry
+	attribution protocol.WorkSession
 }
 
 type workSessionKey struct{}
@@ -1316,7 +1316,7 @@ func workSessionFromContext(ctx context.Context) *workSessionBinding {
 
 // inputAllowed is nil-safe: session-less terminals always take input.
 func (b *workSessionBinding) inputAllowed() bool {
-	return b == nil || b.registry.inputAllowed(b.id)
+	return b == nil || b.registry.inputAllowed(b.attribution.ID)
 }
 
 func (b *workSessionBinding) inputToken() (uint64, bool) {
@@ -1326,7 +1326,7 @@ func (b *workSessionBinding) inputToken() (uint64, bool) {
 	r := b.registry
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	s := r.sessions[b.id]
+	s := r.sessions[b.attribution.ID]
 	if s == nil {
 		return 0, false
 	}
@@ -1345,12 +1345,15 @@ func (b *workSessionBinding) beginProcessStart() (func(), error) {
 	r := b.registry
 	r.actions.Lock()
 	r.mu.Lock()
-	s := r.sessions[b.id]
+	s := r.sessions[b.attribution.ID]
 	var err error
-	if s == nil {
+	switch {
+	case s == nil:
 		err = errWorkSessionStateUnknown
-	} else {
-		err = r.admissible(s, protocol.WorkSession{ID: b.id, Revision: s.revision})
+	case s.known && s.state == workSessionPaused:
+		err = errWorkSessionPaused
+	default:
+		err = r.admissible(s, b.attribution)
 	}
 	r.mu.Unlock()
 	if err != nil {
@@ -1364,7 +1367,7 @@ func (b *workSessionBinding) beginProcessStart() (func(), error) {
 // terminal's shell.
 func (b *workSessionBinding) trackTerminalProcess(commandID string, pid int) {
 	if b != nil {
-		b.registry.trackProcess(b.id, ownedKindTerminal, commandID, pid)
+		b.registry.trackProcess(b.attribution.ID, ownedKindTerminal, commandID, pid)
 	}
 }
 
@@ -1373,5 +1376,5 @@ func (b *workSessionBinding) registerTerminal(terminalID, commandID string) func
 	if b == nil {
 		return func() {}
 	}
-	return b.registry.registerTerminal(b.id, terminalID, commandID)
+	return b.registry.registerTerminal(b.attribution.ID, terminalID, commandID)
 }
