@@ -946,6 +946,7 @@ func TestServiceAccountUIDRange(t *testing.T) {
 			}
 			require.NotNil(t, adduser)
 			assert.Contains(t, strings.Join(adduser, " "), "--uid "+tc.want)
+			assert.Equal(t, "User 'bob' added successfully", out)
 		})
 	}
 }

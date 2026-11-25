@@ -629,8 +629,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 
 // TestUserHandler_AddUser_Idempotent_ExistingUserSkipsCreate verifies that when
 // the user already exists with a matching (or omitted) uid, adduser/useradd is
-// NOT invoked, the command still succeeds, and the idempotent ensure step
-// (AddUserToGroups) still runs so groups converge (issue #344, M8).
+// skipped and the existing account keeps its supplementary groups.
 func TestUserHandler_AddUser_Idempotent_ExistingUserSkipsCreate(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -683,7 +682,7 @@ func TestUserHandler_AddUser_Idempotent_ExistingUserSkipsCreate(t *testing.T) {
 				assert.Equal(t, !tt.groupExists, mock.Invoked("/usr/sbin/groupadd"),
 					"groupadd runs exactly when the primary group is absent; got %+v", mock.GetExecutedCommands())
 			}
-			assert.True(t, gs.AddUserToGroupsCalled, "AddUserToGroups must still run for an existing user so groups converge")
+			assert.False(t, gs.AddUserToGroupsCalled, "an existing account must keep its supplementary groups")
 		})
 	}
 }
@@ -997,39 +996,6 @@ func TestUserHandler_AddUser_Rhel_PrimaryGroupGate(t *testing.T) {
 		assert.Contains(t, output, "already exists with gid 7777")
 		assert.False(t, mock.Invoked("/usr/sbin/useradd"), "useradd must not run when the primary group gid conflicts")
 	})
-}
-
-// TestUserHandler_AddUser_ExistingUser_GroupAddSoftFailMessage verifies the
-// AddUserToGroups soft-failure message reflects that the user already existed
-// (not "created") on the re-provision path.
-func TestUserHandler_AddUser_ExistingUser_GroupAddSoftFailMessage(t *testing.T) {
-	originalPlatformLike := utils.PlatformLike
-	utils.SetPlatformLike("debian")
-	t.Cleanup(func() { utils.SetPlatformLike(originalPlatformLike) })
-
-	mock := common.NewMockCommandExecutor(t)
-	gs := &MockGroupService{AddUserToGroupsError: errors.New("usermod failed")}
-	handler := newTestUserHandler(mock, gs)
-	handler.lookupUser = common.ExistingUserLookup("1001") // user already exists
-
-	args := &common.CommandArgs{
-		Username:      "testuser",
-		UID:           1001,
-		GID:           1001,
-		Comment:       "Test User",
-		HomeDirectory: "/home/testuser",
-		Shell:         "/bin/bash",
-		Groupname:     "testgroup",
-		Groups:        []uint64{1002},
-	}
-
-	exitCode, output, err := handler.Execute(context.Background(), "adduser", args)
-	require.NoError(t, err)
-	require.Equal(t, 0, exitCode, "a group-add soft failure must keep exit 0, output: %q", output)
-	assert.True(t, gs.AddUserToGroupsCalled, "AddUserToGroups must be called for an existing user")
-	assert.NotContains(t, output, "created", "the soft-failure message must not claim the user was created")
-	assert.Contains(t, output, "already exists but failed to add to groups")
-	assert.False(t, mock.Invoked("/usr/sbin/adduser"), "adduser must not run for an existing user")
 }
 
 // TestUserHandler_ModUser_ManagedGroupnames pins the reconcile mode: with
