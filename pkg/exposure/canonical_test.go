@@ -51,6 +51,7 @@ func newTestReport() *exposureReport {
 // The hash input is the body with observed_at and hash removed.
 func TestCanonicalGolden(t *testing.T) {
 	r := newTestReport()
+	r.SchemaVersion = legacySchemaVersion
 	r.Accounts = []account{{
 		Username: "deploy", UID: 1001, Shell: ptr("/bin/bash"), LoginShell: true,
 		Groups: []string{"deploy", "wheel"},

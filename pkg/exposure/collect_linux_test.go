@@ -20,6 +20,218 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestKeyFileStrictModes(t *testing.T) {
+	const homePath = "/data/home/u"
+	const keyPath = homePath + "/.ssh/authorized_keys"
+	const externalPath = "/etc/keys/u"
+	const foreignDir = homePath + "/key-store"
+	const foreignKeyPath = foreignDir + "/authorized_keys"
+	forBothWalks(t, func(t *testing.T) {
+		for _, tc := range []struct {
+			name, home, paths, writable, unreadable string
+			link, target                            string
+			foreign                                 string
+			wantHome                                *bool
+			wantFiles                               map[string]*bool
+		}{
+			{
+				name: "symlink above home", home: "/home/u", paths: ".ssh/authorized_keys " + keyPath,
+				link: "/home", target: "/data/home",
+				writable: "/data", wantHome: ptr(true),
+				wantFiles: map[string]*bool{"/home/u/.ssh/authorized_keys": ptr(true), keyPath: ptr(true)},
+			},
+			{
+				name: "home is an absolute symlink", home: "/home/u", paths: ".ssh/authorized_keys",
+				link: "/home/u", target: homePath, writable: "/data",
+				wantHome: ptr(true), wantFiles: map[string]*bool{"/home/u/.ssh/authorized_keys": ptr(true)},
+			},
+			{
+				name: "home is a relative symlink", home: "/home/u", paths: ".ssh/authorized_keys",
+				link: "/home/u", target: "../data/home/u", writable: "/data",
+				wantHome: ptr(true), wantFiles: map[string]*bool{"/home/u/.ssh/authorized_keys": ptr(true)},
+			},
+			{
+				name: "absolute source resolves under home", home: homePath, paths: "/keys/u/.ssh/authorized_keys",
+				link: "/keys/u", target: homePath, writable: "/data",
+				wantHome: ptr(true), wantFiles: map[string]*bool{"/keys/u/.ssh/authorized_keys": ptr(true)},
+			},
+			{
+				name: "trailing slash on home", home: homePath + "/", paths: "%h/.ssh/authorized_keys",
+				writable: "/data", wantHome: ptr(true), wantFiles: map[string]*bool{keyPath: ptr(true)},
+			},
+			{
+				name: "outside source checks root", home: homePath, paths: ".ssh/authorized_keys " + externalPath,
+				writable: "/", wantHome: ptr(false), wantFiles: map[string]*bool{keyPath: ptr(true), externalPath: ptr(false)},
+			},
+			{
+				name: "writable key file", home: homePath, paths: ".ssh/authorized_keys " + externalPath,
+				writable: keyPath, wantHome: ptr(false), wantFiles: map[string]*bool{keyPath: ptr(false), externalPath: ptr(true)},
+			},
+			{
+				name: "key directory has a different owner", home: homePath, paths: "key-store/authorized_keys",
+				foreign: foreignDir, wantHome: ptr(false), wantFiles: map[string]*bool{foreignKeyPath: ptr(false)},
+			},
+			{
+				name: "absent source", home: homePath, paths: ".ssh/authorized_keys .ssh/missing",
+				wantHome: ptr(true), wantFiles: map[string]*bool{keyPath: ptr(true), homePath + "/.ssh/missing": nil},
+			},
+			{
+				name: "unreadable source", home: homePath, paths: ".ssh/authorized_keys " + externalPath,
+				unreadable: externalPath, wantFiles: map[string]*bool{keyPath: ptr(true), externalPath: nil},
+			},
+			{
+				name: "unreadable parent", home: homePath, paths: ".ssh/authorized_keys " + externalPath,
+				unreadable: homePath + "/.ssh", wantFiles: map[string]*bool{keyPath: nil, externalPath: ptr(true)},
+			},
+			{
+				name: "unreadable home", home: homePath, paths: ".ssh/authorized_keys " + externalPath,
+				unreadable: homePath, wantFiles: map[string]*bool{keyPath: nil, externalPath: nil},
+			},
+			{
+				name: "outside source with absent home", home: "/missing", paths: externalPath,
+				wantHome: ptr(true), wantFiles: map[string]*bool{externalPath: ptr(true)},
+			},
+			{
+				name: "unresolved path token", home: homePath, paths: ".ssh/authorized_keys %x",
+				wantFiles: map[string]*bool{keyPath: ptr(true), "%x": nil},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root := t.TempDir()
+				for _, p := range []string{keyPath, externalPath, foreignKeyPath} {
+					file := filepath.Join(root, p)
+					require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+					require.NoError(t, os.WriteFile(file, nil, 0o644))
+				}
+				if tc.link != "" {
+					link := filepath.Join(root, tc.link)
+					require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+					require.NoError(t, os.Symlink(tc.target, link))
+				}
+				if tc.writable != "" {
+					require.NoError(t, os.Chmod(filepath.Join(root, tc.writable), 0o775))
+				}
+				if tc.unreadable != "" {
+					recordOpens(t, []string{tc.unreadable})
+				}
+				accounts := parsePasswd([]byte("u:x:1001:1001::" + tc.home + ":/bin/sh\n"))
+				require.Len(t, accounts.entries, 1)
+				policy := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(tc.paths)}}
+				owners := map[string]uint32{}
+				if tc.foreign != "" {
+					owners[tc.foreign] = 2000
+				}
+				result := readKeys(readerFor(t, root, owners), accounts.entries, policy, sshdConfig{}).byUser["u"]
+				assert.Equal(t, tc.wantHome, result.home.StrictModesOK)
+				got := make(map[string]*bool, len(result.files))
+				for _, file := range result.files {
+					got[file.Path] = file.StrictModesOK
+				}
+				assert.Len(t, result.files, len(tc.wantFiles))
+				assert.Equal(t, tc.wantFiles, got)
+			})
+		}
+	})
+}
+
+func TestAuthorizedKeyPathsFromPasswdHome(t *testing.T) {
+	forBothWalks(t, func(t *testing.T) {
+		for _, tc := range []struct {
+			name, home, template, path string
+		}{
+			{"trailing slash", "/home/u/", "%hkeys/authorized_keys", "/home/u/keys/authorized_keys"},
+			{"no trailing slash", "/home/u", "%hkeys/authorized_keys", "/home/ukeys/authorized_keys"},
+			{"adjacent slashes", "/home/u/", "%h/keys//authorized_keys", "/home/u/keys/authorized_keys"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root, owners := attackRoot(t)
+				file := filepath.Join(root, tc.path)
+				require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+				require.NoError(t, os.WriteFile(file, []byte("ssh-ed25519 "+testEd0+"\n"), 0o600))
+				owners[tc.path] = 1001
+				accounts := parsePasswd([]byte("u:x:1001:1001::" + tc.home + ":/bin/sh\n"))
+				require.Len(t, accounts.entries, 1)
+				policy := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(tc.template)}}
+
+				read := readKeys(readerFor(t, root, owners), accounts.entries, policy, sshdConfig{}).byUser["u"].files
+				require.Len(t, read, 1)
+				assert.Equal(t, tc.path, read[0].Path)
+				assert.Equal(t, statusRead, read[0].Status)
+				assert.Len(t, read[0].Keys, 1)
+
+				timed := failedAccountKeys(accounts.entries[0], policy, reasonTimeout).files
+				require.Len(t, timed, 1)
+				assert.Equal(t, tc.path, timed[0].Path)
+				assert.Equal(t, statusTimeout, timed[0].Status)
+			})
+		}
+	})
+}
+
+func TestUnverifiedKeyFileReadHasNoMetadata(t *testing.T) {
+	const keyPath = "/home/u/.ssh/authorized_keys"
+	forBothWalks(t, func(t *testing.T) {
+		for _, tc := range []struct {
+			name, reason string
+			setup        func(t *testing.T, file string)
+		}{
+			{
+				name: "read descriptor differs", reason: reasonConcurrentChange,
+				setup: func(t *testing.T, _ string) {
+					testHookFstat = func(path string, st *unix.Stat_t) {
+						if path == keyPath {
+							st.Ino++
+						}
+					}
+					t.Cleanup(func() { testHookFstat = nil })
+				},
+			},
+			{
+				name: "file changes after read", reason: reasonConcurrentChange,
+				setup: func(t *testing.T, file string) {
+					testHookAfterRead = func(path string) {
+						if path == keyPath {
+							require.NoError(t, os.Truncate(file, 0))
+						}
+					}
+					t.Cleanup(func() { testHookAfterRead = nil })
+				},
+			},
+			{
+				name: "file exceeds read limit", reason: reasonLimitExceeded,
+				setup: func(t *testing.T, file string) {
+					require.NoError(t, os.Truncate(file, maxReadBytes+1))
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				root, owners := attackRoot(t)
+				owners[keyPath] = 1001
+				keyFilePath := filepath.Join(root, keyPath)
+				require.NoError(t, os.WriteFile(keyFilePath, []byte("ssh-ed25519 "+testEd0+"\n"), 0o600))
+				tc.setup(t, keyFilePath)
+
+				policy := &sshdT{effective: map[string]*string{"authorizedkeysfile": ptr(".ssh/authorized_keys")}}
+				accounts := []passwdEntry{{name: "u", uid: 1001, home: "/home/u"}}
+				keys := readKeys(readerFor(t, root, owners), accounts, policy, sshdConfig{})
+				result := keys.byUser["u"]
+				require.Len(t, result.files, 1)
+				file := result.files[0]
+				assert.Equal(t, statusRead, file.Status)
+				assert.False(t, file.Complete)
+				assert.Equal(t, []string{tc.reason}, file.Reasons)
+				assert.Empty(t, file.Keys)
+				assert.Nil(t, file.OwnerUID)
+				assert.Nil(t, file.Mode)
+				assert.Nil(t, file.StrictModesOK)
+				assert.Equal(t, statusRead, result.home.Status)
+				assert.Nil(t, result.home.StrictModesOK)
+				assert.Contains(t, keys.reasons.list(), reasonStrictModesUnresolved)
+			})
+		}
+	})
+}
+
 func TestSystemdNSSSources(t *testing.T) {
 	forBothWalks(t, func(t *testing.T) {
 		for _, tc := range []struct {

@@ -500,12 +500,9 @@ func expandPath(tmpl, home, user string) (string, bool) {
 		if home == "" {
 			return "", false
 		}
-		if home == "/" {
-			p = "/" + p
-		} else {
-			p = home + "/" + p
-		}
+		p = home + "/" + p
 	}
+	p = collapseSlashes(p)
 	return p, validPath(p)
 }
 
@@ -530,9 +527,9 @@ func strictOK(ps pathStat, uid uint32) bool {
 }
 
 // strictChain applies sshd's StrictModes rule to a file and its parent
-// directories, up to the home directory or to "/" when the file is outside
-// it.
-func strictChain(file pathStat, dirs []pathStat, home string, uid uint32) bool {
+// directories. The walk records resolved paths, so a match against the
+// canonical home ends the check there. Without a match it reaches "/".
+func strictChain(file pathStat, dirs []pathStat, canonicalHome string, uid uint32) bool {
 	if !strictOK(file, uid) {
 		return false
 	}
@@ -540,7 +537,7 @@ func strictChain(file pathStat, dirs []pathStat, home string, uid uint32) bool {
 		if !strictOK(dirs[i], uid) {
 			return false
 		}
-		if dirs[i].path == home {
+		if dirs[i].path == canonicalHome {
 			break
 		}
 	}
@@ -568,19 +565,23 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 		d.reasons.add(reasonFileUnreadable)
 	}
 	for _, acct := range accounts {
+		homePath := homeDirectory(acct.home)
 		ak := accountKeys{home: home{Status: statusUnresolved}, files: []keyFile{}}
 		rule := ownerRule{uid: acct.uid}
 		strict, strictKnown, noHome, anyRead := true, true, false, false
 		var dirs []pathStat
+		var canonicalHome string
 		hl := loaded{status: statusUnresolved}
-		if acct.home != "" {
-			dirs, hl = fs.statDir(acct.home, rule)
+		if homePath != "" {
+			dirs, hl = fs.statDir(homePath, rule)
 		}
 		ak.home.Status = hl.status
 		switch hl.status {
 		case statusRead:
-			strict = strict && strictOK(dirs[len(dirs)-1], acct.uid)
-			sshDirs, sl := fs.statDir(strings.TrimSuffix(acct.home, "/")+"/.ssh", rule)
+			homeDir := dirs[len(dirs)-1]
+			canonicalHome = homeDir.path
+			strict = strict && strictOK(homeDir, acct.uid)
+			sshDirs, sl := fs.statDir(strings.TrimSuffix(homePath, "/")+"/.ssh", rule)
 			switch sl.status {
 			case statusRead:
 				strict = strict && strictOK(sshDirs[len(sshDirs)-1], acct.uid)
@@ -601,7 +602,7 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 		for _, tmpl := range tmpls {
 			p, ok := expandPath(tmpl, acct.home, acct.name)
 			if !ok {
-				if acct.home == "" {
+				if homePath == "" {
 					continue
 				}
 				if !validValue(tmpl) || seen[tmpl] {
@@ -618,18 +619,18 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 			}
 			seen[p] = true
 			kf, file, fdirs := readKeyFile(fs, p, rule, &budget)
-			if underHome(p, acct.home) && hl.status != statusRead && hl.status != statusAbsent {
+			if underHome(p, homePath) && hl.status != statusRead && hl.status != statusAbsent {
 				kf.Reasons = appendReason(kf.Reasons, reasonHomeUnreadable)
 			}
 			d.reasons.add(kf.Reasons...)
 			switch {
 			case kf.Status == statusAbsent:
 			case file != nil:
-				home := ""
-				if underHome(p, acct.home) {
-					home = acct.home
+				fileStrict := strictChain(*file, fdirs, canonicalHome, acct.uid)
+				if canonicalHome != "" || noHome {
+					kf.StrictModesOK = ptr(fileStrict)
 				}
-				strict = strict && strictChain(*file, fdirs, home, acct.uid)
+				strict = strict && fileStrict
 				anyRead = true
 			default:
 				strictKnown = false
@@ -649,20 +650,16 @@ func readKeys(fs *fsReader, accounts []passwdEntry, t *sshdT, cfg sshdConfig) ke
 	return d
 }
 
-// readKeyFile reads one authorized_keys source. The returned pathStat is
-// the file's own, set when fstat succeeded.
+// readKeyFileUncached returns metadata only for a verified read.
 func readKeyFileUncached(fs *fsReader, p string, rule ownerRule, budget *int) (keyFile, *pathStat, []pathStat) {
 	l, dirs := fs.read(p, rule)
 	kf := keyFile{envelope: l.envelope(p), Keys: []key{}}
-	if l.status != statusRead {
+	if !l.usable() {
 		return kf, nil, dirs
 	}
 	file := &pathStat{path: p, uid: l.uid, mode: l.mode}
 	kf.OwnerUID = ptr(l.uid)
 	kf.Mode = ptr(formatMode(l.mode))
-	if l.data == nil {
-		return kf, file, dirs
-	}
 	res := parseAuthorizedKeys(l.data, budget)
 	clear(l.data)
 	kf.Keys = res.keys
@@ -820,7 +817,7 @@ func readTrust(fs *fsReader, sys systemFiles, accounts []passwdEntry, t *sshdT, 
 			tf := readTrustSource(fs, p, ownerRule{uid: acct.uid}, kind)
 			if tf.Status == statusUnreadable || tf.Status == statusRejected {
 				if !homeChecked {
-					_, hl := fs.statDir(acct.home, ownerRule{uid: acct.uid})
+					_, hl := fs.statDir(homeDirectory(acct.home), ownerRule{uid: acct.uid})
 					homeChecked, homeUnreadable = true, hl.status != statusRead
 				}
 				if homeUnreadable {
@@ -942,7 +939,9 @@ func exposurePanicDetails(stage string) (string, string) {
 				}
 				if !identified {
 					switch {
-					case strings.HasSuffix(frame.Function, ".serializeReport"), strings.HasSuffix(frame.Function, ".encodeValue"):
+					case strings.HasSuffix(frame.Function, ".serializeReport"),
+						strings.HasSuffix(frame.Function, ".encodeValue"),
+						strings.HasSuffix(frame.Function, ".wireTree"):
 						stage, identified = "serialize", true
 					case strings.HasSuffix(frame.Function, ".hashInput"):
 						stage, identified = "hash", true

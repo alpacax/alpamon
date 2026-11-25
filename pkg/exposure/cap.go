@@ -1,8 +1,30 @@
 package exposure
 
-import "slices"
+import (
+	"maps"
+	"slices"
+)
 
 const maxObservationRows = 20000
+
+// reportForVersion copies the containers that finalization edits.
+func reportForVersion(snapshot *exposureReport, version int) *exposureReport {
+	r := *snapshot
+	r.SchemaVersion = version
+	r.Categories = maps.Clone(snapshot.Categories)
+	r.Accounts = slices.Clone(snapshot.Accounts)
+	for i := range r.Accounts {
+		a := &r.Accounts[i]
+		a.KeyFiles = slices.Clone(a.KeyFiles)
+		a.PrincipalsFiles = slices.Clone(a.PrincipalsFiles)
+		a.TrustFiles = slices.Clone(a.TrustFiles)
+	}
+	if r.UserCA != nil {
+		r.UserCA = ptr(*r.UserCA)
+	}
+	r.SystemTrust = slices.Clone(snapshot.SystemTrust)
+	return &r
+}
 
 // finalize limits each account before applying the row and byte caps. Sources are
 // cut largest first, with path order breaking ties, then the report is sealed.
@@ -11,17 +33,17 @@ func finalize(r *exposureReport) ([]byte, error) {
 	retainedAccounts := r.Accounts[:0]
 	for i := range r.Accounts {
 		a := &r.Accounts[i]
-		if encodedLen(a) <= maxAccountBytes {
+		if r.encodedLen(a) <= maxAccountBytes {
 			retainedAccounts = append(retainedAccounts, *a)
 			continue
 		}
 		for _, source := range accountCuts(r, a) {
 			source.cut()
-			if encodedLen(a) <= maxAccountBytes {
+			if r.encodedLen(a) <= maxAccountBytes {
 				break
 			}
 		}
-		if encodedLen(a) <= maxAccountBytes {
+		if r.encodedLen(a) <= maxAccountBytes {
 			retainedAccounts = append(retainedAccounts, *a)
 		} else {
 			markCut(r, catAccounts)
@@ -39,21 +61,21 @@ func finalize(r *exposureReport) ([]byte, error) {
 	}
 	if r.UserCA != nil && len(r.UserCA.CAs) > 0 {
 		u := r.UserCA
-		sources = append(sources, sourceCut{len(u.CAs), encodedLen(u), u.Path, func() { u.CAs = []caKey{}; cutEnvelope(&u.envelope); markCut(r, catCertificates) }, u})
+		sources = append(sources, sourceCut{len(u.CAs), r.encodedLen(u), u.Path, func() { u.CAs = []caKey{}; cutEnvelope(&u.envelope); markCut(r, catCertificates) }, u})
 	}
 	for i := range r.SystemTrust {
 		s := &r.SystemTrust[i]
 		if len(s.Entries) > 0 {
-			sources = append(sources, sourceCut{len(s.Entries), encodedLen(s), s.Path, func() { s.Entries = []hostUser{}; cutEnvelope(&s.envelope); markCut(r, catTrust) }, s})
+			sources = append(sources, sourceCut{len(s.Entries), r.encodedLen(s), s.Path, func() { s.Entries = []hostUser{}; cutEnvelope(&s.envelope); markCut(r, catTrust) }, s})
 		}
 	}
 	sortCuts(sources)
 	size := len(body)
 	for _, source := range sources {
-		beforeCategories := encodedLen(r.Categories)
+		beforeCategories := r.encodedLen(r.Categories)
 		source.cut()
-		size -= source.size - encodedLen(source.value)
-		size += encodedLen(r.Categories) - beforeCategories
+		size -= source.size - r.encodedLen(source.value)
+		size += r.encodedLen(r.Categories) - beforeCategories
 		if size <= maxReportBytes {
 			return serializeReport(r)
 		}
@@ -67,7 +89,7 @@ func finalize(r *exposureReport) ([]byte, error) {
 	}
 	remaining := make([]accountSize, len(r.Accounts))
 	for i := range r.Accounts {
-		remaining[i] = accountSize{i, encodedLen(r.Accounts[i]), r.Accounts[i].Username}
+		remaining[i] = accountSize{i, r.encodedLen(r.Accounts[i]), r.Accounts[i].Username}
 	}
 	slices.SortFunc(remaining, func(a, b accountSize) int {
 		if a.size != b.size {
@@ -82,9 +104,9 @@ func finalize(r *exposureReport) ([]byte, error) {
 		return 0
 	})
 	dropped := map[int]bool{}
-	beforeCategories := encodedLen(r.Categories)
+	beforeCategories := r.encodedLen(r.Categories)
 	markCut(r, catAccounts)
-	size += encodedLen(r.Categories) - beforeCategories
+	size += r.encodedLen(r.Categories) - beforeCategories
 	for _, a := range remaining {
 		if size <= maxReportBytes {
 			break
@@ -130,23 +152,23 @@ func accountCuts(r *exposureReport, a *account) []sourceCut {
 	for i := range a.KeyFiles {
 		s := &a.KeyFiles[i]
 		if len(s.Keys) > 0 {
-			cuts = append(cuts, sourceCut{authorizationRows(s.Keys), encodedLen(s), s.Path, func() { s.Keys = []key{}; cutEnvelope(&s.envelope); markCut(r, catKeys) }, s})
+			cuts = append(cuts, sourceCut{authorizationRows(s.Keys), r.encodedLen(s), s.Path, func() { s.Keys = []key{}; cutEnvelope(&s.envelope); markCut(r, catKeys) }, s})
 		}
 	}
 	for i := range a.PrincipalsFiles {
 		s := &a.PrincipalsFiles[i]
 		if len(s.Entries) > 0 {
-			cuts = append(cuts, sourceCut{len(s.Entries), encodedLen(s), s.Path, func() { s.Entries = []principalEntry{}; cutEnvelope(&s.envelope); markCut(r, catCertificates) }, s})
+			cuts = append(cuts, sourceCut{len(s.Entries), r.encodedLen(s), s.Path, func() { s.Entries = []principalEntry{}; cutEnvelope(&s.envelope); markCut(r, catCertificates) }, s})
 		}
 	}
 	for i := range a.TrustFiles {
 		s := &a.TrustFiles[i]
 		if len(s.Entries) > 0 {
-			cuts = append(cuts, sourceCut{len(s.Entries), encodedLen(s), s.Path, func() { s.Entries = []trustEntry{}; cutEnvelope(&s.envelope); markCut(r, catTrust) }, s})
+			cuts = append(cuts, sourceCut{len(s.Entries), r.encodedLen(s), s.Path, func() { s.Entries = []trustEntry{}; cutEnvelope(&s.envelope); markCut(r, catTrust) }, s})
 		}
 	}
 	if len(a.Sudo.Grants) > 0 {
-		cuts = append(cuts, sourceCut{len(a.Sudo.Grants), encodedLen(a.Sudo), "/etc/sudoers", func() {
+		cuts = append(cuts, sourceCut{len(a.Sudo.Grants), r.encodedLen(a.Sudo), "/etc/sudoers", func() {
 			a.Sudo.Grants = []grant{}
 			a.Sudo.Complete = false
 			a.Sudo.Reasons = appendReason(a.Sudo.Reasons, reasonLimitExceeded)
@@ -154,7 +176,7 @@ func accountCuts(r *exposureReport, a *account) []sourceCut {
 		}, &a.Sudo})
 	}
 	if a.LastPTYLogin != nil {
-		cuts = append(cuts, sourceCut{0, encodedLen(a.LastPTYLogin), "/var/log/lastlog", func() { a.LastPTYLogin = nil; markCut(r, catPTY) }, &a.LastPTYLogin})
+		cuts = append(cuts, sourceCut{0, r.encodedLen(a.LastPTYLogin), "/var/log/lastlog", func() { a.LastPTYLogin = nil; markCut(r, catPTY) }, &a.LastPTYLogin})
 	}
 	sortCuts(cuts)
 	return cuts
@@ -208,7 +230,7 @@ func capObservationRows(r *exposureReport) {
 		cuts := accountCuts(r, a)
 		// accountCuts already orders equal-row sources by size and path.
 		slices.SortStableFunc(cuts, func(a, b sourceCut) int { return b.rows - a.rows })
-		accounts[i] = accountRows{a, observationRows(&exposureReport{Accounts: []account{*a}}), encodedLen(a), cuts}
+		accounts[i] = accountRows{a, observationRows(&exposureReport{Accounts: []account{*a}}), r.encodedLen(a), cuts}
 	}
 	for rows > maxObservationRows {
 		largest := -1
@@ -231,13 +253,17 @@ func capObservationRows(r *exposureReport) {
 		source.cut()
 		rows -= source.rows
 		a.rows -= source.rows
-		a.size = encodedLen(a.account)
+		a.size = r.encodedLen(a.account)
 		a.sources = a.sources[1:]
 	}
 }
 
-func encodedLen(v any) int {
-	b, err := encodeValue(v)
+func (r *exposureReport) encodedLen(v any) int {
+	tree, err := wireTree(v, r.SchemaVersion)
+	if err != nil {
+		return 0
+	}
+	b, err := appendCanonical(nil, tree)
 	if err != nil {
 		return 0
 	}

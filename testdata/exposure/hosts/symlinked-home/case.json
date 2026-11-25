@@ -1,0 +1,25 @@
+{
+  "hostname": "symlinked-home",
+  "sshd": "sshd-T.txt",
+  "btime": 1699990000,
+  "processes": [
+    {
+      "pid": 812,
+      "ppid": 1,
+      "comm": "sshd",
+      "argv": ["sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"],
+      "start": 1700000000
+    }
+  ],
+  "modes": {
+    "data": "0775",
+    "data/deploy/.ssh": "0700",
+    "data/deploy/.ssh/authorized_keys": "0600"
+  },
+  "owners": {
+    "/data/deploy": 1001,
+    "/data/deploy/.ssh": 1001,
+    "/home/deploy/.ssh/authorized_keys": 1001
+  },
+  "canaries": ["AAAAC3NzaC1lZDI1NTE5AAAAIK89ICZPnCbvCFtc5Tf0F9QkA3oJY6Y4b/bQUOW/dzcU"]
+}

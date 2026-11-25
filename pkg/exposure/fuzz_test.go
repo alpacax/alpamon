@@ -236,7 +236,8 @@ func FuzzPasswd(f *testing.F) {
 		assert.NotContains(t, fmt.Sprintf("%+v", result.entries), fuzzCanary)
 		for _, e := range result.entries {
 			assert.True(t, validName(e.name))
-			assert.True(t, e.home == "" || e.home == "/" || validPath(e.home))
+			home := homeDirectory(e.home)
+			assert.True(t, home == "" || home == "/" || validPath(home))
 			assert.True(t, e.shell == "" || validPath(e.shell))
 		}
 	})
