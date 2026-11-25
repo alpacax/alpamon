@@ -15,11 +15,14 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/commandcancel"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/process"
+	"golang.org/x/sys/unix"
 )
 
 // stopSettle bounds how long Stop waits to observe every owned process
 // stopped.
 const stopSettle = time.Second
+
+var errSessionObservationChanged = errors.New("process session observation changed")
 
 // groupProcessControl stops, continues and ends the process groups inside
 // the process sessions a Work Session owns. Commands and terminals lead
@@ -71,11 +74,12 @@ func processArgs(pid int) ([]string, error) {
 type sessionProcessTable struct {
 	members func(int) ([]int, error)
 	started func(int) (int64, error)
+	sid     func(int) (int, error)
 	pgid    func(int) (int, error)
 }
 
 func systemProcessTable() sessionProcessTable {
-	return sessionProcessTable{members: commandcancel.SessionMembers, started: processStartTime, pgid: syscall.Getpgid}
+	return sessionProcessTable{members: commandcancel.SessionMembers, started: processStartTime, sid: unix.Getsid, pgid: syscall.Getpgid}
 }
 
 func processGone(err error) bool {
@@ -111,9 +115,10 @@ type stoppedGroup struct {
 // start time. A SID with a live member is never handed to a new session, so
 // a pinned member still in the session proves the SID was never reused.
 type sessionPin struct {
-	members map[int]int64
-	stop    chan struct{}
-	done    chan struct{}
+	members    map[int]int64
+	generation uint64
+	stop       chan struct{}
+	done       chan struct{}
 }
 
 // sessionPins holds the pin of every tracked process session.
@@ -157,28 +162,25 @@ func observeSessionWithTable(session OwnedSession, pin *sessionPin, table sessio
 		case <-pin.stop:
 			return
 		case <-ticker.C:
-			started, err := table.started(session.SID)
-			if err != nil {
-				if processGone(err) {
-					return
-				}
-				continue
-			}
-			if started == 0 {
-				continue
-			}
-			if started != session.StartedAt {
-				return
-			}
 			members, err := refreshSessionPinWithTable(session, pin, table)
 			if err != nil {
+				if errors.Is(err, commandcancel.ErrSessionUnverified) {
+					return
+				}
 				continue
 			}
 			if len(members) == 0 {
 				return
 			}
-			if state, err := readState(session.SID); (err == nil && state == procZombie) || processGone(err) {
-				return
+			if len(members) == 1 {
+				for pid := range members {
+					if state, err := readState(pid); (err == nil && state == procZombie) || processGone(err) {
+						remaining, err := refreshSessionPinWithTable(session, pin, table)
+						if err == nil && len(remaining) == 0 {
+							return
+						}
+					}
+				}
 			}
 		}
 	}
@@ -297,6 +299,16 @@ func refreshSessionPin(session OwnedSession, expected *sessionPin) map[int]int64
 }
 
 func refreshSessionPinWithTable(session OwnedSession, expected *sessionPin, table sessionProcessTable) (map[int]int64, error) {
+	for range 3 {
+		starts, err := refreshSessionPinOnce(session, expected, table)
+		if !errors.Is(err, errSessionObservationChanged) {
+			return starts, err
+		}
+	}
+	return nil, errSessionObservationChanged
+}
+
+func refreshSessionPinOnce(session OwnedSession, expected *sessionPin, table sessionProcessTable) (map[int]int64, error) {
 	if session.missing {
 		return map[int]int64{}, nil
 	}
@@ -315,6 +327,15 @@ func refreshSessionPinWithTable(session OwnedSession, expected *sessionPin, tabl
 		}
 		return map[int]int64{}, nil
 	}
+	key := keyOf(session)
+	sessionPins.mu.Lock()
+	before := sessionPins.m[key]
+	var generation uint64
+	if before != nil {
+		generation = before.generation
+	}
+	sessionPins.mu.Unlock()
+
 	pids, err := table.members(session.SID)
 	if err != nil {
 		return nil, err
@@ -328,53 +349,85 @@ func refreshSessionPinWithTable(session OwnedSession, expected *sessionPin, tabl
 			}
 			return nil, err
 		}
-		if started != 0 {
-			starts[pid] = started
-		} else {
+		if started == 0 {
 			return nil, fmt.Errorf("process %d start time unavailable", pid)
 		}
+		if table.sid != nil {
+			sid, err := table.sid(pid)
+			if processGone(err) || err == nil && sid != session.SID {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+		starts[pid] = started
 	}
+	unverified := false
 	if len(starts) == 0 {
 		remaining, err := table.members(session.SID)
 		if err != nil {
 			return nil, err
 		}
-		if len(remaining) > 0 {
-			return nil, commandcancel.ErrSessionUnverified
-		}
+		unverified = len(remaining) > 0
 	}
 
-	key := keyOf(session)
 	sessionPins.mu.Lock()
 	defer sessionPins.mu.Unlock()
-	// The recorded leader, by PID and start time, proves itself.
-	verified := starts[session.SID] == session.StartedAt
 	pin, ok := sessionPins.m[key]
 	if expected != nil && pin != expected {
 		return nil, nil
+	}
+	if pin != before || pin != nil && pin.generation != generation {
+		return nil, errSessionObservationChanged
+	}
+	if unverified {
+		return nil, commandcancel.ErrSessionUnverified
 	}
 	if len(starts) == 0 {
 		removeSessionPin(key)
 		return starts, nil
 	}
-	if !ok {
-		if !verified {
-			return nil, nil
-		}
-		pin = &sessionPin{}
-		sessionPins.m[key] = pin
-	}
-	for pid, started := range starts {
-		if verified {
-			break
-		}
-		verified = pin.members[pid] == started
-	}
-	if !verified {
+	leaderStart := starts[session.SID]
+	if leaderStart != 0 && leaderStart != session.StartedAt {
 		removeSessionPin(key)
 		return nil, nil
 	}
-	pin.members = starts
+	verified := false
+	for pid, started := range starts {
+		if !(pid == session.SID && started == session.StartedAt) && (pin == nil || pin.members[pid] != started) {
+			continue
+		}
+		if table.sid != nil {
+			sid, err := table.sid(pid)
+			if processGone(err) || err == nil && sid != session.SID {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			current, err := table.started(pid)
+			if processGone(err) || err == nil && current != started {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+		verified = true
+		break
+	}
+	if !verified {
+		return nil, commandcancel.ErrSessionUnverified
+	}
+	if !ok {
+		pin = &sessionPin{}
+		sessionPins.m[key] = pin
+	}
+	if !maps.Equal(pin.members, starts) {
+		pin.members = starts
+		pin.generation++
+	}
 	return starts, nil
 }
 

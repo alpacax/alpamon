@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"os"
 	"syscall"
 	"testing"
 	"testing/synctest"
@@ -13,6 +14,23 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestProcessLookupReportsUnverifiedMembership(t *testing.T) {
+	session := OwnedSession{SID: 900001, StartedAt: 100}
+	table := sessionProcessTable{
+		members: func(int) ([]int, error) { return []int{session.SID + 1}, nil },
+		started: func(pid int) (int64, error) {
+			if pid == session.SID {
+				return 0, os.ErrNotExist
+			}
+			return 101, nil
+		},
+	}
+
+	members, err := refreshSessionPinWithTable(session, nil, table)
+	assert.Empty(t, members)
+	assert.ErrorIs(t, err, commandcancel.ErrSessionUnverified)
+}
 
 func TestProcessLookupErrorsPreserveTracking(t *testing.T) {
 	for _, failed := range []string{"members", "started", "group"} {
@@ -92,6 +110,50 @@ func TestSessionObserverRetriesTemporaryReads(t *testing.T) {
 		started := pin.members[session.SID+1]
 		sessionPins.mu.Unlock()
 		assert.Equal(t, int64(101), started)
+		unpinSession(session)
+		<-pin.done
+	})
+}
+
+func TestSessionObserverContinuesWithRecordedMembers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		session := OwnedSession{SID: 900003, StartedAt: 100}
+		child, next := session.SID+1, session.SID+2
+		pin := &sessionPin{
+			members: map[int]int64{session.SID: 100, child: 101},
+			stop:    make(chan struct{}),
+			done:    make(chan struct{}),
+		}
+		sessionPins.mu.Lock()
+		sessionPins.m[keyOf(session)] = pin
+		sessionPins.mu.Unlock()
+		t.Cleanup(func() { unpinSession(session) })
+
+		scans := 0
+		table := sessionProcessTable{
+			members: func(int) ([]int, error) {
+				scans++
+				if scans == 1 {
+					return []int{child}, nil
+				}
+				return []int{child, next}, nil
+			},
+			started: func(pid int) (int64, error) {
+				if pid == session.SID {
+					return 0, os.ErrNotExist
+				}
+				return int64(pid - session.SID + 100), nil
+			},
+		}
+		go observeSessionWithTable(session, pin, table, func(int) (procState, error) { return procRunning, nil })
+		synctest.Wait()
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+
+		sessionPins.mu.Lock()
+		started := pin.members[next]
+		sessionPins.mu.Unlock()
+		assert.Equal(t, int64(102), started)
 		unpinSession(session)
 		<-pin.done
 	})
