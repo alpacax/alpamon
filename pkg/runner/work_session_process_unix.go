@@ -395,7 +395,7 @@ func refreshSessionPinOnce(session OwnedSession, expected *sessionPin, table ses
 	}
 	verified := false
 	for pid, started := range starts {
-		if !(pid == session.SID && started == session.StartedAt) && (pin == nil || pin.members[pid] != started) {
+		if (pid != session.SID || started != session.StartedAt) && (pin == nil || pin.members[pid] != started) {
 			continue
 		}
 		if table.sid != nil {
