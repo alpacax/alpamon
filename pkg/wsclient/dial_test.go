@@ -7,11 +7,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -237,8 +239,8 @@ func TestDial_HandsTheProxyAnHTTPScheme(t *testing.T) {
 }
 
 // TestDial_SurvivesAProxyWithoutAReasonPhrase covers gorilla/websocket
-// v1.5.3 reading the reason phrase out of a CONNECT status line that has
-// none, which panics the dialing goroutine. For an agent that goroutine is
+// (v1.5.3 through d67f418) reading the reason phrase out of a CONNECT status
+// line that has none, which panics the dialing goroutine. For an agent that goroutine is
 // the process, and a proxy is reachable by default through the environment,
 // so this has to come back as an error.
 func TestDial_SurvivesAProxyWithoutAReasonPhrase(t *testing.T) {
@@ -282,4 +284,112 @@ func TestDial_SurvivesAProxyWithoutAReasonPhrase(t *testing.T) {
 	// leak an fd per attempt.
 	assert.True(t, tracker.allClosed(),
 		"the socket the proxy dial opened must be closed before the panic is turned into an error")
+}
+
+// silentSOCKS5 runs a SOCKS5 proxy that grants every CONNECT and then never answers through the
+// tunnel. The channel closes once the WebSocket upgrade request has come through.
+func silentSOCKS5(t *testing.T) (*url.URL, <-chan struct{}) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	upgrade := make(chan struct{})
+	var once sync.Once
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				buf := make([]byte, 262)
+				if _, err := io.ReadFull(conn, buf[:2]); err != nil { // version, method count
+					return
+				}
+				if _, err := io.ReadFull(conn, buf[:buf[1]]); err != nil {
+					return
+				}
+				_, _ = conn.Write([]byte{5, 0})                       // no authentication
+				if _, err := io.ReadFull(conn, buf[:5]); err != nil { // up to the domain name's length
+					return
+				}
+				if _, err := io.ReadFull(conn, buf[:int(buf[4])+2]); err != nil { // domain name, port
+					return
+				}
+				_, _ = conn.Write([]byte{5, 0, 0, 1, 127, 0, 0, 1, 0, 80})
+				line, err := bufio.NewReader(conn).ReadString('\n')
+				if err == nil && strings.HasPrefix(line, "GET ") {
+					once.Do(func() { close(upgrade) })
+				}
+				_, _ = io.Copy(io.Discard, conn)
+			}()
+		}
+	}()
+	return &url.URL{Scheme: "socks5", Host: listener.Addr().String()}, upgrade
+}
+
+// dialBehindSOCKS5 starts a dial through a silent SOCKS5 proxy and returns its result channel.
+func dialBehindSOCKS5(t *testing.T, ctx context.Context, timeout time.Duration) (<-chan error, <-chan struct{}) {
+	t.Helper()
+	proxyURL, upgrade := silentSOCKS5(t)
+	cfg := testConfig("ws://backhaul.example.com/ws/")
+	cfg.Dialer = DefaultDialer()
+	cfg.Dialer.Proxy = http.ProxyURL(proxyURL)
+	cfg.Dialer.HandshakeTimeout = timeout
+	done := make(chan error, 1)
+	go func() {
+		conn, _, err := Dial(ctx, cfg)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		done <- err
+	}()
+	return done, upgrade
+}
+
+func TestDial_HandshakeTimeoutCoversTheUpgradeBehindSOCKS5(t *testing.T) {
+	// Given a dial through a SOCKS5 proxy whose backhaul never answers the upgrade
+	// When it runs with a context that has no deadline
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // releases the dial and the proxy socket if the timeout regresses
+	done, upgrade := dialBehindSOCKS5(t, ctx, 500*time.Millisecond)
+
+	// Then the upgrade is sent, and the dial gives up once HandshakeTimeout has passed
+	select {
+	case <-upgrade:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the upgrade request never reached the proxy, so the timeout below would prove nothing")
+	}
+	select {
+	case err := <-done:
+		var netErr net.Error
+		require.ErrorAs(t, err, &netErr)
+		assert.True(t, netErr.Timeout(), "want a timeout, got %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the dial outlived HandshakeTimeout: the SOCKS5 dialer cleared the socket deadline")
+	}
+}
+
+func TestDial_CancelEndsTheUpgradeBehindSOCKS5(t *testing.T) {
+	// Given a dial through a SOCKS5 proxy, waiting on an upgrade the backhaul never answers
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done, upgrade := dialBehindSOCKS5(t, ctx, time.Minute)
+	select {
+	case <-upgrade:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the upgrade request never reached the proxy")
+	}
+
+	// When the caller cancels
+	cancel()
+
+	// Then the dial ends well before HandshakeTimeout
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("a canceled dial stayed blocked: the SOCKS5 dialer cleared the socket deadline")
+	}
 }

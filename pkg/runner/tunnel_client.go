@@ -21,6 +21,7 @@ import (
 	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/alpacax/alpamon/v2/pkg/tunnel"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
+	"github.com/alpacax/alpamon/v2/pkg/wsclient"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -361,7 +362,9 @@ func (tc *TunnelClient) connect(ctx context.Context) error {
 		return c, nil
 	}
 
-	conn, resp, err := dialer.DialContext(dialCtx, target, tc.requestHeader)
+	bounded, finish := wsclient.Abortable(dialCtx, &dialer)
+	conn, resp, err := bounded.DialContext(dialCtx, target, tc.requestHeader)
+	finish()
 	if !unwatch() || dialCtx.Err() != nil {
 		if conn != nil {
 			_ = conn.Close()

@@ -6,18 +6,22 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/commandcancel"
 	"github.com/alpacax/alpamon/v2/internal/protocol"
+	"github.com/alpacax/alpamon/v2/pkg/config"
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/v4/process"
@@ -316,4 +320,51 @@ func TestPtyBackgroundCancelClosesChannelAndUnregisters(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("no per-session close report")
 	}
+}
+
+func TestPtyBackgroundCancelDuringUpgradeIsRecorded(t *testing.T) {
+	// Given a Websh session whose server never answers the upgrade request
+	var once sync.Once
+	upgrade, release := make(chan struct{}), make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(upgrade) })
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(ts.Close)
+	t.Cleanup(func() { close(release) }) // runs first, so ts.Close does not wait on the handler
+	prevServerURL := config.GlobalSettings.ServerURL
+	config.GlobalSettings.ServerURL = ts.URL
+	t.Cleanup(func() { config.GlobalSettings.ServerURL = prevServerURL })
+	wc := &WebsocketClient{}
+	ctx, open := wc.cancellations.register(context.Background(), "open-upgrade")
+	ctx = context.WithValue(ctx, cancellationRegistryKey{}, &wc.cancellations)
+	url := strings.Replace(ts.URL, "http", "ws", 1) + "/ws/pty"
+	pc := NewPtyClient(protocol.CommandData{SessionID: "upgrade-cancel", URL: url, Shell: "/bin/bash", Rows: 24, Cols: 80}, nil, NewTerminalManager(nil))
+	pc.TrackCommand(ctx, "open-upgrade")
+	wc.cancellations.finish("open-upgrade", open)
+	done := make(chan struct{})
+	go func() { pc.RunPtyBackground(); close(done) }()
+	select {
+	case <-upgrade:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the upgrade request never reached the server")
+	}
+
+	// When the session is canceled while the upgrade waits for a response
+	wc.commandRequestHandler([]byte(`{"query":"cancel","command":{"id":"open-upgrade"}}`))
+
+	// Then the worker stops without starting a shell, and the cancellation is recorded
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancel did not stop the pending upgrade")
+	}
+	assert.Nil(t, pc.cmd, "cancel during the upgrade must not start a shell")
+	require.NotNil(t, pc.cancelState)
+	cancelled, survivors := pc.cancelState.Finish()
+	assert.True(t, cancelled, "the cancellation that stopped initialization must be recorded")
+	assert.Empty(t, survivors)
 }

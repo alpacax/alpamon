@@ -73,6 +73,8 @@ jobs:
             github.com/alpacax/alpamon/v2/pkg/tunnel
             github.com/alpacax/alpamon/v2/pkg/version
             github.com/gorilla/websocket
+            golang.org/x/net/proxy
+            golang.org/x/net/internal/socks
         run: |
           set -euo pipefail
 
