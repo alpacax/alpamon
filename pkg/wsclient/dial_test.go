@@ -350,8 +350,10 @@ func dialBehindSOCKS5(t *testing.T, ctx context.Context, timeout time.Duration) 
 
 func TestDial_HandshakeTimeoutCoversTheUpgradeBehindSOCKS5(t *testing.T) {
 	// Given a dial through a SOCKS5 proxy whose backhaul never answers the upgrade
-	// When it runs with a context that never ends
-	done, upgrade := dialBehindSOCKS5(t, context.Background(), 500*time.Millisecond)
+	// When it runs with a context that has no deadline
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // releases the dial and the proxy socket if the timeout regresses
+	done, upgrade := dialBehindSOCKS5(t, ctx, 500*time.Millisecond)
 
 	// Then the upgrade is sent, and the dial gives up once HandshakeTimeout has passed
 	select {

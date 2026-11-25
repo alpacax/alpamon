@@ -111,9 +111,9 @@ func unofferedExtension(values []string, compression bool) (string, bool) {
 	return "", false
 }
 
-// Abortable copies d with its dial hooks wrapped so that every socket they
-// open is unblocked once ctx ends or the dial's own context times out, and
-// returns a function to call when the dial is over.
+// Abortable copies d for one dial attempt. Its hooks unblock opened sockets
+// when ctx ends or the dial's own context times out. Call the returned
+// function as soon as the attempt completes.
 //
 // gorilla/websocket stops watching ctx as soon as the socket is up: the HTTP
 // upgrade exchange, and a proxy CONNECT before it, are bounded only by
@@ -179,7 +179,6 @@ type abortState struct {
 	finished bool
 }
 
-// watch keeps a timeout watcher so finish can stop it.
 func (s *abortState) watch(stop func() bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
