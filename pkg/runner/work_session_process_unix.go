@@ -401,14 +401,14 @@ func refreshSessionPinOnce(session OwnedSession, expected *sessionPin, table ses
 		if table.sid != nil {
 			sid, err := table.sid(pid)
 			if processGone(err) || err == nil && sid != session.SID {
-				continue
+				return nil, errSessionObservationChanged
 			}
 			if err != nil {
 				return nil, err
 			}
 			current, err := table.started(pid)
 			if processGone(err) || err == nil && current != started {
-				continue
+				return nil, errSessionObservationChanged
 			}
 			if err != nil {
 				return nil, err

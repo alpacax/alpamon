@@ -32,6 +32,34 @@ func TestProcessLookupReportsUnverifiedMembership(t *testing.T) {
 	assert.ErrorIs(t, err, commandcancel.ErrSessionUnverified)
 }
 
+func TestProcessLookupRechecksAProcessThatFinishesDuringObservation(t *testing.T) {
+	session := OwnedSession{SID: 900004, StartedAt: 100}
+	t.Cleanup(func() { unpinSession(session) })
+	finished := false
+	sidReads := 0
+	table := sessionProcessTable{
+		members: func(int) ([]int, error) {
+			if finished {
+				return nil, nil
+			}
+			return []int{session.SID}, nil
+		},
+		started: func(int) (int64, error) { return session.StartedAt, nil },
+		sid: func(int) (int, error) {
+			sidReads++
+			if sidReads == 1 {
+				return session.SID, nil
+			}
+			finished = true
+			return 0, os.ErrNotExist
+		},
+	}
+
+	members, err := refreshSessionPinWithTable(session, nil, table)
+	require.NoError(t, err)
+	assert.Empty(t, members)
+}
+
 func TestProcessLookupErrorsPreserveTracking(t *testing.T) {
 	for _, failed := range []string{"members", "started", "group"} {
 		t.Run(failed, func(t *testing.T) {
