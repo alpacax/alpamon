@@ -25,8 +25,11 @@ const stopSettle = time.Second
 // the process sessions a Work Session owns. Commands and terminals lead
 // their own session, so a session holds a command's group, the children a
 // finished command left in it and every job-control group of a terminal.
-// Every signal goes through commandcancel, which reads a member's SID and
-// PGID again right before it signals the member's group.
+// Every signal goes through commandcancel, which reads a member's start
+// time, SID and PGID again right before it signals. On Linux it signals each
+// member through a pidfd, so a reused PID or PGID never receives it. Where
+// that is unavailable Stop and Resume are unsupported, and End signals each
+// checked member's group by PGID, best effort.
 type groupProcessControl struct {
 	mu sync.Mutex
 	// stopped holds the groups a Stop suspended, per Work Session, each with
@@ -39,6 +42,9 @@ type groupProcessControl struct {
 	readState func(int) (procState, error)
 	readArgs  func(int) ([]string, error)
 	table     sessionProcessTable
+	// heldSignals says whether a signal can be delivered only to the
+	// process a check verified. Stop and Resume need it.
+	heldSignals bool
 }
 
 func newProcessControl(cancel func(commandID string)) WorkSessionProcessController {
@@ -49,6 +55,8 @@ func newProcessControl(cancel func(commandID string)) WorkSessionProcessControll
 		readState: processState,
 		readArgs:  processArgs,
 		table:     systemProcessTable(),
+
+		heldSignals: commandcancel.PinnedSignalsHeld(),
 	}
 }
 
@@ -418,9 +426,14 @@ func survivorOf(member ownedMember) WorkSessionSurvivor {
 	return WorkSessionSurvivor{CommandID: member.session.CommandID, PID: member.pid, PGID: member.pgid}
 }
 
-// Stop sends SIGSTOP to every owned process group, again to any group that
-// appears meanwhile, until every owned process is observed stopped.
+// Stop sends SIGSTOP to every owned process, again to any that appears
+// meanwhile, until every owned process is observed stopped. It is
+// unsupported where a signal cannot be held to the process it was checked
+// against.
 func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, error) {
+	if !c.heldSignals {
+		return ProcessEffect{}, errProcessControlUnsupported
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	stopped := c.stopped[id]
@@ -479,7 +492,7 @@ func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, e
 				}
 			}
 			pins := memberPins(members, session, func(member ownedMember) bool { return pending[member.pgid] })
-			signalled, err := commandcancel.SignalPinnedSessionGroups(session.SID, pins, syscall.SIGSTOP)
+			signalled, err := commandcancel.SignalPinnedSessionMembers(session.SID, pins, syscall.SIGSTOP)
 			if err != nil {
 				errs = append(errs, err)
 			}
@@ -501,9 +514,13 @@ func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, e
 	}
 }
 
-// Continue sends SIGCONT to the groups a Stop suspended that are still owned
-// and still the groups it suspended, and to no other group.
+// Continue sends SIGCONT to the members a Stop suspended of the groups that
+// are still owned and still the groups it suspended, and to no other
+// process. It is unsupported where Stop is.
 func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffect, error) {
+	if !c.heldSignals {
+		return ProcessEffect{}, errProcessControlUnsupported
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	stopped := c.stopped[id]
@@ -538,7 +555,7 @@ func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffec
 				pins[member.pid] = commandcancel.SessionMember{StartedAt: member.started, PGID: member.pgid}
 			}
 		}
-		signalled, err := commandcancel.SignalPinnedSessionGroups(key.session.sid, pins, syscall.SIGCONT)
+		signalled, err := commandcancel.SignalPinnedSessionMembers(key.session.sid, pins, syscall.SIGCONT)
 		if err != nil {
 			errs = append(errs, err)
 		}

@@ -36,6 +36,7 @@ func TestProcessLookupErrorsPreserveTracking(t *testing.T) {
 			assert.ErrorIs(t, err, syscall.EACCES)
 			control := newProcessControl(nil).(*groupProcessControl)
 			control.table = table
+			control.heldSignals = true // lookup fails closed before any signal, on every host
 			_, err = control.Stop(wsID, OwnedWork{Sessions: []OwnedSession{session}})
 			assert.ErrorIs(t, err, syscall.EACCES)
 			_, err = control.End(wsID, OwnedWork{Sessions: []OwnedSession{session}})

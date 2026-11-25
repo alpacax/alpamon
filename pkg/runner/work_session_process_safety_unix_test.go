@@ -29,6 +29,7 @@ func TestAdoptSessionRejectsMembersWithoutAnObservedPin(t *testing.T) {
 	adoptSession(session)
 	assert.Empty(t, ownedMembers([]OwnedSession{session}))
 	control := newProcessControl(nil).(*groupProcessControl)
+	control.heldSignals = true // lookup fails closed before any signal, on every host
 	effect, err := control.Stop(wsID, OwnedWork{Sessions: []OwnedSession{session}})
 	require.NoError(t, err)
 	assert.Zero(t, effect.AffectedTrees)
@@ -70,6 +71,7 @@ func TestStopReportsOwnedMembersWhoseStateCannotBeRead(t *testing.T) {
 	t.Cleanup(func() { unpinSession(session) })
 	control := newProcessControl(nil).(*groupProcessControl)
 	control.readState = func(int) (procState, error) { return procRunning, syscall.EACCES }
+	control.heldSignals = true // lookup fails closed before any signal, on every host
 
 	effect, err := control.Stop(wsID, OwnedWork{Sessions: []OwnedSession{session}})
 	assert.ErrorIs(t, err, syscall.EACCES)

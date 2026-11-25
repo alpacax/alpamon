@@ -36,6 +36,7 @@ func TestMissingProcessRecordRemainsNonOwning(t *testing.T) {
 		control := newProcessControl(func(string) { cancelled = true }).(*groupProcessControl)
 		control.table = table
 		control.readState = readState
+		control.heldSignals = true // lookup fails closed before any signal, on every host
 		for _, action := range []func(string, OwnedWork) (ProcessEffect, error){control.Stop, control.Continue, control.End} {
 			effect, err := action(wsID, OwnedWork{Sessions: []OwnedSession{session}})
 			require.NoError(t, err)

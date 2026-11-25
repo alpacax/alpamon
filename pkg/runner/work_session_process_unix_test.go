@@ -117,6 +117,15 @@ func requireState(t *testing.T, want procState, pids ...int) {
 	}
 }
 
+// requireHeldSignals skips a test that stops or resumes real processes on a
+// host where Stop and Resume are unsupported.
+func requireHeldSignals(t *testing.T) {
+	t.Helper()
+	if !commandcancel.PinnedSignalsHeld() {
+		t.Skip("this host cannot hold a process through signal delivery")
+	}
+}
+
 func newProcessRegistry(server *fakeControlServer, inventories *inventoryLog, cancel func(string)) *WorkSessionRegistry {
 	r := newTestRegistry(server)
 	control := newProcessControl(cancel).(*groupProcessControl)
@@ -128,6 +137,7 @@ func newProcessRegistry(server *fakeControlServer, inventories *inventoryLog, ca
 }
 
 func TestStopSuspendsEveryOwnedGroupAndResumeContinuesOnlyThem(t *testing.T) {
+	requireHeldSignals(t)
 	server := &fakeControlServer{}
 	inventories := &inventoryLog{}
 	r := newProcessRegistry(server, inventories, nil)
@@ -199,6 +209,7 @@ func TestStopSuspendsEveryOwnedGroupAndResumeContinuesOnlyThem(t *testing.T) {
 }
 
 func TestResumeLeavesAGroupStopNeverStopped(t *testing.T) {
+	requireHeldSignals(t)
 	server := &fakeControlServer{}
 	r := newProcessRegistry(server, &inventoryLog{}, nil)
 	cc := &ControlClient{workSessions: r}
@@ -221,6 +232,7 @@ func TestResumeLeavesAGroupStopNeverStopped(t *testing.T) {
 }
 
 func TestEndContinuesThenTerminatesEveryOwnedSession(t *testing.T) {
+	requireHeldSignals(t)
 	server := &fakeControlServer{}
 	var cancelled []string
 	r := newProcessRegistry(server, &inventoryLog{}, func(id string) { cancelled = append(cancelled, id) })
@@ -262,6 +274,7 @@ func TestEndContinuesThenTerminatesEveryOwnedSession(t *testing.T) {
 }
 
 func TestReconnectToActiveContinuesWhatAStopSuspended(t *testing.T) {
+	requireHeldSignals(t)
 	server := &fakeControlServer{}
 	r := newProcessRegistry(server, &inventoryLog{}, nil)
 	cc := &ControlClient{workSessions: r}
@@ -356,6 +369,7 @@ func TestSessionWhoseLeaderExitedIsOwnedOnlyThroughAPin(t *testing.T) {
 }
 
 func TestResumeDoesNotContinueARetainedGroupThatChangedIdentity(t *testing.T) {
+	requireHeldSignals(t)
 	server := &fakeControlServer{}
 	r := newProcessRegistry(server, &inventoryLog{}, nil)
 	cc := &ControlClient{workSessions: r}
@@ -379,4 +393,34 @@ func TestResumeDoesNotContinueARetainedGroupThatChangedIdentity(t *testing.T) {
 	cc.HandleMessage(resumeFrame(t, 2))
 	time.Sleep(100 * time.Millisecond)
 	requireState(t, procStopped, leader.Process.Pid)
+}
+
+func TestStopAndResumeReportUnsupportedWhereSignalsCannotBeHeld(t *testing.T) {
+	server := &fakeControlServer{}
+	r := newProcessRegistry(server, &inventoryLog{}, nil)
+	r.processes.(*groupProcessControl).heldSignals = false
+	cc := &ControlClient{workSessions: r}
+
+	owned := startSession(t, "sleep", "60")
+	r.trackProcess(wsID, ownedKindCommand, "cmd-1", owned.Process.Pid)
+
+	cc.HandleMessage(pauseFrame(t, 1))
+	cc.HandleMessage(stopFrame(t, 1))
+	stopped := server.lastResult(t)
+	assert.Equal(t, controlResultUnsupported, stopped.Result)
+	assert.Empty(t, stopped.Error)
+	time.Sleep(100 * time.Millisecond)
+	requireState(t, procRunning, owned.Process.Pid)
+
+	require.NoError(t, syscall.Kill(owned.Process.Pid, syscall.SIGSTOP))
+	requireState(t, procStopped, owned.Process.Pid)
+	cc.HandleMessage(resumeFrame(t, 2))
+	assert.Equal(t, controlResultUnsupported, server.lastResult(t).Result)
+	time.Sleep(100 * time.Millisecond)
+	requireState(t, procStopped, owned.Process.Pid)
+
+	cc.HandleMessage(controlFrame(t, "work_session_end", 3, "ended", "human_end"))
+	ended := server.lastResult(t)
+	assert.Equal(t, controlResultConfirmed, ended.Result, "End stays best-effort termination")
+	assert.Empty(t, liveMembers(t, owned.Process.Pid))
 }

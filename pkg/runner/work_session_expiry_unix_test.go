@@ -12,6 +12,7 @@ import (
 )
 
 func TestExpiryAfterMissedResumeContinuesStoppedGroups(t *testing.T) {
+	requireHeldSignals(t)
 	server := &fakeControlServer{}
 	server.set(workSessionActive, 0)
 	inventories := &inventoryLog{}

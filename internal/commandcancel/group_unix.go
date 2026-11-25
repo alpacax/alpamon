@@ -209,15 +209,61 @@ type pinnedSignalOps struct {
 	sid     func(int) (int, error)
 	pgid    func(int) (int, error)
 	signal  func(int, syscall.Signal) error
+	// pidfd is nil on a host that cannot hold a process through signal
+	// delivery.
+	pidfd *pidfdOps
+}
+
+// pidfdOps opens a handle that keeps referring to one process after it
+// exits, so a signal sent through it never reaches a process that reused
+// its PID.
+type pidfdOps struct {
+	open  func(pid int) (int, error)
+	send  func(fd int, sig syscall.Signal) error
+	close func(fd int) error
+}
+
+// ErrSignalNotHeld reports a host that cannot keep a verified process's
+// identity through signal delivery: a signal could reach a process that
+// reused a verified PID or PGID.
+var ErrSignalNotHeld = fmt.Errorf("process identity cannot be held through signal delivery: %w", errors.ErrUnsupported)
+
+func systemPinnedSignalOps() pinnedSignalOps {
+	return pinnedSignalOps{started: memberStartedAt, sid: unix.Getsid, pgid: syscall.Getpgid, signal: syscall.Kill, pidfd: systemPidfd()}
 }
 
 func memberStartedAt(pid int) (int64, error) {
 	return ProcessStartTime(pid)
 }
 
-// SignalPinnedSessionGroups signals the supplied groups after checking each member.
+// PinnedSignalsHeld reports whether SignalPinnedSessionMembers can signal on
+// this host.
+func PinnedSignalsHeld() bool {
+	return systemPidfd() != nil
+}
+
+// SignalPinnedSessionMembers signals each supplied member through a handle
+// that holds the process, after checking the member through that handle, and
+// returns the groups of the members it signalled. It never signals a PGID.
+// It returns ErrSignalNotHeld, and signals nothing, on a host that cannot
+// hold a process.
+func SignalPinnedSessionMembers(sid int, members map[int]SessionMember, sig syscall.Signal) ([]int, error) {
+	return signalHeldSessionMembers(sid, members, sig, systemPinnedSignalOps())
+}
+
+func signalHeldSessionMembers(sid int, members map[int]SessionMember, sig syscall.Signal, ops pinnedSignalOps) ([]int, error) {
+	if ops.pidfd == nil {
+		return nil, ErrSignalNotHeld
+	}
+	return signalPinnedSessionGroups(sid, members, sig, ops)
+}
+
+// SignalPinnedSessionGroups is SignalPinnedSessionMembers where the host can
+// hold a process. Elsewhere it is best effort: it signals the group of each
+// checked member by PGID, which the member does not hold once it exits
+// between the check and the signal.
 func SignalPinnedSessionGroups(sid int, members map[int]SessionMember, sig syscall.Signal) ([]int, error) {
-	return signalPinnedSessionGroups(sid, members, sig, pinnedSignalOps{started: memberStartedAt, sid: unix.Getsid, pgid: syscall.Getpgid, signal: syscall.Kill})
+	return signalPinnedSessionGroups(sid, members, sig, systemPinnedSignalOps())
 }
 
 func signalPinnedSessionGroups(sid int, members map[int]SessionMember, sig syscall.Signal, ops pinnedSignalOps) ([]int, error) {
@@ -228,35 +274,63 @@ func signalPinnedSessionGroups(sid int, members map[int]SessionMember, sig sysca
 	var errs []error
 	for _, pid := range slices.Sorted(maps.Keys(members)) {
 		member := members[pid]
-		if slices.Contains(groups, member.PGID) {
+		if ops.pidfd == nil && slices.Contains(groups, member.PGID) {
 			continue
 		}
 		if pid <= 1 || member.StartedAt == 0 || member.PGID <= 1 {
 			errs = append(errs, ErrSessionUnverified)
 			continue
 		}
-		valid := true
-		for range 2 {
-			if err := checkPinnedMember(sid, pid, member, ops); err != nil {
-				if !processGone(err) {
-					errs = append(errs, err)
-				}
-				valid = false
-				break
-			}
+		var err error
+		if ops.pidfd != nil {
+			err = signalHeldMember(sid, pid, member, sig, ops)
+		} else {
+			err = signalMemberGroup(sid, pid, member, sig, ops)
 		}
-		if !valid {
-			continue
-		}
-		if err := ops.signal(-member.PGID, sig); err != nil {
+		if err != nil {
 			if !processGone(err) {
 				errs = append(errs, err)
 			}
-		} else {
+			if errors.Is(err, ErrSignalNotHeld) {
+				break
+			}
+			continue
+		}
+		if !slices.Contains(groups, member.PGID) {
 			groups = append(groups, member.PGID)
 		}
 	}
 	return groups, errors.Join(errs...)
+}
+
+// signalHeldMember checks the member once more after its pidfd is open: a
+// PID reused before the open fails that check, and one reused after the
+// check is not the process the pidfd holds.
+func signalHeldMember(sid, pid int, member SessionMember, sig syscall.Signal, ops pinnedSignalOps) error {
+	if err := checkPinnedMember(sid, pid, member, ops); err != nil {
+		return err
+	}
+	fd, err := ops.pidfd.open(pid)
+	if errors.Is(err, syscall.ENOSYS) {
+		return ErrSignalNotHeld
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = ops.pidfd.close(fd) }()
+	if err := checkPinnedMember(sid, pid, member, ops); err != nil {
+		return err
+	}
+	return ops.pidfd.send(fd, sig)
+}
+
+func signalMemberGroup(sid, pid int, member SessionMember, sig syscall.Signal, ops pinnedSignalOps) error {
+	for range 2 {
+		if err := checkPinnedMember(sid, pid, member, ops); err != nil {
+			return err
+		}
+	}
+	return ops.signal(-member.PGID, sig)
 }
 
 func checkPinnedMember(sid, pid int, member SessionMember, ops pinnedSignalOps) error {
