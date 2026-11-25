@@ -5,8 +5,11 @@ import (
 	"errors"
 )
 
-// schemaVersion is the report schema this agent sends.
-const schemaVersion = 1
+// The agent sends version 2 and falls back to version 1 on unsupported_schema_version.
+const (
+	legacySchemaVersion = 1
+	schemaVersion       = 2
+)
 
 // Category names: the eight keys of the report's categories object.
 const (
@@ -172,6 +175,7 @@ type keyFile struct {
 	Mode          *string `json:"mode"`
 	UnparsedLines int     `json:"unparsed_lines"`
 	Keys          []key   `json:"keys"`
+	StrictModesOK *bool   `json:"strict_modes_ok"`
 }
 
 // key is one public key, identified by its fingerprint.

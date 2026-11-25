@@ -42,8 +42,8 @@ func TestPermanentDeliveryFailuresDoNotRetry(t *testing.T) {
 	s := newService(session, nil, nil)
 	sleeps := 0
 	s.sleep = func(context.Context, time.Duration) bool { sleeps++; return true }
-	_, ok := s.send(context.Background(), checkURL, nil, time.Second, nil)
-	assert.False(t, ok)
+	result := s.send(context.Background(), checkURL, nil, time.Second, nil)
+	assert.False(t, result.ok)
 	assert.Zero(t, sleeps)
 }
 func TestRetryDelaysHaveBoundedJitter(t *testing.T) {

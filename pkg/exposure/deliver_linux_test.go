@@ -105,7 +105,7 @@ func TestDeliverReportsOnlyWhenRequired(t *testing.T) {
 	assert.Empty(t, p.callsTo(reportURL))
 	var check map[string]any
 	require.NoError(t, json.Unmarshal(checks[0].body, &check))
-	assert.Equal(t, map[string]any{"schema_version": float64(1), "observed_at": "2026-11-07T19:30:00Z", "hash": check["hash"]}, check)
+	assert.Equal(t, map[string]any{"schema_version": float64(2), "observed_at": "2026-11-07T19:30:00Z", "hash": check["hash"]}, check)
 	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, check["hash"])
 	assert.NotContains(t, logs.String(), "deploy")
 }
@@ -210,6 +210,176 @@ func TestDeliverRetriesResendTheSameBody(t *testing.T) {
 	}
 	assert.Equal(t, reports[0].body, reports[1].body)
 	assert.NotContains(t, logs.String(), "LEAKCANARY")
+}
+
+func TestDeliverFallsBackToVersionOneFromEitherEndpoint(t *testing.T) {
+	const refusal = `{"errors":[{"field":"/schema_version","code":"unsupported_schema_version"}]}`
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		paths    []string
+	}{
+		{"check refuses v2", checkURL, []string{checkURL, checkURL, reportURL}},
+		{"report refuses v2", reportURL, []string{checkURL, reportURL, checkURL, reportURL}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureLogs(t)
+			p := acceptingPoster()
+			p.answers[tc.endpoint] = append([]fakeResponse{{status: http.StatusBadRequest, body: refusal}}, p.answers[tc.endpoint]...)
+			var snapshot *exposureReport
+			reads := 0
+			s := testService(p, func(context.Context) *exposureReport {
+				reads++
+				snapshot = sampleReport()
+				snapshot.Accounts[0].KeyFiles = []keyFile{{
+					envelope:      envelope{Path: "/home/deploy/.ssh/authorized_keys", Status: statusRead, Complete: true},
+					StrictModesOK: ptr(true),
+				}}
+				return snapshot
+			})
+			s.readAndDeliver(context.Background())
+			require.Equal(t, 1, reads)
+			require.Len(t, p.calls, len(tc.paths))
+			for i, path := range tc.paths {
+				assert.Equal(t, path, p.calls[i].url)
+			}
+			v2Body, err := seal(snapshot)
+			require.NoError(t, err)
+			v2Check := decodeTree(t, p.calls[0].body)
+			assert.Equal(t, json.Number("2"), v2Check["schema_version"])
+			assert.Equal(t, snapshot.Hash, v2Check["hash"])
+			if tc.endpoint == reportURL {
+				assert.Equal(t, v2Body, p.calls[1].body)
+			}
+			v1Check := decodeTree(t, p.calls[len(p.calls)-2].body)
+			v1Body := p.calls[len(p.calls)-1].body
+			assertVersionedReports(t, v1Body, v2Body)
+			assert.Equal(t, map[string]any{
+				"schema_version": json.Number("1"),
+				"observed_at":    v2Check["observed_at"],
+				"hash":           goldenHash(t, v1Body),
+			}, v1Check)
+
+			s.readAndDeliver(context.Background())
+			require.Equal(t, 2, reads)
+			require.Len(t, p.calls, len(tc.paths)+2)
+			nextCheck, nextReport := p.calls[len(tc.paths)], p.calls[len(tc.paths)+1]
+			assert.Equal(t, checkURL, nextCheck.url)
+			assert.Equal(t, reportURL, nextReport.url)
+			assert.Equal(t, json.Number("1"), decodeTree(t, nextCheck.body)["schema_version"])
+			assert.Equal(t, json.Number("1"), decodeTree(t, nextReport.body)["schema_version"])
+			assert.JSONEq(t, `{"level":"info","message":"Exposure schema version 2 was refused; using version 1 for this server until restart."}`, logs.String())
+		})
+	}
+}
+
+func TestVersionOneDeliveryUsesItsOwnByteLimit(t *testing.T) {
+	const accountCount, keysPerAccount = 16, 400
+	r := sampleReport()
+	r.Accounts = nil
+	r.ObservedAt = goldenObservedAt
+	var comment, padding string
+	keys := make([]key, keysPerAccount)
+	for i := range keys {
+		keys[i] = key{
+			Fingerprint: fmt.Sprintf("SHA256:%043d", i), Type: "ssh-ed25519", Bits: 256,
+			Authorizations: []authorization{{Count: 1, Role: "user_key", Comment: &comment}},
+		}
+	}
+	for i := range accountCount {
+		r.Accounts = append(r.Accounts, capAccount(fmt.Sprintf("user%02d", i), keys))
+	}
+	r.SSHD.Effective = map[string]*string{"allowusers": &padding}
+	legacy := *r
+	legacy.SchemaVersion = legacySchemaVersion
+	base, err := seal(&legacy)
+	require.NoError(t, err)
+	require.Less(t, len(base), maxReportBytes)
+	available := maxReportBytes - len(base)
+	comment = strings.Repeat("x", available/(accountCount*keysPerAccount))
+	padding = strings.Repeat("x", available%(accountCount*keysPerAccount))
+	v1, err := seal(&legacy)
+	require.NoError(t, err)
+	require.Len(t, v1, maxReportBytes)
+	v2, err := seal(r)
+	require.NoError(t, err)
+	require.Greater(t, len(v2), maxReportBytes)
+
+	p := acceptingPoster()
+	p.answers[reportURL] = append([]fakeResponse{{
+		status: http.StatusBadRequest,
+		body:   `{"errors":[{"field":"/schema_version","code":"unsupported_schema_version"}]}`,
+	}}, p.answers[reportURL]...)
+	reads := 0
+	s := testService(p, func(context.Context) *exposureReport { reads++; return r })
+	s.readAndDeliver(context.Background())
+
+	assert.Equal(t, 1, reads)
+	reports := p.callsTo(reportURL)
+	require.Len(t, reports, 2)
+	assert.LessOrEqual(t, len(reports[0].body), maxReportBytes)
+	assert.Equal(t, maxReportBytes, len(reports[1].body))
+	var delivered exposureReport
+	require.NoError(t, json.Unmarshal(reports[1].body, &delivered))
+	assert.Equal(t, legacySchemaVersion, delivered.SchemaVersion)
+	assert.Equal(t, legacy.Hash, delivered.Hash)
+	require.Len(t, delivered.Accounts, accountCount)
+	for _, account := range delivered.Accounts {
+		require.Len(t, account.KeyFiles, 1)
+		assert.Len(t, account.KeyFiles[0].Keys, keysPerAccount, account.Username)
+	}
+}
+
+func TestDeliverFallbackIsRememberedByServerURL(t *testing.T) {
+	logs := captureLogs(t)
+	const legacyURL = "https://example.test/legacy"
+	const currentURL = "https://example.test/current"
+	t.Cleanup(func() {
+		schemaV1ByServer.Delete(legacyURL)
+		schemaV1ByServer.Delete(currentURL)
+	})
+	var versions []json.Number
+	client := &http.Client{Transport: exposureRoundTrip(func(req *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(req.Body)
+		require.NoError(t, err)
+		version := decodeTree(t, body)["schema_version"].(json.Number)
+		versions = append(versions, version)
+		status, response := http.StatusOK, `{"required":false}`
+		if strings.HasPrefix(req.URL.Path, "/legacy/") && version == "2" {
+			status, response = http.StatusBadRequest, `{"errors":[{"code":"unsupported_schema_version"}]}`
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(response))}, nil
+	})}
+	for _, url := range []string{legacyURL, legacyURL, currentURL} {
+		s := newService(&scheduler.Session{BaseURL: url, Client: client}, func(context.Context) *exposureReport {
+			return sampleReport()
+		}, nil)
+		s.readAndDeliver(context.Background())
+	}
+	assert.Equal(t, []json.Number{"2", "1", "1", "2"}, versions)
+	assert.Equal(t, 1, strings.Count(logs.String(), `"level":"info"`))
+}
+
+func TestDeliverUnknownFieldDoesNotFallBack(t *testing.T) {
+	for _, endpoint := range []string{checkURL, reportURL} {
+		t.Run(endpoint, func(t *testing.T) {
+			logs := captureLogs(t)
+			p := acceptingPoster()
+			p.answers[endpoint] = []fakeResponse{{status: http.StatusBadRequest, body: `{"errors":[{"field":"/unsupported_schema_version","code":"unknown_field"}]}`}}
+			s := testService(p, func(context.Context) *exposureReport { return sampleReport() })
+			s.readAndDeliver(context.Background())
+			checks := p.callsTo(checkURL)
+			require.Len(t, checks, 1)
+			assert.Equal(t, json.Number("2"), decodeTree(t, checks[0].body)["schema_version"])
+			if endpoint == checkURL {
+				assert.Empty(t, p.callsTo(reportURL))
+				assert.JSONEq(t, `{"level":"debug","status_code":400,"message":"Exposure check was not accepted."}`, logs.String())
+			} else {
+				assert.Len(t, p.callsTo(reportURL), 1)
+				assert.JSONEq(t, `{"level":"warn","status_code":400,"message":"Exposure report was not accepted."}`, logs.String())
+			}
+		})
+	}
 }
 
 func TestDeliverRejectedReportLogsNoBody(t *testing.T) {
@@ -352,8 +522,8 @@ func TestExposureResponseLimitAndNoRedirect(t *testing.T) {
 					assert.Fail(t, "rejected response must not retry")
 					return false
 				}
-				_, ok := svc.send(context.Background(), path, []byte(`{}`), time.Second, nil)
-				assert.False(t, ok)
+				result := svc.send(context.Background(), path, []byte(`{}`), time.Second, nil)
+				assert.False(t, result.ok)
 			}
 			assert.Equal(t, int32(0), received.Load())
 			assert.Equal(t, fmt.Sprintf("%p", originalRedirect), fmt.Sprintf("%p", session.Client.CheckRedirect))
@@ -417,8 +587,8 @@ func TestRejectedResponsesAreNotRetried(t *testing.T) {
 			logs := captureLogs(t)
 			p := &fakePoster{answers: map[string][]fakeResponse{url: {response}}}
 			s := testService(p, nil)
-			_, ok := s.send(context.Background(), url, []byte(`{}`), time.Second, nil)
-			assert.False(t, ok)
+			result := s.send(context.Background(), url, []byte(`{}`), time.Second, nil)
+			assert.False(t, result.ok)
 			assert.Len(t, p.callsTo(url), 1)
 			assert.Equal(t, 1, strings.Count(logs.String(), "Exposure response rejected; skipping until the next read."))
 			assert.NotContains(t, logs.String(), "LEAKCANARY")
