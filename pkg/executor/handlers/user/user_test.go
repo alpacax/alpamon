@@ -576,7 +576,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 				mock.SetResult(fmt.Sprintf("/usr/sbin/adduser --home /home/testuser --shell /bin/bash --uid %d --gid %d --gecos Test User --disabled-password testuser", 1001, 1001), 0, "User created", nil)
 			},
 			groupService: &MockGroupService{},
-			wantOutput:   "User 'testuser' added successfully (uid: 1001)",
+			wantOutput:   "User 'testuser' added successfully",
 		},
 		{
 			name: "add user to groups failure",
@@ -584,7 +584,7 @@ func TestUserHandler_AddUserWithGroups(t *testing.T) {
 				mock.SetResult(fmt.Sprintf("/usr/sbin/adduser --home /home/testuser --shell /bin/bash --uid %d --gid %d --gecos Test User --disabled-password testuser", 1001, 1001), 0, "User created", nil)
 			},
 			groupService: &MockGroupService{AddUserToGroupsError: errors.New("failed to add to groups")},
-			wantOutput:   "User 'testuser' created (uid: 1001) but failed to add to groups: failed to add to groups",
+			wantOutput:   "User 'testuser' created but failed to add to groups: failed to add to groups",
 		},
 	}
 

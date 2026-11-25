@@ -343,7 +343,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	if !userExists && len(data.Groups) > 0 && h.groupService != nil {
 		if err := h.groupService.AddUserToGroups(ctx, data.Username, data.Groups); err != nil {
 			log.Warn().Err(err).Msg("Failed to add user to additional groups")
-			return 0, fmt.Sprintf("User '%s' created (uid: %d) but failed to add to groups: %v", data.Username, data.UID, err), nil
+			return 0, fmt.Sprintf("User '%s' created but failed to add to groups: %v", data.Username, err), nil
 		}
 	}
 
@@ -355,7 +355,7 @@ func (h *UserHandler) handleAddUser(ctx context.Context, args *common.CommandArg
 	if userExists {
 		return 0, fmt.Sprintf("User '%s' already exists", data.Username), nil
 	}
-	return 0, fmt.Sprintf("User '%s' added successfully (uid: %d)", data.Username, data.UID), nil
+	return 0, fmt.Sprintf("User '%s' added successfully", data.Username), nil
 }
 
 // runUserCreate runs the platform create command (adduser/useradd) and applies
