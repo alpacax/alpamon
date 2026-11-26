@@ -52,13 +52,15 @@ type groupProcessControl struct {
 }
 
 func newProcessControl(cancel func(commandID string)) WorkSessionProcessController {
+	table := systemProcessTable()
+	table.outsideChildren = outsideSessionChildren
 	return &groupProcessControl{
 		stopped:   map[string]map[groupKey]*stoppedGroup{},
 		cancel:    cancel,
 		grace:     commandcancel.GracePeriod,
 		readState: processState,
 		readArgs:  processArgs,
-		table:     systemProcessTable(),
+		table:     table,
 
 		heldSignals: commandcancel.PinnedSignalsHeld(),
 	}
@@ -73,10 +75,12 @@ func processArgs(pid int) ([]string, error) {
 }
 
 type sessionProcessTable struct {
-	members func(int) ([]int, error)
-	started func(int) (int64, error)
-	sid     func(int) (int, error)
-	pgid    func(int) (int, error)
+	members          func(int) ([]int, error)
+	started          func(int) (int64, error)
+	sid              func(int) (int, error)
+	pgid             func(int) (int, error)
+	outsideChildren  func(int, map[int]int64) (map[int]int64, error)
+	ignoreDepartures bool
 }
 
 func systemProcessTable() sessionProcessTable {
@@ -117,6 +121,7 @@ type stoppedGroup struct {
 // a pinned member still in the session proves the SID was never reused.
 type sessionPin struct {
 	members    map[int]int64
+	departed   map[int]int64
 	generation uint64
 	stop       chan struct{}
 	done       chan struct{}
@@ -156,6 +161,7 @@ func pinSessionWithTable(session OwnedSession, table sessionProcessTable, readSt
 
 func observeSessionWithTable(session OwnedSession, pin *sessionPin, table sessionProcessTable, readState func(int) (procState, error)) {
 	defer close(pin.done)
+	table.ignoreDepartures = true
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -332,8 +338,10 @@ func refreshSessionPinOnce(session OwnedSession, expected *sessionPin, table ses
 	sessionPins.mu.Lock()
 	before := sessionPins.m[key]
 	var generation uint64
+	var known, departed map[int]int64
 	if before != nil {
 		generation = before.generation
+		known, departed = before.members, before.departed
 	}
 	sessionPins.mu.Unlock()
 
@@ -364,6 +372,10 @@ func refreshSessionPinOnce(session OwnedSession, expected *sessionPin, table ses
 		}
 		starts[pid] = started
 	}
+	outside, err := departedMembers(session, table, starts, known, departed)
+	if err != nil {
+		return nil, err
+	}
 	unverified := false
 	if len(starts) == 0 {
 		remaining, err := table.members(session.SID)
@@ -382,17 +394,34 @@ func refreshSessionPinOnce(session OwnedSession, expected *sessionPin, table ses
 	if pin != before || pin != nil && pin.generation != generation {
 		return nil, errSessionObservationChanged
 	}
+	if pin == nil && len(outside) > 0 {
+		pin = &sessionPin{members: map[int]int64{session.SID: session.StartedAt}}
+		sessionPins.m[key] = pin
+		ok = true
+	}
+	if pin != nil && !maps.Equal(pin.departed, outside) {
+		pin.departed = outside
+		pin.generation++
+	}
+	var coverageErr error
+	if len(outside) > 0 && !table.ignoreDepartures {
+		coverageErr = commandcancel.ErrSessionUnverified
+	}
 	if unverified {
 		return nil, commandcancel.ErrSessionUnverified
 	}
 	if len(starts) == 0 {
-		removeSessionPin(key)
-		return starts, nil
+		if len(outside) == 0 {
+			removeSessionPin(key)
+		}
+		return starts, coverageErr
 	}
 	leaderStart := starts[session.SID]
 	if leaderStart != 0 && leaderStart != session.StartedAt {
-		removeSessionPin(key)
-		return nil, nil
+		if len(outside) == 0 {
+			removeSessionPin(key)
+		}
+		return nil, coverageErr
 	}
 	verified := false
 	for pid, started := range starts {
@@ -429,7 +458,103 @@ func refreshSessionPinOnce(session OwnedSession, expected *sessionPin, table ses
 		pin.members = starts
 		pin.generation++
 	}
-	return starts, nil
+	return starts, coverageErr
+}
+
+func departedMembers(session OwnedSession, table sessionProcessTable, starts, known, departed map[int]int64) (map[int]int64, error) {
+	outside := make(map[int]int64)
+	if table.sid == nil {
+		return outside, nil
+	}
+	for _, members := range []map[int]int64{known, departed} {
+		for pid, started := range members {
+			if starts[pid] == started {
+				continue
+			}
+			current, err := table.started(pid)
+			if processGone(err) || err == nil && current != started {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			currentSID, err := table.sid(pid)
+			if processGone(err) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if currentSID == session.SID {
+				continue
+			}
+			current, err = table.started(pid)
+			if processGone(err) || err == nil && current != started {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			outside[pid] = started
+		}
+	}
+	if table.outsideChildren == nil {
+		return outside, nil
+	}
+	for pid, started := range starts {
+		if known[pid] == started || pid == session.SID && started == session.StartedAt {
+			children, err := table.outsideChildren(session.SID, starts)
+			if err != nil {
+				return nil, err
+			}
+			maps.Copy(outside, children)
+			break
+		}
+	}
+	return outside, nil
+}
+
+// outsideSessionChildren observes children that still have a verifiable parent.
+func outsideSessionChildren(sid int, parents map[int]int64) (map[int]int64, error) {
+	pids, err := process.Pids()
+	if err != nil {
+		return nil, err
+	}
+	outside := make(map[int]int64)
+	for _, pid := range pids {
+		childSID, err := unix.Getsid(int(pid))
+		if err != nil || childSID == sid || childSID != int(pid) {
+			continue
+		}
+		started, err := processStartTime(int(pid))
+		if err != nil || started == 0 {
+			continue
+		}
+		child := &process.Process{Pid: pid}
+		ppid, err := child.Ppid()
+		if err != nil || parents[int(ppid)] == 0 {
+			continue
+		}
+		parentStart, err := processStartTime(int(ppid))
+		if err != nil || parentStart != parents[int(ppid)] {
+			continue
+		}
+		parentSID, err := unix.Getsid(int(ppid))
+		if err != nil || parentSID != sid {
+			continue
+		}
+		currentSID, err := unix.Getsid(int(pid))
+		if err != nil || currentSID != childSID {
+			continue
+		}
+		if state, err := processState(int(pid)); processGone(err) || err == nil && state == procZombie {
+			continue
+		}
+		if current, err := processStartTime(int(pid)); err == nil && current == started {
+			outside[int(pid)] = started
+		}
+	}
+	return outside, nil
 }
 
 func ownedSessionAlive(session OwnedSession) bool {
@@ -584,7 +709,10 @@ func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffec
 
 	var continued []ownedMember
 	var errs []error
-	members, lookupErr := lookupOwnedMembers(owned.Sessions, c.readState, c.table)
+	table := c.table
+	table.outsideChildren = nil
+	table.ignoreDepartures = true
+	members, lookupErr := lookupOwnedMembers(owned.Sessions, c.readState, table)
 	if lookupErr != nil {
 		return ProcessEffect{}, lookupErr
 	}
@@ -719,7 +847,10 @@ func terminationSessionMembers(session OwnedSession, baseline map[int]commandcan
 // followed by one basic entry when the caller must mark the report truncated.
 func (c *groupProcessControl) Inventory(owned OwnedWork) ([]WorkSessionProcess, error) {
 	entries := []WorkSessionProcess{}
-	members, lookupErr := lookupOwnedMembers(owned.Sessions, c.readState, c.table)
+	table := c.table
+	table.outsideChildren = nil
+	table.ignoreDepartures = true
+	members, lookupErr := lookupOwnedMembers(owned.Sessions, c.readState, table)
 	for _, member := range members {
 		if len(entries) == workSessionInventoryLimit {
 			entries = append(entries, WorkSessionProcess{Kind: member.session.Kind, CommandID: member.session.CommandID, PID: member.pid})
