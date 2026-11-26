@@ -838,7 +838,7 @@ func TestTwentyHungHomesBoundWorkersAcrossFiveReads(t *testing.T) {
 		for i := range 24 {
 			accounts = append(accounts, passwdEntry{name: fmt.Sprint(i)})
 		}
-		baseline := runtime.NumGoroutine()
+		baseline := bubbleGoroutines(t)
 		for read := range 5 {
 			var wg sync.WaitGroup
 			for _, cat := range []string{catKeys, catCertificates, catTrust} {
@@ -860,7 +860,7 @@ func TestTwentyHungHomesBoundWorkersAcrossFiveReads(t *testing.T) {
 			}
 			wg.Wait()
 			synctest.Wait()
-			assert.LessOrEqual(t, runtime.NumGoroutine()-baseline, 28)
+			assert.LessOrEqual(t, bubbleGoroutines(t)-baseline, 28)
 			c.accountMu.Lock()
 			assert.Equal(t, maxAccountWorkers, c.accountCount)
 			assert.LessOrEqual(t, len(c.accountBusy), 28)
