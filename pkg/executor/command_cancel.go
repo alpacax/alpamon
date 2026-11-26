@@ -59,6 +59,8 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 	if cw != nil {
 		cw.start(chunkFlushInterval)
 	}
+	// Held until its reap, the leader pins its group for Work Session End.
+	commandcancel.HoldLeader(cmd.Process.Pid)
 	invokePIDHook(pidHook, cmd.Process.Pid)
 	copied := make(chan error, 1)
 	go func() { _, err := io.Copy(sink, reader); copied <- err }()
@@ -67,7 +69,7 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 		_, _ = cleanup.cancel(cmd)
 		_ = reader.Close()
 		<-copied
-		_ = cmd.Wait()
+		_ = commandcancel.ReapLeader(cmd.Process.Pid, cmd.Wait)
 		return finish(watchErr)
 	}
 
@@ -147,7 +149,7 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 			if exited != nil {
 				<-exited
 			}
-			_ = cmd.Wait()
+			_ = commandcancel.ReapLeader(cmd.Process.Pid, cmd.Wait)
 		}()
 		if cancelErr != nil {
 			return finish(cancelErr)
@@ -156,7 +158,7 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 	}
 	// Explicit cancellation has completed while the leader was pinned. The
 	// normal path retains the existing post-Wait cleanup order.
-	waitErr := cmd.Wait()
+	waitErr := commandcancel.ReapLeader(cmd.Process.Pid, cmd.Wait)
 	if !cancelled {
 		outcome, cleanupErr := cleanup.cancel(cmd)
 		reason := cleanupReasonExit

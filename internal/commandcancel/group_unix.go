@@ -212,6 +212,9 @@ type pinnedSignalOps struct {
 	// pidfd is nil on a host that cannot hold a process through signal
 	// delivery.
 	pidfd *pidfdOps
+	// leader runs a signal only while its pid is a child alpamon has not
+	// reaped, and reports whether it ran.
+	leader func(int, func() error) (bool, error)
 }
 
 // pidfdOps opens a handle that keeps referring to one process after it
@@ -229,7 +232,7 @@ type pidfdOps struct {
 var ErrSignalNotHeld = fmt.Errorf("process identity cannot be held through signal delivery: %w", errors.ErrUnsupported)
 
 func systemPinnedSignalOps() pinnedSignalOps {
-	return pinnedSignalOps{started: memberStartedAt, sid: unix.Getsid, pgid: syscall.Getpgid, signal: syscall.Kill, pidfd: systemPidfd()}
+	return pinnedSignalOps{started: memberStartedAt, sid: unix.Getsid, pgid: syscall.Getpgid, signal: syscall.Kill, pidfd: systemPidfd(), leader: withHeldLeader}
 }
 
 func memberStartedAt(pid int) (int64, error) {
@@ -259,9 +262,10 @@ func signalHeldSessionMembers(sid int, members map[int]SessionMember, sig syscal
 }
 
 // SignalPinnedSessionGroups is SignalPinnedSessionMembers where the host can
-// hold a process. Elsewhere it is best effort: it signals the group of each
-// checked member by PGID, which the member does not hold once it exits
-// between the check and the signal.
+// hold a process. Elsewhere it signals by PGID only the group of the session
+// leader, and only while alpamon holds that leader unreaped (HoldLeader), so
+// the PGID cannot be reused before delivery. It signals no other group: their
+// members are left for the caller to report.
 func SignalPinnedSessionGroups(sid int, members map[int]SessionMember, sig syscall.Signal) ([]int, error) {
 	return signalPinnedSessionGroups(sid, members, sig, systemPinnedSignalOps())
 }
@@ -288,7 +292,7 @@ func signalPinnedSessionGroups(sid int, members map[int]SessionMember, sig sysca
 			err = signalMemberGroup(sid, pid, member, sig, ops)
 		}
 		if err != nil {
-			if !processGone(err) {
+			if !processGone(err) && !errors.Is(err, errLeaderNotHeld) {
 				errs = append(errs, err)
 			}
 			if errors.Is(err, ErrSignalNotHeld) {
@@ -324,13 +328,24 @@ func signalHeldMember(sid, pid int, member SessionMember, sig syscall.Signal, op
 	return ops.pidfd.send(fd, sig)
 }
 
+// errLeaderNotHeld marks a member whose group no unreaped leader pins; it is
+// not signalled and not an error.
+var errLeaderNotHeld = errors.New("process group leader is not held")
+
 func signalMemberGroup(sid, pid int, member SessionMember, sig syscall.Signal, ops pinnedSignalOps) error {
 	for range 2 {
 		if err := checkPinnedMember(sid, pid, member, ops); err != nil {
 			return err
 		}
 	}
-	return ops.signal(-member.PGID, sig)
+	if member.PGID != sid || ops.leader == nil {
+		return errLeaderNotHeld
+	}
+	held, err := ops.leader(sid, func() error { return ops.signal(-sid, sig) })
+	if !held {
+		return errLeaderNotHeld
+	}
+	return err
 }
 
 func checkPinnedMember(sid, pid int, member SessionMember, ops pinnedSignalOps) error {

@@ -71,11 +71,12 @@ func TestPinnedGroupsUseEachGroupsMember(t *testing.T) {
 			}
 			return 100, nil
 		},
-		sid:    func(int) (int, error) { return 42, nil },
+		sid:    func(int) (int, error) { return 43, nil },
 		pgid:   func(pid int) (int, error) { return pid, nil },
 		signal: func(pgid int, _ syscall.Signal) error { signalled = append(signalled, pgid); return nil },
+		leader: heldLeaderFake(43),
 	}
-	groups, err := signalPinnedSessionGroups(42, map[int]SessionMember{43: {StartedAt: 100, PGID: 43}, 44: {StartedAt: 100, PGID: 44}}, syscall.SIGSTOP, ops)
+	groups, err := signalPinnedSessionGroups(43, map[int]SessionMember{43: {StartedAt: 100, PGID: 43}, 44: {StartedAt: 100, PGID: 44}}, syscall.SIGSTOP, ops)
 	assert.ErrorIs(t, err, ErrSessionUnverified)
 	assert.Equal(t, []int{43}, groups)
 	assert.Equal(t, []int{-43}, signalled)
@@ -106,11 +107,12 @@ func TestPinnedGroupsSignalVerifiedMembers(t *testing.T) {
 	var signals []int
 	ops := pinnedSignalOps{
 		started: func(int) (int64, error) { return 100, nil },
-		sid:     func(int) (int, error) { return 42, nil },
+		sid:     func(int) (int, error) { return 43, nil },
 		pgid:    func(int) (int, error) { return 43, nil },
 		signal:  func(pgid int, _ syscall.Signal) error { signals = append(signals, pgid); return nil },
+		leader:  heldLeaderFake(43),
 	}
-	groups, err := signalPinnedSessionGroups(42, map[int]SessionMember{43: {StartedAt: 100, PGID: 43}}, syscall.SIGCONT, ops)
+	groups, err := signalPinnedSessionGroups(43, map[int]SessionMember{43: {StartedAt: 100, PGID: 43}}, syscall.SIGCONT, ops)
 	require.NoError(t, err)
 	assert.Equal(t, []int{43}, groups)
 	assert.Equal(t, []int{-43}, signals)
@@ -138,10 +140,11 @@ type fakeKernel struct {
 	afterRead func(reads int)
 	reads     int
 	openErr   error
+	held      map[int]bool
 }
 
 func newFakeKernel(members map[int]SessionMember) *fakeKernel {
-	k := &fakeKernel{starts: map[int]int64{}, pgids: map[int]int{}, fds: map[int]int64{}, fdPIDs: map[int]int{}}
+	k := &fakeKernel{starts: map[int]int64{}, pgids: map[int]int{}, fds: map[int]int64{}, fdPIDs: map[int]int{}, held: map[int]bool{}}
 	for pid, member := range members {
 		k.starts[pid], k.pgids[pid] = member.StartedAt, member.PGID
 	}
@@ -168,6 +171,12 @@ func (k *fakeKernel) ops() pinnedSignalOps {
 		sid:    func(int) (int, error) { return 42, nil },
 		pgid:   func(pid int) (int, error) { return k.pgids[pid], nil },
 		signal: func(pgid int, _ syscall.Signal) error { k.groups = append(k.groups, pgid); return nil },
+		leader: func(pid int, signal func() error) (bool, error) {
+			if !k.held[pid] {
+				return false, nil
+			}
+			return true, signal()
+		},
 		pidfd: &pidfdOps{
 			open: func(pid int) (int, error) {
 				if k.openErr != nil {
@@ -261,13 +270,63 @@ func TestHeldSignalsRequireAHostThatHoldsProcesses(t *testing.T) {
 	})
 }
 
-func TestBestEffortSignalsUseGroupsWithoutHeldProcesses(t *testing.T) {
-	members := map[int]SessionMember{43: {StartedAt: 100, PGID: 43}, 44: {StartedAt: 100, PGID: 43}}
+func TestSignalsWithoutPidfdReachOnlyAHeldLeadersGroup(t *testing.T) {
+	members := map[int]SessionMember{42: {StartedAt: 100, PGID: 42}, 43: {StartedAt: 100, PGID: 42}, 44: {StartedAt: 100, PGID: 44}}
 	kernel := newFakeKernel(members)
+	kernel.held[42] = true
 	ops := kernel.ops()
 	ops.pidfd = nil
 	groups, err := signalPinnedSessionGroups(42, members, syscall.SIGTERM, ops)
+	require.NoError(t, err, "a group without a held leader is left to be reported")
+	assert.Equal(t, []int{42}, groups)
+	assert.Equal(t, []int{-42}, kernel.groups, "only the group the unreaped leader pins is signalled")
+}
+
+func TestSignalsWithoutPidfdSendNothingOnceTheLeaderIsReaped(t *testing.T) {
+	members := map[int]SessionMember{43: {StartedAt: 100, PGID: 42}}
+	kernel := newFakeKernel(members)
+	ops := kernel.ops()
+	ops.pidfd = nil
+	groups, err := signalPinnedSessionGroups(42, members, syscall.SIGKILL, ops)
 	require.NoError(t, err)
-	assert.Equal(t, []int{43}, groups)
-	assert.Equal(t, []int{-43}, kernel.groups)
+	assert.Empty(t, groups)
+	assert.Empty(t, kernel.groups)
+}
+
+func TestReapLeaderWaitsForASignalInFlight(t *testing.T) {
+	const pid = 990001
+	HoldLeader(pid)
+	reaped := make(chan struct{})
+	sent, err := withHeldLeader(pid, func() error {
+		go func() { _ = ReapLeader(pid, func() error { close(reaped); return nil }) }()
+		select {
+		case <-reaped:
+			t.Error("the leader was reaped while a signal relied on it")
+		case <-time.After(50 * time.Millisecond):
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, sent)
+	<-reaped
+	sent, err = withHeldLeader(pid, func() error { t.Error("signalled a reaped leader"); return nil })
+	require.NoError(t, err)
+	assert.False(t, sent)
+}
+
+func TestUnheldLeaderIsNeverSignalled(t *testing.T) {
+	sent, err := withHeldLeader(990002, func() error { t.Error("signalled a leader alpamon does not hold"); return nil })
+	require.NoError(t, err)
+	assert.False(t, sent)
+	require.NoError(t, ReapLeader(990002, func() error { return nil }))
+}
+
+// heldLeaderFake holds only pid unreaped.
+func heldLeaderFake(pid int) func(int, func() error) (bool, error) {
+	return func(leader int, signal func() error) (bool, error) {
+		if leader != pid {
+			return false, nil
+		}
+		return true, signal()
+	}
 }

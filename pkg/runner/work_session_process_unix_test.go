@@ -52,7 +52,8 @@ func stopFrame(t *testing.T, revision uint64) []byte {
 }
 
 // startSession starts a session leader the way the executor starts a
-// governed command and reaps it in the background.
+// governed command: held unreaped until its exit is observed, then reaped in
+// the background.
 func startSession(t *testing.T, name string, args ...string) *exec.Cmd {
 	t.Helper()
 	if _, err := exec.LookPath(name); err != nil {
@@ -62,8 +63,13 @@ func startSession(t *testing.T, name string, args ...string) *exec.Cmd {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	require.NoError(t, cmd.Start())
 	sid := cmd.Process.Pid
+	commandcancel.HoldLeader(sid)
 	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
+	go func() {
+		_ = commandcancel.WaitExited(sid)
+		_ = commandcancel.ReapLeader(sid, cmd.Wait)
+		close(done)
+	}()
 	t.Cleanup(func() {
 		_, _, _ = commandcancel.TerminateSession(sid, 0)
 		<-done
@@ -423,4 +429,39 @@ func TestStopAndResumeReportUnsupportedWhereSignalsCannotBeHeld(t *testing.T) {
 	ended := server.lastResult(t)
 	assert.Equal(t, controlResultConfirmed, ended.Result, "End stays best-effort termination")
 	assert.Empty(t, liveMembers(t, owned.Process.Pid))
+}
+
+func TestEndWithoutPidfdSignalsOnlyTheGroupOfAHeldLeader(t *testing.T) {
+	if commandcancel.PinnedSignalsHeld() {
+		t.Skip("this host signals each process through a pidfd")
+	}
+	server := &fakeControlServer{}
+	r := newProcessRegistry(server, &inventoryLog{}, nil)
+	cc := &ControlClient{workSessions: r}
+
+	// The leader's group is pinned by the unreaped leader; the child's own
+	// group has no leader alpamon holds.
+	leader := startSession(t, "perl", "-e", `if (fork() == 0) { setpgrp(0, 0); sleep 60; exit } sleep 60`)
+	pids := sessionMembers(t, leader.Process.Pid, 2)
+	var child int
+	require.Eventually(t, func() bool {
+		for _, pid := range pids {
+			if pgid, err := syscall.Getpgid(pid); err == nil && pid != leader.Process.Pid && pgid == pid {
+				child = pid
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 20*time.Millisecond, "the child creates its own process group")
+	r.trackProcess(wsID, ownedKindCommand, "cmd-1", leader.Process.Pid)
+
+	cc.HandleMessage(pauseFrame(t, 1))
+	cc.HandleMessage(controlFrame(t, "work_session_end", 2, "ended", "human_end"))
+	ended := server.lastResult(t)
+	assert.Equal(t, controlResultFailed, ended.Result)
+	assert.Equal(t, errorCodeSurvivors, ended.Error)
+	assert.Equal(t, []WorkSessionSurvivor{{CommandID: "cmd-1", PID: child, PGID: child}}, ended.Survivors)
+	requireState(t, procRunning, child)
+	assert.Equal(t, []int{child}, liveMembers(t, leader.Process.Pid), "the held leader's group is terminated")
+	_ = syscall.Kill(child, syscall.SIGKILL)
 }

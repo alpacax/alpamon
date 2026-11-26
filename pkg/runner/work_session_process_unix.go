@@ -31,8 +31,9 @@ var errSessionObservationChanged = errors.New("process session observation chang
 // Every signal goes through commandcancel, which reads a member's start
 // time, SID and PGID again right before it signals. On Linux it signals each
 // member through a pidfd, so a reused PID or PGID never receives it. Where
-// that is unavailable Stop and Resume are unsupported, and End signals each
-// checked member's group by PGID, best effort.
+// that is unavailable Stop and Resume are unsupported, and End signals by
+// PGID only a session leader's group while alpamon holds that leader
+// unreaped; the members of any other group are reported as survivors.
 type groupProcessControl struct {
 	mu sync.Mutex
 	// stopped holds the groups a Stop suspended, per Work Session, each with

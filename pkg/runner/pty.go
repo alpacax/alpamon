@@ -158,6 +158,8 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 
 	// Add PID-to-session mapping for auth manager
 	pid := pc.cmd.Process.Pid
+	// Held until its reap, the shell pins its group for Work Session End.
+	commandcancel.HoldLeader(pid)
 	sessionInfo := &SessionInfo{
 		Kind:      TrackerKindWebsh,
 		SessionID: pc.sessionID,
@@ -563,7 +565,7 @@ func (pc *PtyClient) closeSession() {
 		}
 		// A shell may ignore SIGHUP, and a cancelled process may be uninterruptible.
 		// Waiting asynchronously preserves hangup semantics without blocking close.
-		go func() { _ = pc.cmd.Wait() }()
+		go func() { _ = commandcancel.ReapLeader(pc.cmd.Process.Pid, pc.cmd.Wait) }()
 	}
 	if pc.ptmx != nil {
 		_ = pc.ptmx.Close()
