@@ -1,6 +1,7 @@
 package exposure
 
 import (
+	"bytes"
 	"regexp"
 	"runtime"
 	"testing"
@@ -14,22 +15,24 @@ var bubbleHeader = regexp.MustCompile(`(?m)^goroutine \d+ \[[^\n]*, synctest bub
 // bubbleGoroutines counts the goroutines in the caller's synctest bubble; runtime.NumGoroutine counts the whole process.
 func bubbleGoroutines(t *testing.T) int {
 	t.Helper()
-	own := bubbleHeader.FindSubmatch(stack(false))
+	dump := allStacks()
+	first, _, _ := bytes.Cut(dump, []byte("\n")) // runtime.Stack writes the caller's header first
+	own := bubbleHeader.FindSubmatch(first)
 	if own == nil {
-		t.Fatal("bubbleGoroutines called outside a synctest bubble")
+		t.Fatal("no synctest bubble id in the caller's goroutine header: called outside a bubble, or the runtime changed the header format")
 	}
 	n := 0
-	for _, m := range bubbleHeader.FindAllSubmatch(stack(true), -1) {
-		if string(m[1]) == string(own[1]) {
+	for _, m := range bubbleHeader.FindAllSubmatch(dump, -1) {
+		if bytes.Equal(m[1], own[1]) {
 			n++
 		}
 	}
 	return n
 }
 
-func stack(all bool) []byte {
+func allStacks() []byte {
 	for buf := make([]byte, 64<<10); ; buf = make([]byte, 2*len(buf)) {
-		if n := runtime.Stack(buf, all); n < len(buf) {
+		if n := runtime.Stack(buf, true); n < len(buf) {
 			return buf[:n]
 		}
 	}
@@ -39,7 +42,11 @@ func TestBubbleGoroutinesIgnoresGoroutinesOutsideTheBubble(t *testing.T) {
 	spawn, spawned, stop := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	defer close(stop)
 	go func() {
-		<-spawn
+		select {
+		case <-spawn:
+		case <-stop: // the bubble failed before close(spawn)
+			return
+		}
 		for range 3 {
 			go func() { <-stop }()
 		}
