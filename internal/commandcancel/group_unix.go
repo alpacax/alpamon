@@ -343,7 +343,12 @@ func signalMemberGroup(sid, pid int, member SessionMember, sig syscall.Signal, o
 	if member.PGID != sid || ops.leader == nil {
 		return errLeaderNotHeld
 	}
-	held, err := ops.leader(sid, func() error { return ops.signal(-sid, sig) })
+	held, err := ops.leader(sid, func() error {
+		if err := checkPinnedMember(sid, pid, member, ops); err != nil {
+			return err
+		}
+		return ops.signal(-sid, sig)
+	})
 	if !held {
 		return errLeaderNotHeld
 	}

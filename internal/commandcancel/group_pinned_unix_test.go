@@ -300,6 +300,34 @@ func TestSignalsWithoutPidfdSendNothingOnceTheLeaderIsReaped(t *testing.T) {
 	assert.Empty(t, kernel.groups)
 }
 
+func TestGroupSignalRevalidatesMembershipWhileLeaderIsHeld(t *testing.T) {
+	const sid = 42
+	leaderHeld := false
+	checkedWhileHeld := false
+	ops := pinnedSignalOps{
+		started: func(int) (int64, error) {
+			checkedWhileHeld = checkedWhileHeld || leaderHeld
+			return 100, nil
+		},
+		sid:  func(int) (int, error) { return sid, nil },
+		pgid: func(int) (int, error) { return sid, nil },
+		signal: func(int, syscall.Signal) error {
+			assert.True(t, leaderHeld)
+			assert.True(t, checkedWhileHeld)
+			return nil
+		},
+		leader: func(_ int, use func() error) (bool, error) {
+			leaderHeld = true
+			defer func() { leaderHeld = false }()
+			return true, use()
+		},
+	}
+
+	groups, err := signalPinnedSessionGroups(sid, map[int]SessionMember{sid: {StartedAt: 100, PGID: sid}}, syscall.SIGCONT, ops)
+	require.NoError(t, err)
+	assert.Equal(t, []int{sid}, groups)
+}
+
 func TestReapLeaderWaitsForASignalInFlight(t *testing.T) {
 	const pid = 990001
 	HoldLeader(pid)
