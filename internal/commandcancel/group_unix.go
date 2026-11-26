@@ -122,8 +122,9 @@ func matchingProcesses(matches func(int) (bool, error)) ([]int, error) {
 // a live member it verified by start time, since a SID with a live member is
 // never handed to a new session. Each signal takes a fresh membership snapshot;
 // PGIDs are never retained across the grace period.
-// Unix has no atomic session signal: a job can exit between revalidation and
-// kill, leaving a narrow PGID-reuse window, as in normal command exit cleanup.
+// Each signal goes through SignalSessionGroups, so a job group is reached
+// only through its members' pidfds, or not at all where the host has none:
+// its members are then reported as survivors.
 func TerminateSession(sid int, grace time.Duration) ([]int, bool, error) {
 	if sid <= 1 {
 		return nil, false, fmt.Errorf("invalid owned session %d", sid)
@@ -214,7 +215,8 @@ type pinnedSignalOps struct {
 	pidfd *pidfdOps
 	// leader runs a signal only while its pid is a child alpamon has not
 	// reaped, and reports whether it ran.
-	leader func(int, func() error) (bool, error)
+	leader  func(int, func() error) (bool, error)
+	members func(int) ([]int, error)
 }
 
 // pidfdOps opens a handle that keeps referring to one process after it
@@ -232,7 +234,7 @@ type pidfdOps struct {
 var ErrSignalNotHeld = fmt.Errorf("process identity cannot be held through signal delivery: %w", errors.ErrUnsupported)
 
 func systemPinnedSignalOps() pinnedSignalOps {
-	return pinnedSignalOps{started: memberStartedAt, sid: unix.Getsid, pgid: syscall.Getpgid, signal: syscall.Kill, pidfd: systemPidfd(), leader: withHeldLeader}
+	return pinnedSignalOps{started: memberStartedAt, sid: unix.Getsid, pgid: syscall.Getpgid, signal: syscall.Kill, pidfd: systemPidfd(), leader: withHeldLeader, members: SessionMembers}
 }
 
 func memberStartedAt(pid int) (int64, error) {
@@ -430,40 +432,88 @@ func signalSession(sid int, sig syscall.Signal) (bool, error) {
 
 // SignalSessionGroups sends sig to each process group of session sid that
 // include admits, or to every group when include is nil, and returns the
-// groups it signalled. The caller pins sid as TerminateSession requires. Each
-// group is taken from a fresh membership snapshot and its member's SID and
-// PGID are read again right before the signal, so a group that left the
-// session is never signalled.
+// groups it reached. The caller pins sid as TerminateSession requires. Each
+// member is taken from a fresh membership snapshot and its SID and PGID are
+// read again right before the signal, so a process that left the session is
+// never signalled. Where the host holds a process, each member is signalled
+// through its pidfd and no PGID is signalled. Elsewhere only the session
+// leader's group is signalled by PGID, and only while alpamon holds that
+// leader unreaped (HoldLeader); the members of any other group are left for
+// the caller to report.
 func SignalSessionGroups(sid int, sig syscall.Signal, include func(pgid int) bool) ([]int, error) {
+	return signalSessionGroups(sid, sig, include, systemPinnedSignalOps())
+}
+
+func signalSessionGroups(sid int, sig syscall.Signal, include func(pgid int) bool, ops pinnedSignalOps) ([]int, error) {
 	if sid <= 1 {
 		return nil, fmt.Errorf("invalid owned session %d", sid)
 	}
-	pids, err := SessionMembers(sid)
+	pids, err := ops.members(sid)
 	if err != nil {
 		return nil, err
 	}
 	var signalled []int
-	groups := make(map[int]bool)
+	tried := make(map[int]bool)
 	var errs []error
 	for _, pid := range pids {
-		pgid, err := syscall.Getpgid(pid)
-		if err != nil || pgid <= 1 || groups[pgid] || include != nil && !include(pgid) {
+		pgid, err := ops.pgid(pid)
+		if err != nil || pgid <= 1 || tried[pgid] || include != nil && !include(pgid) {
 			continue
 		}
-		session, err := unix.Getsid(pid)
-		if err != nil || session != sid {
-			continue
+		var sent bool
+		if ops.pidfd != nil {
+			sent, err = signalSessionMember(sid, pid, pgid, sig, ops)
+		} else {
+			sent, err = signalLeaderGroup(sid, pid, pgid, sig, ops)
+			tried[pgid] = tried[pgid] || sent || err != nil
 		}
-		currentGroup, err := syscall.Getpgid(pid)
-		if err != nil || currentGroup != pgid {
-			continue
-		}
-		groups[pgid] = true
-		if err := syscall.Kill(-pgid, sig); err == nil {
-			signalled = append(signalled, pgid)
-		} else if !errors.Is(err, syscall.ESRCH) {
+		if err != nil && !processGone(err) {
 			errs = append(errs, err)
+		}
+		if sent && !slices.Contains(signalled, pgid) {
+			signalled = append(signalled, pgid)
 		}
 	}
 	return signalled, errors.Join(errs...)
+}
+
+// sessionMemberOf reports whether pid is still in session sid and group pgid.
+func sessionMemberOf(sid, pid, pgid int, ops pinnedSignalOps) bool {
+	session, err := ops.sid(pid)
+	if err != nil || session != sid {
+		return false
+	}
+	current, err := ops.pgid(pid)
+	return err == nil && current == pgid
+}
+
+// signalSessionMember checks pid's session and group through its open pidfd:
+// a PID reused before the open fails the check, and one reused after it is
+// not the process the pidfd holds.
+func signalSessionMember(sid, pid, pgid int, sig syscall.Signal, ops pinnedSignalOps) (bool, error) {
+	fd, err := ops.pidfd.open(pid)
+	if errors.Is(err, syscall.ENOSYS) {
+		return false, ErrSignalNotHeld
+	}
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = ops.pidfd.close(fd) }()
+	if !sessionMemberOf(sid, pid, pgid, ops) {
+		return false, nil
+	}
+	if err := ops.pidfd.send(fd, sig); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// signalLeaderGroup signals the session leader's group while alpamon holds
+// the leader unreaped, and no other group.
+func signalLeaderGroup(sid, pid, pgid int, sig syscall.Signal, ops pinnedSignalOps) (bool, error) {
+	if pgid != sid || ops.leader == nil || !sessionMemberOf(sid, pid, pgid, ops) {
+		return false, nil
+	}
+	held, err := ops.leader(sid, func() error { return ops.signal(-sid, sig) })
+	return held && err == nil, err
 }

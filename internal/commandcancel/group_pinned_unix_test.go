@@ -4,6 +4,8 @@ package commandcancel
 
 import (
 	"errors"
+	"maps"
+	"slices"
 	"syscall"
 	"testing"
 	"testing/synctest"
@@ -141,6 +143,7 @@ type fakeKernel struct {
 	reads     int
 	openErr   error
 	held      map[int]bool
+	afterOpen func(pid int)
 }
 
 func newFakeKernel(members map[int]SessionMember) *fakeKernel {
@@ -168,9 +171,10 @@ func (k *fakeKernel) ops() pinnedSignalOps {
 			}
 			return started, nil
 		},
-		sid:    func(int) (int, error) { return 42, nil },
-		pgid:   func(pid int) (int, error) { return k.pgids[pid], nil },
-		signal: func(pgid int, _ syscall.Signal) error { k.groups = append(k.groups, pgid); return nil },
+		sid:     func(int) (int, error) { return 42, nil },
+		pgid:    func(pid int) (int, error) { return k.pgids[pid], nil },
+		signal:  func(pgid int, _ syscall.Signal) error { k.groups = append(k.groups, pgid); return nil },
+		members: func(int) ([]int, error) { return slices.Sorted(maps.Keys(k.starts)), nil },
 		leader: func(pid int, signal func() error) (bool, error) {
 			if !k.held[pid] {
 				return false, nil
@@ -188,6 +192,9 @@ func (k *fakeKernel) ops() pinnedSignalOps {
 				}
 				fd := len(k.fds) + 100
 				k.fds[fd], k.fdPIDs[fd] = started, pid
+				if k.afterOpen != nil {
+					k.afterOpen(pid)
+				}
 				return fd, nil
 			},
 			send: func(fd int, _ syscall.Signal) error {
@@ -329,4 +336,39 @@ func heldLeaderFake(pid int) func(int, func() error) (bool, error) {
 		}
 		return true, signal()
 	}
+}
+
+func TestSessionSignalsWithoutPidfdReachOnlyAHeldLeadersGroup(t *testing.T) {
+	members := map[int]SessionMember{42: {StartedAt: 100, PGID: 42}, 43: {StartedAt: 100, PGID: 42}, 44: {StartedAt: 100, PGID: 44}}
+	for _, held := range []bool{true, false} {
+		kernel := newFakeKernel(members)
+		kernel.held[42] = held
+		ops := kernel.ops()
+		ops.pidfd = nil
+		groups, err := signalSessionGroups(42, syscall.SIGTERM, nil, ops)
+		require.NoError(t, err)
+		if held {
+			assert.Equal(t, []int{42}, groups)
+			assert.Equal(t, []int{-42}, kernel.groups, "a job group whose leader alpamon does not hold is never signalled")
+		} else {
+			assert.Empty(t, groups)
+			assert.Empty(t, kernel.groups, "a reaped leader no longer pins its group")
+		}
+	}
+}
+
+func TestSessionSignalsWithPidfdReachEachMemberNotItsGroup(t *testing.T) {
+	members := map[int]SessionMember{42: {StartedAt: 100, PGID: 42}, 43: {StartedAt: 100, PGID: 42}, 44: {StartedAt: 100, PGID: 44}}
+	kernel := newFakeKernel(members)
+	// 43 exits after its pidfd is open and its PID is reused.
+	kernel.afterOpen = func(pid int) {
+		if pid == 43 {
+			kernel.exitAndReuse(43, 200)
+		}
+	}
+	groups, err := signalSessionGroups(42, syscall.SIGTERM, nil, kernel.ops())
+	require.NoError(t, err)
+	assert.Equal(t, []int{42, 44}, groups)
+	assert.Equal(t, []int{42, 44}, kernel.delivered, "the reused PID 43 receives nothing")
+	assert.Empty(t, kernel.groups, "no signal goes to a PGID")
 }

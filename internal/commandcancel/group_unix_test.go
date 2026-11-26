@@ -79,7 +79,8 @@ func TestVerifiedSessionTerminationSkipsKillOnceThePinIsGone(t *testing.T) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	require.NoError(t, cmd.Start())
 	sid := cmd.Process.Pid
-	defer func() { _, _, _ = TerminateSession(sid, 0); _ = cmd.Wait() }()
+	HoldLeader(sid)
+	defer func() { _, _, _ = TerminateSession(sid, 0); _ = ReapLeader(sid, cmd.Wait) }()
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(ready)
 		return err == nil
@@ -114,14 +115,30 @@ func TestSignalSessionGroupsSignalsOnlyTheAdmittedGroups(t *testing.T) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	require.NoError(t, cmd.Start())
 	sid := cmd.Process.Pid
-	defer func() { _, _, _ = TerminateSession(sid, 0); _ = cmd.Wait() }()
+	HoldLeader(sid)
+	var members []int
+	defer func() {
+		_, _, _ = TerminateSession(sid, 0)
+		for _, pid := range members {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		_ = ReapLeader(sid, cmd.Wait)
+	}()
 	require.Eventually(t, func() bool {
-		members, err := SessionMembers(sid)
+		var err error
+		members, err = SessionMembers(sid)
 		return err == nil && len(members) == 2
 	}, 5*time.Second, 20*time.Millisecond)
 
 	groups, err := SignalSessionGroups(sid, syscall.SIGCONT, func(pgid int) bool { return pgid != sid })
 	require.NoError(t, err)
+	if !PinnedSignalsHeld() {
+		assert.Empty(t, groups, "no leader alpamon holds pins the child's group")
+		groups, err = SignalSessionGroups(sid, syscall.SIGCONT, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []int{sid}, groups, "the held leader pins its own group")
+		return
+	}
 	require.Len(t, groups, 1)
 	assert.NotEqual(t, sid, groups[0])
 }
