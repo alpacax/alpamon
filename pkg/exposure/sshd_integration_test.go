@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -88,8 +89,18 @@ func TestDistroSSHDExposure(t *testing.T) {
 	require.NotEmpty(t, distroHostKeys(t))
 
 	var expected map[string]*string
+	var postBootInstall bool
 	if debianFamily {
 		expected = distroDerivedSettings(t)
+		boot, ok := procBootTime("/proc")
+		require.True(t, ok)
+		// Package installation in a running container can update either unit
+		// directory after the host kernel booted.
+		for _, dir := range []string{"/etc/systemd/system", "/lib/systemd/system"} {
+			info, err := os.Stat(dir)
+			require.NoError(t, err)
+			postBootInstall = postBootInstall || info.ModTime().After(time.Unix(boot, 0))
+		}
 	}
 	// Ubuntu socket activation cannot be reproduced in a container. Reproduce its
 	// observable state directly by collecting while /run/sshd is absent.
@@ -121,11 +132,24 @@ func TestDistroSSHDExposure(t *testing.T) {
 				assert.Nil(t, effective)
 			case debianFamily && !tc.directory:
 				assert.Contains(t, reasons, reasonSSHDPrivsepMissing)
-				assert.Equal(t, expected, effective)
-				if expected == nil {
-					t.Log("default service configuration: effective null")
+				if postBootInstall {
+					assert.Nil(t, effective)
+					t.Log("package installation after boot: effective null")
+					t.Run("stock configuration present at boot", func(t *testing.T) {
+						// Model a subsequent boot without changing any package files
+						// or timestamps. Only procfs is supplied by the test.
+						afterBoot := opts
+						afterBoot.procRoot = t.TempDir()
+						stat := "btime " + strconv.FormatInt(time.Now().Unix()+1, 10) + "\n"
+						require.NoError(t, os.WriteFile(filepath.Join(afterBoot.procRoot, "stat"), []byte(stat), 0o644))
+						r := newCollector(afterBoot).collect(t.Context())
+						require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+						require.Equal(t, expected, r.SSHD.Effective)
+						t.Logf("stock settings with simulated post-install boot: %d", len(r.SSHD.Effective))
+					})
 				} else {
-					t.Logf("default service configuration: derived %d settings", len(effective))
+					require.Equal(t, expected, effective)
+					t.Logf("default service configuration: %d settings", len(effective))
 				}
 			default:
 				if !tc.directory {
