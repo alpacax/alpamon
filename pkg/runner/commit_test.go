@@ -86,11 +86,8 @@ func TestLoadValidShells(t *testing.T) {
 	// On macOS/Linux, /etc/shells should exist with common shells
 	shells := loadValidShells()
 
-	// shells may be nil if /etc/shells is not readable, which is acceptable
-	if shells != nil {
-		// If shells file was read, it should contain at least one shell
-		assert.True(t, len(shells) > 0, "Valid shells slice should not be empty when /etc/shells is readable")
-
+	// shells may be nil or empty if /etc/shells is unreadable or lists no shell
+	if len(shells) > 0 {
 		// Common shells that should be in the file on most systems
 		commonShells := []string{"/bin/sh", "/bin/bash", "/bin/zsh"}
 		foundAny := slices.ContainsFunc(commonShells, func(s string) bool {

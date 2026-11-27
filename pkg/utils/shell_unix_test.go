@@ -39,7 +39,10 @@ func TestLoadValidShellsFrom_CommentsAndBlankOnly(t *testing.T) {
 	path := filepath.Join(dir, "shells")
 	require.NoError(t, os.WriteFile(path, []byte("# only comments\n\n\t\n"), 0o644), "failed to write shells file")
 
-	assert.Nil(t, loadValidShellsFrom(path), "expected nil for comments/blank-only file")
+	shells := loadValidShellsFrom(path)
+
+	assert.NotNil(t, shells)
+	assert.Empty(t, shells)
 }
 
 func TestLoadValidShellsFrom_MissingFile(t *testing.T) {

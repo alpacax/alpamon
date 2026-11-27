@@ -125,7 +125,7 @@ type UserData struct {
 	Directory        string   `json:"directory"`
 	Shell            string   `json:"shell"`
 	ShadowExpireDate *int64   `json:"shadow_expire_date,omitempty"` // /etc/shadow: raw expiration date (days since epoch)
-	ValidShells      []string `json:"valid_shells,omitempty"`       // /etc/shells: full list of valid login shells
+	ValidShells      []string `json:"valid_shells,omitzero"`        // /etc/shells list; nil (unreadable) is omitted, empty is sent
 }
 
 type GroupData struct {
@@ -301,9 +301,8 @@ func (u UserData) GetData() ComparableData {
 	}
 }
 
-// GetComparableData returns data for comparison, excluding fields not stored by server.
-// ValidShells is excluded because the server doesn't store it (system-wide, rarely changes).
-// ShadowExpireDate is included because the server stores it for real-time expiration checks.
+// GetComparableData excludes ValidShells, which the server does not store.
+// The users syncer re-sends every user while the shell list is readable.
 func (u UserData) GetComparableData() ComparableData {
 	return UserData{
 		Username:         u.Username,

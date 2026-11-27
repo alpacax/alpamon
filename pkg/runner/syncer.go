@@ -50,7 +50,13 @@ var syncers = []syncable{
 		},
 	},
 	&multiRowSyncer[GroupData]{key: "groups", collect: getGroupData},
-	&multiRowSyncer[UserData]{key: "users", collect: getUserData},
+	&multiRowSyncer[UserData]{
+		key:     "users",
+		collect: getUserData,
+		rewriteAll: func(us []UserData) bool {
+			return len(us) > 0 && us[0].ValidShells != nil
+		},
+	},
 	&multiRowSyncer[Interface]{key: "interfaces", collect: getNetworkInterfaces},
 	&multiRowSyncer[Address]{key: "addresses", collect: getNetworkAddresses},
 	&multiRowSyncer[Disk]{key: "disks", collect: getDisks},
@@ -111,8 +117,9 @@ func (s *singleRowSyncer[T]) syncData(session *scheduler.Session, data any, hash
 
 // multiRowSyncer handles categories with multiple data rows (users, groups, etc.).
 type multiRowSyncer[T ComparableData] struct {
-	key     string
-	collect func() ([]T, error)
+	key        string
+	collect    func() ([]T, error)
+	rewriteAll func([]T) bool
 }
 
 func (s *multiRowSyncer[T]) Key() string { return s.key }
@@ -131,6 +138,7 @@ func (s *multiRowSyncer[T]) syncData(session *scheduler.Session, data any, hash 
 		log.Error().Msgf("Invalid data type for %s, skipping sync.", s.key)
 		return
 	}
+	rewriteAll := s.rewriteAll != nil && s.rewriteAll(current)
 	entry := s.Def()
 	resp, statusCode, err := session.Get(utils.JoinPath(entry.URL, entry.URLSuffix), scheduler.DefaultRequestTimeout)
 	if err != nil {
@@ -144,9 +152,9 @@ func (s *multiRowSyncer[T]) syncData(session *scheduler.Session, data any, hash 
 			log.Error().Err(err).Msgf("Failed to unmarshal remote data for %s.", s.key)
 			return
 		}
-		compareListData(entry, current, remote, hash)
+		compareListData(entry, current, remote, hash, rewriteAll)
 	case http.StatusNotFound:
-		compareListData(entry, current, nil, hash)
+		compareListData(entry, current, nil, hash, rewriteAll)
 	default:
 		log.Error().Msgf("Unexpected HTTP %d when syncing %s.", statusCode, s.key)
 	}

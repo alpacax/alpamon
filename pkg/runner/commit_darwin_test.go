@@ -225,3 +225,28 @@ func TestGetGroupData_WarnsWhenDsclFails(t *testing.T) {
 	assert.Contains(t, logs.String(), `"level":"warn"`)
 	assert.Contains(t, logs.String(), "groups will not be reported")
 }
+
+func TestUsersFromDsclReportsNoShellListWhenEtcShellsIsUnreadable(t *testing.T) {
+	prev := loadReportedShells
+	loadReportedShells = func() []string { return nil }
+	t.Cleanup(func() { loadReportedShells = prev })
+
+	users, err := usersFromDscl([]byte("RecordName: alice\nUniqueID: 501\nPrimaryGroupID: 20\nNFSHomeDirectory: /Users/alice\nUserShell: /bin/bash\n"))
+
+	require.NoError(t, err)
+	require.Len(t, users, 1)
+	assert.Nil(t, users[0].ValidShells)
+}
+
+func TestUsersFromDsclReportsAnEmptyShellListWhenEtcShellsListsNoShell(t *testing.T) {
+	prev := loadReportedShells
+	loadReportedShells = func() []string { return []string{} }
+	t.Cleanup(func() { loadReportedShells = prev })
+
+	users, err := usersFromDscl([]byte("RecordName: alice\nUniqueID: 501\nPrimaryGroupID: 20\nNFSHomeDirectory: /Users/alice\nUserShell: /bin/bash\n"))
+
+	require.NoError(t, err)
+	require.Len(t, users, 1)
+	assert.NotNil(t, users[0].ValidShells)
+	assert.Empty(t, users[0].ValidShells)
+}

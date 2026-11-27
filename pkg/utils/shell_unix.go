@@ -13,7 +13,7 @@ import (
 const validShellsFilePath = "/etc/shells"
 
 // LoadValidShells reads /etc/shells and returns the listed login shell paths.
-// Returns nil if the file cannot be read or parsed.
+// Returns nil if the file cannot be read or parsed, and an empty slice if it lists no shell.
 func LoadValidShells() []string { return loadValidShellsFrom(validShellsFilePath) }
 
 func loadValidShellsFrom(path string) []string {
@@ -24,7 +24,7 @@ func loadValidShellsFrom(path string) []string {
 	}
 	defer func() { _ = file.Close() }()
 
-	var shells []string
+	shells := []string{}
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())

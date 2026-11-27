@@ -459,7 +459,7 @@ func compareData(entry commitDef, currentData, remoteData ComparableData, syncHa
 	}
 }
 
-func compareListData[T ComparableData](entry commitDef, currentData, remoteData []T, syncHash string) {
+func compareListData[T ComparableData](entry commitDef, currentData, remoteData []T, syncHash string, rewriteAll bool) {
 	h := syncHashHeader(syncHash)
 
 	currentMap := make(map[any]ComparableData)
@@ -470,7 +470,7 @@ func compareListData[T ComparableData](entry commitDef, currentData, remoteData 
 	for _, remoteItem := range remoteData {
 		if currentItem, exists := currentMap[remoteItem.GetKey()]; exists {
 			// Compare using GetComparableData() to exclude fields not stored by server
-			if !cmp.Equal(currentItem.GetComparableData(), remoteItem.GetComparableData()) {
+			if rewriteAll || !cmp.Equal(currentItem.GetComparableData(), remoteItem.GetComparableData()) {
 				// Transmit using GetData() to include all raw data for server-side processing
 				scheduler.Rqueue.PatchWithHeaders(entry.URL+remoteItem.GetID()+"/", currentItem.GetData(), 80, time.Time{}, h)
 			}
