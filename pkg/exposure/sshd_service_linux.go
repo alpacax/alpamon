@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -87,7 +88,28 @@ func enabledSSHUnit(fs *fsReader, suffix string, targets ...string) (string, boo
 	return selected, true
 }
 
-func safeSSHDService(ctx context.Context, src systemFiles, binary string) bool {
+// systemd may still have the pre-edit unit loaded. Check the timestamp of
+// each selected file on the same descriptor used to read its contents.
+type sshUnitSource struct {
+	systemFiles
+	boot time.Time
+}
+
+func (s sshUnitSource) load(name string) loaded {
+	l := s.systemFiles.load(name)
+	if l.usable() && (l.mtime.After(s.boot) || bytes.IndexByte(l.data, '\r') >= 0) {
+		clear(l.data)
+		return failed(statusRejected, reasonFileRejected)
+	}
+	return l
+}
+
+func safeSSHDService(ctx context.Context, sys systemFiles, binary, procRoot string) bool {
+	btime, ok := procBootTime(procRoot)
+	if !ok || btime <= 0 {
+		return false
+	}
+	src := sshUnitSource{sys, time.Unix(btime, 0)}
 	direct, directOK := enabledSSHUnit(src.f, ".service", "multi-user.target")
 	targets := []string{"sockets.target", "multi-user.target"}
 	if directOK && direct != "" {
@@ -154,7 +176,7 @@ func (s *sshSocket) set(key, value string) bool {
 
 // A unit alias names another unit in the search path. Resolve only simple,
 // root-owned links inside those directories; masks and external links are unknown.
-func sshUnitFile(ctx context.Context, src systemFiles, name string) (string, bool) {
+func sshUnitFile(ctx context.Context, src sshUnitSource, name string) (string, bool) {
 	for range maxIncludeDepth {
 		if ctx.Err() != nil {
 			return "", false
@@ -173,6 +195,9 @@ func sshUnitFile(ctx context.Context, src systemFiles, name string) (string, boo
 			case unix.S_IFREG:
 				return file, true
 			case unix.S_IFLNK:
+				if l.mtime.After(src.boot) {
+					return "", false
+				}
 				fd, last, _, _, ok := src.f.walkDirs(file, ownerRule{system: true}, false)
 				if !ok {
 					return "", false
@@ -220,7 +245,7 @@ func unitNameGroups(name string) []string {
 // Only examine other unit names when their drop-ins could also apply to the
 // selected unit through an alias. An instance-specific command is unknown
 // until the individual connection is known.
-func sshUnitNames(ctx context.Context, src systemFiles, canonical string) ([]string, bool) {
+func sshUnitNames(ctx context.Context, src sshUnitSource, canonical string) ([]string, bool) {
 	suffix := path.Ext(canonical)
 	template := strings.HasSuffix(canonical, "@"+suffix)
 	instances := map[string]bool{}
@@ -234,6 +259,9 @@ func sshUnitNames(ctx context.Context, src systemFiles, canonical string) ([]str
 			return nil, false
 		}
 		for _, entry := range entries {
+			if strings.HasPrefix(entry, ".") {
+				continue
+			}
 			name, drop := strings.CutSuffix(entry, ".d")
 			if !strings.HasSuffix(name, suffix) {
 				continue
@@ -296,7 +324,7 @@ func sshUnitNames(ctx context.Context, src systemFiles, canonical string) ([]str
 
 // Load the highest-priority main unit and one drop-in per basename. systemd
 // applies the surviving filenames in lexical order across all directories.
-func readSSHUnit(ctx context.Context, src systemFiles, file, section string, set func(string, string) bool) bool {
+func readSSHUnit(ctx context.Context, src sshUnitSource, file, section string, set func(string, string) bool) bool {
 	name := path.Base(file)
 	names, ok := sshUnitNames(ctx, src, name)
 	if !ok {
@@ -327,7 +355,8 @@ func readSSHUnit(ctx context.Context, src systemFiles, file, section string, set
 			return false
 		}
 		for _, file := range files {
-			if strings.HasSuffix(file, ".conf") && dropIns[file] == "" {
+			// systemd skips hidden files. Its backup suffixes already exclude .conf.
+			if !strings.HasPrefix(file, ".") && strings.HasSuffix(file, ".conf") && dropIns[file] == "" {
 				if len(dropIns) >= maxIncludeFiles {
 					return false
 				}
@@ -435,11 +464,15 @@ func (s *sshService) safeStart(ctx context.Context, src systemSource) bool {
 	if s.unsafePre || s.starts != 1 || len(args) == 0 || s.binary == "" || strings.TrimPrefix(args[0], "-") != s.binary {
 		return false
 	}
+	expandsOpts := false
 	for _, arg := range args[1:] {
-		if arg != "$SSHD_OPTS" && arg != "${SSHD_OPTS}" && !serviceFlags(arg) {
+		if arg == "$SSHD_OPTS" || arg == "${SSHD_OPTS}" {
+			expandsOpts = true
+		} else if !serviceFlags(arg) {
 			return false
 		}
 	}
+	assigned := false
 	for _, file := range s.envFiles {
 		if ctx.Err() != nil {
 			return false
@@ -449,19 +482,26 @@ func (s *sshService) safeStart(ctx context.Context, src systemSource) bool {
 		if optional && l.status == statusAbsent {
 			continue
 		}
-		if !readSSHDEnvironment(l) {
+		set, ok := readSSHDEnvironment(l)
+		if !ok {
 			return false
 		}
+		assigned = assigned || set
 	}
-	return ctx.Err() == nil
+	return ctx.Err() == nil && (!expandsOpts || assigned)
 }
 
-func readSSHDEnvironment(l loaded) bool {
-	return serviceLines(l, func(line string) bool {
+func readSSHDEnvironment(l loaded) (assigned, ok bool) {
+	ok = serviceLines(l, func(line string) bool {
 		name, value, ok := strings.Cut(line, "=")
 		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
 			value = value[1 : len(value)-1]
 		}
-		return ok && name == "SSHD_OPTS" && serviceFlags(value)
+		if !ok || name != "SSHD_OPTS" || !serviceFlags(value) {
+			return false
+		}
+		assigned = true
+		return true
 	})
+	return assigned, ok
 }

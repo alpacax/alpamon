@@ -89,8 +89,10 @@
 // directly enabled SSH service when socket activation is disabled. It reads
 // unit drop-ins in systemd order and checks ExecStart and its environment
 // files against the validated sshd binary and supported flags. Uncertain
-// service options, aliases, explicit relative key paths, ambiguous access
-// lists, conditional lists or nested includes leave effective null.
+// service options, unassigned expansions and service inputs modified since
+// boot leave effective null. The same applies to unrecognized directives or
+// syntax, non-ASCII glob inputs, relative key or revocation paths, ambiguous
+// access lists, conditional lists, nested includes or a changed config read.
 // After sshd_privsep_missing the service checks /run/sshd every minute and
 // requests one normal collection when a root-owned directory appears. A later collection
 // with any other outcome ends polling, as does shutdown.

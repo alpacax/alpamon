@@ -186,10 +186,6 @@ func (cfg *sshdConfig) setGlobal(key string, args []string) {
 		return
 	}
 	v := configSetting(key, args)
-	if !configValueSupported(key, v, args) {
-		cfg.derivationUnsupported = true
-		return
-	}
 	if set {
 		if len(previous)+1+len(v) > maxConfigSettingBytes {
 			cfg.derivationUnsupported = true
@@ -347,13 +343,17 @@ func (p *sshdConfigParser) file(name string, depth int, required bool) {
 				p.fail(reasonLimitExceeded)
 				return true
 			}
-			if isBlankOrComment(line) {
+			line = bytes.TrimLeft(line, " \t")
+			if len(line) == 0 || line[0] == '#' {
 				return true
 			}
 			kw, args, ok := splitConfigLine(line)
 			if !ok {
 				p.fail(reasonParseError)
 				return true
+			}
+			if !modeledSSHDDirective(kw, args) {
+				p.cfg.derivationUnsupported = true
 			}
 			switch kw {
 			case "challengeresponseauthentication", "dsaauthentication", "rsaauthentication", "skeyauthentication", "pubkeyacceptedkeytypes", "authorizedkeysfile2":
@@ -371,7 +371,7 @@ func (p *sshdConfigParser) file(name string, depth int, required bool) {
 					}
 				}
 				return true
-			case "trustedusercakeys", "authorizedkeysfile":
+			case "trustedusercakeys", "authorizedkeysfile", "revokedkeys":
 				for _, arg := range args {
 					if !(len(args) == 1 && strings.EqualFold(arg, "none")) && !validPath(arg) {
 						p.cfg.derivationUnsupported = true
@@ -419,11 +419,8 @@ func (p *sshdConfigParser) file(name string, depth int, required bool) {
 				p.current = &p.cfg.blocks[len(p.cfg.blocks)-1]
 			default:
 				if p.current != nil {
-					if _, known := sshdDefaults[kw]; known && (!p.current.seen[kw] || multiLineKeywords[kw]) && !configValueSupported(kw, configSetting(kw, args), args) {
-						p.cfg.derivationUnsupported = true
-					}
 					p.current.set(kw, args)
-				} else if !p.cfg.configIncomplete {
+				} else if !p.cfg.configIncomplete && !p.cfg.derivationUnsupported {
 					p.cfg.setGlobal(kw, args)
 				}
 			}
@@ -482,6 +479,10 @@ func (p *sshdConfigParser) include(arg string, depth int) {
 	}
 	var matched []string
 	for _, n := range names {
+		// OpenSSH globs match bytes, while path.Match consumes Unicode runes.
+		if strings.ContainsFunc(n, func(r rune) bool { return r > 127 }) {
+			p.cfg.derivationUnsupported = true
+		}
 		if ok, err := path.Match(base, n); err == nil && ok && (!strings.HasPrefix(n, ".") || strings.HasPrefix(base, ".")) {
 			matched = append(matched, n)
 		}
@@ -509,14 +510,58 @@ func (p *sshdConfigParser) includedFile(name string, depth int, required bool) {
 	}
 }
 
+// Derive only from directives whose syntax we recognize. The packaged configs
+// also contain a few directives that contribute no authentication settings.
+func modeledSSHDDirective(kw string, args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	for _, arg := range args {
+		if !validToken(arg) || strings.ContainsAny(arg, `\#"'`) {
+			return false
+		}
+	}
+	if _, tracked := sshdDefaults[kw]; tracked {
+		return configValueSupported(kw, configSetting(kw, args), args)
+	}
+	switch kw {
+	case "include", "match":
+		return true
+	case "acceptenv":
+		for _, name := range args {
+			if strings.ContainsRune(name, '=') {
+				return false
+			}
+		}
+		return true
+	case kwKeysCommand, kwPrincipalsCommand:
+		return validPath(args[0]) || len(args) == 1 && strings.EqualFold(args[0], "none")
+	case kwKeysCommandUser, kwPrincipalsCommandUser:
+		return len(args) == 1 && validName(args[0])
+	case "x11forwarding", "printmotd":
+		return len(args) == 1 && (strings.EqualFold(args[0], "yes") || strings.EqualFold(args[0], "no"))
+	case "subsystem":
+		return len(args) == 2 && args[0] == "sftp" && (validPath(args[1]) || args[1] == "internal-sftp")
+	}
+	return false
+}
+
 // splitConfigLine splits "Keyword[=| ]args" with sshd's quoting rules.
 func splitConfigLine(line []byte) (string, []string, bool) {
-	s := strings.TrimSpace(string(line))
+	s := strings.Trim(string(line), " \t")
 	end := strings.IndexAny(s, " \t=")
 	if end < 0 {
-		return strings.ToLower(s), nil, true
+		end = len(s)
 	}
-	kw := strings.ToLower(s[:end])
+	kw := s[:end]
+	for i := range len(kw) {
+		if !isAlnum(kw[i]) {
+			// Leave the spelling unmodeled without discounting a successful -T.
+			kw = ""
+			break
+		}
+	}
+	kw = strings.ToLower(kw)
 	rest := strings.TrimLeft(s[end:], " \t")
 	rest = strings.TrimPrefix(rest, "=")
 	args, ok := splitArgs(rest)

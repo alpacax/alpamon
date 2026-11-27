@@ -215,14 +215,18 @@ type sshdMaster struct {
 
 const clockTicks = 100 // USER_HZ on every Linux architecture alpamon ships for
 
+func procBootTime(procRoot string) (int64, bool) {
+	data, err := readProcFile(filepath.Join(procRoot, "stat"))
+	if err != nil {
+		return 0, false
+	}
+	return parseBootTime(data)
+}
+
 // findSSHDMasters scans procRoot for sshd listener masters. ok is false when
 // the process table could not be read.
 func findSSHDMasters(procRoot string) ([]sshdMaster, bool) {
-	statData, err := readProcFile(filepath.Join(procRoot, "stat"))
-	if err != nil {
-		return nil, false
-	}
-	btime, ok := parseBootTime(statData)
+	btime, ok := procBootTime(procRoot)
 	if !ok {
 		return nil, false
 	}

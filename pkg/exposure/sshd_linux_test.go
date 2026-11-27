@@ -327,11 +327,26 @@ func TestPrivsepDerivationRequiresModeledInputs(t *testing.T) {
 	)
 	type change struct{ name, path, content string }
 	tests := []change{
+		{"quoted keyword", main, "\"PubkeyAuthentication\" yes\nPubkeyAuthentication no"},
+		{"unknown keyword", main, "UnknownDirective yes"},
+		{"unknown match keyword", main, "Match User guest\nUnknownDirective no"},
+		{"invalid environment name", main, "AcceptEnv LANG=en"},
+		{"unknown escape", main, `AcceptEnv LANG\q`},
+		{"unrecognized whitespace", main, "\u00a0PubkeyAuthentication yes"},
+		{"invalid repeated directive", main, "PubkeyAuthentication yes\nPubkeyAuthentication maybe"},
+		{"non-ASCII glob pattern", main, "Include sshd_config.d/café?.conf"},
+		{"relative revoked keys", drop, "RevokedKeys keys/revoked"},
 		{"missing selected service", unit, ""},
 		{"other sshd binary", unit, "[Service]\nExecStart=/usr/bin/sshd -D"},
 		{"non-ASCII service argument", unit, "[Service]\nExecStart=/usr/sbin/sshd\u00a0-i"},
 		{"service options", unit, "[Service]\nExecStart=/usr/sbin/sshd -i -o PasswordAuthentication=yes"},
 		{"service drop-in", "run/systemd/system/ssh.service.d/override.conf", "[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -f /etc/ssh/other"},
+		{"unassigned optional environment", env, ""},
+		{"comments-only environment", env, "# SSHD_OPTS= is not assigned"},
+		{"carriage return in service", unit, "# comment\r[Service]\n[Service]\nExecStart=/usr/sbin/sshd -D"},
+		{"carriage return in socket", "usr/lib/systemd/system/ssh.socket", "[Socket]\r\nListenStream=22"},
+		{"carriage return in drop-in", "etc/systemd/system/ssh.service.d/options.conf", "# comment\r[Service]\rExecStart=/bin/other"},
+		{"carriage return in environment", env, "SSHD_OPTS=\n# comment\rSSHD_OPTS=-f /other"},
 		{"environment options", env, `SSHD_OPTS="-o PasswordAuthentication=yes"`},
 		{"unreadable optional environment", env, "<directory>"},
 		{"unknown expansion", unit, "[Service]\nExecStart=/usr/sbin/sshd -i $OPTIONS"},
@@ -368,6 +383,7 @@ func TestPrivsepDerivationRequiresModeledInputs(t *testing.T) {
 				require.NoError(t, os.Mkdir(target, 0o755))
 			default:
 				require.NoError(t, os.WriteFile(target, []byte(tc.content), 0o644))
+				require.NoError(t, os.Chtimes(target, fixtureMtime, fixtureMtime))
 			}
 			r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(t.Context())
 			assert.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
@@ -376,6 +392,27 @@ func TestPrivsepDerivationRequiresModeledInputs(t *testing.T) {
 			require.NoError(t, err)
 			assert.NotContains(t, string(body), "LEAKCANARY")
 		})
+	}
+}
+
+func TestPrivsepRequiresASCIIGlobCandidates(t *testing.T) {
+	dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	require.NoError(t, os.WriteFile(filepath.Join(root, sshdConfigPath), []byte("Include sshd_config.d/??.conf\nPasswordAuthentication no\n"), 0o644))
+	c := newCollector(caseOptions(t, dir, spec, root, proc))
+	collect := func() map[string]*string {
+		t.Helper()
+		r := c.collect(t.Context())
+		require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+		return r.SSHD.Effective
+	}
+	require.Equal(t, ptr("no"), collect()["passwordauthentication"])
+	for _, name := range []string{"é.conf", "\xff.conf"} {
+		p := filepath.Join(root, "/etc/ssh/sshd_config.d", name)
+		require.NoError(t, os.WriteFile(p, []byte("PasswordAuthentication yes\n"), 0o644))
+		assert.Nil(t, collect())
+		require.NoError(t, os.Remove(p))
 	}
 }
 
@@ -423,7 +460,10 @@ func TestSSHDProbePreservesConditionalAuthenticationAliases(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(root, sshdConfigPath), []byte("Match User guest\n"+value), 0o644))
 		return newCollector(opts).collect(t.Context())
 	}
-	r := write("ChallengeResponseAuthentication yes")
+	r := write(`"KbdInteractiveAuthentication" no`)
+	assert.Equal(t, ptr("no"), r.SSHD.Effective["kbdinteractiveauthentication"])
+	assert.NotContains(t, r.Categories[catSSHD].Reasons, reasonParseError)
+	r = write("ChallengeResponseAuthentication yes")
 	assert.Equal(t, ptr("no"), r.SSHD.Effective["kbdinteractiveauthentication"])
 	require.Len(t, r.SSHD.MatchBlocks, 1)
 	assert.Equal(t, "yes", r.SSHD.MatchBlocks[0].Sets["kbdinteractiveauthentication"])
@@ -471,11 +511,13 @@ func TestPrivsepSelectsEnabledSSHService(t *testing.T) {
 		{"two enabled sockets", inputs{"usr/lib/systemd/system/sshd.socket": "[Socket]\nAccept=no"}, inputs{"run/systemd/system/sockets.target.wants/sshd.socket": "/usr/lib/systemd/system/sshd.socket"}, false},
 		{"direct enablement", inputs{socketLink: "", socket: "[Socket]\nService=other.service", "usr/lib/systemd/system/other.service": unsafe}, inputs{"etc/systemd/system/multi-user.target.wants/ssh.service": "/usr/lib/systemd/system/ssh.service"}, true},
 		{"no enablement", inputs{socketLink: ""}, nil, false},
-		{"optional file absent", inputs{env: ""}, nil, true},
+		{"hidden reset cannot mask unsafe service", inputs{unit: unsafe, "etc/systemd/system/ssh.service.d/.disabled.conf": reset + "/usr/sbin/sshd -D"}, nil, false},
+		{"ignored drop-ins", inputs{"etc/systemd/system/ssh.service.d/.disabled.conf": unsafe, "etc/systemd/system/ssh.service.d/override.conf.dpkg-old": unsafe}, nil, true},
+		{"optional file absent without expansion", inputs{env: "", unit: "[Service]\nEnvironmentFile=-/etc/default/ssh\nExecStart=/usr/sbin/sshd -D"}, nil, true},
 		{"required file absent", inputs{unit: "[Service]\nEnvironmentFile=/etc/default/missing\nExecStart=/usr/sbin/sshd -D"}, nil, false},
 		{"expanded flags", inputs{unit: "[Service]\nEnvironmentFile=/etc/default/ssh\nExecStart=-/usr/sbin/sshd -D ${SSHD_OPTS}", env: `SSHD_OPTS="-4 -e"`}, nil, true},
 		{"unknown argument", inputs{unit: "[Service]\nExecStart=/usr/sbin/sshd -p 22"}, nil, false},
-		{"environment reset", inputs{env: "SSHD_OPTS=-f /other", "etc/systemd/system/ssh.service.d/reset.conf": "[Service]\nEnvironmentFile=\nEnvironmentFile=-/etc/default/missing"}, nil, true},
+		{"environment reset", inputs{env: "SSHD_OPTS=-f /other", "etc/systemd/system/ssh.service.d/reset.conf": "[Service]\nEnvironmentFile=\nEnvironmentFile=-/etc/default/missing"}, nil, false},
 		{"each effective environment file is checked", inputs{env: "SSHD_OPTS=-o PubkeyAuthentication=no", "run/systemd/system/ssh.service.d/options.conf": "[Service]\nEnvironmentFile=/etc/default/options", "etc/default/options": "SSHD_OPTS=-4"}, nil, false},
 		{"service search priority", inputs{unit: unsafe, "run/systemd/system/ssh.service": unsafe, "etc/systemd/system/ssh.service": safeTemplate}, nil, true},
 		{"drop-in directory precedence and lexical order", inputs{
@@ -501,11 +543,14 @@ func TestPrivsepSelectsEnabledSSHService(t *testing.T) {
 				}
 				require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
 				require.NoError(t, os.WriteFile(p, []byte(data), 0o644))
+				require.NoError(t, os.Chtimes(p, fixtureMtime, fixtureMtime))
 			}
 			for file, target := range tc.links {
 				p := filepath.Join(root, file)
 				require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
 				require.NoError(t, os.Symlink(target, p))
+				at := unix.NsecToTimespec(fixtureMtime.UnixNano())
+				require.NoError(t, unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{at, at}, unix.AT_SYMLINK_NOFOLLOW))
 			}
 			r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(t.Context())
 			require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
@@ -515,6 +560,39 @@ func TestPrivsepSelectsEnabledSSHService(t *testing.T) {
 			} else {
 				assert.Nil(t, r.SSHD.Effective)
 			}
+		})
+	}
+}
+
+func TestPrivsepRequiresServiceInputsFromBeforeBoot(t *testing.T) {
+	for _, file := range []string{
+		"usr/lib/systemd/system/ssh.socket",
+		"usr/lib/systemd/system/ssh.service",
+		"etc/systemd/system/ssh.socket.d/10.conf",
+		"etc/systemd/system/ssh.service.d/10.conf",
+		"etc/default/ssh",
+	} {
+		t.Run(file, func(t *testing.T) {
+			dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+			spec := loadCase(t, dir)
+			root, proc := buildHost(t, dir, spec)
+			p := filepath.Join(root, file)
+			if strings.HasSuffix(file, ".conf") {
+				require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+				require.NoError(t, os.WriteFile(p, []byte("# stock options\n"), 0o644))
+			}
+			c := newCollector(caseOptions(t, dir, spec, root, proc))
+			boot := time.Unix(spec.Btime, 0)
+			for _, ts := range []time.Time{boot, boot.Add(time.Nanosecond)} {
+				require.NoError(t, os.Chtimes(p, ts, ts))
+				r := c.collect(t.Context())
+				require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+				assert.Equal(t, ts.Equal(boot), r.SSHD.Effective != nil)
+			}
+			require.NoError(t, os.Remove(filepath.Join(proc, "stat")))
+			r := c.collect(t.Context())
+			require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+			assert.Nil(t, r.SSHD.Effective)
 		})
 	}
 }
