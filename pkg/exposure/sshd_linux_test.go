@@ -244,10 +244,12 @@ func TestRunSSHDTFailureDiagnostics(t *testing.T) {
 		{"present file", diagnostic + "exit 1", "file", ""},
 		{"no host keys", noKeys + "exit 1", "", reasonSSHDNoHostKeys},
 		{"fatal prefix", "echo 'fatal: no hostkeys available -- exiting.' >&2; exit 1", "", reasonSSHDNoHostKeys},
-		{"both diagnostics with directory absent", noKeys + diagnostic + "exit 1", "", reasonSSHDPrivsepMissing},
+		{"both diagnostics with directory absent", noKeys + diagnostic + "exit 1", "", ""},
 		{"both diagnostics with directory present", diagnostic + noKeys + "exit 1", "directory", reasonSSHDNoHostKeys},
 		{"no keys followed by signal", noKeys + "kill -TERM $$", "", ""},
 		{"no keys followed by overflow", noKeys + "head -c 5000 /dev/zero >&2; exit 1", "", ""},
+		{"another fatal", "echo 'fatal: configuration error' >&2\n" + diagnostic + "exit 1", "", ""},
+		{"quoted fatal text", "echo 'warning: sshd: no hostkeys available -- exiting.' >&2; exit 1", "", ""},
 		{"different error", "echo other >&2; exit 1", "", ""},
 		{"substring", "echo 'prefix " + privsepDiagnostic + "' >&2; exit 1", "", ""},
 		{"signal", diagnostic + "kill -TERM $$", "", ""},
@@ -272,4 +274,12 @@ func TestRunSSHDTFailureDiagnostics(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunSSHDTDeadlineClosesInheritedOutput(t *testing.T) {
+	root := t.TempDir()
+	fakeSSHD(t, root, "sleep 30 2>/dev/null &\nexit 0\n")
+	start := time.Now()
+	assert.Equal(t, sshdRun{reason: reasonSSHDTimeout}, runSSHDT(t.Context(), root, rootOwned))
+	assert.Less(t, time.Since(start), sshdTimeout+2*time.Second)
 }

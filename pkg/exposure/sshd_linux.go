@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // sshdCandidates are the only places the sshd binary is looked for. It is
@@ -82,19 +84,18 @@ func (b *sshdStderr) failureReason(root string, mapOwner func(string, uint32) ui
 	if b.overflow {
 		return ""
 	}
-	data := b.data[:b.n]
-	for line := range bytes.SplitSeq(data, []byte("\n")) {
-		if bytes.Equal(bytes.TrimSuffix(line, []byte("\r")), []byte(privsepDiagnostic)) {
-			if privsepStatus(root, mapOwner) == statusAbsent {
-				return reasonSSHDPrivsepMissing
-			}
-			break
-		}
-	}
-	// Log prefixes vary. OpenSSH emits "sshd: no hostkeys available -- exiting."
-	// https://github.com/openssh/openssh-portable/blob/V_9_6_P1/sshd.c#L1934
-	if bytes.Contains(data, []byte("no hostkeys available")) {
+	// Only the final fatal line names the reason for exit. Derivation requires
+	// an unambiguous diagnostic; unknown accompanying output fails closed.
+	lines := bytes.Split(bytes.TrimRight(b.data[:b.n], "\r\n"), []byte("\n"))
+	last := string(bytes.TrimSuffix(lines[len(lines)-1], []byte("\r")))
+	// OpenSSH portable V_9_6_P1, sshd.c: "no hostkeys available -- exiting."
+	switch last {
+	case "sshd: no hostkeys available -- exiting.", "fatal: no hostkeys available -- exiting.", "fatal: sshd: no hostkeys available -- exiting.", "sshd: fatal: no hostkeys available -- exiting.":
 		return reasonSSHDNoHostKeys
+	case privsepDiagnostic:
+		if len(lines) == 1 && privsepStatus(root, mapOwner) == statusAbsent {
+			return reasonSSHDPrivsepMissing
+		}
 	}
 	return ""
 }
@@ -129,29 +130,57 @@ func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) ui
 	cmd.Stdin = nil
 	var stderr sshdStderr
 	defer clear(stderr.data[:])
-	cmd.Stderr = &stderr
-	cmd.WaitDelay = time.Second
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = nil
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		return sshdRun{}
+	}
+	errPipe, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdout.Close()
 		return sshdRun{}
 	}
 	if err := cmd.Start(); err != nil {
 		return sshdRun{}
 	}
+	// Waitid observes exit without reaping. The leader pins its group ID
+	// until the deadline callback and both readers have finished.
+	killGroup := func() { _ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL) }
+	stopped := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(stopped)
+		killGroup()
+		_ = stdout.Close()
+		_ = errPipe.Close()
+	})
+	stderrDone := make(chan error, 1)
+	go func() { _, err := io.Copy(&stderr, errPipe); stderrDone <- err }()
 	var buf bytes.Buffer
 	_, readErr := io.Copy(&buf, io.LimitReader(stdout, sshdStdoutCap+1))
 	over := buf.Len() > sshdStdoutCap
 	if over {
-		_ = cmd.Process.Kill()
+		killGroup()
+	}
+	stderrErr := <-stderrDone
+	var info unix.Siginfo
+	for {
+		err = unix.Waitid(unix.P_PID, cmd.Process.Pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+		if err != unix.EINTR {
+			break
+		}
+	}
+	if !stop() {
+		<-stopped
 	}
 	waitErr := cmd.Wait()
-	if over || readErr != nil || waitErr != nil || ctx.Err() != nil {
+	if over || readErr != nil || stderrErr != nil || waitErr != nil || ctx.Err() != nil {
 		clear(buf.Bytes())
 		if !over && context.Cause(ctx) == errSSHDTimeout {
 			return sshdRun{reason: reasonSSHDTimeout}
 		}
 		var exit *exec.ExitError
-		if !over && readErr == nil && ctx.Err() == nil && errors.As(waitErr, &exit) &&
+		if !over && readErr == nil && stderrErr == nil && ctx.Err() == nil && errors.As(waitErr, &exit) &&
 			exit.ExitCode() > 0 {
 			return sshdRun{reason: stderr.failureReason(root, mapOwner)}
 		}
