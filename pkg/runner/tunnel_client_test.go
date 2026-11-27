@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/pkg/config"
@@ -20,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xtaci/smux"
 )
 
 func TestIsValidSessionID(t *testing.T) {
@@ -503,4 +505,33 @@ func TestTunnelUnregisterAndClose_LeavesANewerTunnelUnderTheSameID(t *testing.T)
 	assert.Same(t, newer, got)
 	assert.Error(t, stale.ctx.Err())
 	assert.NoError(t, newer.ctx.Err())
+}
+
+func TestTunnelServe_UnregistersWhenTheStreamLoopPanics(t *testing.T) {
+	tc := registeredTunnel(t, "panicking-session", relayMustNotStart)
+	logs := captureLogs(t)
+
+	tc.serve(func() { panic("injected stream loop panic") })
+
+	_, registered := GetActiveTunnel("panicking-session")
+	assert.False(t, registered)
+	assert.ErrorIs(t, tc.ctx.Err(), context.Canceled)
+	assert.Contains(t, logs.String(), `"goroutine":"tunnel session"`)
+}
+
+func TestTunnelServeStream_FreesItsSlotsWhenTheHandlerPanics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := captureLogs(t)
+		tc := &TunnelClient{sessionID: "s", streamSem: make(chan struct{}, 1)}
+		tc.streamSem <- struct{}{}
+		globalStreamSem <- struct{}{}
+		globalBefore := len(globalStreamSem)
+
+		tc.serveStream(nil, func(*smux.Stream) { panic("injected stream handler panic") })
+
+		synctest.Wait()
+		assert.Empty(t, tc.streamSem)
+		assert.Len(t, globalStreamSem, globalBefore-1)
+		assert.Contains(t, logs.String(), `"goroutine":"tunnel stream"`)
+	})
 }
