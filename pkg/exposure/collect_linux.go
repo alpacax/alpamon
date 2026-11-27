@@ -357,6 +357,8 @@ func (c *collector) readSSHD(ctx context.Context, fs *fsReader, sys systemFiles)
 	switch {
 	case run.notInstalled:
 		d.reasons.add(reasonSSHDNotInstalled)
+	case run.reason != "":
+		d.reasons.add(run.reason)
 	case !run.ok:
 		d.reasons.add(reasonSSHDUnavailable)
 	default:

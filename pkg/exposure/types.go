@@ -58,6 +58,9 @@ const (
 	reasonStrictModesUnresolved     = "strict_modes_unresolved"
 	reasonSSHDNotInstalled          = "sshd_not_installed"
 	reasonSSHDUnavailable           = "sshd_unavailable"
+	reasonSSHDPrivsepMissing        = "sshd_privsep_missing"
+	reasonSSHDBinaryRejected        = "sshd_binary_rejected"
+	reasonSSHDTimeout               = "sshd_timeout"
 	reasonSSHDConfigUnresolved      = "sshd_config_unresolved"
 	reasonSSHDMatchConditional      = "sshd_match_conditional"
 	reasonSSHDMatchUnsupported      = "sshd_match_unsupported"
@@ -80,6 +83,7 @@ var agentReasons = map[string]bool{
 	reasonLimitExceeded: true, reasonConcurrentChange: true, reasonTimeout: true,
 	reasonHomeUnreadable: true, reasonPathTokenUnresolved: true,
 	reasonStrictModesUnresolved: true, reasonSSHDNotInstalled: true,
+	reasonSSHDPrivsepMissing: true, reasonSSHDBinaryRejected: true, reasonSSHDTimeout: true,
 	reasonSSHDUnavailable: true, reasonSSHDConfigUnresolved: true,
 	reasonSSHDMatchConditional: true, reasonSSHDMatchUnsupported: true,
 	reasonRevocationUnresolved: true, reasonPAMBackendUnresolved: true,

@@ -23,6 +23,7 @@ var sshdCandidates = []string{"/usr/sbin/sshd", "/usr/bin/sshd"}
 // sshdRun is the outcome of one sshd -T run. out is the capped stdout of a
 // successful run and is parsed in place; it is never logged or sent.
 type sshdRun struct {
+	reason       string
 	notInstalled bool
 	ok           bool
 	out          []byte
@@ -61,22 +62,65 @@ func findSSHD(root string, mapOwner func(string, uint32) uint32) (string, bool) 
 	return "", missing
 }
 
-// runSSHDT runs "sshd -T" directly, without a shell, with a 5-second
-// deadline, stderr discarded and stdout capped. On a timeout or an overlong
-// output the process is killed through its handle and reaped.
+const privsepPath = "/run/sshd"
+const privsepDiagnostic = "Missing privilege separation directory: " + privsepPath
+
+type sshdStderr struct {
+	data     [4096]byte
+	n        int
+	overflow bool
+}
+
+func (b *sshdStderr) Write(p []byte) (int, error) {
+	n := copy(b.data[b.n:], p)
+	b.n += n
+	b.overflow = b.overflow || n != len(p)
+	return len(p), nil
+}
+
+func (b *sshdStderr) privsepMissing() bool {
+	if b.overflow {
+		return false
+	}
+	for line := range bytes.SplitSeq(b.data[:b.n], []byte("\n")) {
+		if bytes.Equal(bytes.TrimSuffix(line, []byte("\r")), []byte(privsepDiagnostic)) {
+			return true
+		}
+	}
+	return false
+}
+
+func privsepStatus(root string, mapOwner func(string, uint32) uint32) string {
+	fs, err := newFSReader(root, mapOwner)
+	if err != nil {
+		return statusUnreadable
+	}
+	defer fs.close()
+	_, result := fs.exists(privsepPath)
+	return result.status
+}
+
+var errSSHDTimeout = errors.New("sshd deadline reached")
+
+// runSSHDT retains only bounded output from a validated sshd -T invocation.
 func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) uint32) sshdRun {
 	bin, missing := findSSHD(root, mapOwner)
 	if bin == "" {
-		return sshdRun{notInstalled: missing}
+		if missing {
+			return sshdRun{notInstalled: true}
+		}
+		return sshdRun{reason: reasonSSHDBinaryRejected}
 	}
-	ctx, cancel := context.WithTimeout(ctx, sshdTimeout)
+	ctx, cancel := context.WithTimeoutCause(ctx, sshdTimeout, errSSHDTimeout)
 	defer cancel()
 
 	cmd := commandContext(ctx, bin, "-T")
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
 	cmd.Dir = "/"
 	cmd.Stdin = nil
-	cmd.Stderr = nil // the null device
+	var stderr sshdStderr
+	defer clear(stderr.data[:])
+	cmd.Stderr = &stderr
 	cmd.WaitDelay = time.Second
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -94,6 +138,14 @@ func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) ui
 	waitErr := cmd.Wait()
 	if over || readErr != nil || waitErr != nil || ctx.Err() != nil {
 		clear(buf.Bytes())
+		if !over && context.Cause(ctx) == errSSHDTimeout {
+			return sshdRun{reason: reasonSSHDTimeout}
+		}
+		var exit *exec.ExitError
+		if !over && readErr == nil && ctx.Err() == nil && errors.As(waitErr, &exit) &&
+			exit.ExitCode() > 0 && stderr.privsepMissing() && privsepStatus(root, mapOwner) == statusAbsent {
+			return sshdRun{reason: reasonSSHDPrivsepMissing}
+		}
 		return sshdRun{}
 	}
 	return sshdRun{ok: true, out: buf.Bytes()}

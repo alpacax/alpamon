@@ -70,7 +70,7 @@ func TestRunSSHDTMissingAndForeignBinary(t *testing.T) {
 
 	fakeSSHD(t, root, "echo usepam yes\n")
 	notRoot := func(string, uint32) uint32 { return 1000 }
-	assert.Equal(t, sshdRun{}, runSSHDT(context.Background(), root, notRoot), "a binary not owned by root is never run")
+	assert.Equal(t, sshdRun{reason: reasonSSHDBinaryRejected}, runSSHDT(context.Background(), root, notRoot), "a binary not owned by root is never run")
 	assert.Empty(t, calls())
 
 	require.NoError(t, os.Remove(filepath.Join(root, "usr/sbin/sshd")))
@@ -87,6 +87,8 @@ func TestRunSSHDTRejectsWritableBinaryAndParent(t *testing.T) {
 		uid  uint32
 	}{
 		{"group-writable binary", "usr/sbin/sshd", 0o775, 0},
+		{"world-writable binary", "usr/sbin/sshd", 0o757, 0},
+		{"group-writable parent", "usr/sbin", 0o775, 0},
 		{"world-writable parent", "usr/sbin", 0o777, 0},
 		{"non-root parent", "usr/sbin", 0o755, 1000},
 	} {
@@ -101,7 +103,7 @@ func TestRunSSHDTRejectsWritableBinaryAndParent(t *testing.T) {
 				}
 				return 0
 			}
-			assert.Equal(t, sshdRun{}, runSSHDT(context.Background(), root, mapOwner))
+			assert.Equal(t, sshdRun{reason: reasonSSHDBinaryRejected}, runSSHDT(context.Background(), root, mapOwner))
 			assert.Empty(t, calls())
 		})
 	}
@@ -121,7 +123,7 @@ func TestRunSSHDTTimeoutKillsAndReaps(t *testing.T) {
 	fakeSSHD(t, root, "exec sleep 60\n")
 	start := time.Now()
 	run := runSSHDT(context.Background(), root, rootOwned)
-	assert.False(t, run.ok)
+	assert.Equal(t, sshdRun{reason: reasonSSHDTimeout}, run)
 	assert.Less(t, time.Since(start), sshdTimeout+3*time.Second)
 }
 
@@ -186,6 +188,40 @@ func TestOnlySSHDStartsAProcess(t *testing.T) {
 				}
 			}
 			return true
+		})
+	}
+}
+
+func TestRunSSHDTPrivsepDiagnostic(t *testing.T) {
+	const diagnostic = "echo '" + privsepDiagnostic + "' >&2\n"
+	for _, tc := range []struct {
+		name, script, entry, reason string
+	}{
+		{"absent", diagnostic + "exit 1", "", reasonSSHDPrivsepMissing},
+		{"present directory", diagnostic + "exit 1", "directory", ""},
+		{"present file", diagnostic + "exit 1", "file", ""},
+		{"different error", "echo other >&2; exit 1", "", ""},
+		{"substring", "echo 'prefix " + privsepDiagnostic + "' >&2; exit 1", "", ""},
+		{"signal", diagnostic + "kill -TERM $$", "", ""},
+		{"stdout overflow", diagnostic + "head -c 300000 /dev/zero; exit 1", "", ""},
+		{"stderr overflow", diagnostic + "head -c 5000 /dev/zero >&2; exit 1", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(root, "run"), 0o755))
+			entry := filepath.Join(root, privsepPath)
+			switch tc.entry {
+			case "directory":
+				require.NoError(t, os.Mkdir(entry, 0o755))
+			case "file":
+				require.NoError(t, os.WriteFile(entry, nil, 0o644))
+			}
+			fakeSSHD(t, root, tc.script)
+			assert.Equal(t, sshdRun{reason: tc.reason}, runSSHDT(t.Context(), root, rootOwned))
+			if tc.entry == "" {
+				_, err := os.Lstat(entry)
+				assert.ErrorIs(t, err, os.ErrNotExist)
+			}
 		})
 	}
 }
