@@ -19,6 +19,7 @@ import (
 // directory symlinks reached entirely through root-owned directories without
 // group/world write permission are resolved; account paths use no-follow opens.
 type fsReader struct {
+	scan   *sshdDirectoryBudget
 	rootFD int
 	root   unix.Stat_t
 	// mapOwner turns a file's uid into the uid ownership is judged by. It is
@@ -513,6 +514,9 @@ func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) (names []str
 	fd = readable
 	dir := os.NewFile(uintptr(fd), p)
 	defer func() { _ = dir.Close() }()
+	if !f.scan.take() {
+		return nil, failed(statusUnreadable, reasonLimitExceeded)
+	}
 	names, err = dir.Readdirnames(maxDirEntries + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, failed(statusUnreadable, reasonFileUnreadable)

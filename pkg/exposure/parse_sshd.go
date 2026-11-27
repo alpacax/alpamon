@@ -2,6 +2,7 @@ package exposure
 
 import (
 	"bytes"
+	"context"
 	"path"
 	"slices"
 	"strconv"
@@ -124,19 +125,20 @@ type matchBlock struct {
 }
 
 type sshdConfig struct {
-	globals            map[string]string
-	globalsUnsupported bool
-	providers          matchBlock // only the allowlisted path and user survive parsing
-	blocks             []matchBlock
-	files              []inspectedFile
-	reasons            reasonSet // file and parse reasons for the sshd category
+	unreportableMatch     bool
+	globals               map[string]string
+	derivationUnsupported bool
+	providers             matchBlock // only the allowlisted path and user survive parsing
+	blocks                []matchBlock
+	files                 []inspectedFile
+	reasons               reasonSet // file and parse reasons for the sshd category
 	// readAll is set when every configuration file was read in full.
 	readAll          bool
 	configIncomplete bool
 }
 
 func (cfg sshdConfig) canDerive() bool {
-	if !cfg.readAll || cfg.configIncomplete || cfg.globalsUnsupported || cfg.providers.parseErr {
+	if !cfg.readAll || cfg.configIncomplete || cfg.derivationUnsupported || cfg.providers.parseErr {
 		return false
 	}
 	for _, mb := range cfg.blocks {
@@ -185,12 +187,12 @@ func (cfg *sshdConfig) setGlobal(key string, args []string) {
 	}
 	v := configSetting(key, args)
 	if !configValueSupported(key, v, args) {
-		cfg.globalsUnsupported = true
+		cfg.derivationUnsupported = true
 		return
 	}
 	if set {
 		if len(previous)+1+len(v) > maxConfigSettingBytes {
-			cfg.globalsUnsupported = true
+			cfg.derivationUnsupported = true
 			return
 		}
 		v = previous + " " + v
@@ -273,7 +275,11 @@ const sshdConfigPath = "/etc/ssh/sshd_config"
 
 // parseSSHDConfig reads global settings and Match blocks in Include order.
 func parseSSHDConfig(src systemSource) sshdConfig {
-	p := &sshdConfigParser{src: src, cfg: sshdConfig{providers: matchBlock{block: matchSettings{Sets: map[string]string{}}}, globals: map[string]string{}, reasons: reasonSet{}, readAll: true}, walker: includeWalker{src: src}}
+	return parseSSHDConfigContext(context.Background(), src)
+}
+
+func parseSSHDConfigContext(ctx context.Context, src systemSource) sshdConfig {
+	p := &sshdConfigParser{ctx: ctx, src: src, cfg: sshdConfig{providers: matchBlock{block: matchSettings{Sets: map[string]string{}}}, globals: map[string]string{}, reasons: reasonSet{}, readAll: true}, walker: includeWalker{src: src}}
 	p.file(sshdConfigPath, 0, true)
 	p.cfg.providers.finish()
 	for i := range p.cfg.blocks {
@@ -284,10 +290,12 @@ func parseSSHDConfig(src systemSource) sshdConfig {
 }
 
 type sshdConfigParser struct {
-	src     systemSource
-	cfg     sshdConfig
-	walker  includeWalker
-	current *matchBlock
+	ctx       context.Context
+	exhausted bool
+	src       systemSource
+	cfg       sshdConfig
+	walker    includeWalker
+	current   *matchBlock
 }
 
 func (p *sshdConfigParser) fail(code string) {
@@ -295,7 +303,23 @@ func (p *sshdConfigParser) fail(code string) {
 	p.cfg.readAll = false
 }
 
+func (p *sshdConfigParser) active() bool {
+	if p.ctx.Err() != nil {
+		p.fail(reasonTimeout)
+		return false
+	}
+	return !p.exhausted
+}
+
 func (p *sshdConfigParser) file(name string, depth int, required bool) {
+	if !p.active() {
+		return
+	}
+	if p.walker.files >= maxIncludeFiles {
+		p.fail(reasonLimitExceeded)
+		p.exhausted = true
+		return
+	}
 	p.walker.file(name, depth, func(l loaded) {
 		if l.status == statusAbsent && !required {
 			// sshd skips an Include that matches nothing.
@@ -316,6 +340,9 @@ func (p *sshdConfigParser) file(name string, depth int, required bool) {
 		}
 		p.cfg.files = append(p.cfg.files, inspectedFile{path: name, mtime: l.mtime})
 		forEachLine(l.data, func(line []byte, tooLong bool) bool {
+			if !p.active() {
+				return false
+			}
 			if tooLong {
 				p.fail(reasonLimitExceeded)
 				return true
@@ -329,17 +356,56 @@ func (p *sshdConfigParser) file(name string, depth int, required bool) {
 				return true
 			}
 			switch kw {
-			case "challengeresponseauthentication":
-				kw = "kbdinteractiveauthentication"
-			case "pubkeyacceptedkeytypes":
-				kw = "pubkeyacceptedalgorithms"
+			case "challengeresponseauthentication", "dsaauthentication", "rsaauthentication", "skeyauthentication", "pubkeyacceptedkeytypes", "authorizedkeysfile2":
+				p.cfg.derivationUnsupported = true
+				// Keep existing Match settings for the wire even when the
+				// global policy must come from an actual probe.
+				switch kw {
+				case "challengeresponseauthentication", "skeyauthentication":
+					if p.current != nil {
+						p.current.set("kbdinteractiveauthentication", args)
+					}
+				case "pubkeyacceptedkeytypes":
+					if p.current != nil {
+						p.current.set("pubkeyacceptedalgorithms", args)
+					}
+				}
+				return true
+			case "trustedusercakeys", "authorizedkeysfile":
+				for _, arg := range args {
+					if !(len(args) == 1 && strings.EqualFold(arg, "none")) && !validPath(arg) {
+						p.cfg.derivationUnsupported = true
+					}
+				}
+			case "allowusers", "denyusers", "allowgroups", "denygroups":
+				// Some sshd versions retain an attached # as part of the
+				// pattern. Never publish that text or guess a shorter pattern.
+				for _, arg := range args {
+					if strings.ContainsRune(arg, '#') {
+						p.cfg.derivationUnsupported = true
+						if p.current != nil {
+							p.current.unsupported = true
+							p.cfg.unreportableMatch = true
+						}
+						return true
+					}
+				}
+				if p.current != nil {
+					p.cfg.derivationUnsupported = true
+				}
 			}
 			switch kw {
 			case "include":
+				if p.current != nil || depth != 0 {
+					p.cfg.derivationUnsupported = true
+				}
 				if len(args) == 0 {
 					p.fail(reasonParseError)
 				}
 				for _, a := range args {
+					if !p.active() {
+						return false
+					}
 					p.include(a, depth)
 				}
 			case "match":
@@ -354,7 +420,7 @@ func (p *sshdConfigParser) file(name string, depth int, required bool) {
 			default:
 				if p.current != nil {
 					if _, known := sshdDefaults[kw]; known && (!p.current.seen[kw] || multiLineKeywords[kw]) && !configValueSupported(kw, configSetting(kw, args), args) {
-						p.cfg.globalsUnsupported = true
+						p.cfg.derivationUnsupported = true
 					}
 					p.current.set(kw, args)
 				} else if !p.cfg.configIncomplete {
@@ -396,6 +462,12 @@ func (p *sshdConfigParser) include(arg string, depth int) {
 		p.fail(reasonParseError)
 		return
 	}
+	if p.walker.files >= maxIncludeFiles {
+		p.fail(reasonLimitExceeded)
+		p.exhausted = true
+		return
+	}
+	p.walker.files++ // A glob consumes a traversal slot even when it matches nothing.
 	names, l := p.src.list(dir)
 	p.cfg.reasons.merge(l.reasons)
 	if len(l.reasons) > 0 {

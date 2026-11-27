@@ -1,6 +1,7 @@
 package exposure
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -615,13 +616,13 @@ func TestSSHDConfigDefaults(t *testing.T) {
 func TestSSHDGlobalsFollowIncludeOrder(t *testing.T) {
 	cfg := parseSSHDConfig(mapSource{files: map[string]string{
 		sshdConfigPath:            "Include conf.d/*.conf\nKbdInteractiveAuthentication yes\nPubkeyAcceptedAlgorithms +ssh-rsa\nAllowUsers three\n",
-		"/etc/ssh/conf.d/10.conf": "ChallengeResponseAuthentication NO\nPubkeyAcceptedKeyTypes ssh-ed25519\nAllowUsers YES\nAllowUsers two\nDenyUsers one\nAllowGroups g1\nDenyGroups g3\nAuthorizedKeysFile keys/a keys/b\nMatch User guest\nAllowUsers guest\nChallengeResponseAuthentication yes\nPasswordAuthentication no\n",
-		"/etc/ssh/conf.d/20.conf": "KbdInteractiveAuthentication yes\nDenyUsers two\nAllowGroups g2\nDenyGroups g4\nAuthorizedKeysFile keys/c\n",
+		"/etc/ssh/conf.d/10.conf": "KbdInteractiveAuthentication NO\nPubkeyAcceptedAlgorithms ssh-ed25519\nAllowUsers YES\nAllowUsers two\nDenyUsers one\nAllowGroups g1\nDenyGroups g3\nAuthorizedKeysFile /keys/a /keys/b\nMatch User guest\nKbdInteractiveAuthentication yes\nPasswordAuthentication no\n",
+		"/etc/ssh/conf.d/20.conf": "KbdInteractiveAuthentication yes\nDenyUsers two\nAllowGroups g2\nDenyGroups g4\nAuthorizedKeysFile /keys/c\n",
 	}, dirs: map[string][]string{"/etc/ssh/conf.d": {"20.conf", "10.conf"}}})
 	got := cfg.effective()
 	for key, want := range map[string]string{
 		"kbdinteractiveauthentication": "no", "pubkeyacceptedalgorithms": "ssh-ed25519", "allowusers": "YES two three",
-		"authorizedkeysfile": "keys/a keys/b", "passwordauthentication": "yes",
+		"authorizedkeysfile": "/keys/a /keys/b", "passwordauthentication": "yes",
 		"denyusers": "one two", "allowgroups": "g1 g2", "denygroups": "g3 g4",
 	} {
 		assert.Equal(t, ptr(want), got[key], key)
@@ -678,5 +679,52 @@ func TestOversizeMatchSettingsLeaveEffectiveUnknown(t *testing.T) {
 			assert.LessOrEqual(t, len(*block.block.Criteria), 4096)
 		}
 		assert.LessOrEqual(t, len(block.block.Sets["allowusers"]), 4096)
+	}
+}
+
+type countingSSHIncludes struct {
+	mapSource
+	lists  int
+	cancel context.CancelFunc
+}
+
+func (s *countingSSHIncludes) list(p string) ([]string, loaded) {
+	s.lists++
+	if s.cancel != nil {
+		s.cancel()
+	}
+	return s.mapSource.list(p)
+}
+
+func TestEmptySSHDGlobsConsumeIncludeBudget(t *testing.T) {
+	src := &countingSSHIncludes{mapSource: mapSource{files: map[string]string{sshdConfigPath: strings.Repeat("Include conf.d/empty*\n", maxIncludeFiles+10)}}}
+	cfg := parseSSHDConfig(src)
+	assert.Less(t, src.lists, maxIncludeFiles)
+	assert.Contains(t, cfg.reasons, reasonLimitExceeded)
+	assert.Nil(t, cfg.effective())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	src.lists, src.cancel = 0, cancel
+	cfg = parseSSHDConfigContext(ctx, src)
+	assert.Equal(t, 1, src.lists)
+	assert.Contains(t, cfg.reasons, reasonTimeout)
+	assert.Nil(t, cfg.effective())
+}
+
+func TestSSHDAccessListComments(t *testing.T) {
+	for _, key := range []string{"AllowUsers", "DenyUsers", "AllowGroups", "DenyGroups"} {
+		t.Run(key, func(t *testing.T) {
+			src := mapSource{files: map[string]string{sshdConfigPath: key + " \"guest\" # LEAKCANARY"}}
+			cfg := parseSSHDConfig(src)
+			assert.Equal(t, ptr("guest"), cfg.effective()[strings.ToLower(key)])
+			for _, value := range []string{"guest#LEAKCANARY", "\"guest#LEAKCANARY\""} {
+				src.files[sshdConfigPath] = key + " " + value + "\nMatch User guest\n" + key + " " + value
+				cfg = parseSSHDConfig(src)
+				assert.Nil(t, cfg.effective())
+				assert.NotContains(t, cfg.globals, strings.ToLower(key))
+				require.Len(t, cfg.blocks, 1)
+				assert.NotContains(t, cfg.blocks[0].block.Sets, strings.ToLower(key))
+			}
+		})
 	}
 }

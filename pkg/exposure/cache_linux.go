@@ -3,6 +3,7 @@
 package exposure
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -38,7 +39,7 @@ type sourceDependency struct {
 	id        sourceIdentity
 	absent    bool
 	directory bool
-	names     []string
+	nameHash  [sha256.Size]byte
 	dirs      []pathStat
 	statTime  time.Time
 }
@@ -113,7 +114,7 @@ func cachedSource[T any](f *fsReader, key string, input any, read func(*fsReader
 	if found && entry.epoch == f.epoch && reflect.DeepEqual(entry.input, input) && f.unchanged(entry.dependencies) {
 		return clone(entry.value.(T))
 	}
-	local := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, trace: &sourceTrace{}, now: f.now, cacheStat: f.cacheStat}
+	local := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, trace: &sourceTrace{}, now: f.now, cacheStat: f.cacheStat, scan: f.scan}
 	local.noOpenat2.Store(f.noOpenat2.Load())
 	value := read(local)
 	if !local.trace.failed && local.trace.read && complete(value) && local.unchanged(local.trace.dependencies) {
@@ -167,6 +168,9 @@ func (f *fsReader) rememberFile(p string, rule ownerRule, st unix.Stat_t, dirs [
 }
 
 func directoryNames(f *fsReader, fd int) ([]string, bool) {
+	if !f.scan.take() {
+		return nil, false
+	}
 	readable, err := f.openAt(fd, ".", unix.O_RDONLY|unix.O_DIRECTORY)
 	if err != nil {
 		return nil, false
@@ -182,6 +186,19 @@ func directoryNames(f *fsReader, fd int) ([]string, bool) {
 	}
 	slices.Sort(names)
 	return names, true
+}
+
+// Directory entries cannot contain NUL. Hash their sorted, delimited names
+// so cache entries retain a fixed amount of metadata per directory.
+func directoryDigest(names []string) [sha256.Size]byte {
+	h := sha256.New()
+	for _, name := range names {
+		h.Write([]byte(name))
+		h.Write([]byte{0})
+	}
+	var digest [sha256.Size]byte
+	h.Sum(digest[:0])
+	return digest
 }
 
 func (f *fsReader) rememberDirectory(p string, fd int, rule ownerRule) {
@@ -200,7 +217,7 @@ func (f *fsReader) rememberDirectory(p string, fd int, rule ownerRule) {
 		f.trace.failed = true
 		return
 	}
-	dep := sourceDependency{path: p, rule: rule, id: f.cacheIdentity(p, st), directory: true, names: names, statTime: statTime}
+	dep := sourceDependency{path: p, rule: rule, id: f.cacheIdentity(p, st), directory: true, nameHash: directoryDigest(names), statTime: statTime}
 	if !timestampsOldEnough(dep.id, dep.statTime) {
 		f.trace.failed = true
 	}
@@ -209,6 +226,9 @@ func (f *fsReader) rememberDirectory(p string, fd int, rule ownerRule) {
 
 func (f *fsReader) unchanged(dependencies []sourceDependency) bool {
 	for _, dep := range dependencies {
+		if f.scan != nil && f.scan.ctx.Err() != nil {
+			return false
+		}
 		if !dep.absent && !timestampsOldEnough(dep.id, dep.statTime) {
 			return false
 		}
@@ -237,7 +257,7 @@ func (f *fsReader) unchanged(dependencies []sourceDependency) bool {
 					return false
 				}
 				names, ok := directoryNames(f, fd)
-				return ok && slices.Equal(names, dep.names)
+				return ok && directoryDigest(names) == dep.nameHash
 			}
 			err := unix.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW)
 			if dep.absent {

@@ -294,3 +294,120 @@ func TestRunSSHDTWaitFailureReapsLeader(t *testing.T) {
 	assert.Equal(t, sshdRun{}, runSSHDT(t.Context(), root, rootOwned))
 	assert.Less(t, time.Since(start), sshdTimeout)
 }
+
+func TestPrivsepDerivationRequiresModeledInputs(t *testing.T) {
+	const (
+		main   = "etc/ssh/sshd_config"
+		drop   = "etc/ssh/sshd_config.d/60-cloudimg-settings.conf"
+		unit   = "usr/lib/systemd/system/ssh@.service"
+		env    = "etc/default/ssh"
+		status = "var/lib/dpkg/status"
+	)
+	type change struct{ name, path, content string }
+	tests := []change{
+		{"no service template", unit, ""},
+		{"non-ASCII service argument", unit, "[Service]\nExecStart=/usr/sbin/sshd\u00a0-i"},
+		{"service options", unit, "[Service]\nExecStart=/usr/sbin/sshd -i -o PasswordAuthentication=yes"},
+		{"service drop-in", "run/systemd/system/sshd@.service.d/override.conf", "[Service]\nExecStart=/usr/sbin/sshd -f /etc/ssh/other"},
+		{"environment options", env, "SSHD_OPTS=-h /etc/ssh/other"},
+		{"missing environment", env, ""},
+		{"unknown expansion", unit, "[Service]\nExecStart=/usr/sbin/sshd -i $OPTIONS"},
+		{"unreadable service", unit, "<directory>"},
+		{"unreadable drop-in", "etc/systemd/system/ssh@.service.d/options.conf", "<directory>"},
+		{"include inside match", main, "Match User guest\nInclude sshd_config.d/*.conf"},
+		{"legacy package", status, "Package: openssh-server\nVersion: 1:8.6p1-1\nStatus: install ok installed\n"},
+		{"missing package status", status, ""},
+		{"unrecognized version", status, "Package: openssh-server\nVersion: 9.x\nStatus: install ok installed\n"},
+		{"two list blocks", main, "Match Group staff\nAllowUsers one\nMatch LocalPort 22\nAllowUsers two"},
+		{"single list block", main, "Match Group staff\nDenyGroups guests"},
+		{"attached comment", drop, "AllowUsers guest#LEAKCANARY"},
+		{"relative trusted CA", drop, "TrustedUserCAKeys etc/ca"},
+		{"mixed none and absolute key paths", drop, "AuthorizedKeysFile none /etc/ssh/keys"},
+		{"relative authorized keys", drop, "AuthorizedKeysFile /etc/ssh/keys keys/second"},
+	}
+	for _, alias := range []string{"ChallengeResponseAuthentication", "DSAAuthentication", "RSAAuthentication", "SKeyAuthentication", "PubkeyAcceptedKeyTypes", "AuthorizedKeysFile2"} {
+		tests = append(tests, change{"alias " + alias, drop, "Match User guest\n" + alias + " no"})
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+			spec := loadCase(t, dir)
+			root, proc := buildHost(t, dir, spec)
+			target := filepath.Join(root, tc.path)
+			require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
+			switch tc.content {
+			case "":
+				require.NoError(t, os.Remove(target))
+			case "<directory>":
+				if _, err := os.Lstat(target); err == nil {
+					require.NoError(t, os.Remove(target))
+				}
+				require.NoError(t, os.Mkdir(target, 0o755))
+			default:
+				require.NoError(t, os.WriteFile(target, []byte(tc.content), 0o644))
+			}
+			r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(t.Context())
+			assert.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+			assert.Nil(t, r.SSHD.Effective)
+			body, err := finalize(r)
+			require.NoError(t, err)
+			assert.NotContains(t, string(body), "LEAKCANARY")
+		})
+	}
+}
+
+func TestPrivsepStockConfigAndScalarMatch(t *testing.T) {
+	dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	c := newCollector(caseOptions(t, dir, spec, root, proc))
+	want := make(map[string]*string, len(sshdDefaults))
+	for key, v := range sshdDefaults {
+		if v == "" {
+			want[key] = nil
+		} else {
+			want[key] = &v
+		}
+	}
+	want["passwordauthentication"], want["kbdinteractiveauthentication"] = ptr("no"), ptr("no")
+	for _, withMatch := range []bool{false, true} {
+		if withMatch {
+			f, err := os.OpenFile(filepath.Join(root, sshdConfigPath), os.O_APPEND|os.O_WRONLY, 0)
+			require.NoError(t, err)
+			_, err = f.WriteString("\nMatch User guest\nPasswordAuthentication yes\n")
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+		}
+		r := c.collect(t.Context())
+		assert.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+		assert.Equal(t, want, r.SSHD.Effective)
+		if withMatch {
+			require.Len(t, r.SSHD.MatchBlocks, 1)
+			assert.Equal(t, "yes", r.SSHD.MatchBlocks[0].Sets["passwordauthentication"])
+		}
+	}
+}
+
+func TestSSHDProbePreservesConditionalAuthenticationAliases(t *testing.T) {
+	dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	opts := caseOptions(t, dir, spec, root, proc)
+	opts.runSSHD = func(context.Context) sshdRun {
+		return sshdRun{ok: true, out: []byte("kbdinteractiveauthentication no\n")}
+	}
+	write := func(value string) *exposureReport {
+		require.NoError(t, os.WriteFile(filepath.Join(root, sshdConfigPath), []byte("Match User guest\n"+value), 0o644))
+		return newCollector(opts).collect(t.Context())
+	}
+	r := write("ChallengeResponseAuthentication yes")
+	assert.Equal(t, ptr("no"), r.SSHD.Effective["kbdinteractiveauthentication"])
+	require.Len(t, r.SSHD.MatchBlocks, 1)
+	assert.Equal(t, "yes", r.SSHD.MatchBlocks[0].Sets["kbdinteractiveauthentication"])
+	r = write("AllowUsers guest#LEAKCANARY")
+	assert.Nil(t, r.SSHD.Effective)
+	assert.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDMatchUnsupported)
+	body, err := finalize(r)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "LEAKCANARY")
+}

@@ -2,7 +2,10 @@
 
 package exposure
 
-import "strconv"
+import (
+	"context"
+	"strconv"
+)
 
 // The read trace gates storage; account and sudo results depend only on tracked bytes and the host name.
 func readAccounts(sys systemFiles) accountsData {
@@ -23,9 +26,29 @@ func readCachedSudo(sys systemFiles, host string) sudoPolicy {
 	}, func(sudoPolicy) bool { return true }, immutable[sudoPolicy])
 }
 
-func readCachedSSHDConfig(sys systemFiles) sshdConfig {
-	return cachedSource(sys.f, "sshd:"+sshdConfigPath, nil, func(f *fsReader) sshdConfig {
-		return parseSSHDConfig(systemFiles{f: f})
+type sshdDirectoryBudget struct {
+	ctx       context.Context
+	remaining int
+}
+
+func (b *sshdDirectoryBudget) take() bool {
+	if b == nil {
+		return true
+	}
+	if b.ctx.Err() != nil || b.remaining == 0 {
+		return false
+	}
+	b.remaining--
+	return true
+}
+
+func readCachedSSHDConfig(ctx context.Context, sys systemFiles) sshdConfig {
+	// The category owns this budget, including cache validation enumerations.
+	f := sys.f
+	reader := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, cache: f.cache, epoch: f.epoch, collection: f.collection, now: f.now, cacheStat: f.cacheStat, scan: &sshdDirectoryBudget{ctx, maxIncludeFiles}}
+	reader.noOpenat2.Store(f.noOpenat2.Load())
+	return cachedSource(reader, "sshd:"+sshdConfigPath, nil, func(f *fsReader) sshdConfig {
+		return parseSSHDConfigContext(ctx, systemFiles{f: f})
 	}, func(d sshdConfig) bool { return d.canDerive() && len(d.reasons) == 0 }, immutable[sshdConfig])
 }
 
