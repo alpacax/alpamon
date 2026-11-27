@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -672,4 +673,83 @@ func TestPrivsepRecollection(t *testing.T) {
 		assert.Equal(t, 3, int(stats.Load()))
 		assert.Equal(t, 5, int(reads.Load()))
 	})
+}
+
+func TestReportResendsOnlyForTheRejectedSSHDReason(t *testing.T) {
+	const field = "/categories/sshd/reasons/1"
+	const unknown = `{"field":"` + field + `","code":"unknown_reason"}`
+	for _, tc := range []struct {
+		name, reason, errors string
+		resend               bool
+	}{
+		{"config derived", reasonSSHDPrivsepMissing, unknown, true},
+		{"rejected binary", reasonSSHDBinaryRejected, unknown, true},
+		{"deadline", reasonSSHDTimeout, unknown, true},
+		{"other reason", reasonSSHDUnavailable, unknown, false},
+		{"another error", reasonSSHDPrivsepMissing, unknown + "," + unknown, false},
+		{"other field", reasonSSHDPrivsepMissing, `{"field":"/categories/keys/reasons/1","code":"unknown_reason"}`, false},
+		{"other index", reasonSSHDPrivsepMissing, `{"field":"/categories/sshd/reasons/0","code":"unknown_reason"}`, false},
+		{"other code", reasonSSHDPrivsepMissing, `{"field":"` + field + `","code":"invalid_value"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := acceptingPoster()
+			p.answers[reportURL] = []fakeResponse{{status: 400, body: `{"errors":[` + tc.errors + `]}`}}
+			reads := 0
+			s := testService(p, func(context.Context) *exposureReport {
+				reads++
+				r := sampleReport()
+				r.Categories[catSSHD] = coverage{Status: coveragePartial, Reasons: []string{reasonFileUnreadable, tc.reason}}
+				if tc.reason == reasonSSHDPrivsepMissing {
+					r.SSHD.Effective = map[string]*string{"usepam": ptr("yes")}
+				}
+				return r
+			})
+			s.readAndDeliver(t.Context())
+			assert.Equal(t, 1, reads)
+			assert.Len(t, p.callsTo(checkURL), 1)
+			reports := p.callsTo(reportURL)
+			if !tc.resend {
+				assert.Len(t, reports, 1)
+				return
+			}
+			require.Len(t, reports, 2)
+			original := decodeTree(t, reports[0].body)
+			legacy := decodeTree(t, reports[1].body)
+			assert.Equal(t, goldenHash(t, reports[1].body), legacy["hash"])
+			assert.NotEqual(t, original["hash"], legacy["hash"])
+			original["hash"] = legacy["hash"]
+			original["sshd"].(map[string]any)["effective"] = nil
+			setCategory(original, catSSHD, coveragePartial, reasonFileUnreadable, reasonSSHDUnavailable)
+			assert.Equal(t, original, legacy)
+		})
+	}
+}
+
+func TestLegacySSHDResendMatchesUnavailableCollection(t *testing.T) {
+	dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	opts := caseOptions(t, dir, spec, root, proc)
+	collector := newCollector(opts)
+	reads := 0
+	post := acceptingPoster()
+	post.answers[reportURL] = []fakeResponse{
+		{status: 400, body: `{"errors":[{"field":"/categories/sshd/reasons/1","code":"unknown_reason"}]}`},
+		{status: 200},
+	}
+	s := testService(post, func(ctx context.Context) *exposureReport {
+		reads++
+		return collector.collect(ctx)
+	})
+	s.readAndDeliver(t.Context())
+	assert.Equal(t, 1, reads)
+	reports := post.callsTo(reportURL)
+	require.Len(t, reports, 2)
+	assert.Contains(t, string(reports[0].body), fpEd0)
+	assert.NotContains(t, string(reports[1].body), fpEd0)
+	opts.runSSHD = func(context.Context) sshdRun { return sshdRun{} }
+	want := newCollector(opts).collect(t.Context())
+	want.ObservedAt = s.lastObserved.Format(time.RFC3339)
+	_, body := prepareReport(want, schemaVersion)
+	assert.Equal(t, string(body), string(reports[1].body))
 }

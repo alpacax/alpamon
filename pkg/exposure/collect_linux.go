@@ -223,7 +223,17 @@ func (c *collector) collect(ctx context.Context) *exposureReport {
 		})
 	}
 	wg.Wait()
-	return b.report()
+	r := b.report()
+	if b.sshd.t != nil && b.sshd.reasons.has(reasonSSHDPrivsepMissing) {
+		// Without usable settings these three readers return file_unreadable
+		// before inspecting any sources. Keep the other workers' observations.
+		b.sshd.t = nil
+		b.keys = keysData{reasons: unreadable()}
+		b.certs = certsData{reasons: unreadable()}
+		b.trust = trustData{reasons: unreadable()}
+		r.unavailableSSHD = b.report
+	}
+	return r
 }
 
 func unreadable() reasonSet { return reasonSet{reasonFileUnreadable: {}} }

@@ -228,6 +228,11 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 		return false
 	}
 	report := s.send(ctx, reportURL, body, reportTimeout, nil)
+	if report.unknownReasonField != "" {
+		if legacy := legacySSHDReport(r, report.unknownReasonField); legacy != nil {
+			report = s.sendAttempts(ctx, reportURL, legacy, reportTimeout, nil, 1)
+		}
+	}
 	if report.unsupportedVersion && r.SchemaVersion == schemaVersion {
 		return true
 	}
@@ -235,6 +240,38 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 		log.Warn().Int("status_code", report.status).Msg("Exposure report was not accepted.")
 	}
 	return false
+}
+
+// legacySSHDReport only downgrades the reason at the exact rejected JSON pointer.
+func legacySSHDReport(report *exposureReport, field string) []byte {
+	c := report.Categories[catSSHD]
+	for i, reason := range c.Reasons {
+		switch reason {
+		case reasonSSHDPrivsepMissing, reasonSSHDBinaryRejected, reasonSSHDTimeout:
+			if field != "/categories/sshd/reasons/"+strconv.Itoa(i) {
+				continue
+			}
+			snapshot := report
+			if report.unavailableSSHD != nil {
+				snapshot = report.unavailableSSHD()
+			}
+			legacy := reportForVersion(snapshot, report.SchemaVersion)
+			legacy.ObservedAt = report.ObservedAt
+			c = legacy.Categories[catSSHD]
+			reasons := reasonSet{}
+			reasons.add(c.Reasons...)
+			delete(reasons, reason)
+			reasons.add(reasonSSHDUnavailable)
+			c.Reasons = reasons.list()
+			legacy.Categories[catSSHD] = c
+			legacy.SSHD.Effective = nil
+			body, err := finalize(legacy)
+			if err == nil && len(body) <= maxReportBytes {
+				return body
+			}
+		}
+	}
+	return nil
 }
 
 func (s *service) buildReport(ctx context.Context, version int) (report *exposureReport, encoded []byte, snapshot *exposureReport) {
@@ -339,29 +376,37 @@ type deliveryResponse struct {
 	status             int
 	ok                 bool
 	unsupportedVersion bool
+	unknownReasonField string
 }
 
-func unsupportedSchemaVersion(body []byte) bool {
+func (r *deliveryResponse) readRefusal(body []byte) {
 	var response struct {
 		Errors []struct {
-			Code string `json:"code"`
+			Code  string `json:"code"`
+			Field string `json:"field"`
 		} `json:"errors"`
 	}
 	if json.Unmarshal(body, &response) != nil {
-		return false
+		return
 	}
 	for _, failure := range response.Errors {
 		if failure.Code == "unsupported_schema_version" {
-			return true
+			r.unsupportedVersion = true
 		}
 	}
-	return false
+	if len(response.Errors) == 1 && response.Errors[0].Code == "unknown_reason" {
+		r.unknownReasonField = response.Errors[0].Field
+	}
 }
 
 // send posts body, retrying transport errors and retryable statuses with
 // backoff. ok is false when delivery is deferred. Neither the request nor
 // the response body is logged.
 func (s *service) send(ctx context.Context, url string, body []byte, timeout time.Duration, out any) deliveryResponse {
+	return s.sendAttempts(ctx, url, body, timeout, out, maxAttempts)
+}
+
+func (s *service) sendAttempts(ctx context.Context, url string, body []byte, timeout time.Duration, out any, attempts int) deliveryResponse {
 	backoff := firstBackoff
 	for attempt := 1; ; attempt++ {
 		resp, status, _, err := s.post.PostExposure(ctx, url, body, timeout)
@@ -378,8 +423,11 @@ func (s *service) send(ctx context.Context, url string, body []byte, timeout tim
 			return deliveryResponse{status: status}
 		}
 		if status >= 400 && status < 500 && status != http.StatusRequestTimeout {
-			return deliveryResponse{status: status, ok: true,
-				unsupportedVersion: status == http.StatusBadRequest && err == nil && unsupportedSchemaVersion(resp)}
+			r := deliveryResponse{status: status, ok: true}
+			if status == http.StatusBadRequest && err == nil {
+				r.readRefusal(resp)
+			}
+			return r
 		}
 		if err == nil && !retryable(status) {
 			if out != nil && status == http.StatusOK {
@@ -390,7 +438,7 @@ func (s *service) send(ctx context.Context, url string, body []byte, timeout tim
 			}
 			return deliveryResponse{status: status, ok: true}
 		}
-		if attempt >= maxAttempts || ctx.Err() != nil {
+		if attempt >= attempts || ctx.Err() != nil {
 			log.Debug().Int("status_code", status).Int("attempts", attempt).Msg("Exposure delivery gave up until the next read.")
 			return deliveryResponse{status: status}
 		}

@@ -108,6 +108,9 @@ const (
 // field is metadata: there is no field that can hold a password hash, a key
 // blob, an option value outside the allowlist or a raw line.
 type exposureReport struct {
+	// Reassemble the same collection without facts that depend on config-derived settings.
+	unavailableSSHD func() *exposureReport
+
 	SchemaVersion int                 `json:"schema_version"`
 	ObservedAt    string              `json:"observed_at"`
 	Hash          string              `json:"hash"`

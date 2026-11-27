@@ -90,6 +90,12 @@
 // Other probe errors yield sshd_unavailable. Nothing here runs
 // sudo, visudo, cvtsudoers or sudo-rs, or calls into PAM.
 //
+// A report refused solely for an unknown sshd_privsep_missing,
+// sshd_binary_rejected or sshd_timeout reason is resent once with
+// sshd_unavailable, null effective settings and coverage for an unavailable
+// probe. It omits evidence collected using the derived policy. The resend keeps the
+// collection timestamp and uses the hash of the revised report.
+//
 // # Platforms
 //
 // The collector and its transport build only on Linux. Other builds compile
