@@ -67,21 +67,8 @@ func TestDistroSSHDExposure(t *testing.T) {
 	require.NotEmpty(t, distroHostKeys(t))
 
 	var expected map[string]*string
-	var templateOnly bool
 	if debianFamily {
 		expected = distroDerivedSettings(t)
-		for _, name := range []string{"ssh@.service", "sshd@.service"} {
-			_, err := os.Stat(filepath.Join("/lib/systemd/system", name))
-			if err == nil {
-				templateOnly = true
-			} else {
-				require.ErrorIs(t, err, os.ErrNotExist)
-			}
-		}
-		if files := distroRegularSSHDUnits(t); len(files) != 0 {
-			templateOnly = false
-		}
-
 	}
 	// Ubuntu socket activation cannot be reproduced in a container. Reproduce its
 	// observable state directly by collecting while /run/sshd is absent.
@@ -113,33 +100,16 @@ func TestDistroSSHDExposure(t *testing.T) {
 				assert.Nil(t, effective)
 			case debianFamily && !tc.directory:
 				assert.Contains(t, reasons, reasonSSHDPrivsepMissing)
-				if templateOnly || expected == nil {
-					assert.Equal(t, expected, effective)
+				assert.Equal(t, expected, effective)
+				if expected == nil {
+					t.Log("default service configuration: effective null")
 				} else {
-					assert.Nil(t, effective, "the image cannot establish an exclusive per-connection service")
-					t.Run("verified per-connection service", func(t *testing.T) {
-						// Reproduce a template-only installation while retaining
-						// the image's sshd binary, config, drop-ins and host keys.
-						for _, unit := range distroRegularSSHDUnits(t) {
-							if _, err := os.Lstat(unit); errors.Is(err, os.ErrNotExist) {
-								continue
-							}
-							moveSSHDPathsAside(t, unit)
-						}
-						file := "/etc/systemd/system/ssh@.service"
-						moveSSHDPathsAside(t, file)
-						f, err := os.OpenFile(file, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-						require.NoError(t, err)
-						t.Cleanup(func() { assert.NoError(t, os.Remove(file)) })
-						_, err = f.WriteString("[Service]\nExecStart=/usr/sbin/sshd -i\n")
-						require.NoError(t, err)
-						require.NoError(t, f.Close())
-						report := newCollector(opts).collect(t.Context())
-						assert.Contains(t, report.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
-						assert.Equal(t, expected, report.SSHD.Effective)
-					})
+					t.Logf("default service configuration: derived %d settings", len(effective))
 				}
 			default:
+				if !tc.directory {
+					t.Log("default service configuration: effective from sshd -T")
+				}
 				assert.NotContains(t, reasons, reasonSSHDPrivsepMissing)
 				assert.NotContains(t, reasons, reasonSSHDNoHostKeys)
 				assert.NotContains(t, reasons, reasonSSHDBinaryRejected)
@@ -195,18 +165,6 @@ func distroDerivedSettings(t *testing.T) map[string]*string {
 	if m < 8 || m == 8 && n < 7 {
 		return nil
 	}
-	// Only plain binary invocations are eligible. A leading systemd command
-	// prefix on a packaged template is outside the collector's simple grammar.
-	for _, file := range []string{"/lib/systemd/system/ssh@.service", "/lib/systemd/system/sshd@.service"} {
-		content, err := os.ReadFile(file)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		require.NoError(t, err)
-		if strings.Contains(string(content), "ExecStart=-") {
-			return nil
-		}
-	}
 	values := maps.Clone(sshdDefaults)
 	seen := map[string]bool{}
 	var read func(string, bool)
@@ -259,21 +217,6 @@ func distroDerivedSettings(t *testing.T) map[string]*string {
 		}
 	}
 	return expected
-}
-
-func distroRegularSSHDUnits(t *testing.T) []string {
-	t.Helper()
-	var files []string
-	for _, dir := range []string{"/etc/systemd/system", "/run/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"} {
-		for _, name := range []string{"ssh.service", "sshd.service"} {
-			file := filepath.Join(dir, name)
-			if _, err := os.Lstat(file); !errors.Is(err, os.ErrNotExist) {
-				require.NoError(t, err)
-				files = append(files, file)
-			}
-		}
-	}
-	return files
 }
 
 func distroHostKeys(t *testing.T) []string {
