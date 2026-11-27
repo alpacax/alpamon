@@ -42,17 +42,22 @@ func (b *sshdDirectoryBudget) take() bool {
 	return true
 }
 
-func readCachedSSHDConfig(ctx context.Context, sys systemFiles) sshdConfig {
+func readCachedSSHDConfig(ctx context.Context, sys systemFiles) (sshdConfig, func() bool) {
 	// The category owns this budget, including cache validation enumerations.
 	f := sys.f
 	reader := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, cache: f.cache, epoch: f.epoch, collection: f.collection, now: f.now, cacheStat: f.cacheStat, scan: &sshdDirectoryBudget{ctx, maxIncludeFiles}}
 	reader.noOpenat2.Store(f.noOpenat2.Load())
-	return cachedSourceValidated(reader, "sshd:"+sshdConfigPath, nil, func(f *fsReader) sshdConfig {
+	config, deps := cachedSourceValidated(reader, "sshd:"+sshdConfigPath, nil, func(f *fsReader) sshdConfig {
 		return parseSSHDConfigContext(ctx, systemFiles{f: f})
 	}, func(d sshdConfig) bool { return d.canDerive() && len(d.reasons) == 0 }, immutable[sshdConfig], func(d sshdConfig) sshdConfig {
 		d.derivationUnsupported = true
 		return d
 	})
+	return config, func() bool {
+		// Recent files may be confirmed within this collection.
+		reader.trace = &sourceTrace{}
+		return reader.unchanged(deps)
+	}
 }
 
 type cachedKeyFile struct {

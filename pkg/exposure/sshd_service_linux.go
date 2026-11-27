@@ -3,8 +3,10 @@
 package exposure
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"io"
 	"maps"
 	"path"
 	"regexp"
@@ -19,40 +21,71 @@ import (
 // Debian package versions include an optional epoch and a distribution revision.
 var opensshVersion = regexp.MustCompile(`^(?:[0-9]+:)?([0-9]+)\.([0-9]+)p[0-9]+(?:-[A-Za-z0-9.+~]+)?$`)
 
-func modernSSHD(src systemSource) bool {
-	l := src.load("/var/lib/dpkg/status")
-	defer clear(l.data)
-	if !l.usable() {
+const maxPackageStatusBytes = 64 << 20
+
+func modernSSHD(ctx context.Context, sys systemFiles) bool {
+	file, before, _, _ := sys.f.openRegular("/var/lib/dpkg/status", ownerRule{system: true})
+	if file == nil {
 		return false
 	}
-	found := false
-	for stanza := range bytes.SplitSeq(l.data, []byte("\n\n")) {
-		var pkg, status, version string
-		for line := range bytes.SplitSeq(stanza, []byte("\n")) {
-			switch key, value, _ := strings.Cut(string(line), ": "); key {
-			case "Package":
-				pkg = value
-			case "Status":
-				status = value
-			case "Version":
-				version = value
-			}
+	defer func() { _ = file.Close() }()
+	if !installedModernSSHD(ctx, file, before.Size) {
+		return false
+	}
+	var after unix.Stat_t
+	return unix.Fstat(int(file.Fd()), &after) == nil && !changed(&before, &after) && before.Ctim == after.Ctim
+}
+
+func installedModernSSHD(ctx context.Context, r io.Reader, size int64) bool {
+	lines := bufio.NewReader(io.LimitReader(r, maxPackageStatusBytes))
+	var pkg, status, version string
+	var continuation bool
+	for ctx.Err() == nil {
+		line, more, err := lines.ReadLine()
+		if err == io.EOF {
+			// A final stanza may end at EOF, but not at the scan cutoff.
+			return size <= maxPackageStatusBytes && pkg == "openssh-server" && supportedSSHDPackage(status, version)
 		}
-		if pkg != "openssh-server" {
+		if err != nil {
+			return false
+		}
+		rest := continuation
+		continuation = more
+		if rest {
 			continue
 		}
-		match := opensshVersion.FindStringSubmatch(version)
-		if found || status != "install ok installed" || match == nil {
-			return false
+		if len(line) == 0 {
+			if pkg == "openssh-server" {
+				return supportedSSHDPackage(status, version)
+			}
+			pkg, status, version = "", "", ""
+			continue
 		}
-		major, err := strconv.Atoi(match[1])
-		minor, err2 := strconv.Atoi(match[2])
-		if err != nil || err2 != nil || major < 8 || major == 8 && minor < 7 {
-			return false
+		key, value, _ := bytes.Cut(line, []byte(": "))
+		if more {
+			// None of the three supported field values needs a second buffer.
+			value = nil
 		}
-		found = true
+		switch string(key) {
+		case "Package":
+			pkg = string(value)
+		case "Status":
+			status = string(value)
+		case "Version":
+			version = string(value)
+		}
 	}
-	return found
+	return false
+}
+
+func supportedSSHDPackage(status, version string) bool {
+	match := opensshVersion.FindStringSubmatch(version)
+	if status != "install ok installed" || match == nil {
+		return false
+	}
+	major, err := strconv.Atoi(match[1])
+	minor, err2 := strconv.Atoi(match[2])
+	return err == nil && err2 == nil && (major > 8 || major == 8 && minor >= 7)
 }
 
 // System unit load path, highest priority first. /lib also serves older
@@ -570,10 +603,11 @@ func (s *sshService) safeStart(ctx context.Context, src systemSource) bool {
 	if s.unsafePre || s.starts != 1 || len(args) == 0 || s.binary == "" || strings.TrimPrefix(args[0], "-") != s.binary {
 		return false
 	}
-	expandsOpts := false
+	expandsOpts, requiresEmpty := false, false
 	for _, arg := range args[1:] {
 		if arg == "$SSHD_OPTS" || arg == "${SSHD_OPTS}" {
 			expandsOpts = true
+			requiresEmpty = requiresEmpty || arg == "${SSHD_OPTS}"
 		} else if !serviceFlags(arg) {
 			return false
 		}
@@ -588,7 +622,7 @@ func (s *sshService) safeStart(ctx context.Context, src systemSource) bool {
 		if optional && l.status == statusAbsent {
 			continue
 		}
-		set, ok := readSSHDEnvironment(l)
+		set, ok := readSSHDEnvironment(l, requiresEmpty)
 		if !ok {
 			return false
 		}
@@ -597,13 +631,13 @@ func (s *sshService) safeStart(ctx context.Context, src systemSource) bool {
 	return ctx.Err() == nil && (!expandsOpts || assigned)
 }
 
-func readSSHDEnvironment(l loaded) (assigned, ok bool) {
+func readSSHDEnvironment(l loaded, requiresEmpty bool) (assigned, ok bool) {
 	ok = serviceLines(l, func(line string) bool {
 		name, value, ok := strings.Cut(line, "=")
 		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
 			value = value[1 : len(value)-1]
 		}
-		if !ok || name != "SSHD_OPTS" || !serviceFlags(value) {
+		if !ok || name != "SSHD_OPTS" || (requiresEmpty && value != "") || !serviceFlags(value) {
 			return false
 		}
 		assigned = true

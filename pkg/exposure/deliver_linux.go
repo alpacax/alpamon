@@ -28,6 +28,7 @@ const (
 	loopRestartPause = 60 * time.Second
 
 	privsepPollInterval = time.Minute
+	legacySSHDInterval  = 24 * time.Hour
 
 	checkTimeout  = 10 * time.Second
 	reportTimeout = 60 * time.Second
@@ -36,9 +37,14 @@ const (
 	maxBackoff    = 5 * time.Minute
 )
 
+type legacySSHDWindow struct {
+	version int
+	retryAt time.Time
+}
+
 type serverCapabilities struct {
-	useV1             atomic.Bool
-	legacySSHDVersion atomic.Int32
+	useV1      atomic.Bool
+	legacySSHD atomic.Pointer[legacySSHDWindow]
 }
 
 // Capabilities are shared by services posting to the same endpoint.
@@ -243,6 +249,7 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 	var res struct {
 		Required *bool `json:"required"`
 	}
+	window := s.legacySSHD.Load()
 	check := s.send(ctx, checkURL, checkBody(r), checkTimeout, &res)
 	switch {
 	case check.unsupportedVersion && r.SchemaVersion == schemaVersion:
@@ -257,6 +264,7 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 		log.Debug().Int("status_code", check.status).Msg("Exposure check was not accepted.")
 		return false
 	case !*res.Required:
+		s.acceptSSHDShape(window, r)
 		return false
 	}
 	report := s.send(ctx, reportURL, body, reportTimeout, nil)
@@ -265,10 +273,12 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 			if legacy, encoded := prepareReport(snapshot, r.SchemaVersion); legacy != nil {
 				report = s.sendAttempts(ctx, reportURL, encoded, reportTimeout, nil, 1)
 				if report.ok && report.status == http.StatusOK {
-					s.legacySSHDVersion.Store(int32(r.SchemaVersion))
+					s.legacySSHD.Store(&legacySSHDWindow{r.SchemaVersion, s.now().Add(legacySSHDInterval)})
 				}
 			}
 		}
+	} else if report.ok && report.status == http.StatusOK {
+		s.acceptSSHDShape(window, r)
 	}
 	if report.unsupportedVersion && r.SchemaVersion == schemaVersion {
 		return true
@@ -279,34 +289,45 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 	return false
 }
 
-// A refusal must point to the exact reason. Once accepted, its legacy shape
-// is also used for the hash check on subsequent collections of this version.
-func legacySSHDReport(report *exposureReport, field string) *exposureReport {
-	c := report.Categories[catSSHD]
-	for i, reason := range c.Reasons {
+func (s *service) acceptSSHDShape(window *legacySSHDWindow, report *exposureReport) {
+	if window != nil && window.version == report.SchemaVersion && specificSSHDReason(report, "") != "" {
+		s.legacySSHD.CompareAndSwap(window, nil)
+	}
+}
+
+// A refusal must point to the exact reason in the submitted report.
+func specificSSHDReason(report *exposureReport, field string) string {
+	for i, reason := range report.Categories[catSSHD].Reasons {
 		switch reason {
 		case reasonSSHDPrivsepMissing, reasonSSHDBinaryRejected, reasonSSHDTimeout, reasonSSHDNoHostKeys:
-			if field != "" && field != "/categories/sshd/reasons/"+strconv.Itoa(i) {
-				continue
+			if field == "" || field == "/categories/sshd/reasons/"+strconv.Itoa(i) {
+				return reason
 			}
-			snapshot := report
-			if report.unavailableSSHD != nil {
-				snapshot = report.unavailableSSHD()
-			}
-			legacy := reportForVersion(snapshot, report.SchemaVersion)
-			legacy.ObservedAt = report.ObservedAt
-			c = legacy.Categories[catSSHD]
-			reasons := reasonSet{}
-			reasons.add(c.Reasons...)
-			delete(reasons, reason)
-			reasons.add(reasonSSHDUnavailable)
-			c.Reasons = reasons.list()
-			legacy.Categories[catSSHD] = c
-			legacy.SSHD.Effective = nil
-			return legacy
 		}
 	}
-	return nil
+	return ""
+}
+
+func legacySSHDReport(report *exposureReport, field string) *exposureReport {
+	reason := specificSSHDReason(report, field)
+	if reason == "" {
+		return nil
+	}
+	snapshot := report
+	if report.unavailableSSHD != nil {
+		snapshot = report.unavailableSSHD()
+	}
+	legacy := reportForVersion(snapshot, report.SchemaVersion)
+	legacy.ObservedAt = report.ObservedAt
+	c := legacy.Categories[catSSHD]
+	reasons := reasonSet{}
+	reasons.add(c.Reasons...)
+	delete(reasons, reason)
+	reasons.add(reasonSSHDUnavailable)
+	c.Reasons = reasons.list()
+	legacy.Categories[catSSHD] = c
+	legacy.SSHD.Effective = nil
+	return legacy
 }
 
 func (s *service) buildReport(ctx context.Context, version int) (report *exposureReport, encoded []byte, snapshot *exposureReport) {
@@ -350,9 +371,10 @@ func (s *service) buildReport(ctx context.Context, version int) (report *exposur
 }
 
 func (s *service) prepareReport(snapshot *exposureReport, version int) (*exposureReport, []byte) {
-	if s.legacySSHDVersion.Load() == int32(version) {
-		if legacy := legacySSHDReport(snapshot, ""); legacy != nil {
-			snapshot = legacy
+	if window := s.legacySSHD.Load(); window != nil && window.version == version && specificSSHDReason(snapshot, "") != "" {
+		now := s.now()
+		if now.Before(window.retryAt) || !s.legacySSHD.CompareAndSwap(window, &legacySSHDWindow{version, now.Add(legacySSHDInterval)}) {
+			snapshot = legacySSHDReport(snapshot, "")
 		}
 	}
 	return prepareReport(snapshot, version)

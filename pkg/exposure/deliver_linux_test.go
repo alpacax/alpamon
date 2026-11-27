@@ -810,15 +810,60 @@ func TestAcceptedLegacySSHDShapeIsUsedForSubsequentChecks(t *testing.T) {
 	}
 }
 
+func TestLegacySSHDShapeRetriesAfterOneDay(t *testing.T) {
+	const refusal = `{"errors":[{"code":"unknown_reason","field":"/categories/sshd/reasons/0"}]}`
+	p := acceptingPoster()
+	s := testService(p, func(context.Context) *exposureReport {
+		r := sampleReport()
+		r.Categories[catSSHD] = coverage{Reasons: []string{reasonSSHDPrivsepMissing}}
+		r.SSHD.Effective = map[string]*string{"usepam": ptr("yes")}
+		return r
+	})
+	start := s.now()
+	now := start
+	s.now = func() time.Time { return now }
+	collectAt := func(elapsed time.Duration, responses []fakeResponse, want ...string) {
+		t.Helper()
+		now = start.Add(elapsed)
+		before := len(p.callsTo(reportURL))
+		p.answers[reportURL] = responses
+		s.readAndDeliver(t.Context())
+		reports := p.callsTo(reportURL)[before:]
+		require.Len(t, reports, len(want))
+		checks := p.callsTo(checkURL)
+		assert.Equal(t, goldenHash(t, reports[0].body), decodeTree(t, checks[len(checks)-1].body)["hash"])
+		for i, reason := range want {
+			assert.Contains(t, string(reports[i].body), reason)
+		}
+	}
+	accepted := []fakeResponse{{status: 200}}
+	rejected := []fakeResponse{{status: 400, body: refusal}, {status: 200}}
+	collectAt(0, rejected, reasonSSHDPrivsepMissing, reasonSSHDUnavailable)
+	collectAt(24*time.Hour-time.Second, accepted, reasonSSHDUnavailable)
+	collectAt(24*time.Hour, rejected, reasonSSHDPrivsepMissing, reasonSSHDUnavailable)
+	collectAt(48*time.Hour-time.Second, accepted, reasonSSHDUnavailable)
+	collectAt(48*time.Hour, accepted, reasonSSHDPrivsepMissing)
+	collectAt(48*time.Hour+time.Second, accepted, reasonSSHDPrivsepMissing)
+
+	collectAt(49*time.Hour, rejected, reasonSSHDPrivsepMissing, reasonSSHDUnavailable)
+	now = start.Add(73 * time.Hour)
+	p.answers[checkURL] = []fakeResponse{{status: 200, body: `{"required":false}`}, {status: 200, body: `{"required":true}`}}
+	before := len(p.callsTo(reportURL))
+	s.readAndDeliver(t.Context())
+	assert.Len(t, p.callsTo(reportURL), before)
+	collectAt(73*time.Hour+time.Second, accepted, reasonSSHDPrivsepMissing)
+}
+
 func TestLegacySSHDShapeFollowsServerEndpoint(t *testing.T) {
 	url := "https://example.test/old-reasons"
 	other := "https://example.test/new-reasons"
 	defer schemaV1ByServer.Delete(url)
 	defer schemaV1ByServer.Delete(other)
 	serviceAt := func(base string) *service { return newService(&scheduler.Session{BaseURL: base}, nil, nil) }
-	serviceAt(url).legacySSHDVersion.Store(schemaVersion)
-	assert.EqualValues(t, schemaVersion, serviceAt(url).legacySSHDVersion.Load())
-	assert.Zero(t, serviceAt(other).legacySSHDVersion.Load())
+	window := &legacySSHDWindow{schemaVersion, time.Now().Add(24 * time.Hour)}
+	serviceAt(url).legacySSHD.Store(window)
+	assert.Same(t, window, serviceAt(url).legacySSHD.Load())
+	assert.Nil(t, serviceAt(other).legacySSHD.Load())
 }
 
 func TestPrivsepPollRequiresRootOwnedDirectory(t *testing.T) {

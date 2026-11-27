@@ -383,11 +383,13 @@ func (c *collector) readSSHD(ctx context.Context, fs *fsReader, sys systemFiles)
 	if run.notInstalled {
 		return d
 	}
-	d.cfg = readCachedSSHDConfig(ctx, sys)
+	cfg, configUnchanged := readCachedSSHDConfig(ctx, sys)
+	d.cfg = cfg
 	if d.cfg.unreportableMatch {
 		d.t = nil
 	}
-	if run.reason == reasonSSHDPrivsepMissing && d.cfg.canDerive() && modernSSHD(sys) && safeSSHDService(ctx, sys, run.binary, c.opts.procRoot) {
+	if run.reason == reasonSSHDPrivsepMissing && d.cfg.canDerive() && modernSSHD(ctx, sys) &&
+		safeSSHDService(ctx, sys, run.binary, c.opts.procRoot) && configUnchanged() {
 		if values := d.cfg.effective(); values != nil {
 			d.t = &sshdT{effective: values, keysCommand: d.cfg.providers.keysCommand, principalsCommand: d.cfg.providers.principalsCommand}
 		}

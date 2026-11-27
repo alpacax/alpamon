@@ -19,9 +19,10 @@
 // O_NOFOLLOW where the kernel lacks openat2, and the file is validated with
 // fstat on the descriptor it is read from. A symlink anywhere on the path, a
 // non-regular file, a foreign owner or a second hard link makes the source
-// "rejected". Reads stop at 1 MiB plus one byte, lines at 16 KiB, and a file
-// whose size or modification time moves during the read is discarded as a
-// concurrent change.
+// "rejected". Configuration reads stop at 1 MiB plus one byte, with a 16 KiB
+// line limit. The package status lookup streams up to 64 MiB and stops at the
+// openssh-server stanza. A file whose size or modification time changes
+// during the read is discarded.
 //
 // Before opening a source, fstatat(AT_SYMLINK_NOFOLLOW) checks its identity
 // through the same pinned directory walk. Identity includes device, inode,
@@ -92,9 +93,10 @@
 // service options, unassigned expansions, mismatched enablement links, and
 // post-boot changes to selected units, aliases, enablement links, drop-in
 // directories or files, or referenced environment files leave effective null.
-// Runtime directories may be newer than boot. A selected unit,
-// alias, enablement link or drop-in under /run leaves effective null. The same
-// applies to unrecognized directives or syntax, non-ASCII glob inputs, relative
+// The collector cannot detect removal of an entire unit lookup or drop-in
+// directory after boot (issue #669). Runtime directories may be newer than boot.
+// A selected unit, alias, enablement link or drop-in under /run leaves effective
+// null. The same applies to unrecognized directives or syntax, non-ASCII glob inputs, relative
 // key or revocation paths, ambiguous or conditional access lists, nested
 // includes or a changed config read.
 // After sshd_privsep_missing the service checks /run/sshd every minute and
@@ -110,6 +112,8 @@
 // probe. It omits evidence collected using the derived policy. The resend keeps the
 // collection timestamp and uses the hash of the revised report. Once accepted,
 // later checks and uploads to that endpoint use this shape for the same schema.
+// After 24 hours the next eligible collection retries the specific reason.
+// An accepted report or a known hash restores that format for subsequent collections.
 //
 // # Platforms
 //

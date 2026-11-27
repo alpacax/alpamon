@@ -99,14 +99,15 @@ func (c *sourceCache) acceptsCollection(collection uint64) bool {
 // Each collection carries its own epoch so an abandoned worker cannot publish
 // an old read as the next day's full read. No lock is held during filesystem IO.
 func cachedSource[T any](f *fsReader, key string, input any, read func(*fsReader) T, complete func(T) bool, clone func(T) T) T {
-	return cachedSourceValidated(f, key, input, read, complete, clone, nil)
+	value, _ := cachedSourceValidated(f, key, input, read, complete, clone, nil)
+	return value
 }
 
 // invalidate prevents a caller from publishing a result whose dependencies
 // changed during its own read, even when it has no persistent cache.
-func cachedSourceValidated[T any](f *fsReader, key string, input any, read func(*fsReader) T, complete func(T) bool, clone func(T) T, invalidate func(T) T) T {
+func cachedSourceValidated[T any](f *fsReader, key string, input any, read func(*fsReader) T, complete func(T) bool, clone func(T) T, invalidate func(T) T) (T, []sourceDependency) {
 	if f.cache == nil && invalidate == nil {
-		return read(f)
+		return read(f), nil
 	}
 	if f.cache != nil {
 		f.cache.mu.Lock()
@@ -120,7 +121,7 @@ func cachedSourceValidated[T any](f *fsReader, key string, input any, read func(
 		}
 		f.cache.mu.Unlock()
 		if found && entry.epoch == f.epoch && reflect.DeepEqual(entry.input, input) && f.unchanged(entry.dependencies) {
-			return clone(entry.value.(T))
+			return clone(entry.value.(T)), entry.dependencies
 		}
 	}
 	local := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, trace: &sourceTrace{}, now: f.now, cacheStat: f.cacheStat, scan: f.scan}
@@ -134,7 +135,7 @@ func cachedSourceValidated[T any](f *fsReader, key string, input any, read func(
 		value = invalidate(value)
 	}
 	if f.cache == nil {
-		return value
+		return value, local.trace.dependencies
 	}
 	if stable && !local.trace.recent {
 		stored := sourceCacheEntry{epoch: f.epoch, input: input, value: clone(value), dependencies: local.trace.dependencies, touched: f.collection}
@@ -151,7 +152,7 @@ func cachedSourceValidated[T any](f *fsReader, key string, input any, read func(
 		}
 		f.cache.mu.Unlock()
 	}
-	return value
+	return value, local.trace.dependencies
 }
 
 func immutable[T any](v T) T { return v }

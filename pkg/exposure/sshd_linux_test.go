@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -396,6 +397,66 @@ func TestPrivsepDerivationRequiresModeledInputs(t *testing.T) {
 	}
 }
 
+func TestPrivsepReadsLargePackageDatabase(t *testing.T) {
+	dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	p := filepath.Join(root, "var/lib/dpkg/status")
+	pkg, err := os.ReadFile(p)
+	require.NoError(t, err)
+	other := "Package: other\nDescription: " + strings.Repeat("x", 1024) + "\n\n"
+	require.NoError(t, os.WriteFile(p, []byte(strings.Repeat(other, 1024)+string(pkg)+"\n\n"), 0o644))
+	// Records after openssh-server need not fit within the scan budget.
+	require.NoError(t, os.Truncate(p, maxPackageStatusBytes+1))
+	r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(t.Context())
+	require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+	assert.Len(t, r.SSHD.Effective, len(sshdDefaults))
+}
+
+func TestPackageStatusRequiresACompleteStanzaWithinBudget(t *testing.T) {
+	const stanza = "Package: openssh-server\nStatus: install ok installed\nVersion: 9.6p1-1\n"
+	assert.True(t, installedModernSSHD(t.Context(), strings.NewReader(stanza), int64(len(stanza))))
+
+	// The last version line straddles the limit and would be valid if truncated.
+	padding := strings.Repeat("x", 1<<20)
+	var parts []io.Reader
+	for range 63 {
+		parts = append(parts, strings.NewReader(padding))
+	}
+	paddingLen := len(padding) - len(stanza) - 1
+	parts = append(parts, strings.NewReader(padding[:paddingLen]), strings.NewReader("\n\n"+strings.TrimSuffix(stanza, "\n")+"invalid\n\n"))
+	source := &io.LimitedReader{R: io.MultiReader(parts...), N: maxPackageStatusBytes + 9}
+	assert.False(t, installedModernSSHD(t.Context(), source, source.N))
+	assert.EqualValues(t, 9, source.N)
+}
+
+func TestPrivsepSettingsAcrossCollections(t *testing.T) {
+	for _, warm := range []bool{false, true} {
+		dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+		spec := loadCase(t, dir)
+		root, proc := buildHost(t, dir, spec)
+		opts := caseOptions(t, dir, spec, root, proc)
+		opts.now = func() time.Time { return time.Now().Add(time.Minute) }
+		c := newCollector(opts)
+		if warm {
+			require.Equal(t, ptr("no"), c.collect(t.Context()).SSHD.Effective["passwordauthentication"])
+		}
+		drop := filepath.Join(root, "etc/ssh/sshd_config.d/60-cloudimg-settings.conf")
+		var writeErr error
+		testHookAfterRead = func(p string) {
+			if p == "/etc/default/ssh" {
+				writeErr = os.WriteFile(drop, []byte("PasswordAuthentication yes\n"), 0o644)
+			}
+		}
+		r := c.collect(t.Context())
+		testHookAfterRead = nil
+		require.NoError(t, writeErr)
+		require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+		assert.Nil(t, r.SSHD.Effective)
+		require.Equal(t, ptr("yes"), c.collect(t.Context()).SSHD.Effective["passwordauthentication"])
+	}
+}
+
 func TestPrivsepRequiresASCIIGlobCandidates(t *testing.T) {
 	dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
 	spec := loadCase(t, dir)
@@ -531,7 +592,9 @@ func TestPrivsepSelectsEnabledSSHService(t *testing.T) {
 		{"ignored drop-ins", inputs{"etc/systemd/system/ssh.service.d/.disabled.conf": unsafe, "etc/systemd/system/ssh.service.d/override.conf.dpkg-old": unsafe}, nil, true},
 		{"optional file absent without expansion", inputs{env: "", unit: "[Service]\nEnvironmentFile=-/etc/default/ssh\nExecStart=/usr/sbin/sshd -D"}, nil, true},
 		{"required file absent", inputs{unit: "[Service]\nEnvironmentFile=/etc/default/missing\nExecStart=/usr/sbin/sshd -D"}, nil, false},
-		{"expanded flags", inputs{unit: "[Service]\nEnvironmentFile=/etc/default/ssh\nExecStart=-/usr/sbin/sshd -D ${SSHD_OPTS}", env: `SSHD_OPTS="-4 -e"`}, nil, true},
+		{"unbraced flags", inputs{unit: "[Service]\nEnvironmentFile=/etc/default/ssh\nExecStart=-/usr/sbin/sshd -D $SSHD_OPTS", env: `SSHD_OPTS="-4 -e"`}, nil, true},
+		{"braced empty", inputs{unit: "[Service]\nEnvironmentFile=/etc/default/ssh\nExecStart=/usr/sbin/sshd -D ${SSHD_OPTS}", env: "SSHD_OPTS="}, nil, true},
+		{"braced flags", inputs{unit: "[Service]\nEnvironmentFile=/etc/default/ssh\nExecStart=/usr/sbin/sshd -D ${SSHD_OPTS}", env: `SSHD_OPTS="-4 -e"`}, nil, false},
 		{"unknown argument", inputs{unit: "[Service]\nExecStart=/usr/sbin/sshd -p 22"}, nil, false},
 		{"environment reset", inputs{env: "SSHD_OPTS=-f /other", "etc/systemd/system/ssh.service.d/reset.conf": "[Service]\nEnvironmentFile=\nEnvironmentFile=-/etc/default/missing"}, nil, false},
 		{"each effective environment file is checked", inputs{env: "SSHD_OPTS=-o PubkeyAuthentication=no", "run/systemd/system/ssh.service.d/options.conf": "[Service]\nEnvironmentFile=/etc/default/options", "etc/default/options": "SSHD_OPTS=-4"}, nil, false},
