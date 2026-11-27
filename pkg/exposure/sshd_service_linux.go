@@ -79,13 +79,13 @@ func enabledSSHUnit(ctx context.Context, src sshUnitSource, suffix string, targe
 					if status == statusAbsent {
 						continue
 					}
-					if status != statusRead || entry.runtime || entry.target == "" || name != "" && name != candidate {
+					if status != statusRead || !entry.stableAt(src.boot) || entry.target == "" || name != "" && name != candidate {
 						return "", "", false
 					}
 					if name == "" {
 						name = candidate
 						selected, ok := sshUnitFile(ctx, src, candidate)
-						if !ok || !selected.canRead() {
+						if !ok || !selected.canRead(src.boot) {
 							return "", "", false
 						}
 						file = selected.file
@@ -124,11 +124,7 @@ func safeSSHDService(ctx context.Context, sys systemFiles, binary, procRoot stri
 	if !ok || btime <= 0 {
 		return false
 	}
-	boot := time.Unix(btime, 0)
-	f := sys.f
-	reader := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, now: f.now, directoryLinkCutoff: boot}
-	reader.noOpenat2.Store(f.noOpenat2.Load())
-	src := sshUnitSource{systemFiles{reader}, boot}
+	src := sshUnitSource{sys, time.Unix(btime, 0)}
 	direct, directFile, ok := enabledSSHUnit(ctx, src, ".service", "multi-user.target")
 	if !ok {
 		return false
@@ -163,7 +159,7 @@ func safeSSHDService(ctx context.Context, sys systemFiles, binary, procRoot stri
 			return false
 		}
 		selected, ok := sshUnitFile(ctx, src, name)
-		if !ok || !selected.canRead() {
+		if !ok || !selected.canRead(src.boot) {
 			return false
 		}
 		file = selected.file
@@ -199,13 +195,18 @@ func (s *sshSocket) set(key, value string) bool {
 }
 
 type sshUnitEntry struct {
+	mtime   time.Time
 	runtime bool
 	file    string
 	target  string
 }
 
-func (entry sshUnitEntry) canRead() bool {
-	return !entry.runtime && entry.target == ""
+func (entry sshUnitEntry) stableAt(boot time.Time) bool {
+	return !entry.runtime && !entry.mtime.After(boot)
+}
+
+func (entry sshUnitEntry) canRead(boot time.Time) bool {
+	return entry.target == "" && entry.stableAt(boot)
 }
 
 // Pin the leaf before inspecting its owner, time and link text. The rooted
@@ -219,22 +220,20 @@ func (src sshUnitSource) unitEntry(file string) (sshUnitEntry, string) {
 	if parent != src.f.rootFD {
 		defer func() { _ = unix.Close(parent) }()
 	}
-	var st unix.Stat_t
-	if !l.viaRun && (unix.Fstat(parent, &st) != nil || mtimeOf(&st).After(src.boot)) {
-		return entry, statusRejected
-	}
 	fd, err := src.f.openAt(parent, name, unix.O_PATH)
 	if err != nil {
 		status, _ := statusOf(err)
 		return entry, status
 	}
 	defer func() { _ = unix.Close(fd) }()
-	if unix.Fstat(fd, &st) != nil || src.f.mapOwner(file, st.Uid) != 0 || !l.viaRun && mtimeOf(&st).After(src.boot) {
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil || src.f.mapOwner(file, st.Uid) != 0 {
 		return entry, statusRejected
 	}
 	dir := dirs[len(dirs)-1].path
 	entry.file = path.Join(dir, name)
 	entry.runtime = l.viaRun
+	entry.mtime = mtimeOf(&st)
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFREG:
 		return entry, statusRead
@@ -279,7 +278,7 @@ func (src sshUnitSource) unitEntry(file string) (sshUnitEntry, string) {
 func (src sshUnitSource) resolveUnitTarget(target string) (string, bool) {
 	for range maxIncludeDepth {
 		entry, status := src.unitEntry(target)
-		if status != statusRead || entry.runtime || entry.target == "/dev/null" {
+		if status != statusRead || !entry.stableAt(src.boot) || entry.target == "/dev/null" {
 			break
 		}
 		if entry.target == "" {
@@ -293,6 +292,7 @@ func (src sshUnitSource) resolveUnitTarget(target string) (string, bool) {
 func sshUnitFile(ctx context.Context, src sshUnitSource, name string) (sshUnitEntry, bool) {
 	var expected string
 	var runtimeAlias bool
+	var newest time.Time
 	for range maxIncludeDepth {
 		if ctx.Err() != nil {
 			break
@@ -312,7 +312,11 @@ func sshUnitFile(ctx context.Context, src sshUnitSource, name string) (sshUnitEn
 		if entry.file == "" || expected != "" && entry.file != expected {
 			return sshUnitEntry{}, false
 		}
+		if entry.mtime.After(newest) {
+			newest = entry.mtime
+		}
 		if entry.target == "" || entry.target == "/dev/null" {
+			entry.mtime = newest
 			entry.runtime = entry.runtime || runtimeAlias
 			return entry, true
 		}
@@ -320,18 +324,13 @@ func sshUnitFile(ctx context.Context, src sshUnitSource, name string) (sshUnitEn
 		if status != statusRead {
 			return sshUnitEntry{}, false
 		}
+		if target.mtime.After(newest) {
+			newest = target.mtime
+		}
 		runtimeAlias = runtimeAlias || entry.runtime || target.runtime
 		expected, name = target.file, path.Base(entry.target)
 	}
 	return sshUnitEntry{}, false
-}
-
-func (src sshUnitSource) list(dir string) ([]string, loaded) {
-	names, l := src.systemFiles.list(dir)
-	if l.status == statusRead && !l.viaRun && l.mtime.After(src.boot) {
-		return nil, failed(statusRejected, reasonFileRejected)
-	}
-	return names, l
 }
 
 func unitNameGroups(name string) []string {
@@ -414,7 +413,7 @@ func sshUnitNames(ctx context.Context, src sshUnitSource, canonical string) ([]s
 			if path.Base(unit.file) == canonical {
 				// Priority between competing aliases with the same drop-in
 				// filename is outside the supported service grammar.
-				if unit.runtime || len(names) > 1 {
+				if !unit.stableAt(src.boot) || len(names) > 1 {
 					return nil, false
 				}
 				names = append(names, name)
@@ -453,7 +452,7 @@ func readSSHUnit(ctx context.Context, src sshUnitSource, file, section string, s
 			return false
 		}
 		d := path.Join(dir, group+".d")
-		files, l := src.list(d)
+		files, l := src.f.listBefore(d, ownerRule{system: true}, false, src.boot)
 		if !l.complete() {
 			return false
 		}
@@ -488,7 +487,7 @@ func readSSHUnit(ctx context.Context, src sshUnitSource, file, section string, s
 			return false
 		}
 		entry, status := src.unitEntry(dropIns[file])
-		if status != statusRead || !entry.canRead() || !read(src.load(entry.file)) {
+		if status != statusRead || !entry.canRead(src.boot) || !read(src.load(entry.file)) {
 			return false
 		}
 	}

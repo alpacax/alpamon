@@ -602,6 +602,35 @@ func TestPrivsepIgnoresRuntimeDirectoryTimestamps(t *testing.T) {
 	assert.Equal(t, ptr("no"), r.SSHD.Effective["passwordauthentication"])
 }
 
+func TestPrivsepIgnoresUnrelatedUnitUpdates(t *testing.T) {
+	for _, unitDir := range []string{"/etc/systemd/system", "/usr/lib/systemd/system"} {
+		t.Run(unitDir, func(t *testing.T) {
+			dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+			spec := loadCase(t, dir)
+			root, proc := buildHost(t, dir, spec)
+			base := filepath.Join(root, unitDir)
+			later := time.Unix(spec.Btime+1, 0)
+			file := filepath.Join(base, "foo.service")
+			require.NoError(t, os.WriteFile(file, []byte("[Service]\nExecStart=/bin/true"), 0o644))
+			// The drop-in prompts the collector to check whether foo is an SSH alias.
+			require.NoError(t, os.Mkdir(file+".d", 0o755))
+			for _, kind := range []string{"wants", "requires"} {
+				deps := filepath.Join(base, "sockets.target."+kind)
+				require.NoError(t, os.MkdirAll(deps, 0o755))
+				require.NoError(t, os.Symlink("../foo.service", filepath.Join(deps, "foo.service")))
+				require.NoError(t, os.Chtimes(deps, later, later))
+			}
+			for _, p := range []string{file, file + ".d", base} {
+				require.NoError(t, os.Chtimes(p, later, later))
+			}
+			r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(t.Context())
+			require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+			require.Len(t, r.SSHD.Effective, len(sshdDefaults))
+			assert.Equal(t, ptr("no"), r.SSHD.Effective["passwordauthentication"])
+		})
+	}
+}
+
 func TestPrivsepRequiresServiceInputsFromBeforeBoot(t *testing.T) {
 	for _, file := range []string{
 		"usr/lib/systemd/system/ssh.socket",
@@ -610,9 +639,8 @@ func TestPrivsepRequiresServiceInputsFromBeforeBoot(t *testing.T) {
 		"etc/systemd/system/ssh.service.d/10.conf",
 		"etc/default/ssh",
 		"etc/systemd/system/sockets.target.wants/ssh.socket",
-		"etc/systemd/system/sockets.target.wants",
-		"usr/lib/systemd/system",
-		"etc/systemd/system",
+		"etc/systemd/system/multi-user.target.wants/ssh.service",
+		"etc/systemd/system/selected.service",
 		"etc/systemd/system/ssh.socket.d",
 		"etc/systemd/system/ssh.service.d",
 	} {
@@ -621,6 +649,15 @@ func TestPrivsepRequiresServiceInputsFromBeforeBoot(t *testing.T) {
 			spec := loadCase(t, dir)
 			root, proc := buildHost(t, dir, spec)
 			p := filepath.Join(root, file)
+			switch file {
+			case "etc/systemd/system/multi-user.target.wants/ssh.service":
+				require.NoError(t, os.Remove(filepath.Join(root, "etc/systemd/system/sockets.target.wants/ssh.socket")))
+				require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+				require.NoError(t, os.Symlink("/usr/lib/systemd/system/ssh.service", p))
+			case "etc/systemd/system/selected.service":
+				require.NoError(t, os.WriteFile(filepath.Join(root, "usr/lib/systemd/system/ssh.socket"), []byte("[Socket]\nService=selected.service"), 0o644))
+				require.NoError(t, os.Symlink("/usr/lib/systemd/system/ssh.service", p))
+			}
 			if strings.HasSuffix(file, ".conf") {
 				require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
 				require.NoError(t, os.WriteFile(p, []byte("# stock options\n"), 0o644))
@@ -646,18 +683,43 @@ func TestPrivsepRequiresServiceInputsFromBeforeBoot(t *testing.T) {
 	}
 }
 
-func TestPrivsepRequiresPreBootUnitDirectoryLink(t *testing.T) {
+func TestPrivsepDirectoryLinkTimestamps(t *testing.T) {
+	for _, link := range []string{"usr/lib/systemd/system", "etc/systemd/system/ssh.service.d"} {
+		t.Run(link, func(t *testing.T) {
+			dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+			spec := loadCase(t, dir)
+			root, proc := buildHost(t, dir, spec)
+			p := filepath.Join(root, link)
+			require.NoError(t, os.MkdirAll(p, 0o755))
+			require.NoError(t, os.Rename(p, p+"-target"))
+			require.NoError(t, os.Symlink(filepath.Base(p)+"-target", p))
+			setFixtureTreeMtime(t, root)
+			c := newCollector(caseOptions(t, dir, spec, root, proc))
+			require.Len(t, c.collect(t.Context()).SSHD.Effective, len(sshdDefaults))
+			after := unix.Timespec{Sec: spec.Btime + 1}
+			require.NoError(t, unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{after, after}, unix.AT_SYMLINK_NOFOLLOW))
+			r := c.collect(t.Context())
+			require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+			if strings.HasSuffix(link, ".d") {
+				assert.Nil(t, r.SSHD.Effective)
+			} else {
+				assert.Len(t, r.SSHD.Effective, len(sshdDefaults))
+			}
+		})
+	}
+}
+
+func TestPrivsepRejectsRemovedServiceDropIn(t *testing.T) {
 	dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
 	spec := loadCase(t, dir)
 	root, proc := buildHost(t, dir, spec)
-	p := filepath.Join(root, "/usr/lib/systemd/system")
-	require.NoError(t, os.Rename(p, p+"-units"))
-	require.NoError(t, os.Symlink("system-units", p))
+	drop := filepath.Join(root, "etc/systemd/system/ssh.service.d/override.conf")
+	require.NoError(t, os.MkdirAll(filepath.Dir(drop), 0o755))
+	require.NoError(t, os.WriteFile(drop, []byte("# service override\n"), 0o644))
 	setFixtureTreeMtime(t, root)
 	c := newCollector(caseOptions(t, dir, spec, root, proc))
 	require.Len(t, c.collect(t.Context()).SSHD.Effective, len(sshdDefaults))
-	after := unix.Timespec{Sec: spec.Btime + 1}
-	require.NoError(t, unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{after, after}, unix.AT_SYMLINK_NOFOLLOW))
+	require.NoError(t, os.Remove(drop))
 	r := c.collect(t.Context())
 	require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
 	assert.Nil(t, r.SSHD.Effective)

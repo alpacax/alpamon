@@ -102,8 +102,8 @@ func TestDistroSSHDExposure(t *testing.T) {
 		start := boot.Add(time.Duration(init.startTick) * (time.Second / clockTicks))
 		// btime has one-second precision. Only simulate a later boot when
 		// the package demonstrably changed persistent inputs after PID 1 started.
-		latestDir, latestSSH := distroUnitTimestamps(t)
-		postBootInstall = latestDir.After(boot) || latestSSH.After(boot)
+		latestSSH := distroUnitTimestamp(t)
+		postBootInstall = latestSSH.After(boot)
 		installedInContainer = latestSSH.After(start.Add(time.Second))
 	}
 	// Ubuntu socket activation cannot be reproduced in a container. Reproduce its
@@ -198,33 +198,51 @@ func TestDistroSSHDExposure(t *testing.T) {
 
 // The Debian packages enable SSH in /etc/systemd/system. Inspect the links
 // themselves because their mtimes need not match either directory's mtime.
-func distroUnitTimestamps(t *testing.T) (latestDir, latestSSH time.Time) {
+func distroUnitTimestamp(t *testing.T) time.Time {
 	t.Helper()
-	record := func(file string, latest *time.Time) {
+	var latest time.Time
+	record := func(file string) {
 		info, err := os.Lstat(file)
 		require.NoError(t, err)
-		if info.ModTime().After(*latest) {
-			*latest = info.ModTime()
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
 		}
 	}
 	unitDir, err := filepath.EvalSymlinks("/lib/systemd/system")
 	require.NoError(t, err)
-	record("/etc/systemd/system", &latestDir)
-	record(unitDir, &latestDir)
-	record(filepath.Join(unitDir, "ssh.service"), &latestSSH)
-	record("/etc/default/ssh", &latestSSH)
+	recordUnit := func(unit string) {
+		record(filepath.Join(unitDir, unit))
+		seen := map[string]bool{}
+		for _, dir := range []string{"/etc/systemd/system", unitDir} {
+			dropDir := filepath.Join(dir, unit+".d")
+			entries, err := os.ReadDir(dropDir)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			require.NoError(t, err)
+			record(dropDir)
+			for _, entry := range entries {
+				name := entry.Name()
+				if !seen[name] && strings.HasSuffix(name, ".conf") && !strings.HasPrefix(name, ".") {
+					seen[name] = true
+					record(filepath.Join(dropDir, name))
+				}
+			}
+		}
+	}
+	recordUnit("ssh.service")
+	record("/etc/default/ssh")
 	for _, kind := range []string{"wants", "requires"} {
 		for _, unit := range []string{"ssh.service", "ssh.socket"} {
 			links, err := filepath.Glob("/etc/systemd/system/*." + kind + "/" + unit)
 			require.NoError(t, err)
 			for _, link := range links {
-				record(link, &latestSSH)
-				record(filepath.Dir(link), &latestDir)
-				record(filepath.Join(unitDir, unit), &latestSSH)
+				record(link)
+				recordUnit(unit)
 			}
 		}
 	}
-	return latestDir, latestSSH
+	return latest
 }
 
 // These images ship simple global directives and at most a top-level Include.

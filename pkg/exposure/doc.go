@@ -90,8 +90,9 @@
 // unit drop-ins in systemd order and checks ExecStart and its environment
 // files against the validated sshd binary and supported flags. Uncertain
 // service options, unassigned expansions, mismatched enablement links, and
-// post-boot changes to persistent service inputs or their directories leave
-// effective null. Runtime directories may be newer than boot. A selected unit,
+// post-boot changes to selected units, aliases, enablement links, drop-in
+// directories or files, or referenced environment files leave effective null.
+// Runtime directories may be newer than boot. A selected unit,
 // alias, enablement link or drop-in under /run leaves effective null. The same
 // applies to unrecognized directives or syntax, non-ASCII glob inputs, relative
 // key or revocation paths, ambiguous or conditional access lists, nested
