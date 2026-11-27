@@ -16,7 +16,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func distroSSHDTestEnabled() bool {
+	return os.Getenv("GITHUB_ACTIONS") == "true" || os.Getenv("ALPAMON_SSHD_INTEGRATION") == "1"
+}
+
+func TestDistroSSHDRequiresOptIn(t *testing.T) {
+	t.Setenv("CI", "true")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("ALPAMON_SSHD_INTEGRATION", "")
+	assert.False(t, distroSSHDTestEnabled())
+	t.Setenv("GITHUB_ACTIONS", "true")
+	assert.True(t, distroSSHDTestEnabled())
+	t.Setenv("GITHUB_ACTIONS", "false")
+	t.Setenv("ALPAMON_SSHD_INTEGRATION", "0")
+	assert.False(t, distroSSHDTestEnabled())
+	t.Setenv("ALPAMON_SSHD_INTEGRATION", "1")
+	assert.True(t, distroSSHDTestEnabled())
+}
+
 func TestDistroSSHDExposure(t *testing.T) {
+	if !distroSSHDTestEnabled() {
+		t.Skip("moves SSH host keys in a disposable container; set ALPAMON_SSHD_INTEGRATION=1 to opt in")
+	}
 	if os.Geteuid() != 0 {
 		require.Empty(t, os.Getenv("CI"), "CI requires root in an isolated Docker container")
 		t.Skip("requires root in an isolated Docker container")
