@@ -432,7 +432,7 @@ jobs:
             yum|dnf|microdnf) "$PKG_MANAGER" install -y openssh-server ;;
             zypper) zypper --non-interactive install openssh-server ;;
             *) echo "Unknown package manager: $PKG_MANAGER" >&2; exit 1 ;;
-          esac || export EXPOSURE_SSHD_INSTALL_FAILED=1
+          esac || exit 1
           go test -v -count=1 -tags=integration -run '^TestDistroSSHDExposure$' ./pkg/exposure
 
   build-and-test-windows:

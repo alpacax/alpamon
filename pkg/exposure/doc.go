@@ -83,9 +83,14 @@
 // stat confirms /run/sshd is absent, the report carries sshd_privsep_missing.
 // The diagnostic buffer retains at most 4 KiB and is cleared after use.
 // Only this failure can supply effective settings from the complete global
-// configuration and its includes. An incomplete read leaves effective null.
+// configuration and its top-level includes. Derivation requires openssh-server
+// 8.7 or later in /var/lib/dpkg/status and a verified ssh@.service or
+// sshd@.service command. The collector reads those templates, their drop-ins
+// and their named environment files under the configured root. Uncertain
+// service options, aliases, explicit relative key paths, ambiguous access
+// lists, conditional lists or nested includes leave effective null.
 // After sshd_privsep_missing the service checks /run/sshd every minute and
-// requests one normal collection when the path appears. A later collection
+// requests one normal collection when a root-owned directory appears. A later collection
 // with any other outcome ends polling, as does shutdown.
 // A normal error exit reporting no available host keys yields sshd_no_host_keys
 // with null effective settings. Other probe errors yield sshd_unavailable. Nothing here runs
@@ -95,7 +100,8 @@
 // sshd_binary_rejected, sshd_timeout or sshd_no_host_keys reason is resent once with
 // sshd_unavailable, null effective settings and coverage for an unavailable
 // probe. It omits evidence collected using the derived policy. The resend keeps the
-// collection timestamp and uses the hash of the revised report.
+// collection timestamp and uses the hash of the revised report. Once accepted,
+// later checks and uploads to that endpoint use this shape for the same schema.
 //
 // # Platforms
 //
