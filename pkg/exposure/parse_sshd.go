@@ -180,7 +180,7 @@ func (cfg *sshdConfig) setGlobal(key string, args []string) {
 		return
 	}
 	previous, set := cfg.globals[key]
-	if set && !multiLineKeywords[key] && key != "authorizedkeysfile" {
+	if set && !multiLineKeywords[key] {
 		return
 	}
 	v := configSetting(key, args)

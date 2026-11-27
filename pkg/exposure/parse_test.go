@@ -615,13 +615,14 @@ func TestSSHDConfigDefaults(t *testing.T) {
 func TestSSHDGlobalsFollowIncludeOrder(t *testing.T) {
 	cfg := parseSSHDConfig(mapSource{files: map[string]string{
 		sshdConfigPath:            "Include conf.d/*.conf\nKbdInteractiveAuthentication yes\nPubkeyAcceptedAlgorithms +ssh-rsa\nAllowUsers three\n",
-		"/etc/ssh/conf.d/10.conf": "ChallengeResponseAuthentication NO\nPubkeyAcceptedKeyTypes ssh-ed25519\nAllowUsers YES\nAllowUsers two\nAuthorizedKeysFile keys/a keys/b\nMatch User guest\nAllowUsers guest\nChallengeResponseAuthentication yes\nPasswordAuthentication no\n",
-		"/etc/ssh/conf.d/20.conf": "KbdInteractiveAuthentication yes\nAuthorizedKeysFile keys/c\n",
+		"/etc/ssh/conf.d/10.conf": "ChallengeResponseAuthentication NO\nPubkeyAcceptedKeyTypes ssh-ed25519\nAllowUsers YES\nAllowUsers two\nDenyUsers one\nAllowGroups g1\nDenyGroups g3\nAuthorizedKeysFile keys/a keys/b\nMatch User guest\nAllowUsers guest\nChallengeResponseAuthentication yes\nPasswordAuthentication no\n",
+		"/etc/ssh/conf.d/20.conf": "KbdInteractiveAuthentication yes\nDenyUsers two\nAllowGroups g2\nDenyGroups g4\nAuthorizedKeysFile keys/c\n",
 	}, dirs: map[string][]string{"/etc/ssh/conf.d": {"20.conf", "10.conf"}}})
 	got := cfg.effective()
 	for key, want := range map[string]string{
 		"kbdinteractiveauthentication": "no", "pubkeyacceptedalgorithms": "ssh-ed25519", "allowusers": "YES two three",
-		"authorizedkeysfile": "keys/a keys/b keys/c", "passwordauthentication": "yes",
+		"authorizedkeysfile": "keys/a keys/b", "passwordauthentication": "yes",
+		"denyusers": "one two", "allowgroups": "g1 g2", "denygroups": "g3 g4",
 	} {
 		assert.Equal(t, ptr(want), got[key], key)
 	}
