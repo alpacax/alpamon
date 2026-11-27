@@ -34,6 +34,7 @@ type sshdRun struct {
 // commandContext builds the sshd -T command; tests replace it to record what
 // would run and to stand in for sshd.
 var commandContext = exec.CommandContext
+var waitSSHD = unix.Waitid
 
 // findSSHD returns the first candidate under root that is a root-owned
 // regular file with no group or world write bits, in a root-owned directory
@@ -165,15 +166,23 @@ func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) ui
 	stderrErr := <-stderrDone
 	var info unix.Siginfo
 	for {
-		err = unix.Waitid(unix.P_PID, cmd.Process.Pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+		err = waitSSHD(unix.P_PID, cmd.Process.Pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
 		if err != unix.EINTR {
 			break
 		}
+	}
+	if err != nil {
+		// Keep Wait bounded even when the kernel refuses the observation.
+		_ = cmd.Process.Kill()
 	}
 	if !stop() {
 		<-stopped
 	}
 	waitErr := cmd.Wait()
+	if err != nil {
+		clear(buf.Bytes())
+		return sshdRun{}
+	}
 	if over || readErr != nil || stderrErr != nil || waitErr != nil || ctx.Err() != nil {
 		clear(buf.Bytes())
 		if !over && context.Cause(ctx) == errSSHDTimeout {

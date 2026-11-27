@@ -283,3 +283,14 @@ func TestRunSSHDTDeadlineClosesInheritedOutput(t *testing.T) {
 	assert.Equal(t, sshdRun{reason: reasonSSHDTimeout}, runSSHDT(t.Context(), root, rootOwned))
 	assert.Less(t, time.Since(start), sshdTimeout+2*time.Second)
 }
+
+func TestRunSSHDTWaitFailureReapsLeader(t *testing.T) {
+	root := t.TempDir()
+	fakeSSHD(t, root, "exec 1>&- 2>&-\nexec sleep 30\n")
+	old := waitSSHD
+	waitSSHD = func(int, int, *unix.Siginfo, int, *unix.Rusage) error { return unix.EPERM }
+	t.Cleanup(func() { waitSSHD = old })
+	start := time.Now()
+	assert.Equal(t, sshdRun{}, runSSHDT(t.Context(), root, rootOwned))
+	assert.Less(t, time.Since(start), sshdTimeout)
+}
