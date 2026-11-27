@@ -60,7 +60,7 @@ type sshService struct {
 
 // Accept only literal starts and simple environment assignments. An unmodeled
 // override makes the derived policy unknown even if systemd could resolve it.
-func safeSSHDServices(ctx context.Context, src systemSource) bool {
+func safeSSHDServices(ctx context.Context, src systemFiles) bool {
 	remaining := maxIncludeFiles
 	verified := false
 	for _, name := range []string{"ssh@.service", "sshd@.service"} {
@@ -100,7 +100,23 @@ func safeSSHDServices(ctx context.Context, src systemSource) bool {
 			return false
 		}
 	}
-	return verified && ctx.Err() == nil
+	if !verified {
+		return false
+	}
+	// A socket can start a regular service even when a per-connection
+	// template is installed. Only the templates are inspected; a competing
+	// unit makes selection uncertain, including an unreadable or masked unit.
+	for _, dir := range sshUnitDirs {
+		for _, name := range []string{"ssh.service", "sshd.service"} {
+			if ctx.Err() != nil {
+				return false
+			}
+			if _, l := src.f.exists(path.Join(dir, name)); l.status != statusAbsent {
+				return false
+			}
+		}
+	}
+	return ctx.Err() == nil
 }
 
 // Only simple, single-line ASCII directives are modeled. Unit and environment

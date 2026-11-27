@@ -86,7 +86,8 @@
 // configuration and its top-level includes. Derivation requires openssh-server
 // 8.7 or later in /var/lib/dpkg/status and a verified ssh@.service or
 // sshd@.service command. The collector reads those templates, their drop-ins
-// and their named environment files under the configured root. Uncertain
+// and their named environment files under the configured root. A competing
+// ssh.service or sshd.service leaves the service selection unresolved. Uncertain
 // service options, aliases, explicit relative key paths, ambiguous access
 // lists, conditional lists or nested includes leave effective null.
 // After sshd_privsep_missing the service checks /run/sshd every minute and

@@ -306,6 +306,7 @@ func TestPrivsepDerivationRequiresModeledInputs(t *testing.T) {
 	type change struct{ name, path, content string }
 	tests := []change{
 		{"no service template", unit, ""},
+		{"competing service", "lib/systemd/system/ssh.service", "[Service]\nExecStart=/usr/sbin/sshd -D -f /etc/ssh/other"},
 		{"non-ASCII service argument", unit, "[Service]\nExecStart=/usr/sbin/sshd\u00a0-i"},
 		{"service options", unit, "[Service]\nExecStart=/usr/sbin/sshd -i -o PasswordAuthentication=yes"},
 		{"service drop-in", "run/systemd/system/sshd@.service.d/override.conf", "[Service]\nExecStart=/usr/sbin/sshd -f /etc/ssh/other"},

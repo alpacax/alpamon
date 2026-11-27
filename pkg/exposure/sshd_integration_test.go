@@ -67,17 +67,21 @@ func TestDistroSSHDExposure(t *testing.T) {
 	require.NotEmpty(t, distroHostKeys(t))
 
 	var expected map[string]*string
-	var hasTemplate bool
+	var templateOnly bool
 	if debianFamily {
 		expected = distroDerivedSettings(t)
 		for _, name := range []string{"ssh@.service", "sshd@.service"} {
 			_, err := os.Stat(filepath.Join("/lib/systemd/system", name))
 			if err == nil {
-				hasTemplate = true
+				templateOnly = true
 			} else {
 				require.ErrorIs(t, err, os.ErrNotExist)
 			}
 		}
+		if files := distroRegularSSHDUnits(t); len(files) != 0 {
+			templateOnly = false
+		}
+
 	}
 	// Ubuntu socket activation cannot be reproduced in a container. Reproduce its
 	// observable state directly by collecting while /run/sshd is absent.
@@ -109,13 +113,21 @@ func TestDistroSSHDExposure(t *testing.T) {
 				assert.Nil(t, effective)
 			case debianFamily && !tc.directory:
 				assert.Contains(t, reasons, reasonSSHDPrivsepMissing)
-				if hasTemplate || expected == nil {
+				if templateOnly || expected == nil {
 					assert.Equal(t, expected, effective)
 				} else {
-					assert.Nil(t, effective, "the image has no verifiable per-connection service")
+					assert.Nil(t, effective, "the image cannot establish an exclusive per-connection service")
 					t.Run("verified per-connection service", func(t *testing.T) {
-						// Keep the image's sshd_config and drop-ins intact.
+						// Reproduce a template-only installation while retaining
+						// the image's sshd binary, config, drop-ins and host keys.
+						for _, unit := range distroRegularSSHDUnits(t) {
+							if _, err := os.Lstat(unit); errors.Is(err, os.ErrNotExist) {
+								continue
+							}
+							moveSSHDPathsAside(t, unit)
+						}
 						file := "/etc/systemd/system/ssh@.service"
+						moveSSHDPathsAside(t, file)
 						f, err := os.OpenFile(file, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 						require.NoError(t, err)
 						t.Cleanup(func() { assert.NoError(t, os.Remove(file)) })
@@ -247,6 +259,21 @@ func distroDerivedSettings(t *testing.T) map[string]*string {
 		}
 	}
 	return expected
+}
+
+func distroRegularSSHDUnits(t *testing.T) []string {
+	t.Helper()
+	var files []string
+	for _, dir := range []string{"/etc/systemd/system", "/run/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"} {
+		for _, name := range []string{"ssh.service", "sshd.service"} {
+			file := filepath.Join(dir, name)
+			if _, err := os.Lstat(file); !errors.Is(err, os.ErrNotExist) {
+				require.NoError(t, err)
+				files = append(files, file)
+			}
+		}
+	}
+	return files
 }
 
 func distroHostKeys(t *testing.T) []string {
