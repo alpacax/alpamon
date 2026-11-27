@@ -18,15 +18,18 @@ func Start(ctx context.Context, p Poster) {
 	}
 	c := newCollector(opts)
 	s := newService(p, c.collect, triggers)
+	s.privsepPresent = func() bool { return privsepStatus(opts.root, opts.mapOwner) == statusRead }
 	go s.run(ctx)
 }
 
 // Trigger asks for one exposure read: after the commissioning sync, and for
 // a sync command whose keys name "exposure". A trigger during a read causes
 // exactly one more read after it.
-func Trigger() {
+func Trigger() { requestRead(triggers) }
+
+func requestRead(trigger chan<- struct{}) {
 	select {
-	case triggers <- struct{}{}:
+	case trigger <- struct{}{}:
 	default:
 	}
 }

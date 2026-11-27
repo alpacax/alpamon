@@ -615,3 +615,61 @@ func TestTriggerReadPreservesDueTime(t *testing.T) {
 		<-done
 	})
 }
+
+func TestPrivsepRecollection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		var reads, stats atomic.Int32
+		var missing, present atomic.Bool
+		missing.Store(true)
+		post := &fakePoster{answers: map[string][]fakeResponse{checkURL: {{status: 200, body: `{"required":false}`}}}}
+		s := testService(post, func(context.Context) *exposureReport {
+			reads.Add(1)
+			r := sampleReport()
+			if missing.Load() {
+				r.Categories[catSSHD] = coverage{Status: coveragePartial, Reasons: []string{reasonSSHDPrivsepMissing}}
+			}
+			return r
+		})
+		s.now = time.Now
+		s.privsepPresent = func() bool { stats.Add(1); return present.Load() }
+		done := make(chan struct{})
+		go func() { defer close(done); s.run(ctx) }()
+		advance := func(d time.Duration) { time.Sleep(d); synctest.Wait() }
+		synctest.Wait()
+		assert.Equal(t, 1, int(reads.Load()))
+		advance(time.Minute)
+		assert.Equal(t, 1, int(stats.Load()))
+		assert.Equal(t, 1, int(reads.Load()))
+		present.Store(true)
+		missing.Store(false)
+		advance(time.Minute)
+		assert.Equal(t, 2, int(reads.Load()))
+		advance(2 * time.Minute)
+		assert.Equal(t, 2, int(stats.Load()))
+		assert.Equal(t, 2, int(reads.Load()))
+
+		missing.Store(true)
+		present.Store(false)
+		requestRead(s.trigger)
+		synctest.Wait()
+		advance(time.Minute)
+		assert.Equal(t, 3, int(stats.Load()))
+		missing.Store(false)
+		requestRead(s.trigger)
+		synctest.Wait()
+		advance(time.Minute)
+		assert.Equal(t, 3, int(stats.Load()))
+		assert.Equal(t, 4, int(reads.Load()))
+
+		missing.Store(true)
+		requestRead(s.trigger)
+		synctest.Wait()
+		cancel()
+		<-done
+		advance(2 * time.Minute)
+		assert.Equal(t, 3, int(stats.Load()))
+		assert.Equal(t, 5, int(reads.Load()))
+	})
+}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,8 @@ const (
 	maxReadJitter    = 5 * time.Minute
 	loopRestartPause = 60 * time.Second
 
+	privsepPollInterval = time.Minute
+
 	checkTimeout  = 10 * time.Second
 	reportTimeout = 60 * time.Second
 	maxAttempts   = 5
@@ -40,13 +43,16 @@ var schemaV1ByServer sync.Map // string to *atomic.Bool
 // arrives during a read is held in a one-slot channel and causes exactly one
 // more read after it.
 type service struct {
-	post    Poster
-	collect func(ctx context.Context) *exposureReport
-	trigger chan struct{}
-	now     func() time.Time
-	jitter  func() time.Duration
-	sleep   func(ctx context.Context, d time.Duration) bool
-	useV1   *atomic.Bool
+	post           Poster
+	collect        func(ctx context.Context) *exposureReport
+	trigger        chan struct{}
+	now            func() time.Time
+	jitter         func() time.Duration
+	sleep          func(ctx context.Context, d time.Duration) bool
+	useV1          *atomic.Bool
+	privsepPresent func() bool
+	cancelPoll     context.CancelFunc
+	pollDone       chan struct{}
 	// lastObserved prevents replays within the same second. After a backward
 	// clock step of more than 2 s, an earlier observed_at is sent on purpose;
 	// the server may answer applied: false until the clock catches up.
@@ -102,6 +108,7 @@ func (s *service) runLoop(ctx context.Context) (panicked bool) {
 			logExposurePanic("service", "Exposure service loop panicked; restarting after 60 seconds.")
 		}
 	}()
+	defer s.stopPrivsepPoll()
 	if s.due.IsZero() {
 		s.due = s.now().Add(s.jitter())
 	}
@@ -121,6 +128,55 @@ func (s *service) runLoop(ctx context.Context) (panicked bool) {
 	}
 }
 
+func (s *service) stopPrivsepPoll() {
+	if s.cancelPoll != nil {
+		s.cancelPoll()
+		<-s.pollDone
+		s.cancelPoll = nil
+	}
+}
+
+func (s *service) updatePrivsepPoll(ctx context.Context, snapshot *exposureReport) {
+	if s.privsepPresent == nil || snapshot == nil || !slices.Contains(snapshot.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing) {
+		s.stopPrivsepPoll()
+		return
+	}
+	if s.cancelPoll != nil {
+		select {
+		case <-s.pollDone:
+			s.cancelPoll()
+		default:
+			return
+		}
+	}
+	ctx, s.cancelPoll = context.WithCancel(ctx)
+	done := make(chan struct{})
+	s.pollDone = done
+	go func() {
+		defer close(done)
+		defer func() {
+			if recover() != nil {
+				logExposurePanic("sshd", "Exposure privilege separation directory check failed.")
+			}
+		}()
+		ticker := time.NewTicker(privsepPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if ctx.Err() == nil && s.privsepPresent() {
+					if ctx.Err() == nil {
+						requestRead(s.trigger)
+					}
+					return
+				}
+			}
+		}
+	}()
+}
+
 // readAndDeliver reads once and delivers the result: a check, then the
 // report only when the server asks for it. Retries resend the same
 // observed_at and body.
@@ -133,6 +189,7 @@ func (s *service) readAndDeliver(ctx context.Context) {
 		version = legacySchemaVersion
 	}
 	r, body, snapshot := s.buildReport(ctx, version)
+	s.updatePrivsepPoll(ctx, snapshot)
 	if r == nil || !s.deliver(ctx, r, body) {
 		return
 	}

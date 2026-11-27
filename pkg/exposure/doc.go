@@ -84,6 +84,9 @@
 // The diagnostic buffer retains at most 4 KiB and is cleared after use.
 // Only this failure can supply effective settings from the complete global
 // configuration and its includes. An incomplete read leaves effective null.
+// After sshd_privsep_missing the service checks /run/sshd every minute and
+// requests one normal collection when the path appears. A later collection
+// with any other outcome ends polling, as does shutdown.
 // Other probe errors yield sshd_unavailable. Nothing here runs
 // sudo, visudo, cvtsudoers or sudo-rs, or calls into PAM.
 //
