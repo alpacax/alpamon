@@ -166,6 +166,7 @@ func TestFailedSSHDProbeLeavesHostUntouched(t *testing.T) {
 		wantEffective        bool
 	}{
 		{"missing directory", "echo '" + privsepDiagnostic + "' >&2; exit 1", reasonSSHDPrivsepMissing, true},
+		{"no host keys", "echo 'sshd: no hostkeys available -- exiting.' >&2; exit 1", reasonSSHDNoHostKeys, false},
 		{"long diagnostic", "echo LEAKCANARY >&2; head -c 5000 /dev/zero >&2; exit 1", reasonSSHDUnavailable, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -232,14 +233,21 @@ func TestOnlySSHDStartsAProcess(t *testing.T) {
 	}
 }
 
-func TestRunSSHDTPrivsepDiagnostic(t *testing.T) {
+func TestRunSSHDTFailureDiagnostics(t *testing.T) {
 	const diagnostic = "echo '" + privsepDiagnostic + "' >&2\n"
+	const noKeys = "echo 'sshd: no hostkeys available -- exiting.' >&2\n"
 	for _, tc := range []struct {
 		name, script, entry, reason string
 	}{
 		{"absent", diagnostic + "exit 1", "", reasonSSHDPrivsepMissing},
 		{"present directory", diagnostic + "exit 1", "directory", ""},
 		{"present file", diagnostic + "exit 1", "file", ""},
+		{"no host keys", noKeys + "exit 1", "", reasonSSHDNoHostKeys},
+		{"fatal prefix", "echo 'fatal: no hostkeys available -- exiting.' >&2; exit 1", "", reasonSSHDNoHostKeys},
+		{"both diagnostics with directory absent", noKeys + diagnostic + "exit 1", "", reasonSSHDPrivsepMissing},
+		{"both diagnostics with directory present", diagnostic + noKeys + "exit 1", "directory", reasonSSHDNoHostKeys},
+		{"no keys followed by signal", noKeys + "kill -TERM $$", "", ""},
+		{"no keys followed by overflow", noKeys + "head -c 5000 /dev/zero >&2; exit 1", "", ""},
 		{"different error", "echo other >&2; exit 1", "", ""},
 		{"substring", "echo 'prefix " + privsepDiagnostic + "' >&2; exit 1", "", ""},
 		{"signal", diagnostic + "kill -TERM $$", "", ""},

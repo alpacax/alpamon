@@ -78,16 +78,25 @@ func (b *sshdStderr) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (b *sshdStderr) privsepMissing() bool {
+func (b *sshdStderr) failureReason(root string, mapOwner func(string, uint32) uint32) string {
 	if b.overflow {
-		return false
+		return ""
 	}
-	for line := range bytes.SplitSeq(b.data[:b.n], []byte("\n")) {
+	data := b.data[:b.n]
+	for line := range bytes.SplitSeq(data, []byte("\n")) {
 		if bytes.Equal(bytes.TrimSuffix(line, []byte("\r")), []byte(privsepDiagnostic)) {
-			return true
+			if privsepStatus(root, mapOwner) == statusAbsent {
+				return reasonSSHDPrivsepMissing
+			}
+			break
 		}
 	}
-	return false
+	// Log prefixes vary. OpenSSH emits "sshd: no hostkeys available -- exiting."
+	// https://github.com/openssh/openssh-portable/blob/V_9_6_P1/sshd.c#L1934
+	if bytes.Contains(data, []byte("no hostkeys available")) {
+		return reasonSSHDNoHostKeys
+	}
+	return ""
 }
 
 func privsepStatus(root string, mapOwner func(string, uint32) uint32) string {
@@ -143,8 +152,8 @@ func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) ui
 		}
 		var exit *exec.ExitError
 		if !over && readErr == nil && ctx.Err() == nil && errors.As(waitErr, &exit) &&
-			exit.ExitCode() > 0 && stderr.privsepMissing() && privsepStatus(root, mapOwner) == statusAbsent {
-			return sshdRun{reason: reasonSSHDPrivsepMissing}
+			exit.ExitCode() > 0 {
+			return sshdRun{reason: stderr.failureReason(root, mapOwner)}
 		}
 		return sshdRun{}
 	}

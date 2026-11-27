@@ -247,7 +247,7 @@ func legacySSHDReport(report *exposureReport, field string) []byte {
 	c := report.Categories[catSSHD]
 	for i, reason := range c.Reasons {
 		switch reason {
-		case reasonSSHDPrivsepMissing, reasonSSHDBinaryRejected, reasonSSHDTimeout:
+		case reasonSSHDPrivsepMissing, reasonSSHDBinaryRejected, reasonSSHDTimeout, reasonSSHDNoHostKeys:
 			if field != "/categories/sshd/reasons/"+strconv.Itoa(i) {
 				continue
 			}

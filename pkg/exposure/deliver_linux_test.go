@@ -685,6 +685,7 @@ func TestReportResendsOnlyForTheRejectedSSHDReason(t *testing.T) {
 		{"config derived", reasonSSHDPrivsepMissing, unknown, true},
 		{"rejected binary", reasonSSHDBinaryRejected, unknown, true},
 		{"deadline", reasonSSHDTimeout, unknown, true},
+		{"no host keys", reasonSSHDNoHostKeys, unknown, true},
 		{"other reason", reasonSSHDUnavailable, unknown, false},
 		{"another error", reasonSSHDPrivsepMissing, unknown + "," + unknown, false},
 		{"other field", reasonSSHDPrivsepMissing, `{"field":"/categories/keys/reasons/1","code":"unknown_reason"}`, false},

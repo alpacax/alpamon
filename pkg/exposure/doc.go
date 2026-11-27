@@ -87,11 +87,12 @@
 // After sshd_privsep_missing the service checks /run/sshd every minute and
 // requests one normal collection when the path appears. A later collection
 // with any other outcome ends polling, as does shutdown.
-// Other probe errors yield sshd_unavailable. Nothing here runs
+// A normal error exit reporting no available host keys yields sshd_no_host_keys
+// with null effective settings. Other probe errors yield sshd_unavailable. Nothing here runs
 // sudo, visudo, cvtsudoers or sudo-rs, or calls into PAM.
 //
 // A report refused solely for an unknown sshd_privsep_missing,
-// sshd_binary_rejected or sshd_timeout reason is resent once with
+// sshd_binary_rejected, sshd_timeout or sshd_no_host_keys reason is resent once with
 // sshd_unavailable, null effective settings and coverage for an unavailable
 // probe. It omits evidence collected using the derived policy. The resend keeps the
 // collection timestamp and uses the hash of the revised report.
