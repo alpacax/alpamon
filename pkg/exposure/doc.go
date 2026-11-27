@@ -84,10 +84,11 @@
 // The diagnostic buffer retains at most 4 KiB and is cleared after use.
 // Only this failure can supply effective settings from the complete global
 // configuration and its top-level includes. Derivation requires openssh-server
-// 8.7 or later in /var/lib/dpkg/status and a verified ssh@.service or
-// sshd@.service command. The collector reads those templates, their drop-ins
-// and their named environment files under the configured root. A competing
-// ssh.service or sshd.service leaves the service selection unresolved. Uncertain
+// 8.7 or later in /var/lib/dpkg/status. The collector checks the service
+// selected by the enabled SSH socket's Service and Accept settings, or the
+// directly enabled SSH service when socket activation is disabled. It reads
+// unit drop-ins in systemd order and checks ExecStart and its environment
+// files against the validated sshd binary and supported flags. Uncertain
 // service options, aliases, explicit relative key paths, ambiguous access
 // lists, conditional lists or nested includes leave effective null.
 // After sshd_privsep_missing the service checks /run/sshd every minute and

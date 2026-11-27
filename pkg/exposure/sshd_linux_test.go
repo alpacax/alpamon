@@ -267,7 +267,11 @@ func TestRunSSHDTFailureDiagnostics(t *testing.T) {
 				require.NoError(t, os.WriteFile(entry, nil, 0o644))
 			}
 			fakeSSHD(t, root, tc.script)
-			assert.Equal(t, sshdRun{reason: tc.reason}, runSSHDT(t.Context(), root, rootOwned))
+			want := sshdRun{reason: tc.reason}
+			if want.reason == reasonSSHDPrivsepMissing {
+				want.binary = "/usr/sbin/sshd"
+			}
+			assert.Equal(t, want, runSSHDT(t.Context(), root, rootOwned))
 			if tc.entry == "" {
 				_, err := os.Lstat(entry)
 				assert.ErrorIs(t, err, os.ErrNotExist)
@@ -299,22 +303,22 @@ func TestPrivsepDerivationRequiresModeledInputs(t *testing.T) {
 	const (
 		main   = "etc/ssh/sshd_config"
 		drop   = "etc/ssh/sshd_config.d/60-cloudimg-settings.conf"
-		unit   = "usr/lib/systemd/system/ssh@.service"
+		unit   = "usr/lib/systemd/system/ssh.service"
 		env    = "etc/default/ssh"
 		status = "var/lib/dpkg/status"
 	)
 	type change struct{ name, path, content string }
 	tests := []change{
-		{"no service template", unit, ""},
-		{"competing service", "lib/systemd/system/ssh.service", "[Service]\nExecStart=/usr/sbin/sshd -D -f /etc/ssh/other"},
+		{"missing selected service", unit, ""},
+		{"other sshd binary", unit, "[Service]\nExecStart=/usr/bin/sshd -D"},
 		{"non-ASCII service argument", unit, "[Service]\nExecStart=/usr/sbin/sshd\u00a0-i"},
 		{"service options", unit, "[Service]\nExecStart=/usr/sbin/sshd -i -o PasswordAuthentication=yes"},
-		{"service drop-in", "run/systemd/system/sshd@.service.d/override.conf", "[Service]\nExecStart=/usr/sbin/sshd -f /etc/ssh/other"},
-		{"environment options", env, "SSHD_OPTS=-h /etc/ssh/other"},
-		{"missing environment", env, ""},
+		{"service drop-in", "run/systemd/system/ssh.service.d/override.conf", "[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -f /etc/ssh/other"},
+		{"environment options", env, `SSHD_OPTS="-o PasswordAuthentication=yes"`},
+		{"unreadable optional environment", env, "<directory>"},
 		{"unknown expansion", unit, "[Service]\nExecStart=/usr/sbin/sshd -i $OPTIONS"},
 		{"unreadable service", unit, "<directory>"},
-		{"unreadable drop-in", "etc/systemd/system/ssh@.service.d/options.conf", "<directory>"},
+		{"unreadable drop-in", "etc/systemd/system/ssh.service.d/options.conf", "<directory>"},
 		{"include inside match", main, "Match User guest\nInclude sshd_config.d/*.conf"},
 		{"legacy package", status, "Package: openssh-server\nVersion: 1:8.6p1-1\nStatus: install ok installed\n"},
 		{"missing package status", status, ""},
@@ -411,4 +415,95 @@ func TestSSHDProbePreservesConditionalAuthenticationAliases(t *testing.T) {
 	body, err := finalize(r)
 	require.NoError(t, err)
 	assert.NotContains(t, string(body), "LEAKCANARY")
+}
+
+func TestPrivsepSelectsEnabledSSHService(t *testing.T) {
+	const (
+		socket       = "usr/lib/systemd/system/ssh.socket"
+		unit         = "usr/lib/systemd/system/ssh.service"
+		template     = "usr/lib/systemd/system/ssh@.service"
+		env          = "etc/default/ssh"
+		safeTemplate = "[Service]\nExecStart=-/usr/sbin/sshd -i -4 -6 -e"
+		unsafe       = "[Service]\nExecStart=/usr/sbin/sshd -f /etc/ssh/other"
+		reset        = "[Service]\nExecStart=\nExecStart="
+		socketLink   = "etc/systemd/system/sockets.target.wants/ssh.socket"
+	)
+	type inputs map[string]string
+	for _, tc := range []struct {
+		name   string
+		files  inputs
+		links  inputs
+		derive bool
+	}{
+		{"stock socket and service", nil, nil, true},
+		{"unselected template", inputs{template: unsafe}, nil, true},
+		{"per connection", inputs{socket: "[Socket]\nAccept=yes", template: safeTemplate, unit: unsafe}, nil, true},
+		{"socket service override", inputs{socket: "[Socket]\nService=local-ssh.service", unit: unsafe, "usr/lib/systemd/system/local-ssh.service": safeTemplate}, nil, true},
+		{"service alias drop-in", inputs{"etc/systemd/system/sshd.service.d/options.conf": reset + "/usr/sbin/sshd -f /other"}, inputs{"etc/systemd/system/sshd.service": "/usr/lib/systemd/system/ssh.service"}, false},
+		{"explicit service alias", inputs{socket: "[Socket]\nService=selected.service"}, inputs{"etc/systemd/system/selected.service": "/usr/lib/systemd/system/ssh.service"}, true},
+		{"instance-specific override", inputs{socket: "[Socket]\nAccept=yes", template: safeTemplate, "etc/systemd/system/ssh@connection.service.d/options.conf": unsafe}, nil, false},
+		{"unmodeled start preparation", inputs{unit: "[Service]\nExecStartPre=/usr/bin/prepare-ssh-config\nExecStart=/usr/sbin/sshd -D"}, nil, false},
+		{"administrator prefix overrides vendor drop-in", inputs{socket: "[Socket]\nService=local-ssh.service", "usr/lib/systemd/system/local-ssh.service": safeTemplate,
+			"usr/lib/systemd/system/local-ssh.service.d/50.conf": reset + "/usr/sbin/sshd -D",
+			"etc/systemd/system/local-.service.d/50.conf":        reset + "/usr/sbin/sshd -o PasswordAuthentication=yes"}, nil, false},
+		{"socket alias uses canonical service", inputs{socket: "", "usr/lib/systemd/system/other.socket": "[Socket]\nListenStream=22", "usr/lib/systemd/system/other.service": unsafe}, inputs{socket: "other.socket"}, false},
+		{"instance override under template alias", inputs{socket: "[Socket]\nAccept=yes", template: safeTemplate, "etc/systemd/system/other@connection.service.d/options.conf": unsafe}, inputs{"etc/systemd/system/other@.service": "/usr/lib/systemd/system/ssh@.service"}, false},
+		{"socket drop-in changes target", inputs{"etc/systemd/system/ssh.socket.d/target.conf": "[Socket]\nService=other.service", "usr/lib/systemd/system/other.service": unsafe}, nil, false},
+		{"socket drop-in changes accept", inputs{"run/systemd/system/ssh.socket.d/accept.conf": "[Socket]\nAccept=yes", template: unsafe}, nil, false},
+		{"two enabled sockets", inputs{"usr/lib/systemd/system/sshd.socket": "[Socket]\nAccept=no"}, inputs{"run/systemd/system/sockets.target.wants/sshd.socket": "/usr/lib/systemd/system/sshd.socket"}, false},
+		{"direct enablement", inputs{socketLink: "", socket: "[Socket]\nService=other.service", "usr/lib/systemd/system/other.service": unsafe}, inputs{"etc/systemd/system/multi-user.target.wants/ssh.service": "/usr/lib/systemd/system/ssh.service"}, true},
+		{"no enablement", inputs{socketLink: ""}, nil, false},
+		{"optional file absent", inputs{env: ""}, nil, true},
+		{"required file absent", inputs{unit: "[Service]\nEnvironmentFile=/etc/default/missing\nExecStart=/usr/sbin/sshd -D"}, nil, false},
+		{"expanded flags", inputs{unit: "[Service]\nEnvironmentFile=/etc/default/ssh\nExecStart=-/usr/sbin/sshd -D ${SSHD_OPTS}", env: `SSHD_OPTS="-4 -e"`}, nil, true},
+		{"unknown argument", inputs{unit: "[Service]\nExecStart=/usr/sbin/sshd -p 22"}, nil, false},
+		{"environment reset", inputs{env: "SSHD_OPTS=-f /other", "etc/systemd/system/ssh.service.d/reset.conf": "[Service]\nEnvironmentFile=\nEnvironmentFile=-/etc/default/missing"}, nil, true},
+		{"each effective environment file is checked", inputs{env: "SSHD_OPTS=-o PubkeyAuthentication=no", "run/systemd/system/ssh.service.d/options.conf": "[Service]\nEnvironmentFile=/etc/default/options", "etc/default/options": "SSHD_OPTS=-4"}, nil, false},
+		{"service search priority", inputs{unit: unsafe, "run/systemd/system/ssh.service": unsafe, "etc/systemd/system/ssh.service": safeTemplate}, nil, true},
+		{"drop-in directory precedence and lexical order", inputs{
+			"usr/lib/systemd/system/ssh.service.d/50-start.conf": reset + "/usr/sbin/sshd -h /other",
+			"run/systemd/system/ssh.service.d/50-start.conf":     reset + "/usr/sbin/sshd -h /other",
+			"etc/systemd/system/ssh.service.d/50-start.conf":     reset + "/usr/sbin/sshd -i",
+			"etc/systemd/system/ssh.service.d/10-early.conf":     reset + "/usr/sbin/sshd -f /other",
+		}, nil, true},
+		{"lexically later vendor override", inputs{
+			"etc/systemd/system/ssh.service.d/10-start.conf":     reset + "/usr/sbin/sshd -i",
+			"usr/lib/systemd/system/ssh.service.d/90-start.conf": reset + "/usr/sbin/sshd -f /other",
+		}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+			spec := loadCase(t, dir)
+			root, proc := buildHost(t, dir, spec)
+			for file, data := range tc.files {
+				p := filepath.Join(root, file)
+				if data == "" {
+					require.NoError(t, os.Remove(p))
+					continue
+				}
+				require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+				require.NoError(t, os.WriteFile(p, []byte(data), 0o644))
+			}
+			for file, target := range tc.links {
+				p := filepath.Join(root, file)
+				require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+				require.NoError(t, os.Symlink(target, p))
+			}
+			r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(t.Context())
+			require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+			if tc.derive {
+				require.Len(t, r.SSHD.Effective, len(sshdDefaults))
+				assert.Equal(t, ptr("no"), r.SSHD.Effective["passwordauthentication"])
+			} else {
+				assert.Nil(t, r.SSHD.Effective)
+			}
+		})
+	}
+}
+
+func TestSSHDExecStartPrefixes(t *testing.T) {
+	for _, prefix := range []string{"", "-", "@", "+", "!", ":", "-+", "--"} {
+		s := sshService{binary: "/usr/sbin/sshd", start: prefix + "/usr/sbin/sshd -D", starts: 1}
+		assert.Equal(t, prefix == "" || prefix == "-", s.safeStart(t.Context(), mapSource{}), "prefix %q", prefix)
+	}
 }

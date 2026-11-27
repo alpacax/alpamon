@@ -736,7 +736,7 @@ func TestLegacySSHDResendMatchesUnavailableCollection(t *testing.T) {
 	reads := 0
 	post := acceptingPoster()
 	post.answers[reportURL] = []fakeResponse{
-		{status: 400, body: `{"errors":[{"field":"/categories/sshd/reasons/1","code":"unknown_reason"}]}`},
+		{status: 400, body: `{"errors":[{"field":"/categories/sshd/reasons/0","code":"unknown_reason"}]}`},
 		{status: 200},
 	}
 	s := testService(post, func(ctx context.Context) *exposureReport {

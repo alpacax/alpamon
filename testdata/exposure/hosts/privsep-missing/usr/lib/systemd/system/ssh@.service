@@ -1,3 +1,0 @@
-[Service]
-EnvironmentFile=-/etc/default/ssh
-ExecStart=/usr/sbin/sshd -i $SSHD_OPTS

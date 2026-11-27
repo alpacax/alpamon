@@ -26,6 +26,7 @@ var sshdCandidates = []string{"/usr/sbin/sshd", "/usr/bin/sshd"}
 // successful run and is parsed in place; it is never logged or sent.
 type sshdRun struct {
 	reason       string
+	binary       string // validated path within the host root
 	notInstalled bool
 	ok           bool
 	out          []byte
@@ -60,7 +61,7 @@ func findSSHD(root string, mapOwner func(string, uint32) uint32) (string, bool) 
 		if !ok || mapOwner(parent, dst.Uid) != 0 {
 			continue
 		}
-		return filepath.Join(root, c), false
+		return c, false
 	}
 	return "", missing
 }
@@ -125,7 +126,7 @@ func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) ui
 	ctx, cancel := context.WithTimeoutCause(ctx, sshdTimeout, errSSHDTimeout)
 	defer cancel()
 
-	cmd := commandContext(ctx, bin, "-T")
+	cmd := commandContext(ctx, filepath.Join(root, bin), "-T")
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
 	cmd.Dir = "/"
 	cmd.Stdin = nil
@@ -191,7 +192,11 @@ func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) ui
 		var exit *exec.ExitError
 		if !over && readErr == nil && stderrErr == nil && ctx.Err() == nil && errors.As(waitErr, &exit) &&
 			exit.ExitCode() > 0 {
-			return sshdRun{reason: stderr.failureReason(root, mapOwner)}
+			run := sshdRun{reason: stderr.failureReason(root, mapOwner)}
+			if run.reason == reasonSSHDPrivsepMissing {
+				run.binary = bin
+			}
+			return run
 		}
 		return sshdRun{}
 	}

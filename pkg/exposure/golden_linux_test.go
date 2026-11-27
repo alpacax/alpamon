@@ -245,7 +245,7 @@ func caseOptions(t *testing.T, dir string, spec caseSpec, root, proc string) col
 			case "missing":
 				return sshdRun{notInstalled: true}
 			case "privsep_missing":
-				return sshdRun{reason: reasonSSHDPrivsepMissing}
+				return sshdRun{reason: reasonSSHDPrivsepMissing, binary: "/usr/sbin/sshd"}
 			case "fail":
 				return sshdRun{}
 			}
