@@ -47,6 +47,7 @@ type sourceDependency struct {
 type sourceTrace struct {
 	dependencies []sourceDependency
 	failed       bool
+	recent       bool
 	read         bool
 }
 
@@ -98,26 +99,44 @@ func (c *sourceCache) acceptsCollection(collection uint64) bool {
 // Each collection carries its own epoch so an abandoned worker cannot publish
 // an old read as the next day's full read. No lock is held during filesystem IO.
 func cachedSource[T any](f *fsReader, key string, input any, read func(*fsReader) T, complete func(T) bool, clone func(T) T) T {
-	if f.cache == nil {
+	return cachedSourceValidated(f, key, input, read, complete, clone, nil)
+}
+
+// invalidate prevents a caller from publishing a result whose dependencies
+// changed during its own read, even when it has no persistent cache.
+func cachedSourceValidated[T any](f *fsReader, key string, input any, read func(*fsReader) T, complete func(T) bool, clone func(T) T, invalidate func(T) T) T {
+	if f.cache == nil && invalidate == nil {
 		return read(f)
 	}
-	f.cache.mu.Lock()
-	entry, found := f.cache.entries[key]
-	if !f.cache.acceptsCollection(f.collection) {
-		found = false
-	}
-	if found {
-		entry.touched = f.collection
-		f.cache.entries[key] = entry
-	}
-	f.cache.mu.Unlock()
-	if found && entry.epoch == f.epoch && reflect.DeepEqual(entry.input, input) && f.unchanged(entry.dependencies) {
-		return clone(entry.value.(T))
+	if f.cache != nil {
+		f.cache.mu.Lock()
+		entry, found := f.cache.entries[key]
+		if !f.cache.acceptsCollection(f.collection) {
+			found = false
+		}
+		if found {
+			entry.touched = f.collection
+			f.cache.entries[key] = entry
+		}
+		f.cache.mu.Unlock()
+		if found && entry.epoch == f.epoch && reflect.DeepEqual(entry.input, input) && f.unchanged(entry.dependencies) {
+			return clone(entry.value.(T))
+		}
 	}
 	local := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, trace: &sourceTrace{}, now: f.now, cacheStat: f.cacheStat, scan: f.scan}
 	local.noOpenat2.Store(f.noOpenat2.Load())
 	value := read(local)
-	if !local.trace.failed && local.trace.read && complete(value) && local.unchanged(local.trace.dependencies) {
+	stable := !local.trace.failed && local.trace.read && complete(value)
+	if stable && (invalidate != nil || !local.trace.recent) {
+		stable = local.unchanged(local.trace.dependencies)
+	}
+	if invalidate != nil && !stable {
+		value = invalidate(value)
+	}
+	if f.cache == nil {
+		return value
+	}
+	if stable && !local.trace.recent {
 		stored := sourceCacheEntry{epoch: f.epoch, input: input, value: clone(value), dependencies: local.trace.dependencies, touched: f.collection}
 		f.cache.mu.Lock()
 		// A late worker must not replace a newer epoch's entry.
@@ -162,7 +181,7 @@ func (f *fsReader) rememberFile(p string, rule ownerRule, st unix.Stat_t, dirs [
 	f.trace.read = f.trace.read || l.status == statusRead
 	dep := sourceDependency{path: p, rule: rule, id: f.cacheIdentity(p, st), absent: l.status == statusAbsent, dirs: dirs, statTime: l.statTime}
 	if !dep.absent && !timestampsOldEnough(dep.id, dep.statTime) {
-		f.trace.failed = true
+		f.trace.recent = true
 	}
 	f.trace.dependencies = append(f.trace.dependencies, dep)
 }
@@ -219,7 +238,7 @@ func (f *fsReader) rememberDirectory(p string, fd int, rule ownerRule) {
 	}
 	dep := sourceDependency{path: p, rule: rule, id: f.cacheIdentity(p, st), directory: true, nameHash: directoryDigest(names), statTime: statTime}
 	if !timestampsOldEnough(dep.id, dep.statTime) {
-		f.trace.failed = true
+		f.trace.recent = true
 	}
 	f.trace.dependencies = append(f.trace.dependencies, dep)
 }
@@ -229,7 +248,7 @@ func (f *fsReader) unchanged(dependencies []sourceDependency) bool {
 		if f.scan != nil && f.scan.ctx.Err() != nil {
 			return false
 		}
-		if !dep.absent && !timestampsOldEnough(dep.id, dep.statTime) {
+		if !dep.absent && !f.validCacheTime(dep.id, dep.statTime) {
 			return false
 		}
 		fd, name, dirs, l, ok := f.walkDirs(dep.path, dep.rule, dep.directory)
@@ -253,7 +272,7 @@ func (f *fsReader) unchanged(dependencies []sourceDependency) bool {
 					return false
 				}
 				id := f.cacheIdentity(dep.path, st)
-				if id != dep.id || !timestampsOldEnough(id, statTime) {
+				if id != dep.id || !f.validCacheTime(id, statTime) {
 					return false
 				}
 				names, ok := directoryNames(f, fd)
@@ -267,7 +286,7 @@ func (f *fsReader) unchanged(dependencies []sourceDependency) bool {
 				return false
 			}
 			id := f.cacheIdentity(dep.path, st)
-			return slices.Equal(dirs, dep.dirs) && f.acceptsRegular(dep.path, dep.rule, &st, dirs) && id == dep.id && timestampsOldEnough(id, statTime)
+			return slices.Equal(dirs, dep.dirs) && f.acceptsRegular(dep.path, dep.rule, &st, dirs) && id == dep.id && f.validCacheTime(id, statTime)
 		}()
 		if !matches {
 			return false
@@ -281,6 +300,19 @@ func (f *fsReader) cacheIdentity(p string, st unix.Stat_t) sourceIdentity {
 		f.cacheStat(p, &st)
 	}
 	return identityOf(st, f.mapOwner(p, st.Uid))
+}
+
+// A fresh read can confirm identity even when its timestamps are too recent
+// to reuse the result in a later collection. A cache hit requires both.
+func (f *fsReader) validCacheTime(id sourceIdentity, at time.Time) bool {
+	if timestampsOldEnough(id, at) {
+		return true
+	}
+	if f.trace == nil {
+		return false
+	}
+	f.trace.recent = true
+	return true
 }
 
 func timestampsOldEnough(id sourceIdentity, statTime time.Time) bool {

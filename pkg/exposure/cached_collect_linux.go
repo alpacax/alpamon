@@ -47,9 +47,12 @@ func readCachedSSHDConfig(ctx context.Context, sys systemFiles) sshdConfig {
 	f := sys.f
 	reader := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, cache: f.cache, epoch: f.epoch, collection: f.collection, now: f.now, cacheStat: f.cacheStat, scan: &sshdDirectoryBudget{ctx, maxIncludeFiles}}
 	reader.noOpenat2.Store(f.noOpenat2.Load())
-	return cachedSource(reader, "sshd:"+sshdConfigPath, nil, func(f *fsReader) sshdConfig {
+	return cachedSourceValidated(reader, "sshd:"+sshdConfigPath, nil, func(f *fsReader) sshdConfig {
 		return parseSSHDConfigContext(ctx, systemFiles{f: f})
-	}, func(d sshdConfig) bool { return d.canDerive() && len(d.reasons) == 0 }, immutable[sshdConfig])
+	}, func(d sshdConfig) bool { return d.canDerive() && len(d.reasons) == 0 }, immutable[sshdConfig], func(d sshdConfig) sshdConfig {
+		d.derivationUnsupported = true
+		return d
+	})
 }
 
 type cachedKeyFile struct {
