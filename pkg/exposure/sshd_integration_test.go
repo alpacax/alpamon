@@ -89,22 +89,13 @@ func TestDistroSSHDExposure(t *testing.T) {
 	require.NotEmpty(t, distroHostKeys(t))
 
 	var expected map[string]*string
-	var postBootInstall, installedInContainer bool
+	var latestSSH, boot time.Time
 	if debianFamily {
 		expected = distroDerivedSettings(t)
 		bootSeconds, ok := procBootTime("/proc")
 		require.True(t, ok)
-		boot := time.Unix(bootSeconds, 0)
-		raw, err := os.ReadFile("/proc/1/stat")
-		require.NoError(t, err)
-		init, ok := parseProcStat(raw)
-		require.True(t, ok)
-		start := boot.Add(time.Duration(init.startTick) * (time.Second / clockTicks))
-		// btime has one-second precision. Only simulate a later boot when
-		// the package demonstrably changed persistent inputs after PID 1 started.
-		latestSSH := distroUnitTimestamp(t)
-		postBootInstall = latestSSH.After(boot)
-		installedInContainer = latestSSH.After(start.Add(time.Second))
+		boot = time.Unix(bootSeconds, 0)
+		latestSSH = distroUnitTimestamp(t)
 	}
 	// Ubuntu socket activation cannot be reproduced in a container. Reproduce its
 	// observable state directly by collecting while /run/sshd is absent.
@@ -136,27 +127,25 @@ func TestDistroSSHDExposure(t *testing.T) {
 				assert.Nil(t, effective)
 			case debianFamily && !tc.directory:
 				assert.Contains(t, reasons, reasonSSHDPrivsepMissing)
-				if postBootInstall {
-					assert.Nil(t, effective)
-					t.Log("real kernel boot: persistent inputs changed after boot, effective null")
-				} else {
+				if !latestSSH.After(boot) {
 					require.Equal(t, expected, effective)
 					t.Logf("real kernel boot: %d stock settings", len(effective))
+					break
 				}
-				if installedInContainer {
-					t.Run("stock configuration present at boot", func(t *testing.T) {
-						// Model a subsequent boot without changing any package files
-						// or timestamps. Only procfs is supplied by the test.
-						afterBoot := opts
-						afterBoot.procRoot = t.TempDir()
-						stat := "btime " + strconv.FormatInt(time.Now().Unix()+1, 10) + "\n"
-						require.NoError(t, os.WriteFile(filepath.Join(afterBoot.procRoot, "stat"), []byte(stat), 0o644))
-						r := newCollector(afterBoot).collect(t.Context())
-						require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
-						require.Equal(t, expected, r.SSHD.Effective)
-						t.Logf("stock settings with simulated post-install boot: %d", len(r.SSHD.Effective))
-					})
-				}
+				require.Nil(t, effective)
+				t.Log("real kernel boot: persistent inputs changed after boot, effective null")
+				t.Run("stock configuration present at boot", func(t *testing.T) {
+					// Pin boot just after the installed inputs, including packages
+					// installed in an image layer before the container started.
+					afterBoot := opts
+					afterBoot.procRoot = t.TempDir()
+					stat := "btime " + strconv.FormatInt(latestSSH.Unix()+1, 10) + "\n"
+					require.NoError(t, os.WriteFile(filepath.Join(afterBoot.procRoot, "stat"), []byte(stat), 0o644))
+					r := newCollector(afterBoot).collect(t.Context())
+					require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+					require.Equal(t, expected, r.SSHD.Effective)
+					t.Logf("stock settings with pinned boot: %d", len(r.SSHD.Effective))
+				})
 			default:
 				if !tc.directory {
 					t.Log("default service configuration: effective from sshd -T")

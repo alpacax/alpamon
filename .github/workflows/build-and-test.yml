@@ -427,12 +427,21 @@ jobs:
           PKG_MANAGER: ${{ matrix.pkg_manager }}
           DEBIAN_FRONTEND: noninteractive
         run: |
-          case "$PKG_MANAGER" in
-            apt-get) apt-get install -y -o Acquire::Retries=3 --no-install-recommends openssh-server ;;
-            yum|dnf|microdnf) "$PKG_MANAGER" install -y openssh-server ;;
-            zypper) zypper --non-interactive install openssh-server ;;
-            *) echo "Unknown package manager: $PKG_MANAGER" >&2; exit 1 ;;
-          esac || exit 1
+          for attempt in 1 2 3; do
+            case "$PKG_MANAGER" in
+              apt-get) apt-get install -y --no-install-recommends openssh-server ;;
+              yum|dnf|microdnf) "$PKG_MANAGER" install -y openssh-server ;;
+              zypper) zypper --non-interactive install openssh-server ;;
+              *) echo "Unknown package manager: $PKG_MANAGER" >&2; exit 1 ;;
+            esac && break
+            [ "$attempt" -lt 3 ] || exit 1
+            case "$PKG_MANAGER" in
+              apt-get) apt-get update || true ;;
+              yum|dnf|microdnf) "$PKG_MANAGER" clean metadata || true ;;
+              zypper) zypper --non-interactive clean --metadata || true ;;
+            esac
+            sleep $((attempt * 5))
+          done
           go test -v -count=1 -tags=integration -run '^TestDistroSSHDExposure$' ./pkg/exposure
 
   build-and-test-windows:
