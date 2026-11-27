@@ -715,3 +715,41 @@ func TestSharedHomeParsedSourcesIncludeAccountUID(t *testing.T) {
 		assert.Contains(t, fs.cache.entries, "ca:/etc/ssh/ca")
 	})
 }
+
+func TestPrivsepRejectsChangedConfigDependencies(t *testing.T) {
+	for _, change := range []string{"main file", "included file", "include directory"} {
+		t.Run(change, func(t *testing.T) {
+			dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+			spec := loadCase(t, dir)
+			root, proc := buildHost(t, dir, spec)
+			includes := filepath.Join(root, "/etc/ssh/sshd_config.d")
+			last := "/etc/ssh/sshd_config.d/99-last.conf"
+			require.NoError(t, os.WriteFile(filepath.Join(root, last), []byte("# last file\n"), 0o644))
+			c := newCollector(caseOptions(t, dir, spec, root, proc))
+			var changed bool
+			var writeErr error
+			testHookRead = func(file string) {
+				if file != last || changed {
+					return
+				}
+				changed = true
+				target := filepath.Join(root, sshdConfigPath)
+				switch change {
+				case "included file":
+					target = filepath.Join(includes, "60-cloudimg-settings.conf")
+				case "include directory":
+					target = filepath.Join(includes, "00-first.conf")
+				}
+				writeErr = os.WriteFile(target, []byte("PasswordAuthentication yes\n"), 0o644)
+			}
+			t.Cleanup(func() { testHookRead = nil })
+			r := c.collect(t.Context())
+			require.True(t, changed)
+			require.NoError(t, writeErr)
+			require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+			require.Nil(t, r.SSHD.Effective)
+			next := c.collect(t.Context())
+			assert.Equal(t, ptr("yes"), next.SSHD.Effective["passwordauthentication"])
+		})
+	}
+}

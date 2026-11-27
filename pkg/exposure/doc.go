@@ -19,9 +19,10 @@
 // O_NOFOLLOW where the kernel lacks openat2, and the file is validated with
 // fstat on the descriptor it is read from. A symlink anywhere on the path, a
 // non-regular file, a foreign owner or a second hard link makes the source
-// "rejected". Reads stop at 1 MiB plus one byte, lines at 16 KiB, and a file
-// whose size or modification time moves during the read is discarded as a
-// concurrent change.
+// "rejected". Configuration reads stop at 1 MiB plus one byte, with a 16 KiB
+// line limit. The package status lookup streams up to 64 MiB and stops at the
+// openssh-server stanza. A file whose size or modification time changes
+// during the read is discarded.
 //
 // Before opening a source, fstatat(AT_SYMLINK_NOFOLLOW) checks its identity
 // through the same pinned directory walk. Identity includes device, inode,
@@ -77,8 +78,42 @@
 // # Programs it runs
 //
 // The only subprocess is "sshd -T", from a fixed absolute path, without a
-// shell, with a 5-second deadline and a capped stdout. Nothing here runs
+// shell, with a 5-second deadline and bounded stdout. A rejected binary yields
+// sshd_binary_rejected and a deadline yields sshd_timeout. When a normal
+// error exit names the missing privilege separation directory and a rooted
+// stat confirms /run/sshd is absent, the report carries sshd_privsep_missing.
+// The diagnostic buffer retains at most 4 KiB and is cleared after use.
+// Only this failure can supply effective settings from the complete global
+// configuration and its top-level includes. Derivation requires openssh-server
+// 8.7 or later in /var/lib/dpkg/status. The collector checks the service
+// selected by the enabled SSH socket's Service and Accept settings, or the
+// directly enabled SSH service when socket activation is disabled. It reads
+// unit drop-ins in systemd order and checks ExecStart and its environment
+// files against the validated sshd binary and supported flags. Uncertain
+// service options, unassigned expansions, mismatched enablement links, and
+// post-boot changes to selected units, aliases, enablement links, drop-in
+// directories or files, or referenced environment files leave effective null.
+// The collector cannot detect removal of an entire unit lookup or drop-in
+// directory after boot (issue #669). Runtime directories may be newer than boot.
+// A selected unit, alias, enablement link or drop-in under /run leaves effective
+// null. The same applies to unrecognized directives or syntax, non-ASCII glob inputs, relative
+// key or revocation paths, ambiguous or conditional access lists, nested
+// includes or a changed config read.
+// After sshd_privsep_missing the service checks /run/sshd every minute and
+// requests one normal collection when a root-owned directory appears. A later collection
+// with any other outcome ends polling, as does shutdown.
+// A normal error exit reporting no available host keys yields sshd_no_host_keys
+// with null effective settings. Other probe errors yield sshd_unavailable. Nothing here runs
 // sudo, visudo, cvtsudoers or sudo-rs, or calls into PAM.
+//
+// A report refused solely for an unknown sshd_privsep_missing,
+// sshd_binary_rejected, sshd_timeout or sshd_no_host_keys reason is resent once with
+// sshd_unavailable, null effective settings and coverage for an unavailable
+// probe. It omits evidence collected using the derived policy. The resend keeps the
+// collection timestamp and uses the hash of the revised report. Once accepted,
+// later checks and uploads to that endpoint use this shape for the same schema.
+// After 24 hours the next eligible collection retries the specific reason.
+// An accepted report or a known hash restores that format for subsequent collections.
 //
 // # Platforms
 //

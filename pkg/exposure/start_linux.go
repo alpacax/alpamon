@@ -2,7 +2,10 @@
 
 package exposure
 
-import "context"
+import (
+	"context"
+	"golang.org/x/sys/unix"
+)
 
 // Supported reports whether this build collects and sends the exposure
 // report.
@@ -18,15 +21,18 @@ func Start(ctx context.Context, p Poster) {
 	}
 	c := newCollector(opts)
 	s := newService(p, c.collect, triggers)
+	s.privsepPresent = func() bool { return privsepDirectoryPresent(opts) }
 	go s.run(ctx)
 }
 
 // Trigger asks for one exposure read: after the commissioning sync, and for
 // a sync command whose keys name "exposure". A trigger during a read causes
 // exactly one more read after it.
-func Trigger() {
+func Trigger() { requestRead(triggers) }
+
+func requestRead(trigger chan<- struct{}) {
 	select {
-	case triggers <- struct{}{}:
+	case trigger <- struct{}{}:
 	default:
 	}
 }
@@ -38,3 +44,8 @@ var triggers = make(chan struct{}, 1)
 // testHookStartOptions lets the process test use a fixture host with the
 // real Start lifecycle, regardless of the test process's privileges.
 var testHookStartOptions *collectorOptions
+
+func privsepDirectoryPresent(opts collectorOptions) bool {
+	l := privsepEntry(opts.root, opts.mapOwner)
+	return l.status == statusRead && l.uid == 0 && l.mode&unix.S_IFMT == unix.S_IFDIR
+}

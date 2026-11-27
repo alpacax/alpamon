@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,9 @@ const (
 	maxReadJitter    = 5 * time.Minute
 	loopRestartPause = 60 * time.Second
 
+	privsepPollInterval = time.Minute
+	legacySSHDInterval  = 24 * time.Hour
+
 	checkTimeout  = 10 * time.Second
 	reportTimeout = 60 * time.Second
 	maxAttempts   = 5
@@ -33,8 +37,18 @@ const (
 	maxBackoff    = 5 * time.Minute
 )
 
-// schemaV1ByServer retains the negotiated version across services for each configured URL.
-var schemaV1ByServer sync.Map // string to *atomic.Bool
+type legacySSHDWindow struct {
+	version int
+	retryAt time.Time
+}
+
+type serverCapabilities struct {
+	useV1      atomic.Bool
+	legacySSHD atomic.Pointer[legacySSHDWindow]
+}
+
+// Capabilities are shared by services posting to the same endpoint.
+var schemaV1ByServer sync.Map // string to *serverCapabilities
 
 // service serializes exposure reads and their delivery. A trigger that
 // arrives during a read is held in a one-slot channel and causes exactly one
@@ -46,7 +60,11 @@ type service struct {
 	now     func() time.Time
 	jitter  func() time.Duration
 	sleep   func(ctx context.Context, d time.Duration) bool
-	useV1   *atomic.Bool
+	*serverCapabilities
+	privsepPresent func() bool
+	statBusy       atomic.Bool
+	cancelPoll     context.CancelFunc
+	pollDone       chan struct{}
 	// lastObserved prevents replays within the same second. After a backward
 	// clock step of more than 2 s, an earlier observed_at is sent on purpose;
 	// the server may answer applied: false until the clock catches up.
@@ -56,19 +74,19 @@ type service struct {
 }
 
 func newService(p Poster, collect func(ctx context.Context) *exposureReport, trigger chan struct{}) *service {
-	useV1 := new(atomic.Bool)
+	caps := new(serverCapabilities)
 	if session, ok := p.(*scheduler.Session); ok && session.BaseURL != "" {
-		state, _ := schemaV1ByServer.LoadOrStore(session.BaseURL, useV1)
-		useV1 = state.(*atomic.Bool)
+		state, _ := schemaV1ByServer.LoadOrStore(session.BaseURL, caps)
+		caps = state.(*serverCapabilities)
 	}
 	return &service{
-		post:    p,
-		collect: collect,
-		trigger: trigger,
-		now:     time.Now,
-		jitter:  func() time.Duration { return rand.N(maxReadJitter) },
-		sleep:   sleepCtx,
-		useV1:   useV1,
+		post:               p,
+		collect:            collect,
+		trigger:            trigger,
+		now:                time.Now,
+		jitter:             func() time.Duration { return rand.N(maxReadJitter) },
+		sleep:              sleepCtx,
+		serverCapabilities: caps,
 	}
 }
 
@@ -102,6 +120,7 @@ func (s *service) runLoop(ctx context.Context) (panicked bool) {
 			logExposurePanic("service", "Exposure service loop panicked; restarting after 60 seconds.")
 		}
 	}()
+	defer s.stopPrivsepPoll()
 	if s.due.IsZero() {
 		s.due = s.now().Add(s.jitter())
 	}
@@ -121,6 +140,81 @@ func (s *service) runLoop(ctx context.Context) (panicked bool) {
 	}
 }
 
+func (s *service) stopPrivsepPoll() {
+	if s.cancelPoll != nil {
+		s.cancelPoll()
+		<-s.pollDone
+		s.cancelPoll = nil
+	}
+}
+
+func (s *service) updatePrivsepPoll(ctx context.Context, snapshot *exposureReport) {
+	if s.privsepPresent == nil || snapshot == nil || !slices.Contains(snapshot.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing) {
+		s.stopPrivsepPoll()
+		return
+	}
+	if s.cancelPoll != nil {
+		select {
+		case <-s.pollDone:
+			s.cancelPoll()
+		default:
+			return
+		}
+	}
+	ctx, s.cancelPoll = context.WithCancel(ctx)
+	done := make(chan struct{})
+	s.pollDone = done
+	go func() {
+		defer close(done)
+		defer func() {
+			if recover() != nil {
+				logExposurePanic("sshd", "Exposure privilege separation directory check failed.")
+			}
+		}()
+		ticker := time.NewTicker(privsepPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if ctx.Err() == nil && s.checkPrivsepDirectory(ctx) {
+					if ctx.Err() == nil {
+						requestRead(s.trigger)
+					}
+					return
+				}
+			}
+		}
+	}()
+}
+
+// A kernel lookup can outlive cancellation on a stalled filesystem. Keep at
+// most one such worker, including across poll disarms and subsequent rearms.
+func (s *service) checkPrivsepDirectory(ctx context.Context) bool {
+	if !s.statBusy.CompareAndSwap(false, true) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, categoryBudget)
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() {
+		defer s.statBusy.Store(false)
+		defer func() {
+			if recover() != nil {
+				done <- false
+			}
+		}()
+		done <- s.privsepPresent()
+	}()
+	select {
+	case present := <-done:
+		return present && ctx.Err() == nil
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // readAndDeliver reads once and delivers the result: a check, then the
 // report only when the server asks for it. Retries resend the same
 // observed_at and body.
@@ -133,6 +227,7 @@ func (s *service) readAndDeliver(ctx context.Context) {
 		version = legacySchemaVersion
 	}
 	r, body, snapshot := s.buildReport(ctx, version)
+	s.updatePrivsepPoll(ctx, snapshot)
 	if r == nil || !s.deliver(ctx, r, body) {
 		return
 	}
@@ -142,7 +237,7 @@ func (s *service) readAndDeliver(ctx context.Context) {
 	if snapshot == nil {
 		r, body, _ = fallbackReport(r.ObservedAt, legacySchemaVersion)
 	} else {
-		r, body = prepareReport(snapshot, legacySchemaVersion)
+		r, body = s.prepareReport(snapshot, legacySchemaVersion)
 	}
 	if r != nil {
 		s.deliver(ctx, r, body)
@@ -154,6 +249,7 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 	var res struct {
 		Required *bool `json:"required"`
 	}
+	window := s.legacySSHD.Load()
 	check := s.send(ctx, checkURL, checkBody(r), checkTimeout, &res)
 	switch {
 	case check.unsupportedVersion && r.SchemaVersion == schemaVersion:
@@ -168,9 +264,22 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 		log.Debug().Int("status_code", check.status).Msg("Exposure check was not accepted.")
 		return false
 	case !*res.Required:
+		s.acceptSSHDShape(window, r)
 		return false
 	}
 	report := s.send(ctx, reportURL, body, reportTimeout, nil)
+	if report.unknownReasonField != "" {
+		if snapshot := legacySSHDReport(r, report.unknownReasonField); snapshot != nil {
+			if legacy, encoded := prepareReport(snapshot, r.SchemaVersion); legacy != nil {
+				report = s.sendAttempts(ctx, reportURL, encoded, reportTimeout, nil, 1)
+				if report.ok && report.status == http.StatusOK {
+					s.legacySSHD.Store(&legacySSHDWindow{r.SchemaVersion, s.now().Add(legacySSHDInterval)})
+				}
+			}
+		}
+	} else if report.ok && report.status == http.StatusOK {
+		s.acceptSSHDShape(window, r)
+	}
 	if report.unsupportedVersion && r.SchemaVersion == schemaVersion {
 		return true
 	}
@@ -178,6 +287,47 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 		log.Warn().Int("status_code", report.status).Msg("Exposure report was not accepted.")
 	}
 	return false
+}
+
+func (s *service) acceptSSHDShape(window *legacySSHDWindow, report *exposureReport) {
+	if window != nil && window.version == report.SchemaVersion && specificSSHDReason(report, "") != "" {
+		s.legacySSHD.CompareAndSwap(window, nil)
+	}
+}
+
+// A refusal must point to the exact reason in the submitted report.
+func specificSSHDReason(report *exposureReport, field string) string {
+	for i, reason := range report.Categories[catSSHD].Reasons {
+		switch reason {
+		case reasonSSHDPrivsepMissing, reasonSSHDBinaryRejected, reasonSSHDTimeout, reasonSSHDNoHostKeys:
+			if field == "" || field == "/categories/sshd/reasons/"+strconv.Itoa(i) {
+				return reason
+			}
+		}
+	}
+	return ""
+}
+
+func legacySSHDReport(report *exposureReport, field string) *exposureReport {
+	reason := specificSSHDReason(report, field)
+	if reason == "" {
+		return nil
+	}
+	snapshot := report
+	if report.unavailableSSHD != nil {
+		snapshot = report.unavailableSSHD()
+	}
+	legacy := reportForVersion(snapshot, report.SchemaVersion)
+	legacy.ObservedAt = report.ObservedAt
+	c := legacy.Categories[catSSHD]
+	reasons := reasonSet{}
+	reasons.add(c.Reasons...)
+	delete(reasons, reason)
+	reasons.add(reasonSSHDUnavailable)
+	c.Reasons = reasons.list()
+	legacy.Categories[catSSHD] = c
+	legacy.SSHD.Effective = nil
+	return legacy
 }
 
 func (s *service) buildReport(ctx context.Context, version int) (report *exposureReport, encoded []byte, snapshot *exposureReport) {
@@ -216,8 +366,18 @@ func (s *service) buildReport(ctx context.Context, version int) (report *exposur
 	snapshot = s.collect(ctx)
 	snapshot.ObservedAt = observed.Format(time.RFC3339)
 	stage = "finalize"
-	report, encoded = prepareReport(snapshot, version)
+	report, encoded = s.prepareReport(snapshot, version)
 	return report, encoded, snapshot
+}
+
+func (s *service) prepareReport(snapshot *exposureReport, version int) (*exposureReport, []byte) {
+	if window := s.legacySSHD.Load(); window != nil && window.version == version && specificSSHDReason(snapshot, "") != "" {
+		now := s.now()
+		if now.Before(window.retryAt) || !s.legacySSHD.CompareAndSwap(window, &legacySSHDWindow{version, now.Add(legacySSHDInterval)}) {
+			snapshot = legacySSHDReport(snapshot, "")
+		}
+	}
+	return prepareReport(snapshot, version)
 }
 
 func prepareReport(snapshot *exposureReport, version int) (*exposureReport, []byte) {
@@ -282,29 +442,37 @@ type deliveryResponse struct {
 	status             int
 	ok                 bool
 	unsupportedVersion bool
+	unknownReasonField string
 }
 
-func unsupportedSchemaVersion(body []byte) bool {
+func (r *deliveryResponse) readRefusal(body []byte) {
 	var response struct {
 		Errors []struct {
-			Code string `json:"code"`
+			Code  string `json:"code"`
+			Field string `json:"field"`
 		} `json:"errors"`
 	}
 	if json.Unmarshal(body, &response) != nil {
-		return false
+		return
 	}
 	for _, failure := range response.Errors {
 		if failure.Code == "unsupported_schema_version" {
-			return true
+			r.unsupportedVersion = true
 		}
 	}
-	return false
+	if len(response.Errors) == 1 && response.Errors[0].Code == "unknown_reason" {
+		r.unknownReasonField = response.Errors[0].Field
+	}
 }
 
 // send posts body, retrying transport errors and retryable statuses with
 // backoff. ok is false when delivery is deferred. Neither the request nor
 // the response body is logged.
 func (s *service) send(ctx context.Context, url string, body []byte, timeout time.Duration, out any) deliveryResponse {
+	return s.sendAttempts(ctx, url, body, timeout, out, maxAttempts)
+}
+
+func (s *service) sendAttempts(ctx context.Context, url string, body []byte, timeout time.Duration, out any, attempts int) deliveryResponse {
 	backoff := firstBackoff
 	for attempt := 1; ; attempt++ {
 		resp, status, _, err := s.post.PostExposure(ctx, url, body, timeout)
@@ -321,8 +489,11 @@ func (s *service) send(ctx context.Context, url string, body []byte, timeout tim
 			return deliveryResponse{status: status}
 		}
 		if status >= 400 && status < 500 && status != http.StatusRequestTimeout {
-			return deliveryResponse{status: status, ok: true,
-				unsupportedVersion: status == http.StatusBadRequest && err == nil && unsupportedSchemaVersion(resp)}
+			r := deliveryResponse{status: status, ok: true}
+			if status == http.StatusBadRequest && err == nil {
+				r.readRefusal(resp)
+			}
+			return r
 		}
 		if err == nil && !retryable(status) {
 			if out != nil && status == http.StatusOK {
@@ -333,7 +504,7 @@ func (s *service) send(ctx context.Context, url string, body []byte, timeout tim
 			}
 			return deliveryResponse{status: status, ok: true}
 		}
-		if attempt >= maxAttempts || ctx.Err() != nil {
+		if attempt >= attempts || ctx.Err() != nil {
 			log.Debug().Int("status_code", status).Int("attempts", attempt).Msg("Exposure delivery gave up until the next read.")
 			return deliveryResponse{status: status}
 		}

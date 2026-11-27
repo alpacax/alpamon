@@ -149,6 +149,19 @@ func syncAccounting(t *testing.T, dir string, spec caseSpec) {
 	}
 }
 
+// Git does not preserve timestamps. Model the unit tree, including its
+// enablement links and directories, as installed before the fixture booted.
+func setFixtureTreeMtime(t *testing.T, root string) {
+	t.Helper()
+	at := unix.NsecToTimespec(fixtureMtime.UnixNano())
+	require.NoError(t, filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{at, at}, unix.AT_SYMLINK_NOFOLLOW)
+	}))
+}
+
 // buildHost copies a case's host root into a temporary directory with the
 // modes and times git cannot carry, and writes its process table.
 func buildHost(t *testing.T, dir string, spec caseSpec) (string, string) {
@@ -202,12 +215,7 @@ func buildHost(t *testing.T, dir string, spec caseSpec) (string, string) {
 		require.NoError(t, err)
 		require.NoError(t, os.Chmod(filepath.Join(root, rel), os.FileMode(m)))
 	}
-	require.NoError(t, filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.Type()&fs.ModeSymlink != 0 {
-			return err
-		}
-		return os.Chtimes(p, fixtureMtime, fixtureMtime)
-	}))
+	setFixtureTreeMtime(t, root)
 
 	proc := filepath.Join(base, "proc")
 	require.NoError(t, os.Mkdir(proc, 0o755))
@@ -230,7 +238,7 @@ func caseOptions(t *testing.T, dir string, spec caseSpec, root, proc string) col
 	t.Helper()
 	var out []byte
 	switch spec.SSHD {
-	case "missing", "fail":
+	case "missing", "fail", "privsep_missing":
 	default:
 		var err error
 		out, err = os.ReadFile(filepath.Join(dir, spec.SSHD))
@@ -244,6 +252,8 @@ func caseOptions(t *testing.T, dir string, spec caseSpec, root, proc string) col
 			switch spec.SSHD {
 			case "missing":
 				return sshdRun{notInstalled: true}
+			case "privsep_missing":
+				return sshdRun{reason: reasonSSHDPrivsepMissing, binary: "/usr/sbin/sshd"}
 			case "fail":
 				return sshdRun{}
 			}

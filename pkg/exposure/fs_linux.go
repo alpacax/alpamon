@@ -19,6 +19,7 @@ import (
 // directory symlinks reached entirely through root-owned directories without
 // group/world write permission are resolved; account paths use no-follow opens.
 type fsReader struct {
+	scan   *sshdDirectoryBudget
 	rootFD int
 	root   unix.Stat_t
 	// mapOwner turns a file's uid into the uid ownership is judged by. It is
@@ -180,6 +181,11 @@ func failed(status, reason string) loaded {
 // descriptor of the parent with the stats of each directory from the root.
 // The caller closes the descriptor unless it is the root's.
 func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, string, []pathStat, loaded, bool) {
+	return f.walkDirsBefore(p, rule, includeLast, time.Time{})
+}
+
+// A cutoff applies only to links resolving the final directory being inspected.
+func (f *fsReader) walkDirsBefore(p string, rule ownerRule, includeLast bool, cutoff time.Time) (int, string, []pathStat, loaded, bool) {
 	if p != "/" && !validPath(p) {
 		return -1, "", nil, failed(statusUnresolved, reasonPathTokenUnresolved), false
 	}
@@ -201,6 +207,7 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 	paths := []string{""}
 	trusted := stats[0].uid == 0 && stats[0].mode&0o022 == 0
 	hops := 0
+	viaRun := false
 	keepFD := -1
 	defer func() {
 		for _, fd := range parents[1:] {
@@ -225,6 +232,9 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 			continue
 		}
 		next := prefix + "/" + c
+		if next == "/run" {
+			viaRun = true
+		}
 		if testHookOpen != nil {
 			if err := testHookOpen(next); err != nil {
 				return -1, "", nil, failed(statusOf(err)), false
@@ -237,6 +247,9 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 				return -1, "", nil, failed(statusOf(err)), false
 			}
 			if st.Mode&unix.S_IFMT == unix.S_IFLNK {
+				if !cutoff.IsZero() && len(comps) == 0 && !viaRun && mtimeOf(&st).After(cutoff) {
+					return -1, "", nil, failed(statusRejected, reasonFileRejected), false
+				}
 				var parent unix.Stat_t
 				if err := unix.Fstat(cur, &parent); err != nil {
 					return -1, "", nil, failed(statusUnreadable, reasonFileUnreadable), false
@@ -279,7 +292,7 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 		trusted = trusted && ps.uid == 0 && ps.mode&0o022 == 0
 	}
 	keepFD = cur
-	return cur, last, stats, loaded{status: statusRead, reasons: reasonSet{}}, true
+	return cur, last, stats, loaded{status: statusRead, reasons: reasonSet{}, viaRun: viaRun}, true
 }
 
 // openRegular opens p for reading and validates the descriptor: a regular
@@ -488,7 +501,11 @@ func (f *fsReader) statDir(p string, rule ownerRule) ([]pathStat, loaded) {
 }
 
 // list returns the entry names of directory p.
-func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) (names []string, result loaded) {
+func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) ([]string, loaded) {
+	return f.listBefore(p, rule, recordsOnly, time.Time{})
+}
+
+func (f *fsReader) listBefore(p string, rule ownerRule, recordsOnly bool, cutoff time.Time) (names []string, result loaded) {
 	defer func() {
 		if f.trace != nil {
 			if !result.complete() {
@@ -498,7 +515,7 @@ func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) (names []str
 			}
 		}
 	}()
-	fd, _, _, l, ok := f.walkDirs(p, rule, true)
+	fd, _, _, l, ok := f.walkDirsBefore(p, rule, true, cutoff)
 	if !ok {
 		return nil, l
 	}
@@ -513,6 +530,9 @@ func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) (names []str
 	fd = readable
 	dir := os.NewFile(uintptr(fd), p)
 	defer func() { _ = dir.Close() }()
+	if !f.scan.take() {
+		return nil, failed(statusUnreadable, reasonLimitExceeded)
+	}
 	names, err = dir.Readdirnames(maxDirEntries + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, failed(statusUnreadable, reasonFileUnreadable)
@@ -534,6 +554,15 @@ func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) (names []str
 		}
 		names = files
 	}
+	if !cutoff.IsZero() && !l.viaRun {
+		var st unix.Stat_t
+		if err := unix.Fstat(fd, &st); err != nil {
+			return nil, failed(statusUnreadable, reasonFileUnreadable)
+		}
+		if mtimeOf(&st).After(cutoff) {
+			return nil, failed(statusRejected, reasonFileRejected)
+		}
+	}
 	l.data = []byte{}
 	return names, l
 }
@@ -553,6 +582,7 @@ func (f *fsReader) exists(p string) (bool, loaded) {
 	var st unix.Stat_t
 	err := unix.Fstatat(fd, last, &st, unix.AT_SYMLINK_NOFOLLOW)
 	if err == nil {
+		l.uid, l.mode, l.mtime = f.mapOwner(p, st.Uid), st.Mode, mtimeOf(&st)
 		return true, l
 	}
 	status, reason := statusOf(err)

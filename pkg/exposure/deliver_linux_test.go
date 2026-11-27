@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -614,4 +616,276 @@ func TestTriggerReadPreservesDueTime(t *testing.T) {
 		cancel()
 		<-done
 	})
+}
+
+func TestPrivsepRecollection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		var reads, stats atomic.Int32
+		var missing, present atomic.Bool
+		missing.Store(true)
+		post := &fakePoster{answers: map[string][]fakeResponse{checkURL: {{status: 200, body: `{"required":false}`}}}}
+		s := testService(post, func(context.Context) *exposureReport {
+			reads.Add(1)
+			r := sampleReport()
+			if missing.Load() {
+				r.Categories[catSSHD] = coverage{Status: coveragePartial, Reasons: []string{reasonSSHDPrivsepMissing}}
+			}
+			return r
+		})
+		s.now = time.Now
+		s.privsepPresent = func() bool { stats.Add(1); return present.Load() }
+		done := make(chan struct{})
+		go func() { defer close(done); s.run(ctx) }()
+		advance := func(d time.Duration) { time.Sleep(d); synctest.Wait() }
+		synctest.Wait()
+		assert.Equal(t, 1, int(reads.Load()))
+		advance(time.Minute)
+		assert.Equal(t, 1, int(stats.Load()))
+		assert.Equal(t, 1, int(reads.Load()))
+		present.Store(true)
+		missing.Store(false)
+		advance(time.Minute)
+		assert.Equal(t, 2, int(reads.Load()))
+		advance(2 * time.Minute)
+		assert.Equal(t, 2, int(stats.Load()))
+		assert.Equal(t, 2, int(reads.Load()))
+
+		missing.Store(true)
+		present.Store(false)
+		requestRead(s.trigger)
+		synctest.Wait()
+		advance(time.Minute)
+		assert.Equal(t, 3, int(stats.Load()))
+		missing.Store(false)
+		requestRead(s.trigger)
+		synctest.Wait()
+		advance(time.Minute)
+		assert.Equal(t, 3, int(stats.Load()))
+		assert.Equal(t, 4, int(reads.Load()))
+
+		missing.Store(true)
+		requestRead(s.trigger)
+		synctest.Wait()
+		cancel()
+		<-done
+		advance(2 * time.Minute)
+		assert.Equal(t, 3, int(stats.Load()))
+		assert.Equal(t, 5, int(reads.Load()))
+	})
+}
+
+func TestReportResendsOnlyForTheRejectedSSHDReason(t *testing.T) {
+	const field = "/categories/sshd/reasons/1"
+	const unknown = `{"field":"` + field + `","code":"unknown_reason"}`
+	for _, tc := range []struct {
+		name, reason, errors string
+		resend               bool
+	}{
+		{"config derived", reasonSSHDPrivsepMissing, unknown, true},
+		{"rejected binary", reasonSSHDBinaryRejected, unknown, true},
+		{"deadline", reasonSSHDTimeout, unknown, true},
+		{"no host keys", reasonSSHDNoHostKeys, unknown, true},
+		{"other reason", reasonSSHDUnavailable, unknown, false},
+		{"another error", reasonSSHDPrivsepMissing, unknown + "," + unknown, false},
+		{"other field", reasonSSHDPrivsepMissing, `{"field":"/categories/keys/reasons/1","code":"unknown_reason"}`, false},
+		{"other index", reasonSSHDPrivsepMissing, `{"field":"/categories/sshd/reasons/0","code":"unknown_reason"}`, false},
+		{"other code", reasonSSHDPrivsepMissing, `{"field":"` + field + `","code":"invalid_value"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := acceptingPoster()
+			p.answers[reportURL] = []fakeResponse{{status: 400, body: `{"errors":[` + tc.errors + `]}`}}
+			reads := 0
+			s := testService(p, func(context.Context) *exposureReport {
+				reads++
+				r := sampleReport()
+				r.Categories[catSSHD] = coverage{Status: coveragePartial, Reasons: []string{reasonFileUnreadable, tc.reason}}
+				if tc.reason == reasonSSHDPrivsepMissing {
+					r.SSHD.Effective = map[string]*string{"usepam": ptr("yes")}
+				}
+				return r
+			})
+			s.readAndDeliver(t.Context())
+			assert.Equal(t, 1, reads)
+			assert.Len(t, p.callsTo(checkURL), 1)
+			reports := p.callsTo(reportURL)
+			if !tc.resend {
+				assert.Len(t, reports, 1)
+				return
+			}
+			require.Len(t, reports, 2)
+			original := decodeTree(t, reports[0].body)
+			legacy := decodeTree(t, reports[1].body)
+			assert.Equal(t, goldenHash(t, reports[1].body), legacy["hash"])
+			assert.NotEqual(t, original["hash"], legacy["hash"])
+			original["hash"] = legacy["hash"]
+			original["sshd"].(map[string]any)["effective"] = nil
+			setCategory(original, catSSHD, coveragePartial, reasonFileUnreadable, reasonSSHDUnavailable)
+			assert.Equal(t, original, legacy)
+		})
+	}
+}
+
+func TestLegacySSHDResendMatchesUnavailableCollection(t *testing.T) {
+	dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	opts := caseOptions(t, dir, spec, root, proc)
+	collector := newCollector(opts)
+	reads := 0
+	post := acceptingPoster()
+	post.answers[reportURL] = []fakeResponse{
+		{status: 400, body: `{"errors":[{"field":"/categories/sshd/reasons/0","code":"unknown_reason"}]}`},
+		{status: 200},
+	}
+	s := testService(post, func(ctx context.Context) *exposureReport {
+		reads++
+		return collector.collect(ctx)
+	})
+	s.readAndDeliver(t.Context())
+	assert.Equal(t, 1, reads)
+	reports := post.callsTo(reportURL)
+	require.Len(t, reports, 2)
+	assert.Contains(t, string(reports[0].body), fpEd0)
+	assert.NotContains(t, string(reports[1].body), fpEd0)
+	opts.runSSHD = func(context.Context) sshdRun { return sshdRun{} }
+	want := newCollector(opts).collect(t.Context())
+	want.ObservedAt = s.lastObserved.Format(time.RFC3339)
+	_, body := prepareReport(want, schemaVersion)
+	assert.Equal(t, string(body), string(reports[1].body))
+}
+
+func TestStalledPrivsepStatDoesNotBlockDisarm(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := testService(acceptingPoster(), nil)
+		unblock := make(chan struct{})
+		var calls atomic.Int32
+		s.privsepPresent = func() bool { calls.Add(1); <-unblock; return true }
+		r := sampleReport()
+		r.Categories[catSSHD] = coverage{Reasons: []string{reasonSSHDPrivsepMissing}}
+		s.updatePrivsepPoll(t.Context(), r)
+		time.Sleep(privsepPollInterval)
+		synctest.Wait()
+		started := time.Now()
+		s.stopPrivsepPoll()
+		assert.Equal(t, started, time.Now(), "shutdown does not wait for the stat deadline")
+		s.updatePrivsepPoll(t.Context(), r)
+		time.Sleep(2 * privsepPollInterval)
+		synctest.Wait()
+		s.stopPrivsepPoll()
+		close(unblock)
+		synctest.Wait()
+		assert.EqualValues(t, 1, calls.Load())
+		assert.Empty(t, s.trigger)
+	})
+}
+
+func TestAcceptedLegacySSHDShapeIsUsedForSubsequentChecks(t *testing.T) {
+	const refusal = `{"errors":[{"code":"unknown_reason","field":"/categories/sshd/reasons/0"}]}`
+	for _, status := range []int{200, 400} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			p := acceptingPoster()
+			p.answers[reportURL] = []fakeResponse{{status: 400, body: refusal}, {status: status}, {status: 200}}
+			s := testService(p, func(context.Context) *exposureReport {
+				r := sampleReport()
+				r.Categories[catSSHD] = coverage{Status: coveragePartial, Reasons: []string{reasonSSHDPrivsepMissing}}
+				return r
+			})
+			s.readAndDeliver(t.Context())
+			s.readAndDeliver(t.Context())
+			reports := p.callsTo(reportURL)
+			require.Len(t, reports, 3)
+			check := decodeTree(t, p.callsTo(checkURL)[1].body)
+			last := decodeTree(t, reports[2].body)
+			assert.Equal(t, last["hash"], check["hash"])
+			want := reasonSSHDPrivsepMissing
+			if status == 200 {
+				want = reasonSSHDUnavailable
+			}
+			assert.Contains(t, string(reports[2].body), want)
+			r, _ := s.prepareReport(s.collect(t.Context()), legacySchemaVersion)
+			assert.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+		})
+	}
+}
+
+func TestLegacySSHDShapeRetriesAfterOneDay(t *testing.T) {
+	const refusal = `{"errors":[{"code":"unknown_reason","field":"/categories/sshd/reasons/0"}]}`
+	p := acceptingPoster()
+	s := testService(p, func(context.Context) *exposureReport {
+		r := sampleReport()
+		r.Categories[catSSHD] = coverage{Reasons: []string{reasonSSHDPrivsepMissing}}
+		r.SSHD.Effective = map[string]*string{"usepam": ptr("yes")}
+		return r
+	})
+	start := s.now()
+	now := start
+	s.now = func() time.Time { return now }
+	collectAt := func(elapsed time.Duration, responses []fakeResponse, want ...string) {
+		t.Helper()
+		now = start.Add(elapsed)
+		before := len(p.callsTo(reportURL))
+		p.answers[reportURL] = responses
+		s.readAndDeliver(t.Context())
+		reports := p.callsTo(reportURL)[before:]
+		require.Len(t, reports, len(want))
+		checks := p.callsTo(checkURL)
+		assert.Equal(t, goldenHash(t, reports[0].body), decodeTree(t, checks[len(checks)-1].body)["hash"])
+		for i, reason := range want {
+			assert.Contains(t, string(reports[i].body), reason)
+		}
+	}
+	accepted := []fakeResponse{{status: 200}}
+	rejected := []fakeResponse{{status: 400, body: refusal}, {status: 200}}
+	collectAt(0, rejected, reasonSSHDPrivsepMissing, reasonSSHDUnavailable)
+	collectAt(24*time.Hour-time.Second, accepted, reasonSSHDUnavailable)
+	collectAt(24*time.Hour, rejected, reasonSSHDPrivsepMissing, reasonSSHDUnavailable)
+	collectAt(48*time.Hour-time.Second, accepted, reasonSSHDUnavailable)
+	collectAt(48*time.Hour, accepted, reasonSSHDPrivsepMissing)
+	collectAt(48*time.Hour+time.Second, accepted, reasonSSHDPrivsepMissing)
+
+	collectAt(49*time.Hour, rejected, reasonSSHDPrivsepMissing, reasonSSHDUnavailable)
+	now = start.Add(73 * time.Hour)
+	p.answers[checkURL] = []fakeResponse{{status: 200, body: `{"required":false}`}, {status: 200, body: `{"required":true}`}}
+	before := len(p.callsTo(reportURL))
+	s.readAndDeliver(t.Context())
+	assert.Len(t, p.callsTo(reportURL), before)
+	collectAt(73*time.Hour+time.Second, accepted, reasonSSHDPrivsepMissing)
+}
+
+func TestLegacySSHDShapeFollowsServerEndpoint(t *testing.T) {
+	url := "https://example.test/old-reasons"
+	other := "https://example.test/new-reasons"
+	defer schemaV1ByServer.Delete(url)
+	defer schemaV1ByServer.Delete(other)
+	serviceAt := func(base string) *service { return newService(&scheduler.Session{BaseURL: base}, nil, nil) }
+	window := &legacySSHDWindow{schemaVersion, time.Now().Add(24 * time.Hour)}
+	serviceAt(url).legacySSHD.Store(window)
+	assert.Same(t, window, serviceAt(url).legacySSHD.Load())
+	assert.Nil(t, serviceAt(other).legacySSHD.Load())
+}
+
+func TestPrivsepPollRequiresRootOwnedDirectory(t *testing.T) {
+	root := t.TempDir()
+	opts := collectorOptions{root: root, mapOwner: rootOwned}
+	require.NoError(t, os.Mkdir(filepath.Join(root, "run"), 0o755))
+	entry := filepath.Join(root, privsepPath)
+	assert.False(t, privsepDirectoryPresent(opts))
+	require.NoError(t, os.Symlink("missing", entry))
+	assert.False(t, privsepDirectoryPresent(opts))
+	require.NoError(t, os.Remove(entry))
+	require.NoError(t, os.WriteFile(entry, nil, 0o644))
+	assert.False(t, privsepDirectoryPresent(opts))
+	require.NoError(t, os.Remove(entry))
+	require.NoError(t, os.Mkdir(entry, 0o755))
+	opts.mapOwner = func(p string, _ uint32) uint32 {
+		if p == privsepPath {
+			return 1000
+		}
+		return 0
+	}
+	assert.False(t, privsepDirectoryPresent(opts))
+	opts.mapOwner = rootOwned
+	assert.True(t, privsepDirectoryPresent(opts))
 }

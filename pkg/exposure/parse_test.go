@@ -1,6 +1,7 @@
 package exposure
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -273,7 +274,7 @@ func TestParseSSHDT(t *testing.T) {
 		"banner LEAKCANARY",
 	}, "\n")
 	res := parseSSHDT([]byte(out))
-	assert.Len(t, res.effective, len(effectiveKeywords))
+	assert.Len(t, res.effective, len(sshdDefaults))
 	assert.Equal(t, "yes", *res.effective["passwordauthentication"])
 	assert.Equal(t, "alice bob@10.0.0.0/8", *res.effective["allowusers"])
 	assert.Nil(t, res.effective["permitrootlogin"])
@@ -579,5 +580,151 @@ func TestSSHDArgumentCommentsAndQuotes(t *testing.T) {
 		got, ok := splitArgs(tc.in)
 		assert.True(t, ok)
 		assert.Equal(t, tc.want, got)
+	}
+}
+
+func TestSSHDConfigDefaults(t *testing.T) {
+	const plain = "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521," +
+		"sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,webauthn-sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256,ssh-rsa"
+	const certs = "ssh-ed25519-cert-v01@openssh.com,ecdsa-sha2-nistp256-cert-v01@openssh.com,ecdsa-sha2-nistp384-cert-v01@openssh.com," +
+		"ecdsa-sha2-nistp521-cert-v01@openssh.com,sk-ssh-ed25519-cert-v01@openssh.com,sk-ecdsa-sha2-nistp256-cert-v01@openssh.com," +
+		"webauthn-sk-ecdsa-sha2-nistp256-cert-v01@openssh.com,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com," +
+		"ssh-rsa-cert-v01@openssh.com,ssh-mldsa44-ed25519-cert"
+	expected := map[string]string{
+		"passwordauthentication": "yes", "kbdinteractiveauthentication": "yes", "usepam": "yes",
+		"permitemptypasswords": "no", "permitrootlogin": "prohibit-password", "pubkeyauthentication": "yes",
+		"authenticationmethods": "any", "pubkeyacceptedalgorithms": certs + "," + plain + ",ssh-mldsa44-ed25519", "casignaturealgorithms": plain,
+		"authorizedkeysfile": ".ssh/authorized_keys .ssh/authorized_keys2", "authorizedprincipalsfile": "none",
+		"trustedusercakeys": "none", "revokedkeys": "none", "strictmodes": "yes", "gssapiauthentication": "no",
+		"kerberosauthentication": "no", "kerberosorlocalpasswd": "yes", "hostbasedauthentication": "no",
+		"ignorerhosts": "yes", "ignoreuserknownhosts": "no", "allowusers": "", "denyusers": "", "allowgroups": "", "denygroups": "",
+	}
+	assert.Equal(t, expected, sshdDefaults)
+	cfg := parseSSHDConfig(mapSource{files: map[string]string{sshdConfigPath: "# use defaults\n"}})
+	got := cfg.effective()
+	require.Len(t, got, len(expected))
+	for key, value := range expected {
+		require.Contains(t, got, key)
+		if value == "" {
+			assert.Nil(t, got[key], key)
+		} else {
+			assert.Equal(t, ptr(value), got[key], key)
+		}
+	}
+}
+
+func TestSSHDGlobalsFollowIncludeOrder(t *testing.T) {
+	cfg := parseSSHDConfig(mapSource{files: map[string]string{
+		sshdConfigPath:            "Include conf.d/*.conf\nKbdInteractiveAuthentication yes\nPubkeyAcceptedAlgorithms ssh-rsa\nAllowUsers three\n",
+		"/etc/ssh/conf.d/10.conf": "KbdInteractiveAuthentication NO\nPubkeyAcceptedAlgorithms ssh-ed25519\nAllowUsers YES\nAllowUsers two\nDenyUsers one\nAllowGroups g1\nDenyGroups g3\nAuthorizedKeysFile /keys/a /keys/b\nMatch User guest\nKbdInteractiveAuthentication yes\nPasswordAuthentication no\n",
+		"/etc/ssh/conf.d/20.conf": "KbdInteractiveAuthentication yes\nDenyUsers two\nAllowGroups g2\nDenyGroups g4\nAuthorizedKeysFile /keys/c\n",
+	}, dirs: map[string][]string{"/etc/ssh/conf.d": {"20.conf", "10.conf"}}})
+	got := cfg.effective()
+	for key, want := range map[string]string{
+		"kbdinteractiveauthentication": "no", "pubkeyacceptedalgorithms": "ssh-ed25519", "allowusers": "YES two three",
+		"authorizedkeysfile": "/keys/a /keys/b", "passwordauthentication": "yes",
+		"denyusers": "one two", "allowgroups": "g1 g2", "denygroups": "g3 g4",
+	} {
+		assert.Equal(t, ptr(want), got[key], key)
+	}
+	require.Len(t, cfg.blocks, 1)
+	assert.Equal(t, "yes", cfg.blocks[0].block.Sets["kbdinteractiveauthentication"])
+	assert.Equal(t, "no", cfg.blocks[0].block.Sets["passwordauthentication"])
+}
+
+func TestIncompleteSSHDConfigHasNoEffectiveSettings(t *testing.T) {
+	for name, src := range map[string]mapSource{
+		"absent main":                  {},
+		"unreadable include":           {files: map[string]string{sshdConfigPath: "Include early\nPasswordAuthentication no"}, status: map[string]string{"/etc/ssh/early": statusUnreadable}},
+		"disappeared match":            {files: map[string]string{sshdConfigPath: "Include d/*.conf"}, dirs: map[string][]string{"/etc/ssh/d": {"early.conf"}}},
+		"long line":                    {files: map[string]string{sshdConfigPath: strings.Repeat("x", maxLineBytes+1)}},
+		"match limit":                  {files: map[string]string{sshdConfigPath: strings.Repeat("Match User guest\n", maxMatchBlocks+1)}},
+		"invalid quote":                {files: map[string]string{sshdConfigPath: "AllowGroups \"group"}},
+		"unsupported boolean":          {files: map[string]string{sshdConfigPath: "PasswordAuthentication sometimes"}},
+		"version dependent algorithms": {files: map[string]string{sshdConfigPath: "PubkeyAcceptedKeyTypes +ssh-rsa"}},
+		"invalid match value":          {files: map[string]string{sshdConfigPath: "Match User guest\nAllowUsers a\x00"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Nil(t, parseSSHDConfig(src).effective())
+		})
+	}
+}
+
+func TestSSHDGlobAndGlobalProvider(t *testing.T) {
+	cfg := parseSSHDConfig(mapSource{files: map[string]string{
+		sshdConfigPath:         "Include d/.policy-[!2]*\nPasswordAuthentication no\nAuthorizedKeysCommand /bin/second\n",
+		"/etc/ssh/d/.policy-1": "PasswordAuthentication yes\nAuthorizedKeysCommand /bin/keys private-argument\nAuthorizedKeysCommandUser root\n",
+		"/etc/ssh/d/.policy-2": "AllowUsers blocked\n",
+	}, dirs: map[string][]string{"/etc/ssh/d": {".policy-2", ".policy-1"}}})
+	got := cfg.effective()
+	require.NotNil(t, got)
+	assert.Equal(t, ptr("yes"), got["passwordauthentication"])
+	assert.Nil(t, got["allowusers"])
+	assert.Equal(t, &providerCommand{path: ptr("/bin/keys"), user: ptr("root")}, cfg.providers.keysCommand)
+}
+
+func TestOversizeMatchSettingsLeaveEffectiveUnknown(t *testing.T) {
+	value := strings.Repeat("a", 2050)
+	for _, config := range []string{
+		"Match User guest\nAllowUsers " + value + value,
+		"Match User guest\nAllowUsers " + value + "\nAllowUsers " + value,
+		"Match" + strings.Repeat(" User "+value[:1024], 4),
+	} {
+		cfg := parseSSHDConfig(mapSource{files: map[string]string{sshdConfigPath: config}})
+		assert.Nil(t, cfg.effective())
+		require.Len(t, cfg.blocks, 1)
+		block := cfg.blocks[0]
+		assert.True(t, block.parseErr)
+		if block.block.Criteria != nil {
+			assert.LessOrEqual(t, len(*block.block.Criteria), 4096)
+		}
+		assert.LessOrEqual(t, len(block.block.Sets["allowusers"]), 4096)
+	}
+}
+
+type countingSSHIncludes struct {
+	mapSource
+	lists  int
+	cancel context.CancelFunc
+}
+
+func (s *countingSSHIncludes) list(p string) ([]string, loaded) {
+	s.lists++
+	if s.cancel != nil {
+		s.cancel()
+	}
+	return s.mapSource.list(p)
+}
+
+func TestEmptySSHDGlobsConsumeIncludeBudget(t *testing.T) {
+	src := &countingSSHIncludes{mapSource: mapSource{files: map[string]string{sshdConfigPath: strings.Repeat("Include conf.d/empty*\n", maxIncludeFiles+10)}}}
+	cfg := parseSSHDConfig(src)
+	assert.Less(t, src.lists, maxIncludeFiles)
+	assert.Contains(t, cfg.reasons, reasonLimitExceeded)
+	assert.Nil(t, cfg.effective())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	src.lists, src.cancel = 0, cancel
+	cfg = parseSSHDConfigContext(ctx, src)
+	assert.Equal(t, 1, src.lists)
+	assert.Contains(t, cfg.reasons, reasonTimeout)
+	assert.Nil(t, cfg.effective())
+}
+
+func TestSSHDAccessListComments(t *testing.T) {
+	for _, key := range []string{"AllowUsers", "DenyUsers", "AllowGroups", "DenyGroups"} {
+		t.Run(key, func(t *testing.T) {
+			src := mapSource{files: map[string]string{sshdConfigPath: key + " \"guest\" # LEAKCANARY"}}
+			cfg := parseSSHDConfig(src)
+			assert.Equal(t, ptr("guest"), cfg.effective()[strings.ToLower(key)])
+			for _, value := range []string{"guest#LEAKCANARY", "\"guest#LEAKCANARY\""} {
+				src.files[sshdConfigPath] = key + " " + value + "\nMatch User guest\n" + key + " " + value
+				cfg = parseSSHDConfig(src)
+				assert.Nil(t, cfg.effective())
+				assert.NotContains(t, cfg.globals, strings.ToLower(key))
+				require.Len(t, cfg.blocks, 1)
+				assert.NotContains(t, cfg.blocks[0].block.Sets, strings.ToLower(key))
+			}
+		})
 	}
 }

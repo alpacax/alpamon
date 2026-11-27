@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // sshdCandidates are the only places the sshd binary is looked for. It is
@@ -23,6 +25,8 @@ var sshdCandidates = []string{"/usr/sbin/sshd", "/usr/bin/sshd"}
 // sshdRun is the outcome of one sshd -T run. out is the capped stdout of a
 // successful run and is parsed in place; it is never logged or sent.
 type sshdRun struct {
+	reason       string
+	binary       string // validated path within the host root
 	notInstalled bool
 	ok           bool
 	out          []byte
@@ -31,6 +35,8 @@ type sshdRun struct {
 // commandContext builds the sshd -T command; tests replace it to record what
 // would run and to stand in for sshd.
 var commandContext = exec.CommandContext
+var waitSSHD = unix.Waitid
+var signalSSHDGroup = unix.Kill
 
 // findSSHD returns the first candidate under root that is a root-owned
 // regular file with no group or world write bits, in a root-owned directory
@@ -56,44 +62,146 @@ func findSSHD(root string, mapOwner func(string, uint32) uint32) (string, bool) 
 		if !ok || mapOwner(parent, dst.Uid) != 0 {
 			continue
 		}
-		return filepath.Join(root, c), false
+		return c, false
 	}
 	return "", missing
 }
 
-// runSSHDT runs "sshd -T" directly, without a shell, with a 5-second
-// deadline, stderr discarded and stdout capped. On a timeout or an overlong
-// output the process is killed through its handle and reaped.
+const privsepPath = "/run/sshd"
+const privsepDiagnostic = "Missing privilege separation directory: " + privsepPath
+
+type sshdStderr struct {
+	data     [4096]byte
+	n        int
+	overflow bool
+}
+
+func (b *sshdStderr) Write(p []byte) (int, error) {
+	n := copy(b.data[b.n:], p)
+	b.n += n
+	b.overflow = b.overflow || n != len(p)
+	return len(p), nil
+}
+
+func (b *sshdStderr) failureReason(root string, mapOwner func(string, uint32) uint32) string {
+	if b.overflow {
+		return ""
+	}
+	// Only the final fatal line names the reason for exit. Derivation requires
+	// an unambiguous diagnostic; unknown accompanying output fails closed.
+	lines := bytes.Split(bytes.TrimRight(b.data[:b.n], "\r\n"), []byte("\n"))
+	last := string(bytes.TrimSuffix(lines[len(lines)-1], []byte("\r")))
+	// OpenSSH portable V_9_6_P1, sshd.c: "no hostkeys available -- exiting."
+	switch last {
+	case "sshd: no hostkeys available -- exiting.", "fatal: no hostkeys available -- exiting.", "fatal: sshd: no hostkeys available -- exiting.", "sshd: fatal: no hostkeys available -- exiting.":
+		return reasonSSHDNoHostKeys
+	case privsepDiagnostic:
+		if len(lines) == 1 && privsepEntry(root, mapOwner).status == statusAbsent {
+			return reasonSSHDPrivsepMissing
+		}
+	}
+	return ""
+}
+
+func privsepEntry(root string, mapOwner func(string, uint32) uint32) loaded {
+	fs, err := newFSReader(root, mapOwner)
+	if err != nil {
+		return failed(statusUnreadable, reasonFileUnreadable)
+	}
+	defer fs.close()
+	_, result := fs.exists(privsepPath)
+	return result
+}
+
+var errSSHDTimeout = errors.New("sshd deadline reached")
+
+// runSSHDT retains only bounded output from a validated sshd -T invocation.
 func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) uint32) sshdRun {
 	bin, missing := findSSHD(root, mapOwner)
 	if bin == "" {
-		return sshdRun{notInstalled: missing}
+		if missing {
+			return sshdRun{notInstalled: true}
+		}
+		return sshdRun{reason: reasonSSHDBinaryRejected}
 	}
-	ctx, cancel := context.WithTimeout(ctx, sshdTimeout)
+	ctx, cancel := context.WithTimeoutCause(ctx, sshdTimeout, errSSHDTimeout)
 	defer cancel()
 
-	cmd := commandContext(ctx, bin, "-T")
+	cmd := commandContext(ctx, filepath.Join(root, bin), "-T")
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
 	cmd.Dir = "/"
 	cmd.Stdin = nil
-	cmd.Stderr = nil // the null device
-	cmd.WaitDelay = time.Second
+	var stderr sshdStderr
+	defer clear(stderr.data[:])
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = nil
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		return sshdRun{}
+	}
+	errPipe, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdout.Close()
 		return sshdRun{}
 	}
 	if err := cmd.Start(); err != nil {
 		return sshdRun{}
 	}
+	// Waitid observes exit without reaping. The leader pins its group ID
+	// until the deadline callback and both readers have finished.
+	killProbe := func() {
+		_ = signalSSHDGroup(-cmd.Process.Pid, unix.SIGKILL)
+		_ = cmd.Process.Kill()
+	}
+	stopped := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(stopped)
+		killProbe()
+		_ = stdout.Close()
+		_ = errPipe.Close()
+	})
+	stderrDone := make(chan error, 1)
+	go func() { _, err := io.Copy(&stderr, errPipe); stderrDone <- err }()
 	var buf bytes.Buffer
 	_, readErr := io.Copy(&buf, io.LimitReader(stdout, sshdStdoutCap+1))
 	over := buf.Len() > sshdStdoutCap
 	if over {
+		killProbe()
+	}
+	stderrErr := <-stderrDone
+	var info unix.Siginfo
+	for {
+		err = waitSSHD(unix.P_PID, cmd.Process.Pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+		if err != unix.EINTR {
+			break
+		}
+	}
+	if err != nil {
+		// Keep Wait bounded even when the kernel refuses the observation.
 		_ = cmd.Process.Kill()
 	}
+	if !stop() {
+		<-stopped
+	}
 	waitErr := cmd.Wait()
-	if over || readErr != nil || waitErr != nil || ctx.Err() != nil {
+	if err != nil {
 		clear(buf.Bytes())
+		return sshdRun{}
+	}
+	if over || readErr != nil || stderrErr != nil || waitErr != nil || ctx.Err() != nil {
+		clear(buf.Bytes())
+		if !over && context.Cause(ctx) == errSSHDTimeout {
+			return sshdRun{reason: reasonSSHDTimeout}
+		}
+		var exit *exec.ExitError
+		if !over && readErr == nil && stderrErr == nil && ctx.Err() == nil && errors.As(waitErr, &exit) &&
+			exit.ExitCode() > 0 {
+			run := sshdRun{reason: stderr.failureReason(root, mapOwner)}
+			if run.reason == reasonSSHDPrivsepMissing {
+				run.binary = bin
+			}
+			return run
+		}
 		return sshdRun{}
 	}
 	return sshdRun{ok: true, out: buf.Bytes()}
@@ -107,14 +215,18 @@ type sshdMaster struct {
 
 const clockTicks = 100 // USER_HZ on every Linux architecture alpamon ships for
 
+func procBootTime(procRoot string) (int64, bool) {
+	data, err := readProcFile(filepath.Join(procRoot, "stat"))
+	if err != nil {
+		return 0, false
+	}
+	return parseBootTime(data)
+}
+
 // findSSHDMasters scans procRoot for sshd listener masters. ok is false when
 // the process table could not be read.
 func findSSHDMasters(procRoot string) ([]sshdMaster, bool) {
-	statData, err := readProcFile(filepath.Join(procRoot, "stat"))
-	if err != nil {
-		return nil, false
-	}
-	btime, ok := parseBootTime(statData)
+	btime, ok := procBootTime(procRoot)
 	if !ok {
 		return nil, false
 	}

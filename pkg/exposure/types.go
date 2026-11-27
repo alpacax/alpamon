@@ -58,6 +58,10 @@ const (
 	reasonStrictModesUnresolved     = "strict_modes_unresolved"
 	reasonSSHDNotInstalled          = "sshd_not_installed"
 	reasonSSHDUnavailable           = "sshd_unavailable"
+	reasonSSHDPrivsepMissing        = "sshd_privsep_missing"
+	reasonSSHDBinaryRejected        = "sshd_binary_rejected"
+	reasonSSHDNoHostKeys            = "sshd_no_host_keys"
+	reasonSSHDTimeout               = "sshd_timeout"
 	reasonSSHDConfigUnresolved      = "sshd_config_unresolved"
 	reasonSSHDMatchConditional      = "sshd_match_conditional"
 	reasonSSHDMatchUnsupported      = "sshd_match_unsupported"
@@ -80,6 +84,7 @@ var agentReasons = map[string]bool{
 	reasonLimitExceeded: true, reasonConcurrentChange: true, reasonTimeout: true,
 	reasonHomeUnreadable: true, reasonPathTokenUnresolved: true,
 	reasonStrictModesUnresolved: true, reasonSSHDNotInstalled: true,
+	reasonSSHDPrivsepMissing: true, reasonSSHDBinaryRejected: true, reasonSSHDTimeout: true, reasonSSHDNoHostKeys: true,
 	reasonSSHDUnavailable: true, reasonSSHDConfigUnresolved: true,
 	reasonSSHDMatchConditional: true, reasonSSHDMatchUnsupported: true,
 	reasonRevocationUnresolved: true, reasonPAMBackendUnresolved: true,
@@ -104,6 +109,9 @@ const (
 // field is metadata: there is no field that can hold a password hash, a key
 // blob, an option value outside the allowlist or a raw line.
 type exposureReport struct {
+	// Reassemble the same collection without facts that depend on config-derived settings.
+	unavailableSSHD func() *exposureReport
+
 	SchemaVersion int                 `json:"schema_version"`
 	ObservedAt    string              `json:"observed_at"`
 	Hash          string              `json:"hash"`
@@ -139,8 +147,7 @@ type external struct {
 	Sources []string `json:"sources" nullable:"true"`
 }
 
-// sshdPolicy is the effective sshd policy. Effective is null when sshd -T could
-// not be run; otherwise it holds exactly the effectiveKeywords.
+// sshdPolicy carries effective settings from sshd -T or a complete global configuration.
 type sshdPolicy struct {
 	Effective   map[string]*string `json:"effective"`
 	MatchBlocks []matchSettings    `json:"match_blocks"`

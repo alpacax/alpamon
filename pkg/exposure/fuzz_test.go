@@ -130,7 +130,7 @@ func FuzzSSHDT(f *testing.F) {
 		skipCanary(t, data)
 		data = append(data, "\nforcecommand "+fuzzCanary+"\nauthorizedkeyscommand /usr/bin/k "+fuzzCanary+"\nbanner "+fuzzCanary+"\n"...)
 		res := parseSSHDT(data)
-		if len(res.effective) != len(effectiveKeywords) {
+		if len(res.effective) != len(sshdDefaults) {
 			t.Fatal("effective holds other keywords")
 		}
 		assertNoCanary(t, res.effective)

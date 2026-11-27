@@ -1,0 +1,5 @@
+{
+  "btime": 1700000000,
+  "sshd": "privsep_missing",
+  "canaries": ["Missing privilege separation directory"]
+}

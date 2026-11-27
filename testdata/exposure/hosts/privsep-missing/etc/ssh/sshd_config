@@ -1,0 +1,3 @@
+Include /etc/ssh/sshd_config.d/*.conf
+KbdInteractiveAuthentication no
+UsePAM yes
