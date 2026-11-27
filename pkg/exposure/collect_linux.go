@@ -124,7 +124,7 @@ type shadowData struct {
 
 type sshdData struct {
 	installed  bool
-	t          *sshdT // nil when sshd -T was not usable
+	t          *sshdT // usable probe output or complete config-derived settings
 	cfg        sshdConfig
 	daemon     daemon
 	reasons    reasonSet
@@ -374,6 +374,11 @@ func (c *collector) readSSHD(ctx context.Context, fs *fsReader, sys systemFiles)
 		return d
 	}
 	d.cfg = readCachedSSHDConfig(sys)
+	if run.reason == reasonSSHDPrivsepMissing {
+		if values := d.cfg.effective(); values != nil {
+			d.t = &sshdT{effective: values, keysCommand: d.cfg.providers.keysCommand, principalsCommand: d.cfg.providers.principalsCommand}
+		}
+	}
 	d.reasons.merge(d.cfg.reasons)
 	d.configRead = d.cfg.readAll
 	if d.cfg.readAll {

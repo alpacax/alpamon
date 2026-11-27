@@ -1,0 +1,4 @@
+{
+  "sshd": "privsep_missing",
+  "canaries": ["Missing privilege separation directory"]
+}

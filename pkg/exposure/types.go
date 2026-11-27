@@ -143,8 +143,7 @@ type external struct {
 	Sources []string `json:"sources" nullable:"true"`
 }
 
-// sshdPolicy is the effective sshd policy. Effective is null when sshd -T could
-// not be run; otherwise it holds exactly the effectiveKeywords.
+// sshdPolicy carries effective settings from sshd -T or a complete global configuration.
 type sshdPolicy struct {
 	Effective   map[string]*string `json:"effective"`
 	MatchBlocks []matchSettings    `json:"match_blocks"`

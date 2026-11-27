@@ -77,7 +77,14 @@
 // # Programs it runs
 //
 // The only subprocess is "sshd -T", from a fixed absolute path, without a
-// shell, with a 5-second deadline and a capped stdout. Nothing here runs
+// shell, with a 5-second deadline and bounded stdout. A rejected binary yields
+// sshd_binary_rejected and a deadline yields sshd_timeout. When a normal
+// error exit names the missing privilege separation directory and a rooted
+// stat confirms /run/sshd is absent, the report carries sshd_privsep_missing.
+// The diagnostic buffer retains at most 4 KiB and is cleared after use.
+// Only this failure can supply effective settings from the complete global
+// configuration and its includes. An incomplete read leaves effective null.
+// Other probe errors yield sshd_unavailable. Nothing here runs
 // sudo, visudo, cvtsudoers or sudo-rs, or calls into PAM.
 //
 // # Platforms

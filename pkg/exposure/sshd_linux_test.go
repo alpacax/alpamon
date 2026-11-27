@@ -17,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 type execRecord struct {
@@ -159,6 +160,43 @@ func TestCollectRunsNoSudoTooling(t *testing.T) {
 	assert.Len(t, calls(), 1)
 }
 
+func TestFailedSSHDProbeLeavesHostUntouched(t *testing.T) {
+	for _, tc := range []struct {
+		name, script, reason string
+		wantEffective        bool
+	}{
+		{"missing directory", "echo '" + privsepDiagnostic + "' >&2; exit 1", reasonSSHDPrivsepMissing, true},
+		{"long diagnostic", "echo LEAKCANARY >&2; head -c 5000 /dev/zero >&2; exit 1", reasonSSHDUnavailable, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+			spec := loadCase(t, dir)
+			root, proc := buildHost(t, dir, spec)
+			fakeSSHD(t, root, tc.script)
+			calls := recordExec(t)
+			logs := captureLogs(t)
+			testHookOpenFlags = func(_ string, flags int) {
+				assert.Zero(t, flags&(unix.O_ACCMODE|unix.O_CREAT|unix.O_TRUNC|unix.O_APPEND))
+			}
+			t.Cleanup(func() { testHookOpenFlags = nil })
+			opts := caseOptions(t, dir, spec, root, proc)
+			opts.runSSHD = func(ctx context.Context) sshdRun { return runSSHDT(ctx, root, rootOwned) }
+			report := newCollector(opts).collect(t.Context())
+			body, err := finalize(report)
+			require.NoError(t, err)
+			assert.Contains(t, report.Categories[catSSHD].Reasons, tc.reason)
+			assert.Equal(t, tc.wantEffective, report.SSHD.Effective != nil)
+			assert.Len(t, calls(), 1)
+			for _, canary := range []string{privsepDiagnostic, "LEAKCANARY"} {
+				assert.NotContains(t, string(body), canary)
+				assert.NotContains(t, logs.String(), canary)
+			}
+			_, err = os.Lstat(filepath.Join(root, privsepPath))
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
 // Only sshd_linux.go may start a process, and only through commandContext.
 func TestOnlySSHDStartsAProcess(t *testing.T) {
 	files, err := filepath.Glob("*.go")
@@ -182,6 +220,8 @@ func TestOnlySSHDStartsAProcess(t *testing.T) {
 				return true
 			}
 			switch sel.Sel.Name {
+			case "Mount", "Mkdir", "MkdirAll", "Mkdirat", "WriteFile":
+				assert.Failf(t, "host mutation", "%s calls %s", f, sel.Sel.Name)
 			case "StartProcess", "ForkExec", "Exec", "Command", "CommandContext":
 				if f != "sshd_linux.go" {
 					assert.Failf(t, "unexpected process call", "%s calls %s", f, sel.Sel.Name)

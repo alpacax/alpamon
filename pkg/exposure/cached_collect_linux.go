@@ -26,7 +26,7 @@ func readCachedSudo(sys systemFiles, host string) sudoPolicy {
 func readCachedSSHDConfig(sys systemFiles) sshdConfig {
 	return cachedSource(sys.f, "sshd:"+sshdConfigPath, nil, func(f *fsReader) sshdConfig {
 		return parseSSHDConfig(systemFiles{f: f})
-	}, func(d sshdConfig) bool { return d.readAll && !d.configIncomplete && len(d.reasons) == 0 }, immutable[sshdConfig])
+	}, func(d sshdConfig) bool { return d.canDerive() && len(d.reasons) == 0 }, immutable[sshdConfig])
 }
 
 type cachedKeyFile struct {

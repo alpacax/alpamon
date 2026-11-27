@@ -230,7 +230,7 @@ func caseOptions(t *testing.T, dir string, spec caseSpec, root, proc string) col
 	t.Helper()
 	var out []byte
 	switch spec.SSHD {
-	case "missing", "fail":
+	case "missing", "fail", "privsep_missing":
 	default:
 		var err error
 		out, err = os.ReadFile(filepath.Join(dir, spec.SSHD))
@@ -244,6 +244,8 @@ func caseOptions(t *testing.T, dir string, spec caseSpec, root, proc string) col
 			switch spec.SSHD {
 			case "missing":
 				return sshdRun{notInstalled: true}
+			case "privsep_missing":
+				return sshdRun{reason: reasonSSHDPrivsepMissing}
 			case "fail":
 				return sshdRun{}
 			}

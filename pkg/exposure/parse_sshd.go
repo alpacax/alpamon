@@ -9,17 +9,6 @@ import (
 	"time"
 )
 
-// effectiveKeywords are the sshd -T keywords the report carries, exactly.
-var effectiveKeywords = []string{
-	"passwordauthentication", "kbdinteractiveauthentication", "usepam",
-	"permitemptypasswords", "permitrootlogin", "pubkeyauthentication",
-	"authenticationmethods", "pubkeyacceptedalgorithms", "casignaturealgorithms",
-	"authorizedkeysfile", "authorizedprincipalsfile", "trustedusercakeys",
-	"revokedkeys", "strictmodes", "gssapiauthentication", "kerberosauthentication",
-	"kerberosorlocalpasswd", "hostbasedauthentication", "ignorerhosts",
-	"ignoreuserknownhosts", "allowusers", "denyusers", "allowgroups", "denygroups",
-}
-
 // multiLineKeywords are printed by sshd -T once per entry.
 var multiLineKeywords = map[string]bool{"allowusers": true, "denyusers": true, "allowgroups": true, "denygroups": true}
 
@@ -29,14 +18,6 @@ const (
 	kwPrincipalsCommand     = "authorizedprincipalscommand"
 	kwPrincipalsCommandUser = "authorizedprincipalscommanduser"
 )
-
-var effectiveSet = func() map[string]bool {
-	m := map[string]bool{}
-	for _, k := range effectiveKeywords {
-		m[k] = true
-	}
-	return m
-}()
 
 // providerCommand is an AuthorizedKeysCommand or AuthorizedPrincipalsCommand:
 // the executable path only, never its arguments.
@@ -56,7 +37,7 @@ type sshdT struct {
 // line is dropped unread; a value outside the grammar is null and counted.
 func parseSSHDT(out []byte) sshdT {
 	res := sshdT{effective: map[string]*string{}}
-	for _, k := range effectiveKeywords {
+	for k := range sshdDefaults {
 		res.effective[k] = nil
 	}
 	internal := map[string]string{}
@@ -73,7 +54,7 @@ func parseSSHDT(out []byte) sshdT {
 			internal[kw] = val
 			return true
 		}
-		if !effectiveSet[kw] {
+		if _, ok := sshdDefaults[kw]; !ok {
 			return true
 		}
 		if !validValue(val) {
@@ -143,12 +124,144 @@ type matchBlock struct {
 }
 
 type sshdConfig struct {
-	blocks  []matchBlock
-	files   []inspectedFile
-	reasons reasonSet // file and parse reasons for the sshd category
+	globals            map[string]string
+	globalsUnsupported bool
+	providers          matchBlock // only the allowlisted path and user survive parsing
+	blocks             []matchBlock
+	files              []inspectedFile
+	reasons            reasonSet // file and parse reasons for the sshd category
 	// readAll is set when every configuration file was read in full.
 	readAll          bool
 	configIncomplete bool
+}
+
+func (cfg sshdConfig) canDerive() bool {
+	if !cfg.readAll || cfg.configIncomplete || cfg.globalsUnsupported || cfg.providers.parseErr {
+		return false
+	}
+	for _, mb := range cfg.blocks {
+		if mb.parseErr || mb.unsupported {
+			return false
+		}
+	}
+	return true
+}
+
+func (cfg sshdConfig) effective() map[string]*string {
+	if !cfg.canDerive() {
+		return nil
+	}
+	values := make(map[string]*string, len(sshdDefaults))
+	for key, fallback := range sshdDefaults {
+		v, ok := cfg.globals[key]
+		if !ok {
+			v = fallback
+		}
+		// sshd -T omits empty access lists; their wire value is null.
+		if v == "" {
+			values[key] = nil
+		} else {
+			values[key] = &v
+		}
+	}
+	return values
+}
+
+// The report schema caps each setting at 4096 bytes. Config values are ASCII.
+const maxConfigSettingBytes = 4096
+
+func (cfg *sshdConfig) setGlobal(key string, args []string) {
+	switch key {
+	case kwKeysCommand, kwKeysCommandUser, kwPrincipalsCommand, kwPrincipalsCommandUser:
+		cfg.providers.set(key, args)
+		return
+	}
+	if _, ok := sshdDefaults[key]; !ok {
+		return
+	}
+	previous, set := cfg.globals[key]
+	if set && !multiLineKeywords[key] && key != "authorizedkeysfile" {
+		return
+	}
+	v := configSetting(key, args)
+	if !configValueSupported(key, v, args) {
+		cfg.globalsUnsupported = true
+		return
+	}
+	if set {
+		if len(previous)+1+len(v) > maxConfigSettingBytes {
+			cfg.globalsUnsupported = true
+			return
+		}
+		v = previous + " " + v
+	}
+	cfg.globals[key] = v
+}
+
+func configSetting(key string, args []string) string {
+	value := strings.Join(args, " ")
+	switch key {
+	case "allowusers", "denyusers", "allowgroups", "denygroups":
+		return value
+	case "authorizedkeysfile", "authorizedprincipalsfile", "revokedkeys", "trustedusercakeys":
+		if strings.EqualFold(value, "none") {
+			return "none"
+		}
+		return value
+	}
+	return normalizeValue(value)
+}
+
+func configValueSupported(key, value string, args []string) bool {
+	if !validValue(value) || len(value) > maxConfigSettingBytes {
+		return false
+	}
+	for _, arg := range args {
+		if !validToken(arg) {
+			return false
+		}
+	}
+	switch key {
+	case "pubkeyacceptedalgorithms", "casignaturealgorithms":
+		// List modifiers and patterns require the installed binary's algorithm set.
+		return len(args) == 1 && !strings.ContainsAny(value[:1], "+-^") && !strings.ContainsAny(value, "*?!") &&
+			!slices.Contains(strings.Split(value, ","), "")
+	case "authenticationmethods":
+		if value == "any" {
+			return true
+		}
+		for _, alternative := range args {
+			for method := range strings.SplitSeq(alternative, ",") {
+				name, device, qualified := strings.Cut(method, ":")
+				if qualified && (name != "keyboard-interactive" || !validName(device)) {
+					return false
+				}
+				switch name {
+				case "publickey", "password", "keyboard-interactive", "hostbased", "gssapi-with-mic", "none":
+				default:
+					return false
+				}
+			}
+		}
+		return true
+	case "allowusers", "denyusers", "allowgroups", "denygroups":
+		return true
+	case "authorizedkeysfile":
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "~") {
+				return false
+			}
+		}
+		return true
+	case "authorizedprincipalsfile", "trustedusercakeys", "revokedkeys":
+		return len(args) == 1 && !strings.HasPrefix(value, "~")
+	case "permitrootlogin":
+		return value == "without-password" || value == "prohibit-password" || value == "forced-commands-only" || value == "yes" || value == "no"
+	case "ignorerhosts":
+		return value == "shosts-only" || value == "yes" || value == "no"
+	default:
+		return value == "yes" || value == "no"
+	}
 }
 
 type inspectedFile struct {
@@ -158,11 +271,11 @@ type inspectedFile struct {
 
 const sshdConfigPath = "/etc/ssh/sshd_config"
 
-// parseSSHDConfig reads sshd_config and its includes for Match blocks. Lines
-// before the first Match are ignored: sshd -T already reports them.
+// parseSSHDConfig reads global settings and Match blocks in Include order.
 func parseSSHDConfig(src systemSource) sshdConfig {
-	p := &sshdConfigParser{src: src, cfg: sshdConfig{reasons: reasonSet{}, readAll: true}, walker: includeWalker{src: src}}
-	p.file(sshdConfigPath, 0)
+	p := &sshdConfigParser{src: src, cfg: sshdConfig{providers: matchBlock{block: matchSettings{Sets: map[string]string{}}}, globals: map[string]string{}, reasons: reasonSet{}, readAll: true}, walker: includeWalker{src: src}}
+	p.file(sshdConfigPath, 0, true)
+	p.cfg.providers.finish()
 	for i := range p.cfg.blocks {
 		p.cfg.blocks[i].finish()
 	}
@@ -182,14 +295,15 @@ func (p *sshdConfigParser) fail(code string) {
 	p.cfg.readAll = false
 }
 
-func (p *sshdConfigParser) file(name string, depth int) {
+func (p *sshdConfigParser) file(name string, depth int, required bool) {
 	p.walker.file(name, depth, func(l loaded) {
-		if l.status == statusAbsent && depth > 0 {
+		if l.status == statusAbsent && !required {
 			// sshd skips an Include that matches nothing.
 			return
 		}
 		if !l.usable() {
 			if l.status == statusAbsent {
+				p.fail(reasonFileUnreadable)
 				p.cfg.files = append(p.cfg.files, inspectedFile{path: name})
 				return
 			}
@@ -215,7 +329,16 @@ func (p *sshdConfigParser) file(name string, depth int) {
 				return true
 			}
 			switch kw {
+			case "challengeresponseauthentication":
+				kw = "kbdinteractiveauthentication"
+			case "pubkeyacceptedkeytypes":
+				kw = "pubkeyacceptedalgorithms"
+			}
+			switch kw {
 			case "include":
+				if len(args) == 0 {
+					p.fail(reasonParseError)
+				}
 				for _, a := range args {
 					p.include(a, depth)
 				}
@@ -230,7 +353,12 @@ func (p *sshdConfigParser) file(name string, depth int) {
 				p.current = &p.cfg.blocks[len(p.cfg.blocks)-1]
 			default:
 				if p.current != nil {
+					if _, known := sshdDefaults[kw]; known && (!p.current.seen[kw] || multiLineKeywords[kw]) && !configValueSupported(kw, configSetting(kw, args), args) {
+						p.cfg.globalsUnsupported = true
+					}
 					p.current.set(kw, args)
+				} else if !p.cfg.configIncomplete {
+					p.cfg.setGlobal(kw, args)
 				}
 			}
 			return true
@@ -241,6 +369,10 @@ func (p *sshdConfigParser) file(name string, depth int) {
 func hasGlob(s string) bool { return strings.ContainsAny(s, "*?[") }
 
 func (p *sshdConfigParser) include(arg string, depth int) {
+	if strings.HasPrefix(arg, "~") {
+		p.fail(reasonParseError)
+		return
+	}
 	if !strings.HasPrefix(arg, "/") {
 		arg = "/etc/ssh/" + arg
 	}
@@ -251,7 +383,17 @@ func (p *sshdConfigParser) include(arg string, depth int) {
 		return
 	}
 	if !hasGlob(base) {
-		p.includedFile(arg, depth+1)
+		p.includedFile(arg, depth+1, false)
+		return
+	}
+	// POSIX character classes and collating elements have no path.Match equivalent.
+	if strings.Contains(base, "[[:") || strings.Contains(base, "[[.") || strings.Contains(base, "[[=") {
+		p.fail(reasonParseError)
+		return
+	}
+	base = strings.ReplaceAll(base, "[!", "[^")
+	if _, err := path.Match(base, ""); err != nil {
+		p.fail(reasonParseError)
 		return
 	}
 	names, l := p.src.list(dir)
@@ -268,19 +410,19 @@ func (p *sshdConfigParser) include(arg string, depth int) {
 	}
 	var matched []string
 	for _, n := range names {
-		if ok, err := path.Match(base, n); err == nil && ok && !strings.HasPrefix(n, ".") {
+		if ok, err := path.Match(base, n); err == nil && ok && (!strings.HasPrefix(n, ".") || strings.HasPrefix(base, ".")) {
 			matched = append(matched, n)
 		}
 	}
 	slices.Sort(matched)
 	for _, n := range matched {
-		p.includedFile(dir+"/"+n, depth+1)
+		p.includedFile(dir+"/"+n, depth+1, true)
 	}
 }
 
 // includedFile restores the enclosing Match after each file, including each
 // match of a glob. Save an index because appending can move the block slice.
-func (p *sshdConfigParser) includedFile(name string, depth int) {
+func (p *sshdConfigParser) includedFile(name string, depth int, required bool) {
 	saved := -1
 	for i := range p.cfg.blocks {
 		if p.current == &p.cfg.blocks[i] {
@@ -288,7 +430,7 @@ func (p *sshdConfigParser) includedFile(name string, depth int) {
 			break
 		}
 	}
-	p.file(name, depth)
+	p.file(name, depth, required)
 	p.current = nil
 	if saved >= 0 {
 		p.current = &p.cfg.blocks[saved]
@@ -382,6 +524,10 @@ func newMatchBlock(args []string) matchBlock {
 		return mb
 	}
 	c := strings.Join(parts, " ")
+	if len(c) > maxConfigSettingBytes {
+		mb.parseErr = true
+		return mb
+	}
 	mb.block.Criteria = &c
 	return mb
 }
@@ -422,17 +568,17 @@ func (mb *matchBlock) set(kw string, args []string) {
 		mb.principalsCmdUser = val
 		return
 	}
-	if !effectiveSet[kw] {
+	if _, ok := sshdDefaults[kw]; !ok {
 		return
 	}
-	if !validValue(val) {
+	if !validValue(val) || len(val) > maxConfigSettingBytes {
 		mb.parseErr = true
 		return
 	}
-	val = normalizeValue(val)
+	val = configSetting(kw, args)
 	if prev, ok := mb.block.Sets[kw]; ok && multiLineKeywords[kw] {
 		val = prev + " " + val
-		if len(val) > maxEffectiveValueLen {
+		if len(val) > maxConfigSettingBytes {
 			mb.parseErr = true
 			return
 		}
