@@ -204,6 +204,7 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 	paths := []string{""}
 	trusted := stats[0].uid == 0 && stats[0].mode&0o022 == 0
 	hops := 0
+	viaRun := false
 	keepFD := -1
 	defer func() {
 		for _, fd := range parents[1:] {
@@ -228,6 +229,9 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 			continue
 		}
 		next := prefix + "/" + c
+		if next == "/run" {
+			viaRun = true
+		}
 		if testHookOpen != nil {
 			if err := testHookOpen(next); err != nil {
 				return -1, "", nil, failed(statusOf(err)), false
@@ -240,7 +244,7 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 				return -1, "", nil, failed(statusOf(err)), false
 			}
 			if st.Mode&unix.S_IFMT == unix.S_IFLNK {
-				if !f.directoryLinkCutoff.IsZero() && mtimeOf(&st).After(f.directoryLinkCutoff) {
+				if !f.directoryLinkCutoff.IsZero() && !viaRun && mtimeOf(&st).After(f.directoryLinkCutoff) {
 					return -1, "", nil, failed(statusRejected, reasonFileRejected), false
 				}
 				var parent unix.Stat_t
@@ -285,7 +289,7 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 		trusted = trusted && ps.uid == 0 && ps.mode&0o022 == 0
 	}
 	keepFD = cur
-	return cur, last, stats, loaded{status: statusRead, reasons: reasonSet{}}, true
+	return cur, last, stats, loaded{status: statusRead, reasons: reasonSet{}, viaRun: viaRun}, true
 }
 
 // openRegular opens p for reading and validates the descriptor: a regular

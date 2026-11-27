@@ -90,10 +90,12 @@
 // unit drop-ins in systemd order and checks ExecStart and its environment
 // files against the validated sshd binary and supported flags. Uncertain
 // service options, unassigned expansions, mismatched enablement links, and
-// service inputs or unit and dependency directories modified since
-// boot leave effective null. The same applies to unrecognized directives or
-// syntax, non-ASCII glob inputs, relative key or revocation paths, ambiguous
-// access lists, conditional lists, nested includes or a changed config read.
+// post-boot changes to persistent service inputs or their directories leave
+// effective null. Runtime directories may be newer than boot. A selected unit,
+// alias, enablement link or drop-in under /run leaves effective null. The same
+// applies to unrecognized directives or syntax, non-ASCII glob inputs, relative
+// key or revocation paths, ambiguous or conditional access lists, nested
+// includes or a changed config read.
 // After sshd_privsep_missing the service checks /run/sshd every minute and
 // requests one normal collection when a root-owned directory appears. A later collection
 // with any other outcome ends polling, as does shutdown.

@@ -70,8 +70,8 @@ var sshUnitDirs = []string{
 func enabledSSHUnit(ctx context.Context, src sshUnitSource, suffix string, targets ...string) (name, file string, ok bool) {
 	for _, candidate := range []string{"ssh" + suffix, "sshd" + suffix} {
 		for _, target := range targets {
-			for _, dir := range sshUnitDirs {
-				for _, dependency := range []string{".wants", ".requires"} {
+			for _, dependency := range []string{".wants", ".requires"} {
+				for _, dir := range sshUnitDirs {
 					if ctx.Err() != nil {
 						return "", "", false
 					}
@@ -79,20 +79,23 @@ func enabledSSHUnit(ctx context.Context, src sshUnitSource, suffix string, targe
 					if status == statusAbsent {
 						continue
 					}
-					if status != statusRead || entry.target == "" || name != "" && name != candidate {
+					if status != statusRead || entry.runtime || entry.target == "" || name != "" && name != candidate {
 						return "", "", false
 					}
 					if name == "" {
 						name = candidate
-						file, ok = sshUnitFile(ctx, src, candidate)
-						if !ok {
+						selected, ok := sshUnitFile(ctx, src, candidate)
+						if !ok || !selected.canRead() {
 							return "", "", false
 						}
+						file = selected.file
 					}
 					actual, ok := src.resolveUnitTarget(entry.target)
 					if !ok || actual != file {
 						return "", "", false
 					}
+					// Lower-priority entries with the same dependency basename are shadowed.
+					break
 				}
 			}
 		}
@@ -159,10 +162,14 @@ func safeSSHDService(ctx context.Context, sys systemFiles, binary, procRoot stri
 		} else if selection.accept || !plainServiceName.MatchString(name) {
 			return false
 		}
-		file, ok = sshUnitFile(ctx, src, name)
+		selected, ok := sshUnitFile(ctx, src, name)
+		if !ok || !selected.canRead() {
+			return false
+		}
+		file = selected.file
 	}
 	service := sshService{binary: binary}
-	return ok && readSSHUnit(ctx, src, file, "[Service]", service.set) && service.safeStart(ctx, src)
+	return readSSHUnit(ctx, src, file, "[Service]", service.set) && service.safeStart(ctx, src)
 }
 
 var plainServiceName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*\.service$`)
@@ -192,8 +199,13 @@ func (s *sshSocket) set(key, value string) bool {
 }
 
 type sshUnitEntry struct {
-	file   string
-	target string
+	runtime bool
+	file    string
+	target  string
+}
+
+func (entry sshUnitEntry) canRead() bool {
+	return !entry.runtime && entry.target == ""
 }
 
 // Pin the leaf before inspecting its owner, time and link text. The rooted
@@ -208,7 +220,7 @@ func (src sshUnitSource) unitEntry(file string) (sshUnitEntry, string) {
 		defer func() { _ = unix.Close(parent) }()
 	}
 	var st unix.Stat_t
-	if unix.Fstat(parent, &st) != nil || mtimeOf(&st).After(src.boot) {
+	if !l.viaRun && (unix.Fstat(parent, &st) != nil || mtimeOf(&st).After(src.boot)) {
 		return entry, statusRejected
 	}
 	fd, err := src.f.openAt(parent, name, unix.O_PATH)
@@ -217,11 +229,12 @@ func (src sshUnitSource) unitEntry(file string) (sshUnitEntry, string) {
 		return entry, status
 	}
 	defer func() { _ = unix.Close(fd) }()
-	if unix.Fstat(fd, &st) != nil || src.f.mapOwner(file, st.Uid) != 0 || mtimeOf(&st).After(src.boot) {
+	if unix.Fstat(fd, &st) != nil || src.f.mapOwner(file, st.Uid) != 0 || !l.viaRun && mtimeOf(&st).After(src.boot) {
 		return entry, statusRejected
 	}
 	dir := dirs[len(dirs)-1].path
 	entry.file = path.Join(dir, name)
+	entry.runtime = l.viaRun
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFREG:
 		return entry, statusRead
@@ -244,6 +257,12 @@ func (src sshUnitSource) unitEntry(file string) (sshUnitEntry, string) {
 			}
 			target = path.Join(dir, target)
 		}
+		// A mask can rule out an unrelated alias during discovery. A
+		// masked unit cannot supply the selected socket or service.
+		if target == "/dev/null" {
+			entry.target = target
+			return entry, statusRead
+		}
 		if !validPath(target) || !slices.Contains(sshUnitDirs, path.Dir(target)) || path.Ext(target) != path.Ext(name) ||
 			strings.Contains(path.Base(target), "@") != strings.Contains(name, "@") {
 			return entry, statusRejected
@@ -260,7 +279,7 @@ func (src sshUnitSource) unitEntry(file string) (sshUnitEntry, string) {
 func (src sshUnitSource) resolveUnitTarget(target string) (string, bool) {
 	for range maxIncludeDepth {
 		entry, status := src.unitEntry(target)
-		if status != statusRead {
+		if status != statusRead || entry.runtime || entry.target == "/dev/null" {
 			break
 		}
 		if entry.target == "" {
@@ -271,8 +290,9 @@ func (src sshUnitSource) resolveUnitTarget(target string) (string, bool) {
 	return "", false
 }
 
-func sshUnitFile(ctx context.Context, src sshUnitSource, name string) (string, bool) {
+func sshUnitFile(ctx context.Context, src sshUnitSource, name string) (sshUnitEntry, bool) {
 	var expected string
+	var runtimeAlias bool
 	for range maxIncludeDepth {
 		if ctx.Err() != nil {
 			break
@@ -285,28 +305,30 @@ func sshUnitFile(ctx context.Context, src sshUnitSource, name string) (string, b
 				continue
 			}
 			if status != statusRead {
-				return "", false
+				return sshUnitEntry{}, false
 			}
 			break
 		}
 		if entry.file == "" || expected != "" && entry.file != expected {
-			return "", false
+			return sshUnitEntry{}, false
 		}
-		if entry.target == "" {
-			return entry.file, true
+		if entry.target == "" || entry.target == "/dev/null" {
+			entry.runtime = entry.runtime || runtimeAlias
+			return entry, true
 		}
 		target, status := src.unitEntry(entry.target)
 		if status != statusRead {
-			return "", false
+			return sshUnitEntry{}, false
 		}
+		runtimeAlias = runtimeAlias || entry.runtime || target.runtime
 		expected, name = target.file, path.Base(entry.target)
 	}
-	return "", false
+	return sshUnitEntry{}, false
 }
 
 func (src sshUnitSource) list(dir string) ([]string, loaded) {
 	names, l := src.systemFiles.list(dir)
-	if l.status == statusRead && l.mtime.After(src.boot) {
+	if l.status == statusRead && !l.viaRun && l.mtime.After(src.boot) {
 		return nil, failed(statusRejected, reasonFileRejected)
 	}
 	return names, l
@@ -369,8 +391,8 @@ func sshUnitNames(ctx context.Context, src sshUnitSource, canonical string) ([]s
 			if name == canonical {
 				return nil, false
 			}
-			file, ok := sshUnitFile(ctx, src, name)
-			if !ok || path.Base(file) == canonical {
+			unit, ok := sshUnitFile(ctx, src, name)
+			if !ok || path.Base(unit.file) == canonical {
 				return nil, false
 			}
 		}
@@ -385,14 +407,14 @@ func sshUnitNames(ctx context.Context, src sshUnitSource, canonical string) ([]s
 			if inspected > maxIncludeFiles {
 				return nil, false
 			}
-			file, ok := sshUnitFile(ctx, src, name)
+			unit, ok := sshUnitFile(ctx, src, name)
 			if !ok {
 				return nil, false
 			}
-			if path.Base(file) == canonical {
+			if path.Base(unit.file) == canonical {
 				// Priority between competing aliases with the same drop-in
 				// filename is outside the supported service grammar.
-				if len(names) > 1 {
+				if unit.runtime || len(names) > 1 {
 					return nil, false
 				}
 				names = append(names, name)
@@ -462,7 +484,11 @@ func readSSHUnit(ctx context.Context, src sshUnitSource, file, section string, s
 		}
 	}
 	for _, file := range slices.Sorted(maps.Keys(dropIns)) {
-		if ctx.Err() != nil || !read(src.load(dropIns[file])) {
+		if ctx.Err() != nil {
+			return false
+		}
+		entry, status := src.unitEntry(dropIns[file])
+		if status != statusRead || !entry.canRead() || !read(src.load(entry.file)) {
 			return false
 		}
 	}

@@ -495,6 +495,14 @@ func TestPrivsepSelectsEnabledSSHService(t *testing.T) {
 		derive bool
 	}{
 		{"stock socket and service", nil, nil, true},
+		{"masked runtime socket", nil, inputs{"run/systemd/generator/ssh.socket": "/dev/null"}, false},
+		{"generated socket", inputs{"run/systemd/generator/ssh.socket": "[Socket]\nAccept=no"}, nil, false},
+		{"runtime service drop-in", inputs{"run/systemd/system.control/ssh.service.d/10.conf": "# unchanged options"}, nil, false},
+		{"shadowed runtime enablement", nil, inputs{"run/systemd/system/sockets.target.wants/ssh.socket": "/usr/lib/systemd/system/ssh.socket"}, true},
+		{"runtime enablement", nil, inputs{"run/systemd/system/sockets.target.requires/ssh.socket": "/usr/lib/systemd/system/ssh.socket"}, false},
+		{"runtime service alias", inputs{socket: "[Socket]\nService=selected.service"}, inputs{"run/systemd/transient/selected.service": "/usr/lib/systemd/system/ssh.service"}, false},
+		{"drop-in through runtime directory", inputs{"run/generated/10.conf": "# unchanged options"}, inputs{"etc/systemd/system/ssh.service.d": "/run/generated"}, false},
+		{"runtime alias with drop-in", inputs{"etc/systemd/system/another.service.d/10.conf": "# alias options"}, inputs{"run/systemd/generator/another.service": "/usr/lib/systemd/system/ssh.service"}, false},
 		{"merged library directory", inputs{socketLink: ""}, inputs{"lib": "usr/lib", socketLink: "/lib/systemd/system/ssh.socket"}, true},
 		{"dangling enablement target", inputs{socketLink: ""}, inputs{socketLink: "/lib/systemd/system/ssh.socket"}, false},
 		{"foreign enablement target", inputs{socketLink: "", "usr/lib/systemd/system/foreign.socket": "[Socket]\nAccept=no"}, inputs{socketLink: "/usr/lib/systemd/system/foreign.socket"}, false},
@@ -568,6 +576,30 @@ func TestPrivsepSelectsEnabledSSHService(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrivsepIgnoresRuntimeDirectoryTimestamps(t *testing.T) {
+	dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	afterBoot := time.Unix(spec.Btime+1, 0)
+	for _, name := range []string{"system", "system.control", "transient", "generator", "generator.early", "generator.late"} {
+		runtimeDir := filepath.Join(root, "/run/systemd", name)
+		require.NoError(t, os.MkdirAll(filepath.Join(runtimeDir, "sockets.target.wants"), 0o755))
+		require.NoError(t, os.Chtimes(runtimeDir, afterBoot, afterBoot))
+		require.NoError(t, os.Chtimes(filepath.Join(runtimeDir, "sockets.target.wants"), afterBoot, afterBoot))
+	}
+	generator := filepath.Join(root, "/run/systemd/generator")
+	require.NoError(t, os.WriteFile(filepath.Join(generator, "other.service"), []byte("[Service]\nExecStart=/bin/true"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(generator, "other.service.d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(generator, "other.service.d/10.conf"), []byte("# unrelated"), 0o644))
+	require.NoError(t, os.Symlink("/dev/null", filepath.Join(generator, "masked.service")))
+	require.NoError(t, os.Mkdir(filepath.Join(generator, "masked.service.d"), 0o755))
+	require.NoError(t, os.Symlink("generator", filepath.Join(root, "/run/systemd/system.attached")))
+	r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(t.Context())
+	require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+	require.Len(t, r.SSHD.Effective, len(sshdDefaults))
+	assert.Equal(t, ptr("no"), r.SSHD.Effective["passwordauthentication"])
 }
 
 func TestPrivsepRequiresServiceInputsFromBeforeBoot(t *testing.T) {

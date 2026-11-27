@@ -89,18 +89,22 @@ func TestDistroSSHDExposure(t *testing.T) {
 	require.NotEmpty(t, distroHostKeys(t))
 
 	var expected map[string]*string
-	var postBootInstall bool
+	var postBootInstall, installedInContainer bool
 	if debianFamily {
 		expected = distroDerivedSettings(t)
-		boot, ok := procBootTime("/proc")
+		bootSeconds, ok := procBootTime("/proc")
 		require.True(t, ok)
-		// Package installation in a running container can update either unit
-		// directory after the host kernel booted.
-		for _, dir := range []string{"/etc/systemd/system", "/lib/systemd/system"} {
-			info, err := os.Stat(dir)
-			require.NoError(t, err)
-			postBootInstall = postBootInstall || info.ModTime().After(time.Unix(boot, 0))
-		}
+		boot := time.Unix(bootSeconds, 0)
+		raw, err := os.ReadFile("/proc/1/stat")
+		require.NoError(t, err)
+		init, ok := parseProcStat(raw)
+		require.True(t, ok)
+		start := boot.Add(time.Duration(init.startTick) * (time.Second / clockTicks))
+		// btime has one-second precision. Only simulate a later boot when
+		// the package demonstrably changed persistent inputs after PID 1 started.
+		latestDir, latestSSH := distroUnitTimestamps(t)
+		postBootInstall = latestDir.After(boot) || latestSSH.After(boot)
+		installedInContainer = latestSSH.After(start.Add(time.Second))
 	}
 	// Ubuntu socket activation cannot be reproduced in a container. Reproduce its
 	// observable state directly by collecting while /run/sshd is absent.
@@ -134,7 +138,12 @@ func TestDistroSSHDExposure(t *testing.T) {
 				assert.Contains(t, reasons, reasonSSHDPrivsepMissing)
 				if postBootInstall {
 					assert.Nil(t, effective)
-					t.Log("package installation after boot: effective null")
+					t.Log("real kernel boot: persistent inputs changed after boot, effective null")
+				} else {
+					require.Equal(t, expected, effective)
+					t.Logf("real kernel boot: %d stock settings", len(effective))
+				}
+				if installedInContainer {
 					t.Run("stock configuration present at boot", func(t *testing.T) {
 						// Model a subsequent boot without changing any package files
 						// or timestamps. Only procfs is supplied by the test.
@@ -147,9 +156,6 @@ func TestDistroSSHDExposure(t *testing.T) {
 						require.Equal(t, expected, r.SSHD.Effective)
 						t.Logf("stock settings with simulated post-install boot: %d", len(r.SSHD.Effective))
 					})
-				} else {
-					require.Equal(t, expected, effective)
-					t.Logf("default service configuration: %d settings", len(effective))
 				}
 			default:
 				if !tc.directory {
@@ -188,6 +194,37 @@ func TestDistroSSHDExposure(t *testing.T) {
 			assert.NotContains(t, reasons, reasonSSHDUnavailable)
 		})
 	}
+}
+
+// The Debian packages enable SSH in /etc/systemd/system. Inspect the links
+// themselves because their mtimes need not match either directory's mtime.
+func distroUnitTimestamps(t *testing.T) (latestDir, latestSSH time.Time) {
+	t.Helper()
+	record := func(file string, latest *time.Time) {
+		info, err := os.Lstat(file)
+		require.NoError(t, err)
+		if info.ModTime().After(*latest) {
+			*latest = info.ModTime()
+		}
+	}
+	unitDir, err := filepath.EvalSymlinks("/lib/systemd/system")
+	require.NoError(t, err)
+	record("/etc/systemd/system", &latestDir)
+	record(unitDir, &latestDir)
+	record(filepath.Join(unitDir, "ssh.service"), &latestSSH)
+	record("/etc/default/ssh", &latestSSH)
+	for _, kind := range []string{"wants", "requires"} {
+		for _, unit := range []string{"ssh.service", "ssh.socket"} {
+			links, err := filepath.Glob("/etc/systemd/system/*." + kind + "/" + unit)
+			require.NoError(t, err)
+			for _, link := range links {
+				record(link, &latestSSH)
+				record(filepath.Dir(link), &latestDir)
+				record(filepath.Join(unitDir, unit), &latestSSH)
+			}
+		}
+	}
+	return latestDir, latestSSH
 }
 
 // These images ship simple global directives and at most a top-level Include.

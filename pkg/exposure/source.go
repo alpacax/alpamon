@@ -11,6 +11,7 @@ type loaded struct {
 	data     []byte
 	mtime    time.Time
 	statTime time.Time
+	viaRun   bool // the rooted directory walk traversed /run
 	uid      uint32
 	mode     uint32
 }
