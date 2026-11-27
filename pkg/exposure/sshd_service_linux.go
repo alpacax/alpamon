@@ -67,25 +67,37 @@ var sshUnitDirs = []string{
 
 // enabledSSHUnit returns the single enabled ssh or sshd unit of the requested
 // type. An unreadable dependency directory or two enabled names is ambiguous.
-func enabledSSHUnit(fs *fsReader, suffix string, targets ...string) (string, bool) {
-	var selected string
-	for _, name := range []string{"ssh" + suffix, "sshd" + suffix} {
+func enabledSSHUnit(ctx context.Context, src sshUnitSource, suffix string, targets ...string) (name, file string, ok bool) {
+	for _, candidate := range []string{"ssh" + suffix, "sshd" + suffix} {
 		for _, target := range targets {
 			for _, dir := range sshUnitDirs {
 				for _, dependency := range []string{".wants", ".requires"} {
-					_, l := fs.exists(path.Join(dir, target+dependency, name))
-					if l.status == statusAbsent {
+					if ctx.Err() != nil {
+						return "", "", false
+					}
+					entry, status := src.unitEntry(path.Join(dir, target+dependency, candidate))
+					if status == statusAbsent {
 						continue
 					}
-					if l.status != statusRead || l.uid != 0 || l.mode&unix.S_IFMT != unix.S_IFLNK || selected != "" && selected != name {
-						return "", false
+					if status != statusRead || entry.target == "" || name != "" && name != candidate {
+						return "", "", false
 					}
-					selected = name
+					if name == "" {
+						name = candidate
+						file, ok = sshUnitFile(ctx, src, candidate)
+						if !ok {
+							return "", "", false
+						}
+					}
+					actual, ok := src.resolveUnitTarget(entry.target)
+					if !ok || actual != file {
+						return "", "", false
+					}
 				}
 			}
 		}
 	}
-	return selected, true
+	return name, file, true
 }
 
 // systemd may still have the pre-edit unit loaded. Check the timestamp of
@@ -109,30 +121,35 @@ func safeSSHDService(ctx context.Context, sys systemFiles, binary, procRoot stri
 	if !ok || btime <= 0 {
 		return false
 	}
-	src := sshUnitSource{sys, time.Unix(btime, 0)}
-	direct, directOK := enabledSSHUnit(src.f, ".service", "multi-user.target")
-	targets := []string{"sockets.target", "multi-user.target"}
-	if directOK && direct != "" {
-		targets = append(targets, direct)
-	}
-	socket, ok := enabledSSHUnit(src.f, ".socket", targets...)
+	boot := time.Unix(btime, 0)
+	f := sys.f
+	reader := &fsReader{rootFD: f.rootFD, root: f.root, mapOwner: f.mapOwner, now: f.now, directoryLinkCutoff: boot}
+	reader.noOpenat2.Store(f.noOpenat2.Load())
+	src := sshUnitSource{systemFiles{reader}, boot}
+	direct, directFile, ok := enabledSSHUnit(ctx, src, ".service", "multi-user.target")
 	if !ok {
 		return false
 	}
-	var name string
+	targets := []string{"sockets.target", "multi-user.target"}
+	if direct != "" {
+		targets = append(targets, direct)
+	}
+	socket, socketFile, ok := enabledSSHUnit(ctx, src, ".socket", targets...)
+	if !ok {
+		return false
+	}
+	file := directFile
 	if socket == "" {
 		// Some packages enable the service directly in multi-user.target.
-		if !directOK || direct == "" {
+		if file == "" {
 			return false
 		}
-		name = direct
 	} else {
 		var selection sshSocket
-		socketFile, ok := sshUnitFile(ctx, src, socket)
-		if !ok || !readSSHUnit(ctx, src, socketFile, "[Socket]", selection.set) {
+		if !readSSHUnit(ctx, src, socketFile, "[Socket]", selection.set) {
 			return false
 		}
-		name = selection.service
+		name := selection.service
 		if name == "" {
 			base := strings.TrimSuffix(path.Base(socketFile), ".socket")
 			if selection.accept {
@@ -142,9 +159,9 @@ func safeSSHDService(ctx context.Context, sys systemFiles, binary, procRoot stri
 		} else if selection.accept || !plainServiceName.MatchString(name) {
 			return false
 		}
+		file, ok = sshUnitFile(ctx, src, name)
 	}
 	service := sshService{binary: binary}
-	file, ok := sshUnitFile(ctx, src, name)
 	return ok && readSSHUnit(ctx, src, file, "[Service]", service.set) && service.safeStart(ctx, src)
 }
 
@@ -174,61 +191,125 @@ func (s *sshSocket) set(key, value string) bool {
 	return true
 }
 
-// A unit alias names another unit in the search path. Resolve only simple,
-// root-owned links inside those directories; masks and external links are unknown.
+type sshUnitEntry struct {
+	file   string
+	target string
+}
+
+// Pin the leaf before inspecting its owner, time and link text. The rooted
+// walk supplies the real parent for relative links, including on merged /usr.
+func (src sshUnitSource) unitEntry(file string) (sshUnitEntry, string) {
+	var entry sshUnitEntry
+	parent, name, dirs, l, ok := src.f.walkDirs(file, ownerRule{system: true}, false)
+	if !ok {
+		return entry, l.status
+	}
+	if parent != src.f.rootFD {
+		defer func() { _ = unix.Close(parent) }()
+	}
+	var st unix.Stat_t
+	if unix.Fstat(parent, &st) != nil || mtimeOf(&st).After(src.boot) {
+		return entry, statusRejected
+	}
+	fd, err := src.f.openAt(parent, name, unix.O_PATH)
+	if err != nil {
+		status, _ := statusOf(err)
+		return entry, status
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if unix.Fstat(fd, &st) != nil || src.f.mapOwner(file, st.Uid) != 0 || mtimeOf(&st).After(src.boot) {
+		return entry, statusRejected
+	}
+	dir := dirs[len(dirs)-1].path
+	entry.file = path.Join(dir, name)
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFREG:
+		return entry, statusRead
+	case unix.S_IFLNK:
+		var buf [unix.PathMax]byte
+		n, err := unix.Readlinkat(fd, "", buf[:])
+		if err != nil || n == 0 || n == len(buf) {
+			return entry, statusRejected
+		}
+		target := string(buf[:n])
+		if !path.IsAbs(target) {
+			// Resolve leading parent components from the pinned directory.
+			// Interior dot components would require another symlink walk.
+			for strings.HasPrefix(target, "../") {
+				target, dir = target[3:], path.Dir(dir)
+			}
+			target = strings.TrimPrefix(target, "./")
+			if !validPath("/" + target) {
+				return entry, statusRejected
+			}
+			target = path.Join(dir, target)
+		}
+		if !validPath(target) || !slices.Contains(sshUnitDirs, path.Dir(target)) || path.Ext(target) != path.Ext(name) ||
+			strings.Contains(path.Base(target), "@") != strings.Contains(name, "@") {
+			return entry, statusRejected
+		}
+		entry.target = target
+		return entry, statusRead
+	default:
+		return entry, statusRejected
+	}
+}
+
+// Follow the exact path in the dependency link, without substituting a
+// higher-priority unit of the same name for a missing or shadowed target.
+func (src sshUnitSource) resolveUnitTarget(target string) (string, bool) {
+	for range maxIncludeDepth {
+		entry, status := src.unitEntry(target)
+		if status != statusRead {
+			break
+		}
+		if entry.target == "" {
+			return entry.file, true
+		}
+		target = entry.target
+	}
+	return "", false
+}
+
 func sshUnitFile(ctx context.Context, src sshUnitSource, name string) (string, bool) {
+	var expected string
 	for range maxIncludeDepth {
 		if ctx.Err() != nil {
-			return "", false
+			break
 		}
-		target := ""
+		var entry sshUnitEntry
 		for _, dir := range sshUnitDirs {
-			file := path.Join(dir, name)
-			_, l := src.f.exists(file)
-			if l.status == statusAbsent {
+			var status string
+			entry, status = src.unitEntry(path.Join(dir, name))
+			if status == statusAbsent {
 				continue
 			}
-			if l.status != statusRead || l.uid != 0 {
-				return "", false
-			}
-			switch l.mode & unix.S_IFMT {
-			case unix.S_IFREG:
-				return file, true
-			case unix.S_IFLNK:
-				if l.mtime.After(src.boot) {
-					return "", false
-				}
-				fd, last, _, _, ok := src.f.walkDirs(file, ownerRule{system: true}, false)
-				if !ok {
-					return "", false
-				}
-				var buf [unix.PathMax]byte
-				n, err := unix.Readlinkat(fd, last, buf[:])
-				if fd != src.f.rootFD {
-					_ = unix.Close(fd)
-				}
-				if err != nil || n == len(buf) {
-					return "", false
-				}
-				link := string(buf[:n])
-				if !path.IsAbs(link) {
-					link = path.Join(dir, link)
-				}
-				if !slices.Contains(sshUnitDirs, path.Dir(link)) || path.Ext(link) != path.Ext(name) || strings.Contains(path.Base(link), "@") != strings.Contains(name, "@") {
-					return "", false
-				}
-				target = path.Base(link)
-			default:
+			if status != statusRead {
 				return "", false
 			}
 			break
 		}
-		if target == "" {
+		if entry.file == "" || expected != "" && entry.file != expected {
 			return "", false
 		}
-		name = target
+		if entry.target == "" {
+			return entry.file, true
+		}
+		target, status := src.unitEntry(entry.target)
+		if status != statusRead {
+			return "", false
+		}
+		expected, name = target.file, path.Base(entry.target)
 	}
 	return "", false
+}
+
+func (src sshUnitSource) list(dir string) ([]string, loaded) {
+	names, l := src.systemFiles.list(dir)
+	if l.status == statusRead && l.mtime.After(src.boot) {
+		return nil, failed(statusRejected, reasonFileRejected)
+	}
+	return names, l
 }
 
 func unitNameGroups(name string) []string {

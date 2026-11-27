@@ -385,6 +385,7 @@ func TestPrivsepDerivationRequiresModeledInputs(t *testing.T) {
 				require.NoError(t, os.WriteFile(target, []byte(tc.content), 0o644))
 				require.NoError(t, os.Chtimes(target, fixtureMtime, fixtureMtime))
 			}
+			setFixtureTreeMtime(t, root)
 			r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(t.Context())
 			assert.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
 			assert.Nil(t, r.SSHD.Effective)
@@ -494,6 +495,13 @@ func TestPrivsepSelectsEnabledSSHService(t *testing.T) {
 		derive bool
 	}{
 		{"stock socket and service", nil, nil, true},
+		{"merged library directory", inputs{socketLink: ""}, inputs{"lib": "usr/lib", socketLink: "/lib/systemd/system/ssh.socket"}, true},
+		{"dangling enablement target", inputs{socketLink: ""}, inputs{socketLink: "/lib/systemd/system/ssh.socket"}, false},
+		{"foreign enablement target", inputs{socketLink: "", "usr/lib/systemd/system/foreign.socket": "[Socket]\nAccept=no"}, inputs{socketLink: "/usr/lib/systemd/system/foreign.socket"}, false},
+		{"shadowed enablement target", inputs{"etc/systemd/system/ssh.socket": "[Socket]\nAccept=no"}, nil, false},
+		{"matching enablement alias", inputs{socketLink: ""}, inputs{"etc/systemd/system/alias.socket": "/usr/lib/systemd/system/ssh.socket", socketLink: "/etc/systemd/system/alias.socket"}, true},
+		{"dangling direct service with enabled socket", nil, inputs{"etc/systemd/system/multi-user.target.wants/ssh.service": "/lib/systemd/system/ssh.service"}, false},
+		{"conflicting requires target", inputs{"usr/lib/systemd/system/foreign.socket": "[Socket]\nAccept=no"}, inputs{"etc/systemd/system/sockets.target.requires/ssh.socket": "/usr/lib/systemd/system/foreign.socket"}, false},
 		{"unselected template", inputs{template: unsafe}, nil, true},
 		{"per connection", inputs{socket: "[Socket]\nAccept=yes", template: safeTemplate, unit: unsafe}, nil, true},
 		{"socket service override", inputs{socket: "[Socket]\nService=local-ssh.service", unit: unsafe, "usr/lib/systemd/system/local-ssh.service": safeTemplate}, nil, true},
@@ -543,15 +551,13 @@ func TestPrivsepSelectsEnabledSSHService(t *testing.T) {
 				}
 				require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
 				require.NoError(t, os.WriteFile(p, []byte(data), 0o644))
-				require.NoError(t, os.Chtimes(p, fixtureMtime, fixtureMtime))
 			}
 			for file, target := range tc.links {
 				p := filepath.Join(root, file)
 				require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
 				require.NoError(t, os.Symlink(target, p))
-				at := unix.NsecToTimespec(fixtureMtime.UnixNano())
-				require.NoError(t, unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{at, at}, unix.AT_SYMLINK_NOFOLLOW))
 			}
+			setFixtureTreeMtime(t, root)
 			r := newCollector(caseOptions(t, dir, spec, root, proc)).collect(t.Context())
 			require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
 			if tc.derive {
@@ -571,6 +577,12 @@ func TestPrivsepRequiresServiceInputsFromBeforeBoot(t *testing.T) {
 		"etc/systemd/system/ssh.socket.d/10.conf",
 		"etc/systemd/system/ssh.service.d/10.conf",
 		"etc/default/ssh",
+		"etc/systemd/system/sockets.target.wants/ssh.socket",
+		"etc/systemd/system/sockets.target.wants",
+		"usr/lib/systemd/system",
+		"etc/systemd/system",
+		"etc/systemd/system/ssh.socket.d",
+		"etc/systemd/system/ssh.service.d",
 	} {
 		t.Run(file, func(t *testing.T) {
 			dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
@@ -581,10 +593,15 @@ func TestPrivsepRequiresServiceInputsFromBeforeBoot(t *testing.T) {
 				require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
 				require.NoError(t, os.WriteFile(p, []byte("# stock options\n"), 0o644))
 			}
+			if strings.HasSuffix(file, ".d") {
+				require.NoError(t, os.MkdirAll(p, 0o755))
+			}
+			setFixtureTreeMtime(t, root)
 			c := newCollector(caseOptions(t, dir, spec, root, proc))
 			boot := time.Unix(spec.Btime, 0)
 			for _, ts := range []time.Time{boot, boot.Add(time.Nanosecond)} {
-				require.NoError(t, os.Chtimes(p, ts, ts))
+				at := unix.NsecToTimespec(ts.UnixNano())
+				require.NoError(t, unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{at, at}, unix.AT_SYMLINK_NOFOLLOW))
 				r := c.collect(t.Context())
 				require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
 				assert.Equal(t, ts.Equal(boot), r.SSHD.Effective != nil)
@@ -595,6 +612,23 @@ func TestPrivsepRequiresServiceInputsFromBeforeBoot(t *testing.T) {
 			assert.Nil(t, r.SSHD.Effective)
 		})
 	}
+}
+
+func TestPrivsepRequiresPreBootUnitDirectoryLink(t *testing.T) {
+	dir := filepath.Join(fixturesDir, "hosts", "privsep-missing")
+	spec := loadCase(t, dir)
+	root, proc := buildHost(t, dir, spec)
+	p := filepath.Join(root, "/usr/lib/systemd/system")
+	require.NoError(t, os.Rename(p, p+"-units"))
+	require.NoError(t, os.Symlink("system-units", p))
+	setFixtureTreeMtime(t, root)
+	c := newCollector(caseOptions(t, dir, spec, root, proc))
+	require.Len(t, c.collect(t.Context()).SSHD.Effective, len(sshdDefaults))
+	after := unix.Timespec{Sec: spec.Btime + 1}
+	require.NoError(t, unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{after, after}, unix.AT_SYMLINK_NOFOLLOW))
+	r := c.collect(t.Context())
+	require.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+	assert.Nil(t, r.SSHD.Effective)
 }
 
 func TestSSHDExecStartPrefixes(t *testing.T) {

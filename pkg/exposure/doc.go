@@ -89,7 +89,8 @@
 // directly enabled SSH service when socket activation is disabled. It reads
 // unit drop-ins in systemd order and checks ExecStart and its environment
 // files against the validated sshd binary and supported flags. Uncertain
-// service options, unassigned expansions and service inputs modified since
+// service options, unassigned expansions, mismatched enablement links, and
+// service inputs or unit and dependency directories modified since
 // boot leave effective null. The same applies to unrecognized directives or
 // syntax, non-ASCII glob inputs, relative key or revocation paths, ambiguous
 // access lists, conditional lists, nested includes or a changed config read.

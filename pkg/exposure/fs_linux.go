@@ -19,9 +19,11 @@ import (
 // directory symlinks reached entirely through root-owned directories without
 // group/world write permission are resolved; account paths use no-follow opens.
 type fsReader struct {
-	scan   *sshdDirectoryBudget
-	rootFD int
-	root   unix.Stat_t
+	// Unit selection also bounds the age of directory links it follows.
+	directoryLinkCutoff time.Time
+	scan                *sshdDirectoryBudget
+	rootFD              int
+	root                unix.Stat_t
 	// mapOwner turns a file's uid into the uid ownership is judged by. It is
 	// the identity in production; tests, which run unprivileged, map their
 	// own uid to root or to an account.
@@ -238,6 +240,9 @@ func (f *fsReader) walkDirs(p string, rule ownerRule, includeLast bool) (int, st
 				return -1, "", nil, failed(statusOf(err)), false
 			}
 			if st.Mode&unix.S_IFMT == unix.S_IFLNK {
+				if !f.directoryLinkCutoff.IsZero() && mtimeOf(&st).After(f.directoryLinkCutoff) {
+					return -1, "", nil, failed(statusRejected, reasonFileRejected), false
+				}
 				var parent unix.Stat_t
 				if err := unix.Fstat(cur, &parent); err != nil {
 					return -1, "", nil, failed(statusUnreadable, reasonFileUnreadable), false
@@ -538,6 +543,11 @@ func (f *fsReader) list(p string, rule ownerRule, recordsOnly bool) (names []str
 		}
 		names = files
 	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return nil, failed(statusUnreadable, reasonFileUnreadable)
+	}
+	l.mtime = mtimeOf(&st)
 	l.data = []byte{}
 	return names, l
 }
