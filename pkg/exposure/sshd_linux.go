@@ -36,6 +36,7 @@ type sshdRun struct {
 // would run and to stand in for sshd.
 var commandContext = exec.CommandContext
 var waitSSHD = unix.Waitid
+var signalSSHDGroup = unix.Kill
 
 // findSSHD returns the first candidate under root that is a root-owned
 // regular file with no group or world write bits, in a root-owned directory
@@ -148,11 +149,14 @@ func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) ui
 	}
 	// Waitid observes exit without reaping. The leader pins its group ID
 	// until the deadline callback and both readers have finished.
-	killGroup := func() { _ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL) }
+	killProbe := func() {
+		_ = signalSSHDGroup(-cmd.Process.Pid, unix.SIGKILL)
+		_ = cmd.Process.Kill()
+	}
 	stopped := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
 		defer close(stopped)
-		killGroup()
+		killProbe()
 		_ = stdout.Close()
 		_ = errPipe.Close()
 	})
@@ -162,7 +166,7 @@ func runSSHDT(ctx context.Context, root string, mapOwner func(string, uint32) ui
 	_, readErr := io.Copy(&buf, io.LimitReader(stdout, sshdStdoutCap+1))
 	over := buf.Len() > sshdStdoutCap
 	if over {
-		killGroup()
+		killProbe()
 	}
 	stderrErr := <-stderrDone
 	var info unix.Siginfo

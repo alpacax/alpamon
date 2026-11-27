@@ -288,6 +288,24 @@ func TestRunSSHDTDeadlineClosesInheritedOutput(t *testing.T) {
 	assert.Less(t, time.Since(start), sshdTimeout+2*time.Second)
 }
 
+func TestRunSSHDTDeadlineKillsLeaderWhenGroupIsGone(t *testing.T) {
+	root := t.TempDir()
+	fakeSSHD(t, root, "exec sleep 10")
+	var group int
+	signalSSHDGroup = func(pid int, sig unix.Signal) error {
+		group = pid
+		assert.Equal(t, unix.SIGKILL, sig)
+		return unix.ESRCH
+	}
+	t.Cleanup(func() { signalSSHDGroup = unix.Kill })
+	ctx, cancel := context.WithTimeoutCause(t.Context(), time.Second, errSSHDTimeout)
+	defer cancel()
+	start := time.Now()
+	assert.Equal(t, sshdRun{reason: reasonSSHDTimeout}, runSSHDT(ctx, root, rootOwned))
+	assert.Negative(t, group)
+	assert.Less(t, time.Since(start), sshdTimeout)
+}
+
 func TestRunSSHDTWaitFailureReapsLeader(t *testing.T) {
 	root := t.TempDir()
 	fakeSSHD(t, root, "exec 1>&- 2>&-\nexec sleep 30\n")
