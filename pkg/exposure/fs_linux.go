@@ -557,6 +557,7 @@ func (f *fsReader) exists(p string) (bool, loaded) {
 	var st unix.Stat_t
 	err := unix.Fstatat(fd, last, &st, unix.AT_SYMLINK_NOFOLLOW)
 	if err == nil {
+		l.uid, l.mode = f.mapOwner(p, st.Uid), st.Mode
 		return true, l
 	}
 	status, reason := statusOf(err)

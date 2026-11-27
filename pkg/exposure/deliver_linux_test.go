@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -753,4 +754,93 @@ func TestLegacySSHDResendMatchesUnavailableCollection(t *testing.T) {
 	want.ObservedAt = s.lastObserved.Format(time.RFC3339)
 	_, body := prepareReport(want, schemaVersion)
 	assert.Equal(t, string(body), string(reports[1].body))
+}
+
+func TestStalledPrivsepStatDoesNotBlockDisarm(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := testService(acceptingPoster(), nil)
+		unblock := make(chan struct{})
+		var calls atomic.Int32
+		s.privsepPresent = func() bool { calls.Add(1); <-unblock; return true }
+		r := sampleReport()
+		r.Categories[catSSHD] = coverage{Reasons: []string{reasonSSHDPrivsepMissing}}
+		s.updatePrivsepPoll(t.Context(), r)
+		time.Sleep(privsepPollInterval)
+		synctest.Wait()
+		started := time.Now()
+		s.stopPrivsepPoll()
+		assert.Equal(t, started, time.Now(), "shutdown does not wait for the stat deadline")
+		s.updatePrivsepPoll(t.Context(), r)
+		time.Sleep(2 * privsepPollInterval)
+		synctest.Wait()
+		s.stopPrivsepPoll()
+		close(unblock)
+		synctest.Wait()
+		assert.EqualValues(t, 1, calls.Load())
+		assert.Empty(t, s.trigger)
+	})
+}
+
+func TestAcceptedLegacySSHDShapeIsUsedForSubsequentChecks(t *testing.T) {
+	const refusal = `{"errors":[{"code":"unknown_reason","field":"/categories/sshd/reasons/0"}]}`
+	for _, status := range []int{200, 400} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			p := acceptingPoster()
+			p.answers[reportURL] = []fakeResponse{{status: 400, body: refusal}, {status: status}, {status: 200}}
+			s := testService(p, func(context.Context) *exposureReport {
+				r := sampleReport()
+				r.Categories[catSSHD] = coverage{Status: coveragePartial, Reasons: []string{reasonSSHDPrivsepMissing}}
+				return r
+			})
+			s.readAndDeliver(t.Context())
+			s.readAndDeliver(t.Context())
+			reports := p.callsTo(reportURL)
+			require.Len(t, reports, 3)
+			check := decodeTree(t, p.callsTo(checkURL)[1].body)
+			last := decodeTree(t, reports[2].body)
+			assert.Equal(t, last["hash"], check["hash"])
+			want := reasonSSHDPrivsepMissing
+			if status == 200 {
+				want = reasonSSHDUnavailable
+			}
+			assert.Contains(t, string(reports[2].body), want)
+			r, _ := s.prepareReport(s.collect(t.Context()), legacySchemaVersion)
+			assert.Contains(t, r.Categories[catSSHD].Reasons, reasonSSHDPrivsepMissing)
+		})
+	}
+}
+
+func TestLegacySSHDShapeFollowsServerEndpoint(t *testing.T) {
+	url := "https://example.test/old-reasons"
+	other := "https://example.test/new-reasons"
+	defer schemaV1ByServer.Delete(url)
+	defer schemaV1ByServer.Delete(other)
+	serviceAt := func(base string) *service { return newService(&scheduler.Session{BaseURL: base}, nil, nil) }
+	serviceAt(url).legacySSHDVersion.Store(schemaVersion)
+	assert.EqualValues(t, schemaVersion, serviceAt(url).legacySSHDVersion.Load())
+	assert.Zero(t, serviceAt(other).legacySSHDVersion.Load())
+}
+
+func TestPrivsepPollRequiresRootOwnedDirectory(t *testing.T) {
+	root := t.TempDir()
+	opts := collectorOptions{root: root, mapOwner: rootOwned}
+	require.NoError(t, os.Mkdir(filepath.Join(root, "run"), 0o755))
+	entry := filepath.Join(root, privsepPath)
+	assert.False(t, privsepDirectoryPresent(opts))
+	require.NoError(t, os.Symlink("missing", entry))
+	assert.False(t, privsepDirectoryPresent(opts))
+	require.NoError(t, os.Remove(entry))
+	require.NoError(t, os.WriteFile(entry, nil, 0o644))
+	assert.False(t, privsepDirectoryPresent(opts))
+	require.NoError(t, os.Remove(entry))
+	require.NoError(t, os.Mkdir(entry, 0o755))
+	opts.mapOwner = func(p string, _ uint32) uint32 {
+		if p == privsepPath {
+			return 1000
+		}
+		return 0
+	}
+	assert.False(t, privsepDirectoryPresent(opts))
+	opts.mapOwner = rootOwned
+	assert.True(t, privsepDirectoryPresent(opts))
 }

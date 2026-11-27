@@ -2,7 +2,10 @@
 
 package exposure
 
-import "context"
+import (
+	"context"
+	"golang.org/x/sys/unix"
+)
 
 // Supported reports whether this build collects and sends the exposure
 // report.
@@ -18,7 +21,7 @@ func Start(ctx context.Context, p Poster) {
 	}
 	c := newCollector(opts)
 	s := newService(p, c.collect, triggers)
-	s.privsepPresent = func() bool { return privsepStatus(opts.root, opts.mapOwner) == statusRead }
+	s.privsepPresent = func() bool { return privsepDirectoryPresent(opts) }
 	go s.run(ctx)
 }
 
@@ -41,3 +44,8 @@ var triggers = make(chan struct{}, 1)
 // testHookStartOptions lets the process test use a fixture host with the
 // real Start lifecycle, regardless of the test process's privileges.
 var testHookStartOptions *collectorOptions
+
+func privsepDirectoryPresent(opts collectorOptions) bool {
+	l := privsepEntry(opts.root, opts.mapOwner)
+	return l.status == statusRead && l.uid == 0 && l.mode&unix.S_IFMT == unix.S_IFDIR
+}

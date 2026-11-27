@@ -94,21 +94,21 @@ func (b *sshdStderr) failureReason(root string, mapOwner func(string, uint32) ui
 	case "sshd: no hostkeys available -- exiting.", "fatal: no hostkeys available -- exiting.", "fatal: sshd: no hostkeys available -- exiting.", "sshd: fatal: no hostkeys available -- exiting.":
 		return reasonSSHDNoHostKeys
 	case privsepDiagnostic:
-		if len(lines) == 1 && privsepStatus(root, mapOwner) == statusAbsent {
+		if len(lines) == 1 && privsepEntry(root, mapOwner).status == statusAbsent {
 			return reasonSSHDPrivsepMissing
 		}
 	}
 	return ""
 }
 
-func privsepStatus(root string, mapOwner func(string, uint32) uint32) string {
+func privsepEntry(root string, mapOwner func(string, uint32) uint32) loaded {
 	fs, err := newFSReader(root, mapOwner)
 	if err != nil {
-		return statusUnreadable
+		return failed(statusUnreadable, reasonFileUnreadable)
 	}
 	defer fs.close()
 	_, result := fs.exists(privsepPath)
-	return result.status
+	return result
 }
 
 var errSSHDTimeout = errors.New("sshd deadline reached")

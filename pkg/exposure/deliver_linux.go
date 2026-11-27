@@ -36,21 +36,27 @@ const (
 	maxBackoff    = 5 * time.Minute
 )
 
-// schemaV1ByServer retains the negotiated version across services for each configured URL.
-var schemaV1ByServer sync.Map // string to *atomic.Bool
+type serverCapabilities struct {
+	useV1             atomic.Bool
+	legacySSHDVersion atomic.Int32
+}
+
+// Capabilities are shared by services posting to the same endpoint.
+var schemaV1ByServer sync.Map // string to *serverCapabilities
 
 // service serializes exposure reads and their delivery. A trigger that
 // arrives during a read is held in a one-slot channel and causes exactly one
 // more read after it.
 type service struct {
-	post           Poster
-	collect        func(ctx context.Context) *exposureReport
-	trigger        chan struct{}
-	now            func() time.Time
-	jitter         func() time.Duration
-	sleep          func(ctx context.Context, d time.Duration) bool
-	useV1          *atomic.Bool
+	post    Poster
+	collect func(ctx context.Context) *exposureReport
+	trigger chan struct{}
+	now     func() time.Time
+	jitter  func() time.Duration
+	sleep   func(ctx context.Context, d time.Duration) bool
+	*serverCapabilities
 	privsepPresent func() bool
+	statBusy       atomic.Bool
 	cancelPoll     context.CancelFunc
 	pollDone       chan struct{}
 	// lastObserved prevents replays within the same second. After a backward
@@ -62,19 +68,19 @@ type service struct {
 }
 
 func newService(p Poster, collect func(ctx context.Context) *exposureReport, trigger chan struct{}) *service {
-	useV1 := new(atomic.Bool)
+	caps := new(serverCapabilities)
 	if session, ok := p.(*scheduler.Session); ok && session.BaseURL != "" {
-		state, _ := schemaV1ByServer.LoadOrStore(session.BaseURL, useV1)
-		useV1 = state.(*atomic.Bool)
+		state, _ := schemaV1ByServer.LoadOrStore(session.BaseURL, caps)
+		caps = state.(*serverCapabilities)
 	}
 	return &service{
-		post:    p,
-		collect: collect,
-		trigger: trigger,
-		now:     time.Now,
-		jitter:  func() time.Duration { return rand.N(maxReadJitter) },
-		sleep:   sleepCtx,
-		useV1:   useV1,
+		post:               p,
+		collect:            collect,
+		trigger:            trigger,
+		now:                time.Now,
+		jitter:             func() time.Duration { return rand.N(maxReadJitter) },
+		sleep:              sleepCtx,
+		serverCapabilities: caps,
 	}
 }
 
@@ -166,7 +172,7 @@ func (s *service) updatePrivsepPoll(ctx context.Context, snapshot *exposureRepor
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if ctx.Err() == nil && s.privsepPresent() {
+				if ctx.Err() == nil && s.checkPrivsepDirectory(ctx) {
 					if ctx.Err() == nil {
 						requestRead(s.trigger)
 					}
@@ -175,6 +181,32 @@ func (s *service) updatePrivsepPoll(ctx context.Context, snapshot *exposureRepor
 			}
 		}
 	}()
+}
+
+// A kernel lookup can outlive cancellation on a stalled filesystem. Keep at
+// most one such worker, including across poll disarms and subsequent rearms.
+func (s *service) checkPrivsepDirectory(ctx context.Context) bool {
+	if !s.statBusy.CompareAndSwap(false, true) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, categoryBudget)
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() {
+		defer s.statBusy.Store(false)
+		defer func() {
+			if recover() != nil {
+				done <- false
+			}
+		}()
+		done <- s.privsepPresent()
+	}()
+	select {
+	case present := <-done:
+		return present && ctx.Err() == nil
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // readAndDeliver reads once and delivers the result: a check, then the
@@ -199,7 +231,7 @@ func (s *service) readAndDeliver(ctx context.Context) {
 	if snapshot == nil {
 		r, body, _ = fallbackReport(r.ObservedAt, legacySchemaVersion)
 	} else {
-		r, body = prepareReport(snapshot, legacySchemaVersion)
+		r, body = s.prepareReport(snapshot, legacySchemaVersion)
 	}
 	if r != nil {
 		s.deliver(ctx, r, body)
@@ -229,8 +261,13 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 	}
 	report := s.send(ctx, reportURL, body, reportTimeout, nil)
 	if report.unknownReasonField != "" {
-		if legacy := legacySSHDReport(r, report.unknownReasonField); legacy != nil {
-			report = s.sendAttempts(ctx, reportURL, legacy, reportTimeout, nil, 1)
+		if snapshot := legacySSHDReport(r, report.unknownReasonField); snapshot != nil {
+			if legacy, encoded := prepareReport(snapshot, r.SchemaVersion); legacy != nil {
+				report = s.sendAttempts(ctx, reportURL, encoded, reportTimeout, nil, 1)
+				if report.ok && report.status == http.StatusOK {
+					s.legacySSHDVersion.Store(int32(r.SchemaVersion))
+				}
+			}
 		}
 	}
 	if report.unsupportedVersion && r.SchemaVersion == schemaVersion {
@@ -242,13 +279,14 @@ func (s *service) deliver(ctx context.Context, r *exposureReport, body []byte) b
 	return false
 }
 
-// legacySSHDReport only downgrades the reason at the exact rejected JSON pointer.
-func legacySSHDReport(report *exposureReport, field string) []byte {
+// A refusal must point to the exact reason. Once accepted, its legacy shape
+// is also used for the hash check on subsequent collections of this version.
+func legacySSHDReport(report *exposureReport, field string) *exposureReport {
 	c := report.Categories[catSSHD]
 	for i, reason := range c.Reasons {
 		switch reason {
 		case reasonSSHDPrivsepMissing, reasonSSHDBinaryRejected, reasonSSHDTimeout, reasonSSHDNoHostKeys:
-			if field != "/categories/sshd/reasons/"+strconv.Itoa(i) {
+			if field != "" && field != "/categories/sshd/reasons/"+strconv.Itoa(i) {
 				continue
 			}
 			snapshot := report
@@ -265,10 +303,7 @@ func legacySSHDReport(report *exposureReport, field string) []byte {
 			c.Reasons = reasons.list()
 			legacy.Categories[catSSHD] = c
 			legacy.SSHD.Effective = nil
-			body, err := finalize(legacy)
-			if err == nil && len(body) <= maxReportBytes {
-				return body
-			}
+			return legacy
 		}
 	}
 	return nil
@@ -310,8 +345,17 @@ func (s *service) buildReport(ctx context.Context, version int) (report *exposur
 	snapshot = s.collect(ctx)
 	snapshot.ObservedAt = observed.Format(time.RFC3339)
 	stage = "finalize"
-	report, encoded = prepareReport(snapshot, version)
+	report, encoded = s.prepareReport(snapshot, version)
 	return report, encoded, snapshot
+}
+
+func (s *service) prepareReport(snapshot *exposureReport, version int) (*exposureReport, []byte) {
+	if s.legacySSHDVersion.Load() == int32(version) {
+		if legacy := legacySSHDReport(snapshot, ""); legacy != nil {
+			snapshot = legacy
+		}
+	}
+	return prepareReport(snapshot, version)
 }
 
 func prepareReport(snapshot *exposureReport, version int) (*exposureReport, []byte) {
