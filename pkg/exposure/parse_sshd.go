@@ -373,7 +373,7 @@ func (p *sshdConfigParser) file(name string, depth int, required bool) {
 				return true
 			case "trustedusercakeys", "authorizedkeysfile", "revokedkeys":
 				for _, arg := range args {
-					if !(len(args) == 1 && strings.EqualFold(arg, "none")) && !validPath(arg) {
+					if (len(args) != 1 || !strings.EqualFold(arg, "none")) && !validPath(arg) {
 						p.cfg.derivationUnsupported = true
 					}
 				}
