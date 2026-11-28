@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -366,6 +367,59 @@ func TestSudoApprovalResponse_ApprovalDetailsPassthrough(t *testing.T) {
 				}
 			}
 			assert.NotContains(t, frame, "unknown")
+		})
+	}
+}
+
+func TestUnattributedSudoForTrackedUsername(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		am.AddPIDCommandMapping(2147483645, "command-id", "alice")
+		am.UpdateBlockLocalSudo(false)
+		req := SudoApprovalRequest{
+			Type: "check_user", Username: "alice",
+			PID: 2147483647, PPID: 2147483646, RequestID: "2147483647",
+		}
+		client, _ := startPAMClient(t, am, req)
+		var classification IsAlpconResponse
+		require.NoError(t, json.Unmarshal([]byte(client.output(t)), &classification))
+		assert.Equal(t, "is_alpacon_response", classification.Type)
+		assert.True(t, classification.IsAlpconUser)
+
+		req.Type = "sudo_approval"
+		client, _ = startPAMClient(t, am, req)
+		var verdict SudoApprovalResponse
+		require.NoError(t, json.Unmarshal([]byte(client.output(t)), &verdict))
+		assert.Equal(t, "sudo_approval_response", verdict.Type)
+		assert.Equal(t, req.RequestID, verdict.RequestID)
+		assert.False(t, verdict.Approved)
+		assert.Empty(t, verdict.CommandID)
+		assert.Empty(t, verdict.SessionID)
+	})
+}
+
+func TestSudoSessionIdentity(t *testing.T) {
+	command := &SessionInfo{Kind: TrackerKindCommand, uid: "4100", groupPath: "/agent/alpamon-command-one"}
+	websh := &SessionInfo{Kind: TrackerKindWebsh, uid: "4200"}
+	am := AuthManager{pidToSessionMap: map[int]*SessionInfo{70: command, 80: websh}}
+	for _, tc := range []struct {
+		name    string
+		id      sudoIdentity
+		want    *SessionInfo
+		managed bool
+	}{
+		{"command subgroup", sudoIdentity{group: command.groupPath + "/worker", commandGroup: true}, command, true},
+		{"different group with tracked parent", sudoIdentity{parent: 70, group: "/local"}, nil, true},
+		{"retired command group", sudoIdentity{group: "/agent/alpamon-command-ended", commandGroup: true}, nil, true},
+		{"ancestor fallback", sudoIdentity{ancestors: []int{90, 80}}, websh, true},
+		{"unmatched account alias", sudoIdentity{username: "alias", uid: "4100"}, nil, true},
+		{"unmatched process uid", sudoIdentity{processUID: "4100"}, nil, true},
+		{"local account", sudoIdentity{uid: "4300"}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session, managed := am.sudoSessionLocked(tc.id)
+			assert.Same(t, tc.want, session)
+			assert.Equal(t, tc.managed, managed)
 		})
 	}
 }
