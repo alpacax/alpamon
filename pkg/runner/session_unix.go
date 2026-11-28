@@ -25,8 +25,8 @@ func sessionID(pid int) (int, bool) {
 }
 
 // parentPID returns the parent pid of pid. Reports ok=false when the process
-// is gone or its parent cannot be read, which ends any ancestor walk rather
-// than guessing. On Linux this is a single /proc/<pid>/stat read.
+// is gone or its parent cannot be read. A zero parent is valid when the
+// parent lives outside the PID namespace. On Linux the PID comes from /proc.
 func parentPID(pid int) (int, bool) {
 	if pid <= 1 {
 		return 0, false
@@ -36,7 +36,7 @@ func parentPID(pid int) (int, bool) {
 		return 0, false
 	}
 	ppid, err := proc.Ppid()
-	if err != nil || ppid <= 0 {
+	if err != nil || ppid < 0 {
 		return 0, false
 	}
 	return int(ppid), true
