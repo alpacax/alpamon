@@ -199,7 +199,8 @@ type IsAlpconResponse struct {
 type AuthManager struct {
 	// checkedSudo holds positive PAM checks under mu for the process lifetime.
 	checkedSudo     map[int]uint64
-	spawn           sync.RWMutex
+	pendingStarts   map[*pendingCommandStart]struct{} // guarded by mu
+	startChanged    chan struct{}                     // guarded by mu
 	mu              sync.RWMutex
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -897,25 +898,106 @@ func sudoIdentityFor(pid, parent int, username string) sudoIdentity {
 	}
 }
 
-func (id sudoIdentity) managedAccount(s *SessionInfo) bool {
+func (id sudoIdentity) managedAccount(username, uid string) bool {
 	if id.processUID != "" {
-		return id.processUID != "0" && id.processUID == s.uid
+		return id.processUID != "0" && id.processUID == uid
 	}
-	return id.username != "" && id.username == s.Username || id.uid != "" && id.uid == s.uid
+	return id.username != "" && id.username == username || id.uid != "" && id.uid == uid
+}
+
+type pendingCommandStart struct {
+	username, uid, group string
+}
+
+func (am *AuthManager) beginCommandStart(username, uid, group string) func() {
+	start := &pendingCommandStart{username: username, uid: uid, group: group}
+	am.mu.Lock()
+	if am.pendingStarts == nil {
+		am.pendingStarts = make(map[*pendingCommandStart]struct{})
+	}
+	am.pendingStarts[start] = struct{}{}
+	am.mu.Unlock()
+	return func() {
+		am.mu.Lock()
+		delete(am.pendingStarts, start)
+		if am.startChanged != nil {
+			close(am.startChanged)
+			am.startChanged = nil
+		}
+		am.mu.Unlock()
+	}
+}
+
+// An unpublished command leader is still a direct child of this agent. Check
+// the same PID candidates as the tracker, including a session leader that
+// isn't in the caller's ancestry.
+func (id sudoIdentity) mayMatchStartingPID() bool {
+	if id.commandGroup {
+		return false
+	}
+	self := os.Getpid()
+	if slices.Contains(id.ancestors, self) {
+		return true
+	}
+	mayBeChild := func(pid int) bool {
+		if pid <= 1 || pid == self {
+			return false
+		}
+		if parent, ok := parentPID(pid); ok {
+			return parent == self
+		}
+		_, absent := sudoProcessStart(pid)
+		return !absent
+	}
+	if id.sidOK && mayBeChild(id.sid) || mayBeChild(id.parent) {
+		return true
+	}
+	// Earlier ancestors have a known parent in the chain.
+	return len(id.ancestors) > 0 && mayBeChild(id.ancestors[len(id.ancestors)-1])
 }
 
 // lockSudoSession returns with mu held so the caller can act on the same
-// registration. Only a miss needs to wait for an in-flight PID publication.
+// registration. Only starts that could change the verdict need to complete.
 func (am *AuthManager) lockSudoSession(id sudoIdentity) (*SessionInfo, bool) {
 	am.mu.Lock()
-	if session, managed := am.sudoSessionLocked(id); session != nil {
+	session, managed := am.sudoSessionLocked(id)
+	if session != nil || len(am.pendingStarts) == 0 {
 		return session, managed
 	}
 	am.mu.Unlock()
-	am.spawn.RLock()
-	defer am.spawn.RUnlock()
+	mayMatchPID := id.mayMatchStartingPID()
 	am.mu.Lock()
-	return am.sudoSessionLocked(id)
+	for {
+		session, managed = am.sudoSessionLocked(id)
+		if session != nil {
+			return session, managed
+		}
+		if !am.hasRelevantStartLocked(id, mayMatchPID, managed) {
+			return nil, managed
+		}
+		// A PID match may have several candidate starts. Recheck after any
+		// completes so a stalled candidate cannot hide a published match.
+		if am.startChanged == nil {
+			am.startChanged = make(chan struct{})
+		}
+		changed := am.startChanged
+		am.mu.Unlock()
+		<-changed
+		am.mu.Lock()
+	}
+}
+
+func (am *AuthManager) hasRelevantStartLocked(id sudoIdentity, mayMatchPID, managed bool) bool {
+	for start := range am.pendingStarts {
+		if mayMatchPID || inSudoCommandGroup(id.group, start.group) || !managed && id.managedAccount(start.username, start.uid) {
+			return true
+		}
+	}
+	return false
+}
+
+func inSudoCommandGroup(group, commandGroup string) bool {
+	return commandGroup != "" && (group == commandGroup || strings.HasPrefix(group, commandGroup+"/"))
 }
 
 func registeredUID(pid int, username string) string {
@@ -928,10 +1010,10 @@ func registeredUID(pid int, username string) string {
 func (am *AuthManager) sudoSessionLocked(id sudoIdentity) (*SessionInfo, bool) {
 	managed := false
 	for _, s := range am.pidToSessionMap {
-		if s.groupPath != "" && (id.group == s.groupPath || strings.HasPrefix(id.group, s.groupPath+"/")) {
+		if inSudoCommandGroup(id.group, s.groupPath) {
 			return s, true
 		}
-		if id.managedAccount(s) {
+		if id.managedAccount(s.Username, s.uid) {
 			managed = true
 		}
 	}
@@ -962,7 +1044,9 @@ func PrepareCommandSession(ctx context.Context, commandID, username string) (con
 		return ctx, func(int) {}, func() {}
 	}
 	ctx, group, closeGroup := commandgroup.Prepare(ctx)
-	ctx = commandgroup.WithStartLock(ctx, &am.spawn)
+	ctx = commandgroup.WithStartHook(ctx, func(uid string) func() {
+		return am.beginCommandStart(username, uid, group)
+	})
 	var pid int
 	register := func(child int) {
 		pid = child

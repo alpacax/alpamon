@@ -3,21 +3,19 @@ package commandgroup
 import (
 	"context"
 	"os/exec"
-	"sync"
 )
 
-type lockKey struct{}
+type startKey struct{}
 
-// WithStartLock coordinates PID publication with authorization on platforms
-// where the process hierarchy is the only available session identifier.
-func WithStartLock(ctx context.Context, lock *sync.RWMutex) context.Context {
-	return context.WithValue(ctx, lockKey{}, lock)
+// WithStartHook installs a hook that opens the PID publication window and
+// returns a function to close it, including on a failed start.
+func WithStartHook(ctx context.Context, begin func(uid string) func()) context.Context {
+	return context.WithValue(ctx, startKey{}, begin)
 }
 
-func LockStart(ctx context.Context) func() {
-	if lock, ok := ctx.Value(lockKey{}).(*sync.RWMutex); ok {
-		lock.Lock()
-		return lock.Unlock
+func BeginStart(ctx context.Context, cmd *exec.Cmd) func() {
+	if begin, ok := ctx.Value(startKey{}).(func(string) func()); ok {
+		return begin(startUID(cmd))
 	}
 	return func() {}
 }

@@ -427,18 +427,34 @@ func TestLocalSudoApproval(t *testing.T) {
 }
 
 func TestClassificationWaitsForPIDRegistration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix process ancestry")
+	}
+	cmd := exec.CommandContext(t.Context(), "/bin/cat")
+	input, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	defer func() {
+		assert.NoError(t, input.Close())
+		assert.NoError(t, cmd.Wait())
+	}()
+
 	synctest.Test(t, func(t *testing.T) {
 		am := newTestAuthManager()
-		am.spawn.Lock()
-		req := SudoApprovalRequest{Type: "check_user", Username: "alice", PID: os.Getpid(), PPID: 2147483646}
+		finishUnrelated := am.beginCommandStart("bob", "4200", "")
+		defer finishUnrelated()
+		finish := am.beginCommandStart("alice", "", "")
+		req := SudoApprovalRequest{Type: "check_user", Username: "alice", PID: os.Getpid(), PPID: cmd.Process.Pid}
 		client, _ := startPAMClient(t, am, req)
+		synctest.Wait()
 		select {
 		case <-client.done:
+			finish()
 			t.Fatal("classification completed before registration")
 		default:
 		}
 		am.addPIDCommandMapping(req.PPID, "command", "alice", "")
-		am.spawn.Unlock()
+		finish()
 		var response IsAlpconResponse
 		require.NoError(t, json.Unmarshal([]byte(client.output(t)), &response))
 		assert.True(t, response.IsAlpconUser)
@@ -491,8 +507,8 @@ func TestRegisteredSessionDuringAnotherStart(t *testing.T) {
 			// An unknown kind returns a local approval verdict without contacting a server.
 			const parent = 2147483646
 			am.AddPIDSessionMapping(parent, &SessionInfo{Kind: "unknown"})
-			am.spawn.Lock()
-			defer am.spawn.Unlock()
+			finish := am.beginCommandStart("alice", "", "")
+			defer finish()
 			req := SudoApprovalRequest{Type: typ, PID: os.Getpid(), PPID: parent, RequestID: strconv.Itoa(os.Getpid())}
 			client, _ := startPAMClient(t, am, req)
 			select {
@@ -509,6 +525,83 @@ func TestRegisteredSessionDuringAnotherStart(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("registered session waited for unrelated start")
 			}
+		})
+	}
+}
+
+func TestUnrelatedLocalSudoDuringCommandStart(t *testing.T) {
+	for _, typ := range []string{"check_user", "sudo_approval"} {
+		t.Run(typ, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				am := newTestAuthManager()
+				am.UpdateBlockLocalSudo(false)
+				finish := am.beginCommandStart("alice", strconv.Itoa(os.Getuid()+1), "")
+				defer finish()
+				req := SudoApprovalRequest{Type: typ, Username: "local-user", PID: os.Getpid(), RequestID: strconv.Itoa(os.Getpid())}
+				client, _ := startPAMClient(t, am, req)
+				output := []byte(client.output(t))
+				if typ == "check_user" {
+					var response IsAlpconResponse
+					require.NoError(t, json.Unmarshal(output, &response))
+					assert.False(t, response.IsAlpconUser)
+					assert.False(t, response.UnmatchedSession)
+				} else {
+					var response SudoApprovalResponse
+					require.NoError(t, json.Unmarshal(output, &response))
+					assert.True(t, response.Approved)
+				}
+			})
+		})
+	}
+}
+
+func TestSudoLookupWaitsForRelevantCommandStart(t *testing.T) {
+	const group = "/agent/alpamon-command-test"
+	for _, tc := range []struct {
+		name        string
+		id          sudoIdentity
+		wantSession bool
+	}{
+		{"cgroup", sudoIdentity{group: group + "/child", commandGroup: true}, true},
+		{"managed UID", sudoIdentity{processUID: "4100"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				am := newTestAuthManager()
+				finishUnrelated := am.beginCommandStart("bob", "4200", "")
+				defer finishUnrelated()
+				finish := am.beginCommandStart("alice", "4100", group)
+				type lookupResult struct {
+					session *SessionInfo
+					managed bool
+				}
+				result := make(chan lookupResult, 1)
+				go func() {
+					s, managed := am.lockSudoSession(tc.id)
+					am.mu.Unlock()
+					result <- lookupResult{s, managed}
+				}()
+
+				synctest.Wait()
+				published := &SessionInfo{uid: "4100", groupPath: group}
+				am.mu.Lock()
+				am.pidToSessionMap[42] = published
+				am.mu.Unlock()
+				finish()
+				synctest.Wait()
+
+				select {
+				case got := <-result:
+					assert.True(t, got.managed)
+					if tc.wantSession {
+						assert.Same(t, published, got.session)
+					} else {
+						assert.Nil(t, got.session)
+					}
+				default:
+					t.Fatal("lookup waited for the unrelated command start")
+				}
+			})
 		})
 	}
 }

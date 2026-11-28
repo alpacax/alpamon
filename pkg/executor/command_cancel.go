@@ -45,7 +45,7 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 		}
 		return buf.Bytes(), err
 	}
-	release := sync.OnceFunc(commandgroup.LockStart(ctx))
+	release := sync.OnceFunc(commandgroup.BeginStart(ctx, cmd))
 	defer release()
 	cmd, err = commandgroup.StartCommand(ctx, cmd, (*exec.Cmd).Start)
 	if err != nil {
