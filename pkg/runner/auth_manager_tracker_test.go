@@ -368,7 +368,7 @@ func TestUnattributedSudoForTrackedUsername(t *testing.T) {
 }
 
 func TestSudoSessionIdentity(t *testing.T) {
-	command := &SessionInfo{Kind: TrackerKindCommand, uid: "4100", groupPath: "/agent/alpamon-command-one"}
+	command := &SessionInfo{Kind: TrackerKindCommand, Username: "managed", uid: "4100", groupPath: "/agent/alpamon-command-one"}
 	websh := &SessionInfo{Kind: TrackerKindWebsh, uid: "4200"}
 	am := AuthManager{pidToSessionMap: map[int]*SessionInfo{70: command, 80: websh}}
 	for _, tc := range []struct {
@@ -384,6 +384,9 @@ func TestSudoSessionIdentity(t *testing.T) {
 		{"unmatched account alias", sudoIdentity{username: "alias", uid: "4100"}, nil, true},
 		{"unmatched process uid", sudoIdentity{processUID: "4100"}, nil, true},
 		{"local account", sudoIdentity{uid: "4300"}, nil, false},
+		{"managed process with root claim", sudoIdentity{processUID: "4100", username: "root", uid: "0"}, nil, true},
+		{"local process with managed claim", sudoIdentity{processUID: "4300", username: "managed", uid: "4100"}, nil, false},
+		{"root process with managed claim", sudoIdentity{processUID: "0", username: "managed", uid: "4100"}, nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			session, managed := am.sudoSessionLocked(tc.id)
@@ -408,12 +411,12 @@ func TestLocalSudoApproval(t *testing.T) {
 				var classification IsAlpconResponse
 				require.NoError(t, json.Unmarshal([]byte(client.output(t)), &classification))
 				assert.False(t, classification.IsAlpconUser)
-				assert.False(t, classification.UnmatchedSession)
+				assert.Equal(t, username == "root", classification.UnmatchedSession)
 				req.Type = "sudo_approval"
 				client, _ = startPAMClient(t, am, req)
 				var response SudoApprovalResponse
 				require.NoError(t, json.Unmarshal([]byte(client.output(t)), &response))
-				assert.True(t, response.Approved)
+				assert.Equal(t, username != "root", response.Approved)
 			})
 		})
 	}

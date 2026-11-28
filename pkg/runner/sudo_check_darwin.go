@@ -2,10 +2,13 @@ package runner
 
 import "golang.org/x/sys/unix"
 
-func sudoProcessStart(pid int) uint64 {
-	info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+func sudoProcessStart(pid int) (start uint64, absent bool) {
+	records, err := unix.SysctlKinfoProcSlice("kern.proc.pid", pid)
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return uint64(info.Proc.P_starttime.Nano())
+	if len(records) == 0 {
+		return 0, true
+	}
+	return uint64(records[0].Proc.P_starttime.Nano()), false
 }

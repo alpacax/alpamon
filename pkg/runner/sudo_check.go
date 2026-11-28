@@ -1,46 +1,34 @@
 package runner
 
-import "time"
-
-const (
-	sudoCheckTTL   = 120 * time.Second
-	maxCheckedSudo = 4096
-)
-
-type checkedSudoProcess struct {
-	start   uint64
-	expires time.Time
-}
+const maxCheckedSudo = 4096
 
 // Never skip the password if a later approval could lose its positive check.
-func (am *AuthManager) rememberCheckedSudoLocked(pid int, start uint64, now time.Time) bool {
+func (am *AuthManager) rememberCheckedSudoLocked(pid int, start uint64, lookup func(int) (uint64, bool)) bool {
 	if start == 0 {
 		return false
 	}
 	if am.checkedSudo == nil {
-		am.checkedSudo = make(map[int]checkedSudoProcess)
+		am.checkedSudo = make(map[int]uint64)
 	}
 	if _, exists := am.checkedSudo[pid]; !exists && len(am.checkedSudo) >= maxCheckedSudo {
-		for key, check := range am.checkedSudo {
-			if !now.Before(check.expires) {
+		for key, recorded := range am.checkedSudo {
+			current, absent := lookup(key)
+			if absent || current != 0 && current != recorded {
 				delete(am.checkedSudo, key)
+				break
 			}
 		}
 		if len(am.checkedSudo) >= maxCheckedSudo {
 			return false
 		}
 	}
-	am.checkedSudo[pid] = checkedSudoProcess{start: start, expires: now.Add(sudoCheckTTL)}
+	am.checkedSudo[pid] = start
 	return true
 }
 
-func (am *AuthManager) consumeCheckedSudoLocked(pid int, start uint64, now time.Time) bool {
-	check, ok := am.checkedSudo[pid]
+func (am *AuthManager) wasCheckedSudoLocked(pid int, start uint64) bool {
+	recorded, ok := am.checkedSudo[pid]
 	if !ok {
-		return false
-	}
-	if !now.Before(check.expires) {
-		delete(am.checkedSudo, pid)
 		return false
 	}
 	if start == 0 {
@@ -48,9 +36,9 @@ func (am *AuthManager) consumeCheckedSudoLocked(pid int, start uint64, now time.
 		// for a retry and require session approval on this request.
 		return true
 	}
-	if start != check.start {
+	if start != recorded {
+		delete(am.checkedSudo, pid)
 		return false
 	}
-	delete(am.checkedSudo, pid)
 	return true
 }

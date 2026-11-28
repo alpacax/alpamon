@@ -197,8 +197,8 @@ type IsAlpconResponse struct {
 }
 
 type AuthManager struct {
-	// checkedSudo holds positive PAM checks under mu until approval or expiry.
-	checkedSudo     map[int]checkedSudoProcess
+	// checkedSudo holds positive PAM checks under mu for the process lifetime.
+	checkedSudo     map[int]uint64
 	spawn           sync.RWMutex
 	mu              sync.RWMutex
 	ctx             context.Context
@@ -514,8 +514,8 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		am.spawn.RLock()
 		am.mu.Lock()
 		session, managed := am.sudoSessionLocked(identity)
-		matched := session != nil && am.rememberCheckedSudoLocked(isAlpconReq.PID, identity.start, time.Now())
-		unmatched := session == nil && managed && identity.uid != "0"
+		matched := session != nil && am.rememberCheckedSudoLocked(isAlpconReq.PID, identity.start, sudoProcessStart)
+		unmatched := session == nil && managed
 		am.mu.Unlock()
 		am.spawn.RUnlock()
 		am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, matched, unmatched)
@@ -570,13 +570,12 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	am.spawn.RLock()
 	am.mu.Lock()
 	session, managed := am.sudoSessionLocked(identity)
-	checked := am.consumeCheckedSudoLocked(sudoApprovalReq.PID, identity.start, time.Now())
+	checked := am.wasCheckedSudoLocked(sudoApprovalReq.PID, identity.start)
 	am.spawn.RUnlock()
 	blockLocalSudo := am.blockLocalSudo
 	if session == nil {
 		// No tracked session owns this request.
 		am.mu.Unlock()
-		managed = managed && identity.uid != "0"
 		sudoApprovalReq.IsAlpconUser = managed
 
 		if checked || managed || blockLocalSudo {
@@ -894,13 +893,21 @@ func accountUID(name string) string {
 
 func sudoIdentityFor(pid, parent int, username string) sudoIdentity {
 	sid, ok := sessionID(pid)
+	start, _ := sudoProcessStart(pid)
 	group := commandgroup.Path(pid)
 	return sudoIdentity{
-		start: sudoProcessStart(pid),
+		start: start,
 		sid:   sid, sidOK: ok, parent: parent, ancestors: ancestorPIDs(pid, parentPID),
 		group: group, commandGroup: commandgroup.Owned(group), username: username,
 		uid: accountUID(username), processUID: commandgroup.RealUID(pid),
 	}
+}
+
+func (id sudoIdentity) managedAccount(s *SessionInfo) bool {
+	if id.processUID != "" {
+		return id.processUID != "0" && id.processUID == s.uid
+	}
+	return id.username != "" && id.username == s.Username || id.uid != "" && id.uid == s.uid
 }
 
 func (am *AuthManager) sudoSessionLocked(id sudoIdentity) (*SessionInfo, bool) {
@@ -909,7 +916,7 @@ func (am *AuthManager) sudoSessionLocked(id sudoIdentity) (*SessionInfo, bool) {
 		if s.groupPath != "" && (id.group == s.groupPath || strings.HasPrefix(id.group, s.groupPath+"/")) {
 			return s, true
 		}
-		if id.username != "" && s.Username == id.username || s.uid != "" && (id.uid == s.uid || id.processUID == s.uid) {
+		if id.managedAccount(s) {
 			managed = true
 		}
 	}

@@ -22,8 +22,8 @@ func TestCheckedSudoApproval(t *testing.T) {
 		{name: "session ended", check: true, end: true},
 		{name: "session live", check: true, wantApproved: true},
 		{name: "no prior check", end: true, wantApproved: true},
-		{name: "before expiry", check: true, end: true, delay: 120*time.Second - time.Nanosecond},
-		{name: "expired", check: true, end: true, delay: 120 * time.Second, wantApproved: true},
+		{name: "delayed live session", check: true, delay: time.Hour, wantApproved: true},
+		{name: "delayed ended session", check: true, end: true, delay: time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -57,7 +57,13 @@ func TestCheckedSudoApproval(t *testing.T) {
 				var result SudoApprovalResponse
 				require.NoError(t, json.Unmarshal([]byte(client.output(t)), &result))
 				assert.Equal(t, tc.wantApproved, result.Approved)
-				assert.Empty(t, am.checkedSudo)
+				if tc.check {
+					am.RemovePIDSessionMapping(holdTestPPID)
+					retry, _ := startPAMClient(t, am, req)
+					var repeated SudoApprovalResponse
+					require.NoError(t, json.Unmarshal([]byte(retry.output(t)), &repeated))
+					assert.False(t, repeated.Approved)
+				}
 			})
 		})
 	}
@@ -65,17 +71,38 @@ func TestCheckedSudoApproval(t *testing.T) {
 
 func TestCheckedSudoProcessIdentityAndCapacity(t *testing.T) {
 	am := newTestAuthManager()
-	now := time.Now()
-	require.False(t, am.rememberCheckedSudoLocked(1, 0, now))
+	lookup := func(int) (uint64, bool) { return 10, false }
+	require.False(t, am.rememberCheckedSudoLocked(1, 0, lookup))
 	for pid := 1; pid <= maxCheckedSudo; pid++ {
-		require.True(t, am.rememberCheckedSudoLocked(pid, 10, now))
+		require.True(t, am.rememberCheckedSudoLocked(pid, 10, lookup))
 	}
-	assert.False(t, am.rememberCheckedSudoLocked(maxCheckedSudo+1, 20, now))
-	assert.False(t, am.consumeCheckedSudoLocked(1, 20, now))
-	assert.True(t, am.consumeCheckedSudoLocked(1, 0, now))
-	assert.True(t, am.consumeCheckedSudoLocked(1, 10, now))
-	assert.False(t, am.consumeCheckedSudoLocked(1, 10, now))
-	require.True(t, am.rememberCheckedSudoLocked(1, 20, now))
-	assert.True(t, am.rememberCheckedSudoLocked(maxCheckedSudo+1, 20, now.Add(sudoCheckTTL)))
-	assert.Len(t, am.checkedSudo, 1)
+	assert.False(t, am.rememberCheckedSudoLocked(maxCheckedSudo+1, 20, lookup))
+	unreadable := func(int) (uint64, bool) { return 0, false }
+	assert.False(t, am.rememberCheckedSudoLocked(maxCheckedSudo+1, 20, unreadable))
+	for _, tc := range []struct {
+		name    string
+		pid     int
+		current uint64
+		absent  bool
+	}{
+		{"absent", 1, 0, true},
+		{"reused", 2, 11, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probe := func(pid int) (uint64, bool) {
+				if pid == tc.pid {
+					return tc.current, tc.absent
+				}
+				return am.checkedSudo[pid], false
+			}
+			assert.True(t, am.rememberCheckedSudoLocked(maxCheckedSudo+tc.pid, 20, probe))
+			assert.NotContains(t, am.checkedSudo, tc.pid)
+			assert.Len(t, am.checkedSudo, maxCheckedSudo)
+		})
+	}
+	assert.True(t, am.wasCheckedSudoLocked(3, 0))
+	assert.True(t, am.wasCheckedSudoLocked(3, 10))
+	assert.True(t, am.wasCheckedSudoLocked(3, 10))
+	assert.False(t, am.wasCheckedSudoLocked(4, 20))
+	assert.NotContains(t, am.checkedSudo, 4)
 }
