@@ -23,6 +23,7 @@ import (
 const stopSettle = time.Second
 
 var errSessionObservationChanged = errors.New("process session observation changed")
+var errIncompleteProcessCoverage = fmt.Errorf("process coverage is incomplete: %w", commandcancel.ErrSessionUnverified)
 
 // groupProcessControl stops, continues and ends the process groups inside
 // the process sessions a Work Session owns. Commands and terminals lead
@@ -41,11 +42,12 @@ type groupProcessControl struct {
 	stopped map[string]map[groupKey]*stoppedGroup
 	// cancel is the existing command cancel, applied by End to every owned
 	// command and terminal.
-	cancel    func(commandID string)
-	grace     time.Duration
-	readState func(int) (procState, error)
-	readArgs  func(int) ([]string, error)
-	table     sessionProcessTable
+	cancel        func(commandID string)
+	grace         time.Duration
+	readState     func(int) (procState, error)
+	readArgs      func(int) ([]string, error)
+	table         sessionProcessTable
+	signalMembers func(int, map[int]commandcancel.SessionMember, syscall.Signal) ([]int, error)
 	// heldSignals says whether a signal can be delivered only to the
 	// process a check verified. Stop and Resume need it.
 	heldSignals bool
@@ -62,7 +64,8 @@ func newProcessControl(cancel func(commandID string)) WorkSessionProcessControll
 		readArgs:  processArgs,
 		table:     table,
 
-		heldSignals: commandcancel.PinnedSignalsHeld(),
+		heldSignals:   commandcancel.PinnedSignalsHeld(),
+		signalMembers: commandcancel.SignalPinnedSessionMembers,
 	}
 }
 
@@ -234,10 +237,16 @@ func ownedMembersWithState(sessions []OwnedSession, readState func(int) (procSta
 }
 
 func lookupOwnedMembers(sessions []OwnedSession, readState func(int) (procState, error), table sessionProcessTable) ([]ownedMember, error) {
+	return lookupOwnedMembersWithCoverage(sessions, readState, table, nil)
+}
+
+// A caller that accepts verified members despite incomplete coverage provides
+// a flag to retain that outcome separately from lookup errors.
+func lookupOwnedMembersWithCoverage(sessions []OwnedSession, readState func(int) (procState, error), table sessionProcessTable, incomplete *bool) ([]ownedMember, error) {
 	var members []ownedMember
 	var errs []error
 	for _, session := range sessions {
-		observed, err := observedSessionMembers(session, readState, table)
+		observed, err := observedSessionMembersWithCoverage(session, readState, table, incomplete)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -250,7 +259,15 @@ func lookupOwnedMembers(sessions []OwnedSession, readState func(int) (procState,
 }
 
 func observedSessionMembers(session OwnedSession, readState func(int) (procState, error), table sessionProcessTable) (map[int]commandcancel.SessionMember, error) {
+	return observedSessionMembersWithCoverage(session, readState, table, nil)
+}
+
+func observedSessionMembersWithCoverage(session OwnedSession, readState func(int) (procState, error), table sessionProcessTable, incomplete *bool) (map[int]commandcancel.SessionMember, error) {
 	starts, err := refreshSessionPinWithTable(session, nil, table)
+	if incomplete != nil && err == errIncompleteProcessCoverage {
+		*incomplete = true
+		err = nil
+	}
 	if err != nil || starts == nil {
 		return nil, err
 	}
@@ -405,7 +422,7 @@ func refreshSessionPinOnce(session OwnedSession, expected *sessionPin, table ses
 	}
 	var coverageErr error
 	if len(outside) > 0 && !table.ignoreDepartures {
-		coverageErr = commandcancel.ErrSessionUnverified
+		coverageErr = errIncompleteProcessCoverage
 	}
 	if unverified {
 		return nil, commandcancel.ErrSessionUnverified
@@ -623,9 +640,14 @@ func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, e
 
 	var effect ProcessEffect
 	var errs []error
+	incomplete := false
 	deadline := time.Now().Add(stopSettle)
 	for {
-		members, lookupErr := lookupOwnedMembers(owned.Sessions, c.readState, c.table)
+		alreadyIncomplete := incomplete
+		members, lookupErr := lookupOwnedMembersWithCoverage(owned.Sessions, c.readState, c.table, &incomplete)
+		if incomplete && !alreadyIncomplete {
+			errs = append(errs, errIncompleteProcessCoverage, errProcessSurvivors)
+		}
 		if effect.AffectedTrees == 0 {
 			effect.AffectedTrees = treesOf(members)
 		}
@@ -671,7 +693,7 @@ func (c *groupProcessControl) Stop(id string, owned OwnedWork) (ProcessEffect, e
 				}
 			}
 			pins := memberPins(members, session, func(member ownedMember) bool { return pending[member.pgid] })
-			signalled, err := commandcancel.SignalPinnedSessionMembers(session.SID, pins, syscall.SIGSTOP)
+			signalled, err := c.signalMembers(session.SID, pins, syscall.SIGSTOP)
 			if err != nil {
 				errs = append(errs, err)
 			}
@@ -737,7 +759,7 @@ func (c *groupProcessControl) Continue(id string, owned OwnedWork) (ProcessEffec
 				pins[member.pid] = commandcancel.SessionMember{StartedAt: member.started, PGID: member.pgid}
 			}
 		}
-		signalled, err := commandcancel.SignalPinnedSessionMembers(key.session.sid, pins, syscall.SIGCONT)
+		signalled, err := c.signalMembers(key.session.sid, pins, syscall.SIGCONT)
 		if err != nil {
 			errs = append(errs, err)
 		}

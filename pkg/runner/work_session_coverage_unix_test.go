@@ -4,7 +4,9 @@ package runner
 
 import (
 	"os"
+	"syscall"
 	"testing"
+	"testing/synctest"
 
 	"github.com/alpacax/alpamon/v2/internal/commandcancel"
 	"github.com/stretchr/testify/assert"
@@ -31,6 +33,51 @@ func TestProcessControlReportsIncompleteCoverage(t *testing.T) {
 	assert.ErrorIs(t, err, commandcancel.ErrSessionUnverified)
 	_, err = control.End(wsID, work)
 	assert.ErrorIs(t, err, commandcancel.ErrSessionUnverified)
+}
+
+func TestStopReportsIncompleteCoverageAfterStoppingVerifiedMembers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		session := OwnedSession{SID: 900009, StartedAt: 100, CommandID: "command"}
+		child := session.SID + 1
+		sessionPins.mu.Lock()
+		sessionPins.m[keyOf(session)] = &sessionPin{members: map[int]int64{session.SID: 100, child: 101}}
+		sessionPins.mu.Unlock()
+		t.Cleanup(func() { unpinSession(session) })
+
+		control := newProcessControl(nil).(*groupProcessControl)
+		control.heldSignals = true
+		control.table = sessionProcessTable{
+			members: func(int) ([]int, error) { return []int{session.SID}, nil },
+			started: func(pid int) (int64, error) {
+				if pid == session.SID {
+					return session.StartedAt, nil
+				}
+				return 101, nil
+			},
+			sid:  func(pid int) (int, error) { return pid, nil },
+			pgid: func(pid int) (int, error) { return pid, nil },
+		}
+		states := map[int]procState{session.SID: procRunning, child: procRunning}
+		control.readState = func(pid int) (procState, error) { return states[pid], nil }
+		control.signalMembers = func(sid int, members map[int]commandcancel.SessionMember, sig syscall.Signal) ([]int, error) {
+			assert.Equal(t, session.SID, sid)
+			assert.Equal(t, syscall.SIGSTOP, sig)
+			assert.Equal(t, map[int]commandcancel.SessionMember{
+				session.SID: {StartedAt: session.StartedAt, PGID: session.SID},
+			}, members)
+			for pid := range members {
+				states[pid] = procStopped
+			}
+			return []int{session.SID}, nil
+		}
+
+		effect, err := control.Stop(wsID, OwnedWork{Sessions: []OwnedSession{session}})
+		assert.ErrorIs(t, err, commandcancel.ErrSessionUnverified)
+		assert.Equal(t, controlResultFailed, processResult(err))
+		assert.Equal(t, uint32(1), effect.AffectedTrees)
+		assert.Equal(t, procStopped, states[session.SID])
+		assert.Equal(t, procRunning, states[child])
+	})
 }
 
 func TestProcessControlTracksChildrenOutsideTheSession(t *testing.T) {
