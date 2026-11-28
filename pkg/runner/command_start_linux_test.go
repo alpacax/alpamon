@@ -31,7 +31,7 @@ func TestStartCommandWithoutCgroup(t *testing.T) {
 			defer func() { assert.NoError(t, started.Wait()) }()
 			am := newTestAuthManager()
 			pid := started.Process.Pid
-			am.registerStartedCommand(pid, "command-id", "alice", "", "/agent/alpamon-command-test")
+			am.registerStartedCommand(pid, "command-id", "alice", "/agent/alpamon-command-test")
 			sid, err := unix.Getsid(pid)
 			require.NoError(t, err)
 			session, _ := am.sudoSessionLocked(sudoIdentity{sid: sid, sidOK: true, group: "/local"})

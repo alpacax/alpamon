@@ -1,6 +1,8 @@
 package commandgroup
 
 import (
+	"os"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +10,7 @@ import (
 )
 
 func TestRealUID(t *testing.T) {
+	assert.Equal(t, strconv.Itoa(os.Getuid()), RealUID(os.Getpid()))
 	info := unix.KinfoProc{}
 	info.Eproc.Pcred.P_ruid = 501
 	info.Eproc.Ucred.Uid = 0

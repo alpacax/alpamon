@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/commandcancel"
@@ -44,7 +45,8 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 		}
 		return buf.Bytes(), err
 	}
-	release := commandgroup.LockStart(ctx)
+	release := sync.OnceFunc(commandgroup.LockStart(ctx))
+	defer release()
 	cmd, err = commandgroup.StartCommand(ctx, cmd, (*exec.Cmd).Start)
 	if err != nil {
 		release()

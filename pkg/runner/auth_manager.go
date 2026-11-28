@@ -511,13 +511,10 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		}
 
 		identity := sudoIdentityFor(isAlpconReq.PID, isAlpconReq.PPID, isAlpconReq.Username)
-		am.spawn.RLock()
-		am.mu.Lock()
-		session, managed := am.sudoSessionLocked(identity)
+		session, managed := am.lockSudoSession(identity)
 		matched := session != nil && am.rememberCheckedSudoLocked(isAlpconReq.PID, identity.start, sudoProcessStart)
 		unmatched := session == nil && managed
 		am.mu.Unlock()
-		am.spawn.RUnlock()
 		am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, matched, unmatched)
 
 	case "sudo_approval":
@@ -567,11 +564,8 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 	}
 
 	identity := sudoIdentityFor(sudoApprovalReq.PID, sudoApprovalReq.PPID, sudoApprovalReq.Username)
-	am.spawn.RLock()
-	am.mu.Lock()
-	session, managed := am.sudoSessionLocked(identity)
+	session, managed := am.lockSudoSession(identity)
 	checked := am.wasCheckedSudoLocked(sudoApprovalReq.PID, identity.start)
-	am.spawn.RUnlock()
 	blockLocalSudo := am.blockLocalSudo
 	if session == nil {
 		// No tracked session owns this request.
@@ -910,6 +904,27 @@ func (id sudoIdentity) managedAccount(s *SessionInfo) bool {
 	return id.username != "" && id.username == s.Username || id.uid != "" && id.uid == s.uid
 }
 
+// lockSudoSession returns with mu held so the caller can act on the same
+// registration. Only a miss needs to wait for an in-flight PID publication.
+func (am *AuthManager) lockSudoSession(id sudoIdentity) (*SessionInfo, bool) {
+	am.mu.Lock()
+	if session, managed := am.sudoSessionLocked(id); session != nil {
+		return session, managed
+	}
+	am.mu.Unlock()
+	am.spawn.RLock()
+	defer am.spawn.RUnlock()
+	am.mu.Lock()
+	return am.sudoSessionLocked(id)
+}
+
+func registeredUID(pid int, username string) string {
+	if uid := commandgroup.RealUID(pid); uid != "" {
+		return uid
+	}
+	return accountUID(username)
+}
+
 func (am *AuthManager) sudoSessionLocked(id sudoIdentity) (*SessionInfo, bool) {
 	managed := false
 	for _, s := range am.pidToSessionMap {
@@ -948,11 +963,10 @@ func PrepareCommandSession(ctx context.Context, commandID, username string) (con
 	}
 	ctx, group, closeGroup := commandgroup.Prepare(ctx)
 	ctx = commandgroup.WithStartLock(ctx, &am.spawn)
-	uid := accountUID(username)
 	var pid int
 	register := func(child int) {
 		pid = child
-		am.registerStartedCommand(pid, commandID, username, uid, group)
+		am.registerStartedCommand(pid, commandID, username, group)
 	}
 	finish := func() {
 		if pid != 0 {
@@ -963,11 +977,11 @@ func PrepareCommandSession(ctx context.Context, commandID, username string) (con
 	return ctx, register, finish
 }
 
-func (am *AuthManager) registerStartedCommand(pid int, commandID, username, uid, group string) {
+func (am *AuthManager) registerStartedCommand(pid int, commandID, username, group string) {
 	if group != "" && commandgroup.Path(pid) != group {
 		group = ""
 	}
-	am.addPIDCommandMapping(pid, commandID, username, uid, group)
+	am.addPIDCommandMapping(pid, commandID, username, group)
 }
 
 // AddPIDSessionMapping registers an entry for a Websh PTY session. Unset Kind,
@@ -978,7 +992,7 @@ func (am *AuthManager) AddPIDSessionMapping(pid int, session *SessionInfo) {
 		return
 	}
 
-	uid := accountUID(session.Username)
+	uid := registeredUID(pid, session.Username)
 	am.mu.Lock()
 	session.uid = uid
 	// Filled in under the lock: re-registering the entry already installed for
@@ -1046,15 +1060,15 @@ func (am *AuthManager) RemovePIDSessionMapping(pid int) {
 // the child process can exec sudo, or sudo reaches the PAM module before the
 // tracker knows about the pid. Safe to call from any goroutine.
 func (am *AuthManager) AddPIDCommandMapping(pid int, commandID, username string) {
-	am.addPIDCommandMapping(pid, commandID, username, accountUID(username), "")
+	am.addPIDCommandMapping(pid, commandID, username, "")
 }
 
-func (am *AuthManager) addPIDCommandMapping(pid int, commandID, username, uid, group string) {
+func (am *AuthManager) addPIDCommandMapping(pid int, commandID, username, group string) {
 	if pid <= 0 || commandID == "" {
 		return
 	}
 	info := &SessionInfo{
-		uid:       uid,
+		uid:       registeredUID(pid, username),
 		groupPath: group,
 		Kind:      TrackerKindCommand,
 		CommandID: commandID,

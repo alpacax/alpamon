@@ -28,6 +28,23 @@ func TestConfigureAndFallback(t *testing.T) {
 	assert.True(t, cmd.SysProcAttr.Setsid)
 }
 
+func TestExtendedCloneFallback(t *testing.T) {
+	cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{UseCgroupFD: true}}
+	require.True(t, Unsupported(cmd, &os.PathError{Op: "fork/exec", Err: syscall.E2BIG}))
+	assert.False(t, cmd.SysProcAttr.UseCgroupFD)
+}
+
+func TestPrepareWithoutCleanupMarker(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "cgroup.controllers"), nil, 0600))
+	ctx, group, finish := prepare(t.Context(), "/", root, "", os.MkdirTemp)
+	defer finish()
+	require.NotEmpty(t, group)
+	cmd := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{}}
+	Configure(ctx, cmd)
+	assert.True(t, cmd.SysProcAttr.UseCgroupFD)
+}
+
 func TestPrepareFallback(t *testing.T) {
 	for _, tc := range []struct {
 		name, groupFile         string
@@ -44,7 +61,7 @@ func TestPrepareFallback(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(root, "agent", "cgroup.controllers"), nil, 0600))
 			}
 			created := false
-			ctx, group, finish := prepare(t.Context(), unifiedPath(tc.groupFile), root, func(string, string) (string, error) { created = true; return "", syscall.EROFS })
+			ctx, group, finish := prepare(t.Context(), unifiedPath(tc.groupFile), root, ownershipAttribute, func(string, string) (string, error) { created = true; return "", syscall.EROFS })
 			defer finish()
 			assert.Equal(t, tc.wantCreate, created)
 			assert.Empty(t, group)

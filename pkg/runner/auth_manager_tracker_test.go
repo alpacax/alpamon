@@ -4,8 +4,12 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -433,7 +437,7 @@ func TestClassificationWaitsForPIDRegistration(t *testing.T) {
 			t.Fatal("classification completed before registration")
 		default:
 		}
-		am.addPIDCommandMapping(req.PPID, "command", "alice", "", "")
+		am.addPIDCommandMapping(req.PPID, "command", "alice", "")
 		am.spawn.Unlock()
 		var response IsAlpconResponse
 		require.NoError(t, json.Unmarshal([]byte(client.output(t)), &response))
@@ -444,4 +448,67 @@ func TestClassificationWaitsForPIDRegistration(t *testing.T) {
 		assert.Empty(t, session.groupPath)
 		assert.Equal(t, "command", session.CommandID)
 	})
+}
+
+func TestDirectorySessionDeniesUnmatchedSudo(t *testing.T) {
+	if (runtime.GOOS != "linux" && runtime.GOOS != "darwin") || os.Getuid() == 0 {
+		t.Skip("requires kernel non-root UID")
+	}
+	const account = "alpamon-test-directory-only"
+	require.Empty(t, accountUID(account))
+	cmd := exec.CommandContext(t.Context(), "/bin/cat")
+	input, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	defer func() {
+		assert.NoError(t, input.Close())
+		assert.NoError(t, cmd.Wait())
+	}()
+	for _, kind := range []string{TrackerKindCommand, TrackerKindWebsh} {
+		t.Run(kind, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				am := newTestAuthManager()
+				if kind == TrackerKindCommand {
+					am.AddPIDCommandMapping(cmd.Process.Pid, "command", account)
+				} else {
+					am.AddPIDSessionMapping(cmd.Process.Pid, &SessionInfo{Username: account})
+				}
+				am.UpdateBlockLocalSudo(false)
+				req := SudoApprovalRequest{Type: "sudo_approval", Username: account, PID: os.Getpid(), RequestID: strconv.Itoa(os.Getpid())}
+				client, _ := startPAMClient(t, am, req)
+				var response SudoApprovalResponse
+				require.NoError(t, json.Unmarshal([]byte(client.output(t)), &response))
+				assert.False(t, response.Approved)
+			})
+		})
+	}
+}
+
+func TestRegisteredSessionDuringAnotherStart(t *testing.T) {
+	for _, typ := range []string{"check_user", "sudo_approval"} {
+		t.Run(typ, func(t *testing.T) {
+			am := newTestAuthManager()
+			// An unknown kind returns a local approval verdict without contacting a server.
+			const parent = 2147483646
+			am.AddPIDSessionMapping(parent, &SessionInfo{Kind: "unknown"})
+			am.spawn.Lock()
+			defer am.spawn.Unlock()
+			req := SudoApprovalRequest{Type: typ, PID: os.Getpid(), PPID: parent, RequestID: strconv.Itoa(os.Getpid())}
+			client, _ := startPAMClient(t, am, req)
+			select {
+			case <-client.done:
+				if typ == "check_user" {
+					var response IsAlpconResponse
+					require.NoError(t, json.Unmarshal(client.got.Bytes(), &response))
+					assert.True(t, response.IsAlpconUser)
+				} else {
+					var response SudoApprovalResponse
+					require.NoError(t, json.Unmarshal(client.got.Bytes(), &response))
+					assert.Equal(t, "Unknown session kind", response.Reason)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("registered session waited for unrelated start")
+			}
+		})
+	}
 }

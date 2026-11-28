@@ -68,7 +68,7 @@ func Unsupported(cmd *exec.Cmd, err error) bool {
 		return false
 	}
 	switch errno {
-	case syscall.ENOSYS, syscall.EINVAL, syscall.EOPNOTSUPP, syscall.EPERM, syscall.EACCES, syscall.EBUSY, syscall.ENOENT:
+	case syscall.E2BIG, syscall.ENOSYS, syscall.EINVAL, syscall.EOPNOTSUPP, syscall.EPERM, syscall.EACCES, syscall.EBUSY, syscall.ENOENT:
 		cmd.SysProcAttr.UseCgroupFD = false
 		cmd.SysProcAttr.CgroupFD = 0
 		return true
@@ -97,10 +97,10 @@ func unifiedPath(data string) string {
 // Prepare creates a private child in the agent's delegated hierarchy.
 func Prepare(ctx context.Context) (context.Context, string, func()) {
 	CleanupEmpty()
-	return prepare(ctx, Path(os.Getpid()), "/sys/fs/cgroup", os.MkdirTemp)
+	return prepare(ctx, Path(os.Getpid()), "/sys/fs/cgroup", ownershipAttribute, os.MkdirTemp)
 }
 
-func prepare(ctx context.Context, parent, root string, mkdir func(string, string) (string, error)) (context.Context, string, func()) {
+func prepare(ctx context.Context, parent, root, attribute string, mkdir func(string, string) (string, error)) (context.Context, string, func()) {
 	if parent == "" {
 		return ctx, "", func() {}
 	}
@@ -124,11 +124,9 @@ func prepare(ctx context.Context, parent, root string, mkdir func(string, string
 		return ctx, "", func() {}
 	}
 	// A privileged marker distinguishes our groups from similarly named siblings after restart.
-	if unix.Fsetxattr(int(file.Fd()), ownershipAttribute, []byte{1}, unix.XATTR_CREATE) != nil {
-		_ = file.Close()
-		_ = os.Remove(dir)
-		return ctx, "", func() {}
-	}
+	// Without a marker, cleanup after restart skips this group. The live owner
+	// can still place the command and retire its directory on completion.
+	_ = unix.Fsetxattr(int(file.Fd()), attribute, []byte{1}, unix.XATTR_CREATE)
 	return context.WithValue(ctx, groupKey{}, file), filepath.Join(parent, filepath.Base(dir)), func() { _ = file.Close(); retire(dir) }
 }
 
