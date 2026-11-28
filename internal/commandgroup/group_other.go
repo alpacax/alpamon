@@ -14,3 +14,5 @@ func Configure(context.Context, *exec.Cmd)                          {}
 func Owned(string) bool                 { return false }
 func RealUID(int) string                { return "" }
 func Unsupported(*exec.Cmd, error) bool { return false }
+
+func CleanupEmpty() {}

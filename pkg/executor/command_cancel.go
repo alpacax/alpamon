@@ -14,21 +14,6 @@ import (
 	"github.com/alpacax/alpamon/v2/internal/commandgroup"
 )
 
-// A failed Start consumes exec.Cmd. A kernel without clone-into-cgroup
-// support can still launch under the synchronized PID and ancestor tracker.
-func startCommand(ctx context.Context, cmd *exec.Cmd) (*exec.Cmd, error) {
-	err := cmd.Start()
-	if !commandgroup.Unsupported(cmd, err) {
-		return cmd, err
-	}
-	retry := exec.CommandContext(ctx, cmd.Path)
-	retry.Path, retry.Args, retry.Dir, retry.Env = cmd.Path, cmd.Args, cmd.Dir, cmd.Env
-	retry.Stdin, retry.Stdout, retry.Stderr = cmd.Stdin, cmd.Stdout, cmd.Stderr
-	retry.ExtraFiles, retry.SysProcAttr = cmd.ExtraFiles, cmd.SysProcAttr
-	retry.Cancel = nil
-	return retry, retry.Start()
-}
-
 // Own the pipe drain so the leader stays unreaped until cancellation can no
 // longer arrive. exec.Cmd.Wait otherwise reaps before waiting on inherited pipes.
 func runTrackedCommand(ctx context.Context, cmd *exec.Cmd, cleanup *commandCleanup, cw *chunkWriter, pidHook func(int), commandID string) ([]byte, error) {
@@ -60,7 +45,7 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 		return buf.Bytes(), err
 	}
 	release := commandgroup.LockStart(ctx)
-	cmd, err = startCommand(ctx, cmd)
+	cmd, err = commandgroup.StartCommand(ctx, cmd, (*exec.Cmd).Start)
 	if err != nil {
 		release()
 		if errors.Is(err, context.Canceled) {
@@ -72,8 +57,8 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 	_ = writer.Close()
 	if err := cleanup.afterStart(cmd); err != nil {
 		_, _ = cleanup.cancel(cmd)
-		_ = cmd.Wait()
 		release()
+		_ = cmd.Wait()
 		return finish(err)
 	}
 	if cw != nil {

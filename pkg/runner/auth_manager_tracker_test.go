@@ -175,38 +175,6 @@ func TestAddPIDSessionMapping_NormalisesWebshKind(t *testing.T) {
 	assert.False(t, entry.StartedAt.IsZero(), "StartedAt should be populated by AddPIDSessionMapping when unset")
 }
 
-// TestRegisterCommandPID_NoopWithoutManager verifies that the package-
-// level helper degrades gracefully when the AuthManager singleton has
-// not been initialised (tests, early boot, non-agent binaries).
-func TestRegisterCommandPID_NoopWithoutManager(t *testing.T) {
-	prev := authManager
-	authManager = nil
-	t.Cleanup(func() { authManager = prev })
-
-	cleanup := RegisterCommandPID(123, "cmd", "user")
-	require.NotNil(t, cleanup, "RegisterCommandPID should always return a non-nil cleanup closure")
-	// Must not panic even when the AuthManager is absent.
-	assert.NotPanics(t, cleanup)
-}
-
-// TestRegisterCommandPID_RoundTrip exercises the package-level helper
-// against a real AuthManager singleton (Register -> Lookup -> cleanup).
-func TestRegisterCommandPID_RoundTrip(t *testing.T) {
-	prev := authManager
-	authManager = newTestAuthManager()
-	t.Cleanup(func() { authManager = prev })
-
-	cleanup := RegisterCommandPID(9001, "cmd-round", "eve")
-	require.NotNil(t, cleanup, "RegisterCommandPID returned a nil cleanup closure")
-	entry, ok := authManager.LookupPID(9001)
-	require.True(t, ok, "entry should be present after RegisterCommandPID")
-	assert.Equal(t, "cmd-round", entry.CommandID)
-
-	cleanup()
-	_, ok = authManager.LookupPID(9001)
-	assert.False(t, ok, "entry should be gone after cleanup()")
-}
-
 // TestSudoApprovalRequest_JSONTagsOmitEmpty is a guardrail against
 // accidentally sending both session_id and command_id (or neither) on
 // the wire. It marshals the struct and inspects the serialized keys so
@@ -381,10 +349,11 @@ func TestUnattributedSudoForTrackedUsername(t *testing.T) {
 			PID: 2147483647, PPID: 2147483646, RequestID: "2147483647",
 		}
 		client, _ := startPAMClient(t, am, req)
-		var classification IsAlpconResponse
+		var classification map[string]any
 		require.NoError(t, json.Unmarshal([]byte(client.output(t)), &classification))
-		assert.Equal(t, "is_alpacon_response", classification.Type)
-		assert.True(t, classification.IsAlpconUser)
+		assert.Equal(t, "is_alpacon_response", classification["type"])
+		assert.Equal(t, false, classification["is_alpacon_user"])
+		assert.Equal(t, true, classification["unmatched_session"])
 
 		req.Type = "sudo_approval"
 		client, _ = startPAMClient(t, am, req)
@@ -409,8 +378,8 @@ func TestSudoSessionIdentity(t *testing.T) {
 		managed bool
 	}{
 		{"command subgroup", sudoIdentity{group: command.groupPath + "/worker", commandGroup: true}, command, true},
-		{"different group with tracked parent", sudoIdentity{parent: 70, group: "/local"}, nil, true},
-		{"retired command group", sudoIdentity{group: "/agent/alpamon-command-ended", commandGroup: true}, nil, true},
+		{"different group with tracked parent", sudoIdentity{parent: 70, group: "/local", uid: "4100"}, nil, true},
+		{"retired command group", sudoIdentity{group: "/agent/alpamon-command-ended", commandGroup: true}, nil, false},
 		{"ancestor fallback", sudoIdentity{ancestors: []int{90, 80}}, websh, true},
 		{"unmatched account alias", sudoIdentity{username: "alias", uid: "4100"}, nil, true},
 		{"unmatched process uid", sudoIdentity{processUID: "4100"}, nil, true},
@@ -422,4 +391,54 @@ func TestSudoSessionIdentity(t *testing.T) {
 			assert.Equal(t, tc.managed, managed)
 		})
 	}
+}
+
+func TestLocalSudoApproval(t *testing.T) {
+	for _, username := range []string{"root", "local-user"} {
+		t.Run(username, func(t *testing.T) {
+			if username == "root" && accountUID(username) != "0" {
+				t.Skip("requires a root account with UID 0")
+			}
+			synctest.Test(t, func(t *testing.T) {
+				am := newTestAuthManager()
+				am.AddPIDCommandMapping(2147483645, "command-id", "root")
+				am.UpdateBlockLocalSudo(false)
+				req := SudoApprovalRequest{Type: "check_user", Username: username, PID: 2147483647, PPID: 2147483646, RequestID: "2147483647"}
+				client, _ := startPAMClient(t, am, req)
+				var classification IsAlpconResponse
+				require.NoError(t, json.Unmarshal([]byte(client.output(t)), &classification))
+				assert.False(t, classification.IsAlpconUser)
+				assert.False(t, classification.UnmatchedSession)
+				req.Type = "sudo_approval"
+				client, _ = startPAMClient(t, am, req)
+				var response SudoApprovalResponse
+				require.NoError(t, json.Unmarshal([]byte(client.output(t)), &response))
+				assert.True(t, response.Approved)
+			})
+		})
+	}
+}
+
+func TestClassificationWaitsForPIDRegistration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		am.spawn.Lock()
+		req := SudoApprovalRequest{Type: "check_user", Username: "alice", PID: os.Getpid(), PPID: 2147483646}
+		client, _ := startPAMClient(t, am, req)
+		select {
+		case <-client.done:
+			t.Fatal("classification completed before registration")
+		default:
+		}
+		am.addPIDCommandMapping(req.PPID, "command", "alice", "", "")
+		am.spawn.Unlock()
+		var response IsAlpconResponse
+		require.NoError(t, json.Unmarshal([]byte(client.output(t)), &response))
+		assert.True(t, response.IsAlpconUser)
+		assert.False(t, response.UnmatchedSession)
+		session, _ := am.sudoSessionLocked(sudoIdentity{sid: req.PPID, sidOK: true})
+		require.NotNil(t, session)
+		assert.Empty(t, session.groupPath)
+		assert.Equal(t, "command", session.CommandID)
+	})
 }
