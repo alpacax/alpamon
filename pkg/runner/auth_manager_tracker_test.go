@@ -443,7 +443,7 @@ func TestClassificationWaitsForPIDRegistration(t *testing.T) {
 		am := newTestAuthManager()
 		finishUnrelated := am.beginCommandStart("bob", "4200", "")
 		defer finishUnrelated()
-		finish := am.beginCommandStart("alice", "", "")
+		finish := am.beginCommandStart("alice", strconv.Itoa(os.Getuid()), "")
 		req := SudoApprovalRequest{Type: "check_user", Username: "alice", PID: os.Getpid(), PPID: cmd.Process.Pid}
 		client, _ := startPAMClient(t, am, req)
 		synctest.Wait()
@@ -563,6 +563,7 @@ func TestSudoLookupWaitsForRelevantCommandStart(t *testing.T) {
 		wantSession bool
 	}{
 		{"cgroup", sudoIdentity{group: group + "/child", commandGroup: true}, true},
+		{"cgroup with different UID", sudoIdentity{group: group + "/child", commandGroup: true, processUID: "4300"}, true},
 		{"managed UID", sudoIdentity{processUID: "4100"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -604,4 +605,74 @@ func TestSudoLookupWaitsForRelevantCommandStart(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestStalledCommandStartLookup(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		uid       string
+		startUID  string
+		group     string
+		ancestors []int
+		managed   bool
+		wait      time.Duration
+	}{
+		{name: "verified root PID candidate", uid: "0", startUID: "0", ancestors: []int{os.Getpid()}, wait: 2 * time.Second},
+		{name: "exact cgroup unmanaged UID", uid: "4300", group: "/agent/cmd", wait: 2 * time.Second},
+		{name: "unrelated UID", uid: "4200"},
+		{name: "unrelated UID with agent ancestor", uid: "4200", ancestors: []int{os.Getpid()}},
+		{name: "pending managed UID", uid: "4100", managed: true, wait: 2 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				am := newTestAuthManager()
+				startUID := tc.startUID
+				if startUID == "" {
+					startUID = "4100"
+				}
+				finish := am.beginCommandStart("alice", startUID, "/agent/cmd")
+				defer finish()
+				result := make(chan bool, 1)
+				start := time.Now()
+				go func() {
+					session, managed := am.lockSudoSession(sudoIdentity{processUID: tc.uid, ancestors: tc.ancestors, group: tc.group})
+					am.mu.Unlock()
+					assert.Nil(t, session)
+					result <- managed
+				}()
+				select {
+				case managed := <-result:
+					assert.Equal(t, tc.managed, managed)
+					assert.Equal(t, tc.wait, time.Since(start))
+				case <-time.After(3 * time.Second):
+					t.Fatal("classification still waiting on stalled registration")
+				}
+			})
+		})
+	}
+}
+
+func TestStalledManagedCommandStartDeniesSudo(t *testing.T) {
+	if (runtime.GOOS != "linux" && runtime.GOOS != "darwin") || os.Getuid() == 0 {
+		t.Skip("requires kernel non-root UID")
+	}
+	synctest.Test(t, func(t *testing.T) {
+		am := newTestAuthManager()
+		am.UpdateBlockLocalSudo(false)
+		finish := am.beginCommandStart("managed", strconv.Itoa(os.Getuid()), "")
+		defer finish()
+		req := SudoApprovalRequest{Type: "sudo_approval", Username: "root", PID: os.Getpid(), RequestID: strconv.Itoa(os.Getpid())}
+		start := time.Now()
+		client, _ := startPAMClient(t, am, req)
+		select {
+		case <-client.done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("no verdict after registration timed out")
+		}
+		var verdict SudoApprovalResponse
+		require.NoError(t, json.Unmarshal([]byte(client.output(t)), &verdict))
+		assert.False(t, verdict.Approved)
+		assert.Equal(t, "No Authority", verdict.Reason)
+		assert.Equal(t, 2*time.Second, time.Since(start))
+	})
 }

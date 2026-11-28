@@ -956,44 +956,53 @@ func (id sudoIdentity) mayMatchStartingPID() bool {
 	return len(id.ancestors) > 0 && mayBeChild(id.ancestors[len(id.ancestors)-1])
 }
 
+// commandRegistrationTimeout bounds a PAM request's wait for PID publication.
+const commandRegistrationTimeout = 2 * time.Second
+
 // lockSudoSession returns with mu held so the caller can act on the same
-// registration. Only starts that could change the verdict need to complete.
+// registration. A pending start manages its account until publication finishes.
 func (am *AuthManager) lockSudoSession(id sudoIdentity) (*SessionInfo, bool) {
-	am.mu.Lock()
-	session, managed := am.sudoSessionLocked(id)
-	if session != nil || len(am.pendingStarts) == 0 {
-		return session, managed
-	}
-	am.mu.Unlock()
-	mayMatchPID := id.mayMatchStartingPID()
+	// Root can belong to a tracked command, but its UID alone never makes it
+	// managed. Without a kernel UID, also retain the PID registration fallback.
+	mayMatchPID := (id.processUID == "" || id.processUID == "0") && id.mayMatchStartingPID()
+	var deadline *time.Timer
+	var expires time.Time
 	am.mu.Lock()
 	for {
-		session, managed = am.sudoSessionLocked(id)
+		session, managed := am.sudoSessionLocked(id)
 		if session != nil {
 			return session, managed
 		}
-		if !am.hasRelevantStartLocked(id, mayMatchPID, managed) {
+		pending := false
+		for start := range am.pendingStarts {
+			if id.managedAccount(start.username, start.uid) {
+				managed = true
+				pending = true
+				break
+			}
+			if inSudoCommandGroup(id.group, start.group) || mayMatchPID && (id.processUID == "" || id.processUID == start.uid) {
+				pending = true
+			}
+		}
+		if !pending || deadline != nil && !time.Now().Before(expires) {
 			return nil, managed
 		}
-		// A PID match may have several candidate starts. Recheck after any
-		// completes so a stalled candidate cannot hide a published match.
+		if deadline == nil {
+			expires = time.Now().Add(commandRegistrationTimeout)
+			deadline = time.NewTimer(time.Until(expires))
+			defer deadline.Stop()
+		}
 		if am.startChanged == nil {
 			am.startChanged = make(chan struct{})
 		}
 		changed := am.startChanged
 		am.mu.Unlock()
-		<-changed
+		select {
+		case <-changed:
+		case <-deadline.C:
+		}
 		am.mu.Lock()
 	}
-}
-
-func (am *AuthManager) hasRelevantStartLocked(id sudoIdentity, mayMatchPID, managed bool) bool {
-	for start := range am.pendingStarts {
-		if mayMatchPID || inSudoCommandGroup(id.group, start.group) || !managed && id.managedAccount(start.username, start.uid) {
-			return true
-		}
-	}
-	return false
 }
 
 func inSudoCommandGroup(group, commandGroup string) bool {
