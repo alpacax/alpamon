@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/alpacax/alpamon/v2/internal/commandcancel"
+	"github.com/alpacax/alpamon/v2/internal/commandgroup"
 )
 
 // Own the pipe drain so the leader stays unreaped until cancellation can no
@@ -43,7 +45,11 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 		}
 		return buf.Bytes(), err
 	}
-	if err := cmd.Start(); err != nil {
+	release := sync.OnceFunc(commandgroup.BeginStart(ctx, cmd))
+	defer release()
+	cmd, err = commandgroup.StartCommand(ctx, cmd, (*exec.Cmd).Start)
+	if err != nil {
+		release()
 		if errors.Is(err, context.Canceled) {
 			state.Observe()
 		}
@@ -53,6 +59,7 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 	_ = writer.Close()
 	if err := cleanup.afterStart(cmd); err != nil {
 		_, _ = cleanup.cancel(cmd)
+		release()
 		_ = cmd.Wait()
 		return finish(err)
 	}
@@ -60,6 +67,7 @@ func runTrackedProcessCommand(ctx context.Context, cmd *exec.Cmd, cleanup *comma
 		cw.start(chunkFlushInterval)
 	}
 	invokePIDHook(pidHook, cmd.Process.Pid)
+	release()
 	copied := make(chan error, 1)
 	go func() { _, err := io.Copy(sink, reader); copied <- err }()
 	exited, watchErr := watchCommandExit(cmd, cleanup)

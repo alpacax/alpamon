@@ -11,13 +11,16 @@ import (
 	"maps"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/alpacax/alpamon/v2/internal/commandgroup"
 	"github.com/alpacax/alpamon/v2/internal/retry"
 	"github.com/alpacax/alpamon/v2/internal/safego"
 	"github.com/alpacax/alpamon/v2/pkg/accessoutbox"
@@ -46,6 +49,8 @@ const (
 // Legacy entries created before the Kind field was introduced are treated
 // as websh entries for backward compatibility (see effectiveKind).
 type SessionInfo struct {
+	uid       string
+	groupPath string
 	Kind      string
 	SessionID string
 	CommandID string
@@ -182,15 +187,20 @@ type IsAlpconRequest struct {
 }
 
 type IsAlpconResponse struct {
-	Type         string `json:"type"`
-	Username     string `json:"username"`
-	Groupname    string `json:"groupname"`
-	PID          int    `json:"pid"`
-	PPID         int    `json:"ppid"`
-	IsAlpconUser bool   `json:"is_alpacon_user"`
+	UnmatchedSession bool   `json:"unmatched_session,omitempty"`
+	Type             string `json:"type"`
+	Username         string `json:"username"`
+	Groupname        string `json:"groupname"`
+	PID              int    `json:"pid"`
+	PPID             int    `json:"ppid"`
+	IsAlpconUser     bool   `json:"is_alpacon_user"`
 }
 
 type AuthManager struct {
+	// checkedSudo holds positive PAM checks under mu for the process lifetime.
+	checkedSudo     map[int]uint64
+	pendingStarts   map[*pendingCommandStart]struct{} // guarded by mu
+	startChanged    chan struct{}                     // guarded by mu
 	mu              sync.RWMutex
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -310,6 +320,7 @@ func (am *AuthManager) NotifyServerReachable() {
 }
 
 func (am *AuthManager) Start(ctx context.Context) {
+	commandgroup.CleanupEmpty()
 	am.ctx, am.cancel = context.WithCancel(ctx)
 
 	// Started ahead of the listener, so events held from a previous run are
@@ -466,7 +477,7 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 	n, err := unixConn.Read(buf)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to read sudo request")
-		am.sendIsAlpconResponse(unixConn, "", "", 0, 0, false)
+		am.sendIsAlpconResponse(unixConn, "", "", 0, 0, false, false)
 		return
 	}
 
@@ -496,23 +507,16 @@ func (am *AuthManager) handleSudoRequest(unixConn net.Conn) {
 		var isAlpconReq IsAlpconRequest
 		if err := json.Unmarshal(buf[:n], &isAlpconReq); err != nil {
 			log.Warn().Err(err).Msg("Invalid is_alpcon_request")
-			am.sendIsAlpconResponse(unixConn, "", "", 0, 0, false)
+			am.sendIsAlpconResponse(unixConn, "", "", 0, 0, false, false)
 			return
 		}
 
-		sid, sidOK := sessionID(isAlpconReq.PID)
-		am.mu.RLock()
-		session, exists := am.lookupSessionLocked(sid, sidOK, isAlpconReq.PPID)
-		am.mu.RUnlock()
-
-		if !exists {
-			log.Warn().Msgf("No session found for PID %d (ppid %d, sid %d), username: %s, groupname: %s", isAlpconReq.PID, isAlpconReq.PPID, sid, isAlpconReq.Username, isAlpconReq.Groupname)
-			am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, false)
-			return
-		}
-
-		log.Debug().Msgf("Session found for PID %d (sid %d): %s", isAlpconReq.PID, sid, session.SessionID)
-		am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, true)
+		identity := sudoIdentityFor(isAlpconReq.PID, isAlpconReq.PPID, isAlpconReq.Username)
+		session, managed := am.lockSudoSession(identity)
+		matched := session != nil && am.rememberCheckedSudoLocked(isAlpconReq.PID, identity.start, sudoProcessStart)
+		unmatched := session == nil && managed
+		am.mu.Unlock()
+		am.sendIsAlpconResponse(unixConn, isAlpconReq.Username, isAlpconReq.Groupname, isAlpconReq.PID, isAlpconReq.PPID, matched, unmatched)
 
 	case "sudo_approval":
 		am.handleSudoApprovalRequest(buf[:n], unixConn)
@@ -560,17 +564,17 @@ func (am *AuthManager) handleSudoApprovalRequest(data []byte, unixConn net.Conn)
 		return
 	}
 
-	sid, sidOK := sessionID(sudoApprovalReq.PID)
-	am.mu.Lock()
-	session, exists := am.lookupSessionLocked(sid, sidOK, sudoApprovalReq.PPID)
+	identity := sudoIdentityFor(sudoApprovalReq.PID, sudoApprovalReq.PPID, sudoApprovalReq.Username)
+	session, managed := am.lockSudoSession(identity)
+	checked := am.wasCheckedSudoLocked(sudoApprovalReq.PID, identity.start)
 	blockLocalSudo := am.blockLocalSudo
-	if !exists {
-		// Non-WebSH session (local SSH, etc.)
+	if session == nil {
+		// No tracked session owns this request.
 		am.mu.Unlock()
-		sudoApprovalReq.IsAlpconUser = false
+		sudoApprovalReq.IsAlpconUser = managed
 
-		if blockLocalSudo {
-			// block_local_sudo=true: reject all local sudo (original behavior)
+		if checked || managed || blockLocalSudo {
+			// Keep managed accounts on the approval path.
 			log.Debug().Msgf("Local sudo blocked by policy: %s for user %s", sudoApprovalReq.RequestID, sudoApprovalReq.Username)
 			am.sendSudoApprovalResponse(unixConn, sudoApprovalReq, false, "No Authority", "")
 			return
@@ -704,14 +708,15 @@ func (am *AuthManager) awaitTakenRequest(req *SudoRequest) {
 	}
 }
 
-func (am *AuthManager) sendIsAlpconResponse(conn net.Conn, username, groupname string, pid, ppid int, isAlpconUser bool) {
+func (am *AuthManager) sendIsAlpconResponse(conn net.Conn, username, groupname string, pid, ppid int, isAlpconUser, unmatchedSession bool) {
 	response := IsAlpconResponse{
-		Type:         "is_alpacon_response",
-		Username:     username,
-		Groupname:    groupname,
-		PID:          pid,
-		PPID:         ppid,
-		IsAlpconUser: isAlpconUser,
+		Type:             "is_alpacon_response",
+		Username:         username,
+		Groupname:        groupname,
+		PID:              pid,
+		PPID:             ppid,
+		IsAlpconUser:     isAlpconUser,
+		UnmatchedSession: unmatchedSession,
 	}
 
 	responseJSON, err := json.Marshal(response)
@@ -863,6 +868,215 @@ func (am *AuthManager) deliverVerdict(sudoRequest *SudoRequest, response SudoApp
 	return nil
 }
 
+type sudoIdentity struct {
+	start                uint64
+	sid                  int
+	sidOK                bool
+	parent               int
+	ancestors            []int
+	group, username, uid string
+	processUID           string
+	commandGroup         bool
+}
+
+func accountUID(name string) string {
+	if u, err := user.Lookup(name); err == nil {
+		return u.Uid
+	}
+	return ""
+}
+
+func sudoIdentityFor(pid, parent int, username string) sudoIdentity {
+	sid, ok := sessionID(pid)
+	start, _ := sudoProcessStart(pid)
+	group := commandgroup.Path(pid)
+	return sudoIdentity{
+		start: start,
+		sid:   sid, sidOK: ok, parent: parent, ancestors: ancestorPIDs(pid, parentPID),
+		group: group, commandGroup: commandgroup.Owned(group), username: username,
+		uid: accountUID(username), processUID: commandgroup.RealUID(pid),
+	}
+}
+
+func (id sudoIdentity) managedAccount(username, uid string) bool {
+	if id.processUID != "" {
+		return id.processUID != "0" && id.processUID == uid
+	}
+	return id.username != "" && id.username == username || id.uid != "" && id.uid == uid
+}
+
+type pendingCommandStart struct {
+	username, uid, group string
+}
+
+func (am *AuthManager) beginCommandStart(username, uid, group string) func() {
+	start := &pendingCommandStart{username: username, uid: uid, group: group}
+	am.mu.Lock()
+	if am.pendingStarts == nil {
+		am.pendingStarts = make(map[*pendingCommandStart]struct{})
+	}
+	am.pendingStarts[start] = struct{}{}
+	am.mu.Unlock()
+	return func() {
+		am.mu.Lock()
+		delete(am.pendingStarts, start)
+		if am.startChanged != nil {
+			close(am.startChanged)
+			am.startChanged = nil
+		}
+		am.mu.Unlock()
+	}
+}
+
+// An unpublished command leader is still a direct child of this agent. Check
+// the same PID candidates as the tracker, including a session leader that
+// isn't in the caller's ancestry.
+func (id sudoIdentity) mayMatchStartingPID() bool {
+	if id.commandGroup {
+		return false
+	}
+	self := os.Getpid()
+	if slices.Contains(id.ancestors, self) {
+		return true
+	}
+	mayBeChild := func(pid int) bool {
+		if pid <= 1 || pid == self {
+			return false
+		}
+		if parent, ok := parentPID(pid); ok {
+			return parent == self
+		}
+		_, absent := sudoProcessStart(pid)
+		return !absent
+	}
+	if id.sidOK && mayBeChild(id.sid) || mayBeChild(id.parent) {
+		return true
+	}
+	// Earlier ancestors have a known parent in the chain.
+	return len(id.ancestors) > 0 && mayBeChild(id.ancestors[len(id.ancestors)-1])
+}
+
+// commandRegistrationTimeout bounds a PAM request's wait for PID publication.
+const commandRegistrationTimeout = 2 * time.Second
+
+// lockSudoSession returns with mu held so the caller can act on the same
+// registration. A pending start manages its account until publication finishes.
+func (am *AuthManager) lockSudoSession(id sudoIdentity) (*SessionInfo, bool) {
+	// Root can belong to a tracked command, but its UID alone never makes it
+	// managed. Without a kernel UID, also retain the PID registration fallback.
+	mayMatchPID := (id.processUID == "" || id.processUID == "0") && id.mayMatchStartingPID()
+	var deadline *time.Timer
+	var expires time.Time
+	am.mu.Lock()
+	for {
+		session, managed := am.sudoSessionLocked(id)
+		if session != nil {
+			return session, managed
+		}
+		pending := false
+		for start := range am.pendingStarts {
+			if id.managedAccount(start.username, start.uid) {
+				managed = true
+				pending = true
+				break
+			}
+			if inSudoCommandGroup(id.group, start.group) || mayMatchPID && (id.processUID == "" || id.processUID == start.uid) {
+				pending = true
+			}
+		}
+		if !pending || deadline != nil && !time.Now().Before(expires) {
+			return nil, managed
+		}
+		if deadline == nil {
+			expires = time.Now().Add(commandRegistrationTimeout)
+			deadline = time.NewTimer(time.Until(expires))
+			defer deadline.Stop()
+		}
+		if am.startChanged == nil {
+			am.startChanged = make(chan struct{})
+		}
+		changed := am.startChanged
+		am.mu.Unlock()
+		select {
+		case <-changed:
+		case <-deadline.C:
+		}
+		am.mu.Lock()
+	}
+}
+
+func inSudoCommandGroup(group, commandGroup string) bool {
+	return commandGroup != "" && (group == commandGroup || strings.HasPrefix(group, commandGroup+"/"))
+}
+
+func registeredUID(pid int, username string) string {
+	if uid := commandgroup.RealUID(pid); uid != "" {
+		return uid
+	}
+	return accountUID(username)
+}
+
+func (am *AuthManager) sudoSessionLocked(id sudoIdentity) (*SessionInfo, bool) {
+	managed := false
+	for _, s := range am.pidToSessionMap {
+		if inSudoCommandGroup(id.group, s.groupPath) {
+			return s, true
+		}
+		if id.managedAccount(s.Username, s.uid) {
+			managed = true
+		}
+	}
+	if id.commandGroup {
+		return nil, managed
+	}
+	if s, ok := am.lookupSessionLocked(id.sid, id.sidOK, id.parent); ok {
+		if s.groupPath != "" && id.group != "" {
+			return nil, managed
+		}
+		return s, true
+	}
+	s, _ := am.lookupSessionAncestorLocked(id.ancestors)
+	if s != nil && s.groupPath != "" && id.group != "" {
+		return nil, managed
+	}
+	return s, s != nil || managed
+}
+
+// PrepareCommandSession serializes PAM classification with command startup until
+// the executor publishes the child PID or returns a startup error.
+func PrepareCommandSession(ctx context.Context, commandID, username string) (context.Context, func(int), func()) {
+	if commandID == "" {
+		return ctx, nil, func() {}
+	}
+	am := authManager
+	if am == nil {
+		return ctx, func(int) {}, func() {}
+	}
+	ctx, group, closeGroup := commandgroup.Prepare(ctx)
+	ctx = commandgroup.WithStartHook(ctx, func(uid string) func() {
+		return am.beginCommandStart(username, uid, group)
+	})
+	var pid int
+	register := func(child int) {
+		pid = child
+		am.registerStartedCommand(pid, commandID, username, group)
+	}
+	finish := func() {
+		if pid != 0 {
+			am.RemovePIDCommandMapping(pid, commandID)
+		}
+		closeGroup()
+	}
+	return ctx, register, finish
+}
+
+func (am *AuthManager) registerStartedCommand(pid int, commandID, username, group string) {
+	if group != "" && commandgroup.Path(pid) != group {
+		group = ""
+	}
+	am.addPIDCommandMapping(pid, commandID, username, group)
+}
+
 // AddPIDSessionMapping registers an entry for a Websh PTY session. Unset Kind,
 // Requests, StartedAt and PID are filled in; CommandID is always cleared to keep
 // the websh and command fields mutually exclusive per entry.
@@ -871,7 +1085,9 @@ func (am *AuthManager) AddPIDSessionMapping(pid int, session *SessionInfo) {
 		return
 	}
 
+	uid := registeredUID(pid, session.Username)
 	am.mu.Lock()
+	session.uid = uid
 	// Filled in under the lock: re-registering the entry already installed for
 	// this pid writes fields a concurrent lookup is reading.
 	if session.Kind == "" {
@@ -937,10 +1153,16 @@ func (am *AuthManager) RemovePIDSessionMapping(pid int) {
 // the child process can exec sudo, or sudo reaches the PAM module before the
 // tracker knows about the pid. Safe to call from any goroutine.
 func (am *AuthManager) AddPIDCommandMapping(pid int, commandID, username string) {
+	am.addPIDCommandMapping(pid, commandID, username, "")
+}
+
+func (am *AuthManager) addPIDCommandMapping(pid int, commandID, username, group string) {
 	if pid <= 0 || commandID == "" {
 		return
 	}
 	info := &SessionInfo{
+		uid:       registeredUID(pid, username),
+		groupPath: group,
 		Kind:      TrackerKindCommand,
 		CommandID: commandID,
 		Username:  username,
@@ -1017,24 +1239,6 @@ func (am *AuthManager) LookupPID(pid int) (TrackerEntry, bool) {
 		PID:       info.PID,
 		StartedAt: info.StartedAt,
 	}, true
-}
-
-// RegisterCommandPID is a package-level helper that registers a deploy
-// shell Command root pid on the singleton AuthManager (if initialized)
-// and returns an unregister closure. The closure captures the exact
-// (pid, commandID) pair so callers cannot accidentally unregister the
-// wrong entry, making the Register/Unregister pair leak-proof by
-// construction. The returned closure is always safe to call — it is a
-// no-op when the AuthManager has not been wired up yet (tests, early
-// boot) or when the arguments would be rejected by
-// AddPIDCommandMapping (non-positive pid, empty commandID).
-func RegisterCommandPID(pid int, commandID, username string) func() {
-	if authManager == nil || pid <= 0 || commandID == "" {
-		return func() {}
-	}
-	am := authManager
-	am.AddPIDCommandMapping(pid, commandID, username)
-	return func() { am.RemovePIDCommandMapping(pid, commandID) }
 }
 
 // signalCompletion releases the waiter of exactly this instance. It never

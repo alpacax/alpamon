@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/alpacax/alpamon/v2/internal/commandgroup"
 	"github.com/alpacax/alpamon/v2/pkg/executor/handlers/common"
 	"github.com/alpacax/alpamon/v2/pkg/utils"
 	"github.com/rs/zerolog/log"
@@ -329,6 +330,7 @@ func (e *Executor) runCommand(ctx context.Context, cmd *exec.Cmd, commandID stri
 		}
 		return nil, err
 	}
+	commandgroup.Configure(ctx, cmd)
 	return runTrackedCommand(ctx, cmd, cleanup, cw, pidHook, commandID)
 }
 

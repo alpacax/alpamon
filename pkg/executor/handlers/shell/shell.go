@@ -140,22 +140,15 @@ func (h *ShellHandler) handleExecFile(ctx context.Context, args *common.CommandA
 		Dur("timeout", timeout).
 		Msg("Executing verified file")
 
-	var pidHook func(pid int)
-	var cleanup func()
-	if args.CommandID != "" {
-		pidHook = func(pid int) {
-			cleanup = runner.RegisterCommandPID(pid, args.CommandID, username)
-		}
-	}
+	ctx, pidHook, finish := runner.PrepareCommandSession(ctx, args.CommandID, username)
+	defer finish()
 
 	// Execute folds startup errors into output, so the err return is dropped
 	// here for the same reason as executeCommand.
 	exitCode, output, _ := h.Executor.ExecFileWithStreamingHook(
 		ctx, args.VerifiedFile, args.ExecArgs, username, groupname, args.Env, timeout, args.CommandID, pidHook, args.ChunkCallback,
 	)
-	if cleanup != nil {
-		cleanup()
-	}
+
 	return exitCode, output, nil
 }
 
@@ -257,16 +250,9 @@ func (h *ShellHandler) executeCommand(ctx context.Context, cmdArgs []string, use
 		return 0, ""
 	}
 
-	var pidHook func(pid int)
-	var cleanup func()
-	if commandID != "" {
-		pidHook = func(pid int) {
-			cleanup = runner.RegisterCommandPID(pid, commandID, username)
-		}
-	}
+	ctx, pidHook, finish := runner.PrepareCommandSession(ctx, commandID, username)
+	defer finish()
 	exitCode, output, _ := h.Executor.ExecWithStreamingHook(ctx, cmdArgs, username, groupname, env, timeout, commandID, pidHook, chunkCallback)
-	if cleanup != nil {
-		cleanup()
-	}
+
 	return exitCode, output
 }
