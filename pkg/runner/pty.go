@@ -61,6 +61,10 @@ type PtyClient struct {
 	cancelDone         <-chan struct{}
 	finishCancellation func() (bool, []int)
 	closeOnce          sync.Once
+	// workSession fences this terminal's input while its Work Session is
+	// paused; nil for a session-less terminal.
+	workSession        *workSessionBinding
+	releaseWorkSession func()
 }
 
 const (
@@ -138,6 +142,14 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 	}
 
 	initialSize := &pty.Winsize{Rows: pc.rows, Cols: pc.cols}
+	releaseStart, err := pc.workSession.beginProcessStart()
+	if err != nil {
+		return fmt.Errorf("work session refused terminal start: %w", err)
+	}
+	defer releaseStart()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	pc.ptmx, err = pty.StartWithSize(pc.cmd, initialSize)
 	if err != nil {
 		return fmt.Errorf("failed to start pty: %w", err)
@@ -147,6 +159,8 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 
 	// Add PID-to-session mapping for auth manager
 	pid := pc.cmd.Process.Pid
+	// Held until its reap, the shell pins its group for Work Session End.
+	commandcancel.HoldLeader(pid)
 	sessionInfo := &SessionInfo{
 		Kind:      TrackerKindWebsh,
 		SessionID: pc.sessionID,
@@ -157,6 +171,9 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 	}
 
 	pc.manager.trackPID(pid, sessionInfo)
+	// The shell leads its own session, so every job-control group it starts
+	// stays owned by the terminal's Work Session.
+	pc.workSession.trackTerminalProcess(pc.commandID, pid)
 
 	return nil
 }
@@ -165,6 +182,8 @@ func (pc *PtyClient) initializePtySession(ctx context.Context) error {
 // Call before starting the background worker, while the command is registered.
 func (pc *PtyClient) TrackCommand(ctx context.Context, id string) {
 	pc.commandID = id
+	pc.workSession = workSessionFromContext(ctx)
+	pc.releaseWorkSession = pc.workSession.registerTerminal(pc.sessionID, id)
 	registry, _ := ctx.Value(cancellationRegistryKey{}).(*commandCancellations)
 	if registry == nil || id == "" || len(id) > 128 {
 		return
@@ -364,28 +383,22 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 				}
 				continue
 			}
-			select {
-			case pc.wsToPty <- msg:
-			case <-ctx.Done():
+			if !pc.enqueueInput(ctx, msg) {
 				return
 			}
 		}
 	}
 }
 
-func (pc *PtyClient) writeToPty(ctx context.Context, cancel context.CancelFunc) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case msg := <-pc.wsToPty:
-			_, err := pc.ptmx.Write(msg)
-			if err != nil {
-				cancel()
-				return
-			}
-		}
+// writeInput writes one input message to the terminal, or drops it while
+// the terminal's Work Session is fenced. Dropped input is never replayed.
+func (pc *PtyClient) writeInput(msg []byte) error {
+	if !pc.workSession.inputAllowed() {
+		log.Debug().Str("session_id", pc.sessionID).Int("size", len(msg)).Msg("Dropped terminal input of a fenced work session.")
+		return nil
 	}
+	_, err := pc.ptmx.Write(msg)
+	return err
 }
 
 func (pc *PtyClient) readFromPty(ctx context.Context, cancel context.CancelFunc) {
@@ -522,6 +535,9 @@ func (pc *PtyClient) close() {
 
 func (pc *PtyClient) closeSession() {
 	remote := pc.cancelState != nil && pc.cancelState.StopRequests()
+	if pc.releaseWorkSession != nil {
+		defer pc.releaseWorkSession()
+	}
 	defer func() {
 		if pc.finishCancellation != nil {
 			cancelled, survivors := pc.finishCancellation()
@@ -560,7 +576,7 @@ func (pc *PtyClient) closeSession() {
 		}
 		// A shell may ignore SIGHUP, and a cancelled process may be uninterruptible.
 		// Waiting asynchronously preserves hangup semantics without blocking close.
-		go func() { _ = pc.cmd.Wait() }()
+		go func() { _ = commandcancel.ReapLeader(pc.cmd.Process.Pid, pc.cmd.Wait) }()
 	}
 	if pc.ptmx != nil {
 		_ = pc.ptmx.Close()

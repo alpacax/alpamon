@@ -175,6 +175,7 @@ func runAgent(ready chan<- struct{}) {
 	// here, before the websocket hooks, so a reconnect can tell the Auth
 	// Manager the server is reachable again. Both start further down.
 	controlClient := runner.NewControlClient()
+	controlClient.SetWorkSessions(wsClient.WorkSessions())
 	authManager := runner.GetAuthManager(controlClient, session)
 	if client != nil { // a store on a nil client would pass the nil check and panic
 		authManager.UseAccessEventStore(db.NewAccessEventOutboxStore(client))

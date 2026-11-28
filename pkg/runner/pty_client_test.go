@@ -194,6 +194,8 @@ func TestPtyOpenCommandHandleLifetime(t *testing.T) {
 			cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-i")
 			ptmx, err := pty.Start(cmd)
 			require.NoError(t, err)
+			// As PtyClient.Start does, hold the shell until its reap.
+			commandcancel.HoldLeader(cmd.Process.Pid)
 			pc := &PtyClient{sessionID: "session", cmd: cmd, ptmx: ptmx, manager: NewTerminalManager(nil)}
 			pc.TrackCommand(ctx, "openpty-id")
 			t.Cleanup(pc.close)
@@ -261,6 +263,19 @@ func TestPtyOpenCommandHandleLifetime(t *testing.T) {
 			assert.NotContains(t, registry.active, "openpty-id")
 			cancelled, survivors := pc.cancelState.Finish()
 			assert.Equal(t, cancelTerminal, cancelled)
+			if cancelTerminal && !commandcancel.PinnedSignalsHeld() {
+				// Without pidfd only the shell's own group is signalled: the
+				// job groups have no leader alpamon holds.
+				t.Cleanup(func() {
+					for _, pid := range pids {
+						_ = syscall.Kill(pid, syscall.SIGKILL)
+					}
+				})
+				assert.ElementsMatch(t, pids, survivors)
+				assert.True(t, ptyTestProcessAlive(pids[0]))
+				assert.True(t, ptyTestProcessAlive(pids[1]))
+				return
+			}
 			assert.Empty(t, survivors)
 			assert.Eventually(t, func() bool { return !ptyTestProcessAlive(pids[0]) }, time.Second, 50*time.Millisecond)
 			if cancelTerminal {

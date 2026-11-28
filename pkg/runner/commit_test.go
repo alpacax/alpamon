@@ -801,9 +801,9 @@ func TestLoginCaptureWireShape(t *testing.T) {
 func TestCapabilitiesWireShape(t *testing.T) {
 	// Restates the build constraint on purpose: deriving want from
 	// fileExecCompiled would make the check agree with itself.
-	want := `[]`
+	want := `["work_session_control_v1"]`
 	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-		want = `["file_exec"]`
+		want = `["file_exec","work_session_control_v1"]`
 	}
 
 	bodies := []any{newServerData(0.5), collectData()}

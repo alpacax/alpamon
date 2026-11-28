@@ -53,6 +53,10 @@ type PtyClient struct {
 	cancelDone         <-chan struct{}
 	finishCancellation func() (bool, []int)
 	closeOnce          sync.Once
+	// workSession fences this terminal's input while its Work Session is
+	// paused; nil for a session-less terminal.
+	workSession        *workSessionBinding
+	releaseWorkSession func()
 }
 
 func NewPtyClient(data protocol.CommandData, apiSession *scheduler.Session, manager *TerminalManager) *PtyClient {
@@ -193,12 +197,21 @@ func (pc *PtyClient) initializeSession(ctx context.Context) error {
 		opts = append(opts, conpty.ConPtyWorkDir(pc.homeDirectory))
 	}
 
+	releaseStart, err := pc.workSession.beginProcessStart()
+	if err != nil {
+		return fmt.Errorf("work session refused terminal start: %w", err)
+	}
+	defer releaseStart()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	pc.cpty, err = conpty.Start(commandLine, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to start ConPTY: %w", err)
 	}
 
 	pc.manager.Register(pc.sessionID, pc)
+	pc.workSession.trackTerminalProcess(pc.commandID, pc.cpty.Pid())
 
 	log.Info().Str("sessionID", pc.sessionID).Int("pid", pc.cpty.Pid()).
 		Msg("ConPTY session started.")
@@ -225,19 +238,15 @@ func (pc *PtyClient) readFromPty(ctx context.Context, cancel context.CancelFunc,
 	}
 }
 
-func (pc *PtyClient) writeToPty(ctx context.Context, cancel context.CancelFunc) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case msg := <-pc.wsToPty:
-			_, err := pc.cpty.Write(msg)
-			if err != nil {
-				cancel()
-				return
-			}
-		}
+// writeInput writes one input message to the terminal, or drops it while
+// the terminal's Work Session is fenced. Dropped input is never replayed.
+func (pc *PtyClient) writeInput(msg []byte) error {
+	if !pc.workSession.inputAllowed() {
+		log.Debug().Str("session_id", pc.sessionID).Int("size", len(msg)).Msg("Dropped terminal input of a fenced work session.")
+		return nil
 	}
+	_, err := pc.cpty.Write(msg)
+	return err
 }
 
 func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.CancelFunc) {
@@ -260,9 +269,7 @@ func (pc *PtyClient) readFromWebsocket(ctx context.Context, cancel context.Cance
 				cancel()
 				return
 			}
-			select {
-			case pc.wsToPty <- msg:
-			case <-ctx.Done():
+			if !pc.enqueueInput(ctx, msg) {
 				return
 			}
 		}
@@ -318,6 +325,9 @@ func (pc *PtyClient) close() {
 
 func (pc *PtyClient) closeSession() {
 	remote := pc.cancelState != nil && pc.cancelState.StopRequests()
+	if pc.releaseWorkSession != nil {
+		defer pc.releaseWorkSession()
+	}
 	defer func() {
 		if pc.finishCancellation != nil {
 			cancelled, survivors := pc.finishCancellation()
@@ -371,6 +381,8 @@ func (pc *PtyClient) Refresh() error {
 // TrackCommand retains the openpty command ID until the terminal closes.
 func (pc *PtyClient) TrackCommand(ctx context.Context, id string) {
 	pc.commandID = id
+	pc.workSession = workSessionFromContext(ctx)
+	pc.releaseWorkSession = pc.workSession.registerTerminal(pc.sessionID, id)
 	registry, _ := ctx.Value(cancellationRegistryKey{}).(*commandCancellations)
 	if registry == nil || id == "" || len(id) > 128 {
 		return
